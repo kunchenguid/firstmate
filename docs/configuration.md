@@ -404,17 +404,29 @@ Install the job from the source Firstmate home:
 bin/fm-review-sweep-supervisor.sh install --source-home "$PWD"
 ```
 
+Installation validates the supplied source home before it persists any private configuration, so a mistyped `--source-home` leaves nothing behind and the installer stays reusable.
+It also pins the source repository's default branch and records it as `source_branch`; the automation home tracks that branch afterwards, so switching working branches in the captain's live checkout never disables the scheduled job.
+`jq` is required and is checked whenever configuration loads, rather than being discovered as a receipt failure later.
+
 The installed default is 07:00 through 17:00 America/Chicago at 30-minute boundaries, with 17:00 as the final daily slot and at most ten concurrent independent reviews.
 The LaunchAgent wakes once per minute, while a durable slot ledger ensures that the review cycle itself runs only once per due half-hour slot.
-A wake after sleep or reboot runs only the newest missed slot from the current Chicago calendar day, so it catches up without replaying a queue of stale sweeps.
-A single owner lock excludes overlap between launchd and manual runs, failed cycles wait five minutes before retry, and an abandoned running slot resumes under the same slot identity.
+A duplicate minute tick reads slot state and retry eligibility under the owner lock and returns before any git fetch, context copy, or project validation, so the once-a-minute wake stays cheap and a transient synchronization problem is reported once per slot rather than once per minute.
+A wake after sleep or reboot runs only the newest missed slot from the current Chicago calendar day, and the final 17:00 slot stays claimable only through 17:29, so no unattended cycle begins an authorized external write later in the evening.
+A single owner lock excludes overlap between launchd and manual runs, and an abandoned running slot resumes under the same slot identity.
+A failed cycle waits five minutes measured from when that cycle actually finished, so a long cycle still throttles before its next attempt.
+A lock directory left behind by a crash between its creation and its owner record is respected briefly and then reclaimed, so the job self-heals instead of wedging invisibly.
 
 Each cycle starts a fresh non-interactive Codex process in the isolated home and invokes the installed skill.
+The cycle runs in its own verified process group, and a timeout or a supervisor signal terminates that exact group; the owner lock is released only once the whole group is confirmed gone, so no reviewer still holding GitHub and Slack write authorization can outlive the exclusion that stops a second cycle for the same slot.
 The skill remains the owner of live Jira pagination, GitHub discovery, watermark checks, review content, comment publication, own-comment minimization, and the exact Slack author notification.
 The supervisor accepts success only when no task metadata remains and the cycle writes a valid receipt binding every reviewed PR to its exact head, direct GitHub comment URL, and either a direct Slack message URL or a unique-match skip reason.
+A missing receipt, a receipt that is not readable JSON, a receipt that violates the publication contract, and a receipt gate that could not be evaluated are distinct failures with distinct exit codes (74, 76, 75, and 77), so a tooling problem is never reported as a publication problem.
 The runtime is bounded to three hours by default, after which the slot is failed and becomes eligible for its normal retry.
 
-Use `bin/fm-review-sweep-supervisor.sh status` to verify the loaded LaunchAgent, schedule, current owner, last successful slot, and isolated-home task count.
+Artifacts are bounded. A verified cycle keeps its prompt, compact final result, and receipt, and discards the raw Codex event stream; only the most recent failure retains a bounded diagnostic tail of that stream.
+Supervisor-owned slot records, result directories, and receipt files older than `retention_days` (90 by default) are removed after a cycle runs, and pruning skips symlinks and anything that is not the shape it expects.
+
+Use `bin/fm-review-sweep-supervisor.sh status` to verify the loaded LaunchAgent, schedule, pinned branch, retention horizon, current owner, last successful slot, and isolated-home task count.
 Use `bin/fm-review-sweep-supervisor.sh run-now` for an immediate cycle through the same lock and receipt gates.
 Use `bin/fm-review-sweep-supervisor.sh uninstall` to boot out the LaunchAgent and remove its property list while retaining private configuration, reports, receipts, logs, and the isolated home for recovery.
 The script header and `--help` output own exact private paths, commands, configuration keys, state transitions, and test overrides.

@@ -7,13 +7,21 @@
 #       host-job authorization contract, and the current script bytes. The
 #       default schedule is every half hour from 07:00 through 17:00 in
 #       America/Chicago, with the final daily slot at 17:00 and a maximum of
-#       ten concurrent reviews. Existing private configuration is preserved;
+#       ten concurrent reviews. The source home is validated before any private
+#       configuration is persisted, so a wrong path leaves nothing behind and
+#       stays reinstallable. Installation pins the source repository's default
+#       branch; later working-branch changes in the source home never disturb
+#       the scheduled job. Existing private configuration is preserved;
 #       rerunning install refreshes code, context, projects, and the launchd
 #       contract idempotently.
 #   fm-review-sweep-supervisor.sh tick
 #       Claim and run the newest due slot for the current Chicago day. A single
 #       process owns the slot through completion. A wake after sleep catches up
-#       only the newest missed slot, never replays a backlog of old slots.
+#       only the newest missed slot, never replays a backlog of old slots, and
+#       never starts a cycle after the final slot's half-hour window closes.
+#       A duplicate tick for a slot that already succeeded, or for a failed slot
+#       whose retry is not yet due, decides that under the owner lock and exits
+#       without synchronizing the automation home.
 #   fm-review-sweep-supervisor.sh run-now
 #       Run one manually named slot immediately, through the same lock, review
 #       lifecycle, receipt, and retry machinery as a scheduled slot.
@@ -23,7 +31,7 @@
 #       Print the exact property list contract for inspection or tests.
 #   fm-review-sweep-supervisor.sh slot-at <YYYYMMDD> <HH> <MM>
 #       Print the newest due slot for supplied local clock fields, or nothing
-#       before the daily window. This is a deterministic diagnostic surface.
+#       outside the daily window. This is a deterministic diagnostic surface.
 #   fm-review-sweep-supervisor.sh uninstall
 #       Boot out the exact LaunchAgent and remove its property list. Runtime
 #       state, logs, reports, the isolated home, and configuration are retained.
@@ -32,7 +40,22 @@
 # Jira and GitHub discovery, watermark rules, review shape, publication, and the
 # Slack author notification. This script owns only recurrence, an isolated
 # execution home, the persisted host-job authorization, crash-safe slot claims,
-# bounded process lifetime, and terminal task reconciliation.
+# bounded process lifetime, bounded artifact retention, and terminal task
+# reconciliation.
+#
+# Durability rules this script owns:
+#   * A cycle runs in its own verified process group. A timeout or a supervisor
+#     signal terminates that exact group, and the owner lock is released only
+#     after the group is confirmed gone, so no authorized external writer
+#     outlives the exclusion that stops a second cycle for the same slot.
+#   * A lock directory left behind by a crash between its creation and its owner
+#     record is reclaimed after a short grace, so the job self-heals.
+#   * A failed slot's retry deadline is measured from when the cycle actually
+#     finished, never from when the tick started.
+#   * A successful cycle keeps its prompt, final result, and receipt. Full Codex
+#     event streams are not retained; only the most recent failure keeps a
+#     bounded diagnostic tail. Supervisor-owned slot, result, and receipt
+#     artifacts older than retention_days are removed after a cycle runs.
 #
 # Private files:
 #   ~/Library/Application Support/Firstmate/review-sweep/config/supervisor.conf
@@ -43,8 +66,10 @@
 #
 # Tests may override FM_REVIEW_SWEEP_APP_ROOT, FM_REVIEW_SWEEP_CONFIG,
 # FM_REVIEW_SWEEP_LAUNCH_AGENT_DIR, FM_REVIEW_SWEEP_LOG_DIR,
-# FM_REVIEW_SWEEP_LAUNCHCTL, and FM_REVIEW_SWEEP_NOW_FIELDS. The last value is
-# five space-separated fields: YYYYMMDD HH MM epoch UTC-offset.
+# FM_REVIEW_SWEEP_LAUNCHCTL, FM_REVIEW_SWEEP_NOW_FIELDS, and
+# FM_REVIEW_SWEEP_NOW_FIELDS_FILE. A clock override is five space-separated
+# fields: YYYYMMDD HH MM epoch UTC-offset. The file form is re-read on every
+# clock query, so a fixture can advance the logical clock across a cycle.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,6 +82,11 @@ DEFAULT_INTERVAL_MINUTES=30
 DEFAULT_MAX_CONCURRENT_REVIEWS=10
 DEFAULT_RETRY_SECONDS=300
 DEFAULT_MAX_RUNTIME_SECONDS=10800
+DEFAULT_RETENTION_DAYS=90
+LOCK_ORPHAN_GRACE_SECONDS=120
+CYCLE_STOP_GRACE_SECONDS=15
+CYCLE_KILL_GRACE_SECONDS=5
+EVENT_TAIL_LINES=200
 
 die() {
   printf 'error: %s\n' "$1" >&2
@@ -80,6 +110,15 @@ safe_absolute_path() {
 
 safe_project_name() {
   case $1 in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+}
+
+safe_slot_id() {
+  case $1 in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+}
+
+safe_branch_name() {
+  case $1 in ''|-*|*..*|*//*|*/|*[!A-Za-z0-9._/-]*) return 1 ;; esac
+  case $1 in */.*|.*) return 1 ;; esac
 }
 
 safe_positive_integer() {
@@ -117,8 +156,11 @@ STATE_ROOT="$APP_ROOT/state"
 SLOTS_ROOT="$STATE_ROOT/slots"
 RESULTS_ROOT="$APP_ROOT/results"
 LOCK_DIR="$STATE_ROOT/run.lock"
+LOCK_OWNER_FILE="$LOCK_DIR/owner"
+LOCK_CYCLE_PGID_FILE="$LOCK_DIR/cycle-pgid"
 
 SOURCE_HOME=
+SOURCE_BRANCH=
 AUTOMATION_HOME=
 CODEX_BIN=
 KNOWLEDGE_BASE_PATH=
@@ -130,7 +172,15 @@ INTERVAL_MINUTES=$DEFAULT_INTERVAL_MINUTES
 MAX_CONCURRENT_REVIEWS=$DEFAULT_MAX_CONCURRENT_REVIEWS
 RETRY_SECONDS=$DEFAULT_RETRY_SECONDS
 MAX_RUNTIME_SECONDS=$DEFAULT_MAX_RUNTIME_SECONDS
+RETENTION_DAYS=$DEFAULT_RETENTION_DAYS
 ENABLED=1
+JQ_BIN=
+RUN_LOCK_HELD=0
+RUN_LOCK_RETAINED=0
+RUN_CHILD_PID=
+RUN_CHILD_PGID=
+SLOT_DIR=
+SLOT_ADMISSION_MESSAGE=
 
 config_value_seen() {
   case " ${CONFIG_KEYS_SEEN:-} " in *" $1 "*) return 0 ;; *) return 1 ;; esac
@@ -144,7 +194,7 @@ load_config() {
     line_no=$((line_no + 1))
     case ${key:-} in ''|'#'*) continue ;; esac
     case ${key:-} in
-      source_home|automation_home|codex_bin|knowledge_base|runtime_path|timezone|start_hour|end_hour|interval_minutes|max_concurrent_reviews|retry_seconds|max_runtime_seconds|enabled) ;;
+      source_home|source_branch|automation_home|codex_bin|knowledge_base|runtime_path|timezone|start_hour|end_hour|interval_minutes|max_concurrent_reviews|retry_seconds|max_runtime_seconds|retention_days|enabled) ;;
       *) die "unknown config key '$key' on line $line_no" ;;
     esac
     config_value_seen "$key" && die "duplicate config key '$key'"
@@ -152,6 +202,7 @@ load_config() {
     safe_single_line "${value:-}" || die "config value for $key is not one line"
     case $key in
       source_home) SOURCE_HOME=$value ;;
+      source_branch) SOURCE_BRANCH=$value ;;
       automation_home) AUTOMATION_HOME=$value ;;
       codex_bin) CODEX_BIN=$value ;;
       knowledge_base) KNOWLEDGE_BASE_PATH=$value ;;
@@ -163,11 +214,13 @@ load_config() {
       max_concurrent_reviews) MAX_CONCURRENT_REVIEWS=$value ;;
       retry_seconds) RETRY_SECONDS=$value ;;
       max_runtime_seconds) MAX_RUNTIME_SECONDS=$value ;;
+      retention_days) RETENTION_DAYS=$value ;;
       enabled) ENABLED=$value ;;
     esac
   done < <(awk 'BEGIN { FS="=" } { key=$1; sub(/^[[:space:]]+/, "", key); sub(/[[:space:]]+$/, "", key); value=substr($0, index($0, "=")+1); if (index($0, "=")==0) { print $0 "=" } else { print key "=" value } }' "$CONFIG_PATH")
 
   safe_absolute_path "$SOURCE_HOME" || die 'source_home must be an absolute non-root path'
+  safe_branch_name "$SOURCE_BRANCH" || die 'source_branch must name the pinned default branch of source_home'
   safe_absolute_path "$AUTOMATION_HOME" || die 'automation_home must be an absolute non-root path'
   safe_absolute_path "$CODEX_BIN" || die 'codex_bin must be absolute'
   [ -x "$CODEX_BIN" ] || die "codex executable is unavailable: $CODEX_BIN"
@@ -185,8 +238,12 @@ load_config() {
   [ "$MAX_CONCURRENT_REVIEWS" -le 10 ] || die 'max_concurrent_reviews cannot exceed 10'
   safe_positive_integer "$RETRY_SECONDS" || die 'retry_seconds must be positive'
   safe_positive_integer "$MAX_RUNTIME_SECONDS" || die 'max_runtime_seconds must be positive'
+  safe_positive_integer "$RETENTION_DAYS" || die 'retention_days must be positive'
   case $ENABLED in 0|1) ;; *) die 'enabled must be 0 or 1' ;; esac
   case ":$RUNTIME_PATH:" in *::*|*:$'\n'*|*:$'\r'*) die 'runtime_path is invalid' ;; esac
+  JQ_BIN=$(command -v jq 2>/dev/null || true)
+  [ -n "$JQ_BIN" ] && [ -x "$JQ_BIN" ] \
+    || die 'jq is required to validate review-sweep cycle receipts but is not on PATH'
 }
 
 atomic_write() { # <path> <mode> <text>
@@ -200,6 +257,17 @@ atomic_write() { # <path> <mode> <text>
     rm -f -- "$tmp" 2>/dev/null || true
     return 1
   fi
+}
+
+path_mtime() { # <path>
+  local value
+  if [ "$(uname)" = Darwin ]; then
+    value=$(stat -f %m -- "$1" 2>/dev/null || true)
+  else
+    value=$(stat -c %Y -- "$1" 2>/dev/null || true)
+  fi
+  safe_nonnegative_integer "${value:-}" || return 1
+  printf '%s\n' "$value"
 }
 
 copy_private_file() { # <source> <destination>
@@ -233,19 +301,46 @@ write_empty_backlog() {
 ## Done'
 }
 
-ensure_automation_home() {
-  local source_top source_branch
-  [ -d "$SOURCE_HOME" ] && [ ! -L "$SOURCE_HOME" ] || die "source home is unavailable: $SOURCE_HOME"
-  source_top=$(git -C "$SOURCE_HOME" rev-parse --show-toplevel 2>/dev/null) || die 'source_home is not a git worktree'
-  [ "$source_top" = "$SOURCE_HOME" ] || die 'source_home must name the Firstmate worktree root'
-  [ -f "$SOURCE_HOME/AGENTS.md" ] && [ -x "$SOURCE_HOME/bin/fm-session-start.sh" ] \
+validate_source_home() { # <path>
+  local home=$1 top
+  safe_absolute_path "$home" || die 'source_home must be an absolute non-root path'
+  [ -d "$home" ] && [ ! -L "$home" ] || die "source home is unavailable: $home"
+  top=$(git -C "$home" rev-parse --show-toplevel 2>/dev/null) || die 'source_home is not a git worktree'
+  [ "$top" = "$home" ] || die 'source_home must name the Firstmate worktree root'
+  [ -f "$home/AGENTS.md" ] && [ -x "$home/bin/fm-session-start.sh" ] \
     || die 'source_home is not a Firstmate home'
-  source_branch=$(git -C "$SOURCE_HOME" symbolic-ref --short HEAD 2>/dev/null || true)
-  [ -n "$source_branch" ] || die 'source_home must be on its default branch, not detached'
+}
+
+source_default_branch() { # <path>
+  # Resolve the repository's default branch, never the transient working branch,
+  # so a captain switching branches in the source home cannot disable the job.
+  local home=$1 ref branch= candidate
+  ref=$(git -C "$home" symbolic-ref --short --quiet refs/remotes/origin/HEAD 2>/dev/null || true)
+  case $ref in origin/?*) branch=${ref#origin/} ;; esac
+  if [ -z "$branch" ]; then
+    for candidate in main master; do
+      if git -C "$home" rev-parse --verify --quiet "refs/heads/$candidate" >/dev/null 2>&1; then
+        branch=$candidate
+        break
+      fi
+    done
+  fi
+  if [ -z "$branch" ]; then
+    branch=$(git -C "$home" symbolic-ref --short --quiet HEAD 2>/dev/null || true)
+  fi
+  safe_branch_name "${branch:-}" || return 1
+  git -C "$home" rev-parse --verify --quiet "refs/heads/$branch^{commit}" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$branch"
+}
+
+ensure_automation_home() {
+  validate_source_home "$SOURCE_HOME"
+  git -C "$SOURCE_HOME" rev-parse --verify --quiet "refs/heads/$SOURCE_BRANCH^{commit}" >/dev/null 2>&1 \
+    || die "source_home no longer carries its pinned branch '$SOURCE_BRANCH'"
 
   if [ ! -e "$AUTOMATION_HOME" ]; then
     mkdir -p "${AUTOMATION_HOME%/*}"
-    git clone --quiet --no-hardlinks --branch "$source_branch" "$SOURCE_HOME" "$AUTOMATION_HOME" \
+    git clone --quiet --no-hardlinks --branch "$SOURCE_BRANCH" "$SOURCE_HOME" "$AUTOMATION_HOME" \
       || die 'failed to clone the isolated automation home'
   fi
   [ -d "$AUTOMATION_HOME" ] && [ ! -L "$AUTOMATION_HOME" ] || die 'automation_home is unsafe'
@@ -258,15 +353,16 @@ ensure_automation_home() {
 }
 
 sync_automation_code() {
-  local branch source_head auto_branch dirty
-  branch=$(git -C "$SOURCE_HOME" symbolic-ref --short HEAD 2>/dev/null || true)
-  [ -n "$branch" ] || die 'source_home became detached'
+  local source_head auto_branch dirty
   auto_branch=$(git -C "$AUTOMATION_HOME" symbolic-ref --short HEAD 2>/dev/null || true)
-  [ "$auto_branch" = "$branch" ] || die "automation_home is on '$auto_branch', expected '$branch'"
+  [ "$auto_branch" = "$SOURCE_BRANCH" ] \
+    || die "automation_home is on '${auto_branch:-a detached head}', expected the pinned branch '$SOURCE_BRANCH'"
   dirty=$(git -C "$AUTOMATION_HOME" status --porcelain --untracked-files=no 2>/dev/null || true)
   [ -z "$dirty" ] || die 'automation_home has tracked local changes; refusing to overwrite them'
-  source_head=$(git -C "$SOURCE_HOME" rev-parse "$branch^{commit}" 2>/dev/null) || die 'cannot resolve source_home head'
-  git -C "$AUTOMATION_HOME" fetch --quiet "$SOURCE_HOME" "$branch" || die 'failed to refresh automation code from source_home'
+  source_head=$(git -C "$SOURCE_HOME" rev-parse "refs/heads/$SOURCE_BRANCH^{commit}" 2>/dev/null) \
+    || die "cannot resolve the pinned branch '$SOURCE_BRANCH' in source_home"
+  git -C "$AUTOMATION_HOME" fetch --quiet "$SOURCE_HOME" "$SOURCE_BRANCH" \
+    || die 'failed to refresh automation code from source_home'
   git -C "$AUTOMATION_HOME" merge --quiet --ff-only "$source_head" || die 'automation code cannot fast-forward to source_home'
 }
 
@@ -282,16 +378,12 @@ sync_private_context() {
     || die 'failed to synchronize inherited Firstmate configuration'
 }
 
-project_origin_safe() {
-  # shellcheck source=bin/fm-project-origin-lib.sh
-  . "$AUTOMATION_HOME/bin/fm-project-origin-lib.sh"
-  fm_project_origin_safe "$1"
-}
-
 sync_projects() {
   local registry name src dst origin dst_origin
   registry="$AUTOMATION_HOME/data/projects.md"
   [ -f "$registry" ] || die 'automation project registry is absent'
+  # shellcheck source=bin/fm-project-origin-lib.sh
+  . "$AUTOMATION_HOME/bin/fm-project-origin-lib.sh"
   while IFS= read -r name; do
     safe_project_name "$name" || die "unsafe project name in registry: $name"
     src="$SOURCE_HOME/projects/$name"
@@ -299,7 +391,7 @@ sync_projects() {
     [ -d "$src" ] && git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
       || die "registered source project is unavailable: $name"
     origin=$(git -C "$src" remote get-url origin 2>/dev/null || true)
-    [ -n "$origin" ] && project_origin_safe "$origin" || die "project $name has an unsafe or missing origin"
+    [ -n "$origin" ] && fm_project_origin_safe "$origin" || die "project $name has an unsafe or missing origin"
     if [ ! -e "$dst" ]; then
       git clone --quiet --filter=blob:none "$origin" "$dst" || die "failed to clone project $name"
     fi
@@ -348,17 +440,19 @@ resolve_codex_bin() {
   printf '%s\n' "$found"
 }
 
-write_config() { # <source-home>
-  local source=$1 automation codex knowledge runtime
+write_config() { # <source-home> <source-branch>
+  local source=$1 branch=$2 automation codex knowledge runtime
   automation=${FM_REVIEW_SWEEP_AUTOMATION_HOME:-$APP_ROOT/home}
   codex=$(resolve_codex_bin)
   knowledge=${KNOWLEDGE_BASE:-}
   runtime=$(runtime_path_default)
   safe_absolute_path "$source" || die 'install --source-home must be absolute'
+  safe_branch_name "$branch" || die 'resolved source branch is unsafe'
   safe_absolute_path "$automation" || die 'automation home must be absolute'
   if [ -n "$knowledge" ]; then safe_absolute_path "$knowledge" || die 'KNOWLEDGE_BASE must be absolute'; fi
   mkdir -p "${CONFIG_PATH%/*}"
   atomic_write "$CONFIG_PATH" 0600 "source_home=$source
+source_branch=$branch
 automation_home=$automation
 codex_bin=$codex
 knowledge_base=$knowledge
@@ -370,6 +464,7 @@ interval_minutes=$DEFAULT_INTERVAL_MINUTES
 max_concurrent_reviews=$DEFAULT_MAX_CONCURRENT_REVIEWS
 retry_seconds=$DEFAULT_RETRY_SECONDS
 max_runtime_seconds=$DEFAULT_MAX_RUNTIME_SECONDS
+retention_days=$DEFAULT_RETENTION_DAYS
 enabled=1" || die 'failed to write private supervisor config'
 }
 
@@ -495,14 +590,26 @@ reload_launchagent() {
 }
 
 read_clock_fields() {
-  local fields=${FM_REVIEW_SWEEP_NOW_FIELDS:-}
+  local fields=${FM_REVIEW_SWEEP_NOW_FIELDS:-} file=${FM_REVIEW_SWEEP_NOW_FIELDS_FILE:-}
+  if [ -n "$file" ] && [ -f "$file" ] && [ ! -L "$file" ]; then
+    fields=$(sed -n '1p' "$file")
+  fi
   if [ -n "$fields" ]; then
     set -- $fields
-    [ "$#" -eq 5 ] || die 'FM_REVIEW_SWEEP_NOW_FIELDS must have five fields'
+    [ "$#" -eq 5 ] || die 'a review-sweep clock override must have five fields'
     printf '%s %s %s %s %s\n' "$1" "$2" "$3" "$4" "$5"
     return
   fi
   TZ="$TIMEZONE" date '+%Y%m%d %H %M %s %z'
+}
+
+current_epoch() {
+  local day hour minute epoch offset
+  read -r day hour minute epoch offset <<EOF
+$(read_clock_fields)
+EOF
+  safe_nonnegative_integer "$epoch" || die 'clock epoch is invalid'
+  printf '%s\n' "$epoch"
 }
 
 strip_leading_zero() {
@@ -522,7 +629,11 @@ slot_at() { # <YYYYMMDD> <HH> <MM>
   minute_n=$(strip_leading_zero "$minute")
   [ "$hour_n" -le 23 ] || return 2
   if [ "$hour_n" -lt "$START_HOUR" ]; then return 3; fi
-  if [ "$hour_n" -ge "$END_HOUR" ]; then
+  # The final slot's catch-up window closes with its own half hour, so an
+  # unattended cycle never begins an authorized external write after hours.
+  if [ "$hour_n" -gt "$END_HOUR" ]; then return 3; fi
+  if [ "$hour_n" -eq "$END_HOUR" ]; then
+    [ "$minute_n" -lt "$INTERVAL_MINUTES" ] || return 3
     slot_hour=$END_HOUR
     slot_minute=0
   else
@@ -530,15 +641,6 @@ slot_at() { # <YYYYMMDD> <HH> <MM>
     if [ "$minute_n" -lt "$INTERVAL_MINUTES" ]; then slot_minute=0; else slot_minute=$INTERVAL_MINUTES; fi
   fi
   printf '%s-%02d%02d\n' "$day" "$slot_hour" "$slot_minute"
-}
-
-latest_due_slot() {
-  local day hour minute epoch offset
-  read -r day hour minute epoch offset <<EOF
-$(read_clock_fields)
-EOF
-  safe_nonnegative_integer "$epoch" || die 'clock epoch is invalid'
-  slot_at "$day" "$hour" "$minute"
 }
 
 process_is_live_owner() { # <pid>
@@ -550,39 +652,145 @@ process_is_live_owner() { # <pid>
   case "$command" in *fm-review-sweep-supervisor.sh*) return 0 ;; *) return 1 ;; esac
 }
 
+process_group_of() { # <pid>
+  local value
+  safe_positive_integer "$1" || return 1
+  value=$(ps -p "$1" -o pgid= 2>/dev/null | sed -n '1p' | tr -d '[:space:]')
+  safe_positive_integer "${value:-}" || return 1
+  printf '%s\n' "$value"
+}
+
+lock_dir_age_seconds() {
+  local mtime now
+  mtime=$(path_mtime "$LOCK_DIR") || return 1
+  now=$(date +%s)
+  safe_nonnegative_integer "$now" || return 1
+  [ "$now" -ge "$mtime" ] || return 1
+  printf '%s\n' "$((now - mtime))"
+}
+
+lock_cycle_group_is_live() {
+  local pgid=
+  if [ -f "$LOCK_CYCLE_PGID_FILE" ] && [ ! -L "$LOCK_CYCLE_PGID_FILE" ]; then
+    pgid=$(sed -n '1p' "$LOCK_CYCLE_PGID_FILE" 2>/dev/null || true)
+  fi
+  safe_positive_integer "${pgid:-}" || return 1
+  if kill -0 "-$pgid" 2>/dev/null; then
+    printf '%s\n' "$pgid"
+    return 0
+  fi
+  return 1
+}
+
+retire_lock_directory() {
+  local stale="$STATE_ROOT/run.lock.stale.$$"
+  rm -rf -- "$stale" 2>/dev/null || true
+  if mv "$LOCK_DIR" "$stale" 2>/dev/null; then
+    rm -f -- "$stale/owner" "$stale/cycle-pgid" 2>/dev/null || true
+    rmdir -- "$stale" 2>/dev/null || die 'cannot retire stale review-sweep lock safely'
+  fi
+}
+
 acquire_run_lock() {
-  local owner pid stale
+  local owner pgid age
   mkdir -p "$STATE_ROOT"
   [ -d "$STATE_ROOT" ] && [ ! -L "$STATE_ROOT" ] || die 'state root is unsafe'
   while ! mkdir "$LOCK_DIR" 2>/dev/null; do
-    owner="$LOCK_DIR/owner"
-    [ -f "$owner" ] && [ ! -L "$owner" ] || {
-      printf 'busy: review-sweep lock exists without a readable owner\n'
-      return 1
-    }
-    pid=$(sed -n '1p' "$owner" 2>/dev/null || true)
-    if process_is_live_owner "$pid"; then
-      printf 'busy: review-sweep cycle already owned by pid %s\n' "$pid"
-      return 1
+    [ -d "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ] || die 'review-sweep lock path is unsafe'
+    owner=
+    if [ -f "$LOCK_OWNER_FILE" ] && [ ! -L "$LOCK_OWNER_FILE" ]; then
+      owner=$(sed -n '1p' "$LOCK_OWNER_FILE" 2>/dev/null || true)
     fi
-    stale="$STATE_ROOT/run.lock.stale.$$"
-    if mv "$LOCK_DIR" "$stale" 2>/dev/null; then
-      rm -f -- "$stale/owner" 2>/dev/null || true
-      rmdir -- "$stale" 2>/dev/null || die 'cannot retire stale review-sweep lock safely'
+    if [ -n "$owner" ]; then
+      if process_is_live_owner "$owner"; then
+        printf 'busy: review-sweep cycle already owned by pid %s\n' "$owner"
+        return 1
+      fi
+      # A dead supervisor whose cycle process group outlived it still holds the
+      # external write authorization, so the lock must not be reclaimed yet.
+      if pgid=$(lock_cycle_group_is_live); then
+        printf 'busy: review-sweep cycle process group %s outlived its supervisor\n' "$pgid"
+        return 1
+      fi
+    else
+      # A crash between the lock directory and its owner record leaves an
+      # ownerless lock that nothing would ever release; reclaim it after a grace
+      # long enough that a live claimant in that window is never stolen from.
+      age=$(lock_dir_age_seconds) || {
+        printf 'busy: review-sweep lock exists without a readable owner or age\n'
+        return 1
+      }
+      if [ "$age" -lt "$LOCK_ORPHAN_GRACE_SECONDS" ]; then
+        printf 'busy: review-sweep lock is being claimed by another process\n'
+        return 1
+      fi
+      printf 'reclaim: retiring an ownerless review-sweep lock after %s seconds\n' "$age"
     fi
+    retire_lock_directory
   done
-  atomic_write "$LOCK_DIR/owner" 0600 "$$" || {
+  atomic_write "$LOCK_OWNER_FILE" 0600 "$$" || {
     rmdir -- "$LOCK_DIR" 2>/dev/null || true
     die 'cannot publish review-sweep lock owner'
   }
   RUN_LOCK_HELD=1
+  RUN_LOCK_RETAINED=0
 }
 
 release_run_lock() {
   [ "${RUN_LOCK_HELD:-0}" = 1 ] || return 0
-  rm -f -- "$LOCK_DIR/owner" 2>/dev/null || true
+  [ "${RUN_LOCK_RETAINED:-0}" = 0 ] || return 0
+  rm -f -- "$LOCK_OWNER_FILE" "$LOCK_CYCLE_PGID_FILE" 2>/dev/null || true
   rmdir -- "$LOCK_DIR" 2>/dev/null || true
   RUN_LOCK_HELD=0
+}
+
+cycle_processes_live() {
+  if safe_positive_integer "${RUN_CHILD_PGID:-}"; then
+    if kill -0 "-$RUN_CHILD_PGID" 2>/dev/null; then return 0; fi
+    return 1
+  fi
+  if safe_positive_integer "${RUN_CHILD_PID:-}"; then
+    if kill -0 "$RUN_CHILD_PID" 2>/dev/null; then return 0; fi
+  fi
+  return 1
+}
+
+signal_cycle_processes() { # <signal>
+  local signal=$1
+  if safe_positive_integer "${RUN_CHILD_PGID:-}"; then
+    kill -"$signal" "-$RUN_CHILD_PGID" 2>/dev/null || true
+    return 0
+  fi
+  if safe_positive_integer "${RUN_CHILD_PID:-}"; then
+    kill -"$signal" "$RUN_CHILD_PID" 2>/dev/null || true
+  fi
+  return 0
+}
+
+stop_cycle_processes() {
+  local waited=0
+  if ! cycle_processes_live; then return 0; fi
+  signal_cycle_processes TERM
+  while [ "$waited" -lt "$CYCLE_STOP_GRACE_SECONDS" ]; do
+    if ! cycle_processes_live; then return 0; fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  signal_cycle_processes KILL
+  waited=0
+  while [ "$waited" -lt "$CYCLE_KILL_GRACE_SECONDS" ]; do
+    if ! cycle_processes_live; then return 0; fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if cycle_processes_live; then return 1; fi
+  return 0
+}
+
+forget_cycle_processes() {
+  RUN_CHILD_PID=
+  RUN_CHILD_PGID=
+  rm -f -- "$LOCK_CYCLE_PGID_FILE" 2>/dev/null || true
 }
 
 slot_file_value() { # <slot-dir> <name>
@@ -604,6 +812,84 @@ automation_inflight_count() {
   printf '%s\n' "$count"
 }
 
+prune_expired_slot_dirs() { # <root> <cutoff>
+  local root=$1 cutoff=$2 entry name mtime
+  [ -d "$root" ] && [ ! -L "$root" ] || return 0
+  for entry in "$root"/*; do
+    [ -e "$entry" ] || continue
+    name=${entry##*/}
+    safe_slot_id "$name" || continue
+    [ ! -L "$entry" ] && [ -d "$entry" ] || continue
+    mtime=$(path_mtime "$entry") || continue
+    [ "$mtime" -lt "$cutoff" ] || continue
+    rm -rf -- "$entry" 2>/dev/null || true
+  done
+}
+
+prune_expired_receipts() { # <root> <cutoff>
+  local root=$1 cutoff=$2 entry name mtime
+  [ -d "$root" ] && [ ! -L "$root" ] || return 0
+  for entry in "$root"/*.json; do
+    [ -e "$entry" ] || continue
+    name=${entry##*/}
+    name=${name%.json}
+    safe_slot_id "$name" || continue
+    [ ! -L "$entry" ] && [ -f "$entry" ] || continue
+    mtime=$(path_mtime "$entry") || continue
+    [ "$mtime" -lt "$cutoff" ] || continue
+    rm -f -- "$entry" 2>/dev/null || true
+  done
+}
+
+prune_expired_artifacts() {
+  # Retention is measured against real file times, and only supervisor-owned
+  # regular slot directories, result directories, and receipt files qualify.
+  # Anything symlinked or unexpectedly shaped is left untouched.
+  local now cutoff
+  now=$(date +%s)
+  safe_nonnegative_integer "$now" || return 0
+  cutoff=$((now - RETENTION_DAYS * 86400))
+  [ "$cutoff" -gt 0 ] || return 0
+  prune_expired_slot_dirs "$SLOTS_ROOT" "$cutoff"
+  prune_expired_slot_dirs "$RESULTS_ROOT" "$cutoff"
+  prune_expired_receipts "$AUTOMATION_HOME/state/review-sweep-cycle-receipts" "$cutoff"
+}
+
+prune_other_failure_tails() { # <keep-path>
+  local keep=$1 entry
+  [ -d "$RESULTS_ROOT" ] && [ ! -L "$RESULTS_ROOT" ] || return 0
+  for entry in "$RESULTS_ROOT"/*/events.tail.jsonl; do
+    [ -e "$entry" ] || continue
+    [ "$entry" != "$keep" ] || continue
+    [ ! -L "$entry" ] && [ -f "$entry" ] || continue
+    rm -f -- "$entry" 2>/dev/null || true
+  done
+}
+
+bound_cycle_telemetry() { # <result-dir> <event-log> <exit-code>
+  local result_dir=$1 event_log=$2 rc=$3 tail_file="$1/events.tail.jsonl" tmp
+  if [ "$rc" -eq 0 ]; then
+    # A verified cycle keeps its prompt, final result, and receipt. The raw
+    # event stream is unbounded telemetry and is not an audit record.
+    rm -f -- "$event_log" "$tail_file" "$result_dir/runner.pid" 2>/dev/null || true
+    return 0
+  fi
+  if [ -f "$event_log" ] && [ ! -L "$event_log" ]; then
+    rm -f -- "$tail_file" 2>/dev/null || true
+    tmp=$(mktemp "$result_dir/.fm-review-sweep-tail.XXXXXX" 2>/dev/null || true)
+    if [ -n "$tmp" ]; then
+      if tail -n "$EVENT_TAIL_LINES" "$event_log" > "$tmp" 2>/dev/null && chmod 0600 "$tmp" \
+        && mv -f -- "$tmp" "$tail_file"; then
+        :
+      else
+        rm -f -- "$tmp" 2>/dev/null || true
+      fi
+    fi
+  fi
+  rm -f -- "$event_log" 2>/dev/null || true
+  prune_other_failure_tails "$tail_file"
+}
+
 review_cycle_prompt() { # <slot>
   local slot=$1
   cat <<EOF
@@ -623,23 +909,93 @@ Before finishing, atomically write this machine receipt to $AUTOMATION_HOME/stat
 EOF
 }
 
+receipt_gate_program() {
+  cat <<'JQ'
+. as $receipt |
+($receipt | type) == "object" and
+$receipt.version == 1 and
+$receipt.slot == $slot and
+$receipt.coverage == "complete" and
+($receipt.discovered | type == "number" and . >= 0 and floor == .) and
+($receipt.reviewed | type == "number" and . >= 0 and floor == .) and
+($receipt.skipped | type == "number" and . >= 0 and floor == .) and
+$receipt.failed == 0 and
+($receipt.comments_published == $receipt.reviewed) and
+($receipt.slack_messages_sent | type == "number" and . >= 0 and floor == .) and
+$receipt.tasks_left_in_flight == 0 and
+($receipt.reviews | type) == "array" and
+($receipt.reviews | length) == $receipt.reviewed and
+all($receipt.reviews[];
+  (.pr | type == "string" and test("^https://github[.]com/[^/]+/[^/]+/pull/[0-9]+$")) and
+  (.head | type == "string" and test("^[0-9a-f]{40}([0-9a-f]{24})?$")) and
+  (.comment_url | type == "string" and test("^https://github[.]com/[^/]+/[^/]+/pull/[0-9]+#issuecomment-[0-9]+$")) and
+  (.slack.status == "sent" or .slack.status == "skipped") and
+  (if .slack.status == "sent" then
+     (.slack.message_url | type == "string" and test("^https://[^/]*slack[.]com/archives/"))
+   else
+     (.slack.reason | type == "string" and length > 0)
+   end)) and
+$receipt.slack_messages_sent == ([$receipt.reviews[] | select(.slack.status == "sent")] | length)
+JQ
+}
+
+# Receipt outcomes are distinct so a missing tool, unreadable JSON, and a
+# semantically invalid receipt are never reported as the same failure:
+#   74  the cycle published no receipt
+#   75  the receipt is valid JSON but does not satisfy the publication contract
+#   76  the receipt is not parseable as a JSON object
+#   77  jq could not evaluate the receipt gate at all
+verify_cycle_receipt() { # <slot> <receipt-path>
+  local slot=$1 receipt=$2 status=0
+  if [ ! -f "$receipt" ] || [ -L "$receipt" ]; then
+    printf 'error: slot %s did not publish its cycle receipt at %s\n' "$slot" "$receipt" >&2
+    return 74
+  fi
+  "$JQ_BIN" -e 'type == "object"' "$receipt" >/dev/null 2>&1 || status=$?
+  if [ "$status" -ne 0 ]; then
+    printf 'error: slot %s published a receipt that is not a readable JSON object (jq exit %s)\n' \
+      "$slot" "$status" >&2
+    return 76
+  fi
+  status=0
+  "$JQ_BIN" -e --arg slot "$slot" "$(receipt_gate_program)" "$receipt" >/dev/null 2>&1 || status=$?
+  case $status in
+    0) return 0 ;;
+    1|4)
+      printf 'error: slot %s published an invalid or incomplete cycle receipt\n' "$slot" >&2
+      return 75
+      ;;
+    *)
+      printf 'error: slot %s receipt could not be evaluated by jq (exit %s)\n' "$slot" "$status" >&2
+      return 77
+      ;;
+  esac
+}
+
 run_codex_cycle() { # <slot> <result-dir>
-  local slot=$1 result_dir=$2 prompt_file result_file event_log receipt pid start_epoch now_epoch deadline rc=0 inflight
+  local slot=$1 result_dir=$2 prompt prompt_file result_file event_log receipt
+  local pid pgid self_pgid job_control=0 start_epoch now_epoch deadline rc=0 inflight
   mkdir -p "$result_dir"
   [ -d "$result_dir" ] && [ ! -L "$result_dir" ] || die 'result directory is unsafe'
   prompt_file="$result_dir/prompt.txt"
   result_file="$result_dir/result.txt"
   event_log="$result_dir/events.jsonl"
   receipt="$AUTOMATION_HOME/state/review-sweep-cycle-receipts/$slot.json"
-  atomic_write "$prompt_file" 0600 "$(review_cycle_prompt "$slot")" || die 'failed to write cycle prompt'
+  prompt=$(review_cycle_prompt "$slot")
+  atomic_write "$prompt_file" 0600 "$prompt" || die 'failed to write cycle prompt'
   if [ -L "$event_log" ] || [ -L "$result_file" ] || [ -L "$receipt" ]; then
     die 'refusing symlinked review-cycle output path'
   fi
-  rm -f -- "$result_file" "$receipt"
+  rm -f -- "$result_file" "$receipt" "$result_dir/events.tail.jsonl"
   : > "$event_log"
   chmod 0600 "$event_log"
   start_epoch=$(date +%s)
   deadline=$((start_epoch + MAX_RUNTIME_SECONDS))
+  self_pgid=$(process_group_of "$$" || true)
+  # Job control puts the cycle in its own process group, so every reviewer the
+  # cycle spawns can be terminated as one owned group rather than one pid.
+  set -m
+  case $- in *m*) job_control=1 ;; esac
   (
     export HOME
     export PATH="$RUNTIME_PATH"
@@ -647,25 +1003,48 @@ run_codex_cycle() { # <slot> <result-dir>
     export TZ="$TIMEZONE"
     if [ -n "$KNOWLEDGE_BASE_PATH" ]; then export KNOWLEDGE_BASE="$KNOWLEDGE_BASE_PATH"; fi
     exec "$CODEX_BIN" exec --ephemeral --json --color never --approve-for-me \
-      -C "$AUTOMATION_HOME" -o "$result_file" "$(cat "$prompt_file")"
-  ) > "$event_log" 2>&1 &
+      -C "$AUTOMATION_HOME" -o "$result_file" "$prompt"
+  ) > "$event_log" 2>&1 < /dev/null &
   pid=$!
+  set +m
   RUN_CHILD_PID=$pid
+  RUN_CHILD_PGID=
+  pgid=$(process_group_of "$pid" || true)
+  if safe_positive_integer "${pgid:-}"; then
+    if [ "$pgid" = "$pid" ] && [ "$pgid" != "${self_pgid:-}" ]; then RUN_CHILD_PGID=$pgid; fi
+  elif [ "$job_control" = 1 ] && [ "$pid" != "${self_pgid:-}" ]; then
+    RUN_CHILD_PGID=$pid
+  fi
+  if [ -n "$RUN_CHILD_PGID" ]; then
+    if [ "${RUN_LOCK_HELD:-0}" = 1 ]; then
+      atomic_write "$LOCK_CYCLE_PGID_FILE" 0600 "$RUN_CHILD_PGID" || true
+    fi
+  else
+    printf 'warning: slot %s did not obtain an owned cycle process group; only its direct child can be stopped\n' \
+      "$slot" >&2
+  fi
   atomic_write "$result_dir/runner.pid" 0600 "$pid" || true
   while kill -0 "$pid" 2>/dev/null; do
     now_epoch=$(date +%s)
     if [ "$now_epoch" -ge "$deadline" ]; then
-      printf 'timeout: slot %s exceeded %s seconds; stopping pid %s\n' "$slot" "$MAX_RUNTIME_SECONDS" "$pid" >&2
-      kill -TERM "$pid" 2>/dev/null || true
-      sleep 5
-      kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+      printf 'timeout: slot %s exceeded %s seconds; stopping its cycle process group\n' \
+        "$slot" "$MAX_RUNTIME_SECONDS" >&2
+      stop_cycle_processes || true
       rc=124
       break
     fi
     sleep 5
   done
   if [ "$rc" -eq 0 ]; then wait "$pid" || rc=$?; else wait "$pid" 2>/dev/null || true; fi
-  RUN_CHILD_PID=
+  # The exclusion lock is only meaningful while no authorized writer from this
+  # cycle survives, so confirm the whole group is gone before anything releases.
+  if stop_cycle_processes; then
+    forget_cycle_processes
+  else
+    printf 'error: slot %s left cycle processes running after termination escalation\n' "$slot" >&2
+    [ "$rc" -ne 0 ] || rc=71
+    RUN_LOCK_RETAINED=1
+  fi
   inflight=$(automation_inflight_count)
   atomic_write "$result_dir/inflight-count" 0600 "$inflight" || true
   if [ "$inflight" -ne 0 ]; then
@@ -673,95 +1052,77 @@ run_codex_cycle() { # <slot> <result-dir>
     [ "$rc" -ne 0 ] || rc=73
   fi
   if [ "$rc" -eq 0 ]; then
-    if [ ! -f "$receipt" ] || [ -L "$receipt" ]; then
-      printf 'error: slot %s did not publish its cycle receipt at %s\n' "$slot" "$receipt" >&2
-      rc=74
-    elif ! jq -e --arg slot "$slot" '
-      . as $receipt |
-      ($receipt | type) == "object" and
-      $receipt.version == 1 and
-      $receipt.slot == $slot and
-      $receipt.coverage == "complete" and
-      ($receipt.discovered | type == "number" and . >= 0 and floor == .) and
-      ($receipt.reviewed | type == "number" and . >= 0 and floor == .) and
-      ($receipt.skipped | type == "number" and . >= 0 and floor == .) and
-      $receipt.failed == 0 and
-      ($receipt.comments_published == $receipt.reviewed) and
-      ($receipt.slack_messages_sent | type == "number" and . >= 0 and floor == .) and
-      $receipt.tasks_left_in_flight == 0 and
-      ($receipt.reviews | type) == "array" and
-      ($receipt.reviews | length) == $receipt.reviewed and
-      all($receipt.reviews[];
-        (.pr | type == "string" and test("^https://github[.]com/[^/]+/[^/]+/pull/[0-9]+$")) and
-        (.head | type == "string" and test("^[0-9a-f]{40}([0-9a-f]{24})?$")) and
-        (.comment_url | type == "string" and test("^https://github[.]com/[^/]+/[^/]+/pull/[0-9]+#issuecomment-[0-9]+$")) and
-        (.slack.status == "sent" or .slack.status == "skipped") and
-        (if .slack.status == "sent" then
-           (.slack.message_url | type == "string" and test("^https://[^/]*slack[.]com/archives/"))
-         else
-           (.slack.reason | type == "string" and length > 0)
-         end)) and
-      $receipt.slack_messages_sent == ([$receipt.reviews[] | select(.slack.status == "sent")] | length)
-    ' "$receipt" >/dev/null 2>&1; then
-      printf 'error: slot %s published an invalid or incomplete cycle receipt\n' "$slot" >&2
-      rc=75
-    fi
+    verify_cycle_receipt "$slot" "$receipt" || rc=$?
   fi
+  bound_cycle_telemetry "$result_dir" "$event_log" "$rc"
   return "$rc"
 }
 
 handle_cycle_signal() {
   local signal=${1:-TERM}
-  if safe_positive_integer "${RUN_CHILD_PID:-}" && kill -0 "$RUN_CHILD_PID" 2>/dev/null; then
-    kill -TERM "$RUN_CHILD_PID" 2>/dev/null || true
+  if stop_cycle_processes; then
+    forget_cycle_processes
+    release_run_lock
+  else
+    printf 'error: review-sweep cycle processes survived termination; retaining the owner lock\n' >&2
+    RUN_LOCK_RETAINED=1
   fi
-  release_run_lock
   case $signal in HUP) exit 129 ;; INT) exit 130 ;; *) exit 143 ;; esac
 }
 
-run_slot() { # <slot> <epoch>
-  local slot=$1 now_epoch=$2 slot_dir result_dir status retry_at attempt rc
+slot_admission() { # <slot> <now-epoch>
+  local slot=$1 now_epoch=$2 status retry_at
   safe_single_line "$slot" || die 'slot id is invalid'
-  case $slot in ''|*[!A-Za-z0-9._-]*) die 'slot id is invalid' ;; esac
+  safe_slot_id "$slot" || die 'slot id is invalid'
   mkdir -p "$SLOTS_ROOT" "$RESULTS_ROOT"
-  slot_dir="$SLOTS_ROOT/$slot"
-  result_dir="$RESULTS_ROOT/$slot"
-  mkdir -p "$slot_dir"
-  [ -d "$slot_dir" ] && [ ! -L "$slot_dir" ] || die 'slot state directory is unsafe'
-  status=$(slot_file_value "$slot_dir" status 2>/dev/null || true)
+  SLOT_DIR="$SLOTS_ROOT/$slot"
+  mkdir -p "$SLOT_DIR"
+  [ -d "$SLOT_DIR" ] && [ ! -L "$SLOT_DIR" ] || die 'slot state directory is unsafe'
+  SLOT_ADMISSION_MESSAGE=
+  status=$(slot_file_value "$SLOT_DIR" status 2>/dev/null || true)
   if [ "$status" = succeeded ]; then
-    printf 'noop: slot %s already succeeded\n' "$slot"
-    return 0
+    SLOT_ADMISSION_MESSAGE="noop: slot $slot already succeeded"
+    return 1
   fi
-  retry_at=$(slot_file_value "$slot_dir" retry-at 2>/dev/null || printf '0')
+  retry_at=$(slot_file_value "$SLOT_DIR" retry-at 2>/dev/null || printf '0')
   safe_nonnegative_integer "$retry_at" || retry_at=0
   if [ "$status" = failed ] && [ "$now_epoch" -lt "$retry_at" ]; then
-    printf 'deferred: slot %s retry is due at epoch %s\n' "$slot" "$retry_at"
-    return 0
+    SLOT_ADMISSION_MESSAGE="deferred: slot $slot retry is due at epoch $retry_at"
+    return 1
   fi
-  attempt=$(slot_file_value "$slot_dir" attempt 2>/dev/null || printf '0')
+  # A slot left in "running" by a crash is deliberately admitted so the next
+  # tick recovers it under the same slot identity.
+  return 0
+}
+
+run_slot() { # <slot> <now-epoch>
+  local slot=$1 now_epoch=$2 result_dir attempt rc=0 completed
+  result_dir="$RESULTS_ROOT/$slot"
+  attempt=$(slot_file_value "$SLOT_DIR" attempt 2>/dev/null || printf '0')
   safe_nonnegative_integer "$attempt" || attempt=0
   attempt=$((attempt + 1))
-  slot_set "$slot_dir" attempt "$attempt"
-  slot_set "$slot_dir" started-at "$now_epoch"
-  slot_set "$slot_dir" owner-pid "$$"
-  slot_set "$slot_dir" status running
+  slot_set "$SLOT_DIR" attempt "$attempt"
+  slot_set "$SLOT_DIR" started-at "$now_epoch"
+  slot_set "$SLOT_DIR" owner-pid "$$"
+  slot_set "$SLOT_DIR" status running
   printf 'start: slot=%s attempt=%s max-concurrent-reviews=%s\n' "$slot" "$attempt" "$MAX_CONCURRENT_REVIEWS"
-  if run_codex_cycle "$slot" "$result_dir"; then
-    slot_set "$slot_dir" completed-at "$(date +%s)"
-    slot_set "$slot_dir" status succeeded
+  run_codex_cycle "$slot" "$result_dir" || rc=$?
+  # The retry deadline is measured from when this cycle actually finished, so a
+  # cycle longer than retry_seconds still waits a full throttle before attempt N+1.
+  completed=$(current_epoch)
+  slot_set "$SLOT_DIR" completed-at "$completed"
+  if [ "$rc" -eq 0 ]; then
+    slot_set "$SLOT_DIR" status succeeded
     atomic_write "$STATE_ROOT/last-succeeded-slot" 0600 "$slot" || true
     printf 'complete: slot=%s status=succeeded\n' "$slot"
-    return 0
   else
-    rc=$?
-    slot_set "$slot_dir" exit-code "$rc"
-    slot_set "$slot_dir" completed-at "$(date +%s)"
-    slot_set "$slot_dir" retry-at "$((now_epoch + RETRY_SECONDS))"
-    slot_set "$slot_dir" status failed
+    slot_set "$SLOT_DIR" exit-code "$rc"
+    slot_set "$SLOT_DIR" retry-at "$((completed + RETRY_SECONDS))"
+    slot_set "$SLOT_DIR" status failed
     printf 'complete: slot=%s status=failed exit=%s retry-after=%s\n' "$slot" "$rc" "$RETRY_SECONDS" >&2
-    return "$rc"
   fi
+  prune_expired_artifacts
+  return "$rc"
 }
 
 prepare_cycle_home() {
@@ -772,49 +1133,55 @@ prepare_cycle_home() {
   write_host_contract
 }
 
+run_supervised_cycle() { # <slot> <now-epoch>
+  local slot=$1 now_epoch=$2 rc=0
+  acquire_run_lock || return 0
+  trap release_run_lock EXIT
+  trap 'handle_cycle_signal HUP' HUP
+  trap 'handle_cycle_signal INT' INT
+  trap 'handle_cycle_signal TERM' TERM
+  # Slot admission is decided under the lock and before any synchronization, so
+  # a duplicate minute tick costs one state read instead of a full home sync.
+  if slot_admission "$slot" "$now_epoch"; then
+    prepare_cycle_home
+    run_slot "$slot" "$now_epoch" || rc=$?
+  else
+    printf '%s\n' "$SLOT_ADMISSION_MESSAGE"
+  fi
+  release_run_lock
+  trap - EXIT HUP INT TERM
+  return "$rc"
+}
+
 tick() {
-  local fields day hour minute epoch offset slot rc=0
+  local day hour minute epoch offset slot rc=0
   load_config
   [ "$ENABLED" = 1 ] || { printf 'disabled: review-sweep supervisor\n'; return 0; }
   read -r day hour minute epoch offset <<EOF
 $(read_clock_fields)
 EOF
+  safe_nonnegative_integer "$epoch" || die 'clock epoch is invalid'
   slot=$(slot_at "$day" "$hour" "$minute" 2>/dev/null || true)
   [ -n "$slot" ] || { printf 'noop: no review-sweep slot is due\n'; return 0; }
-  acquire_run_lock || return 0
-  trap release_run_lock EXIT
-  trap 'handle_cycle_signal HUP' HUP
-  trap 'handle_cycle_signal INT' INT
-  trap 'handle_cycle_signal TERM' TERM
-  prepare_cycle_home
-  run_slot "$slot" "$epoch" || rc=$?
-  release_run_lock
-  trap - EXIT HUP INT TERM
+  run_supervised_cycle "$slot" "$epoch" || rc=$?
   return "$rc"
 }
 
 run_now() {
-  local fields day hour minute epoch offset slot rc=0
+  local day hour minute epoch offset slot rc=0
   load_config
   [ "$ENABLED" = 1 ] || die 'review-sweep supervisor is disabled'
   read -r day hour minute epoch offset <<EOF
 $(read_clock_fields)
 EOF
+  safe_nonnegative_integer "$epoch" || die 'clock epoch is invalid'
   slot="manual-$day-$hour$minute-$epoch"
-  acquire_run_lock || return 0
-  trap release_run_lock EXIT
-  trap 'handle_cycle_signal HUP' HUP
-  trap 'handle_cycle_signal INT' INT
-  trap 'handle_cycle_signal TERM' TERM
-  prepare_cycle_home
-  run_slot "$slot" "$epoch" || rc=$?
-  release_run_lock
-  trap - EXIT HUP INT TERM
+  run_supervised_cycle "$slot" "$epoch" || rc=$?
   return "$rc"
 }
 
 install_supervisor() {
-  local source= changed=0
+  local source= branch= changed=0
   while [ "$#" -gt 0 ]; do
     case $1 in
       --source-home) [ "$#" -ge 2 ] || usage; source=$2; shift 2 ;;
@@ -824,9 +1191,15 @@ install_supervisor() {
   [ -n "$source" ] || usage
   if [ -f "$CONFIG_PATH" ] && [ ! -L "$CONFIG_PATH" ]; then
     load_config
-    [ "$SOURCE_HOME" = "$source" ] || die "existing config belongs to source_home $SOURCE_HOME"
+    [ "$SOURCE_HOME" = "$source" ] \
+      || die "existing config belongs to source_home $SOURCE_HOME; remove $CONFIG_PATH to install a different source home"
   else
-    write_config "$source"
+    # Nothing is persisted until the supplied home proves it is a Firstmate
+    # worktree root, so a mistyped path leaves the installer reusable.
+    validate_source_home "$source"
+    branch=$(source_default_branch "$source") \
+      || die 'cannot resolve the default branch of source_home'
+    write_config "$source" "$branch"
     load_config
   fi
   install_runtime_script
@@ -841,12 +1214,14 @@ install_supervisor() {
   printf 'schedule: %02d:00-%02d:00 %s every %s minutes, final slot %02d:00\n' \
     "$START_HOUR" "$END_HOUR" "$TIMEZONE" "$INTERVAL_MINUTES" "$END_HOUR"
   printf 'max-concurrent-reviews: %s\n' "$MAX_CONCURRENT_REVIEWS"
+  printf 'source-branch: %s\n' "$SOURCE_BRANCH"
+  printf 'retention-days: %s\n' "$RETENTION_DAYS"
   printf 'automation-home: %s\n' "$AUTOMATION_HOME"
   printf 'config: %s\n' "$CONFIG_PATH"
 }
 
 status_supervisor() {
-  local loaded=no lock=idle owner= latest=none slot_status=unknown
+  local loaded=no lock=idle owner= pgid latest=none slot_status=unknown
   if [ -f "$CONFIG_PATH" ] && [ ! -L "$CONFIG_PATH" ]; then
     load_config
   else
@@ -854,9 +1229,19 @@ status_supervisor() {
     return 1
   fi
   launchagent_loaded && loaded=yes
-  if [ -f "$LOCK_DIR/owner" ] && [ ! -L "$LOCK_DIR/owner" ]; then
-    owner=$(sed -n '1p' "$LOCK_DIR/owner" 2>/dev/null || true)
-    if process_is_live_owner "$owner"; then lock="running pid=$owner"; else lock="stale pid=${owner:-unknown}"; fi
+  if [ -d "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ]; then
+    if [ -f "$LOCK_OWNER_FILE" ] && [ ! -L "$LOCK_OWNER_FILE" ]; then
+      owner=$(sed -n '1p' "$LOCK_OWNER_FILE" 2>/dev/null || true)
+      if process_is_live_owner "$owner"; then
+        lock="running pid=$owner"
+      elif pgid=$(lock_cycle_group_is_live); then
+        lock="orphaned cycle process group=$pgid"
+      else
+        lock="stale pid=${owner:-unknown}"
+      fi
+    else
+      lock="ownerless since $(lock_dir_age_seconds || printf unknown) seconds"
+    fi
   fi
   if [ -f "$STATE_ROOT/last-succeeded-slot" ] && [ ! -L "$STATE_ROOT/last-succeeded-slot" ]; then
     latest=$(sed -n '1p' "$STATE_ROOT/last-succeeded-slot")
@@ -868,6 +1253,8 @@ status_supervisor() {
   printf 'schedule: %02d:00-%02d:00 %s every %s minutes, final slot %02d:00\n' \
     "$START_HOUR" "$END_HOUR" "$TIMEZONE" "$INTERVAL_MINUTES" "$END_HOUR"
   printf 'max-concurrent-reviews: %s\n' "$MAX_CONCURRENT_REVIEWS"
+  printf 'source-branch: %s\n' "$SOURCE_BRANCH"
+  printf 'retention-days: %s\n' "$RETENTION_DAYS"
   printf 'cycle: %s\n' "$lock"
   printf 'last-succeeded-slot: %s\n' "$latest"
   printf 'last-slot-status: %s\n' "$slot_status"
