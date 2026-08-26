@@ -286,9 +286,11 @@ test_harness_family_resolution() {
 
 # fm-spawn.sh's claude branch is the one caller of these three; issue: a
 # wholesale settings.local.json write destroys a project's committed content.
-# Ownership is per hook-group entry (the entry's command names
-# bin/fm-busy-event.sh), so these fixtures use a realistic-looking command for
-# firstmate's own entries and a distinct one for a project's own entries.
+# Ownership is per COMMAND within a hook-group entry (the command names
+# bin/fm-busy-event.sh), not per whole entry, so a project's own command
+# co-located in the SAME entry as firstmate's survives too; these fixtures use
+# a realistic-looking command for firstmate's own commands and a distinct one
+# for a project's own commands.
 test_claude_settings_merge_preserves_project_keys_and_replaces_own_hooks() {
   local project merged gen1 gen2 hooks1 hooks2
   project='{"permissions":{"allow":["Bash(npm test)"]},"enabledPlugins":{"context7":true},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"project-own-stop-hook"}]}],"PreToolUse":[{"hooks":[{"type":"command","command":"project-lint-on-pretooluse"}]}]}}'
@@ -332,7 +334,34 @@ test_claude_settings_merge_preserves_project_keys_and_replaces_own_hooks() {
     || fail "an absent existing file must not fabricate any other top-level key"
   [ "$(fm_control_claude_settings_merged 'not json' "$hooks1" | jq -r '.hooks.Stop[0].hooks[0].command')" = "fm-busy-event.sh apply gen1" ] \
     || fail "malformed existing content must fall back to a bare hooks document rather than refusing"
-  pass "fm-control-lib: claude settings merge preserves a project's own keys, other hook events, and co-located hooks, and fully replaces firstmate's own hooks on respawn"
+
+  # A project's own command can be co-located in the SAME hook-group entry as
+  # firstmate's own (one matcher entry, multiple commands in its "hooks"
+  # array) rather than in a separate array entry. Ownership must be decided
+  # per command, not per whole entry, or stripping firstmate's command out of
+  # a mixed entry would take the project's command with it.
+  local mixed same_entry_merged same_entry_cleared
+  mixed='{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen1"},{"type":"command","command":"project-own-stop-hook"}]}]}}'
+  # Firstmate's fresh fragment always arrives as its own entry, so stripping
+  # firstmate's command out of the mixed entry leaves the project's command in
+  # its original entry alongside a new entry for firstmate's fresh command -
+  # two entries total, not the one mixed entry the fixture started with, and
+  # not three (which would mean the project's entry was fragmented further).
+  same_entry_merged=$(fm_control_claude_settings_merged "$mixed" "$hooks2")
+  [ "$(printf '%s' "$same_entry_merged" | jq '.hooks.Stop | length')" = 2 ] \
+    || fail "a respawn on a mixed entry must end with the project's own entry plus firstmate's fresh one, got $(printf '%s' "$same_entry_merged" | jq -c '.hooks.Stop')"
+  assert_contains "$(printf '%s' "$same_entry_merged" | jq -c '.hooks.Stop')" "project-own-stop-hook" \
+    "a project's own command co-located in the same entry as firstmate's must survive a respawn merge"
+  assert_not_contains "$(printf '%s' "$same_entry_merged" | jq -c '.hooks.Stop')" "gen1" \
+    "a respawn merge must still replace firstmate's own command inside a mixed entry"
+  assert_contains "$(printf '%s' "$same_entry_merged" | jq -c '.hooks.Stop')" "fm-busy-event.sh apply gen2" \
+    "a respawn merge must still install the fresh generation's command"
+
+  same_entry_cleared=$(printf '%s' "$mixed" | jq -c "$_FM_CONTROL_CLAUDE_SETTINGS_STRIP_JQ")
+  [ "$(printf '%s' "$same_entry_cleared" | jq -c '.hooks.Stop')" = '[{"hooks":[{"type":"command","command":"project-own-stop-hook"}]}]' ] \
+    || fail "clearing a mixed entry must strip only firstmate's own command, keeping the project's, got $(printf '%s' "$same_entry_cleared" | jq -c '.hooks.Stop')"
+
+  pass "fm-control-lib: claude settings merge preserves a project's own keys, other hook events, and co-located hooks (including a command sharing firstmate's own entry), and fully replaces firstmate's own hooks on respawn"
 }
 
 test_claude_settings_clear_strips_own_hooks_and_diff_predicate() {

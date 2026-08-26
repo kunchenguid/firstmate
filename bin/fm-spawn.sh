@@ -2437,6 +2437,17 @@ if [ "$KIND" != secondmate ]; then
       # (fm_control_claude_settings_merged owns the merge contract).
       claude_existing_settings=
       [ ! -f "$WT/.claude/settings.local.json" ] || claude_existing_settings=$(cat "$WT/.claude/settings.local.json")
+      # A non-empty file that fm_control_claude_settings_merged cannot parse as
+      # a JSON object (a mid-edit syntax error, or - unlikely for a real Claude
+      # settings file - valid JSON of some other shape) is merged as a bare {}
+      # so firstmate can still arm its hooks, which drops those original bytes
+      # from the document written below. Save them outside the worktree first
+      # so a project's in-progress, not-yet-committed edit is recoverable
+      # rather than silently gone.
+      if [ -n "$claude_existing_settings" ] \
+          && ! printf '%s' "$claude_existing_settings" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        printf '%s' "$claude_existing_settings" > "$STATE_REAL/$ID.claude-settings-local-unmergeable" 2>/dev/null || true
+      fi
       fm_control_claude_settings_merged "$claude_existing_settings" "$claude_hooks_json" \
         > "$WT/.claude/settings.local.json"
       exclude_path '.claude/settings.local.json'

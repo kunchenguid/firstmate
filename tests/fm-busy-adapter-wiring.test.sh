@@ -351,6 +351,38 @@ test_claude_hooks_merge_preserves_committed_project_settings() {
   pass "claude spawn merges its busy hooks into a project's committed settings.local.json instead of destroying it"
 }
 
+# issue: a committed settings.local.json that fm_control_claude_settings_merged
+# cannot parse as a JSON object (a mid-edit syntax error) was merged as a bare
+# {} so firstmate could still arm its hooks - but that silently dropped the
+# original bytes from the file firstmate writes. They must be recoverable.
+test_claude_hooks_merge_preserves_unmergeable_settings_as_backup() {
+  local rec id=busy-cl-4 out state settings backup malformed
+  rec=$(make_spawn_case claude-invalid-settings claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$PROJ_DIR/.claude"
+  malformed='{"permissions": {"allow": ["Bash(npm test)"],}'
+  printf '%s' "$malformed" > "$PROJ_DIR/.claude/settings.local.json"
+  git -C "$PROJ_DIR" add .claude/settings.local.json
+  git -C "$PROJ_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'project commits a mid-edit, syntactically invalid claude settings file'
+  git -C "$PROJ_DIR" push -q origin HEAD:main
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn must still succeed and arm hooks over an unparseable settings file: $out"
+  state="$HOME_DIR/state"
+  settings="$WT_DIR/.claude/settings.local.json"
+  jq -e . "$settings" >/dev/null || fail "claude hook settings must still be valid JSON after the fallback"
+  for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
+    jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "claude hook settings lack $ev"
+  done
+
+  backup="$state/$id.claude-settings-local-unmergeable"
+  [ -f "$backup" ] || fail "an unparseable committed settings file's original bytes must be saved, not just discarded"
+  [ "$(cat "$backup")" = "$malformed" ] \
+    || fail "the backup must hold exactly the original unparseable bytes, got $(cat "$backup" 2>/dev/null)"
+  pass "claude spawn saves a committed settings file's original bytes before falling back to a bare hooks document when it cannot be parsed"
+}
+
 test_codex_unverified_until_a_semantic_source_exists() {
   local rec id=busy-cx-1 out state
   rec=$(make_spawn_case codex-unverified codex "$id")
@@ -391,6 +423,7 @@ test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
 test_claude_hooks_merge_preserves_committed_project_settings
+test_claude_hooks_merge_preserves_unmergeable_settings_as_backup
 test_codex_unverified_until_a_semantic_source_exists
 
 echo "all fm-busy-adapter-wiring tests passed"

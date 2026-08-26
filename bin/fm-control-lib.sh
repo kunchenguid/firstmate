@@ -262,25 +262,30 @@ fm_control_harness_turnend_auth_path() {  # <harness> <token>
 # fm_control_claude_settings_only_hooks_differ to decide whether a tracked file's
 # only working-tree difference from HEAD is firstmate's own hook entries.
 #
-# Ownership is per hook-group ENTRY, not per top-level key: a hook-group under one
-# of firstmate's four managed events (UserPromptSubmit, Stop, StopFailure,
-# SessionEnd) is firstmate's own iff one of its commands names
-# bin/fm-busy-event.sh - the fixed script every incarnation's hook shells out
-# through, regardless of the --gen token embedded alongside it. Merging or
-# clearing touches only entries that pass that test, so a project's own hook for
-# the same managed event, any OTHER hook event entirely, and every other
-# top-level key all pass through untouched. That per-entry rule is also what
-# keeps a respawn or a harness relaunch from accumulating a superseded
-# incarnation's stale hook commands: each managed event's own entries are always
-# fully replaced, never appended to.
+# Ownership is per COMMAND within a hook-group entry, not per top-level key and
+# not per whole entry: a command within one of firstmate's four managed events
+# (UserPromptSubmit, Stop, StopFailure, SessionEnd) is firstmate's own iff it
+# names bin/fm-busy-event.sh - the fixed script every incarnation's hook shells
+# out through, regardless of the --gen token embedded alongside it. Merging or
+# clearing strips only commands that pass that test, dropping an entry entirely
+# only once every one of its commands was firstmate's own; a project's own
+# command co-located in the SAME hook-group entry as firstmate's (as well as a
+# project's own hook for the same managed event, any OTHER hook event entirely,
+# and every other top-level key) all pass through untouched. That per-command
+# rule is also what keeps a respawn or a harness relaunch from accumulating a
+# superseded incarnation's stale hook commands: each managed event's own
+# commands are always fully replaced, never appended to.
 # shellcheck disable=SC2016  # single quotes are deliberate: this is a jq program whose $managed/$k/$h are jq variables, not shell ones
 _FM_CONTROL_CLAUDE_SETTINGS_STRIP_JQ='
-  def fm_owned: any(.hooks[]?.command // ""; test("fm-busy-event\\.sh"));
+  def fm_owned_command: (.command // "") | test("fm-busy-event\\.sh");
   ["UserPromptSubmit","Stop","StopFailure","SessionEnd"] as $managed |
   ((.hooks // {})
     | with_entries(
         if (.key as $k | $managed | index($k)) then
-          .value |= map(select(fm_owned | not))
+          .value |= (
+            map(if has("hooks") then .hooks |= map(select(fm_owned_command | not)) else . end)
+            | map(select((has("hooks") | not) or ((.hooks | length) > 0)))
+          )
         else . end
       )
     | with_entries(select(.value | length > 0))
@@ -292,11 +297,15 @@ _FM_CONTROL_CLAUDE_SETTINGS_STRIP_JQ='
 # print a settings.local.json document with <hooks-fragment-json> - a
 # {"UserPromptSubmit":[...],"Stop":[...],...} object holding exactly firstmate's
 # four managed events - merged into <existing-json>. Within each managed event,
-# firstmate's own entries are replaced by the fragment's; every other top-level
-# key, every other hook event, and every non-owned entry within a managed event
+# firstmate's own commands are replaced by the fragment's; every other top-level
+# key, every other hook event, and every non-owned command (whether in its own
+# entry or co-located in the same entry as one of firstmate's own commands)
 # passes through unchanged. Absent, empty, or unparseable existing content is
 # treated as {} rather than refused, since an unreadable committed file cannot be
-# merged into and firstmate must still be able to arm its own hooks.
+# merged into and firstmate must still be able to arm its own hooks; a caller
+# that wants the original bytes recoverable when this fallback fires (they are
+# discarded from the printed document) must save them before calling, which is
+# what fm-spawn.sh does.
 fm_control_claude_settings_merged() {
   local existing=${1-} fresh=$2 base
   if [ -n "$existing" ] \
@@ -306,11 +315,16 @@ fm_control_claude_settings_merged() {
     base='{}'
   fi
   printf '%s' "$base" | jq -c --argjson fresh "$fresh" '
-    def fm_owned: any(.hooks[]?.command // ""; test("fm-busy-event\\.sh"));
+    def fm_owned_command: (.command // "") | test("fm-busy-event\\.sh");
     ($fresh | keys) as $managed |
     ((.hooks // {}) as $existing_hooks
       | reduce $managed[] as $k
-          ($existing_hooks; .[$k] = ((.[$k] // []) | map(select(fm_owned | not))) + $fresh[$k])
+          ($existing_hooks; .[$k] = (
+              (
+                (.[$k] // [])
+                | map(if has("hooks") then .hooks |= map(select(fm_owned_command | not)) else . end)
+                | map(select((has("hooks") | not) or ((.hooks | length) > 0)))
+              ) + $fresh[$k]))
     ) as $merged_hooks |
     . + {hooks: $merged_hooks}
   '
