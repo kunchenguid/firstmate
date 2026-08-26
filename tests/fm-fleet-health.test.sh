@@ -247,6 +247,27 @@ test_malformed_snapshot_is_incomplete() {
   pass "schema-tagged snapshots require the complete top-level shape"
 }
 
+test_snapshot_task_evidence_requires_keys_and_known_states() {
+  local home fixture out rc=0 mutation snapshot
+  home=$(make_home malformed-task-evidence)
+  fixture=$(make_health_fixture_root malformed-task-evidence)
+  snapshot='{"schema":"fm-fleet-snapshot.v1","generated":"2026-01-01T00:00:00Z","fm_home":"/tmp/home","roots":{"fm_root":"/tmp/root","state":"/tmp/state","data":"/tmp/data","config":"/tmp/config","projects":"/tmp/projects"},"backlog":{"path":"/tmp/backlog.md","present":false,"records":[]},"tasks":[{"id":"task","kind":"ship","remote":null,"current_state":{"state":"working"},"endpoint":{"agent_state":"alive","agent_alive":"alive","probe":"local","codex_session":{"resume_banner":null}},"paths":{"status_log":{"last_event":{"state":"working","handoff_required":false,"mtime_epoch":null}}},"pr":{"url":null,"source":"absent"}}],"scout_reports":[],"collection":{"state":{"present":true,"available":true,"invalid_metadata_count":0,"invalid_metadata":[]}},"main_inventory":{"valid":true,"reason":null},"secondmate_current":{"records":[],"truncated":0,"registry":{"available":true,"complete":true,"input_truncated":false,"records_truncated":false}},"secondmate_landed":{"records":[],"truncated":[],"unreadable":[],"partial":[]},"secondmate_guidance":{"note":"fixture"}}'
+  for mutation in omit-endpoint-exists invalid-state; do
+    if [ "$mutation" = omit-endpoint-exists ]; then
+      snapshot=$(printf '%s' "$snapshot" | jq 'del(.tasks[0].endpoint.exists)')
+    else
+      snapshot=$(printf '%s' "$snapshot" | jq '.tasks[0].current_state.state = "not-a-state"')
+    fi
+    rc=0
+    out=$(FM_HOME="$home" FM_TEST_SNAPSHOT="$snapshot" FM_FLEET_HEALTH_TIMED_WORKER=1 \
+      "$fixture/bin/fm-fleet-health.sh" --json) || rc=$?
+    expect_code 3 "$rc" "snapshot with $mutation should be incomplete"
+    printf '%s' "$out" | jq -e '.status == "incomplete" and .reason == "fleet snapshot was malformed"' \
+      >/dev/null || fail "snapshot with $mutation was accepted: $out"
+  done
+  pass "snapshot task evidence requires nullable keys and known states"
+}
+
 test_remote_snapshot_probe_disabled_skips_remote_state() {
   local home fixture out rc=0 log
   home=$(make_home remote-probe-disabled)
@@ -1044,8 +1065,6 @@ EOF
     "yolo=off" \
     "pr=https://github.com/example/alpha/pull/9"
   printf 'working: waiting on CI\n' > "$home/state/pr-ship.status"
-  printf '#!/usr/bin/env bash\nprintf "OPEN\\n"\n' > "$home/state/pr-ship.check.sh"
-  chmod 0600 "$home/state/pr-ship.check.sh"
   mkdir -p "$home/state/procevent"
   printf 'adapter=lavish\nargc=1\nargv:\npoll\n' > "$home/state/procevent/board-src.source"
   fakebin=$(make_fakebin "$home")
@@ -1159,6 +1178,29 @@ test_unknown_worker_state_does_not_create_missing_pr_listener() {
                and .subject == "unknown-pr") | not)
   ' >/dev/null || fail "unknown worker state produced a missing listener finding: $out"
   pass "unknown worker state does not create a missing PR listener"
+}
+
+test_invalid_pr_listener_evidence_is_inconclusive() {
+  local home fakebin out rc=0
+  home=$(make_home invalid-pr-listener-evidence)
+  write_live_ship "$home" invalid-pr
+  printf 'pr=https://github.com/example/alpha/pull/24\n' >> "$home/state/invalid-pr.meta"
+  printf 'paused: waiting for CI\n' > "$home/state/invalid-pr.status"
+  printf 'not a valid merge-poll listener\n' > "$home/state/invalid-pr.check.sh"
+  chmod 0600 "$home/state/invalid-pr.check.sh"
+  ln -s "$home/state/missing-retirement" "$home/state/retired.pr-poll-merge-notified"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm \
+    "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "invalid PR-listener artifacts should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "result-listener-inconclusive" and .subject == "pr-polls"
+              and .count == 2)
+      and (any(.findings[]; .kind == "result-listener-missing" and .subject == "invalid-pr") | not)
+  ' >/dev/null || fail "invalid PR-listener evidence became actionable: $out"
+  pass "invalid PR-listener evidence remains inconclusive"
 }
 
 test_matching_retired_pr_listener_is_not_missing() {
@@ -1314,6 +1356,7 @@ test_usage_exit
 test_healthy_empty_fleet
 test_missing_state_home_remains_unmodified
 test_malformed_snapshot_is_incomplete
+test_snapshot_task_evidence_requires_keys_and_known_states
 test_remote_snapshot_probe_disabled_skips_remote_state
 test_dangling_state_path_is_inconclusive
 test_unsearchable_state_is_inconclusive
@@ -1354,6 +1397,7 @@ test_dangling_procevent_claim_root_is_inconclusive
 test_dangling_procevent_registry_is_inconclusive
 test_paused_ship_still_requires_pr_listener
 test_unknown_worker_state_does_not_create_missing_pr_listener
+test_invalid_pr_listener_evidence_is_inconclusive
 test_matching_retired_pr_listener_is_not_missing
 test_inconclusive_dominates_actionable_status
 test_unreadable_supervision_lock_is_inconclusive

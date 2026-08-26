@@ -17,6 +17,11 @@
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
 
+_FM_PR_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_PR_LIB_DIR="."
+# shellcheck source=bin/fm-classify-lib.sh
+# shellcheck disable=SC1091
+. "$_FM_PR_LIB_DIR/fm-classify-lib.sh"
+
 FM_PR_PROVIDER=
 FM_PR_URL=
 FM_PR_HOST=
@@ -619,39 +624,92 @@ fm_pr_poll_artifacts_valid() {
 }
 
 fm_pr_poll_listeners_json() {
-  local state=$1 template=$2 f id meta records='[]'
-  if [ ! -d "$state" ]; then
-    jq -n '{available:true,records:[]}'
+  local state=$1 template=$2 f id meta records='[]' invalid='[]' unreadable='[]'
+  local artifact_readable artifact_valid notification_matches classification
+  if [ ! -d "$state" ] && [ ! -L "$state" ]; then
+    classification=$(fm_evidence_classify true true)
+    jq -n --argjson available "$( [ "$classification" = available ] && printf true || printf false )" \
+      '{available:$available,records:[],invalid_count:0,invalid:[],unreadable_count:0,unreadable:[]}'
     return 0
   fi
-  if [ ! -r "$state" ] || [ ! -x "$state" ]; then
-    jq -n '{available:false,records:[]}'
+  if { [ -L "$state" ] && [ ! -e "$state" ]; } \
+    || { [ -e "$state" ] && { [ ! -d "$state" ] || [ ! -r "$state" ] || [ ! -x "$state" ]; }; }; then
+    classification=$(fm_evidence_classify false false)
+    jq -n --arg path "$state" --argjson available "$( [ "$classification" = available ] && printf true || printf false )" \
+      '{available:$available,records:[],invalid_count:0,invalid:[],unreadable_count:1,unreadable:[{path:$path}]}'
     return 0
   fi
   for f in "$state"/*.check.sh; do
-    [ -f "$f" ] || continue
+    [ -e "$f" ] || [ -L "$f" ] || continue
     id=$(basename "$f" .check.sh)
     case "$id" in
       x-watch|tool-updates) continue ;;
     esac
-    if fm_pr_poll_artifacts_valid "$state" "$id" "$template"; then
+    artifact_readable=false
+    if [ -f "$f" ] && [ ! -L "$f" ] && [ -r "$f" ]; then
+      artifact_readable=true
+    fi
+    artifact_valid=false
+    if [ "$artifact_readable" = true ] \
+      && fm_pr_poll_artifacts_valid "$state" "$id" "$template"; then
+      artifact_valid=true
+    fi
+    classification=$(fm_evidence_classify "$artifact_readable" "$artifact_valid")
+    if [ "$classification" = available ]; then
       records=$(jq -n --argjson records "$records" --arg id "$id" \
         '$records + [{id:$id,armed:true,terminal_notified:false}]')
+    elif [ "$artifact_readable" = true ]; then
+      invalid=$(jq -n --argjson invalid "$invalid" --arg id "$id" --arg path "$f" \
+        '$invalid + [{id:$id,path:$path}]')
+    else
+      unreadable=$(jq -n --argjson unreadable "$unreadable" --arg id "$id" --arg path "$f" \
+        '$unreadable + [{id:$id,path:$path}]')
     fi
   done
   for f in "$state"/*.pr-poll-merge-notified; do
-    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    [ -e "$f" ] || [ -L "$f" ] || continue
     id=$(basename "$f" .pr-poll-merge-notified)
-    fm_pr_task_id_valid "$id" || continue
     meta="$state/$id.meta"
-    if fm_pr_metadata_identity_parse "$meta" \
-      && fm_pr_poll_merge_already_notified "$state" "$id" \
-        "$FM_PR_META_PROVIDER" "$FM_PR_META_HOST" "$FM_PR_META_PATH" "$FM_PR_META_NUMBER"; then
+    artifact_readable=false
+    if [ -f "$f" ] && [ ! -L "$f" ] && [ -r "$f" ]; then
+      artifact_readable=true
+    fi
+    artifact_valid=false
+    notification_matches=false
+    if [ "$artifact_readable" = true ] \
+      && fm_pr_task_id_valid "$id" \
+      && fm_pr_poll_merge_marker_valid "$state" "$f"; then
+      artifact_valid=true
+      if fm_pr_metadata_identity_parse "$meta" \
+        && fm_pr_poll_merge_already_notified "$state" "$id" \
+          "$FM_PR_META_PROVIDER" "$FM_PR_META_HOST" "$FM_PR_META_PATH" "$FM_PR_META_NUMBER"; then
+        notification_matches=true
+      fi
+    fi
+    classification=$(fm_evidence_classify "$artifact_readable" "$artifact_valid")
+    if [ "$classification" = available ] && [ "$notification_matches" = true ]; then
       records=$(jq -n --argjson records "$records" --arg id "$id" \
         '$records + [{id:$id,armed:false,terminal_notified:true}]')
+    elif [ "$classification" = available ]; then
+      :
+    elif [ "$artifact_readable" = true ]; then
+      invalid=$(jq -n --argjson invalid "$invalid" --arg id "$id" --arg path "$f" \
+        '$invalid + [{id:$id,path:$path}]')
+    else
+      unreadable=$(jq -n --argjson unreadable "$unreadable" --arg id "$id" --arg path "$f" \
+        '$unreadable + [{id:$id,path:$path}]')
     fi
   done
-  jq -n --argjson records "$records" '{available:true,records:$records}'
+  if [ "$(printf '%s' "$invalid" | jq 'length')" -eq 0 ] \
+    && [ "$(printf '%s' "$unreadable" | jq 'length')" -eq 0 ]; then
+    classification=$(fm_evidence_classify true true)
+  else
+    classification=$(fm_evidence_classify false false)
+  fi
+  jq -n \
+    --argjson available "$( [ "$classification" = available ] && printf true || printf false )" \
+    --argjson records "$records" --argjson invalid "$invalid" --argjson unreadable "$unreadable" \
+    '{available:$available,records:$records,invalid_count:($invalid|length),invalid:$invalid,unreadable_count:($unreadable|length),unreadable:$unreadable}'
 }
 
 fm_pr_poll_snapshot_capture() {
@@ -989,7 +1047,19 @@ fm_pr_poll_retirement_recover_all() {
 # outcome is published.
 fm_pr_poll_merge_marker_matches() {  # <marker> <device> <provider> <host> <path> <number>
   local marker=$1 device=$2 expected_provider=$3 expected_host=$4 expected_path=$5 expected_number=$6
-  local version provider host path number
+  fm_pr_poll_merge_marker_parse "$marker" "$device" || return 1
+  [ "$FM_PR_MARKER_PROVIDER" = "$expected_provider" ] \
+    && [ "$FM_PR_MARKER_HOST" = "$expected_host" ] \
+    && [ "$FM_PR_MARKER_PATH" = "$expected_path" ] \
+    && [ "$FM_PR_MARKER_NUMBER" = "$expected_number" ]
+}
+
+fm_pr_poll_merge_marker_parse() {
+  local marker=$1 device=$2 version provider host path number _extra
+  FM_PR_MARKER_PROVIDER=
+  FM_PR_MARKER_HOST=
+  FM_PR_MARKER_PATH=
+  FM_PR_MARKER_NUMBER=
   fm_pr_private_file_valid "$marker" 600 "$device" || return 1
   exec 8< "$marker" || return 1
   IFS= read -r version <&8 || { exec 8<&-; return 1; }
@@ -1002,11 +1072,21 @@ fm_pr_poll_merge_marker_matches() {  # <marker> <device> <provider> <host> <path
     return 1
   fi
   exec 8<&-
-  [ "$version" = fm-pr-poll-merge-notified-v1 ] \
-    && [ "$provider" = "$expected_provider" ] \
-    && [ "$host" = "$expected_host" ] \
-    && [ "$path" = "$expected_path" ] \
-    && [ "$number" = "$expected_number" ]
+  [ "$version" = fm-pr-poll-merge-notified-v1 ] || return 1
+  case "$provider" in github|gitlab) ;; *) return 1 ;; esac
+  [ -n "$host" ] && [ -n "$path" ] || return 1
+  case "$number" in ''|*[!0-9]*) return 1 ;; esac
+  FM_PR_MARKER_PROVIDER=$provider
+  FM_PR_MARKER_HOST=$host
+  FM_PR_MARKER_PATH=$path
+  FM_PR_MARKER_NUMBER=$number
+}
+
+fm_pr_poll_merge_marker_valid() {
+  local state=$1 marker=$2 state_device
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  fm_pr_poll_merge_marker_parse "$marker" "$state_device"
 }
 
 fm_pr_poll_merge_already_notified() {  # <state> <id> <provider> <host> <path> <number>

@@ -51,6 +51,9 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
@@ -147,37 +150,44 @@ fingerprint_hex() {
 }
 
 snapshot_shape_valid() {
-  printf '%s' "$1" | jq -e '
+  local shape_valid=false classification
+  if printf '%s' "$1" | jq -e '
     def nullable($expected): (. == null or type == $expected);
+    def nullable_key($key; $expected): has($key)
+      and (.[ $key ] == null or (.[ $key] | type) == $expected);
+    def task_state_valid: ["working","parked","done","blocked","paused","failed","unknown"] | index(.) != null;
+    def secondmate_state_valid: ["active_child_work","captain_decision","externally_held","no_active_work","unknown"] | index(.) != null;
     def task_valid:
       type == "object"
       and (.id | type) == "string"
       and (.kind | type) == "string"
-      and (.remote | nullable("object"))
+      and nullable_key("remote"; "object")
       and (.current_state | type) == "object"
       and (.current_state.state | type) == "string"
+      and (.current_state.state | task_state_valid)
       and (.endpoint | type) == "object"
-      and (.endpoint.exists | nullable("boolean"))
+      and (.endpoint | nullable_key("exists"; "boolean"))
       and (.endpoint.agent_state | type) == "string"
       and (.endpoint.agent_alive | type) == "string"
       and (.endpoint.probe | type) == "string"
       and (.endpoint.codex_session | type) == "object"
-      and (.endpoint.codex_session.resume_banner | nullable("boolean"))
+      and (.endpoint.codex_session | nullable_key("resume_banner"; "boolean"))
       and (.paths | type) == "object"
       and (.paths.status_log | type) == "object"
       and (.paths.status_log.last_event | type) == "object"
       and (.paths.status_log.last_event.state | type) == "string"
       and (.paths.status_log.last_event.handoff_required | type) == "boolean"
-      and (.paths.status_log.last_event.mtime_epoch | nullable("number"))
+      and (.paths.status_log.last_event | nullable_key("mtime_epoch"; "number"))
       and (.pr | type) == "object"
-      and (.pr.url | nullable("string"))
+      and (.pr | nullable_key("url"; "string"))
       and (.pr.source | type) == "string";
     def secondmate_valid:
       type == "object"
       and (.id | type) == "string"
       and (.current | type) == "object"
       and (.current.state | type) == "string"
-      and (.current.failure_kind | nullable("string"));
+      and (.current.state | secondmate_state_valid)
+      and (.current | nullable_key("failure_kind"; "string"));
     type == "object"
     and .schema == "fm-fleet-snapshot.v1"
     and (.generated | type) == "string"
@@ -225,7 +235,11 @@ snapshot_shape_valid() {
     and (.secondmate_landed.partial | type) == "array"
     and (.secondmate_guidance | type) == "object"
     and (.secondmate_guidance.note | type) == "string"
-  '
+  ' >/dev/null 2>&1; then
+    shape_valid=true
+  fi
+  classification=$(fm_evidence_classify true "$shape_valid")
+  [ "$classification" = available ]
 }
 
 collect_supervision_json() {
@@ -388,7 +402,17 @@ EVALUATED=$(jq -n \
       else empty end),
       (if $prs.available == false then
         finding("result-listener-inconclusive";"pr-polls";"notice";"inconclusive";
-                "PR-listener registrations could not be read";"unreadable";1)
+                ((if ($prs.invalid_count // 0) > 0 then
+                    ($prs.invalid_count | tostring) + " invalid PR-listener artifact(s)"
+                  else ""
+                  end)
+                 + (if ($prs.unreadable_count // 0) > 0 then
+                    (if ($prs.invalid_count // 0) > 0 then "; " else "" end)
+                    + ($prs.unreadable_count | tostring) + " unreadable PR-listener artifact(s)"
+                  else ""
+                  end)
+                 | if . == "" then "PR-listener registrations could not be read" else . end);
+                "unreadable";(($prs.invalid_count // 0) + ($prs.unreadable_count // 0)))
       else empty end),
       (if $snapshot.collection.state.available == false then
         finding("fleet-inventory-inconclusive";"state";"notice";"inconclusive";

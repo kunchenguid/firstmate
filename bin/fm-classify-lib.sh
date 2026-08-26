@@ -50,6 +50,15 @@ case $- in *u*) _fm_classify_nounset=on ;; *) _fm_classify_nounset=off ;; esac
 [ "$_fm_classify_nounset" = on ] || set +u
 unset _fm_classify_nounset
 
+fm_evidence_classify() {
+  local readable=${1:-false} valid=${2:-false}
+  if [ "$readable" = true ] && [ "$valid" = true ]; then
+    printf 'available\n'
+  else
+    printf 'inconclusive\n'
+  fi
+}
+
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
 # absorbs them only with positive provably-working evidence, while the daemon uses
