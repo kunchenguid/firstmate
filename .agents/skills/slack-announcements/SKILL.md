@@ -45,8 +45,8 @@ A single-asterisk pair is only ever a bold section header, never inline emphasis
 ## One clause per bullet
 
 A bullet is an index entry, not a paragraph.
-One clause per bullet is the target that binds, and one sentence per bullet is only the floor beneath it, so a bullet trailing a second clause inside a single sentence still fails the rule.
-Keep every capability list brief, and hold every bullet in it to that same ladder wherever the announcement lists bullet points.
+One claim per bullet is what binds: cut a second sentence, and cut a trailing clause that adds a second claim, restates the first, or defends it, while keeping a subordinate clause the claim's meaning depends on.
+Keep every capability list brief, and hold every bullet in it to that same one-claim rule wherever the announcement lists bullet points.
 If a bullet has a second sentence, that sentence is almost always the cut.
 
 Before:
@@ -123,5 +123,8 @@ Run this pass in order before handing the draft over, applying the rules above r
    Keep only the "what it is not" section's plain statements of what the thing is not, plus any clause that passes that same load-bearing test, so a defensive clause is still cut wherever it sits, including inside that section.
 3. Replace every em dash with a colon or a full stop, or restructure the sentence, and never remove a clause separator in a way that leaves a run-on.
 4. Cut every sentence about how the thing is built or refreshed.
+5. Replace every markdown emphasis or heading form with plain text or a single-asterisk bold section header: no double-asterisk bold, no hash headings, no markdown links, no underscore italics, and no backtick code spans, and a single-asterisk pair only ever wraps a section header.
+6. Cut every pipe character, and rewrite whatever table it carried as bullets or a sentence.
+7. Cut every mention of the captain, because the announcement carries no captain attribution.
 
 Then confirm the outline still stands.
