@@ -3846,6 +3846,98 @@ PY
 }
 
 
+capacity_release_inventory_does_not_hold_controller_lock() {
+  python3 - "$CONTROLLER" <<'PY' \
+    || fail "capacity-release held the controller lock across inventory or skipped durable revalidation"
+import contextlib
+import copy
+import importlib.util
+import types
+import sys
+
+spec = importlib.util.spec_from_file_location("controller", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+reservation_id = "ccm-release-lock-regression"
+fence = "a" * 64
+receipt = "b" * 64
+durable = {
+    "capacity_reservations": {
+        reservation_id: {
+            "reservation_id": reservation_id,
+            "fence_binding": fence,
+            "status": "queued",
+        },
+    },
+}
+lock = {"held": False, "entries": 0}
+
+@contextlib.contextmanager
+def tracked_lock(_env):
+    assert not lock["held"]
+    lock["held"] = True
+    lock["entries"] += 1
+    try:
+        yield
+    finally:
+        lock["held"] = False
+
+def load_state(_env):
+    return copy.deepcopy(durable)
+
+def save_state(_env, state):
+    durable.clear()
+    durable.update(copy.deepcopy(state))
+
+def inventory(_env, operation):
+    assert operation == "inventory"
+    assert not lock["held"], "slow provider inventory ran under the global controller lock"
+    assert durable["capacity_reservations"][reservation_id]["status"] == "queued"
+    return {"inventory": {"capacity_reservations": []}}
+
+module.controller_lock = tracked_lock
+module.load_state = load_state
+module.save_state = save_state
+module.provider_call = inventory
+args = types.SimpleNamespace(
+    reservation_id=reservation_id, fence_binding=fence,
+    cleanup_receipt=receipt, confirm_subscription="sub",
+)
+module.command_capacity_release({"subscription": "sub"}, args)
+assert lock["entries"] == 2, lock
+released = durable["capacity_reservations"][reservation_id]
+assert released["status"] == "released"
+assert released["cleanup_receipt"] == receipt
+
+# An exact concurrent release during the unlocked inventory window is
+# idempotent. The second lock re-reads that durable result instead of
+# overwriting it from the stale pre-inventory document.
+durable["capacity_reservations"][reservation_id] = {
+    "reservation_id": reservation_id,
+    "fence_binding": fence,
+    "status": "queued",
+}
+lock.update(held=False, entries=0)
+
+def inventory_after_release(_env, operation):
+    value = inventory(_env, operation)
+    durable["capacity_reservations"][reservation_id].update({
+        "status": "released",
+        "released_at": "2026-08-26T00:00:00Z",
+        "cleanup_receipt": receipt,
+    })
+    return value
+
+module.provider_call = inventory_after_release
+module.command_capacity_release({"subscription": "sub"}, args)
+assert lock["entries"] == 2, lock
+assert durable["capacity_reservations"][reservation_id]["released_at"] == "2026-08-26T00:00:00Z"
+PY
+  pass "capacity-release inventories outside the controller lock and revalidates durable identity"
+}
+
+
 
 surrender_refusal_matrix() {
   # Every advertised surrender refusal, pinned at the command against durable
@@ -8147,6 +8239,7 @@ account_authority_real_helper
 restart_idempotency
 partial_apply_never_persists
 capacity_reserve_inventory_does_not_hold_controller_lock
+capacity_release_inventory_does_not_hold_controller_lock
 surrender_lane
 surrender_refuses_when_ordinary_authority_passes
 surrender_refusal_matrix
