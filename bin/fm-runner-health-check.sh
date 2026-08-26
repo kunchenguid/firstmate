@@ -110,9 +110,12 @@ RECORD_TARGET=
 RECORD_REPORTED=
 
 record_read() {
-  local line first=1
+  local line first=1 state_device
   RECORD_TARGET=
   RECORD_REPORTED=
+  state_private_valid || return 1
+  state_device=$(fm_pr_file_device "$STATE") || return 1
+  fm_pr_regular_destination_on_device_or_absent "$RECORD" "$state_device" || return 1
   [ -f "$RECORD" ] || return 0
   while IFS= read -r line; do
     if [ "$first" -eq 1 ]; then
@@ -128,7 +131,10 @@ record_read() {
 }
 
 record_write() {
-  local target=$1 reported=$2 tmp
+  local target=$1 reported=$2 tmp state_device
+  state_private_valid || return 1
+  state_device=$(fm_pr_file_device "$STATE") || return 1
+  fm_pr_regular_destination_on_device_or_absent "$RECORD" "$state_device" || return 1
   tmp=$(mktemp "$RECORD.XXXXXX" 2>/dev/null) || return 1
   chmod 0600 "$tmp" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
   {
@@ -136,6 +142,8 @@ record_write() {
     printf 'target=%s\n' "$target"
     printf 'reported=%s\n' "$reported"
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  fm_pr_regular_destination_on_device_or_absent "$RECORD" "$state_device" \
+    || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$RECORD" || { rm -f -- "$tmp"; return 1; }
 }
 
@@ -152,7 +160,7 @@ api_state() {
   fi
 
   command -v gh-axi >/dev/null 2>&1 || return 1
-  query="[.runners[] | select(any(.labels[]; .name == \"$label\"))] as \$matching | if (\$matching | length) == 0 then \"missing\" elif any(\$matching[]; (.status | type) != \"string\" or (.status != \"online\" and .status != \"offline\")) then \"invalid\" elif any(\$matching[]; .status == \"online\") then \"online\" else \"offline\" end"
+  query="if (type != \"object\") or ((.runners | type) != \"array\") then \"invalid\" elif any(.runners[]; if (type != \"object\") then true elif ((.labels | type) != \"array\") then true else any(.labels[]; (type != \"object\") or ((.name | type) != \"string\")) end) then \"invalid\" else [.runners[] | select(any(.labels[]; .name == \"$label\"))] as \$matching | if (\$matching | length) == 0 then \"missing\" elif any(\$matching[]; (.status | type) != \"string\" or (.status != \"online\" and .status != \"offline\")) then \"invalid\" elif any(\$matching[]; .status == \"online\") then \"online\" else \"offline\" end end"
   output=$(fm_run_timed "$max_probe" gh-axi api "/repos/$repository/actions/runners" --paginate --jq "$query" --full 2>/dev/null)
   status=$?
   [ "$status" -eq 0 ] || return 1
@@ -237,7 +245,7 @@ action_check() {
     *) return 0 ;;
   esac
 
-  record_read
+  record_read || return 0
   if [ "$RECORD_TARGET" != "$target" ]; then
     RECORD_REPORTED=
   fi

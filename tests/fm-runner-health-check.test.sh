@@ -27,6 +27,7 @@ set -u
 
 [ "${1:-}" = api ] || exit 9
 [ "${2:-}" = "/repos/${FAKE_GH_AXI_REPOSITORY}/actions/runners" ] || exit 9
+[ -z "${FAKE_GH_AXI_CALL_LOG:-}" ] || printf 'called\n' > "$FAKE_GH_AXI_CALL_LOG"
 
 case "${FAKE_GH_AXI_MODE:-answer}" in
   auth-error) exit 1 ;;
@@ -99,6 +100,13 @@ write_runner_without_status() {
   local file=$1
   cat > "$file" <<'JSON'
 {"runners":[{"name":"toolroll-mac","busy":false,"labels":[{"name":"self-hosted"},{"name":"toolroll-mac"}]}]}
+JSON
+}
+
+write_runner_with_invalid_label() {
+  local file=$1
+  cat > "$file" <<'JSON'
+{"runners":[{"name":"toolroll-mac","status":"offline","busy":false,"labels":[{"name":null}]}]}
 JSON
 }
 
@@ -219,30 +227,74 @@ test_malformed_matching_runner_status_is_silent() {
   run_check "$home" "$fakebin" "$response" "$out"
   [ ! -s "$out" ] || fail "a matching runner with no status produced a report: $(cat "$out")"
   expect_reported "$home" ''
+
+  write_runner_with_invalid_label "$response"
+  run_check "$home" "$fakebin" "$response" "$out"
+  [ ! -s "$out" ] || fail "a matching runner with a non-string label produced a report: $(cat "$out")"
+  expect_reported "$home" ''
   pass "a matching runner with an unreadable status is a silent missed poll"
 }
 
 test_failed_report_persistence_is_silent() {
-  local home fakebin response out status
+  local home fakebin response out status real_mktemp
   home=$(make_home persistence-failure)
   fakebin=$(make_fake_gh_axi persistence-failure)
   response="$home/runners.json"
   out="$home/out.txt"
   write_runners "$response" offline false
-  cat > "$fakebin/mktemp" <<'SH'
+  real_mktemp=$(command -v mktemp)
+  cat > "$fakebin/mktemp" <<SH
 #!/usr/bin/env bash
-exit 1
+case "\${1:-}" in
+  *'.runner-health.'*) exit 1 ;;
+  *) exec "$real_mktemp" "\$@" ;;
+esac
 SH
   chmod 0755 "$fakebin/mktemp"
 
   status=0
   env FM_HOME="$home" PATH="$fakebin:$PATH" \
     FAKE_GH_AXI_REPOSITORY="$REPOSITORY" FAKE_GH_AXI_RESPONSE="$response" \
+    FAKE_GH_AXI_CALL_LOG="$home/api-called" \
     "$CHECK" check "$REPOSITORY" "$LABEL" > "$out" 2>&1 || status=$?
   expect_code 0 "$status" "read-only state check exit"
+  assert_present "$home/api-called" "the persistence test did not reach the API"
   [ ! -s "$out" ] || fail "an outage was printed without durable report state: $(cat "$out")"
   assert_absent "$home/state/.runner-health" "a failed report write created a health record"
   pass "an outage is silent when its durable report cannot be written"
+}
+
+test_record_destination_must_be_private_regular_file() {
+  local home fakebin response out record_dir home2 fakebin2 target
+  home=$(make_home record-directory)
+  fakebin=$(make_fake_gh_axi record-directory)
+  response="$home/runners.json"
+  out="$home/out.txt"
+  write_runners "$response" offline false
+  record_dir="$home/state/.runner-health"
+  mkdir "$record_dir"
+  printf 'do not replace me\n' > "$record_dir/sentinel"
+
+  run_check "$home" "$fakebin" "$response" "$out"
+  [ ! -s "$out" ] || fail "a record directory produced a health report: $(cat "$out")"
+  [ "$(cat "$record_dir/sentinel")" = 'do not replace me' ] || fail "a record directory was modified"
+  [ "$(find "$record_dir" -mindepth 1 -maxdepth 1 -type f ! -name sentinel | wc -l | tr -d '[:space:]')" = 0 ] \
+    || fail "a temporary report was moved into the record directory"
+
+  home2=$(make_home record-symlink)
+  fakebin2=$(make_fake_gh_axi record-symlink)
+  target="$home2/external-record"
+  printf 'do not modify me\n' > "$target"
+  ln -s "$target" "$home2/state/.runner-health"
+  response="$home2/runners.json"
+  out="$home2/out.txt"
+  write_runners "$response" offline false
+
+  run_check "$home2" "$fakebin2" "$response" "$out"
+  [ ! -s "$out" ] || fail "a record symlink produced a health report: $(cat "$out")"
+  [ "$(cat "$target")" = 'do not modify me' ] || fail "a record symlink target was modified"
+  [ -L "$home2/state/.runner-health" ] || fail "the record symlink was replaced"
+  pass "record persistence refuses directories and symlinks without moving data"
 }
 
 test_check_refuses_a_symlinked_state_directory() {
@@ -440,6 +492,7 @@ test_missing_label_is_a_distinct_once_only_finding
 test_api_failures_are_silent_and_do_not_clear_an_outage
 test_malformed_matching_runner_status_is_silent
 test_failed_report_persistence_is_silent
+test_record_destination_must_be_private_regular_file
 test_check_refuses_a_symlinked_state_directory
 test_paginated_api_results_are_aggregated_before_verdict
 test_malformed_envelope_with_trailing_diagnostics_is_silent
