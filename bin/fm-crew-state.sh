@@ -35,6 +35,8 @@
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
 #      the same line of history). Local work that advanced past the run head, or
 #      diverged from it, invalidates attribution.
+#      A run head unavailable in the worktree's object store makes correlation
+#      unattributable and reports unknown rather than a terminal run verdict.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -384,7 +386,7 @@ nm_ci_checks_state() {
 # matching row's status word (running/completed/cancelled/failed), or empty
 # when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
 nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha
+  local branch=$1 out row st rest br sha relationship
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -400,11 +402,17 @@ nm_runs_status_for_branch() {  # <branch>
     if [ "$br" = "$branch" ]; then
       # Same code-identity rule as axi status: skip a same-branch row whose
       # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
-      fi
-      printf '%s' "$st"
-      return 0
+      relationship=$(nm_coarse_head_relationship "$sha")
+      case "$relationship" in
+        equal|worktree-ancestor-of-run)
+          printf '%s' "$st"
+          return 0
+          ;;
+        unresolvable-*)
+          printf 'unattributable|%s|%s' "$sha" "$relationship"
+          return 0
+          ;;
+      esac
     fi
   done <<< "$out"
   return 0
@@ -414,20 +422,38 @@ nm_runs_status_for_branch() {  # <branch>
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
-# 0 if the active axi-status run's head field matches this worktree's code
-# identity. Branch match is a precondition (caller). Rule owned by
-# fm_nm_head_matches_worktree in bin/fm-nm-run-lib.sh.
-nm_run_head_matches_worktree() {
+# Relationship between the active axi-status run's head field and this
+# worktree's code identity. Branch match is a precondition (caller). Rule owned
+# by fm_nm_head_relationship in bin/fm-nm-run-lib.sh.
+nm_run_head_relationship() {
   local run_head
   run_head=$(strip_quotes "$(nm_field head)")
-  fm_nm_head_matches_worktree "$WT" "$run_head"
+  fm_nm_head_relationship "$WT" "$run_head"
 }
 
-# Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
-# sha for this branch row matches the worktree head under the same rules as
-# nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
-nm_coarse_head_matches_worktree() {  # <short-sha>
-  fm_nm_head_matches_worktree "$WT" "$1"
+# Coarse runs-list rows are "<status> <branch> <short-sha> ...". Return the
+# relationship between that short SHA and the worktree head under the same
+# rules as nm_run_head_relationship.
+nm_coarse_head_relationship() {  # <short-sha>
+  fm_nm_head_relationship "$WT" "$1"
+}
+
+emit_unattributable_run() {  # <run-head> <relationship>
+  local run_head=$1 relationship=$2
+  case "$relationship" in
+    unresolvable-run-head)
+      emit unknown run-step \
+        "run unattributable: run head $run_head is not present in the worktree object store; ancestry cannot be computed"
+      ;;
+    unresolvable-worktree-head)
+      emit unknown run-step \
+        "run unattributable: worktree HEAD cannot be resolved; ancestry with run head $run_head cannot be computed"
+      ;;
+    *)
+      emit unknown run-step \
+        "run unattributable: ancestry between worktree HEAD and run head $run_head cannot be computed"
+      ;;
+  esac
 }
 
 HAVE_RUN=0
@@ -443,9 +469,16 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
-      HAVE_RUN=1
-    else
+    run_head=$(strip_quotes "$(nm_field head)")
+    head_relationship=missing-run-head
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ]; then
+      head_relationship=$(nm_run_head_relationship)
+      case "$head_relationship" in
+        equal|worktree-ancestor-of-run) HAVE_RUN=1 ;;
+        unresolvable-*) emit_unattributable_run "$run_head" "$head_relationship" ;;
+      esac
+    fi
+    if [ "$HAVE_RUN" = 0 ]; then
       # The active-or-most-recent run is for another branch, or same branch with
       # a rewritten/diverged head (the CLI is alive and answered; only the
       # attribution missed) - try the coarse fallback.
@@ -454,10 +487,19 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # immediately with a second bounded call would just double the wait
       # for no better answer.
       COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
-      if [ -n "$COARSE_STATUS" ]; then
-        HAVE_RUN=1
-        RUN_SOURCE=coarse
-      fi
+      case "$COARSE_STATUS" in
+        unattributable\|*)
+          coarse_unattributable=${COARSE_STATUS#*|}
+          coarse_head=${coarse_unattributable%%|*}
+          coarse_relationship=${coarse_unattributable#*|}
+          emit_unattributable_run "$coarse_head" "$coarse_relationship"
+          ;;
+        '') ;;
+        *)
+          HAVE_RUN=1
+          RUN_SOURCE=coarse
+          ;;
+      esac
     fi
   fi
 fi

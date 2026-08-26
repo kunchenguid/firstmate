@@ -681,6 +681,8 @@ test_terminal_failed() {
   local out; out=$(run_crew_state "$d" feat-e)
   assert_contains "$out" "state: failed" "failed run -> failed"
   assert_contains "$out" "source: run-step" "failed -> run-step source"
+  assert_contains "$out" "run failed" "failed run preserves its terminal detail"
+  assert_not_contains "$out" "unattributable" "genuine failure is not an attribution refusal"
   pass "terminal failed run is authoritative"
 }
 
@@ -1367,6 +1369,73 @@ test_active_run_descendant_fix_head_remains_current() {
   pass "active run with valid descendant fix head remains current"
 }
 
+# The pipeline owns fix-round commits before they are present in the crew
+# worktree's object store. An unresolvable live run must stop attribution at
+# that newest same-branch row instead of falling through to an older terminal
+# run whose head happens to remain resolvable.
+test_absent_active_run_head_is_unattributable() {
+  reset_fakes
+  local d local_short missing_head out
+  d=$(new_case absent-active-run-head)
+  make_repo_on_branch "$d/wt" fm/feat-unattributable
+  local_short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  missing_head=ffffffffffffffffffffffffffffffffffffffff
+  git -C "$d/wt" cat-file -e "${missing_head}^{commit}" 2>/dev/null \
+    && fail "absent-object fixture unexpectedly resolved"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/unattributable.meta" \
+    "window=fm:fm-unattributable" \
+    "worktree=$d/wt" \
+    "kind=ship"
+  FM_FAKE_RUN_HEAD=$missing_head
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-unattributable)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-unattributable ${missing_head:0:7}  2026-08-14 12:00
+  failed     fm/feat-unattributable ${local_short}  2026-08-14 11:00
+EOF
+)"
+  out=$(run_crew_state "$d" unattributable)
+  assert_contains "$out" "state: unknown" "absent active run head -> unknown"
+  assert_contains "$out" "source: run-step" "unattributable run remains the reported source"
+  assert_contains "$out" "run head ${missing_head} is not present" \
+    "unattributable detail names the unresolved run head"
+  assert_contains "$out" "ancestry cannot be computed" \
+    "unattributable detail names the unavailable relationship"
+  assert_not_contains "$out" "state: failed" \
+    "an attribution refusal must never become a terminal failure"
+  pass "absent active run head is unknown and unattributable"
+}
+
+test_absent_runs_list_head_is_unattributable() {
+  reset_fakes
+  local d local_short missing_head out
+  d=$(new_case absent-runs-list-head)
+  make_repo_on_branch "$d/wt" fm/feat-unattributable-list
+  local_short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  missing_head=eeeeeee
+  git -C "$d/wt" cat-file -e "${missing_head}^{commit}" 2>/dev/null \
+    && fail "absent runs-list fixture unexpectedly resolved"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/unattributable-list.meta" \
+    "window=fm:fm-unattributable-list" \
+    "worktree=$d/wt" \
+    "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-14 12:05
+  running    fm/feat-unattributable-list ${missing_head}  2026-08-14 12:00
+  failed     fm/feat-unattributable-list ${local_short}  2026-08-14 11:00
+EOF
+)"
+  out=$(run_crew_state "$d" unattributable-list)
+  assert_contains "$out" "state: unknown" "absent runs-list head -> unknown"
+  assert_contains "$out" "run head ${missing_head} is not present" \
+    "runs-list refusal names the unresolved run head"
+  assert_not_contains "$out" "state: failed" \
+    "runs-list refusal must not fall through to an older terminal run"
+  pass "absent runs-list head is unknown and unattributable"
+}
+
 # Head-binding: local work that advanced past the run head invalidates the run.
 test_local_advanced_past_run_head_invalidates() {
   reset_fakes
@@ -1459,6 +1528,8 @@ test_not_provably_working_when_stopped
 test_usage_error
 test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
+test_absent_active_run_head_is_unattributable
+test_absent_runs_list_head_is_unattributable
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
 
