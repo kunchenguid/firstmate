@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # bin/backends/orca.sh - the Orca terminal session-provider adapter.
 #
-# Orca owns both the task worktree and the terminal endpoint. Escape key support
-# remains unsupported until Orca exposes a terminal-send primitive for it.
+# Orca owns both the task worktree and the terminal endpoint. send_key delivers
+# only Enter and Ctrl-C: `terminal send --text` can carry a raw ESC byte, but a
+# lone ESC is not a verified turn-cancel on Orca (its agent model does not even
+# observe it - docs/orca-backend.md "Active limits"), so Escape is deliberately
+# not mapped as a control-plane interrupt.
 #
 # Target string shape: the Orca terminal id accepted by `orca terminal ...`.
 

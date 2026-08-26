@@ -33,8 +33,8 @@
 # treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
 # `backend=tmux` for a default-backend task, so existing and newly spawned
 # default-path metas stay byte-identical. Only a task spawned on a non-tmux
-# spawn-capable backend, currently experimental herdr, zellij, orca, or cmux,
-# carries an explicit `backend=` line.
+# spawn-capable backend, currently herdr, zellij, orca, or cmux, carries an
+# explicit `backend=` line.
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
 # backend's supervision surface is conceptually an EVENT SOURCE - it produces
@@ -61,9 +61,12 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # v0.7.1/protocol-14 binary (data/fm-backend-design-d7/herdr-verification-p2.md)
 # but newer than tmux's long-proven default path. zellij is EXPERIMENTAL (P3;
 # data/fm-backend-design-d7/report.md "Zellij Backend") - verified against the
-# real 0.44.0 binary (docs/zellij-backend.md). orca is EXPERIMENTAL and
-# spawn-capable; unlike tmux/herdr/zellij it is also the worktree provider.
-# cmux is EXPERIMENTAL and spawn-capable, session-provider-only like
+# real 0.44.0 binary (docs/zellij-backend.md). orca is spawn-capable and,
+# unlike tmux/herdr/zellij, also the worktree provider; it is verified against
+# the real app with a documented scope (macOS-only; recovery-grade agent state,
+# native busy, and idle exit/relaunch for the harnesses Orca hooks - claude and
+# codex - see docs/orca-backend.md). cmux is EXPERIMENTAL and spawn-capable,
+# session-provider-only like
 # herdr/zellij - verified against the real 0.64.17 binary (docs/cmux-backend.md).
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
 FM_BACKEND_KNOWN="tmux herdr zellij orca cmux"

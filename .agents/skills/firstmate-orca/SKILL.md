@@ -8,8 +8,11 @@ metadata:
 
 # firstmate-orca
 
-Use this as the operator checklist for Firstmate's experimental Orca runtime backend.
+Use this as the operator checklist for Firstmate's Orca runtime backend.
 It does not replace `AGENTS.md`, `docs/orca-backend.md`, or `harness-adapters`.
+
+Orca is verified within a documented scope: recovery-grade agent state, a native busy signal, and idle-clean `exit`/`relaunch` cover claude and codex tasks (the harnesses Orca hooks); every other harness reads `unverified` and its `exit`/`relaunch` is refused, and a busy Escape-harness agent cannot be interrupted for exit.
+`docs/orca-backend.md` "Active limits" owns the exact scope.
 
 Orca is a runtime backend, not an agent harness.
 The runtime backend owns the task endpoint and, for Orca, the task worktree.
