@@ -73,6 +73,7 @@ case "${1:-}" in
   capture-pane)
     window_present || exit 1
     case "$target" in
+      *codex-resume*) printf 'session ended\nTo continue this session, run codex resume\n' ;;
       *paused*) printf 'all quiet\n> \n' ;;
       *) printf 'work in progress\nesc to interrupt\n' ;;
     esac
@@ -294,6 +295,136 @@ test_dead_agent_with_live_endpoint() {
         and .evidence == "direct-report agent is dead while its endpoint remains present")
   ' >/dev/null || fail "dead agent behind live endpoint was missed: $out"
   pass "dead agent is detected even when its endpoint remains present"
+}
+
+test_codex_resume_banner_is_dead_session() {
+  local home fakebin out rc=0
+  home=$(make_home codex-resume-banner)
+  mkdir -p "$home/projects/codex-resume-wt"
+  fm_write_meta "$home/state/codex-resume-task.meta" \
+    "window=firstmate:fm-codex-resume-task" \
+    "worktree=$home/projects/codex-resume-wt" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship" \
+    "yolo=off"
+  printf 'working: still in flight\n' > "$home/state/codex-resume-task.status"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
+  expect_code 1 "$rc" "Codex resume banner should be an actionable dead session"
+  printf '%s' "$out" | jq -e '
+    .status == "actionable"
+      and any(.findings[]; .kind == "dead-codex-session" and .subject == "codex-resume-task"
+              and .confidence == "high"
+              and .evidence == "Codex session exited; pane contains the resume banner")
+      and (any(.findings[]; .kind == "dead-direct-report" and .subject == "codex-resume-task") | not)
+  ' >/dev/null || fail "Codex resume banner was missed or duplicated: $out"
+  pass "Codex resume banner is a high-confidence dead-session finding"
+}
+
+test_codex_bare_shell_is_dead_session() {
+  local home fakebin out rc=0
+  home=$(make_home codex-bare-shell)
+  mkdir -p "$home/projects/dead-codex-wt"
+  fm_write_meta "$home/state/dead-codex.meta" \
+    "window=firstmate:fm-dead-codex" \
+    "worktree=$home/projects/dead-codex-wt" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship" \
+    "yolo=off"
+  printf 'working: still in flight\n' > "$home/state/dead-codex.status"
+  printf 'fm-dead-codex\n' > "$home/state/.fake-windows"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
+  expect_code 1 "$rc" "Codex bare-shell pane should be an actionable dead session"
+  printf '%s' "$out" | jq -e '
+    any(.findings[]; .kind == "dead-codex-session" and .subject == "dead-codex"
+        and .confidence == "high"
+        and .evidence == "Codex session exited; endpoint pane is a bare shell")
+      and (any(.findings[]; .kind == "dead-direct-report" and .subject == "dead-codex") | not)
+  ' >/dev/null || fail "Codex bare-shell session was missed or classified generically: $out"
+  pass "Codex bare-shell pane is a high-confidence dead-session finding"
+}
+
+test_live_codex_without_banner_is_not_dead_session() {
+  local home fakebin out rc=0
+  home=$(make_home live-codex)
+  mkdir -p "$home/projects/codex-live-wt"
+  fm_write_meta "$home/state/codex-live.meta" \
+    "window=firstmate:fm-codex-live" \
+    "worktree=$home/projects/codex-live-wt" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship" \
+    "yolo=off"
+  printf 'working: implementing\n' > "$home/state/codex-live.status"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "live Codex without resume banner keeps unknown lifecycle inconclusive"
+  printf '%s' "$out" | jq -e '
+    (any(.findings[]; .kind == "dead-codex-session") | not)
+      and any(.findings[]; .kind == "current-state-inconclusive" and .subject == "codex-live")
+  ' >/dev/null || fail "live Codex was reported as a dead session or lost unknown-state evidence: $out"
+  pass "live Codex without resume banner is not a dead-session finding"
+}
+
+test_missed_handoff_after_done_signal() {
+  local home fakebin out rc=0
+  home=$(make_home missed-handoff)
+  write_live_ship "$home" done-idle
+  printf 'done: PR https://example.test/pull/1 checks green\n' > "$home/state/done-idle.status"
+  touch -t 202001011200 "$home/state/done-idle.status"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm \
+    FM_FLEET_HEALTH_HANDOFF_STALE_SECS=60 "$HEALTH" --json) || rc=$?
+  expect_code 1 "$rc" "stale done signal should be an actionable missed handoff"
+  printf '%s' "$out" | jq -e '
+    .status == "actionable"
+      and any(.findings[]; .kind == "missed-handoff" and .subject == "done-idle"
+              and .confidence == "high")
+  ' >/dev/null || fail "missed handoff was not reported: $out"
+  pass "stale done signal with no later inbox is a missed handoff"
+}
+
+test_later_inbox_clears_missed_handoff() {
+  local home fakebin out rc=0
+  home=$(make_home handoff-inbox)
+  write_live_ship "$home" done-followed
+  printf 'done: ready for next step\n' > "$home/state/done-followed.status"
+  touch -t 202001011200 "$home/state/done-followed.status"
+  fakebin=$(make_fakebin "$home")
+  PATH="$fakebin:$PATH" FM_HOME="$home" \
+    fm_task_inbox_write "$home/state" done-followed "next step" >/dev/null
+  fresh_autoarm_supervision "$home"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm \
+    FM_FLEET_HEALTH_HANDOFF_STALE_SECS=60 "$HEALTH" --json) || rc=$?
+  printf '%s' "$out" | jq -e '
+    any(.findings[]; .kind == "missed-handoff" and .subject == "done-followed") | not
+  ' >/dev/null || fail "later inbox did not suppress missed handoff: $out"
+  pass "a later steering message suppresses the missed-handoff finding"
+}
+
+test_recent_done_signal_is_not_missed_handoff() {
+  local home fakebin out rc=0
+  home=$(make_home recent-done)
+  write_live_ship "$home" just-done
+  printf 'done: just finished\n' > "$home/state/just-done.status"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm \
+    FM_FLEET_HEALTH_HANDOFF_STALE_SECS=1800 "$HEALTH" --json) || rc=$?
+  printf '%s' "$out" | jq -e '
+    (any(.findings[]; .kind == "missed-handoff" and .subject == "just-done") | not)
+  ' >/dev/null || fail "fresh done signal was treated as missed handoff: $out"
+  pass "a fresh done signal is inside the handoff stale window"
 }
 
 test_unreadable_local_endpoint_is_inconclusive() {
@@ -541,10 +672,12 @@ test_pending_reply_broken_and_historical_noise_omitted() {
 
 ## Done
 EOF
-  printf 'working: ping\n' > "$home/state/attorney-data.status"
-  printf 'needs-decision [key=shape]: choose an API\n' >> "$home/state/attorney-data.status"
-  printf 'working: still going\n' >> "$home/state/attorney-data.status"
-  printf 'working: another historical reply event\n' >> "$home/state/attorney-data.status"
+  {
+    printf 'working: ping\n'
+    printf 'needs-decision [key=shape]: choose an API\n'
+    printf 'working: still going\n'
+    printf 'working: another historical reply event\n'
+  } > "$home/state/attorney-data.status"
   fakebin=$(make_fakebin "$home")
   out=$(run_health "$home" "$fakebin")
   printf '%s' "$out" | jq -e '
@@ -978,6 +1111,12 @@ test_dangling_metadata_is_inconclusive
 test_unsearchable_nested_inventories_are_inconclusive
 test_actionable_dead_direct_report
 test_dead_agent_with_live_endpoint
+test_codex_resume_banner_is_dead_session
+test_codex_bare_shell_is_dead_session
+test_live_codex_without_banner_is_not_dead_session
+test_missed_handoff_after_done_signal
+test_later_inbox_clears_missed_handoff
+test_recent_done_signal_is_not_missed_handoff
 test_unreadable_local_endpoint_is_inconclusive
 test_terminal_unreadable_endpoint_is_inconclusive
 test_historical_status_pr_does_not_require_listener

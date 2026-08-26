@@ -494,3 +494,53 @@ fm_task_inbox_unhandled_json() {  # <state-dir>
     --argjson records "$records" \
     '{available:$available,invalid_count:$invalid,unreadable_count:$unreadable,records:$records}'
 }
+
+# Read-only latest steering-inbox activity per task, including handled records.
+# Does not ring, escalate, or rewrite ladder bookkeeping.
+fm_task_inbox_latest_activity_json() {  # <state-dir>
+  local state=$1 dir task rec mtime latest available=true
+  local records='[]' row
+  if [ ! -d "$state" ]; then
+    jq -n '{available:true,records:[]}'
+    return 0
+  fi
+  if [ ! -r "$state" ] || [ ! -x "$state" ]; then
+    jq -n '{available:false,records:[]}'
+    return 0
+  fi
+  for dir in "$state"/*.inbox; do
+    [ -e "$dir" ] || [ -L "$dir" ] || continue
+    if [ ! -d "$dir" ] || { [ -L "$dir" ] && [ ! -e "$dir" ]; }; then
+      continue
+    fi
+    if [ ! -r "$dir" ] || [ ! -x "$dir" ]; then
+      available=false
+      continue
+    fi
+    task=$(basename "$dir" .inbox)
+    latest=
+    for rec in "$dir"/*.msg "$dir/handled"/*.msg; do
+      [ -f "$rec" ] && [ ! -L "$rec" ] || continue
+      mtime=$(fm_path_mtime "$rec") || {
+        available=false
+        continue
+      }
+      case "$mtime" in
+        ''|*[!0-9]*)
+          available=false
+          continue
+          ;;
+      esac
+      if [ -z "$latest" ] || [ "$mtime" -gt "$latest" ]; then
+        latest=$mtime
+      fi
+    done
+    [ -n "$latest" ] || continue
+    row=$(jq -n --arg task "$task" --argjson latest "$latest" \
+      '{task_id:$task,last_epoch:$latest}') || return 1
+    records=$(jq -n --argjson records "$records" --argjson row "$row" \
+      '$records + [$row]') || return 1
+  done
+  jq -n --argjson available "$available" --argjson records "$records" \
+    '{available:$available,records:$records}'
+}

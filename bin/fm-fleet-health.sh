@@ -14,11 +14,15 @@
 # no recovery the wake queue and watcher continuity do not already provide.
 #
 # Findings are mechanically provable Firstmate operational failures: dead or
-# missing local agents, unavailable or invalid secondmate summaries, broken or
-# overdue reply delivery, aged unacknowledged steering-inbox messages,
-# inconsistent active-work inventory, terminal workers that still have a live
-# endpoint, missing required result listeners, and unhealthy supervision
-# continuity when `fm_watcher_supervision_verdict` can establish it.
+# missing local agents, a Codex worker whose pane shows the exact resume banner
+# or a bare shell while the task is still in flight, a worker `done:` signal
+# with no later status append or steering inbox activity for
+# FM_FLEET_HEALTH_HANDOFF_STALE_SECS (default 1800), unavailable or invalid
+# secondmate summaries, broken or overdue reply delivery, aged unacknowledged
+# steering-inbox messages, inconsistent active-work inventory, terminal workers
+# that still have a live endpoint, missing required result listeners, and
+# unhealthy supervision continuity when `fm_watcher_supervision_verdict` can
+# establish it.
 # Product decisions, ordinary external waits, and historical status events are
 # out of scope. Unavailable evidence is `inconclusive`, never healthy and never
 # definitely broken. A remote task's local placeholder window is never remote
@@ -71,6 +75,9 @@ JSON is the stable machine-readable output contract.
 
 The checker consumes fm-fleet-snapshot.sh --json once, with remote SSH probes
 disabled by default, and never mutates fleet state.
+FM_FLEET_HEALTH_HANDOFF_STALE_SECS (default 1800) is the age after a `done:`
+status line with no later status append or steering-inbox activity that
+becomes a missed-handoff finding.
 EOF
 }
 
@@ -210,16 +217,32 @@ SUPERVISION_JSON=$(collect_supervision_json "$STATE" "$SCRIPT_DIR/fm-watch.sh") 
   || SUPERVISION_JSON='{"available":false,"needed":false,"ok":false,"reason":null,"model":null}'
 
 INBOX_GRACE=$(fm_task_inbox_grace_secs)
+HANDOFF_STALE=${FM_FLEET_HEALTH_HANDOFF_STALE_SECS:-1800}
+case "$HANDOFF_STALE" in
+  ''|*[!0-9]*)
+    echo "fm-fleet-health: FM_FLEET_HEALTH_HANDOFF_STALE_SECS must be a non-negative integer" >&2
+    exit 2
+    ;;
+esac
+INBOX_ACTIVITY_JSON=$(fm_task_inbox_latest_activity_json "$STATE") \
+  || INBOX_ACTIVITY_JSON='{"available":false,"records":[]}'
+NOW_EPOCH=$(date +%s)
+case "$NOW_EPOCH" in
+  ''|*[!0-9]*) NOW_EPOCH=0 ;;
+esac
 
 EVALUATED=$(jq -n \
   --arg generated "$NOW" \
   --argjson snapshot "$SNAPSHOT" \
   --argjson pending "$PENDING_JSON" \
   --argjson inbox "$INBOX_JSON" \
+  --argjson inbox_activity "$INBOX_ACTIVITY_JSON" \
   --argjson listeners "$LISTENERS_JSON" \
   --argjson prs "$PR_JSON" \
   --argjson supervision "$SUPERVISION_JSON" \
   --argjson inbox_grace "$INBOX_GRACE" \
+  --argjson handoff_stale "$HANDOFF_STALE" \
+  --argjson now_epoch "$NOW_EPOCH" \
   '
   def finding($kind; $subject; $severity; $confidence; $evidence; $cause; $count):
     {kind:$kind,subject:$subject,severity:$severity,confidence:$confidence,
@@ -236,6 +259,11 @@ EVALUATED=$(jq -n \
      else "unreadable" end));
   def exists($t): $t.endpoint.exists;
   def terminal_state($s): ($s == "done" or $s == "failed");
+  def codex_harness($t): (($t.harness // "") | startswith("codex"));
+  def resume_banner($t): ($t.endpoint.codex_session.resume_banner == true);
+  def inbox_last($id):
+    ([ $inbox_activity.records[]? | select(.task_id == $id) | .last_epoch ]
+     | if length == 0 then null else max end);
   ($pending.now_epoch // 0) as $now
   | [
       (if $pending.available == false then
@@ -301,10 +329,21 @@ EVALUATED=$(jq -n \
         | select(.kind != "secondmate")
         | select(agent_state(.) == "dead" or agent_state(.) == "missing")
         | select(terminal_state(.current_state.state) | not)
+        | select((codex_harness(.) and exists(.) == true and agent_state(.) == "dead") | not)
         | finding("dead-direct-report";.id;"error";"high";
                   (if agent_state(.) == "missing" then "recorded endpoint is absent while current state is " + .current_state.state
                    else "direct-report agent is dead while its endpoint remains present" end);
                   agent_state(.);1)),
+      ($snapshot.tasks[]?
+        | select(remote(.) | not)
+        | select(.kind != "secondmate")
+        | select(codex_harness(.))
+        | select(terminal_state(.current_state.state) | not)
+        | select(resume_banner(.) or (exists(.) == true and agent_state(.) == "dead"))
+        | finding("dead-codex-session";.id;"error";"high";
+                  (if resume_banner(.) then "Codex session exited; pane contains the resume banner"
+                   else "Codex session exited; endpoint pane is a bare shell" end);
+                  (if resume_banner(.) then "resume-banner" else "bare-shell" end);1)),
       ($snapshot.tasks[]?
         | select(remote(.) | not)
         | select(.kind != "secondmate")
@@ -317,6 +356,7 @@ EVALUATED=$(jq -n \
         | select(.kind != "secondmate")
         | select(agent_state(.) == "alive")
         | select(.current_state.state == "unknown")
+        | select(resume_banner(.) | not)
         | finding("current-state-inconclusive";.id;"notice";"inconclusive";
                   "worker lifecycle state could not be established";"unknown";1)),
       ($snapshot.tasks[]?
@@ -428,6 +468,27 @@ EVALUATED=$(jq -n \
         | finding("steering-inbox-aged";$g[0].task_id;"warning";"high";
                   ($n|tostring) + " unacknowledged steering message(s) older than grace (" + ($inbox_grace|tostring) + "s)";
                   "aged";$n)),
+      ($snapshot.tasks[]?
+        | select(.kind != "secondmate")
+        | select((.paths.status_log.last_event.state // "") == "done")
+        | . as $t
+        | ($t.paths.status_log.last_event.mtime_epoch) as $mtime
+        | if ($mtime == null or $now_epoch == 0) then
+            finding("missed-handoff-inconclusive";$t.id;"notice";"inconclusive";
+                    "done-signal age could not be established";"mtime-unavailable";1)
+          elif ($now_epoch - $mtime) < $handoff_stale then
+            empty
+          elif $inbox_activity.available == false then
+            finding("missed-handoff-inconclusive";$t.id;"notice";"inconclusive";
+                    "steering-inbox activity after done could not be read";"inbox-unavailable";1)
+          elif ((inbox_last($t.id) != null) and (inbox_last($t.id) >= $mtime)) then
+            empty
+          else
+            finding("missed-handoff";$t.id;"warning";"high";
+                    ("worker signaled done with no later status append or steering message for at least "
+                     + ($handoff_stale|tostring) + "s");
+                    "stale-done";1)
+          end),
       ($snapshot.tasks[]?
         | select(.kind == "ship")
         | select((.pr.url // null) != null)

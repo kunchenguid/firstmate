@@ -296,6 +296,7 @@ fm_watcher_supervision_verdict() {
     FM_WATCHER_VERDICT_OK=true
   elif [ "$fresh" = true ]; then
     if fm_watcher_lock_evidence_unreadable "$state" "$watch" "$home"; then
+      # shellcheck disable=SC2034 # Read by callers after the function returns.
       FM_WATCHER_VERDICT_AVAILABLE=false
       FM_WATCHER_VERDICT_REASON=no-watcher
     elif [ "$model" = extension ] && fm_watcher_lock_unheld "$state" \

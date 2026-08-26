@@ -85,6 +85,7 @@ fm_procevent_registration_parse() {  # <registration> <source-id>
     ! IFS= read -r extra || return 1
   } < "$file"
   FM_PROCEVENT_REG_ADAPTER=$adapter
+  # shellcheck disable=SC2034 # Read by callers after the function returns.
   FM_PROCEVENT_REG_ARGV=("${argv[@]}")
   FM_PROCEVENT_REG_FAILURE=
 }

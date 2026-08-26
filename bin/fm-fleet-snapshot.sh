@@ -49,6 +49,10 @@
 #     none. Remote tasks never treat a local placeholder window as remote
 #     liveness. FM_SNAPSHOT_REMOTE_PROBES=0 skips SSH probes and records
 #     agent_alive=not_collected with probe=skipped instead.
+#     endpoint.codex_session is collected only for local in-flight Codex tasks
+#     whose agent is not already proven dead: resume_banner is true when the
+#     bounded backend pane capture contains the exact Codex exit banner.
+#     paths.status_log.last_event.mtime_epoch is the status-file mtime.
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
@@ -205,6 +209,9 @@ FM_SNAPSHOT_REGISTRY_BYTES, FM_SNAPSHOT_REGISTRY_RECORDS, and
 FM_SNAPSHOT_REGISTRY_TIMEOUT, with unavailability and truncation disclosed.
 FM_SNAPSHOT_REMOTE_PROBES=0 skips SSH probes for remote endpoint liveness and
 remote home summaries; those surfaces are then marked not-collected.
+Local in-flight Codex pane capture uses the same terminal-line/byte/timeout
+bounds and never stores pane text; it records only whether the exact resume
+banner was present.
 EOF
 }
 
@@ -298,13 +305,25 @@ crew_state_json() {  # <id>
     '{state:$state,source:$source,detail:$detail,raw:$raw}'
 }
 
+snapshot_file_mtime() {  # <path>
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %m "$1" 2>/dev/null
+  else
+    stat -c %Y "$1" 2>/dev/null
+  fi
+}
+
 status_event_json() {  # <status-log>
-  local log=$1 present=0 raw='' verb='' note=''
+  local log=$1 present=0 raw='' verb='' note='' mtime_json=null
   if [ -f "$log" ]; then
     present=1
     raw=$(last_nonempty_line "$log" || true)
     verb=$(status_line_verb "$raw")
     note=$(status_line_note "$raw")
+    mtime_json=$(snapshot_file_mtime "$log" || true)
+    case "$mtime_json" in
+      ''|*[!0-9]*) mtime_json=null ;;
+    esac
   fi
   jq -n \
     --arg path "$log" \
@@ -312,7 +331,71 @@ status_event_json() {  # <status-log>
     --arg verb "$verb" \
     --arg note "$note" \
     --argjson present "$(bool_json "$present")" \
-    '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw}}'
+    --argjson mtime_epoch "$mtime_json" \
+    '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw,mtime_epoch:$mtime_epoch}}'
+}
+
+# Exact Codex-cli exit banner. Health treats this as one of two independent
+# dead-session signals; the other is a proven bare-shell foreground.
+CODEX_RESUME_BANNER='To continue this session, run codex resume'
+
+codex_session_evidence_json() {  # <harness> <remote-host> <backend> <target> <id> <exists> <agent-state> <current-state>
+  local harness=$1 remote_host=$2 backend=$3 target=$4 id=$5 exists=$6 agent_state=$7 current_state=$8
+  local expected out rc clean reason='' resume=false
+  case "$harness" in
+    codex|codex-*) ;;
+    *)
+      jq -n '{collected:false,reason:"not_applicable",resume_banner:null}'
+      return 0
+      ;;
+  esac
+  if [ -n "$remote_host" ]; then
+    jq -n '{collected:false,reason:"remote pane capture was not collected",resume_banner:null}'
+    return 0
+  fi
+  case "$current_state" in
+    done|failed)
+      jq -n '{collected:false,reason:"task is terminal",resume_banner:null}'
+      return 0
+      ;;
+  esac
+  case "$agent_state" in
+    dead|missing)
+      jq -n '{collected:false,reason:"foreground already proved agent-free",resume_banner:null}'
+      return 0
+      ;;
+    unreadable|not_checked|not_collected|unverified)
+      # Banner capture is only the extra signal for a still-classified-live pane.
+      jq -n --arg reason "$agent_state" '{collected:false,reason:$reason,resume_banner:null}'
+      return 0
+      ;;
+  esac
+  if [ -z "$target" ] || [ "$exists" = false ]; then
+    [ "$exists" = false ] && reason="recorded endpoint is absent" || reason="no recorded endpoint"
+    jq -n --arg reason "$reason" '{collected:false,reason:$reason,resume_banner:null}'
+    return 0
+  fi
+  expected="fm-$id"
+  # shellcheck disable=SC2016
+  out=$(fm_run_timed "$FM_SNAPSHOT_TERMINAL_TIMEOUT" bash -c \
+    '. "$1"; fm_backend_capture "$2" "$3" "$4" "$5" | LC_ALL=C head -c "$6"; rc=${PIPESTATUS[0]}; [ "$rc" -eq 141 ] && rc=0; exit "$rc"' \
+    fm-codex-pane-capture "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target" "$FM_SNAPSHOT_TERMINAL_LINES" "$expected" "$FM_SNAPSHOT_TERMINAL_BYTES" 2>/dev/null)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    [ "$rc" -eq 124 ] && reason="pane capture timed out" || reason="pane capture unavailable"
+    jq -n --arg reason "$reason" '{collected:false,reason:$reason,resume_banner:null}'
+    return 0
+  fi
+  clean=$(printf '%s' "$out" | tail -n "$FM_SNAPSHOT_TERMINAL_LINES" | LC_ALL=C head -c "$FM_SNAPSHOT_TERMINAL_BYTES")
+  if command -v perl >/dev/null 2>&1; then
+    clean=$(printf '%s' "$clean" | perl -pe 's/\e\[[0-?]*[ -\/]*[@-~]//g; s/[^\x09\x0A\x0D\x20-\x7E]//g')
+  else
+    clean=$(printf '%s' "$clean" | LC_ALL=C tr -cd '\11\12\15\40-\176')
+  fi
+  case "$clean" in
+    *"$CODEX_RESUME_BANNER"*) resume=true ;;
+  esac
+  jq -n --argjson resume "$resume" '{collected:true,reason:null,resume_banner:$resume}'
 }
 
 first_pr_url_in_file() {  # <file>
@@ -480,7 +563,7 @@ task_json_lines() {
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_state agent_alive probe meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json
+  local open_decisions_tsv open_decisions_json codex_session_json
 
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || continue
@@ -601,6 +684,10 @@ task_json_lines() {
         esac
       fi
     fi
+    codex_session_json=$(codex_session_evidence_json \
+      "$harness" "$remote_host" "$backend" "$target" "$id" \
+      "$endpoint_exists" "$agent_state" "$current_state") \
+      || codex_session_json='{"collected":false,"reason":"codex session evidence failed","resume_banner":null}'
 
     [ -f "$report_path" ] && report_present=1 || report_present=0
     meta_json=$(path_present_json "$meta")
@@ -644,6 +731,7 @@ task_json_lines() {
       --argjson worktree_path "$worktree_json" \
       --argjson home_path "$home_json" \
       --argjson endpoint_exists "$endpoint_exists" \
+      --argjson codex_session "$codex_session_json" \
       --argjson open_decisions "$open_decisions_json" \
       --argjson pending_decision "$(bool_json "$pending_decision")" \
       --argjson blocked_event "$(bool_json "$blocked_event")" \
@@ -673,7 +761,8 @@ task_json_lines() {
                   elif $endpoint_exists == false and $agent_state == "missing" then "absent"
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
                   else "unknown" end),
-          observed_at:$observed_at,freshness:(if $probe == "skipped" then "not_collected" else "fresh" end)},
+          observed_at:$observed_at,freshness:(if $probe == "skipped" then "not_collected" else "fresh" end),
+          codex_session:$codex_session},
         pr:{url:($pr | if . == "" then null else . end),source:$pr_source},
         hints:{
           pending_decision:$pending_decision,
