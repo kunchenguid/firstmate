@@ -31,10 +31,6 @@ A concurrent replacement remains armed, every non-merged or invalid observation 
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step attributed to that crew's current code, or an exact busy verdict from the semantic busy-state contract.
 A `kind=secondmate` task's status signal is the parent-directed reply stream and is never absorbed as provably working; only its bare turn-ended signal retains the ordinary absorb rule.
 A crew that declares `paused:` for a known external wait, or carries a verified `captain-held` transfer, is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
-`bin/fm-pr-lib.sh` owns the receipt format and strict identity mechanics, while `bin/fm-watch.sh` owns queue-before-retirement ordering.
-No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-task-state.sh` reports positive evidence that the task is still working.
-The provider-aware reader delegates local tasks unchanged to `bin/fm-crew-state.sh`, where positive evidence remains an actively running no-mistakes step attributed to that crew's current code or an exact busy verdict from the semantic busy-state contract.
-A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
 For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint only when the backend confidently reports its agent dead.
 Live or inconclusive liveness remains fail-open at that initial surface, and a secondmate's endpoint liveness is still never read at all; a mate is admitted to that same cadence only to serve a declared wait's bounded re-surface, so a forgotten pause or captain hold on a mate cannot rot invisibly.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
@@ -157,7 +153,7 @@ The explicit `remote-agent/aime` and `remote-agent/ida` selectors create no harn
 Remote agents are therefore task executors, not harnesses or runtime backends, and no heuristic chooses between the two providers.
 
 All executors reuse the ordinary Firstmate task identity and lifecycle.
-A remote research task keeps its backlog item, private brief and instruction, status-event history, supervision obligation, `data/<id>/report.md`, decision-hold gate, and completion handling, while its metadata records `executor=remote-agent` and an explicit `provider=aime|ida` instead of faking local fields.
+A remote research task keeps its backlog item, private brief and instruction, status-event history, supervision obligation, `data/<id>/report.md`, captain-hold gate, and completion handling, while its metadata records `executor=remote-agent` and an explicit `provider=aime|ida` instead of faking local fields.
 `bin/fm-task-state.sh` and `bin/fm-task-retire.sh` are the matching provider-aware read and retirement boundaries.
 Legacy or explicit local task records delegate unchanged to `fm-crew-state.sh` and `fm-teardown.sh`.
 

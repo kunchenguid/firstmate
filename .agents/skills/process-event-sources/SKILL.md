@@ -56,7 +56,7 @@ Eligibility is a firstmate judgment made BEFORE arming, because the scripts cann
 Never bind an action that is destructive, irreversible, or security-sensitive, an action needing captain approval or any gate decision, or an action whose right form depends on what the condition finds - those keep the existing check-fires-then-firstmate-decides flow, for which a plain custom check or another adapter stays correct.
 When in doubt, arm only the condition half as an ordinary check and keep the action as a wake-time decision.
 
-`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, `bin/fm-procevent-when.sh --help`, and `bin/fm-procevent-remote-reply.sh --help` own the exact commands and flags.
+`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, `bin/fm-procevent-when.sh --help`, `bin/fm-procevent-remote-reply.sh --help`, `bin/fm-procevent-aime.sh --help`, and `bin/fm-procevent-ida.sh --help` own the exact commands and flags.
 An AIME cloud research source is armed and handled through `bin/fm-procevent-aime.sh`.
 Load `cloud-research-worker` first; that skill owns AIME intake, provider-result, restart, document, cancellation, and retirement procedure.
 The AIME adapter owns authoritative event replay, session and output readback, durable cursor continuity, duplicate handling, acknowledgement, and re-arming.
@@ -66,8 +66,6 @@ An iDA remote research source is armed and handled through `bin/fm-procevent-ida
 Load `cloud-research-worker` first; that skill owns iDA selection, intake, session-marker reconciliation, result, restart, cancellation-authority, and retirement procedure.
 The iDA adapter owns first submission, official session readback, normalized report capture, acknowledgement, and re-arming.
 An ambiguous observation is terminal for that source generation so it cannot retry submission, but the recorded task remains blocked for explicit adoption/reconciliation.
-
-`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, `bin/fm-procevent-remote-reply.sh --help`, `bin/fm-procevent-aime.sh --help`, and `bin/fm-procevent-ida.sh --help` own the exact commands and flags.
 
 Two rules the commands cannot enforce for you:
 

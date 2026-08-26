@@ -129,4 +129,4 @@ Provider output grants no implementation, publication, merge, destructive, compl
 AIME cancellation remains explicitly unsupported.
 iDA cancellation requires the public script's authorization flag and current destructive-action authority; a successful close response remains nonterminal until provider session readback confirms cancellation.
 iDA abandonment likewise requires its own `--authorize-abandon` flag plus an authoritative complete non-truncated zero-match session-list proof and performs no provider write.
-Both providers require the ordinary decision-hold gate and safe report linkage before retirement.
+Both providers require the ordinary captain-hold gate and safe report linkage before retirement.

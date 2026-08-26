@@ -105,7 +105,7 @@ Rollback is therefore two steps.
 First set `enabled=false`, or remove `config/aime-cloud-worker`, to stop new cloud dispatch immediately while leaving local routing unchanged.
 Then reconcile every existing cloud task to a terminal report, or interrupt only its local waiter while recording that the AIME session may still continue.
 Do not delete a nonterminal cloud record, claim cancellation, or create a replacement session.
-Terminal tasks retire through `bin/fm-task-retire.sh` only after task state binds a private single-link report and the ordinary decision-hold completion gate passes.
+Terminal tasks retire through `bin/fm-task-retire.sh` only after task state binds a private single-link report and the ordinary captain-hold completion gate passes.
 A previously recorded `result-unavailable` task can cross that boundary only through the adapter's idempotent stopped terminal-unavailable preparation using its preserved authoritative observation or one bounded fresh readback and an already existing safe report.
 Retirement preserves the report and private quarantined capture evidence while removing volatile cloud state.
 
@@ -178,7 +178,7 @@ iDA document mode does not imply AIME's Feishu creation contract; the durable re
 Provider cancellation uses official `chat completion close`, requires current destructive-action authority plus `--authorize-provider-cancel`, and does not become terminal until session readback confirms a cancelled/closed state.
 After that confirmation, the command retires only the older local waiter before routing a fresh normalized terminal observation through durable capture, publication, and automatic application.
 An ambiguous or submission-unknown task whose marker yields an authoritative complete non-truncated zero-match session list can leave its permanent blocked state only through the explicit `abandon` command with `--authorize-abandon`; abandonment fail-terminals the durable record, performs no provider write, never retries or recreates, and any future execution requires a separate explicit dispatch.
-Retirement requires normalized terminal state, a safe bound report, retired process-event supervision, and the ordinary decision-hold completion gate.
+Retirement requires normalized terminal state, a safe bound report, retired process-event supervision, and the ordinary captain-hold completion gate.
 Disabling the config blocks new submission but does not erase, cancel, or make an existing record unreadable.
 Current behavioral evidence is in [`verification/remote-agents.md`](verification/remote-agents.md).
 
