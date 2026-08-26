@@ -874,7 +874,16 @@ def prepare(env, args, parent_state=None):
     if getattr(args, "public_ref", None) and args.source_ref:
         raise RunnerError("choose one exact source identity: --source-ref or --public-ref")
     source_ancestors = tuple(getattr(args, "public_ancestor", None) or ())
-    if private_snapshot_source is not None and not args.capacity_parent:
+    if private_snapshot_from_head:
+        if args.capacity_parent or not args.source_ref:
+            raise RunnerError("direct private HEAD snapshot requires one exact source ref and no capacity parent")
+        public = public_origin_proof(
+            repo, remote, commit,
+            source_ref=args.source_ref,
+            source_ancestors=source_ancestors,
+            private_source=True,
+        )
+    elif private_snapshot_source is not None and not args.capacity_parent:
         public = private_bundle_origin_proof(
             repo,
             remote,
@@ -888,15 +897,6 @@ def prepare(env, args, parent_state=None):
             source_ref=getattr(args, "public_ref", None) or args.source_ref,
             source_ancestors=source_ancestors,
             private_source=private_snapshot_source is not None,
-        )
-    if private_snapshot_from_head:
-        if args.capacity_parent or not args.source_ref:
-            raise RunnerError("direct private HEAD snapshot requires one exact source ref and no capacity parent")
-        public = public_origin_proof(
-            repo, remote, commit,
-            source_ref=args.source_ref,
-            source_ancestors=source_ancestors,
-            private_source=True,
         )
     private_snapshot_requested = private_snapshot_source is not None or private_snapshot_from_head
     tree = public["tree"]
