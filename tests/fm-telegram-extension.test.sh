@@ -69,6 +69,9 @@ if ! (cd "$FIXTURE" && \
   FM_TELEGRAM_SESSION_LOCK_CHECK="$TMP_ROOT/session-lock-check" \
   FM_HOME="$TMP_ROOT/fmhome" \
   WORKER_HOME="$TMP_ROOT/workerhome" \
+  PENDING_HOME="$TMP_ROOT/pendinghome" \
+  FM_TELEGRAM_LOCK_WAIT_MS=100 \
+  FM_TELEGRAM_LOCK_WAIT_ATTEMPTS=40 \
   node --input-type=module >"$OUT" 2>&1) <<'JS'
 import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
@@ -76,6 +79,37 @@ import { tmpdir } from "node:os";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+// Pi's own footer renderer decides how the statuses extensions publish are
+// ordered, joined, and truncated, so the rendered line is asserted through it
+// rather than through a local copy of those rules.
+import { FooterComponent, initTheme } from "@earendil-works/pi-coding-agent";
+
+initTheme("dark");
+
+const VOICE_STATUS = "voice: alt+m • parakeet-v3-q8";
+
+function renderFooter(statuses, width) {
+  const session = {
+    state: { model: undefined, thinkingLevel: "off" },
+    sessionManager: {
+      getEntries: () => [],
+      getCwd: () => process.cwd(),
+      getSessionName: () => undefined,
+    },
+    getContextUsage: () => undefined,
+    modelRuntime: { isUsingSubscription: () => false },
+    autoCompactionEnabled: true,
+  };
+  const footerData = {
+    getGitBranch: () => null,
+    getExtensionStatuses: () => statuses,
+    getAvailableProviderCount: () => 1,
+  };
+  return new FooterComponent(session, footerData)
+    .render(width)
+    // eslint-disable-next-line no-control-regex
+    .map((line) => line.replace(/\u001b\[[0-9;]*m/g, ""));
+}
 
 const home = process.env.FM_TELEGRAM_DIR;
 mkdirSync(home, { recursive: true });
@@ -668,14 +702,42 @@ if (notifications.at(-1)?.message !== "Mirror is on. Firstmate is connected. Con
   fail(`the bot status was not reported in Pi: ${JSON.stringify(notifications)}`);
 }
 
-// 6. The footer tracks whatever the bot last published, from either surface.
-if (footerText() !== "telegram: off") {
+// 6. The footer tracks whatever the bot last published, from either surface,
+//    and shares Pi's one status line with whatever other extensions publish.
+if (footerText() !== "telegram: off •") {
   fail(`the footer did not start from the bot's state: ${footerText()}`);
 }
 botWrite({ t: "state", mirror: true, confirmations: true });
-await waitFor(() => footerText() === "telegram: on", "the footer to follow a mirror change");
+await waitFor(() => footerText() === "telegram: on •", "the footer to follow a mirror change");
+
+// Pi sorts statuses by key, joins them with one space, and truncates the
+// result, so the mirror's own text is what has to keep Telegram and the status
+// after it apart on that shared line.
+const withVoice = new Map([...footer.entries(), ["pi-voice", VOICE_STATUS]]);
+const wideLines = renderFooter(withVoice, 100);
+const statusLine = wideLines.at(-1);
+if (statusLine !== `telegram: on • ${VOICE_STATUS}`) {
+  fail(`Pi did not render Telegram and the next status on one separated line: ${JSON.stringify(wideLines)}`);
+}
+if (wideLines.filter((line) => line.includes("telegram:")).length !== 1) {
+  fail(`Telegram appeared on more than one footer line: ${JSON.stringify(wideLines)}`);
+}
+if (statusLine.indexOf("telegram:") > statusLine.indexOf("voice:")) {
+  fail(`Telegram lost its place ahead of the next status: ${statusLine}`);
+}
+// A narrow terminal stays bounded: still one status line, never wider than the
+// terminal, and Telegram is the part that survives.
+const narrowLines = renderFooter(withVoice, 30);
+const narrowStatus = narrowLines.at(-1);
+if (narrowLines.length !== wideLines.length) {
+  fail(`a narrow terminal changed the footer's line count: ${JSON.stringify(narrowLines)}`);
+}
+if ([...narrowStatus].length > 30 || !narrowStatus.startsWith("telegram: on")) {
+  fail(`a narrow terminal did not bound the status line: ${JSON.stringify(narrowStatus)}`);
+}
+
 botWrite({ t: "state", mirror: false, confirmations: false });
-await waitFor(() => footerText() === "telegram: off", "the footer to follow a mirror change back");
+await waitFor(() => footerText() === "telegram: off •", "the footer to follow a mirror change back");
 
 // The settings surface reads the same published values, with no Pi command for
 // the individual mirror states any more.
@@ -709,7 +771,8 @@ await waitFor(() => connections > connectionsAfterShutdown, "a reconnect on the 
 const connectionsBeforeWorker = connections;
 mkdirSync(join(process.env.WORKER_HOME, "state"), { recursive: true });
 // A live pid that is not this process's ancestor: exactly a crewmate's shape.
-writeFileSync(join(process.env.WORKER_HOME, "state", ".lock"), "1\n");
+const workerOwner = spawn(process.execPath, ["-e", "setTimeout(() => {}, 10000)"]);
+writeFileSync(join(process.env.WORKER_HOME, "state", ".lock"), `${workerOwner.pid}\n`);
 process.env.FM_HOME = process.env.WORKER_HOME;
 const workerHandlers = new Map();
 const workerCommands = [];
@@ -730,6 +793,75 @@ if (connections !== connectionsBeforeWorker) {
 if (workerFooter.size !== 0) {
   fail("a worker session published a Telegram footer");
 }
+workerOwner.kill();
+await new Promise((resolve) => workerOwner.once("exit", resolve));
+process.env.FM_HOME = process.env.WORKER_HOME.replace("workerhome", "fmhome");
+
+// 9. A home that has not recorded its live session yet is not a worker. Pi
+//    loads this file while the session is starting, and Firstmate records the
+//    session lock from inside that same session moments later, so a bridge that
+//    answered "not mine" once at load stayed dark until the captain reloaded Pi.
+//    Malformed and symlink locks are also unclaimed and must keep retrying until
+//    the regular lock arrives, with no reload, second import, or session_start.
+const connectionsBeforePending = connections;
+const pendingState = join(process.env.PENDING_HOME, "state");
+mkdirSync(pendingState, { recursive: true });
+writeFileSync(join(pendingState, ".lock"), "1\n");
+process.env.FM_HOME = process.env.PENDING_HOME;
+const pendingHandlers = new Map();
+const pendingCommands = [];
+const pendingFooter = new Map();
+const pendingCtx = {
+  ...ctx,
+  ui: {
+    ...ctx.ui,
+    setStatus: (key, value) => {
+      if (value === undefined) pendingFooter.delete(key);
+      else pendingFooter.set(key, value);
+    },
+  },
+};
+const pending = await import(`${pathToFileURL(process.env.EXT).href}?pending=${Date.now()}`);
+pending.default({
+  on: (event, handler) => pendingHandlers.set(event, handler),
+  registerCommand: (name) => pendingCommands.push(name),
+  sendUserMessage: () => fail("a session without the lock submitted text to Pi"),
+});
+if (!pendingHandlers.get("session_start")) {
+  fail("a session in a home with no recorded session gave up at load, so only a Pi reload could revive the mirror");
+}
+pendingHandlers.get("session_start")({ reason: "startup" }, pendingCtx);
+
+// Before the lock names it, that session is as inert as a worker.
+await new Promise((resolve) => setTimeout(resolve, 500));
+if (connections !== connectionsBeforePending) {
+  fail("a session connected to the Telegram bot before the home recorded it");
+}
+if (pendingCommands.length !== 0 || pendingFooter.size !== 0) {
+  fail(`an unrecorded session published ${pendingFooter.size} status(es) and ${pendingCommands.length} command(s)`);
+}
+
+const pendingLock = join(pendingState, ".lock");
+const symlinkTarget = join(pendingState, "symlink-target");
+unlinkSync(pendingLock);
+writeFileSync(symlinkTarget, `${process.pid}\n`);
+symlinkSync(symlinkTarget, pendingLock);
+await new Promise((resolve) => setTimeout(resolve, 300));
+if (connections !== connectionsBeforePending || pendingCommands.length !== 0 || pendingFooter.size !== 0) {
+  fail("a symlink lock claimed the Telegram bridge before a valid session record arrived");
+}
+unlinkSync(pendingLock);
+writeFileSync(pendingLock, `${process.pid}\n`);
+await waitFor(() => connections > connectionsBeforePending, "the bridge to connect once the home recorded its session");
+await waitFor(() => pendingFooter.get("firstmate-telegram") !== undefined, "the Telegram footer to appear without a Pi reload");
+if (!pendingFooter.get("firstmate-telegram").startsWith("telegram: ")) {
+  fail(`the recovered footer was not the mirror's status: ${pendingFooter.get("firstmate-telegram")}`);
+}
+if (!pendingCommands.includes("telegram") || !pendingCommands.includes("telegram-settings")) {
+  fail(`the recovered session is missing its commands: ${JSON.stringify(pendingCommands)}`);
+}
+pendingHandlers.get("session_shutdown")({ reason: "quit" }, pendingCtx);
+await new Promise((resolve) => setTimeout(resolve, 100));
 process.env.FM_HOME = process.env.WORKER_HOME.replace("workerhome", "fmhome");
 
 handlers.get("session_shutdown")({ reason: "quit" }, ctx);
@@ -742,4 +874,4 @@ then
 fi
 [ -s "$OUT" ] && fail "Telegram mirror extension test printed output: $(cat "$OUT")"
 
-pass "the Pi mirror bridge mirrors only the live session's terminal submissions and final replies, hides thinking, tools, and operational input, submits queued Telegram text through Pi's own input path in order, toggles with bare /telegram, keeps the footer on the bot's published state, and stays completely inert in a worker session"
+pass "the Pi mirror bridge mirrors only the live session's terminal submissions and final replies, hides thinking, tools, and operational input, submits queued Telegram text through Pi's own input path in order, toggles with bare /telegram, keeps the footer on the bot's published state, shares Pi's one status line with the status after it, activates when the home records its session instead of waiting for a Pi reload, and stays completely inert in a worker session"

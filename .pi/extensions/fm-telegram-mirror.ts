@@ -23,6 +23,7 @@ import {
   constants as fsConstants,
   existsSync,
   fstatSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -59,10 +60,24 @@ type FinalizedMessage = {
 const RECONNECT_MS = positiveInteger("FM_TELEGRAM_RECONNECT_MS", 2000);
 const RECONNECT_MAX_MS = positiveInteger("FM_TELEGRAM_RECONNECT_MAX_MS", 60000);
 const COMMAND_TIMEOUT_MS = positiveInteger("FM_TELEGRAM_COMMAND_TIMEOUT_MS", 5000);
+// Pi loads this file while the session is starting, and the Firstmate session
+// lock is recorded from inside that same session moments later, so the first
+// ownership answer of a fresh session is "not yet" rather than "never". These
+// bound how long an unclaimed home is given to record its session before the
+// bridge stops asking.
+const LOCK_WAIT_MS = positiveInteger("FM_TELEGRAM_LOCK_WAIT_MS", 2000);
+const LOCK_WAIT_ATTEMPTS = positiveInteger("FM_TELEGRAM_LOCK_WAIT_ATTEMPTS", 30);
 // The footer item Pi renders, and the only Pi-side preference: whether that
 // item is shown. It is stored beside the bot's private directory so it survives
 // a restart and can still be read while the bot is unreachable.
 const FOOTER_KEY = "firstmate-telegram";
+// Pi renders every extension status on one shared footer line: it sorts the
+// statuses by key, joins them with a single space, strips control characters,
+// and truncates the result to the terminal width. An extension therefore owns
+// only its own text, so the mirror ends its status with the same separator Pi's
+// other statuses use between their own fields, and the status that follows it
+// on that shared line reads as a separate item.
+const STATUS_SEPARATOR = "\u2022";
 // Pi's terminal does not preview an attached image, so every image message
 // carries this marker as its visible text. It names no origin: an image sent
 // from anywhere reads the same to Firstmate.
@@ -89,7 +104,9 @@ function botSocketPath(): string {
 // replies and its tool activity would flow into the captain's private chat the
 // moment it connected. Primacy is decided the way the tracked watcher extension
 // decides it: the Firstmate home's session lock names the live session, and only
-// a process inside that session's own ancestry owns it.
+// a process inside that session's own ancestry owns it. That record is written
+// from inside the session Pi has already started, so ownership is re-read while
+// the home is still unclaimed instead of being settled once at load.
 function firstmateHome(): string {
   return process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE ||
     resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -103,13 +120,44 @@ function sessionLockChecker(): string {
   return join(firstmateHome(), "bin", "fm-session-lock-check.sh");
 }
 
+function stateDirectory(): string {
+  return process.env.FM_STATE_OVERRIDE || join(firstmateHome(), "state");
+}
+
 function ownsSessionLock(): boolean {
-  const stateDir = process.env.FM_STATE_OVERRIDE || join(firstmateHome(), "state");
-  const result = spawnSync(sessionLockChecker(), [stateDir, String(process.pid)], {
+  const result = spawnSync(sessionLockChecker(), [stateDirectory(), String(process.pid)], {
     stdio: "ignore",
     timeout: 2000,
   });
   return result.status === 0;
+}
+
+// A lock naming a live process belongs to a session that already claimed this
+// home, and no later check can hand it to this one. A missing, malformed, or
+// dead-pid lock means the home is unclaimed, which is exactly the window
+// between Pi starting and bin/fm-session-start.sh recording the new session.
+// Ownership itself stays with the checker script; this only decides whether
+// asking again could ever change the answer.
+function sessionLockClaimed(): boolean {
+  const lockPath = join(stateDirectory(), ".lock");
+  let lockPid = "";
+  try {
+    const lockStat = lstatSync(lockPath);
+    if (!lockStat.isFile() || lockStat.isSymbolicLink()) return false;
+    lockPid = readFileSync(lockPath, "utf8").trim();
+  } catch {
+    return false;
+  }
+  if (!/^[0-9]+$/.test(lockPid)) return false;
+  const pid = Number(lockPid);
+  if (!Number.isSafeInteger(pid) || pid <= 1) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // A process this user cannot signal is still a live claim.
+    return (error as NodeJS.ErrnoException | null)?.code === "EPERM";
+  }
 }
 
 function readDisplayStatus(): boolean {
@@ -347,8 +395,12 @@ function finalVisibleReply(message: unknown): string {
 }
 
 export default function (pi: ExtensionAPI) {
-  // A worker session stays completely inert: no socket, no footer, no commands.
-  if (!ownsSessionLock()) return;
+  // A session that can never hold this home's lock stays completely inert: no
+  // socket, no footer, no commands. A session that simply has not been recorded
+  // yet is a different case, and waits below rather than deciding against
+  // itself once, at load, before its own session start could record it.
+  let owned = ownsSessionLock();
+  if (!owned && sessionLockClaimed()) return;
   const socketPath = botSocketPath();
   let socket: Socket | null = null;
   let buffer = "";
@@ -367,14 +419,57 @@ export default function (pi: ExtensionAPI) {
   let mirrorOn = false;
   let confirmations = true;
   let displayStatus = readDisplayStatus();
+  let commandsRegistered = false;
+  let lockWaitTimer: ReturnType<typeof setTimeout> | null = null;
+  let lockWaitAttempts = 0;
 
   function footerText(): string {
-    if (!connected) return "telegram: unavailable";
-    return mirrorOn ? "telegram: on" : "telegram: off";
+    const state = connected ? (mirrorOn ? "on" : "off") : "unavailable";
+    return `telegram: ${state} ${STATUS_SEPARATOR}`;
   }
 
   function refreshFooter(): void {
+    if (!owned) return;
     activeCtx?.ui?.setStatus?.(FOOTER_KEY, displayStatus ? footerText() : undefined);
+  }
+
+  // Everything the live session may do, and nothing a session without the lock
+  // may do. Idempotent, because it runs on every session start and again when a
+  // pending lock finally names this session.
+  function startBridge(): void {
+    registerCommands();
+    displayStatus = readDisplayStatus();
+    refreshFooter();
+    openSocket();
+  }
+
+  // Firstmate records its session lock from inside the session Pi has already
+  // started, so a fresh session's first ownership answer is "not yet". Waiting
+  // for that record is what keeps the bridge from needing a Pi reload; a home
+  // claimed by another live session, or one that never records a session within
+  // the window, ends the wait and leaves this session inert.
+  function waitForSessionLock(): void {
+    if (owned || stopped || lockWaitTimer) return;
+    if (lockWaitAttempts >= LOCK_WAIT_ATTEMPTS) return;
+    const timer = setTimeout(() => {
+      lockWaitTimer = null;
+      lockWaitAttempts += 1;
+      if (stopped) return;
+      if (ownsSessionLock()) {
+        owned = true;
+        startBridge();
+        return;
+      }
+      if (sessionLockClaimed()) return;
+      waitForSessionLock();
+    }, LOCK_WAIT_MS);
+    timer.unref?.();
+    lockWaitTimer = timer;
+  }
+
+  function stopWaitingForSessionLock(): void {
+    if (lockWaitTimer) clearTimeout(lockWaitTimer);
+    lockWaitTimer = null;
   }
 
   function write(frame: Record<string, unknown>): boolean {
@@ -534,13 +629,17 @@ export default function (pi: ExtensionAPI) {
     activeCtx = ctx;
     stopped = false;
     reconnectDelay = RECONNECT_MS;
-    displayStatus = readDisplayStatus();
-    refreshFooter();
-    openSocket();
+    if (owned) {
+      startBridge();
+      return;
+    }
+    lockWaitAttempts = 0;
+    waitForSessionLock();
   });
 
   pi.on?.("session_shutdown", () => {
     stopped = true;
+    stopWaitingForSessionLock();
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectTimer = null;
     closeSocket();
@@ -583,74 +682,85 @@ export default function (pi: ExtensionAPI) {
     if (text.trim()) write({ t: "reply", text });
   });
 
-  pi.registerCommand?.("telegram", {
-    description: "Toggle the Telegram terminal mirror.",
-    handler: async (_args, ctx) => {
-      activeCtx = ctx;
-      ctx.ui.notify(await sendCommand("toggle"), "info");
-    },
-  });
+  // Registered when this session is the live one, whether that was already true
+  // at load or became true while the bridge waited for the session lock.
+  function registerCommands(): void {
+    if (commandsRegistered) return;
+    commandsRegistered = true;
 
-  pi.registerCommand?.("telegram-settings", {
-    description: "Show and change the Telegram mirror settings.",
-    handler: async (_args, ctx) => {
-      activeCtx = ctx;
-      if (ctx.mode !== "tui") {
-        ctx.ui.notify(
-          `Telegram settings: display status ${displayStatus ? "on" : "off"}, ` +
-          `delivery confirmations ${connected ? (confirmations ? "on" : "off") : "unavailable"}.`,
-          "info",
-        );
-        return;
-      }
-      const items: SettingItem[] = [
-        {
-          id: "display",
-          label: "Display Telegram status",
-          currentValue: displayStatus ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
-          id: "confirmations",
-          label: "Delivery confirmations",
-          currentValue: connected ? (confirmations ? "on" : "off") : "unavailable",
-          values: connected ? ["on", "off"] : ["unavailable"],
-        },
-      ];
-      await ctx.ui.custom((_tui, theme, _keybindings, done) => {
-        const container = new Container();
-        container.addChild(new Text(theme.fg("accent", theme.bold("Telegram mirror")), 1, 1));
-        const list = new SettingsList(
-          items,
-          Math.min(items.length + 2, 15),
-          getSettingsListTheme(),
-          (id, value) => {
-            if (id === "display") {
-              displayStatus = value === "on";
-              writeDisplayStatus(displayStatus);
-              refreshFooter();
-              return;
-            }
-            if (id === "confirmations") {
-              if (!connected) {
-                ctx.ui.notify("The Telegram mirror bot is not running.", "warning");
+    pi.registerCommand?.("telegram", {
+      description: "Toggle the Telegram terminal mirror.",
+      handler: async (_args, ctx) => {
+        activeCtx = ctx;
+        ctx.ui.notify(await sendCommand("toggle"), "info");
+      },
+    });
+
+    pi.registerCommand?.("telegram-settings", {
+      description: "Show and change the Telegram mirror settings.",
+      handler: async (_args, ctx) => {
+        activeCtx = ctx;
+        if (ctx.mode !== "tui") {
+          ctx.ui.notify(
+            `Telegram settings: display status ${displayStatus ? "on" : "off"}, ` +
+            `delivery confirmations ${connected ? (confirmations ? "on" : "off") : "unavailable"}.`,
+            "info",
+          );
+          return;
+        }
+        const items: SettingItem[] = [
+          {
+            id: "display",
+            label: "Display Telegram status",
+            currentValue: displayStatus ? "on" : "off",
+            values: ["on", "off"],
+          },
+          {
+            id: "confirmations",
+            label: "Delivery confirmations",
+            currentValue: connected ? (confirmations ? "on" : "off") : "unavailable",
+            values: connected ? ["on", "off"] : ["unavailable"],
+          },
+        ];
+        await ctx.ui.custom((_tui, theme, _keybindings, done) => {
+          const container = new Container();
+          container.addChild(new Text(theme.fg("accent", theme.bold("Telegram mirror")), 1, 1));
+          const list = new SettingsList(
+            items,
+            Math.min(items.length + 2, 15),
+            getSettingsListTheme(),
+            (id, value) => {
+              if (id === "display") {
+                displayStatus = value === "on";
+                writeDisplayStatus(displayStatus);
+                refreshFooter();
                 return;
               }
-              // The bot owns this setting for both surfaces; its state frame is
-              // what updates the local copy.
-              write({ t: "set", setting: "confirmations", value: value === "on" });
-            }
-          },
-          () => done(undefined),
-          { enableSearch: false },
-        );
-        container.addChild(list);
-        return {
-          render: (width: number) => container.render(width),
-          invalidate: () => container.invalidate(),
-          handleInput: (data: string) => list.handleInput?.(data),
-        };
-      });
-    },
-  });
+              if (id === "confirmations") {
+                if (!connected) {
+                  ctx.ui.notify("The Telegram mirror bot is not running.", "warning");
+                  return;
+                }
+                // The bot owns this setting for both surfaces; its state frame is
+                // what updates the local copy.
+                write({ t: "set", setting: "confirmations", value: value === "on" });
+              }
+            },
+            () => done(undefined),
+            { enableSearch: false },
+          );
+          container.addChild(list);
+          return {
+            render: (width: number) => container.render(width),
+            invalidate: () => container.invalidate(),
+            handleInput: (data: string) => list.handleInput?.(data),
+          };
+        });
+      },
+    });
+  }
+
+  // A session that already holds the lock keeps today's behavior exactly:
+  // its commands exist from the moment Pi loads this file.
+  if (owned) registerCommands();
 }

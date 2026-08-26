@@ -240,3 +240,65 @@ printf ' \n' >"$HOME_DIR/inject-image.txt"
 wait_for_image_payload "" \
   || fail "a screenshot without a caption never reached the model as image content (Pi $PI_VERSION)"
 pass "a Telegram screenshot without a caption reaches the model as the [Image attached] marker plus the image (Pi $PI_VERSION)"
+
+# D: the production start order. Firstmate records its session lock from inside
+# the session Pi has already started, so the bridge is loaded before the home
+# names it. The fixture above writes the lock first and would never see that
+# window; here Pi starts against an unrecorded home, exactly as a real Firstmate
+# session does, and the mirror has to come up on its own once the lock lands.
+# The rendered footer is asserted from the real TUI because how Pi orders,
+# joins, and separates independently published statuses is Pi's own behavior.
+start_pi_unrecorded() {
+  : >"$HOME_DIR/frames.log"
+  rm -f "$HOME_DIR/inject.txt" "$FM_LAB_HOME/state/.lock"
+  tmux -L "$SOCKET" kill-server 2>/dev/null || true
+  mkdir -p "$FM_LAB_HOME/state"
+  tmux -L "$SOCKET" new-session -d -s "$SESSION" -x 200 -y 50 -c "$WORK" \
+    "FM_HOME='$ROOT' FM_STATE_OVERRIDE='$FM_LAB_HOME/state' \
+     FM_TELEGRAM_DIR='$HOME_DIR' FAKE_MODEL_PORT='$PORT' \
+     exec pi --no-session --no-context-files --no-extensions --no-skills --no-tools \
+     -e '$FIXTURES/fake-provider.ts' -e '$FIXTURES/status-peer.ts' -e '$EXT' --model fakelab/slow-fake"
+  local i=0
+  while [ "$i" -lt 100 ]; do
+    capture_pane | grep -q 'voice: alt+m' && return 0
+    sleep 0.2
+    i=$((i + 1))
+  done
+  fail "the real Pi session never rendered its footer (Pi $PI_VERSION)"
+}
+
+start_pi_unrecorded
+sleep 2
+[ "$(frames_of hello)" -eq 0 ] \
+  || fail "the bridge connected before the home recorded its live session (Pi $PI_VERSION)"
+capture_pane | grep -q 'telegram:' \
+  && fail "the mirror published a footer status before the home recorded its live session (Pi $PI_VERSION)"
+
+# The lock names the pane's own process, which is Pi itself: the fixture execs
+# Pi into the pane, so this is the same shape fm-session-start.sh records.
+tmux -L "$SOCKET" display-message -p -t "$SESSION" '#{pane_pid}' >"$TMP_ROOT/pane-pid"
+cat "$TMP_ROOT/pane-pid" >"$FM_LAB_HOME/state/.lock"
+
+wait_for_status_line() {
+  local i=0
+  while [ "$i" -lt 150 ]; do
+    capture_pane | grep -q 'telegram:' && return 0
+    sleep 0.2
+    i=$((i + 1))
+  done
+  fail "the mirror never appeared after the home recorded its live session, so only a Pi reload would have revived it (Pi $PI_VERSION)"
+}
+wait_for_status_line
+[ "$(frames_of hello)" -ge 1 ] \
+  || fail "the mirror published a footer status without connecting to the bot (Pi $PI_VERSION)"
+
+STATUS_LINE=$(capture_pane | grep 'telegram:' | tail -1 | sed 's/[[:space:]]*$//')
+# Telegram first, then the separator the other statuses use between their own
+# fields, then the status Pi renders next, all on the one status line.
+case $STATUS_LINE in
+  "telegram: "*" • voice: alt+m • parakeet-v3-q8") ;;
+  *) fail "Telegram and the next status were not rendered as one separated footer line: [$STATUS_LINE] (Pi $PI_VERSION)" ;;
+esac
+[ "$(capture_pane | grep -c 'telegram:')" -eq 1 ] \
+  || fail "the Telegram status was rendered more than once: (Pi $PI_VERSION)"
+pass "a real Pi session started before its home recorded the session brings the mirror up without a reload and renders it ahead of the next status on one separated footer line (Pi $PI_VERSION)"

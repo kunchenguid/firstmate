@@ -87,8 +87,13 @@ In the Pi terminal there are two commands: `/telegram` toggles mirror mode, and 
 
 ## The terminal footer
 
-Pi's footer shows `telegram: on`, `telegram: off`, or `telegram: unavailable`.
+Pi's footer shows `telegram: on •`, `telegram: off •`, or `telegram: unavailable •`.
 `unavailable` means this Pi session cannot reach the bot service or its local socket, so mirror mode has no reachable owner to report.
+
+Pi renders every extension's status on one shared footer line, sorted by key and joined with a single space.
+The Telegram key sorts before the captain's voice status, and its text ends with the same `•` that voice uses between `Alt+M` and its model name, so those two statuses read as separate items on that line.
+The separator belongs to the Telegram status itself, because Pi lets an extension shape only its own text, so it stays at the end of the item when voice is absent.
+When the terminal is too narrow for both statuses, Pi keeps the leading Telegram text and truncates the rest to the terminal width.
 
 The bot owns mirror mode and publishes every change, so the footer updates promptly whether you switch from Telegram or from the terminal, and when the bot starts or stops.
 
