@@ -4,6 +4,7 @@
 import argparse
 import fcntl
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -44,6 +45,7 @@ LIFECYCLE_ENV_KEYS = {
     "FM_AZURE_BUDGET_START_DATE", "FM_AZURE_DEPLOYMENT_GENERATION",
     "FM_AZURE_OWNER_TAG", "FM_AZURE_NAMING_PREFIX", "FM_AZURE_RESOURCE_GROUP",
     "FM_AZURE_STORAGE_NAME", "FM_AZURE_LOCATION", "FM_AZURE_WORKER_STATE_DIR",
+    "FM_AZURE_WORKER_IMAGE_ID", "FM_AZURE_OPERATOR_DATA_PLANE_IP",
     "FM_AZURE_WORKER_MAX", "FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS",
     "FM_AZURE_WORKER_IDLE_RELEASE_SECONDS", "FM_AZURE_WORKER_POLICY_PHASE",
     "FM_AZURE_WORKER_STEADY_TARGET_USD", "FM_AZURE_WORKER_COMMISSIONING_CEILING_USD",
@@ -115,6 +117,20 @@ def validate_config(value):
         not isinstance(item, str) or not item or "\x00" in item for item in env.values()
     ):
         raise WrapperError("lifecycle environment is incomplete or malformed", "config_invalid", False)
+    operator_ip = env.get("FM_AZURE_OPERATOR_DATA_PLANE_IP")
+    if operator_ip is not None:
+        try:
+            parsed_operator_ip = ipaddress.IPv4Address(operator_ip)
+        except ipaddress.AddressValueError:
+            raise WrapperError(
+                "operator data-plane route must be one canonical IPv4 address",
+                "config_invalid", False,
+            )
+        if str(parsed_operator_ip) != operator_ip:
+            raise WrapperError(
+                "operator data-plane route must be one canonical IPv4 address",
+                "config_invalid", False,
+            )
     for field, low, high in (
         ("assignment_timeout_seconds", 1, 7200),
         ("cleanup_timeout_seconds", 1, 7200),
