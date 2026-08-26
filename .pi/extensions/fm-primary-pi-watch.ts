@@ -17,6 +17,11 @@ import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Text, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
+  createBranchDispatchOffer,
+  FM_BRANCH_DISPATCH_EVENT,
+  scopeForUnreadWake,
+} from "./lib/fm-branch-dispatch.ts";
+import {
   type CalmPresentationState,
   calmTranscriptClassIsVisible,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
@@ -292,9 +297,29 @@ export default function (pi: ExtensionAPI) {
     return confirmHandlingDelivery(snapshot());
   }
 
+  function offerWakeToBranch(message: string): boolean {
+    const heartbeat = /^heartbeat($|:)/.test(message);
+    // A check-kind close (merge-confirmation polls, Relay mentions,
+    // credential/auth failures, and every other legitimately main-only
+    // class - docs/pi-supervision-branch.md) is never routed to the branch
+    // even when other currently-unread rows are individually eligible: this
+    // watcher cycle's own triggering event stays on main, exactly as before
+    // scopeForUnreadWake stopped letting a co-present check row veto the
+    // whole scan. That relaxation is what lets an UNRELATED eligible
+    // signal/stale row still reach the branch on this cycle; it must never
+    // also let a check-kind trigger itself slip past main's delivery.
+    const isCheckTrigger = /^check:/.test(message);
+    const scope = scopeForUnreadWake(state, heartbeat);
+    const eligible = !isCheckTrigger && scope.eligible;
+    const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, eligible);
+    pi.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
+    return offer.accepted;
+  }
+
   async function deliverActionableWake(
     owner: SessionGeneration,
     message: string,
+    repairFailed: boolean,
     recovery?: { generation: string; watcherPid: string },
   ): Promise<void> {
     if (!generationIsLive(owner)) return;
@@ -309,6 +334,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
     }
+    if (!repairFailed && offerWakeToBranch(message)) return;
     await sendWake(owner, message);
   }
 
@@ -506,7 +532,7 @@ export default function (pi: ExtensionAPI) {
             const restoration = await restoreAfterActionableClose(owner, predecessor);
             if (!generationIsLive(owner)) return;
             const message = restoration.failure ? `${classification.message}\n\n${restoration.failure}` : classification.message;
-            await deliverActionableWake(owner, message, restoration.recovery);
+            await deliverActionableWake(owner, message, Boolean(restoration.failure), restoration.recovery);
           } catch (error) {
             const detail = error instanceof Error ? error.message : String(error);
             surfaceFailure(owner, `watcher: FAILED - Pi extension could not deliver an actionable wake\n${detail}`);

@@ -168,10 +168,12 @@ queue_note() {
   [ -n "${body//[[:space:]]/}" ] || die "refusing to queue an empty note"
   mkdir -p "$INBOX"
 
-  local tmp id summary
+  local tmp id summary staging_name
   tmp=$(mktemp "$INBOX/.staging-XXXXXX")
+  staging_name=$(basename "$tmp")
+  id="$(date +%s)-${staging_name#.staging-}"
   {
-    printf 'id=PENDING\n'
+    printf 'id=%s\n' "$id"
     printf 'at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'source=%s\n' "$source"
     [ -z "$extra" ] || printf '%s\n' "$extra"
@@ -179,9 +181,7 @@ queue_note() {
     printf '%s\n' "$body"
   } >"$tmp"
 
-  id="$(date +%s)-$(basename "$tmp" | sed 's/^\.staging-//')"
-  # Rewrite the id line now that we know it, then publish atomically.
-  sed -i "s/^id=PENDING$/id=$id/" "$tmp"
+  # Publish the completed note atomically.
   mv "$tmp" "$INBOX/$id.note"
 
   # One-line summary for the wake payload; the full body stays in the file.
