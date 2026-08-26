@@ -1452,7 +1452,7 @@ fm_pending_reply_open_json() {  # <state-dir>
     jq -n --argjson now "$now" '{available:true,now_epoch:$now,invalid_count:0,records:[]}'
     return 0
   fi
-  if [ ! -d "$dir" ] || [ ! -r "$dir" ]; then
+  if [ ! -d "$dir" ] || [ ! -r "$dir" ] || [ ! -x "$dir" ]; then
     jq -n --argjson now "$now" '{available:false,now_epoch:$now,invalid_count:0,records:[]}'
     return 0
   fi

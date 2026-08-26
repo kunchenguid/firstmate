@@ -71,13 +71,18 @@ fm_procevent_any_registered() {
 # Does not acquire source locks, start runners, or mark results handled.
 # owner is live, missing, stale, orphaned, uncertain, or terminal.
 fm_procevent_listeners_json() {  # <state>
-  local state=$1 reg rec id adapter owner status records='[]' available=true
+  local state=$1 reg root rec id adapter owner status records='[]' available=true
   reg=$(fm_procevent_registry_dir "$state")
   if [ ! -e "$reg" ]; then
     jq -n '{available:true,records:[]}'
     return 0
   fi
-  if [ ! -d "$reg" ] || [ ! -r "$reg" ]; then
+  if [ ! -d "$reg" ] || [ ! -r "$reg" ] || [ ! -x "$reg" ]; then
+    jq -n '{available:false,records:[]}'
+    return 0
+  fi
+  root=$(fm_procevent_claim_root)
+  if [ -e "$root" ] && { [ ! -d "$root" ] || [ ! -r "$root" ] || [ ! -x "$root" ]; }; then
     jq -n '{available:false,records:[]}'
     return 0
   fi

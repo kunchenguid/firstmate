@@ -618,6 +618,30 @@ fm_pr_poll_artifacts_valid() {
   [ "$FM_PR_META_NUMBER" = "$FM_PR_DATA_NUMBER" ]
 }
 
+fm_pr_poll_listeners_json() {
+  local state=$1 template=$2 f id records='[]'
+  if [ ! -d "$state" ]; then
+    jq -n '{available:true,records:[]}'
+    return 0
+  fi
+  if [ ! -r "$state" ] || [ ! -x "$state" ]; then
+    jq -n '{available:false,records:[]}'
+    return 0
+  fi
+  for f in "$state"/*.check.sh; do
+    [ -f "$f" ] || continue
+    id=$(basename "$f" .check.sh)
+    case "$id" in
+      x-watch|tool-updates) continue ;;
+    esac
+    if fm_pr_poll_artifacts_valid "$state" "$id" "$template"; then
+      records=$(jq -n --argjson records "$records" --arg id "$id" \
+        '$records + [{id:$id,armed:true}]')
+    fi
+  done
+  jq -n --argjson records "$records" '{available:true,records:$records}'
+}
+
 fm_pr_poll_snapshot_capture() {
   local state=$1 id=$2 template=$3 registration
   fm_pr_poll_artifacts_valid "$state" "$id" "$template" || return 1

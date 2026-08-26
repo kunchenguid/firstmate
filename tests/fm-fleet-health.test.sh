@@ -201,6 +201,35 @@ test_unsearchable_state_is_inconclusive() {
   pass "unsearchable state inventory remains inconclusive"
 }
 
+test_unsearchable_nested_inventories_are_inconclusive() {
+  local home fakebin claim_root out rc=0
+  home=$(make_home unsearchable-nested)
+  claim_root="$home/procevent-claims"
+  mkdir -p "$home/state/pending-replies" "$home/state/hidden.inbox" \
+    "$home/state/procevent" "$claim_root"
+  printf 'adapter=lavish\nargc=1\nargv:\ntrue\n' > "$home/state/procevent/hidden.source"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  chmod 400 "$home/state/pending-replies" "$home/state/hidden.inbox" \
+    "$home/state/procevent" "$claim_root"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm \
+    FM_PROCEVENT_CLAIM_ROOT="$claim_root" "$HEALTH" --json) || rc=$?
+  chmod 700 "$home/state/pending-replies" "$home/state/hidden.inbox" \
+    "$home/state/procevent" "$claim_root"
+  expect_code 3 "$rc" "unsearchable nested inventories should make health inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "pending-reply-inconclusive")
+      and any(.findings[]; .kind == "steering-inbox-inconclusive")
+      and any(.findings[]; .kind == "result-listener-inconclusive"
+              and .subject == "procevent")
+      and (any(.findings[]; .kind == "pending-reply-broken") | not)
+      and (any(.findings[]; .kind == "result-listener-missing"
+               and .subject == "hidden") | not)
+  ' >/dev/null || fail "nested inaccessible evidence was treated as healthy or broken: $out"
+  pass "nested inventory access failures remain inconclusive"
+}
+
 test_actionable_dead_direct_report() {
   local home fakebin out rc=0
   home=$(make_home dead-agent)
@@ -609,6 +638,7 @@ test_usage_exit
 test_healthy_empty_fleet
 test_missing_state_home_remains_unmodified
 test_unsearchable_state_is_inconclusive
+test_unsearchable_nested_inventories_are_inconclusive
 test_actionable_dead_direct_report
 test_dead_agent_with_live_endpoint
 test_unreadable_local_endpoint_is_inconclusive

@@ -409,17 +409,17 @@ fm_task_inbox_unhandled_json() {  # <state-dir>
     jq -n '{available:true,records:[]}'
     return 0
   fi
-  if [ ! -r "$state" ]; then
+  if [ ! -r "$state" ] || [ ! -x "$state" ]; then
     jq -n '{available:false,records:[]}'
     return 0
   fi
   for dir in "$state"/*.inbox; do
     [ -d "$dir" ] || continue
-    [ -r "$dir" ] || available=false
+    [ -r "$dir" ] && [ -x "$dir" ] || available=false
   done
   {
     for dir in "$state"/*.inbox; do
-      [ -d "$dir" ] && [ -r "$dir" ] || continue
+      [ -d "$dir" ] && [ -r "$dir" ] && [ -x "$dir" ] || continue
       task=$(basename "$dir" .inbox)
       for rec in "$dir"/*.msg; do
         [ -f "$rec" ] || continue

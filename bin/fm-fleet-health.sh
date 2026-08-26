@@ -126,30 +126,6 @@ fingerprint_hex() {
   printf 'sha256:%s' "$digest"
 }
 
-collect_pr_listeners_json() {
-  local state=$1 f id records='[]'
-  if [ ! -d "$state" ]; then
-    jq -n '{available:true,records:[]}'
-    return 0
-  fi
-  if [ ! -r "$state" ] || [ ! -x "$state" ]; then
-    jq -n '{available:false,records:[]}'
-    return 0
-  fi
-  for f in "$state"/*.check.sh; do
-    [ -f "$f" ] || continue
-    id=$(basename "$f" .check.sh)
-    case "$id" in
-      x-watch|tool-updates) continue ;;
-    esac
-    if fm_pr_poll_artifacts_valid "$state" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
-      records=$(jq -n --argjson records "$records" --arg id "$id" \
-        '$records + [{id:$id,armed:true}]')
-    fi
-  done
-  jq -n --argjson records "$records" '{available:true,records:$records}'
-}
-
 collect_supervision_json() {
   local state=$1 watch=$2 needed ok reason model
   fm_supervision_status "$state" >/dev/null
@@ -211,7 +187,7 @@ INBOX_JSON=$(fm_task_inbox_unhandled_json "$STATE") \
   || INBOX_JSON='{"available":false,"records":[]}'
 LISTENERS_JSON=$(fm_procevent_listeners_json "$STATE") \
   || LISTENERS_JSON='{"available":false,"records":[]}'
-PR_JSON=$(collect_pr_listeners_json "$STATE") \
+PR_JSON=$(fm_pr_poll_listeners_json "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh") \
   || PR_JSON='{"available":false,"records":[]}'
 SUPERVISION_JSON=$(collect_supervision_json "$STATE" "$SCRIPT_DIR/fm-watch.sh") \
   || SUPERVISION_JSON='{"available":false,"needed":false,"ok":false,"reason":null,"model":null}'
