@@ -460,6 +460,7 @@ azure_provider_refusal_matrix() {
 import copy
 import hashlib
 import importlib.util
+import inspect
 import json
 import subprocess
 import sys
@@ -506,6 +507,61 @@ action["resources"] = {
 }
 worker = {"slot": 1, "resources": resources}
 module.recorded_exact(action, worker)
+
+# Replacement compute advances the worker generation without rewriting the
+# durable slot reservation. Cleanup accepts only that reservation's canonical
+# older generation; every other resource and ownership tag remains exact.
+cleanup_action = copy.deepcopy(action)
+cleanup_action["cloud_generation"] = 3
+cleanup_tags = module.action_tags(controller, cleanup_action)
+cleanup_worker = copy.deepcopy(worker)
+for value in cleanup_worker["resources"].values():
+    value["tags"] = dict(cleanup_tags)
+cleanup_worker["resources"]["global-reservation"]["tags"]["cloud-generation"] = "1"
+try:
+    module.recorded_exact(cleanup_action, cleanup_worker)
+except module.ProviderError as exc:
+    assert "global-reservation" in str(exc) and "cloud-generation" in str(exc), exc
+else:
+    raise AssertionError("ordinary exactness accepted an older reservation generation")
+module.cleanup_recorded_exact(cleanup_action, cleanup_worker)
+for invalid in ("0", "01", "4", "foreign"):
+    changed = copy.deepcopy(cleanup_worker)
+    changed["resources"]["global-reservation"]["tags"]["cloud-generation"] = invalid
+    try:
+        module.cleanup_recorded_exact(cleanup_action, changed)
+    except module.ProviderError as exc:
+        assert "cloud-generation" in str(exc), exc
+    else:
+        raise AssertionError("cleanup accepted invalid reservation generation {!r}".format(invalid))
+changed = copy.deepcopy(cleanup_worker)
+changed["resources"]["task-disk"]["tags"]["cloud-generation"] = "1"
+try:
+    module.cleanup_recorded_exact(cleanup_action, changed)
+except module.ProviderError as exc:
+    assert "task-disk" in str(exc) and "cloud-generation" in str(exc), exc
+else:
+    raise AssertionError("cleanup widened the generation exception beyond the reservation")
+changed = copy.deepcopy(cleanup_worker)
+changed["resources"]["global-reservation"]["tags"]["task-binding"] = "foreign"
+try:
+    module.cleanup_recorded_exact(cleanup_action, changed)
+except module.ProviderError as exc:
+    assert "task-binding" in str(exc), exc
+else:
+    raise AssertionError("cleanup accepted a foreign reservation ownership binding")
+for missing in ("cloud-generation", "task-binding"):
+    changed = copy.deepcopy(cleanup_worker)
+    changed["resources"]["global-reservation"]["tags"].pop(missing)
+    try:
+        module.cleanup_recorded_exact(cleanup_action, changed)
+    except module.ProviderError as exc:
+        assert missing in str(exc) and "absent" in str(exc), exc
+    else:
+        raise AssertionError("cleanup accepted a reservation missing {}".format(missing))
+for cleanup_name in ("mutate_deallocate", "mutate_delete_compute", "mutate_reset"):
+    cleanup_source = inspect.getsource(getattr(module, cleanup_name))
+    assert "cleanup_recorded_exact(" in cleanup_source, cleanup_name
 # Compute-child ARM IDs are stable across mutable provisioningState changes;
 # preserve compatibility with a live assignment recorded before this fix,
 # whose legacy immutable_id contains the old Succeeded value.

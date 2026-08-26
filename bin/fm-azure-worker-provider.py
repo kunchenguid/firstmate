@@ -1286,7 +1286,8 @@ def worker_by_slot(snapshot, slot):
 
 def recorded_exact(
     action, worker, allow_missing=(), allow_previous_cloud_generation=False,
-    skip_immutable=(), require_ready_children=True,
+    allow_older_global_reservation_generation=False, skip_immutable=(),
+    require_ready_children=True,
 ):
     if worker is None:
         raise ProviderError("exact worker slot is absent")
@@ -1332,6 +1333,10 @@ def recorded_exact(
                 "role-assignment", "state-container", "global-reservation",
                 "staging-request", "staging-result",
             ) and key not in current.get("tags", {}):
+                if allow_older_global_reservation_generation and kind == "global-reservation":
+                    raise ProviderError(
+                        "global-reservation exact cleanup ownership tag is absent: {}".format(key)
+                    )
                 continue
             actual = current.get("tags", {}).get(key)
             if (
@@ -1339,6 +1344,21 @@ def recorded_exact(
                 and key == "cloud-generation"
                 and actual == str(action.get("previous_cloud_generation"))
             ):
+                continue
+            if (
+                allow_older_global_reservation_generation
+                and kind == "global-reservation"
+                and key == "cloud-generation"
+                and re.fullmatch(r"[1-9][0-9]*", str(actual or ""))
+                and re.fullmatch(r"[1-9][0-9]*", str(value))
+                and int(actual) < int(value)
+            ):
+                # The slot reservation is durable across replacement compute
+                # generations and is deliberately not rewritten on resume.
+                # Cleanup may therefore see its original generation after the
+                # worker advanced. The exact blob identity and every durable
+                # task/account/worktree tag were already checked above; only
+                # a canonical, strictly older generation is compatible.
                 continue
             if actual != value:
                 raise ProviderError("{} exact task/account/worktree tag differs: {}".format(kind, key))
@@ -1369,6 +1389,18 @@ def recorded_exact(
             ):
                 raise ProviderError("{} provisioning state is not succeeded".format(kind))
     return resources
+
+
+def cleanup_recorded_exact(
+    action, worker, allow_missing=(), skip_immutable=(), require_ready_children=True,
+):
+    """Bind cleanup to exact ownership while accepting its durable reservation generation."""
+    return recorded_exact(
+        action, worker, allow_missing=allow_missing,
+        allow_older_global_reservation_generation=True,
+        skip_immutable=skip_immutable,
+        require_ready_children=require_ready_children,
+    )
 
 
 def tag_resource(controller, resource_id, tags):
@@ -2434,7 +2466,7 @@ def conditional_delete(controller, kind, resource):
 
 def mutate_deallocate(controller, action):
     snapshot = inventory(controller, include_metrics=False)
-    resources = recorded_exact(
+    resources = cleanup_recorded_exact(
         action, worker_by_slot(snapshot, action["slot"]), require_ready_children=False
     )
     power = str(resources["vm"].get("power_state", "")).lower()
@@ -2446,7 +2478,7 @@ def mutate_deallocate(controller, action):
         if rc != 0:
             raise ProviderError("exact worker deallocation failed: {}".format(stderr))
     final = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
-    final_resources = recorded_exact(action, final, require_ready_children=False)
+    final_resources = cleanup_recorded_exact(action, final, require_ready_children=False)
     if "deallocated" not in str(final_resources["vm"].get("power_state", "")).lower():
         raise ProviderError("worker compute did not reach Azure deallocated state")
     return final
@@ -2476,7 +2508,7 @@ def mutate_delete_compute(controller, action):
             raise ProviderError(
                 "missing task-command has no exact retired-execute custody proof"
             )
-        resources = recorded_exact(
+        resources = cleanup_recorded_exact(
             action, worker,
             allow_missing=("task-command",) if task_command_missing else (),
             require_ready_children=False,
@@ -2491,7 +2523,7 @@ def mutate_delete_compute(controller, action):
     # cascaded away (Azure deletes shutdown-computevm schedules with their
     # target VM); the fresh-entry path above still required it alongside the
     # live deallocated VM.
-    resources = recorded_exact(
+    resources = cleanup_recorded_exact(
         action, worker, allow_missing=(
             "vm", "nic", "os-disk", "monitor-extension", "bootstrap-command", "task-command",
             "ttl-schedule",
@@ -2557,7 +2589,7 @@ def mutate_delete_compute(controller, action):
     # schedules delete with their target VM, VM absence was proved just above,
     # and entry exactness proved the TTL alive alongside the live VM, so the
     # bound held for the worker's whole compute lifetime.
-    recorded_exact(
+    cleanup_recorded_exact(
         action, final, allow_missing=compute_kinds + ("ttl-schedule",),
         skip_immutable=("state-container",), require_ready_children=False,
     )
@@ -2583,7 +2615,7 @@ def mutate_reset(controller, action):
             "vm", "nic", "os-disk", "monitor-extension", "bootstrap-command", "task-command",
             "ttl-schedule",
         )
-        resources = recorded_exact(
+        resources = cleanup_recorded_exact(
             action, worker, allow_missing=disposable, require_ready_children=False
         )
         if any(kind in resources for kind in disposable):
@@ -2593,7 +2625,7 @@ def mutate_reset(controller, action):
         )
         worker = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
     allow_missing = tuple(kind for kind in REQUIRED_RESOURCE_KINDS if kind != "state-container")
-    resources = recorded_exact(
+    resources = cleanup_recorded_exact(
         action, worker, allow_missing=allow_missing, skip_immutable=("state-container",),
         require_ready_children=False,
     )
