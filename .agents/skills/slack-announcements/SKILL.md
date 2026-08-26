@@ -1,0 +1,115 @@
+---
+name: slack-announcements
+description: >-
+  Agent-only style contract for drafting a Slack announcement the captain will post to a channel.
+  Load before drafting a new-page, new-tool, capability-launch, brownbag, process-change, or broadcast status message.
+  Owns the length target, the section skeleton, the one-clause bullet rule, the no-defence rule, punctuation and formatting limits, and the final deletion pass.
+user-invocable: false
+metadata:
+  internal: true
+---
+
+# Slack announcement style
+
+This skill is the single owner of how firstmate drafts a message the captain will post to a channel.
+The rules below come from one measured case: a draft announcing a new internal page went from 323 words to 144 before posting, and the captain's section outline survived untouched.
+Every cut was prose, none was structure, so treat these as rules rather than preferences.
+
+## Scope
+
+Use this for any message the captain will post to a channel: a new page or tool, a capability launch, a brownbag, a process change, a broadcast status note.
+
+Do not use it for captain-facing chat, PR bodies, commit messages, or project documentation.
+Several rules here are the opposite of what those surfaces need, and applying them there deletes detail those readers depend on.
+
+## Assume the first draft is twice as long as it should be
+
+The measured case cut 55% of the words with the outline unchanged.
+The excess is explanation, not content.
+Draft, then cut to roughly half, and expect to find nothing missing.
+
+## Keep the skeleton, cut the prose
+
+Three or four bold section headers, each answering a question the reader actually has: what this is plus the link, what it counts or does, what makes it trustworthy, what it is not.
+That outline survived verbatim through the cut.
+Edit inside the sections, never the outline.
+
+## One clause per bullet
+
+A bullet is an index entry, not a paragraph.
+If a bullet has a second sentence, that sentence is almost always the cut.
+
+Before:
+
+- "A completion is credited to whoever held the ticket the moment it moved to Done, replayed from the ticket's own history, not whoever it happens to be assigned to today. Work finished in July and reassigned in August still credits July's owner."
+
+After:
+
+- "A completion is credited to whoever held the ticket the moment it moved to Done."
+
+## Never defend the claim
+
+This was the single largest source of cut words.
+Delete every phrase that pre-empts an objection nobody raised.
+These are the phrases the captain cut from the real case, and the pattern is easier to recognise from them than from a definition:
+
+- "never guessed at, and never handed to whoever filed them"
+- "that's honest data, not a gap in the page"
+- "rather than being fuzzy-matched into a plausible pod"
+- "and the page says so itself"
+- "Nothing else sneaks in."
+
+A reader who doubts a claim clicks the link.
+A reader who does not is being argued with for no reason.
+
+## Keep a reason only when it changes how the thing is used
+
+Not all reasoning is padding.
+This sentence survived in full: "Weeks run Thursday to Thursday UTC, deliberately matching the release week, so an activity week and a release cover the same seven days."
+A reader comparing the page against a release would otherwise misread it.
+
+The test: does the reason prevent a wrong action, or does it defend the work's credibility?
+Keep the first, cut the second.
+
+## No em dashes
+
+Use a colon, a full stop, or restructure the sentence.
+In the real case both em dashes that introduced a definition became colons, and the rest of those sentences were split or dropped.
+
+## No intensifiers, no hedges, numerals for numbers
+
+"genuinely went through AgentOS" became "went through AgentOS".
+"Nineteen weeks of history so far" became "19 weeks of history".
+An adverb survives only when it carries meaning: "what's actually moving through AgentOS" stayed, because it distinguishes real throughput from noise.
+
+## Leave out how it works
+
+An entire closing paragraph covering refresh cadence, credential handling, and build-time embedding was cut wholesale.
+Refresh schedules, security posture, generator scripts, and file layout belong on the page or in the repo, never in the announcement.
+A reader who needs that detail is already past the announcement.
+
+## Link plainly
+
+Bare domain and path on its own line, no scheme and no label text.
+
+This does not relax `AGENTS.md` section 9's requirement for a full `https://` URL in captain-facing chat about a PR.
+Different audience, different rule: nothing here is a general relaxation of that requirement.
+
+## No pipe characters
+
+That rules out markdown tables, because Slack renders them as noise.
+
+## Never name the captain
+
+An announcement carries no captain attribution.
+
+## Final deletion pass
+
+Run this pass in order before handing the draft over:
+
+1. Delete every second sentence of every bullet.
+2. Delete every clause beginning "never", "rather than", or "not a".
+3. Delete every em dash.
+4. Delete every sentence about how the thing is built or refreshed.
+
+Then confirm the outline still stands.
