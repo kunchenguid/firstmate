@@ -63,6 +63,24 @@ SH
   printf '%s\n' "$fb"
 }
 
+install_windows_cygpath_fake() {  # <fakebin>
+  cat > "$1/cygpath" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = -u ] || exit 2
+path=${2:-}
+case "$path" in
+  [A-Za-z]:[\\/]*)
+    drive=$(printf '%s' "${path%%:*}" | tr '[:upper:]' '[:lower:]')
+    rest=$(printf '%s' "${path#?:}" | tr '\\' '/')
+    printf '/%s%s\n' "$drive" "$rest"
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$1/cygpath"
+}
+
 # make_herdr_statefake: a STATEFUL `herdr` stub that models the parts of herdr's
 # real container behavior the workspace-leak fix (and the default-tab-prune
 # safety fix) depend on, so a full spawn->teardown cycle can be replayed
@@ -323,6 +341,19 @@ test_launcher_identity_absent_when_herdr_env_alone_is_set() {
   pass "fm_backend_herdr_launcher_identity: HERDR_ENV=1 without a pane id selects the backend but binds no parent"
 }
 
+test_canonical_socket_path_accepts_native_windows_absolute_paths() {
+  local dir fb out
+  dir="$TMP_ROOT/canonical-windows-socket"; fb="$dir/fakebin"; mkdir -p "$fb"
+  install_windows_cygpath_fake "$fb"
+  out=$(PATH="$fb:$PATH" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_canonical_socket_path "$1"' \
+      "$ROOT" 'C:\Users\test\AppData\Roaming\herdr\herdr.sock') \
+    || fail "a native Windows absolute Herdr socket path must canonicalize under Git Bash"
+  [ "$out" = '/c/Users/test/AppData/Roaming/herdr/herdr.sock' ] \
+    || fail "native Windows socket path canonicalized to '$out'"
+  pass "fm_backend_herdr_canonical_socket_path: accepts and normalizes a native Windows absolute socket path"
+}
+
 test_launcher_identity_resolves_the_exact_pane_tab_and_workspace() {
   local dir log resp fb out
   dir="$TMP_ROOT/launcher-ok"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -340,6 +371,24 @@ test_launcher_identity_resolves_the_exact_pane_tab_and_workspace() {
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''get'$'\x1f''w7:p3' "launcher_identity did not read its own pane"
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''get'$'\x1f''w7:t3' "launcher_identity did not cross-check the owning tab"
   pass "fm_backend_herdr_launcher_identity: resolves the launcher's exact workspace even when a same-labeled workspace sorts first"
+}
+
+test_launcher_identity_resolves_matching_native_windows_socket_paths() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/launcher-windows-ok"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"sessions":[{"name":"default","running":true,"socket_path":"C:\\Users\\test\\AppData\\Roaming\\herdr\\herdr.sock"}]}' > "$resp/1.out"
+  printf '{"result":{"pane":{"pane_id":"w7:p3","tab_id":"w7:t3","workspace_id":"w7"}}}\n' > "$resp/2.out"
+  printf '{"result":{"tab":{"tab_id":"w7:t3","workspace_id":"w7"}}}\n' > "$resp/3.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w7","label":"firstmate"}]}}\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  install_windows_cygpath_fake "$fb"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SOCKET_PATH='C:\Users\test\AppData\Roaming\herdr\herdr.sock' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity default || exit 1
+      printf "%s|%s|%s" "$FM_BACKEND_HERDR_LAUNCHER_PANE_ID" "$FM_BACKEND_HERDR_LAUNCHER_TAB_ID" "$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID"' "$ROOT" )
+  [ "$out" = 'w7:p3|w7:t3|w7' ] \
+    || fail "matching native Windows socket paths should resolve the launcher identity, got '$out'"
+  pass "fm_backend_herdr_launcher_identity: resolves a launcher whose injected and live socket paths use native Windows spelling"
 }
 
 test_launcher_identity_refuses_a_pane_from_another_session_name() {
@@ -384,6 +433,22 @@ test_launcher_identity_refuses_a_pane_from_another_server_socket() {
   assert_contains "$out" "cross-session parent identity" "the cross-socket refusal did not explain itself"
   assert_not_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''get' "a cross-server launcher identity must be refused before its pane is trusted"
   pass "fm_backend_herdr_launcher_identity: refuses a launcher pane whose injected socket belongs to another herdr server"
+}
+
+test_launcher_identity_refuses_different_native_windows_socket_paths() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/launcher-windows-xsocket"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"sessions":[{"name":"default","running":true,"socket_path":"C:\\Users\\test\\AppData\\Roaming\\herdr\\herdr.sock"}]}' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  install_windows_cygpath_fake "$fb"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SOCKET_PATH='D:\Other\herdr.sock' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity default' "$ROOT" 2>&1)
+  status=$?
+  expect_code 1 "$status" "different native Windows socket paths must refuse"
+  assert_contains "$out" "cross-session parent identity" "the native Windows cross-socket refusal did not explain itself"
+  assert_not_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''get' "a cross-server Windows launcher identity must be refused before its pane is trusted"
+  pass "fm_backend_herdr_launcher_identity: refuses different native Windows socket paths before trusting the pane"
 }
 
 test_launcher_identity_refuses_an_unreadable_pane() {
@@ -4434,10 +4499,13 @@ test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_launcher_identity_absent_without_a_herdr_pane
 test_launcher_identity_absent_when_herdr_env_alone_is_set
+test_canonical_socket_path_accepts_native_windows_absolute_paths
 test_launcher_identity_resolves_the_exact_pane_tab_and_workspace
+test_launcher_identity_resolves_matching_native_windows_socket_paths
 test_launcher_identity_refuses_a_pane_from_another_session_name
 test_launcher_identity_refuses_a_missing_server_socket
 test_launcher_identity_refuses_a_pane_from_another_server_socket
+test_launcher_identity_refuses_different_native_windows_socket_paths
 test_launcher_identity_refuses_an_unreadable_pane
 test_launcher_identity_refuses_a_pane_and_tab_that_disagree
 test_launcher_identity_refuses_a_workspace_missing_from_the_session

@@ -689,18 +689,29 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
 # it would turn JSON null into the literal string "null"). Canonicalizes the
 # parent directory when that directory exists so symlink parents such as /tmp
 # -> /private/tmp cannot yield two lock identities for the same socket.
-# fm_backend_herdr_canonical_socket_path: normalize one absolute Unix-socket
-# path so two spellings of the same socket compare equal. Refuses a relative
-# or empty path. An unresolvable directory is left as-is rather than treated as
-# a failure, so a socket whose directory was removed still compares by its own
-# literal path. Single owner for every socket-identity comparison in this
-# adapter (the presentation session lock and the launcher-identity same-session
-# proof both use it).
+# fm_backend_herdr_canonical_socket_path: normalize one absolute socket path so
+# two spellings of the same socket compare equal.
+# Accepts Unix paths directly and converts native Windows drive paths through
+# Git for Windows' cygpath before applying the same physical-parent resolution.
+# Refuses a relative or empty path.
+# An unresolvable directory is left as-is rather than treated as a failure, so
+# a socket whose directory was removed still compares by its own literal path.
+# Single owner for every socket-identity comparison in this adapter (the
+# presentation session lock and the launcher-identity same-session proof both
+# use it).
 fm_backend_herdr_canonical_socket_path() {  # <socket-path>
   local socket=$1 sock_dir sock_base
   [ -n "$socket" ] || return 1
   case "$socket" in
     /*) ;;
+    [A-Za-z]:[\\/]*)
+      command -v cygpath >/dev/null 2>&1 || return 1
+      socket=$(cygpath -u "$socket" 2>/dev/null) || return 1
+      case "$socket" in
+        /*) ;;
+        *) return 1 ;;
+      esac
+      ;;
     *) return 1 ;;
   esac
   sock_dir=$(dirname "$socket")
