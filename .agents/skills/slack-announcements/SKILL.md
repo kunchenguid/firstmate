@@ -37,14 +37,16 @@ That outline survived verbatim through the cut.
 Edit inside the sections, never the outline.
 
 The announcement itself uses no markdown emphasis or heading syntax at all: no double-asterisk bold, no hash headings, no underscores for italics, no markdown links, and no backtick code spans.
-Slack does not parse markdown and renders every one of those literally.
+Slack uses its own mrkdwn rather than markdown, so the markdown-only forms among those, double-asterisk bold, hash headings, and markdown link syntax, show up as literal punctuation.
+The forms Slack does share, underscore italics and backtick code spans, are banned as a style choice, because plain unstyled text scans better in an announcement.
 Section headers stay bold through Slack's own mrkdwn form instead, a single asterisk on each side of the header text, written as `*What this is*`.
 A single-asterisk pair is only ever a bold section header, never inline emphasis on a word or a phrase, and the announcement carries no hash title.
 
 ## One clause per bullet
 
 A bullet is an index entry, not a paragraph.
-Keep every capability list brief, and prefer one sentence per bullet wherever the announcement lists bullet points.
+One clause per bullet is the target that binds, and one sentence per bullet is only the floor beneath it, so a bullet trailing a second clause inside a single sentence still fails the rule.
+Keep every capability list brief, and hold every bullet in it to that same ladder wherever the announcement lists bullet points.
 If a bullet has a second sentence, that sentence is almost always the cut.
 
 Before:
@@ -118,7 +120,7 @@ Run this pass in order before handing the draft over, applying the rules above r
 
 1. Cut the second sentence of every bullet: it is almost always the cut, so keep it only when it is a load-bearing reason that prevents a wrong action, never when it restates or illustrates the first sentence, as the worked example's cut second sentence does.
 2. Cut every clause that defends a claim or pre-empts an objection nobody raised, measured against the quoted phrases in the no-defence rule above rather than against any fixed opener, so a clause reading "that's honest data, not a gap in the page", "and the page says so itself", or "Nothing else sneaks in." is caught exactly as one opening "never", "rather than", or "not a" is.
-   Keep the "what it is not" section's own content and any clause that passes that same load-bearing test.
+   Keep only the "what it is not" section's plain statements of what the thing is not, plus any clause that passes that same load-bearing test, so a defensive clause is still cut wherever it sits, including inside that section.
 3. Replace every em dash with a colon or a full stop, or restructure the sentence, and never remove a clause separator in a way that leaves a run-on.
 4. Cut every sentence about how the thing is built or refreshed.
 
