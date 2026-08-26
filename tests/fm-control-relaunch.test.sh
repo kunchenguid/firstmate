@@ -21,6 +21,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fm-konten-fixture-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-konten-fixture-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
@@ -135,6 +137,13 @@ new_case() {
   printf 'claude' > "$dir/fake/becomes"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   make_tmux_stub "$dir"
+  # A relaunch respawns on an account resolved from this home's ledger
+  # (bin/fm-spawn-gate-lib.sh); without a fixture ledger the lookup falls back to
+  # the checkout's real config/konten.tsv. The trust list names every path a case
+  # in this file spawns into, worker worktree and secondmate home alike, all
+  # created after this point.
+  fm_test_konten_fixture "$dir/home" "$dir/konten" \
+    "$dir/proj" "$dir/wt" "$dir/smhome" "$dir/home"
   printf '%s\n' "$dir"
 }
 
@@ -166,6 +175,7 @@ add_ship_task() {
 run_control() {  # <case-dir> <args...>
   local dir=$1; shift
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_KONTEN_AKTE="$dir/home/config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \

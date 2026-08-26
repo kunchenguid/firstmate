@@ -59,7 +59,7 @@ test_fm_home_parameterization() {
   out=$(FM_HOME="$home_two" "$ROOT/bin/fm-project-mode.sh" app 2>/dev/null)
   [ "$out" = "no-mistakes off" ] || fail "fm-project-mode did not isolate missing registry by home"
 
-  FM_HOME="$home_one" "$ROOT/bin/fm-brief.sh" task-a app --mode no-mistakes >/dev/null || fail "brief scaffold failed under FM_HOME"
+  FM_HOME="$home_one" "$ROOT/bin/fm-brief.sh" task-a app --mode no-mistakes --order O-0001 --ziel "fixture goal|app/fixture-anker" >/dev/null || fail "brief scaffold failed under FM_HOME"
   brief="$home_one/data/task-a/brief.md"
   [ -f "$brief" ] || fail "brief was not written under FM_HOME/data"
   grep -F ">> '$home_one/state/task-a.status'" "$brief" >/dev/null || fail "brief did not shell-quote FM_HOME state path"
@@ -2815,13 +2815,25 @@ test_secondmate_charter_brief_is_idle_by_default() {
   scaffold_secondmate_charter "$home" idle-sm 'feature work for alpha' alpha
   brief="$home/data/idle-sm/brief.md"
   [ -f "$brief" ] || fail "secondmate charter brief was not scaffolded"
-  # Idle contract: waits for routed work, never self-initiates.
-  grep -F 'go idle and wait silently for the main firstmate' "$brief" >/dev/null \
-    || fail "charter brief does not tell the secondmate to go idle and wait for routed work"
-  grep -F 'Act only on tasks the main firstmate routes to you' "$brief" >/dev/null \
-    || fail "charter brief does not restrict work to routed tasks"
-  grep -F 'never spawn a survey, audit, or any self-directed' "$brief" >/dev/null \
-    || fail "charter brief does not forbid self-initiated survey/audit work"
+  # Initiative contract v2 (regeln/ABGESCHAFFT.md, charter-eigeninitiative-verbot):
+  # the blanket "do not generate your own work" ban is struck. A secondmate now
+  # proposes from its product foundation - as a written plan, routed for review -
+  # and an empty plan state is reportable rather than restful. What survives is
+  # the narrow half: no survey or audit that cannot name a vision anchor.
+  grep -F 'You DO generate your own work' "$brief" >/dev/null \
+    || fail "charter brief does not carry the reversed initiative doctrine"
+  grep -F 'You never start unplanned.' "$brief" >/dev/null \
+    || fail "charter brief does not keep plan-before-start"
+  grep -F 'reportable condition, not a resting state' "$brief" >/dev/null \
+    || fail "charter brief does not make an empty plan state reportable"
+  grep -F 'without a vision anchor remain unwanted' "$brief" >/dev/null \
+    || fail "charter brief dropped the surviving half of the survey ban"
+  if grep -F 'You do not generate your own work' "$brief" >/dev/null; then
+    fail "charter brief still carries the struck initiative ban"
+  fi
+  if grep -F 'An empty queue is a healthy resting state' "$brief" >/dev/null; then
+    fail "charter brief still calls an empty queue a resting state"
+  fi
   # Reconcile-on-startup must remain: bootstrap and recovery still run, scoped to own work.
   grep -F 'run normal firstmate bootstrap and recovery' "$brief" >/dev/null \
     || fail "charter brief dropped the bootstrap/recovery reconciliation step"

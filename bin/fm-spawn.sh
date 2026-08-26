@@ -43,6 +43,12 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   --konto <speicher> overrides, for this one launch, the account seat the spawn
+#   would otherwise resolve from config/konten.tsv (role offiziere-worker). The
+#   account is a managed state and is never inherited from the invoking session's
+#   CLAUDE_CONFIG_DIR; it is recorded as account= in state/<id>.meta and is what
+#   an order's `enforce: spawn account=` is judged against. The whole account and
+#   pre-launch gate contract lives in bin/fm-spawn-gate-lib.sh.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -317,6 +323,8 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+KONTO_ARG=
+KONTO_SET=0
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -340,6 +348,7 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      konto) KONTO_ARG=$a; KONTO_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -363,6 +372,8 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --konto) want_value=konto ;;
+    --konto=*) KONTO_ARG=${a#--konto=}; KONTO_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -374,6 +385,7 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ "$KONTO_SET" -eq 0 ] || [ -n "$KONTO_ARG" ] || { echo "error: --konto requires a non-empty value" >&2; exit 1; }
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -1730,6 +1742,21 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+# Pre-launch gate chain and account resolution (whole contract:
+# bin/fm-spawn-gate-lib.sh). The .fleet-stop gate above answers "may the fleet
+# start anything at all"; this one answers "may THIS task start here, on this
+# account" - captain orders, reservations, open captain remarks, the ship
+# brief's acceptance block - and resolves the account from config/konten.tsv
+# instead of inheriting it. It sits at the first point where task, project,
+# harness, and brief are all resolved. Each sub-gate owns its own arming flag.
+# shellcheck source=bin/fm-spawn-gate-lib.sh
+. "$SCRIPT_DIR/fm-spawn-gate-lib.sh"
+SPAWN_KONTO=$(fm_spawn_konto_aufloesen "$KIND" "$HARNESS" "$KONTO_ARG" "$PROJ_ABS") || exit 1
+SPAWN_KONTO_DIR=${SPAWN_KONTO#*$'\t'}
+SPAWN_KONTO=${SPAWN_KONTO%%$'\t'*}
+fm_spawn_gates_check "task=$ID" "project=$(basename "$PROJ_ABS")" "kind=$KIND" \
+  "account=$SPAWN_KONTO" "brief=$BRIEF" || exit 1
+
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in
     no-mistakes) echo 3 ;;
@@ -2781,7 +2808,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness account kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2793,6 +2820,10 @@ preserve_relaunch_meta() {
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
+  # The resolved seat, recorded so every revival path (bootstrap sweep, control
+  # relaunch, Anstoss) reads the account instead of guessing it again, and so
+  # the order gates on account= have a durable field to judge.
+  [ "$SPAWN_KONTO" = - ] || echo "account=$SPAWN_KONTO"
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
@@ -2881,15 +2912,15 @@ case "$HARNESS" in
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
     ;;
 esac
-# Crewmate panes are created by a long-lived tmux/herdr daemon that does not
-# inherit firstmate's current environment, so a bare `claude` in the pane falls
-# back to the default ~/.claude store even when firstmate itself runs under a
-# different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
-# Forward firstmate's own resolved store onto the claude launch so the crewmate
-# uses the same credential/config firstmate is authenticated with. Only when set;
-# an unset value is the single-store default and needs no prefix.
-if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+# The account is a MANAGED state, never inherited (AGENTS.md, "Accounts and day
+# close"): the launch store comes from config/konten.tsv via the gate library
+# above, which already refused a seat that cannot start a session here. What
+# firstmate's own session happens to carry in CLAUDE_CONFIG_DIR is deliberately
+# not read - inheriting it is what launched a worker on the firstmate seat
+# against a pinned order. "-" means this harness runs on no Anthropic account,
+# or its own wrapper already exports the store (claude-ox), so no prefix.
+if [ -n "$SPAWN_KONTO_DIR" ] && [ "$SPAWN_KONTO_DIR" != - ]; then
+  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$SPAWN_KONTO_DIR") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
