@@ -6,9 +6,35 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab] <v2 flags>
+#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab] [<v2 flags>]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#   v2 flags (crewmate briefs only; bin/fm-brief-product-lib.sh owns their
+#   validation and every line they render):
+#     --order O-0083 | --no-order-reason '<why this work has no order>'
+#         REQUIRED on a ship brief, optional on a scout brief. Renders the fixed
+#         "Order-Bezug:" header line, the same read-it-back mechanic as
+#         "Delivery contract:". A scout brief with neither records
+#         "keiner (scout: report only, no order named)".
+#     --ziel '<sentence>|<repo>/<anchor>'
+#         REQUIRED on a ship brief. Renders "Dient Produktziel: <sentence>
+#         (<repo>/VISION.md#<anchor>)". Work that cannot name the product goal it
+#         serves has no business being dispatched.
+#     --abnahme 'A<n>::<criterion>::<evidence-kind>'   (repeatable)
+#         Renders the "## Abnahme (maschinenlesbar)" block that
+#         bin/fm-abnahme.sh checks the report against. A ship brief without one
+#         scaffolds with a warning; the acceptance gate holds it later.
+#     --no-go '<line>'   (repeatable)
+#         Product no-gos, quoted verbatim, hard-capped by
+#         regeln/VERFASSUNG.yaml (nogo_zeilen_max_je_brief). Choosing which ones
+#         travel is the briefing party's call and its fault.
+#     --captain-flaeche
+#         Marks a brief that touches a captain-facing surface. Renders
+#         "Captain-Flaeche: ja", which makes bin/fm-abnahme.sh require a
+#         beleg=klickbeleg acceptance point.
+#   The rule block ("## Regeln") is added unconditionally through
+#   bin/fm-regeln, fail-open: harnesses without hooks get their rules in the
+#   brief, which is the worker's actual place of action.
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -22,6 +48,12 @@
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   The charter's "# Product" section is scaffolded with a {PRODUCT_LINES}
+#   placeholder that the caller replaces, one line per project:
+#     projects/<repo>/VISION.md (+ Anhang P) - success measures: <the measures>
+#   It is left as a placeholder on purpose: this script cannot read a project's
+#   vision, and a charter that named no product foundation would hand a
+#   secondmate a product mandate over documents it was never pointed at.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
@@ -85,6 +117,11 @@ esac
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+# v2 product blocks: bin/fm-brief-product-lib.sh owns every line of them and the
+# validation of their flags. Everything here is the hook, never the content.
+# shellcheck source=bin/fm-brief-product-lib.sh
+. "$SCRIPT_DIR/fm-brief-product-lib.sh"
+fm_brief_v2_reset
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved
@@ -115,6 +152,7 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+V2_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -124,6 +162,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      order|no-order-reason|ziel|abnahme|no-go) fm_brief_v2_set "--$want_value" "$a" || exit 1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -136,6 +175,11 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    # v2 product flags - values are parsed and validated by fm-brief-product-lib.sh.
+    --order|--no-order-reason|--ziel|--abnahme|--no-go) want_value=${a#--}; V2_SET=1 ;;
+    --order=*|--no-order-reason=*|--ziel=*|--abnahme=*|--no-go=*)
+      V2_SET=1; fm_brief_v2_set "${a%%=*}" "${a#*=}" || exit 1 ;;
+    --captain-flaeche) FM_BRIEF_CAPTAIN_FLAECHE=1; V2_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -162,6 +206,22 @@ if [ "$KIND" = ship ]; then
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
+fi
+
+# v2 product contract. A ship brief must name its order reference and the product
+# goal it serves; a scout brief may leave both open (its deliverable is a report,
+# and its order is often the question itself). A charter is not a brief and takes
+# none of them - refuse rather than accept and drop, as with --mode above.
+if [ "$KIND" = secondmate ]; then
+  [ "$V2_SET" -eq 0 ] || {
+    echo "error: --order/--no-order-reason/--ziel/--abnahme/--no-go/--captain-flaeche apply to crewmate briefs; a secondmate charter carries its product frame in its # Product section" >&2
+    exit 1
+  }
+else
+  if [ "$KIND" = scout ] && [ -z "$FM_BRIEF_ORDER" ] && [ -z "$FM_BRIEF_NO_ORDER_REASON" ]; then
+    fm_brief_v2_set --no-order-reason 'scout: report only, no order named' || exit 1
+  fi
+  fm_brief_v2_require "$KIND" || exit 1
 fi
 ID=${POS[0]}
 
@@ -228,6 +288,13 @@ You are a persistent second mate managed by the main firstmate. Work on your own
 # Charter
 $SECONDMATE_CHARTER
 
+# Product
+{PRODUCT_LINES}
+Your product mandate lives inside those documents: you decide and prioritize within that frame, and a gap in it (who is meant, the success measures, the no-gos) is filled only with the captain's approval, one addition at a time.
+The boundary is a path list, not a judgement call: \`projects/<repo>/MANDAT.md\` names the captain-class patterns, and it is checked mechanically at merge (\`bin/fm-mandat-check.sh\`) - a hit or a missing mandate file holds the change for the captain.
+Operate your own product regularly as its named personas, on the real surface a user touches, not on its code.
+Every finding of such a walkthrough becomes a backlog item; a walkthrough that produced no item is a walkthrough you have to justify, not a clean bill of health.
+
 # Routing scope
 $SECONDMATE_SCOPE
 
@@ -240,9 +307,10 @@ $PROJECT_CLONES_NOTE
 Delegate project work to your own crewmates with the normal firstmate lifecycle: brief, spawn, status, watcher, steer, teardown, and recovery.
 Do not invent a second delegation system.
 Never add an agent name as a commit co-author or Co-authored-by footer in any commit you or your crewmates make; commit as the repository's configured user only.
-You do not generate your own work.
-Act only on tasks the main firstmate routes to you.
-Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
+You DO generate your own work - from your product foundation, never from nowhere: every proposal is a written plan (goal, vision anchor, premises, acceptance) routed for firstmate review before any implementation starts.
+You never start unplanned.
+An empty plan state on a live product is a reportable condition, not a resting state.
+Surveys and audits without a vision anchor remain unwanted.
 
 # Plan approval before an implementation
 Investigation and analysis are free: scout work, reading, reproduction, and diagnosis need no permission.
@@ -287,14 +355,19 @@ Routine internal supervision, heartbeats, retries, and crewmate churn stay insid
 # Definition of done
 You are persistent by default. Do not exit just because your queue is empty.
 On startup and restart, run normal firstmate bootstrap and recovery through \`bin/fm-session-start.sh\` for your own home, but only to RECONCILE work that is already yours: in-flight crewmates, tracked backlog items, and durable watches recorded in this home.
-When you have no assigned or in-flight work after that reconciliation, go idle and wait silently for the main firstmate to route you a task.
-An empty queue is a healthy resting state, not a cue to invent work: never spawn a survey, audit, or any self-directed "find work" task on your own initiative.
+When you have no assigned or in-flight work after that reconciliation, look at your plan state before you go quiet.
+An empty queue on a live product is not a resting state: propose the next work from your product foundation as a written plan and route it for review, or report that there is nothing to propose and why.
+Waiting silently is correct only for a product marked dormant, or once a routed plan is with the main firstmate for review.
+Surveys, audits, and self-directed "find work" sweeps without a vision anchor stay unwanted, however empty the queue is.
 If this charter cannot be carried out, append \`blocked: {why}\` or \`failed: {why}\` to the main status file and stop.
 EOF
+# {PRODUCT_LINES} is always scaffolded unfilled, so it is always named here: a
+# charter grants a product mandate, and an unreplaced placeholder would grant it
+# over documents the secondmate was never pointed at.
 if [ "$SECONDMATE_CHARTER" = "{TASK}" ]; then
-  echo "scaffolded: $BRIEF (secondmate charter; replace {TASK})"
+  echo "scaffolded: $BRIEF (secondmate charter; replace {TASK} and {PRODUCT_LINES})"
 else
-  echo "scaffolded: $BRIEF (secondmate charter)"
+  echo "scaffolded: $BRIEF (secondmate charter; replace {PRODUCT_LINES})"
 fi
 exit 0
 fi
@@ -333,11 +406,19 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+# v2 product blocks (owner: bin/fm-brief-product-lib.sh). The header lines join
+# this brief's existing header lines; the Abnahme, No-Go, and embedded-rule
+# blocks go in immediately before "# Rules" in both crewmate scaffolds.
+V2_KOPF=$(fm_brief_kopf_v2)
+V2_BLOCKS=$(fm_brief_v2_bloecke worker "$REPO")
+
 BUDGET_NOTE='**Budget note:** if the task above states a money or usage frame for image, model, or measurement calls, it must also name the invocation path - a gateway alias (which one), the house channel, or local with a key (which variable/source). A budget without a stated path sends the worker hunting for a key that may not exist.'
 
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+
+$V2_KOPF
 
 # Task
 {TASK}
@@ -353,6 +434,8 @@ The worktree is your laboratory - install, run, edit, and make scratch commits f
 Never delete anything, here or anywhere else: teardown discards this worktree for you, so a scout has no reason to run rm at all.
 A delete built from a variable reaches outside the worktree the moment that variable is empty, which is why the rule is none rather than careful.
 The report is the only thing that survives, so anything worth keeping must be in it.
+
+$V2_BLOCKS
 
 # Rules
 1. Never push to any remote and never open a PR.
@@ -460,6 +543,8 @@ DOD=${DOD%$'\n'}
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
+$V2_KOPF
+
 # Task
 {TASK}
 
@@ -475,6 +560,8 @@ The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
 1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+
+$V2_BLOCKS
 
 # Rules
 $RULE1
