@@ -704,6 +704,7 @@ RELAUNCH_REPLACEMENT_WT=
 RECOVERY_REPLACEMENT_PENDING=0
 RECOVERY_REPLACEMENT_TARGET=
 RECOVERY_REPLACEMENT_SESSION=
+RECOVERY_REPLACEMENT_TAB=
 RECOVERY_REPLACEMENT_PANE=
 RECOVERY_ATTEMPT_FILE=${FM_CONTROL_RECOVER_MISSING_ATTEMPT:-}
 RECOVERY_ATTEMPT_TX=${FM_CONTROL_RECOVER_MISSING_TX:-}
@@ -723,6 +724,7 @@ recovery_attempt_write() {  # <phase> [extra-line]...
     printf 'old_endpoint=%s\n' "$RECOVERY_OLD_TARGET"
     printf 'new_endpoint=%s\n' "$RECOVERY_REPLACEMENT_TARGET"
     printf 'session=%s\n' "$RECOVERY_REPLACEMENT_SESSION"
+    printf 'tab=%s\n' "$RECOVERY_REPLACEMENT_TAB"
     printf 'pane=%s\n' "$RECOVERY_REPLACEMENT_PANE"
     printf 'worktree=%s\n' "$WT"
     printf 'project=%s\n' "$PROJ_ABS"
@@ -757,6 +759,18 @@ recovery_cleanup_exact() {
   esac
   recovery_attempt_write cleanup-ambiguous "observed_state=$pane_state" || true
   echo "warning: could not prove cleanup of the exact replacement endpoint $RECOVERY_REPLACEMENT_TARGET; retaining recovery evidence at $RECOVERY_ATTEMPT_FILE" >&2
+}
+
+recovery_replacement_record_created() {
+  HERDR_TAB_ID=$FM_BACKEND_HERDR_CREATED_TAB_ID
+  HERDR_PANE_ID=$FM_BACKEND_HERDR_CREATED_PANE_ID
+  [ -n "$HERDR_TAB_ID" ] && [ -n "$HERDR_PANE_ID" ] || return 1
+  RECOVERY_REPLACEMENT_SESSION=$HERDR_SES
+  RECOVERY_REPLACEMENT_TAB=$HERDR_TAB_ID
+  RECOVERY_REPLACEMENT_PANE=$HERDR_PANE_ID
+  RECOVERY_REPLACEMENT_TARGET="$HERDR_SES:$HERDR_PANE_ID"
+  RECOVERY_REPLACEMENT_PENDING=1
+  recovery_attempt_write created
 }
 
 parse_orca_worktree_result() {
@@ -2064,15 +2078,13 @@ elif [ "$RECOVER_MISSING" -eq 1 ]; then
     echo "error: could not persist allocation evidence for missing-endpoint recovery of $ID; refusing to create its replacement endpoint" >&2
     exit 1
   }
-  if ! HERDR_TASK_IDS=$(fm_backend_herdr_create_task \
-    "$HERDR_SES:$HERDR_WORKSPACE_ID" "$W" "$PROJ_ABS" ""); then
+  if ! fm_backend_herdr_create_task \
+    "$HERDR_SES:$HERDR_WORKSPACE_ID" "$W" "$PROJ_ABS" "" \
+    recovery_replacement_record_created >/dev/null; then
     recovery_attempt_write allocation-failed || true
     echo "error: could not allocate a fresh Herdr endpoint for missing-endpoint recovery of $ID; recovery evidence was retained" >&2
     exit 1
   fi
-  read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
-$HERDR_TASK_IDS
-EOF
   [ -n "$HERDR_TAB_ID" ] && [ -n "$HERDR_PANE_ID" ] || {
     echo "error: fresh Herdr endpoint for $ID returned incomplete tab/pane identity" >&2
     exit 1
@@ -2086,14 +2098,6 @@ EOF
   T="$HERDR_SES:$HERDR_PANE_ID"
   WT_TARGET=$T
   SES=$HERDR_SES
-  RECOVERY_REPLACEMENT_SESSION=$HERDR_SES
-  RECOVERY_REPLACEMENT_PANE=$HERDR_PANE_ID
-  RECOVERY_REPLACEMENT_TARGET=$T
-  RECOVERY_REPLACEMENT_PENDING=1
-  recovery_attempt_write created || {
-    echo "error: could not persist the exact fresh endpoint evidence for $ID; refusing to launch it" >&2
-    exit 1
-  }
 else
 case "$BACKEND" in
   tmux)

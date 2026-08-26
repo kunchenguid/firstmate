@@ -2012,13 +2012,23 @@ fm_backend_herdr_recovery_ownership_state() {  # <recorded-session> <task-id> <w
         printf 'unreadable'
         return 0
       }
-      if ! printf '%s' "$panes" | jq -e '(.result.panes | type) == "array"' >/dev/null 2>&1; then
+      if ! printf '%s' "$panes" | jq -e '
+        (.result.panes | type) == "array"
+        and all(.result.panes[];
+          ((.pane_id | type) == "string")
+          and ((.pane_id | length) > 0)
+          and ((.tab_id | type) == "string")
+          and ((.tab_id | length) > 0))
+      ' >/dev/null 2>&1; then
         printf 'unreadable'
         return 0
       fi
-      while IFS= read -r pane_row; do
-        [ -n "$pane_row" ] || continue
-        pane_id=$pane_row
+      while IFS=$'\t' read -r pane_id pane_tab_id; do
+        [ -n "$pane_id" ] && [ -n "$pane_tab_id" ] || {
+          printf 'unreadable'
+          return 0
+        }
+        [ "$pane_tab_id" = "$tab_id" ] || continue
         pane_info=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>/dev/null) || {
           printf 'ambiguous'
           return 0
@@ -2050,10 +2060,7 @@ fm_backend_herdr_recovery_ownership_state() {  # <recorded-session> <task-id> <w
         [ "$tab_label" = "fm-$task_id" ] && candidate=1
         fm_backend_herdr_recovery_path_contains "$worktree" "$foreground" && candidate=1
         [ "$candidate" = 1 ] || continue
-        agent_info=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>/dev/null) || {
-          printf 'ambiguous'
-          return 0
-        }
+        agent_info=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>&1)
         agent_code=$(printf '%s' "$agent_info" | jq -r '.error.code // empty' 2>/dev/null)
         if [ "$agent_code" = agent_not_found ]; then
           # A missing native registration is not enough to call a pane clear:
@@ -2082,7 +2089,7 @@ fm_backend_herdr_recovery_ownership_state() {  # <recorded-session> <task-id> <w
             return 0
             ;;
         esac
-      done < <(printf '%s' "$panes" | jq -r '.result.panes[]? | if (.pane_id | type) == "string" then .pane_id else "" end' 2>/dev/null)
+      done < <(printf '%s' "$panes" | jq -r '.result.panes[] | [.pane_id, .tab_id] | @tsv' 2>/dev/null)
     done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | [
       (if (.tab_id | type) == "string" then .tab_id else "" end),
       (if (.label | type) == "string" then .label else "" end),
@@ -2148,9 +2155,14 @@ fm_backend_herdr_agent_alive() {  # <target>
 # fm_backend_herdr_workspace_prune_seeded_default_tab for the incident and
 # the safety argument). An ADOPTED workspace's caller always passes an empty
 # 4th arg, so this function never even queries for a prune candidate in that
-# case. Echoes "<tab_id> <pane_id>" on success.
-fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
-  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
+# case. An optional 5th-argument callback runs after exact response-derived IDs
+# are available and before any post-create cleanup. Echoes "<tab_id> <pane_id>"
+# on success.
+fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id> [created_callback]
+  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} created_callback=${5:-}
+  local session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
+  FM_BACKEND_HERDR_CREATED_TAB_ID=
+  FM_BACKEND_HERDR_CREATED_PANE_ID=
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
@@ -2179,6 +2191,9 @@ EOF
     echo "error: could not parse tab/pane id from herdr tab create output" >&2
     return 1
   fi
+  FM_BACKEND_HERDR_CREATED_TAB_ID=$tab_id
+  FM_BACKEND_HERDR_CREATED_PANE_ID=$pane_id
+  [ -z "$created_callback" ] || "$created_callback" || return 1
   [ -z "$seeded_tab_id" ] || fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded_tab_id"
   if [ -n "$dup_tab_ids" ]; then
     while IFS= read -r dup; do

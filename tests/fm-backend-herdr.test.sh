@@ -4420,6 +4420,104 @@ test_wait_transition_clean_timeout_returns_1() {
   pass "fm_backend_herdr_wait_transition: stock macOS Bash clean timeout closes fd 9 and returns 1"
 }
 
+test_recovery_ownership_accepts_verified_multitab_inventory() {
+  local worktree out
+  worktree="$TMP_ROOT/ownership-multitab"
+  mkdir -p "$worktree"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "session list") printf "%s\n" '\''{"sessions":[{"name":"lab","running":true}]}'\'' ;;
+        "tab list") printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t1","label":"other-1","workspace_id":"w1"},{"tab_id":"w1:t2","label":"other-2","workspace_id":"w1"}]}}'\'' ;;
+        "pane list") printf "%s\n" '\''{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"},{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}'\'' ;;
+        "pane get")
+          case "$4" in
+            w1:p1) printf "%s\n" '\''{"result":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","foreground_cwd":"/"}}}'\'' ;;
+            w1:p2) printf "%s\n" '\''{"result":{"pane":{"pane_id":"w1:p2","tab_id":"w1:t2","workspace_id":"w1","foreground_cwd":"/"}}}'\'' ;;
+          esac
+          ;;
+      esac
+    }
+    fm_backend_herdr_recovery_ownership_state lab task "$1"
+  ' "$ROOT" "$worktree")
+  [ "$out" = clear ] || fail "a verified two-tab workspace should be clear, got '$out'"
+  pass "fm_backend_herdr_recovery_ownership_state: joins workspace panes to their owning tabs"
+}
+
+test_recovery_ownership_refuses_malformed_pane_inventory() {
+  local worktree out
+  worktree="$TMP_ROOT/ownership-malformed"
+  mkdir -p "$worktree"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "session list") printf "%s\n" '\''{"sessions":[{"name":"lab","running":true}]}'\'' ;;
+        "tab list") printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t1","label":"other","workspace_id":"w1"}]}}'\'' ;;
+        "pane list") printf "%s\n" '\''{"result":{"panes":[{"tab_id":"w1:t1"}]}}'\'' ;;
+      esac
+    }
+    fm_backend_herdr_recovery_ownership_state lab task "$1"
+  ' "$ROOT" "$worktree")
+  [ "$out" = unreadable ] || fail "a malformed pane row should be unreadable, got '$out'"
+  pass "fm_backend_herdr_recovery_ownership_state: malformed pane rows fail closed"
+}
+
+test_recovery_ownership_parses_agent_not_found_body_after_nonzero_exit() {
+  local worktree out
+  worktree="$TMP_ROOT/ownership-agent-not-found"
+  mkdir -p "$worktree"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "session list") printf "%s\n" '\''{"sessions":[{"name":"lab","running":true}]}'\'' ;;
+        "tab list") printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t1","label":"fm-task","workspace_id":"w1"}]}}'\'' ;;
+        "pane list") printf "%s\n" '\''{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}'\'' ;;
+        "pane get") printf '\''{"result":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","foreground_cwd":"%s"}}}\n'\'' "$1" ;;
+        "agent get") printf "%s\n" '\''{"error":{"code":"agent_not_found","message":"no agent"}}'\''; return 1 ;;
+      esac
+    }
+    fm_backend_herdr_pane_idle_shell_pid() { return 0; }
+    fm_backend_herdr_recovery_ownership_state lab task "$1"
+  ' "$ROOT" "$worktree")
+  [ "$out" = clear ] || fail "agent_not_found with a verified idle shell should be clear, got '$out'"
+  pass "fm_backend_herdr_recovery_ownership_state: expected nonzero agent lookup remains classifiable"
+}
+
+test_create_task_reports_identity_before_post_create_failure() {
+  local evidence out rc
+  evidence="$TMP_ROOT/create-task-identity"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    evidence=$1
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "tab list")
+          if [ -e "$evidence.evidence" ]; then
+            printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t-old","label":"fm-task","workspace_id":"w1"},{"tab_id":"w1:t-new","label":"fm-task","workspace_id":"w1"}]}}'\''
+          else
+            printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t-old","label":"fm-task","workspace_id":"w1"}]}}'\''
+          fi
+          ;;
+        "tab create") printf "%s\n" '\''{"result":{"tab":{"tab_id":"w1:t-new"},"root_pane":{"pane_id":"w1:p-new"}}}'\'' ;;
+        "tab close") return 0 ;;
+      esac
+    }
+    fm_backend_herdr_pane_for_tab() { printf "%s" w1:p-old; }
+    fm_backend_herdr_tab_is_husk() { return 0; }
+    record_created() {
+      printf "%s %s" "$FM_BACKEND_HERDR_CREATED_TAB_ID" "$FM_BACKEND_HERDR_CREATED_PANE_ID" > "$evidence.evidence"
+    }
+    fm_backend_herdr_create_task lab:w1 fm-task /tmp "" record_created
+  ' "$ROOT" "$evidence" 2>&1); rc=$?
+  [ "$rc" = 1 ] || fail "post-create duplicate verification should fail, got rc=$rc output=$out"
+  [ "$(cat "$evidence.evidence")" = "w1:t-new w1:p-new" ] \
+    || fail "the created identity was not reported before post-create failure"
+  pass "fm_backend_herdr_create_task: publishes exact identity before post-create validation"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
@@ -4604,3 +4702,7 @@ test_wait_transition_stream_absorb_clears_then_timeout
 test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
+test_recovery_ownership_accepts_verified_multitab_inventory
+test_recovery_ownership_refuses_malformed_pane_inventory
+test_recovery_ownership_parses_agent_not_found_body_after_nonzero_exit
+test_create_task_reports_identity_before_post_create_failure
