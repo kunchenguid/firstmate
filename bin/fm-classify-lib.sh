@@ -75,6 +75,7 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # (status_is_paused) rather than hardcoding the literal, so the vocabulary cannot
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
+FM_CLASSIFY_STEP_COMPLETE_VERB_DEFAULT='step-complete'
 
 # Bounded re-surface cadence for a declared pause or a verified captain hold.
 # Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it
@@ -144,6 +145,13 @@ status_is_paused() {  # <status-line>
   [ -n "$line" ] || return 1
   verb=$(status_line_verb "$line")
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
+}
+
+status_is_step_complete() {  # <status-line>
+  local line=$1 verb
+  [ -n "$line" ] || return 1
+  verb=$(status_line_verb "$line")
+  [ "$verb" = "${FM_CLASSIFY_STEP_COMPLETE_VERB:-$FM_CLASSIFY_STEP_COMPLETE_VERB_DEFAULT}" ]
 }
 
 # 0 if a status line's leading verb is the verified captain-held transfer verb.

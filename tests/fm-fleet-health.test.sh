@@ -95,6 +95,25 @@ run_health() {  # <home> <fakebin>
   PATH="$2:$PATH" FM_HOME="$1" "$HEALTH" --json
 }
 
+make_health_fixture_root() {  # <name>
+  local name=$1 root=$TMP_ROOT/health-command-$1 source base
+  mkdir -p "$root/bin"
+  cp "$HEALTH" "$root/bin/fm-fleet-health.sh"
+  for source in "$ROOT"/bin/*.sh; do
+    base=${source##*/}
+    case "$base" in
+      fm-fleet-health.sh|fm-fleet-snapshot.sh) continue ;;
+    esac
+    ln -s "$source" "$root/bin/$base"
+  done
+  cat > "$root/bin/fm-fleet-snapshot.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_TEST_SNAPSHOT:?}"
+SH
+  chmod +x "$root/bin/fm-fleet-health.sh" "$root/bin/fm-fleet-snapshot.sh"
+  printf '%s\n' "$root"
+}
+
 write_pending() {  # <home> <corr> <task> <phase> [completed_epoch] [grace] [sender-pid] [sender-identity]
   local home=$1 corr=$2 task=$3 phase=$4 completed=${5-} grace=${6:-120}
   local sender_pid=${7-} sender_identity=${8-}
@@ -187,6 +206,21 @@ test_missing_state_home_remains_unmodified() {
   printf '%s' "$out" | jq -e '.status == "healthy"' >/dev/null \
     || fail "missing-state home did not report healthy: $out"
   pass "health check does not create a missing state directory"
+}
+
+test_malformed_snapshot_is_incomplete() {
+  local home fixture out rc=0
+  home=$(make_home malformed-snapshot)
+  fixture=$(make_health_fixture_root malformed-snapshot)
+  out=$(FM_HOME="$home" FM_TEST_SNAPSHOT='{"schema":"fm-fleet-snapshot.v1"}' \
+    FM_FLEET_HEALTH_TIMED_WORKER=1 "$fixture/bin/fm-fleet-health.sh" --json) || rc=$?
+  expect_code 3 "$rc" "a schema-tagged incomplete snapshot should be incomplete"
+  printf '%s' "$out" | jq -e '
+    .status == "incomplete"
+      and .reason == "fleet snapshot was malformed"
+      and (.findings | length) == 0
+  ' >/dev/null || fail "incomplete snapshot was treated as usable: $out"
+  pass "schema-tagged incomplete snapshots remain incomplete"
 }
 
 test_dangling_state_path_is_inconclusive() {
@@ -425,6 +459,46 @@ test_recent_done_signal_is_not_missed_handoff() {
     (any(.findings[]; .kind == "missed-handoff" and .subject == "just-done") | not)
   ' >/dev/null || fail "fresh done signal was treated as missed handoff: $out"
   pass "a fresh done signal is inside the handoff stale window"
+}
+
+test_missed_handoff_after_step_complete_signal() {
+  local home fakebin out rc=0
+  home=$(make_home step-complete-handoff)
+  write_live_ship "$home" step-idle
+  printf 'step-complete: phase 7 complete; send the next instruction\n' > "$home/state/step-idle.status"
+  touch -t 202001011200 "$home/state/step-idle.status"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm \
+    FM_FLEET_HEALTH_HANDOFF_STALE_SECS=60 "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "stale step-complete signal should remain inconclusive when lifecycle state is unknown"
+  printf '%s' "$out" | jq -e '
+    any(.findings[]; .kind == "missed-handoff" and .subject == "step-idle"
+        and .confidence == "high")
+  ' >/dev/null || fail "step-complete missed handoff was not reported: $out"
+  pass "stale step-complete signal is a missed handoff"
+}
+
+test_handled_inbox_corruption_is_inconclusive() {
+  local home fakebin out rc=0
+  home=$(make_home handled-inbox-corruption)
+  write_live_ship "$home" handled-task
+  printf 'done: ready for the next step\n' > "$home/state/handled-task.status"
+  touch -t 202001011200 "$home/state/handled-task.status"
+  mkdir -p "$home/state/handled-task.inbox/handled"
+  printf 'not a task inbox record\n' > "$home/state/handled-task.inbox/handled/001.msg"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm \
+    FM_FLEET_HEALTH_HANDOFF_STALE_SECS=60 "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "corrupt handled inbox evidence should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "steering-inbox-inconclusive"
+              and (.evidence | contains("activity record(s) are invalid")))
+      and (any(.findings[]; .kind == "missed-handoff" and .subject == "handled-task") | not)
+  ' >/dev/null || fail "corrupt handled inbox evidence was hidden: $out"
+  pass "corrupt handled inbox evidence remains inconclusive"
 }
 
 test_unreadable_local_endpoint_is_inconclusive() {
@@ -972,6 +1046,36 @@ test_paused_ship_still_requires_pr_listener() {
   pass "declared waits retain their required PR listeners"
 }
 
+test_unknown_worker_state_does_not_create_missing_pr_listener() {
+  local home fakebin out rc=0
+  home=$(make_home unknown-pr-listener)
+  mkdir -p "$home/projects/unknown-pr-wt"
+  fm_write_meta "$home/state/unknown-pr.meta" \
+    "window=firstmate:fm-unknown-pr" \
+    "worktree=$home/projects/unknown-pr-wt" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship" \
+    "yolo=off" \
+    "pr=https://github.com/example/alpha/pull/22"
+  printf 'working: waiting on the unknown Codex lifecycle\n' > "$home/state/unknown-pr.status"
+  printf 'fm-unknown-pr\n' > "$home/state/.fake-windows"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm \
+    "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "unknown worker state should keep PR listener evidence inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "result-listener-inconclusive"
+              and .subject == "unknown-pr")
+      and (any(.findings[]; .kind == "result-listener-missing"
+               and .subject == "unknown-pr") | not)
+  ' >/dev/null || fail "unknown worker state produced a missing listener finding: $out"
+  pass "unknown worker state does not create a missing PR listener"
+}
+
 test_matching_retired_pr_listener_is_not_missing() {
   local home fakebin marker out rc=0
   home=$(make_home retired-pr-listener)
@@ -1105,6 +1209,7 @@ test_human_view_and_incomplete_exit() {
 test_usage_exit
 test_healthy_empty_fleet
 test_missing_state_home_remains_unmodified
+test_malformed_snapshot_is_incomplete
 test_dangling_state_path_is_inconclusive
 test_unsearchable_state_is_inconclusive
 test_dangling_metadata_is_inconclusive
@@ -1117,6 +1222,8 @@ test_live_codex_without_banner_is_not_dead_session
 test_missed_handoff_after_done_signal
 test_later_inbox_clears_missed_handoff
 test_recent_done_signal_is_not_missed_handoff
+test_missed_handoff_after_step_complete_signal
+test_handled_inbox_corruption_is_inconclusive
 test_unreadable_local_endpoint_is_inconclusive
 test_terminal_unreadable_endpoint_is_inconclusive
 test_historical_status_pr_does_not_require_listener
@@ -1139,6 +1246,7 @@ test_inventory_and_missing_listener
 test_invalid_procevent_registration_is_reported
 test_dangling_procevent_claim_root_is_inconclusive
 test_paused_ship_still_requires_pr_listener
+test_unknown_worker_state_does_not_create_missing_pr_listener
 test_matching_retired_pr_listener_is_not_missing
 test_inconclusive_dominates_actionable_status
 test_unreadable_supervision_lock_is_inconclusive

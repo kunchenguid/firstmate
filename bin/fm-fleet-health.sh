@@ -15,7 +15,8 @@
 #
 # Findings are mechanically provable Firstmate operational failures: dead or
 # missing local agents, a Codex worker whose pane shows the exact resume banner
-# or a bare shell while the task is still in flight, a worker `done:` signal
+# or a bare shell while the task is still in flight, a worker `done:` or
+# canonical `step-complete:` signal
 # with no later status append or steering inbox activity for
 # FM_FLEET_HEALTH_HANDOFF_STALE_SECS (default 1800), unavailable or invalid
 # secondmate summaries, broken or overdue reply delivery, aged unacknowledged
@@ -75,8 +76,8 @@ JSON is the stable machine-readable output contract.
 
 The checker consumes fm-fleet-snapshot.sh --json once, with remote SSH probes
 disabled by default, and never mutates fleet state.
-FM_FLEET_HEALTH_HANDOFF_STALE_SECS (default 1800) is the age after a `done:`
-status line with no later status append or steering-inbox activity that
+FM_FLEET_HEALTH_HANDOFF_STALE_SECS (default 1800) is the age after a terminal
+handoff signal with no later status append or steering-inbox activity that
 becomes a missed-handoff finding.
 EOF
 }
@@ -145,6 +146,65 @@ fingerprint_hex() {
   printf 'sha256:%s' "$digest"
 }
 
+snapshot_shape_valid() {
+  printf '%s' "$1" | jq -e '
+    def nullable($expected): (. == null or type == $expected);
+    def task_valid:
+      type == "object"
+      and (.id | type) == "string"
+      and (.kind | type) == "string"
+      and (.remote | nullable("object"))
+      and (.current_state | type) == "object"
+      and (.current_state.state | type) == "string"
+      and (.endpoint | type) == "object"
+      and (.endpoint.exists | nullable("boolean"))
+      and (.endpoint.agent_state | type) == "string"
+      and (.endpoint.agent_alive | type) == "string"
+      and (.endpoint.probe | type) == "string"
+      and (.endpoint.codex_session | type) == "object"
+      and (.endpoint.codex_session.resume_banner | nullable("boolean"))
+      and (.paths | type) == "object"
+      and (.paths.status_log | type) == "object"
+      and (.paths.status_log.last_event | type) == "object"
+      and (.paths.status_log.last_event.state | type) == "string"
+      and (.paths.status_log.last_event.handoff_required | type) == "boolean"
+      and (.paths.status_log.last_event.mtime_epoch | nullable("number"))
+      and (.pr | type) == "object"
+      and (.pr.url | nullable("string"))
+      and (.pr.source | type) == "string";
+    def secondmate_valid:
+      type == "object"
+      and (.id | type) == "string"
+      and (.current | type) == "object"
+      and (.current.state | type) == "string"
+      and (.current.failure_kind | nullable("string"));
+    type == "object"
+    and .schema == "fm-fleet-snapshot.v1"
+    and (.generated | type) == "string"
+    and (.fm_home | type) == "string"
+    and (.tasks | type) == "array"
+    and (.tasks | all(.[]; task_valid))
+    and (.collection | type) == "object"
+    and (.collection.state | type) == "object"
+    and (.collection.state.present | type) == "boolean"
+    and (.collection.state.available | type) == "boolean"
+    and (.collection.state.invalid_metadata_count | type) == "number"
+    and (.collection.state.invalid_metadata | type) == "array"
+    and (.main_inventory | type) == "object"
+    and (.main_inventory.valid | type) == "boolean"
+    and (.main_inventory.reason | nullable("string"))
+    and (.secondmate_current | type) == "object"
+    and (.secondmate_current.records | type) == "array"
+    and (.secondmate_current.records | all(.[]; secondmate_valid))
+    and (.secondmate_current.truncated | type) == "number"
+    and (.secondmate_current.registry | type) == "object"
+    and (.secondmate_current.registry.available | type) == "boolean"
+    and (.secondmate_current.registry.complete | type) == "boolean"
+    and (.secondmate_current.registry.input_truncated | type) == "boolean"
+    and (.secondmate_current.registry.records_truncated | type) == "boolean"
+  '
+}
+
 collect_supervision_json() {
   local state=$1 watch=$2 needed available ok reason model
   fm_supervision_status "$state" >/dev/null
@@ -195,7 +255,7 @@ if [ "$SNAPSHOT_RC" -ne 0 ]; then
   fi
   exit 3
 fi
-if ! printf '%s' "$SNAPSHOT" | jq -e '.schema == "fm-fleet-snapshot.v1"' >/dev/null 2>&1; then
+if ! snapshot_shape_valid "$SNAPSHOT" >/dev/null 2>&1; then
   if [ "$OUTPUT_MODE" = json ]; then
     jq -n --arg generated "$NOW" --arg home "$FM_HOME" \
       '{schema:"fm-fleet-health.v1",generated:$generated,fm_home:$home,status:"incomplete",snapshot_generated:null,reason:"fleet snapshot was malformed",findings:[]}'
@@ -288,6 +348,16 @@ EVALUATED=$(jq -n \
         finding("steering-inbox-inconclusive";"steering-inbox";"notice";"inconclusive";
                 (($inbox.unreadable_count | tostring) + " steering-inbox record(s) could not be aged");
                 "unreadable-record";$inbox.unreadable_count)
+      else empty end),
+      (if ($inbox_activity.invalid_count // 0) > 0 then
+        finding("steering-inbox-inconclusive";"steering-inbox";"notice";"inconclusive";
+                (($inbox_activity.invalid_count | tostring) + " steering-inbox activity record(s) are invalid");
+                "activity-invalid";$inbox_activity.invalid_count)
+      else empty end),
+      (if ($inbox_activity.unreadable_count // 0) > 0 then
+        finding("steering-inbox-inconclusive";"steering-inbox";"notice";"inconclusive";
+                (($inbox_activity.unreadable_count | tostring) + " steering-inbox activity record(s) could not be read or aged");
+                "activity-unreadable";$inbox_activity.unreadable_count)
       else empty end),
       (if $listeners.available == false then
         finding("result-listener-inconclusive";"procevent";"notice";"inconclusive";
@@ -470,7 +540,8 @@ EVALUATED=$(jq -n \
                   "aged";$n)),
       ($snapshot.tasks[]?
         | select(.kind != "secondmate")
-        | select((.paths.status_log.last_event.state // "") == "done")
+        | select((.paths.status_log.last_event.state // "") == "done"
+                 or (.paths.status_log.last_event.handoff_required // false) == true)
         | . as $t
         | ($t.paths.status_log.last_event.mtime_epoch) as $mtime
         | if ($mtime == null or $now_epoch == 0) then
@@ -478,9 +549,12 @@ EVALUATED=$(jq -n \
                     "done-signal age could not be established";"mtime-unavailable";1)
           elif ($now_epoch - $mtime) < $handoff_stale then
             empty
-          elif $inbox_activity.available == false then
+          elif $inbox_activity.available == false
+               or ($inbox_activity.invalid_count // 0) > 0
+               or ($inbox_activity.unreadable_count // 0) > 0 then
             finding("missed-handoff-inconclusive";$t.id;"notice";"inconclusive";
-                    "steering-inbox activity after done could not be read";"inbox-unavailable";1)
+                    "steering-inbox activity after the handoff signal could not be established";
+                    "inbox-activity-unavailable";1)
           elif ((inbox_last($t.id) != null) and (inbox_last($t.id) >= $mtime)) then
             empty
           else
@@ -493,14 +567,22 @@ EVALUATED=$(jq -n \
         | select(.kind == "ship")
         | select((.pr.url // null) != null)
         | select(.pr.source == "meta")
-        | select(terminal_state(.current_state.state) | not)
         | select($prs.available == true)
         | .id as $id
-        | select(any($prs.records[]?;
-                     .id == $id and (.armed == true or .terminal_notified == true)) | not)
-        | finding("result-listener-missing";$id;"error";"high";
-                  "in-flight ship with a recorded PR has no armed merge-poll listener";
-                  "pr-poll";1)),
+        | if .current_state.state == "unknown" then
+            finding("result-listener-inconclusive";$id;"notice";"inconclusive";
+                    "worker lifecycle state is unknown, so PR-listener requirement cannot be established";
+                    "worker-state-unknown";1)
+          elif (.current_state.state == "working"
+                or .current_state.state == "parked"
+                or .current_state.state == "blocked"
+                or .current_state.state == "paused")
+               and (any($prs.records[]?;
+                        .id == $id and (.armed == true or .terminal_notified == true)) | not) then
+            finding("result-listener-missing";$id;"error";"high";
+                    "in-flight ship with a recorded PR has no armed merge-poll listener";
+                    "pr-poll";1)
+          else empty end),
       (($listeners.records // [])[]
         | select(.owner == "missing" or .owner == "stale" or .owner == "orphaned"
                  or .owner == "invalid")

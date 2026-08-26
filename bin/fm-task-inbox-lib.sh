@@ -498,35 +498,56 @@ fm_task_inbox_unhandled_json() {  # <state-dir>
 # Read-only latest steering-inbox activity per task, including handled records.
 # Does not ring, escalate, or rewrite ladder bookkeeping.
 fm_task_inbox_latest_activity_json() {  # <state-dir>
-  local state=$1 dir task rec mtime latest available=true
-  local records='[]' row
+  local state=$1 dir handled task rec mtime latest available=true
+  local invalid_count=0 unreadable_count=0 records='[]' row
   if [ ! -d "$state" ]; then
-    jq -n '{available:true,records:[]}'
+    jq -n '{available:true,invalid_count:0,unreadable_count:0,records:[]}'
     return 0
   fi
   if [ ! -r "$state" ] || [ ! -x "$state" ]; then
-    jq -n '{available:false,records:[]}'
+    jq -n '{available:false,invalid_count:0,unreadable_count:0,records:[]}'
     return 0
   fi
   for dir in "$state"/*.inbox; do
     [ -e "$dir" ] || [ -L "$dir" ] || continue
     if [ ! -d "$dir" ] || { [ -L "$dir" ] && [ ! -e "$dir" ]; }; then
+      invalid_count=$((invalid_count + 1))
       continue
     fi
     if [ ! -r "$dir" ] || [ ! -x "$dir" ]; then
       available=false
       continue
     fi
+    handled="$dir/handled"
+    if [ ! -d "$handled" ] || { [ -L "$handled" ] && [ ! -e "$handled" ]; }; then
+      invalid_count=$((invalid_count + 1))
+      continue
+    fi
+    if [ ! -r "$handled" ] || [ ! -x "$handled" ]; then
+      available=false
+      continue
+    fi
     task=$(basename "$dir" .inbox)
     latest=
-    for rec in "$dir"/*.msg "$dir/handled"/*.msg; do
-      [ -f "$rec" ] && [ ! -L "$rec" ] || continue
+    for rec in "$dir"/*.msg "$handled"/*.msg; do
+      [ -e "$rec" ] || [ -L "$rec" ] || continue
+      if ! fm_task_inbox_record_valid "$rec"; then
+        [ -e "$rec" ] || [ -L "$rec" ] || continue
+        case "$FM_TASK_INBOX_RECORD_FAILURE" in
+          unreadable) unreadable_count=$((unreadable_count + 1)) ;;
+          *) invalid_count=$((invalid_count + 1)) ;;
+        esac
+        continue
+      fi
       mtime=$(fm_path_mtime "$rec") || {
+        [ -e "$rec" ] || [ -L "$rec" ] || continue
+        unreadable_count=$((unreadable_count + 1))
         available=false
         continue
       }
       case "$mtime" in
         ''|*[!0-9]*)
+          unreadable_count=$((unreadable_count + 1))
           available=false
           continue
           ;;
@@ -541,6 +562,7 @@ fm_task_inbox_latest_activity_json() {  # <state-dir>
     records=$(jq -n --argjson records "$records" --argjson row "$row" \
       '$records + [$row]') || return 1
   done
-  jq -n --argjson available "$available" --argjson records "$records" \
-    '{available:$available,records:$records}'
+  jq -n --argjson available "$available" --argjson invalid "$invalid_count" \
+    --argjson unreadable "$unreadable_count" --argjson records "$records" \
+    '{available:$available,invalid_count:$invalid,unreadable_count:$unreadable,records:$records}'
 }
