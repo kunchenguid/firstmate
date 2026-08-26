@@ -1407,3 +1407,59 @@ fm_pending_reply_task_has_open() {  # <state-dir> <task_id>
   done
   return 1
 }
+
+# Read-only list of open (non-resolved) pending-reply records.
+# Does not tick, recover, escalate, or otherwise mutate records.
+fm_pending_reply_open_json() {  # <state-dir>
+  local state=$1 dir rec corr phase task_id created delivered completed recovery_completed
+  local now age
+  dir=$(fm_pending_reply_dir "$state")
+  now=$(fm_pending_reply_now)
+  if [ ! -e "$dir" ]; then
+    jq -n --argjson now "$now" '{available:true,now_epoch:$now,records:[]}'
+    return 0
+  fi
+  if [ ! -d "$dir" ] || [ ! -r "$dir" ]; then
+    jq -n --argjson now "$now" '{available:false,now_epoch:$now,records:[]}'
+    return 0
+  fi
+  {
+    for rec in "$dir"/*; do
+      [ -f "$rec" ] || continue
+      case "$(basename "$rec")" in .*) continue ;; esac
+      corr=$(fm_pending_reply_get "$rec" corr_id)
+      [ -n "$corr" ] || corr=$(basename "$rec")
+      phase=$(fm_pending_reply_get "$rec" phase)
+      [ "$phase" != resolved ] || continue
+      task_id=$(fm_pending_reply_get "$rec" task_id)
+      created=$(fm_pending_reply_get "$rec" created_epoch)
+      delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+      completed=$(fm_pending_reply_get "$rec" request_turn_completed_epoch)
+      recovery_completed=$(fm_pending_reply_get "$rec" recovery_turn_completed_epoch)
+      age=null
+      case "$created" in
+        ''|*[!0-9]*) ;;
+        *) age=$((now - created)); [ "$age" -lt 0 ] && age=0 ;;
+      esac
+      jq -n \
+        --arg corr "$corr" \
+        --arg task "$task_id" \
+        --arg phase "$phase" \
+        --arg created "$created" \
+        --arg delivered "$delivered" \
+        --arg completed "$completed" \
+        --arg recovery_completed "$recovery_completed" \
+        --argjson age "$age" \
+        '{
+          corr_id:$corr,
+          task_id:$task,
+          phase:$phase,
+          created_epoch:(if $created == "" then null else (try ($created | tonumber) catch null) end),
+          delivered_epoch:(if $delivered == "" then null else (try ($delivered | tonumber) catch null) end),
+          request_turn_completed_epoch:(if $completed == "" then null else (try ($completed | tonumber) catch null) end),
+          recovery_turn_completed_epoch:(if $recovery_completed == "" then null else (try ($recovery_completed | tonumber) catch null) end),
+          age_seconds:$age
+        }'
+    done
+  } | jq -s --argjson now "$now" '{available:true,now_epoch:$now,records:.}'
+}

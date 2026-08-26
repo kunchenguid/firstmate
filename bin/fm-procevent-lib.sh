@@ -67,6 +67,45 @@ fm_procevent_any_registered() {
   return 1
 }
 
+# Read-only registered-source inventory for health checks.
+# Does not acquire source locks, start runners, or mark results handled.
+# owner is live, missing, stale, orphaned, uncertain, or terminal.
+fm_procevent_listeners_json() {  # <state>
+  local state=$1 reg rec id adapter owner status records='[]' available=true
+  reg=$(fm_procevent_registry_dir "$state")
+  if [ ! -e "$reg" ]; then
+    jq -n '{available:true,records:[]}'
+    return 0
+  fi
+  if [ ! -d "$reg" ] || [ ! -r "$reg" ]; then
+    jq -n '{available:false,records:[]}'
+    return 0
+  fi
+  for rec in "$reg"/*.source; do
+    [ -f "$rec" ] || continue
+    id=${rec##*/}; id=${id%.source}
+    adapter=$(awk -F= '$1 == "adapter" { print $2; exit }' "$rec" 2>/dev/null || printf '')
+    fm_procevent_claim_state_locked "$id"
+    status=$?
+    case "$status" in
+      0) owner=live ;;
+      1) owner=missing ;;
+      2) owner=uncertain ;;
+      3) owner=orphaned ;;
+      4) owner=terminal ;;
+      *) owner=uncertain ;;
+    esac
+    records=$(jq -n \
+      --argjson records "$records" \
+      --arg id "$id" \
+      --arg adapter "$adapter" \
+      --arg owner "$owner" \
+      '$records + [{id:$id,adapter:$adapter,owner:$owner}]')
+  done
+  jq -n --argjson available "$available" --argjson records "$records" \
+    '{available:$available,records:$records}'
+}
+
 # --- ownership --------------------------------------------------------------
 # A claim is a private file recording the home, runner pid, claim generation,
 # and process identity. Registration and every ownership transition are

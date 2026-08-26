@@ -624,6 +624,35 @@ test_view_renders_dead_secondmate_agent_status() {
   pass "fleet view renders secondmate agent liveness"
 }
 
+test_remote_probe_skip_does_not_use_local_placeholder() {
+  local home fakebin out
+  home=$(make_home remote-placeholder)
+  mkdir -p "$home/secondmate-home"
+  fm_write_meta "$home/state/remote-mate.meta" \
+    "window=firstmate:fm-remote-mate" \
+    "worktree=$home/secondmate-home" \
+    "project=$home/secondmate-home" \
+    "harness=codex" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=/remote/secondmate-home" \
+    "remote_host=example.invalid" \
+    "remote_root=/remote/firstmate" \
+    "projects=alpha"
+  printf 'working: watching delegated scope\n' > "$home/state/remote-mate.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_REMOTE_PROBES=0 "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "remote-mate")
+    | .remote.host == "example.invalid"
+      and .endpoint.probe == "skipped"
+      and .endpoint.agent_alive == "not_collected"
+      and .endpoint.exists == null
+      and .endpoint.status == "not_collected"
+  ' >/dev/null || fail "skipped remote probes must not treat a local placeholder as liveness: $out"
+  pass "skipped remote probes record not_collected instead of local placeholder liveness"
+}
+
 # A still-open decision must survive a LATER, UNRELATED terminal event on the same
 # append-only stream. This is the fmdev masking bug: last-event-wins read the trailing
 # `done` and reported pending_decision=false while a needs-decision was still open. The
@@ -814,3 +843,4 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_remote_probe_skip_does_not_use_local_placeholder

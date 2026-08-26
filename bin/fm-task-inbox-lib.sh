@@ -400,3 +400,39 @@ fm_task_inbox_record_escalated() {  # <state-dir> <task-id> <record-path>
     return 1
   fi
 }
+
+# Read-only list of unhandled steering-inbox records with age.
+# Does not ring, escalate, or rewrite ladder bookkeeping.
+fm_task_inbox_unhandled_json() {  # <state-dir>
+  local state=$1 dir task rec seq age available=true
+  if [ ! -d "$state" ]; then
+    jq -n '{available:true,records:[]}'
+    return 0
+  fi
+  if [ ! -r "$state" ]; then
+    jq -n '{available:false,records:[]}'
+    return 0
+  fi
+  for dir in "$state"/*.inbox; do
+    [ -d "$dir" ] || continue
+    [ -r "$dir" ] || available=false
+  done
+  {
+    for dir in "$state"/*.inbox; do
+      [ -d "$dir" ] && [ -r "$dir" ] || continue
+      task=$(basename "$dir" .inbox)
+      for rec in "$dir"/*.msg; do
+        [ -f "$rec" ] || continue
+        seq=$(fm_task_inbox_seq_of "${rec##*/}") || continue
+        age=$(fm_path_age "$rec")
+        case "$age" in ''|*[!0-9]*) age=null ;; esac
+        jq -n \
+          --arg task "$task" \
+          --arg rec "$rec" \
+          --arg seq "$seq" \
+          --argjson age "$age" \
+          '{task_id:$task,path:$rec,seq:($seq | tonumber),age_seconds:$age}'
+      done
+    done
+  } | jq -s --argjson available "$available" '{available:$available,records:.}'
+}
