@@ -74,12 +74,16 @@
 # Fail-closed boundaries:
 #   - An unverified harness, or a harness whose control mechanics are unknown,
 #     is refused rather than guessed at.
-#   - A backend that cannot deliver the harness's interrupt key is refused
-#     (Orca's terminal API has no Escape).
+#   - A backend that cannot deliver the harness's interrupt key is refused. Orca
+#     delivers Ctrl-C but not the Escape that claude/codex/etc. interrupt with
+#     (a raw ESC byte is not a verified cancel on Orca), so a BUSY Escape-harness
+#     agent - which must be interrupted before exit - is refused on Orca, while
+#     an IDLE one exits cleanly with no interrupt.
 #   - `exit` and `relaunch` require a backend with a recovery-grade agent-state
-#     classifier (tmux, herdr), because without one the "the agent stopped"
-#     postcondition cannot be proven. zellij, orca, and cmux are refused rather
-#     than reported as successful blind.
+#     classifier (tmux, herdr, and Orca for the harnesses it hooks - claude,
+#     codex), because without one the "the agent stopped" postcondition cannot
+#     be proven. zellij, cmux, and Orca running any other harness are refused
+#     rather than reported as successful blind.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
 #
@@ -311,7 +315,7 @@ fm_backend_validate "$BACKEND" || exit 1
 # --- shared helpers ---------------------------------------------------------
 
 agent_state() {
-  fm_backend_agent_state "$BACKEND" "$T"
+  fm_backend_agent_state "$BACKEND" "$T" "$RECORDED_HARNESS"
 }
 
 busy_verdict() {
@@ -340,8 +344,18 @@ wait_agent_state() {  # <timeout> <wanted>...
 }
 
 require_state_verified_backend() {  # <verb>
-  fm_control_backend_state_verified "$BACKEND" && return 0
-  die "task $ID runs on the $BACKEND backend, which has no recovery-grade agent-state classifier, so '$1' cannot prove the agent actually stopped; refusing rather than reporting an unproven transition as done"
+  fm_control_backend_state_verified "$BACKEND" \
+    || die "task $ID runs on the $BACKEND backend, which has no recovery-grade agent-state classifier, so '$1' cannot prove the agent actually stopped; refusing rather than reporting an unproven transition as done"
+  # Orca's classifier is recovery grade only for the harnesses it hooks (claude,
+  # codex). For any other harness a stopped agent leaves no observable trace in
+  # Orca's agent model, so the stop cannot be proven - refuse rather than act
+  # blind (bin/backends/orca.sh fm_backend_orca_agent_tracked_harness).
+  if [ "$BACKEND" = orca ]; then
+    fm_backend_source orca 2>/dev/null || true
+    fm_backend_orca_agent_tracked_harness "$RECORDED_HARNESS" \
+      || die "task $ID runs harness '${RECORDED_HARNESS:-none}' on the orca backend, which tracks only claude and codex agent state, so '$1' cannot prove the agent stopped; refusing rather than reporting an unproven transition as done"
+  fi
+  return 0
 }
 
 # send_interrupt_keys: deliver the harness's interrupt key the verified number

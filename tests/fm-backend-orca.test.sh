@@ -364,23 +364,69 @@ test_probe_blocked_agent_is_blocked() {
   pass "fm_backend_orca_busy_state: a blocked agent reads blocked"
 }
 
-test_probe_connected_no_agent_entry_is_dead() {
-  # The critical agent-vs-shell distinction: a connected terminal whose pane has
-  # NO entry in the agents[] model is a bare shell the agent has exited to -
-  # `dead`, which is what lets fm-control prove an `exit` actually stopped it.
+test_probe_connected_no_agent_entry_is_no_agent() {
+  # A connected terminal whose pane has NO agents[] entry is `no-agent`: whether
+  # that means "exited to a shell" (dead) or "Orca does not track this harness"
+  # is harness-dependent and resolved by fm_backend_orca_agent_state. busy_state
+  # is unknown either way (no live agent entry).
   local probe busy
-  orca_case probe-dead-shell
+  orca_case probe-no-agent
   orca_show_connected > "$RESP/1.out"
   # agents[] present but for a DIFFERENT pane, so tabx:leafy is absent.
   printf '{"ok":true,"result":{"worktrees":[{"agents":[{"paneKey":"other:pane","state":"working"}]}]}}\n' > "$RESP/2.out"
   probe=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_probe term-123' "$ROOT" )
-  [ "$probe" = "dead -" ] || fail "a connected terminal with no matching agent entry must read 'dead -', got '$probe'"
+  [ "$probe" = "no-agent -" ] || fail "a connected terminal with no matching agent entry must read 'no-agent -', got '$probe'"
   : > "$RESP/.count"
   busy=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_busy_state term-123' "$ROOT" )
-  [ "$busy" = unknown ] || fail "busy_state must be unknown for a dead endpoint, not idle, got '$busy'"
-  pass "fm_backend_orca_agent_state: a connected shell with no agent entry reads dead"
+  [ "$busy" = unknown ] || fail "busy_state must be unknown for a no-agent endpoint, not idle, got '$busy'"
+  pass "fm_backend_orca_probe: a connected terminal with no agent entry reads no-agent"
+}
+
+test_agent_state_no_agent_is_dead_for_tracked_harness() {
+  # For an Orca-tracked harness (claude, codex), a `no-agent` reading means the
+  # agent exited to a shell -> dead, which is what lets fm-control prove an exit.
+  local h st
+  for h in claude codex; do
+    orca_case "no-agent-tracked-$h"
+    orca_show_connected > "$RESP/1.out"
+    printf '{"ok":true,"result":{"worktrees":[{"agents":[]}]}}\n' > "$RESP/2.out"
+    st=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+      bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_agent_state term-123 '"$h" "$ROOT" )
+    [ "$st" = dead ] || fail "a no-agent reading for tracked harness $h must read dead, got '$st'"
+  done
+  pass "fm_backend_orca_agent_state: a no-agent endpoint reads dead for a tracked harness (claude, codex)"
+}
+
+test_agent_state_no_agent_is_unverified_for_untracked_harness() {
+  # For an untracked harness (or no harness at all), Orca gives no agent signal,
+  # so a `no-agent` reading must NOT be a false dead - it is unverified. This is
+  # the recovery-safety guarantee: a live untracked agent is never read as dead.
+  local h st
+  for h in grok pi opencode kimi cursor muse omp ''; do
+    orca_case "no-agent-untracked-${h:-none}"
+    orca_show_connected > "$RESP/1.out"
+    printf '{"ok":true,"result":{"worktrees":[{"agents":[]}]}}\n' > "$RESP/2.out"
+    st=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+      bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_agent_state term-123 '"$h" "$ROOT" )
+    [ "$st" = unverified ] || fail "a no-agent reading for untracked harness '${h:-none}' must read unverified (never a false dead), got '$st'"
+  done
+  pass "fm_backend_orca_agent_state: a no-agent endpoint reads unverified for an untracked harness, never a false dead"
+}
+
+test_agent_tracked_harness_set_is_claude_and_codex() {
+  local h
+  for h in claude codex claude-2 codex-x; do
+    PATH="$FB:$PATH" bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_agent_tracked_harness '"$h" "$ROOT" \
+      || fail "$h should be an Orca-tracked harness"
+  done
+  for h in grok pi opencode kimi cursor muse omp someagent ''; do
+    if PATH="$FB:$PATH" bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_agent_tracked_harness '"$h" "$ROOT"; then
+      fail "'${h:-none}' must NOT be an Orca-tracked harness"
+    fi
+  done
+  pass "fm_backend_orca_agent_tracked_harness: the tracked set is exactly claude and codex"
 }
 
 test_probe_disconnected_is_dead() {
@@ -1479,7 +1525,10 @@ test_send_helpers_reject_orca_error_json
 test_probe_alive_working_is_busy
 test_probe_alive_done_is_idle
 test_probe_blocked_agent_is_blocked
-test_probe_connected_no_agent_entry_is_dead
+test_probe_connected_no_agent_entry_is_no_agent
+test_agent_state_no_agent_is_dead_for_tracked_harness
+test_agent_state_no_agent_is_unverified_for_untracked_harness
+test_agent_tracked_harness_set_is_claude_and_codex
 test_probe_disconnected_is_dead
 test_probe_stale_handle_is_missing
 test_probe_unreadable_worktree_ps_is_unreadable

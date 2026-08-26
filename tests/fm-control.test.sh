@@ -384,21 +384,34 @@ test_harness_kind_capability() {
   pass "fm-control-lib: adapter capability is per task kind, not per adapter alone"
 }
 
-test_orca_refuses_an_escape_harness_interrupt() {
-  local dir out rc
-  dir=$(new_case orca-escape)
-  add_task "$dir" t1 claude ship orca "term-1"
-  # Orca records its endpoint as terminal=, which endpoint validation requires.
-  {
-    cat "$dir/home/state/t1.meta"
-    echo "terminal=term-1"
-    echo "orca_worktree_id=wt-1"
-  } > "$dir/home/state/t1.meta.new"
-  sed 's|^window=.*|window=fm-t1|' "$dir/home/state/t1.meta.new" > "$dir/home/state/t1.meta"
-  out=$(run_control "$dir" t1 interrupt); rc=$?
-  expect_code 1 "$rc" "an Escape harness on orca should refuse"
-  assert_contains "$out" "cannot deliver" "refusal should name the undeliverable key"
-  pass "fm-control interrupt: a backend that cannot deliver the harness's key refuses instead of sending another"
+# Orca's agent-state classifier is recovery grade only for the harnesses Orca
+# hooks (claude, codex). exit/relaunch of any other harness on Orca is refused
+# at the tracked-harness gate, which fires before any Orca CLI call, so a stop
+# that Orca cannot observe is never reported as done. (The claude/codex idle
+# exit/relaunch lifecycle itself is proven against the real app in
+# tests/fm-orca-agent-state-live-e2e.test.sh.)
+test_orca_refuses_stop_verbs_for_untracked_harness() {
+  local dir out rc verb
+  for verb in exit relaunch; do
+    dir=$(new_case "orca-untracked-$verb")
+    add_task "$dir" t1 grok ship orca "term-1"
+    {
+      cat "$dir/home/state/t1.meta"
+      echo "terminal=term-1"
+      echo "orca_worktree_id=wt-1"
+    } > "$dir/home/state/t1.meta.new"
+    sed 's|^window=.*|window=fm-t1|' "$dir/home/state/t1.meta.new" > "$dir/home/state/t1.meta"
+    if [ "$verb" = relaunch ]; then
+      out=$(run_control "$dir" t1 relaunch --note x); rc=$?
+    else
+      out=$(run_control "$dir" t1 exit); rc=$?
+    fi
+    expect_code 1 "$rc" "grok on orca should refuse $verb (untracked agent state)"$'\n'"$out"
+    assert_contains "$out" "tracks only claude and codex" \
+      "the $verb refusal should name Orca's tracked-harness limit"
+    [ -z "$(literals "$dir")" ] || fail "orca untracked-harness $verb must send no exit command"
+  done
+  pass "fm-control: exit/relaunch of an Orca-untracked harness (grok) refuses at the tracked-harness gate"
 }
 
 test_unverified_state_backends_refuse_stop_verbs() {
@@ -432,15 +445,18 @@ test_unverified_state_backends_refuse_stop_verbs() {
   pass "fm-control: a backend that cannot prove an agent stopped refuses exit and relaunch"
 }
 
-test_state_verified_backends_are_exactly_tmux_and_herdr() {
+test_state_verified_backends_are_tmux_herdr_and_orca() {
   fm_control_backend_state_verified tmux || fail "tmux has a recovery-grade classifier"
   fm_control_backend_state_verified herdr || fail "herdr has a recovery-grade classifier"
+  # Orca has a recovery-grade classifier for the harnesses it hooks; the
+  # per-harness refinement is applied in fm-control.sh, not here.
+  fm_control_backend_state_verified orca || fail "orca has a recovery-grade classifier (its worktree-ps agent model)"
   local backend
-  for backend in zellij orca cmux; do
+  for backend in zellij cmux; do
     fm_control_backend_state_verified "$backend" \
       && fail "$backend has no recovery-grade classifier and must not claim one"
   done
-  pass "fm-control-lib: stop-proving verbs are gated on the backends that really classify agent state"
+  pass "fm-control-lib: stop-proving verbs are gated on the backends that really classify agent state (tmux, herdr, orca)"
 }
 
 # --- 3. exact-id scoping ----------------------------------------------------
@@ -881,9 +897,9 @@ test_harness_family_resolution
 test_prefixed_recorded_harness_reaches_each_control_verb
 test_backend_key_capability_matrix
 test_harness_kind_capability
-test_orca_refuses_an_escape_harness_interrupt
+test_orca_refuses_stop_verbs_for_untracked_harness
 test_unverified_state_backends_refuse_stop_verbs
-test_state_verified_backends_are_exactly_tmux_and_herdr
+test_state_verified_backends_are_tmux_herdr_and_orca
 test_window_label_is_refused_with_the_exact_id
 test_explicit_endpoint_is_refused
 test_unknown_task_is_refused

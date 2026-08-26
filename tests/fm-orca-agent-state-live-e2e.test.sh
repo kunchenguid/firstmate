@@ -73,6 +73,11 @@ if (cur != null) process.stdout.write(String(cur));
 ' "$1"
 }
 
+# claude is an Orca-tracked harness, so agent_state must be asked WITH the
+# harness: without it the recovery-grade `dead` verdict de-rates to `unverified`
+# (the safe default that protects untracked harnesses from a false dead).
+agent_state_claude() { fm_backend_orca_agent_state "$1" claude; }
+
 # poll_state <fn> <want> <timeout-secs>: poll adapter <fn> "$TERM" until it
 # prints <want>, up to <timeout-secs>. Prints the final observed value.
 poll_state() {  # <fn> <want> <timeout-secs>
@@ -115,7 +120,7 @@ orca terminal send --terminal "$TERM" --text "" --enter --json >/dev/null 2>&1 |
 idle=$(poll_state fm_backend_orca_busy_state idle 30) \
   || fail "claude never reached an idle prompt on Orca (last busy_state=$idle, appVersion=$APPVER)"
 
-state=$(fm_backend_orca_agent_state "$TERM")
+state=$(agent_state_claude "$TERM")
 [ "$state" = alive ] || fail "an idle claude agent must read alive, got '$state' (appVersion=$APPVER)"
 pass "orca live: an idle claude agent reads alive / idle (appVersion=$APPVER)"
 
@@ -124,7 +129,7 @@ orca terminal send --terminal "$TERM" --text "Count from 1 to 20, one number per
   || fail "could not send a working prompt to claude on Orca"
 busy=$(poll_state fm_backend_orca_busy_state busy 20) \
   || fail "a working claude turn must read busy, got '$busy' (appVersion=$APPVER)"
-state=$(fm_backend_orca_agent_state "$TERM")
+state=$(agent_state_claude "$TERM")
 [ "$state" = alive ] || fail "a working claude agent must read alive, got '$state' (appVersion=$APPVER)"
 pass "orca live: a working claude turn reads alive / busy (appVersion=$APPVER)"
 
@@ -135,12 +140,12 @@ pass "orca live: a completed claude turn settles back to alive / idle (appVersio
 
 # --- exit an idle agent to a shell reads dead -------------------------------
 orca terminal send --terminal "$TERM" --text "/exit" --enter --json >/dev/null 2>&1 || true
-dead=$(poll_state fm_backend_orca_agent_state dead 30) \
+dead=$(poll_state agent_state_claude dead 30) \
   || fail "an agent exited to a shell must read dead, got '$dead' (appVersion=$APPVER)"
 pass "orca live: an idle claude agent that ran /exit reads dead (appVersion=$APPVER)"
 
 # --- a stale handle reads missing -------------------------------------------
-stale=$(fm_backend_orca_agent_state "term_00000000-0000-0000-0000-000000000000")
+stale=$(agent_state_claude "term_00000000-0000-0000-0000-000000000000")
 [ "$stale" = missing ] || fail "a stale terminal handle must read missing, got '$stale' (appVersion=$APPVER)"
 pass "orca live: a stale terminal handle reads missing (appVersion=$APPVER)"
 

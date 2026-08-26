@@ -253,17 +253,37 @@ fm_backend_orca_composer_state() {  # <terminal-id> [expected-label] -> empty|pe
   printf '%s' "$verdict"
 }
 
+# fm_backend_orca_agent_tracked_harness: whether Orca populates its structured
+# `worktree ps` agents[] model for <harness>. Orca tracks an agent through a
+# per-harness hook, and it ships hooks for exactly claude and codex
+# (`~/.orca/agent-hooks/` holds claude-hook.sh and codex-hook.sh only; a live pi
+# produced zero agents[] entries - verified v1.4.188). For a tracked harness the
+# agent's presence and disappearance are observable, so agents[] is recovery
+# grade; for any other harness Orca gives no structured agent signal, so
+# agents[]-absence must NOT be read as `dead`. Matches the recorded basename the
+# same prefix way bin/fm-control-lib.sh's fm_control_harness_family does.
+fm_backend_orca_agent_tracked_harness() {  # <harness>
+  case "${1-}" in
+    claude*|codex*) return 0 ;;
+  esac
+  return 1
+}
+
 # fm_backend_orca_probe: correlate one terminal's endpoint liveness with Orca's
 # own structured agent model in a single pass. Prints "<endpoint> <agent>":
-#   endpoint - alive|dead|missing|ambiguous|unreadable, the recovery-grade
-#              classifier vocabulary (bin/fm-backend.sh fm_backend_agent_state).
+#   endpoint - alive|dead|no-agent|missing|ambiguous|unreadable.
 #   agent    - the Orca `worktree ps` agents[] `state` for this exact pane
 #              (working|done|blocked|...), or "-" when no agent entry applies.
+# `dead` is a confidently gone endpoint (disconnected or exited); `no-agent` is
+# a still-connected terminal with no agents[] entry for its pane - which means
+# "agent exited to a shell" ONLY for an Orca-tracked harness, and "Orca does not
+# track this harness" otherwise. fm_backend_orca_agent_state resolves that with
+# the harness; the probe stays harness-blind.
 # The correlation key is the pane key `tabId:leafId`, which `terminal show` and
 # `worktree ps` agents[] share. That structured array - not a rendered title or
 # `terminal wait --for tui-idle`, which cannot separate a busy agent from a
-# plain shell because both simply time out - is what distinguishes a running
-# agent from a bare shell the agent has exited to. Verified against Orca
+# plain shell because both simply time out - is Orca's only agent-presence
+# signal, and it exists only for tracked harnesses. Verified against Orca
 # v1.4.188 (docs/verification/runtime-backends.md "Orca").
 # One `terminal show` plus one `worktree ps`, reduced in one Node pass; the
 # 0x1e record separator joins the two payloads without colliding with JSON.
@@ -314,8 +334,10 @@ for (const w of ps.result.worktrees) {
   }
 }
 if (!agent) {
-  // Connected terminal with no agent entry: the agent has exited to a shell.
-  process.stdout.write("dead -");
+  // Connected terminal with no agents[] entry. Whether this is "agent exited to
+  // a shell" (dead) or "Orca does not track this harness" is harness-dependent,
+  // so leave it to fm_backend_orca_agent_state.
+  process.stdout.write("no-agent -");
   process.exit(0);
 }
 const st = (typeof agent.state === "string" && agent.state) ? agent.state : "unknown";
@@ -325,13 +347,26 @@ process.stdout.write("alive " + st);
 
 # fm_backend_orca_agent_state: the recovery-grade endpoint classifier for one
 # recorded terminal (see bin/fm-backend.sh fm_backend_agent_state for the shared
-# vocabulary). Reuses fm_backend_orca_probe so the agent-vs-shell distinction is
-# proven from Orca's own structured agent model, exactly as tmux uses its
-# foreground process group.
-fm_backend_orca_agent_state() {  # <terminal-id> -> alive|dead|missing|ambiguous|unreadable
-  local probe
+# vocabulary). Recovery grade ONLY for an Orca-tracked harness (claude, codex),
+# whose agents[] entry disappearing proves the agent stopped. For any other
+# harness - or when the harness is unknown - a still-connected terminal with no
+# agents[] entry is NOT proof of death (Orca just does not track it), so it is
+# reported `unverified` rather than a false `dead`. `alive` (an agents[] entry
+# is present) and the terminal-level `dead`/`missing` verdicts are
+# harness-independent.
+fm_backend_orca_agent_state() {  # <terminal-id> [harness] -> alive|dead|missing|ambiguous|unreadable|unverified
+  local probe endpoint
   probe=$(fm_backend_orca_probe "$1") || { printf 'unreadable'; return 0; }
-  printf '%s' "${probe%% *}"
+  endpoint=${probe%% *}
+  if [ "$endpoint" = no-agent ]; then
+    if fm_backend_orca_agent_tracked_harness "${2-}"; then
+      printf 'dead'
+    else
+      printf 'unverified'
+    fi
+    return 0
+  fi
+  printf '%s' "$endpoint"
 }
 
 # fm_backend_orca_busy_state: semantic busy state from Orca's native agent

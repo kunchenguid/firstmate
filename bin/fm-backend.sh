@@ -910,17 +910,22 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # successful session inventory and returns `missing` only when it omits the
 # exact window; the Herdr adapter reuses its husk classifier; the Orca adapter
 # correlates the terminal against Orca's structured `worktree ps` agent model,
-# so an exited-to-shell agent reads `dead` and a stale handle reads `missing`.
-# Zellij remains unverified because its secondmate ghost-tab and agent-process
-# recovery path has not been empirically validated. Orca and cmux do not
-# support secondmate spawns.
-fm_backend_agent_state() {  # <backend> <target>
-  local backend=$1 target=$2
+# which is recovery grade only for the harnesses Orca hooks (claude, codex) -
+# for those, an exited-to-shell agent reads `dead`; for any other harness a
+# still-connected terminal with no agent entry reads `unverified`, never a false
+# `dead` (pass the harness as the third argument). Zellij remains unverified
+# because its secondmate ghost-tab and agent-process recovery path has not been
+# empirically validated. Orca and cmux do not support secondmate spawns.
+fm_backend_agent_state() {  # <backend> <target> [harness]
+  local backend=$1 target=$2 harness=${3-}
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
     tmux) fm_backend_tmux_agent_state "$target" ;;
     herdr) fm_backend_herdr_agent_state "$target" ;;
-    orca) fm_backend_orca_agent_state "$target" ;;
+    # Orca's agents[] model is recovery grade only for harnesses Orca hooks
+    # (claude, codex); passing the harness lets the adapter avoid a false `dead`
+    # for an untracked one. Omitting it stays safe (untracked -> unverified).
+    orca) fm_backend_orca_agent_state "$target" "$harness" ;;
     *) printf 'unverified' ;;
   esac
 }
@@ -928,8 +933,8 @@ fm_backend_agent_state() {  # <backend> <target>
 # Backward-compatible three-state view for existing callers. An
 # authoritatively missing endpoint is confidently not a live agent, while every
 # ambiguous, unreadable, or unverified result stays unknown.
-fm_backend_agent_alive() {  # <backend> <target>
-  case "$(fm_backend_agent_state "$1" "$2")" in
+fm_backend_agent_alive() {  # <backend> <target> [harness]
+  case "$(fm_backend_agent_state "$1" "$2" "${3-}")" in
     alive) printf 'alive' ;;
     dead|missing) printf 'dead' ;;
     *) printf 'unknown' ;;

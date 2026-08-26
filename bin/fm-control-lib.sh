@@ -189,14 +189,18 @@ fm_control_backend_supports_key() {  # <backend> <key>
   return 1
 }
 
-# Whether <backend> has a recovery-grade agent-state classifier. Only tmux and
-# herdr implement fm_backend_agent_state; zellij, orca, and cmux report
-# `unverified`, so no reading of theirs can prove an agent stopped. The control
-# plane refuses a stop-proving verb there instead of reporting an unprovable
-# transition as success.
+# Whether <backend> has a recovery-grade agent-state classifier at all. tmux and
+# herdr classify every harness; orca classifies only the harnesses it hooks
+# (claude, codex) through its structured `worktree ps` agent model, so this
+# returns 0 for orca but bin/fm-control.sh additionally gates the verb on that
+# harness being one Orca tracks (bin/backends/orca.sh
+# fm_backend_orca_agent_tracked_harness). zellij and cmux report `unverified`,
+# so no reading of theirs can prove an agent stopped. The control plane refuses
+# a stop-proving verb on an unverified backend rather than reporting an
+# unprovable transition as success.
 fm_control_backend_state_verified() {  # <backend>
   case "${1-}" in
-    tmux|herdr) return 0 ;;
+    tmux|herdr|orca) return 0 ;;
   esac
   return 1
 }
