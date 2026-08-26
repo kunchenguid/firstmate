@@ -41,9 +41,10 @@ META
 }
 
 # A minimal but schema-true fleet snapshot carrying one structured-home record.
-write_snapshot() {  # <path> <mate-id> <invalidity-json> [state]
-  jq -n --arg id "$2" --argjson inv "$3" --arg state "${4:-captain_decision}" '{
-    schema:"fm-fleet-snapshot.v1",
+write_snapshot() {  # <path> <mate-id> <invalidity-json> [state] [generated]
+  jq -n --arg id "$2" --argjson inv "$3" --arg state "${4:-captain_decision}" \
+    --arg generated "${5:-2026-08-26T00:00:00Z}" '{
+    schema:"fm-fleet-snapshot.v1", generated:$generated,
     secondmate_current:{records:[{
       id:$id, home:("/tmp/" + $id),
       current:{state:$state, reason:null},
@@ -141,6 +142,86 @@ test_a_completed_send_survives_a_missing_episode_commit() {
   pass "an interrupted episode commit resumes without duplicating delivery"
 }
 
+test_an_unconfirmed_remote_send_reuses_its_delivery_identity() {
+  local home mate fakebin runtime first retry out rc first_corr second_corr
+  { read -r home; read -r mate; read -r fakebin; } < <(make_main_home remote-unknown mate)
+  runtime="$home/runtime"
+  mkdir -p "$runtime"
+  cp -R "$ROOT/bin" "$runtime/bin"
+  cat > "$runtime/bin/fm-send.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+state=${FM_STATE_OVERRIDE:?}
+corr=${FM_PENDING_REPLY_EXISTING_CORR:-${FM_PENDING_REPLY_CORR_ID:-}}
+mkdir -p "$state/pending-replies" "$state/fake-remote-deliveries"
+printf '%s\n' "$corr" >> "${FM_RECONCILE_FAKE_SEND_LOG:?}"
+touch "$state/fake-remote-deliveries/$corr"
+if [ ! -f "$state/fake-unknown-once" ]; then
+  cat > "$state/pending-replies/$corr" <<EOF
+schema=fm-pending-reply.v1
+task_id=$1
+delivered_epoch=
+phase=delivery_unknown
+EOF
+  touch "$state/fake-unknown-once"
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$runtime/bin/fm-send.sh"
+  first="$home/first.json"
+  retry="$home/retry.json"
+  write_snapshot "$first" mate '{"kind":"unowned_current","ids":["live-row"]}' captain_decision 2026-08-26T00:00:01Z
+  write_snapshot "$retry" mate '{"kind":"unowned_current","ids":["live-row"]}' captain_decision 2026-08-26T00:00:02Z
+
+  set +e
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$runtime" \
+    FM_STATE_OVERRIDE="$home/state" FM_RECONCILE_FAKE_SEND_LOG="$home/send.log" \
+    "$runtime/bin/fm-secondmate-reconcile.sh" notify --snapshot "$first")
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "completion-unknown transport reported success: $out"
+  assert_contains "$out" "unconfirmed: mate unowned_current:live-row" \
+    "completion uncertainty was not preserved: $out"
+  first_corr=$(head -1 "$home/send.log")
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$runtime" \
+    FM_STATE_OVERRIDE="$home/state" FM_RECONCILE_FAKE_SEND_LOG="$home/send.log" \
+    "$runtime/bin/fm-secondmate-reconcile.sh" notify --snapshot "$retry" >/dev/null \
+    || fail "the correlation-preserving retry failed"
+  second_corr=$(tail -1 "$home/send.log")
+  [ "$first_corr" = "$second_corr" ] \
+    || fail "the retry changed correlation from $first_corr to $second_corr"
+  [ "$(find "$home/state/fake-remote-deliveries" -type f | wc -l | tr -d '[:space:]')" -eq 1 ] \
+    || fail "the completion-unknown retry created a second logical delivery"
+  pass "completion-unknown remote sends reuse their delivery identity"
+}
+
+test_an_older_snapshot_cannot_restore_a_cleared_episode() {
+  local home mate fakebin first cleared stale recurrence out
+  { read -r home; read -r mate; read -r fakebin; } < <(make_main_home stale mate)
+  first="$home/first.json"
+  cleared="$home/cleared.json"
+  stale="$home/stale.json"
+  recurrence="$home/recurrence.json"
+  write_snapshot "$first" mate '{"kind":"orphan_in_flight","ids":["ghost"]}' captain_decision 2026-08-26T00:00:01Z
+  write_snapshot "$cleared" mate null no_active_work 2026-08-26T00:00:03Z
+  write_snapshot "$stale" mate '{"kind":"orphan_in_flight","ids":["ghost"]}' captain_decision 2026-08-26T00:00:02Z
+  write_snapshot "$recurrence" mate '{"kind":"orphan_in_flight","ids":["ghost"]}' captain_decision 2026-08-26T00:00:04Z
+
+  run_notify "$home" "$fakebin" stale "$first" >/dev/null || fail "the first episode failed"
+  run_notify "$home" "$fakebin" stale "$cleared" >/dev/null || fail "the clear observation failed"
+  out=$(run_notify "$home" "$fakebin" stale "$stale") || fail "the stale observation failed: $out"
+  assert_contains "$out" "stale: mate 2026-08-26T00:00:02Z" \
+    "an older observation was not rejected: $out"
+  [ "$(inbox_records "$home/state" mate)" -eq 1 ] \
+    || fail "an older snapshot sent a stale reconcile instruction"
+  run_notify "$home" "$fakebin" stale "$recurrence" >/dev/null \
+    || fail "the later recurrence failed"
+  [ "$(inbox_records "$home/state" mate)" -eq 2 ] \
+    || fail "a stale snapshot prevented a later recurrence from being asked"
+  pass "older snapshots cannot restore cleared reconcile episodes"
+}
+
 test_the_ids_order_does_not_split_one_episode_in_two() {
   local home mate fakebin snap
   { read -r home; read -r mate; read -r fakebin; } < <(make_main_home order mate)
@@ -231,6 +312,8 @@ test_a_failed_send_is_retried_on_the_next_run() {
 test_an_inventory_mismatch_asks_the_mate_once_and_only_once
 test_concurrent_recaps_send_one_instruction
 test_a_completed_send_survives_a_missing_episode_commit
+test_an_unconfirmed_remote_send_reuses_its_delivery_identity
+test_an_older_snapshot_cannot_restore_a_cleared_episode
 test_the_ids_order_does_not_split_one_episode_in_two
 test_a_changed_or_cleared_mismatch_is_a_new_episode
 test_a_readable_home_without_a_mismatch_is_never_asked

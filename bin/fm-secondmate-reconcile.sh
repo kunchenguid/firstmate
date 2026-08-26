@@ -32,13 +32,16 @@
 #     and a send failure is reported, never fatal to the caller's own work.
 #
 # Exit status: 0 when every due home was either notified, deduped, or cleared;
-# 1 when at least one due send failed (the episode is NOT recorded for a failed
-# send, so the next run retries it).
+# 1 when at least one due send failed or remained completion-unknown.
+# A known-undelivered send records no episode, while an unknown completion keeps
+# its correlation so the next fresh snapshot retries the same logical delivery.
 #
 # Output, one line per home considered:
 #   sent: <mate-id> <episode>       one reconcile instruction was recorded
 #   dedupe: <mate-id> <episode>     same episode already notified; nothing sent
 #   cleared: <mate-id>              the mismatch is gone; the record was dropped
+#   unconfirmed: <mate-id> <episode> transport completion is unknown
+#   stale: <mate-id> <generation>   an older observation was ignored
 #   failed: <mate-id> <episode>     the steer could not be recorded
 set -u
 
@@ -48,6 +51,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-pending-reply-lib.sh
+. "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 ACTIVE_LOCK=
 release_active_lock() {
@@ -74,6 +79,20 @@ fail() { echo "fm-secondmate-reconcile: $*" >&2; exit 2; }
 
 episode_path() {  # <mate-id>
   printf '%s/%s.reconcile-episode\n' "$STATE" "$1"
+}
+
+observation_path() {  # <mate-id>
+  printf '%s/%s.reconcile-observed\n' "$STATE" "$1"
+}
+
+write_observation() {  # <mate-id> <generation>
+  local path
+  path=$(observation_path "$1")
+  (umask 077; printf '%s\n' "$2" > "$path.tmp") && mv -f -- "$path.tmp" "$path"
+}
+
+observation_is_stale() {  # <generation> <latest-generation>
+  [ -n "$2" ] && [[ "$1" < "$2" ]]
 }
 
 cmd_episode() {
@@ -143,11 +162,14 @@ cmd_notify() {
     [ -f "$snapshot_src" ] || fail "snapshot does not exist: $snapshot_src"
     snapshot=$(cat "$snapshot_src")
   fi
-  printf '%s' "$snapshot" | jq -e '.schema == "fm-fleet-snapshot.v1" or .schema == "fm-bearings.v1"' >/dev/null 2>&1 \
-    || fail "input is not an fm-fleet-snapshot.v1 or fm-bearings.v1 document"
+  printf '%s' "$snapshot" | jq -e '
+    (.schema == "fm-fleet-snapshot.v1" or .schema == "fm-bearings.v1")
+    and (.generated | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+  ' >/dev/null 2>&1 || fail "input is not a generated fm-fleet-snapshot.v1 or fm-bearings.v1 document"
 
   rows=$(printf '%s' "$snapshot" | jq -r '
-    (if .schema == "fm-bearings.v1" then
+    .generated as $generation
+    | (if .schema == "fm-bearings.v1" then
        (.secondmate_reconcile // [])[]
        | {id, kind:(.kind // ""), ids:(.ids // [])}
      else
@@ -160,34 +182,57 @@ cmd_notify() {
     | (if ["orphan_in_flight","unowned_current","terminal_in_flight"] | index($kind)
        then (.ids | map(select(type == "string")) | sort | join(","))
        else "" end) as $ids
-    | [.id, (if $ids == "" then "" else $kind end), $ids] | @tsv')
+    | [.id, (if $ids == "" then "" else $kind end), $ids, $generation] | join("\u001f")')
 
-  local id kind ids episode path prior corr pending_reply lock pending_tag pending_episode pending_corr
-  while IFS=$'\t' read -r id kind ids; do
+  local id kind ids generation episode path observed_path observed prior corr pending_reply lock
+  local pending_tag pending_episode pending_corr pending_generation phase
+  while IFS=$'\x1f' read -r id kind ids generation; do
     [ -n "${id:-}" ] || continue
     path=$(episode_path "$id")
+    observed_path=$(observation_path "$id")
     lock="$STATE/.$id.reconcile.lock"
     fm_lock_acquire_wait "$lock" || { printf 'failed: %s lock\n' "$id"; rc=1; continue; }
     ACTIVE_LOCK=$lock
+    observed=
+    if [ -f "$observed_path" ] && [ ! -L "$observed_path" ]; then observed=$(cat "$observed_path" 2>/dev/null || true); fi
+    prior=
+    if [ -f "$path" ] && [ ! -L "$path" ]; then prior=$(cat "$path" 2>/dev/null || true); fi
+    pending_tag=
+    pending_episode=
+    pending_corr=
+    pending_generation=
+    IFS=$'\t' read -r pending_tag pending_episode pending_corr pending_generation <<EOF_PENDING
+$prior
+EOF_PENDING
+    if observation_is_stale "$generation" "$observed" \
+      || { [ "$pending_tag" = pending ] && [ -n "$pending_generation" ] \
+        && [[ "$generation" < "$pending_generation" ]]; }; then
+      printf 'stale: %s %s\n' "$id" "$generation"
+      release_active_lock
+      continue
+    fi
     if [ -z "$kind" ]; then
-      if [ -f "$path" ] && [ ! -L "$path" ]; then
+      if ! write_observation "$id" "$generation"; then
+        printf 'failed: %s observation\n' "$id"
+        rc=1
+      elif [ -f "$path" ] && [ ! -L "$path" ]; then
         rm -f -- "$path" && printf 'cleared: %s\n' "$id"
       fi
       release_active_lock
       continue
     fi
     episode="$kind:$ids"
-    prior=
-    if [ -f "$path" ] && [ ! -L "$path" ]; then prior=$(cat "$path" 2>/dev/null || true); fi
     if [ "$prior" = "$episode" ]; then
-      printf 'dedupe: %s %s\n' "$id" "$episode"
+      if write_observation "$id" "$generation"; then
+        printf 'dedupe: %s %s\n' "$id" "$episode"
+      else
+        printf 'failed: %s observation\n' "$id"
+        rc=1
+      fi
       release_active_lock
       continue
     fi
     corr=
-    IFS=$'\t' read -r pending_tag pending_episode pending_corr <<EOF_PENDING
-$prior
-EOF_PENDING
     if [ "$pending_tag" = pending ] && [ "$pending_episode" = "$episode" ] \
       && printf '%s' "$pending_corr" | grep -Eq '^[a-f0-9]{16}$'; then
       corr=$pending_corr
@@ -199,7 +244,7 @@ EOF_PENDING
         continue
       }
     fi
-    if ! (umask 077; printf 'pending\t%s\t%s\n' "$episode" "$corr" > "$path.tmp") \
+    if ! (umask 077; printf 'pending\t%s\t%s\t%s\n' "$episode" "$corr" "$generation" > "$path.tmp") \
       || ! mv -f -- "$path.tmp" "$path"; then
       rm -f -- "$path.tmp"
       printf 'failed: %s %s\n' "$id" "$episode"
@@ -211,21 +256,46 @@ EOF_PENDING
     if [ -f "$pending_reply" ] && [ ! -L "$pending_reply" ]; then
       if ! FM_SEND_IDEMPOTENT=1 FM_PENDING_REPLY_EXISTING_CORR="$corr" \
         "$SCRIPT_DIR/fm-send.sh" "$id" "$(reconcile_text "$kind" "$ids")" >/dev/null 2>&1; then
-        rm -f -- "$path"
-        printf 'failed: %s %s\n' "$id" "$episode"
+        phase=$(fm_pending_reply_get "$pending_reply" phase)
+        if [ "$phase" = delivery_unknown ]; then
+          write_observation "$id" "$generation" || rc=1
+          printf 'unconfirmed: %s %s\n' "$id" "$episode"
+        else
+          if write_observation "$id" "$generation"; then
+            fm_pending_reply_discard_undelivered "$STATE" "$corr" || true
+            rm -f -- "$path"
+          else
+            rc=1
+          fi
+          printf 'failed: %s %s\n' "$id" "$episode"
+        fi
         rc=1
         release_active_lock
         continue
       fi
     elif ! FM_SEND_IDEMPOTENT=1 FM_PENDING_REPLY_CORR_ID="$corr" \
       "$SCRIPT_DIR/fm-send.sh" "$id" "$(reconcile_text "$kind" "$ids")" >/dev/null 2>&1; then
-      rm -f -- "$path"
-      printf 'failed: %s %s\n' "$id" "$episode"
+      phase=$(fm_pending_reply_get "$pending_reply" phase)
+      if [ "$phase" = delivery_unknown ]; then
+        write_observation "$id" "$generation" || rc=1
+        printf 'unconfirmed: %s %s\n' "$id" "$episode"
+      else
+        if write_observation "$id" "$generation"; then
+          fm_pending_reply_discard_undelivered "$STATE" "$corr" || true
+          rm -f -- "$path"
+        else
+          rc=1
+        fi
+        printf 'failed: %s %s\n' "$id" "$episode"
+      fi
       rc=1
       release_active_lock
       continue
     fi
-    if (umask 077; printf '%s\n' "$episode" > "$path.tmp") && mv -f -- "$path.tmp" "$path"; then
+    if ! write_observation "$id" "$generation"; then
+      printf 'sent-unrecorded: %s %s\n' "$id" "$episode"
+      rc=1
+    elif (umask 077; printf '%s\n' "$episode" > "$path.tmp") && mv -f -- "$path.tmp" "$path"; then
       printf 'sent: %s %s\n' "$id" "$episode"
     else
       rm -f -- "$path.tmp"
