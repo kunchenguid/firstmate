@@ -193,6 +193,10 @@ First launch in a fresh worktree, or first ever on a machine, may show a trust o
 After every spawn, peek the pane within about 20 seconds.
 If such a dialog is showing, accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
 
+Crewmate and secondmate panes are created by a long-lived backend daemon that does not inherit firstmate's own environment, so every claude launch forwards firstmate's `CLAUDE_CONFIG_DIR` and `ANTHROPIC_BASE_URL` when they are set (`bin/fm-spawn.sh`).
+Forwarding `CLAUDE_CONFIG_DIR` keeps the worker on the same credential and config store firstmate is authenticated with, and forwarding `ANTHROPIC_BASE_URL` keeps it routed through the same local proxy in front of the model API, for example one the captain uses for cost tracking.
+An unset value is the default (single store, direct API) and adds no prefix, and neither variable is forwarded onto a non-claude harness.
+
 Claude renders a predicted-next-prompt suggestion as dim/faint text inside an otherwise-empty composer after a turn completes.
 A plain `tmux capture-pane` cannot tell that ghost text apart from typed text.
 Firstmate launches every claude crewmate and secondmate with `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`, scoped to firstmate-launched agents through `bin/fm-spawn.sh`, so it never touches the captain's global config.
