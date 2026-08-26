@@ -75,6 +75,198 @@ test_large_snapshot_assembly_does_not_use_argv() {
   pass "large snapshot assembly transports JSON without argv limits"
 }
 
+test_large_backlog_end_to_end_snapshot() {
+  local home arg_max payload_bytes backlog
+  home="$TMP_ROOT/large-backlog"
+  mkdir -p "$home"/{config,data,projects,state}
+  arg_max=$(getconf ARG_MAX 2>/dev/null || printf '1048576')
+  payload_bytes=$((arg_max + 262144))
+  backlog="$home/data/backlog.md"
+  {
+    printf '%s\n- [ ] oversized - ' '## Queued'
+    dd if=/dev/zero bs=1 count="$payload_bytes" 2>/dev/null | tr '\0' x
+    printf '%s\n\n## Done\n' ' (repo: firstmate) (kind: ship)'
+  } > "$backlog"
+
+  FM_HOME="$home" "$SNAPSHOT" --local-json > "$home/snapshot.json" \
+    || fail "end-to-end snapshot should survive a backlog payload above ARG_MAX"
+  jq -e '
+    .schema == "fm-fleet-snapshot.v1"
+      and .backlog.present == true
+      and (.backlog.records | length) == 1
+      and .backlog.records[0].id == "oversized"
+  ' "$home/snapshot.json" >/dev/null \
+    || fail "large backlog snapshot did not emit the expected valid JSON"
+  pass "large backlog is transported through the complete local snapshot pipeline"
+}
+
+test_large_status_event_end_to_end_snapshot() {
+  local home arg_max payload_bytes status
+  home="$TMP_ROOT/large-status-event"
+  mkdir -p "$home"/{config,data,projects,state}
+  fm_write_meta "$home/state/oversized.meta" \
+    "project=firstmate" \
+    "kind=ship" \
+    "mode=ship" \
+    "yolo=off"
+  arg_max=$(getconf ARG_MAX 2>/dev/null || printf '1048576')
+  payload_bytes=$((arg_max + 262144))
+  status="$home/state/oversized.status"
+  {
+    printf 'working: '
+    dd if=/dev/zero bs=1 count="$payload_bytes" 2>/dev/null | tr '\0' x
+    printf '\n'
+  } > "$status"
+
+  FM_HOME="$home" "$SNAPSHOT" --local-json > "$home/snapshot.json" \
+    || fail "end-to-end snapshot should survive a status event above ARG_MAX"
+  jq -e --argjson expected "$payload_bytes" '
+    .schema == "fm-fleet-snapshot.v1"
+      and (.tasks | length) == 1
+      and .tasks[0].id == "oversized"
+      and (.tasks[0].paths.status_log.last_event.raw | length) == ($expected + 9)
+      and .tasks[0].hints.last_event_text == .tasks[0].paths.status_log.last_event.raw
+  ' "$home/snapshot.json" >/dev/null \
+    || fail "large status event snapshot did not preserve the expected JSON meaning"
+  pass "large status event is transported through the complete local snapshot pipeline"
+}
+
+test_large_metadata_end_to_end_snapshot() {
+  local home arg_max payload_bytes meta
+  home="$TMP_ROOT/large-metadata"
+  mkdir -p "$home"/{config,data,projects,state}
+  arg_max=$(getconf ARG_MAX 2>/dev/null || printf '1048576')
+  payload_bytes=$((arg_max + 262144))
+  meta="$home/state/oversized.meta"
+  {
+    printf 'project='
+    dd if=/dev/zero bs=1 count="$payload_bytes" 2>/dev/null | tr '\0' x
+    printf '\nkind=ship\nmode=ship\nyolo=off\n'
+  } > "$meta"
+
+  FM_HOME="$home" "$SNAPSHOT" --local-json > "$home/snapshot.json" \
+    || fail "end-to-end snapshot should survive metadata above ARG_MAX"
+  jq -e --argjson expected "$payload_bytes" '
+    .schema == "fm-fleet-snapshot.v1"
+      and (.tasks | length) == 1
+      and .tasks[0].id == "oversized"
+      and (.tasks[0].project | length) == $expected
+  ' "$home/snapshot.json" >/dev/null \
+    || fail "large metadata snapshot did not preserve the expected JSON meaning"
+  pass "large metadata is transported through the complete local snapshot pipeline"
+}
+
+test_large_remote_secondmate_metadata_degrades_cleanly() {
+  local home fakebin arg_max payload_bytes meta
+  home="$TMP_ROOT/large-remote-secondmate-metadata"
+  fakebin="$home/fakebin"
+  mkdir -p "$home"/{config,data,projects,state} "$fakebin"
+  arg_max=$(getconf ARG_MAX 2>/dev/null || printf '1048576')
+  payload_bytes=$((arg_max + 262144))
+  meta="$home/state/oversized.meta"
+  {
+    printf 'kind=secondmate\nmode=secondmate\nyolo=off\nremote_host=unavailable.example\nremote_root=/tmp\nhome=/'
+    dd if=/dev/zero bs=1 count="$payload_bytes" 2>/dev/null | tr '\0' x
+    printf '\n'
+  } > "$meta"
+  {
+    printf '%s' '- oversized - remote route (host: unavailable.example; root: /tmp; home: /'
+    dd if=/dev/zero bs=1 count="$payload_bytes" 2>/dev/null | tr '\0' x
+    printf '; scope: testing; projects: firstmate; added 2026-08-26)\n'
+  } > "$home/data/secondmates.md"
+  printf 'working: remote route unavailable\n' > "$home/state/oversized.status"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/ssh"
+  chmod +x "$fakebin/ssh"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_REGISTRY_BYTES=$((payload_bytes + 4096)) \
+    "$SNAPSHOT" --json > "$home/snapshot.json" \
+    || fail "snapshot should degrade an unavailable secondmate with metadata above ARG_MAX"
+  jq -e --argjson expected "$payload_bytes" '
+    .schema == "fm-fleet-snapshot.v1"
+      and (.secondmate_current.records | length) == 1
+      and .secondmate_current.records[0].id == "oversized"
+      and (.secondmate_current.records[0].home | length) == ($expected + 1)
+      and .secondmate_current.records[0].remote == true
+      and .secondmate_current.records[0].current.state == "unknown"
+      and .secondmate_current.records[0].provenance.selected == "parent-event-fallback"
+  ' "$home/snapshot.json" >/dev/null \
+    || fail "large remote secondmate metadata did not preserve degraded snapshot semantics"
+  pass "large remote secondmate metadata preserves degraded snapshot output"
+}
+
+test_status_event_staging_failure_fails_snapshot() {
+  local home fakebin err rc real_mktemp
+  home="$TMP_ROOT/status-staging-failure/home"
+  fakebin="$TMP_ROOT/status-staging-failure/fakebin"
+  err="$TMP_ROOT/status-staging-failure/stderr"
+  real_mktemp=$(command -v mktemp)
+  mkdir -p "$home"/{config,data,projects,state} "$fakebin"
+  fm_write_meta "$home/state/task.meta" \
+    "project=firstmate" \
+    "kind=ship" \
+    "mode=ship" \
+    "yolo=off"
+  printf 'working: still running\n' > "$home/state/task.status"
+  sed "s|@REAL_MKTEMP@|$real_mktemp|" > "$fakebin/mktemp" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *fm-fleet-snapshot.status-event.*) exit 73 ;;
+esac
+exec "@REAL_MKTEMP@" "$@"
+EOF
+  chmod +x "$fakebin/mktemp"
+
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --local-json >/dev/null 2> "$err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "status staging failure should fail the snapshot"
+  assert_contains "$(cat "$err")" "fm-fleet-snapshot: task snapshot failed" \
+    "status staging failure should propagate through task assembly"
+  pass "status event staging failures fail the snapshot"
+}
+
+test_reconciliation_staging_failure_fails_snapshot() {
+  local home secondmate fakebin err rc real_mktemp
+  home="$TMP_ROOT/reconciliation-staging-failure/home"
+  secondmate="$TMP_ROOT/reconciliation-staging-failure/secondmate"
+  fakebin="$TMP_ROOT/reconciliation-staging-failure/fakebin"
+  err="$TMP_ROOT/reconciliation-staging-failure/stderr"
+  real_mktemp=$(command -v mktemp)
+  mkdir -p "$home"/{config,data,projects,state} \
+    "$secondmate"/{bin,config,data,projects,state} "$fakebin"
+  printf 'mate\n' > "$secondmate/.fm-secondmate-home"
+  : > "$secondmate/AGENTS.md"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$secondmate/data/backlog.md"
+  printf '%s\n' \
+    "- mate - delegated work (home: $secondmate; scope: testing; projects: firstmate; added 2026-08-26)" \
+    > "$home/data/secondmates.md"
+  fm_write_secondmate_meta "$home/state/mate.meta" "$secondmate"
+  printf 'working: delegated work\n' > "$home/state/mate.status"
+  FM_HOME="$home" "$SNAPSHOT" --json > "$home/baseline.json" \
+    || fail "reconciliation failure fixture should produce a baseline snapshot"
+  jq -e '.secondmate_current.records[0].provenance.selected == "structured-home"' \
+    "$home/baseline.json" >/dev/null \
+    || fail "reconciliation failure fixture should reach structured secondmate aggregation"
+  sed "s|@REAL_MKTEMP@|$real_mktemp|" > "$fakebin/mktemp" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *fm-fleet-snapshot.reconciliation.*) exit 73 ;;
+esac
+exec "@REAL_MKTEMP@" "$@"
+EOF
+  chmod +x "$fakebin/mktemp"
+
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json >/dev/null 2> "$err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "reconciliation staging failure should fail the snapshot"
+  assert_contains "$(cat "$err")" "fm-fleet-snapshot: registered secondmate aggregation failed" \
+    "reconciliation staging failure should propagate through secondmate aggregation"
+  pass "reconciliation staging failures fail the snapshot"
+}
+
 test_snapshot_assembly_preserves_jq_failure() {
   local home fakebin staging rc
   home="$TMP_ROOT/jq-failure/home"
@@ -83,11 +275,13 @@ test_snapshot_assembly_preserves_jq_failure() {
   mkdir -p "$home"/{config,data,projects,state} "$fakebin" "$staging"
   sed "s|@REAL_JQ@|$REAL_JQ|" > "$fakebin/jq" <<'EOF'
 #!/usr/bin/env bash
+slurpfiles=0
 for arg in "$@"; do
   if [ "$arg" = --slurpfile ]; then
-    exit 42
+    slurpfiles=$((slurpfiles + 1))
   fi
 done
+[ "$slurpfiles" -lt 6 ] || exit 42
 exec "@REAL_JQ@" "$@"
 EOF
   chmod +x "$fakebin/jq"
@@ -107,4 +301,10 @@ EOF
 test_empty_local_snapshot_contract
 test_invalid_mode_fails_closed
 test_large_snapshot_assembly_does_not_use_argv
+test_large_backlog_end_to_end_snapshot
+test_large_status_event_end_to_end_snapshot
+test_large_metadata_end_to_end_snapshot
+test_large_remote_secondmate_metadata_degrades_cleanly
+test_status_event_staging_failure_fails_snapshot
+test_reconciliation_staging_failure_fails_snapshot
 test_snapshot_assembly_preserves_jq_failure
