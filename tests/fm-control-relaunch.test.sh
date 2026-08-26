@@ -168,6 +168,7 @@ run_control() {  # <case-dir> <args...>
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
     FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_COMPLETE_JOURNAL_MV_FAIL="${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" \
     FM_FAKE_META_PUBLISH_MV_FAIL="${FM_FAKE_META_PUBLISH_MV_FAIL:-}" \
+    FM_FAKE_POST_PUBLISH_SIGNAL="${FM_FAKE_POST_PUBLISH_SIGNAL:-}" \
     FM_FAKE_TRACE_PREPARE="${FM_FAKE_TRACE_PREPARE:-}" \
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
@@ -228,7 +229,17 @@ if [ -n "${FM_FAKE_META_WRITER_TARGET:-}" ] \
   : > "$FM_FAKE_META_WRITER_READY"
   while [ ! -e "$FM_FAKE_META_WRITER_RELEASE" ]; do /bin/sleep 0.01; done
 fi
-exec "$FM_REAL_MV" "$@"
+"$FM_REAL_MV" "$@"
+rc=$?
+if [ "$rc" = 0 ] && [ -n "${FM_FAKE_POST_PUBLISH_SIGNAL:-}" ]; then
+  for path in "$@"; do
+    if [ "$path" = "$FM_FAKE_POST_PUBLISH_SIGNAL" ]; then
+      kill -TERM "$PPID"
+      break
+    fi
+  done
+fi
+exit "$rc"
 SH
   chmod +x "$1/fakebin/mv"
 }
@@ -387,6 +398,7 @@ run_herdr_control() {  # <case-dir> <args...>
     FM_FAKE_OLD_LIVE="${FM_FAKE_OLD_LIVE:-}" FM_FAKE_OLD_DEAD="${FM_FAKE_OLD_DEAD:-}" \
     FM_FAKE_OLD_AMBIG="${FM_FAKE_OLD_AMBIG:-}" FM_FAKE_SEPARATE_LIVE="${FM_FAKE_SEPARATE_LIVE:-}" \
     FM_FAKE_CREATE_FAIL="${FM_FAKE_CREATE_FAIL:-}" FM_FAKE_LAUNCH_FAIL="${FM_FAKE_LAUNCH_FAIL:-}" \
+    FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_POST_PUBLISH_SIGNAL="${FM_FAKE_POST_PUBLISH_SIGNAL:-}" \
     FM_SPAWN_NO_GUARD=1 FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 \
     FM_CONTROL_LAUNCH_WAIT=0.05 FM_CONTROL_RECOVER_MISSING_LAUNCH_WAIT=0.05 \
     "$CONTROL" "$@" 2>&1
@@ -1511,12 +1523,23 @@ test_missing_herdr_recovery_reuses_dirty_copy_and_publishes_a_fresh_endpoint() {
 }
 
 test_missing_herdr_recovery_preserves_claude_worktree_settings() {
-  local dir out rc settings
+  local dir out rc settings state
   unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
   dir=$(new_herdr_case preserve-settings mr12)
   settings="$dir/wt/.claude/settings.local.json"
+  state="$dir/home/state"
   mkdir -p "${settings%/*}"
-  printf '%s\n' '{"permissions":{"allow":["Read"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch user-stop"}]}]}}' > "$settings"
+  jq -n --arg old "'$ROOT/bin/fm-busy-event.sh' apply '$state' 'mr12' idle --gen old --source claude-hook --event stop" '
+    {
+      permissions: {allow: ["Read"]},
+      hooks: {
+        Stop: [{hooks: [
+          {type: "command", command: $old},
+          {type: "command", command: "touch user-stop"}
+        ]}]
+      }
+    }
+  ' > "$settings"
 
   out=$(run_herdr_control "$dir" mr12 recover-missing --captain-authorized --note 'preserve local Claude configuration'); rc=$?
   expect_code 0 "$rc" "recovery with project Claude settings should succeed"$'\n'"$out"
@@ -1524,9 +1547,40 @@ test_missing_herdr_recovery_preserves_claude_worktree_settings() {
     || fail "recovery must preserve project-owned Claude settings"
   jq -e '[.hooks.Stop[].hooks[].command] | any(. == "touch user-stop")' "$settings" >/dev/null \
     || fail "recovery must preserve project-owned Claude hooks"
+  [ "$(jq '[.hooks.Stop[].hooks[].command | select(. == "touch user-stop")] | length' "$settings")" = 1 ] \
+    || fail "recovery must retain a user hook sharing a matcher with retired Firstmate wiring"
   jq -e '[.hooks.Stop[].hooks[].command] | any(contains("fm-busy-event.sh"))' "$settings" >/dev/null \
     || fail "recovery must add replacement lifecycle wiring without overwriting project hooks"
+  [ "$(jq '[.hooks.Stop[].hooks[].command | select(contains("fm-busy-event.sh"))] | length' "$settings")" = 1 ] \
+    || fail "recovery must replace retired Firstmate commands without duplicating them"
   pass "missing Herdr recovery: Claude worktree settings are merged, not overwritten"
+}
+
+test_missing_herdr_recovery_keeps_published_replacement_on_interrupt() {
+  local dir out rc meta settings
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case publish-interrupt mr14)
+  meta="$dir/home/state/mr14.meta"
+  settings="$dir/wt/.claude/settings.local.json"
+  mkdir -p "${settings%/*}"
+  printf '%s\n' '{"permissions":{"allow":["Read"]}}' > "$settings"
+  make_mv_failure_stub "$dir"
+
+  FM_REAL_MV=$(command -v mv) FM_FAKE_POST_PUBLISH_SIGNAL="$meta" \
+    out=$(run_herdr_control "$dir" mr14 recover-missing --captain-authorized --note 'interrupt after publication'); rc=$?
+  expect_code 1 "$rc" "an interruption at the publication boundary should stop the control command"$'\n'"$out"
+  [ "$(meta_field "$dir" mr14 window)" = 'lab:w1:p3' ] \
+    || fail "published metadata must keep the replacement endpoint"
+  [ "$(meta_field "$dir" mr14 control_recover_missing_tx)" != "" ] \
+    || fail "published metadata must retain the recovery transaction"
+  [ -f "$dir/fake/agent" ] || fail "post-publication cleanup must not kill the replacement agent"
+  assert_no_grep 'pane close lab:w1:p3' "$dir/fake/herdr.log" \
+    "post-publication cleanup must not close the replacement pane"
+  jq -e '.permissions.allow == ["Read"]' "$settings" >/dev/null \
+    || fail "post-publication cleanup must keep merged project settings"
+  jq -e '[.hooks.Stop[].hooks[].command] | any(contains("fm-busy-event.sh"))' "$settings" >/dev/null \
+    || fail "post-publication cleanup must keep replacement lifecycle wiring"
+  pass "missing Herdr recovery: publication is the irreversible cleanup boundary"
 }
 
 test_missing_herdr_recovery_preserves_opencode_worktree_plugin() {
@@ -1750,6 +1804,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_missing_herdr_recovery_requires_captain_authorization
 test_missing_herdr_recovery_reuses_dirty_copy_and_publishes_a_fresh_endpoint
 test_missing_herdr_recovery_preserves_claude_worktree_settings
+test_missing_herdr_recovery_keeps_published_replacement_on_interrupt
 test_missing_herdr_recovery_preserves_opencode_worktree_plugin
 test_missing_herdr_recovery_refuses_unrelated_live_copy_ownership
 test_missing_herdr_recovery_retains_evidence_when_endpoint_allocation_fails

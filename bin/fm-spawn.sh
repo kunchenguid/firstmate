@@ -794,6 +794,19 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$RECOVER_MISSING" = 1 ] \
+     && [ -n "$RECOVERY_ATTEMPT_TX" ] \
+     && [ "$(grep -Fxc "control_recover_missing_tx=$RECOVERY_ATTEMPT_TX" "$STATE/$ID.meta" 2>/dev/null || true)" = 1 ]; then
+    RECOVERY_REPLACEMENT_PENDING=0
+    RELAUNCH_REPLACEMENT_PENDING=0
+    SPAWN_META_PUBLISH_STARTED=0
+    SPAWN_META_TMP=
+    if [ "$RECOVERY_WIRING_PENDING" = 1 ] \
+       && ! recovery_commit_worktree_wiring; then
+      RECOVERY_WIRING_PENDING=0
+      echo "warning: published recovery wiring evidence could not be retired for $ID" >&2
+    fi
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -995,8 +1008,8 @@ recovery_restore_worktree_wiring() {
 
 recovery_commit_worktree_wiring() {
   [ "$RECOVERY_WIRING_PENDING" = 1 ] || return 0
-  rm -rf -- "$RECOVERY_WIRING_BACKUP_DIR" || return 1
   RECOVERY_WIRING_PENDING=0
+  rm -rf -- "$RECOVERY_WIRING_BACKUP_DIR" || return 1
   RECOVERY_WIRING_BACKUP_DIR=
 }
 
@@ -2701,12 +2714,21 @@ EOF
         claude_merged="$STATE_REAL/.$ID.claude-settings-merged.${BASHPID:-$$}"
         if ! jq -s --arg needle "$FM_ROOT/bin/fm-busy-event.sh" \
             --arg state "$STATE_REAL" --arg id "$ID" '
-          def firstmate_hook:
-            any(.hooks[]?.command?;
-              type == "string"
-              and contains($needle)
-              and contains($state)
-              and contains($id));
+          def firstmate_command:
+            type == "object"
+            and ((.command? // null) | type) == "string"
+            and (.command | contains($needle))
+            and (.command | contains($state))
+            and (.command | contains($id));
+          def without_firstmate_commands:
+            if ((.hooks? // null) | type) == "array" then
+              .hooks |= map(select(firstmate_command | not))
+            else
+              .
+            end;
+          def has_hooks:
+            ((.hooks? // null) | type) != "array"
+            or (.hooks | length) > 0;
           .[0] as $base
           | .[1] as $generated
           | if (($base.hooks // {}) | type) != "object" then
@@ -2714,7 +2736,9 @@ EOF
             else
               reduce ($generated.hooks | keys[]) as $event ($base;
                 .hooks[$event] =
-                  (((.hooks[$event] // []) | map(select(firstmate_hook | not)))
+                  (((.hooks[$event] // [])
+                    | map(without_firstmate_commands)
+                    | map(select(has_hooks)))
                    + $generated.hooks[$event]))
             end
         ' "$RECOVERY_WIRING_BACKUP_DIR/original" "$claude_generated" \
