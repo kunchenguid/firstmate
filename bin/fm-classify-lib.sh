@@ -85,10 +85,11 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # unattended - idle, or busy in a polling or watch loop - so the wedge path
 # absorbs it instead of escalating (status_pause_damps_wedge below). It is
 # deliberately NOT in the captain-relevant set above: a pause is a "stop
-# wedge-nagging this idle pane" signal, not work to keep surfacing. This constant
-# is the ONE definition of the verb; both the watcher and the daemon read it here
-# (status_is_paused) rather than hardcoding the literal, so the vocabulary cannot
-# drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
+# wedge-nagging this unattended pane" signal, not work to keep surfacing. This
+# constant is the ONE definition of the verb; both the watcher and the daemon
+# read it here (status_is_paused) rather than hardcoding the literal, so the
+# vocabulary cannot drift between the two consumers. FM_CLASSIFY_PAUSED_VERB
+# overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
 # Bounded re-surface cadence for a declared pause or a verified captain hold.

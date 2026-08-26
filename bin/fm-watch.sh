@@ -9,7 +9,7 @@
 # since the previous poll. Every other no-verb wake surfaces, so a crew
 # that finishes (or stops and waits) is never silently swallowed. A declared wait,
 # either a paused: external wait or a verified captain-held transfer, is the
-# separate idle absorb case and re-surfaces only on its long bounded cadence,
+# separate absorb case and re-surfaces only on its long bounded cadence,
 # although its initial no-verb status signal still surfaces in normal mode.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
@@ -45,10 +45,10 @@
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
 #                          (state/<id>.turn-ended, or the spawn record before any
-#                          turn completes). Past that bound, a declared external
-#                          wait or verified captain-held transfer uses the long
-#                          pause recheck cadence (under afk it is instead handed
-#                          to the daemon as this plain reason, once per
+#                          turn completes). Past that bound, a current declared
+#                          external wait or verified captain-held transfer uses
+#                          the long pause recheck cadence (under afk it is instead
+#                          handed to the daemon as this plain reason, once per
 #                          declaration; busy_turn_bound_check owns that handoff);
 #                          every other pane goes through the same wedge timer and
 #                          surfaces with the identical "stale: ..." reason,
@@ -217,15 +217,19 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # A local secondmate's foreign queue is checked on every poll, but only after this
 # bounded age can it produce a parent notification.
 SECONDMATE_WAKE_STALL_SECS=${FM_SECONDMATE_WAKE_STALL_SECS:-60}
-# A crew that declared a pause is idling on a known external wait, so its stale
-# pane is absorbed rather than wedge-escalated.
-# A captain-held or paused crew whose agent has confidently exited uses the same
-# bounded cadence, while a live or ambiguously read agent surfaces on first sight
-# and is then held to that same cadence; a secondmate earns the cadence on its
-# declaration alone, because its endpoint liveness is deliberately never read
-# (pause_state_class owns that split).
+# A crew whose latest status declares a pause is waiting on a known external
+# dependency, idle or busy in its own poll loop, so it takes this bounded cadence
+# on that declaration alone rather than a wedge escalation; a newer non-pause
+# status restores ordinary wedge detection.
+# A captain-held crew earns the same cadence on the stale path only once its
+# agent has confidently exited, while a live or ambiguously read agent surfaces
+# on first sight and is then held to that same cadence; a secondmate's hold earns
+# it on the declaration alone, because its endpoint liveness is deliberately
+# never read (pause_state_class owns that split, and busy_turn_bound_check owns
+# the busy-pane bound).
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
-# longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
+# longer than the wedge threshold, but finite so a forgotten pause or hold cannot
+# rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
 # connect/subscribe failure) before the push fast-path is disabled for the rest
