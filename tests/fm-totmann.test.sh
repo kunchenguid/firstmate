@@ -43,6 +43,7 @@ run() {
   FM_HOME="$HOME_A" FM_TOTMANN_TMUX="-L $SOCK" FM_TOTMANN_TARGET="fmtest:0" \
   FM_TOTMANN_RELAUNCH_CMD="echo REVIVED >> $TMP/revive.log" FM_TOTMANN_NOTIFY="" \
   FM_TOTMANN_DEBOUNCE=1800 FM_TOTMANN_PROC_STAT="$TMP/procstat-day" \
+  FM_TOTMANN_ERGEBNIS_SECS=0 \
   FM_TOTMANN_ANSTOSS="" "$TOTMANN" "$@"
 }
 revive_count() { [ -f "$TMP/revive.log" ] && wc -l < "$TMP/revive.log" | tr -d ' ' || echo 0; }
@@ -158,6 +159,7 @@ run_mode() { # run_mode <state-home> <procstat> -> check, boot-capable env
   FM_HOME="$1" FM_ROOT_OVERRIDE="$FAKEROOT" FM_TOTMANN_TMUX="-L $SOCK" \
   FM_TOTMANN_TARGET="fmtest:0" FM_TOTMANN_RELAUNCH_CMD="echo REVIVED-M >> $TMP/revive-mode.log" \
   FM_TOTMANN_NOTIFY="" FM_TOTMANN_DEBOUNCE=60 FM_TOTMANN_READY_SECS=10 \
+  FM_TOTMANN_ERGEBNIS_SECS=0 \
   FM_TOTMANN_PROC_STAT="$2" FM_TOTMANN_ANSTOSS="$KICKER" \
   FMSTUB_LOG="${FMSTUB_LOG:-$TMP/mode-stub.log}" \
   "$TOTMANN" check
@@ -231,6 +233,7 @@ printf 'busy\n' > "$OVER/busy"; printf 'pending\n' > "$OVER/composer"; printf 'p
 DL_OUT=$(FM_HOME="$HOME_D" FM_ROOT_OVERRIDE="$FAKEROOT" FM_TOTMANN_TMUX="-L $SOCK" \
   FM_TOTMANN_TARGET="fmtest:0" FM_TOTMANN_RELAUNCH_CMD="echo REVIVED-D >> $TMP/revive-dl.log" \
   FM_TOTMANN_NOTIFY="" FM_TOTMANN_DEBOUNCE=60 FM_TOTMANN_READY_SECS=2 \
+  FM_TOTMANN_ERGEBNIS_SECS=0 \
   FM_TOTMANN_PROC_STAT="$BOOTPS" FM_TOTMANN_ANSTOSS="$KICKER" \
   FMSTUB_LOG="$TMP/dl-stub.log" FMSTUB_DIR="$OVER" \
   "$TOTMANN" check 2>&1) && DL_RC=0 || DL_RC=$?
