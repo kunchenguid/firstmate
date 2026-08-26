@@ -383,6 +383,9 @@ esac
 for selector in OPENAI_API_KEY CODEX_API_KEY CODEX_ACCESS_TOKEN CODEX_REFRESH_TOKEN CODEX_REVOKE_TOKEN; do
   [ -z "$(printenv "$selector" 2>/dev/null)" ] || exit 63
 done
+[ "${FM_TEST_PI_FAIL_FOLLOWUP:-0}" != 1 ] \
+  || [ "${FM_CROSSCHECK_LOOKUP_ALLOWED:-0}" = 1 ] \
+  || exit 43
 [ -z "${FM_TEST_PI_EXIT:-}" ] || exit "$FM_TEST_PI_EXIT"
 mode=
 provider=
@@ -418,10 +421,10 @@ done
 [ "$mode" = json ] || exit 64
 [ "$provider" = "${FM_TEST_PI_EXPECT_PROVIDER:-openai-codex}" ] || exit 65
 [ "$model" = "${FM_TEST_PI_EXPECT_MODEL:-gpt-5.6-sol}" ] || exit 66
-[ "$thinking" = xhigh ] || exit 67
-[ "$tools" = read,bash,grep,find,ls,submit_crosscheck_verdict ] || exit 68
+[ "$thinking" = xhigh ] || [ "$thinking" = low ] || exit 67
+[ "$tools" = repo_search,repo_read,submit_evidence_file,report_finding,report_suspicion,update_finding,request_lookup,finish_review ] || exit 68
 [ -f "$extension" ] && [ -f "${FM_CROSSCHECK_REVIEW_SCHEMA:-}" ] \
-  && [ -n "$session_id" ] && [ -n "$system_prompt" ] || exit 97
+  && [ -n "$system_prompt" ] || exit 97
 [ "$context_isolated" = yes ] || {
   [ ! -f "$PWD/AGENTS.md" ] || cat "$PWD/AGENTS.md" > "$FM_TEST_CONTEXT_LOG"
   exit 69
@@ -429,13 +432,41 @@ done
 [ "$ephemeral" = yes ] && [ "$isolated" -eq 6 ] \
   && [ "${prompt#@}" != "$prompt" ] && [ -f "${prompt#@}" ] || exit 69
 cat "${prompt#@}" >> "$FM_TEST_PROMPT_LOG"
-temporary=$(mktemp "${TMPDIR:-/tmp}/fm-crosscheck-pi.XXXXXX") || exit 70
-python3 "$FM_TEST_REVIEW_DRIVER" "$PWD" "$temporary" "$FM_TEST_REVIEW_SCENARIO" "$FM_TEST_HEAD" || exit 71
-python3 - "$temporary" "${FM_TEST_PI_STOP_REASON:-toolUse}" <<'PY'
+python3 - "${FM_TEST_PI_STOP_REASON:-toolUse}" <<'PY'
+import hashlib
 import json
 import os
 import sys
-structured = json.load(open(sys.argv[1]))
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+def digest(value):
+    return "sha256:" + hashlib.sha256(canonical(value).encode()).hexdigest()
+
+active = json.loads(os.environ.get("FM_CROSSCHECK_ACTIVE_FINDING_IDS", "[]"))
+lookup = (
+    os.environ.get("FM_TEST_PI_REQUEST_LOOKUP") == "1"
+    and os.environ.get("FM_CROSSCHECK_LOOKUP_ALLOWED") == "1"
+)
+arguments = (
+    {"queries": [{"type": "search", "query": "firstmate internal behavior"}]}
+    if lookup
+    else {
+        "verdict": "BLOCKING" if active else "CLEAR",
+        "summary": "review complete",
+        "citations": [{"path": "app.txt", "line": 1}],
+    }
+)
+result = {"requested": True} if lookup else {"finalized": True}
+record = {
+    "seq": 1,
+    "name": "request_lookup" if lookup else "finish_review",
+    "arguments": arguments,
+    "result_sha256": digest(result),
+}
+with open(os.environ["FM_CROSSCHECK_TOOL_EVENT_LOG"], "w", encoding="utf-8") as handle:
+    handle.write(canonical(record) + "\n")
 print(json.dumps({"type": "session", "version": 3, "id": "test-pi-session"}))
 print(json.dumps({"type": "agent_start"}))
 print(json.dumps({"type": "turn_start"}))
@@ -448,10 +479,10 @@ print(json.dumps({
         "content": [{
             "type": "toolCall",
             "id": "crosscheck-verdict-1",
-            "name": "submit_crosscheck_verdict",
-            "arguments": structured,
+            "name": "request_lookup" if lookup else "finish_review",
+            "arguments": arguments,
         }],
-        "stopReason": sys.argv[2],
+        "stopReason": sys.argv[1],
         "usage": {
             "input": 100,
             "output": 20,
@@ -467,11 +498,13 @@ print(json.dumps({
             },
         },
     },
-    "toolResults": [{"toolName": "bash", "isError": False}],
+    "toolResults": [{
+        "toolName": "request_lookup" if lookup else "finish_review",
+        "isError": False,
+    }],
 }))
 print(json.dumps({"type": "agent_end", "messages": []}))
 PY
-rm -f "$temporary"
 SH
   chmod +x "$case_dir/fakebin/pi"
 }
@@ -497,6 +530,11 @@ case "${3:-}" in
   */pi)
     grep -qxF '(allow network*)' "$profile" || exit 79
     grep -qF "(subpath \"$FM_TEST_PI_HOME\")" "$profile" || exit 80
+    ;;
+  */python|*/python3|*/python3.*)
+    [ "${4##*/}" = fm-crosscheck-pi-reviewer.py ] || exit 81
+    grep -qxF '(allow network*)' "$profile" || exit 82
+    grep -qF "(subpath \"$FM_TEST_PI_HOME\")" "$profile" || exit 83
     ;;
   *)
     ! grep -qxF '(allow network*)' "$profile" || exit 76
@@ -571,14 +609,6 @@ base = {
     "head_sha": head,
     "executing_account_home": str(Path(account_selector).resolve()),
     "execution_home": str(Path(os.environ["HOME"]).resolve()),
-    "executed_reproduction": {
-        "test_path": ".crosscheck/reproductions/review-execution.sh",
-        "command": command,
-        "expected_exit": 0,
-        "output_contains": "CROSSCHECK-REVIEW-EXECUTED",
-        "receipt_path": ".crosscheck/reproductions/review-execution.receipt",
-        "receipt_contains": "CROSSCHECK-REVIEW-EXECUTED",
-    },
     "summary": "review complete",
     "citations": [{"path": "app.txt", "line": 1}],
     "finding_updates": [],
@@ -643,6 +673,7 @@ elif scenario in {
     "readable-state-forgery",
     "stateful-forgery",
     "support-forgery",
+    "mixed-invalid-closure",
     "symlink-forgery",
     "unclassified-runner",
     "positional-target",
@@ -682,7 +713,7 @@ elif scenario in {
 -base
 +irrelevant
 """)
-    elif scenario == "support-forgery":
+    elif scenario in {"support-forgery", "mixed-invalid-closure"}:
         patch.parent.mkdir(parents=True, exist_ok=True)
         patch.write_text("""diff --git a/tests/helper.sh b/tests/helper.sh
 --- a/tests/helper.sh
@@ -706,6 +737,7 @@ elif scenario in {
         "readable-state-forgery": "tests/readable-state.test.sh",
         "stateful-forgery": "tests/stateful.test.sh",
         "support-forgery": "tests/support.test.sh",
+        "mixed-invalid-closure": "tests/support.test.sh",
         "symlink-forgery": "tests/symlink.test.sh",
         "positional-target": "tests/vacuous.test.sh",
         "path-dependent": "tests/pathdep.test.sh",
@@ -741,6 +773,31 @@ elif scenario in {
         "mutation_proof": mutation_proof,
         "equivalent_to": None,
     }]
+    if scenario == "mixed-invalid-closure":
+        sibling = protocol / "reproductions" / "sibling.sh"
+        sibling.parent.mkdir(parents=True, exist_ok=True)
+        sibling.write_text("#!/usr/bin/env bash\necho SIBLING-REPRODUCED\nexit 9\n")
+        os.chmod(sibling, 0o755)
+        base["finding_updates"].append({
+            "id": "cc-bbbbbbbbbbbb",
+            "status": "claimed-fixed",
+            "note": "The sibling remains claimed fixed.",
+            "reproduction": None,
+            "mutation_proof": None,
+            "equivalent_to": None,
+        })
+        base["new_findings"] = [{
+            "title": "Sibling reproduced defect",
+            "severity": "blocking",
+            "description": "A sibling defect remains independently reproducible.",
+            "citations": [{"path": "app.txt", "line": 1}],
+            "reproduction": {
+                "test_path": ".crosscheck/reproductions/sibling.sh",
+                "command": "bash .crosscheck/reproductions/sibling.sh",
+                "expected_exit": 9,
+                "output_contains": "SIBLING-REPRODUCED",
+            },
+        }]
 elif scenario in {
     "node-id-proof",
     "node-id-unmatched",
@@ -826,6 +883,18 @@ elif scenario == "reviewer-env-dependent-execution":
         capture_output=True,
         text=True,
     )
+    base["new_findings"] = [{
+        "title": "Reviewer-only environment dependency",
+        "severity": "blocking",
+        "description": "The proposed helper requires reviewer-only state.",
+        "citations": [{"path": "app.txt", "line": 1}],
+        "reproduction": {
+            "test_path": ".crosscheck/reproductions/review-execution.sh",
+            "command": command,
+            "expected_exit": 0,
+            "output_contains": "CROSSCHECK-REVIEW-EXECUTED",
+        },
+    }]
 elif scenario == "unfound-reproduction-command":
     reproduction = protocol / "reproductions" / "missing-tool.sh"
     reproduction.parent.mkdir(parents=True, exist_ok=True)
@@ -837,7 +906,10 @@ elif scenario == "unfound-reproduction-command":
         "title": "Evidence needing absent tooling",
         "severity": "blocking",
         "description": "The helper invokes a tool the review checkout does not carry.",
-        "citations": [{"path": "app.txt", "line": 1}],
+        "citations": [
+            {"path": "app.txt", "line": 1},
+            {"path": "app.txt", "line": 999},
+        ],
         "reproduction": {
             "test_path": ".crosscheck/reproductions/missing-tool.sh",
             "command": "bash .crosscheck/reproductions/missing-tool.sh",
@@ -894,7 +966,6 @@ elif scenario == "reading-only-suspicion":
         "description": "The reviewer reported a concern without executing a command.",
         "citations": [{"path": "app.txt", "line": 1}],
     }]
-    del base["executed_reproduction"]
     execution.unlink()
     receipt.unlink(missing_ok=True)
 
@@ -1087,10 +1158,9 @@ select_cross_family_reviewer() {
 EOF
 }
 
-test_non_codex_prompt_addendum_preserves_codex_prompt_bytes() {
+test_conditional_prompt_is_one_shot_and_model_neutral() {
   "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" <<'PY' \
-    || fail "the lane-specific exact-SHA prompt addendum regressed"
-import hashlib
+    || fail "the conditional evidence prompt contract regressed"
 import importlib.util
 import sys
 
@@ -1112,22 +1182,6 @@ codex_prompt = module.make_prompt(
     ledger,
     {"account_selector": "CODEX_HOME", "model": "gpt-5.6-sol"},
 )
-# Golden bytes captured immediately before the lane addendum landed. This
-# makes an accidental edit to the shared Codex prompt observable even when a
-# refactor leaves the cross-family assertions below green.
-assert len(codex_prompt.encode("utf-8")) == 5358, len(codex_prompt.encode("utf-8"))
-assert hashlib.sha256(codex_prompt.encode("utf-8")).hexdigest() == (
-    "97599f6a8fb3415847c70cc046130993d643ad831ddcb468d7b10ce8e95e3bc0"
-)
-
-addendum = f"""
-REPRODUCTION COMMAND FORMAT - EXACT REQUIREMENT:
-The literal string you place in `executed_reproduction.command` MUST contain, verbatim, both
-full 40-character SHAs: exact base {base_sha} and exact head {head_sha}.
-Example: bash .crosscheck/reproductions/repro.sh {base_sha} {head_sha}
-A command that omits either SHA, abbreviates it, or references it through a shell variable is
-refused and the entire review is discarded as UNREVIEWED.
-"""
 pi_codex_prompt = module.make_prompt(
     snapshot,
     ledger,
@@ -1141,16 +1195,18 @@ cross_family_prompt = module.make_prompt(
         "model": "accounts/fireworks/models/glm-5p2",
     },
 )
-assert cross_family_prompt == pi_codex_prompt + addendum
-assert base_sha in addendum and head_sha in addendum
-print("PROMPT ADDENDUM OK")
+assert pi_codex_prompt == cross_family_prompt
+assert codex_prompt.replace("CODEX_HOME", "PI_CODING_AGENT_DIR") == pi_codex_prompt
+assert "executed_reproduction" not in codex_prompt
+assert base_sha in codex_prompt and head_sha in codex_prompt
+print("CONDITIONAL PROMPT OK")
 PY
-  pass "the non-Codex addendum names both full SHAs without changing Codex prompt bytes"
+  pass "the conditional evidence prompt is one-shot and model-neutral"
 }
 
-test_full_sha_verdict_gate_is_not_relaxed_by_the_prompt_addendum() {
+test_one_shot_verdict_needs_no_verdict_level_reproduction() {
   "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$TMP_ROOT" <<'PY' \
-    || fail "the full-SHA verdict gate was weakened or lost its mutation pin"
+    || fail "the one-shot verdict still required legacy execution evidence"
 import importlib.util
 from pathlib import Path
 import subprocess
@@ -1169,9 +1225,8 @@ subprocess.run(["git", "-C", str(review_dir), "add", "app.txt"], check=True)
 
 
 class EvidenceExecutor:
-    def validate_declared_paths(self, paths, *, receipt_path):
-        assert paths == {".crosscheck/reproductions/repro.sh"}, paths
-        assert receipt_path == ".crosscheck/reproductions/repro.receipt"
+    def validate_declared_paths(self, paths):
+        assert paths == set(), paths
 
 
 base_sha = "b" * 40
@@ -1181,44 +1236,30 @@ verdict = {
     "head_sha": head_sha,
     "executing_account_home": "/reviewer/account",
     "execution_home": "/reviewer/home",
-    "executed_reproduction": {
-        "test_path": ".crosscheck/reproductions/repro.sh",
-        # Otherwise-valid shape, but neither required literal SHA is present.
-        # Deleting the implementation's full-SHA check makes this validation
-        # return successfully and therefore makes this mutation pin fail.
-        "command": "bash .crosscheck/reproductions/repro.sh BASE HEAD",
-        "expected_exit": 0,
-        "output_contains": "REPRODUCED",
-        "receipt_path": ".crosscheck/reproductions/repro.receipt",
-        "receipt_contains": "REPRODUCED",
-    },
     "summary": "review complete",
     "citations": [{"path": "app.txt", "line": 1}],
     "finding_updates": [],
     "new_findings": [],
     "suspicions": [],
 }
-try:
-    module.validate_review_shape(
-        verdict,
-        {"base_sha": base_sha, "head_sha": head_sha},
-        review_dir,
+validated = module.validate_review_shape(
+    verdict,
+    {"base_sha": base_sha, "head_sha": head_sha},
+    review_dir,
         {
             "executing_account_home": "/reviewer/account",
             "execution_home": "/reviewer/home",
+            "evidence_policy": module.EVIDENCE_POLICY_CONDITIONAL_V1,
         },
-        evidence_executor=EvidenceExecutor(),
-    )
-except module.CrosscheckError as exc:
-    assert str(exc) == (
-        "reviewer verdict executed reproduction command must name the exact "
-        "base and head SHAs"
-    ), str(exc)
-else:
-    raise AssertionError("a verdict command omitting both full SHAs was accepted")
-print("FULL SHA GATE PINNED")
+    evidence_executor=EvidenceExecutor(),
+)
+assert "executed_reproduction" not in validated
+schema = module.review_output_schema("/reviewer/account", "/reviewer/home")
+assert "executed_reproduction" not in schema["required"]
+assert "executed_reproduction" not in schema["properties"]
+print("ONE-SHOT VERDICT ACCEPTED")
 PY
-  pass "the full-SHA verdict gate remains independently mutation-pinned"
+  pass "the one-shot verdict relies on controller identity without legacy execution evidence"
 }
 
 test_status_reports_serving_family_relaxation_and_latest_run() {
@@ -2225,7 +2266,7 @@ test_pi_reviewer_executes_bound_policy_profile() {
     || fail "Pi reviewer did not complete"
   assert_contains "$output" 'crosscheck clear' \
     "Pi reviewer did not earn a clear result"
-  assert_grep '--mode json --offline --provider openai-codex --model gpt-5.6-sol --thinking xhigh --tools read,bash,grep,find,ls,submit_crosscheck_verdict --extension' \
+  assert_grep '--mode json --offline --provider openai-codex --model gpt-5.6-sol --thinking xhigh --tools repo_search,repo_read,submit_evidence_file,report_finding,report_suspicion,update_finding,request_lookup,finish_review --extension' \
     "$case_dir/pi.log" \
     "Pi reviewer was not invoked with its pinned provider, model, effort, and tools"
   assert_grep '--no-context-files' "$case_dir/pi.log" \
@@ -2243,16 +2284,123 @@ assert reviewer["execution_home"].endswith("/.crosscheck/pi-home")
 assert reviewer["account_selector"] == "PI_CODING_AGENT_DIR"
 assert reviewer["credential_source"] == "pi-openai-codex-oauth-file"
 assert reviewer["reviewer_turn_count"] == "1"
-assert reviewer["execution_proof"]["actual_exit"] == 0
-receipt = reviewer["execution_proof"]["reviewer_receipt"]["output"]
-assert sys.argv[2] in receipt
-assert sys.argv[3] in reviewer["execution_proof"]["command"]
-assert sys.argv[4] in reviewer["execution_proof"]["command"]
+assert reviewer["evidence_policy"] == "conditional-v1"
+assert reviewer["evidence_mode"] == "identity-only-v1"
+assert "execution_proof" not in reviewer
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     "$case_dir/pi-home" "$base" "$head" \
-    || fail "Pi review did not record its bound account, nonzero turn, and executed command"
+    || fail "Pi review did not record its bound account and conditional evidence identity"
   assert_absent "$case_dir/codex.log" "Codex launched instead of the selected Pi reviewer"
   pass "Pi reviewer executes a bound nonzero-turn exact-head review"
+}
+
+test_pi_lookup_refusal_still_reaches_fresh_final_review() {
+  local record case_dir base head output launches
+  record=$(make_case pi-lookup-refusal)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  select_pi_reviewer "$case_dir"
+  output=$(FM_TEST_PI_BIN=pi PATH="$case_dir/fakebin:$PATH" \
+    FM_TEST_PI_REQUEST_LOOKUP=1 \
+    run_case "$case_dir" "$base" "$head" clear run) \
+    || fail "a refused lookup prevented the required final review"
+  assert_contains "$output" 'crosscheck clear' \
+    "the fresh post-lookup pass did not earn a clear result"
+  launches=$(wc -l < "$case_dir/pi.log" | tr -d ' ')
+  [ "$launches" = 2 ] || fail "lookup flow launched Pi $launches times, expected 2"
+  assert_grep 'LOOKUP FOLLOW-UP PASS' "$case_dir/prompt.log" \
+    "the final pass did not receive the bound lookup follow-up"
+  assert_grep 'lookup query names the private repository' "$case_dir/prompt.log" \
+    "the mechanical lookup refusal was not delivered as bounded context"
+  "$CROSSCHECK_PYTHON" - "$case_dir/data/task-x1/crosscheck-ledger.json" <<'PY' \
+    || fail "the two-pass lookup telemetry was not durable"
+import json
+import sys
+
+run = json.load(open(sys.argv[1], encoding="utf-8"))["runs"][-1]
+lookup = run["telemetry"]["lookup"]
+assert run["state"] == "clear", run
+assert lookup["requested"] is True and lookup["follow_up_pass"] is True, lookup
+assert lookup["completed"] == 0 and lookup["failed"] == 1, lookup
+assert lookup["digest"].startswith("sha256:"), lookup
+assert run["telemetry"]["turns"] == 2, run["telemetry"]
+assert run["telemetry"]["finish_repairs"] == 0, run["telemetry"]
+assert run["reviewer"]["reviewer_turn_count"] == "2", run["reviewer"]
+PY
+  pass "a refused lookup has no authority and still reaches a fresh final review"
+}
+
+test_pi_lookup_followup_failure_keeps_incurred_telemetry() {
+  local record case_dir base head rc
+  record=$(make_case pi-lookup-followup-failure)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  select_pi_reviewer "$case_dir"
+  set +e
+  FM_TEST_PI_BIN=pi PATH="$case_dir/fakebin:$PATH" \
+    FM_TEST_PI_REQUEST_LOOKUP=1 FM_TEST_PI_FAIL_FOLLOWUP=1 \
+    run_case "$case_dir" "$base" "$head" clear run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a failed lookup follow-up produced a verdict"
+  "$CROSSCHECK_PYTHON" - "$case_dir/data/task-x1/crosscheck-ledger.json" <<'PY' \
+    || fail "the failed lookup follow-up lost already-incurred telemetry"
+import json
+import sys
+
+run = json.load(open(sys.argv[1], encoding="utf-8"))["runs"][-1]
+telemetry = run["telemetry"]
+lookup = telemetry["lookup"]
+assert run["state"] == "tool-failure", run
+assert lookup["requested"] is True and lookup["follow_up_pass"] is True, lookup
+assert lookup["completed"] == 0 and lookup["failed"] == 1, lookup
+assert lookup["digest"].startswith("sha256:"), lookup
+assert telemetry["turns"] == 1 and telemetry["finish_repairs"] == 0, telemetry
+assert telemetry["costs_usd"]["declared"] is not None, telemetry
+PY
+  pass "a failed fresh follow-up preserves provisional spend and lookup identity"
+}
+
+test_pi_lookup_identity_failure_keeps_both_passes_telemetry() {
+  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" <<'PY' \
+    || fail "identity failure lost telemetry from a completed follow-up"
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+telemetry = {
+    "tokens": {"input": 200, "output": 40, "cache_read": 160,
+               "cache_write": 0, "source": "fixture"},
+    "costs_usd": {"provider_reported": None,
+                  "provider_reported_source": "unavailable",
+                  "pi_calculated": 0.0004784,
+                  "pi_calculated_source": "fixture",
+                  "declared": 0.0004784,
+                  "declared_source": "fixture"},
+    "turns": 2,
+}
+lookup = {"requested": True, "completed": 1, "failed": 0,
+          "follow_up_pass": True, "digest": "sha256:" + "1" * 64}
+config = {}
+try:
+    module.bind_lookup_followup_telemetry(
+        config=config,
+        first_result={"terminal_identity": {"provider": "one", "model": "m"}},
+        runtime_result={"terminal_identity": {"provider": "two", "model": "m"},
+                        "telemetry": telemetry},
+        reviewer_latency_ms=123,
+        lookup_measurement=lookup,
+    )
+except module.CrosscheckToolError as exc:
+    assert "different provider/model identities" in str(exc), str(exc)
+else:
+    raise AssertionError("mismatched lookup identities were accepted")
+assert config["_run_telemetry"]["turns"] == 2, config
+assert config["_run_telemetry"]["costs_usd"]["declared"] == 0.0004784, config
+assert config["_run_telemetry"]["lookup"] == lookup, config
+PY
+  pass "a completed follow-up identity failure preserves both passes' telemetry"
 }
 
 test_pi_reviewer_failures_are_tool_failures() {
@@ -2293,7 +2441,7 @@ test_pi_reviewer_failures_are_tool_failures() {
   rc=$?
   set -e
   expect_code 1 "$rc" "Pi launch failure"
-  assert_grep 'CROSSCHECK TOOL-FAILURE: Pi reviewer exited 47' \
+  assert_grep 'model guest: Pi reviewer exited 47' \
     "$case_dir/err" "Pi launch failure was not a named tool failure"
 
   "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" <<'PY' \
@@ -2426,7 +2574,7 @@ PY
       || fail "$model reviewer did not complete"
     assert_contains "$output" 'crosscheck clear' \
       "$model reviewer did not earn a clear result"
-    assert_grep "--mode json --offline --provider $slot --model $model --thinking xhigh --tools read,bash,grep,find,ls,submit_crosscheck_verdict --extension" \
+    assert_grep "--mode json --offline --provider $slot --model $model --thinking xhigh --tools repo_search,repo_read,submit_evidence_file,report_finding,report_suspicion,update_finding,request_lookup,finish_review --extension" \
       "$case_dir/pi.log" \
       "$model reviewer was not invoked on the $slot provider with its pinned model, effort, and tools"
     assert_no_grep 'CROSSCHECK DEGRADED' "$case_dir/err" \
@@ -2450,20 +2598,20 @@ binding = hashlib.sha256(
 assert reviewer["credential_identifier"] == "provider-binding:" + slot + ":" + binding
 assert reviewer["terminal_provider"] == slot
 assert reviewer["terminal_model"] == model
-assert reviewer["review_depth_passes"] == "2"
-assert reviewer["review_depth_mode"] == "two-pass-independent-synthesis-v1"
-assert reviewer["reviewer_turn_count"] == "2"
-assert reviewer["execution_proof"]["actual_exit"] == 0
+assert reviewer["review_depth_passes"] == "1"
+assert reviewer["review_depth_mode"] == "single-pass-skeptical-rechallenge-v1"
+assert reviewer["reviewer_turn_count"] == "1"
+assert reviewer["evidence_policy"] == "conditional-v1"
+assert reviewer["evidence_mode"] == "identity-only-v1"
+assert "execution_proof" not in reviewer
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" "$case_dir/pi-home" "$slot" "$model" \
       || fail "$model review did not record its bound provider, terminal route, depth, and non-secret credential binding"
-    [ "$(wc -l < "$case_dir/pi.log")" -eq 2 ] \
-      || fail "$model did not execute exactly one challenge and one synthesis pass"
-    assert_grep 'REGULAR GLM REVIEW DEPTH - PASS 1 OF 2' "$case_dir/prompt.log" \
-      "$model challenge pass was not independently prompted"
-    assert_grep 'REGULAR GLM REVIEW DEPTH - PASS 2 OF 2' "$case_dir/prompt.log" \
-      "$model synthesis pass was not independently prompted"
-    assert_grep 'BEGIN UNTRUSTED PRIOR REVIEW ANALYSIS' "$case_dir/prompt.log" \
-      "$model synthesis did not receive a delimited bounded challenge projection"
+    [ "$(wc -l < "$case_dir/pi.log")" -eq 1 ] \
+      || fail "$model did not execute exactly one substantive review pass"
+    assert_grep 'skeptical re-challenge happens in the same session' "$case_dir/prompt.log" \
+      "$model was not prompted for the in-session skeptical re-challenge"
+    assert_grep 'accepted reports are append-only' "$case_dir/prompt.log" \
+      "$model was not told to re-challenge candidates before reporting them"
     assert_no_grep 'review-execution.sh' "$case_dir/prompt.log" \
       "$model synthesis received a challenge execution claim instead of hypotheses"
     assert_no_grep 'CODEX FALLBACK' "$case_dir/data/task-x1/crosscheck.md" \
@@ -2500,8 +2648,10 @@ test_truncated_cross_family_verdict_is_never_a_verdict() {
   expect_code 1 "$rc" "truncated cross-family verdict"
   assert_no_grep 'crosscheck clear' "$case_dir/out" \
     "a truncated reviewer turn was accepted as a clear verdict"
-  assert_grep "stopReason='length'" "$case_dir/err" \
+  assert_grep "stopReason was 'length'" "$case_dir/err" \
     "the truncated reviewer turn was not refused by its stop reason"
+  [ "$(wc -l < "$case_dir/pi.log")" -eq 2 ] \
+    || fail "the truncated turn did not receive exactly one bounded repair"
   "$CROSSCHECK_PYTHON" - "$case_dir/data/task-x1/crosscheck-ledger.json" <<'PY' \
     || fail "a truncated review was recorded as anything but a tool failure"
 import json
@@ -3435,6 +3585,38 @@ assert value["runs"][-1]["state"] == "blocking"
   pass "new finding enters the ledger only with gate-executed reproduction evidence"
 }
 
+test_failed_new_finding_reproduction_becomes_a_suspicion() {
+  local record case_dir base head rc ledger
+  record=$(make_case degraded-new-finding)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  set +e
+  run_case "$case_dir" "$base" "$head" unfound-reproduction-command run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "degraded new finding reproduction"
+  assert_grep 'CROSSCHECK BLOCKING:' "$case_dir/err" \
+    "a failed new-finding reproduction voided the semantic review"
+  assert_no_grep 'CROSSCHECK TOOL-FAILURE' "$case_dir/err" \
+    "a failed new-finding reproduction remained a tool failure"
+  ledger="$case_dir/data/task-x1/crosscheck-ledger.json"
+  python3 - "$ledger" <<'PY' || fail "failed new-finding evidence was not preserved as a suspicion"
+import json
+import sys
+
+value = json.load(open(sys.argv[1]))
+run = value["runs"][-1]
+assert value["findings"] == [], value["findings"]
+assert run["state"] == "blocking", run
+assert len(run["suspicions"]) == 1, run["suspicions"]
+suspicion = run["suspicions"][0]
+assert "Evidence attempt failed" in suspicion["description"], suspicion
+assert "Dropped invalid citation" in suspicion["description"], suspicion
+assert suspicion["citations"] == [{"path": "app.txt", "line": 1}], suspicion
+PY
+  pass "failed new-finding evidence degrades to a run-scoped suspicion"
+}
+
 test_silence_never_closes_prior_finding() {
   local record case_dir base head rc
   record=$(make_case silence)
@@ -3504,7 +3686,7 @@ PY
   pass "a package-governed Jest test can certify a TypeScript mutation"
 }
 
-test_preexisting_jest_runner_cannot_certify() {
+test_preexisting_jest_runner_stays_blocking() {
   local record case_dir base head rc
   record=$(make_case preexisting-jest-runner)
   IFS=$'\t' read -r case_dir base head <<< "$record"
@@ -3523,8 +3705,8 @@ test_preexisting_jest_runner_cannot_certify() {
   rc=$?
   set -e
   expect_code 1 "$rc" "preexisting Jest runner"
-  assert_grep 'CROSSCHECK CANNOT-CERTIFY:' "$case_dir/err" \
-    "a preexisting Jest runner was not classified as unavailable proof"
+  assert_grep 'CROSSCHECK BLOCKING:' "$case_dir/err" \
+    "a preexisting Jest runner voided the semantic review"
   assert_grep 'Jest runner preexists lockfile materialization' "$case_dir/err" \
     "the proof did not reject the committed Jest runner"
   assert_no_grep 'crosscheck clear' "$case_dir/out" \
@@ -3532,7 +3714,7 @@ test_preexisting_jest_runner_cannot_certify() {
   pass "preexisting Jest runners never establish proof provenance"
 }
 
-test_local_fake_jest_package_cannot_certify() {
+test_local_fake_jest_package_stays_blocking() {
   local record case_dir base head rc
   record=$(make_case local-fake-jest-package)
   IFS=$'\t' read -r case_dir base head <<< "$record"
@@ -3553,8 +3735,8 @@ JSON
   rc=$?
   set -e
   expect_code 1 "$rc" "local fake Jest package"
-  assert_grep 'CROSSCHECK CANNOT-CERTIFY:' "$case_dir/err" \
-    "a local fake Jest package was not classified as unavailable proof"
+  assert_grep 'CROSSCHECK BLOCKING:' "$case_dir/err" \
+    "a local fake Jest package voided the semantic review"
   assert_grep 'local, linked, workspace, Git, or URL source' "$case_dir/err" \
     "the lockfile provenance check did not reject file: Jest"
   assert_no_grep 'crosscheck clear' "$case_dir/out" \
@@ -3562,7 +3744,7 @@ JSON
   pass "local fake Jest packages cannot establish registry provenance"
 }
 
-test_local_transitive_jest_package_cannot_certify() {
+test_local_transitive_jest_package_stays_blocking() {
   local record case_dir base head rc
   record=$(make_case local-transitive-jest-package)
   IFS=$'\t' read -r case_dir base head <<< "$record"
@@ -3583,8 +3765,8 @@ JSON
   rc=$?
   set -e
   expect_code 1 "$rc" "local transitive Jest package"
-  assert_grep 'CROSSCHECK CANNOT-CERTIFY:' "$case_dir/err" \
-    "a local transitive Jest package was not unavailable proof"
+  assert_grep 'CROSSCHECK BLOCKING:' "$case_dir/err" \
+    "a local transitive Jest package voided the semantic review"
   assert_grep 'runtime package jest-cli is a local or linked lock entry' "$case_dir/err" \
     "the authenticated closure did not reject local jest-cli"
   assert_no_grep 'crosscheck clear' "$case_dir/out" \
@@ -3644,7 +3826,7 @@ PY
   pass "a TypeScript test that misses the mutation remains blocking"
 }
 
-test_typescript_without_usable_route_is_cannot_certify() {
+test_typescript_without_usable_route_stays_blocking() {
   local record case_dir base head rc
   record=$(make_case typescript-no-route)
   IFS=$'\t' read -r case_dir base head <<< "$record"
@@ -3662,26 +3844,27 @@ JSON
   rc=$?
   set -e
   expect_code 1 "$rc" "TypeScript mutation with no usable certification route"
-  assert_grep 'CROSSCHECK CANNOT-CERTIFY:' "$case_dir/err" \
-    "an unavailable governed route was mislabeled as a review verdict"
+  assert_grep 'CROSSCHECK BLOCKING:' "$case_dir/err" \
+    "an unavailable governed route voided the semantic review"
   assert_no_grep 'crosscheck clear' "$case_dir/out" \
     "a missing TypeScript certification route silently cleared"
   "$CROSSCHECK_PYTHON" - \
     "$case_dir/data/task-x1/crosscheck-ledger.json" \
     "$case_dir/data/task-x1/crosscheck.md" <<'PY' \
-    || fail "cannot-certify outcome was not durable and explicit"
+    || fail "degraded closure outcome was not durable and explicit"
 import json
 from pathlib import Path
 import sys
 
 ledger = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-assert ledger["findings"][0]["lifecycle"] == "open", ledger["findings"][0]
-assert ledger["runs"][-1]["state"] == "cannot-certify", ledger["runs"][-1]
+finding = ledger["findings"][0]
+assert finding["lifecycle"] == "claimed-fixed", finding
+assert "changed JavaScript/TypeScript is governed by vitest" in finding["history"][-1]["note"], finding
+assert ledger["runs"][-1]["state"] == "blocking", ledger["runs"][-1]
 report = Path(sys.argv[2]).read_text(encoding="utf-8")
-assert "State: **CANNOT-CERTIFY**" in report, report
-assert "no trustworthy mutation-certification route" in report, report
+assert "State: **BLOCKING**" in report, report
 PY
-  pass "an unavailable language-governed route reports CANNOT-CERTIFY and never clears"
+  pass "an unavailable language-governed route stays blocking and never clears"
 }
 
 test_python_mutation_proof_is_byte_exact() {
@@ -3795,7 +3978,7 @@ test_unclassified_runner_cannot_clear_a_finding() {
   python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1]))
-assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+assert value["findings"][0]["lifecycle"] == "claimed-fixed", value["findings"][0]["lifecycle"]
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "an unclassified runner cleared a finding"
   pass "a runner with no measured non-execution signal cannot certify a fix"
@@ -3823,7 +4006,7 @@ test_flag_argument_cannot_rewrite_the_non_execution_signal() {
   python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1]))
-assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+assert value["findings"][0]["lifecycle"] == "claimed-fixed", value["findings"][0]["lifecycle"]
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "a flag that rewrote the non-execution signal cleared a finding"
   pass "a runner flag cannot rewrite the exit semantics the gate classifies"
@@ -3850,7 +4033,7 @@ test_positional_argument_cannot_supply_a_second_target() {
   python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1]))
-assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+assert value["findings"][0]["lifecycle"] == "claimed-fixed", value["findings"][0]["lifecycle"]
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "a vacuous named test cleared a finding through a second target"
   pass "a positional argument cannot smuggle in a second, unvalidated test target"
@@ -3892,7 +4075,7 @@ test_mutated_non_execution_cannot_clear_a_finding() {
   python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1]))
-assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+assert value["findings"][0]["lifecycle"] == "claimed-fixed", value["findings"][0]["lifecycle"]
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "a mutation that only broke collection cleared the finding"
   pass "a mutated run that never executed the test cannot clear a finding"
@@ -3925,7 +4108,7 @@ test_ancestor_runner_config_cannot_rewrite_the_non_execution_signal() {
   python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1]))
-assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+assert value["findings"][0]["lifecycle"] == "claimed-fixed", value["findings"][0]["lifecycle"]
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "an ancestor runner config cleared a finding"
 
@@ -3982,7 +4165,7 @@ test_ambient_addopts_cannot_rewrite_the_non_execution_signal() {
   python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1]))
-assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+assert value["findings"][0]["lifecycle"] == "claimed-fixed", value["findings"][0]["lifecycle"]
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "an exported runner option cleared a finding"
   pass "an exported runner option cannot reach the gate's own proof runs"
@@ -4028,7 +4211,7 @@ test_incomplete_proof_environment_fails_loudly() {
   python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1]))
-assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+assert value["findings"][0]["lifecycle"] == "claimed-fixed", value["findings"][0]["lifecycle"]
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "a proof that never ran cleared a finding"
   pass "an allowlist missing something the runner needs refuses at the baseline"
@@ -4106,15 +4289,21 @@ test_reviewer_env_dependent_evidence_names_the_difference() {
   rc=$?
   set -e
   expect_code 1 "$rc" "reviewer evidence depending on reviewer-only environment"
-  assert_grep 'none of the reviewer' "$case_dir/err" \
-    "the refusal did not name the independent re-execution environment"
-  assert_grep 'CODEX_HOME' "$case_dir/err" \
-    "the refusal did not surface the command output that explains the exit"
+  python3 - "$case_dir/data/task-x1/crosscheck-ledger.json" <<'PY' \
+    || fail "the degraded proof did not retain its execution diagnosis"
+import json
+import sys
+
+run = json.load(open(sys.argv[1]))["runs"][-1]
+description = run["suspicions"][0]["description"]
+assert "CODEX_HOME" in description, description
+assert "reviewer" in description, description
+PY
   pass "evidence that needs reviewer-only environment is diagnosable, not a bare exit"
 }
 
 test_unfound_evidence_command_is_a_non_execution() {
-  local record case_dir base head rc
+  local record case_dir base head rc ledger
   record=$(make_case unfound-reproduction)
   IFS=$'\t' read -r case_dir base head <<< "$record"
   set +e
@@ -4123,8 +4312,17 @@ test_unfound_evidence_command_is_a_non_execution() {
   rc=$?
   set -e
   expect_code 1 "$rc" "evidence command that does not exist"
-  assert_grep 'never ran' "$case_dir/err" \
-    "an unfound evidence command was not reported as a non-execution"
+  assert_grep 'CROSSCHECK BLOCKING:' "$case_dir/err" \
+    "an unfound evidence command voided the semantic review"
+  ledger="$case_dir/data/task-x1/crosscheck-ledger.json"
+  python3 - "$ledger" <<'PY' || fail "an unfound evidence command lost its non-execution diagnosis"
+import json
+import sys
+
+run = json.load(open(sys.argv[1]))["runs"][-1]
+assert run["state"] == "blocking", run
+assert "never ran" in run["suspicions"][0]["description"], run
+PY
   pass "an evidence command that was never found is a non-execution"
 }
 
@@ -4231,8 +4429,8 @@ test_forged_git_diff_mutation_command_is_rejected() {
   python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1]))
-assert value["findings"][0]["lifecycle"] == "open"
-assert value["runs"][-1]["state"] == "unreviewed"
+assert value["findings"][0]["lifecycle"] == "claimed-fixed"
+assert value["runs"][-1]["state"] == "blocking"
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "forged git-diff command cleared the durable finding"
   pass "forged git-diff command cannot impersonate a named test"
@@ -4313,6 +4511,59 @@ PY
     fi
   done
   pass "mutation proof changes only cited non-test implementation paths"
+}
+
+test_invalid_closure_stays_blocking_and_preserves_siblings() {
+  local record case_dir base head rc ledger
+  record=$(make_case mixed-invalid-closure)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  ledger="$case_dir/data/task-x1/crosscheck-ledger.json"
+  python3 - "$ledger" <<'PY'
+import copy
+import json
+import sys
+
+path = sys.argv[1]
+value = json.load(open(path))
+value["findings"][0]["citations"] = [{"path": "tests/helper.sh", "line": 1}]
+sibling = copy.deepcopy(value["findings"][0])
+sibling.update({
+    "id": "cc-bbbbbbbbbbbb",
+    "title": "Sibling blocker",
+    "description": "A separate durable blocker.",
+    "citations": [{"path": "app.txt", "line": 1}],
+})
+value["findings"].append(sibling)
+with open(path, "w") as stream:
+    json.dump(value, stream)
+PY
+  set +e
+  run_case "$case_dir" "$base" "$head" mixed-invalid-closure run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "inadmissible closure proof"
+  assert_grep 'CROSSCHECK BLOCKING:' "$case_dir/err" \
+    "an inadmissible closure proof voided the semantic review"
+  assert_no_grep 'CROSSCHECK UNREVIEWED' "$case_dir/err" \
+    "an inadmissible closure proof rewrote the review as unreviewed"
+  python3 - "$ledger" <<'PY' || fail "inadmissible closure discarded sibling review work"
+import json
+import sys
+
+value = json.load(open(sys.argv[1]))
+by_id = {finding["id"]: finding for finding in value["findings"]}
+degraded = by_id["cc-aaaaaaaaaaaa"]
+assert degraded["lifecycle"] == "claimed-fixed", degraded
+assert "Gate proof result" in degraded["history"][-1]["note"], degraded
+assert by_id["cc-bbbbbbbbbbbb"]["lifecycle"] == "claimed-fixed", by_id
+assert len(value["findings"]) == 3, value["findings"]
+run = value["runs"][-1]
+assert run["state"] == "blocking", run
+assert len(run["new_findings"]) == 1, run
+PY
+  pass "inadmissible closure stays blocking and preserves sibling review work"
 }
 
 test_final_wait_and_residual_processes_are_bounded() {
@@ -4622,7 +4873,7 @@ PY
 }
 
 test_artifacts_cannot_escape_designated_subtrees() {
-  local record case_dir base head rc
+  local record case_dir base head rc ledger
   record=$(make_case escaped-reproduction)
   IFS=$'\t' read -r case_dir base head <<< "$record"
   set +e
@@ -4631,8 +4882,16 @@ test_artifacts_cannot_escape_designated_subtrees() {
   rc=$?
   set -e
   expect_code 1 "$rc" "escaped reproduction artifact"
-  assert_grep 'artifact path escapes .crosscheck/reproductions/' "$case_dir/err" \
-    "resolved artifact containment was not enforced: $(tr '\n' ' ' < "$case_dir/err")"
+  assert_grep 'CROSSCHECK BLOCKING:' "$case_dir/err" \
+    "escaped evidence voided the semantic review"
+  ledger="$case_dir/data/task-x1/crosscheck-ledger.json"
+  python3 - "$ledger" <<'PY' || fail "resolved artifact containment was not preserved in the suspicion"
+import json
+import sys
+
+run = json.load(open(sys.argv[1]))["runs"][-1]
+assert "artifact path escapes .crosscheck/reproductions/" in run["suspicions"][0]["description"], run
+PY
   pass "resolved evidence paths remain inside designated subtrees"
 }
 
@@ -4700,7 +4959,7 @@ test_reviewer_capture_override_is_validated() {
 }
 
 test_ordinary_output_paths_remain_bounded() {
-  local record case_dir base head rc
+  local record case_dir base head rc ledger
   "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" <<'PY' \
     || fail "ordinary run_command output did not retain the original ceiling"
 import importlib.util
@@ -4733,8 +4992,16 @@ PY
   rc=$?
   set -e
   expect_code 1 "$rc" "noisy reproduction output limit"
-  assert_grep 'exceeded the 200000-byte aggregate output limit' "$case_dir/err" \
-    "reproduction command did not retain the ordinary output limit"
+  assert_grep 'CROSSCHECK BLOCKING:' "$case_dir/err" \
+    "a noisy reproduction voided the semantic review"
+  ledger="$case_dir/data/task-x1/crosscheck-ledger.json"
+  python3 - "$ledger" <<'PY' || fail "reproduction command did not retain the ordinary output limit"
+import json
+import sys
+
+run = json.load(open(sys.argv[1]))["runs"][-1]
+assert "exceeded the 200000-byte aggregate output limit" in run["suspicions"][0]["description"], run
+PY
 
   record=$(make_case oversized-artifact)
   IFS=$'\t' read -r case_dir base head <<< "$record"
@@ -4792,7 +5059,7 @@ PY
   pass "later reviewers receive bounded lifecycle metadata and proof digests only"
 }
 
-test_nonexistent_mutation_proof_is_unreviewed() {
+test_nonexistent_mutation_proof_stays_blocking() {
   local record case_dir base head rc
   record=$(make_case missing-proof)
   IFS=$'\t' read -r case_dir base head <<< "$record"
@@ -4807,11 +5074,11 @@ test_nonexistent_mutation_proof_is_unreviewed() {
   python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1]))
-assert value["findings"][0]["lifecycle"] == "open"
-assert value["runs"][-1]["state"] == "unreviewed"
+assert value["findings"][0]["lifecycle"] == "claimed-fixed"
+assert value["runs"][-1]["state"] == "blocking"
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "missing mutation proof cleared the durable blocker"
-  pass "nonexistent mutation proof cannot clear a finding"
+  pass "nonexistent mutation proof stays blocking and cannot clear a finding"
 }
 
 test_mutation_proof_does_not_float_to_a_new_head() {
@@ -5047,7 +5314,7 @@ assert run["suspicions"][0]["description"] == "The reviewer could not finish a r
   pass "a completed review that declines clearance is blocking code evidence"
 }
 
-test_reading_only_suspicion_is_a_tool_failure() {
+test_reading_only_suspicion_is_identity_only_blocking() {
   local record case_dir base head rc
   record=$(make_case reading-only-suspicion)
   IFS=$'\t' read -r case_dir base head <<< "$record"
@@ -5057,23 +5324,24 @@ test_reading_only_suspicion_is_a_tool_failure() {
   rc=$?
   set -e
   expect_code 1 "$rc" "reading-only reviewer suspicion"
-  assert_grep 'CROSSCHECK TOOL-FAILURE:' "$case_dir/err" \
-    "a verdict without command execution was not classified as a tool failure"
-  assert_grep 'reviewer verdict carries no executed reproduction' "$case_dir/err" \
-    "the command-execution failure did not name the missing inspected artifact"
-  assert_no_grep 'CROSSCHECK BLOCKING' "$case_dir/err" \
-    "a reading-only concern was accepted as blocking code evidence"
+  assert_grep 'CROSSCHECK BLOCKING:' "$case_dir/err" \
+    "a reading-only concern was not preserved as blocking code evidence"
+  assert_no_grep 'CROSSCHECK TOOL-FAILURE' "$case_dir/err" \
+    "a valid identity-only review collapsed into a tool failure"
   assert_no_grep 'CROSSCHECK UNREVIEWED' "$case_dir/err" \
     "a reviewer runtime failure collapsed into a generic review outcome"
   python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1]))
 run = value["runs"][-1]
-assert run["state"] == "tool-failure"
-assert run["suspicions"] == []
+assert run["state"] == "blocking"
+assert run["suspicions"][0]["description"] == "The reviewer reported a concern without executing a command."
+assert run["reviewer"]["evidence_policy"] == "conditional-v1"
+assert run["reviewer"]["evidence_mode"] == "identity-only-v1"
+assert "execution_proof" not in run["reviewer"]
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
-    || fail "reading-only verdict was not durably classified as a tool failure"
-  pass "a verdict without an executed reproduction is a tool failure, never blocking code evidence"
+    || fail "reading-only verdict was not durably recorded as identity-only blocking"
+  pass "a reading-only suspicion is a valid identity-only blocking review"
 }
 
 test_launcher_requires_supported_python() {
@@ -5278,7 +5546,7 @@ print(" ".join(run["state"] for run in ledger["runs"]))
   [ "$states" = "tool-failure clear" ] \
     || fail "ledger recorded runs '$states', expected 'tool-failure clear'"
 
-  assert_grep 'Pi reviewer exited 42 without an earned verdict' \
+  assert_grep 'Pi reviewer initial exited 125 without an earned terminal event: model guest: Pi reviewer exited 42' \
     "$case_dir/data/task-x1/crosscheck-ledger.json" \
     "the abandoned reviewer did not record its reported reason"
   pass "an unreachable reviewer fails over to the next policy-screened account"
@@ -5575,6 +5843,29 @@ timed_report = module.render_report(ledger_with(timed), timed)
 assert (
     "Timing: total 30.0s (reviewer 20.0s, snapshot 1.5s)." in timed_report
 ), timed_report
+
+# Current identity-only Azure reviews intentionally have no tool/verifier VM.
+# Rendering that admitted result must not turn the successful review into a
+# post-admission tool failure.
+identity_only = run_record(
+    state="clear",
+    citations=[{"path": "docs/marker.md", "line": 1}],
+    reviewer={
+        "execution_mode": "azure-compartment-v1",
+        "azure_identity": {
+            "review_generation": "a" * 24,
+            "model": {"vm_instance_id": "model-1", "cleanup_phase": "complete"},
+            "tool": None,
+            "verifier": None,
+            "evidence_attempts": [],
+            "evidence_attempts_digest": "sha256:" + "d" * 64,
+            "staging_cleanup_phase": "complete",
+        },
+    },
+)
+identity_report = module.render_report(ledger_with(identity_only), identity_only)
+assert "Tool compartment: `none`" in identity_report, identity_report
+assert "Verifier compartment: `none`" in identity_report, identity_report
 
 # Every way a recorded measurement can be dishonest is refused.
 for durations, expected in (
@@ -5880,12 +6171,18 @@ PY
     echo "# note: installed Pi unavailable; deterministic strict-schema fallback passed"
     return
   fi
-  printf '%s\n' '{"type":"object","additionalProperties":false,"properties":{}}' \
-    > "$probe_dir/schema.json"
-  if ! FM_CROSSCHECK_REVIEW_SCHEMA="$probe_dir/schema.json" \
+  mkdir -p "$probe_dir/repository"
+  printf 'review line\n' > "$probe_dir/repository/review.txt"
+  : > "$probe_dir/tool-events.jsonl"
+  pi_tool_names=repo_search,repo_read,submit_evidence_file,report_finding,report_suspicion,update_finding,request_lookup,finish_review
+  if ! FM_CROSSCHECK_REVIEW_SCHEMA="$probe_dir/local-schema.json" \
+    FM_CROSSCHECK_REPOSITORY="$probe_dir/repository" \
+    FM_CROSSCHECK_TOOL_EVENT_LOG="$probe_dir/tool-events.jsonl" \
+    FM_CROSSCHECK_BASE_SHA="$(printf 'b%.0s' {1..40})" \
+    FM_CROSSCHECK_HEAD_SHA="$(printf 'a%.0s' {1..40})" \
     "$pi_bin" --offline --no-extensions \
       --extension "$ROOT/bin/fm-crosscheck-pi-verdict-extension.mjs" \
-      --tools submit_crosscheck_verdict --help \
+      --tools "$pi_tool_names" --help \
       > "$probe_dir/tracked-help" 2> "$probe_dir/tracked-help.err"; then
     echo "# note: installed Pi is not runnable; deterministic strict-schema fallback passed"
     return
@@ -5926,18 +6223,39 @@ if (typeof strict.makeStrictJsonSchema === "function") {
   throw new Error(`Pi ${version} unexpectedly lacks makeStrictJsonSchema`);
 }
 JS
-  FM_CROSSCHECK_REVIEW_SCHEMA="$probe_dir/schema.json" \
+  FM_CROSSCHECK_REVIEW_SCHEMA="$probe_dir/local-schema.json" \
+    FM_CROSSCHECK_REPOSITORY="$probe_dir/repository" \
+    FM_CROSSCHECK_TOOL_EVENT_LOG="$probe_dir/tool-events.jsonl" \
+    FM_CROSSCHECK_BASE_SHA="$(printf 'b%.0s' {1..40})" \
+    FM_CROSSCHECK_HEAD_SHA="$(printf 'a%.0s' {1..40})" \
     "$node_bin" --input-type=module - \
       "$ROOT/bin/fm-crosscheck-pi-verdict-extension.mjs" <<'JS'
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-let tool;
+const tools = [];
 const extension = await import(pathToFileURL(process.argv[2]));
-extension.default({ registerTool(value) { tool = value; } });
-if (tool?.name !== "submit_crosscheck_verdict") throw new Error("tool name drifted");
-if (tool?.constrainedSampling?.type !== "json_schema") throw new Error("tool is unconstrained");
-if (tool?.constrainedSampling?.strict !== "require") throw new Error("tool is not strict");
-const result = await tool.execute("probe", {});
-if (result?.terminate !== true) throw new Error("tool requires another model turn");
+extension.default({ registerTool(value) { tools.push(value); } });
+const expected = [
+  "repo_search", "repo_read", "submit_evidence_file", "report_finding",
+  "report_suspicion", "update_finding", "request_lookup", "finish_review",
+];
+if (JSON.stringify(tools.map((tool) => tool.name)) !== JSON.stringify(expected)) throw new Error("tool names drifted");
+for (const tool of tools) {
+  if (tool?.executionMode !== "sequential") throw new Error(`${tool.name} is not sequential`);
+  if (tool?.constrainedSampling?.type !== "json_schema") throw new Error(`${tool.name} is unconstrained`);
+  if (tool?.constrainedSampling?.strict !== "require") throw new Error(`${tool.name} is not strict`);
+}
+const finish = tools.find((tool) => tool.name === "finish_review");
+const invalid = await finish.execute("invalid", {
+  verdict: "CLEAR", summary: "complete", citations: [],
+});
+if (invalid?.details?.correctable !== true || invalid?.terminate) throw new Error("invalid finalization was not correctable");
+const result = await finish.execute("finish", {
+  verdict: "CLEAR", summary: "complete",
+  citations: [{ path: "review.txt", line: 1 }],
+});
+if (result?.terminate !== true || result?.details?.accepted !== true) throw new Error("finish did not terminate");
+if (!readFileSync(process.env.FM_CROSSCHECK_TOOL_EVENT_LOG, "utf8").includes('"name":"finish_review"')) throw new Error("accepted finalization was not logged");
 JS
   cat > "$probe_dir/probe.mjs" <<'JS'
 export default function (pi) {
@@ -5987,7 +6305,7 @@ test_telemetry_economics_and_exact_head_reuse() {
     run_case "$case_dir" "$base" "$head" clear run > "$case_dir/reuse.out" \
     || fail "the exact-head reuse failed"
   after=$(wc -l < "$case_dir/pi.log")
-  [ "$before" -eq 2 ] && [ "$after" -eq 2 ] \
+  [ "$before" -eq 1 ] && [ "$after" -eq 1 ] \
     || fail "exact-head reuse launched another paid reviewer"
   "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" \
     "$case_dir/data/task-x1/crosscheck-ledger.json" "$head" <<'PY' \
@@ -6002,13 +6320,13 @@ source, reused = ledger["runs"]
 assert source["state"] == reused["state"] == "clear"
 assert reused["telemetry"]["reuse"]["source_run_sha256"] == module.run_sha256(source)
 tokens = source["telemetry"]["tokens"]
-assert tokens == {"input": 200, "output": 40, "cache_read": 160,
+assert tokens == {"input": 100, "output": 20, "cache_read": 80,
                   "cache_write": 0, "source": "pi-turn-end-message-usage"}
 costs = source["telemetry"]["costs_usd"]
 assert costs["provider_reported"] is None
-assert costs["pi_calculated"] == 0.0004784
-assert costs["declared"] == 0.0004784
-assert source["telemetry"]["turns"] == 2
+assert costs["pi_calculated"] == 0.0002392
+assert costs["declared"] == 0.0002392
+assert source["telemetry"]["turns"] == 1
 assert source["telemetry"]["reviewer_latency_ms"] >= 0
 config = dict(source["reviewer"])
 snapshot = {"head_sha": head, "base_sha": source["base_sha"],
@@ -6034,9 +6352,9 @@ PY
   output=$(run_economics "$case_dir") || fail "the read-only economics report failed"
   assert_contains "$output" "provider-reported total: \$0.000000 across 0 run(s)." \
     "economics hid provider-cost provenance"
-  assert_contains "$output" "Pi-calculated total: \$0.000478 across 1 run(s)." \
+  assert_contains "$output" "Pi-calculated total: \$0.000239 across 1 run(s)." \
     "economics omitted Pi-calculated cost"
-  assert_contains "$output" "declared-rate total: \$0.000478 across 2 run(s)." \
+  assert_contains "$output" "declared-rate total: \$0.000239 across 2 run(s)." \
     "economics omitted declared regular-lane cost and zero-cost reuse"
   verified=$(run_case "$case_dir" "$base" "$head" clear verify) \
     || fail "verify did not follow the reused run to its source proof"
@@ -6119,7 +6437,6 @@ with open(path, encoding="utf-8") as handle:
     ledger = json.load(handle)
 reviewer = ledger["runs"][1]["reviewer"]
 for field in (
-    "execution_proof",
     "terminal_provider",
     "terminal_model",
     "review_depth_passes",
@@ -6138,7 +6455,7 @@ PY
   expect_code 1 "$rc" "reused current contract missing review evidence"
   assert_grep 'current regular review contract is missing terminal or depth fields' \
     "$case_dir/reuse-omission.err" \
-    "a reused current-contract record omitted its proof and depth evidence"
+    "a reused current-contract record omitted its terminal and depth evidence"
   pass "current regular records missing terminal or depth evidence cannot be reused"
 }
 
@@ -6184,19 +6501,179 @@ print(failed["state"], retried["state"])
   pass "failed current regular records remain reloadable for a successful retry"
 }
 
+test_post_admission_alarm_never_rotates_reviewer() {
+  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" <<'PY' || fail "post-admission cleanup alarm allowed reviewer rotation"
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("fm_crosscheck_rotation", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+assert module.reviewer_failure_allows_rotation(
+    module.CrosscheckToolError("pre-admission failure")
+)
+assert not module.reviewer_failure_allows_rotation(
+    module.CrosscheckPostAdmissionToolError("cleanup ambiguity")
+)
+PY
+  pass "an admitted semantic review is never rerun after its cleanup alarm"
+}
+
+test_controller_lookup_is_bounded_and_private_safe() {
+  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" <<'PY' \
+    || fail "controller-side lookup bounds or privacy filters regressed"
+import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+spec = importlib.util.spec_from_file_location("fm_crosscheck_lookup", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    repository = root / "repository"
+    repository.mkdir()
+    private_fragment = "private snapshot sentence spanning enough bytes"
+    (repository / "private.py").write_text(private_fragment + "\n", encoding="utf-8")
+    large_fragment = "private phrase beyond the former eight mebibyte cutoff"
+    (repository / "large-private.txt").write_text(
+        "x" * (8 * 1024 * 1024 + 1) + large_fragment,
+        encoding="utf-8",
+    )
+    private_path = repository / "private-path-name-spanning-more-than-24-chars.txt"
+    private_path.write_text("ordinary contents\n", encoding="utf-8")
+    capture = root / "capture.json"
+    fake = root / "ketch"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        f"open({str(capture)!r}, 'w').write(json.dumps({{'argv': sys.argv[1:], 'env': dict(os.environ)}}))\n"
+        "print(json.dumps({'matches': [{'source': 'public'}]}))\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o700)
+    module.KETCH_BIN = fake
+    requests = [
+        {"type": "code", "query": "python hashlib semantics"},
+        {"type": "code", "query": "python hashlib semantics"},
+    ]
+    result = module.perform_ketch_lookups(
+        requests,
+        review_dir=repository,
+        diff_text="diff contains another private sentence of sufficient length",
+        private_repository="ruby-dlee/firstmate",
+    )
+    assert [item["status"] for item in result["queries"]] == ["complete", "complete"]
+    assert result["queries"][1]["cache_hit"] is True
+    observed = json.loads(capture.read_text(encoding="utf-8"))
+    assert observed["argv"] == [
+        "code", "--backend", "grepapp", "--json", "--limit", "5",
+        "python hashlib semantics",
+    ]
+    assert set(observed["env"]) <= {
+        "HOME", "XDG_CONFIG_HOME", "PATH", "LC_ALL", "LC_CTYPE",
+        "__CF_USER_TEXT_ENCODING", "FM_BOUNDED_IO_OWNERSHIP",
+    }, observed["env"]
+    assert not any(
+        marker in name.upper()
+        for name in observed["env"]
+        for marker in ("TOKEN", "SECRET", "KEY", "GITHUB", "AZURE", "OPENAI")
+    )
+    isolated_home = Path(observed["env"]["HOME"])
+    assert isolated_home.name.startswith("crosscheck-ketch-")
+    assert not isolated_home.exists()
+
+    cases = [
+        ("line one\nline two", "non-printable"),
+        ("x" * 201, "exceeds 200"),
+        ("https://example.com docs", "URL"),
+        ("ftp://host.local/path", "URL"),
+        ("ssh://git@example.local/repo", "URL"),
+        ("docs.python.ai/guide", "URL"),
+        ("example.co.uk/path", "URL"),
+        ("localhost:8080/path", "URL"),
+        ("--scrape", "command-line option"),
+        ("--multi=all", "command-line option"),
+        ("--random=all", "command-line option"),
+        ("--cookie-file=/etc/passwd", "command-line option"),
+        ("commit deadbeef behavior", "hex"),
+        ("firstmate internal behavior", "private repository"),
+        ("access token format", "secret-like"),
+        ("another private sentence of sufficient length", "private diff"),
+        (private_fragment, "private snapshot"),
+        (large_fragment, "private snapshot"),
+        ("private-path-name-spanning-more-than-24-chars", "private snapshot"),
+    ]
+    for query, expected in cases:
+        normalized, refusal = module.validate_lookup_query(
+            query,
+            review_dir=repository,
+            diff_text="diff contains another private sentence of sufficient length",
+            private_repository="ruby-dlee/firstmate",
+        )
+        assert normalized == "" and expected in refusal, (query, refusal)
+
+    for query in ("private-org", "private-base", "contrib-user", "public-fork"):
+        normalized, refusal = module.validate_lookup_query(
+            query + " parser behavior",
+            review_dir=repository,
+            diff_text="",
+            private_repository=[
+                "private-org/private-base", "contrib-user/public-fork",
+            ],
+        )
+        assert normalized == "" and "private repository" in refusal, (
+            query, refusal,
+        )
+
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "print('{\"integer\":' + '9' * 5000 + '}')\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o700)
+    malformed = module.perform_ketch_lookups(
+        [{"type": "search", "query": "python numeric parser behavior"}],
+        review_dir=repository,
+        diff_text="",
+        private_repository="ruby-dlee/firstmate",
+    )
+    assert malformed["queries"][0]["status"] == "unavailable", malformed
+
+    module.KETCH_BIN = root / "missing-ketch"
+    unavailable = module.perform_ketch_lookups(
+        [{"type": "search", "query": "python release notes"}],
+        review_dir=repository,
+        diff_text="",
+        private_repository="ruby-dlee/firstmate",
+    )
+    assert unavailable["queries"][0]["status"] == "unavailable"
+    assert unavailable["digest"].startswith("sha256:")
+PY
+  pass "controller lookup uses fixed Ketch argv, isolated config, caching, and strict filters"
+}
+
 if [ -n "${FM_TEST_CASE:-}" ]; then
   case "$FM_TEST_CASE" in
-    test_non_codex_prompt_addendum_preserves_codex_prompt_bytes|\
-    test_full_sha_verdict_gate_is_not_relaxed_by_the_prompt_addendum|\
+    test_conditional_prompt_is_one_shot_and_model_neutral|\
+    test_one_shot_verdict_needs_no_verdict_level_reproduction|\
     test_status_reports_serving_family_relaxation_and_latest_run|\
     test_reviewer_policy_profiles_and_independence|\
     test_same_model_relaxation_does_not_require_author_identity|\
     test_reviewer_binary_never_resolves_from_working_directory|\
     test_gate_refuses_an_unsupported_interpreter|\
     test_pi_reviewer_accepts_only_successful_terminal_turn|\
+    test_pi_reviewer_follows_auto_retry_contract|\
     test_pi_reviewer_pins_sibling_node_before_path|\
     test_pi_reviewer_executes_bound_policy_profile|\
     test_pi_reviewer_failures_are_tool_failures|\
+    test_pi_lookup_refusal_still_reaches_fresh_final_review|\
+    test_pi_lookup_followup_failure_keeps_incurred_telemetry|\
+    test_pi_lookup_identity_failure_keeps_both_passes_telemetry|\
     test_clear_review_uses_policy_contract|\
     test_missing_author_identity_reaches_normal_verdict|\
     test_claude_reviewer_profile_is_retired|\
@@ -6219,19 +6696,22 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_codex_reviewer_requires_bound_auth_and_clears_ambient_credentials|\
     test_launcher_requires_supported_python|\
     test_completed_reviewer_suspicion_is_blocking|\
-    test_reading_only_suspicion_is_a_tool_failure|\
+    test_reading_only_suspicion_is_identity_only_blocking|\
     test_new_finding_requires_executed_reproduction|\
+    test_failed_new_finding_reproduction_becomes_a_suspicion|\
     test_silence_never_closes_prior_finding|\
+    test_verified_fix_executes_mutation_proof|\
     test_typescript_jest_mutation_proof_can_clear|\
-    test_preexisting_jest_runner_cannot_certify|\
-    test_local_fake_jest_package_cannot_certify|\
-    test_local_transitive_jest_package_cannot_certify|\
+    test_preexisting_jest_runner_stays_blocking|\
+    test_local_fake_jest_package_stays_blocking|\
+    test_local_transitive_jest_package_stays_blocking|\
     test_jest_runs_under_declared_node_major|\
     test_inadequate_typescript_jest_coverage_stays_blocking|\
-    test_typescript_without_usable_route_is_cannot_certify|\
+    test_typescript_without_usable_route_stays_blocking|\
     test_python_mutation_proof_is_byte_exact|\
     test_baseline_readable_state_is_destroyed_before_mutation|\
     test_mutation_is_bound_to_cited_non_test_implementation|\
+    test_invalid_closure_stays_blocking_and_preserves_siblings|\
     test_reviewer_output_uses_separate_capture_limit|\
     test_reviewer_capture_override_is_validated|\
     test_ordinary_output_paths_remain_bounded|\
@@ -6251,6 +6731,9 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_ambient_addopts_cannot_rewrite_the_non_execution_signal|\
     test_ancestor_runner_config_cannot_rewrite_the_non_execution_signal|\
     test_incomplete_proof_environment_fails_loudly|\
+    test_nonexistent_mutation_proof_stays_blocking|\
+    test_mutation_proof_does_not_float_to_a_new_head|\
+    test_equivalent_finding_reopens_when_direct_proof_regresses|\
     test_symlinked_directory_named_test_is_rejected|\
     test_symlinked_home_ancestor_still_clears|\
     test_reviewer_env_dependent_evidence_names_the_difference|\
@@ -6259,7 +6742,19 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_tampered_review_checkout_is_still_detected|\
     test_bulky_unauthorized_scratch_is_named_not_truncated|\
     test_evidence_capture_runs_on_older_interpreters|\
+    test_forged_git_diff_mutation_command_is_rejected|\
+    test_stateful_test_cannot_fabricate_mutation_causality|\
     test_evidence_batch_has_aggregate_deadline|\
+    test_remote_receipt_does_not_impersonate_model_environment|\
+    test_artifacts_cannot_escape_designated_subtrees|\
+    test_prompt_uses_only_bounded_ledger_projection|\
+    test_claims_lookup_error_never_reaches_reviewer|\
+    test_reviewer_configuration_failures_are_tool_failures|\
+    test_stopped_reviewer_and_wrong_head_are_unreviewed|\
+    test_pytest_runner_resolves_through_a_uv_aware_ladder|\
+    test_moved_default_branch_stays_reviewable|\
+    test_unavailable_reviewer_fails_over_to_the_next_account|\
+    test_verify_rechecks_live_head_and_claims|\
     test_run_records_local_lane_phase_durations|\
     test_failure_before_the_reviewer_records_no_reviewer_phase|\
     test_local_lane_run_records_no_compartment_phases|\
@@ -6270,7 +6765,9 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_explicit_pi_tool_loads_with_discovery_disabled|\
     test_telemetry_economics_and_exact_head_reuse|\
     test_current_regular_contract_requires_reuse_evidence|\
-    test_failed_current_regular_contract_remains_reloadable)
+    test_failed_current_regular_contract_remains_reloadable|\
+    test_post_admission_alarm_never_rotates_reviewer|\
+    test_controller_lookup_is_bounded_and_private_safe)
       "$FM_TEST_CASE"
       exit 0
       ;;
@@ -6288,9 +6785,9 @@ if [ "${FM_TEST_FOCUSED:-}" = review-safety-findings ]; then
   test_claude_reviewer_profile_is_retired
   test_same_model_review_is_adversarial_and_durable
   test_typescript_jest_mutation_proof_can_clear
-  test_preexisting_jest_runner_cannot_certify
-  test_local_fake_jest_package_cannot_certify
-  test_local_transitive_jest_package_cannot_certify
+  test_preexisting_jest_runner_stays_blocking
+  test_local_fake_jest_package_stays_blocking
+  test_local_transitive_jest_package_stays_blocking
   test_jest_runs_under_declared_node_major
   test_inadequate_typescript_jest_coverage_stays_blocking
   exit 0
@@ -6298,7 +6795,7 @@ fi
 
 if [ "${FM_TEST_FOCUSED:-}" = review-jest-runtime-closure ]; then
   test_typescript_jest_mutation_proof_can_clear
-  test_local_transitive_jest_package_cannot_certify
+  test_local_transitive_jest_package_stays_blocking
   exit 0
 fi
 
@@ -6316,8 +6813,8 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-3 ]; then
 fi
 
 test_launcher_requires_supported_python
-test_non_codex_prompt_addendum_preserves_codex_prompt_bytes
-test_full_sha_verdict_gate_is_not_relaxed_by_the_prompt_addendum
+test_conditional_prompt_is_one_shot_and_model_neutral
+test_one_shot_verdict_needs_no_verdict_level_reproduction
 test_status_reports_serving_family_relaxation_and_latest_run
 test_reviewer_policy_profiles_and_independence
 test_same_model_relaxation_does_not_require_author_identity
@@ -6327,6 +6824,9 @@ test_pi_reviewer_accepts_only_successful_terminal_turn
 test_pi_reviewer_follows_auto_retry_contract
 test_pi_reviewer_pins_sibling_node_before_path
 test_pi_reviewer_executes_bound_policy_profile
+test_pi_lookup_refusal_still_reaches_fresh_final_review
+test_pi_lookup_followup_failure_keeps_incurred_telemetry
+test_pi_lookup_identity_failure_keeps_both_passes_telemetry
 test_pi_reviewer_failures_are_tool_failures
 test_clear_review_uses_policy_contract
 test_missing_author_identity_reaches_normal_verdict
@@ -6349,15 +6849,16 @@ test_review_fetches_exact_pr_head_when_author_worktree_is_behind
 test_missing_pr_head_ref_fails_closed
 test_codex_reviewer_requires_bound_auth_and_clears_ambient_credentials
 test_new_finding_requires_executed_reproduction
+test_failed_new_finding_reproduction_becomes_a_suspicion
 test_silence_never_closes_prior_finding
 test_verified_fix_executes_mutation_proof
 test_typescript_jest_mutation_proof_can_clear
-test_preexisting_jest_runner_cannot_certify
-test_local_fake_jest_package_cannot_certify
-test_local_transitive_jest_package_cannot_certify
+test_preexisting_jest_runner_stays_blocking
+test_local_fake_jest_package_stays_blocking
+test_local_transitive_jest_package_stays_blocking
 test_jest_runs_under_declared_node_major
 test_inadequate_typescript_jest_coverage_stays_blocking
-test_typescript_without_usable_route_is_cannot_certify
+test_typescript_without_usable_route_stays_blocking
 test_python_mutation_proof_is_byte_exact
 test_node_id_selector_clears_a_passing_named_test
 test_absent_runner_is_never_a_test_outcome
@@ -6381,6 +6882,7 @@ test_forged_git_diff_mutation_command_is_rejected
 test_stateful_test_cannot_fabricate_mutation_causality
 test_baseline_readable_state_is_destroyed_before_mutation
 test_mutation_is_bound_to_cited_non_test_implementation
+test_invalid_closure_stays_blocking_and_preserves_siblings
 test_final_wait_and_residual_processes_are_bounded
 test_installed_sandbox_denies_shared_private_tmp
 test_symlinked_named_test_cannot_hide_test_mutation
@@ -6392,7 +6894,7 @@ test_reviewer_output_uses_separate_capture_limit
 test_reviewer_capture_override_is_validated
 test_ordinary_output_paths_remain_bounded
 test_prompt_uses_only_bounded_ledger_projection
-test_nonexistent_mutation_proof_is_unreviewed
+test_nonexistent_mutation_proof_stays_blocking
 test_mutation_proof_does_not_float_to_a_new_head
 test_recorded_argument_proof_loads_but_no_longer_clears
 test_equivalent_finding_reopens_when_direct_proof_regresses
@@ -6401,7 +6903,7 @@ test_claims_lookup_error_never_reaches_reviewer
 test_reviewer_configuration_failures_are_tool_failures
 test_stopped_reviewer_and_wrong_head_are_unreviewed
 test_completed_reviewer_suspicion_is_blocking
-test_reading_only_suspicion_is_a_tool_failure
+test_reading_only_suspicion_is_identity_only_blocking
 test_pytest_runner_resolves_through_a_uv_aware_ladder
 test_moved_default_branch_stays_reviewable
 test_unavailable_reviewer_fails_over_to_the_next_account
@@ -6417,3 +6919,5 @@ test_explicit_pi_tool_loads_with_discovery_disabled
 test_telemetry_economics_and_exact_head_reuse
 test_current_regular_contract_requires_reuse_evidence
 test_failed_current_regular_contract_remains_reloadable
+test_post_admission_alarm_never_rotates_reviewer
+test_controller_lookup_is_bounded_and_private_safe

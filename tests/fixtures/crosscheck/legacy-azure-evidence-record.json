@@ -1,0 +1,266 @@
+{
+  "run": {
+    "active_blockers": [],
+    "at": "2026-08-24T21:42:25Z",
+    "base_branch_sha": "1b8245105f29ebf48e0a2cc244d8146b1197bc68",
+    "base_sha": "1b8245105f29ebf48e0a2cc244d8146b1197bc68",
+    "citations": [
+      {
+        "line": 5158,
+        "path": "bin/fm-crosscheck.py"
+      },
+      {
+        "line": 4432,
+        "path": "tests/fm-crosscheck.test.sh"
+      },
+      {
+        "line": 302,
+        "path": "tests/fm-crosscheck-azure.test.sh"
+      },
+      {
+        "line": 1965,
+        "path": "bin/fm-crosscheck-azure.py"
+      }
+    ],
+    "claims_sha256": "06a2cf88a01c9c1b38822817e80ffa0777face9516d85e784e400acba90b4687",
+    "durations_ms": {
+      "boot": 3050,
+      "collect": 592,
+      "create": 129950,
+      "ledger": 0,
+      "proofs": 801099,
+      "reviewer": 105959,
+      "snapshot": 3273,
+      "stage": 1073,
+      "total": 1173529
+    },
+    "head_sha": "c7f6f790d0a174e61f19ed61eac6dfc3e45177a3",
+    "new_findings": [],
+    "reviewer": {
+      "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+      "account_selector": "PI_CODING_AGENT_DIR",
+      "azure_identity": {
+        "base_branch_sha": "1b8245105f29ebf48e0a2cc244d8146b1197bc68",
+        "base_sha": "1b8245105f29ebf48e0a2cc244d8146b1197bc68",
+        "claims_sha256": "06a2cf88a01c9c1b38822817e80ffa0777face9516d85e784e400acba90b4687",
+        "credential_archive_digest": "sha256:1d73aa63684a067c08eab5d8b4a977cdac8a5a4ad053b613a2afc2de2866e6f9",
+        "credential_digest": "sha256:acac4288c5887fafb0e00e247565ae9dca52be39dccd15cb72d5edd0380f5e2d",
+        "deployment_generation": "gen-20260812-01",
+        "evidence_attempts": [
+          {
+            "result": {
+              "exit_code": 0,
+              "signal": null,
+              "stderr_bytes": 0,
+              "stderr_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stderr_truncated": false,
+              "stdout_bytes": 185,
+              "stdout_digest": "sha256:52df26b630bd1e5552f84153b7c37f991ae84a15d58a3828f2b0947be0ba7a6d",
+              "stdout_truncated": false,
+              "timed_out": false
+            },
+            "tool": {
+              "base_sha": "1b8245105f29ebf48e0a2cc244d8146b1197bc68",
+              "boot_id": "791f273c-ef68-4dd7-932d-2a7f06607118",
+              "cleanup_phase": "complete",
+              "credential_present": false,
+              "deployment_generation": "gen-20260812-01",
+              "head_sha": "c7f6f790d0a174e61f19ed61eac6dfc3e45177a3",
+              "invocation": "azr-95e34edf3365",
+              "network_bytes": 0,
+              "request_digest": "sha256:9c0c92fa8c9f7ade24e15142d18b0a5d8725446584ab16842986cc5398d544e9",
+              "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-run-95e34edf3365",
+              "result_digest": "sha256:ebe345ae5386075f70e63178c1a34d9d474f4100238cf8ceaa02fa3ad3275e70",
+              "review_generation": "4611ad150e0e2e555731e2e6",
+              "source_ref": "refs/pull/325/head",
+              "vm_instance_id": "91ab06af-96a1-4253-9bea-dae75949d7dc"
+            },
+            "verifier": {
+              "base_sha": "1b8245105f29ebf48e0a2cc244d8146b1197bc68",
+              "boot_id": "7413e081-2614-4571-849d-95f39900e2f2",
+              "cleanup_phase": "complete",
+              "credential_present": false,
+              "deployment_generation": "gen-20260812-01",
+              "head_sha": "c7f6f790d0a174e61f19ed61eac6dfc3e45177a3",
+              "invocation": "azr-4a76b64a0397",
+              "network_bytes": 0,
+              "request_digest": "sha256:0a475019cd5cd3edadc68b3bf163d490e57c1e0c5a9011bbfdf84176a2824855",
+              "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-run-4a76b64a0397",
+              "result_digest": "sha256:a6b711f41e18aa149d2ff1f1e846e3a6e4c215d2e65a2427c8e1eba578273934",
+              "review_generation": "4611ad150e0e2e555731e2e6",
+              "source_ref": "refs/pull/325/head",
+              "vm_instance_id": "c87eb164-92cb-47e8-99f8-082b6c3362a7"
+            }
+          }
+        ],
+        "evidence_attempts_digest": "sha256:cb3dc73ea0552fc02be2ade965c10f4c810559bcd19ab63083e4b83b5ee67d7b",
+        "head_sha": "c7f6f790d0a174e61f19ed61eac6dfc3e45177a3",
+        "home_binding": "sha256:3dbb511eeecdb2b76c1dc4e347ec27b530ca709bb476a6f89a795e19de63077f",
+        "ledger_digest": "sha256:9991a8b9d6c1dc1639c1d6d0ced53ab4050117660fbbbe7ad303dd0873e8a294",
+        "model": {
+          "boot_id": "fef43781-9992-4130-bec5-6ec7eba4764b",
+          "capacity_fence_digest": "sha256:44420d5040870f418e9114328e970d63707996bcbce4ef4dbbbbdd28de20466b",
+          "capacity_reservation": "ccm-4611ad150e0e",
+          "cleanup_phase": "complete",
+          "deployment_generation": "gen-20260812-01",
+          "image_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/galleries/fmcellgallery/images/fm-ccm/versions/1.0.1787092687",
+          "request_digest": "sha256:5d8bcc2f43802c495394abcfaf51cfde72b8e490f7fca4ff3954e84766a2d7bb",
+          "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-ccm-4611ad150e0e",
+          "result_digest": "sha256:ef334cea0c6637a40da8abc9ead1d248620221fccd92403e4c934bf7dfa91436",
+          "vm_instance_id": "42ac9563-2c79-4f97-af8a-a2700d7ee60e"
+        },
+        "model_image_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/galleries/fmcellgallery/images/fm-ccm/versions/1.0.1787092687",
+        "provider_host": "api.fireworks.ai",
+        "provider_port": "443",
+        "pull_request": "https://github.com/ruby-dlee/firstmate/pull/325",
+        "request_digest": "sha256:5d8bcc2f43802c495394abcfaf51cfde72b8e490f7fca4ff3954e84766a2d7bb",
+        "review_generation": "4611ad150e0e2e555731e2e6",
+        "reviewer_account_digest": "sha256:ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_effort": "xhigh",
+        "reviewer_harness": "pi",
+        "reviewer_model": "accounts/fireworks/models/glm-5p2",
+        "reviewer_sku": "Standard_D4as_v6",
+        "staging_cleanup_phase": "complete",
+        "task_id": "crosscheck-azure-receipt-fix",
+        "tool": {
+          "base_sha": "1b8245105f29ebf48e0a2cc244d8146b1197bc68",
+          "boot_id": "791f273c-ef68-4dd7-932d-2a7f06607118",
+          "cleanup_phase": "complete",
+          "credential_present": false,
+          "deployment_generation": "gen-20260812-01",
+          "head_sha": "c7f6f790d0a174e61f19ed61eac6dfc3e45177a3",
+          "invocation": "azr-95e34edf3365",
+          "network_bytes": 0,
+          "request_digest": "sha256:9c0c92fa8c9f7ade24e15142d18b0a5d8725446584ab16842986cc5398d544e9",
+          "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-run-95e34edf3365",
+          "result_digest": "sha256:ebe345ae5386075f70e63178c1a34d9d474f4100238cf8ceaa02fa3ad3275e70",
+          "review_generation": "4611ad150e0e2e555731e2e6",
+          "source_ref": "refs/pull/325/head",
+          "vm_instance_id": "91ab06af-96a1-4253-9bea-dae75949d7dc"
+        },
+        "verifier": {
+          "base_sha": "1b8245105f29ebf48e0a2cc244d8146b1197bc68",
+          "boot_id": "7413e081-2614-4571-849d-95f39900e2f2",
+          "cleanup_phase": "complete",
+          "credential_present": false,
+          "deployment_generation": "gen-20260812-01",
+          "head_sha": "c7f6f790d0a174e61f19ed61eac6dfc3e45177a3",
+          "invocation": "azr-4a76b64a0397",
+          "network_bytes": 0,
+          "request_digest": "sha256:0a475019cd5cd3edadc68b3bf163d490e57c1e0c5a9011bbfdf84176a2824855",
+          "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-run-4a76b64a0397",
+          "result_digest": "sha256:a6b711f41e18aa149d2ff1f1e846e3a6e4c215d2e65a2427c8e1eba578273934",
+          "review_generation": "4611ad150e0e2e555731e2e6",
+          "source_ref": "refs/pull/325/head",
+          "vm_instance_id": "c87eb164-92cb-47e8-99f8-082b6c3362a7"
+        }
+      },
+      "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+      "credential_source": "pi-fireworks-glm-models-file",
+      "effort": "xhigh",
+      "executing_account_home": "/var/lib/fm-crosscheck-model/account",
+      "execution_home": "/var/lib/fm-crosscheck-model/home",
+      "execution_mode": "azure-compartment-v1",
+      "execution_proof": {
+        "actual_exit": 0,
+        "azure_replay": {
+          "result": {
+            "exit_code": 0,
+            "signal": null,
+            "stderr_bytes": 0,
+            "stderr_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stderr_truncated": false,
+            "stdout_bytes": 185,
+            "stdout_digest": "sha256:52df26b630bd1e5552f84153b7c37f991ae84a15d58a3828f2b0947be0ba7a6d",
+            "stdout_truncated": false,
+            "timed_out": false
+          },
+          "tool": {
+            "base_sha": "1b8245105f29ebf48e0a2cc244d8146b1197bc68",
+            "boot_id": "791f273c-ef68-4dd7-932d-2a7f06607118",
+            "cleanup_phase": "complete",
+            "credential_present": false,
+            "deployment_generation": "gen-20260812-01",
+            "head_sha": "c7f6f790d0a174e61f19ed61eac6dfc3e45177a3",
+            "invocation": "azr-95e34edf3365",
+            "network_bytes": 0,
+            "request_digest": "sha256:9c0c92fa8c9f7ade24e15142d18b0a5d8725446584ab16842986cc5398d544e9",
+            "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-run-95e34edf3365",
+            "result_digest": "sha256:ebe345ae5386075f70e63178c1a34d9d474f4100238cf8ceaa02fa3ad3275e70",
+            "review_generation": "4611ad150e0e2e555731e2e6",
+            "source_ref": "refs/pull/325/head",
+            "vm_instance_id": "91ab06af-96a1-4253-9bea-dae75949d7dc"
+          },
+          "verifier": {
+            "base_sha": "1b8245105f29ebf48e0a2cc244d8146b1197bc68",
+            "boot_id": "7413e081-2614-4571-849d-95f39900e2f2",
+            "cleanup_phase": "complete",
+            "credential_present": false,
+            "deployment_generation": "gen-20260812-01",
+            "head_sha": "c7f6f790d0a174e61f19ed61eac6dfc3e45177a3",
+            "invocation": "azr-4a76b64a0397",
+            "network_bytes": 0,
+            "request_digest": "sha256:0a475019cd5cd3edadc68b3bf163d490e57c1e0c5a9011bbfdf84176a2824855",
+            "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-run-4a76b64a0397",
+            "result_digest": "sha256:a6b711f41e18aa149d2ff1f1e846e3a6e4c215d2e65a2427c8e1eba578273934",
+            "review_generation": "4611ad150e0e2e555731e2e6",
+            "source_ref": "refs/pull/325/head",
+            "vm_instance_id": "c87eb164-92cb-47e8-99f8-082b6c3362a7"
+          }
+        },
+        "command": "bash --noprofile --norc .crosscheck/reproductions/repro.sh 1b8245105f29ebf48e0a2cc244d8146b1197bc68 c7f6f790d0a174e61f19ed61eac6dfc3e45177a3",
+        "expected_exit": 0,
+        "output": "validated in fresh networkless Azure tool/verifier attempts; sha256:52df26b630bd1e5552f84153b7c37f991ae84a15d58a3828f2b0947be0ba7a6d",
+        "output_contains": "CROSSCHECK_AZURE_REPRO_OK",
+        "reviewer_receipt": {
+          "contains": "CROSSCHECK_AZURE_RECEIPT_BOUND",
+          "output": "private receipt content retained by digest",
+          "path": ".crosscheck/reproductions/receipt.txt",
+          "sha256": "52df26b630bd1e5552f84153b7c37f991ae84a15d58a3828f2b0947be0ba7a6d"
+        },
+        "test_path": ".crosscheck/reproductions/repro.sh"
+      },
+      "harness": "pi",
+      "model": "accounts/fireworks/models/glm-5p2",
+      "review_contract_sha256": "a3bbabcab1fd40a0e7ed07f351ea914424f5f59b62f4b5921c506c545d6f607d",
+      "review_family_mode": "cross-family-primary",
+      "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+      "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4"
+    },
+    "state": "clear",
+    "summary": "Reviewed the full diff for PR #325, which separates local receipt identity requirements from Azure evidence receipts. The core change in bin/fm-crosscheck.py conditionally extends receipt_markers with execution_home and executing_account_home only when evidence_executor is None (local reviews), so Azure credentialless tool VM receipts bind only their distinctive marker and exact base/head SHAs. This is correct: a credentialless Azure VM echoing the model compartment's private paths would prove only a copied literal, not actual identity binding. The new test test_remote_receipt_does_not_impersonate_model_environment verifies the Azure receipt contains list excludes model-only paths, and the Azure prompt test assertions confirm the updated prompt text. Documentation in crosscheck.md and configuration.md is consistent with the implementation. No blocking issues, high-severity concerns, or reproducible defects found.",
+    "suspicions": [],
+    "telemetry": {
+      "costs_usd": {
+        "declared": 0.043919,
+        "declared_source": "pinned-fireworks-regular-rates",
+        "pi_calculated": 0.043919,
+        "pi_calculated_source": "pi-turn-end-message-usage-cost-total",
+        "provider_reported": null,
+        "provider_reported_source": "unavailable-in-pi-events"
+      },
+      "failure_category": null,
+      "finding_disposition": {
+        "active": 0,
+        "closed_equivalent": 0,
+        "new": 0,
+        "suspicions": 0,
+        "updated": 0,
+        "verified_fixed": 0
+      },
+      "outcome": "clear",
+      "reuse": null,
+      "reviewer_latency_ms": 105959,
+      "schema": "firstmate.crosscheck-run-telemetry.v1",
+      "tokens": {
+        "cache_read": 0,
+        "cache_write": 0,
+        "input": 7023,
+        "output": 7747,
+        "source": "pi-turn-end-message-usage"
+      },
+      "turns": 1
+    },
+    "updated_findings": []
+  }
+}
