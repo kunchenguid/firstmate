@@ -36,6 +36,10 @@ case "${FAKE_GH_AXI_MODE:-answer}" in
     printf 'offline\n'
     exit 0
     ;;
+  direct-pagination)
+    printf 'offline\nonline\n'
+    exit 0
+    ;;
   malformed)
     printf 'not an API response\n'
     exit 0
@@ -383,6 +387,20 @@ test_direct_scalar_health_state_is_consumed() {
   pass "an exact direct scalar health state is accepted without weakening malformed-output rejection"
 }
 
+test_direct_paginated_health_states_are_aggregated() {
+  local home fakebin response out
+  home=$(make_home direct-pagination)
+  fakebin=$(make_fake_gh_axi direct-pagination)
+  response="$home/runners.json"
+  out="$home/out.txt"
+
+  write_runners "$response" offline false
+  run_check "$home" "$fakebin" "$response" "$out" FAKE_GH_AXI_MODE=direct-pagination
+  [ ! -s "$out" ] || fail "an online runner on a later direct page was reported unavailable: $(cat "$out")"
+  expect_reported "$home" ''
+  pass "direct paginated health states are aggregated before deciding health"
+}
+
 test_api_timeout_finishes_inside_the_watcher_bound() {
   local home fakebin response out before after elapsed
   home=$(make_home timeout)
@@ -553,6 +571,7 @@ test_check_refuses_a_symlinked_state_directory
 test_paginated_api_results_are_aggregated_before_verdict
 test_malformed_envelope_with_trailing_diagnostics_is_silent
 test_direct_scalar_health_state_is_consumed
+test_direct_paginated_health_states_are_aggregated
 test_api_timeout_finishes_inside_the_watcher_bound
 test_target_validation_refuses_unsafe_or_ambiguous_values
 test_arm_registers_a_targeted_shim_and_disarm_removes_it

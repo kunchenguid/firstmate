@@ -186,7 +186,7 @@ api_state() {
 }
 
 api_response_states() {
-  local output=$1 body separator segment
+  local output=$1 body separator segment direct
   local -a lines
 
   case "$output" in
@@ -200,6 +200,22 @@ api_response_states() {
   while IFS= read -r line; do
     lines+=("$line")
   done <<< "$output"
+
+  # A paginated jq projection may be returned as one exact state per line
+  # rather than inside gh-axi's raw-response envelope. Accept only the three
+  # health states here; any other line continues through the strict envelope
+  # validation below and is rejected as an unavailable poll.
+  if [ "${#lines[@]}" -gt 1 ]; then
+    direct=1
+    for segment in "${lines[@]}"; do
+      case "$segment" in
+        online|offline|missing) printf '%s\n' "$segment" ;;
+        *) direct=0; break ;;
+      esac
+    done
+    [ "$direct" -eq 1 ] && return 0
+  fi
+
   [ "${#lines[@]}" -eq 3 ] || return 1
   [ "${lines[0]}" = 'api_response:' ] || return 1
   case "${lines[1]}" in
