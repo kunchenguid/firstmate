@@ -258,6 +258,15 @@ for kind in ("monitor-extension", "bootstrap-command", "ttl-schedule"):
     transitioned["resources"][kind]["immutable_id"] = "Updating"
 transitioned["resources"]["monitor-extension"]["provisioning_state"] = "Updating"
 assert module.resources_exact(worker, transitioned)[0] is True
+# State-container metadata writes legitimately replace the ETag recorded by
+# older workers. Canonical inventory identifies the exact container by its ARM
+# path, so that one migration shape remains exact while arbitrary identities
+# and changed paths below still fail closed.
+metadata_updated = copy.deepcopy(cloud)
+metadata_updated["resources"]["state-container"]["immutable_id"] = (
+    metadata_updated["resources"]["state-container"]["id"]
+)
+assert module.resources_exact(worker, metadata_updated)[0] is True
 foreign_child = copy.deepcopy(transitioned)
 foreign_child["resources"]["monitor-extension"]["id"] = "/foreign/monitor-extension"
 exact, reason = module.resources_exact(worker, foreign_child)

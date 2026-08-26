@@ -1482,11 +1482,23 @@ def resources_exact(worker, cloud, allow_missing_compute=False):
         # transitions. Its stable ARM ID remains fenced above; the provider
         # independently checks exact VM attachment, tags, and readiness where
         # the requested operation needs a ready child.
+        # Azure Blob container metadata writes change the container ETag. The
+        # provider's canonical inventory therefore uses the exact container
+        # ARM path as its stable identity. Accept a worker recorded by the
+        # older ETag-bearing shape only when the current stable identity and
+        # both resource paths are that same exact ARM path.
+        legacy_state_container = (
+            kind == "state-container"
+            and current.get("immutable_id") == current.get("id")
+            and prior is not None
+            and prior.get("id") == current.get("id")
+        )
         if (
             prior is not None
             and kind not in MUTABLE_PROVISIONING_CHILD_KINDS
             and kind not in ("staging-request", "staging-result")
             and current.get("immutable_id") != prior.get("immutable_id")
+            and not legacy_state_container
         ):
             return False, "{} immutable identity changed".format(kind)
         tags = current.get("tags") or {}
