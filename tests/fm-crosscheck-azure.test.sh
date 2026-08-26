@@ -1603,6 +1603,22 @@ base = {
 }
 run = {"head_sha": "a" * 40, "base_sha": "b" * 40, "claims_sha256": "c" * 64}
 module.validate_azure_reviewer_record(base, run, "run")
+for cleanup_phase in ("pending", "ambiguous"):
+    import copy
+    candidate = copy.deepcopy(base)
+    candidate["azure_identity"]["model"]["cleanup_phase"] = cleanup_phase
+    candidate["azure_identity"]["staging_cleanup_phase"] = cleanup_phase
+    module.validate_azure_reviewer_record(candidate, run, "run")
+    try:
+        module.verify_azure_reviewer_record(
+            candidate,
+            run,
+            {"head_sha": "a" * 40, "claims_sha256": "c" * 64},
+        )
+    except module.AzureCrosscheckError as exc:
+        assert "cleanup is not complete" in str(exc), str(exc)
+    else:
+        raise AssertionError("incomplete cleanup certified a review")
 for mutation, expected in (
     (("head_sha", "9" * 40), "generation"),
     (("tool.vm_instance_id", "model"), "immutable identity"),
@@ -2688,11 +2704,14 @@ attempts = [{
     "tool": {"vm_instance_id": "tool-vm"},
     "verifier": {"vm_instance_id": "verifier-vm"},
 }]
+class BridgeError(RuntimeError):
+    pass
 class EvidenceExecutor:
     def __init__(self, **_kwargs):
         self.attempts = attempts
 
 bridge = SimpleNamespace(
+    BridgeError=BridgeError,
     validate_evidence_files=lambda _value: {},
     RemoteEvidenceExecutor=EvidenceExecutor,
 )
@@ -2714,6 +2733,7 @@ core.apply_review = apply_review
 def persist_result(ledger, run):
     assert ledger["runs"][-1] is run
     events.append("persist")
+    events.append(run)
 
 def cleanup(*_args):
     events.append("cleanup")
@@ -2738,11 +2758,74 @@ try:
         lane=0,
         persist_result=persist_result,
     )
-except core.CrosscheckToolError as exc:
+except core.CrosscheckPostAdmissionToolError as exc:
     assert "cleanup is ambiguous" in str(exc), str(exc)
 else:
     raise AssertionError("ambiguous cleanup did not remain a tool-level failure")
-assert events == ["persist", "cleanup"], events
+assert events[0] == "persist" and events[2] == "cleanup", events
+persisted_run = events[1]
+assert persisted_run["reviewer"]["azure_identity"]["model"]["cleanup_phase"] == "ambiguous"
+assert persisted_run["reviewer"]["azure_identity"]["staging_cleanup_phase"] == "ambiguous"
+
+# A bridge failure must enter the core's item-scoped CrosscheckError family so
+# apply_review can degrade one proof without discarding the semantic review.
+class FailingExecutor:
+    attempts = []
+    batch_deadline = 1.0
+    def __call__(self, *_args, **_kwargs):
+        raise BridgeError("fixture evidence refusal")
+    def validate_declared_paths(self, *_args, **_kwargs):
+        raise BridgeError("fixture manifest refusal")
+    def execute_mutation(self, *_args, **_kwargs):
+        raise BridgeError("fixture mutation refusal")
+
+normalized = adapter.NormalizedRemoteEvidenceExecutor(
+    core, bridge, FailingExecutor()
+)
+for operation in (
+    lambda: normalized(None),
+    lambda: normalized.validate_declared_paths(set(), receipt_path="fixture"),
+    lambda: normalized.execute_mutation(None),
+):
+    try:
+        operation()
+    except core.CrosscheckError as exc:
+        assert "fixture" in str(exc), str(exc)
+    else:
+        raise AssertionError("bridge refusal escaped core classification")
+
+# The second integrity check runs after proof application and before persist.
+events.clear()
+integrity_checks = 0
+def assert_intact(*_args):
+    global integrity_checks
+    integrity_checks += 1
+    if integrity_checks == 2:
+        raise core.CrosscheckError("fixture proof tampered with checkout")
+core.assert_review_checkout_intact = assert_intact
+adapter.cleanup_model_vm = lambda *_args: events.append("cleanup")
+adapter.release_model_capacity = lambda *_args: events.append("release")
+try:
+    adapter._run_azure_review_in_lane(
+        core=core,
+        root=root,
+        home=home,
+        task_id="tamper-before-persist",
+        pr_url="https://github.com/ruby-dlee/firstmate/pull/327",
+        review_dir=review,
+        proof_root=proof,
+        snapshot_value=snapshot,
+        ledger={"runs": []},
+        config=dict(config),
+        author_account_identity="",
+        lane=0,
+        persist_result=persist_result,
+    )
+except core.CrosscheckError as exc:
+    assert "tampered" in str(exc), str(exc)
+else:
+    raise AssertionError("post-proof checkout tampering was persisted")
+assert "persist" not in events, events
 PY
   pass "admitted Azure run persists before an ambiguous cleanup alarm"
 }

@@ -6325,6 +6325,24 @@ print(failed["state"], retried["state"])
   pass "failed current regular records remain reloadable for a successful retry"
 }
 
+test_post_admission_alarm_never_rotates_reviewer() {
+  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" <<'PY' || fail "post-admission cleanup alarm allowed reviewer rotation"
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("fm_crosscheck_rotation", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+assert module.reviewer_failure_allows_rotation(
+    module.CrosscheckToolError("pre-admission failure")
+)
+assert not module.reviewer_failure_allows_rotation(
+    module.CrosscheckPostAdmissionToolError("cleanup ambiguity")
+)
+PY
+  pass "an admitted semantic review is never rerun after its cleanup alarm"
+}
+
 if [ -n "${FM_TEST_CASE:-}" ]; then
   case "$FM_TEST_CASE" in
     test_non_codex_prompt_addendum_preserves_codex_prompt_bytes|\
@@ -6430,7 +6448,8 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_explicit_pi_tool_loads_with_discovery_disabled|\
     test_telemetry_economics_and_exact_head_reuse|\
     test_current_regular_contract_requires_reuse_evidence|\
-    test_failed_current_regular_contract_remains_reloadable)
+    test_failed_current_regular_contract_remains_reloadable|\
+    test_post_admission_alarm_never_rotates_reviewer)
       "$FM_TEST_CASE"
       exit 0
       ;;
@@ -6579,3 +6598,4 @@ test_explicit_pi_tool_loads_with_discovery_disabled
 test_telemetry_economics_and_exact_head_reuse
 test_current_regular_contract_requires_reuse_evidence
 test_failed_current_regular_contract_remains_reloadable
+test_post_admission_alarm_never_rotates_reviewer

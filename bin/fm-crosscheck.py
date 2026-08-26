@@ -347,6 +347,10 @@ class CrosscheckToolError(CrosscheckError):
     """Raised when environment, metadata, or tooling prevents review."""
 
 
+class CrosscheckPostAdmissionToolError(CrosscheckToolError):
+    """Raised for an alarm after a semantic reviewer result was admitted."""
+
+
 class CrosscheckBlockingError(CrosscheckError):
     """Raised when completed review evidence blocks the exact head."""
 
@@ -361,6 +365,12 @@ class CrosscheckCoverageError(CrosscheckError):
     def __init__(self, message: str, proof: dict[str, Any]):
         super().__init__(message)
         self.proof = proof
+
+
+def reviewer_failure_allows_rotation(exc: CrosscheckToolError) -> bool:
+    """Return whether another reviewer may be launched after this failure."""
+
+    return not isinstance(exc, CrosscheckPostAdmissionToolError)
 
 
 def cannot_certify(message: str) -> NoReturn:
@@ -6441,6 +6451,11 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
                                 config,
                             )
                 except CrosscheckToolError as exc:
+                    if not reviewer_failure_allows_rotation(exc):
+                        # The adapter already persisted the admitted semantic
+                        # run. Cleanup ambiguity is a separate loud alarm,
+                        # never a reason to spend on another reviewer account.
+                        raise
                     if not remaining:
                         raise
                     run = append_failed_run(

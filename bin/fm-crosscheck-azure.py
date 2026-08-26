@@ -1932,6 +1932,40 @@ def normalize_pi_evidence_files(value: Any) -> dict[str, str]:
     return result
 
 
+class NormalizedRemoteEvidenceExecutor:
+    """Translate bridge implementation errors into item-scoped core errors."""
+
+    def __init__(self, core: Any, bridge: Any, executor: Any) -> None:
+        self.core = core
+        self.bridge = bridge
+        self.executor = executor
+
+    @property
+    def attempts(self) -> list[dict[str, Any]]:
+        return self.executor.attempts
+
+    @property
+    def batch_deadline(self) -> float:
+        return self.executor.batch_deadline
+
+    def _call(self, operation: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return operation(*args, **kwargs)
+        except self.bridge.BridgeError as exc:
+            raise self.core.CrosscheckError(str(exc)) from exc
+
+    def validate_declared_paths(self, *args: Any, **kwargs: Any) -> Any:
+        return self._call(
+            self.executor.validate_declared_paths, *args, **kwargs
+        )
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return self._call(self.executor, *args, **kwargs)
+
+    def execute_mutation(self, *args: Any, **kwargs: Any) -> Any:
+        return self._call(self.executor.execute_mutation, *args, **kwargs)
+
+
 def static_review_packet(core: Any, review_dir: Path, snapshot_value: dict[str, Any]) -> str:
     result = core.run_command(
         [
@@ -2339,6 +2373,7 @@ def _run_azure_review_in_lane(
                 "capacity_fence_digest": "sha256:" + hashlib.sha256(
                     model_capacity["fence"].encode("utf-8")
                 ).hexdigest(),
+                "cleanup_phase": "pending",
             }
             bridge = load_tool_bridge()
             raw_evidence_files = result.get("evidence_files")
@@ -2359,14 +2394,18 @@ def _run_azure_review_in_lane(
             core.assert_review_checkout_intact(
                 review_dir, snapshot_value["head_sha"]
             )
-            evidence_executor = bridge.RemoteEvidenceExecutor(
-                repository_root=review_dir,
-                remote=f"https://github.com/{snapshot_value['base_repo']}.git",
-                source_ref=f"refs/pull/{snapshot_value['number']}/head",
-                head_sha=snapshot_value["head_sha"],
-                base_sha=snapshot_value["base_sha"],
-                review_generation=identity["review_generation"],
-                evidence_files=evidence_files,
+            evidence_executor = NormalizedRemoteEvidenceExecutor(
+                core,
+                bridge,
+                bridge.RemoteEvidenceExecutor(
+                    repository_root=review_dir,
+                    remote=f"https://github.com/{snapshot_value['base_repo']}.git",
+                    source_ref=f"refs/pull/{snapshot_value['number']}/head",
+                    head_sha=snapshot_value["head_sha"],
+                    base_sha=snapshot_value["base_sha"],
+                    review_generation=identity["review_generation"],
+                    evidence_files=evidence_files,
+                ),
             )
             with measured_phase(phase_timer, "proofs"):
                 review = core.validate_review_shape(
@@ -2388,6 +2427,9 @@ def _run_azure_review_in_lane(
                         core, evidence_executor, evidence_files
                     ),
                 )
+            core.assert_review_checkout_intact(
+                review_dir, snapshot_value["head_sha"]
+            )
             if not evidence_executor.attempts:
                 raise AzureCrosscheckError(
                     "Azure review completed without remote execution evidence"
@@ -2418,6 +2460,7 @@ def _run_azure_review_in_lane(
                 "evidence_attempts_digest": digest_bytes(
                     canonical_bytes(evidence_executor.attempts)
                 ),
+                "staging_cleanup_phase": "pending",
             }
             config.update(
                 {
@@ -2464,6 +2507,9 @@ def _run_azure_review_in_lane(
                 ledger_identity["model"]["cleanup_phase"] = "complete"
                 ledger_identity["staging_cleanup_phase"] = "complete"
             if cleanup_error is not None or blob_cleanup_errors:
+                if ledger_identity is not None:
+                    ledger_identity["model"]["cleanup_phase"] = "ambiguous"
+                    ledger_identity["staging_cleanup_phase"] = "ambiguous"
                 detail = "; ".join(
                     [
                         *(
@@ -2474,7 +2520,7 @@ def _run_azure_review_in_lane(
                         *blob_cleanup_errors,
                     ]
                 )
-                raise core.CrosscheckToolError(
+                raise core.CrosscheckPostAdmissionToolError(
                     f"Azure model compartment cleanup is ambiguous: {detail}"
                 )
 
@@ -2562,11 +2608,15 @@ def validate_azure_reviewer_record(
         raise RuntimeError(f"{label}.reviewer Azure executing account digest is missing")
     if identity["reviewer_account_digest"] != "sha256:" + account_digest:
         raise RuntimeError(f"{label}.reviewer Azure account identity mismatches")
-    if identity.get("staging_cleanup_phase") != "complete":
-        raise RuntimeError(f"{label}.reviewer Azure staging cleanup is incomplete")
+    if identity.get("staging_cleanup_phase") not in {
+        "pending",
+        "complete",
+        "ambiguous",
+    }:
+        raise RuntimeError(f"{label}.reviewer Azure staging cleanup state is invalid")
     model = require_identity_record(identity.get("model"), f"{label}.reviewer.azure_identity.model")
     if (
-        model.get("cleanup_phase") != "complete"
+        model.get("cleanup_phase") not in {"pending", "complete", "ambiguous"}
         or model.get("request_digest") != identity["request_digest"]
         or model.get("deployment_generation") != identity["deployment_generation"]
         or model.get("image_id") != identity["model_image_id"]
@@ -2656,6 +2706,13 @@ def verify_azure_reviewer_record(
     except RuntimeError as exc:
         raise AzureCrosscheckError(str(exc)) from exc
     identity = reviewer["azure_identity"]
+    if (
+        identity.get("staging_cleanup_phase") != "complete"
+        or identity.get("model", {}).get("cleanup_phase") != "complete"
+    ):
+        raise AzureCrosscheckError(
+            "Azure review cleanup is not complete for certification"
+        )
     if identity["head_sha"] != snapshot_value["head_sha"]:
         raise AzureCrosscheckError("Azure review identity is stale for the live PR head")
     if identity["claims_sha256"] != snapshot_value["claims_sha256"]:

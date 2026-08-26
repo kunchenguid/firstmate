@@ -182,6 +182,12 @@ The durable v2 per-task lock and ledger remain home-local and keep one writer pe
 
 Cleanup starts only after a complete digest-bound result and exact compartment identities are retained.
 The controller persists that admitted semantic run before cleanup begins.
+The record carries an explicit pending cleanup state while cleanup is in flight.
+If cleanup becomes ambiguous, that state remains ledger-valid but cannot certify
+the review, and the separate post-admission tool alarm exits nonzero without
+launching or charging another reviewer. Bridge refusals during an individual
+proof are normalized into the core evidence error family so closure and
+new-finding degradation keep their item-scoped semantics.
 If cleanup is ambiguous, the admitted run remains durable and a separate nonzero tool-failure alarm is appended; retrying publication or cleanup never reruns the model.
 The controller re-reads tags and ETags before conditional deletion.
 It deletes only the attempt's review and safety Managed Run Commands, model VM, NIC, OS disk, exact staged request, exact staged credential, and exact staged result.
