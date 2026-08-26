@@ -25,6 +25,7 @@ Board answers are acted on later under the normal authority rules; this skill's 
 Chat-Digest und Dateibericht ausschließlich auf Deutsch mit echten Umlauten.
 Anrede mindestens einmal: Kapitän.
 Die vier Abschnittsüberschriften bleiben Englisch (Contract).
+Dateibericht-Titel bei Morgenbrief: nur „Morgenlage“ (kein englisches Morning status).
 Leere Abschnitte auf Deutsch rendern:
 
 - Captain's Call: „Derzeit brauchst du keine Aktion, Kapitän.“
