@@ -377,6 +377,33 @@ PY
   pass "release authority retains the worker when localized scout scratch is missing"
 }
 
+test_endpoint_authority_uses_backend_present_vocabulary() {
+  local root
+  root=$(fm_test_tmproot "fm-cloud-endpoint-present")
+  mkdir -p "$root/runtime/bin" "$root/home/state"
+  printf 'failed: returned outcome retained\n' > "$root/home/state/task-one.status"
+  cat > "$root/runtime/bin/fm-backend.sh" <<'SH'
+fm_backend_target_state() { printf '%s\n' present; }
+SH
+  python3 - "$ROOT/bin/fm-worker-authority.py" "$root/runtime" "$root/home" <<'PY'
+import importlib.util
+from pathlib import Path
+import sys
+
+module_path, runtime_text, home_text = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("worker_authority", module_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.ROOT = Path(runtime_text)
+evidence = module.endpoint_evidence(
+    Path(home_text), "task-one",
+    {"backend": ["herdr"], "window": ["target-one"], "placement": ["azure"]},
+)
+assert evidence.endswith(b"cloud-return-localized"), evidence
+PY
+  pass "cloud return endpoint authority accepts the production backend present state"
+}
+
 test_monitor_retries_release_and_removes_credentials() {
   local record root home repo id out
   id=cloud-return-release
@@ -440,6 +467,7 @@ test_corrupt_bundle_refuses_before_artifacts
 test_cloud_custody_authority_reads_localized_return
 test_lifecycle_accepts_only_exact_return_identity
 test_release_authority_requires_retained_scout_scratch
+test_endpoint_authority_uses_backend_present_vocabulary
 test_monitor_retries_release_and_removes_credentials
 
 echo "# fm-cloud-result.test.sh: all assertions passed"
