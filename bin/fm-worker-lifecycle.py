@@ -3658,6 +3658,34 @@ def refuse_retired_capacity_fence(state, fence):
         raise LifecycleError("retired capacity fence cannot admit another reservation")
 
 
+def matching_capacity_reservation(state, candidate):
+    reservation_id = candidate["reservation_id"]
+    existing = state["capacity_reservations"].get(reservation_id)
+    if existing is None:
+        return None, None
+    identity_fields = (
+        "schema", "reservation_id", "fence_binding", "role", "workload_role", "sku",
+        "sku_family", "vcpus", "discretionary",
+    )
+    # A shape constituent is reserved by its parent with a cushioned
+    # worst-case amount; the child's exact bound may re-admit at or below that
+    # cushion without weakening the held accounting. A reservation outside a
+    # shape still requires the exact amount.
+    if existing.get("shape_id"):
+        amount_exact = candidate["amount_usd"] <= existing.get("amount_usd", -1.0) + 1e-6
+    else:
+        amount_exact = math.isclose(
+            float(existing.get("amount_usd", -1.0)), float(candidate["amount_usd"]),
+            rel_tol=0.0, abs_tol=1e-6,
+        )
+    if any(existing.get(field) != candidate.get(field) for field in identity_fields) or not amount_exact:
+        raise LifecycleError("capacity reservation id already has a different exact identity")
+    if existing.get("status") == "released":
+        raise LifecycleError("released capacity reservation identity cannot be reused")
+    readmission_id = reservation_id if existing.get("status") == "reserved" else None
+    return existing, readmission_id
+
+
 def command_capacity_reserve(env, args):
     if args.confirm_subscription != env["subscription"]:
         raise LifecycleError("--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
@@ -3666,39 +3694,31 @@ def command_capacity_reserve(env, args):
     with controller_lock(env):
         state = load_state(env)
         refuse_retired_capacity_fence(state, candidate["fence_binding"])
-        existing = state["capacity_reservations"].get(reservation_id)
-        readmission_id = None
-        identity_fields = (
-            "schema", "reservation_id", "fence_binding", "role", "workload_role", "sku",
-            "sku_family", "vcpus", "discretionary",
-        )
-        if existing is not None:
-            # A shape constituent is reserved by its parent with a cushioned
-            # worst-case amount; the child's exact bound may re-admit at or
-            # below that cushion without weakening the held accounting. A
-            # reservation outside a shape still requires the exact amount.
-            if existing.get("shape_id"):
-                amount_exact = candidate["amount_usd"] <= existing.get("amount_usd", -1.0) + 1e-6
-            else:
-                amount_exact = math.isclose(
-                    float(existing.get("amount_usd", -1.0)), float(candidate["amount_usd"]),
-                    rel_tol=0.0, abs_tol=1e-6,
-                )
-            if any(existing.get(field) != candidate.get(field) for field in identity_fields) or not amount_exact:
-                raise LifecycleError("capacity reservation id already has a different exact identity")
-            if existing.get("status") == "released":
-                raise LifecycleError("released capacity reservation identity cannot be reused")
-            if existing.get("status") == "reserved":
-                readmission_id = reservation_id
-            candidate = existing
-        else:
+        existing, _ = matching_capacity_reservation(state, candidate)
+        if existing is None:
             state["capacity_reservations"][reservation_id] = candidate
             save_state(env, state)
+    # Azure inventory can take minutes. The queued reservation above makes
+    # this attempt durable while leaving the controller lock available to
+    # unrelated admissions, releases, status reads, and cleanup.
+    inventory = None
+    inventory_error = None
+    try:
+        inventory = provider_call(env, "inventory")["inventory"]
+    except LifecycleError as exc:
+        inventory_error = str(exc)
+    with controller_lock(env):
+        state = load_state(env)
+        refuse_retired_capacity_fence(state, candidate["fence_binding"])
+        candidate, readmission_id = matching_capacity_reservation(state, candidate)
+        if candidate is None:
+            raise LifecycleError("capacity reservation disappeared during inventory inspection")
         actual = None
         forecast = None
         override_day = None
         try:
-            inventory = provider_call(env, "inventory")["inventory"]
+            if inventory_error is not None:
+                raise LifecycleError(inventory_error)
             state["last_metrics"] = metrics_from_inventory(inventory)
             actual = inventory["metrics"].get("actual_usd")
             forecast = inventory["metrics"].get("forecast_usd")
@@ -3882,6 +3902,21 @@ def command_capacity_reserve_shape(env, args):
     }, sort_keys=True, separators=(",", ":")))
 
 
+def matching_capacity_release(state, reservation_id, fence, receipt):
+    reservation = state["capacity_reservations"].get(reservation_id)
+    if reservation is None:
+        raise LifecycleError("capacity release has no exact durable reservation")
+    if reservation.get("fence_binding") != fence:
+        raise LifecycleError("capacity release fence binding is not exact")
+    if reservation.get("status") == "released":
+        if reservation.get("cleanup_receipt") != receipt:
+            raise LifecycleError("capacity reservation already has a different cleanup receipt")
+        return reservation, True
+    if reservation.get("status") not in ("queued", "reserved"):
+        raise LifecycleError("capacity reservation status is not releasable")
+    return reservation, False
+
+
 def command_capacity_release(env, args):
     if args.confirm_subscription != env["subscription"]:
         raise LifecycleError("--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
@@ -3890,19 +3925,23 @@ def command_capacity_release(env, args):
     receipt = require_binding("capacity cleanup receipt", args.cleanup_receipt)
     with controller_lock(env):
         state = load_state(env)
-        reservation = state["capacity_reservations"].get(reservation_id)
-        if reservation is None:
-            raise LifecycleError("capacity release has no exact durable reservation")
-        if reservation.get("fence_binding") != fence:
-            raise LifecycleError("capacity release fence binding is not exact")
-        if reservation.get("status") == "released":
-            if reservation.get("cleanup_receipt") != receipt:
-                raise LifecycleError("capacity reservation already has a different cleanup receipt")
+        _, already_released = matching_capacity_release(
+            state, reservation_id, fence, receipt
+        )
+        if already_released:
             print("capacity reservation already released with exact zero-compute proof")
             return
-        if reservation.get("status") not in ("queued", "reserved"):
-            raise LifecycleError("capacity reservation status is not releasable")
-        inventory = provider_call(env, "inventory")["inventory"]
+    # Azure inventory is a multi-minute read. It proves compute absence, but
+    # it does not need exclusive access to the durable controller document.
+    inventory = provider_call(env, "inventory")["inventory"]
+    with controller_lock(env):
+        state = load_state(env)
+        reservation, already_released = matching_capacity_release(
+            state, reservation_id, fence, receipt
+        )
+        if already_released:
+            print("capacity reservation already released with exact zero-compute proof")
+            return
         if any(
             item.get("reservation_id") == reservation_id and item.get("active") is True
             for item in inventory["capacity_reservations"]
@@ -4620,8 +4659,6 @@ def command_surrender(env, args):
         raise LifecycleError("--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
     with controller_lock(env):
         state = load_state(env)
-        if state.get("pending_actions"):
-            raise LifecycleError("a pending provider action exists; reconcile first")
         key = request_key(args.task, args.task_generation)
         item = state["queue"].get(key)
         if item is not None and item.get("status") == "complete":
@@ -4635,6 +4672,8 @@ def command_surrender(env, args):
         worker = state["workers"].get(str(item.get("slot")))
         if worker is None or worker.get("queue_key") != key:
             raise LifecycleError("surrender task has no exact durable worker owner")
+        if (state.get("pending_actions") or {}).get(str(worker["slot"])) is not None:
+            raise LifecycleError("the worker slot has a pending provider action; reconcile it first")
         existing = worker.get("release_proof")
         if existing is not None:
             if isinstance(existing.get("surrender"), dict):

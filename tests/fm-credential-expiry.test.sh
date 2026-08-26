@@ -279,21 +279,29 @@ pool = work / "pool"
 home = work / "home"
 
 # The preflight runs before the FIFO lane wait, before runtime_config, and
-# before any staged object - and again once the lane is held, because the lane
-# wait can outlast the credential.
-source = inspect.getsource(adapter.run_azure_review)
-assert source.index("preflight_reviewer_credential") < source.index("acquire_review_lane")
-assert source.index("preflight_reviewer_credential") < source.index("runtime_config")
-assert source.rindex("preflight_reviewer_credential") > source.index("acquire_review_lane")
+# again once the lane is held because the lane wait can outlast the
+# credential. A third check after shared-capacity admission still precedes
+# every staged object. The snapshot wrapper deliberately delegates these
+# contracts to the two functions that own lane admission and paid compute.
+lane_source = inspect.getsource(adapter._run_azure_review_after_snapshot)
+entry_source = inspect.getsource(adapter.run_azure_review)
+assert "_run_azure_review_after_snapshot" in entry_source
+assert lane_source.index("preflight_reviewer_credential") < lane_source.index("acquire_review_lane")
+assert lane_source.index("preflight_reviewer_credential") < lane_source.index("runtime_config")
+assert lane_source.rindex("preflight_reviewer_credential") > lane_source.index("acquire_review_lane")
+compute_source = inspect.getsource(adapter._run_azure_review_in_lane)
+assert compute_source.index("reserve_model_capacity") < compute_source.index("preflight_reviewer_credential")
+assert compute_source.index("preflight_reviewer_credential") < compute_source.index("upload_blob")
 
 
 def review(profile, harness):
-    return adapter.run_azure_review(
+    return adapter._run_azure_review_after_snapshot(
         core=core, root=home, home=home, task_id="t", pr_url="https://example.invalid/pr/1",
         review_dir=home, proof_root=home, snapshot_value={}, ledger={},
         config={"harness": harness, "account_home": str(profile),
                 "model": "m", "effort": "xhigh"},
         author_account_identity="",
+        phase_timer=None, persist_result=None, repository_snapshot={}, guidance={},
     )
 
 
