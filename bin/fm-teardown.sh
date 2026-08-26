@@ -24,10 +24,11 @@
 # Uncommitted changes are never landed. A project-committed .claude/settings.local.json
 # is a tracked exception to that: fm-spawn.sh merges its per-task busy hooks into that
 # file rather than replacing it, so the dirty check would otherwise false-refuse on
-# firstmate's own hooks key every time. restore_claude_settings_if_only_hooks_differ
+# firstmate's own hook entries every time. restore_claude_settings_if_only_hooks_differ
 # restores that file to HEAD before the dirty check runs, but ONLY when the file's sole
-# working-tree difference from HEAD is the top-level "hooks" key (proven by
-# fm_control_claude_settings_only_hooks_differ in bin/fm-control-lib.sh); any other
+# working-tree difference from HEAD is the exact entries recorded in
+# state/<id>.claude-settings-owned (proven by
+# fm_control_claude_settings_only_owned_differ in bin/fm-control-lib.sh); any other
 # difference is potentially real unlanded work and still refuses normally. The later
 # cleanup step (teardown_reset_claude_settings) restores a tracked settings file to
 # HEAD instead of deleting it, and still deletes the untracked case, so a
@@ -1387,17 +1388,20 @@ teardown_treehouse_return() {
 # the dirty check below runs, so live per-task busy hooks merged into a
 # project's committed settings file never manufacture a false "uncommitted
 # changes" refusal. Only a TRACKED file whose sole difference from HEAD is
-# the top-level "hooks" key is restored; any other difference is potentially
-# real unlanded work and is left for the dirty check to catch (AGENTS.md hard
-# rule 3). Always succeeds: a restore that cannot be proven safe is simply
-# skipped, never a teardown failure.
+# the exact entries the state/<id>.claude-settings-owned record proves
+# firstmate wrote is restored; any other difference - including a hook a
+# project added whose command merely resembles firstmate's, and any
+# difference with no record to account for it - is potentially real unlanded
+# work and is left for the dirty check to catch (AGENTS.md hard rule 3).
+# Always succeeds: a restore that cannot be proven safe is simply skipped,
+# never a teardown failure.
 restore_claude_settings_if_only_hooks_differ() {
-  local wt=$1 path="$1/.claude/settings.local.json" head_json wt_json
+  local wt=$1 record_path=$2 path="$1/.claude/settings.local.json" head_json wt_json
   [ -f "$path" ] || return 0
   git -C "$wt" ls-files --error-unmatch -- .claude/settings.local.json >/dev/null 2>&1 || return 0
   head_json=$(git -C "$wt" show HEAD:.claude/settings.local.json 2>/dev/null) || return 0
   wt_json=$(cat "$path")
-  fm_control_claude_settings_only_hooks_differ "$head_json" "$wt_json" || return 0
+  fm_control_claude_settings_only_owned_differ "$head_json" "$wt_json" "$record_path" || return 0
   git -C "$wt" checkout -q -- .claude/settings.local.json 2>/dev/null || true
 }
 
@@ -1420,7 +1424,7 @@ teardown_reset_claude_settings() {
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
-  restore_claude_settings_if_only_hooks_differ "$WT"
+  restore_claude_settings_if_only_hooks_differ "$WT" "$STATE/$ID.claude-settings-owned"
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
     secondmate|scout) return 0 ;;
@@ -2548,7 +2552,8 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
-      "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged"
+      "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged" \
+      "$sub_state/$child_id.claude-settings-owned"
   done
 }
 
@@ -2866,6 +2871,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
+  "$STATE/$ID.claude-settings-owned" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged"

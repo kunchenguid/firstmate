@@ -340,6 +340,8 @@ test_claude_hooks_merge_preserves_committed_project_settings() {
     || fail "spawn must preserve the project's own committed enabledPlugins"
   for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
     jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "claude hook settings lack $ev"
+    jq -e ".entries[\"$ev\"]" "$state/$id.claude-settings-owned" >/dev/null \
+      || fail "the ownership record must hold the $ev entry the spawn merged in"
   done
 
   out=$(classify claude "$id" "$state")
@@ -351,12 +353,13 @@ test_claude_hooks_merge_preserves_committed_project_settings() {
   pass "claude spawn merges its busy hooks into a project's committed settings.local.json instead of destroying it"
 }
 
-# issue: a committed settings.local.json that fm_control_claude_settings_merged
-# cannot parse as a JSON object (a mid-edit syntax error) was merged as a bare
-# {} so firstmate could still arm its hooks - but that silently dropped the
-# original bytes from the file firstmate writes. They must be recoverable.
-test_claude_hooks_merge_preserves_unmergeable_settings_as_backup() {
-  local rec id=busy-cl-4 out state settings backup malformed
+# issue: a committed settings.local.json that cannot be parsed as a JSON
+# object (a mid-edit syntax error) used to be replaced by a bare hooks
+# document, destroying the project's committed bytes. There is deliberately
+# no fallback: the spawn must refuse with the file untouched, because
+# firstmate never overwrites project content it cannot prove it can merge.
+test_claude_hooks_spawn_refuses_unmergeable_settings_untouched() {
+  local rec id=busy-cl-4 out rc state settings malformed
   rec=$(make_spawn_case claude-invalid-settings claude "$id")
   read_case_record "$rec"
   mkdir -p "$PROJ_DIR/.claude"
@@ -367,20 +370,18 @@ test_claude_hooks_merge_preserves_unmergeable_settings_as_backup() {
     commit -qm 'project commits a mid-edit, syntactically invalid claude settings file'
   git -C "$PROJ_DIR" push -q origin HEAD:main
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
-  expect_code 0 $? "claude spawn must still succeed and arm hooks over an unparseable settings file: $out"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "claude spawn must refuse an unparseable committed settings file rather than overwrite it: $out"
+  assert_contains "$out" "settings.local.json" \
+    "the refusal must name the settings file so the operator can act on it"
   state="$HOME_DIR/state"
   settings="$WT_DIR/.claude/settings.local.json"
-  jq -e . "$settings" >/dev/null || fail "claude hook settings must still be valid JSON after the fallback"
-  for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
-    jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "claude hook settings lack $ev"
-  done
-
-  backup="$state/$id.claude-settings-local-unmergeable"
-  [ -f "$backup" ] || fail "an unparseable committed settings file's original bytes must be saved, not just discarded"
-  [ "$(cat "$backup")" = "$malformed" ] \
-    || fail "the backup must hold exactly the original unparseable bytes, got $(cat "$backup" 2>/dev/null)"
-  pass "claude spawn saves a committed settings file's original bytes before falling back to a bare hooks document when it cannot be parsed"
+  [ "$(cat "$settings")" = "$malformed" ] \
+    || fail "a refused spawn must leave the project's original bytes untouched, got $(cat "$settings" 2>/dev/null)"
+  assert_absent "$state/$id.claude-settings-owned" \
+    "a refused spawn must not write a claude settings ownership record"
+  pass "claude spawn refuses an unmergeable committed settings file loudly, leaving its bytes untouched"
 }
 
 test_codex_unverified_until_a_semantic_source_exists() {
@@ -423,7 +424,7 @@ test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
 test_claude_hooks_merge_preserves_committed_project_settings
-test_claude_hooks_merge_preserves_unmergeable_settings_as_backup
+test_claude_hooks_spawn_refuses_unmergeable_settings_untouched
 test_codex_unverified_until_a_semantic_source_exists
 
 echo "all fm-busy-adapter-wiring tests passed"

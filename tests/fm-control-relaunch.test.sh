@@ -411,19 +411,31 @@ test_relaunch_requires_a_note_for_a_ship_task() {
 # --- 2. harness switch -------------------------------------------------------
 
 test_harness_switch_moves_the_record_and_clears_prior_wiring() {
-  local dir out rc
+  local dir out rc settings
   dir=$(new_case switch rl4)
   add_ship_task "$dir" rl4 claude
-  # Wiring the previous claude incarnation left in the worktree.
+  # Wiring the previous claude incarnation left in the worktree: its hook
+  # entries merged into the settings file (which may also hold a project's
+  # own content) plus the ownership record naming exactly those entries. The
+  # switch must retire the entries and the record, never the file - deleting
+  # the file is the project-content-destroying behavior this contract forbids.
+  settings="$dir/wt/.claude/settings.local.json"
   mkdir -p "$dir/wt/.claude"
-  printf '{"hooks":{}}\n' > "$dir/wt/.claude/settings.local.json"
+  printf '%s\n' '{"permissions":{"allow":["Bash(npm test)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply old-gen"}]}]}}' \
+    > "$settings"
+  printf '%s\n' '{"version":1,"entries":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply old-gen"}]}]}}' \
+    > "$dir/home/state/rl4.claude-settings-owned"
   printf 'codex' > "$dir/fake/becomes"
   out=$(run_control "$dir" rl4 relaunch --harness codex --note "switching runtime"); rc=$?
   expect_code 0 "$rc" "a harness switch should succeed"$'\n'"$out"
   assert_contains "$out" "harness=codex from=claude" "the outcome should name both harnesses"
   [ "$(meta_field "$dir" rl4 harness)" = codex ] || fail "the record should follow the switch"
-  [ ! -e "$dir/wt/.claude/settings.local.json" ] \
-    || fail "the previous harness's per-task wiring must be cleared on a switch"
+  assert_not_contains "$(jq -c '.' "$settings")" "old-gen" \
+    "the previous harness's recorded hook entries must be cleared on a switch"
+  [ "$(jq -r '.permissions.allow[0]' "$settings")" = "Bash(npm test)" ] \
+    || fail "a switch must clear only firstmate's own entries, never the project's content"
+  [ ! -e "$dir/home/state/rl4.claude-settings-owned" ] \
+    || fail "the retired incarnation's claude settings ownership record must be removed on a switch"
   assert_grep "codex" "$dir/fake/literal" "the replacement launch should be the new harness"
   [ "$(journal_field "$dir" rl4 from_harness)" = claude ] || fail "the journal should record the origin harness"
   [ "$(journal_field "$dir" rl4 to_harness)" = codex ] || fail "the journal should record the target harness"
@@ -432,26 +444,35 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
 
 # issue: fm-spawn destroyed a project's committed .claude/settings.local.json;
 # the arm/re-arm side of the fix must also never accumulate a superseded
-# incarnation's hook commands instead of replacing them.
+# incarnation's hook commands instead of replacing them. Ownership comes from
+# the state/<id>.claude-settings-owned record a real prior spawn writes, so
+# the fixture plants that record alongside the stale entry it names; a
+# project hook that merely LOOKS like firstmate's is not recorded and must
+# survive the relaunch untouched.
 test_same_harness_relaunch_replaces_own_hooks_without_losing_project_settings() {
   local dir out rc settings
   dir=$(new_case respawn-merge rl31)
   add_ship_task "$dir" rl31 claude
   settings="$dir/wt/.claude/settings.local.json"
   mkdir -p "${settings%/*}"
-  printf '%s\n' '{"permissions":{"allow":["Bash(npm test)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"project-own-stop-hook"}]},{"hooks":[{"type":"command","command":"fm-busy-event.sh apply stale-gen"}]}]}}' \
+  printf '%s\n' '{"permissions":{"allow":["Bash(npm test)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"project hook that mentions fm-busy-event.sh"}]},{"hooks":[{"type":"command","command":"fm-busy-event.sh apply stale-gen"}]}]}}' \
     > "$settings"
+  printf '%s\n' '{"version":1,"entries":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply stale-gen"}]}]}}' \
+    > "$dir/home/state/rl31.claude-settings-owned"
   out=$(run_control "$dir" rl31 relaunch --note "restart after wiring merge"); rc=$?
   expect_code 0 "$rc" "a same-harness relaunch over a committed settings file should succeed"$'\n'"$out"
   [ "$(jq -r '.permissions.allow[0]' "$settings")" = "Bash(npm test)" ] \
     || fail "relaunch must preserve the project's own committed permissions"
   [ "$(jq '.hooks.Stop | length' "$settings")" = 2 ] \
-    || fail "relaunch must replace, not accumulate, firstmate's own hook entries, got $(jq -c '.hooks.Stop' "$settings")"
-  assert_contains "$(jq -c '.hooks.Stop' "$settings")" "project-own-stop-hook" \
-    "relaunch must preserve the project's own Stop hook alongside firstmate's"
+    || fail "relaunch must replace, not accumulate, firstmate's own recorded hook entries, got $(jq -c '.hooks.Stop' "$settings")"
+  assert_contains "$(jq -c '.hooks.Stop' "$settings")" "project hook that mentions fm-busy-event.sh" \
+    "relaunch must preserve a project hook whose command text merely mentions fm-busy-event.sh"
   assert_not_contains "$(jq -c '.hooks.Stop' "$settings")" "stale-gen" \
-    "relaunch must fully replace the previous incarnation's hook command"
-  pass "fm-control relaunch: a same-harness relaunch replaces firstmate's own hooks without losing a project's committed settings"
+    "relaunch must fully replace the previous incarnation's recorded hook entry"
+  jq -e '.entries.Stop[0].hooks[0].command | contains("stale-gen") | not' \
+    "$dir/home/state/rl31.claude-settings-owned" >/dev/null \
+    || fail "relaunch must replace the ownership record with the fresh incarnation's entries"
+  pass "fm-control relaunch: a same-harness relaunch replaces firstmate's own recorded hooks without losing a project's committed settings"
 }
 
 test_harness_switch_does_not_carry_the_old_profile_axes() {
@@ -582,20 +603,26 @@ test_prior_harness_turnend_registry_entry_is_cleared() {
 }
 
 test_wiring_removal_failure_refuses_before_replacement_arm() {
-  local dir hook out rc real_rm
+  local dir hook record out rc real_rm
   dir=$(new_case wiring-failure rl29)
   add_ship_task "$dir" rl29 claude
   hook="$dir/wt/.claude/settings.local.json"
+  record="$dir/home/state/rl29.claude-settings-owned"
   mkdir -p "${hook%/*}"
-  printf '{}\n' > "$hook"
+  printf '%s\n' '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply old-gen"}]}]}}' \
+    > "$hook"
+  printf '%s\n' '{"version":1,"entries":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply old-gen"}]}]}}' \
+    > "$record"
   real_rm=$(command -v rm)
   make_rm_failure_stub "$dir"
-  out=$(FM_REAL_RM="$real_rm" FM_FAKE_RM_FAIL_PATH="$hook" \
+  # fm-spawn retires wiring against its physically resolved state dir (pwd -P),
+  # so the byte-exact failure match must use that resolved path too.
+  out=$(FM_REAL_RM="$real_rm" FM_FAKE_RM_FAIL_PATH="$(cd "$dir/home/state" && pwd -P)/rl29.claude-settings-owned" \
     run_control "$dir" rl29 relaunch --note "retry after wiring cleanup"); rc=$?
-  expect_code 1 "$rc" "an undeletable prior hook must fail closed"$'\n'"$out"
+  expect_code 1 "$rc" "an unretirable prior-wiring ownership record must fail closed"$'\n'"$out"
   assert_contains "$out" "could not retire claude wiring" \
     "the failure should identify prior wiring cleanup"
-  [ -e "$hook" ] || fail "the fixture should retain the undeletable prior hook"
+  [ -e "$record" ] || fail "the fixture should retain the unretirable ownership record"
   assert_no_grep "encode launch-brief" "$dir/fake/literal" \
     "replacement launch must not be armed after wiring cleanup fails"
   [ "$(journal_field "$dir" rl29 phase)" = failed:launching ] \

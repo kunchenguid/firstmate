@@ -257,106 +257,209 @@ fm_control_harness_turnend_auth_path() {  # <harness> <token>
 # its own OTHER Claude Code hooks, e.g. a PreToolUse linter). The functions below
 # are the one owner of installing and retiring firstmate's own content there
 # without ever destroying a project's: fm-spawn.sh calls
-# fm_control_claude_settings_merged to arm or re-arm, clear_relaunch_harness_wiring
+# fm_control_claude_settings_install to arm or re-arm, clear_relaunch_harness_wiring
 # calls fm_control_claude_settings_clear to retire, and bin/fm-teardown.sh calls
-# fm_control_claude_settings_only_hooks_differ to decide whether a tracked file's
+# fm_control_claude_settings_only_owned_differ to decide whether a tracked file's
 # only working-tree difference from HEAD is firstmate's own hook entries.
 #
-# Ownership is per COMMAND within a hook-group entry, not per top-level key and
-# not per whole entry: a command within one of firstmate's four managed events
-# (UserPromptSubmit, Stop, StopFailure, SessionEnd) is firstmate's own iff it
-# names bin/fm-busy-event.sh - the fixed script every incarnation's hook shells
-# out through, regardless of the --gen token embedded alongside it. Merging or
-# clearing strips only commands that pass that test, dropping an entry entirely
-# only once every one of its commands was firstmate's own; a project's own
-# command co-located in the SAME hook-group entry as firstmate's (as well as a
-# project's own hook for the same managed event, any OTHER hook event entirely,
-# and every other top-level key) all pass through untouched. That per-command
-# rule is also what keeps a respawn or a harness relaunch from accumulating a
-# superseded incarnation's stale hook commands: each managed event's own
-# commands are always fully replaced, never appended to.
-# shellcheck disable=SC2016  # single quotes are deliberate: this is a jq program whose $managed/$k/$h are jq variables, not shell ones
-_FM_CONTROL_CLAUDE_SETTINGS_STRIP_JQ='
-  def fm_owned_command: (.command // "") | test("fm-busy-event\\.sh");
-  ["UserPromptSubmit","Stop","StopFailure","SessionEnd"] as $managed |
-  ((.hooks // {})
-    | with_entries(
-        if (.key as $k | $managed | index($k)) then
-          .value |= (
-            map(if has("hooks") then .hooks |= map(select(fm_owned_command | not)) else . end)
-            | map(select((has("hooks") | not) or ((.hooks | length) > 0)))
-          )
-        else . end
-      )
-    | with_entries(select(.value | length > 0))
-  ) as $h |
-  if ($h | length) == 0 then del(.hooks) else . + {hooks: $h} end
+# Ownership is STRUCTURAL, never inferred from file content: at install time
+# firstmate records the exact hook-group entries it wrote in a private
+# per-task state file (state/<id>.claude-settings-owned, a
+# {"version":1,"preexisted":<bool>,"entries":{...}} document outside the
+# worktree), and a later strip, clear, or restore decision touches only
+# entries deep-equal (jq ==, so a formatting or key-order rewrite by claude
+# itself still matches) to one recorded there. No substring, pattern, or
+# heuristic ever classifies an entry: a project hook whose command text
+# happens to mention fm-busy-event.sh is not equal to any recorded entry and
+# passes through untouched, and an entry a project could not have authored
+# without byte-for-byte copying one incarnation's minted per-task command is
+# the only thing ever removed. Re-installing strips the previous record's
+# entries before appending the fresh incarnation's and then replaces the
+# record, so a respawn or relaunch fully replaces firstmate's own entries
+# rather than accumulating them; with no record nothing is provably
+# firstmate's, so nothing is stripped and nothing is restored (a file armed by
+# a pre-record firstmate keeps its stale entries, which the busy-generation
+# gate already refuses harmlessly). preexisted records whether the settings
+# file already existed before firstmate's first install for the task (carried
+# unchanged across re-installs, and treated as true when a record omits it):
+# clearing may remove the file only when firstmate created it AND nothing but
+# firstmate's own entries ever landed in it.
+#
+# A settings file that cannot be merged into is REFUSED, never overwritten:
+# install fails loudly on unparseable JSON, a non-object top level (including
+# an empty file), or a non-object "hooks" value, leaving the original bytes
+# untouched, because destroying a project's committed configuration is the
+# exact bug this contract exists to prevent (issue #3111).
+# shellcheck disable=SC2016  # single quotes are deliberate: these are jq programs whose $rec/$fresh/$k vars are jq variables, not shell ones
+_FM_CONTROL_CLAUDE_SETTINGS_JQ_DEFS='
+  def fm_strip_recorded($rec):
+    if (has("hooks")) and ((.hooks | type) == "object") then
+      .hooks |= with_entries(
+        .key as $k
+        | if ($rec | has($k)) and ((.value | type) == "array") then
+            .value |= map(select(. as $e | any($rec[$k][]?; . == $e) | not))
+          else . end)
+    else . end;
+  def fm_norm_hooks:
+    if (has("hooks")) and ((.hooks | type) == "object") then
+      (.hooks | with_entries(select((((.value | type) == "array") and ((.value | length) == 0)) | not))) as $h
+      | if ($h | length) == 0 then del(.hooks) else .hooks = $h end
+    else . end;
+'
+# shellcheck disable=SC2016
+_FM_CONTROL_CLAUDE_SETTINGS_INSTALL_JQ="$_FM_CONTROL_CLAUDE_SETTINGS_JQ_DEFS"'
+  fm_strip_recorded($rec)
+  | .hooks = (reduce ($fresh | keys[]) as $k ((.hooks // {}); .[$k] = ((.[$k] // []) + $fresh[$k])))
+'
+# shellcheck disable=SC2016
+_FM_CONTROL_CLAUDE_SETTINGS_STRIP_ONLY_JQ="$_FM_CONTROL_CLAUDE_SETTINGS_JQ_DEFS"'
+  fm_strip_recorded($rec)
+'
+_FM_CONTROL_CLAUDE_SETTINGS_NORM_JQ="$_FM_CONTROL_CLAUDE_SETTINGS_JQ_DEFS"'
+  fm_norm_hooks
+'
+# shellcheck disable=SC2016
+_FM_CONTROL_CLAUDE_SETTINGS_STRIP_NORM_JQ="$_FM_CONTROL_CLAUDE_SETTINGS_JQ_DEFS"'
+  fm_strip_recorded($rec) | fm_norm_hooks
 '
 
-# fm_control_claude_settings_merged <existing-json-or-empty> <hooks-fragment-json>:
-# print a settings.local.json document with <hooks-fragment-json> - a
-# {"UserPromptSubmit":[...],"Stop":[...],...} object holding exactly firstmate's
-# four managed events - merged into <existing-json>. Within each managed event,
-# firstmate's own commands are replaced by the fragment's; every other top-level
-# key, every other hook event, and every non-owned command (whether in its own
-# entry or co-located in the same entry as one of firstmate's own commands)
-# passes through unchanged. Absent, empty, or unparseable existing content is
-# treated as {} rather than refused, since an unreadable committed file cannot be
-# merged into and firstmate must still be able to arm its own hooks; a caller
-# that wants the original bytes recoverable when this fallback fires (they are
-# discarded from the printed document) must save them before calling, which is
-# what fm-spawn.sh does.
-fm_control_claude_settings_merged() {
-  local existing=${1-} fresh=$2 base
-  if [ -n "$existing" ] \
-      && printf '%s' "$existing" | jq -e 'type == "object"' >/dev/null 2>&1; then
-    base=$existing
+# Read the entries object out of an ownership record file, printing {} for an
+# absent record (nothing recorded means nothing is provably firstmate's own)
+# and failing loudly on a present-but-unreadable one: a corrupt firstmate-owned
+# record must stop the caller rather than let it guess at ownership.
+_fm_control_claude_settings_recorded_entries() {
+  local record_path=$1
+  if [ ! -e "$record_path" ]; then
+    printf '%s' '{}'
+    return 0
+  fi
+  jq -ce '.entries | select(type == "object")' "$record_path" 2>/dev/null || {
+    echo "error: $record_path is not a readable firstmate claude-settings ownership record; refusing to guess which hook entries are firstmate's own" >&2
+    return 1
+  }
+}
+
+# fm_control_claude_settings_install <settings-path> <hooks-fragment-json> <record-path>:
+# merge <hooks-fragment-json> - a {"UserPromptSubmit":[...],"Stop":[...],...}
+# object holding exactly firstmate's managed hook entries - into the settings
+# file at <settings-path>, and record those exact entries in <record-path> as
+# the ownership authority every later strip, clear, or restore decision uses.
+# Entries recorded by a previous incarnation are stripped before the fresh ones
+# are appended, so a respawn replaces firstmate's own entries instead of
+# accumulating them; every other top-level key, every other hook event, and
+# every entry not deep-equal to a recorded one passes through unchanged. An
+# existing file that is not a JSON object with an object (or absent) "hooks"
+# key is refused with the original bytes untouched - there is deliberately no
+# fallback that writes over content this function cannot prove it can merge.
+# The record is written before the settings file so no window exists where
+# firstmate's entries are on disk without the record that identifies them;
+# both writes are atomic same-directory renames.
+fm_control_claude_settings_install() {
+  local path=$1 fresh=$2 record_path=$3 base old_entries preexisted merged tmp
+  [ -n "$path" ] && [ -n "$fresh" ] && [ -n "$record_path" ] || return 1
+  if [ -e "$path" ]; then
+    if ! jq -e 'type == "object" and ((.hooks // {}) | type == "object")' "$path" >/dev/null 2>&1; then
+      echo "error: $path exists but is not a JSON object firstmate can merge its claude hooks into; fix or remove that file in the project, then respawn (it is never overwritten: a project's own settings must survive a spawn)" >&2
+      return 1
+    fi
+    base=$(cat "$path") || return 1
+    preexisted=true
   else
     base='{}'
+    preexisted=false
   fi
-  printf '%s' "$base" | jq -c --argjson fresh "$fresh" '
-    def fm_owned_command: (.command // "") | test("fm-busy-event\\.sh");
-    ($fresh | keys) as $managed |
-    ((.hooks // {}) as $existing_hooks
-      | reduce $managed[] as $k
-          ($existing_hooks; .[$k] = (
-              (
-                (.[$k] // [])
-                | map(if has("hooks") then .hooks |= map(select(fm_owned_command | not)) else . end)
-                | map(select((has("hooks") | not) or ((.hooks | length) > 0)))
-              ) + $fresh[$k]))
-    ) as $merged_hooks |
-    . + {hooks: $merged_hooks}
-  '
+  old_entries=$(_fm_control_claude_settings_recorded_entries "$record_path") || return 1
+  # preexisted describes the state before firstmate's FIRST install for the
+  # task: a re-install always finds the file present (the previous install
+  # wrote it), so the prior record's value carries forward.
+  if [ -e "$record_path" ]; then
+    preexisted=$(jq -r 'if .preexisted == false then "false" else "true" end' "$record_path" 2>/dev/null) || preexisted=true
+  fi
+  merged=$(printf '%s' "$base" \
+    | jq -c --argjson rec "$old_entries" --argjson fresh "$fresh" \
+        "$_FM_CONTROL_CLAUDE_SETTINGS_INSTALL_JQ") || {
+    echo "error: could not merge firstmate's claude hooks into $path; the file was left untouched" >&2
+    return 1
+  }
+  tmp="$record_path.tmp.$$"
+  if ! jq -nc --argjson fresh "$fresh" --argjson preexisted "$preexisted" \
+        '{version: 1, preexisted: $preexisted, entries: $fresh}' > "$tmp" \
+      || ! mv -f -- "$tmp" "$record_path"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  tmp="$path.tmp.$$"
+  if ! printf '%s\n' "$merged" > "$tmp" || ! mv -f -- "$tmp" "$path"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
-# fm_control_claude_settings_clear <settings-path>: remove firstmate's own hook
-# entries from an installed settings.local.json, in place, so a relaunch or a
-# harness switch never deletes a project's own committed content the way a blind
-# rm -f would. Deletes the file only when nothing is left after stripping - the
-# untracked, firstmate-created case teardown already removes outright. A missing
-# or unparseable file is left alone.
+# fm_control_claude_settings_clear <settings-path> <record-path>: remove the
+# hook entries the ownership record proves firstmate wrote, in place, then
+# retire the record, so a relaunch or a harness switch never deletes a
+# project's own content the way a blind rm -f would. A file the record says
+# firstmate itself created is removed entirely once nothing but firstmate's
+# own entries remains in it, so an aborted or retired incarnation leaves no
+# trace of a file the project never had; a pre-existing file is only ever
+# rewritten without firstmate's entries, and left byte-untouched when none of
+# them are present. With no record nothing is provably firstmate's own and
+# the file is left alone entirely. An unparseable settings file is also left
+# alone, with its record kept and a warning: an unparseable file fires no
+# hooks, and the next install or teardown will refuse loudly instead of
+# guessing.
 fm_control_claude_settings_clear() {
-  local path=$1 stripped
-  [ -f "$path" ] || return 0
-  stripped=$(jq -c "$_FM_CONTROL_CLAUDE_SETTINGS_STRIP_JQ" "$path" 2>/dev/null) || return 0
-  if [ "$stripped" = '{}' ]; then
-    rm -f -- "$path" || return 1
-  else
-    printf '%s\n' "$stripped" > "$path" || return 1
+  local path=$1 record_path=$2 entries stripped tmp
+  [ -n "$path" ] && [ -n "$record_path" ] || return 1
+  [ -e "$record_path" ] || return 0
+  entries=$(_fm_control_claude_settings_recorded_entries "$record_path") || return 1
+  if [ ! -e "$path" ]; then
+    rm -f -- "$record_path"
+    return 0
   fi
+  if ! stripped=$(jq -c --argjson rec "$entries" "$_FM_CONTROL_CLAUDE_SETTINGS_STRIP_ONLY_JQ" "$path" 2>/dev/null); then
+    echo "warning: $path is not parseable JSON; leaving it and its ownership record $record_path in place rather than guessing" >&2
+    return 0
+  fi
+  if jq -e '.preexisted == false' "$record_path" >/dev/null 2>&1 \
+      && [ "$(printf '%s' "$stripped" | jq -S -c "$_FM_CONTROL_CLAUDE_SETTINGS_NORM_JQ")" = '{}' ]; then
+    rm -f -- "$path" || return 1
+    rm -f -- "$record_path"
+    return 0
+  fi
+  if [ "$stripped" = "$(jq -c . "$path")" ]; then
+    # Nothing of firstmate's is in the file; skip the rewrite so a project
+    # file's own formatting stays byte-untouched.
+    rm -f -- "$record_path"
+    return 0
+  fi
+  tmp="$path.tmp.$$"
+  if ! printf '%s\n' "$stripped" > "$tmp" || ! mv -f -- "$tmp" "$path"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  rm -f -- "$record_path"
 }
 
-# fm_control_claude_settings_only_hooks_differ <a-json> <b-json>: true when two
-# settings.local.json documents become identical once firstmate's own hook
-# entries are stripped from each (the same per-entry rule
-# fm_control_claude_settings_clear uses) - i.e. the only possible difference
-# between them is firstmate's own installed hooks. Malformed JSON on either side
-# is never provably hooks-only, so it returns false: keep a real dirty refusal
-# rather than risk discarding content teardown cannot parse.
-fm_control_claude_settings_only_hooks_differ() {
-  local a=$1 b=$2 a_stripped b_stripped
-  a_stripped=$(printf '%s' "$a" | jq -S -c "$_FM_CONTROL_CLAUDE_SETTINGS_STRIP_JQ" 2>/dev/null) || return 1
-  b_stripped=$(printf '%s' "$b" | jq -S -c "$_FM_CONTROL_CLAUDE_SETTINGS_STRIP_JQ" 2>/dev/null) || return 1
-  [ "$a_stripped" = "$b_stripped" ]
+# fm_control_claude_settings_only_owned_differ <head-json> <wt-json> <record-path>:
+# true when the working-tree document becomes identical to the HEAD document
+# once the entries the ownership record proves firstmate wrote are stripped
+# from the working-tree side - i.e. the only difference is firstmate's own
+# installed hooks. Both sides are normalized (sorted keys; an event left as an
+# empty array, or a hooks object left empty, compares equal to that key being
+# absent) so stripping firstmate's entries out of an event it created cannot
+# manufacture a difference. Entries are stripped from the working-tree side
+# only: if HEAD itself somehow contains one of the recorded entries, the sides
+# stay different and the caller keeps refusing. An absent or unreadable
+# record, or malformed JSON on either side, is never provably hooks-only, so
+# it returns false: keep a real dirty refusal rather than risk discarding
+# content this predicate cannot account for.
+fm_control_claude_settings_only_owned_differ() {
+  local head=$1 wt=$2 record_path=$3 entries head_norm wt_norm
+  [ -n "$record_path" ] && [ -e "$record_path" ] || return 1
+  entries=$(_fm_control_claude_settings_recorded_entries "$record_path") || return 1
+  head_norm=$(printf '%s' "$head" | jq -S -c "$_FM_CONTROL_CLAUDE_SETTINGS_NORM_JQ" 2>/dev/null) || return 1
+  wt_norm=$(printf '%s' "$wt" \
+    | jq -S -c --argjson rec "$entries" "$_FM_CONTROL_CLAUDE_SETTINGS_STRIP_NORM_JQ" 2>/dev/null) || return 1
+  [ "$head_norm" = "$wt_norm" ]
 }

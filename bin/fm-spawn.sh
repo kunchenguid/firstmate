@@ -171,6 +171,14 @@
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
+# claude merges its busy hooks into <worktree>/.claude/settings.local.json (a path a
+# project may itself commit) and writes state/<id>.claude-settings-owned, a
+# {"version":1,"preexisted":<bool>,"entries":{...}} record of the exact entries it
+# merged in and whether the file existed before firstmate's first install; that
+# record, not any content match, is the sole authority for which entries are
+# firstmate's own when a relaunch strips them, a respawn replaces them, or teardown
+# restores the file (bin/fm-control-lib.sh owns the contract). An existing settings
+# file that is not a mergeable JSON object refuses the spawn with the file untouched.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
@@ -837,9 +845,11 @@ clear_relaunch_harness_wiring() {
   fi
   # claude is not in fm_control_harness_wiring_paths' generic rm -f table: its
   # wiring file may hold a project's own committed content, so retiring it
-  # strips only firstmate's own "hooks" key (fm-control-lib.sh header comment).
+  # strips only the entries the state/<id>.claude-settings-owned record proves
+  # firstmate wrote (fm-control-lib.sh header comment).
   if [ "$harness" = claude ]; then
-    fm_control_claude_settings_clear "$wt/.claude/settings.local.json" || return 1
+    fm_control_claude_settings_clear "$wt/.claude/settings.local.json" \
+      "$state/$id.claude-settings-owned" || return 1
   fi
   while IFS= read -r path; do
     [ -n "$path" ] || continue
@@ -2433,23 +2443,18 @@ if [ "$KIND" != secondmate ]; then
       claude_hooks_json="{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_submit\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stop\"}]}],\"StopFailure\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stopfail\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_sessionend\"}]}]}"
       # A project may commit its own .claude/settings.local.json (permissions,
       # env, enabledPlugins); merge our hooks into it rather than replacing the
-      # whole file, or a real spawn destroys that committed configuration
-      # (fm_control_claude_settings_merged owns the merge contract).
-      claude_existing_settings=
-      [ ! -f "$WT/.claude/settings.local.json" ] || claude_existing_settings=$(cat "$WT/.claude/settings.local.json")
-      # A non-empty file that fm_control_claude_settings_merged cannot parse as
-      # a JSON object (a mid-edit syntax error, or - unlikely for a real Claude
-      # settings file - valid JSON of some other shape) is merged as a bare {}
-      # so firstmate can still arm its hooks, which drops those original bytes
-      # from the document written below. Save them outside the worktree first
-      # so a project's in-progress, not-yet-committed edit is recoverable
-      # rather than silently gone.
-      if [ -n "$claude_existing_settings" ] \
-          && ! printf '%s' "$claude_existing_settings" | jq -e 'type == "object"' >/dev/null 2>&1; then
-        printf '%s' "$claude_existing_settings" > "$STATE_REAL/$ID.claude-settings-local-unmergeable" 2>/dev/null || true
+      # whole file, or a real spawn destroys that committed configuration.
+      # fm_control_claude_settings_install owns the merge contract: it records
+      # the exact entries written in state/<id>.claude-settings-owned as the
+      # ownership authority later strip/restore decisions use, and it REFUSES
+      # a file it cannot prove it can merge into (unparseable, or not a JSON
+      # object) with the original bytes untouched - an unmergeable committed
+      # file fails the spawn loudly instead of being overwritten.
+      if ! fm_control_claude_settings_install "$WT/.claude/settings.local.json" \
+          "$claude_hooks_json" "$STATE_REAL/$ID.claude-settings-owned"; then
+        echo "error: could not arm claude busy hooks for $ID without risking the project's own settings; nothing was overwritten" >&2
+        exit 1
       fi
-      fm_control_claude_settings_merged "$claude_existing_settings" "$claude_hooks_json" \
-        > "$WT/.claude/settings.local.json"
       exclude_path '.claude/settings.local.json'
       ;;
     opencode*)
