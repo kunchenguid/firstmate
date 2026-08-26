@@ -4,7 +4,9 @@
 # Output contract: `--json` prints one object with schema
 # `fm-fleet-snapshot.v1`.
 # The command is read-only: it does not acquire the session lock, drain wakes,
-# arm watchers, mutate backlog state, or write reports.
+# arm watchers, mutate backlog state, or write reports. Its only writes are
+# scratch JSON staged for jq in a trap-cleaned directory under TMPDIR (see
+# jq_value_file), so it needs a writable TMPDIR and never touches the fleet home.
 #
 # Top-level fields:
 #   schema: stable schema id.
