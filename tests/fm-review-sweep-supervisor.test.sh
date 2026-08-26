@@ -39,6 +39,7 @@ CASE_CODEX_SLOW="$TMP_ROOT/codex.slow"
 CASE_CODEX_HELPER_SUCCESS="$TMP_ROOT/codex.helper-success"
 CASE_CODEX_CONNECTOR_FALLBACK="$TMP_ROOT/codex.connector-fallback"
 CASE_CODEX_NOTIFICATION_FAILURE="$TMP_ROOT/codex.notification-failure"
+CASE_CODEX_SLACK_MESSAGE_URL="$TMP_ROOT/codex.slack-message-url"
 CASE_CODEX_TOKEN_PROBE="$TMP_ROOT/codex.token-probe"
 CASE_SLACK_SECRET='xoxb-test-not-a-real-token-0001'
 CASE_CLOCK_FILE="$TMP_ROOT/clock.fields"
@@ -129,10 +130,18 @@ if [ -f "$FM_FAKE_CODEX_BAD_JSON" ]; then
   printf 'unparseable receipt for %s\n' "$slot" > "$out"
   exit 0
 fi
+if [ -f "$FM_FAKE_CODEX_SLACK_MESSAGE_URL" ]; then
+  slack_message_url=$(sed -n '1p' "$FM_FAKE_CODEX_SLACK_MESSAGE_URL")
+  cat > "$receipts/$slot.json" <<EOF
+{"version":2,"slot":"$slot","coverage":"complete","discovered":1,"reviewed":1,"skipped":0,"failed":0,"comments_published":1,"slack_messages_sent":1,"tasks_left_in_flight":0,"reviews":[{"pr":"https://github.com/acme/widget/pull/12","head":"0123456789abcdef0123456789abcdef01234567","comment_url":"https://github.com/acme/widget/pull/12#issuecomment-94","slack":{"status":"sent","transport":"helper","message_url":"$slack_message_url","attempts":[{"transport":"helper","outcome":"sent"}]}}]}
+EOF
+  printf 'review published with supplied Slack URL for %s\n' "$slot" > "$out"
+  exit 0
+fi
 if [ -f "$FM_FAKE_CODEX_HELPER_SUCCESS" ]; then
   printf 'active\n' > "$FM_HOME/state/notification-review.meta"
   cat > "$receipts/$slot.json" <<EOF
-{"version":2,"slot":"$slot","coverage":"complete","discovered":1,"reviewed":1,"skipped":0,"failed":0,"comments_published":1,"slack_messages_sent":1,"tasks_left_in_flight":0,"reviews":[{"pr":"https://github.com/acme/widget/pull/9","head":"0123456789abcdef0123456789abcdef01234567","comment_url":"https://github.com/acme/widget/pull/9#issuecomment-91","slack":{"status":"sent","transport":"helper","message_url":"https://example.slack.com/archives/C0/p1","attempts":[{"transport":"helper","outcome":"sent"}]}}]}
+{"version":2,"slot":"$slot","coverage":"complete","discovered":1,"reviewed":1,"skipped":0,"failed":0,"comments_published":1,"slack_messages_sent":1,"tasks_left_in_flight":0,"reviews":[{"pr":"https://github.com/acme/widget/pull/9","head":"0123456789abcdef0123456789abcdef01234567","comment_url":"https://github.com/acme/widget/pull/9#issuecomment-91","slack":{"status":"sent","transport":"helper","message_url":"https://example.slack.com/archives/C01234567/p1234567890123456","attempts":[{"transport":"helper","outcome":"sent"}]}}]}
 EOF
   rm -f -- "$FM_HOME/state/notification-review.meta"
   printf 'review published and helper notification sent for %s\n' "$slot" > "$out"
@@ -141,7 +150,7 @@ fi
 if [ -f "$FM_FAKE_CODEX_CONNECTOR_FALLBACK" ]; then
   printf 'active\n' > "$FM_HOME/state/notification-review.meta"
   cat > "$receipts/$slot.json" <<EOF
-{"version":2,"slot":"$slot","coverage":"complete","discovered":1,"reviewed":1,"skipped":0,"failed":0,"comments_published":1,"slack_messages_sent":1,"tasks_left_in_flight":0,"reviews":[{"pr":"https://github.com/acme/widget/pull/10","head":"0123456789abcdef0123456789abcdef01234567","comment_url":"https://github.com/acme/widget/pull/10#issuecomment-92","slack":{"status":"sent","transport":"connector","message_url":"https://example.slack.com/archives/C0/p2","attempts":[{"transport":"helper","outcome":"failed","reason":"helper send failed"},{"transport":"connector","outcome":"sent"}]}}]}
+{"version":2,"slot":"$slot","coverage":"complete","discovered":1,"reviewed":1,"skipped":0,"failed":0,"comments_published":1,"slack_messages_sent":1,"tasks_left_in_flight":0,"reviews":[{"pr":"https://github.com/acme/widget/pull/10","head":"0123456789abcdef0123456789abcdef01234567","comment_url":"https://github.com/acme/widget/pull/10#issuecomment-92","slack":{"status":"sent","transport":"connector","message_url":"https://example.slack.com/archives/G01234567/p2345678901234567","attempts":[{"transport":"helper","outcome":"failed","reason":"helper send failed"},{"transport":"connector","outcome":"sent"}]}}]}
 EOF
   rm -f -- "$FM_HOME/state/notification-review.meta"
   printf 'review published and connector fallback notification sent for %s\n' "$slot" > "$out"
@@ -219,6 +228,7 @@ run_subject() {
   FM_FAKE_CODEX_HELPER_SUCCESS="$CASE_CODEX_HELPER_SUCCESS" \
   FM_FAKE_CODEX_CONNECTOR_FALLBACK="$CASE_CODEX_CONNECTOR_FALLBACK" \
   FM_FAKE_CODEX_NOTIFICATION_FAILURE="$CASE_CODEX_NOTIFICATION_FAILURE" \
+  FM_FAKE_CODEX_SLACK_MESSAGE_URL="$CASE_CODEX_SLACK_MESSAGE_URL" \
   FM_FAKE_CODEX_TOKEN_PROBE="$CASE_CODEX_TOKEN_PROBE" \
   "$SUBJECT" "$@"
 }
@@ -634,7 +644,7 @@ pass 'an expired cycle group proven to be this job own runaway is terminated, no
 mkdir -p "$CASE_SOURCE/data/tools"
 cat > "$CASE_SOURCE/data/tools/fm-slack-message.sh" <<'SH'
 #!/usr/bin/env bash
-printf 'https://example.slack.com/archives/C0/p1\n'
+printf 'https://example.slack.com/archives/C01234567/p1234567890123456\n'
 SH
 chmod +x "$CASE_SOURCE/data/tools/fm-slack-message.sh"
 CREDENTIALLESS_OUT=$(run_tick '20260828 14 00 13400 -0500') || fail "credentialless tick failed: $CREDENTIALLESS_OUT"
@@ -694,7 +704,7 @@ assert_eq 18 "$(codex_runs)" 'the credentialed cycle did not run exactly once'
 assert_eq "present ${#CASE_SLACK_SECRET}" "$(sed -n '1p' "$CASE_CODEX_TOKEN_PROBE")" 'the cycle did not receive the provisioned credential'
 assert_eq helper "$(jq -r '.reviews[0].slack.transport' "$CASE_APP/home/state/review-sweep-cycle-receipts/20260828-1430.json")" \
   'helper success did not record its transport'
-assert_eq 'https://example.slack.com/archives/C0/p1' \
+assert_eq 'https://example.slack.com/archives/C01234567/p1234567890123456' \
   "$(jq -r '.reviews[0].slack.message_url' "$CASE_APP/home/state/review-sweep-cycle-receipts/20260828-1430.json")" \
   'helper success did not retain its direct Slack permalink'
 assert_absent "$CASE_APP/home/state/notification-review.meta" 'helper success left task metadata behind'
@@ -718,7 +728,7 @@ assert_eq 19 "$(codex_runs)" 'the connector-fallback case did not run exactly on
 assert_eq connector \
   "$(jq -r '.reviews[0].slack.transport' "$CASE_APP/home/state/review-sweep-cycle-receipts/20260828-1500.json")" \
   'connector fallback did not record its successful transport'
-assert_eq 'https://example.slack.com/archives/C0/p2' \
+assert_eq 'https://example.slack.com/archives/G01234567/p2345678901234567' \
   "$(jq -r '.reviews[0].slack.message_url' "$CASE_APP/home/state/review-sweep-cycle-receipts/20260828-1500.json")" \
   'connector fallback did not retain its direct Slack permalink'
 assert_eq 'helper:failed,connector:sent' \
@@ -822,6 +832,31 @@ assert_present "$TMP_ROOT/linked-slot" 'retention deleted through a symlinked re
 assert_present "$CASE_APP/state/slots/20260828-1330" 'retention removed a current slot record'
 assert_present "$CASE_APP/home/state/review-sweep-cycle-receipts/20260828-1330.json" 'retention removed a current receipt'
 pass 'retention prunes only expired supervisor-owned artifacts and refuses unexpected shapes'
+
+PERMALINK_RUNS_BEFORE=$(codex_runs)
+while IFS='|' read -r CASE_PERMALINK_CLOCK CASE_PERMALINK_URL CASE_PERMALINK_REASON; do
+  printf '%s\n' "$CASE_PERMALINK_URL" > "$CASE_CODEX_SLACK_MESSAGE_URL"
+  set +e
+  CASE_PERMALINK_OUT=$(run_tick "$CASE_PERMALINK_CLOCK" 2>&1)
+  CASE_PERMALINK_RC=$?
+  set -e
+  assert_eq 75 "$CASE_PERMALINK_RC" "$CASE_PERMALINK_REASON was accepted as a direct Slack permalink"
+  assert_contains "$CASE_PERMALINK_OUT" 'invalid or incomplete cycle receipt' \
+    "$CASE_PERMALINK_REASON did not fail at the receipt contract"
+done <<'EOF'
+20260829 07 00 20000 -0500|https://evilslack.com/archives/not-a-permalink|lookalike Slack host
+20260829 07 30 20100 -0500|https://example.slack.com/archives/|missing conversation and message identifiers
+20260829 08 00 20200 -0500|https://example.slack.com/archives/C01234567/|missing message identifier
+20260829 08 30 20300 -0500|https://example.slack.com/archives/C01234567/p123|short message identifier
+20260829 09 00 20400 -0500|https://example.slack.com/archives/X01234567/p1234567890123456|unsupported conversation identifier
+20260829 09 30 20500 -0500|https://example.slack.com/archives/C01234567/p1234567890123456/extra|trailing permalink path
+20260829 10 00 20600 -0500|https://example.slack.com/archives/C01234567/p1234567890123456\n|trailing encoded newline
+EOF
+rm -f -- "$CASE_CODEX_SLACK_MESSAGE_URL"
+assert_eq "$((PERMALINK_RUNS_BEFORE + 7))" "$(codex_runs)" 'malformed Slack permalink cases did not each run once'
+VALID_PERMALINK_OUT=$(run_tick '20260829 10 30 20700 -0500') || fail "post-permalink validation tick failed: $VALID_PERMALINK_OUT"
+assert_contains "$VALID_PERMALINK_OUT" 'slot=20260829-1030 status=succeeded' 'a valid cycle did not recover after malformed permalink receipts'
+pass 'sent receipts require a canonical Slack workspace permalink with concrete channel and message identifiers'
 
 STATUS_OUT=$(run_subject status) || fail "status failed: $STATUS_OUT"
 assert_contains "$STATUS_OUT" 'launchagent-loaded: yes' 'status did not verify the loaded LaunchAgent'

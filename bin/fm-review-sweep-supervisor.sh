@@ -1194,7 +1194,7 @@ all($receipt.reviews[];
   ((.slack.attempts | type) == "array") and
   (if .slack.status == "sent" then
      (.slack.transport == "helper" or .slack.transport == "connector") and
-     (.slack.message_url | type == "string" and test("^https://[^/]*slack[.]com/archives/")) and
+     (.slack.message_url | type == "string" and test("\\Ahttps://[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?[.]slack[.]com/archives/[CDG][A-Z0-9]{8,}/p[0-9]{16}\\z")) and
      (if .slack.transport == "helper" then
         ((.slack.attempts | length) == 1) and
         (.slack.attempts[0] | sent_attempt("helper"))
