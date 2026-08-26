@@ -63,6 +63,11 @@ case "$cmd" in
       | select((.name as $n | $before | index($n) | not))
       | .name
     ')
+    # Strip the CR a native Windows jq appends to every line: command
+    # substitution only trims a trailing \r\n, so without it every name
+    # except the last would keep a carriage return through this multi-line
+    # capture and fail the is_lab_name guard.
+    candidates=${candidates//$'\r'/}
     failed=0
     if [ -z "$candidates" ]; then
       log "no job-owned fm-lab-* sessions to clean"

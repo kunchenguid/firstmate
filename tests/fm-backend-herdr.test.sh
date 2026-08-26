@@ -60,6 +60,12 @@ fi
 exit 0
 SH
   chmod +x "$fb/herdr"
+  # The workspace-move capability probe and the ordering path only check that
+  # a `python3` name exists on PATH (the real mover is python; every test
+  # here substitutes a fake mover). Provide a no-op shim so hosts that only
+  # spell it `python` (Windows) exercise the same fixtures.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/python3"
+  chmod +x "$fb/python3"
   printf '%s\n' "$fb"
 }
 

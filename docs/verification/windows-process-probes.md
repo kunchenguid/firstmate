@@ -45,6 +45,27 @@ $ readlink /proc/194430/cwd
 That is the population the scan needs, because every crew process, and every `git` firstmate runs, descends from Git Bash.
 A process started entirely outside MSYS is absent from this table, which is why the scan answers only the companion-directory half of the proof and never the lock file itself.
 
+## The lingering entry an exiting process leaves, and the kill -0 answer that resolves it
+
+An exiting MSYS process keeps its listed `/proc` entry for a beat after its cwd stops resolving, so the cwd scan on a busy host routinely walks into that state, and counting it as a gap made the leaked-process answer randomly incomplete.
+The scan therefore skips a lingering entry only when `kill -0` proves the pid already exited; `fm_lock_windows_pid_liveness` in `bin/fm-lock-lib.sh` treats only the C-locale ESRCH answer as that proof, and any other failure stays a fail-closed gap.
+Verified 2026-08-25 on the same host and versions, against a child killed but not yet reaped:
+
+```sh
+$ tail -f /dev/null & pid=$!; kill "$pid"
+$ [ -d "/proc/$pid" ] && echo listed; cd -P "/proc/$pid/cwd"
+listed
+bash: cd: /proc/473159/cwd: No such file or directory
+$ LC_ALL=C kill -0 "$pid"; echo "exit=$?"
+bash: kill: (473159) - No such process
+exit=1
+$ [ -d "/proc/$pid" ] || echo unlisted   # a beat later, after the reap
+unlisted
+```
+
+A live pid answers `kill -0` with exit 0 in the same locale.
+`tests/fm-lock-cwd-scan.test.sh` pins all four scan verdicts with real pids on every platform; only the lingering-entry shape above is Windows-only evidence.
+
 ## Why a FileShare.None open is a holder verdict
 
 Windows refuses an open requesting `FileShare.None` while any other handle to the file is open, so the open succeeding is the proof that nothing holds it.

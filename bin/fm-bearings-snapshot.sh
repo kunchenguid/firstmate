@@ -204,14 +204,22 @@ if [ "$INCLUDE_PRS" = 1 ]; then
     PR_STATUS='unavailable (gh not found)'
   else
     # Candidate repos: recorded pr= URLs plus live worktree origins. Deduped.
+    # The ${...//} strips the CR a native Windows jq appends to every line:
+    # command substitution only trims a trailing \r\n, so without it every
+    # line except the last would keep a carriage return through these
+    # multi-line captures.
     repos=""
+    pr_urls=$(printf '%s' "$SNAP" | jq -r '.tasks[].pr.url // empty')
+    pr_urls=${pr_urls//$'\r'/}
     while IFS= read -r u; do
       [ -n "$u" ] || continue
       s=$(repo_slug "$u"); [ -n "$s" ] || continue
       case " $repos " in *" $s "*) : ;; *) repos="$repos $s" ;; esac
     done <<EOF
-$(printf '%s' "$SNAP" | jq -r '.tasks[].pr.url // empty')
+$pr_urls
 EOF
+    wt_paths=$(printf '%s' "$SNAP" | jq -r '.tasks[] | select(.kind != "secondmate") | .paths.worktree.path // empty')
+    wt_paths=${wt_paths//$'\r'/}
     while IFS= read -r wt; do
       [ -n "$wt" ] || continue
       [ -d "$wt" ] || continue
@@ -219,7 +227,7 @@ EOF
       s=$(repo_slug "$u"); [ -n "$s" ] || continue
       case " $repos " in *" $s "*) : ;; *) repos="$repos $s" ;; esac
     done <<EOF
-$(printf '%s' "$SNAP" | jq -r '.tasks[] | select(.kind != "secondmate") | .paths.worktree.path // empty')
+$wt_paths
 EOF
 
     for repo in $repos; do PR_REPOS_TOTAL=$((PR_REPOS_TOTAL + 1)); done

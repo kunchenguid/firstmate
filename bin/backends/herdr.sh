@@ -1505,8 +1505,17 @@ fm_backend_herdr_workspace_find_all() {  # <session>
   # compile error that `2>/dev/null` would silently swallow, making this find
   # ALWAYS return empty and every spawn mint a fresh "firstmate" workspace
   # (the workspace leak).
-  printf '%s' "$list" | jq -r --arg want "$label" \
-    '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null
+  # The ${...//} strips the CR a native Windows jq appends to every line:
+  # command substitution only trims a TRAILING \r\n, so without it every id
+  # except the last would keep a "w1\r" carriage return through multi-line
+  # captures. A parameter substitution, not a tr pipe, so jq's own exit
+  # status stays the function's status exactly as before.
+  local status=0
+  list=$(printf '%s' "$list" | jq -r --arg want "$label" \
+    '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null) || status=$?
+  list=${list//$'\r'/}
+  [ -z "$list" ] || printf '%s\n' "$list"
+  return "$status"
 }
 
 # fm_backend_herdr_workspace_find: this HOME's own workspace id inside
@@ -2021,6 +2030,10 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
     echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
     return 1
   }
+  # Strip the CR a native Windows jq appends to every line (see
+  # fm_backend_herdr_workspace_find_all); without it every id except the
+  # last keeps a trailing carriage return through this multi-line capture.
+  dup_tabs=${dup_tabs//$'\r'/}
   dup_tab_ids=""
   if [ -n "$dup_tabs" ]; then
     while IFS= read -r dup; do
@@ -2060,6 +2073,7 @@ EOF
     fi
     remaining_dup_tabs=$(printf '%s' "$list" | jq -r --arg want "$label" --arg replacement "$tab_id" \
       '.result.tabs[]? | select(.label == $want and .tab_id != $replacement) | .tab_id' 2>/dev/null)
+    remaining_dup_tabs=${remaining_dup_tabs//$'\r'/}
     remaining_dup_tabs=${remaining_dup_tabs//$'\n'/ }
     if [ -n "$remaining_dup_tabs" ]; then
       echo "error: failed to remove preexisting herdr tab(s) $remaining_dup_tabs for label '$label' in workspace $wsid (session $session)" >&2
@@ -2465,6 +2479,7 @@ fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <tas
   fi
   wsids=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" \
     '.result.workspaces[]? | select((.label | type) == "string" and (.label | endswith($suffix))) | .workspace_id' 2>/dev/null)
+  wsids=${wsids//$'\r'/}
   count=$(printf '%s\n' "$wsids" | awk 'NF { n += 1 } END { print n + 0 }')
   if [ "$count" -eq 0 ]; then
     echo "warning: no exact herdr presentation token match for $id; leaving any stale space untouched and spawning flat" >&2
@@ -2484,6 +2499,7 @@ fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <tas
       return 1
     fi
     pane_ids=$(printf '%s' "$panes" | jq -r '.result.panes[]? | .pane_id' 2>/dev/null)
+    pane_ids=${pane_ids//$'\r'/}
     while IFS= read -r pane; do
       [ -n "$pane" ] || continue
       state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
@@ -3067,6 +3083,7 @@ fm_backend_herdr_pane_for_tab() {  # <session> <workspace_id> <tab_id>
 fm_backend_herdr_resolve_bare_selector() {  # <name>
   local name=$1 sessions session tabs tab_id wsid pane_id
   sessions=$(herdr session list --json 2>/dev/null | jq -r '.sessions[]? | select(.running == true) | .name' 2>/dev/null)
+  sessions=${sessions//$'\r'/}
   while IFS= read -r session; do
     [ -n "$session" ] || continue
     tabs=$(fm_backend_herdr_cli "$session" tab list 2>/dev/null) || continue
@@ -3107,7 +3124,7 @@ fm_backend_herdr_list_live() {  # <session>
     pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || continue
     [ -n "$pane_id" ] || continue
     printf '%s:%s\t%s\n' "$session" "$pane_id" "$label"
-  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | select(.label | startswith("fm-")) | "\(.tab_id)\t\(.label)"' 2>/dev/null)
+  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | select(.label | startswith("fm-")) | "\(.tab_id)\t\(.label)"' 2>/dev/null | tr -d '\r')
 }
 
 # --- native event push: pane.agent_status_changed subscriber -----------------

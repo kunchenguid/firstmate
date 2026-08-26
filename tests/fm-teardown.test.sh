@@ -2447,14 +2447,18 @@ test_windows_cwd_scan_reaps_leaked_worktree_process() {
 }
 
 test_windows_cwd_scan_error_refuses_before_removal() {
-  local case_dir rc proc_root path_without_lsof
+  local case_dir rc proc_root path_without_lsof gap_pid
   case_dir=$(make_case windows-cwd-scan-error)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
   path_without_lsof=$(fm_test_path_without_lsof "$case_dir")
   add_uname_shim "$case_dir" MINGW64_NT-10.0-26200
   proc_root=$(new_proc_fixture "$case_dir")
-  add_unresolvable_proc_entry "$proc_root" 424242
+  # The gap entry must belong to a LIVE process: an unresolvable entry whose
+  # pid is already dead is the exit race the scan now deliberately skips, not
+  # a gap in the answer.
+  sleep 300 & gap_pid=$!
+  add_unresolvable_proc_entry "$proc_root" "$gap_pid"
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
 printf 'return\n' >> "$case_dir/treehouse.log"
@@ -2464,6 +2468,7 @@ EOF
   rc=0
   FM_TEARDOWN_TEST_PATH="$path_without_lsof" FM_PROC_ROOT_OVERRIDE="$proc_root" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill "$gap_pid" 2>/dev/null || true; wait "$gap_pid" 2>/dev/null || true
 
   expect_code 1 "$rc" "windows-cwd-scan-error: teardown should refuse"
   assert_grep "REFUSED: cannot determine leaked processes under $case_dir/wt for task-x1 (the MSYS /proc cwd scan failed)" \
