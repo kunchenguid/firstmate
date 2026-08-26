@@ -63,6 +63,15 @@ report() {
     printf 'file=data/%s bytes=%s estimated_tokens=%s status=%s\n' \
       "$file" "$bytes" "$tokens" "$presence"
   done
+  if fm_startup_memory_measure_backlog_listing "$DATA/backlog.md" >/dev/null; then
+    bytes=$FM_STARTUP_MEMORY_MEASURE_BYTES
+    tokens=$FM_STARTUP_MEMORY_MEASURE_TOKENS
+    total=$((total + tokens))
+    printf 'source=data/backlog.md-listing bytes=%s estimated_tokens=%s status=measured\n' \
+      "$bytes" "$tokens"
+  else
+    printf 'source=data/backlog.md-listing status=unmeasured (%s)\n' "$FM_STARTUP_MEMORY_BUDGET_ERROR"
+  fi
   printf 'total_estimated_tokens=%s\n' "$total"
   if fm_startup_memory_decimal_le "$total" "$budget"; then
     printf 'budget_status=within-budget\n'

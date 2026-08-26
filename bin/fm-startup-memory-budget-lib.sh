@@ -203,6 +203,47 @@ fm_startup_memory_measure_file() {
   printf '%s %s present\n' "$bytes" "$tokens"
 }
 
+# fm_startup_memory_measure_backlog_listing <backlog-path>
+# Prints "<bytes> <estimated-tokens>" for the same tasks-axi queries the
+# session-start digest's compact backlog listing runs (in_flight, held,
+# blocked, ready with the identical field set). This is the largest and only
+# unbounded component of the digest - it grows with the backlog rather than
+# being curated like captain.md/learnings.md - so the budget must measure it
+# too, not just the three memory files. Field list duplicated from
+# bin/fm-session-start.sh's BACKLOG_FIELDS; keep the two in sync.
+fm_startup_memory_measure_backlog_listing() {
+  local path=$1 fields=blocked_by,hold_kind,hold_reason bytes tokens
+  FM_STARTUP_MEMORY_MEASURE_BYTES=""
+  FM_STARTUP_MEMORY_MEASURE_TOKENS=""
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    fm_startup_memory_budget_fail "tasks-axi unavailable; cannot measure backlog listing"
+    return 1
+  fi
+  bytes=$(
+    {
+      tasks-axi list --file "$path" --state in_flight --fields "$fields" 2>/dev/null
+      tasks-axi list --file "$path" --state held --fields "$fields" 2>/dev/null
+      tasks-axi list --file "$path" --state queued --blocked --fields "$fields" 2>/dev/null
+      tasks-axi ready --file "$path" 2>/dev/null
+    } | LC_ALL=C wc -c | tr -d '[:space:]'
+  )
+  case "$bytes" in
+    ''|*[!0-9]*)
+      fm_startup_memory_budget_fail "could not measure backlog listing"
+      return 1
+      ;;
+  esac
+  tokens=$(fm_startup_memory_estimated_tokens_for_bytes "$bytes") || {
+    fm_startup_memory_budget_fail "could not estimate backlog listing tokens"
+    return 1
+  }
+  # shellcheck disable=SC2034 # Public measurement result consumed by the caller after sourcing.
+  FM_STARTUP_MEMORY_MEASURE_BYTES=$bytes
+  # shellcheck disable=SC2034 # Public measurement result consumed by the caller after sourcing.
+  FM_STARTUP_MEMORY_MEASURE_TOKENS=$tokens
+  printf '%s %s\n' "$bytes" "$tokens"
+}
+
 # fm_startup_memory_decimal_le <left> <right>
 # Decimal comparison without shell arithmetic overflow.  Inputs are normalized
 # non-negative decimal strings.

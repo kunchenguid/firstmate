@@ -477,16 +477,20 @@ print_backlog_tasks_axi_compact() {
   elif ! ready=$(tasks-axi ready --file "$path" 2>&1); then
     err=$ready
   else
-    printf 'compact backlog listing (tasks-axi; done rows omitted; every in-flight, held, and blocked row shown in full; ready queued bounded to %s; task bodies omitted)\n' \
+    printf 'compact backlog listing (tasks-axi; done rows omitted; every in-flight, held, and blocked row shown in full except hold_reason capped at ~200 chars, see tasks-axi show <id> --full; a row already shown in full by an earlier group is cross-referenced, not repeated; ready queued bounded to %s; task bodies omitted)\n' \
       "$QUEUED_LIMIT"
+    local seen_ids
+    seen_ids=$(mktemp "${TMPDIR:-/tmp}/fm-backlog-seen.XXXXXX")
+    trap 'rm -f "$seen_ids"' RETURN
     printf '\nin flight:\n'
-    printf '%s\n' "$in_flight" | strip_axi_help
+    printf '%s\n' "$in_flight" | strip_axi_help | "$SCRIPT_DIR/fm-backlog-listing-trim.py" "in flight" "$seen_ids"
     printf '\nheld (captain- or time-gated; an in-flight item that is also held appears in both groups):\n'
-    printf '%s\n' "$held" | strip_axi_help
+    printf '%s\n' "$held" | strip_axi_help | "$SCRIPT_DIR/fm-backlog-listing-trim.py" held "$seen_ids"
     printf '\nblocked queued:\n'
-    printf '%s\n' "$blocked" | strip_axi_help
+    printf '%s\n' "$blocked" | strip_axi_help | "$SCRIPT_DIR/fm-backlog-listing-trim.py" blocked "$seen_ids"
     printf '\nready queued (dispatchable now):\n'
     print_ready_queued_bounded "$ready" "$path"
+    rm -f "$seen_ids"
     return 0
   fi
   printf 'tasks-axi compact listing failed; falling back to title-line rendering.\n'

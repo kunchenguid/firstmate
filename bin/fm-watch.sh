@@ -1110,6 +1110,16 @@ retire_merged_pr_poll() {  # <id>
   fi
 }
 
+# WATCHER_RECOVERY_PENDING is computed once at watcher startup, before the
+# poll loop begins, and is never reassigned inside it. Left unbounded, a
+# watcher that starts with it set to 1 called wake() on every single poll
+# cycle for its entire process lifetime - measured at 183 identical wakes in
+# five minutes. The 183rd carries no information the 1st did not, so bound
+# re-announcement per watcher process lifetime instead of trying to make the
+# condition itself go false mid-loop.
+REARM_RESURFACE_MAX=3
+REARM_RESURFACE_COUNT=0
+
 resurface_after_downtime() {
   # Handling successors already have a predecessor-delivered wake on the way.
   # Re-announcing from this cycle is what turned a lost handshake into an
@@ -1124,6 +1134,14 @@ resurface_after_downtime() {
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
   fi
+  if [ "$REARM_RESURFACE_COUNT" -ge "$REARM_RESURFACE_MAX" ]; then
+    if [ "$REARM_RESURFACE_COUNT" -eq "$REARM_RESURFACE_MAX" ]; then
+      echo "watcher: rearm-resurface bound reached ($REARM_RESURFACE_MAX consecutive wakes this watcher lifetime); suppressing further re-announcement, condition already reported" >&2
+      REARM_RESURFACE_COUNT=$((REARM_RESURFACE_COUNT + 1))
+    fi
+    return 0
+  fi
+  REARM_RESURFACE_COUNT=$((REARM_RESURFACE_COUNT + 1))
   wake "check: rearm-resurface"
 }
 
