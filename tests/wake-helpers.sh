@@ -68,6 +68,15 @@ if [ "${1:-}" = "list-windows" ]; then
   exit 0
 fi
 if [ "${1:-}" = "capture-pane" ]; then
+  # A GONE window: real tmux fails a capture against a target that is absent from
+  # its inventory, and that failure is the watcher's only signal that a recorded
+  # endpoint's process is no longer running. The default (exit 0, possibly empty)
+  # is kept for every existing fixture; a case that means "this endpoint is gone"
+  # opts in, so no other suite's capture semantics move.
+  if [ -n "${FM_FAKE_TMUX_MISSING_WINDOW:-}" ]; then
+    printf "can't find window\n" >&2
+    exit 1
+  fi
   if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
     cat "$FM_FAKE_TMUX_CAPTURE"
   fi
