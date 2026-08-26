@@ -19,12 +19,16 @@
 #           fleet work and must not become fleet work.
 #
 # Usage:
-#   fm-inbox.sh note <text>...          | fm-inbox.sh note -   (body from stdin)
+#   fm-inbox.sh note [--request-id <id>] [--json] [--classify] <text>...
+#   fm-inbox.sh note [--request-id <id>] [--json] [--classify] -
 #   fm-inbox.sh say  [<file.wav>]       (default: audio on stdin)
 #   fm-inbox.sh status
 #   fm-inbox.sh ask  <question>...
 #   fm-inbox.sh list
 #   fm-inbox.sh drain [--ack <id>...]
+#
+# `note --classify --request-id <id> --json -` reports whether the exact stdin
+# body is absent, pending, handled, or conflicting without writing or waking.
 #
 # Configuration. A region, a model id and an AWS profile name somebody's account
 # and somebody's choices, so this file carries no default for any of them. Each is
@@ -154,49 +158,193 @@ aws_call() {
 # disk, so we report the wake failure and still exit non-zero loudly.
 wake_for() {
   local id=$1 summary=$2 lib="$FM_ROOT/bin/fm-wake-lib.sh"
+  WAKE_STATUS=failed
   if [ ! -r "$lib" ]; then
     printf 'fm-inbox: note saved but NOT announced (missing %s)\n' "$lib" >&2
     return 1
   fi
   # shellcheck source=/dev/null
   FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" STATE="$STATE" . "$lib"
-  fm_wake_append check "inbox:$id" "check: captain inbox note $id - $summary"
+  if fm_wake_queued_keys check | grep -Fqx -- "inbox:$id"; then
+    WAKE_STATUS=already-announced
+    return 0
+  fi
+  if fm_wake_append check "inbox:$id" "check: captain inbox note $id - $summary"; then
+    WAKE_STATUS=announced
+    return 0
+  fi
+  return 1
+}
+
+emit_note_result() {  # <json-mode> <id> <request-id> <saved> <duplicate> <wake> [error]
+  local json_mode=$1 id=$2 request_id=$3 saved=$4 duplicate=$5 wake=$6 error=${7:-}
+  if [ "$json_mode" -eq 1 ]; then
+    printf '{"schema":"fm-inbox-note.v1","id":"%s","request_id":"%s","saved":%s,"duplicate":%s,"wake":"%s"' \
+      "$id" "$request_id" "$saved" "$duplicate" "$wake"
+    [ -z "$error" ] || printf ',"error":"%s"' "$error"
+    printf '}\n'
+    return
+  fi
+  if [ "$duplicate" = true ]; then
+    printf 'already queued %s\n' "$id"
+  else
+    printf 'queued %s\n' "$id"
+  fi
+}
+
+stored_note_matches() {  # <path> <request-id> <body>
+  local path=$1 request_id=$2 body=$3 stored_body
+  grep -Fqx -- "request_id=$request_id" "$path" 2>/dev/null || return 1
+  stored_body=$(sed -n '/^--$/,$p' "$path" | tail -n +2)
+  [ "$stored_body" = "$body" ]
+}
+
+finish_requested_note() {  # <path> <id> <request-id> <body> <json-mode> <handled>
+  local path=$1 id=$2 request_id=$3 body=$4 json_mode=$5 handled=$6 summary
+  if ! stored_note_matches "$path" "$request_id" "$body"; then
+    emit_note_result "$json_mode" "$id" "$request_id" false true not-attempted request-id-conflict
+    return 1
+  fi
+  if [ "$handled" -eq 1 ]; then
+    emit_note_result "$json_mode" "$id" "$request_id" true true handled
+    return 0
+  fi
+  summary=$(printf '%s' "$body" | tr '\n\t' '  ' | cut -c1-100)
+  if wake_for "$id" "$summary"; then
+    emit_note_result "$json_mode" "$id" "$request_id" true true "$WAKE_STATUS"
+    return 0
+  fi
+  emit_note_result "$json_mode" "$id" "$request_id" true true failed
+  return 1
+}
+
+classify_requested_note() {  # <path> <id> <request-id> <body> <json-mode> <handled>
+  local path=$1 id=$2 request_id=$3 body=$4 json_mode=$5 handled=$6
+  if ! stored_note_matches "$path" "$request_id" "$body"; then
+    emit_note_result "$json_mode" "$id" "$request_id" false true not-attempted request-id-conflict
+    return 1
+  fi
+  if [ "$handled" -eq 1 ]; then
+    emit_note_result "$json_mode" "$id" "$request_id" true true handled
+  else
+    emit_note_result "$json_mode" "$id" "$request_id" true true pending
+  fi
+}
+
+classify_requested_body() {  # <request-id> <body> <json-mode>
+  local request_id=$1 body=$2 json_mode=$3
+  local id="request-$request_id"
+  if [ -f "$INBOX/handled/$id.note" ]; then
+    classify_requested_note "$INBOX/handled/$id.note" "$id" "$request_id" "$body" "$json_mode" 1
+  elif [ -f "$INBOX/$id.note" ]; then
+    classify_requested_note "$INBOX/$id.note" "$id" "$request_id" "$body" "$json_mode" 0
+  else
+    emit_note_result "$json_mode" "$id" "$request_id" false false not-attempted request-id-absent
+  fi
+}
+
+validate_request_id() {  # <request-id>
+  case "$1" in
+    *[!A-Za-z0-9._-]*|'') die "request id must contain only letters, numbers, dot, underscore, or hyphen" ;;
+  esac
+  [ "${#1}" -le 160 ] || die "request id is too long"
 }
 
 queue_note() {
-  local source=$1 body=$2 extra=${3:-}
+  local source=$1 body=$2 extra=${3:-} request_id=${4:-} json_mode=${5:-0}
   [ -n "${body//[[:space:]]/}" ] || die "refusing to queue an empty note"
   mkdir -p "$INBOX"
 
-  local tmp id summary staging_name
+  local tmp id summary staging_name target handled_target
+  if [ -n "$request_id" ]; then
+    validate_request_id "$request_id"
+    id="request-$request_id"
+    if [ -f "$INBOX/handled/$id.note" ]; then
+      finish_requested_note "$INBOX/handled/$id.note" "$id" "$request_id" "$body" "$json_mode" 1
+      return
+    fi
+    if [ -f "$INBOX/$id.note" ]; then
+      finish_requested_note "$INBOX/$id.note" "$id" "$request_id" "$body" "$json_mode" 0
+      return
+    fi
+  fi
   tmp=$(mktemp "$INBOX/.staging-XXXXXX")
   staging_name=$(basename "$tmp")
-  id="$(date +%s)-${staging_name#.staging-}"
+  [ -n "$request_id" ] || id="$(date +%s)-${staging_name#.staging-}"
   {
     printf 'id=%s\n' "$id"
     printf 'at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'source=%s\n' "$source"
+    [ -z "$request_id" ] || printf 'request_id=%s\n' "$request_id"
     [ -z "$extra" ] || printf '%s\n' "$extra"
     printf -- '--\n'
     printf '%s\n' "$body"
   } >"$tmp"
 
-  # Publish the completed note atomically.
-  mv "$tmp" "$INBOX/$id.note"
+  target="$INBOX/$id.note"
+  if [ -n "$request_id" ]; then
+    handled_target="$INBOX/handled/$id.note"
+    if ! ln "$tmp" "$target" 2>/dev/null; then
+      rm -f "$tmp"
+      if [ -f "$handled_target" ]; then
+        finish_requested_note "$handled_target" "$id" "$request_id" "$body" "$json_mode" 1
+      elif [ -f "$target" ]; then
+        finish_requested_note "$target" "$id" "$request_id" "$body" "$json_mode" 0
+      else
+        emit_note_result "$json_mode" "$id" "$request_id" false false not-attempted publish-failed
+        return 1
+      fi
+      return
+    fi
+    # An acknowledgement can move the prior request after the two namespace
+    # checks above but before this hard link. In that case the new link must not
+    # put already handled work back into the live inbox.
+    if [ -f "$handled_target" ]; then
+      rm -f "$target" "$tmp"
+      finish_requested_note "$handled_target" "$id" "$request_id" "$body" "$json_mode" 1
+      return
+    fi
+    rm -f "$tmp"
+  else
+    mv "$tmp" "$target"
+  fi
 
   # One-line summary for the wake payload; the full body stays in the file.
   summary=$(printf '%s' "$body" | tr '\n\t' '  ' | cut -c1-100)
-  printf 'queued %s\n' "$id"
-  printf '  %s\n' "$summary"
+  if [ "$json_mode" -eq 0 ]; then
+    emit_note_result "$json_mode" "$id" "$request_id" true false pending
+    printf '  %s\n' "$summary"
+  fi
   if wake_for "$id" "$summary"; then
-    printf '  firstmate will pick this up at its next check.\n'
+    if [ "$json_mode" -eq 1 ]; then
+      emit_note_result "$json_mode" "$id" "$request_id" true false "$WAKE_STATUS"
+    else
+      printf '  firstmate will pick this up at its next check.\n'
+    fi
   else
+    if [ "$json_mode" -eq 1 ]; then
+      emit_note_result "$json_mode" "$id" "$request_id" true false failed
+      return 1
+    fi
     die "note $id is saved at $INBOX/$id.note but firstmate was NOT woken"
   fi
 }
 
 cmd_note() {
-  local body
+  local body request_id='' json_mode=0 classify_only=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --request-id)
+        [ "$#" -ge 2 ] || die "usage: fm-inbox.sh note --request-id <id> [--json] <text>..."
+        request_id=$2
+        shift 2
+        ;;
+      --json) json_mode=1; shift ;;
+      --classify) classify_only=1; shift ;;
+      --) shift; break ;;
+      *) break ;;
+    esac
+  done
   if [ "$#" -eq 0 ]; then
     die "usage: fm-inbox.sh note <text>...   (or: note - to read stdin)"
   elif [ "$1" = "-" ]; then
@@ -204,7 +352,13 @@ cmd_note() {
   else
     body="$*"
   fi
-  queue_note text "$body"
+  if [ "$classify_only" -eq 1 ]; then
+    [ -n "$request_id" ] || die "--classify requires --request-id"
+    validate_request_id "$request_id"
+    classify_requested_body "$request_id" "$body" "$json_mode"
+    return
+  fi
+  queue_note text "$body" "" "$request_id" "$json_mode"
 }
 
 # ---------------------------------------------------------------- say

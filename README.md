@@ -175,6 +175,7 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine notifications in bash, escalates captain-relevant events and bounded declared-external-wait rechecks as batched digests, and actively alerts if delivery gets stuck while you step away |
 | `/ahoy`            | Recap visible session events since the prior real captain message plus visibly unanswered captain decisions, then guide the captain through any open decisions one at a time in agent-judged impact order; fall back to Bearings when invoked as the session's first real captain message |
 | `/bearings`        | Generate a concise four-section chat digest from bounded local fleet and registered-secondmate state; use `/bearings file` to also replace today's dated report in `data/`, and add `include PRs` when live PR enrichment is wanted |
+| `/fleet`           | Start or reopen the always-on local Kanban board for backlog, active work, verification, captain decisions, waits, and recent completions |
 | `/updatefirstmate` | Self-update the running firstmate and its secondmates to the latest from origin with fast-forward-only pulls, then re-read instructions and nudge secondmates |
 | `/stow`            | Sweep the session for uncaptured durable knowledge, persist the open work records this session knows are unfiled or now wrong, curate tiered startup memory with decay and cold archival, enforce each home's budget or surface the required decision, cascade to registered second mates, and report what is safe to reset |
 
@@ -184,6 +185,10 @@ Bearings invocation examples:
 - `/bearings include PRs` keeps chat-only mode and opts into live PR enrichment.
 - `/bearings file` replaces today's `data/status-report-<YYYY-MM-DD>.md` from scratch and links it from the four-section chat digest.
 - `/bearings file include PRs` combines the dated report with live PR enrichment.
+
+Run `/fleet` when you want the live browser application instead of a chat digest.
+The board is a read-only projection of Firstmate's canonical records, while answers and requests for more detail return to Firstmate through its durable inbox.
+See [docs/fleet-board.md](docs/fleet-board.md) for lifecycle lanes, controls, and local security behavior.
 
 Agent-only reference skills live under `.agents/skills/` and are loaded by firstmate at the trigger points named in [`AGENTS.md`](AGENTS.md).
 
@@ -204,6 +209,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/remote-secondmates.md](docs/remote-secondmates.md) - current setup, routing, transfer, recovery, and safety behavior for whole-home remote second mates.
 - [docs/calm.md](docs/calm.md) - current Pi `/calm` behavior and supported presentation limits.
 - [docs/voice-relay.md](docs/voice-relay.md) - the optional spoken interface: setup on both machines, measured round-trip cost, what a spoken answer may read, and what this build does not do yet.
+- [docs/fleet-board.md](docs/fleet-board.md) - the always-on local Kanban application for fleet status, risk, evidence, context, and captain actions.
 - [docs/wedge-alarm.md](docs/wedge-alarm.md) - configure the active alert for an away-mode escalation delivery that gets stuck.
 - [docs/tmux-backend.md](docs/tmux-backend.md) - current setup and limits for the tmux reference backend.
 - [docs/herdr-backend.md](docs/herdr-backend.md) - current setup, safety boundaries, and limits for the experimental Herdr backend.

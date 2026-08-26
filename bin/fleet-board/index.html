@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Firstmate Fleet Board</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/board-state.js" defer></script>
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#board">Skip to fleet board</a>
+    <header class="masthead">
+      <div class="brand-lockup" aria-label="Firstmate Fleet Board">
+        <div class="brand-mark" aria-hidden="true">FM</div>
+        <div>
+          <p class="eyebrow">FIRSTMATE</p>
+          <h1>Fleet Board</h1>
+        </div>
+      </div>
+      <div class="signal-cluster" aria-label="Fleet summary">
+        <button class="signal signal-captain" id="needs-you-signal" type="button">
+          <span class="signal-value" id="needs-you-count">0</span>
+          <span class="signal-label">Needs you</span>
+        </button>
+        <div class="signal">
+          <span class="signal-value" id="open-count">0</span>
+          <span class="signal-label">Open</span>
+        </div>
+        <div class="signal">
+          <span class="signal-value" id="risk-count">0</span>
+          <span class="signal-label">High risk</span>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <section class="control-deck" aria-label="Board controls">
+        <label class="search-field" for="search">
+          <span>Find a task</span>
+          <input id="search" type="search" placeholder="Search title, context, repo…" autocomplete="off">
+        </label>
+        <label for="home-filter">
+          <span>Home</span>
+          <select id="home-filter">
+            <option value="all">All homes</option>
+          </select>
+        </label>
+        <label for="risk-filter">
+          <span>Risk</span>
+          <select id="risk-filter">
+            <option value="all">All risk</option>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+            <option value="unknown">Unassessed</option>
+          </select>
+        </label>
+        <button class="refresh-button" id="refresh" type="button">Refresh</button>
+        <div class="freshness">
+          <span class="freshness-dot" id="freshness-dot" aria-hidden="true"></span>
+          <span id="freshness-label">Loading the fleet…</span>
+        </div>
+        <span class="visually-hidden" id="freshness-announcement" role="status" aria-live="polite"></span>
+      </section>
+
+      <section class="warning-stack" id="warnings" aria-live="polite" hidden></section>
+
+      <section class="board-shell" aria-label="Task status Kanban board">
+        <div class="board" id="board" tabindex="0"></div>
+      </section>
+
+      <section class="empty-state" id="empty-state" hidden>
+        <p class="empty-kicker">CLEAR HORIZON</p>
+        <h2>No tasks match these filters.</h2>
+        <p>Clear a filter or wait for Firstmate to chart new work.</p>
+      </section>
+    </main>
+
+    <dialog class="task-dialog" id="task-dialog" aria-labelledby="dialog-title">
+      <div class="dialog-frame">
+        <header class="dialog-header">
+          <div>
+            <p class="eyebrow" id="dialog-home"></p>
+            <h2 id="dialog-title"></h2>
+          </div>
+          <button class="icon-button" id="dialog-close" type="button" aria-label="Close task details">×</button>
+        </header>
+        <div class="dialog-body" id="dialog-body"></div>
+        <footer class="dialog-actions" id="dialog-actions"></footer>
+      </div>
+    </dialog>
+
+    <template id="lane-template">
+      <section class="lane">
+        <header class="lane-header">
+          <div>
+            <h2 class="lane-title"></h2>
+            <p class="lane-description"></p>
+          </div>
+          <span class="lane-count"></span>
+        </header>
+        <div class="lane-cards"></div>
+      </section>
+    </template>
+
+    <template id="card-template">
+      <article class="task-card">
+        <button class="card-open" type="button">
+          <span class="card-topline">
+            <span class="risk-badge"></span>
+            <span class="home-badge"></span>
+          </span>
+          <strong class="card-title"></strong>
+          <span class="card-status"></span>
+          <span class="card-context"></span>
+          <span class="card-evidence"></span>
+          <span class="card-footer">
+            <span class="card-id"></span>
+            <span class="card-inspect">Details <span aria-hidden="true">→</span></span>
+          </span>
+        </button>
+      </article>
+    </template>
+  </body>
+</html>

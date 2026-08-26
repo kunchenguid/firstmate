@@ -172,6 +172,10 @@ EOF
 
 ## Done
 - [x] mate-landed - Secondmate-managed fix https://github.com/kunchenguid/firstmate/pull/50 (repo: firstmate) (kind: ship) (merged 2026-07-11)
+  Risk assessment recorded by fm-task-risk.
+  Risk level: medium
+  Risk rationale: Visible completion behavior changed.
+  Preserve the completed rollout context.
 EOF
   mkdir -p "$mate/projects/mate"
   fm_write_meta "$mate/state/mate.meta" \
@@ -371,14 +375,18 @@ EOF
 }
 
 test_structured_child_decision_reaches_captains_call() {
-  local home mate fakebin json
+  local home mate fakebin canonical json
   home=$(make_home child-decision-parent)
   mate="$TMP_ROOT/child-decision-home"
   write_domain_alpha_fixture "$home" "$mate"
   mkdir -p "$mate/projects/phase8"
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
-- [ ] phase8 - Sample rollout Phase 8 (repo: sample) (kind: ship) (since 2026-07-13)
+- [ ] phase8 - Sample rollout Phase 8 https://example.com/phase8-evidence (repo: sample) (kind: ship) (since 2026-07-13)
+  Risk assessment recorded by fm-task-risk.
+  Risk level: medium
+  Risk rationale: Release timing changes visible behavior.
+  Validate release evidence at https://example.com/phase8-evidence
 
 ## Queued
 - [ ] phase8-decision-release - Choose sample release (repo: sample) (kind: captain) (hold: captain release choice pending) (hold-kind: captain)
@@ -392,6 +400,20 @@ EOF
   record_claude_state "$mate/state" phase8 idle
   printf 'needs-decision [key=release]: choose release A or B\n' > "$mate/state/phase8.status"
   fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" NET_LOG="$home/net.log" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[]
+    | select(.id == "domain-alpha")
+    | .decisions_open[]
+    | select(.id == "phase8" and .key == "release" and .source == "status")
+    | .title == "Sample rollout Phase 8"
+      and .repo == "sample"
+      and .kind == "ship"
+      and .risk.level == "medium"
+      and .context == "Validate release evidence at https://example.com/phase8-evidence"
+      and .links == ["https://example.com/phase8-evidence"]
+  ' >/dev/null || fail "status decision lost its canonical card fields: $canonical"
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
     (.secondmates | any(.[]; .id == "domain-alpha" and .state == "captain_decision"))
@@ -419,6 +441,157 @@ EOF
 append_secondmate_registry() {  # <parent> <id> <home>
   printf -- '- %s - fixture domain (home: %s; scope: fixture; projects: sample; added 2026-07-13)\n' \
     "$2" "$3" >> "$1/data/secondmates.md"
+}
+
+test_secondmate_task_evidence_is_self_contained() {
+  local home mate fakebin canonical active_pr decision_pr parked_pr
+  home=$(make_home task-evidence-parent)
+  mate="$TMP_ROOT/task-evidence-home"
+  make_valid_secondmate_home evidence "$mate"
+  mate=$(cd "$mate" && pwd -P)
+  : > "$home/data/secondmates.md"
+  append_secondmate_registry "$home" evidence "$mate"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] active-evidence - Active evidence task (repo: firstmate) (kind: ship)
+- [ ] decision-evidence - Decision evidence task (repo: firstmate) (kind: ship)
+- [ ] parked-evidence - Parked evidence task (repo: firstmate) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  mkdir -p "$mate/projects/active" "$mate/projects/decision" "$mate/projects/parked" \
+    "$mate/data/decision-evidence" "$mate/data/parked-evidence"
+  active_pr=https://github.com/kunchenguid/firstmate/pull/301
+  decision_pr=https://github.com/kunchenguid/firstmate/pull/302
+  parked_pr=https://github.com/kunchenguid/firstmate/pull/303
+  fm_write_meta "$mate/state/active-evidence.meta" \
+    "window=firstmate:fm-active-evidence" "worktree=$mate/projects/active" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "pr=$active_pr"
+  record_claude_state "$mate/state" active-evidence busy
+  printf 'working: exercising active evidence\n' > "$mate/state/active-evidence.status"
+  fm_write_meta "$mate/state/decision-evidence.meta" \
+    "window=firstmate:fm-decision-evidence" "worktree=$mate/projects/decision" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "pr=$decision_pr"
+  record_claude_state "$mate/state" decision-evidence idle
+  printf 'needs-decision [key=evidence-route]: choose the evidence route\n' \
+    > "$mate/state/decision-evidence.status"
+  printf '# Decision evidence\n' > "$mate/data/decision-evidence/report.md"
+  fm_write_meta "$mate/state/parked-evidence.meta" \
+    "window=firstmate:fm-parked-evidence" "worktree=$mate/projects/parked" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "pr=$parked_pr"
+  record_claude_state "$mate/state" parked-evidence idle
+  printf 'paused: waiting for the evidence owner\n' > "$mate/state/parked-evidence.status"
+  printf '# Parked evidence\n' > "$mate/data/parked-evidence/report.md"
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-24T12:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e \
+    --arg active_pr "$active_pr" --arg decision_pr "$decision_pr" --arg parked_pr "$parked_pr" \
+    --arg decision_report "$mate/data/decision-evidence/report.md" \
+    --arg parked_report "$mate/data/parked-evidence/report.md" '
+    .secondmate_current.records[] | select(.id == "evidence")
+    | (.active_children[] | select(.id == "active-evidence")
+        | .pr_url == $active_pr and .report_path == null)
+      and (.decisions_open[] | select(.id == "decision-evidence")
+        | .pr_url == $decision_pr and .report_path == $decision_report)
+      and (.holds[] | select(.id == "parked-evidence")
+        | .pr_url == $parked_pr and .report_path == $parked_report)
+  ' >/dev/null || fail "task-backed secondmate surfaces lost or invented evidence: $canonical"
+  pass "task-backed secondmate cards project only canonical present evidence"
+}
+
+test_secondmate_reads_respect_one_total_budget() {
+  local home fakebin slow_ssh ssh_log canonical snapshot_rc id
+  home=$(make_home total-secondmate-budget)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  : > "$home/data/secondmates.md"
+  for id in remote-a remote-b remote-c; do
+    printf -- '- %s - fixture domain (host: %s; root: /srv/firstmate; home: /srv/%s; scope: fixture; projects: sample; added 2026-08-24)\n' \
+      "$id" "$id" "$id" >> "$home/data/secondmates.md"
+    fm_write_meta "$home/state/$id.meta" \
+      "window=firstmate:fm-$id" "worktree=/srv/$id" "project=sample" \
+      "harness=codex" "kind=secondmate" "mode=secondmate" "home=/srv/$id" \
+      "remote_host=$id" "remote_root=/srv/firstmate" "remote_backend=tmux" \
+      "remote_target=firstmate:fm-$id"
+    printf 'working [key=%s]: fixture remote work\n' "$id" > "$home/state/$id.status"
+  done
+  fakebin=$(make_fakebin "$home")
+  slow_ssh="$fakebin/slow-ssh"
+  ssh_log="$home/slow-ssh.log"
+  cat > "$slow_ssh" <<'SH'
+#!/usr/bin/env bash
+printf '.\n' >> "${SLOW_SSH_LOG:?}"
+sleep 30
+SH
+  chmod +x "$slow_ssh"
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$ROOT/bin/fm-timeout-lib.sh"
+  canonical=$(fm_run_timed 6 env PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_SSH_BIN="$slow_ssh" SLOW_SSH_LOG="$ssh_log" \
+    FM_SNAPSHOT_SECONDMATES=0 FM_SNAPSHOT_SECONDMATE_TIMEOUT=8 \
+    FM_SNAPSHOT_SECONDMATE_TOTAL_TIMEOUT=2 FM_SNAPSHOT_NOW=2026-08-24T12:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  snapshot_rc=$?
+  [ "$snapshot_rc" -eq 0 ] || fail "total-budgeted secondmate snapshot returned $snapshot_rc"
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.total == 3
+      and .secondmate_current.shown == 3
+      and .secondmate_current.truncated == 0
+      and ([.secondmate_current.records[] | select(.current.state == "unknown")] | length) == 3
+      and ([.secondmate_current.records[].current.reason
+            | select(contains("total budget expired"))] | length) >= 1
+  ' >/dev/null || fail "total-budgeted secondmate reads lost canonical home records: $canonical"
+  [ "$(wc -l < "$ssh_log" | tr -d ' ')" -eq 1 ] \
+    || fail "remote current-state reads did not share the total budget: $(cat "$ssh_log")"
+  pass "registered secondmate reads share one bounded snapshot budget"
+}
+
+test_streaming_secondmate_summary_is_capped_while_reading() {
+  local home fakebin streaming_ssh canonical snapshot_rc
+  home=$(make_home streaming-secondmate-summary)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  printf '%s\n' \
+    '- streaming - fixture domain (host: streaming-host; root: /srv/firstmate; home: /srv/streaming; scope: fixture; projects: sample; added 2026-08-24)' \
+    > "$home/data/secondmates.md"
+  fakebin=$(make_fakebin "$home")
+  streaming_ssh="$fakebin/streaming-ssh"
+  cat > "$streaming_ssh" <<'SH'
+#!/usr/bin/env bash
+exec yes '{"padding":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}'
+SH
+  chmod +x "$streaming_ssh"
+  . "$ROOT/bin/fm-timeout-lib.sh"
+  canonical=$(fm_run_timed 4 env PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_SSH_BIN="$streaming_ssh" FM_SNAPSHOT_SECONDMATE_MAX_BYTES=512 \
+    FM_SNAPSHOT_SECONDMATE_TIMEOUT=8 FM_SNAPSHOT_NOW=2026-08-24T12:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  snapshot_rc=$?
+  [ "$snapshot_rc" -eq 0 ] \
+    || fail "streaming secondmate output escaped the read-time byte bound with $snapshot_rc"
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records
+    | any(.id == "streaming" and .current.state == "unknown"
+      and (.current.reason | contains("exceeded byte limit")))
+  ' >/dev/null || fail "streaming secondmate output was not classified at the byte boundary: $canonical"
+  pass "streaming secondmate summaries terminate at the read-time byte bound"
 }
 
 append_landed_row() {  # <secondmate-home> <id> <title> <date>
@@ -544,9 +717,19 @@ test_secondmate_and_child_bounds_are_disclosed() {
   printf '## In flight\n' >> "$mate/data/backlog.md"
   i=1
   while [ "$i" -le 3 ]; do
+    printf -- '- [ ] program-%s - Program %s (repo: sample) (kind: program)\n' \
+      "$i" "$i" >> "$mate/data/backlog.md"
+    i=$((i + 1))
+  done
+  i=1
+  while [ "$i" -le 3 ]; do
     child="child-$i"
     mkdir -p "$mate/projects/$child"
-    printf -- '- [ ] %s - Active %s (repo: sample) (kind: ship) (since 2026-07-13)\n' "$child" "$child" >> "$mate/data/backlog.md"
+    if [ "$i" -eq 1 ]; then
+      printf -- '- [ ] %s - Active %s https://example.com/active-1 (repo: sample) (kind: ship) (since 2026-07-13)\n' "$child" "$child" >> "$mate/data/backlog.md"
+    else
+      printf -- '- [ ] %s - Active %s (repo: sample) (kind: ship) (since 2026-07-13)\n' "$child" "$child" >> "$mate/data/backlog.md"
+    fi
     fm_write_meta "$mate/state/$child.meta" \
       "window=firstmate:fm-$child" "worktree=$mate/projects/$child" "project=sample" \
       "harness=claude" "kind=ship" "mode=no-mistakes"
@@ -554,17 +737,45 @@ test_secondmate_and_child_bounds_are_disclosed() {
     printf 'working [key=%s]: active child %s\n' "$child" "$i" > "$mate/state/$child.status"
     i=$((i + 1))
   done
-  printf '\n## Queued\n\n## Done\n' >> "$mate/data/backlog.md"
+  printf '\n## Queued\n' >> "$mate/data/backlog.md"
+  i=1
+  while [ "$i" -le 3 ]; do
+    if [ "$i" -eq 1 ]; then
+      printf -- '- [ ] hold-%s - Held %s https://example.com/hold-1 (repo: sample) (kind: ship) (hold: waiting %s) (hold-kind: external)\n' \
+        "$i" "$i" "$i" >> "$mate/data/backlog.md"
+    else
+      printf -- '- [ ] hold-%s - Held %s (repo: sample) (kind: ship) (hold: waiting %s) (hold-kind: external)\n' \
+        "$i" "$i" "$i" >> "$mate/data/backlog.md"
+    fi
+    i=$((i + 1))
+  done
+  printf '\n## Done\n' >> "$mate/data/backlog.md"
   fakebin=$(make_fakebin "$home")
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
-    FM_SNAPSHOT_SECONDMATES=2 FM_SNAPSHOT_SECONDMATE_CHILDREN=2 "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+    FM_SNAPSHOT_SECONDMATES=2 FM_SNAPSHOT_SECONDMATE_CHILDREN=2 \
+    FM_SNAPSHOT_SECONDMATE_QUEUED=2 "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.total_registered == 3
       and .secondmate_current.shown == 2
       and .secondmate_current.truncated == 1
       and (.secondmate_current.records[] | select(.id == "a")
-        | .counts.active_children == 3 and (.active_children | length) == 2
-          and (.omitted | any(.surface == "active_children" and .count == 1)))
+        | .counts.programs == 3 and (.programs | length) == 2
+          and (.omitted | any(.surface == "programs" and .count == 1))
+          and .counts.active_children == 3 and (.active_children | length) == 2
+          and (.omitted | any(.surface == "active_children" and .count == 1))
+          and .counts.holds == 3 and (.holds | length) == 2
+          and (.omitted | any(.surface == "holds" and .count == 1))
+          and .counts.queued == 3 and (.queued | length) == 2
+          and (.omitted | any(.surface == "queued" and .count == 1))
+          and (.active_children[] | select(.id == "child-1")
+            | .repo == "sample" and .kind == "ship"
+              and .links == ["https://example.com/active-1"])
+          and (.holds[] | select(.id == "hold-1")
+            | .repo == "sample" and .kind == "ship"
+              and .links == ["https://example.com/hold-1"])
+          and (.queued[] | select(.id == "hold-1")
+            | .repo == "sample" and .kind == "ship"
+              and .links == ["https://example.com/hold-1"]))
       and (.secondmate_current.records | any(.id == "b" and .current.state == "no_active_work"))
   ' >/dev/null || fail "canonical secondmate or child bounds were not enforced: $canonical"
   json=$(FM_SNAPSHOT_SECONDMATES=2 FM_SNAPSHOT_SECONDMATE_CHILDREN=2 FM_BEARINGS_SECONDMATES=1 \
@@ -722,8 +933,25 @@ EOF
     .secondmate_current.records[] | select(.id == "states")
     | .current.state == "captain_decision"
       and .active_children == []
-      and (.holds | any(.id == "parked" and .source == "child-state"))
+      and (.holds | any(.id == "parked" and .title == "Parked child" and .source == "child-state"))
   ' >/dev/null || fail "parked child was classified as active work: $canonical"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] parked - Parked child (repo: sample) (kind: ship) (since 2026-07-11)
+  DEFERRED - revisit after planning.
+
+## Queued
+
+## Done
+EOF
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "states")
+    | .current.state == "externally_held"
+      and (.decisions_open
+        | any(.id == "parked" and .key == "parked" and .deferred_marker == true))
+  ' >/dev/null || fail "deferred child decision remained an urgent captain call: $canonical"
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
 
@@ -1214,9 +1442,20 @@ test_completed_scout_report_not_pending() {
 # live in the secondmate home's OWN backlog, not the main one, so the projection must
 # roll them up. Local, deterministic, no GitHub call.
 test_landed_includes_secondmate_home_merges() {
-  local home fakebin json
+  local home fakebin json canonical
   home=$(make_home mate-landed); write_fixture "$home"
   fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "mate")
+    | .landed[] | select(.id == "mate-landed")
+    | .repo == "firstmate"
+      and .kind == "ship"
+      and .risk == {level:"medium",rationale:"Visible completion behavior changed.",source:"task-body"}
+      and .context == "Preserve the completed rollout context."
+      and .pr_url == "https://github.com/kunchenguid/firstmate/pull/50"
+  ' >/dev/null || fail "secondmate completion lost canonical card fields: $canonical"
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
     (.landed | any(.[]; .id == "mate-landed" and (.artifact | test("/pull/50"))))
@@ -1692,6 +1931,7 @@ EOF
   printf '%s' "$canonical" | jq -e '
     (.secondmate_current.records[] | select(.id == "hibit")
       | .current.state == "active_child_work"
+        and [.programs[].id] == ["dogfood-program"]
         and [.active_children[].id] == ["hibit-worker"]
         and ([.endpoints[].id] | index("dogfood-program") | not))
       and (.secondmate_current.records[] | select(.id == "wheel")
@@ -1870,6 +2110,104 @@ EOF
   pass "mixed secondmate roles, partial state, and captain readiness project independently"
 }
 
+test_backlog_input_is_bounded_before_projection() {
+  local home fakebin rc
+  home=$(make_home bounded-backlog-input)
+  : > "$home/data/secondmates.md"
+  {
+    printf '## In flight\n'
+    printf -- '- [ ] bounded-task - Bounded task (repo: firstmate) (kind: program)\n'
+    for _ in $(seq 1 40); do
+      printf '  This intentionally oversized task body exercises the public snapshot input boundary.\n'
+    done
+    printf '\n## Queued\n\n## Done\n'
+  } > "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_BACKLOG_BYTES=1024 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json \
+    > "$home/oversized.out" 2> "$home/oversized.err"
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an oversized canonical backlog was parsed without a memory boundary"
+  [ ! -s "$home/oversized.out" ] || fail "an oversized canonical backlog emitted a partial snapshot"
+  assert_contains "$(cat "$home/oversized.err")" "exceeds FM_SNAPSHOT_BACKLOG_BYTES" \
+    "the snapshot did not disclose its canonical backlog boundary"
+  pass "canonical backlog input is rejected before unbounded projection work"
+}
+
+test_program_only_secondmate_is_current_work() {
+  local home mate fakebin canonical json
+  home=$(make_home program-only-current-work)
+  mate="$TMP_ROOT/program-only-current-work-home"
+  make_valid_secondmate_home program-only "$mate"
+  : > "$home/data/secondmates.md"
+  append_secondmate_registry "$home" program-only "$mate"
+  fm_write_secondmate_meta "$home/state/program-only.meta" "$mate" \
+    "firstmate:fm-program-only" sample
+  printf 'working [key=rollout-program]: coordinating rollout\n' > "$home/state/program-only.status"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] rollout-program - Coordinate the rollout (repo: sample) (kind: program)
+
+## Queued
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "program-only")
+    | .current.state == "active_child_work"
+      and .contradiction == false
+      and [.programs[].id] == ["rollout-program"]
+      and .active_children == []
+      and (.parent_event.reconciliation.activities
+        | any(.verb == "working" and .key == "rollout-program"
+          and .verdict == "corroborates" and .matched.surface == "programs"))
+  ' >/dev/null || fail "a program-only secondmate was not canonical current work: $canonical"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.secondmates | any(.id == "program-only" and .state == "active_child_work"
+      and (.doing | contains("rollout-program"))))
+      and (.in_flight | any(.id == "program-only" and .state == "active_child_work"
+        and (.doing | contains("rollout-program"))))
+  ' >/dev/null || fail "Bearings omitted a program-only secondmate from current work: $json"
+
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] rollout-program - Coordinate the rollout (repo: sample) (kind: program)
+  DEFERRED - revisit after the next planning cycle.
+
+## Queued
+
+## Done
+EOF
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "program-only")
+    | .current.state == "no_active_work"
+      and .contradiction == true
+      and ([.programs[] | select(.id == "rollout-program")][0]
+        | .state == "deferred" and .deferred_marker == true)
+      and (.parent_event.reconciliation.activities
+        | any(.verb == "working" and .key == "rollout-program" and .verdict == "contradicts"))
+  ' >/dev/null || fail "a deferred secondmate program remained canonical current work: $canonical"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.secondmates | any(.id == "program-only" and .state == "no_active_work"))
+      and (.in_flight | any(.id == "program-only") | not)
+  ' >/dev/null || fail "Bearings treated a deferred secondmate program as current work: $json"
+  pass "program-only secondmates distinguish active and deferred work"
+}
+
 test_main_captain_readiness_matches_secondmate_projection() {
   local home fakebin json
   home=$(make_home main-captain-readiness)
@@ -1952,6 +2290,9 @@ test_parent_decision_is_untrusted_contradiction_only
 test_parent_evidence_reconciles_by_verb_and_key
 test_nonprogressing_child_states_are_explicit
 test_registry_unavailability_and_bounds_are_explicit
+test_secondmate_task_evidence_is_self_contained
+test_secondmate_reads_respect_one_total_budget
+test_streaming_secondmate_summary_is_capped_while_reading
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
 test_toon_json_parity
@@ -1969,6 +2310,8 @@ test_main_orphan_in_flight_is_disclosed_not_invented
 test_main_unstructured_current_is_disclosed_with_structured_sibling
 test_main_orphan_counterfactual_meta_clears_inventory_warning
 test_mixed_secondmate_roles_partial_state_and_captain_readiness
+test_program_only_secondmate_is_current_work
+test_backlog_input_is_bounded_before_projection
 test_main_captain_readiness_matches_secondmate_projection
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
