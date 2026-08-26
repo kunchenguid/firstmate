@@ -1,9 +1,9 @@
 // Firstmate's home-persistent Pi transcript presentation toggle.
 //
-// Verified against Pi 0.81.1 and 0.82.0, which expose built-in ToolDefinitions, per-slot
-// renderers, renderShell: "self", session_start replacement reasons, agent_start and
-// agent_settled, ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), setWidget()
-// with a disposable component factory, and setHiddenThinkingLabel().
+// Pi exposes built-in ToolDefinitions, per-slot renderers, renderShell: "self",
+// session_start replacement reasons, agent_start and agent_settled,
+// ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), setWidget() with a
+// disposable component factory, and setHiddenThinkingLabel().
 // ./lib/fm-calm-working-ship.ts owns the animated working presentation this file
 // installs. The focused tests pin those assumptions but never reject a
 // newer Pi solely for its version. The collapsed-thinking and operational-user
@@ -13,11 +13,11 @@
 // docs/configuration.md owns the home-local Calm preference contract.
 //
 // Pi has one first-registration-wins ToolDefinition per tool name, with no merge or
-// unregister operation. Keep Calm-off registration empty; keep Calm-on load-time
-// registration synchronous because restored rows capture the registry before
-// session_start; and collision-check only the later first-activation path, when
-// getAllTools() is reliable. docs/calm-mode-feasibility.md owns the Pi-source evidence
-// and docs/calm.md owns the user-facing behavior and non-retroactive first-toggle bound.
+// unregister operation, and Pi 0.84 rejects duplicate extension-owned names at startup.
+// Register Calm's wrappers only after the extension runtime is bound, when getAllTools()
+// can identify foreign owners, and leave every contested name untouched.
+// docs/calm-mode-feasibility.md owns the version-scoped Pi evidence, and docs/calm.md
+// owns the user-facing behavior and restored-row presentation bound.
 import { randomUUID } from "node:crypto";
 import {
   mkdirSync,
@@ -326,93 +326,93 @@ export default function (pi: ExtensionAPI) {
     wrapBuiltIn(createLsToolDefinition),
   ];
 
-  // True once this extension has handled built-in registration for its lifetime:
-  // either all seven synchronously at load, or only the uncontested subset during
-  // first activation.
+  // True once this extension has handled built-in registration for its lifetime.
   let builtInsRegistered = false;
 
-  // Gate on Calm already being on at load time. This must stay synchronous and
-  // unconditional here (see file header): a foreign-claim check is not reachable at
-  // this point, while deferral would make restored rows capture the wrong definition.
-  // A Calm-off session or reload registers nothing and creates no collision exposure.
-  if (loadCalmPreference()) {
-    for (const tool of wrappedBuiltIns) pi.registerTool(tool);
-    builtInsRegistered = true;
-  }
-
-  // Which of the 7 built-ins are currently owned by a different, non-builtin
-  // extension. Only safe to call once every extension has finished loading (see file
-  // header); never call this during the factory's own synchronous execution above.
-  function contestedBuiltIns(): ToolDefinition<any, any, any>[] {
-    let registered: ToolInfo[];
+  function builtInOwnership():
+    | {
+        uncontested: ToolDefinition<any, any, any>[];
+        contested: ToolDefinition<any, any, any>[];
+        unverified: ToolDefinition<any, any, any>[];
+      }
+    | undefined {
     try {
-      registered = pi.getAllTools();
+      const registered = pi.getAllTools();
+      if (!Array.isArray(registered)) throw new Error("tool inventory was not an array");
+      const uncontested: ToolDefinition<any, any, any>[] = [];
+      const contested: ToolDefinition<any, any, any>[] = [];
+      const unverified: ToolDefinition<any, any, any>[] = [];
+      for (const tool of wrappedBuiltIns) {
+        const matches = registered.filter(
+          (info: ToolInfo) => info !== null && typeof info === "object" && info.name === tool.name,
+        );
+        const owner = matches.length === 1 ? matches[0].sourceInfo : undefined;
+        if (
+          !owner ||
+          typeof owner.source !== "string" ||
+          owner.source.trim().length === 0 ||
+          typeof owner.path !== "string" ||
+          owner.path.trim().length === 0
+        ) {
+          unverified.push(tool);
+        } else if (owner.source === "builtin" || realpathOrSelf(owner.path) === extensionRealFile) {
+          uncontested.push(tool);
+        } else {
+          contested.push(tool);
+        }
+      }
+      return { uncontested, contested, unverified };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      console.error(`Firstmate Calm: built-in ownership check unavailable, claiming every built-in unconditionally. ${reason}`);
-      return [];
+      console.error(`Firstmate Calm: built-in ownership check unavailable; no built-in wrappers were registered. ${reason}`);
+      return undefined;
     }
-    return wrappedBuiltIns.filter((tool) => {
-      const owner = registered.find((info) => info.name === tool.name)?.sourceInfo;
-      return owner !== undefined && owner.source !== "builtin" && realpathOrSelf(owner.path) !== extensionRealFile;
-    });
   }
 
-  // The first time Calm turns on in a session that started off, claim every
-  // uncontested built-in and leave each contested tool and its owning extension
-  // untouched. Tell the user which built-in Calm could not take over, since Calm's
-  // presentation does not apply to it.
+  // Once Calm is active, claim every uncontested built-in and leave each contested
+  // tool and its owning extension untouched. Tell the user which built-in Calm could
+  // not take over, since Calm's presentation does not apply to it.
   function activateBuiltInsIfNeeded(ui: ExtensionUIContext): void {
     if (builtInsRegistered) return;
-    const contested = contestedBuiltIns();
-    const contestedNames = new Set(contested.map((tool) => tool.name));
-    for (const tool of wrappedBuiltIns) {
-      if (!contestedNames.has(tool.name)) pi.registerTool(tool);
-    }
-    builtInsRegistered = true;
-    if (contested.length === 0) return;
-    const names = contested.map((tool) => `"${tool.name}"`).join(", ");
-    const plural = contested.length > 1;
-    ui.notify(
-      `Firstmate Calm: the ${names} built-in tool${plural ? "s are" : " is"} already provided by another extension, so Calm may not fully function for ${plural ? "them" : "it"} this session.`,
-      "warning",
-    );
-    for (const tool of contested) {
-      console.error(`Firstmate Calm: skipped claiming built-in "${tool.name}" because another extension already owns it.`);
-    }
-  }
-
-  // Backstop for the one case activateBuiltInsIfNeeded cannot reach: Calm registered
-  // unconditionally at load time because it was already on, without any chance to
-  // check for a foreign claim first, so it can still silently lose a name to an
-  // earlier-loaded extension. Runs on every session_start reason because a reload
-  // rebuilds every extension's registrations from scratch, so last session's clean
-  // bill of health does not carry over.
-  function reportBuiltInLosses(): void {
-    if (!builtInsRegistered) return;
-    let registered: ToolInfo[];
-    try {
-      registered = pi.getAllTools();
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      console.error(`Firstmate Calm: built-in ownership check unavailable. ${reason}`);
+    const ownership = builtInOwnership();
+    if (!ownership) {
+      ui.notify(
+        "Firstmate Calm: built-in ownership could not be verified, so Calm left every built-in tool untouched this session.",
+        "warning",
+      );
       return;
     }
-    for (const tool of wrappedBuiltIns) {
-      const owner = registered.find((info) => info.name === tool.name)?.sourceInfo;
-      if (owner && owner.source !== "builtin" && realpathOrSelf(owner.path) !== extensionRealFile) {
-        console.error(
-          `Firstmate Calm: another extension (${owner.path}) also claimed the built-in "${tool.name}" tool and won; Calm's presentation for it is unavailable this session.`,
-        );
-      }
+    for (const tool of ownership.uncontested) pi.registerTool(tool);
+    builtInsRegistered = true;
+    if (ownership.contested.length > 0) {
+      const names = ownership.contested.map((tool) => `"${tool.name}"`).join(", ");
+      const plural = ownership.contested.length > 1;
+      ui.notify(
+        `Firstmate Calm: the ${names} built-in tool${plural ? "s are" : " is"} already provided by another extension, so Calm may not fully function for ${plural ? "them" : "it"} this session.`,
+        "warning",
+      );
+    }
+    for (const tool of ownership.contested) {
+      console.error(`Firstmate Calm: skipped claiming built-in "${tool.name}" because another extension already owns it.`);
+    }
+    if (ownership.unverified.length > 0) {
+      const names = ownership.unverified.map((tool) => `"${tool.name}"`).join(", ");
+      const plural = ownership.unverified.length > 1;
+      ui.notify(
+        `Firstmate Calm: ownership of the ${names} built-in tool${plural ? "s" : ""} could not be verified, so Calm left ${plural ? "them" : "it"} untouched this session.`,
+        "warning",
+      );
+    }
+    for (const tool of ownership.unverified) {
+      console.error(`Firstmate Calm: skipped claiming built-in "${tool.name}" because its ownership could not be verified.`);
     }
   }
 
   pi.on("session_start", (_event, ctx) => {
-    reportBuiltInLosses();
     calmToolRowRepaints.clear();
     exportRendering = false;
     setCalmPresentation(loadCalmPreference());
+    if (calmPresentationIsActive()) activateBuiltInsIfNeeded(ctx.ui);
     setCalmStockExportRendering(false);
     publishPresentationState();
     agentRunActive = false;
@@ -457,20 +457,24 @@ export default function (pi: ExtensionAPI) {
     });
   });
 
+  // Headless modes have no working row, so they must not retain UI work into
+  // print-mode shutdown after Pi invalidates the session-bound context.
   pi.on("agent_start", (_event, ctx) => {
     agentRunActive = true;
-    applyWorkingPresentation(ctx.ui);
+    if (ctx.hasUI) applyWorkingPresentation(ctx.ui);
   });
 
   // agent_settled is emitted from a finally block, so it also covers abort and failure.
   pi.on("agent_settled", (_event, ctx) => {
     agentRunActive = false;
-    applyWorkingPresentation(ctx.ui);
+    if (workingShipShown) applyWorkingPresentation(ctx.ui);
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
     agentRunActive = false;
-    applyWorkingPresentation(ctx.ui);
+    removeTerminalInputHandler?.();
+    removeTerminalInputHandler = undefined;
+    if (workingShipShown) applyWorkingPresentation(ctx.ui);
   });
 
   pi.registerCommand("calm", {

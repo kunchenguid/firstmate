@@ -58,6 +58,16 @@ test_family_selection() {
   pass "family selection returns a proper subset of the suite"
 }
 
+test_live_family_includes_vendor_guards() {
+  local listed
+  listed=$("$RUNNER" --list --family live-harness-optin)
+  printf '%s\n' "$listed" | grep -Fq 'tests/fm-calm-pi-conflict-live-e2e.test.sh' \
+    || fail "live-harness-optin must include the installed-Pi Calm conflict guard"
+  printf '%s\n' "$listed" | grep -Fq 'tests/fm-pi-primary-live-e2e.test.sh' \
+    || fail "live-harness-optin must retain the credentialed Pi guard"
+  pass "live family includes both Pi vendor guards"
+}
+
 test_single_script_selection() {
   local listed
   listed=$("$RUNNER" --list tests/fm-lint.test.sh)
@@ -705,6 +715,7 @@ assert len(doc["scripts"])==3
 
 test_list_all_exact_suite_coverage
 test_family_selection
+test_live_family_includes_vendor_guards
 test_single_script_selection
 test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure

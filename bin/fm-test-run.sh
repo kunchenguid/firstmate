@@ -193,7 +193,8 @@ family_for_basename() {
     fm-grok-stop-live-e2e.test.sh|fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-muse-signals-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
-    fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
+    fm-opencode-primary-live-e2e.test.sh|fm-calm-pi-conflict-live-e2e.test.sh|\
+    fm-pi-branch-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
@@ -409,6 +410,7 @@ tests/fm-claude-stop-autoarm-live-e2e.test.sh 30
 tests/fm-claude-stop-autoarm.test.sh 60633
 tests/fm-cmux-claude-composer-live-e2e.test.sh 20
 tests/fm-codex-continuity-live-e2e.test.sh 19
+tests/fm-calm-pi-conflict-live-e2e.test.sh 19
 tests/fm-composer-matrix-live-e2e.test.sh 21
 tests/fm-control-relaunch.test.sh 31881
 tests/fm-control.test.sh 36712

@@ -18,6 +18,7 @@ A mid-turn working note is assistant text in a message the model did not end its
 Hiding it removes the narration a model emits alongside its tool calls, while the genuine reply that ends a response stays visible.
 Text that is still streaming is never hidden, because suppressing it would also stop a genuine reply from streaming, so a working note is briefly visible before its row collapses.
 The narration is hidden only from the live transcript presentation, and remains in the message, model context, session storage, and `/export` artifacts.
+If another extension replaces a built-in tool, Calm leaves that extension's complete tool definition untouched, including execution, metadata, prompt behavior, and rendering.
 The operational inputs remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
 The session-start nudge remains on its existing non-displayed custom-message path.
 
@@ -38,12 +39,12 @@ The collapsed-thinking and operational-user-row presentation adapters probe the 
 If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter; `/calm`, the other adapter, and unrelated Pi extensions remain available.
 
 Calm's built-in tool presentation (`bash`, `read`, `edit`, `write`, `grep`, `find`, `ls`) shares Pi's single, unmerged override slot per name with any other extension that overrides the same tool.
-While the persisted Calm preference is off, Calm registers none of those overrides and therefore contests no built-in tool name.
-The first time Calm turns on in a session that started off, it claims every built-in name no other extension already owns, leaves every contested tool intact and callable, and displays a prominent warning naming the tools it skipped.
-Tool-call rows already on screen before that first toggle do not retroactively collapse; later rows for the names Calm claimed use Calm presentation.
-When a session starts or reloads with Calm already on, Calm must instead register all seven overrides synchronously so Pi can render restored rows with them.
-Pi provides no ownership check early enough for that load-time path, and the first registrant wins the complete tool definition.
-If the other extension wins, a session-start console diagnostic names the tool and winning extension; if Calm wins, Pi does not expose the losing registration, so the other extension's override is unavailable and cannot be named.
+Pi 0.84 rejects duplicate extension-owned tool names during startup, before the ownership inventory is available.
+Calm therefore registers no built-in overrides while extensions are loading.
+When a session starts with Calm on, or Calm is toggled on later, it claims only built-in names whose current ownership Pi can verify as built-in or Calm-owned, leaves contested or unverifiable definitions untouched, and displays a prominent warning naming the tools it skipped.
+If Pi's complete ownership inventory is unavailable, Calm leaves all seven built-in names untouched and warns rather than guessing.
+Tool-call rows created before those wrappers are registered, including rows restored during `/reload`, do not retroactively collapse; later rows for names Calm claimed use Calm presentation.
+While Calm remains off, it registers none of those overrides and contests no built-in tool name.
 
 [`calm-mode-feasibility.md`](calm-mode-feasibility.md) owns the version-scoped renderer taxonomy, built-in override constraints, and empirical evidence.
 [`configuration.md`](configuration.md#pi-calm-preference-configcalm) owns the persisted preference file and resolution rules.
@@ -55,5 +56,6 @@ Regression entry points:
 tests/fm-calm-pi-extension.test.sh
 tests/fm-pi-branch-extension.test.sh
 tests/fm-pi-primary-types.test.sh
+FM_PI_LIVE_E2E=1 tests/fm-calm-pi-conflict-live-e2e.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 ```

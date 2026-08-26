@@ -15,6 +15,10 @@ WATCH_EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 OPERATIONAL_INPUT="$ROOT/bin/fm-operational-input.sh"
 PI_OPERATIONAL_INPUT="$ROOT/.pi/extensions/lib/fm-operational-input.ts"
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
+PI_DEPENDENCY_DIR="$PI_PACKAGE_DIR/node_modules"
+if [ ! -e "$PI_DEPENDENCY_DIR/@earendil-works/pi-tui" ]; then
+  PI_DEPENDENCY_DIR="$(dirname "$(dirname "$PI_PACKAGE_DIR")")/.pnpm/node_modules"
+fi
 TMUX_SOCKET="fm-calm-$$"
 TMUX_SESSION="fm-calm-e2e"
 # Verified against Pi 0.81.1 and 0.82.0 (docs/calm-mode-feasibility.md). This is
@@ -97,8 +101,8 @@ test_home_resolution() {
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
-  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
-  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
+  ln -s "$PI_DEPENDENCY_DIR/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_DEPENDENCY_DIR/typebox" "$fixture/project/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
 
   out=$(cd "$fixture/launch-cwd" && \
@@ -128,7 +132,10 @@ function registerCalm() {
     registerEntryRenderer() {},
     registerTool() {},
     getAllTools() {
-      return [];
+      return ["read", "bash", "edit", "write", "grep", "find", "ls"].map((name) => ({
+        name,
+        sourceInfo: { source: "builtin", path: `<builtin:${name}>` },
+      }));
     },
   };
   extension.default(pi);
@@ -219,8 +226,8 @@ test_pi_compat_degraded_adapter() {
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
-  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
-  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
+  ln -s "$PI_DEPENDENCY_DIR/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_DEPENDENCY_DIR/typebox" "$fixture/project/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
 
   out=$(cd "$fixture/project" && \
@@ -256,6 +263,12 @@ const pi = {
     if (name === "calm") calmCommand = command;
   },
   registerEntryRenderer() {},
+  getAllTools() {
+    return ["read", "bash", "edit", "write", "grep", "find", "ls"].map((name) => ({
+      name,
+      sourceInfo: { source: "builtin", path: `<builtin:${name}>` },
+    }));
+  },
   registerTool() {},
 };
 
@@ -354,7 +367,7 @@ JS
   pass "missing Pi presentation class exports reach the independent adapter degradation path"
 }
 
-test_builtin_gate_load_time() {
+test_builtin_gate_after_extension_load() {
   local fixture out output_file status
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
     echo "skip: node or npm not found for Pi calm gate test"
@@ -378,8 +391,8 @@ test_builtin_gate_load_time() {
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
-  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
-  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
+  ln -s "$PI_DEPENDENCY_DIR/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_DEPENDENCY_DIR/typebox" "$fixture/project/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
   printf '%s\n' on >"$fixture/home-on/config/calm"
 
@@ -391,9 +404,14 @@ test_builtin_gate_load_time() {
     node --input-type=module) >"$output_file" 2>&1 <<'JS'
 import { pathToFileURL } from "node:url";
 
-function fakePi() {
+const diagnostics = [];
+const originalConsoleError = console.error;
+console.error = (...args) => diagnostics.push(args.join(" "));
+const builtinNames = ["bash", "edit", "find", "grep", "ls", "read", "write"];
+function fakePi({ foreignRead = false, inventoryUnavailable = false, readInventory = "valid" } = {}) {
   const tools = [];
   const handlers = new Map();
+  const notifications = [];
   const pi = {
     events: { emit() {}, on() {} },
     on(event, handler) {
@@ -405,40 +423,133 @@ function fakePi() {
       tools.push(tool);
     },
     getAllTools() {
-      return tools.map((tool) => ({ name: tool.name, sourceInfo: { source: "extension", path: "self" } }));
+      if (inventoryUnavailable) throw new Error("inventory offline");
+      const inventory = builtinNames.map((name) => ({
+        name,
+        sourceInfo: name === "read" && foreignRead
+          ? { source: "auto", path: "/global/pdf-read/index.ts" }
+          : { source: "builtin", path: `<builtin:${name}>` },
+      }));
+      if (readInventory === "missing") return inventory.filter((tool) => tool.name !== "read");
+      if (readInventory === "malformed") {
+        return inventory.map((tool) => tool.name === "read" ? { name: "read", sourceInfo: {} } : tool);
+      }
+      return inventory;
     },
   };
-  return { pi, tools, handlers };
+  const ctx = {
+    hasUI: true,
+    ui: {
+      getEditorText: () => "",
+      getToolsExpanded: () => false,
+      onTerminalInput: () => () => {},
+      setHiddenThinkingLabel() {},
+      setStatus() {},
+      setToolsExpanded() {},
+      setWorkingVisible() {},
+      notify(message, type) {
+        notifications.push({ message, type });
+      },
+    },
+  };
+  return { pi, tools, handlers, notifications, ctx };
 }
 
-// Calm-off (config/calm absent for this home): load-time registration must be
-// entirely skipped, so a non-Calm user contests nothing.
+delete process.env.FM_CONFIG_OVERRIDE;
+delete process.env.FM_ROOT_OVERRIDE;
+
+// Neither preference state may register tool wrappers during extension discovery,
+// because Pi 0.84 rejects duplicate extension-owned names before startup completes.
 process.env.FM_HOME = process.env.HOME_OFF;
 const offRun = fakePi();
 const extensionOff = await import(`${pathToFileURL(process.env.EXT).href}?gate-off=${Date.now()}`);
 extensionOff.default(offRun.pi);
 if (offRun.tools.length !== 0) {
-  throw new Error(`Calm registered ${offRun.tools.length} built-ins while config/calm was absent: ${offRun.tools.map((t) => t.name).join(",")}`);
+  throw new Error(`Calm registered ${offRun.tools.length} built-ins at load while config/calm was absent`);
 }
+await offRun.handlers.get("session_start")({ reason: "startup" }, offRun.ctx);
+if (offRun.tools.length !== 0) {
+  throw new Error("Calm claimed built-ins when the session started with Calm off");
+}
+const headlessContext = { ...offRun.ctx, hasUI: false };
+await offRun.handlers.get("agent_start")({}, headlessContext);
+const invalidatedContext = new Proxy({}, {
+  get() {
+    throw new Error("stale headless extension context accessed");
+  },
+});
+await offRun.handlers.get("agent_settled")({}, invalidatedContext);
+await offRun.handlers.get("session_shutdown")({ reason: "quit" }, invalidatedContext);
 
-// Calm-on (config/calm="on" for this home): registration must happen synchronously,
-// during this same factory call, exactly the timing /reload's pre-session_start
-// transcript render depends on - not deferred to session_start or later.
 process.env.FM_HOME = process.env.HOME_ON;
-const onRun = fakePi();
+const onRun = fakePi({ foreignRead: true });
 const extensionOn = await import(`${pathToFileURL(process.env.EXT).href}?gate-on=${Date.now()}`);
 extensionOn.default(onRun.pi);
-const names = onRun.tools.map((t) => t.name).sort();
-const expected = ["bash", "edit", "find", "grep", "ls", "read", "write"];
-if (JSON.stringify(names) !== JSON.stringify(expected)) {
-  throw new Error(`Calm registered ${JSON.stringify(names)} synchronously at load with config/calm=on, expected ${JSON.stringify(expected)}`);
+if (onRun.tools.length !== 0) {
+  throw new Error(`Calm registered ${onRun.tools.length} built-ins during extension discovery with config/calm=on`);
 }
+await onRun.handlers.get("session_start")({ reason: "startup" }, onRun.ctx);
+const names = onRun.tools.map((tool) => tool.name).sort();
+const expected = ["bash", "edit", "find", "grep", "ls", "write"];
+if (JSON.stringify(names) !== JSON.stringify(expected)) {
+  throw new Error(`Calm did not preserve extension-owned read on session start: ${JSON.stringify(names)}`);
+}
+if (
+  onRun.notifications.length !== 1 ||
+  onRun.notifications[0].type !== "warning" ||
+  !onRun.notifications[0].message.includes("read")
+) {
+  throw new Error(`Calm did not warn about the extension-owned read tool: ${JSON.stringify(onRun.notifications)}`);
+}
+if (!diagnostics.some((line) => line.includes("read"))) {
+  throw new Error(`Calm did not log the extension-owned read tool: ${JSON.stringify(diagnostics)}`);
+}
+
+const unavailableRun = fakePi({ inventoryUnavailable: true });
+const unavailableExtension = await import(`${pathToFileURL(process.env.EXT).href}?gate-unavailable=${Date.now()}`);
+unavailableExtension.default(unavailableRun.pi);
+await unavailableRun.handlers.get("session_start")({ reason: "startup" }, unavailableRun.ctx);
+if (unavailableRun.tools.length !== 0) {
+  throw new Error(`Calm claimed built-ins without an ownership inventory: ${unavailableRun.tools.map((tool) => tool.name).join(",")}`);
+}
+if (
+  unavailableRun.notifications.length !== 1 ||
+  unavailableRun.notifications[0].type !== "warning" ||
+  !unavailableRun.notifications[0].message.includes("ownership")
+) {
+  throw new Error(`Calm did not warn when ownership inventory failed: ${JSON.stringify(unavailableRun.notifications)}`);
+}
+if (!diagnostics.some((line) => line.includes("inventory offline"))) {
+  throw new Error(`Calm did not diagnose the ownership inventory failure: ${JSON.stringify(diagnostics)}`);
+}
+
+for (const readInventory of ["missing", "malformed"]) {
+  const unverifiedRun = fakePi({ readInventory });
+  const unverifiedExtension = await import(
+    `${pathToFileURL(process.env.EXT).href}?gate-${readInventory}=${Date.now()}`
+  );
+  unverifiedExtension.default(unverifiedRun.pi);
+  await unverifiedRun.handlers.get("session_start")({ reason: "startup" }, unverifiedRun.ctx);
+  const registeredNames = unverifiedRun.tools.map((tool) => tool.name).sort();
+  if (JSON.stringify(registeredNames) !== JSON.stringify(expected)) {
+    throw new Error(`Calm did not skip the ${readInventory} read owner: ${JSON.stringify(registeredNames)}`);
+  }
+  if (
+    unverifiedRun.notifications.length !== 1 ||
+    unverifiedRun.notifications[0].type !== "warning" ||
+    !unverifiedRun.notifications[0].message.includes("read") ||
+    !unverifiedRun.notifications[0].message.includes("ownership")
+  ) {
+    throw new Error(`Calm did not warn about the ${readInventory} read owner: ${JSON.stringify(unverifiedRun.notifications)}`);
+  }
+}
+console.error = originalConsoleError;
 JS
   status=$?
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm gate-at-load-time path failed: $out"
   [ -z "$out" ] || fail "Pi calm gate-at-load-time test printed output: $out"
-  pass "Calm registers none of its 7 built-in tool wrappers at load while config/calm is off, and all 7 synchronously at load while config/calm is on"
+  pass "Calm registers no tool wrappers during extension discovery, leaves contested and unverified built-ins untouched, wraps verified built-ins, fails closed when ownership inventory is unavailable, and avoids invalidated UI context after a headless Calm-off run"
 }
 
 test_calm_activation_collision_and_regression_bound() {
@@ -464,8 +575,8 @@ test_calm_activation_collision_and_regression_bound() {
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
-  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
-  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
+  ln -s "$PI_DEPENDENCY_DIR/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_DEPENDENCY_DIR/typebox" "$fixture/project/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
   printf '%s\n' 'export default function () {}' >"$fixture/project/foreign-bash-extension.ts"
 
@@ -474,6 +585,7 @@ test_calm_activation_collision_and_regression_bound() {
     EXT="$fixture/project/.pi/extensions/fm-calm.ts" \
     FOREIGN_EXT="$fixture/project/foreign-bash-extension.ts" \
     FM_HOME="$fixture/home" \
+    PI_DEPENDENCY_DIR="$PI_DEPENDENCY_DIR" \
     PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
     node --input-type=module) >"$output_file" 2>&1 <<'JS'
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -484,7 +596,7 @@ const { ToolExecutionComponent } = await import(
 );
 const { initTheme } = await import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href);
 const { setCapabilities } = await import(
-  pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href
+  pathToFileURL(`${process.env.PI_DEPENDENCY_DIR}/@earendil-works/pi-tui/dist/index.js`).href
 );
 initTheme("dark");
 setCapabilities({ images: null, trueColor: true, hyperlinks: false });
@@ -506,6 +618,7 @@ const foreignBash = {
   },
 };
 
+const builtinNames = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const registry = new Map([["bash", { tool: foreignBash, ownerPath: foreignPath }]]);
 const notifications = [];
 const diagnostics = [];
@@ -531,10 +644,15 @@ const pi = {
     }
   },
   getAllTools() {
-    return Array.from(registry.entries()).map(([name, { ownerPath }]) => ({
-      name,
-      sourceInfo: { source: "extension", path: ownerPath },
-    }));
+    return builtinNames.map((name) => {
+      const registered = registry.get(name);
+      return {
+        name,
+        sourceInfo: registered
+          ? { source: "extension", path: registered.ownerPath }
+          : { source: "builtin", path: `<builtin:${name}>` },
+      };
+    });
   },
 };
 
@@ -680,8 +798,8 @@ test_rendering_and_session_lifecycle() {
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$fixture/lib/fm-branch-dispatch.ts"
   cp "$WATCH_EXT" "$fixture/fm-primary-pi-watch.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
-  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
-  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
+  ln -s "$PI_DEPENDENCY_DIR/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_DEPENDENCY_DIR/typebox" "$fixture/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
   cat >"$fixture/operational-input-probe.sh" <<'SH'
 #!/usr/bin/env bash
@@ -691,7 +809,7 @@ SH
   chmod +x "$fixture/operational-input-probe.sh"
 
   output_file="$fixture/node-output"
-  (cd "$fixture" && EXT="$fixture/fm-calm.ts" WATCH_EXT="$fixture/fm-primary-pi-watch.ts" FM_HOME="$fixture/home" FM_OPERATIONAL_INPUT_SCRIPT="$fixture/operational-input-probe.sh" FM_OPERATIONAL_INPUT_OWNER="$OPERATIONAL_INPUT" FM_OPERATIONAL_INPUT_CALLS="$fixture/operational-input-calls" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module) >"$output_file" 2>&1 <<'JS'
+  (cd "$fixture" && EXT="$fixture/fm-calm.ts" WATCH_EXT="$fixture/fm-primary-pi-watch.ts" FM_HOME="$fixture/home" FM_OPERATIONAL_INPUT_SCRIPT="$fixture/operational-input-probe.sh" FM_OPERATIONAL_INPUT_OWNER="$OPERATIONAL_INPUT" FM_OPERATIONAL_INPUT_CALLS="$fixture/operational-input-calls" PI_DEPENDENCY_DIR="$PI_DEPENDENCY_DIR" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module) >"$output_file" 2>&1 <<'JS'
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -709,13 +827,14 @@ const [{ AssistantMessageComponent }, { CustomEntryComponent }, { ToolExecutionC
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/user-message.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/interactive-mode.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
-  import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
+  import(pathToFileURL(`${process.env.PI_DEPENDENCY_DIR}/@earendil-works/pi-tui/dist/index.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/core/export-html/tool-renderer.js`).href),
 ]);
 initTheme("dark");
 setCapabilities({ images: null, trueColor: true, hyperlinks: false });
 
 const tools = [];
+const builtinNames = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const handlers = new Map();
 const entryRenderers = new Map();
 const eventListeners = new Map();
@@ -748,12 +867,11 @@ const pi = {
     else tools[existingIndex] = tool;
   },
   getAllTools() {
-    // Only Calm itself has registered anything in this fixture, so every entry
-    // reports Calm's own extension path; the dedicated collision fixture below is
-    // what exercises a foreign extension already owning a name.
-    return tools.map((tool) => ({
-      name: tool.name,
-      sourceInfo: { source: "extension", path: extPath },
+    return builtinNames.map((name) => ({
+      name,
+      sourceInfo: tools.some((tool) => tool.name === name)
+        ? { source: "extension", path: extPath }
+        : { source: "builtin", path: `<builtin:${name}>` },
     }));
   },
 };
@@ -832,6 +950,7 @@ const operationalMode = {
   // Firstmate both use today.
   getMarkdownTransformers: () => [],
   getMarkdownThemeWithSettings: () => undefined,
+  getMarkdownTransformers: () => [],
   getUserMessageText: (message) => typeof message.content === "string"
     ? message.content
     : message.content.filter((item) => item.type === "text").map((item) => item.text).join(""),
@@ -2153,15 +2272,6 @@ TS
   grep -Fq 'tool result one' "$session_file" \
     || fail "Calm removed hidden tool results from persisted history"
 
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/reload'
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
-  wait_for_geometry_transition \
-    "$snapshot" \
-    "Reloading keybindings, extensions, skills, prompts, themes, and context files..." \
-    "CALM_GEOMETRY_FINAL" \
-    || fail "Pi Calm hidden-block geometry E2E did not complete the /reload viewport transition"
-  assert_geometry_gap "$snapshot" "reloaded native Calm transcript"
-
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
   wait_for_geometry_text "$expanded_snapshot" "CALM_GEOMETRY_THINKING_ONE" \
     || fail "thinking expansion did not restore Calm-hidden reasoning"
@@ -2195,6 +2305,16 @@ TS
   done
   assert_geometry_gap "$snapshot" "Calm redraw of existing transcript"
 
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/reload'
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  wait_for_geometry_transition \
+    "$snapshot" \
+    "Reloading keybindings, extensions, skills, prompts, themes, and context files..." \
+    "CALM_GEOMETRY_FINAL" \
+    || fail "Pi Calm hidden-block geometry E2E did not complete the /reload viewport transition"
+  assert_not_contains "$(cat "$snapshot")" "Thinking..." "reload restored a collapsed thinking label under Calm"
+  assert_contains "$(cat "$snapshot")" "probe-one.txt" "reload did not preserve the documented pre-registration tool-row boundary"
+
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/quit'
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   sleep 0.2
@@ -2209,7 +2329,7 @@ TS
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   sleep 0.2
   tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
-  pass "Pi Calm native /skill:ahoy geometry keeps every collapsed thinking and tool block at zero height while preserving expansion, history, restart, and Calm-off rendering"
+  pass "Pi Calm native /skill:ahoy geometry keeps live and restarted thinking/tool blocks at zero height, preserves expansion and Calm-off rendering, and leaves reload-restored pre-registration tool rows stock-visible"
 }
 
 test_working_ship_geometry_and_lifecycle() {
@@ -2234,17 +2354,17 @@ test_working_ship_geometry_and_lifecycle() {
   cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
-  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
-  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
+  ln -s "$PI_DEPENDENCY_DIR/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_DEPENDENCY_DIR/typebox" "$fixture/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
 
-  out=$(cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module 2>&1 <<'JS'
+  out=$(cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_DEPENDENCY_DIR="$PI_DEPENDENCY_DIR" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module 2>&1 <<'JS'
 import { pathToFileURL } from "node:url";
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
 const [{ initTheme, theme }, { visibleWidth, setCapabilities }] = await Promise.all([
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
-  import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
+  import(pathToFileURL(`${process.env.PI_DEPENDENCY_DIR}/@earendil-works/pi-tui/dist/index.js`).href),
 ]);
 initTheme("dark");
 setCapabilities({ images: null, trueColor: true, hyperlinks: false });
@@ -2797,7 +2917,10 @@ const pi = {
   registerEntryRenderer() {},
   registerTool() {},
   getAllTools() {
-    return [];
+    return ["read", "bash", "edit", "write", "grep", "find", "ls"].map((name) => ({
+      name,
+      sourceInfo: { source: "builtin", path: `<builtin:${name}>` },
+    }));
   },
   appendEntry: (...args) => sessionWrites.push(["appendEntry", ...args]),
   sendMessage: (...args) => sessionWrites.push(["sendMessage", ...args]),
@@ -2845,7 +2968,7 @@ const ui = {
   notify() {},
   theme,
 };
-const ctx = { ui };
+const ctx = { hasUI: true, ui };
 const fire = async (event, payload = {}) => {
   for (const handler of handlers.get(event) ?? []) await handler(payload, ctx);
 };
@@ -3959,7 +4082,7 @@ test_home_resolution
 test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter
 test_pi_compat_missing_adapter_exports
-test_builtin_gate_load_time
+test_builtin_gate_after_extension_load
 test_calm_activation_collision_and_regression_bound
 test_rendering_and_session_lifecycle
 test_calm_mid_turn_working_notes
