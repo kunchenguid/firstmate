@@ -1107,7 +1107,7 @@ if [ "$RELAUNCH" -eq 1 ] || [ "$RECOVER_MISSING" -eq 1 ]; then
     # Role partition refinement: branch recovery relaunches only through the
     # fm-control transaction that owns the control lock, never by invoking
     # this entrypoint directly (contract: bin/fm-lease-lib.sh).
-    echo "error: existing-task recovery (fm-spawn) refused - the supervision branch must recover through fm-control" >&2
+    echo "error: existing-task recovery (fm-spawn) refused - the supervision branch must relaunch through fm-control" >&2
     exit "$FM_LEASE_REFUSE_EXIT"
   elif fm_lock_try_acquire "$SPAWN_CONTROL_LOCK"; then
     SPAWN_CONTROL_LOCK_HELD=1
