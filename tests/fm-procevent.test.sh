@@ -595,6 +595,83 @@ out=$(PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh"
 assert_contains "$out" "retired: $lavish_id" "explicit adapter retirement stays supported after automatic retirement"
 pass "one Send & End yields exactly one captured result, automatic retirement, and no recurring poll"
 
+# --- end-user-aligned regression: an empty board close is not news ------------
+# The captain's report: closing a review surface he had said nothing on still
+# put a wake in his chat whose entire content was that nothing happened. The
+# adapter now answers the runner's silence seam for exactly that shape, so the
+# result is captured and recorded handled without ever being announced. Driven
+# through the adapter's own arm command and the real runner, so registration,
+# capture, the silence verdict, and retirement all run for real.
+HEMPTY="$TMP_ROOT/hempty"; new_home "$HEMPTY"
+EMPTY_BIN=$(fm_fakebin "$TMP_ROOT/lavish-empty-stub")
+cat > "$EMPTY_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+# Stand-in for `lavish-axi poll <file>` when the captain closes a board he said
+# nothing on: an ended session carrying no queued content at all.
+printf 'session:\n  file: /quiet.html\n  status: ended\n  ended_by: user\n'
+SH
+chmod +x "$EMPTY_BIN/lavish-axi"
+QUIET_ART="$TMP_ROOT/quiet-board.html"
+printf '<h1>quiet</h1>\n' > "$QUIET_ART"
+quiet_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$QUIET_ART")
+PE_TRACKED+=("$HEMPTY|$quiet_id")
+PATH="$EMPTY_BIN:$PATH" FM_HOME="$HEMPTY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$QUIET_ART" >/dev/null
+quiet_out=$(PATH="$EMPTY_BIN:$PATH" pe "$HEMPTY" start "$quiet_id" 2>&1)
+assert_not_contains "$quiet_out" "not-autohandled" \
+  "a durably silenced result was reported as still unacknowledged"
+# The handled marker is written at exactly the point the wake would otherwise
+# have been appended, so waiting on it - rather than on a fixed sleep - is what
+# makes "no wake" a real observation instead of a race the test won by being
+# early.
+QUIET_HANDLED="$HEMPTY/state/procevent-inbox/$quiet_id.1.handled"
+for _ in $(seq 1 100); do
+  [ -f "$QUIET_HANDLED" ] && break
+  sleep 0.1
+done
+[ -f "$QUIET_HANDLED" ] \
+  || fail "a silenced result was not durably recorded handled, so a later reconcile would announce it"
+[ "$(count_results "$HEMPTY" "$quiet_id")" = 1 ] \
+  || fail "an empty board close captured $(count_results "$HEMPTY" "$quiet_id") results instead of one"
+[ -z "$(wake_payloads "$HEMPTY")" ] \
+  || fail "an empty board close woke the captain: $(wake_payloads "$HEMPTY")"
+# Re-announcement is exactly what the handled marker exists to stop, so the
+# silence has to survive the reconcile that would otherwise republish it.
+PATH="$EMPTY_BIN:$PATH" pe "$HEMPTY" reconcile >/dev/null
+sleep 0.3
+[ -z "$(wake_payloads "$HEMPTY")" ] \
+  || fail "a later reconcile re-announced a silenced empty board close: $(wake_payloads "$HEMPTY")"
+assert_absent "$HEMPTY/state/procevent/$quiet_id.source" \
+  "an empty board close still retires its ended source"
+pass "an empty board close is captured and recorded handled without ever waking the captain"
+
+# The other half of the same contract, on the same real path: a close that
+# carries what the captain actually said must still reach him. Same runner, same
+# adapter, one different response shape.
+HANSWER="$TMP_ROOT/hanswer"; new_home "$HANSWER"
+ANSWER_BIN=$(fm_fakebin "$TMP_ROOT/lavish-answer-stub")
+cat > "$ANSWER_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+# Stand-in for `lavish-axi poll <file>` on a real `Send & End`: the captain's
+# own choice, delivered with session_ended.
+printf 'session:\n  file: /answered.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nprompts[1]{tag,text,prompt}:\n  "choice","Option B","Context data: {\\"question\\":\\"noop-check-routing\\",\\"answer\\":\\"b\\"}"\n'
+SH
+chmod +x "$ANSWER_BIN/lavish-axi"
+ANSWER_ART="$TMP_ROOT/answered-board.html"
+printf '<h1>answered</h1>\n' > "$ANSWER_ART"
+answer_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$ANSWER_ART")
+PE_TRACKED+=("$HANSWER|$answer_id")
+PATH="$ANSWER_BIN:$PATH" FM_HOME="$HANSWER" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$ANSWER_ART" >/dev/null
+PATH="$ANSWER_BIN:$PATH" pe "$HANSWER" reconcile >/dev/null
+wait_for "$HANSWER/state/.wake-queue" \
+  || fail "a board close carrying the captain's real answer produced no wake"
+assert_contains "$(wake_payloads "$HANSWER")" "procevent lavish $answer_id 1" \
+  "a real board answer still reaches the captain"
+[ ! -f "$HANSWER/state/procevent-inbox/$answer_id.1.handled" ] \
+  || fail "a real board answer was recorded handled without ever being handled"
+pass "a board close carrying the captain's real answer is still announced"
+
 # --- end-user-aligned regression: a transient poll interruption is not news ---
 # The dogfood defect: a live board listener can answer with exactly
 #     error: Lavish Editor poll response was interrupted
@@ -1355,6 +1432,60 @@ printf 'session:\n  file: /a.html\n  status: feedback\nfeedback[1]{text}:\n  ses
 "$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" \
   && fail "prompt payload text was read as a session-level terminal marker"
 pass "the adapter owns which Lavish results end a source, and payload text cannot forge one"
+
+# The adapter, not the runner, decides which Lavish results are routine no-ops
+# the runner should record without announcing. Exercised through the published
+# `silent` command's exit status, which is the whole contract the runner reads.
+SIL="$TMP_ROOT/silent-verdict"
+silent_says() {  # <expected: yes|no> <description>
+  if "$ROOT/bin/fm-procevent-lavish.sh" silent "$SIL" >/dev/null 2>&1; then
+    [ "$1" = yes ] || fail "silent suppressed a result that must reach the handler: $2"
+  else
+    [ "$1" = no ] || fail "silent announced a result that carries no news: $2"
+  fi
+}
+printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\n' > "$SIL"
+silent_says yes "an ended session carrying nothing is an empty board close"
+printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nprompts[0]{tag,text}:\n' > "$SIL"
+silent_says no "a declared-empty content block is still present"
+printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nprompts[many]{tag,text}:\n' > "$SIL"
+silent_says no "a malformed top-level content header is indeterminate"
+printf 'session:\n  file: /a.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nfeedback[1]{text}:\n  ship it\n' > "$SIL"
+silent_says no "a Send & End close carrying the captain's answer is news"
+printf 'session:\n  file: /a.html\n  status: feedback\nprompts[1]{tag,text}:\n  "message","some prose"\n' > "$SIL"
+silent_says no "a freeform captain message is news"
+printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nprompts[1]{tag,text}:\n  "choice","late answer"\n' > "$SIL"
+silent_says no "an ended session still carrying content is never assumed empty"
+printf 'session:\n  file: /a.html\n  status: waiting\n' > "$SIL"
+silent_says no "a waiting session proves nothing about what was said"
+printf 'error: No active Lavish Editor session for this file\ncode: NOT_FOUND\n' > "$SIL"
+silent_says no "a missing session is not a no-op"
+printf 'error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n' > "$SIL"
+silent_says no "a server error is not a no-op"
+printf 'garbage that is not a session block\n' > "$SIL"
+silent_says no "an unreadable result fails closed and is announced"
+printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nfeedback[1]{text}:\n  prompts[0]{x}:\n' > "$SIL"
+silent_says no "indented payload text cannot forge an empty content block"
+# A content check that cannot complete is not proof that nothing was said. Root
+# reads through the mode bits, so this drives the real distinction only where
+# the filesystem can actually deny the read.
+if [ "$(id -u)" != 0 ]; then
+  printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\n' > "$SIL"
+  chmod 000 "$SIL"
+  silent_says no "a content check that cannot complete announces rather than assuming silence"
+  chmod 600 "$SIL"
+fi
+pass "the adapter owns which Lavish results are silent, and fails closed on everything else"
+
+# The runner's silence seam is generic and closed by default: an adapter with no
+# `silent` command must keep announcing, so adding the seam changed nothing for
+# every adapter that has no notion of a no-op.
+printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\n' > "$SIL"
+for adapter in remote-reply when; do
+  ! "$ROOT/bin/fm-procevent-$adapter.sh" silent "$SIL" >/dev/null 2>&1 \
+    || fail "the $adapter adapter declared silence without implementing the seam"
+done
+pass "an adapter with no silence verdict keeps announcing every result"
 
 # --- the loss limitation is stated on the public interface ------------------
 # Checked through --help, the operator-facing surface, rather than by reading
