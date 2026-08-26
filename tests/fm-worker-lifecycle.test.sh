@@ -508,6 +508,39 @@ action["resources"] = {
 worker = {"slot": 1, "resources": resources}
 module.recorded_exact(action, worker)
 
+# A child may disappear after its list response while another exact cleanup
+# removes it. Only Azure's explicit ResourceNotFound is a truthful absence;
+# every other read failure and malformed success remains fail-closed.
+original_az = module.az
+module.az = lambda *_args, **_kwargs: (
+    None, 3,
+    "ERROR: (ResourceNotFound) child disappeared\nCode: ResourceNotFound\n",
+)
+assert module.show_full(controller, "/child", inventory_missing_ok=True) is None
+try:
+    module.show_full(controller, "/child")
+except module.ProviderError as exc:
+    assert "ResourceNotFound" in str(exc), exc
+else:
+    raise AssertionError("non-inventory child read softened ResourceNotFound")
+module.az = lambda *_args, **_kwargs: (None, 3, "ERROR: (AuthorizationFailed) denied")
+try:
+    module.show_full(controller, "/child")
+except module.ProviderError as exc:
+    assert "AuthorizationFailed" in str(exc), exc
+else:
+    raise AssertionError("child inventory softened a non-absence provider error")
+module.az = lambda *_args, **_kwargs: ([], 0, "")
+try:
+    module.show_full(controller, "/child")
+except module.ProviderError as exc:
+    assert "malformed" in str(exc), exc
+else:
+    raise AssertionError("child inventory accepted a malformed successful read")
+module.az = original_az
+inventory_source = inspect.getsource(module.inventory)
+assert inventory_source.count("if value is None:") == 3
+
 # Replacement compute advances the worker generation without rewriting the
 # durable slot reservation. Cleanup accepts only that reservation's canonical
 # older generation; every other resource and ownership tag remains exact.

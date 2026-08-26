@@ -481,12 +481,24 @@ def resource_record(kind, value, power_state=None, tags_override=None):
     return record
 
 
-def show_full(controller, resource_id, api_version=None):
+def show_full(controller, resource_id, api_version=None, inventory_missing_ok=False):
     args = ["resource", "show", "--ids", resource_id]
     if api_version:
         args += ["--api-version", api_version]
     value, rc, stderr = az(controller, args, check=False)
-    if rc != 0 or not isinstance(value, dict):
+    if rc != 0:
+        # Inventory lists each child before reading its full object. Cleanup
+        # may delete that exact child between those two reads, including from
+        # another slot's fenced mutation. ResourceNotFound is therefore a
+        # truthful later observation, not an inventory failure. Every other
+        # provider error remains fail-closed.
+        if inventory_missing_ok and re.search(
+            r"(?:\(ResourceNotFound\)|^Code:\s*ResourceNotFound\s*$)",
+            str(stderr or ""), re.MULTILINE,
+        ):
+            return None
+        raise ProviderError("Azure child inventory read failed or was malformed: {}".format(stderr))
+    if not isinstance(value, dict):
         raise ProviderError("Azure child inventory read failed or was malformed: {}".format(stderr))
     return value
 
@@ -1172,7 +1184,9 @@ def inventory(controller, include_metrics=True):
         )
         # The generic resource listing omits properties and etag; only the full
         # object carries an immutable child identity.
-        value = show_full(controller, extension["id"])
+        value = show_full(controller, extension["id"], inventory_missing_ok=True)
+        if value is None:
+            continue
         value["attached_to"] = vm_id
         value["properties"] = dict(value.get("properties") or {})
         value["properties"]["virtualMachineId"] = vm_id
@@ -1186,7 +1200,9 @@ def inventory(controller, include_metrics=True):
         if kind is None:
             conflicts.append({"kind": "run-command", "slot": slot, "reason": "undeclared worker Run Command child"})
             continue
-        value = show_full(controller, command["id"])
+        value = show_full(controller, command["id"], inventory_missing_ok=True)
+        if value is None:
+            continue
         value["attached_to"] = exact_id(
             controller, "Microsoft.Compute", "virtualMachines",
             expected_names(controller, slot)["vm"],
@@ -1197,7 +1213,12 @@ def inventory(controller, include_metrics=True):
     for schedule in schedules:
         slot = slot_from_name(schedule.get("name"), r"^shutdown-computevm-vm-{}-wkr-".format(prefix))
         if slot is not None:
-            value = show_full(controller, schedule["id"], api_version="2018-09-15")
+            value = show_full(
+                controller, schedule["id"], api_version="2018-09-15",
+                inventory_missing_ok=True,
+            )
+            if value is None:
+                continue
             value["properties"] = dict(value.get("properties") or {})
             value["properties"].setdefault("targetResourceId", exact_id(
                 controller, "Microsoft.Compute", "virtualMachines",
