@@ -11,6 +11,7 @@
 #   generated: UTC observation time for this fresh command execution.
 #   fm_home: resolved operational home.
 #   roots: resolved root/config/data/state/projects directories.
+#   collection.state: whether the state inventory was absent or fully accessible.
 #   backlog: {path,present,records[]} where records are ordered as written in
 #     data/backlog.md and cover In flight, Queued, and Done.
 #     Canonical tasks-axi rows are structured; free-form non-empty lines in
@@ -225,6 +226,16 @@ path_present_json() {  # <path>
   [ -e "$1" ] && present=1
   jq -n --arg path "$1" --argjson present "$(bool_json "$present")" \
     '{path:$path,present:$present}'
+}
+
+state_collection_json() {
+  if [ ! -e "$STATE" ]; then
+    jq -n '{present:false,available:true,reason:null}'
+  elif [ ! -d "$STATE" ] || [ ! -r "$STATE" ] || [ ! -x "$STATE" ]; then
+    jq -n '{present:true,available:false,reason:"state directory is not readable and searchable"}'
+  else
+    jq -n '{present:true,available:true,reason:null}'
+  fi
 }
 
 meta_value() {  # <meta-file> <key>
@@ -1455,6 +1466,7 @@ scout_report_lines() {
 }
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
+STATE_COLLECTION_JSON=$(state_collection_json) || { echo "fm-fleet-snapshot: state collection check failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
@@ -1480,6 +1492,7 @@ jq -n \
   --arg config "$CONFIG" \
   --arg projects "$PROJECTS" \
   --argjson backlog "$BACKLOG_JSON" \
+  --argjson state_collection "$STATE_COLLECTION_JSON" \
   --argjson tasks "$TASKS_JSON" \
   --argjson main_inventory "$MAIN_INVENTORY_JSON" \
   --argjson scout_reports "$SCOUT_REPORTS_JSON" \
@@ -1493,6 +1506,7 @@ jq -n \
      generated:$generated,
      fm_home:$fm_home,
      roots:{fm_root:$fm_root,state:$state,data:$data,config:$config,projects:$projects},
+     collection:{state:$state_collection},
      backlog:$backlog,
      tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
      main_inventory:$main_inventory,

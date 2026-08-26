@@ -72,7 +72,10 @@ case "${1:-}" in
     ;;
   capture-pane)
     window_present || exit 1
-    printf 'work in progress\nesc to interrupt\n'
+    case "$target" in
+      *paused*) printf 'all quiet\n> \n' ;;
+      *) printf 'work in progress\nesc to interrupt\n' ;;
+    esac
     ;;
 esac
 exit 0
@@ -179,6 +182,23 @@ test_missing_state_home_remains_unmodified() {
   printf '%s' "$out" | jq -e '.status == "healthy"' >/dev/null \
     || fail "missing-state home did not report healthy: $out"
   pass "health check does not create a missing state directory"
+}
+
+test_unsearchable_state_is_inconclusive() {
+  local home fakebin out rc=0
+  home=$(make_home unsearchable-state)
+  write_live_ship "$home" hidden-task
+  fakebin=$(make_fakebin "$home")
+  chmod 400 "$home/state"
+  out=$(run_health "$home" "$fakebin") || rc=$?
+  chmod 700 "$home/state"
+  expect_code 3 "$rc" "unsearchable state should make health inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "fleet-inventory-inconclusive" and .subject == "state")
+      and (any(.findings[]; .kind == "result-listener-missing") | not)
+  ' >/dev/null || fail "unsearchable state was treated as healthy or definitely broken: $out"
+  pass "unsearchable state inventory remains inconclusive"
 }
 
 test_actionable_dead_direct_report() {
@@ -509,6 +529,50 @@ EOF
   pass "inconsistent inventory and missing listeners are actionable"
 }
 
+test_paused_ship_still_requires_pr_listener() {
+  local home fakebin out rc=0
+  home=$(make_home paused-pr-listener)
+  write_live_ship "$home" paused-ship
+  printf 'pr=https://github.com/example/alpha/pull/18\n' >> "$home/state/paused-ship.meta"
+  printf 'paused: waiting for upstream checks\n' > "$home/state/paused-ship.status"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
+  expect_code 1 "$rc" "paused ship without its PR listener should be actionable"
+  printf '%s' "$out" | jq -e '
+    .status == "actionable"
+      and any(.findings[]; .kind == "result-listener-missing" and .subject == "paused-ship")
+  ' >/dev/null || fail "paused ship escaped PR-listener validation: $out"
+  pass "declared waits retain their required PR listeners"
+}
+
+test_inconclusive_dominates_actionable_status() {
+  local home fakebin out rc=0
+  home=$(make_home mixed-confidence)
+  write_live_ship "$home" dead-mixed
+  mkdir -p "$home/projects/unreadable-mixed-wt"
+  fm_write_meta "$home/state/unreadable-mixed.meta" \
+    "backend=herdr" \
+    "window=malformed-herdr-target" \
+    "worktree=$home/projects/unreadable-mixed-wt" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship"
+  printf 'working: implementing\n' > "$home/state/unreadable-mixed.status"
+  : > "$home/state/.fake-windows"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "inconclusive evidence should dominate actionable report status"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "dead-direct-report" and .subject == "dead-mixed")
+      and any(.findings[]; .kind == "endpoint-inconclusive" and .subject == "unreadable-mixed")
+  ' >/dev/null || fail "mixed-confidence report masked incomplete evidence: $out"
+  pass "inconclusive evidence dominates overall status without hiding findings"
+}
+
 test_complete_timeout_covers_fingerprinting() {
   local home fakebin out rc=0
   home=$(make_home complete-timeout)
@@ -544,6 +608,7 @@ test_human_view_and_incomplete_exit() {
 test_usage_exit
 test_healthy_empty_fleet
 test_missing_state_home_remains_unmodified
+test_unsearchable_state_is_inconclusive
 test_actionable_dead_direct_report
 test_dead_agent_with_live_endpoint
 test_unreadable_local_endpoint_is_inconclusive
@@ -557,5 +622,7 @@ test_incomplete_registry_does_not_break_secondmate_summary
 test_pending_reply_uses_recorded_grace
 test_invalid_pending_reply_is_inconclusive
 test_inventory_and_missing_listener
+test_paused_ship_still_requires_pr_listener
+test_inconclusive_dominates_actionable_status
 test_complete_timeout_covers_fingerprinting
 test_human_view_and_incomplete_exit

@@ -132,7 +132,7 @@ collect_pr_listeners_json() {
     jq -n '{available:true,records:[]}'
     return 0
   fi
-  if [ ! -r "$state" ]; then
+  if [ ! -r "$state" ] || [ ! -x "$state" ]; then
     jq -n '{available:false,records:[]}'
     return 0
   fi
@@ -243,7 +243,6 @@ EVALUATED=$(jq -n \
      else "unreadable" end));
   def exists($t): $t.endpoint.exists;
   def terminal_state($s): ($s == "done" or $s == "failed");
-  def skip_wait($s): ($s == "parked" or $s == "paused" or $s == "blocked");
   ($pending.now_epoch // 0) as $now
   | [
       (if $pending.available == false then
@@ -262,6 +261,15 @@ EVALUATED=$(jq -n \
       (if $listeners.available == false then
         finding("result-listener-inconclusive";"procevent";"notice";"inconclusive";
                 "process-event registrations could not be read";"unreadable";1)
+      else empty end),
+      (if $prs.available == false then
+        finding("result-listener-inconclusive";"pr-polls";"notice";"inconclusive";
+                "PR-listener registrations could not be read";"unreadable";1)
+      else empty end),
+      (if $snapshot.collection.state.available == false then
+        finding("fleet-inventory-inconclusive";"state";"notice";"inconclusive";
+                ($snapshot.collection.state.reason // "fleet state could not be inventoried");
+                "unavailable";1)
       else empty end),
       (if $supervision.available == false then
         finding("supervision-inconclusive";"supervision";"notice";"inconclusive";
@@ -393,7 +401,7 @@ EVALUATED=$(jq -n \
         | select(.kind == "ship")
         | select((.pr.url // null) != null)
         | select(terminal_state(.current_state.state) | not)
-        | select(skip_wait(.current_state.state) | not)
+        | select($prs.available == true)
         | .id as $id
         | select([$prs.records[]?.id] | index($id) | not)
         | finding("result-listener-missing";$id;"error";"high";
@@ -446,7 +454,7 @@ REPORT=$(jq -n \
   | ($findings | any(.confidence == "inconclusive")) as $inconclusive
   | $base
   | .findings = $findings
-  | .status = (if $actionable then "actionable" elif $inconclusive then "inconclusive" else "healthy" end)
+  | .status = (if $inconclusive then "inconclusive" elif $actionable then "actionable" else "healthy" end)
 ')
 
 if [ "$OUTPUT_MODE" = json ]; then
