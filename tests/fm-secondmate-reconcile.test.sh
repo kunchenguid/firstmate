@@ -367,12 +367,13 @@ test_a_stale_snapshot_never_targets_a_replacement_mate() {
 }
 
 test_teardown_cannot_leave_its_replacement_in_cooldown() {
-  local home mate fakebin snap signal release lifecycle_done notify_pid lifecycle_pid
+  local home mate fakebin snap signal release lifecycle_done cooldown notify_pid lifecycle_pid
   { read -r home; read -r mate; read -r fakebin; } < <(make_main_home lifecycle mate)
   snap="$home/snapshot.json"
   signal="$home/send-ringing"
   release="$home/release-ring"
   lifecycle_done="$home/lifecycle-done"
+  cooldown="$home/state/mate.reconcile-nudged"
   write_snapshot "$snap" mate '{"kind":"orphan_in_flight","ids":["ghost"]}'
   mv "$fakebin/tmux" "$fakebin/tmux-real"
   cat > "$fakebin/tmux" <<'SH'
@@ -417,7 +418,7 @@ META
   wait "$notify_pid" 2>/dev/null || true
   wait "$lifecycle_pid" || fail "the simulated teardown and reseed failed"
   [ -f "$lifecycle_done" ] || fail "the simulated lifecycle transition did not finish"
-  assert_absent "$home/state/mate.reconcile-nudged" \
+  assert_absent "$cooldown" \
     "a retired mate's cooldown was recreated after its replacement was seeded"
   pass "teardown retires the cooldown before a replacement can inherit it"
 }
