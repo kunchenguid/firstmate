@@ -20,7 +20,12 @@
 # the default branch. Either source is revalidated with
 # `git check-ref-format --branch` before being recorded, and a missing
 # destination is not an error: every consumer defaults to the default branch
-# when none is recorded, matching prior behavior.
+# when none is recorded, matching prior behavior. The one exception is a
+# re-arm of the exact same pr= URL with no destination supplied this call
+# (for example bin/fm-pr-merge.sh's internal re-arm before merging): that
+# keeps the previously recorded pr_dest instead of wiping it, since nothing
+# about the pull request's destination changed. A re-arm for a different URL
+# still gets no carried-over destination.
 # Usage: fm-pr-check.sh <task-id> <pr-url> [dest-branch]
 set -eu
 
