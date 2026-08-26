@@ -4019,9 +4019,19 @@ def expect_refusal(state, call_args, fragment, *, attempt=None, provider=None):
 # Malformed identities refuse before anything else runs.
 expect_refusal(base_state(), args(task="../escape"), "bounded identifier characters")
 
-# A pending provider action blocks the whole lane.
+# A pending provider action blocks only its own worker slot. An unrelated
+# stranded claim must not prevent a dark worker from taking its sanctioned
+# surrender path.
 state = base_state()
 state["pending_actions"] = {"2": {"type": "execute", "request": {"task": "other", "task_generation": "gen-9"}}}
+expect_refusal(
+    state, args(), "non-assigned or ambiguous",
+    attempt=lambda *_a: "WORKER AUTHORITY REFUSED: fixture refusal",
+    provider=lambda *_a, **_k: {"inventory": {"workers": []}},
+)
+
+state = base_state()
+state["pending_actions"] = {"1": {"type": "execute", "request": {"task": "task-1", "task_generation": "gen-1"}}}
 expect_refusal(state, args(), "pending provider action")
 
 # A converged entry names its credential recovery instead of a generic refusal.

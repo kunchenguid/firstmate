@@ -4274,8 +4274,6 @@ def command_surrender(env, args):
         raise LifecycleError("--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
     with controller_lock(env):
         state = load_state(env)
-        if state.get("pending_actions"):
-            raise LifecycleError("a pending provider action exists; reconcile first")
         key = request_key(args.task, args.task_generation)
         item = state["queue"].get(key)
         if item is not None and item.get("status") == "complete":
@@ -4289,6 +4287,8 @@ def command_surrender(env, args):
         worker = state["workers"].get(str(item.get("slot")))
         if worker is None or worker.get("queue_key") != key:
             raise LifecycleError("surrender task has no exact durable worker owner")
+        if (state.get("pending_actions") or {}).get(str(worker["slot"])) is not None:
+            raise LifecycleError("the worker slot has a pending provider action; reconcile it first")
         existing = worker.get("release_proof")
         if existing is not None:
             if isinstance(existing.get("surrender"), dict):
