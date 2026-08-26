@@ -44,6 +44,11 @@ SH
 cat > "$TMP_ROOT/no-mistakes" <<'SH'
 #!/bin/sh
 set -eu
+[ "$#" -eq 8 ]
+[ "$1" = worker ] && [ "$2" = run ] && [ "$3" = --role ] && [ "$4" = review ]
+[ "$5" = --brief ] && [ "$7" = --result ] && [ "$8" = outcome.json ]
+case "$6" in /*/.fm-task/brief.md) ;; *) exit 25 ;; esac
+[ -f "$6" ]
 pi --mode json --no-session </dev/null >/dev/null
 head=$(git rev-parse HEAD)
 cat > outcome.json <<JSON
@@ -106,6 +111,8 @@ subprocess.run(["git", "-C", str(repo), "add", "file.txt"], check=True)
 subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True)
 head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
 supervisor.stage_no_mistakes_runtime(bundle, guest / ".fm-runtime", enforce_linux=False)
+(guest / ".fm-task").mkdir()
+(guest / ".fm-task" / "brief.md").write_text("review this exact head\n")
 os.environ["FM_WORKER_ACCOUNT_HOME"] = str(account)
 os.environ["FM_WORKER_OUTCOME_FILE"] = str(temporary / "outcome.bundle")
 request = {
@@ -126,6 +133,10 @@ result = supervisor.execute(request, repo, guest)
 stderr = (guest / ".fm-worker" / (("2" * 32) + "-stderr.log")).read_text()
 assert result["exit_code"] == 0, (result, stderr)
 assert result.get("service_return_present") is True, result
+status = subprocess.check_output(
+    ["git", "-C", str(repo), "status", "--porcelain"], text=True,
+)
+assert status == "?? outcome.json\n", status
 assert (account / "pi-started-under-home").read_text().strip() == str(account)
 assert (account / "pi-agent/extensions/pi-openai-fast-mode/config.json").is_file()
 assert not (guest / ".fm-runtime/auth.json").exists()

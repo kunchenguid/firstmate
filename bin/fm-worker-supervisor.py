@@ -136,6 +136,12 @@ def read_request(path):
         raise SupervisorError("execution worker role is not supported")
     service_contract = request.get("service_return_contract")
     if worker_role == "no-mistakes":
+        role = argv[4] if len(argv) == 9 else ""
+        if role not in ("review", "repair", "test") or argv != [
+            "no-mistakes", "worker", "run", "--role", role,
+            "--brief", "brief.md", "--result", "outcome.json",
+        ]:
+            raise SupervisorError("no-mistakes service argv is not exact")
         if service_contract != {
             "schema": "fm.no-mistakes-worker-return/v1",
             "step_outcome_path": "outcome.json",
@@ -938,9 +944,20 @@ def execute(request, worktree, worktree_root):
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_ASKPASS": "/bin/false",
     }
+    argv = request["argv"]
+    if request.get("worker_role") == "no-mistakes":
+        # The repository must stay at the exact clean dispatched head, so the
+        # controller-owned brief lives beside it in the verified staging root.
+        # Resolve only the one argv field whose logical control-plane name is
+        # `brief.md`; the result remains repository-relative for collection.
+        brief = worktree_root / ".fm-task" / "brief.md"
+        if brief.is_symlink() or not brief.is_file():
+            raise SupervisorError("no-mistakes staged brief is unavailable or redirected")
+        argv = list(argv)
+        argv[6] = str(brief.resolve())
     try:
         completed = subprocess.run(
-            request["argv"], cwd=str(worktree), env=safe_env,
+            argv, cwd=str(worktree), env=safe_env,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=request["wall_seconds"], check=False,
         )
