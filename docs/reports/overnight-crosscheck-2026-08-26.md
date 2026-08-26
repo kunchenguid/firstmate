@@ -16,9 +16,6 @@ was changed.
 | 2B2 | `cc-2b2` / #341 | Ready, Azure checkpoint parked | Six real local Fireworks reviews were `CLEAR`; the V2 Azure run was interrupted after 31 minutes waiting for shared proof capacity after model completion |
 | 2C | `cc-2c` / #343 | Ready, checkpoint parked | Offline and real-model prerequisites passed; no additional Azure run was launched into the same unresolved allocator contention |
 
-PR #343 is the expected number at report creation time and should be corrected
-if GitHub assigns a different number.
-
 ## Release evidence
 
 ### R1
@@ -74,6 +71,7 @@ if GitHub assigns a different number.
 
 ### Release 2C
 
+- Implementation commit: `d17ab481`
 - Parent-failing evidence: `d8e53aee` has no controller Ketch round, and the
   new two-pass runtime regression observes only one Pi launch on that parent.
 - Controller Ketch is fixed to `/opt/homebrew/bin/ketch` v0.14.0 with fixed argv,
