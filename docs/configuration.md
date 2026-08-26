@@ -422,8 +422,10 @@ A single owner lock excludes overlap between launchd and manual runs, and an aba
 A failed cycle waits five minutes measured from when that cycle actually finished, so a long cycle still throttles before its next attempt.
 A lock directory left behind by a crash between its creation and its owner record is respected briefly and then reclaimed, so the job self-heals instead of wedging invisibly.
 The lock also records the cycle's process group, and that record is fail-closed: any live group keeps the lock, including one whose codex process has already exited but whose reviewer descendants are still running, because a surviving reviewer is exactly what the exclusion exists for.
-A record is retired only on positive evidence that it can no longer be a real cycle - it is older than `max_runtime_seconds` plus the lock grace, which no cycle can outlive, and the group no longer runs the configured codex binary.
-That bound is the guaranteed self-heal for a group id reused after a reboot, and `status` reports such a record as reclaimable rather than as a running cycle.
+Past an age no cycle could reach - `max_runtime_seconds` plus the lock grace - the record stops being trusted, because the supervisor that should have enforced that runtime bound is by then already dead.
+An unrecognizable group at that point is treated as a reused id and its record is retired; a group positively proven to be this job's own abandoned cycle - its leader is still the configured codex binary running against this exact automation home - is terminated by the next supervisor with `TERM` then `KILL` on that exact group, and the lock is retained if that termination cannot be confirmed.
+A live group that is neither is never killed and still keeps the lock.
+`status` reports the record's age alongside the group so an orphan is diagnosable rather than a silent stall.
 
 Each cycle starts a fresh non-interactive Codex process in the isolated home and invokes the installed skill.
 The cycle runs in its own verified process group, and a timeout or a supervisor signal terminates that exact group; the owner lock is released only once the whole group is confirmed gone, so no reviewer still holding GitHub and Slack write authorization can outlive the exclusion that stops a second cycle for the same slot.
@@ -433,6 +435,11 @@ The supervisor accepts success only when no task metadata remains and the cycle 
 Slack author notifications may leave this job through exactly one route: the captain's private direct Web API helper at `data/tools/fm-slack-message.sh`, which the supervisor provisions into the automation home from the source home and names in the host contract along with whether it was actually provisioned for this cycle.
 The ChatGPT Slack connector is forbidden for every message in this job, because it appends agent attribution to the delivered message even when the submitted payload is exact, and the captain prohibits agent attribution everywhere.
 No other Slack transport, tool, connector, or MCP server may be used, and there is no fallback: if the helper is missing or not executable, if `SLACK_BOT_TOKEN` is unavailable, or if the helper fails or returns no permalink, the cycle sends nothing and records that PR's notification as `blocked` with the exact reason, in both the receipt and the captain-facing result.
+
+The helper's credential comes from an optional private `config/slack-bot-token` in the source home, which must be a regular non-symlinked file with mode `0600` holding exactly one non-empty whitespace-free line.
+The supervisor provisions it into the automation home at the same mode and exports `SLACK_BOT_TOKEN` only inside the cycle process, so the value never reaches the LaunchAgent property list, the host contract, `status` output, receipts, prompts, or logs - a launchd agent does not read a login shell profile, so without this the scheduled cycle would have no credential at all.
+`slack_transport_state` therefore reports `available` only when both the helper and a valid credential are present, `credentials-missing` when the helper exists but the token does not, and `unavailable` when the helper itself is absent or unsafe; `install` and `status` print that state and never the secret.
+A missing or unsafe helper or credential never fails the sweep: reviews are still published and the affected notifications are recorded `blocked`.
 A receipt row is therefore `sent` with the permalink the helper returned, `skipped` when no unique author matched, or `blocked` when the author was known but the authorized transport could not be used.
 A missing receipt (74), a receipt that is not readable JSON (76), a receipt that violates the publication contract (75), and a receipt gate that `jq` itself could not run (77) are distinct failures, so a tooling problem is never reported as a publication problem.
 A receipt whose field types make the contract unevaluable counts as a contract violation, not as a tooling failure.

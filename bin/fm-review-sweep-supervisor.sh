@@ -49,10 +49,13 @@
 #     signal terminates that exact group, and the owner lock is released only
 #     after the group is confirmed gone, so no authorized external writer
 #     outlives the exclusion that stops a second cycle for the same slot.
-#   * The recorded cycle process group is trusted only while it is still live,
-#     still runs the configured codex binary, and is younger than any cycle
-#     could legitimately be. A record that fails those checks - a reused group
-#     id after a reboot, for example - is retired instead of wedging the job.
+#   * The recorded cycle process group keeps the lock for as long as it is live,
+#     including after the codex process itself has exited, because a surviving
+#     reviewer still holds the external write authorization. Past an age no
+#     cycle could reach, an unrecognizable group is treated as a reused id and
+#     its record retired, while a group positively proven to be this job's own
+#     runaway cycle is terminated by the next supervisor. A live group that is
+#     neither is never killed and keeps the lock.
 #   * A lock directory left behind by a crash between its creation and its owner
 #     record is reclaimed after a short grace, so the job self-heals.
 #   * A failed slot's retry deadline is measured from when the attempt actually
@@ -67,6 +70,10 @@
 #     connector is forbidden because it appends agent attribution, and no
 #     fallback transport exists: a notification that cannot use the authorized
 #     helper is recorded as blocked in the receipt and in the captain's result.
+#     That helper's credential is read from a private owner-only single-line
+#     file in the source home, provisioned into the automation home, and
+#     exported only inside the cycle process. It never reaches the LaunchAgent
+#     property list, the host contract, status output, receipts, or logs.
 #   * The automation home is a clone this script owns. When the pinned source
 #     history is rewritten it is realigned to the exact source head, but only
 #     after its identity, pinned branch, and clean tracked worktree re-verify.
@@ -103,6 +110,7 @@ DEFAULT_RETRY_SECONDS=300
 DEFAULT_MAX_RUNTIME_SECONDS=10800
 DEFAULT_RETENTION_DAYS=90
 SLACK_TRANSPORT_RELATIVE=data/tools/fm-slack-message.sh
+SLACK_TOKEN_RELATIVE=config/slack-bot-token
 LOCK_ORPHAN_GRACE_SECONDS=120
 CYCLE_STOP_GRACE_SECONDS=15
 CYCLE_KILL_GRACE_SECONDS=5
@@ -297,6 +305,32 @@ path_mtime() { # <path>
   printf '%s\n' "$value"
 }
 
+path_octal_mode() { # <path>
+  local value
+  if [ "$(uname)" = Darwin ]; then
+    value=$(stat -f %Lp -- "$1" 2>/dev/null || true)
+  else
+    value=$(stat -c %a -- "$1" 2>/dev/null || true)
+  fi
+  case ${value:-} in ''|*[!0-7]*) return 1 ;; esac
+  printf '%s\n' "$((8#$value))"
+}
+
+# The Slack credential is the one private input this job reads, so its source is
+# held to a strict shape: a regular non-symlinked owner-only file holding exactly
+# one non-empty line. Nothing here ever prints, logs, or returns the value.
+slack_token_source_is_usable() { # <path>
+  local path=$1 mode count value
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  mode=$(path_octal_mode "$path") || return 1
+  [ "$mode" = "$((8#600))" ] || return 1
+  count=$(awk 'END { print NR }' "$path" 2>/dev/null || printf 0)
+  [ "$count" = 1 ] || return 1
+  value=$(sed -n '1p' "$path" 2>/dev/null || true)
+  case ${value:-} in ''|*[[:space:]]*|*[![:print:]]*) return 1 ;; esac
+  return 0
+}
+
 copy_private_file() { # <source> <destination> [mode]
   local src=$1 dest=$2 mode=${3:-0600} parent tmp
   if [ ! -e "$src" ] && [ ! -L "$src" ]; then
@@ -316,6 +350,15 @@ copy_private_file() { # <source> <destination> [mode]
     rm -f -- "$tmp" 2>/dev/null || true
     return 1
   fi
+}
+
+provision_optional_private_file() { # <source> <destination> <mode>
+  local src=$1 dest=$2 mode=$3
+  if [ -f "$src" ] && [ ! -L "$src" ]; then
+    if copy_private_file "$src" "$dest" "$mode"; then return 0; fi
+  fi
+  if [ -e "$dest" ] || [ -L "$dest" ]; then rm -f -- "$dest"; fi
+  return 0
 }
 
 write_empty_backlog() {
@@ -435,9 +478,17 @@ sync_private_context() {
       || die "failed to synchronize data/$name"
   done
   # The only Slack transport this job may use is the captain's private direct
-  # Web API helper, so it is provisioned here rather than discovered at run time.
-  copy_private_file "$SOURCE_HOME/$SLACK_TRANSPORT_RELATIVE" "$AUTOMATION_HOME/$SLACK_TRANSPORT_RELATIVE" 0700 \
-    || die "failed to synchronize $SLACK_TRANSPORT_RELATIVE"
+  # Web API helper, and its only credential is a private owner-only token file.
+  # Both are optional: an absent or unsafe one leaves the transport unusable and
+  # the cycle records blocked notifications, rather than losing the whole sweep.
+  provision_optional_private_file "$SOURCE_HOME/$SLACK_TRANSPORT_RELATIVE" \
+    "$AUTOMATION_HOME/$SLACK_TRANSPORT_RELATIVE" 0700
+  if slack_token_source_is_usable "$SOURCE_HOME/$SLACK_TOKEN_RELATIVE"; then
+    provision_optional_private_file "$SOURCE_HOME/$SLACK_TOKEN_RELATIVE" \
+      "$AUTOMATION_HOME/$SLACK_TOKEN_RELATIVE" 0600
+  else
+    rm -f -- "$AUTOMATION_HOME/$SLACK_TOKEN_RELATIVE" 2>/dev/null || true
+  fi
   # shellcheck source=bin/fm-config-inherit-lib.sh
   . "$AUTOMATION_HOME/bin/fm-config-inherit-lib.sh"
   propagate_secondmate_inheritance "$SOURCE_HOME" "$AUTOMATION_HOME" \
@@ -470,10 +521,14 @@ sync_projects() {
 
 slack_transport_state() {
   local path="$AUTOMATION_HOME/$SLACK_TRANSPORT_RELATIVE"
-  if [ -f "$path" ] && [ ! -L "$path" ] && [ -x "$path" ]; then
+  if [ ! -f "$path" ] || [ -L "$path" ] || [ ! -x "$path" ]; then
+    printf 'unavailable\n'
+    return
+  fi
+  if slack_token_source_is_usable "$AUTOMATION_HOME/$SLACK_TOKEN_RELATIVE"; then
     printf 'available\n'
   else
-    printf 'unavailable\n'
+    printf 'credentials-missing\n'
   fi
 }
 
@@ -491,6 +546,7 @@ slack_message_template=Review posted: <direct PR comment URL>
 slack_transport=$SLACK_TRANSPORT_RELATIVE
 slack_transport_state=$(slack_transport_state)
 slack_transport_requires=SLACK_BOT_TOKEN
+slack_transport_credentials=$SLACK_TOKEN_RELATIVE
 slack_chatgpt_connector=forbidden
 slack_any_other_transport=forbidden
 agent_attribution=forbidden
@@ -788,17 +844,37 @@ lock_cycle_record_age_seconds() {
   printf '%s\n' "$((now - epoch))"
 }
 
+# Positive proof that a process group is this supervisor's own abandoned cycle:
+# the group leader is still the configured codex binary, running against this
+# exact automation home. Nothing weaker may authorize terminating a group.
+process_group_is_owned_cycle() { # <pgid>
+  local pgid=$1 command
+  safe_positive_integer "$pgid" || return 1
+  [ -n "$CODEX_BIN" ] && [ -n "$AUTOMATION_HOME" ] || return 1
+  [ "$(process_group_of "$pgid" 2>/dev/null || true)" = "$pgid" ] || return 1
+  command=$(ps -p "$pgid" -o command= 2>/dev/null || true)
+  [ -n "$command" ] || return 1
+  case $command in *"$CODEX_BIN"*) ;; *) return 1 ;; esac
+  case $command in *"-C $AUTOMATION_HOME "*|*"-C $AUTOMATION_HOME") ;; *) return 1 ;; esac
+  return 0
+}
+
 # Prints the recorded cycle process group id and reports:
 #   0  a live group that cannot be positively ruled out as this cycle's writers
 #   1  there is no usable record, or its group is already gone
 #   2  positive evidence that the record is stale or its id was reused
+#   3  positive evidence that the group is this job's own abandoned cycle, run
+#      past any runtime a supervisor could still be enforcing
 #
 # This classification is deliberately fail-closed. A live group that still holds
 # GitHub and Slack write authorization keeps the lock even when the codex process
 # itself has already exited, because a surviving reviewer is exactly what the
-# exclusion exists for. Only the age bound - which no legitimate cycle can pass,
-# since a cycle is terminated at max_runtime_seconds - retires a live record, and
-# even then not while the group still positively runs the configured codex binary.
+# exclusion exists for. Past the age bound the record stops being trusted: an
+# unrecognizable group means a reused id and the record is retired, while a group
+# proven to be this job's own runaway cycle is reaped rather than blocking
+# forever - the dead supervisor that should have enforced max_runtime_seconds
+# cannot, so the next supervisor does. A live group that is neither is still
+# never killed and still keeps the lock.
 lock_cycle_group_status() {
   local pgid age bound
   pgid=$(lock_cycle_record_field 1) || return 1
@@ -808,8 +884,29 @@ lock_cycle_group_status() {
   age=$(lock_cycle_record_age_seconds) || return 0
   bound=$((MAX_RUNTIME_SECONDS + LOCK_ORPHAN_GRACE_SECONDS))
   [ "$age" -gt "$bound" ] || return 0
+  if process_group_is_owned_cycle "$pgid"; then return 3; fi
   if process_group_runs_codex "$pgid"; then return 0; fi
   return 2
+}
+
+reap_expired_cycle_group() { # <pgid>
+  local pgid=$1 waited=0
+  process_group_is_owned_cycle "$pgid" || return 1
+  kill -TERM "-$pgid" 2>/dev/null || true
+  while [ "$waited" -lt "$CYCLE_STOP_GRACE_SECONDS" ]; do
+    if ! kill -0 "-$pgid" 2>/dev/null; then return 0; fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  kill -KILL "-$pgid" 2>/dev/null || true
+  waited=0
+  while [ "$waited" -lt "$CYCLE_KILL_GRACE_SECONDS" ]; do
+    if ! kill -0 "-$pgid" 2>/dev/null; then return 0; fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if kill -0 "-$pgid" 2>/dev/null; then return 1; fi
+  return 0
 }
 
 retire_lock_directory() {
@@ -842,11 +939,19 @@ acquire_run_lock() {
       # stale or its id was reused retires it.
       cycle_rc=0
       pgid=$(lock_cycle_group_status) || cycle_rc=$?
-      if [ "$cycle_rc" -eq 0 ]; then
-        printf 'busy: review-sweep cycle process group %s outlived its supervisor\n' "$pgid"
+      age=$(lock_cycle_record_age_seconds 2>/dev/null || printf unknown)
+      if [ "$cycle_rc" -eq 3 ]; then
+        printf 'reaping: review-sweep cycle process group %s has run %s seconds with no supervisor; terminating it\n' \
+          "$pgid" "$age"
+        if ! reap_expired_cycle_group "$pgid"; then
+          printf 'busy: could not terminate abandoned review-sweep cycle process group %s; retaining the lock\n' "$pgid"
+          return 1
+        fi
+        printf 'reclaim: terminated an abandoned review-sweep cycle process group (%s)\n' "$pgid"
+      elif [ "$cycle_rc" -eq 0 ]; then
+        printf 'busy: review-sweep cycle process group %s outlived its supervisor (%s seconds)\n' "$pgid" "$age"
         return 1
-      fi
-      if [ "$cycle_rc" -eq 2 ]; then
+      elif [ "$cycle_rc" -eq 2 ]; then
         printf 'reclaim: retiring a review-sweep cycle process group record (%s) that outlived any possible cycle\n' \
           "${pgid:-unknown}"
       fi
@@ -1039,7 +1144,7 @@ First reconcile every task already recorded in this isolated home. Recover unfin
 
 Then refresh Jira live with complete pagination, discover eligible open PR heads, and execute one idempotent sweep. Dispatch no more than $MAX_CONCURRENT_REVIEWS focused reviewers at once. Review only: do not edit project code, merge, push, mutate Jira, or publish anything other than the skill's authorized review comments, minimization of the configured reviewer's own superseded watermark comments, and exact PR-author Slack direct message.
 
-Slack notification transport is restricted to exactly one route: run $AUTOMATION_HOME/$SLACK_TRANSPORT_RELATIVE with an available SLACK_BOT_TOKEN, send the exact authorized message, and capture the direct permalink that helper returns. The ChatGPT Slack connector is forbidden for every message in this job, because it appends agent attribution the captain prohibits; no message may carry any agent or AI attribution. Any other Slack transport, tool, connector, or MCP server is forbidden too. If that helper is missing or not executable, if SLACK_BOT_TOKEN is unavailable, or if the helper fails or returns no permalink, send nothing at all: do not retry through another route, and record that PR's notification as blocked with the exact reason. The host contract's slack_transport_state field states whether the transport was provisioned for this cycle.
+Slack notification transport is restricted to exactly one route: run $AUTOMATION_HOME/$SLACK_TRANSPORT_RELATIVE with an available SLACK_BOT_TOKEN, send the exact authorized message, and capture the direct permalink that helper returns. The ChatGPT Slack connector is forbidden for every message in this job, because it appends agent attribution the captain prohibits; no message may carry any agent or AI attribution. Any other Slack transport, tool, connector, or MCP server is forbidden too. If that helper is missing or not executable, if SLACK_BOT_TOKEN is unavailable, or if the helper fails or returns no permalink, send nothing at all: do not retry through another route, and record that PR's notification as blocked with the exact reason. The host contract's slack_transport_state field states whether the transport was provisioned for this cycle: available means the helper and its credential are both present, credentials-missing means the helper exists but SLACK_BOT_TOKEN was not provisioned, and unavailable means the helper itself is absent. Treat anything other than available as a certainty that every author notification must be recorded blocked. Never print, echo, log, or repeat the token value anywhere.
 
 After dispatch, supervise in the foreground until every task from this cycle is terminal. Reconcile reports and receipts, complete publication followed immediately by Slack notification, close task records, and run guarded teardown. Do not finish while this home's state contains task metadata. If coverage is partial or an author identity is ambiguous, record that plainly and leave no fabricated success. If no PR needs review, send no Slack message and finish as a verified no-op.
 
@@ -1145,6 +1250,10 @@ run_codex_cycle() { # <slot> <result-dir>
     export FM_HOME="$AUTOMATION_HOME"
     export TZ="$TIMEZONE"
     if [ -n "$KNOWLEDGE_BASE_PATH" ]; then export KNOWLEDGE_BASE="$KNOWLEDGE_BASE_PATH"; fi
+    if slack_token_source_is_usable "$AUTOMATION_HOME/$SLACK_TOKEN_RELATIVE"; then
+      SLACK_BOT_TOKEN=$(sed -n '1p' "$AUTOMATION_HOME/$SLACK_TOKEN_RELATIVE")
+      export SLACK_BOT_TOKEN
+    fi
     exec "$CODEX_BIN" exec --ephemeral --json --color never --approve-for-me \
       -C "$AUTOMATION_HOME" -o "$result_file" "$prompt"
   ) > "$event_log" 2>&1 < /dev/null &
@@ -1425,7 +1534,7 @@ install_supervisor() {
 }
 
 status_supervisor() {
-  local loaded=no lock=idle owner= pgid cycle_rc latest=none slot_status=unknown slot_receipt=unknown
+  local loaded=no lock=idle owner= pgid cycle_rc cycle_age latest=none slot_status=unknown slot_receipt=unknown
   if [ -f "$CONFIG_PATH" ] && [ ! -L "$CONFIG_PATH" ]; then
     load_config
   else
@@ -1438,10 +1547,13 @@ status_supervisor() {
       owner=$(sed -n '1p' "$LOCK_OWNER_FILE" 2>/dev/null || true)
       cycle_rc=0
       pgid=$(lock_cycle_group_status) || cycle_rc=$?
+      cycle_age=$(lock_cycle_record_age_seconds 2>/dev/null || printf unknown)
       if process_is_live_owner "$owner"; then
         lock="running pid=$owner"
+      elif [ "$cycle_rc" -eq 3 ]; then
+        lock="reapable abandoned cycle process group=$pgid age=${cycle_age}s"
       elif [ "$cycle_rc" -eq 0 ]; then
-        lock="orphaned cycle process group=$pgid"
+        lock="orphaned cycle process group=$pgid age=${cycle_age}s"
       elif [ "$cycle_rc" -eq 2 ]; then
         lock="reclaimable expired cycle process group record=${pgid:-unknown}"
       else

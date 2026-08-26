@@ -37,6 +37,8 @@ CASE_CODEX_LINGER_PID="$TMP_ROOT/codex.linger-pid"
 CASE_CODEX_MALFORMED_SLACK="$TMP_ROOT/codex.malformed-slack"
 CASE_CODEX_SLOW="$TMP_ROOT/codex.slow"
 CASE_CODEX_BLOCKED_SLACK="$TMP_ROOT/codex.blocked-slack"
+CASE_CODEX_TOKEN_PROBE="$TMP_ROOT/codex.token-probe"
+CASE_SLACK_SECRET='xoxb-test-not-a-real-token-0001'
 CASE_CLOCK_FILE="$TMP_ROOT/clock.fields"
 CASE_ALT_LAUNCH_AGENT_DIR="$CASE_HOME/Library/LaunchAgentsAlt"
 CASE_ALT_LAUNCH_STATE="$TMP_ROOT/launch-state-alt"
@@ -98,6 +100,13 @@ count=$((count + 1))
 printf '%s\n' "$count" > "$FM_FAKE_CODEX_COUNT"
 printf 'slot=%s\n%s\n' "$slot" "$prompt" >> "$FM_FAKE_CODEX_LOG"
 receipts="$FM_HOME/state/review-sweep-cycle-receipts"
+if [ -n "${FM_FAKE_CODEX_TOKEN_PROBE:-}" ]; then
+  if [ -n "${SLACK_BOT_TOKEN:-}" ]; then
+    printf 'present %s\n' "${#SLACK_BOT_TOKEN}" > "$FM_FAKE_CODEX_TOKEN_PROBE"
+  else
+    printf 'absent\n' > "$FM_FAKE_CODEX_TOKEN_PROBE"
+  fi
+fi
 # Simulate a cycle whose wall time advances the supervisor's logical clock.
 if [ -n "${FM_FAKE_CODEX_CLOCK_AFTER:-}" ] && [ -n "${FM_REVIEW_SWEEP_NOW_FIELDS_FILE:-}" ]; then
   printf '%s\n' "$FM_FAKE_CODEX_CLOCK_AFTER" > "$FM_REVIEW_SWEEP_NOW_FIELDS_FILE"
@@ -186,6 +195,7 @@ run_subject() {
   FM_FAKE_CODEX_MALFORMED_SLACK="$CASE_CODEX_MALFORMED_SLACK" \
   FM_FAKE_CODEX_SLOW="$CASE_CODEX_SLOW" \
   FM_FAKE_CODEX_BLOCKED_SLACK="$CASE_CODEX_BLOCKED_SLACK" \
+  FM_FAKE_CODEX_TOKEN_PROBE="$CASE_CODEX_TOKEN_PROBE" \
   "$SUBJECT" "$@"
 }
 
@@ -202,6 +212,7 @@ assert_contains "$INSTALL_OUT" 'max-concurrent-reviews: 10' 'install did not rep
 assert_contains "$INSTALL_OUT" 'source-branch: main' 'install did not pin the source default branch'
 assert_contains "$INSTALL_OUT" 'retention-days: 90' 'install did not report bounded artifact retention'
 assert_contains "$INSTALL_OUT" 'slack-transport: data/tools/fm-slack-message.sh (unavailable)' 'install did not report the Slack transport state'
+assert_no_grep 'SLACK_BOT_TOKEN' "$CASE_LAUNCH_AGENT_DIR/dev.firstmate.review-sweep.plist" 'the LaunchAgent carries a Slack credential'
 assert_grep 'slack_chatgpt_connector=forbidden' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not forbid the ChatGPT Slack connector'
 assert_grep 'slack_any_other_transport=forbidden' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not restrict the Slack transport'
 assert_grep 'agent_attribution=forbidden' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not forbid agent attribution'
@@ -550,19 +561,48 @@ STALE_PGID_OUT=$(run_tick '20260828 11 30 12902 -0500') || fail "stale cycle gro
 assert_contains "$STALE_PGID_OUT" "reclaim: retiring a review-sweep cycle process group record ($STRAY_PGID) that outlived any possible cycle" 'a reused cycle process group id wedged the supervisor'
 assert_contains "$STALE_PGID_OUT" 'slot=20260828-1130 status=succeeded' 'the reclaimed slot did not run'
 assert_eq 15 "$(codex_runs)" 'the reclaimed slot did not invoke Codex once'
-# Even past that bound, a group still positively running codex keeps the lock.
+# Past that bound a codex-running group that is not provably this job's own
+# cycle is still never killed, and still keeps the lock.
 mkdir -p "$CASE_APP/state/run.lock"
 printf '%s\n' "$STRAY_OWNER_PID" > "$CASE_APP/state/run.lock/owner"
 printf '%s\n%s\n' "$CODEX_LIKE_PGID" 1 > "$CASE_APP/state/run.lock/cycle-pgid"
 EXPIRED_CODEX_OUT=$(run_tick '20260828 12 00 12903 -0500') || fail "expired codex group tick failed: $EXPIRED_CODEX_OUT"
-assert_contains "$EXPIRED_CODEX_OUT" "busy: review-sweep cycle process group $CODEX_LIKE_PGID outlived its supervisor" 'an expired record still running codex was retired'
-assert_eq 15 "$(codex_runs)" 'an expired record still running codex did not exclude a cycle'
+assert_contains "$EXPIRED_CODEX_OUT" "busy: review-sweep cycle process group $CODEX_LIKE_PGID outlived its supervisor" 'an unverifiable expired group was retired'
+assert_not_contains "$EXPIRED_CODEX_OUT" 'reaping:' 'an unverifiable expired group was reaped'
+assert_eq 15 "$(codex_runs)" 'an unverifiable expired group did not exclude a cycle'
+kill -0 "$CODEX_LIKE_PGID" 2>/dev/null || fail 'an unverifiable expired group was terminated'
 rm -f -- "$CASE_APP/state/run.lock/owner" "$CASE_APP/state/run.lock/cycle-pgid"
 rmdir -- "$CASE_APP/state/run.lock"
 kill -KILL "-$CODEX_LIKE_PGID" 2>/dev/null || true
 kill -KILL "-$STRAY_PGID" 2>/dev/null || true
 trap fm_test_cleanup EXIT
-pass 'a live cycle process group always blocks, and only positive expiry evidence retires its record'
+pass 'a live cycle process group always blocks, and an unverifiable one is never killed'
+
+# A group whose leader is provably this job's own abandoned Codex cycle is
+# reaped by the next supervisor rather than blocking forever.
+ORPHAN_OWNER_PID=$(bash -c 'echo $$')
+set -m
+bash -c 'exec -a "$0" /bin/sleep 300' \
+  "$CASE_BIN/codex exec --ephemeral --json --color never --approve-for-me -C $CASE_APP/home -o result prompt" \
+  >/dev/null 2>&1 </dev/null &
+OWNED_ORPHAN_PGID=$!
+set +m
+disown -a 2>/dev/null || true
+trap 'kill -KILL "-$OWNED_ORPHAN_PGID" 2>/dev/null || true; fm_test_cleanup' EXIT
+mkdir -p "$CASE_APP/state/run.lock"
+printf '%s\n' "$ORPHAN_OWNER_PID" > "$CASE_APP/state/run.lock/owner"
+printf '%s\n%s\n' "$OWNED_ORPHAN_PGID" 1 > "$CASE_APP/state/run.lock/cycle-pgid"
+REAP_OUT=$(run_tick '20260828 12 00 12904 -0500') || fail "orphan reaper tick failed: $REAP_OUT"
+assert_contains "$REAP_OUT" "reaping: review-sweep cycle process group $OWNED_ORPHAN_PGID has run" 'a provably abandoned cycle was not reaped'
+assert_contains "$REAP_OUT" "reclaim: terminated an abandoned review-sweep cycle process group ($OWNED_ORPHAN_PGID)" 'the reaped cycle was not reclaimed'
+assert_contains "$REAP_OUT" 'slot=20260828-1200 status=succeeded' 'the slot behind a reaped orphan did not run'
+assert_eq 16 "$(codex_runs)" 'the reaped slot did not invoke Codex once'
+if kill -0 "$OWNED_ORPHAN_PGID" 2>/dev/null; then
+  kill -KILL "-$OWNED_ORPHAN_PGID" 2>/dev/null || true
+  fail 'the abandoned cycle survived its reaper'
+fi
+trap fm_test_cleanup EXIT
+pass 'an expired cycle group proven to be this job own runaway is terminated, not blocked forever'
 
 mkdir -p "$CASE_SOURCE/data/tools"
 cat > "$CASE_SOURCE/data/tools/fm-slack-message.sh" <<'SH'
@@ -574,18 +614,85 @@ touch "$CASE_CODEX_BLOCKED_SLACK"
 BLOCKED_OUT=$(run_tick '20260828 14 00 13400 -0500') || fail "blocked notification tick failed: $BLOCKED_OUT"
 rm -f -- "$CASE_CODEX_BLOCKED_SLACK"
 assert_contains "$BLOCKED_OUT" 'slot=20260828-1400 status=succeeded' 'a published review with a blocked notification was rejected'
-assert_eq 16 "$(codex_runs)" 'the blocked-notification case did not run exactly once'
+assert_eq 17 "$(codex_runs)" 'the blocked-notification case did not run exactly once'
 assert_present "$CASE_APP/home/data/tools/fm-slack-message.sh" 'the private Slack transport was not provisioned'
 [ -x "$CASE_APP/home/data/tools/fm-slack-message.sh" ] || fail 'the provisioned Slack transport is not executable'
-assert_grep 'slack_transport_state=available' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not report the provisioned Slack transport'
+assert_grep 'slack_transport_state=credentials-missing' "$CASE_APP/home/config/review-sweep-host-contract" 'a transport without a credential was reported available'
+assert_eq absent "$(sed -n '1p' "$CASE_CODEX_TOKEN_PROBE")" 'the cycle saw a credential that was never provisioned'
+pass 'a provisioned transport without a credential is reported credentials-missing and still publishes reviews'
+
+# Every rejected credential shape must degrade to credentials-missing, never leak.
+for CASE_BAD_TOKEN in 'mode' 'symlink' 'multiline' 'empty'; do
+  case $CASE_BAD_TOKEN in
+    mode)
+      printf '%s\n' "$CASE_SLACK_SECRET" > "$CASE_SOURCE/config/slack-bot-token"
+      chmod 0644 "$CASE_SOURCE/config/slack-bot-token"
+      ;;
+    symlink)
+      printf '%s\n' "$CASE_SLACK_SECRET" > "$TMP_ROOT/linked-token"
+      chmod 0600 "$TMP_ROOT/linked-token"
+      rm -f -- "$CASE_SOURCE/config/slack-bot-token"
+      ln -s "$TMP_ROOT/linked-token" "$CASE_SOURCE/config/slack-bot-token"
+      ;;
+    multiline)
+      rm -f -- "$CASE_SOURCE/config/slack-bot-token"
+      printf '%s\nextra\n' "$CASE_SLACK_SECRET" > "$CASE_SOURCE/config/slack-bot-token"
+      chmod 0600 "$CASE_SOURCE/config/slack-bot-token"
+      ;;
+    empty)
+      rm -f -- "$CASE_SOURCE/config/slack-bot-token"
+      printf '\n' > "$CASE_SOURCE/config/slack-bot-token"
+      chmod 0600 "$CASE_SOURCE/config/slack-bot-token"
+      ;;
+  esac
+  BAD_TOKEN_INSTALL=$(run_subject install --source-home "$CASE_SOURCE") \
+    || fail "install with a $CASE_BAD_TOKEN credential failed: $BAD_TOKEN_INSTALL"
+  assert_contains "$BAD_TOKEN_INSTALL" 'slack-transport: data/tools/fm-slack-message.sh (credentials-missing)' \
+    "a $CASE_BAD_TOKEN credential was accepted"
+  assert_absent "$CASE_APP/home/config/slack-bot-token" "a $CASE_BAD_TOKEN credential was provisioned"
+done
+rm -f -- "$CASE_SOURCE/config/slack-bot-token"
+pass 'an unsafe or malformed Slack credential is refused without failing installation'
+
+printf '%s\n' "$CASE_SLACK_SECRET" > "$CASE_SOURCE/config/slack-bot-token"
+chmod 0600 "$CASE_SOURCE/config/slack-bot-token"
+TOKEN_INSTALL=$(run_subject install --source-home "$CASE_SOURCE") || fail "credential install failed: $TOKEN_INSTALL"
+assert_contains "$TOKEN_INSTALL" 'slack-transport: data/tools/fm-slack-message.sh (available)' 'a valid credential was not recognized'
+assert_present "$CASE_APP/home/config/slack-bot-token" 'a valid credential was not provisioned'
+assert_eq 600 "$(stat -f %Lp "$CASE_APP/home/config/slack-bot-token" 2>/dev/null || stat -c %a "$CASE_APP/home/config/slack-bot-token")" \
+  'the provisioned credential is not owner-only'
+TOKEN_OUT=$(run_tick '20260828 14 30 13450 -0500') || fail "credentialed tick failed: $TOKEN_OUT"
+assert_contains "$TOKEN_OUT" 'slot=20260828-1430 status=succeeded' 'the credentialed cycle did not complete'
+assert_eq 18 "$(codex_runs)" 'the credentialed cycle did not run exactly once'
+assert_eq "present ${#CASE_SLACK_SECRET}" "$(sed -n '1p' "$CASE_CODEX_TOKEN_PROBE")" 'the cycle did not receive the provisioned credential'
+# The secret must exist only in the two private files and the cycle environment.
+assert_no_grep "$CASE_SLACK_SECRET" "$CASE_LAUNCH_AGENT_DIR/dev.firstmate.review-sweep.plist" 'the LaunchAgent leaked the credential'
+assert_no_grep "$CASE_SLACK_SECRET" "$CASE_APP/home/config/review-sweep-host-contract" 'the host contract leaked the credential'
+assert_no_grep "$CASE_SLACK_SECRET" "$CASE_APP/results/20260828-1430/prompt.txt" 'the cycle prompt leaked the credential'
+assert_no_grep "$CASE_SLACK_SECRET" "$CASE_CODEX_LOG" 'the cycle log leaked the credential'
+assert_no_grep "$CASE_SLACK_SECRET" "$CASE_APP/home/state/review-sweep-cycle-receipts/20260828-1430.json" 'the receipt leaked the credential'
+assert_not_contains "$TOKEN_OUT" "$CASE_SLACK_SECRET" 'the cycle output leaked the credential'
+TOKEN_STATUS=$(run_subject status) || fail "credentialed status failed: $TOKEN_STATUS"
+assert_contains "$TOKEN_STATUS" 'slack-transport: data/tools/fm-slack-message.sh (available)' 'status did not report the usable transport'
+assert_not_contains "$TOKEN_STATUS" "$CASE_SLACK_SECRET" 'status leaked the credential'
+pass 'a valid credential reaches only the cycle process and never any artifact'
+
+# A symlinked helper is unusable but must not cost the sweep its reviews.
 rm -f -- "$CASE_SOURCE/data/tools/fm-slack-message.sh"
-pass 'the authorized Slack transport is provisioned and a blocked notification is a valid receipt outcome'
+ln -s "$TMP_ROOT/linked-token" "$CASE_SOURCE/data/tools/fm-slack-message.sh"
+SYMLINK_OUT=$(run_tick '20260828 15 00 13500 -0500') || fail "symlinked transport tick failed: $SYMLINK_OUT"
+assert_contains "$SYMLINK_OUT" 'slot=20260828-1500 status=succeeded' 'a symlinked Slack helper cost the whole sweep'
+assert_eq 19 "$(codex_runs)" 'the symlinked-transport case did not run exactly once'
+assert_absent "$CASE_APP/home/data/tools/fm-slack-message.sh" 'an unsafe Slack helper was provisioned'
+assert_grep 'slack_transport_state=unavailable' "$CASE_APP/home/config/review-sweep-host-contract" 'an unsafe Slack helper was reported usable'
+rm -f -- "$CASE_SOURCE/data/tools/fm-slack-message.sh" "$CASE_SOURCE/config/slack-bot-token"
+pass 'an unsafe Slack helper degrades to an unavailable transport instead of failing the cycle'
 
 sed 's/^max_runtime_seconds=.*/max_runtime_seconds=1/' "$CASE_APP/config/supervisor.conf" > "$TMP_ROOT/bounded.conf"
 cp "$TMP_ROOT/bounded.conf" "$CASE_APP/config/supervisor.conf"
 touch "$CASE_CODEX_SLOW"
 set +e
-BOUNDED_OUT=$(run_tick '20260828 12 00 13000 -0500' 2>&1)
+BOUNDED_OUT=$(run_tick '20260828 15 30 13600 -0500' 2>&1)
 BOUNDED_RC=$?
 set -e
 rm -f -- "$CASE_CODEX_SLOW"
@@ -593,12 +700,12 @@ sed 's/^max_runtime_seconds=.*/max_runtime_seconds=10800/' "$CASE_APP/config/sup
 cp "$TMP_ROOT/bounded.conf" "$CASE_APP/config/supervisor.conf"
 assert_eq 124 "$BOUNDED_RC" 'a cycle past its runtime bound did not report the timeout'
 assert_contains "$BOUNDED_OUT" 'exceeded 1 seconds' 'the runtime bound was not enforced'
-assert_contains "$BOUNDED_OUT" 'slot=20260828-1200 status=succeeded exit=124 publication=verified' 'a verified publication was discarded with the failed cycle'
-assert_eq 0 "$(sed -n '1p' "$CASE_APP/state/slots/20260828-1200/receipt-status")" 'the receipt verdict was not recorded for a failed cycle'
-assert_eq 17 "$(codex_runs)" 'the bounded cycle did not run exactly once'
-REPUBLISH_OUT=$(run_tick '20260828 12 05 13010 -0500') || fail "post-timeout tick failed: $REPUBLISH_OUT"
-assert_contains "$REPUBLISH_OUT" 'noop: slot 20260828-1200 already succeeded' 'a verified publication was scheduled again'
-assert_eq 17 "$(codex_runs)" 'a verified publication was published twice'
+assert_contains "$BOUNDED_OUT" 'slot=20260828-1530 status=succeeded exit=124 publication=verified' 'a verified publication was discarded with the failed cycle'
+assert_eq 0 "$(sed -n '1p' "$CASE_APP/state/slots/20260828-1530/receipt-status")" 'the receipt verdict was not recorded for a failed cycle'
+assert_eq 20 "$(codex_runs)" 'the bounded cycle did not run exactly once'
+REPUBLISH_OUT=$(run_tick '20260828 15 45 13610 -0500') || fail "post-timeout tick failed: $REPUBLISH_OUT"
+assert_contains "$REPUBLISH_OUT" 'noop: slot 20260828-1530 already succeeded' 'a verified publication was scheduled again'
+assert_eq 20 "$(codex_runs)" 'a verified publication was published twice'
 pass 'a cycle that verified its publication is never re-run, even when it ended badly'
 
 touch "$CASE_CODEX_MALFORMED_SLACK"
@@ -628,7 +735,7 @@ set -e
 rm -f -- "$CASE_BIN/jq"
 assert_eq 77 "$JQ_BROKEN_RC" 'an unrunnable receipt gate was not reported as a tooling failure'
 assert_contains "$JQ_BROKEN_OUT" 'receipt gate could not be run by jq' 'an unrunnable receipt gate was not named'
-assert_eq 19 "$(codex_runs)" 'the receipt classification cases did not run once each'
+assert_eq 22 "$(codex_runs)" 'the receipt classification cases did not run once each'
 pass 'a malformed receipt field is a contract violation and only an unrunnable gate is a tooling failure'
 
 mkdir -p "$CASE_APP/state/slots/20200101-0700" "$CASE_APP/results/20200101-0700" "$TMP_ROOT/linked-slot"
@@ -645,7 +752,7 @@ touch -t 202001010000 "$CASE_APP/state/slots/20200101-0700" "$CASE_APP/results/2
 touch -h -t 202001010000 "$CASE_APP/results/20200101-0900"
 RETAIN_OUT=$(run_tick '20260828 13 30 13300 -0500') || fail "retention tick failed: $RETAIN_OUT"
 assert_contains "$RETAIN_OUT" 'slot=20260828-1330 status=succeeded' 'the retention cycle did not complete'
-assert_eq 20 "$(codex_runs)" 'the retention cycle did not invoke Codex once'
+assert_eq 23 "$(codex_runs)" 'the retention cycle did not invoke Codex once'
 assert_absent "$CASE_APP/state/slots/20200101-0700" 'an expired slot record was retained'
 assert_absent "$CASE_APP/results/20200101-0700" 'an expired result directory was retained'
 assert_absent "$CASE_APP/home/state/review-sweep-cycle-receipts/20200101-0700.json" 'an expired receipt was retained'
