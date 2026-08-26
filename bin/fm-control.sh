@@ -126,6 +126,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-identity-lib.sh
+. "$SCRIPT_DIR/fm-identity-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
@@ -247,15 +249,18 @@ case "$NEW_EFFORT" in
   *) die "--effort must be one of low, medium, high, xhigh, max" ;;
 esac
 
-# --- exact task-id resolution ----------------------------------------------
+# --- exact task identity resolution ----------------------------------------
 
 case "$RAW_ID" in
   *:*) die "'$RAW_ID' is an explicit backend endpoint; fm-control accepts an exact task id only, so a lifecycle command can never land on an endpoint this home does not own" ;;
 esac
-if ! fm_task_id_creation_valid "$RAW_ID"; then
-  die "'$RAW_ID' is not a valid task id"
+if fm_task_id_creation_valid "$RAW_ID" && [ -f "$STATE/$RAW_ID.meta" ] \
+  && [ ! -f "$(fm_identity_task_record "$RAW_ID")" ]; then
+  fm_identity_ensure_task_from_meta "$STATE/$RAW_ID.meta" "$RAW_ID" >/dev/null \
+    || die "task '$RAW_ID' could not receive a persistent callsign"
 fi
-ID=$RAW_ID
+ID=$(fm_identity_resolve_selector "$STATE" "$RAW_ID") \
+  || die "'$RAW_ID' is not a live task id or callsign in $STATE"
 # Supervision lease guard: lifecycle control is overlap territory between the
 # two Pi supervision actors; refuse while the OTHER actor holds this task's
 # live lease (contract: bin/fm-lease-lib.sh; no-op in homes without leases).

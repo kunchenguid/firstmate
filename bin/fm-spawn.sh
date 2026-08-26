@@ -246,6 +246,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-identity-lib.sh
+. "$SCRIPT_DIR/fm-identity-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -494,6 +496,14 @@ spawn_remote_secondmate() {
       return 1
     fi
   fi
+  if [ ! -f "$(fm_identity_task_record "$id")" ]; then
+    if [ -f "$meta" ]; then
+      fm_identity_ensure_task_from_meta "$meta" "$id" >/dev/null || return 1
+    else
+      fm_identity_reserve_fresh_task "$id" secondmate >/dev/null || return 1
+      IDENTITY_FRESH_RESERVED=1
+    fi
+  fi
   # Gate the host before anything is published or transferred, so a host that
   # cannot hold a durable Herdr endpoint refuses here rather than half-way
   # through a launch. This is also the readiness gate every liveness relaunch
@@ -656,6 +666,7 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
+IDENTITY_FRESH_RESERVED=0
 SPAWN_CONTROL_LOCK=
 SPAWN_CONTROL_LOCK_HELD=0
 SPAWN_CONTROL_PARENT=0
@@ -985,6 +996,10 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+if [ "$RELAUNCH" -eq 0 ]; then
+  fm_identity_reserve_fresh_task "$ID" "$KIND" >/dev/null || exit 1
+  IDENTITY_FRESH_RESERVED=1
+fi
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -2710,6 +2725,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_TMP=
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
+fi
+if [ "$IDENTITY_FRESH_RESERVED" = 1 ]; then
+  fm_identity_activate_reserved_task_from_meta "$STATE/$ID.meta" "$ID" >/dev/null || exit 1
+else
+  fm_identity_ensure_task_from_meta "$STATE/$ID.meta" "$ID" rebind >/dev/null || exit 1
 fi
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   # The record is published, so this task is now part of the set a teardown

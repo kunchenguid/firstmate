@@ -152,6 +152,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-identity-lib.sh
+. "$SCRIPT_DIR/fm-identity-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
@@ -2651,6 +2653,15 @@ if [ "$KIND" != secondmate ]; then
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 
+# Bind legacy metadata only after the landed-work and teardown safety gates have
+# passed. The active record keeps its callsign reserved through cleanup.
+if [ ! -f "$(fm_identity_task_record "$ID")" ]; then
+  fm_identity_ensure_task_from_meta "$META" "$ID" >/dev/null || {
+    echo "error: task $ID could not receive a persistent callsign; teardown aborted" >&2
+    exit 1
+  }
+fi
+
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
 # pruned code root. Best effort - a sweep failure never blocks this teardown.
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
@@ -2823,6 +2834,10 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.
 rm -rf "$STATE/$ID.inbox"
+fm_identity_archive_task "" "$ID" >/dev/null || {
+  echo "error: task $ID teardown completed, but its callsign could not be released; retaining identity history for a safe retry" >&2
+  exit 1
+}
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

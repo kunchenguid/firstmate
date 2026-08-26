@@ -202,6 +202,8 @@ fi
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-identity-lib.sh
+. "$SCRIPT_DIR/fm-identity-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-marker-lib.sh
@@ -295,7 +297,7 @@ fm_send_count_colons() {  # <string>
 }
 
 fm_send_resolve_target() {  # <raw-target>
-  local raw=$1 meta pane_meta target backend assumed colons id session hint
+  local raw=$1 meta pane_meta target backend assumed colons id session hint identity_id
 
   RESOLVED_TARGET=""
   TARGET_BACKEND=""
@@ -306,6 +308,12 @@ fm_send_resolve_target() {  # <raw-target>
   TARGET_REMOTE_ID=""
   TARGET_REMOTE_HOST=""
   RESOLUTION_TRIED=""
+
+  case "$raw" in
+    *:*) ;;
+    *) identity_id=$(fm_identity_resolve_selector "$STATE" "$raw" 2>/dev/null || true)
+       [ -z "$identity_id" ] || raw=$identity_id ;;
+  esac
 
   meta=$(fm_backend_meta_for_selector "$raw" "$STATE" 2>/dev/null || true)
   if [ -n "$meta" ]; then

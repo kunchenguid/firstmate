@@ -17,11 +17,18 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-identity-lib.sh
+. "$SCRIPT_DIR/fm-identity-lib.sh"
 
 "$SCRIPT_DIR/fm-guard.sh" || true
 
 RAW_TARGET=$1
 N=${2:-40}
+case "$RAW_TARGET" in
+  *:*) ;;
+  *) identity_id=$(fm_identity_resolve_selector "$STATE" "$RAW_TARGET" 2>/dev/null || true)
+     [ -z "$identity_id" ] || RAW_TARGET=$identity_id ;;
+esac
 
 REMOTE_META=$(fm_backend_meta_for_selector "$RAW_TARGET" "$STATE" 2>/dev/null || true)
 if [ -n "$REMOTE_META" ] && [ -n "$(fm_meta_get "$REMOTE_META" remote_host)" ]; then

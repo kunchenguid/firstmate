@@ -67,6 +67,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-tmux-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-identity-lib.sh
+. "$SCRIPT_DIR/fm-identity-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -76,6 +78,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
+resolved_id=$(fm_identity_resolve_selector "$STATE" "$ID" 2>/dev/null || true)
+[ -z "$resolved_id" ] || ID=$resolved_id
 
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
