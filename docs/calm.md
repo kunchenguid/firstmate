@@ -14,6 +14,7 @@ A fresh Pi session or new Calm extension lifetime starts at the normal initial p
 Very narrow terminals fall back to a smaller deterministic sprite.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
 Calm hides collapsed thinking labels, mid-turn assistant working notes, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` and `fm_branch_outcomes` tool shells, and canonically classified Firstmate operational user rows.
+A `fm_branch_outcomes` read is the one Calm-collapsed row that can leave something behind: an outcome the supervision branch already handled collapses with the row, while a failed read, an outcome the branch marked captain-relevant, and any output Calm does not recognize as the store's records each stay on screen as one dim line carrying the branch's own sailboat glyph.
 A mid-turn working note is assistant text in a message the model did not end its response with, identified by that message's own `stopReason` of `toolUse`, or of `length` with tool calls present.
 Hiding it removes the narration a model emits alongside its tool calls, while the genuine reply that ends a response stays visible.
 Text that is still streaming is never hidden, because suppressing it would also stop a genuine reply from streaming, so a working note is briefly visible before its row collapses.
@@ -47,13 +48,15 @@ If the other extension wins, a session-start console diagnostic names the tool a
 
 [`calm-mode-feasibility.md`](calm-mode-feasibility.md) owns the version-scoped renderer taxonomy, built-in override constraints, and empirical evidence.
 [`configuration.md`](configuration.md#pi-calm-preference-configcalm) owns the persisted preference file and resolution rules.
-`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, and `.pi/extensions/lib/fm-calm-working-ship.ts` owns the animated working presentation.
+`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, `.pi/extensions/lib/fm-calm-branch-outcomes.ts` owns what survives the collapsed branch-outcome row, and `.pi/extensions/lib/fm-calm-working-ship.ts` owns the animated working presentation.
 
 Regression entry points:
 
 ```sh
 tests/fm-calm-pi-extension.test.sh
 tests/fm-pi-branch-extension.test.sh
+tests/fm-calm-branch-outcomes.test.sh
 tests/fm-pi-primary-types.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
+FM_CALM_BRANCH_OUTCOMES_LIVE_E2E=1 tests/fm-calm-branch-outcomes-live-e2e.test.sh
 ```

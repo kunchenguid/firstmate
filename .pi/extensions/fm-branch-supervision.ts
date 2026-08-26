@@ -72,6 +72,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { calmBranchOutcomeAttention } from "./lib/fm-calm-branch-outcomes.ts";
 import {
   type CalmPresentationState,
   calmTranscriptClassIsVisible,
@@ -1233,11 +1234,25 @@ ${context.command}
     },
     renderResult: (result, _options, theme, context) => {
       if (calmPresentation.stockExportRendering) throw new Error("Use Pi stock export rendering");
-      if (calmHides("tool-result")) return new Container();
       const output = result.content
         .filter((item) => item.type === "text")
         .map((item) => normalizeOutcomesToolOutput(item.text))
         .join("\n");
+      if (calmHides("tool-result")) {
+        const attention = calmBranchOutcomeAttention(output, context.isError === true);
+        if (attention.length === 0) return new Container();
+        return new Text(
+          attention
+            .map((line) =>
+              line.glyph
+                ? `${theme.fg("customMessageText", MERGE_NOTE_BOAT)} ${theme.fg("dim", line.text)}`
+                : theme.fg("dim", line.text),
+            )
+            .join("\n"),
+          1,
+          0,
+        );
+      }
       const shellState = context.state as OutcomesToolShellState;
       shellState.result = output ? new Text(theme.fg("toolOutput", output), 0, 0) : new Container();
       refreshOutcomesToolShell(shellState, theme, context);

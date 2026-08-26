@@ -204,7 +204,7 @@ Every tool registered or supplied by Firstmate under `.pi/extensions` has this d
 | --- | --- | --- |
 | `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` | Calm wrappers for Pi's seven main-session built-ins | Their call and text-result shells hide while Calm is active; ordinary and stock export rendering delegate to Pi's original renderers. |
 | `fm_watch_arm_pi` | Main-session custom tool in `fm-primary-pi-watch.ts` | Its complete self-rendered shell hides while Calm is active and returns unchanged when Calm is off or stock export rendering is active. |
-| `fm_branch_outcomes` | Main-session custom tool in `fm-branch-supervision.ts` | Its complete self-rendered shell hides while Calm is active; the self-renderer reconstructs Pi's ordinary boxed fallback shell when visible, while stock export rendering deliberately falls through to Pi's structured fallback. |
+| `fm_branch_outcomes` | Main-session custom tool in `fm-branch-supervision.ts` | Its self-rendered shell hides while Calm is active subject to the exception owned by `.pi/extensions/lib/fm-calm-branch-outcomes.ts`; ordinary rendering uses Pi's boxed fallback shape, while stock export rendering deliberately falls through to Pi's structured fallback. |
 | `fm_branch_report` | Branch-session custom tool supplied directly to `createAgentSession` | It runs only in the headless supervision session and has no main-session `ToolExecutionComponent`; successful execution writes the outcome store and merges a branch note through the separately audited delivery path, so the tool cannot emit a dump-shaped row in the captain's transcript. |
 | branch-local `read` built-in | Branch-session built-in enabled through `createAgentSession` | It runs only in the headless supervision session and has no main-session `ToolExecutionComponent`, so its file output cannot emit a row in the captain's transcript. |
 | branch-local `bash` override | Branch-session replacement supplied directly to `createAgentSession` | It runs only in the headless supervision session and has no main-session `ToolExecutionComponent`, so its command output cannot emit a row in the captain's transcript. |
@@ -223,7 +223,7 @@ The test fixture enumerates every class below through the centralized policy, an
 | `assistant-working-note` | Assistant text in an `AssistantMessageComponent` message the model did not end its response with, identified by its own `stopReason` of `toolUse`, or of `length` with tool calls present | The text blocks are removed from the shallow presentation copy before layout, so a `toolUse` message carrying only narration occupies zero rows (verified on Pi 0.84.1); a still-streaming `pending` message is never filtered, so narration is briefly visible before the marker flips. |
 | `assistant-thinking` | Thinking content in `AssistantMessageComponent` | Collapsed reasoning is removed from the shallow presentation copy before layout and occupies zero rows; explicit expansion renders the original reasoning. |
 | `assistant-tool-call` | `ToolExecutionComponent` | Seven built-ins, `fm_watch_arm_pi`, and `fm_branch_outcomes` hidden; other arbitrary custom tools remain an unsupported boundary. |
-| `tool-result` | `ToolExecutionComponent` | Text results for the controlled tools hidden; other arbitrary custom results remain an unsupported boundary. |
+| `tool-result` | `ToolExecutionComponent` | Text results for the controlled tools hidden; a handled routine `fm_branch_outcomes` result collapses with its row, while a failed read, a captain-relevant outcome, and unrecognized output each stay as one dim line carrying the branch's sailboat glyph; other arbitrary custom results remain an unsupported boundary. |
 | `tool-image` | Image children appended outside tool renderer slots | Unsupported boundary; remains visible. |
 | `user-bash` | `BashExecutionComponent` for `!` and `!!` | Unsupported boundary; remains visible. |
 | `skill-invocation` | `SkillInvocationMessageComponent` plus parsed user text | Unsupported boundary; remains visible. |
@@ -278,8 +278,9 @@ Only Pi's Calm presentation implementation changed; every producer and non-Pi tr
 ## Regression coverage
 
 `tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers and verifies all seven built-ins plus `fm_watch_arm_pi`; `tests/fm-pi-branch-extension.test.sh` verifies `fm_branch_outcomes` Calm toggling and export rendering.
+`tests/fm-calm-branch-outcomes.test.sh` and `tests/fm-calm-branch-outcomes-live-e2e.test.sh` cover the one taught custom tool whose collapsed row can leave something behind.
 Together they exercise redraw of already-rendered tool, thinking, current operational-user, and legacy synthetic rows, and cover every policy class.
-It covers persisted preference restoration across every session-start reason and a real restart, proves the working-ship presentation and Calm-off stock `Working...` row through a delayed deterministic provider, asserts no Calm status row, verifies operational messages remain exact ordinary user-role session entries and complete exports, and drives genuine 100 by 44, 160 by 36, and 180 by 44 terminal fixtures.
+`tests/fm-calm-pi-extension.test.sh` also covers persisted preference restoration across every session-start reason and a real restart, proves the working-ship presentation and Calm-off stock `Working...` row through a delayed deterministic provider, asserts no Calm status row, verifies operational messages remain exact ordinary user-role session entries and complete exports, and drives genuine 100 by 44, 160 by 36, and 180 by 44 terminal fixtures.
 A native deterministic `/skill:ahoy` turn produces thinking, tool-call, and tool-result blocks, asserts that the collapsed skill-to-final gap equals the two-row visible-only baseline, expands and re-collapses original thinking, restores Calm-off rendering, verifies persisted hidden history, and repeats the geometry assertion after restart with `terminal.clearOnShrink` explicitly off.
 The operational provider path covers Calm loaded on, loaded off, default preference, extension absent, exact watcher delivery, narrow bare-marker legacy input, persisted restart replay, a genuine captain prompt, and adjacent notifications coalesced into one intended processing turn.
 It asserts one persisted and rendered captain answer, exact user-role operational envelopes in order, no replacement custom messages, one processing result, zero operational transcript rows, and the two-row neighboring-assistant geometry for live, adjacent, and restart paths.
@@ -292,7 +293,9 @@ The relevant commands are:
 ```sh
 tests/fm-calm-pi-extension.test.sh
 tests/fm-pi-branch-extension.test.sh
+tests/fm-calm-branch-outcomes.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
+FM_CALM_BRANCH_OUTCOMES_LIVE_E2E=1 tests/fm-calm-branch-outcomes-live-e2e.test.sh
 tests/fm-pi-primary-types.test.sh
 ```
 

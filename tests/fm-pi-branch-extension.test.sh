@@ -27,6 +27,7 @@ install_pi_branch_extension_fixture() {
     "$repo/node_modules/typebox"
   cp "$EXT" "$repo/.pi/extensions/fm-branch-supervision.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-calm-branch-outcomes.ts" "$repo/.pi/extensions/lib/fm-calm-branch-outcomes.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
   mkdir -p "$repo/bin"
@@ -540,13 +541,14 @@ const renderTheme = {
   bold(text) { return text; },
 };
 const renderContext = { state: {}, isError: false, isPartial: false };
-const stockResult = { content: [{ type: "text", text: "OUTCOME_DUMP" }] };
+const routineOutcome = '{"seq":1,"epoch":0,"task":"task-9","wake":"signal: working","verdict":"routine","summary":"worker healthy","silent":false}';
+const stockResult = { content: [{ type: "text", text: routineOutcome }] };
 const calmOffCall = outcomesTool.renderCall({}, renderTheme, renderContext);
 const calmOffResult = outcomesTool.renderResult(stockResult, { expanded: false, isPartial: false }, renderTheme, renderContext);
 if (calmOffCall.constructor.name !== "Box" || calmOffCall.paddingX !== 1 || calmOffCall.paddingY !== 1) {
   throw new Error("fm_branch_outcomes changed its ordinary shell rendering");
 }
-if (calmOffResult.constructor.name !== "Container" || calmOffCall.children[0]?.text !== "fm_branch_outcomes" || calmOffCall.children[1]?.text !== "OUTCOME_DUMP") {
+if (calmOffResult.constructor.name !== "Container" || calmOffCall.children[0]?.text !== "fm_branch_outcomes" || calmOffCall.children[1]?.text !== routineOutcome) {
   throw new Error("fm_branch_outcomes changed its ordinary call or result rendering");
 }
 pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: false });
@@ -2338,6 +2340,7 @@ test_outcomes_tool_uses_stock_execution_and_export_consumers() {
   mkdir -p "$fixture/.pi/extensions/lib" "$fixture/node_modules/@earendil-works"
   cp "$EXT" "$fixture/.pi/extensions/fm-branch-supervision.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$fixture/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-calm-branch-outcomes.ts" "$fixture/.pi/extensions/lib/fm-calm-branch-outcomes.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$fixture/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$package_dir" "$fixture/node_modules/@earendil-works/pi-coding-agent"
@@ -2385,7 +2388,15 @@ delete stockDefinition.renderResult;
 
 const args = { recent: 2 };
 const result = {
-  content: [{ type: "text", text: "\x1b[31mOUTCOME_ONE\x1b[0m\r\nOUT\u0000COME_TWO\uFFF9" }],
+  content: [{ type: "text", text: "\x1b[31mOUT\u0000COME\uFFF9\x1b[0m\r" }],
+  details: { ok: true },
+  isError: false,
+};
+const routineResult = {
+  content: [{
+    type: "text",
+    text: '{"seq":1,"epoch":0,"task":"task-9","wake":"signal: working","verdict":"routine","summary":"worker healthy","silent":false}',
+  }],
   details: { ok: true },
   isError: false,
 };
@@ -2400,6 +2411,8 @@ for (const row of [stockRow, actualRow]) {
 if (JSON.stringify(actualRow.render(100)) !== JSON.stringify(stockRow.render(100))) {
   throw new Error("Calm-off ToolExecutionComponent rendering differs from Pi stock");
 }
+actualRow.updateResult(routineResult);
+stockRow.updateResult(routineResult);
 pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: false });
 actualRow.invalidate();
 if (actualRow.render(100).length !== 0) {
