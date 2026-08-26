@@ -1,0 +1,19 @@
+{
+  "schema": "fm.no-mistakes-worker-wrapper-config/v1",
+  "fm_home": "/absolute/path/to/firstmate-home",
+  "account_pool_home": "/absolute/path/to/azure-pi-account-pool",
+  "runtime_bundle": "/absolute/path/to/no-mistakes-pi-runtime.tar.gz",
+  "runtime_bundle_sha256": "replace-with-64-lowercase-hex",
+  "lifecycle_path": "/absolute/path/to/firstmate/bin/fm-worker-lifecycle.sh",
+  "lifecycle_env": {
+    "FM_AZURE_SUBSCRIPTION_ID": "replace-with-subscription-uuid",
+    "FM_AZURE_DEPLOYMENT_GENERATION": "replace-with-deployment-generation",
+    "FM_AZURE_OWNER_TAG": "replace-with-owner-tag",
+    "FM_AZURE_NAMING_PREFIX": "replace-with-naming-prefix",
+    "FM_AZURE_STORAGE_NAME": "replace-with-storage-account"
+  },
+  "assignment_timeout_seconds": 1800,
+  "cleanup_timeout_seconds": 1800,
+  "poll_seconds": 5,
+  "wall_seconds": 3600
+}

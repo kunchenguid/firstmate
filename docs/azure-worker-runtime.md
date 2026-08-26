@@ -54,10 +54,8 @@ is inert until the parameter is supplied) and point it at the new gallery
 version. Rationale: workers are egress-sealed by posture; per-boot registry
 downloads are both a provenance hole and a boot-time failure mode, while the
 image is a cache of a recorded provenance chain (the bake doc's own model).
-The pi extension pack (multi-pass and friends) is NOT staged: those exist to
-rotate a human's many local accounts; a worker runs one leased account. The
-multi-pass OAuth-refresh patch is therefore also not needed on workers; the
-bounded wall (max 6h) sits inside a fresh access token's life.
+Ordinary author workers do not stage the local Pi extension pack because one worker runs one leased account.
+The specialized no-mistakes role instead uses the sealed runtime documented in `docs/azure-workers.md`, which includes only fast mode and Ketch and still excludes multi-pass and OAuth material.
 
 ### D2. One payload archive per assignment, over the private staging lane
 
@@ -135,7 +133,8 @@ Release and reconcile are idempotent retries, and local credential staging is re
 
 ## Non-goals
 
-- No pi extension pack, fast-mode, or account rotation on workers.
+- No account rotation or OAuth material inside a worker runtime bundle.
+- Ordinary author workers keep their existing extension-free runtime; the no-mistakes role has only its sealed fast-mode and Ketch extensions.
 - No public egress from workers; every transfer stays on the private lane.
 - No captain-on-cloud changes; that is its own phase with its own custody
   design (setup-token) and is tracked outside this document.

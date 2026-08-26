@@ -233,22 +233,37 @@ spec = importlib.util.spec_from_file_location("supervisor", root / "bin/fm-worke
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 binary = b"#!/bin/sh\nexit 0\n"
+files = {
+    "bin/no-mistakes": binary, "bin/node": binary, "bin/pi": binary,
+    "lib/pi/dist/cli.js": b"export {};\n",
+    "extensions/pi-openai-fast-mode/src/index.ts": b"export default () => {};\n",
+    "extensions/fast-mode-all-codex-accounts.ts": b"export default () => {};\n",
+    "extensions/pi-ketch/src/index.ts": b"export default () => {};\n",
+}
 manifest = {
-    "schema": "fm.azure-validation-runtime/v1", "no_mistakes_path": "bin/no-mistakes",
-    "files": [{"path": "bin/no-mistakes", "digest": "sha256:" + hashlib.sha256(binary).hexdigest()}],
+    "schema": "fm.azure-validation-runtime/v1", "provider": "pi",
+    "no_mistakes_version": "test-1", "no_mistakes_source_commit": "1" * 40,
+    "owner_decision_protocol": "fm.azure-validation-owner-decision/v1",
+    "no_mistakes_path": "bin/no-mistakes", "provider_path": "bin/pi",
+    "gh_path": "", "node_path": "bin/node", "gh_axi_path": "",
+    "gh_axi_entrypoint": "", "gh_axi_closure": [],
+    "files": [{"path": name, "digest": "sha256:" + hashlib.sha256(body).hexdigest()}
+              for name, body in sorted(files.items())],
 }
 manifest_body = json.dumps(manifest, separators=(",", ":")).encode() + b"\n"
 archive_path = temporary / "verified-runtime.tar.gz"
 with tarfile.open(archive_path, "w:gz") as archive:
-    for name, body, mode in (
-        ("runtime.json", manifest_body, 0o644), ("bin/no-mistakes", binary, 0o755),
-    ):
+    entries = [("runtime.json", manifest_body, 0o644)] + [
+        (name, body, 0o755 if name in ("bin/no-mistakes", "bin/node", "bin/pi") else 0o644)
+        for name, body in sorted(files.items())
+    ]
+    for name, body, mode in entries:
         info = tarfile.TarInfo(name)
         info.size = len(body)
         info.mode = mode
         archive.addfile(info, io.BytesIO(body))
 target = temporary / "verified-runtime"
-module.stage_no_mistakes_runtime(archive_path, target)
+module.stage_no_mistakes_runtime(archive_path, target, enforce_linux=False)
 assert (target / "bin/no-mistakes").read_bytes() == binary
 assert (target / "bin/no-mistakes").stat().st_mode & 0o111
 PY

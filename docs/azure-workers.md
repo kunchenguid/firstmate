@@ -362,6 +362,37 @@ The request, result, and semantic step outcome use `no-mistakes.firstmate-worker
 The request and result echo the canonical `step` (`review` or `test`) separately from job `kind`; a repair may repair either step, and the semantic artifact follows `step`, so a test repair can never assert a review-approved head.
 The caller payload contains exactly `repo.bundle` and `brief.md`; the wrapper verifies both against the request, stages the configured digest-bound credential-free `runtime.tar.gz`, and submits the request's exact argv without a shell.
 The owner-private config uses `fm.no-mistakes-worker-wrapper-config/v1` and names the Firstmate home, canonical Pi account pool home, sealed runtime path and digest, lifecycle executable, bounded assignment/cleanup/wall times, and the non-secret lifecycle environment.
+
+`docs/azure-no-mistakes-worker-config.example.json` is the copy-and-fill wrapper config template.
+
+Build the credential-free runtime on Linux amd64 from the exact custom no-mistakes binary, a compatible Linux Node binary, an installed `@earendil-works/pi-coding-agent` package closure, and the exact fast-mode and Ketch packages:
+
+```sh
+bin/fm-no-mistakes-runtime \
+  --no-mistakes /absolute/linux-amd64/no-mistakes \
+  --node /absolute/linux-amd64/node \
+  --pi-package /absolute/linux-pi-package/@earendil-works/pi-coding-agent \
+  --fast-mode-package /absolute/extensions/pi-openai-fast-mode \
+  --fast-mode-fleet-extension /absolute/fast-mode-all-codex-accounts.ts \
+  --ketch-package /absolute/extensions/pi-ketch \
+  --no-mistakes-version '<exact-version>' \
+  --no-mistakes-source-commit '<exact-40-hex-source-commit>' \
+  --output /absolute/no-mistakes-pi-runtime.tar.gz
+```
+
+The builder refuses host-native or non-amd64 Node and no-mistakes artifacts, redirected package members, native modules from another platform, credential-shaped files, duplicate paths, and unbounded inputs.
+
+It emits the established `fm.azure-validation-runtime/v1` manifest with a digest for every byte and pins Pi, fast mode, and Ketch by their package bytes and versions.
+
+Use an npm installation made on the target Linux amd64 build host as `--pi-package`; never point the builder at `~/.pi/agent`, an account pool, or a directory containing `auth.json`.
+
+The worker lifecycle selects the least-loaded usable account and projects only that account into the assignment-private HOME as the fixed `openai-codex` profile.
+
+The guest does not load multi-pass or choose an account.
+
+The sealed `bin/pi` launcher uses the bundled Node, disables ambient extension discovery, pins fast mode and Ketch from the verified runtime, and reads OAuth only from `$HOME/pi-agent/auth.json`.
+
+The builder and hermetic staged-runtime execution are proven locally; a real Azure no-mistakes run is still required before claiming the packaged Linux closure live.
 It never names an account profile: `fm-worker-lifecycle` selects the least-loaded usable profile under its controller lock and creates an assignment-private projection.
 
 The dedicated `no-mistakes` lifecycle role admits only `repo.bundle`, `brief.md`, and `runtime.tar.gz`.

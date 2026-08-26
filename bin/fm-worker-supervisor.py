@@ -372,7 +372,7 @@ def stage_payload(request, worktree, account_home):
     return repo
 
 
-def stage_no_mistakes_runtime(source, target):
+def stage_no_mistakes_runtime(source, target, enforce_linux=True):
     """Extract and re-verify the sealed credential-free runtime in the guest."""
     if source.is_symlink() or not source.is_file():
         raise SupervisorError("no-mistakes runtime bundle is unavailable or redirected")
@@ -415,9 +415,26 @@ def stage_no_mistakes_runtime(source, target):
     except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SupervisorError("no-mistakes runtime manifest is unreadable: {}".format(exc))
     records = manifest.get("files") if isinstance(manifest, dict) else None
+    manifest_fields = {
+        "schema", "provider", "no_mistakes_version", "no_mistakes_source_commit",
+        "owner_decision_protocol", "no_mistakes_path", "provider_path", "gh_path",
+        "node_path", "gh_axi_path", "gh_axi_entrypoint", "gh_axi_closure", "files",
+    }
     if (
-        manifest.get("schema") != "fm.azure-validation-runtime/v1"
+        not isinstance(manifest, dict)
+        or set(manifest) != manifest_fields
+        or manifest.get("schema") != "fm.azure-validation-runtime/v1"
+        or manifest.get("provider") != "pi"
         or manifest.get("no_mistakes_path") != "bin/no-mistakes"
+        or manifest.get("provider_path") != "bin/pi"
+        or manifest.get("node_path") != "bin/node"
+        or manifest.get("gh_path") != ""
+        or manifest.get("gh_axi_path") != ""
+        or manifest.get("gh_axi_entrypoint") != ""
+        or manifest.get("gh_axi_closure") != []
+        or manifest.get("owner_decision_protocol") != "fm.azure-validation-owner-decision/v1"
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", str(manifest.get("no_mistakes_version", "")))
+        or not re.fullmatch(r"[0-9a-f]{40}", str(manifest.get("no_mistakes_source_commit", "")))
         or not isinstance(records, list) or not records
     ):
         raise SupervisorError("no-mistakes runtime manifest identity is not exact")
@@ -429,13 +446,35 @@ def stage_no_mistakes_runtime(source, target):
         digest_claim = record.get("digest")
         if (
             not isinstance(path, str) or path in expected or path not in extracted
+            or Path(path).name.lower() in {
+                ".env", ".netrc", ".npmrc", "auth.json", "credentials.json",
+                "credentials", "id_rsa", "id_ed25519",
+            }
             or not isinstance(digest_claim, str) or not digest_claim.startswith("sha256:")
             or hashlib.sha256(extracted[path]).hexdigest() != digest_claim[7:]
         ):
             raise SupervisorError("no-mistakes runtime file inventory differs")
         expected.add(path)
-    if set(extracted) != expected or not os.access(target / "bin" / "no-mistakes", os.X_OK):
+    required_executables = ("bin/no-mistakes", "bin/node", "bin/pi")
+    if (
+        set(extracted) != expected
+        or any(not os.access(target / path, os.X_OK) for path in required_executables)
+        or "lib/pi/dist/cli.js" not in extracted
+        or "extensions/pi-openai-fast-mode/src/index.ts" not in extracted
+        or "extensions/fast-mode-all-codex-accounts.ts" not in extracted
+        or "extensions/pi-ketch/src/index.ts" not in extracted
+    ):
         raise SupervisorError("no-mistakes runtime is not exactly inventoried and executable")
+    if enforce_linux:
+        for path in ("bin/no-mistakes", "bin/node"):
+            header = extracted[path][:20]
+            if not (
+                len(header) == 20 and header[:4] == b"\x7fELF"
+                and header[4] == 2 and header[5] == 1
+                and int.from_bytes(header[18:20], "little") == 62
+            ):
+                raise SupervisorError(
+                    "no-mistakes runtime {} is not Linux amd64".format(path))
 
 
 def git_in(repo, *arguments, timeout=BUNDLE_CREATE_TIMEOUT):
@@ -888,8 +927,10 @@ def execute(request, worktree, worktree_root):
     path = "/usr/local/bin:/usr/bin:/bin"
     if request.get("worker_role") == "no-mistakes":
         path = str((worktree_root / ".fm-runtime" / "bin").resolve()) + ":" + path
+    account_home = Path(os.environ.get("FM_WORKER_ACCOUNT_HOME", "/nonexistent")).resolve()
     safe_env = {
-        "HOME": str(Path(os.environ.get("FM_WORKER_ACCOUNT_HOME", "/nonexistent")).resolve()),
+        "HOME": str(account_home),
+        "PI_CODING_AGENT_DIR": str(account_home / "pi-agent"),
         "PATH": path,
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
