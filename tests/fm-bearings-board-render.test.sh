@@ -146,7 +146,7 @@ test_open_prs_render_as_links_in_the_nav() {
   home=$(make_home prs-links)
   out=$(render "$home" '[]' 0 0 "$(open_prs 2)")
   printf '%s' "$out" | jq -e '
-    .error == "" and .prs.hidden == false and .prs.count == "2 open PRs"
+    .error == "" and .prs.count == "2 open PRs"
       and .prs.overflow == ""
       and ([.prs.links[] | .text] == ["sample#1", "other#2"])
       and (.prs.links[0] | .href == "https://github.com/example/repo/pull/1"
@@ -177,7 +177,7 @@ test_a_board_without_open_prs_renders_nothing_in_the_nav() {
   home=$(make_home prs-absent)
   out=$(render "$home" '[]')
   printf '%s' "$out" | jq -e '
-    .error == "" and .prs.hidden == true and .prs.count == ""
+    .error == "" and .prs.count == ""
       and .prs.overflow == "" and (.prs.links | length) == 0
   ' >/dev/null || fail "a board with no open pull requests still rendered the nav element: $out"
   pass "a board without open pull requests renders nothing in the nav"

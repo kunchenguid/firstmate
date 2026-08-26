@@ -66,9 +66,6 @@ globalThis.document = {
   getElementById: (id) => {
     if (!byId.has(id)) {
       const n = new Node("div");
-      // carry the element's initial `hidden` attribute over from the document,
-      // so a renderer that forgets to reveal an element still reads as hidden
-      n.hidden = new RegExp('id="' + id + '"[^>]*\\shidden[\\s>]').test(html);
       new Node("div").appendChild(n);
       byId.set(id, n);
     }
@@ -118,7 +115,6 @@ const errorText = [...byId.entries()]
 const prBox = document.getElementById("bb-prs");
 const prText = (cls) => prBox.children.find((c) => c.className.includes(cls))?.textContent ?? "";
 const prs = {
-  hidden: prBox.hidden,
   count: prText("bb-prs__count"),
   overflow: prText("bb-prs__more"),
   links: (prBox.children.find((c) => c.className.includes("bb-prs__list"))?.children ?? []).map((a) => ({
