@@ -47,8 +47,18 @@ ack_stopped_cycle() {  # <state>
 watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
   local state=$1 fakebin=$2 out=$3
   shift 3
+  # The extra assignments go through env(1): an assignment that arrives by
+  # expansion is a command word, not an assignment prefix, so passing "$@"
+  # directly would run the caller's "FOO=bar" as a program.
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$out" &
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 env "$@" "$WATCH" > "$out" &
+}
+
+# Line count of a file that may not exist yet, with no stderr from the shell's
+# own redirection when it does not.
+lines_in() {  # <file>
+  [ -f "$1" ] || { echo 0; return; }
+  wc -l < "$1" | tr -d '[:space:]'
 }
 
 # wait_live, reap, seen_sig, and file_mtime are shared with the other
@@ -65,6 +75,11 @@ watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
 # beacon left by an earlier round, waits for THIS watcher to write a fresh one
 # (some poll's top), then waits for that one to advance (the next poll's top) -
 # and the whole cycle in between is what the caller's assertions describe.
+# That equivalence holds only while the watcher's intra-cycle progress refresh
+# stays longer than a test cycle, which it does at the default grace. A case that
+# shortens FM_GUARD_GRACE shortens the refresh with it, so the beacon can advance
+# mid-cycle: such a case must observe cycle boundaries some other way rather than
+# calling this helper.
 # 0 if the watcher is still alive after a completed cycle, 1 if it exited.
 wait_poll_cycle() {  # <state> <pid> [limit-ticks]
   local state=$1 pid=$2 limit=${3:-300} beat first now i=0
@@ -2595,6 +2610,115 @@ test_beacon_stays_fresh_while_absorbing() {
   pass "the liveness beacon stays fresh while the watcher absorbs benign wakes (fm-guard never false-alarms)"
 }
 
+# The case above absorbs across SEVERAL cycles, so one beat per cycle was enough
+# to keep it green. This one stays inside a SINGLE cycle, which is where the
+# beacon actually went stale: one iteration of the supervision loop is not
+# bounded by the poll interval, and on a large fleet the per-window stale scan
+# alone runs for minutes. A watcher that was polling normally and absorbing
+# benign wakes the whole time therefore let the beacon age past the staleness
+# grace, and every liveness reader - the turn-end guard, the pull warning, the
+# attached arm, and the watcher's own live-holder refusal - read that as a dead
+# watcher. Measured on a 37-task home: beacon age at cycle exit tracked the
+# cycle's whole length (288s of a 298s cycle) instead of the poll interval.
+#
+# The fixture reproduces the SHAPE, not the size: every pane capture costs a
+# second, so one pass over these windows spends more than the whole grace
+# between its first and last absorb while never reaching the top of the loop.
+test_beacon_stays_fresh_inside_one_long_cycle() {
+  local dir state fakebin out log pid grace count i limit lines
+  local t_first t_last m_first m_last elapsed age distinct
+  dir=$(make_case beacon-long-cycle); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; log="$state/.watch-triage.log"
+  # Sized for margin on a loaded machine, not for speed: one pass spends
+  # count-1 seconds between its first and last absorb, so the pass clears the
+  # grace by ~5s while each window's own step stays ~3s inside it.
+  grace=4
+  count=10
+
+  # A pane capture that costs a second, so the per-window stale scan - the
+  # segment that dominates a real fleet's cycle - is what stretches this one.
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  capture-pane) sleep 1; printf 'a quiet pane\n'; exit 0 ;;
+  display-message) printf '\n'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+
+  # Declared external waits: each window is absorbed onto the long pause cadence,
+  # a benign wake that logs one triage line and leaves the loop running. A
+  # secondmate endpoint takes that path without an agent-liveness read, so the
+  # fixture needs no live agent. The .seen-* markers are primed so the status
+  # files themselves do not fire a signal wake and end the cycle early.
+  for i in $(seq 1 "$count"); do
+    fm_write_meta "$state/sm$i.meta" "window=sess:fm-sm$i" "kind=secondmate"
+    printf 'paused: waiting on the upstream release\n' > "$state/sm$i.status"
+    prime_status_seen "$state" "$state/sm$i.status" || fail "could not prime sm$i.status"
+  done
+  export FM_FAKE_CREW_STATE='state: paused · source: status · declared external wait'
+
+  # FM_GUARD_GRACE is the ONLY liveness knob this case sets: the intra-cycle
+  # refresh interval is derived from the grace, so a fixture that shortens one
+  # shortens the other and cannot drift out of the relationship being tested.
+  watch_bg "$state" "$fakebin" "$out" FM_GUARD_GRACE="$grace"
+  pid=$!
+
+  # The first absorb of the cycle.
+  limit=300; t_first=
+  while [ "$limit" -gt 0 ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    if [ "$(lines_in "$log")" -ge 1 ]; then
+      t_first=$(date +%s); m_first=$(file_mtime "$state/.last-watcher-beat"); break
+    fi
+    sleep 0.1
+    limit=$((limit - 1))
+  done
+  [ -n "$t_first" ] || { reap "$pid"; fail "watcher never absorbed a declared-pause window: $(cat "$out" 2>/dev/null)"; }
+
+  # The last absorb of the SAME cycle: each window is classified at most once per
+  # pass, so the first $count lines naming $count distinct windows are necessarily
+  # all from the first pass - the loop cannot have gone around in between.
+  limit=600; t_last=
+  while [ "$limit" -gt 0 ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    if [ "$(lines_in "$log")" -ge "$count" ]; then
+      t_last=$(date +%s); m_last=$(file_mtime "$state/.last-watcher-beat"); break
+    fi
+    sleep 0.1
+    limit=$((limit - 1))
+  done
+  [ -n "$t_last" ] || { reap "$pid"; fail "watcher did not finish one pass over $count windows: $(cat "$log" 2>/dev/null)"; }
+
+  lines=$(head -n "$count" "$log")
+  distinct=$(printf '%s\n' "$lines" | grep -o 'sess:fm-sm[0-9]*' | sort -u | wc -l | tr -d '[:space:]')
+  [ "$distinct" = "$count" ] \
+    || { reap "$pid"; fail "the first $count absorbs were not $count distinct windows, so they are not one pass: $lines"; }
+
+  # Non-vacuity: this really is a single cycle that outlived the staleness grace.
+  # Without it the assertion below would pass on a cycle too short to go stale.
+  elapsed=$(( t_last - t_first ))
+  [ "$elapsed" -ge "$grace" ] \
+    || { reap "$pid"; fail "one pass took ${elapsed}s, under the ${grace}s grace - the fixture never reproduced a long cycle"; }
+
+  # The fix: the beacon advanced DURING that pass. Written only at the top of the
+  # loop, these two reads are the same mtime and the beacon is already stale.
+  [ -n "$m_first" ] && [ -n "$m_last" ] \
+    || { reap "$pid"; fail "watcher beacon missing during the pass"; }
+  [ "$m_last" -gt "$m_first" ] \
+    || { reap "$pid"; fail "beacon never advanced inside a ${elapsed}s cycle (first ${m_first}, last ${m_last})"; }
+  age=$(( t_last - m_last ))
+  [ "$age" -lt "$grace" ] \
+    || { reap "$pid"; fail "beacon was ${age}s stale mid-cycle against a ${grace}s grace - every liveness reader would call this healthy watcher dead"; }
+
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "absorbing declared waits enqueued a wake"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "the liveness beacon stays fresh inside ONE cycle that outlives the staleness grace"
+}
+
 # --- afk coherence: the daemon owns triage; the watcher does not double-triage ---
 
 test_afk_present_reverts_watcher_to_one_shot() {
@@ -2713,5 +2837,6 @@ test_procevent_marker_failure_exits_and_replays
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
+test_beacon_stays_fresh_inside_one_long_cycle
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
