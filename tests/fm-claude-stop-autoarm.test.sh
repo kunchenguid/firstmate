@@ -163,6 +163,22 @@ watcher_identity() {
   FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$dir/bin/fm-wake-lib.sh" "$pid"
 }
 
+start_path_named_watcher_holder() {
+  local dir=$1 script_path
+  STARTED_WATCHER_PID=
+  script_path=$(cd "$dir/bin" && pwd)/fm-watch.sh
+  cat > "$script_path" <<'SH'
+#!/usr/bin/env bash
+trap 'exit 0' TERM INT
+while :; do
+  sleep 1
+done
+SH
+  chmod +x "$script_path"
+  "$script_path" >/dev/null 2>&1 &
+  STARTED_WATCHER_PID=$!
+}
+
 record_watcher_lock() {
   local dir=$1 pid=$2 identity=$3 root bin_dir
   root=$dir
@@ -402,7 +418,8 @@ test_failed_cycles_notify_once_and_keep_retrying() {
   expect_code 2 "$status1" "the first exhausted failure must notify"
   expect_code 2 "$status2" "a consecutive exhausted failure must force another Stop-owned retry"
   [ -n "$out1" ] || fail "the first exhausted failure did not notify"
-  [ -z "$out2" ] || fail "consecutive exhausted failure repeated an operator notice: $out2"
+  assert_contains "$out2" "firstmate watcher auto-arm retry" "consecutive exhausted failure must carry a compact retry banner"
+  assert_not_contains "$out2" "automatic supervision mechanism is broken" "consecutive exhausted failure repeated the full operator notice"
   [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" -eq 4 ] || fail "each cycle must retain bounded automatic retries"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "failure episode marker was not recorded"
   [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "second failure must record failed-suppressed"
@@ -467,6 +484,39 @@ test_benign_cycle_end_with_live_watcher_is_silent() {
   pass "auto-arm: benign cycle end with a live watcher and fresh beacon stays silent across the next cycle"
 }
 
+test_blank_identity_live_watcher_clears_stuck_failure_episode() {
+  local dir out1 out2 status1 status2 pid repaired
+  dir=$(make_primary_dir "$TMP_ROOT/blank-identity-live")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" benign-live
+  start_path_named_watcher_holder "$dir"
+  pid=$STARTED_WATCHER_PID
+  record_watcher_lock "$dir" "$pid" ""
+  : > "$dir/state/.watch.lock/pid-identity"
+  touch "$dir/state/.last-watcher-beat"
+  printf 'session=sess-autoarm\ncount=3\nepoch=9\n' > "$dir/state/.turnend-claude-blocks"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+
+  out1=$(run_autoarm "$dir" 2>/dev/null); status1=$?
+  out2=$(run_autoarm "$dir" 2>/dev/null); status2=$?
+  repaired=$(cat "$dir/state/.watch.lock/pid-identity" 2>/dev/null || true)
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  if [ "$status1" -eq 2 ] && [ -z "$out1" ] \
+    && [ "$status2" -eq 2 ] && [ -z "$out2" ]; then
+    fail "blank pid-identity incumbent reproduced a repeated blank exit-2 autoarm loop"
+  fi
+  expect_code 0 "$status1" "first autoarm turn must accept the matching live watcher and clear stale failure state"
+  expect_code 0 "$status2" "next autoarm turn must stay quiet after stale failure state is cleared"
+  [ -z "$out1" ] || fail "first healthy blank-identity autoarm produced output: $out1"
+  [ -z "$out2" ] || fail "next healthy blank-identity autoarm produced output: $out2"
+  [ -n "$repaired" ] || fail "healthy blank-identity autoarm did not repair the watcher pid identity"
+  assert_absent "$dir/state/.turnend-claude-blocks" "blank-identity recovery left the block budget"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "blank-identity recovery left the failure notice marker"
+  pass "auto-arm: blank-identity live watcher clears stale failure state instead of looping with blank exit 2"
+}
+
 test_positive_recovery_budget_contention_preserves_episode() {
   local dir out status pid identity holder
   dir=$(make_primary_dir "$TMP_ROOT/recovery-budget-contention")
@@ -485,7 +535,8 @@ test_positive_recovery_budget_contention_preserves_episode() {
   printf '%s\n' "$holder" > "$dir/state/.turnend-claude-blocks.lock/pid"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
   expect_code 2 "$status" "a healthy auto-arm must continue when the episode reset lock is busy"
-  [ -z "$out" ] || fail "recovery contention produced an operator notice: $out"
+  assert_contains "$out" "firstmate watcher auto-arm retry" "recovery contention must carry a compact retry banner"
+  assert_not_contains "$out" "automatic supervision mechanism is broken" "recovery contention repeated the full operator notice"
   [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "recovery contention must not record ordinary clean recovery"
   assert_present "$dir/state/.turnend-claude-blocks" "recovery contention partially cleared the block budget"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "recovery contention partially cleared the failure notice"
@@ -801,6 +852,7 @@ test_failed_cycles_notify_once_and_keep_retrying
 test_unverified_clean_close_exhausts_retries
 test_post_alarm_actionable_close_is_suppressed
 test_benign_cycle_end_with_live_watcher_is_silent
+test_blank_identity_live_watcher_clears_stuck_failure_episode
 test_positive_recovery_budget_contention_preserves_episode
 test_arms_for_x_mode_poll_need_without_inflight
 test_single_flight_admits_exactly_one_owner

@@ -133,7 +133,7 @@ test_guard_warnings() {
   #       warning follows it, and the guidance is repair-after-drain (never the
   #       old conflicting "restart NOW first").
   #   (2) a fresh watcher and an empty queue: total silence.
-  local dir state err first banner_line queue_line pid identity
+  local dir state err first banner_line queue_line pid out i
   dir=$(make_case guard)
   state="$dir/state"
   err="$dir/guard.err"
@@ -178,21 +178,30 @@ test_guard_warnings() {
   dir=$(make_case guard-fresh)
   state="$dir/state"
   err="$dir/guard.err"
+  out="$dir/watch.out"
   printf 'project=x\n' > "$state/task.meta"
-  sleep 60 &
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
   pid=$!
-  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") || fail "could not identify fresh guard watcher"
-  mkdir -p "$state/.watch.lock"
-  printf '%s\n' "$pid" > "$state/.watch.lock/pid"
-  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
-  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
-  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
-  touch "$state/.last-watcher-beat"
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+      && [ -s "$state/.watch.lock/pid-identity" ] \
+      && [ -e "$state/.last-watcher-beat" ] \
+      && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+    && [ -s "$state/.watch.lock/pid-identity" ] \
+    && [ -e "$state/.last-watcher-beat" ] \
+    || fail "fresh guard fixture watcher did not publish its lock: $(cat "$out" 2>/dev/null || true)"
   # Non-git FM_ROOT keeps the worktree-tangle check inert so "fresh watcher ->
   # total silence" stays a pure assertion about watcher state.
-  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  printf 'done: fresh guard cleanup\n' > "$state/cleanup.status"
+  wait_for_exit "$pid" 80 || true
   [ ! -s "$err" ] || fail "guard warned with a live watcher and fresh beacon: $(cat "$err")"
   pass "guard banner leads when down with pending wakes (repair-after-drain) and stays silent when live and fresh"
 }
@@ -534,6 +543,138 @@ test_watcher_self_evicts_on_lock_takeover() {
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
   [ "$lock_pid" = "$$" ] || fail "self-evicting watcher clobbered the new holder's lock (got '$lock_pid')"
   pass "watcher self-evicts when the lock pid no longer names it"
+}
+
+test_blank_identity_live_watcher_lock_is_repaired_before_health() {
+  local dir state fakebin pid out status repaired i
+  dir=$(make_case blank-identity-health)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$dir/watch.out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+      && [ -s "$state/.watch.lock/pid-identity" ] \
+      && [ -e "$state/.last-watcher-beat" ] \
+      && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+    && [ -s "$state/.watch.lock/pid-identity" ] \
+    && [ -e "$state/.last-watcher-beat" ] \
+    || fail "blank-identity fixture watcher did not finish publishing its lock"
+  : > "$state/.watch.lock/pid-identity"
+
+  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_watcher_healthy "$2" "$3" 300 "$4"; then
+      printf "healthy pid=%s identity=%s\n" "$FM_WATCHER_HEALTHY_PID" "$FM_WATCHER_HEALTHY_IDENTITY"
+    else
+      printf "unhealthy\n"
+      exit 7
+    fi
+  ' _ "$LIB" "$state" "$WATCH" "$dir" 2>&1); status=$?
+  repaired=$(cat "$state/.watch.lock/pid-identity" 2>/dev/null || true)
+  printf 'done: blank identity cleanup\n' > "$state/cleanup.status"
+  wait_for_exit "$pid" 80 || true
+
+  expect_code 0 "$status" "fresh live watcher with blank recorded identity must be repaired into strict health"
+  assert_contains "$out" "healthy pid=$pid" "blank-identity repair did not report the live watcher"
+  [ -n "$repaired" ] || fail "blank-identity repair left pid-identity empty"
+  pass "watcher health repairs a blank identity record before accepting the live lock holder"
+}
+
+test_blank_identity_live_nonwatcher_lock_is_not_repaired_into_health() {
+  local dir state pid out status repaired identity
+  dir=$(make_case blank-identity-nonwatcher)
+  state="$dir/state"
+  sleep 60 &
+  pid=$!
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  : > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+
+  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_watcher_healthy "$2" "$3" 300 "$4"; then
+      printf "healthy pid=%s identity=%s\n" "$FM_WATCHER_HEALTHY_PID" "$FM_WATCHER_HEALTHY_IDENTITY"
+      exit 0
+    fi
+    printf "unhealthy\n"
+    exit 7
+  ' _ "$LIB" "$state" "$WATCH" "$dir" 2>&1); status=$?
+  repaired=$(cat "$state/.watch.lock/pid-identity" 2>/dev/null || true)
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid" 2>/dev/null || true)
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  expect_code 7 "$status" "blank-identity repair must not certify an unrelated live pid"
+  assert_contains "$out" "unhealthy" "unrelated live pid was not rejected"
+  [ -z "$repaired" ] || fail "unrelated live pid was repaired into a watcher identity: $repaired (actual $identity)"
+  pass "watcher health refuses to repair a blank identity from an unrelated live pid"
+}
+
+test_release_cleans_dangling_watch_lock_owner_after_spawn_guard_contention() {
+  local dir state lockdir foreign_lock referenced_link out status
+  dir=$(make_case guard-contention-dangling)
+  state="$dir/state"
+  lockdir="$state/.watch.lock"
+  foreign_lock="$state/.foreign-watch.lock"
+  referenced_link="$state/.watch.lock.owner-referenced-link"
+
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    orphan_empty="$2.owner.empty"
+    orphan_known="$2.owner.known"
+    referenced_owner="$2.owner.referenced"
+    other_state="$4/other-home/state"
+    foreign_owner="$other_state/.watch.lock.owner.foreign"
+    mkdir -p "$orphan_empty" "$orphan_known" "$referenced_owner" "$foreign_owner"
+    printf "99999999\n" > "$orphan_known/pid"
+    printf "%s\n" "$4" > "$orphan_known/fm-home"
+    printf "%s/bin/fm-watch.sh\n" "$4" > "$orphan_known/watcher-path"
+    printf "old identity\n" > "$orphan_known/pid-identity"
+    touch -t 200001010000 "$orphan_empty" "$orphan_known" "$referenced_owner" "$foreign_owner"
+    ln -s "$referenced_owner" "$5"
+
+    fm_lock_try_acquire "$2" || exit 10
+    owner=${FM_LOCK_OWNER_DIR:-}
+    [ -n "$owner" ] || exit 11
+    fm_lock_release "$2"
+    [ ! -e "$2" ] && [ ! -L "$2" ] || exit 12
+    [ ! -e "$owner" ] || exit 13
+    [ ! -e "$orphan_empty" ] || exit 14
+    [ ! -e "$orphan_known" ] || exit 15
+    [ -d "$referenced_owner" ] || exit 16
+    [ -d "$foreign_owner" ] || exit 17
+    rm -f "$5"
+    fm_lock_discard_owner "$referenced_owner"
+
+    fm_lock_try_acquire "$2" || exit 20
+    owner=${FM_LOCK_OWNER_DIR:-}
+    [ -n "$owner" ] || exit 21
+    fm_lock_discard_owner "$owner"
+    fm_lock_release "$2"
+    if [ -e "$2" ] || [ -L "$2" ]; then
+      printf "residue target=%s\n" "$(readlink "$2" 2>/dev/null || true)"
+      exit 22
+    fi
+
+    ln -s "$4/foreign-owner-missing" "$3"
+    fm_lock_release "$3"
+    [ -L "$3" ] || exit 23
+  ' _ "$LIB" "$lockdir" "$foreign_lock" "$dir" "$referenced_link" 2>&1); status=$?
+
+  expect_code 0 "$status" "self-eviction release must clear only exact-lock unowned watcher lock residue"
+  [ -z "$out" ] || fail "dangling symlink cleanup produced unexpected output: $out"
+  pass "watcher lock release removes exact-lock dangling and orphaned owner residue without crossing home boundaries"
 }
 
 test_arm_self_eviction_is_loud_without_successor() {
@@ -1140,6 +1281,9 @@ test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
+test_blank_identity_live_watcher_lock_is_repaired_before_health
+test_blank_identity_live_nonwatcher_lock_is_not_repaired_into_health
+test_release_cleans_dangling_watch_lock_owner_after_spawn_guard_contention
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
 test_attached_arm_signal_is_recorded_in_cycle_ledger
