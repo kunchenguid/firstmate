@@ -36,6 +36,7 @@ CASE_CODEX_LINGER="$TMP_ROOT/codex.linger"
 CASE_CODEX_LINGER_PID="$TMP_ROOT/codex.linger-pid"
 CASE_CODEX_MALFORMED_SLACK="$TMP_ROOT/codex.malformed-slack"
 CASE_CODEX_SLOW="$TMP_ROOT/codex.slow"
+CASE_CODEX_BLOCKED_SLACK="$TMP_ROOT/codex.blocked-slack"
 CASE_CLOCK_FILE="$TMP_ROOT/clock.fields"
 CASE_ALT_LAUNCH_AGENT_DIR="$CASE_HOME/Library/LaunchAgentsAlt"
 CASE_ALT_LAUNCH_STATE="$TMP_ROOT/launch-state-alt"
@@ -117,6 +118,13 @@ if [ -f "$FM_FAKE_CODEX_BAD_JSON" ]; then
   printf 'unparseable receipt for %s\n' "$slot" > "$out"
   exit 0
 fi
+if [ -f "$FM_FAKE_CODEX_BLOCKED_SLACK" ]; then
+  cat > "$receipts/$slot.json" <<EOF
+{"version":1,"slot":"$slot","coverage":"complete","discovered":1,"reviewed":1,"skipped":0,"failed":0,"comments_published":1,"slack_messages_sent":0,"tasks_left_in_flight":0,"reviews":[{"pr":"https://github.com/acme/widget/pull/9","head":"0123456789abcdef0123456789abcdef01234567","comment_url":"https://github.com/acme/widget/pull/9#issuecomment-91","slack":{"status":"blocked","reason":"private slack transport unavailable"}}]}
+EOF
+  printf 'review published, author notification blocked for %s\n' "$slot" > "$out"
+  exit 0
+fi
 if [ -f "$FM_FAKE_CODEX_MALFORMED_SLACK" ]; then
   cat > "$receipts/$slot.json" <<EOF
 {"version":1,"slot":"$slot","coverage":"complete","discovered":1,"reviewed":1,"skipped":0,"failed":0,"comments_published":1,"slack_messages_sent":1,"tasks_left_in_flight":0,"reviews":[{"pr":"https://github.com/acme/widget/pull/7","head":"0123456789abcdef0123456789abcdef01234567","comment_url":"https://github.com/acme/widget/pull/7#issuecomment-42","slack":"sent"}]}
@@ -177,6 +185,7 @@ run_subject() {
   FM_FAKE_CODEX_LINGER_PID="$CASE_CODEX_LINGER_PID" \
   FM_FAKE_CODEX_MALFORMED_SLACK="$CASE_CODEX_MALFORMED_SLACK" \
   FM_FAKE_CODEX_SLOW="$CASE_CODEX_SLOW" \
+  FM_FAKE_CODEX_BLOCKED_SLACK="$CASE_CODEX_BLOCKED_SLACK" \
   "$SUBJECT" "$@"
 }
 
@@ -192,6 +201,13 @@ INSTALL_OUT=$(run_subject install --source-home "$CASE_SOURCE") || fail "install
 assert_contains "$INSTALL_OUT" 'max-concurrent-reviews: 10' 'install did not report the ten-review cap'
 assert_contains "$INSTALL_OUT" 'source-branch: main' 'install did not pin the source default branch'
 assert_contains "$INSTALL_OUT" 'retention-days: 90' 'install did not report bounded artifact retention'
+assert_contains "$INSTALL_OUT" 'slack-transport: data/tools/fm-slack-message.sh (unavailable)' 'install did not report the Slack transport state'
+assert_grep 'slack_chatgpt_connector=forbidden' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not forbid the ChatGPT Slack connector'
+assert_grep 'slack_any_other_transport=forbidden' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not restrict the Slack transport'
+assert_grep 'agent_attribution=forbidden' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not forbid agent attribution'
+assert_grep 'slack_transport=data/tools/fm-slack-message.sh' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not name the authorized Slack transport'
+assert_grep 'slack_transport_state=unavailable' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not report an absent Slack transport'
+assert_absent "$CASE_APP/home/data/tools/fm-slack-message.sh" 'an absent private Slack transport was invented'
 assert_present "$CASE_APP/config/supervisor.conf" 'private config was not installed'
 assert_present "$CASE_APP/home/config/review-sweep-host-contract" 'host-job contract was not installed'
 assert_present "$CASE_LAUNCH_AGENT_DIR/dev.firstmate.review-sweep.plist" 'LaunchAgent was not installed'
@@ -233,14 +249,31 @@ set -e
 assert_eq 1 "$LEGACY_STATUS_RC" 'a config without a pinned branch should fail loudly'
 assert_contains "$LEGACY_STATUS_OUT" 'rerun install' 'a config without a pinned branch named no repair path'
 BACKFILL_OUT=$(run_subject install --source-home "$CASE_SOURCE") || fail "backfill install failed: $BACKFILL_OUT"
-assert_contains "$BACKFILL_OUT" 'backfilled: source_branch=main' 'install did not backfill the pinned branch'
+assert_contains "$BACKFILL_OUT" 'repinned: source_branch=main' 'install did not backfill the pinned branch'
 assert_grep 'source_branch=main' "$CASE_ALT_APP/config/supervisor.conf" 'backfill did not persist the pinned branch'
 assert_grep 'retention_days=90' "$CASE_ALT_APP/config/supervisor.conf" 'backfill discarded other configuration'
 assert_eq 1 "$(grep -c '^source_branch=' "$CASE_ALT_APP/config/supervisor.conf")" 'backfill duplicated the pinned branch key'
+STABLE_OUT=$(run_subject install --source-home "$CASE_SOURCE") || fail "stable reinstall failed: $STABLE_OUT"
+assert_not_contains "$STABLE_OUT" 'repinned:' 'a resolvable pin was rewritten'
+# A pin the source home no longer carries must be repairable by the same reinstall.
+sed 's/^source_branch=.*/source_branch=retired-default/' "$CASE_ALT_APP/config/supervisor.conf" > "$TMP_ROOT/repin.conf"
+cp "$TMP_ROOT/repin.conf" "$CASE_ALT_APP/config/supervisor.conf"
+set +e
+MISSING_PIN_OUT=$(FM_REVIEW_SWEEP_NOW_FIELDS='20260828 09 00 20000 -0500' run_subject tick 2>&1)
+MISSING_PIN_RC=$?
+set -e
+assert_eq 1 "$MISSING_PIN_RC" 'a vanished pinned branch should fail loudly'
+assert_contains "$MISSING_PIN_OUT" "no longer carries its pinned branch 'retired-default'" 'a vanished pinned branch was not named'
+assert_contains "$MISSING_PIN_OUT" 'rerun install' 'a vanished pinned branch named no recovery path'
+REPIN_OUT=$(run_subject install --source-home "$CASE_SOURCE") || fail "repin install failed: $REPIN_OUT"
+assert_contains "$REPIN_OUT" 'repinned: source_branch=main' 'install did not re-resolve a vanished pinned branch'
+assert_grep 'source_branch=main' "$CASE_ALT_APP/config/supervisor.conf" 'repin did not persist the resolved branch'
+assert_eq 1 "$(grep -c '^source_branch=' "$CASE_ALT_APP/config/supervisor.conf")" 'repin duplicated the pinned branch key'
+assert_no_grep 'source_branch=retired-default' "$CASE_ALT_APP/config/supervisor.conf" 'repin left the vanished branch behind'
 SUBJECT_APP_ROOT="$CASE_APP"
 SUBJECT_LAUNCH_AGENT_DIR="$CASE_LAUNCH_AGENT_DIR"
 SUBJECT_LAUNCH_STATE="$CASE_LAUNCH_STATE"
-pass 'install backfills a pinned branch into a private config written before that key existed'
+pass 'install repins the source branch when it is missing or vanished, and leaves a valid pin alone'
 
 set +e
 BEFORE_OUT=$(run_subject slot-at 20260826 06 59 2>&1)
@@ -283,6 +316,10 @@ assert_eq 1 "$(codex_runs)" 'first due slot did not invoke Codex exactly once'
 assert_grep 'maximum of 10 concurrent independent PR reviews' "$CASE_CODEX_LOG" 'cycle prompt did not carry approved large-swarm cap'
 assert_grep 'publication-and-Slack notification sequence' "$CASE_CODEX_LOG" 'cycle prompt did not bind publication to notification'
 assert_grep "Do not finish while this home's state contains task metadata" "$CASE_CODEX_LOG" 'cycle prompt did not require teardown'
+assert_grep 'The ChatGPT Slack connector is forbidden' "$CASE_CODEX_LOG" 'cycle prompt did not forbid the attributing Slack connector'
+assert_grep 'data/tools/fm-slack-message.sh with an available SLACK_BOT_TOKEN' "$CASE_CODEX_LOG" 'cycle prompt did not require the authorized Slack transport'
+assert_grep 'send nothing at all' "$CASE_CODEX_LOG" 'cycle prompt did not forbid a fallback transport'
+assert_grep 'record that PR' "$CASE_CODEX_LOG" 'cycle prompt did not require a blocked notification record'
 assert_present "$CASE_APP/home/state/review-sweep-cycle-receipts/20260826-0700.json" 'cycle receipt was not retained'
 pass 'a due slot runs once and requires publication, notification, receipt, and teardown'
 
@@ -500,15 +537,49 @@ printf '%s\n%s\n' "$CODEX_LIKE_PGID" "$(date +%s)" > "$CASE_APP/state/run.lock/c
 LIVE_PGID_OUT=$(run_tick '20260828 11 30 12900 -0500') || fail "live cycle group tick failed: $LIVE_PGID_OUT"
 assert_contains "$LIVE_PGID_OUT" "busy: review-sweep cycle process group $CODEX_LIKE_PGID outlived its supervisor" 'a live cycle group no longer excludes a second cycle'
 assert_eq 14 "$(codex_runs)" 'a live cycle group did not exclude a second cycle'
+# A surviving reviewer whose codex parent already exited is exactly what the
+# retained lock exists for, so a live group must block even without codex in it.
 printf '%s\n%s\n' "$STRAY_PGID" "$(date +%s)" > "$CASE_APP/state/run.lock/cycle-pgid"
-STALE_PGID_OUT=$(run_tick '20260828 11 30 12901 -0500') || fail "stale cycle group tick failed: $STALE_PGID_OUT"
-assert_contains "$STALE_PGID_OUT" "reclaim: retiring an unverifiable review-sweep cycle process group record ($STRAY_PGID)" 'a reused cycle process group id wedged the supervisor'
+ORPHAN_WRITER_OUT=$(run_tick '20260828 11 30 12901 -0500') || fail "orphan writer tick failed: $ORPHAN_WRITER_OUT"
+assert_contains "$ORPHAN_WRITER_OUT" "busy: review-sweep cycle process group $STRAY_PGID outlived its supervisor" 'a live orphaned writer group no longer excludes a second cycle'
+assert_not_contains "$ORPHAN_WRITER_OUT" 'reclaim:' 'a live orphaned writer group was retired'
+assert_eq 14 "$(codex_runs)" 'a live orphaned writer group did not exclude a second cycle'
+# A record older than any cycle could possibly be is positive reuse evidence.
+printf '%s\n%s\n' "$STRAY_PGID" 1 > "$CASE_APP/state/run.lock/cycle-pgid"
+STALE_PGID_OUT=$(run_tick '20260828 11 30 12902 -0500') || fail "stale cycle group tick failed: $STALE_PGID_OUT"
+assert_contains "$STALE_PGID_OUT" "reclaim: retiring a review-sweep cycle process group record ($STRAY_PGID) that outlived any possible cycle" 'a reused cycle process group id wedged the supervisor'
 assert_contains "$STALE_PGID_OUT" 'slot=20260828-1130 status=succeeded' 'the reclaimed slot did not run'
 assert_eq 15 "$(codex_runs)" 'the reclaimed slot did not invoke Codex once'
+# Even past that bound, a group still positively running codex keeps the lock.
+mkdir -p "$CASE_APP/state/run.lock"
+printf '%s\n' "$STRAY_OWNER_PID" > "$CASE_APP/state/run.lock/owner"
+printf '%s\n%s\n' "$CODEX_LIKE_PGID" 1 > "$CASE_APP/state/run.lock/cycle-pgid"
+EXPIRED_CODEX_OUT=$(run_tick '20260828 12 00 12903 -0500') || fail "expired codex group tick failed: $EXPIRED_CODEX_OUT"
+assert_contains "$EXPIRED_CODEX_OUT" "busy: review-sweep cycle process group $CODEX_LIKE_PGID outlived its supervisor" 'an expired record still running codex was retired'
+assert_eq 15 "$(codex_runs)" 'an expired record still running codex did not exclude a cycle'
+rm -f -- "$CASE_APP/state/run.lock/owner" "$CASE_APP/state/run.lock/cycle-pgid"
+rmdir -- "$CASE_APP/state/run.lock"
 kill -KILL "-$CODEX_LIKE_PGID" 2>/dev/null || true
 kill -KILL "-$STRAY_PGID" 2>/dev/null || true
 trap fm_test_cleanup EXIT
-pass 'a cycle process group record is honored only while it verifies, and retired otherwise'
+pass 'a live cycle process group always blocks, and only positive expiry evidence retires its record'
+
+mkdir -p "$CASE_SOURCE/data/tools"
+cat > "$CASE_SOURCE/data/tools/fm-slack-message.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'https://example.slack.com/archives/C0/p1\n'
+SH
+chmod +x "$CASE_SOURCE/data/tools/fm-slack-message.sh"
+touch "$CASE_CODEX_BLOCKED_SLACK"
+BLOCKED_OUT=$(run_tick '20260828 14 00 13400 -0500') || fail "blocked notification tick failed: $BLOCKED_OUT"
+rm -f -- "$CASE_CODEX_BLOCKED_SLACK"
+assert_contains "$BLOCKED_OUT" 'slot=20260828-1400 status=succeeded' 'a published review with a blocked notification was rejected'
+assert_eq 16 "$(codex_runs)" 'the blocked-notification case did not run exactly once'
+assert_present "$CASE_APP/home/data/tools/fm-slack-message.sh" 'the private Slack transport was not provisioned'
+[ -x "$CASE_APP/home/data/tools/fm-slack-message.sh" ] || fail 'the provisioned Slack transport is not executable'
+assert_grep 'slack_transport_state=available' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not report the provisioned Slack transport'
+rm -f -- "$CASE_SOURCE/data/tools/fm-slack-message.sh"
+pass 'the authorized Slack transport is provisioned and a blocked notification is a valid receipt outcome'
 
 sed 's/^max_runtime_seconds=.*/max_runtime_seconds=1/' "$CASE_APP/config/supervisor.conf" > "$TMP_ROOT/bounded.conf"
 cp "$TMP_ROOT/bounded.conf" "$CASE_APP/config/supervisor.conf"
@@ -524,10 +595,10 @@ assert_eq 124 "$BOUNDED_RC" 'a cycle past its runtime bound did not report the t
 assert_contains "$BOUNDED_OUT" 'exceeded 1 seconds' 'the runtime bound was not enforced'
 assert_contains "$BOUNDED_OUT" 'slot=20260828-1200 status=succeeded exit=124 publication=verified' 'a verified publication was discarded with the failed cycle'
 assert_eq 0 "$(sed -n '1p' "$CASE_APP/state/slots/20260828-1200/receipt-status")" 'the receipt verdict was not recorded for a failed cycle'
-assert_eq 16 "$(codex_runs)" 'the bounded cycle did not run exactly once'
+assert_eq 17 "$(codex_runs)" 'the bounded cycle did not run exactly once'
 REPUBLISH_OUT=$(run_tick '20260828 12 05 13010 -0500') || fail "post-timeout tick failed: $REPUBLISH_OUT"
 assert_contains "$REPUBLISH_OUT" 'noop: slot 20260828-1200 already succeeded' 'a verified publication was scheduled again'
-assert_eq 16 "$(codex_runs)" 'a verified publication was published twice'
+assert_eq 17 "$(codex_runs)" 'a verified publication was published twice'
 pass 'a cycle that verified its publication is never re-run, even when it ended badly'
 
 touch "$CASE_CODEX_MALFORMED_SLACK"
@@ -557,7 +628,7 @@ set -e
 rm -f -- "$CASE_BIN/jq"
 assert_eq 77 "$JQ_BROKEN_RC" 'an unrunnable receipt gate was not reported as a tooling failure'
 assert_contains "$JQ_BROKEN_OUT" 'receipt gate could not be run by jq' 'an unrunnable receipt gate was not named'
-assert_eq 18 "$(codex_runs)" 'the receipt classification cases did not run once each'
+assert_eq 19 "$(codex_runs)" 'the receipt classification cases did not run once each'
 pass 'a malformed receipt field is a contract violation and only an unrunnable gate is a tooling failure'
 
 mkdir -p "$CASE_APP/state/slots/20200101-0700" "$CASE_APP/results/20200101-0700" "$TMP_ROOT/linked-slot"
@@ -574,7 +645,7 @@ touch -t 202001010000 "$CASE_APP/state/slots/20200101-0700" "$CASE_APP/results/2
 touch -h -t 202001010000 "$CASE_APP/results/20200101-0900"
 RETAIN_OUT=$(run_tick '20260828 13 30 13300 -0500') || fail "retention tick failed: $RETAIN_OUT"
 assert_contains "$RETAIN_OUT" 'slot=20260828-1330 status=succeeded' 'the retention cycle did not complete'
-assert_eq 19 "$(codex_runs)" 'the retention cycle did not invoke Codex once'
+assert_eq 20 "$(codex_runs)" 'the retention cycle did not invoke Codex once'
 assert_absent "$CASE_APP/state/slots/20200101-0700" 'an expired slot record was retained'
 assert_absent "$CASE_APP/results/20200101-0700" 'an expired result directory was retained'
 assert_absent "$CASE_APP/home/state/review-sweep-cycle-receipts/20200101-0700.json" 'an expired receipt was retained'

@@ -406,7 +406,7 @@ bin/fm-review-sweep-supervisor.sh install --source-home "$PWD"
 
 Installation validates the supplied source home before it persists any private configuration, so a mistyped `--source-home` leaves nothing behind and the installer stays reusable.
 It also pins the source repository's default branch and records it as `source_branch`; the automation home tracks that branch afterwards, so switching working branches in the captain's live checkout never disables the scheduled job.
-Rerunning install against a private configuration written before that key existed backfills the pinned branch in place, so no hand edit under the private application-support directory is ever required.
+Rerunning install against a private configuration written before that key existed, or one pinned to a branch the source home no longer carries, re-resolves and rewrites the pin in place, so no hand edit under the private application-support directory is ever required; a pin that still resolves is never rewritten.
 `jq` is required and is checked whenever configuration loads, rather than being discovered as a receipt failure later.
 
 The automation home is a clone this script owns, and it is kept exactly on the pinned branch.
@@ -421,12 +421,19 @@ A wake after sleep or reboot runs only the newest missed slot from the current C
 A single owner lock excludes overlap between launchd and manual runs, and an abandoned running slot resumes under the same slot identity.
 A failed cycle waits five minutes measured from when that cycle actually finished, so a long cycle still throttles before its next attempt.
 A lock directory left behind by a crash between its creation and its owner record is respected briefly and then reclaimed, so the job self-heals instead of wedging invisibly.
-The lock also records the cycle's process group, and that record is honored only while the group is still live, still runs the configured codex binary, and is younger than any cycle could legitimately be; a record that fails those checks - a group id reused after a reboot, for instance - is retired rather than trusted forever, and `status` reports it as reclaimable rather than as a running cycle.
+The lock also records the cycle's process group, and that record is fail-closed: any live group keeps the lock, including one whose codex process has already exited but whose reviewer descendants are still running, because a surviving reviewer is exactly what the exclusion exists for.
+A record is retired only on positive evidence that it can no longer be a real cycle - it is older than `max_runtime_seconds` plus the lock grace, which no cycle can outlive, and the group no longer runs the configured codex binary.
+That bound is the guaranteed self-heal for a group id reused after a reboot, and `status` reports such a record as reclaimable rather than as a running cycle.
 
 Each cycle starts a fresh non-interactive Codex process in the isolated home and invokes the installed skill.
 The cycle runs in its own verified process group, and a timeout or a supervisor signal terminates that exact group; the owner lock is released only once the whole group is confirmed gone, so no reviewer still holding GitHub and Slack write authorization can outlive the exclusion that stops a second cycle for the same slot.
 The skill remains the owner of live Jira pagination, GitHub discovery, watermark checks, review content, comment publication, own-comment minimization, and the exact Slack author notification.
-The supervisor accepts success only when no task metadata remains and the cycle writes a valid receipt binding every reviewed PR to its exact head, direct GitHub comment URL, and either a direct Slack message URL or a unique-match skip reason.
+The supervisor accepts success only when no task metadata remains and the cycle writes a valid receipt binding every reviewed PR to its exact head, direct GitHub comment URL, and either a direct Slack permalink or a reason the author was not notified.
+
+Slack author notifications may leave this job through exactly one route: the captain's private direct Web API helper at `data/tools/fm-slack-message.sh`, which the supervisor provisions into the automation home from the source home and names in the host contract along with whether it was actually provisioned for this cycle.
+The ChatGPT Slack connector is forbidden for every message in this job, because it appends agent attribution to the delivered message even when the submitted payload is exact, and the captain prohibits agent attribution everywhere.
+No other Slack transport, tool, connector, or MCP server may be used, and there is no fallback: if the helper is missing or not executable, if `SLACK_BOT_TOKEN` is unavailable, or if the helper fails or returns no permalink, the cycle sends nothing and records that PR's notification as `blocked` with the exact reason, in both the receipt and the captain-facing result.
+A receipt row is therefore `sent` with the permalink the helper returned, `skipped` when no unique author matched, or `blocked` when the author was known but the authorized transport could not be used.
 A missing receipt (74), a receipt that is not readable JSON (76), a receipt that violates the publication contract (75), and a receipt gate that `jq` itself could not run (77) are distinct failures, so a tooling problem is never reported as a publication problem.
 A receipt whose field types make the contract unevaluable counts as a contract violation, not as a tooling failure.
 The receipt is read and recorded on every cycle, whatever else went wrong, and the verdict is kept in the slot ledger and reported by `status`.
@@ -436,7 +443,7 @@ The runtime is bounded to three hours by default, after which the slot is failed
 Artifacts are bounded. A verified cycle keeps its prompt, compact final result, and receipt, and discards the raw Codex event stream; only the most recent failure retains a bounded diagnostic tail of that stream.
 Supervisor-owned slot records, result directories, and receipt files older than `retention_days` (90 by default) are removed after a cycle runs, and pruning skips symlinks and anything that is not the shape it expects.
 
-Use `bin/fm-review-sweep-supervisor.sh status` to verify the loaded LaunchAgent, schedule, pinned branch, retention horizon, current owner, last successful slot, and isolated-home task count.
+Use `bin/fm-review-sweep-supervisor.sh status` to verify the loaded LaunchAgent, schedule, pinned branch, retention horizon, Slack transport availability, current owner, last successful slot, and isolated-home task count.
 Use `bin/fm-review-sweep-supervisor.sh run-now` for an immediate cycle through the same lock and receipt gates.
 Use `bin/fm-review-sweep-supervisor.sh uninstall` to boot out the LaunchAgent and remove its property list while retaining private configuration, reports, receipts, logs, and the isolated home for recovery.
 The script header and `--help` output own exact private paths, commands, configuration keys, state transitions, and test overrides.

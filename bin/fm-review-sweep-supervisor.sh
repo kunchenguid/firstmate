@@ -61,6 +61,12 @@
 #   * The cycle receipt is read and recorded whatever else went wrong. A slot
 #     whose publication verified is never re-run, so a stray surviving process
 #     is reported and the lock retained without duplicating comments or DMs.
+#   * Slack author notifications may leave this job through exactly one route:
+#     the captain's private direct Web API helper, provisioned into the
+#     automation home and named in the host contract. The ChatGPT Slack
+#     connector is forbidden because it appends agent attribution, and no
+#     fallback transport exists: a notification that cannot use the authorized
+#     helper is recorded as blocked in the receipt and in the captain's result.
 #   * The automation home is a clone this script owns. When the pinned source
 #     history is rewritten it is realigned to the exact source head, but only
 #     after its identity, pinned branch, and clean tracked worktree re-verify.
@@ -96,6 +102,7 @@ DEFAULT_MAX_CONCURRENT_REVIEWS=10
 DEFAULT_RETRY_SECONDS=300
 DEFAULT_MAX_RUNTIME_SECONDS=10800
 DEFAULT_RETENTION_DAYS=90
+SLACK_TRANSPORT_RELATIVE=data/tools/fm-slack-message.sh
 LOCK_ORPHAN_GRACE_SECONDS=120
 CYCLE_STOP_GRACE_SECONDS=15
 CYCLE_KILL_GRACE_SECONDS=5
@@ -290,8 +297,8 @@ path_mtime() { # <path>
   printf '%s\n' "$value"
 }
 
-copy_private_file() { # <source> <destination>
-  local src=$1 dest=$2 parent tmp
+copy_private_file() { # <source> <destination> [mode]
+  local src=$1 dest=$2 mode=${3:-0600} parent tmp
   if [ ! -e "$src" ] && [ ! -L "$src" ]; then
     [ ! -e "$dest" ] && [ ! -L "$dest" ] || rm -f -- "$dest"
     return 0
@@ -301,11 +308,11 @@ copy_private_file() { # <source> <destination>
   mkdir -p "$parent"
   [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
   if [ -f "$dest" ] && [ ! -L "$dest" ] && cmp -s "$src" "$dest"; then
-    chmod 0600 "$dest" 2>/dev/null || true
+    chmod "$mode" "$dest" 2>/dev/null || true
     return 0
   fi
   tmp=$(mktemp "$parent/.fm-review-sweep-copy.XXXXXX") || return 1
-  if ! cp "$src" "$tmp" || ! chmod 0600 "$tmp" || ! mv -f -- "$tmp" "$dest"; then
+  if ! cp "$src" "$tmp" || ! chmod "$mode" "$tmp" || ! mv -f -- "$tmp" "$dest"; then
     rm -f -- "$tmp" 2>/dev/null || true
     return 1
   fi
@@ -355,8 +362,8 @@ source_default_branch() { # <path>
 
 ensure_automation_home() {
   validate_source_home "$SOURCE_HOME"
-  git -C "$SOURCE_HOME" rev-parse --verify --quiet "refs/heads/$SOURCE_BRANCH^{commit}" >/dev/null 2>&1 \
-    || die "source_home no longer carries its pinned branch '$SOURCE_BRANCH'"
+  source_branch_is_present \
+    || die "source_home no longer carries its pinned branch '$SOURCE_BRANCH'; rerun install --source-home $SOURCE_HOME to repin it"
 
   if [ ! -e "$AUTOMATION_HOME" ]; then
     mkdir -p "${AUTOMATION_HOME%/*}"
@@ -427,6 +434,10 @@ sync_private_context() {
     copy_private_file "$SOURCE_HOME/data/$name" "$AUTOMATION_HOME/data/$name" \
       || die "failed to synchronize data/$name"
   done
+  # The only Slack transport this job may use is the captain's private direct
+  # Web API helper, so it is provisioned here rather than discovered at run time.
+  copy_private_file "$SOURCE_HOME/$SLACK_TRANSPORT_RELATIVE" "$AUTOMATION_HOME/$SLACK_TRANSPORT_RELATIVE" 0700 \
+    || die "failed to synchronize $SLACK_TRANSPORT_RELATIVE"
   # shellcheck source=bin/fm-config-inherit-lib.sh
   . "$AUTOMATION_HOME/bin/fm-config-inherit-lib.sh"
   propagate_secondmate_inheritance "$SOURCE_HOME" "$AUTOMATION_HOME" \
@@ -457,6 +468,15 @@ sync_projects() {
   done < <(awk '$1 == "-" { print $2 }' "$registry")
 }
 
+slack_transport_state() {
+  local path="$AUTOMATION_HOME/$SLACK_TRANSPORT_RELATIVE"
+  if [ -f "$path" ] && [ ! -L "$path" ] && [ -x "$path" ]; then
+    printf 'available\n'
+  else
+    printf 'unavailable\n'
+  fi
+}
+
 host_contract_text() {
   cat <<EOF
 version=1
@@ -468,6 +488,12 @@ publish_review_comments=authorized
 minimize_own_superseded_comments=authorized
 slack_pr_author_direct_message=authorized
 slack_message_template=Review posted: <direct PR comment URL>
+slack_transport=$SLACK_TRANSPORT_RELATIVE
+slack_transport_state=$(slack_transport_state)
+slack_transport_requires=SLACK_BOT_TOKEN
+slack_chatgpt_connector=forbidden
+slack_any_other_transport=forbidden
+agent_attribution=forbidden
 edit_code=forbidden
 merge_pull_requests=forbidden
 mutate_jira=forbidden
@@ -523,12 +549,18 @@ retention_days=$DEFAULT_RETENTION_DAYS
 enabled=1" || die 'failed to write private supervisor config'
 }
 
-backfill_source_branch() { # <branch>
+pin_source_branch() { # <branch>
   local branch=$1 existing
   safe_branch_name "$branch" || die 'resolved source branch is unsafe'
-  existing=$(cat "$CONFIG_PATH") || die 'cannot read the private supervisor config'
+  existing=$(grep -v '^[[:space:]]*source_branch[[:space:]]*=' "$CONFIG_PATH") \
+    || die 'cannot read the private supervisor config'
   atomic_write "$CONFIG_PATH" 0600 "$existing
-source_branch=$branch" || die 'failed to backfill source_branch into the private config'
+source_branch=$branch" || die 'failed to persist source_branch in the private config'
+}
+
+source_branch_is_present() {
+  [ -n "$SOURCE_BRANCH" ] || return 1
+  git -C "$SOURCE_HOME" rev-parse --verify --quiet "refs/heads/$SOURCE_BRANCH^{commit}" >/dev/null 2>&1
 }
 
 install_runtime_script() {
@@ -743,26 +775,41 @@ process_group_runs_codex() { # <pgid>
   ps -A -o pgid=,command= 2>/dev/null | awk -v g="$1" '$1 == g { print }' | grep -Fq -- "$CODEX_BIN"
 }
 
+lock_cycle_record_age_seconds() {
+  local epoch now
+  epoch=$(lock_cycle_record_field 2) || epoch=
+  if ! safe_nonnegative_integer "${epoch:-}"; then
+    lock_dir_age_seconds
+    return
+  fi
+  now=$(date +%s)
+  safe_nonnegative_integer "$now" || return 1
+  [ "$now" -ge "$epoch" ] || return 1
+  printf '%s\n' "$((now - epoch))"
+}
+
 # Prints the recorded cycle process group id and reports:
-#   0  a verified cycle group from this record is still live
+#   0  a live group that cannot be positively ruled out as this cycle's writers
 #   1  there is no usable record, or its group is already gone
-#   2  the record is live but unverifiable, so it is safe to retire
+#   2  positive evidence that the record is stale or its id was reused
+#
+# This classification is deliberately fail-closed. A live group that still holds
+# GitHub and Slack write authorization keeps the lock even when the codex process
+# itself has already exited, because a surviving reviewer is exactly what the
+# exclusion exists for. Only the age bound - which no legitimate cycle can pass,
+# since a cycle is terminated at max_runtime_seconds - retires a live record, and
+# even then not while the group still positively runs the configured codex binary.
 lock_cycle_group_status() {
-  local pgid epoch now age bound
+  local pgid age bound
   pgid=$(lock_cycle_record_field 1) || return 1
   safe_positive_integer "${pgid:-}" || return 1
   printf '%s\n' "$pgid"
   kill -0 "-$pgid" 2>/dev/null || return 1
-  epoch=$(lock_cycle_record_field 2) || epoch=
-  safe_nonnegative_integer "${epoch:-}" || return 2
-  now=$(date +%s)
-  safe_nonnegative_integer "$now" || return 2
-  [ "$now" -ge "$epoch" ] || return 2
-  age=$((now - epoch))
+  age=$(lock_cycle_record_age_seconds) || return 0
   bound=$((MAX_RUNTIME_SECONDS + LOCK_ORPHAN_GRACE_SECONDS))
-  [ "$age" -le "$bound" ] || return 2
-  process_group_runs_codex "$pgid" || return 2
-  return 0
+  [ "$age" -gt "$bound" ] || return 0
+  if process_group_runs_codex "$pgid"; then return 0; fi
+  return 2
 }
 
 retire_lock_directory() {
@@ -790,10 +837,9 @@ acquire_run_lock() {
         return 1
       fi
       # A dead supervisor whose cycle process group outlived it still holds the
-      # external write authorization, so the lock must not be reclaimed yet. A
-      # record that cannot be verified as that group - a reused id after a
-      # reboot, or one older than any cycle could legitimately run - is retired
-      # instead of trusted forever.
+      # external write authorization, so the lock is kept for any live group that
+      # cannot be positively ruled out. Only positive evidence that the record is
+      # stale or its id was reused retires it.
       cycle_rc=0
       pgid=$(lock_cycle_group_status) || cycle_rc=$?
       if [ "$cycle_rc" -eq 0 ]; then
@@ -801,7 +847,7 @@ acquire_run_lock() {
         return 1
       fi
       if [ "$cycle_rc" -eq 2 ]; then
-        printf 'reclaim: retiring an unverifiable review-sweep cycle process group record (%s)\n' \
+        printf 'reclaim: retiring a review-sweep cycle process group record (%s) that outlived any possible cycle\n' \
           "${pgid:-unknown}"
       fi
     else
@@ -993,11 +1039,13 @@ First reconcile every task already recorded in this isolated home. Recover unfin
 
 Then refresh Jira live with complete pagination, discover eligible open PR heads, and execute one idempotent sweep. Dispatch no more than $MAX_CONCURRENT_REVIEWS focused reviewers at once. Review only: do not edit project code, merge, push, mutate Jira, or publish anything other than the skill's authorized review comments, minimization of the configured reviewer's own superseded watermark comments, and exact PR-author Slack direct message.
 
+Slack notification transport is restricted to exactly one route: run $AUTOMATION_HOME/$SLACK_TRANSPORT_RELATIVE with an available SLACK_BOT_TOKEN, send the exact authorized message, and capture the direct permalink that helper returns. The ChatGPT Slack connector is forbidden for every message in this job, because it appends agent attribution the captain prohibits; no message may carry any agent or AI attribution. Any other Slack transport, tool, connector, or MCP server is forbidden too. If that helper is missing or not executable, if SLACK_BOT_TOKEN is unavailable, or if the helper fails or returns no permalink, send nothing at all: do not retry through another route, and record that PR's notification as blocked with the exact reason. The host contract's slack_transport_state field states whether the transport was provisioned for this cycle.
+
 After dispatch, supervise in the foreground until every task from this cycle is terminal. Reconcile reports and receipts, complete publication followed immediately by Slack notification, close task records, and run guarded teardown. Do not finish while this home's state contains task metadata. If coverage is partial or an author identity is ambiguous, record that plainly and leave no fabricated success. If no PR needs review, send no Slack message and finish as a verified no-op.
 
-Return the skill's required review table plus totals for discovered, reviewed, skipped, failed, comments published, Slack messages sent, and tasks left in flight. The final in-flight total must be zero for a successful cycle.
+Return the skill's required review table plus totals for discovered, reviewed, skipped, failed, comments published, Slack messages sent, Slack notifications blocked, and tasks left in flight. Name every blocked notification and its reason in that result so the captain sees which authors were not told. The final in-flight total must be zero for a successful cycle.
 
-Before finishing, atomically write this machine receipt to $AUTOMATION_HOME/state/review-sweep-cycle-receipts/$slot.json. Use version 1, slot "$slot", coverage "complete" only after full Jira and GitHub verification, nonnegative integer fields discovered/reviewed/skipped/comments_published/slack_messages_sent, integer failed 0, integer tasks_left_in_flight 0, and a reviews array with exactly one row per reviewed PR. Each row must contain pr, full head, direct comment_url, and slack. slack is either {"status":"sent","message_url":"<direct Slack message URL>"} or {"status":"skipped","reason":"<no unique author match reason>"}. comments_published must equal reviewed. slack_messages_sent must equal the number of sent rows. A no-op sweep uses zero counts and an empty reviews array. Do not write coverage complete when any required coverage, publication, notification decision, metadata reconciliation, or teardown is unresolved.
+Before finishing, atomically write this machine receipt to $AUTOMATION_HOME/state/review-sweep-cycle-receipts/$slot.json. Use version 1, slot "$slot", coverage "complete" only after full Jira and GitHub verification, nonnegative integer fields discovered/reviewed/skipped/comments_published/slack_messages_sent, integer failed 0, integer tasks_left_in_flight 0, and a reviews array with exactly one row per reviewed PR. Each row must contain pr, full head, direct comment_url, and slack. slack is exactly one of {"status":"sent","message_url":"<direct Slack permalink returned by the transport>"}, {"status":"skipped","reason":"<no unique author match reason>"}, or {"status":"blocked","reason":"<why the authorized transport could not be used>"}. Use blocked, never skipped, when the author was identified but the private transport was unavailable or failed. comments_published must equal reviewed. slack_messages_sent must equal the number of sent rows, and every sent row must carry the permalink the transport returned. A no-op sweep uses zero counts and an empty reviews array. Do not write coverage complete when any required coverage, publication, notification decision, metadata reconciliation, or teardown is unresolved.
 EOF
 }
 
@@ -1023,7 +1071,7 @@ all($receipt.reviews[];
   (.head | type == "string" and test("^[0-9a-f]{40}([0-9a-f]{24})?$")) and
   (.comment_url | type == "string" and test("^https://github[.]com/[^/]+/[^/]+/pull/[0-9]+#issuecomment-[0-9]+$")) and
   ((.slack | type) == "object") and
-  (.slack.status == "sent" or .slack.status == "skipped") and
+  (.slack.status == "sent" or .slack.status == "skipped" or .slack.status == "blocked") and
   (if .slack.status == "sent" then
      (.slack.message_url | type == "string" and test("^https://[^/]*slack[.]com/archives/"))
    else
@@ -1336,15 +1384,17 @@ install_supervisor() {
     load_config --allow-missing-source-branch
     [ "$SOURCE_HOME" = "$source" ] \
       || die "existing config belongs to source_home $SOURCE_HOME; remove $CONFIG_PATH to install a different source home"
-    if [ -z "$SOURCE_BRANCH" ]; then
-      # A config written before the branch pin is repaired in place rather than
-      # requiring a hand edit under the private application-support directory.
+    if ! source_branch_is_present; then
+      # A config written before the branch pin, or one pinned to a branch the
+      # source home no longer carries, is repaired in place rather than requiring
+      # a hand edit under the private application-support directory. A pin that
+      # still resolves is never rewritten.
       validate_source_home "$SOURCE_HOME"
       branch=$(source_default_branch "$SOURCE_HOME") \
         || die 'cannot resolve the default branch of source_home'
-      backfill_source_branch "$branch"
+      pin_source_branch "$branch"
       load_config
-      printf 'backfilled: source_branch=%s\n' "$SOURCE_BRANCH"
+      printf 'repinned: source_branch=%s\n' "$SOURCE_BRANCH"
     fi
   else
     # Nothing is persisted until the supplied home proves it is a Firstmate
@@ -1369,6 +1419,7 @@ install_supervisor() {
   printf 'max-concurrent-reviews: %s\n' "$MAX_CONCURRENT_REVIEWS"
   printf 'source-branch: %s\n' "$SOURCE_BRANCH"
   printf 'retention-days: %s\n' "$RETENTION_DAYS"
+  printf 'slack-transport: %s (%s)\n' "$SLACK_TRANSPORT_RELATIVE" "$(slack_transport_state)"
   printf 'automation-home: %s\n' "$AUTOMATION_HOME"
   printf 'config: %s\n' "$CONFIG_PATH"
 }
@@ -1392,7 +1443,7 @@ status_supervisor() {
       elif [ "$cycle_rc" -eq 0 ]; then
         lock="orphaned cycle process group=$pgid"
       elif [ "$cycle_rc" -eq 2 ]; then
-        lock="reclaimable stale cycle process group record=${pgid:-unknown}"
+        lock="reclaimable expired cycle process group record=${pgid:-unknown}"
       else
         lock="stale pid=${owner:-unknown}"
       fi
@@ -1413,6 +1464,7 @@ status_supervisor() {
   printf 'max-concurrent-reviews: %s\n' "$MAX_CONCURRENT_REVIEWS"
   printf 'source-branch: %s\n' "$SOURCE_BRANCH"
   printf 'retention-days: %s\n' "$RETENTION_DAYS"
+  printf 'slack-transport: %s (%s)\n' "$SLACK_TRANSPORT_RELATIVE" "$(slack_transport_state)"
   printf 'cycle: %s\n' "$lock"
   printf 'last-succeeded-slot: %s\n' "$latest"
   printf 'last-slot-status: %s\n' "$slot_status"
