@@ -37,6 +37,7 @@ Edit inside the sections, never the outline.
 ## One clause per bullet
 
 A bullet is an index entry, not a paragraph.
+Keep every capability list brief, and prefer one sentence per bullet wherever the announcement lists bullet points.
 If a bullet has a second sentence, that sentence is almost always the cut.
 
 Before:
@@ -91,6 +92,7 @@ A reader who needs that detail is already past the announcement.
 ## Link plainly
 
 Bare domain and path on its own line, no scheme and no label text.
+Keep the scheme when the host is not one Slack will auto-link, such as an internal or non-public-suffix hostname.
 
 This does not relax `AGENTS.md` section 9's requirement for a full `https://` URL in captain-facing chat about a PR.
 Different audience, different rule: nothing here is a general relaxation of that requirement.
@@ -105,11 +107,11 @@ An announcement carries no captain attribution.
 
 ## Final deletion pass
 
-Run this pass in order before handing the draft over:
+Run this pass in order before handing the draft over, applying the rules above rather than overriding them:
 
-1. Delete every second sentence of every bullet.
-2. Delete every clause beginning "never", "rather than", or "not a".
-3. Delete every em dash.
-4. Delete every sentence about how the thing is built or refreshed.
+1. Cut the second sentence of every bullet: it is almost always the cut, so keep it only when it passes the prevent-a-wrong-action test above.
+2. Cut every defensive clause beginning "never", "rather than", or "not a", keeping the "what it is not" section's own content and any clause that passes that same test.
+3. Replace every em dash with a colon or a full stop, or restructure the sentence, and never remove a clause separator in a way that leaves a run-on.
+4. Cut every sentence about how the thing is built or refreshed.
 
 Then confirm the outline still stands.
