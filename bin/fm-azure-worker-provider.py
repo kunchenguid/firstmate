@@ -481,6 +481,13 @@ def resource_record(kind, value, power_state=None, tags_override=None):
     return record
 
 
+def azure_resource_not_found(stderr):
+    return bool(re.search(
+        r"(?:\(ResourceNotFound\)|^Code:\s*ResourceNotFound\s*$)",
+        str(stderr or ""), re.MULTILINE,
+    ))
+
+
 def show_full(controller, resource_id, api_version=None, inventory_missing_ok=False):
     args = ["resource", "show", "--ids", resource_id]
     if api_version:
@@ -492,10 +499,7 @@ def show_full(controller, resource_id, api_version=None, inventory_missing_ok=Fa
         # another slot's fenced mutation. ResourceNotFound is therefore a
         # truthful later observation, not an inventory failure. Every other
         # provider error remains fail-closed.
-        if inventory_missing_ok and re.search(
-            r"(?:\(ResourceNotFound\)|^Code:\s*ResourceNotFound\s*$)",
-            str(stderr or ""), re.MULTILINE,
-        ):
+        if inventory_missing_ok and azure_resource_not_found(stderr):
             return None
         raise ProviderError("Azure child inventory read failed or was malformed: {}".format(stderr))
     if not isinstance(value, dict):
@@ -503,11 +507,28 @@ def show_full(controller, resource_id, api_version=None, inventory_missing_ok=Fa
     return value
 
 
-def list_json(controller, args):
-    value, rc, stderr = az(controller, args, check=False)
-    if rc != 0 or not isinstance(value, list):
+def list_json(controller, args, transient_not_found_attempts=1):
+    for attempt in range(transient_not_found_attempts):
+        value, rc, stderr = az(controller, args, check=False)
+        if rc == 0:
+            if not isinstance(value, list):
+                raise ProviderError(
+                    "Azure inventory call failed or was malformed: {}".format(stderr)
+                )
+            return value
+        # `az vm list --show-details` expands instance views after its list.
+        # Another exact cleanup can delete one VM during that expansion, so
+        # Azure CLI fails the whole read with ResourceNotFound. Retry only
+        # that explicit read-only race, with a small fixed bound; every other
+        # error and a persistent disappearance still fail closed.
+        if (
+            attempt + 1 < transient_not_found_attempts
+            and azure_resource_not_found(stderr)
+        ):
+            time.sleep(min(0.25 * (2 ** attempt), 1.0))
+            continue
         raise ProviderError("Azure inventory call failed or was malformed: {}".format(stderr))
-    return value
+    raise ProviderError("Azure inventory retry bound was exhausted")
 
 
 def blob_record(controller, storage, container, name, kind, required=False):
@@ -1055,7 +1076,11 @@ def inventory(controller, include_metrics=True):
         raise ProviderError("Azure subscription scope is not the exact enabled controller binding")
 
     prefix = re.escape(controller["prefix"])
-    vms = list_json(controller, ["vm", "list", "--resource-group", controller["resource_group"], "--show-details"])
+    vms = list_json(
+        controller,
+        ["vm", "list", "--resource-group", controller["resource_group"], "--show-details"],
+        transient_not_found_attempts=4,
+    )
     nics = list_json(controller, ["network", "nic", "list", "--resource-group", controller["resource_group"]])
     disks = list_json(controller, ["disk", "list", "--resource-group", controller["resource_group"]])
     identities = list_json(controller, ["identity", "list", "--resource-group", controller["resource_group"]])
