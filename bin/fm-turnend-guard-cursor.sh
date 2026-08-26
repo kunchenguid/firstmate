@@ -49,6 +49,12 @@
 # park owner in state/.cursor-park-owner, and once a newer stop has published its
 # claim, an older park still running stands down without emitting. Newest stop
 # wins; the arm's own singleton keeps the overlap from starting a second watcher.
+#
+# PI STAND-DOWN. Exit 0 without parking when PI_CODING_AGENT=true and neither
+# CURSOR_AGENT nor CURSOR_INVOKED_AS is set, so a Pi host that loaded
+# .cursor/hooks.json via pi-cursor-sdk does not dual-watch against
+# fm_watch_arm_pi. Cursor identity keeps parking despite a leaked
+# PI_CODING_AGENT. docs/turnend-guard.md owns the contract.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -103,14 +109,8 @@ case "$SESSION_ID" in ''|*[!A-Za-z0-9._-]*) SESSION_ID=unknown ;; esac
 
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
-# Pi-with-Cursor-provider (pi-cursor-sdk) loads project `.cursor/hooks.json` into the
-# Pi process. That must never park a second watcher: Pi's tracked extensions own
-# continuity via fm_watch_arm_pi. A Cursor park under PI_CODING_AGENT races the
-# extension arm, emits rearm-resurface wakes, and aborts in-flight asks.
-# fm-spawn's cursor launch clears PI_CODING_AGENT; a hand-started cursor-agent may
-# still inherit it (same multiplexer inheritance class as CLAUDECODE). Stand down
-# only for a Pi host with no Cursor identity markers. If CURSOR_AGENT or
-# CURSOR_INVOKED_AS is present, park despite a leaked PI_CODING_AGENT.
+# Pi-host stand-down: docs/turnend-guard.md owns the PI_CODING_AGENT /
+# CURSOR_AGENT / CURSOR_INVOKED_AS contract summarized in this script's header.
 if [ "${PI_CODING_AGENT:-}" = "true" ] \
   && [ -z "${CURSOR_AGENT:-}" ] \
   && [ -z "${CURSOR_INVOKED_AS:-}" ]; then
