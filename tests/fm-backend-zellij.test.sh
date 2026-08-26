@@ -1291,6 +1291,34 @@ test_scripts_reject_fm_target_label_mismatch() {
   pass "fm-send: fm-id zellij targets reject pane ids whose tab label no longer matches"
 }
 
+test_target_presence_requires_complete_inventory() {
+  local dir fb out title
+  dir="$TMP_ROOT/presence-present"; mkdir -p "$dir/responses"
+  title=$(zellij_expected_scoped_title fm-task)
+  zellij_tab_response "$dir" 1 3 "$title"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=firstmate \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_target_presence_state firstmate:7 fm-task' "$ROOT" )
+  [ "$out" = present ] || fail "zellij presence should confirm a uniquely owned task tab, got '$out'"
+
+  dir="$TMP_ROOT/presence-missing"; mkdir -p "$dir/responses"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST= \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_target_presence_state firstmate:7 fm-task' "$ROOT" )
+  [ "$out" = missing ] || fail "zellij presence should confirm a missing session, got '$out'"
+
+  dir="$TMP_ROOT/presence-unknown"; mkdir -p "$dir/responses"
+  printf '{}\n' > "$dir/responses/1.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=firstmate \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_target_presence_state firstmate:7 fm-task' "$ROOT" )
+  [ "$out" = unknown ] || fail "zellij presence should fail closed on malformed inventory, got '$out'"
+  pass "fm_backend_zellij_target_presence_state: distinguishes present, missing, and unknown"
+}
+
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 
@@ -1301,6 +1329,7 @@ test_version_check_refuses_missing_zellij
 test_session_defaults_to_firstmate
 test_session_honors_override
 test_parse_target
+test_target_presence_requires_complete_inventory
 test_normalize_key
 test_scoped_title_uses_primary_home_label
 test_scoped_title_uses_secondmate_home_label

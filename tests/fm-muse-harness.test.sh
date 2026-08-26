@@ -91,7 +91,11 @@ case "${1:-}" in
         printf '%s\n' "$arg" >> "$FM_FAKE_LAUNCH_LOG"
         if [ "${FM_FAKE_EXECUTE_MUSE_LAUNCH:-}" = 1 ]; then
           case "$arg" in
-            *"$FM_FAKE_MUSE_EXECUTABLE"*) (cd "$FM_FAKE_PANE_PATH" && bash -c "$arg") ;;
+            *"$FM_FAKE_MUSE_EXECUTABLE"*)
+              FM_FAKE_LAUNCH_COMMAND=$arg FM_FAKE_LAUNCH_CWD=$FM_FAKE_PANE_PATH \
+                python3 -c 'import os; os.setpgrp(); os.chdir(os.environ["FM_FAKE_LAUNCH_CWD"]); os.execvp("bash", ["bash", "-c", os.environ["FM_FAKE_LAUNCH_COMMAND"]])' \
+                </dev/null >/dev/null 2>&1 &
+              ;;
           esac
         fi
         break
@@ -109,7 +113,7 @@ SH
 #!/usr/bin/env bash
 set -u
 [ -n "${FM_FAKE_HARNESS_RESULT:-}" ] || exit 0
-exec "$FM_FAKE_MUSE_VERSIONED" -c 'result=$($FM_FAKE_HARNESS_PROBE); printf "%s" "$result" > "$FM_FAKE_HARNESS_RESULT"'
+exec "$FM_FAKE_MUSE_VERSIONED" -c 'result=$($FM_FAKE_HARNESS_PROBE); printf "%s" "$result" > "$FM_FAKE_HARNESS_RESULT"; sleep 1'
 SH
   chmod +x "$fakebin/muse"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
@@ -145,12 +149,17 @@ run_muse_spawn() {  # <home> <proj> <wt> <fakebin> <id> [extra args...]
     FM_FAKE_HARNESS_PROBE="$HARNESS" \
     FM_FAKE_EXECUTE_MUSE_LAUNCH="${FM_FAKE_EXECUTE_MUSE_LAUNCH:-}" \
     FM_FAKE_HARNESS_RESULT="${FM_FAKE_HARNESS_RESULT:-}" \
+    FM_TASK_PROCESS_SCOPE_START_ATTEMPTS="${FM_TEST_TASK_PROCESS_SCOPE_START_ATTEMPTS:-0}" \
     FM_FAKE_WORKER_META_KEY="${FM_TEST_MUSE_WORKER_KEY-present}" \
     META_API_KEY="${FM_TEST_MUSE_KEY-test-key}" \
     XDG_CONFIG_HOME="${FM_TEST_MUSE_CONFIG_HOME-$home/xdgconfig}" \
     XDG_DATA_HOME="${FM_TEST_MUSE_DATA_HOME-$home/xdgdata}" \
     PATH="$fakebin:$PATH" \
     "$SPAWN" "$id" "$proj" muse "$@" 2>&1
+}
+
+muse_launch_fragment() {
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
 }
 
 # --- detection --------------------------------------------------------------
@@ -209,9 +218,14 @@ EOF
   out=$(CLAUDECODE=1 PI_CODING_AGENT=true GROK_AGENT=1 FM_PI_HARNESS=pi-signed \
     CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent \
     FM_FAKE_EXECUTE_MUSE_LAUNCH=1 FM_FAKE_HARNESS_RESULT="$result" \
+    FM_TEST_TASK_PROCESS_SCOPE_START_ATTEMPTS=50 \
     run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "muse spawn from a marked backend should succeed: $out"
+  for _ in $(seq 1 50); do
+    [ ! -f "$result" ] || break
+    sleep 0.02
+  done
   [ -f "$result" ] || fail "the generated muse launch never executed its harness probe"
   [ "$(cat "$result")" = muse ] \
     || fail "muse worker inherited a foreign harness identity: $(cat "$result")"
@@ -245,9 +259,9 @@ EOF
   # The captain accepted muse's self-update risk, so firstmate must not pin it.
   assert_not_contains "$launch" 'MUSE_NO_AUTO_UPDATE' \
     "muse launch pinned auto-update, which the captain declined"
-  assert_contains "$launch" "XDG_CONFIG_HOME='$home/xdgconfig'" \
+  assert_contains "$launch" "$(muse_launch_fragment "XDG_CONFIG_HOME='$home/xdgconfig'")" \
     "muse launch did not forward its non-secret config root"
-  assert_contains "$launch" "XDG_DATA_HOME='$home/xdgdata'" \
+  assert_contains "$launch" "$(muse_launch_fragment "XDG_DATA_HOME='$home/xdgdata'")" \
     "muse launch did not forward its non-secret data root"
   assert_not_contains "$launch" 'META_API_KEY' "muse launch exposed META_API_KEY in worker argv"
   assert_not_contains "$launch" 'test-key' "muse launch exposed the credential value in worker argv"
@@ -277,8 +291,9 @@ EOF
       --mode no-mistakes --yolo off --model muse-spark-1.2 --effort "$effort" >/dev/null \
       || fail "muse spawn with effort $effort failed"
     launch=$(cat "$home/launch.log")
-    assert_contains "$launch" "$expect" "muse effort $effort did not map to '$expect'"
-    assert_contains "$launch" "--model 'muse-spark-1.2'" "muse spawn dropped the model axis"
+    assert_contains "$launch" "$(muse_launch_fragment "$expect")" "muse effort $effort did not map to '$expect'"
+    assert_contains "$launch" "$(muse_launch_fragment "--model 'muse-spark-1.2'")" \
+      "muse spawn dropped the model axis"
   done
   # ultra is muse's max-class level and must be reachable ONLY through an
   # explicit max, never as the fallback when no effort was chosen.
@@ -362,9 +377,9 @@ EOF
   status=$?
   expect_code 0 "$status" "muse spawn with relative XDG roots should succeed: $out"
   launch=$(cat "$home/launch.log")
-  assert_contains "$launch" "XDG_CONFIG_HOME='$resolved_caller/cfg'" \
+  assert_contains "$launch" "$(muse_launch_fragment "XDG_CONFIG_HOME='$resolved_caller/cfg'")" \
     "muse launch did not forward the resolved config root"
-  assert_contains "$launch" "XDG_DATA_HOME='$resolved_caller/data'" \
+  assert_contains "$launch" "$(muse_launch_fragment "XDG_DATA_HOME='$resolved_caller/data'")" \
     "muse launch did not forward the resolved data root"
   binding="$home/state/$id.muse-session"
   assert_grep "sessions_root=$resolved_caller/data/muse/sessions" "$binding" \
@@ -376,13 +391,18 @@ EOF
 # dialect rejects the model-reawakening handlers a firstmate primary needs, so a
 # secondmate on muse could never arm a supervision cycle.
 test_spawn_refuses_secondmate() {
-  local case_dir home fakebin id out status
+  local case_dir home fakebin id out raw_id unrelated_id status
   case_dir="$TMP_ROOT/secondmate"
   home="$case_dir/home"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   id="muse-secondmate-x1"
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$case_dir/muse"
+  raw_id="muse-raw-secondmate-x1"
+  unrelated_id="muse-unrelated-secondmate-x1"
+  mkdir -p "$home/data/$id" "$home/data/$raw_id" "$home/data/$unrelated_id" \
+    "$home/projects" "$home/state" "$home/config" "$case_dir/muse"
   printf 'charter\n' > "$home/data/$id/brief.md"
+  printf 'charter\n' > "$home/data/$raw_id/brief.md"
+  printf 'charter\n' > "$home/data/$unrelated_id/brief.md"
   out=$(cd "$case_dir" && FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -392,6 +412,31 @@ test_spawn_refuses_secondmate() {
   status=$?
   [ "$status" -ne 0 ] || fail "muse was accepted as a secondmate harness"
   assert_contains "$out" "crewmate/scout adapter only" "muse secondmate refusal did not explain the boundary"
+
+  out=$(cd "$case_dir" && FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" META_API_KEY=test-key \
+    PATH="$fakebin:$PATH" \
+    "$SPAWN" "$raw_id" 'muse-bin-0.1.0 --yolo' --raw-harness muse --secondmate 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "raw muse command was accepted as a secondmate harness"
+  assert_contains "$out" "muse is a verified crewmate/scout adapter only" \
+    "raw muse command bypassed the secondmate capability boundary"
+
+  out=$(cd "$case_dir" && FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" META_API_KEY=test-key \
+    PATH="$fakebin:$PATH" \
+    "$SPAWN" "$unrelated_id" 'muse-binary --yolo' \
+      --raw-harness muse-binary --secondmate 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unregistered raw secondmate unexpectedly spawned"
+  assert_contains "$out" "no firstmate home supplied or registered" \
+    "unrelated raw command did not reach normal secondmate validation"
+  assert_not_contains "$out" "crewmate/scout adapter only" \
+    "unrelated raw command was claimed by the Muse adapter"
   pass "muse is refused as a secondmate harness"
 }
 

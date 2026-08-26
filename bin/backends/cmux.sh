@@ -431,6 +431,44 @@ fm_backend_cmux_target_ready() {  # <target> [expected-label]
   fm_backend_cmux_surface_exists "$FM_BACKEND_CMUX_WORKSPACE" "$FM_BACKEND_CMUX_SURFACE"
 }
 
+fm_backend_cmux_target_presence_state() {  # <target> [expected-label]
+  local target=$1 expected_label=${2:-} expected_title wins window_ids wid workspaces matches total=0
+  fm_backend_cmux_parse_target "$target" || { printf 'unknown'; return 0; }
+  if [ -n "$expected_label" ]; then
+    expected_title=$(fm_backend_cmux_scoped_title "$expected_label")
+  fi
+  wins=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  printf '%s' "$wins" | jq -e 'type == "array"' >/dev/null 2>&1 \
+    || { printf 'unknown'; return 0; }
+  window_ids=$(printf '%s' "$wins" | jq -r '.[]? | .id // empty' 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  while IFS= read -r wid; do
+    [ -n "$wid" ] || continue
+    workspaces=$(fm_backend_cmux_cli workspace list --json --id-format uuids --window "$wid" 2>/dev/null) \
+      || { printf 'unknown'; return 0; }
+    printf '%s' "$workspaces" | jq -e '(.workspaces | type) == "array"' >/dev/null 2>&1 \
+      || { printf 'unknown'; return 0; }
+    if [ -n "$expected_title" ]; then
+      matches=$(printf '%s' "$workspaces" | jq -r --arg title "$expected_title" \
+        '[.workspaces[]? | select(.title == $title)] | length' 2>/dev/null) \
+        || { printf 'unknown'; return 0; }
+    else
+      matches=$(printf '%s' "$workspaces" | jq -r --arg id "$FM_BACKEND_CMUX_WORKSPACE" \
+        '[.workspaces[]? | select(.id == $id)] | length' 2>/dev/null) \
+        || { printf 'unknown'; return 0; }
+    fi
+    total=$((total + matches))
+  done <<EOF
+$window_ids
+EOF
+  case "$total" in
+    0) printf 'missing' ;;
+    1) printf 'present' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 # fm_backend_cmux_current_path: the live foreground process's cwd, or empty on
 # any error. Mirrors fm_backend_zellij_current_path's active pwd-marker-probe
 # workaround (bin/backends/zellij.sh:306-347) verbatim in spirit.

@@ -24,6 +24,8 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
+. "$ROOT/bin/fm-task-process-lib.sh"
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-marker-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
@@ -35,7 +37,7 @@ mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse"
+VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse agy"
 
 # The expectation table, written out independently of the implementation so a
 # silent change to either side shows up here. The fourth field is the composer
@@ -52,6 +54,7 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
     kimi) printf '/exit\tEscape\t1\t\n' ;;
     cursor) printf '/exit\tEscape\t1\t\n' ;;
     muse) printf '/exit\tEscape\t1\tC-u\n' ;;
+    agy) printf '/exit\tC-c\t1\t\n' ;;
     *) return 1 ;;
   esac
 }
@@ -96,6 +99,11 @@ case "${1:-}" in
       if [ -z "${FM_FAKE_NEVER_DIES:-}" ] \
          && { [ "$payload" = /exit ] || [ "$payload" = /quit ]; }; then
         printf 'zsh' > "$D/command"
+        if [ -n "${FM_FAKE_SCOPE_RECORD:-}" ]; then
+          : > "$D/scope-exit-sent"
+          agent=$(awk -F= '$1 == "agent_pid" {print $2}' "$FM_FAKE_SCOPE_RECORD")
+          [ -z "$agent" ] || kill -TERM "$agent" 2>/dev/null || true
+        fi
       fi
       case "$payload" in
         *'encode launch-brief'*) cat "$D/becomes" > "$D/command" ;;
@@ -119,7 +127,20 @@ case "${1:-}" in
     for a in "$@"; do
       case "$a" in
         *cursor_y*) printf '1\n'; exit 0 ;;
-        *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
+        *pane_current_command*)
+          if [ -n "${FM_FAKE_SCOPE_RECORD:-}" ] && [ -e "$D/scope-exit-sent" ]; then
+            anchor=$(awk -F= '$1 == "anchor_pid" {print $2}' "$FM_FAKE_SCOPE_RECORD")
+            stat=$(ps -o stat= -p "$anchor" 2>/dev/null || true)
+            case "$stat" in
+              ''|*Z*) printf 'zsh\n' ;;
+              *) printf 'sleep\n' ;;
+            esac
+          else
+            cat "$D/command"
+            printf '\n'
+          fi
+          exit 0
+          ;;
         *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
       esac
     done
@@ -134,8 +155,11 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  cat > "$fb/sleep" <<'SH'
+cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
+if [ -n "${FM_FAKE_REAL_SLEEP:-}" ]; then
+  exec /bin/sleep "$@"
+fi
 if [ -n "${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" ] \
    && [ -e "$FM_FAKE_DIR/muse-ack-pending" ]; then
   rm -f "$FM_FAKE_DIR/muse-ack-pending"
@@ -145,6 +169,23 @@ fi
 exit 0
 SH
   chmod +x "$fb/sleep"
+  cat > "$fb/unshare" <<'SH'
+#!/usr/bin/env bash
+set -u
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --user|--map-current-user|--pid|--fork|--kill-child=SIGKILL|--mount-proc) shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+if [ "${1:-}" = /bin/sh ] && [ "${2:-}" = -c ] \
+   && [ "${3:-}" = '[ "$$" -eq 1 ]' ]; then
+  exit 0
+fi
+exec "$@"
+SH
+  chmod +x "$fb/unshare"
   printf '%s\n' "$fb"
 }
 
@@ -181,8 +222,16 @@ add_task() {
     echo "yolo=off"
     echo "model=default"
     echo "effort=default"
+    echo "spawn_gen=test-$id"
+    echo "process_scope_token=test-$id"
     [ "$backend" = tmux ] || echo "backend=$backend"
   } > "$home/state/$id.meta"
+  {
+    echo "version=2"
+    echo "status=empty"
+    echo "token=test-$id"
+    echo "containment=pid-namespace"
+  } > "$home/state/$id.process-scope"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
 }
@@ -197,6 +246,8 @@ run_control() {
     FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
     FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK="${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" \
     FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
+    FM_FAKE_SCOPE_RECORD="${FM_FAKE_SCOPE_RECORD:-}" \
+    FM_FAKE_REAL_SLEEP="${FM_FAKE_REAL_SLEEP:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -260,22 +311,25 @@ test_interrupt_sends_each_harness_verified_key() {
   pass "fm-control interrupt: every verified harness gets its own verified key and repeat count"
 }
 
-# A recorded harness can carry a raw launch command's basename, so the tables
-# are reached through one prefix rule rather than an exact string match.
+# A recorded harness can carry a raw launch command's basename, so most tables
+# accept a verified prefix while adapters with exact identities remain exact.
 test_harness_family_resolution() {
   local pair recorded want got
   for pair in claude:claude claude-latest:claude codex:codex codex-cli:codex \
       opencode:opencode grok:grok grok-2:grok kimi:kimi cursor:cursor \
       cursor-agent:cursor muse:muse muse-bin-0.1.0:muse pi:pi \
-      pi-signed:pi-signed; do
+      pi-signed:pi-signed agy:agy; do
     recorded=${pair%%:*}
     want=${pair#*:}
     got=$(fm_control_harness_family "$recorded") \
       || fail "'$recorded' should resolve to the $want adapter"
     [ "$got" = "$want" ] || fail "'$recorded' should resolve to $want, got '$got'"
   done
-  fm_control_harness_family someagent \
-    && fail "an unrecognized launch command must not be guessed into an adapter family"
+  for recorded in someagent musescore amuse notmuse-bin muse-binary muse-bind muse-cli \
+      agytest agy-helper agy-cli; do
+    fm_control_harness_family "$recorded" \
+      && fail "unrecognized launch command '$recorded' must not be guessed into an adapter family"
+  done
   fm_control_harness_family '' \
     && fail "an empty harness must not resolve to an adapter family"
   # The signed adapter is a distinct launch profile, not a pi variant.
@@ -375,13 +429,74 @@ test_harness_kind_capability() {
   done
   fm_control_harness_supports_kind muse secondmate \
     && fail "muse has no primary supervision protocol and must not claim a secondmate"
-  for harness in claude codex opencode pi pi-signed grok kimi; do
+  fm_control_harness_supports_kind agy secondmate \
+    && fail "agy has no primary supervision protocol and must not claim a secondmate"
+  for harness in claude codex opencode pi pi-signed grok kimi cursor; do
     fm_control_harness_supports_kind "$harness" secondmate \
       || fail "$harness should be able to run a secondmate"
   done
   fm_control_harness_supports_kind someagent ship \
     && fail "an unverified harness must not claim any kind"
   pass "fm-control-lib: adapter capability is per task kind, not per adapter alone"
+}
+
+test_agy_wiring_contract() {
+  local paths dir
+  paths=$(fm_control_harness_wiring_paths agy /tmp/wt /tmp/state task-x1)
+  assert_contains "$paths" "/tmp/wt/.agents/plugins/fm-firstmate-busy-task-x1/plugin.json" \
+    "agy wiring contract omitted its plugin manifest"
+  assert_contains "$paths" "/tmp/wt/.agents/plugins/fm-firstmate-busy-task-x1/hooks.json" \
+    "agy wiring contract omitted its hooks"
+  assert_contains "$paths" "/tmp/wt/.agents/plugins/fm-firstmate-busy-task-x1/fm-stop.sh" \
+    "agy wiring contract omitted its lifecycle observer"
+  dir=$(fm_control_harness_wiring_dirs agy /tmp/wt /tmp/state task-x1)
+  [ "$dir" = "/tmp/wt/.agents/plugins/fm-firstmate-busy-task-x1" ] \
+    || fail "agy wiring contract did not own its plugin directory"
+  pass "fm-control-lib: agy lifecycle wiring has one cleanup owner"
+}
+
+test_agy_wiring_cleanup_does_not_follow_symlinks() {
+  local dir wt state plugin target
+  dir=$(new_case agy-wiring-cleanup)
+  wt="$dir/wt"
+  state="$dir/state"
+  plugin="$wt/.agents/plugins/fm-firstmate-busy-task-x1"
+  target="$dir/plugin-target"
+  mkdir -p "$wt/.agents/plugins" "$state" "$target"
+  printf 'target manifest\n' > "$target/plugin.json"
+  printf 'target hooks\n' > "$target/hooks.json"
+  ln -s "$target" "$plugin"
+  fm_control_harness_wiring_cleanup agy "$wt" "$state" task-x1 \
+    || fail "agy wiring cleanup refused its replaceable leaf symlink"
+  [ ! -e "$plugin" ] && [ ! -L "$plugin" ] \
+    || fail "agy wiring cleanup did not unlink the replaceable plugin symlink"
+  [ "$(cat "$target/plugin.json")" = "target manifest" ] \
+    || fail "agy wiring cleanup followed the symlink to the target manifest"
+  [ "$(cat "$target/hooks.json")" = "target hooks" ] \
+    || fail "agy wiring cleanup followed the symlink to the target hooks"
+  pass "fm-control-lib: agy wiring cleanup unlinks symlinks without traversal"
+}
+
+test_agy_wiring_cleanup_rejects_symlinked_worktree() {
+  local dir wt target state plugin out rc
+  dir=$(new_case agy-worktree-symlink-cleanup)
+  wt="$dir/wt-link"
+  target="$dir/wt-target"
+  state="$dir/state"
+  plugin="$target/.agents/plugins/fm-firstmate-busy-task-x1"
+  mkdir -p "$plugin" "$state"
+  printf 'target manifest\n' > "$plugin/plugin.json"
+  printf 'target hooks\n' > "$plugin/hooks.json"
+  ln -s "$target" "$wt"
+  out=$(fm_control_harness_wiring_cleanup agy "$wt" "$state" task-x1 2>&1); rc=$?
+  expect_code 1 "$rc" "agy wiring cleanup should reject a symlinked worktree"
+  assert_contains "$out" "unsafe worktree path" \
+    "agy wiring cleanup did not explain the symlinked-worktree refusal"
+  [ "$(cat "$plugin/plugin.json")" = "target manifest" ] \
+    || fail "agy wiring cleanup followed the worktree symlink to the target manifest"
+  [ "$(cat "$plugin/hooks.json")" = "target hooks" ] \
+    || fail "agy wiring cleanup followed the worktree symlink to the target hooks"
+  pass "fm-control-lib: agy wiring cleanup rejects symlinked worktrees"
 }
 
 test_orca_refuses_an_escape_harness_interrupt() {
@@ -399,6 +514,37 @@ test_orca_refuses_an_escape_harness_interrupt() {
   expect_code 1 "$rc" "an Escape harness on orca should refuse"
   assert_contains "$out" "cannot deliver" "refusal should name the undeliverable key"
   pass "fm-control interrupt: a backend that cannot deliver the harness's key refuses instead of sending another"
+}
+
+test_orca_delivers_agy_interrupt() {
+  local dir out rc
+  dir=$(new_case orca-agy-interrupt)
+  add_task "$dir" t1 agy ship orca "term-1"
+  {
+    cat "$dir/home/state/t1.meta"
+    echo "terminal=term-1"
+    echo "orca_worktree_id=wt-1"
+  } > "$dir/home/state/t1.meta.new"
+  sed 's|^window=.*|window=fm-t1|' "$dir/home/state/t1.meta.new" > "$dir/home/state/t1.meta"
+  cat > "$dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FAKE_DIR/orca-log"
+case "${1:-} ${2:-}" in
+  "terminal read") printf '%s\n' '{"ok":true,"result":{"text":">"}}' ;;
+  "terminal send") printf '%s\n' '{"ok":true,"result":{}}' ;;
+  *) printf '%s\n' '{"ok":true,"result":{}}' ;;
+esac
+SH
+  chmod +x "$dir/fakebin/orca"
+  : > "$dir/fake/orca-log"
+
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "an agy interrupt on Orca should succeed"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/orca-log")" "terminal send --terminal term-1 --interrupt --json" \
+    "agy interrupt did not use Orca's supported interrupt primitive"
+  assert_contains "$out" "cancel=unconfirmed" \
+    "agy interrupt should report delivery without inventing an acknowledgement"
+  pass "fm-control interrupt: agy uses Orca's verified Ctrl+C primitive"
 }
 
 test_unverified_state_backends_refuse_stop_verbs() {
@@ -800,6 +946,49 @@ test_agent_that_does_not_stop_fails_closed() {
   pass "fm-control exit: a stubborn agent reports delivered input and an unconfirmed exit"
 }
 
+test_scoped_exit_quiesces_before_dead_state_proof() {
+  local dir state record token leader attempt=0 out rc
+  dir=$(new_case scoped-exit)
+  add_task "$dir" t1 agy
+  alive_as "$dir" agy
+  state="$dir/home/state"
+  record="$state/t1.process-scope"
+  token=scoped-exit-t1
+  rm -f "$record"
+  printf 'process_scope_token=%s\n' "$token" >> "$state/t1.meta"
+  python3 - "$ROOT/bin/fm-task-process-launch.sh" "$record" "$token" "$dir/fakebin/unshare" <<'PY' &
+import os
+import sys
+
+os.setpgrp()
+os.execv(sys.argv[1], [sys.argv[1], sys.argv[2], sys.argv[3], "-", "/bin/sleep 30 & wait", sys.argv[4]])
+PY
+  leader=$!
+  while [ "$attempt" -lt 100 ]; do
+    if fm_task_process_scope_record_read "$state" t1 "$token" 2>/dev/null \
+       && [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ]; then
+      break
+    fi
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  [ "${FM_TASK_PROCESS_SCOPE_STATUS:-}" = active ] || {
+    kill -KILL "$leader" 2>/dev/null || true
+    fail "scoped exit fixture did not publish an active worker scope"
+  }
+  out=$(FM_FAKE_SCOPE_RECORD="$record" FM_FAKE_REAL_SLEEP=1 \
+    run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "scoped exit should quiesce before endpoint dead-state proof"$'\n'"$out"
+  assert_contains "$out" "stopped t1 harness=agy" \
+    "scoped exit did not report its proven stop: $out"
+  fm_task_process_scope_record_read "$state" t1 "$token" \
+    || fail "scoped exit lost its durable process-scope record"
+  [ "$FM_TASK_PROCESS_SCOPE_STATUS" = empty ] \
+    || fail "scoped exit did not retire its process scope"
+  wait "$leader" 2>/dev/null || true
+  pass "fm-control exit: scoped workers quiesce before endpoint proof"
+}
+
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed() {
   local dir out rc
   dir=$(new_case nosettle)
@@ -881,7 +1070,11 @@ test_harness_family_resolution
 test_prefixed_recorded_harness_reaches_each_control_verb
 test_backend_key_capability_matrix
 test_harness_kind_capability
+test_agy_wiring_contract
+test_agy_wiring_cleanup_does_not_follow_symlinks
+test_agy_wiring_cleanup_rejects_symlinked_worktree
 test_orca_refuses_an_escape_harness_interrupt
+test_orca_delivers_agy_interrupt
 test_unverified_state_backends_refuse_stop_verbs
 test_state_verified_backends_are_exactly_tmux_and_herdr
 test_window_label_is_refused_with_the_exact_id
@@ -904,6 +1097,7 @@ test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait
 test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed
+test_scoped_exit_quiesces_before_dead_state_proof
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
 test_secondmate_control_command_carries_no_marker

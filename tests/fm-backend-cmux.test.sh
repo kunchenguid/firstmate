@@ -1100,6 +1100,34 @@ test_secondmate_spawn_refuses_cmux_backend() {
   pass "fm-spawn.sh: refuses backend=cmux for --secondmate spawns (mirrors Orca's refusal; no secondmate launch design exists yet)"
 }
 
+test_target_presence_requires_complete_inventory() {
+  local dir fb out title
+  title=$(cmux_expected_scoped_title fm-task)
+  dir="$TMP_ROOT/presence-present"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 "aaaaaaaa-0000-0000-0000-000000000000" "$title"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_target_presence_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" fm-task' "$ROOT" )
+  [ "$out" = present ] || fail "cmux presence should confirm a uniquely owned task workspace, got '$out'"
+
+  dir="$TMP_ROOT/presence-missing"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 "cccccccc-0000-0000-0000-000000000000" other
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_target_presence_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" fm-task' "$ROOT" )
+  [ "$out" = missing ] || fail "cmux presence should confirm a missing task workspace, got '$out'"
+
+  dir="$TMP_ROOT/presence-unknown"; mkdir -p "$dir/responses"
+  printf '{}\n' > "$dir/responses/1.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_target_presence_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" fm-task' "$ROOT" )
+  [ "$out" = unknown ] || fail "cmux presence should fail closed on malformed inventory, got '$out'"
+  pass "fm_backend_cmux_target_presence_state: distinguishes present, missing, and unknown"
+}
+
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 
@@ -1113,6 +1141,7 @@ test_password_respects_config_override
 test_password_empty_when_config_absent
 test_cli_exports_password_only_when_configured
 test_parse_target
+test_target_presence_requires_complete_inventory
 test_normalize_key
 test_scoped_title_uses_primary_home_label
 test_scoped_title_uses_secondmate_home_label

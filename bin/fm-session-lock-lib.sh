@@ -16,7 +16,7 @@
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
 
-# Known harness command names; extend when a new adapter is verified.
+# Known primary-harness command names; extend when a new primary adapter is verified.
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
 
 # The same harnesses as exact executable names. Keep in sync with

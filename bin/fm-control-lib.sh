@@ -37,8 +37,9 @@
 # `resume` is deliberately NOT a verb. It is not deterministic across the
 # verified adapters: codex and grok resume only from a session id printed at
 # exit, opencode resumes the most recent session for the cwd with --continue,
-# and claude, pi, pi-signed, and kimi have no verified pane-resume contract at
-# all. `relaunch` covers the same need deterministically for every adapter,
+# agy exposes both id-based and continue modes without a verified exact-selection
+# contract, and claude, pi, pi-signed, and kimi have no verified pane-resume
+# contract at all. `relaunch` covers the same need deterministically for every adapter,
 # because the brief on disk - not a harness-private session - is the durable
 # instruction.
 
@@ -63,7 +64,7 @@ fm_control_verb_allowed() {  # <verb>
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harness_supported() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse) return 0 ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy) return 0 ;;
   esac
   return 1
 }
@@ -71,11 +72,11 @@ fm_control_harness_supported() {  # <harness>
 # The verified adapter a RECORDED harness value belongs to. Every table below
 # is keyed by the exact verified adapter name, but a task launched from a raw
 # command records the command's basename instead (bin/fm-spawn.sh derives
-# harness= that way), which is why the spawn adapters match `claude*`, `muse*`,
-# and friends. This is the one place that prefix rule is stated. `pi` and
-# `pi-signed` are exact because a `pi*` prefix would swallow the signed adapter,
-# and an unrecognized value returns nonzero rather than being guessed into a
-# family.
+# harness= that way), which is why most spawn adapters match a command prefix.
+# Muse is exact `muse` or versioned `muse-bin-*`, matching its recorded process
+# identity. `agy`, `pi`, and `pi-signed` are exact because Antigravity ships as
+# exactly `agy` and broader prefixes would swallow unrelated commands.
+# An unrecognized value returns nonzero rather than being guessed into a family.
 fm_control_harness_family() {  # <recorded-harness>
   case "${1-}" in
     pi) printf 'pi' ;;
@@ -86,14 +87,15 @@ fm_control_harness_family() {  # <recorded-harness>
     grok*) printf 'grok' ;;
     kimi*) printf 'kimi' ;;
     cursor*) printf 'cursor' ;;
-    muse*) printf 'muse' ;;
+    muse|muse-bin-*) printf 'muse' ;;
+    agy) printf 'agy' ;;
     *) return 1 ;;
   esac
 }
 
-# Which task kinds an adapter is verified to run. muse is a crewmate/scout
-# adapter only: it has no primary supervision protocol, and bin/fm-spawn.sh
-# refuses a --secondmate launch on it. The control plane
+# Which task kinds an adapter is verified to run. muse and agy are crewmate/scout
+# adapters only: neither has a primary supervision protocol, and bin/fm-spawn.sh
+# refuses a --secondmate launch on either. The control plane
 # asks this BEFORE it stops anything, so an incompatible relaunch target is
 # refused while the current agent is still running rather than after it has
 # been stopped.
@@ -101,17 +103,18 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
-    muse) [ "$kind" != secondmate ] || return 1 ;;
+    muse|agy) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
 }
 
-# The key that cancels a running turn. Escape for every adapter except grok,
-# whose Esc only moves focus to the scrollback; grok cancels on Ctrl+C.
+# The key that cancels a running turn. Agy uses its verified Ctrl+C path so
+# every supported backend, including Orca, can deliver it. Grok also uses
+# Ctrl+C because its Esc only moves focus to the scrollback.
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
     claude|codex|opencode|pi|pi-signed|kimi|cursor|muse) printf 'Escape' ;;
-    grok) printf 'C-c' ;;
+    grok|agy) printf 'C-c' ;;
     *) return 1 ;;
   esac
 }
@@ -121,7 +124,7 @@ fm_control_interrupt_key() {  # <harness>
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode) printf '2' ;;
-    claude|codex|pi|pi-signed|grok|kimi|cursor|muse) printf '1' ;;
+    claude|codex|pi|pi-signed|grok|kimi|cursor|muse|agy) printf '1' ;;
     *) return 1 ;;
   esac
 }
@@ -139,7 +142,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|agy) ;;
     *) return 1 ;;
   esac
 }
@@ -151,7 +154,7 @@ fm_control_interrupt_ack_source() {  # <harness>
     # after an interrupt was measured as variable - sometimes seconds, sometimes
     # not within 20 - so a cancellation claim built on it would be unreliable.
     # Normal turn completion is prompt, which is what the busy fold depends on.
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) printf 'none' ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|agy) printf 'none' ;;
     *) return 1 ;;
   esac
 }
@@ -159,7 +162,7 @@ fm_control_interrupt_ack_source() {  # <harness>
 # The command that exits the agent from its own composer.
 fm_control_exit_command() {  # <harness>
   case "${1-}" in
-    claude|opencode|grok|kimi|cursor|muse) printf '/exit' ;;
+    claude|opencode|grok|kimi|cursor|muse|agy) printf '/exit' ;;
     codex|pi|pi-signed) printf '/quit' ;;
     *) return 1 ;;
   esac
@@ -224,7 +227,93 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
       printf '%s\n' "$state/$id.muse-session-current"
       ;;
     cursor) printf '%s\n' "$state/$id.cursor-session" ;;
+    agy)
+      printf '%s\n' "$wt/.agents/plugins/fm-firstmate-busy-$id/plugin.json"
+      printf '%s\n' "$wt/.agents/plugins/fm-firstmate-busy-$id/hooks.json"
+      printf '%s\n' "$wt/.agents/plugins/fm-firstmate-busy-$id/fm-stop.sh"
+      ;;
   esac
+}
+
+fm_control_harness_wiring_dirs() {  # <harness> <worktree> <state-dir> <id>
+  local harness=${1-} wt=${2-} state=${3-} id=${4-}
+  [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] || return 1
+  case "$harness" in
+    agy) printf '%s\n' "$wt/.agents/plugins/fm-firstmate-busy-$id" ;;
+  esac
+}
+
+fm_control_harness_worktree_preflight() {  # <harness> <worktree>
+  local harness=${1-} wt=${2-}
+  harness=$(fm_control_harness_family "$harness") || return 0
+  [ "$harness" = agy ] || return 0
+  if [ -L "$wt" ] || { [ -e "$wt" ] && [ ! -d "$wt" ]; }; then
+    echo "error: refusing agy operation through an unsafe worktree path: $wt" >&2
+    return 1
+  fi
+}
+
+fm_control_harness_worktree_identity() {  # <harness> <worktree>
+  local harness=${1-} wt=${2-}
+  harness=$(fm_control_harness_family "$harness") || return 1
+  [ "$harness" = agy ] || return 1
+  fm_control_harness_worktree_preflight "$harness" "$wt" || return 1
+  if [ ! -e "$wt" ]; then
+    printf 'missing\n'
+  elif [ "$(uname 2>/dev/null)" = Darwin ]; then
+    LC_ALL=C stat -f '%d:%i' "$wt" 2>/dev/null
+  else
+    LC_ALL=C stat -c '%d:%i' "$wt" 2>/dev/null
+  fi
+}
+
+fm_control_harness_worktree_identity_verify() {  # <harness> <worktree> <identity>
+  local harness=${1-} wt=${2-} expected=${3-} current
+  [ -n "$expected" ] || return 1
+  current=$(fm_control_harness_worktree_identity "$harness" "$wt") || {
+    echo "error: refusing agy operation because the worktree identity changed or became unsafe: $wt" >&2
+    return 1
+  }
+  if [ "$current" != "$expected" ]; then
+    echo "error: refusing agy operation because the worktree identity changed: $wt" >&2
+    return 1
+  fi
+}
+
+fm_control_harness_wiring_cleanup() {  # <harness> <worktree> <state-dir> <id>
+  local harness=${1-} wt=${2-} state=${3-} id=${4-} dir parent path
+  [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] || return 1
+  harness=$(fm_control_harness_family "$harness") || return 0
+  if [ "$harness" = agy ]; then
+    fm_control_harness_worktree_preflight "$harness" "$wt" || return 1
+    dir=$(fm_control_harness_wiring_dirs "$harness" "$wt" "$state" "$id") || return 1
+    for parent in "$wt/.agents" "$wt/.agents/plugins"; do
+      if [ -L "$parent" ] || { [ -e "$parent" ] && [ ! -d "$parent" ]; }; then
+        echo "error: refusing agy wiring cleanup through an unsafe plugin parent: $parent" >&2
+        return 1
+      fi
+    done
+    if [ -L "$dir" ]; then
+      rm -f -- "$dir"
+      return
+    fi
+    if [ -e "$dir" ] && [ ! -d "$dir" ]; then
+      echo "error: refusing agy wiring cleanup through a non-directory plugin path: $dir" >&2
+      return 1
+    fi
+  fi
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    rm -f -- "$path" || return 1
+  done <<EOF
+$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
+EOF
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    rmdir -- "$path" 2>/dev/null || [ ! -e "$path" ] || return 1
+  done <<EOF
+$(fm_control_harness_wiring_dirs "$harness" "$wt" "$state" "$id")
+EOF
 }
 
 # The firstmate-owned global turn-end registry entry a harness mints per task.

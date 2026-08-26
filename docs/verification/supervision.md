@@ -173,7 +173,7 @@ The detailed reconciliation and task chronology stay in the private audit report
 
 ## Semantic busy state
 
-The per-adapter semantic sources behind [`bin/fm-busy-lib.sh`](../../bin/fm-busy-lib.sh) were live-verified on 2026-07-28 against firstmate-launched workers wired exactly as `fm-spawn` writes them.
+The established per-adapter semantic sources behind [`bin/fm-busy-lib.sh`](../../bin/fm-busy-lib.sh) were live-verified on 2026-07-28 against firstmate-launched workers wired exactly as `fm-spawn` writes them.
 Each pass polled `state/<id>.busy-state` while a real turn ran.
 
 | Harness | Version verified | Semantic source | Observed result |
@@ -197,11 +197,15 @@ In this 2026-07-28 Codex 0.145.0 semantic-busy probe, Firstmate-written lifecycl
 Codex also exposes no `StopFailure` hook, so an API-error turn end would need separate coverage even after hook discovery works.
 The app-server protocol schema does define the required lifecycle (`turn/started`, plus a `turn/completed` status of `completed`, `interrupted`, `failed`, or `inProgress`), so the gate is a reachability problem rather than a protocol gap.
 
+`tests/fm-agy-harness.test.sh` deterministically exercises the generated `PreInvocation` and `Stop` commands with synthetic payloads and pins the rendered delivery-busy token with a fixture.
+No opt-in real-agy guard currently refreshes those lifecycle or delivery-footer observations, so this record makes no live Antigravity semantic-state claim.
+
 Deterministic entry points:
 
 ```sh
 tests/fm-busy-state.test.sh
 tests/fm-busy-adapter-wiring.test.sh
+tests/fm-agy-harness.test.sh
 tests/fm-crew-state.test.sh
 ```
 

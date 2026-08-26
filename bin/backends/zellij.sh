@@ -386,6 +386,51 @@ fm_backend_zellij_target_ready() {  # <target> [expected-label]
   fm_backend_zellij_pane_exists "$FM_BACKEND_ZELLIJ_SESSION" "$FM_BACKEND_ZELLIJ_PANE"
 }
 
+fm_backend_zellij_target_presence_state() {  # <target> [expected-label]
+  local target=$1 expected_label=${2:-} sessions tabs panes scoped scoped_count bare_count
+  fm_backend_zellij_parse_target "$target" || { printf 'unknown'; return 0; }
+  sessions=$(zellij list-sessions --short --no-formatting 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  if ! printf '%s\n' "$sessions" | grep -qxF "$FM_BACKEND_ZELLIJ_SESSION"; then
+    printf 'missing'
+    return 0
+  fi
+  if [ -n "$expected_label" ]; then
+    tabs=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action list-tabs --json 2>/dev/null) \
+      || { printf 'unknown'; return 0; }
+    printf '%s' "$tabs" | jq -e 'type == "array"' >/dev/null 2>&1 \
+      || { printf 'unknown'; return 0; }
+    scoped=$(fm_backend_zellij_scoped_title "$expected_label")
+    scoped_count=$(printf '%s' "$tabs" | jq -r --arg want "$scoped" \
+      '[.[]? | select(.name == $want)] | length' 2>/dev/null) \
+      || { printf 'unknown'; return 0; }
+    case "$scoped_count" in
+      1) printf 'present'; return 0 ;;
+      0) ;;
+      *) printf 'unknown'; return 0 ;;
+    esac
+    bare_count=$(printf '%s' "$tabs" | jq -r --arg want "$expected_label" \
+      '[.[]? | select(.name == $want)] | length' 2>/dev/null) \
+      || { printf 'unknown'; return 0; }
+    case "$bare_count" in
+      0) printf 'missing' ;;
+      1) printf 'present' ;;
+      *) printf 'unknown' ;;
+    esac
+    return 0
+  fi
+  panes=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action list-panes --json 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  printf '%s' "$panes" | jq -e 'type == "array"' >/dev/null 2>&1 \
+    || { printf 'unknown'; return 0; }
+  if printf '%s' "$panes" | jq -e --argjson pane "$FM_BACKEND_ZELLIJ_PANE" \
+      '[.[]? | select(.id == $pane and .is_plugin == false)] | length == 1' >/dev/null 2>&1; then
+    printf 'present'
+  else
+    printf 'missing'
+  fi
+}
+
 # fm_backend_zellij_current_path: the live pane's cwd, or empty on any error.
 # Mirrors tmux's pane_current_path poll used for worktree-path discovery after
 # `treehouse get`.

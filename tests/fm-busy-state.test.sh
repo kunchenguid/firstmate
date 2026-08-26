@@ -260,7 +260,7 @@ test_record_without_sidecar_unknown() {
 # --- adapter isolation ---------------------------------------------------------
 
 test_source_mismatch_cross_adapter() {
-  local state gen out
+  local state agy_state gen agy_gen out
   state=$(new_state_dir cross-adapter)
   gen=$("$EV" arm "$state" t1)
   "$EV" apply "$state" t1 busy --gen "$gen" --source pi-ext --event agent-start
@@ -270,6 +270,15 @@ test_source_mismatch_cross_adapter() {
   [ "$out" = "busy pi-ext" ] || fail "pi-ext record on a pi task must classify, got '$out'"
   out=$(fm_busy_classify tmux w1 grok t1 "$state")
   [ "$out" = "unknown source-mismatch" ] || fail "grok trusts no semantic source, got '$out'"
+
+  agy_state=$(new_state_dir agy-lookalike)
+  agy_gen=$("$EV" arm "$agy_state" t1)
+  "$EV" apply "$agy_state" t1 busy --gen "$agy_gen" --source agy-hook --event pre-invocation
+  out=$(fm_busy_classify tmux w1 agytest t1 "$agy_state")
+  [ "$out" = "unknown source-mismatch" ] \
+    || fail "agy-like raw workers must not trust Antigravity hooks, got '$out'"
+  out=$(fm_busy_classify tmux w1 agy t1 "$agy_state")
+  [ "$out" = "busy agy-hook" ] || fail "exact agy task must trust its lifecycle hook, got '$out'"
   pass "a record is trusted only by the adapter whose source wrote it"
 }
 

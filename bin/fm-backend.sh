@@ -870,6 +870,35 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   esac
 }
 
+fm_backend_target_presence_state() {  # <backend> <target> [expected-label]
+  local backend=$1 target=$2 expected_label=${3:-} state
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  case "$backend" in
+    tmux)
+      state=$(fm_backend_tmux_agent_state "$target")
+      case "$state" in
+        missing) printf 'missing' ;;
+        alive|dead|ambiguous) printf 'present' ;;
+        *) printf 'unknown' ;;
+      esac
+      ;;
+    herdr)
+      fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+      state=$(fm_backend_herdr_pane_presence_state \
+        "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+      case "$state" in
+        dead) printf 'missing' ;;
+        present) printf 'present' ;;
+        *) printf 'unknown' ;;
+      esac
+      ;;
+    zellij) fm_backend_zellij_target_presence_state "$target" "$expected_label" ;;
+    orca) fm_backend_orca_target_presence_state "$target" ;;
+    cmux) fm_backend_cmux_target_presence_state "$target" "$expected_label" ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 # fm_backend_agent_state: the single recovery-grade agent/endpoint state
 # contract. It is deliberately richer than fm_backend_target_exists's cheap
 # pane-presence read and prints exactly one of:

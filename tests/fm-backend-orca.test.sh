@@ -109,6 +109,28 @@ test_capture_fails_on_orca_error_json() {
   pass "fm_backend_orca_capture: fails closed on Orca read error JSON"
 }
 
+test_target_presence_classifies_orca_json() {
+  local out
+  orca_case presence-present
+  printf '{"ok":true,"result":{"terminal":{"tail":[]}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_target_presence_state term-live' "$ROOT" )
+  [ "$out" = present ] || fail "Orca presence should confirm a readable terminal, got '$out'"
+
+  orca_case presence-missing
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_target_presence_state term-stale' "$ROOT" )
+  [ "$out" = missing ] || fail "Orca presence should confirm a stale terminal handle as missing, got '$out'"
+
+  orca_case presence-unknown
+  printf '{"ok":false,"error":{"code":"runtime_unavailable"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_target_presence_state term-unknown' "$ROOT" )
+  [ "$out" = unknown ] || fail "Orca presence should fail closed on an unqueryable terminal, got '$out'"
+  pass "fm_backend_orca_target_presence_state: distinguishes present, missing, and unknown"
+}
+
 test_runtime_check_accepts_ready_orca_status() {
   local out
   orca_case runtime-ready
@@ -504,9 +526,12 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-spawn"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-spawn","path":"%s"},"terminal":{"handle":"term-spawn"}}}\n' "$wt" > "$RESP/3.out"
+  # This fake records terminal input but does not execute it. The dedicated
+  # process-scope suite exercises the launcher with real processes; this case
+  # verifies that the Orca transport receives the scoped launch command.
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
-    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 FM_TASK_PROCESS_SCOPE_START_ATTEMPTS=0 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
   expect_code 0 $? "fm-spawn.sh --backend orca should succeed with fake Orca"$'\n'"$out"
   assert_contains "$out" "spawned $id harness=claude kind=ship mode=no-mistakes yolo=off window=fm-$id worktree=$wt" \
@@ -516,6 +541,9 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   assert_grep "terminal=term-spawn" "$state/$id.meta" "meta missing terminal handle"
   assert_grep "orca_worktree_id=wt-spawn" "$state/$id.meta" "meta missing Orca worktree id"
   assert_grep "worktree=$wt" "$state/$id.meta" "meta missing Orca worktree path"
+  assert_grep "process_scope_token=" "$state/$id.meta" "meta missing worker process-scope token"
+  assert_contains "$(cat "$log")" "fm-task-process-launch.sh" \
+    "spawn did not send the worker process-scope launcher through Orca"
   assert_not_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''create' \
     "spawn should reuse the implicit terminal returned by Orca worktree creation"
   assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f''export GOTMPDIR=/tmp/fm-orcaspawnz1/gotmp'$'\x1f''--enter'$'\x1f''--json' \
@@ -1306,6 +1334,7 @@ test_dispatcher_sources_orca_and_routes_primitives() {
 test_capture_reads_terminal_tail_json
 test_capture_falls_back_to_text_fields
 test_capture_fails_on_orca_error_json
+test_target_presence_classifies_orca_json
 test_runtime_check_accepts_ready_orca_status
 test_runtime_check_refuses_unready_orca_status
 test_send_text_submit_verifies_empty_composer_after_enter

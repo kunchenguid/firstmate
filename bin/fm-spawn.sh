@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--raw-harness <identity>] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--raw-harness <identity>] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--raw-harness <identity>] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -34,10 +34,14 @@
 #   the new incarnation.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
+#   --raw-harness <identity> declares the adapter identity of a raw launch
+#   command. It is required for raw secondmate launches and optional for raw
+#   worker launches; it does not change the command being launched.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
-#   axes chosen by firstmate at intake. They are only threaded into harnesses whose
-#   installed CLIs were verified to support that axis; unsupported axes are omitted
-#   from that harness's launch rather than guessed.
+#   axes chosen by firstmate at intake. They reach a harness only through a
+#   verified adapter mapping; a value with no verified mapping is omitted from
+#   that harness's launch rather than guessed. docs/configuration.md owns
+#   adapter-specific defaults and translations such as agy's effort cap.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -104,7 +108,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -141,7 +145,7 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
+#   source of truth; shared --scout/--harness/--raw-harness/--model/--effort/--backend/--mode/--yolo
 #   applies to every pair. A ship batch therefore carries one delivery contract, and each
 #   pair still checks it against its own brief; a batch spanning modes is two invocations.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
@@ -248,6 +252,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-task-process-lib.sh
+. "$SCRIPT_DIR/fm-task-process-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -269,6 +275,7 @@ fm_refuse_if_gate_agent
 KIND=ship
 KIND_SET=0
 HARNESS_ARG=
+RAW_HARNESS_ARG=
 MODEL=
 EFFORT=
 BACKEND_ARG=
@@ -276,6 +283,7 @@ MODE=
 YOLO=
 TRACEPARENT_ARG=
 HARNESS_SET=0
+RAW_HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
@@ -292,6 +300,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
+      raw-harness) RAW_HARNESS_ARG=$a; RAW_HARNESS_SET=1 ;;
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
@@ -309,6 +318,8 @@ for a in "$@"; do
     --relaunch) RELAUNCH=1 ;;
     --harness) want_value=harness ;;
     --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
+    --raw-harness) want_value='raw-harness' ;;
+    --raw-harness=*) RAW_HARNESS_ARG=${a#--raw-harness=}; RAW_HARNESS_SET=1 ;;
     --model) want_value=model ;;
     --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
     --effort) want_value=effort ;;
@@ -326,6 +337,14 @@ for a in "$@"; do
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
+if [ "$RAW_HARNESS_SET" -eq 1 ]; then
+  case "$RAW_HARNESS_ARG" in
+    ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._+-]*)
+      echo "error: --raw-harness requires a single adapter identity using letters, digits, '.', '_', '+', or '-'" >&2
+      exit 1
+      ;;
+  esac
+fi
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
@@ -670,6 +689,14 @@ RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
 RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
+AGY_PLUGIN_INSTALL_PENDING=0
+AGY_PLUGIN_DIR=
+AGY_RECOVERY_META_PENDING=0
+TASK_PROCESS_SCOPE_ENABLED=0
+TASK_SCOPE_PRIOR_TOKEN=
+TASK_SCOPE_TOKEN=
+TASK_SCOPE_ENCLOSURE=
+TASK_SCOPE_CONTAINMENT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -692,6 +719,21 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$AGY_PLUGIN_INSTALL_PENDING" = 1 ]; then
+    AGY_PLUGIN_INSTALL_PENDING=0
+    fm_control_harness_wiring_cleanup agy "$WT" "${STATE_REAL:-$STATE}" "$ID" 2>/dev/null || true
+  fi
+  if [ "$AGY_RECOVERY_META_PENDING" = 1 ]; then
+    AGY_RECOVERY_META_PENDING=0
+    if [ "$status" -ne 0 ] && [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" != orca ] \
+       && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+      if publish_spawn_recovery_meta; then
+        echo "error: agy setup stopped after endpoint creation; recoverable metadata was preserved at $STATE/$ID.meta" >&2
+      else
+        echo "error: agy setup stopped after endpoint creation and recovery metadata could not be published" >&2
+      fi
+    fi
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -808,13 +850,14 @@ spawn_herdr_presentation_order_lock_acquire() {
 }
 
 clear_relaunch_harness_wiring() {
-  local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path path
-  # The wiring arms above match on harness PREFIXES, because a task launched
-  # from a raw command records that command's basename rather than the exact
-  # adapter name. The retirement tables are keyed by the exact adapter, so the
-  # recorded value is resolved to its adapter first; otherwise a task recorded
-  # as, say, `grok-2` would have wiring armed and never retired. An
-  # unrecognized value resolves to no adapter, which is also the case in which
+  local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path
+  # Most wiring arms above match on harness prefixes, because a raw command with
+  # no declared --raw-harness identity records its command basename instead of
+  # an exact adapter name. The retirement tables are keyed by the exact adapter,
+  # so the recorded value is resolved to its adapter first; otherwise a task
+  # recorded as, say, `grok-2` would have wiring armed and never retired.
+  # Agy is exact because its verified command is exactly `agy`.
+  # An unrecognized value resolves to no adapter, which is also the case in which
   # no wiring was armed to begin with.
   harness=$(fm_control_harness_family "$harness") || harness=
   token_path=$(fm_control_harness_turnend_token_path "$harness" "$state" "$id") || return 1
@@ -826,12 +869,87 @@ clear_relaunch_harness_wiring() {
   if [ -n "$auth_path" ]; then
     rm -f -- "$auth_path" || return 1
   fi
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    rm -f -- "$path" || return 1
-  done <<EOF
-$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
-EOF
+  fm_control_harness_wiring_cleanup "$harness" "$wt" "$state" "$id"
+}
+
+agy_plugin_prepare() {
+  local wt=$1 state=$2 id=$3 agents_dir plugins_dir plugin_dir path
+  plugin_dir=$(fm_control_harness_wiring_dirs agy "$wt" "$state" "$id") || return 1
+  plugins_dir=${plugin_dir%/*}
+  agents_dir=${plugins_dir%/*}
+  for path in "$agents_dir" "$plugins_dir"; do
+    if [ -L "$path" ] || { [ -e "$path" ] && [ ! -d "$path" ]; }; then
+      echo "error: refusing agy spawn because plugin parent is not a real directory: $path" >&2
+      return 1
+    fi
+  done
+  if [ -L "$plugin_dir" ]; then
+    echo "error: refusing agy spawn because plugin path is a symlink: $plugin_dir" >&2
+    return 1
+  fi
+  if [ -e "$plugin_dir" ]; then
+    echo "error: refusing agy spawn because plugin path already exists: $plugin_dir" >&2
+    return 1
+  fi
+  for path in "$agents_dir" "$plugins_dir"; do
+    if [ ! -e "$path" ]; then
+      mkdir -- "$path" || {
+        echo "error: could not create agy plugin parent: $path" >&2
+        return 1
+      }
+    fi
+    if [ -L "$path" ] || [ ! -d "$path" ]; then
+      echo "error: refusing agy spawn because plugin parent is not a real directory: $path" >&2
+      return 1
+    fi
+  done
+  mkdir -- "$plugin_dir" || {
+    echo "error: could not create exclusive agy plugin directory: $plugin_dir" >&2
+    return 1
+  }
+  AGY_PLUGIN_DIR=$plugin_dir
+  AGY_PLUGIN_INSTALL_PENDING=1
+}
+
+publish_spawn_recovery_meta() {
+  local meta_window=$T tmp="$STATE/.$ID.meta.recovery.${BASHPID:-$$}"
+  [ "$BACKEND" != orca ] || return 0
+  {
+    echo "window=$meta_window"
+    echo "endpoint_task_id=$ID"
+    echo "worktree=$WT"
+    echo "project=$PROJ_ABS"
+    echo "harness=unknown"
+    echo "kind=$KIND"
+    [ -z "$MODE" ] || echo "mode=$MODE"
+    [ -z "$YOLO" ] || echo "yolo=$YOLO"
+    echo "tasktmp=$TASK_TMP"
+    echo "model=${MODEL:-default}"
+    echo "effort=${EFFORT:-default}"
+    [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+    if [ "$BACKEND" = herdr ]; then
+      echo "herdr_session=$HERDR_SES"
+      echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
+      echo "herdr_tab_id=$HERDR_TAB_ID"
+      echo "herdr_pane_id=$HERDR_PANE_ID"
+    fi
+    if [ "$BACKEND" = zellij ]; then
+      echo "zellij_session=$ZELLIJ_SES"
+      echo "zellij_tab_id=$ZELLIJ_TAB_ID"
+      echo "zellij_pane_id=$ZELLIJ_PANE_ID"
+    fi
+    if [ "$BACKEND" = cmux ]; then
+      echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
+      echo "cmux_surface_id=$CMUX_SURFACE_ID"
+    fi
+  } > "$tmp" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  mv -f -- "$tmp" "$STATE/$ID.meta" || {
+    rm -f -- "$tmp"
+    return 1
+  }
 }
 
 spawn_herdr_presentation_order_lock_release() {
@@ -860,6 +978,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   rc=0
   shared_args=()
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
+  [ -z "$RAW_HARNESS_ARG" ] || shared_args+=(--raw-harness "$RAW_HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
@@ -1061,7 +1180,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1073,8 +1192,12 @@ elif [ "$KIND" = secondmate ]; then
       fi
       ;;
     *)
-      FIRSTMATE_HOME=${POS[1]}
-      ARG3=${POS[2]:-}
+      if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
+        FIRSTMATE_HOME=${POS[1]}
+        ARG3=${POS[2]:-}
+      else
+        ARG3=${POS[1]}
+      fi
       ;;
   esac
 else
@@ -1191,17 +1314,30 @@ launch_template() {
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # agy (Antigravity CLI): --prompt-interactive (-i) delivers the brief to start
+    # the supervised interactive session. --dangerously-skip-permissions auto-approves
+    # tool execution without per-tool confirmation prompts.
+    agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __AGYBIN__ --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__--prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
 
+RAW_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    RAW_LAUNCH=1
     LAUNCH=$ARG3
-    HARNESS=""
-    for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
-    done
+    if [ "$RAW_HARNESS_SET" -eq 1 ]; then
+      HARNESS=$RAW_HARNESS_ARG
+    elif [ "$KIND" = secondmate ]; then
+      echo "error: a raw secondmate launch requires --raw-harness <adapter-identity> so task-kind capability checks do not guess through shell wrappers" >&2
+      exit 1
+    else
+      HARNESS=""
+      for word in $LAUNCH; do
+        case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
+      done
+    fi
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -1231,15 +1367,21 @@ case "$ARG3" in
     ;;
 esac
 
-# muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
-# instance, so it needs a primary supervision protocol; muse has none, and its
-# Claude-compatible hook dialect explicitly rejects the model-reawakening and
-# asyncRewake handlers that firstmate's primary turn-end supervision is built on
-# (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
-# secondmate whose supervision cycle could never be armed.
-if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
-  echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+if [ "$RAW_HARNESS_SET" -eq 1 ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  echo "error: --raw-harness applies only to a raw launch command" >&2
   exit 1
+fi
+
+TASK_PROCESS_SCOPE_FAMILY=$(fm_control_harness_family "$HARNESS" 2>/dev/null || true)
+if [ -n "$TASK_PROCESS_SCOPE_FAMILY" ] \
+   && ! fm_control_harness_supports_kind "$TASK_PROCESS_SCOPE_FAMILY" "$KIND"; then
+  echo "error: $TASK_PROCESS_SCOPE_FAMILY is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+  exit 1
+fi
+
+if [ "$KIND" != secondmate ] \
+   && fm_control_harness_supported "$TASK_PROCESS_SCOPE_FAMILY"; then
+  TASK_PROCESS_SCOPE_ENABLED=1
 fi
 
 case "$HARNESS" in
@@ -1295,6 +1437,24 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
   fi
 fi
 
+if [ "$HARNESS" = agy ]; then
+  if [ -z "$MODEL" ] || [ "$MODEL" = default ]; then
+    case "$EFFORT" in
+      low) MODEL=gemini-3.7-flash-low ;;
+      medium) MODEL=gemini-3.7-flash-medium ;;
+      *) MODEL=gemini-3.7-flash-high ;;
+    esac
+  fi
+  case "$MODEL:$EFFORT" in
+    *-low:medium|*-low:high|*-low:xhigh|*-low:max|\
+    *-medium:low|*-medium:high|*-medium:xhigh|*-medium:max|\
+    *-high:low|*-high:medium)
+      echo "error: agy model '$MODEL' conflicts with requested effort '$EFFORT'; select the matching low, medium, or high model variant" >&2
+      exit 1
+      ;;
+  esac
+fi
+
 secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
 }
@@ -1342,6 +1502,25 @@ resolve_muse_binary() {
   return 1
 }
 
+resolve_agy_binary() {
+  local candidate dir
+  candidate=$(command -v agy 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    case "$candidate" in
+      /*) printf '%s\n' "$candidate"; return 0 ;;
+      *)
+        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+        if [ -n "$dir" ]; then
+          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  echo "error: agy executable not found on PATH; install Antigravity CLI or select a different verified harness" >&2
+  return 1
+}
+
 # muse_credential_present: 0 when a launched muse pane can reach its provider
 # without an interactive login. muse offers exactly two credential paths
 # (verified, muse 0.1.0-R708.1): the META_API_KEY environment variable, which
@@ -1376,14 +1555,14 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
 }
 
 effort_flag_for_harness() {
-  local harness=$1 effort=$2
+  local harness=$1 effort=$2 model=${3:-}
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness" in
     claude)
@@ -1429,6 +1608,23 @@ effort_flag_for_harness() {
         max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
       esac
       ;;
+    agy)
+      # agy accepts --effort low|medium|high.
+      # When the selected model already encodes reasoning effort (e.g. *-low,
+      # *-medium, *-high), agy rejects a conflicting --effort flag and redundant
+      # effort flags are unnecessary, so omit --effort.
+      # For base/generic models (e.g. gemini-3.7-flash), map requested effort;
+      # cap unsupported xhigh/max to high.
+      case "$model" in
+        *-low|*-medium|*-high) ;;
+        *)
+          case "$effort" in
+            low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+            xhigh|max) printf -- '--effort %s ' "$(shell_quote "high")" ;;
+          esac
+          ;;
+      esac
+      ;;
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
@@ -1471,6 +1667,35 @@ case "$LAUNCH" in
     fi
     ;;
 esac
+
+case "$LAUNCH" in
+  *__AGYBIN__*)
+    AGY_BIN=$(resolve_agy_binary) || exit 1
+    AGY_JQ_BIN=$(command -v jq) || {
+      echo "error: jq executable not found on PATH; agy lifecycle hooks require jq" >&2
+      exit 1
+    }
+    LAUNCH=${LAUNCH//__AGYBIN__/$(shell_quote "$AGY_BIN")}
+    ;;
+esac
+
+if [ "$TASK_PROCESS_SCOPE_ENABLED" = 1 ]; then
+  command -v ps >/dev/null 2>&1 || {
+    echo "error: ps executable not found on PATH; worker process-scope supervision requires ps" >&2
+    exit 1
+  }
+  [ -x "$SCRIPT_DIR/fm-task-process-launch.sh" ] || {
+    echo "error: worker process-scope launcher is missing or not executable: $SCRIPT_DIR/fm-task-process-launch.sh" >&2
+    exit 1
+  }
+  TASK_SCOPE_ENCLOSURE=$(fm_task_process_enclosure_resolve) || exit 1
+  TASK_SCOPE_CONTAINMENT=$(fm_task_process_enclosure_containment "$TASK_SCOPE_ENCLOSURE") || exit 1
+  TASK_SCOPE_PATH=$(fm_task_process_scope_path "$STATE" "$ID") || exit 1
+  if [ "$RELAUNCH" -eq 0 ] && { [ -e "$TASK_SCOPE_PATH" ] || [ -L "$TASK_SCOPE_PATH" ]; }; then
+    echo "error: refusing worker spawn because a prior process-scope record still exists: $TASK_SCOPE_PATH" >&2
+    exit 1
+  fi
+fi
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -2302,6 +2527,28 @@ exclude_path() {
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
 if [ "$RELAUNCH" -eq 1 ]; then
+  RELAUNCH_PRIOR_FAMILY=$(fm_control_harness_family "$RELAUNCH_PRIOR_HARNESS" 2>/dev/null || true)
+  RELAUNCH_SCOPE_TOKEN=$(fm_task_process_scope_meta_token_explicit "$RELAUNCH_META") || exit 1
+  if [ -z "$RELAUNCH_SCOPE_TOKEN" ] && [ "$RELAUNCH_PRIOR_FAMILY" = agy ]; then
+    RELAUNCH_SCOPE_TOKEN=$(fm_task_process_scope_meta_token "$RELAUNCH_META") || exit 1
+  fi
+  if [ -n "$RELAUNCH_SCOPE_TOKEN" ]; then
+    if [ "$RELAUNCH_PRIOR_FAMILY" = agy ] || [ "$HARNESS" = agy ]; then
+      fm_task_process_scope_require_pid_namespace \
+        "$STATE_REAL" "$ID" "$RELAUNCH_SCOPE_TOKEN" "an agy relaunch transition" || exit 1
+      RELAUNCH_WT_IDENTITY=$(fm_control_harness_worktree_identity agy "$WT") || exit 1
+    else
+      RELAUNCH_WT_IDENTITY=
+    fi
+    fm_task_process_scope_quiesce "$STATE_REAL" "$ID" "$RELAUNCH_SCOPE_TOKEN" "retired worker" || exit 1
+    [ -z "$RELAUNCH_WT_IDENTITY" ] \
+      || fm_control_harness_worktree_identity_verify agy "$WT" "$RELAUNCH_WT_IDENTITY" \
+      || exit 1
+    TASK_SCOPE_PRIOR_TOKEN=$RELAUNCH_SCOPE_TOKEN
+  elif [ "$HARNESS" = agy ]; then
+    echo "error: refusing agy relaunch from $RELAUNCH_PRIOR_HARNESS because the prior worker has no durable process scope" >&2
+    exit 1
+  fi
   # Retire the previous incarnation's per-task harness wiring before arming the
   # new one. Without this, a harness switch would leave the old adapter's hook
   # files and turn-end token registry entries behind, and even a same-harness
@@ -2316,6 +2563,14 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
+case "$HARNESS" in
+  agy)
+    if [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" != orca ]; then
+      AGY_RECOVERY_META_PENDING=1
+    fi
+    agy_plugin_prepare "$WT" "$STATE_REAL" "$ID" || exit 1
+    ;;
+esac
 if [ "$KIND" != secondmate ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
   # adapter with a verified semantic source. The launch brief sent below IS a
@@ -2334,7 +2589,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|opencode*|pi|pi-signed|agy)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -2460,6 +2715,55 @@ export default function (pi: any) {
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
 }
 EOF
+      ;;
+    agy)
+      busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+      busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source agy-hook"
+      j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event pre-invocation >/dev/null 2>&1 || true; printf '%s\\n' '{}'")
+      if ! (set -o noclobber; cat > "$AGY_PLUGIN_DIR/fm-stop.sh" <<EOF
+#!/bin/sh
+agy_payload=\$(cat)
+agy_fully_idle=\$(printf '%s' "\$agy_payload" | $(shell_quote "$AGY_JQ_BIN") -r 'if (.fullyIdle | type) == "boolean" then (.fullyIdle | tostring) else "invalid" end' 2>/dev/null) || agy_fully_idle=invalid
+case "\$agy_fully_idle" in
+  true)
+    touch $(shell_quote "$TURNEND")
+    $busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 || true
+    ;;
+  false)
+    $busy_cmd_prefix unknown $busy_suffix --event background-active >/dev/null 2>&1 || true
+    ;;
+  *)
+    $busy_cmd_prefix unknown $busy_suffix --event stop-unreadable >/dev/null 2>&1 || true
+    ;;
+esac
+printf '%s\n' '{"decision":"allow"}'
+EOF
+      ); then
+        echo "error: refusing to replace an existing agy lifecycle observer: $AGY_PLUGIN_DIR/fm-stop.sh" >&2
+        exit 1
+      fi
+      chmod 700 "$AGY_PLUGIN_DIR/fm-stop.sh" || {
+        echo "error: could not make the agy lifecycle observer executable: $AGY_PLUGIN_DIR/fm-stop.sh" >&2
+        exit 1
+      }
+      j_stop=$(json_escape "$(shell_quote "$AGY_PLUGIN_DIR/fm-stop.sh")")
+      if ! (set -o noclobber; cat > "$AGY_PLUGIN_DIR/plugin.json" <<EOF
+{"name":"fm-firstmate-busy"}
+EOF
+      ); then
+        echo "error: refusing to replace an existing agy plugin manifest: $AGY_PLUGIN_DIR/plugin.json" >&2
+        exit 1
+      fi
+      if ! (set -o noclobber; cat > "$AGY_PLUGIN_DIR/hooks.json" <<EOF
+{"fm-firstmate-busy":{"PreInvocation":[{"type":"command","command":"$j_submit"}],"Stop":[{"type":"command","command":"$j_stop"}]}}
+EOF
+      ); then
+        echo "error: refusing to replace existing agy lifecycle hooks: $AGY_PLUGIN_DIR/hooks.json" >&2
+        exit 1
+      fi
+      exclude_path ".agents/plugins/fm-firstmate-busy-$ID/plugin.json"
+      exclude_path ".agents/plugins/fm-firstmate-busy-$ID/hooks.json"
+      exclude_path ".agents/plugins/fm-firstmate-busy-$ID/fm-stop.sh"
       ;;
     codex*)
       # Semantic busy-state source negotiation (bin/fm-busy-lib.sh owns the
@@ -2636,6 +2940,9 @@ fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
+if [ "$TASK_PROCESS_SCOPE_ENABLED" = 1 ]; then
+  TASK_SCOPE_TOKEN=$SPAWN_GEN
+fi
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -2647,7 +2954,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen process_scope_token traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2667,6 +2974,7 @@ preserve_relaunch_meta() {
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  [ "$TASK_PROCESS_SCOPE_ENABLED" != 1 ] || echo "process_scope_token=$TASK_SCOPE_TOKEN"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -2711,6 +3019,15 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
 fi
+if [ "$RELAUNCH" -eq 1 ] && [ -n "$TASK_SCOPE_PRIOR_TOKEN" ] \
+   && [ "$TASK_PROCESS_SCOPE_ENABLED" != 1 ]; then
+  fm_task_process_scope_remove_empty "$STATE" "$ID" "$TASK_SCOPE_PRIOR_TOKEN" || {
+    echo "error: could not retire the prior worker process-scope record for task $ID" >&2
+    exit 1
+  }
+  TASK_SCOPE_PRIOR_TOKEN=
+fi
+AGY_RECOVERY_META_PENDING=0
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   # The record is published, so this task is now part of the set a teardown
   # enumerates and locks per task. The set lock is only needed across that
@@ -2728,7 +3045,7 @@ sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
@@ -2743,9 +3060,13 @@ case "$HARNESS" in
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+  claude|codex|opencode|pi|pi-signed|grok|kimi|muse|agy)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
     ;;
+esac
+case "$HARNESS" in
+  agy) ;;
+  *) LAUNCH="env -u ANTIGRAVITY_LS_VERSION -u ANTIGRAVITY_SOURCE_METADATA $LAUNCH" ;;
 esac
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
@@ -2776,9 +3097,49 @@ if [ "$KIND" = secondmate ]; then
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
+if [ "$TASK_PROCESS_SCOPE_ENABLED" = 1 ]; then
+  TASK_SCOPE_PATH=$(fm_task_process_scope_path "$STATE_REAL" "$ID") || exit 1
+  if [ -z "$TASK_SCOPE_PRIOR_TOKEN" ]; then
+    fm_task_process_scope_create_empty \
+      "$STATE_REAL" "$ID" "$TASK_SCOPE_TOKEN" "$TASK_SCOPE_CONTAINMENT" || {
+      echo "error: could not establish the empty worker process scope for task $ID" >&2
+      exit 1
+    }
+    TASK_SCOPE_LAUNCH_PRIOR_TOKEN=$TASK_SCOPE_TOKEN
+  else
+    fm_task_process_scope_record_read "$STATE_REAL" "$ID" "$TASK_SCOPE_PRIOR_TOKEN" || exit 1
+    [ "$FM_TASK_PROCESS_SCOPE_STATUS" = empty ] || {
+      echo "error: refusing worker launch because its prior process scope is not empty: $TASK_SCOPE_PATH" >&2
+      exit 1
+    }
+    TASK_SCOPE_LAUNCH_PRIOR_TOKEN=$TASK_SCOPE_PRIOR_TOKEN
+  fi
+  LAUNCH="$(shell_quote "$SCRIPT_DIR/fm-task-process-launch.sh") $(shell_quote "$TASK_SCOPE_PATH") $(shell_quote "$TASK_SCOPE_TOKEN") $(shell_quote "$TASK_SCOPE_LAUNCH_PRIOR_TOKEN") $(shell_quote "$LAUNCH") $(shell_quote "$TASK_SCOPE_ENCLOSURE")"
+fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
+
+task_process_scope_wait_for_start() {
+  local attempt=0 attempts=${FM_TASK_PROCESS_SCOPE_START_ATTEMPTS:-${FM_AGY_PROCESS_SCOPE_START_ATTEMPTS:-50}}
+  local interval=${FM_TASK_PROCESS_SCOPE_START_INTERVAL:-${FM_AGY_PROCESS_SCOPE_START_INTERVAL:-0.1}}
+  case "$attempts" in ''|*[!0-9]*) attempts=50 ;; esac
+  while [ "$attempt" -lt "$attempts" ]; do
+    if fm_task_process_scope_record_read "$STATE_REAL" "$ID" "$TASK_SCOPE_TOKEN" 2>/dev/null \
+       && [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ] \
+       && fm_task_process_identity_matches \
+         "$FM_TASK_PROCESS_SCOPE_ANCHOR_PID" "$FM_TASK_PROCESS_SCOPE_ANCHOR_IDENTITY" \
+       && fm_task_process_identity_matches \
+         "$FM_TASK_PROCESS_SCOPE_AGENT_PID" "$FM_TASK_PROCESS_SCOPE_AGENT_IDENTITY"; then
+      return 0
+    fi
+    sleep "$interval"
+    attempt=$((attempt + 1))
+  done
+  [ "$attempts" -eq 0 ] && return 0
+  echo "error: worker process-scope launcher did not register a live task process for $ID" >&2
+  return 1
+}
 
 spawn_record_traceparent() {
   local meta="$STATE/$ID.meta" tmp status=0
@@ -2828,6 +3189,9 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$TASK_PROCESS_SCOPE_ENABLED" = 1 ]; then
+  task_process_scope_wait_for_start || exit 1
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
@@ -2864,4 +3228,5 @@ fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
+AGY_PLUGIN_INSTALL_PENDING=0
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"

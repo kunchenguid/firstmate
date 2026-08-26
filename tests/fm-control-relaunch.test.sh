@@ -24,6 +24,8 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
+. "$ROOT/bin/fm-task-process-lib.sh"
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
@@ -120,6 +122,24 @@ SH
 exit 0
 SH
   chmod +x "$fb/sleep"
+  cat > "$fb/unshare" <<'SH'
+#!/usr/bin/env bash
+set -u
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --user|--map-current-user|--pid|--fork|--kill-child=SIGKILL|--mount-proc) shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+if [ "${1:-}" = /bin/sh ] && [ "${2:-}" = -c ] \
+   && [ "${3:-}" = '[ "$$" -eq 1 ]' ]; then
+  exit 0
+fi
+exec "$@"
+SH
+  chmod +x "$fb/unshare"
+  fm_fake_exit0 "$fb" agy jq
 }
 
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
@@ -154,7 +174,15 @@ add_ship_task() {
     echo "tasktmp=/tmp/fm-$id"
     echo "model=default"
     echo "effort=default"
+    echo "spawn_gen=test-$id"
+    echo "process_scope_token=test-$id"
   } > "$home/state/$id.meta"
+  {
+    echo "version=2"
+    echo "status=empty"
+    echo "token=test-$id"
+    echo "containment=pid-namespace"
+  } > "$home/state/$id.process-scope"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
   TASK_TMPS+=("/tmp/fm-$id")
@@ -165,6 +193,7 @@ run_control() {  # <case-dir> <args...>
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    FM_TASK_PROCESS_SCOPE_START_ATTEMPTS=0 \
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
     FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_COMPLETE_JOURNAL_MV_FAIL="${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" \
     FM_FAKE_META_PUBLISH_MV_FAIL="${FM_FAKE_META_PUBLISH_MV_FAIL:-}" \
@@ -178,6 +207,7 @@ run_spawn() {  # <case-dir> <args...>
   local dir=$1; shift
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    FM_TASK_PROCESS_SCOPE_START_ATTEMPTS=0 \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -428,6 +458,126 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
   [ "$(journal_field "$dir" rl4 from_harness)" = claude ] || fail "the journal should record the origin harness"
   [ "$(journal_field "$dir" rl4 to_harness)" = codex ] || fail "the journal should record the target harness"
   pass "fm-control relaunch: switching harness is one ordinary relaunch, and the old wiring goes with the old agent"
+}
+
+test_agy_harness_switch_removes_the_plugin_directory() {
+  local dir plugin out rc
+  dir=$(new_case agy-switch rl36)
+  add_ship_task "$dir" rl36 agy
+  printf 'agy' > "$dir/fake/command"
+  plugin="$dir/wt/.agents/plugins/fm-firstmate-busy-rl36"
+  mkdir -p "$plugin"
+  printf '%s\n' '{"name":"fm-firstmate-busy-rl36"}' > "$plugin/plugin.json"
+  printf '%s\n' '{"fm-firstmate-busy":{}}' > "$plugin/hooks.json"
+  printf 'claude' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl36 relaunch --harness claude --note "switching runtime"); rc=$?
+  expect_code 0 "$rc" "switching away from agy should succeed"$'\n'"$out"
+  [ ! -e "$plugin" ] || fail "switching away from agy left its plugin directory behind"
+  pass "fm-control relaunch: agy plugin wiring retires with its agent"
+}
+
+test_scoped_harness_switch_to_agy() {
+  local dir plugin out rc
+  dir=$(new_case agy-target rl38)
+  add_ship_task "$dir" rl38 claude
+  printf 'agy' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl38 relaunch --harness agy --note "switching runtime"); rc=$?
+  expect_code 0 "$rc" "a scoped worker should relaunch onto agy"$'\n'"$out"
+  plugin="$dir/wt/.agents/plugins/fm-firstmate-busy-rl38"
+  [ -d "$plugin" ] || fail "scoped relaunch onto agy did not install its plugin"
+  [ "$(meta_field "$dir" rl38 harness)" = agy ] \
+    || fail "scoped relaunch onto agy did not publish the replacement harness"
+  pass "fm-control relaunch: scoped workers can transition safely onto agy"
+}
+
+test_unscoped_harness_switch_to_agy_refuses_before_exit() {
+  local dir out rc
+  dir=$(new_case unscoped-agy-target rl39)
+  add_ship_task "$dir" rl39 claude
+  awk -F= '$1 != "process_scope_token"' "$dir/home/state/rl39.meta" \
+    > "$dir/home/state/rl39.meta.tmp"
+  mv "$dir/home/state/rl39.meta.tmp" "$dir/home/state/rl39.meta"
+  rm -f "$dir/home/state/rl39.process-scope"
+  printf 'agy' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl39 relaunch --harness agy --note "switching runtime"); rc=$?
+  expect_code 1 "$rc" "an unscoped prior worker must not transition onto agy"
+  assert_contains "$out" "predates durable worker process scopes" \
+    "unscoped agy transition refusal did not name the missing ownership proof"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "unscoped agy transition stopped the current agent before refusing"
+  [ ! -e "$dir/wt/.agents/plugins/fm-firstmate-busy-rl39" ] \
+    || fail "unscoped agy transition wrote plugin wiring before refusing"
+  pass "fm-control relaunch: unscoped agy transitions fail before mutation"
+}
+
+test_portable_scope_harness_switch_to_agy_refuses_before_exit() {
+  local dir out rc
+  dir=$(new_case portable-agy-target rl40)
+  add_ship_task "$dir" rl40 claude
+  sed 's/^containment=pid-namespace$/containment=process-group/' \
+    "$dir/home/state/rl40.process-scope" > "$dir/home/state/rl40.process-scope.tmp"
+  mv "$dir/home/state/rl40.process-scope.tmp" "$dir/home/state/rl40.process-scope"
+  printf 'agy' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl40 relaunch --harness agy --note "switching runtime"); rc=$?
+  expect_code 1 "$rc" "a portable prior worker must not enter an agy worktree transition"
+  assert_contains "$out" "lacks PID namespace containment" \
+    "portable agy transition refusal did not name the missing containment proof"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "portable agy transition stopped the current agent before refusing"
+  [ ! -e "$dir/wt/.agents/plugins/fm-firstmate-busy-rl40" ] \
+    || fail "portable agy transition wrote plugin wiring before refusing"
+  pass "fm-control relaunch: portable agy transitions fail before mutation"
+}
+
+test_agy_relaunch_reaps_the_prior_process_scope() {
+  local dir plugin out rc pid pgid attempts=0 token=test-rl37
+  dir=$(new_case agy-scope rl37)
+  add_ship_task "$dir" rl37 agy
+  printf 'agy' > "$dir/fake/command"
+  plugin="$dir/wt/.agents/plugins/fm-firstmate-busy-rl37"
+  mkdir -p "$plugin"
+  printf '%s\n' '{"name":"fm-firstmate-busy"}' > "$plugin/plugin.json"
+  printf '%s\n' '{"fm-firstmate-busy":{}}' > "$plugin/hooks.json"
+  FM_TASK_PROCESS_SCOPE_TOKEN="$token" python3 - <<'PY' &
+import os
+
+os.setpgrp()
+os.chdir("/tmp")
+os.execv("/bin/sleep", ["sleep", "300"])
+PY
+  pid=$!
+  while [ "$attempts" -lt 50 ]; do
+    pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+    [ "$pgid" = "$pid" ] && break
+    /bin/sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ "$pgid" = "$pid" ] || fail "agy relaunch scope fixture did not enter its own process group"
+  {
+    printf 'version=1\n'
+    printf 'status=active\n'
+    printf 'token=%s\n' "$token"
+    printf 'containment=pid-namespace\n'
+    printf 'leader_pid=%s\n' "$pid"
+    printf 'leader_identity=%s\n' "$(fm_task_process_identity "$pid")"
+    printf 'pgid=%s\n' "$pid"
+  } > "$dir/home/state/rl37.process-scope"
+  printf 'claude' > "$dir/fake/becomes"
+
+  out=$(run_control "$dir" rl37 relaunch --harness claude --note "switching runtime"); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  expect_code 0 "$rc" "switching away from agy should reap its process scope"$'\n'"$out"
+  wait "$pid" 2>/dev/null || true
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "agy relaunch left a detached task process alive"
+  fi
+  [ ! -e "$plugin" ] || fail "agy relaunch did not retire wiring after quiescence"
+  [ -e "$dir/home/state/rl37.process-scope" ] \
+    || fail "agy relaunch did not retain the scope for its verified replacement worker"
+  pass "fm-control relaunch: agy process scope is empty before replacement transition"
 }
 
 test_harness_switch_does_not_carry_the_old_profile_axes() {
@@ -785,9 +935,9 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
 }
 
-# fm-spawn arms per-task wiring on harness PREFIXES, because a task launched
-# from a raw command records that command's basename rather than the exact
-# adapter name. Retirement must resolve the same way, or a task recorded as
+# fm-spawn arms per-task wiring on harness PREFIXES, because a raw command with
+# no declared --raw-harness identity records its command basename rather than
+# the exact adapter name. Retirement must resolve the same way, or a task recorded as
 # `grok-2` would have its turn-end token and hook pointer armed and never
 # retired - leaving a registry entry that outlives the agent that owned it.
 test_prefixed_prior_harness_wiring_is_still_retired() {
@@ -1319,6 +1469,11 @@ test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
+test_agy_harness_switch_removes_the_plugin_directory
+test_scoped_harness_switch_to_agy
+test_unscoped_harness_switch_to_agy_refuses_before_exit
+test_portable_scope_harness_switch_to_agy_refuses_before_exit
+test_agy_relaunch_reaps_the_prior_process_scope
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement

@@ -170,6 +170,7 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
     # cannot carry it either: ~/.local/bin/muse-bin-<version> has no `muse` path
     # COMPONENT, so the fm_harness_path_name fallback below never fires for it.
     muse|muse-bin-*) printf 'agent' ;;
+    agy) printf 'agent' ;;
     *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
@@ -341,6 +342,7 @@ EOF
     '') printf 'unreadable'; return 0 ;;
   esac
   case "$(fm_backend_tmux_classify_process_name "$comm")" in
+    agent) printf 'alive' ;;
     shell) printf 'dead' ;;
     *) printf 'ambiguous' ;;
   esac

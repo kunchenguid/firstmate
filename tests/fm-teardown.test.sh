@@ -53,6 +53,8 @@ set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-task-process-lib.sh
+. "$ROOT/bin/fm-task-process-lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -87,7 +89,27 @@ exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
-# tmux kill-window etc.: succeed silently.
+case "${1:-}" in
+  kill-window)
+    if [ -n "${FM_FAKE_TMUX_SWAP_WT:-}" ] && [ -n "${FM_FAKE_TMUX_SWAP_TARGET:-}" ]; then
+      mv "$FM_FAKE_TMUX_SWAP_WT" "$FM_FAKE_TMUX_SWAP_WT-original"
+      ln -s "$FM_FAKE_TMUX_SWAP_TARGET" "$FM_FAKE_TMUX_SWAP_WT"
+    fi
+    [ -z "${FM_FAKE_TMUX_STATE:-}" ] || : > "$FM_FAKE_TMUX_STATE"
+    ;;
+  display-message)
+    [ -z "${FM_FAKE_TMUX_STATE:-}" ] || [ ! -e "$FM_FAKE_TMUX_STATE" ]
+    exit $?
+    ;;
+  list-windows)
+    if [ "${FM_FAKE_TMUX_LIST_ERROR:-0}" = 1 ]; then
+      echo "transient tmux inventory failure" >&2
+      exit 1
+    fi
+    [ -z "${FM_FAKE_TMUX_STATE:-}" ] || [ -e "$FM_FAKE_TMUX_STATE" ] || printf 'fm-task-x1\n'
+    exit 0
+    ;;
+esac
 exit 0
 SH
   # Default gh-axi mock: no PR is associated with the branch, and viewing any PR
@@ -483,6 +505,55 @@ SH
   chmod +x "$case_dir/fakebin/lsof"
 }
 
+add_lsof_scope_holder() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+process_is_live() {
+  local pid=$1 process_stat
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  process_stat=$("$REAL_PS_FOR_TEST" -o stat= -p "$pid" 2>/dev/null || true)
+  case "$process_stat" in ''|*Z*) return 1 ;; esac
+}
+case " $* " in
+  *" -a -d cwd -Fpn "*)
+    if process_is_live "${FM_EXPECT_SCOPE_PID:-}"; then
+      printf 'p%s\nfcwd\nn%s\n' "$FM_EXPECT_SCOPE_PID" "$FM_EXPECT_SCOPE_WT"
+    fi
+    if process_is_live "${FM_EXPECT_ENDPOINT_PID:-}"; then
+      printf 'p%s\nfcwd\nn%s\n' "$FM_EXPECT_ENDPOINT_PID" "$FM_EXPECT_SCOPE_WT"
+    fi
+    if process_is_live "${FM_EXPECT_FOREIGN_PID:-}"; then
+      printf 'p%s\nfcwd\nn%s\n' "$FM_EXPECT_FOREIGN_PID" "$FM_EXPECT_SCOPE_WT"
+    fi
+    exit 0
+    ;;
+  *" -Fp -- $FM_EXPECT_SCOPE_WT "*)
+    found=0
+    if process_is_live "${FM_EXPECT_SCOPE_PID:-}"; then
+      [ -z "${FM_EXPECT_SCOPE_LOG:-}" ] || printf 'scope-holder\n' >> "$FM_EXPECT_SCOPE_LOG"
+      printf 'p%s\nfcwd\n' "$FM_EXPECT_SCOPE_PID"
+      found=1
+    fi
+    if process_is_live "${FM_EXPECT_ENDPOINT_PID:-}"; then
+      [ -z "${FM_EXPECT_ENDPOINT_LOG:-}" ] || printf 'endpoint-holder\n' >> "$FM_EXPECT_ENDPOINT_LOG"
+      printf 'p%s\nfcwd\n' "$FM_EXPECT_ENDPOINT_PID"
+      found=1
+    fi
+    if process_is_live "${FM_EXPECT_FOREIGN_PID:-}"; then
+      printf 'p%s\nfcwd\n' "$FM_EXPECT_FOREIGN_PID"
+      found=1
+    fi
+    [ "$found" -eq 1 ]
+    exit $?
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/lsof"
+}
+
 add_lsof_error() {
   local case_dir=$1
   cat > "$case_dir/fakebin/lsof" <<'SH'
@@ -545,6 +616,7 @@ run_teardown() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_FAKE_TMUX_STATE="${FM_FAKE_TMUX_STATE:-$case_dir/tmux-state}" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -1326,6 +1398,505 @@ test_teardown_missing_busy_sidecar_completes() {
   pass "teardown completes when an exact busy-state sidecar is already absent"
 }
 
+mark_agy_scope_empty() {
+  local state=$1 id=$2 token
+  token="test-$id"
+  printf 'spawn_gen=%s\n' "$token" >> "$state/$id.meta"
+  {
+    printf 'version=1\n'
+    printf 'status=empty\n'
+    printf 'token=%s\n' "$token"
+    printf 'containment=pid-namespace\n'
+  } > "$state/$id.process-scope"
+}
+
+start_agy_scoped_sleeper() {
+  local state=$1 id=$2 cwd=$3 token pgid attempts=0
+  token="test-$id"
+  printf 'spawn_gen=%s\n' "$token" >> "$state/$id.meta"
+  FM_TASK_PROCESS_SCOPE_TOKEN="$token" python3 - "$cwd" <<'PY' &
+import os
+import sys
+
+os.setpgrp()
+os.chdir(sys.argv[1])
+os.execv("/bin/sleep", ["sleep", "300"])
+PY
+  AGY_SCOPE_PID=$!
+  while [ "$attempts" -lt 50 ]; do
+    pgid=$(ps -o pgid= -p "$AGY_SCOPE_PID" 2>/dev/null | tr -d '[:space:]')
+    [ "$pgid" = "$AGY_SCOPE_PID" ] && break
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ "$pgid" = "$AGY_SCOPE_PID" ] || fail "agy scope fixture did not enter its own process group"
+  {
+    printf 'version=1\n'
+    printf 'status=active\n'
+    printf 'token=%s\n' "$token"
+    printf 'containment=pid-namespace\n'
+    printf 'leader_pid=%s\n' "$AGY_SCOPE_PID"
+    printf 'leader_identity=%s\n' "$(fm_task_process_identity "$AGY_SCOPE_PID")"
+    printf 'pgid=%s\n' "$AGY_SCOPE_PID"
+  } > "$state/$id.process-scope"
+}
+
+start_agy_endpoint_scoped_sleeper() {
+  local state=$1 id=$2 cwd=$3 case_dir=$4 launch=${5:-sleep 300} persist=${6:-0}
+  local token attempts=0 enclosure
+  token="test-$id"
+  enclosure="$case_dir/fakebin/unshare"
+  cat > "$enclosure" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --user|--map-current-user|--pid|--fork|--kill-child=SIGKILL|--mount-proc) shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+if [ "${1:-}" = /bin/sh ] && [ "${2:-}" = -c ] \
+   && [ "${3:-}" = '[ "$$" -eq 1 ]' ]; then
+  exit 0
+fi
+exec "$@"
+SH
+  chmod +x "$enclosure"
+  printf 'spawn_gen=%s\n' "$token" >> "$state/$id.meta"
+  fm_task_process_scope_create_empty "$state" "$id" "$token" pid-namespace \
+    || fail "agy endpoint scope fixture could not create an empty scope"
+  python3 - "$cwd" "$ROOT/bin/fm-task-process-launch.sh" \
+    "$state/$id.process-scope" "$token" "$enclosure" "$launch" "$persist" <<'PY' &
+import os
+import signal
+import sys
+
+os.chdir(sys.argv[1])
+pid = os.fork()
+if pid == 0:
+    os.setpgrp()
+    os.execv(sys.argv[2], [sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[4], sys.argv[6], sys.argv[5]])
+os.waitpid(pid, 0)
+if sys.argv[7] == "1":
+    signal.pause()
+os._exit(0)
+PY
+  AGY_ENDPOINT_PID=$!
+  while [ "$attempts" -lt 100 ]; do
+    if fm_task_process_scope_record_read "$state" "$id" "$token" 2>/dev/null \
+       && [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ]; then
+      break
+    fi
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ "${FM_TASK_PROCESS_SCOPE_STATUS:-}" = active ] \
+    || fail "agy endpoint scope fixture did not become active"
+  AGY_SCOPE_PID=$FM_TASK_PROCESS_SCOPE_ANCHOR_PID
+  [ "$FM_TASK_PROCESS_SCOPE_ENDPOINT_PID" = "$AGY_ENDPOINT_PID" ] \
+    || fail "agy endpoint scope fixture did not bind its waiting parent"
+}
+
+test_agy_portable_scope_teardown_refuses_before_worktree_access() {
+  local case_dir rc
+  case_dir=$(make_case agy-portable-scope)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  mark_agy_scope_empty "$case_dir/state" task-x1
+  sed 's/^containment=pid-namespace$/containment=process-group/' \
+    "$case_dir/state/task-x1.process-scope" > "$case_dir/state/task-x1.process-scope.tmp"
+  mv "$case_dir/state/task-x1.process-scope.tmp" "$case_dir/state/task-x1.process-scope"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "agy-portable-scope: teardown should fail closed"
+  assert_grep "lacks PID namespace containment" "$case_dir/stderr" \
+    "agy-portable-scope: teardown did not name the missing containment proof"
+  assert_present "$case_dir/wt" \
+    "agy-portable-scope: teardown removed the worktree without strict containment"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "agy-portable-scope: teardown removed task metadata without strict containment"
+  pass "agy teardown preserves portable process-group worktrees"
+}
+
+test_agy_teardown_refuses_unsafe_work_before_quiescence() {
+  local case_dir rc
+  case_dir=$(make_case agy-unsafe-work-preflight)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  mark_agy_scope_empty "$case_dir/state" task-x1
+  printf 'uncommitted work\n' > "$case_dir/wt/dirty.txt"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "agy-unsafe-work-preflight: teardown should refuse"
+  assert_grep "uncommitted changes" "$case_dir/stderr" \
+    "agy-unsafe-work-preflight: teardown did not report the unsafe work"
+  assert_absent "$case_dir/tmux-state" \
+    "agy-unsafe-work-preflight: teardown closed the endpoint before refusing"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "agy-unsafe-work-preflight: teardown removed task metadata after refusing"
+  pass "agy teardown preserves workers when worktree safety refuses"
+}
+
+test_agy_teardown_refuses_missing_lsof_before_quiescence() {
+  local case_dir path_without_lsof rc
+  case_dir=$(make_case agy-missing-lsof-preflight)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  mark_agy_scope_empty "$case_dir/state" task-x1
+  path_without_lsof=$(make_path_without_lsof "$case_dir")
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "agy-missing-lsof-preflight: teardown should refuse"
+  assert_grep "lsof is unavailable" "$case_dir/stderr" \
+    "agy-missing-lsof-preflight: teardown did not report the missing proof tool"
+  assert_absent "$case_dir/tmux-state" \
+    "agy-missing-lsof-preflight: teardown closed the endpoint before refusing"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "agy-missing-lsof-preflight: teardown removed task metadata after refusing"
+  pass "agy teardown preserves workers when strict process proof is unavailable"
+}
+
+test_agy_teardown_recovers_stale_lock_before_quiescence() {
+  local case_dir lock pid endpoint_pid rc
+  case_dir=$(make_case agy-stale-lock-preflight)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  start_agy_endpoint_scoped_sleeper \
+    "$case_dir/state" task-x1 "$case_dir/wt" "$case_dir"
+  pid=$AGY_SCOPE_PID
+  endpoint_pid=$AGY_ENDPOINT_PID
+  kill -0 "$pid" 2>/dev/null || fail "agy-stale-lock-preflight: setup worker did not start"
+  kill -0 "$endpoint_pid" 2>/dev/null \
+    || fail "agy-stale-lock-preflight: setup endpoint did not start"
+  add_lsof_scope_holder "$case_dir"
+  add_git_status_lock_failure "$case_dir"
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  rc=0
+  FM_EXPECT_SCOPE_PID="$pid" FM_EXPECT_ENDPOINT_PID="$endpoint_pid" \
+  FM_EXPECT_SCOPE_WT="$case_dir/wt" \
+  FM_EXPECT_SCOPE_LOG="$case_dir/scope-holder.log" \
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if [ "$rc" -ne 0 ]; then
+    kill -KILL "$pid" "$endpoint_pid" 2>/dev/null || true
+  fi
+  wait "$endpoint_pid" 2>/dev/null || true
+  expect_code 0 "$rc" "agy-stale-lock-preflight: teardown should recover"
+  assert_present "$case_dir/scope-holder.log" \
+    "agy-stale-lock-preflight: regression did not exercise a live scope holder"
+  assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
+    "agy-stale-lock-preflight: teardown did not recover the stale lock"
+  assert_absent "$lock" \
+    "agy-stale-lock-preflight: teardown left the stale lock in place"
+  assert_present "$case_dir/tmux-state" \
+    "agy-stale-lock-preflight: teardown did not close the endpoint after recovery"
+  pass "agy teardown recovers stale locks before worker quiescence"
+}
+
+test_agy_teardown_recovers_stale_lock_after_worker_exit() {
+  local case_dir lock endpoint_pid attempts=0 rc
+  case_dir=$(make_case agy-stale-lock-empty-scope)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  start_agy_endpoint_scoped_sleeper \
+    "$case_dir/state" task-x1 "$case_dir/wt" "$case_dir" "sleep 0.2" 1
+  endpoint_pid=$AGY_ENDPOINT_PID
+  while [ "$attempts" -lt 100 ]; do
+    if fm_task_process_scope_record_read \
+         "$case_dir/state" task-x1 test-task-x1 2>/dev/null \
+       && [ "$FM_TASK_PROCESS_SCOPE_STATUS" = empty ]; then
+      break
+    fi
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ "${FM_TASK_PROCESS_SCOPE_STATUS:-}" = empty ] \
+    || fail "agy-stale-lock-empty-scope: worker scope did not become empty"
+  [ "$FM_TASK_PROCESS_SCOPE_ENDPOINT_PID" = "$endpoint_pid" ] \
+    || fail "agy-stale-lock-empty-scope: empty scope lost its endpoint binding"
+  kill -0 "$endpoint_pid" 2>/dev/null \
+    || fail "agy-stale-lock-empty-scope: endpoint did not remain live"
+  add_lsof_scope_holder "$case_dir"
+  add_git_status_lock_failure "$case_dir"
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  rc=0
+  FM_EXPECT_ENDPOINT_PID="$endpoint_pid" FM_EXPECT_SCOPE_WT="$case_dir/wt" \
+  FM_EXPECT_ENDPOINT_LOG="$case_dir/endpoint-holder.log" \
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  kill -TERM "$endpoint_pid" 2>/dev/null || true
+  wait "$endpoint_pid" 2>/dev/null || true
+  expect_code 0 "$rc" "agy-stale-lock-empty-scope: teardown should recover"
+  assert_present "$case_dir/endpoint-holder.log" \
+    "agy-stale-lock-empty-scope: regression did not exercise the endpoint holder"
+  assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
+    "agy-stale-lock-empty-scope: teardown did not recover the stale lock"
+  assert_absent "$lock" \
+    "agy-stale-lock-empty-scope: teardown left the stale lock in place"
+  assert_present "$case_dir/tmux-state" \
+    "agy-stale-lock-empty-scope: teardown did not close the endpoint after recovery"
+  pass "agy teardown recovers stale locks after worker exit"
+}
+
+test_agy_teardown_rejects_foreign_worktree_holder() {
+  local case_dir lock pid endpoint_pid foreign_pid pgid attempts=0 process_stat rc
+  local scope_alive=0 endpoint_alive=0 foreign_alive=0
+  case_dir=$(make_case agy-foreign-holder-preflight)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  start_agy_endpoint_scoped_sleeper \
+    "$case_dir/state" task-x1 "$case_dir/wt" "$case_dir"
+  pid=$AGY_SCOPE_PID
+  endpoint_pid=$AGY_ENDPOINT_PID
+  kill -0 "$pid" 2>/dev/null || fail "agy-foreign-holder-preflight: setup worker did not start"
+  python3 - "$case_dir/wt" <<'PY' &
+import os
+import sys
+
+os.setpgrp()
+os.chdir(sys.argv[1])
+os.execv("/bin/sleep", ["sleep", "300"])
+PY
+  foreign_pid=$!
+  while [ "$attempts" -lt 50 ]; do
+    pgid=$(ps -o pgid= -p "$foreign_pid" 2>/dev/null | tr -d '[:space:]')
+    [ "$pgid" = "$foreign_pid" ] && break
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  if [ "$pgid" != "$foreign_pid" ]; then
+    kill -KILL "$pid" "$endpoint_pid" "$foreign_pid" 2>/dev/null || true
+    wait "$endpoint_pid" 2>/dev/null || true
+    wait "$foreign_pid" 2>/dev/null || true
+    fail "agy-foreign-holder-preflight: setup foreign holder did not start"
+  fi
+  add_lsof_scope_holder "$case_dir"
+  add_git_status_lock_failure "$case_dir"
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  rc=0
+  FM_EXPECT_SCOPE_PID="$pid" FM_EXPECT_ENDPOINT_PID="$endpoint_pid" \
+  FM_EXPECT_FOREIGN_PID="$foreign_pid" \
+  FM_EXPECT_SCOPE_WT="$case_dir/wt" \
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if kill -0 "$pid" 2>/dev/null; then
+    process_stat=$("$REAL_PS_FOR_TEST" -o stat= -p "$pid" 2>/dev/null || true)
+    case "$process_stat" in ''|*Z*) ;; *) scope_alive=1 ;; esac
+  fi
+  if kill -0 "$endpoint_pid" 2>/dev/null; then
+    process_stat=$("$REAL_PS_FOR_TEST" -o stat= -p "$endpoint_pid" 2>/dev/null || true)
+    case "$process_stat" in ''|*Z*) ;; *) endpoint_alive=1 ;; esac
+  fi
+  if kill -0 "$foreign_pid" 2>/dev/null; then
+    process_stat=$("$REAL_PS_FOR_TEST" -o stat= -p "$foreign_pid" 2>/dev/null || true)
+    case "$process_stat" in ''|*Z*) ;; *) foreign_alive=1 ;; esac
+  fi
+  kill -KILL "$pid" "$endpoint_pid" "$foreign_pid" 2>/dev/null || true
+  wait "$endpoint_pid" 2>/dev/null || true
+  wait "$foreign_pid" 2>/dev/null || true
+  expect_code 1 "$rc" "agy-foreign-holder-preflight: teardown should refuse"
+  [ "$scope_alive" -eq 1 ] \
+    || fail "agy-foreign-holder-preflight: teardown stopped the worker before refusing"
+  [ "$endpoint_alive" -eq 1 ] \
+    || fail "agy-foreign-holder-preflight: teardown stopped the endpoint before refusing"
+  [ "$foreign_alive" -eq 1 ] \
+    || fail "agy-foreign-holder-preflight: teardown stopped the foreign holder"
+  assert_grep "not provably stale" "$case_dir/stderr" \
+    "agy-foreign-holder-preflight: teardown did not report the foreign holder"
+  assert_present "$lock" \
+    "agy-foreign-holder-preflight: teardown removed the guarded lock"
+  assert_absent "$case_dir/tmux-state" \
+    "agy-foreign-holder-preflight: teardown closed the endpoint after refusing"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "agy-foreign-holder-preflight: teardown removed task metadata after refusing"
+  pass "agy teardown rejects foreign worktree holders"
+}
+
+test_agy_teardown_does_not_follow_replaced_plugin_symlink() {
+  local case_dir plugin target rc
+  case_dir=$(make_case agy-plugin-symlink)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  mark_agy_scope_empty "$case_dir/state" task-x1
+  plugin="$case_dir/wt/.agents/plugins/fm-firstmate-busy-task-x1"
+  target="$case_dir/plugin-target"
+  mkdir -p "${plugin%/*}" "$target"
+  printf 'target manifest\n' > "$target/plugin.json"
+  printf 'target hooks\n' > "$target/hooks.json"
+  ln -s "$target" "$plugin"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "agy-plugin-symlink: forced teardown should complete safely"
+  [ ! -e "$plugin" ] && [ ! -L "$plugin" ] \
+    || fail "agy-plugin-symlink: teardown did not unlink the replaced plugin directory"
+  [ "$(cat "$target/plugin.json")" = "target manifest" ] \
+    || fail "agy-plugin-symlink: teardown followed the symlink to the target manifest"
+  [ "$(cat "$target/hooks.json")" = "target hooks" ] \
+    || fail "agy-plugin-symlink: teardown followed the symlink to the target hooks"
+  pass "agy teardown unlinks a replaced plugin directory without traversal"
+}
+
+test_agy_teardown_rejects_replaced_worktree_before_mutation() {
+  local case_dir hook branch rc
+  case_dir=$(make_case agy-worktree-symlink)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  mark_agy_scope_empty "$case_dir/state" task-x1
+  mv "$case_dir/wt" "$case_dir/wt-original"
+  ln -s "$case_dir/project" "$case_dir/wt"
+  hook="$case_dir/project/.claude/settings.local.json"
+  mkdir -p "${hook%/*}"
+  printf 'foreign hook\n' > "$hook"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "agy-worktree-symlink: forced teardown should refuse"
+  assert_grep "unsafe worktree path" "$case_dir/stderr" \
+    "agy-worktree-symlink: teardown did not explain the refusal"
+  [ "$(cat "$hook")" = "foreign hook" ] \
+    || fail "agy-worktree-symlink: teardown removed a hook through the worktree symlink"
+  branch=$(git -C "$case_dir/project" symbolic-ref --short HEAD 2>/dev/null || true)
+  [ "$branch" = main ] \
+    || fail "agy-worktree-symlink: teardown detached the symlink target checkout"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "agy-worktree-symlink: teardown removed task metadata after refusing"
+  pass "agy teardown rejects a replaced worktree before mutation"
+}
+
+test_agy_teardown_revalidates_worktree_after_endpoint_quiescence() {
+  local case_dir hook branch rc
+  case_dir=$(make_case agy-worktree-quiesce-race)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  mark_agy_scope_empty "$case_dir/state" task-x1
+  hook="$case_dir/project/.claude/settings.local.json"
+  mkdir -p "${hook%/*}"
+  printf 'foreign hook\n' > "$hook"
+
+  rc=0
+  FM_FAKE_TMUX_SWAP_WT="$case_dir/wt" \
+  FM_FAKE_TMUX_SWAP_TARGET="$case_dir/project" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "agy-worktree-quiesce-race: teardown should refuse"
+  assert_grep "worktree identity changed" "$case_dir/stderr" \
+    "agy-worktree-quiesce-race: teardown did not revalidate after closing the endpoint"
+  assert_present "$case_dir/tmux-state" \
+    "agy-worktree-quiesce-race: regression did not close the endpoint before replacement"
+  [ "$(cat "$hook")" = "foreign hook" ] \
+    || fail "agy-worktree-quiesce-race: teardown removed a hook through the replacement path"
+  branch=$(git -C "$case_dir/project" symbolic-ref --short HEAD 2>/dev/null || true)
+  [ "$branch" = main ] \
+    || fail "agy-worktree-quiesce-race: teardown detached the replacement checkout"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "agy-worktree-quiesce-race: teardown removed task metadata after refusing"
+  pass "agy teardown binds worktree identity before worktree safety checks"
+}
+
+test_agy_teardown_refuses_unknown_endpoint_presence() {
+  local case_dir rc
+  case_dir=$(make_case agy-endpoint-presence-unknown)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  mark_agy_scope_empty "$case_dir/state" task-x1
+
+  rc=0
+  FM_FAKE_TMUX_LIST_ERROR=1 FM_TEARDOWN_ENDPOINT_CONFIRM_ATTEMPTS=0 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "agy-endpoint-presence-unknown: teardown should fail closed"
+  assert_grep "has unknown presence after close" "$case_dir/stderr" \
+    "agy-endpoint-presence-unknown: teardown did not report the unqueryable endpoint"
+  assert_present "$case_dir/wt" \
+    "agy-endpoint-presence-unknown: teardown removed the worktree without confirmed endpoint absence"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "agy-endpoint-presence-unknown: teardown removed task metadata without confirmed endpoint absence"
+  pass "agy teardown requires confirmed endpoint absence"
+}
+
+test_agy_teardown_checks_worktree_safety_before_and_after_reap() {
+  local case_dir pid rc
+  case_dir=$(make_case agy-safety-around-reap)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  land_shippable_commit "$case_dir"
+  start_agy_scoped_sleeper "$case_dir/state" task-x1 /tmp
+  pid=$AGY_SCOPE_PID
+  kill -0 "$pid" 2>/dev/null || fail "agy-safety-around-reap: setup sleeper did not start"
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" -C $FM_EXPECT_REAP_WT status --porcelain "*)
+    if [ -n "${FM_EXPECT_REAP_PID:-}" ] && kill -0 "$FM_EXPECT_REAP_PID" 2>/dev/null; then
+      process_stat=$("$REAL_PS_FOR_TEST" -o stat= -p "$FM_EXPECT_REAP_PID" 2>/dev/null || true)
+      case "$process_stat" in
+        *Z*) printf '%s\n' "safety-after-reap" >> "$FM_EXPECT_REAP_LOG" ;;
+        *) printf '%s\n' "safety-before-reap" >> "$FM_EXPECT_REAP_LOG" ;;
+      esac
+    else
+      printf '%s\n' "safety-after-reap" >> "$FM_EXPECT_REAP_LOG"
+    fi
+    ;;
+esac
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+
+  rc=0
+  FM_EXPECT_REAP_PID="$pid" FM_EXPECT_REAP_WT="$case_dir/wt" \
+  FM_EXPECT_REAP_LOG="$case_dir/order.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if [ "$rc" -ne 0 ]; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  expect_code 0 "$rc" "agy-safety-around-reap: teardown should succeed"
+  wait "$pid" 2>/dev/null || true
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "agy-safety-around-reap: leaked process survived teardown"
+  fi
+  assert_grep "safety-before-reap" "$case_dir/order.log" \
+    "agy-safety-around-reap: teardown omitted the worker-preserving safety preflight"
+  assert_grep "safety-after-reap" "$case_dir/order.log" \
+    "agy-safety-around-reap: teardown omitted the authoritative safety recheck"
+  pass "agy teardown checks worktree safety around process quiescence"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -1684,6 +2255,91 @@ configure_secondmate_with_tmux_children() {  # <case-dir>
       "mode=local-only"
     : > "$home/state/$child.status"
   done
+}
+
+test_forced_secondmate_reaps_agy_child_processes() {
+  local case_dir home child_wt pid rc
+  case_dir=$(make_case descendant-agy-reap)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  child_wt="$case_dir/child-a-wt"
+  printf 'harness=agy\n' >> "$home/state/child-a.meta"
+  start_agy_scoped_sleeper "$home/state" child-a /tmp
+  pid=$AGY_SCOPE_PID
+  kill -0 "$pid" 2>/dev/null || fail "descendant-agy-reap: setup sleeper did not start"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" $FM_EXPECT_CHILD_WT "*)
+    if kill -0 "$FM_EXPECT_REAP_PID" 2>/dev/null; then
+      process_stat=$("$REAL_PS_FOR_TEST" -o stat= -p "$FM_EXPECT_REAP_PID" 2>/dev/null || true)
+      case "$process_stat" in *Z*) ;; *) printf '%s\n' "return-before-reap" >> "$FM_EXPECT_REAP_LOG" ;; esac
+    fi
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_EXPECT_CHILD_WT="$child_wt" FM_EXPECT_REAP_PID="$pid" \
+  FM_EXPECT_REAP_LOG="$case_dir/order.log" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if [ "$rc" -ne 0 ]; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  expect_code 0 "$rc" "descendant-agy-reap: forced teardown should succeed"
+  wait "$pid" 2>/dev/null || true
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "descendant-agy-reap: agy child process survived forced teardown"
+  fi
+  assert_absent "$case_dir/order.log" \
+    "descendant-agy-reap: child worktree return ran before its processes were reaped"
+  pass "forced secondmate teardown reaps agy child processes"
+}
+
+test_forced_secondmate_retains_agy_child_identity() {
+  local case_dir home child_wt foreign_wt proof rc
+  case_dir=$(make_case descendant-agy-identity)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  child_wt="$case_dir/child-a-wt"
+  foreign_wt="$case_dir/foreign-wt"
+  printf 'harness=agy\n' >> "$home/state/child-a.meta"
+  mark_agy_scope_empty "$home/state" child-a
+  git -C "$case_dir/project" worktree add -q -b fm/foreign "$foreign_wt" main
+  proof="$foreign_wt/.claude/settings.local.json"
+  mkdir -p "${proof%/*}" "$home/state/procevent" "$home/bin"
+  printf 'foreign hook\n' > "$proof"
+  : > "$home/state/procevent/swap.source"
+  cat > "$home/bin/fm-procevent.sh" <<SH
+#!/usr/bin/env bash
+if [ ! -e "$case_dir/swap-complete" ]; then
+  mv -- "$child_wt" "$child_wt-original"
+  mv -- "$foreign_wt" "$child_wt"
+  : > "$case_dir/swap-complete"
+fi
+exit 0
+SH
+  chmod +x "$home/bin/fm-procevent.sh"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "descendant-agy-identity: replacement worktree should refuse"
+  assert_grep "worktree identity changed" "$case_dir/stderr" \
+    "descendant-agy-identity: cleanup did not retain the pre-quiescence identity"
+  [ "$(cat "$child_wt/.claude/settings.local.json")" = "foreign hook" ] \
+    || fail "descendant-agy-identity: cleanup mutated the replacement worktree"
+  assert_present "$home/state/child-a.meta" \
+    "descendant-agy-identity: cleanup removed child metadata after refusing"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "descendant-agy-identity: cleanup removed parent metadata after refusing"
+  pass "forced secondmate teardown retains agy child worktree identities"
 }
 
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks() {
@@ -2600,12 +3256,25 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
+test_agy_portable_scope_teardown_refuses_before_worktree_access
+test_agy_teardown_refuses_unsafe_work_before_quiescence
+test_agy_teardown_refuses_missing_lsof_before_quiescence
+test_agy_teardown_recovers_stale_lock_before_quiescence
+test_agy_teardown_recovers_stale_lock_after_worker_exit
+test_agy_teardown_rejects_foreign_worktree_holder
+test_agy_teardown_does_not_follow_replaced_plugin_symlink
+test_agy_teardown_rejects_replaced_worktree_before_mutation
+test_agy_teardown_revalidates_worktree_after_endpoint_quiescence
+test_agy_teardown_refuses_unknown_endpoint_presence
+test_agy_teardown_checks_worktree_safety_before_and_after_reap
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
+test_forced_secondmate_reaps_agy_child_processes
+test_forced_secondmate_retains_agy_child_identity
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close

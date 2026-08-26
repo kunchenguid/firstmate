@@ -29,8 +29,10 @@
 #   exit       Stop the agent, preserving its terminal endpoint, worktree, and
 #              every uncommitted change. Interrupts first when the task reads
 #              busy, then submits the harness's exit command. Postcondition:
-#              the backend's recovery-grade classifier reports the agent gone.
-#              Already-stopped is success (idempotent).
+#              the backend's recovery-grade classifier reports the agent gone,
+#              and a durable worker process scope is empty when one is recorded.
+#              Already-stopped with no live scoped processes is success
+#              (idempotent).
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME endpoint and SAME worktree, on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use
@@ -130,6 +132,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-task-process-lib.sh
+. "$SCRIPT_DIR/fm-task-process-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -177,7 +181,7 @@ shift 2
 if ! fm_control_verb_allowed "$VERB"; then
   {
     if [ "$VERB" = resume ]; then
-      echo "error: 'resume' is not a control verb: resuming an exited agent is not deterministic across the verified adapters (codex and grok need a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, and kimi have no verified pane-resume contract). Use 'relaunch', which carries the brief plus a progress note into a fresh agent on any adapter."
+      echo "error: 'resume' is not a control verb: resuming an exited agent is not deterministic across the verified adapters (codex and grok need a session id printed at exit, opencode continues the most recent session for the cwd, agy exposes id-based and continue modes without a verified exact-selection contract, and claude, pi, pi-signed, and kimi have no verified pane-resume contract). Use 'relaunch', which carries the brief plus a progress note into a fresh agent on any adapter."
     else
       echo "error: '$VERB' is not a control verb"
     fi
@@ -439,6 +443,55 @@ retire_busy_incarnation() {
   fi
 }
 
+quiesce_task_process_scope() {
+  local scope_token
+  scope_token=$(task_process_scope_token) || return 1
+  [ -n "$scope_token" ] || return 0
+  fm_task_process_scope_quiesce "$STATE" "$ID" "$scope_token" "worker"
+}
+
+task_process_scope_token() {
+  local scope_token
+  scope_token=$(fm_task_process_scope_meta_token_explicit "$META") || return 1
+  if [ -z "$scope_token" ] && [ "$HARNESS" = agy ]; then
+    scope_token=$(fm_task_process_scope_meta_token "$META") || return 1
+  fi
+  printf '%s' "$scope_token"
+}
+
+wait_scoped_agent_exit() {
+  local scope_token elapsed=0
+  scope_token=$(task_process_scope_token) || return 1
+  [ -n "$scope_token" ] || return 2
+  fm_task_process_scope_record_read "$STATE" "$ID" "$scope_token" || return 1
+  [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ] || return 2
+  [ "$FM_TASK_PROCESS_SCOPE_LEGACY" != 1 ] || return 2
+  while :; do
+    fm_task_process_scope_record_read "$STATE" "$ID" "$scope_token" || return 1
+    [ "$FM_TASK_PROCESS_SCOPE_STATUS" = empty ] && return 0
+    fm_task_process_identity_matches \
+      "$FM_TASK_PROCESS_SCOPE_AGENT_PID" "$FM_TASK_PROCESS_SCOPE_AGENT_IDENTITY" \
+      || return 0
+    awk -v e="$elapsed" -v t="$EXIT_WAIT" 'BEGIN{exit !(e < t)}' || break
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+  return 1
+}
+
+quiesce_legacy_task_process_scope() {
+  local scope_token
+  scope_token=$(fm_task_process_scope_meta_token_explicit "$META") || return 1
+  if [ -z "$scope_token" ] && [ "$HARNESS" = agy ]; then
+    scope_token=$(fm_task_process_scope_meta_token "$META") || return 1
+  fi
+  [ -n "$scope_token" ] || return 0
+  fm_task_process_scope_record_read "$STATE" "$ID" "$scope_token" || return 1
+  [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ] || return 0
+  [ "$FM_TASK_PROCESS_SCOPE_LEGACY" = 1 ] || return 0
+  fm_task_process_scope_quiesce "$STATE" "$ID" "$scope_token" "legacy worker"
+}
+
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped` or `stopped`.
 do_exit() {
@@ -447,6 +500,7 @@ do_exit() {
   state=$(agent_state)
   case "$state" in
     dead)
+      quiesce_task_process_scope || return $?
       printf 'already-stopped'
       return 0
       ;;
@@ -454,6 +508,14 @@ do_exit() {
     missing) die "task $ID's recorded endpoint is gone, so there is no agent to stop; reconcile the task before any further control action" ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
+  quiesce_legacy_task_process_scope || return $?
+  state=$(agent_state)
+  if [ "$state" = dead ]; then
+    retire_busy_incarnation
+    quiesce_task_process_scope || return $?
+    printf 'stopped'
+    return 0
+  fi
   # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in
     busy*)
@@ -462,6 +524,7 @@ do_exit() {
       case "$state" in
         dead)
           retire_busy_incarnation
+          quiesce_task_process_scope || return $?
           printf 'stopped'
           return 0
           ;;
@@ -475,19 +538,36 @@ do_exit() {
   # The submit verdict is NOT the postcondition here: a successful exit command
   # destroys the composer the verdict is read from, so a post-exit read can
   # legitimately report anything. Only a hard transport failure aborts; the
-  # authoritative proof is the agent-state wait below. The retried Enter still
-  # matters, because a slash command opens a completion popup on some TUIs that
-  # swallows the first Enter.
+  # authoritative proof is the scoped agent identity when present, followed by
+  # endpoint state after the scope is empty. The retried Enter still matters,
+  # because a slash command opens a completion popup on some TUIs that swallows
+  # the first Enter.
   verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" 1.2 "$LABEL") \
     || die "the exit command could not be sent to task $ID on $BACKEND"
   [ "$verdict" != send-failed ] \
     || die "the exit command could not be sent to task $ID on $BACKEND"
-  state=$(wait_agent_state "$EXIT_WAIT" dead) || {
-    die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
-  }
+  if wait_scoped_agent_exit; then
+    retire_busy_incarnation
+    quiesce_task_process_scope || return $?
+    state=$(wait_agent_state "$EXIT_WAIT" dead) || {
+      die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the worker scope stopped but its endpoint did not return to a shell within ${EXIT_WAIT}s"
+    }
+  else
+    case $? in
+      2)
+        state=$(wait_agent_state "$EXIT_WAIT" dead) || {
+          die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
+        }
+        retire_busy_incarnation
+        quiesce_task_process_scope || return $?
+        ;;
+      *)
+        die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered process-scope=active exit=unconfirmed; the scoped agent did not stop within ${EXIT_WAIT}s"
+        ;;
+    esac
+  fi
   # The incarnation is over: retire its busy wiring so no stale record or
   # orphaned generation survives the agent that produced it.
-  retire_busy_incarnation
   printf 'stopped'
 }
 
@@ -779,11 +859,25 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line relaunch_worktree_identity= relaunch_scope_token=
   local -a spawn_args
 
   require_state_verified_backend relaunch
   resolve_relaunch_profile
+  if [ "$HARNESS" = agy ] || [ "$TARGET_HARNESS" = agy ]; then
+    relaunch_scope_token=$(fm_task_process_scope_meta_token_explicit "$META") \
+      || die "task $ID has malformed worker process-scope ownership metadata"
+    if [ -z "$relaunch_scope_token" ] && [ "$HARNESS" = agy ]; then
+      relaunch_scope_token=$(fm_task_process_scope_meta_token "$META" 2>/dev/null || true)
+    fi
+    [ -n "$relaunch_scope_token" ] \
+      || die "task $ID predates durable worker process scopes, so a relaunch involving agy cannot prove detached prior work is stopped; stop it and start a fresh worker instead"
+    fm_task_process_scope_record_read "$STATE" "$ID" "$relaunch_scope_token" \
+      || die "task $ID has no trustworthy worker process scope, so its agy relaunch transition is refused before the current agent is stopped"
+    fm_task_process_scope_require_pid_namespace \
+      "$STATE" "$ID" "$relaunch_scope_token" "an agy relaunch transition" \
+      || die "task $ID cannot be relaunched through agy on this host; stop it and start a fresh worker instead"
+  fi
 
   case "$KIND" in
     ship|scout)
@@ -816,8 +910,15 @@ do_relaunch() {
   record_note
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
+  if [ "$HARNESS" = agy ] || [ "$TARGET_HARNESS" = agy ]; then
+    relaunch_worktree_identity=$(fm_control_harness_worktree_identity agy "$WT") \
+      || die "task $ID's worktree identity cannot be retained before its agy transition"
+  fi
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
   exit_result=$(do_exit)
+  [ -z "$relaunch_worktree_identity" ] \
+    || fm_control_harness_worktree_identity_verify agy "$WT" "$relaunch_worktree_identity" \
+    || die "task $ID's worktree identity changed while its worker process scope was stopping"
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's

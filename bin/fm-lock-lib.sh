@@ -52,6 +52,52 @@ fm_lock_lsof_holder() {
   return 2
 }
 
+fm_lock_lsof_holder_pids() {
+  local target=$1 output status line pid pids=""
+  if output=$(lsof -Fp -- "$target" 2>&1); then
+    :
+  else
+    status=$?
+    if [ "$status" -eq 1 ] && [ -z "$output" ]; then
+      return 1
+    fi
+    if [ -n "$output" ]; then
+      while IFS= read -r line; do
+        fm_lock_log "lsof check failed: $line"
+      done <<< "$output"
+    else
+      fm_lock_log "lsof check failed for $target with exit $status"
+    fi
+    return 2
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      p*)
+        pid=${line#p}
+        case "$pid" in
+          ''|*[!0-9]*)
+            fm_lock_log "lsof returned an invalid holder pid for $target"
+            return 2
+            ;;
+        esac
+        pids="$pids
+$pid"
+        ;;
+      f*|'') ;;
+      *)
+        fm_lock_log "lsof returned an unexpected field for $target"
+        return 2
+        ;;
+    esac
+  done <<< "$output"
+  pids=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un)
+  if [ -z "$pids" ]; then
+    fm_lock_log "lsof reported a holder for $target without a pid"
+    return 2
+  fi
+  printf '%s\n' "$pids"
+}
+
 # fm_lock_has_live_holder <lock> <dir>: 0 if a live process holds $lock or the
 # companion $dir open, OR if the answer is uncertain - a missing lsof or an lsof
 # error is treated as "cannot prove no holder" (fail safe: assume live). Returns

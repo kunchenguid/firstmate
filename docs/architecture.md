@@ -126,12 +126,17 @@ Text for a worker to read and commands that drive a worker's process are separat
 `bin/fm-control.sh` is the control plane: an allowlisted `interrupt`, `exit`, and transactional `relaunch` addressed to an exact task id, with per-harness mechanics owned by `bin/fm-control-lib.sh`, a verified postcondition per verb, and no arbitrary-text or raw-key entry point.
 [`docs/agent-control.md`](agent-control.md) owns the verb contract, the capability matrix, the relaunch transaction, and the fail-closed boundaries.
 
+Every verified ship and scout worker launches through `bin/fm-task-process-launch.sh`, which publishes a generation-bound `state/<id>.process-scope` and remains as its ownership anchor until the agent and every scoped descendant have exited.
+Control-plane exit and relaunch plus teardown use that record to reap detached task processes before a replacement starts or a worktree is removed, and refuse rather than signal when the token, process identities, or group ownership cannot be proved.
+[`bin/fm-task-process-lib.sh`](../bin/fm-task-process-lib.sh) owns the record, identity, containment, and quiescence contract; [`configuration.md`](configuration.md#harness-support) owns agy's additional PID-namespace limit.
+
 ## Busy state is semantic, per adapter
 
 `bin/fm-busy-lib.sh` is the single owner of what "this worker is busy" means, and `bin/fm-busy-event.sh` is the only writer of the per-task records it reads.
 Every classification returns a verdict of busy, idle, unknown, or dead together with the source that produced it, so a consumer or a diagnostic can never confuse semantic state with a fallback.
 
-Each converted adapter reports its own turn lifecycle through a machine-readable contract the vendor already exposes, rather than through rendered footer text: Pi and pi-signed through the Firstmate-owned extension's `agent_start` and `agent_settled` confirmed by `ctx.isIdle()`, OpenCode through its plugin's semantic `session.status`, Claude through owned `UserPromptSubmit`, `Stop`, `StopFailure`, and `SessionEnd` hooks, Muse through its session log, and Cursor through its conversation transcript.
+Each converted adapter reports its own turn lifecycle through a machine-readable contract the vendor already exposes, rather than through rendered footer text: Pi and pi-signed through the Firstmate-owned extension's `agent_start` and `agent_settled` confirmed by `ctx.isIdle()`, OpenCode through its plugin's semantic `session.status`, Claude through owned `UserPromptSubmit`, `Stop`, `StopFailure`, and `SessionEnd` hooks, Antigravity CLI through plugin `PreInvocation` and `Stop` hooks, Muse through its session log, and Cursor through its conversation transcript.
+Antigravity's official project hook surface has no event for background completion after `Stop` reports `fullyIdle: false`, so that boundary records `unknown` until a later official lifecycle event supersedes it.
 Kimi behind Pi inherits Pi's lifecycle.
 Codex and standalone Kimi classify unknown behind explicit probes until a semantic source is live-verified for them, and Grok keeps one clearly isolated rendered-tail fallback that can only ever classify a Grok task.
 
@@ -208,8 +213,8 @@ The shell scripts validate the JSON shape and verified harness/effort combinatio
 The session-start bootstrap step keeps valid dispatch configuration silent unless verbose facts are enabled and surfaces a concise invalid-config line when validation fails.
 When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness, so `config/crew-harness` is only automatic when no dispatch profile file is active.
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
-Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
-That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse while preserving the requested profile for later audit.
+An effort value with no verified adapter mapping is still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits it instead of guessing; [`configuration.md`](configuration.md#harness-support) owns deliberate adapter translations.
+That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, muse, and agy while preserving the requested profile for later audit.
 
 ## Optional secondmates
 

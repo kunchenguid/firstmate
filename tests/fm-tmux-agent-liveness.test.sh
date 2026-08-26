@@ -52,6 +52,9 @@ export PATH
 # and is killed on macOS arm64. The symlink name is what the kernel records as
 # the executable identity, which is exactly the signal under test.
 ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
+ln -s "$SLEEP_BIN" "$LAB/bin/agy"
+ln -s "$SLEEP_BIN" "$LAB/bin/notagy"
+ln -s "$SLEEP_BIN" "$LAB/bin/agy-helper"
 ln -s "$SLEEP_BIN" "$LAB/bin/pi"
 ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
@@ -154,6 +157,22 @@ new_window agent "$LAB/bin/claude-link" 900
 wait_for_state "$SESSION:agent" alive \
   || fail "a running harness-named foreground process must classify alive"
 pass "tmux liveness: a harness-named foreground process classifies alive"
+
+# --- agy's exact executable name -------------------------------------------
+# Antigravity's verified executable is exactly `agy`. Substring matching here
+# makes unrelated foreground commands look like live agents, which prevents
+# endpoint recovery even though no Antigravity worker occupies the pane.
+
+new_window agy "$LAB/bin/agy" 900
+wait_for_state "$SESSION:agy" alive \
+  || fail "agy's exact executable name must classify alive"
+
+for decoy in notagy agy-helper; do
+  new_window "decoy-$decoy" "$LAB/bin/$decoy" 900
+  wait_for_state "$SESSION:decoy-$decoy" ambiguous \
+    || fail "'$decoy' merely contains 'agy' and must not classify as a live agent pane"
+done
+pass "tmux liveness: only agy's exact executable name classifies as Antigravity"
 
 # --- muse's version-suffixed binary name ------------------------------------
 # A muse crewmate pane misclassified here reads as a dead endpoint, so a healthy

@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse.
+  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, muse, and agy.
 user-invocable: false
 metadata:
   internal: true
@@ -45,7 +45,8 @@ If the captain asks for a new harness, propose verifying it first: spawn a trivi
 
 ## Detection
 
-`bin/fm-harness.sh` prints firstmate's own harness, using verified env markers first and then process ancestry.
+`bin/fm-harness.sh` prints firstmate's own harness, using verified env markers and process ancestry.
+Antigravity's inheritable markers are fallback evidence behind nearer recognized ancestry, so a markerless harness started manually from an Antigravity shell keeps its own identity.
 Within the Pi family, only the exact launch-boundary marker `FM_PI_HARNESS=pi-signed` alongside `PI_CODING_AGENT=true` selects the signed identity; unmarked shared launcher ancestry remains `pi`.
 `bin/fm-harness.sh crew` resolves the effective crewmate harness from `config/crew-harness` (absent or `default` -> own).
 `bin/fm-harness.sh secondmate` resolves the secondmate-launch harness through the chain `config/secondmate-harness` -> `config/crew-harness` -> own, so an unset `config/secondmate-harness` matches the crew harness.
@@ -65,7 +66,8 @@ The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `
 Grok selects native blocking or its pre-native bounded resume fallback from the exact running Stop payload; [`docs/turnend-guard.md`](../../../docs/turnend-guard.md) owns that contract.
 Kimi is outside the primary turn-end guard scope, while `docs/turnend-guard.md` owns its separate guarded global hook for crew wake signals.
 muse is CREWMATE/SCOUT ONLY and has no primary integration at all: its plugin engine (its only hook surface) is disabled in the default build, and its Claude-compatible hook dialect names `asyncRewake` and model reawakening as explicitly unsupported, which is exactly what a firstmate primary's turn-end supervision needs.
-`bin/fm-spawn.sh` refuses a `--secondmate` launch on muse for that reason.
+agy is also CREWMATE/SCOUT ONLY because no primary session-start, turn-end, or watcher supervision protocol has been verified for it.
+`bin/fm-spawn.sh` refuses a `--secondmate` launch on either adapter for that reason.
 cursor HAS a full hooks system: 20 lifecycle events configurable at project scope in `.cursor/hooks.json`, plus a Claude-Code compatibility name map that also loads `<project>/.claude/settings.json`.
 Its `stop` step cannot block - exit 2 there is a silent no-op - so `bin/fm-turnend-guard-cursor.sh` parks the turn boundary on the watcher and returns one bounded `followup_message` instead.
 Because Cursor loads the tracked Claude settings too, every Claude-shaped entrypoint whose event Cursor covers stands down on a Cursor-delivered payload.
@@ -133,6 +135,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 | cursor | `--model <model>` | none | Verified 2026-08-11 on Cursor Agent CLI 2026.08.11-e8db854. No effort flag exists, so firstmate records the requested effort in task metadata and omits it from the launch. Validate ids against `cursor-agent --list-models` rather than assuming a low/medium/high family: the live catalog carries only `-high` Grok ids. |
 | muse | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>`, and `ultra` only for an explicit `max` | Verified 2026-08-05 on Muse Code 0.1.0-R708.1. The flag accepts `none\|minimal\|low\|medium\|high\|xhigh\|ultra` and defaults to `high`. `ultra` is muse's max-class level, so it is reachable only through an explicit captain `max`, never from the generic fallback; `none` and `minimal` sit below the shared vocabulary and stay unreachable. |
+| agy | `--model <model>` | `--effort <low\|medium\|high>` | Verified 2026-08-24 on Antigravity CLI (`agy`) 1.1.19. [`docs/configuration.md`](../../../docs/configuration.md#harness-support) owns Firstmate's current default-model and effort-translation contract. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 Likewise, `harness=cursor` with `model=cursor-grok-4.5-*` is Cursor Agent CLI routing a Grok model, not the xAI Grok Build `grok` harness.
@@ -152,13 +155,14 @@ Use the discovery surface in the current authenticated environment because suppo
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
 | cursor | Run `cursor-agent --list-models` (or the legacy `agent --list-models`), which lists the ids available to the current Cursor account. `cursor` is not the CLI name. |
+| agy | Run `agy models`, which lists the models available to the authenticated account. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
 A discovery surface you could not reach establishes nothing; report that as uncertainty rather than turning it into a supported or unsupported verdict.
 
-When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
-This preserves launch success instead of passing a known-bad value.
+When a requested effort value has no verified adapter mapping, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
+This preserves launch success instead of passing a known-bad value; [`docs/configuration.md`](../../../docs/configuration.md#harness-support) records deliberate translations such as agy's `xhigh` and `max` cap to `high`.
 For Cursor, select the intended reasoning class through a model id the account's own `--list-models` actually returns, and leave the separate effort axis unset.
 
 ## no-mistakes skill invocation
@@ -173,6 +177,7 @@ Natural language is acceptable if uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the shared structural composer classifier; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
 - cursor: `/<skill>`, for example `/no-mistakes`. Cursor discovers firstmate's user-level skills. Its slash popup swallows the first Enter, so a genuine second Enter submits; the shared submit retry handles it.
+- agy: `/<skill>`, for example `/no-mistakes`.
 
 ## Submission acknowledgement hazards
 
@@ -534,3 +539,29 @@ A teardown refusal naming muse scratch is therefore correct behavior: inspect it
 muse is a day-0 `0.1.0` beta whose launcher polls a release channel hourly and can replace the running binary underneath the fleet, changing the process name with it.
 The captain accepted that risk, so firstmate does NOT set `MUSE_NO_AUTO_UPDATE=1`; a fleet that later wants stability can set it in the launch environment without any adapter change.
 Its plugin/hook engine reports `plugins are not available in this build` unless `MUSE_EXPERIMENTAL_PLUGINS=on`, which is why the busy source reads the session log instead of installing a hook.
+
+## agy (VERIFIED CREWMATE/SCOUT 2026-08-24, Antigravity CLI 1.1.19)
+
+Antigravity CLI launches from `PATH` (typically `/opt/homebrew/bin/agy`).
+It is not verified for secondmate or primary work.
+
+| Fact | Value |
+|---|---|
+| Binary | Executable `agy` from `PATH`; verified on version 1.1.19. |
+| Process enclosure | [`docs/configuration.md`](../../../docs/configuration.md#harness-support) owns the supported host behavior and agy transition limit; never override a process-scope refusal. |
+| Launch | `agy --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__--prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)"`; positional prompts are rejected with exit code 2. |
+| Models | `gemini-3.7-flash-high`, `gemini-3.7-flash-medium`, `gemini-3.7-flash-low`, Pro models, and Claude Sonnet/Opus models were present in the verified catalog. Authoritative discovery: `agy models`; Firstmate's current default is owned by [`docs/configuration.md`](../../../docs/configuration.md#harness-support). |
+| Busy state | Generated project plugin hooks `PreInvocation` and `Stop`; [architecture](../../../docs/architecture.md#busy-state-is-semantic-per-adapter) owns the verdict contract and [verification](../../../docs/verification/supervision.md#semantic-busy-state) owns active evidence. |
+| Delivery busy token | `esc to cancel`, the live footer present only while a turn is running. |
+| Exit command | `/exit` or `/quit` or `Ctrl+D` (exits cleanly with status 0). |
+| Interrupt | Single Escape or `Ctrl+C` cancels active turn and returns to composer; Firstmate uses `Ctrl+C` so interrupt delivery works on every supported backend, including Orca. |
+| Skill invocation | `/<skill>`, for example `/no-mistakes`; skills in `.agents/skills/` are discovered. Typing `/` opens the interactive autocomplete menu, and typing the full skill name with Enter submits and activates the skill directly. |
+| Autonomy | `--dangerously-skip-permissions` auto-approves all tool permission requests without prompting once project trust is established. |
+| Trust dialog | Interactive launches (`-i`) in untrusted workspaces display a project trust dialog (`Do you trust the contents of this project?`) with `Yes, I trust this folder` as default. Firstmate peek handles this with `fm-send.sh <window> --key Enter`. Trust persists per canonical path in `~/.gemini/antigravity-cli/settings.json` under `trustedWorkspaces`. |
+| Hooks | Natively supports `.agents/hooks.json` and project plugin hooks including `Stop`, `PreToolUse`, `PostToolUse`, `PreInvocation`, `PostInvocation`. Project hooks are strictly gated on workspace trust. |
+| Environment markers | Child tool processes receive `ANTIGRAVITY_LS_VERSION=cli-1.1.19` and `ANTIGRAVITY_SOURCE_METADATA`. |
+| Composer | Horizontal rule borders (`───`) enclosing prompt glyph `>`. Bordered empty composer correctly classifies as `empty`. |
+| Effort | The verified CLI accepts `--effort low\|medium\|high`; [`docs/configuration.md`](../../../docs/configuration.md#harness-support) owns Firstmate's translation from the shared effort vocabulary. |
+| Resumption | Resumes prior conversations via `agy --conversation <id>` or `--continue` / `-c`. |
+
+Antigravity CLI 1.1.9 and newer cap consecutive `decision: continue` responses, so Firstmate does not use continuation retries as completion state.

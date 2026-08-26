@@ -203,6 +203,36 @@ fm_backend_orca_capture() {  # <terminal-id> <lines>
   fm_backend_orca_json_text "$out"
 }
 
+fm_backend_orca_target_presence_state() {  # <terminal-id>
+  local terminal=$1 out status state
+  out=$(orca terminal read --terminal "$terminal" --limit 1 --json 2>/dev/null)
+  status=$?
+  state=$(printf '%s' "$out" | node -e '
+const fs = require("fs");
+let data;
+try {
+  data = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch (_) {
+  process.stdout.write("unknown");
+  process.exit(0);
+}
+if (data.ok === false) {
+  process.stdout.write(data.error && data.error.code === "terminal_handle_stale" ? "missing" : "unknown");
+} else if (data.ok === true || data.result) {
+  process.stdout.write("present");
+} else {
+  process.stdout.write("unknown");
+}
+') || state=unknown
+  if [ "$state" = missing ]; then
+    printf 'missing'
+  elif [ "$status" -eq 0 ] && [ "$state" = present ]; then
+    printf 'present'
+  else
+    printf 'unknown'
+  fi
+}
+
 fm_backend_orca_json_text() {  # <json>
   printf '%s' "$1" | node -e '
 const fs = require("fs");

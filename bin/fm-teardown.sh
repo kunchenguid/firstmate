@@ -89,9 +89,11 @@
 #      window. A missing `lsof`, or a lock that fails any stale check, is treated as
 #      NOT provably stale (fail safe): the lock is left untouched.
 # The same proof is used when non-force safety inspection cannot run because the lock
-# is present; teardown clears only a provably stale lock, then re-runs the safety
-# checks before any destructive return. Teardown output notes every wait, retry, and
-# removal so the operator can see what happened.
+# is present; a verified active agy scope may account for its own identity-bound
+# worktree-directory holders, but never a lock-file holder or any foreign holder.
+# Teardown clears only a provably stale lock, then re-runs the safety checks before
+# any destructive return. Teardown output notes every wait, retry, and removal so the
+# operator can see what happened.
 #
 # Pre-teardown cleanup sequence (runs once every landed/discard-work safety
 # refusal above has already passed, and BEFORE any worktree return, branch
@@ -113,20 +115,21 @@
 #     that verified run instance. A run already terminal
 #     (an outcome is set) or not parked at a gate is left untouched. Idempotent:
 #     an already-aborted run reads back terminal and is skipped on retry.
-#   Fix 2 - reap leaked descendant processes. A backgrounded/disowned process
-#     started under the worktree (or its per-task tasktmp) does not receive the
-#     SIGHUP/SIGTERM that closing the backend pane sends to its own foreground
-#     process group, so it survives reparented to init (observed 2026-08-03:
-#     two `go test` binaries, deadlines blown past by ~100x, pinning CPU for
-#     hours with no live task meta to attribute them to once teardown had
-#     already removed it). reap_task_worktree_processes finds every process
-#     whose CURRENT WORKING DIRECTORY is this task's own worktree or tasktmp
-#     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
-#     walking the worktree's file tree) and sends TERM, then KILL after a short
-#     grace period to any survivor whose process identity still matches. Both
-#     roots are unique per task and never
-#     shared, so this can never reach another task's or the primary's
-#     processes. Idempotent: nothing left to find is a silent no-op.
+#   Fix 2 - reap leaked descendant processes. New verified ship and scout
+#     workers carry a generation-bound durable process scope owned by
+#     bin/fm-task-process-lib.sh. Teardown validates and quiesces that scope
+#     before inspecting or removing its worktree, so detached work remains
+#     attributable through its recorded group after changing cwd or clearing
+#     the task token, and through the token after leaving that group. An agy
+#     worktree transition additionally requires PID-namespace containment,
+#     retains the worktree's filesystem identity across process and endpoint
+#     quiescence, and refuses unless endpoint absence is confirmed. Legacy
+#     tasks and any remaining out-of-scope stragglers keep the cwd fallback:
+#     reap_task_worktree_processes finds processes whose current directory is
+#     the task's unique worktree or tasktmp via `lsof -a -d cwd`, then signals
+#     only survivors whose creation-time identities still match. Both paths are
+#     idempotent, and any unprovable ownership or incomplete reap refuses before
+#     the destructive return.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -154,6 +157,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-task-process-lib.sh
+. "$SCRIPT_DIR/fm-task-process-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
@@ -205,6 +210,7 @@ DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
 DESCENDANT_TASK_KINDS=()
 DESCENDANT_TASK_HOMES=()
+DESCENDANT_TASK_WORKTREE_IDENTITIES=()
 teardown_release_locks() {
   local status=$? i
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
@@ -673,6 +679,14 @@ BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
+HARNESS=$(fm_meta_get "$META" harness)
+HARNESS_FAMILY=$(fm_control_harness_family "$HARNESS" 2>/dev/null || true)
+if [ "$HARNESS_FAMILY" = agy ]; then
+  AGY_SCOPE_TOKEN=$(fm_task_process_scope_meta_token "$META") || exit 1
+  fm_task_process_scope_require_pid_namespace \
+    "$STATE" "$ID" "$AGY_SCOPE_TOKEN" "agy worktree teardown" || exit 1
+fi
+fm_control_harness_worktree_preflight "$HARNESS_FAMILY" "$WT" || exit 1
 T_ORCA=
 [ "$BACKEND" != orca ] || T_ORCA=$T
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
@@ -1268,12 +1282,62 @@ worktree_safety_blocked_by_lock() {
   local reason=$1 lock
   lock=$(worktree_git_lock_path "$WT") || lock=""
   [ -n "$lock" ] && [ -e "$lock" ] || return 1
-  echo "teardown: cannot inspect worktree $WT for $reason while git lock $lock is present; checking whether the lock is stale" >&2
+  echo "teardown: cannot inspect worktree $WT for $reason while git lock $lock is present" >&2
   return 0
 }
 
+worktree_lock_has_only_expected_scope_holders() {
+  local dir=$1 state=$2 id=$3 token=$4 holders holder_rc anchor_pgid anchor_parent
+  local snapshot pid identity endpoint_valid=0
+  if holders=$(fm_lock_lsof_holder_pids "$dir"); then
+    :
+  else
+    holder_rc=$?
+    [ "$holder_rc" -eq 1 ] && return 0
+    return 1
+  fi
+  fm_task_process_scope_record_read "$state" "$id" "$token" || return 1
+  if [ -n "$FM_TASK_PROCESS_SCOPE_ENDPOINT_PID" ] \
+     && fm_task_process_identity_matches \
+       "$FM_TASK_PROCESS_SCOPE_ENDPOINT_PID" "$FM_TASK_PROCESS_SCOPE_ENDPOINT_IDENTITY"; then
+    endpoint_valid=1
+  fi
+  case "$FM_TASK_PROCESS_SCOPE_STATUS" in
+    active)
+      fm_task_process_identity_matches \
+        "$FM_TASK_PROCESS_SCOPE_ANCHOR_PID" "$FM_TASK_PROCESS_SCOPE_ANCHOR_IDENTITY" || return 1
+      anchor_pgid=$(fm_task_process_pgid "$FM_TASK_PROCESS_SCOPE_ANCHOR_PID") || return 1
+      [ "$anchor_pgid" = "$FM_TASK_PROCESS_SCOPE_PGID" ] || return 1
+      snapshot=$(fm_task_process_scope_snapshot \
+        "$FM_TASK_PROCESS_SCOPE_TOKEN" "$FM_TASK_PROCESS_SCOPE_PGID" 1) || return 1
+      fm_task_process_scope_snapshot_contains "$snapshot" \
+        "$FM_TASK_PROCESS_SCOPE_ANCHOR_PID" "$FM_TASK_PROCESS_SCOPE_ANCHOR_IDENTITY" || return 1
+      if [ "$endpoint_valid" -eq 1 ]; then
+        anchor_parent=$(fm_task_process_parent_pid "$FM_TASK_PROCESS_SCOPE_ANCHOR_PID") || return 1
+        [ "$anchor_parent" = "$FM_TASK_PROCESS_SCOPE_ENDPOINT_PID" ] || return 1
+      fi
+      ;;
+    empty)
+      [ "$endpoint_valid" -eq 1 ] || return 1
+      snapshot=
+      ;;
+    *) return 1 ;;
+  esac
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    identity=$(fm_task_process_identity "$pid") || return 1
+    if fm_task_process_scope_snapshot_contains "$snapshot" "$pid" "$identity"; then
+      continue
+    fi
+    [ "$endpoint_valid" -eq 1 ] \
+      && [ "$pid" = "$FM_TASK_PROCESS_SCOPE_ENDPOINT_PID" ] \
+      && [ "$identity" = "$FM_TASK_PROCESS_SCOPE_ENDPOINT_IDENTITY" ] \
+      || return 1
+  done <<< "$holders"
+}
+
 cleanup_stale_lock_for_safety_check() {
-  local dir=$1 lock
+  local dir=$1 scope_state=${2:-} scope_id=${3:-} scope_token=${4:-} lock proven=0
   lock=$(worktree_git_lock_path "$dir") || lock=""
   [ -n "$lock" ] && [ -e "$lock" ] || return 0
 
@@ -1285,7 +1349,18 @@ cleanup_stale_lock_for_safety_check() {
     return 0
   fi
 
-  if fm_lock_is_provably_stale "$lock" "$dir" "$STALE_WORKTREE_LOCK_AGE_SECS"; then
+  if [ -n "$scope_state" ] && [ -n "$scope_id" ] && [ -n "$scope_token" ]; then
+    if fm_lock_is_provably_stale "$lock" "" "$STALE_WORKTREE_LOCK_AGE_SECS" \
+       && worktree_lock_has_only_expected_scope_holders \
+         "$dir" "$scope_state" "$scope_id" "$scope_token" \
+       && fm_lock_is_provably_stale "$lock" "" "$STALE_WORKTREE_LOCK_AGE_SECS"; then
+      proven=1
+    fi
+  elif fm_lock_is_provably_stale "$lock" "$dir" "$STALE_WORKTREE_LOCK_AGE_SECS"; then
+    proven=1
+  fi
+
+  if [ "$proven" -eq 1 ]; then
     rm -f "$lock"
     echo "teardown: removed provably-stale git lock $lock (age >= ${STALE_WORKTREE_LOCK_AGE_SECS}s, no live holder) and retrying worktree safety checks" >&2
     return 0
@@ -1437,6 +1512,19 @@ validate_worktree_teardown_safety() {
       return 1
     fi
   fi
+}
+
+validate_worktree_teardown_safety_with_lock_recovery() {
+  local safety_rc scope_state=${1:-} scope_id=${2:-} scope_token=${3:-}
+  if validate_worktree_teardown_safety; then
+    return 0
+  else
+    safety_rc=$?
+  fi
+  [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ] || return "$safety_rc"
+  cleanup_stale_lock_for_safety_check \
+    "$WT" "$scope_state" "$scope_id" "$scope_token" || return $?
+  validate_worktree_teardown_safety
 }
 
 # Fix 1 (see script header): does the active-or-most-recent no-mistakes run in
@@ -1751,6 +1839,32 @@ EOF
   [ -z "$TASK_PIDS" ] && return 0
   echo "REFUSED: leaked $label processes for $ID remain after $max_passes reap attempts; preserving the worktree/tasktmp for manual inspection or retry." >&2
   return 1
+}
+
+task_worktree_process_scan_strict() {  # <label> <dir>...
+  local label=$1 dir has_root=0
+  shift
+  for dir in "$@"; do
+    [ -n "$dir" ] && [ -d "$dir" ] || continue
+    has_root=1
+    break
+  done
+  [ "$has_root" -eq 1 ] || return 0
+  if ! command -v lsof >/dev/null 2>&1; then
+    echo "REFUSED: cannot prove every leaked $label process for $ID is stopped because lsof is unavailable; preserving the worktree/tasktmp for manual inspection or retry." >&2
+    return 1
+  fi
+  if ! task_pids_under_roots "$@"; then
+    echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+    return 1
+  fi
+}
+
+reap_task_worktree_processes_strict() {  # <label> <dir>...
+  local label=$1
+  shift
+  task_worktree_process_scan_strict "$label" "$@" || return 1
+  reap_task_worktree_processes "$label" "$@"
 }
 
 require_orca_worktree_path_match() {
@@ -2184,6 +2298,7 @@ collect_descendant_task_locks() {
     DESCENDANT_TASK_IDS+=("$child_id")
     DESCENDANT_TASK_KINDS+=("$child_kind")
     DESCENDANT_TASK_HOMES+=("$child_home")
+    DESCENDANT_TASK_WORKTREE_IDENTITIES+=("")
     [ "$child_kind" != secondmate ] \
       || collect_descendant_task_locks "$child_home" \
       || return 1
@@ -2196,6 +2311,7 @@ preflight_descendant_task_locks() {
   DESCENDANT_TASK_IDS=()
   DESCENDANT_TASK_KINDS=()
   DESCENDANT_TASK_HOMES=()
+  DESCENDANT_TASK_WORKTREE_IDENTITIES=()
   collect_descendant_task_locks "$home" || return 1
   # Acquisition order, which every other holder of these locks must match so
   # they cannot cycle: each home's task-set lock first (parent home before child
@@ -2245,16 +2361,54 @@ preflight_descendant_task_locks() {
   done
 }
 
+descendant_task_index() {  # <state> <task-id>
+  local state=$1 task_id=$2 i
+  for ((i=0; i < ${#DESCENDANT_TASK_IDS[@]}; i++)); do
+    if [ "${DESCENDANT_TASK_STATES[$i]}" = "$state" ] \
+       && [ "${DESCENDANT_TASK_IDS[$i]}" = "$task_id" ]; then
+      printf '%s\n' "$i"
+      return 0
+    fi
+  done
+  echo "error: descendant task $task_id is outside the locked teardown set" >&2
+  return 1
+}
+
+descendant_task_worktree_identity_record() {  # <state> <task-id> <identity>
+  local state=$1 task_id=$2 identity=$3 index
+  index=$(descendant_task_index "$state" "$task_id") || return 1
+  DESCENDANT_TASK_WORKTREE_IDENTITIES[$index]=$identity
+}
+
+descendant_task_worktree_identity_require() {  # <state> <task-id>
+  local state=$1 task_id=$2 index identity
+  index=$(descendant_task_index "$state" "$task_id") || return 1
+  identity=${DESCENDANT_TASK_WORKTREE_IDENTITIES[$index]:-}
+  if [ -z "$identity" ]; then
+    echo "error: descendant agy task $task_id has no retained worktree identity" >&2
+    return 1
+  fi
+  printf '%s\n' "$identity"
+}
+
 validate_firstmate_home_children_removal() {
-  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id
+  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_harness child_family child_identity child_orca_worktree_id
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
     fm_backend_validate_task_endpoint "$child_meta" "$child_id" || return 1
-    validate_pr_poll_cleanup "$sub_state" "$child_id" || return 1
     child_wt=$(meta_value "$child_meta" worktree)
+    child_harness=$(meta_value "$child_meta" harness)
+    child_family=$(fm_control_harness_family "$child_harness" 2>/dev/null || true)
+    if [ "$child_family" = agy ]; then
+      child_identity=$(descendant_task_worktree_identity_require "$sub_state" "$child_id") || return 1
+      fm_control_harness_worktree_identity_verify agy "$child_wt" "$child_identity" || return 1
+    else
+      fm_control_harness_worktree_preflight "$child_harness" "$child_wt" || return 1
+    fi
+    validate_pr_poll_cleanup "$sub_state" "$child_id" || return 1
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     child_backend=$(fm_backend_of_meta "$child_meta")
@@ -2412,8 +2566,125 @@ preflight_firstmate_home_herdr_children() {  # <home>
   done
 }
 
+teardown_endpoint_presence_in_home() {  # <backend> <target> <label> <home>
+  local backend=$1 target=$2 label=$3 home=${4:-$FM_HOME}
+  case "$backend:$home" in
+    zellij:"$FM_HOME"|cmux:"$FM_HOME")
+      fm_backend_target_presence_state "$backend" "$target" "$label"
+      ;;
+    zellij:*|cmux:*)
+      ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_target_presence_state "$backend" "$target" "$label" )
+      ;;
+    *)
+      fm_backend_target_presence_state "$backend" "$target" "$label"
+      ;;
+  esac
+}
+
+teardown_quiesce_endpoint() {  # <backend> <target> <tab-id> <label> <home> <task-id>
+  local backend=$1 target=$2 tab_id=$3 label=$4 home=${5:-$FM_HOME} task_id=$6
+  local attempt=0 max_attempts=${FM_TEARDOWN_ENDPOINT_CONFIRM_ATTEMPTS:-50} presence
+  if [ "$backend" = herdr ]; then
+    fm_backend_herdr_parse_target "$target" || return 1
+    if ! teardown_herdr_session_lock_held "$FM_BACKEND_HERDR_SESSION"; then
+      echo "error: herdr session presentation lock is not held for $task_id; preserving its endpoint and worktree" >&2
+      return 1
+    fi
+    fm_backend_herdr_kill_serialized "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true
+    if ! fm_backend_herdr_endpoint_confirmed_gone "$target"; then
+      echo "error: herdr pane $target for $task_id is not confirmed gone; preserving its worktree and durable identity" >&2
+      return 1
+    fi
+    return 0
+  fi
+  case "$max_attempts" in ''|*[!0-9]*) max_attempts=50 ;; esac
+  case "$backend:$home" in
+    zellij:"$FM_HOME"|cmux:"$FM_HOME")
+      fm_backend_kill "$backend" "$target" "$tab_id" "$label" 2>/dev/null || true
+      ;;
+    zellij:*|cmux:*)
+      ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$backend" "$target" "$tab_id" "$label" ) 2>/dev/null || true
+      ;;
+    *)
+      fm_backend_kill "$backend" "$target" "$tab_id" "$label" 2>/dev/null || true
+      ;;
+  esac
+  while :; do
+    presence=$(teardown_endpoint_presence_in_home "$backend" "$target" "$label" "$home")
+    case "$presence" in
+      missing) return 0 ;;
+      present|unknown) ;;
+      *) presence=unknown ;;
+    esac
+    if [ "$attempt" -ge "$max_attempts" ]; then
+      echo "error: endpoint $target for $task_id has $presence presence after close; preserving its worktree and durable identity" >&2
+      return 1
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+}
+
+quiesce_firstmate_home_scoped_children() {  # <home>
+  local home=$1 sub_state child_meta child_id child_kind child_home child_harness child_family
+  local child_backend child_target child_wt child_task_tmp child_identity child_scope_token
+  sub_state="$home/state"
+  [ -d "$sub_state" ] || return 0
+  for child_meta in "$sub_state"/*.meta; do
+    [ -e "$child_meta" ] || continue
+    child_id=$(basename "$child_meta" .meta)
+    fm_backend_validate_task_endpoint "$child_meta" "$child_id" || return 1
+    child_backend=$FM_BACKEND_VALIDATED_BACKEND
+    child_target=$FM_BACKEND_VALIDATED_TARGET
+    child_kind=$(meta_value "$child_meta" kind)
+    [ -n "$child_kind" ] || child_kind=ship
+    child_harness=$(meta_value "$child_meta" harness)
+    child_family=$(fm_control_harness_family "$child_harness" 2>/dev/null || true)
+    child_wt=$(meta_value "$child_meta" worktree)
+    child_scope_token=$(fm_task_process_scope_meta_token_explicit "$child_meta") || return 1
+    if [ -z "$child_scope_token" ] && [ "$child_family" = agy ]; then
+      child_scope_token=$(fm_task_process_scope_meta_token "$child_meta") || return 1
+    fi
+    if [ "$child_family" = agy ] && [ "$child_kind" != secondmate ]; then
+      fm_task_process_scope_require_pid_namespace \
+        "$sub_state" "$child_id" "$child_scope_token" "agy worktree teardown" || return 1
+      child_task_tmp=$(meta_value "$child_meta" tasktmp)
+      (
+        ID=$child_id
+        task_worktree_process_scan_strict "child worktree" "$child_wt" "$child_task_tmp"
+      ) || return 1
+      child_identity=$(fm_control_harness_worktree_identity agy "$child_wt") || return 1
+      descendant_task_worktree_identity_record "$sub_state" "$child_id" "$child_identity" || return 1
+      fm_task_process_scope_quiesce "$sub_state" "$child_id" "$child_scope_token" "agy child" || return 1
+      fm_control_harness_worktree_identity_verify agy "$child_wt" "$child_identity" || return 1
+      [ -n "$child_target" ] || {
+        echo "error: agy child $child_id has no endpoint to quiesce; preserving its worktree and durable identity" >&2
+        return 1
+      }
+      teardown_quiesce_endpoint \
+        "$child_backend" "$child_target" "$(meta_value "$child_meta" zellij_tab_id)" \
+        "fm-$child_id" "$home" "$child_id" || return 1
+      fm_control_harness_worktree_identity_verify agy "$child_wt" "$child_identity" || return 1
+      (
+        ID=$child_id
+        BACKEND=$child_backend
+        T=$child_target
+        reap_task_worktree_processes_strict "child worktree" "$child_wt" "$child_task_tmp"
+      ) || return 1
+      fm_control_harness_worktree_identity_verify agy "$child_wt" "$child_identity" || return 1
+    elif [ "$child_kind" != secondmate ] && [ -n "$child_scope_token" ]; then
+      fm_task_process_scope_quiesce "$sub_state" "$child_id" "$child_scope_token" "worker child" || return 1
+    fi
+    if [ "$child_kind" = secondmate ]; then
+      child_home=$(meta_value "$child_meta" home)
+      [ -n "$child_home" ] || child_home=$child_wt
+      quiesce_firstmate_home_scoped_children "$child_home" || return 1
+    fi
+  done
+}
+
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_harness child_harness_family child_orca_worktree_id child_return_rc child_busy_gen child_worktree_identity
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2423,11 +2694,17 @@ cleanup_firstmate_home_children() {
     child_proj=$(meta_value "$child_meta" project)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
+    child_harness=$(meta_value "$child_meta" harness)
+    child_harness_family=$(fm_control_harness_family "$child_harness" 2>/dev/null || true)
     child_backend=$(fm_backend_of_meta "$child_meta")
     if [ "$child_backend" = orca ]; then
       child_t=$(meta_value "$child_meta" terminal)
     else
       child_t=$(fm_backend_target_of_meta "$child_meta")
+    fi
+    if [ "$child_harness_family" = agy ]; then
+      child_worktree_identity=$(descendant_task_worktree_identity_require "$sub_state" "$child_id") || return 1
+      fm_control_harness_worktree_identity_verify agy "$child_wt" "$child_worktree_identity" || return 1
     fi
     if [ "$child_backend" = orca ] && [ "$child_kind" != secondmate ]; then
       child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
@@ -2435,7 +2712,7 @@ cleanup_firstmate_home_children() {
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       fi
     fi
-    if [ -n "$child_t" ]; then
+    if [ "$child_harness_family" != agy ] && [ -n "$child_t" ]; then
       if [ "$child_backend" = herdr ]; then
         fm_backend_herdr_parse_target "$child_t" || return 1
         if ! teardown_herdr_session_lock_held "$FM_BACKEND_HERDR_SESSION"; then
@@ -2455,6 +2732,9 @@ cleanup_firstmate_home_children() {
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
       fi
     fi
+    [ "$child_harness_family" != agy ] \
+      || fm_control_harness_worktree_identity_verify agy "$child_wt" "$child_worktree_identity" \
+      || return 1
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -2467,6 +2747,9 @@ cleanup_firstmate_home_children() {
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+        [ "$child_harness_family" != agy ] \
+          || fm_control_harness_wiring_cleanup agy "$child_wt" "$sub_state" "$child_id" \
+          || return 1
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
@@ -2474,6 +2757,9 @@ cleanup_firstmate_home_children() {
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
         "$child_wt/.opencode/plugins/fm-busy-state.js" \
         "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+      [ "$child_harness_family" != agy ] \
+        || fm_control_harness_wiring_cleanup agy "$child_wt" "$sub_state" "$child_id" \
+        || return 1
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
         if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
           :
@@ -2501,7 +2787,7 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
-      "$sub_state/$child_id.cursor-session"
+      "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.process-scope"
   done
 }
 
@@ -2532,13 +2818,13 @@ if [ "$KIND" = secondmate ]; then
   handoff_wake_retire_validate || exit 1
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
   if [ "$FORCE" = "--force" ]; then
-    validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     preflight_descendant_task_locks "$HOME_PATH" || exit 1
-    validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     if [ "$BACKEND" = herdr ]; then
       teardown_herdr_preflight_target "$T" "$ID" || exit 1
     fi
     preflight_firstmate_home_herdr_children "$HOME_PATH" || exit 1
+    quiesce_firstmate_home_scoped_children "$HOME_PATH" || exit 1
+    validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
   fi
 fi
 
@@ -2615,53 +2901,6 @@ if [ -n "$X_REQUEST" ]; then
   echo "warning: task $ID still carries an unreconciled Relay request link ($X_REQUEST) on its task record." >&2
 fi
 
-if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
-  if ! inspectable_git_worktree "$WT"; then
-    echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
-    echo "Cannot verify dirty or unlanded work; restore the worktree path or get explicit OK to discard, then --force." >&2
-    exit 1
-  fi
-  require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || exit 1
-  ORCA_PATH_MATCH_VERIFIED=1
-fi
-
-if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
-  if validate_worktree_teardown_safety; then
-    :
-  else
-    safety_rc=$?
-    if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
-      cleanup_stale_lock_for_safety_check "$WT" || exit 1
-      validate_worktree_teardown_safety || exit 1
-    else
-      exit 1
-    fi
-  fi
-fi
-
-# Every landed/discard-work refusal above has now passed (or --force skipped
-# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
-# --force, and before ANY destructive step below - a still-parked run or a
-# leaked process can own live work in this exact worktree. Not for
-# kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
-# dedicated process-event and firstmate-home removal machinery further below,
-# not by task-worktree cleanup.
-if [ "$KIND" != secondmate ]; then
-  conclude_task_no_mistakes_run "$WT"
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
-fi
-
-# Fix 3 (see script header): sweep remote job workers abandoned by an already
-# pruned code root. Best effort - a sweep failure never blocks this teardown.
-"$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
-
-# A Herdr close may reposition shared workspace order, so the whole
-# destructive sequence below (worktree return, pane close, record removal)
-# runs under the named-session presentation lock, acquired BEFORE anything is
-# returned or erased: a contended lock refuses here while the isolated copy,
-# every durable record, and the endpoint are all still intact for a plain
-# rerun. An unresolvable lock path (for example an unreachable server) also
-# refuses before any destructive step.
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
 if [ "$BACKEND" = herdr ]; then
@@ -2669,49 +2908,6 @@ if [ "$BACKEND" = herdr ]; then
   fm_backend_herdr_parse_target "$T" || exit 1
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
-fi
-
-# Best-effort: drop the local task branch so the shared repo does not accumulate refs.
-if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
-  if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
-    require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
-    ORCA_PATH_MATCH_VERIFIED=1
-  fi
-  if [ -d "$WT" ]; then
-    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-    if [ "$branch" != "HEAD" ]; then
-      if git -C "$WT" checkout --detach -q 2>/dev/null; then
-        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-      fi
-    fi
-    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
-      "$WT/.opencode/plugins/fm-busy-state.js" \
-      "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
-  fi
-  [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
-  fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
-elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-  if [ "$branch" != "HEAD" ]; then
-    if git -C "$WT" checkout --detach -q 2>/dev/null; then
-      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-    fi
-  fi
-  # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
-  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
-    "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
-  # Kills remaining processes in the worktree (including the agent), resets, returns
-  # to pool. treehouse resolves the pool from the working directory, so run it from
-  # the project. teardown_treehouse_return tolerates transient and stale git locks
-  # left by a killed crew process; see the script header for retry and stale-lock proof.
-  post_lock_cleanup_check=
-  if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
-    post_lock_cleanup_check=validate_worktree_teardown_safety
-  fi
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-    exit 1
-  }
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
@@ -2735,7 +2931,132 @@ if [ "$BACKEND" = herdr ] \
   fi
 fi
 
-if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+TEARDOWN_ENDPOINT_QUIESCED=0
+TEARDOWN_WORKTREE_PROCESSES_REAPED=0
+AGY_WORKTREE_IDENTITY=
+if [ "$HARNESS_FAMILY" = agy ] && [ "$KIND" != secondmate ]; then
+  AGY_WORKTREE_IDENTITY=$(fm_control_harness_worktree_identity agy "$WT") || exit 1
+  task_worktree_process_scan_strict worktree "$WT" "$TASK_TMP" || exit 1
+  if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+    validate_worktree_teardown_safety_with_lock_recovery \
+      "$STATE" "$ID" "$AGY_SCOPE_TOKEN" || exit 1
+  fi
+  fm_task_process_scope_quiesce "$STATE" "$ID" "$AGY_SCOPE_TOKEN" "agy" || exit 1
+  fm_control_harness_worktree_identity_verify agy "$WT" "$AGY_WORKTREE_IDENTITY" || exit 1
+  if [ "$BACKEND" = herdr ] && [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+    if teardown_herdr_session_lock_held "$HERDR_PRESENTATION_SESSION"; then
+      fm_backend_herdr_projection_close_pane_focus_preserving \
+        "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" || true
+    fi
+    if ! fm_backend_herdr_endpoint_confirmed_gone "$T"; then
+      echo "error: herdr pane $T for $ID is not confirmed gone; preserving its worktree and durable identity" >&2
+      exit 1
+    fi
+  else
+    teardown_quiesce_endpoint \
+      "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" \
+      "fm-$ID" "$FM_HOME" "$ID" || exit 1
+  fi
+  fm_control_harness_worktree_identity_verify agy "$WT" "$AGY_WORKTREE_IDENTITY" || exit 1
+  reap_task_worktree_processes_strict worktree "$WT" "$TASK_TMP" || exit 1
+  fm_control_harness_worktree_identity_verify agy "$WT" "$AGY_WORKTREE_IDENTITY" || exit 1
+  TEARDOWN_ENDPOINT_QUIESCED=1
+  TEARDOWN_WORKTREE_PROCESSES_REAPED=1
+fi
+
+if [ "$KIND" != secondmate ] && [ "$HARNESS_FAMILY" != agy ]; then
+  TASK_SCOPE_TOKEN=$(fm_task_process_scope_meta_token_explicit "$META") || exit 1
+  [ -z "$TASK_SCOPE_TOKEN" ] \
+    || fm_task_process_scope_quiesce "$STATE" "$ID" "$TASK_SCOPE_TOKEN" "worker" \
+    || exit 1
+fi
+
+if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
+  if ! inspectable_git_worktree "$WT"; then
+    echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
+    echo "Cannot verify dirty or unlanded work; restore the worktree path or get explicit OK to discard, then --force." >&2
+    exit 1
+  fi
+  require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || exit 1
+  ORCA_PATH_MATCH_VERIFIED=1
+fi
+
+if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+  validate_worktree_teardown_safety_with_lock_recovery || exit 1
+fi
+
+# Every landed/discard-work refusal above has now passed (or --force skipped
+# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
+# --force, and before ANY destructive step below - a still-parked run or a
+# leaked process can own live work in this exact worktree. Not for
+# kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
+# dedicated process-event and firstmate-home removal machinery further below,
+# not by task-worktree cleanup.
+if [ "$KIND" != secondmate ]; then
+  conclude_task_no_mistakes_run "$WT"
+  [ "$TEARDOWN_WORKTREE_PROCESSES_REAPED" = 1 ] \
+    || reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+fi
+
+if [ "$HARNESS_FAMILY" = agy ] && [ "$KIND" != secondmate ]; then
+  fm_control_harness_worktree_identity_verify agy "$WT" "$AGY_WORKTREE_IDENTITY" || exit 1
+fi
+
+# Fix 3 (see script header): sweep remote job workers abandoned by an already
+# pruned code root. Best effort - a sweep failure never blocks this teardown.
+"$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
+
+# Best-effort: drop the local task branch so the shared repo does not accumulate refs.
+if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
+  if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
+    require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
+    ORCA_PATH_MATCH_VERIFIED=1
+  fi
+  if [ -d "$WT" ]; then
+    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+    if [ "$branch" != "HEAD" ]; then
+      if git -C "$WT" checkout --detach -q 2>/dev/null; then
+        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+      fi
+    fi
+    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
+      "$WT/.opencode/plugins/fm-busy-state.js" \
+      "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+    [ "$HARNESS_FAMILY" != agy ] \
+      || fm_control_harness_wiring_cleanup agy "$WT" "$STATE" "$ID" \
+      || exit 1
+  fi
+  [ "$TEARDOWN_ENDPOINT_QUIESCED" = 1 ] || [ -z "$T_ORCA" ] \
+    || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+  if [ "$branch" != "HEAD" ]; then
+    if git -C "$WT" checkout --detach -q 2>/dev/null; then
+      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+    fi
+  fi
+  # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
+  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
+    "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+  [ "$HARNESS_FAMILY" != agy ] \
+    || fm_control_harness_wiring_cleanup agy "$WT" "$STATE" "$ID" \
+    || exit 1
+  # Kills remaining processes in the worktree (including the agent), resets, returns
+  # to pool. treehouse resolves the pool from the working directory, so run it from
+  # the project. teardown_treehouse_return tolerates transient and stale git locks
+  # left by a killed crew process; see the script header for retry and stale-lock proof.
+  post_lock_cleanup_check=
+  if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
+    post_lock_cleanup_check=validate_worktree_teardown_safety
+  fi
+  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+    exit 1
+  }
+fi
+
+if [ "$TEARDOWN_ENDPOINT_QUIESCED" != 1 ] && [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   # The presentation lock was acquired before the worktree return above; a
   # contended lock already refused this teardown while everything was intact.
   if teardown_herdr_session_lock_held "$HERDR_PRESENTATION_SESSION"; then
@@ -2752,13 +3073,13 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   else
     echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
   fi
-elif [ "$BACKEND" = herdr ]; then
+elif [ "$TEARDOWN_ENDPOINT_QUIESCED" != 1 ] && [ "$BACKEND" = herdr ]; then
   if teardown_herdr_session_lock_held "$TEARDOWN_HERDR_SESSION"; then
     fm_backend_herdr_kill_serialized "$TEARDOWN_HERDR_SESSION" "$TEARDOWN_HERDR_PANE" 2>/dev/null || true
   else
     echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
   fi
-elif [ "$BACKEND" != orca ]; then
+elif [ "$TEARDOWN_ENDPOINT_QUIESCED" != 1 ] && [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
@@ -2816,7 +3137,7 @@ status_retire_presentation_task "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
-  "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
+  "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" "$STATE/$ID.process-scope" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
