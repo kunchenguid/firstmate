@@ -804,7 +804,7 @@ EOF
   pass "branch default-on eligibility (task-scoped, heartbeat, afk) binds and a broken branch falls back to main"
 }
 
-test_branch_predrain_recheck_defers_new_main_owned_row() {
+test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under() {
   local repo home out status
   repo="$TMP_ROOT/predrain-recheck-root"
   home="$TMP_ROOT/predrain-recheck-home"
@@ -818,36 +818,44 @@ const { dispatch, fire, home, mainUserMessages } = globalThis.__t;
 import { appendFileSync, readFileSync } from "node:fs";
 
 fire("session_start", {});
+let releasePrompt;
+globalThis.__fmPromptGate = new Promise((resolve) => { releasePrompt = resolve; });
 const offer = dispatch("heartbeat", [], true, true);
 if (!offer.accepted) throw new Error("eligible heartbeat offer was not accepted");
+// A main-only notice arrives between offer acceptance and the branch's own
+// drain. It must not carry the fleet review into the captain's chat.
 appendFileSync(`${home}/state/.wake-queue`, "2\t2\tcheck\tx-inbox\tcheck: pending x mention\n");
-for (let i = 0; i < 250 && mainUserMessages.length === 0; i += 1) {
+for (let i = 0; i < 250 && !globalThis.__fmPromptStarted && mainUserMessages.length === 0; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
-if ((globalThis.__fmPrompts ?? []).length !== 0) {
-  throw new Error("branch prompted after a main-owned row arrived before drain");
+if (mainUserMessages.length !== 0) {
+  throw new Error(`a co-present check row rode the heartbeat into main: ${JSON.stringify(mainUserMessages)}`);
 }
-if (mainUserMessages.length !== 1 || !String(mainUserMessages[0].content).includes("FIRSTMATE WATCHER WAKE: heartbeat")) {
-  throw new Error(`mixed queue did not fall back to main: ${JSON.stringify(mainUserMessages)}`);
+if (!globalThis.__fmPromptStarted) {
+  throw new Error("the branch was never prompted even though the heartbeat stayed eligible");
 }
+const snapshot = readFileSync(`${home}/state/.branch-eligible-rows`, "utf8").trim().split("\n");
+if (!snapshot.includes("1")) throw new Error(`eligible-row snapshot omitted the heartbeat row: ${snapshot}`);
+if (snapshot.includes("2")) throw new Error(`eligible-row snapshot granted the main-owned row: ${snapshot}`);
+releasePrompt();
 const queue = readFileSync(`${home}/state/.wake-queue`, "utf8");
 if (!queue.includes("\theartbeat\t") || !queue.includes("\tcheck\t")) {
-  throw new Error(`pre-drain fallback mutated the queued set: ${queue}`);
+  throw new Error(`the pre-drain recheck mutated the queued set: ${queue}`);
 }
 process.exit(0);
 EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
-  expect_code 0 "$status" "pre-drain eligibility re-check must defer the whole mixed queue to main: $out"
-  pass "pre-drain eligibility re-check defers a newly main-owned row"
+  expect_code 0 "$status" "a co-present check row must not carry a heartbeat review into main: $out"
+  pass "a heartbeat review survives a check row arriving before its drain"
 }
 
 # The non-heartbeat half of the same recheck: a check-kind row that arrives
 # after a signal/stale offer is accepted must stay main-owned WITHOUT bouncing
-# the branch's own eligible row back to main - the reproduction from the task
-# (docs/watcher-continuity.md "Per-actor acknowledgement"). Heartbeat keeps
-# its own, unchanged, all-or-nothing rule (proven above); this is the case
-# scopeForUnreadWake changed.
+# the branch's own eligible row back to main
+# (docs/watcher-continuity.md "Per-actor acknowledgement"). A check row is
+# main-owned in every mode, so the heartbeat case proven above and this one
+# resolve the same way.
 test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligible_work() {
   local repo home out status
   repo="$TMP_ROOT/predrain-partial-root"
@@ -2251,12 +2259,61 @@ if (writeEligibleRowsSnapshot(state, ["2"], process.env.GRANT, "fixture") !== "m
   throw new Error("a row already claimed by main was not reported as main-owned");
 }
 
-// heartbeat keeps its own unchanged all-or-nothing rule: the same main-only
-// row that is merely excluded for a non-heartbeat scan still vetoes a
-// heartbeat review outright.
+// A heartbeat is not vetoed or ridden into main by a co-present check row.
+// The check row is permanently main-owned in every mode, so it is excluded
+// from the claim rather than deferring a fleet review that has nothing to do
+// with it - the captain's reproduction.
+writeFileSync(
+  `${state}/.wake-queue`,
+  [
+    "1\t1\tcheck\tx-inbox\tcheck: pending x mention",
+    "1\t2\theartbeat\theartbeat\theartbeat",
+    "1\t3\tsignal\ttask-a.status\tsignal: task-a.status",
+  ].join("\n"),
+);
 const heartbeatMixed = scopeForUnreadWake(state, true);
-if (heartbeatMixed.eligible || !heartbeatMixed.corrupted) {
-  throw new Error(`a main-only row must still veto a heartbeat review: ${JSON.stringify(heartbeatMixed)}`);
+if (!heartbeatMixed.eligible || heartbeatMixed.corrupted) {
+  throw new Error(`a co-present check row rode a heartbeat into main: ${JSON.stringify(heartbeatMixed)}`);
+}
+if (heartbeatMixed.eligibleSeqs.slice().sort().join(",") !== "2,3") {
+  throw new Error(`a heartbeat claim must cover every branch-ownable row and no check row: ${JSON.stringify(heartbeatMixed)}`);
+}
+
+// All-or-nothing is unchanged in what it actually guarantees: a heartbeat
+// review takes every branch-ownable row or none of them, so a row this scan
+// cannot resolve still defers the whole review to main.
+writeFileSync(
+  `${state}/.wake-queue`,
+  [
+    "1\t1\theartbeat\theartbeat\theartbeat",
+    "1\t2\tsignal\tno-such-task.status\tsignal: no-such-task.status",
+  ].join("\n"),
+);
+const heartbeatUnresolvable = scopeForUnreadWake(state, true);
+if (heartbeatUnresolvable.eligible || !heartbeatUnresolvable.corrupted) {
+  throw new Error(`an unresolvable row must still defer a heartbeat review: ${JSON.stringify(heartbeatUnresolvable)}`);
+}
+writeFileSync(
+  `${state}/.wake-queue`,
+  [
+    "1\t1\theartbeat\theartbeat\theartbeat",
+    "1\t2\tinvented\tsomething\tinvented: not a kind fm_wake_append emits",
+  ].join("\n"),
+);
+const heartbeatUnknownKind = scopeForUnreadWake(state, true);
+if (heartbeatUnknownKind.eligible || !heartbeatUnknownKind.corrupted) {
+  throw new Error(`an unknown row kind must still defer a heartbeat review: ${JSON.stringify(heartbeatUnknownKind)}`);
+}
+
+// A queue holding nothing but main-only rows leaves a heartbeat with nothing
+// to hand over, so it is not offered rather than granted an empty claim.
+writeFileSync(`${state}/.wake-queue`, "1\t1\tcheck\tx-inbox\tcheck: pending x mention");
+const heartbeatNothingOwnable = scopeForUnreadWake(state, true);
+if (heartbeatNothingOwnable.eligible || heartbeatNothingOwnable.eligibleSeqs.length !== 0) {
+  throw new Error(`a heartbeat was offered with no branch-ownable row: ${JSON.stringify(heartbeatNothingOwnable)}`);
+}
+if (heartbeatNothingOwnable.corrupted) {
+  throw new Error(`a purely main-only queue is ordinary absence, not a fault: ${JSON.stringify(heartbeatNothingOwnable)}`);
 }
 process.exit(0);
 EOF
@@ -2377,7 +2434,7 @@ test_branch_dispatch_two_stage_filter_and_prefix_contract
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
-test_branch_predrain_recheck_defers_new_main_owned_row
+test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under
 test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligible_work
 test_settled_branch_prompt_releases_unacknowledged_grant
 test_main_owned_grant_result_falls_back_to_main

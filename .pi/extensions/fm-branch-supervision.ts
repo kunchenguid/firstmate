@@ -825,17 +825,16 @@ ${context.command}
         const heartbeat = /^heartbeat($|:)/.test(message);
         const scope = scopeForUnreadWake(state, heartbeat);
         // A newly-arrived main-owned (check-kind) row never bounces this
-        // whole recheck back to main any more - scopeForUnreadWake already
-        // excludes it from eligibleSeqs rather than vetoing the scan, so it
-        // stays queued for main while whatever else is eligible right now
-        // still reaches the branch. A genuinely empty queue, or a queue that
-        // simply has nothing (or nothing further) eligible for the branch
-        // right now, is an ordinary quiet no-op - not a fault, so it is
-        // never reported back to main. Only a scan scopeForUnreadWake itself
-        // marks corrupted (the queue or its metadata could not be read
-        // safely, or - for a heartbeat review - a main-owned row anywhere in
-        // the unread queue, since a heartbeat needs full-fleet context)
-        // still falls back to main.
+        // whole recheck back to main - scopeForUnreadWake excludes it from
+        // eligibleSeqs rather than vetoing the scan, in a heartbeat review as
+        // in every other, so it stays queued for main while whatever else is
+        // eligible right now still reaches the branch. A genuinely empty
+        // queue, or a queue that simply has nothing (or nothing further)
+        // eligible for the branch right now, is an ordinary quiet no-op - not
+        // a fault, so it is never reported back to main. Only a scan
+        // scopeForUnreadWake itself marks corrupted (the queue or its
+        // metadata could not be read safely, or an unresolvable task-local
+        // row) still falls back to main.
         if (scope.status === "empty" || (!scope.corrupted && scope.eligibleSeqs.length === 0)) return;
         if (scope.corrupted) {
           throw new Error("the unread wake queue could not be read safely");
