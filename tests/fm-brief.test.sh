@@ -747,8 +747,39 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# AGENTS.md section 1 forbids an agent co-author on a commit, but crewmates work
+# inside a project checkout and never read firstmate's AGENTS.md - the brief is
+# the only instruction surface they see. Every variant that can produce commits
+# must therefore carry the prohibition itself, and it must override the harness
+# default (Claude Code appends both trailers unless told otherwise).
+test_commit_variants_forbid_agent_attribution() {
+  local home id brief spec args
+  home="$TMP_ROOT/coauthor-home"
+  mkdir -p "$home/data"
+  for spec in "brief-ca-nm:--mode no-mistakes" "brief-ca-dp:--mode direct-PR" \
+              "brief-ca-lo:--mode local-only" "brief-ca-scout:--scout"; do
+    id=${spec%%:*}
+    args=${spec#*:}
+    # shellcheck disable=SC2086  # deliberate word splitting of the flag fixture
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj $args >/dev/null 2>&1 \
+      || fail "$id: fm-brief.sh exited non-zero"
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_grep "no agent attribution in a commit message" "$brief" \
+      "$id: brief does not forbid agent attribution in commit messages"
+    assert_grep "Co-Authored-By:" "$brief" \
+      "$id: brief does not name the Co-Authored-By agent trailer"
+    assert_grep "Claude-Session:" "$brief" \
+      "$id: brief does not name the agent session line"
+    assert_grep "whatever your harness or tooling" "$brief" \
+      "$id: brief does not override the harness default"
+  done
+  pass "fm-brief.sh: commit-producing briefs forbid agent co-author trailers"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
+test_commit_variants_forbid_agent_attribution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set

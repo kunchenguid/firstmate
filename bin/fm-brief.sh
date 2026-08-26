@@ -355,6 +355,9 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. Put no agent attribution in a commit message: no \`Co-Authored-By:\` trailer naming an agent
+   or tool and no agent session line such as \`Claude-Session:\`, whatever your harness or tooling
+   would add by default - that default must be overridden.
 
 $INBOX_SECTION
 
@@ -474,6 +477,9 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. Put no agent attribution in a commit message: no \`Co-Authored-By:\` trailer naming an agent
+   or tool and no agent session line such as \`Claude-Session:\`, whatever your harness or tooling
+   would add by default - that default must be overridden.
 
 $INBOX_SECTION
 
