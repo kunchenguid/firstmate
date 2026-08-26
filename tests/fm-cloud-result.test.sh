@@ -16,6 +16,7 @@ make_return_case() {  # <name> <id> <kind> <report yes|no|empty> <scratch yes|no
   state="$home/state"
   mkdir -p "$state/$id.cloud-outcome" "$home/data/$id" "$worker/task" "$worker/account"
   fm_git_init_commit "$repo"
+  fm_git_identity "$repo"
   git clone --quiet "$repo" "$worker/task/repo"
   fm_git_identity "$worker/task/repo"
   git -C "$worker/task/repo" checkout --quiet --detach
