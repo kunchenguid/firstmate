@@ -602,6 +602,34 @@ assert_distinct_chain() {  # <dir>
     || fail "fixture did not produce three distinct harness levels: launcher=$launcher daemon=$daemon session=$session"
 }
 
+# The real turn-end guard runs last in every fixture below, on the same Stop
+# event as the auto-arm before it, so its verdict is the second half of the same
+# identity decision: it may only stand down where this session was recognized as
+# its home's owner and the auto-arm therefore claimed recovery. Asserting it is
+# what stops a guard that crashed, blocked blindly, or allowed blindly from
+# passing unnoticed underneath the identity assertions.
+guard_rc() {  # <dir>
+  tr -d '[:space:]' < "$1/state/guard.rc"
+}
+
+assert_guard_stood_down() {  # <dir> <why>
+  local dir=$1 why=$2
+  expect_code 0 "$(guard_rc "$dir")" "$why"
+  [ ! -s "$dir/state/guard.out" ] \
+    || fail "the guard allowed the turn but still printed a banner: $(cat "$dir/state/guard.out")"
+}
+
+assert_guard_blocked_blind_turn() {  # <dir> <why>
+  local dir=$1 why=$2
+  expect_code 2 "$(guard_rc "$dir")" "$why"
+  grep -q 'TURN WOULD END BLIND' "$dir/state/guard.out" \
+    || fail "the guard blocked without its repair banner: $(cat "$dir/state/guard.out")"
+  grep -q 'task(s) in flight, but no live watcher holds this home lock' "$dir/state/guard.out" \
+    || fail "the guard's banner did not record the supervision need it blocked on: $(cat "$dir/state/guard.out")"
+  grep -q 'The Stop-owned auto-arm did not claim this home' "$dir/state/guard.out" \
+    || fail "the guard's banner did not record that no auto-arm claim covered it: $(cat "$dir/state/guard.out")"
+}
+
 test_bg_session_records_its_own_identity_and_keeps_arming() {
   local dir launcher session recorded
   dir="$TMP_ROOT/bg-session-sole"
@@ -622,6 +650,8 @@ test_bg_session_records_its_own_identity_and_keeps_arming() {
     || fail "supervision never armed for a background session that owns its home"
   [ "$(epoch_outcome "$dir")" = rewake ] \
     || fail "no claim was recorded for a background session, got: $(epoch_outcome "$dir")"
+  assert_guard_stood_down "$dir" \
+    "the turn-end guard must stand down for the claim the auto-arm just recorded"
   pass "session-lock: a background session records its own identity and keeps claiming its home"
 }
 
@@ -643,6 +673,8 @@ test_bg_session_never_claims_a_home_a_live_session_owns() {
   expect_code 0 "$(hook_rc "$dir")" "a session that does not own the home must stay inert"
   [ ! -e "$dir/state/arm-ran" ] || fail "a session that does not own the home armed supervision"
   [ -z "$(epoch_outcome "$dir")" ] || fail "a non-owning session wrote an auto-arm claim"
+  assert_guard_blocked_blind_turn "$dir" \
+    "with no auto-arm claim behind it the turn-end guard must block rather than allow a blind turn"
   pass "session-lock: a background session never claims a home a live launching session owns"
 }
 
@@ -659,6 +691,8 @@ test_bg_session_recovers_a_genuinely_dead_owner() {
   [ -e "$dir/state/arm-ran" ] || fail "supervision never armed after reclaiming a dead owner"
   [ "$recorded" = "$session" ] \
     || fail "the reclaimed lock does not name the recovering session: expected $session, got $recorded"
+  assert_guard_stood_down "$dir" \
+    "the turn-end guard must stand down once the reclaiming session's auto-arm has claimed the home"
   pass "session-lock: a background session still reclaims a genuinely dead owner"
 }
 
@@ -671,6 +705,8 @@ test_bg_session_stays_inert_while_away_mode_owns_supervision() {
   expect_code 0 "$(hook_rc "$dir")" "away mode must keep the auto-arm inert"
   [ ! -e "$dir/state/arm-ran" ] || fail "the auto-arm armed supervision while away mode owned it"
   [ -z "$(epoch_outcome "$dir")" ] || fail "the auto-arm claimed the home while away mode owned it"
+  assert_guard_blocked_blind_turn "$dir" \
+    "away mode silences the auto-arm, not the turn-end guard, which must still block a blind turn"
   pass "session-lock: away mode still owns supervision for a background session"
 }
 
@@ -715,6 +751,8 @@ done
   [ "$recorded" = "$launcher" ] \
     || fail "an inherited declaration did not fall back to prior behavior: got '$recorded', expected $launcher"
   expect_code 0 "$(hook_rc "$dir")" "the documented fallback keeps the hook inert, not arming blind"
+  assert_guard_blocked_blind_turn "$dir" \
+    "the ignored declaration leaves no auto-arm claim, so the turn-end guard must block the blind turn"
   pass "session-lock: a declaration outside this session's ancestry is ignored for the prior identity"
 }
 
