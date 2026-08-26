@@ -18,6 +18,8 @@ Every cut was prose, none was structure, so treat these as rules rather than pre
 ## Scope
 
 Use this for any message the captain will post to a channel: a new page or tool, a capability launch, a brownbag, a process change, a broadcast status note.
+This skill produces a draft and nothing else: the captain posts it.
+Never send, schedule, or otherwise publish the announcement yourself, through any channel or tool.
 
 Do not use it for captain-facing chat, PR bodies, commit messages, or project documentation.
 Several rules here are the opposite of what those surfaces need, and applying them there deletes detail those readers depend on.
@@ -33,6 +35,11 @@ Draft, then cut to roughly half, and expect to find nothing missing.
 Three or four bold section headers, each answering a question the reader actually has: what this is plus the link, what it counts or does, what makes it trustworthy, what it is not.
 That outline survived verbatim through the cut.
 Edit inside the sections, never the outline.
+
+The announcement itself uses no markdown emphasis or heading syntax at all: no double-asterisk bold, no hash headings, no underscores for italics, no markdown links, and no backtick code spans.
+Slack does not parse markdown and renders every one of those literally.
+Section headers stay bold through Slack's own mrkdwn form instead, a single asterisk on each side of the header text, written as `*What this is*`.
+A single-asterisk pair is only ever a bold section header, never inline emphasis on a word or a phrase, and the announcement carries no hash title.
 
 ## One clause per bullet
 
@@ -109,8 +116,9 @@ An announcement carries no captain attribution.
 
 Run this pass in order before handing the draft over, applying the rules above rather than overriding them:
 
-1. Cut the second sentence of every bullet: it is almost always the cut, so keep it only when it passes the prevent-a-wrong-action test above.
-2. Cut every defensive clause beginning "never", "rather than", or "not a", keeping the "what it is not" section's own content and any clause that passes that same test.
+1. Cut the second sentence of every bullet: it is almost always the cut, so keep it only when it is a load-bearing reason that prevents a wrong action, never when it restates or illustrates the first sentence, as the worked example's cut second sentence does.
+2. Cut every clause that defends a claim or pre-empts an objection nobody raised, measured against the quoted phrases in the no-defence rule above rather than against any fixed opener, so a clause reading "that's honest data, not a gap in the page", "and the page says so itself", or "Nothing else sneaks in." is caught exactly as one opening "never", "rather than", or "not a" is.
+   Keep the "what it is not" section's own content and any clause that passes that same load-bearing test.
 3. Replace every em dash with a colon or a full stop, or restructure the sentence, and never remove a clause separator in a way that leaves a run-on.
 4. Cut every sentence about how the thing is built or refreshed.
 
