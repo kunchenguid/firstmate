@@ -46,11 +46,15 @@ assert data["parameters"]["runnerValidationSku"]["defaultValue"] == "Standard_D4
 # by default, threaded through the nested deployment, and never applied to
 # the supervisor's own image reference.
 assert data["parameters"]["workerImageId"]["defaultValue"] == ""
+assert data["variables"]["resourcesDeploymentName"] == "[format('firstmate-pilot-resources-{0}', uniqueString(deployment().name))]"
 nested = next(
     item for item in data["resources"]
     if item["type"] == "Microsoft.Resources/deployments"
     and "firstmate-pilot-resources" in json.dumps(item["name"])
 )
+assert nested["name"] == "[variables('resourcesDeploymentName')]"
+assert data["outputs"]["blobPrivateEndpointNicId"]["value"] == "[reference(variables('resourcesDeploymentName')).outputs.blobPrivateEndpointNicId.value]"
+assert data["outputs"]["blobPrivateEndpointNicResourceGuid"]["value"] == "[reference(variables('resourcesDeploymentName')).outputs.blobPrivateEndpointNicResourceGuid.value]"
 inner = nested["properties"]["template"]
 assert inner["parameters"]["workerImageId"]["defaultValue"] == ""
 assert nested["properties"]["parameters"]["workerImageId"] == {"value": "[parameters('workerImageId')]"}

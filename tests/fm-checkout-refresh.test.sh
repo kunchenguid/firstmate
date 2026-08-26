@@ -2217,6 +2217,43 @@ test_logical_home_state_migrates_and_ambiguity_fails_closed() {
   pass "logical home state migration is discoverable, staged, and rollback-safe"
 }
 
+test_launch_agent_script_drift_is_audited_and_adopted() {
+  local home state_base state agents logical_key logical_label logical_plist out status observed_script
+  home="$TMP_ROOT/launch-agent-script-drift-home"
+  state_base="$TMP_ROOT/launch-agent-script-drift-state-base"
+  state="$state_base/homes/aaaaaaaaaaaaaaaa"
+  agents="$TMP_ROOT/launch-agent-script-drift-agents"
+  mkdir -p "$home/projects" "$home/config" "$home/user/.treehouse" "$state" "$agents"
+  logical_key=$(checkout_state_key "$home" 16)
+  logical_label="com.firstmate.checkout-refresh.$logical_key"
+  logical_plist="$agents/$logical_label.plist"
+  write_launch_agent_fixture "$logical_plist" "$logical_label" "$home" "$state"
+  observed_script="$TMP_ROOT/older-firstmate/bin/fm-checkout-refresh.sh"
+  python3 - "$logical_plist" "$ROOT/bin/fm-checkout-refresh.sh" "$observed_script" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+body = path.read_text(encoding="utf-8")
+old, new = sys.argv[2:]
+if old not in body:
+    raise SystemExit("fixture script path is absent")
+path.write_text(body.replace(old, new), encoding="utf-8")
+PY
+  set +e
+  out=$(HOME="$home/user" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
+    FM_TREEHOUSE_ROOT="$home/user/.treehouse" \
+    FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
+    FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
+    "$ROOT/bin/fm-checkout-refresh.sh" discover 2>&1)
+  status=$?
+  set -e
+  [ "$status" -eq 0 ] || fail "a same-home LaunchAgent script drift blocked namespace discovery: $out"
+  assert_contains "$out" "expected=$ROOT/bin/fm-checkout-refresh.sh observed=$observed_script; adopting observed namespace" \
+    "LaunchAgent script drift did not audit both observed paths"
+  pass "same-home LaunchAgent script drift is audited and adopted"
+}
+
 test_launch_agent_label_and_custom_legacy_state_are_authoritative() {
   local home state_base custom_state agents fakebin fake_state logical_key logical_label logical_plist legacy_plist out status
   home="$TMP_ROOT/launch-agent-identity-home"
@@ -2650,6 +2687,11 @@ if [ "${FM_TEST_FOCUSED:-}" = treehouse-per-home ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = launchagent-script-drift ]; then
+  test_launch_agent_script_drift_is_audited_and_adopted
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = review-round-7 ]; then
   test_discovery_rejects_nested_configured_and_scanned_paths
   exit 0
@@ -2732,6 +2774,7 @@ test_managed_treehouse_source_refuses_tracked_config_and_symlinks
 test_acquisition_honors_shared_checkout_lock
 test_launch_agent_definition_is_home_scoped_with_scheduler_seam
 test_logical_home_state_migrates_and_ambiguity_fails_closed
+test_launch_agent_script_drift_is_audited_and_adopted
 test_launch_agent_label_and_custom_legacy_state_are_authoritative
 test_loaded_launch_agent_controls_and_untracked_legacy_job_fail_closed
 test_same_path_replacement_and_manifest_failures_are_unhealthy

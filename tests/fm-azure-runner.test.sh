@@ -9,6 +9,7 @@ HOST="$ROOT/bin/fm-azure-runner.py"
 RUNNER="$ROOT/bin/fm-azure-runner.sh"
 GUEST="$ROOT/bin/fm-azure-runner-guest.sh"
 EXECUTOR="$ROOT/bin/fm-azure-runner-exec.py"
+AGENT_FLEET_INSTALLER="$ROOT/bin/fm-azure-runner-agent-fleet-install.py"
 TEMPLATE="$ROOT/docs/azure-runner/invocation.json"
 SUB=11111111-1111-4111-8111-111111111111
 TENANT=22222222-2222-4222-8222-222222222222
@@ -31,6 +32,16 @@ runner() {
   env FM_HOME="$home" FM_AZURE_TENANT_ID="$TENANT" FM_AZURE_SUBSCRIPTION_ID="$SUB" \
     FM_AZURE_NAMING_PREFIX=fmtest FM_AZURE_STORAGE_NAME=fmteststorage0001 FM_AZURE_OWNER_TAG=owner \
     FM_AZURE_DEPLOYMENT_GENERATION=gen-one FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID="$PE_GUID" "$RUNNER" "$@"
+}
+
+python_311() {
+  if python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' 2>/dev/null; then
+    command -v python3
+  elif command -v uv >/dev/null 2>&1; then
+    uv python find '>=3.11'
+  else
+    return 1
+  fi
 }
 
 environment_mode_defaults() {
@@ -316,8 +327,8 @@ repo=pathlib.Path(sys.argv[2]); bundle=pathlib.Path(sys.argv[3]); state_dir=path
 env={"state_dir":state_dir,"home_binding":"sha256:"+"a"*64,"deployment_generation":"gen","prefix":"fmtest","subscription":"11111111-1111-4111-8111-111111111111","resource_group":"rg","owner":"owner","cost_admission_mode":m.STRICT_COST_ADMISSION_MODE,"cell_ordinal":None}
 m.ensure_state_dirs(env)
 head=m.git(repo,"rev-parse","HEAD").stdout.strip(); tree=m.git(repo,"rev-parse","HEAD^{tree}").stdout.strip()
-m.public_origin_proof=lambda *_a,**_k:{"remote":"https://github.com/Ruby-Labs/cloud-host-owner.git","default_ref":"refs/heads/main","default_head":"d"*40,"source_ref":"refs/heads/topic","source_head":head,"tree":tree}
-args=argparse.Namespace(repo=str(repo),task="azv-aaaaaaaaaaaa-s1",generation="round-aaaaaaaaaaaa",resource_class="behavior-heavy",source_ref="refs/heads/topic",private_snapshot_bundle=str(bundle),capacity_parent="azv-aaaaaaaaaaaa",capacity_reservation_vcpus=40,wall_seconds=None,dependency=[],artifact=[],command=["true"],invocation="azr-aaaaaaaaaaaa")
+m.public_origin_proof=lambda *_a,**k:{"remote":"https://github.com/Ruby-Labs/cloud-host-owner.git","default_ref":"refs/heads/main","default_head":"d"*40,"source_ref":k.get("source_ref") or "refs/heads/main","source_head":head,"tree":tree}
+args=argparse.Namespace(repo=str(repo),task="azv-aaaaaaaaaaaa-s1",generation="round-aaaaaaaaaaaa",resource_class="behavior-heavy",source_ref="refs/heads/topic",public_ref=None,public_ancestor=[],private_snapshot_bundle=str(bundle),private_snapshot_from_head=False,capacity_parent="azv-aaaaaaaaaaaa",capacity_reservation_vcpus=40,wall_seconds=None,dependency=[],artifact=[],command=["true"],invocation="azr-aaaaaaaaaaaa")
 state=m.prepare(env,args)
 r=state["request"]["repository"]
 assert r["source_mode"]=="private-parent-bundle" and r["source_head"]==head and r["tree"]==tree
@@ -367,8 +378,36 @@ args.private_snapshot_bundle=str(plain_bundle)
 plain_state=m.prepare(env,args)
 assert plain_state["request"]["repository"]["source_head"]==plain_head
 assert plain_state["request"]["protocol"]["agent_fleet_python"]=={"lock_digest":None,"wheels":[]}
+# The direct no-mistakes route seals a detached, unpushed HEAD without a
+# validation parent. Its deterministic private ref is identity, not a guessed
+# task branch, and the bundle must carry complete ancestry into an empty repo.
+args.repo=str(repo); args.resource_class="behavior-heavy"; args.command=["true"]
+args.private_snapshot_bundle=None; args.private_snapshot_from_head=True
+args.capacity_parent=None; args.capacity_reservation_vcpus=None
+args.source_ref="refs/heads/fm-no-mistakes/01BX5ZZKBKACTAV9WEVGEMMVRZ"
+args.invocation="azr-eeeeeeeeeeee"; args.task="nm-01BX5ZZKBKACTAV9WEVGEMMVRZ"
+(repo/"second").write_text("second\n"); m.run(["git","-C",str(repo),"add","second"]); m.run(["git","-C",str(repo),"commit","-qm","second"])
+head=m.git(repo,"rev-parse","HEAD").stdout.strip(); parent=m.git(repo,"rev-parse","HEAD^1").stdout.strip()
+proof_calls=[]
+def direct_origin_proof(*_a,**k):
+    proof_calls.append(k)
+    return {"remote":"https://github.com/Ruby-Labs/cloud-host-owner.git","default_ref":"refs/heads/main","default_head":"d"*40,"source_ref":k.get("source_ref"),"source_head":head,"tree":m.git(repo,"rev-parse","HEAD^{tree}").stdout.strip()}
+m.public_origin_proof=direct_origin_proof
+m.run(["git","-C",str(repo),"checkout","-q","--detach",head])
+direct=m.prepare(env,args); direct_repo=direct["request"]["repository"]
+assert len(proof_calls)==1 and proof_calls[0].get("private_source") is True, proof_calls
+assert direct_repo["source_mode"]=="private-direct-bundle"
+assert direct_repo["source_ref"]==args.source_ref and direct_repo["source_head"]==head
+assert direct["request"]["capacity_parent"] is None
+assert direct["request"]["capacity_fence"] is None
+sealed=pathlib.Path(direct["input_path"]).parent/"snapshot.bundle"
+assert m.git(repo,"bundle","list-heads",str(sealed)).stdout.splitlines()==[head+" "+args.source_ref]
+verify=repo.parent/"verify.git"; m.run(["git","init","--bare",str(verify)]); m.run(["git","-C",str(verify),"bundle","verify",str(sealed)]); m.run(["git","-C",str(verify),"fetch",str(sealed),args.source_ref])
+assert m.git(verify,"rev-parse","FETCH_HEAD").stdout.strip()==head
+assert m.git(verify,"rev-parse","FETCH_HEAD^1").stdout.strip()==parent
+assert m.git(verify,"rev-parse","--is-shallow-repository").stdout.strip()=="false"
 PY
-  pass "private snapshot preparation binds both parent-cell and credentialless exact-checkout bundle modes"
+  pass "private prepare binds parent, exact-checkout, and detached direct source graphs"
 }
 
 private_snapshot_ancestor_verification() {
@@ -395,7 +434,7 @@ path,ancestor,head=sys.argv[1:]
 with open(path,"w",encoding="utf-8") as handle:
     json.dump({"repository":{"source_mode":"private-exact-bundle","commit":head,"source_ancestors":[ancestor]}},handle)
 PY
-  for mode in private-parent-bundle private-exact-bundle; do
+  for mode in private-parent-bundle private-exact-bundle private-direct-bundle; do
     python3 - "$request" "$mode" <<'PY'
 import json,sys
 path,mode=sys.argv[1:]
@@ -418,7 +457,59 @@ PY
   if python3 "$EXECUTOR" --verify-private-source-ancestors "$request" "$clone" >/dev/null 2>&1; then
     fail "private snapshot ancestor verification accepted a descendant"
   fi
-  pass "private bundle modes verify ancestors locally without contacting origin"
+  pass "all private bundle modes verify ancestors locally without contacting origin"
+}
+
+agent_fleet_offline_install_contract() {
+  local tmp project python out rc
+  fm_test_tmproot_into tmp fm-azure-agent-fleet-install
+  project="$tmp/project"
+  mkdir -p "$project/src"
+  cp "$ROOT/tools/agent-fleet/pyproject.toml" "$ROOT/tools/agent-fleet/uv.lock" "$project/"
+  cp -R "$ROOT/tools/agent-fleet/src/agent_fleet" "$project/src/"
+  python=$(python_311) \
+    || fail "could not resolve Python 3.11+ for the hermetic Agent Fleet installer"
+  "$python" -m venv --without-pip "$project/.venv" \
+    || fail "could not create the hermetic Agent Fleet installer venv"
+  "$project/.venv/bin/python" "$AGENT_FLEET_INSTALLER" "$project" "$project/.venv" >/dev/null \
+    || fail "the locked Agent Fleet project could not be installed offline"
+  "$project/.venv/bin/agent-fleet" --help >/dev/null \
+    || fail "the offline Agent Fleet console entrypoint is not runnable"
+  "$project/.venv/bin/python" - "$project/.venv/bin/agent-fleet" <<'PY' \
+    || fail "the offline Agent Fleet project is not release-local"
+import pathlib, stat, sys
+from agent_fleet.providers import agent_fleet_entrypoint_path
+expected = pathlib.Path(sys.argv[1]).absolute()
+actual = agent_fleet_entrypoint_path()
+assert actual == expected, (actual, expected)
+metadata = expected.lstat()
+assert stat.S_ISREG(metadata.st_mode) and metadata.st_mode & 0o111
+PY
+  sed 's/^dependencies = \[\]$/dependencies = ["requests"]/' "$project/pyproject.toml" \
+    >"$project/pyproject.changed"
+  mv "$project/pyproject.changed" "$project/pyproject.toml"
+  "$python" -m venv --without-pip "$project/changed-venv" >/dev/null
+  rc=0
+  out=$("$project/changed-venv/bin/python" "$AGENT_FLEET_INSTALLER" \
+    "$project" "$project/changed-venv" 2>&1) || rc=$?
+  [ "$rc" -eq 125 ] \
+    || fail "the offline Agent Fleet installer accepted an unsealed runtime dependency"
+  assert_contains "$out" "gained runtime dependencies" \
+    "the offline Agent Fleet refusal did not name its closure change"
+  cp "$ROOT/tools/agent-fleet/pyproject.toml" "$project/pyproject.toml"
+  mkdir -p "$tmp/linked-source"
+  cp -R "$ROOT/tools/agent-fleet/src/agent_fleet" "$tmp/linked-source/"
+  rm -rf "$project/src"
+  ln -s "$tmp/linked-source" "$project/src"
+  "$python" -m venv --without-pip "$project/linked-venv" >/dev/null
+  rc=0
+  out=$("$project/linked-venv/bin/python" "$AGENT_FLEET_INSTALLER" \
+    "$project" "$project/linked-venv" 2>&1) || rc=$?
+  [ "$rc" -eq 125 ] \
+    || fail "the offline Agent Fleet installer followed linked source ancestry"
+  assert_contains "$out" "real directory ancestry" \
+    "the linked Agent Fleet source refusal did not name its ancestry defect"
+  pass "the locked Agent Fleet project and console entrypoint are installed into the offline venv before execution"
 }
 
 executor_credential_adversary() {
@@ -730,6 +821,7 @@ assert len(reserve_calls)==2 and sleeps
 assert all(command[command.index("--reservation-id")+1]=="azr-aaaaaaaaaaaa" for command in reserve_calls)
 assert len({command[command.index("--fence-binding")+1] for command in reserve_calls})==1
 assert reserve_calls[-1][reserve_calls[-1].index("--sku-family")+1]=="StandardDasv7Family"
+assert reserve_calls[-1][reserve_calls[-1].index("--role")+1]=="validation"
 assert state["shared_capacity_reservation"]["status"]=="reserved"
 # A non-capacity queue refusal is immediate and releases its exact row.
 state.pop("shared_capacity_reservation")
@@ -988,15 +1080,34 @@ printf '%s\n' "\$@" >"$root/captured"
   printf 'FM_AZURE_RUNNER_STATE_DIR=%s\n' "\${FM_AZURE_RUNNER_STATE_DIR:-}"
   printf 'FM_AZURE_SHARED_CAPACITY_STATE_DIR=%s\n' "\${FM_AZURE_SHARED_CAPACITY_STATE_DIR:-}"
 } >"$root/captured-env"
+if [ "\${FM_TEST_FIXTURE_EXECUTE_REMOTE:-0}" = 1 ]; then
+  while [ "\$#" -gt 0 ] && [ "\${1:-}" != -- ]; do shift; done
+  [ "\${1:-}" = -- ] || exit 98
+  shift
+  ( cd "$root" && HOME="\${FM_TEST_FIXTURE_REMOTE_HOME:?}" FM_AZURE_RUNNER=1 "\$@" )
+  exit \$?
+fi
 exit 0
 SH
   cat >"$root/tests/run.sh" <<SH
 #!/bin/sh
+if [ -n "\${FM_TEST_CONCURRENCY_DIR:-}" ]; then
+  touch "\$FM_TEST_CONCURRENCY_DIR/herdr.started"
+  i=0
+  while [ ! -e "\$FM_TEST_CONCURRENCY_DIR/agent-fleet.started" ]; do
+    i=\$((i + 1)); [ "\$i" -lt 100 ] || exit 95
+    sleep 0.05
+  done
+fi
 {
   printf 'call'
   for arg do printf '\t%s' "\$arg"; done
   printf '\n'
 } >>"$root/local-runs"
+if [ "\${1:-}" = --skip-herdr ]; then
+  [ "\${FM_TEST_HOST_CAPABILITIES_ABSENT:-}" = real-tmux-server,passwordless-root-escalation,system-openat-binding,origin-egress ] || exit 96
+  printf 'FM_HOST_CAPABILITY_DECLARATION absent=%s\n' "\$FM_TEST_HOST_CAPABILITIES_ABSENT" >>"$root/remote-runs"
+fi
 exit 0
 SH
   cat >"$root/tests/test-capabilities.tsv" <<'TSV'
@@ -1180,13 +1291,14 @@ PY
 
 no_mistakes_test_step_offload_contract() {
   local tmp fixture gatewt gate_head fakebin anchor fmhome routing expires rc out
-  local mutation mutation_action replacement
+  local mutation mutation_action replacement remote_home project python
   fm_test_tmproot_into tmp fm-azure-runner-test-step-offload
   fixture="$tmp/fixture"
   make_dispatch_fixture "$fixture"
   gatewt="$tmp/nm-home/worktrees/19543ae8611e/$NM_RUN_FIXTURE"
   make_ambient_worktree "$gatewt"
   gate_head=$(git -C "$gatewt" rev-parse HEAD)
+  git -C "$gatewt" checkout -q --detach "$gate_head"
   fakebin="$tmp/fakebin"
   mkdir -p "$fakebin"
   cat >"$fakebin/tmux" <<'SH'
@@ -1196,6 +1308,14 @@ exit 0
 SH
   cat >"$fakebin/uv" <<'SH'
 #!/bin/sh
+if [ -n "${FM_TEST_CONCURRENCY_DIR:-}" ] && [ "${5:-}" = pytest ]; then
+  touch "$FM_TEST_CONCURRENCY_DIR/agent-fleet.started"
+  i=0
+  while [ ! -e "$FM_TEST_CONCURRENCY_DIR/herdr.started" ]; do
+    i=$((i + 1)); [ "$i" -lt 100 ] || exit 95
+    sleep 0.05
+  done
+fi
 exit 0
 SH
   chmod +x "$fakebin/tmux" "$fakebin/uv"
@@ -1267,6 +1387,73 @@ PY
   assert_capability_derived_local_host_set "$fixture/local-runs"
   [ "$(routing_dispatch_count)" -eq 1 ] \
     || fail "non-consuming test inspection did not leave exactly one durable dispatch spend"
+  grep -qx -- '--private-snapshot-from-head' "$fixture/captured" \
+    || fail "the detached per-run gate did not select an exact private HEAD snapshot"
+  grep -qx -- "refs/heads/fm-no-mistakes/$NM_RUN_FIXTURE" "$fixture/captured" \
+    || fail "the detached per-run gate did not bind its deterministic private source ref"
+  ! grep -qx -- '--capacity-parent' "$fixture/captured" \
+    || fail "the direct per-run gate incorrectly required a validation-cell parent"
+
+  # Execute the exact production remote argv in a hermetic fixture. The fake uv
+  # keeps this focused on orchestration while requiring the release-local Agent
+  # Fleet entrypoint that all 416 incident setup errors could not find.
+  remote_home="$tmp/remote-home"
+  mkdir -p "$remote_home/.fm-runner-tools/bin" "$remote_home/.fm-runner-tools/uv" \
+    "$remote_home/.fm-runner-tools/wheelhouse" "$fixture/tools/agent-fleet/src"
+  cp "$ROOT/tools/agent-fleet/pyproject.toml" "$ROOT/tools/agent-fleet/uv.lock" \
+    "$fixture/tools/agent-fleet/"
+  cp -R "$ROOT/tools/agent-fleet/src/agent_fleet" "$fixture/tools/agent-fleet/src/"
+  python=$(python_311) \
+    || fail "could not resolve Python 3.11+ for the remote-command fixture"
+  "$python" -m venv --without-pip "$fixture/tools/agent-fleet/.venv" >/dev/null \
+    || fail "the remote-command fixture could not create its Agent Fleet venv"
+  "$fixture/tools/agent-fleet/.venv/bin/python" "$AGENT_FLEET_INSTALLER" \
+    "$fixture/tools/agent-fleet" "$fixture/tools/agent-fleet/.venv" >/dev/null \
+    || fail "the remote-command fixture could not install Agent Fleet offline"
+  cat >"$remote_home/.fm-runner-tools/bin/shellcheck" <<'SH'
+#!/bin/sh
+printf '%s\n' 'ShellCheck - shell script analysis tool' 'version: 0.11.0'
+SH
+  cat >"$remote_home/.fm-runner-tools/uv/uv" <<SH
+#!/bin/sh
+if [ "\${1:-}" = --version ]; then echo 'uv 0.9.10'; exit 0; fi
+[ "\${UV_OFFLINE:-}" = 1 ] && [ "\${UV_NO_INDEX:-}" = 1 ] && [ "\${UV_NO_SYNC:-}" = 1 ] || exit 94
+printf '%s\n' "\$*" >>"$fixture/remote-uv-runs"
+[ "\${1:-}" = run ] && [ "\${2:-}" = --directory ] && [ "\${4:-}" = --locked ] || exit 95
+case "\${5:-}" in
+  pytest)
+    [ -x "\$3/.venv/bin/agent-fleet" ] || exit 93
+    "\$3/.venv/bin/agent-fleet" --help >/dev/null
+    "\$3/.venv/bin/python" -c 'from agent_fleet.providers import agent_fleet_entrypoint_path; assert agent_fleet_entrypoint_path().is_file()'
+    ;;
+  python)
+    shift 5
+    "tools/agent-fleet/.venv/bin/python" "\$@"
+    ;;
+  *) exit 92 ;;
+esac
+SH
+  chmod +x "$remote_home/.fm-runner-tools/bin/shellcheck" \
+    "$remote_home/.fm-runner-tools/uv/uv"
+  write_test_routing '{}'
+  rm -f "$fixture/captured" "$fixture/local-runs" "$fixture/remote-runs" "$fixture/remote-uv-runs"
+  out=$(cd "$gatewt" && env HOME="$anchor" PATH="$fakebin:$PATH" \
+    FM_TEST_FIXTURE_EXECUTE_REMOTE=1 FM_TEST_FIXTURE_REMOTE_HOME="$remote_home" \
+    "$fixture/bin/fm-no-mistakes-test-command.sh" 2>&1) \
+    || fail "the full remote no-mistakes command failed in its hermetic fixture"
+  assert_contains "$out" "selected REMOTE resource-class=behavior-heavy" \
+    "the hermetic full command lost its remote routing selection"
+  grep -Fqx \
+    "FM_HOST_CAPABILITY_DECLARATION absent=real-tmux-server,passwordless-root-escalation,system-openat-binding,origin-egress" \
+    "$fixture/remote-runs" \
+    || fail "the production remote command lost the exact four-name capability declaration"
+  grep -Fqx "run --directory tools/agent-fleet --locked pytest" \
+    "$fixture/remote-uv-runs" \
+    || fail "the production remote command did not run locked Agent Fleet pytest"
+  grep -Fqx "run --directory tools/agent-fleet --locked python -m compileall -q src" \
+    "$fixture/remote-uv-runs" \
+    || fail "the production remote command did not run locked Agent Fleet compileall"
+  pass "the full production remote command runs hermetically with four named absences and the offline Agent Fleet entrypoint"
 
   # Inspection is only a planning read. The real heavy dispatch must carry an
   # exact binding from that read so deletion, unselection, or replacement in
@@ -1348,13 +1535,18 @@ SH
   # capability-derived host set and records why the class ran locally.
   write_test_routing '{"classes":{"lint":"validation-standard"}}'
   rm -f "$fixture/captured" "$fixture/local-runs"
+  concurrency_dir="$tmp/local-concurrency"
+  mkdir -p "$concurrency_dir"
   out=$(cd "$gatewt" && env HOME="$anchor" PATH="$fakebin:$PATH" \
+    FM_TEST_CONCURRENCY_DIR="$concurrency_dir" \
     "$fixture/bin/fm-no-mistakes-test-command.sh" 2>&1) \
     || fail "an unselected per-run test class did not preserve local host execution"
   [ ! -e "$fixture/captured" ] || fail "an unselected per-run test class reached the runner"
   assert_capability_derived_local_host_set "$fixture/local-runs"
   assert_contains "$out" "executed LOCALLY (routing=present-not-selected, env=absent)" \
     "an unselected per-run test class emitted no local-execution proof"
+  [ -e "$concurrency_dir/herdr.started" ] && [ -e "$concurrency_dir/agent-fleet.started" ] \
+    || fail "the local Herdr and Agent Fleet lanes did not overlap"
   [ "$(routing_dispatch_count)" -eq 0 ] \
     || fail "an unselected per-run test class spent a dispatch budget slot"
 
@@ -1390,6 +1582,12 @@ assert value("--task")==sys.argv[2]
 assert value("--generation")==sys.argv[3]
 assert value("--confirm-subscription")==sys.argv[4]
 assert value("--resource-class")=="behavior-heavy"
+assert "bin/fm-azure-runner-command.sh" in argv, "the Azure command lost its guest-relative wrapper"
+assert not any(item.endswith("/bin/fm-azure-runner-command.sh") for item in argv), (
+    "the Azure payload serialized a host-absolute wrapper", argv
+)
+declaration="FM_TEST_HOST_CAPABILITIES_ABSENT=real-tmux-server,passwordless-root-escalation,system-openat-binding,origin-egress"
+assert declaration in argv, "the Azure shard lost its reviewed Linux host-capability declaration"
 assert any("tests/run.sh --skip-herdr" in item for item in argv), "the Azure shard lost the non-Herdr suite"
 PY
   assert_capability_derived_local_host_set "$fixture/local-runs"
@@ -1417,6 +1615,7 @@ storage_network_access_contract
 prepare_contract
 private_snapshot_prepare_contract
 private_snapshot_ancestor_verification
+agent_fleet_offline_install_contract
 executor_credential_adversary
 linux_systemd_drop_integration
 spend_ledger_unit
@@ -2048,9 +2247,46 @@ PY
   pass "Azure runner bootstrap waits for apt/dpkg maintenance races and times out deterministically"
 }
 
+no_mistakes_yaml_test_route_contract() {
+  local tmp fixture command local_marker shard_marker
+  tmp=$(mktemp -d)
+  fixture="$tmp/repo"
+  local_marker="$tmp/local-route"
+  shard_marker="$tmp/shard-route"
+  mkdir -p "$fixture/bin"
+  command=$(ruby -e \
+    'require "yaml"; puts YAML.safe_load_file(ARGV.fetch(0)).fetch("commands").fetch("test")' \
+    "$ROOT/.no-mistakes.yaml") \
+    || fail "the no-mistakes test command could not be loaded from YAML"
+  [ -n "$command" ] || fail "the no-mistakes YAML has no test command"
+
+  printf '#!/usr/bin/env bash\nprintf "local\\n" >%q\n' "$local_marker" \
+    >"$fixture/bin/fm-no-mistakes-test-command.sh"
+  printf '#!/usr/bin/env bash\nprintf "shard\\n" >%q\n' "$shard_marker" \
+    >"$fixture/shard-bridge"
+  chmod +x "$fixture/bin/fm-no-mistakes-test-command.sh" "$fixture/shard-bridge"
+
+  (cd "$fixture" && env -u FM_AZURE_VALIDATION_CELL \
+    FM_AZURE_VALIDATION_SHARD_BRIDGE="$fixture/shard-bridge" bash -c "$command") \
+    || fail "the no-mistakes YAML local test route failed"
+  [ -e "$local_marker" ] || fail "the no-mistakes YAML local test route bypassed its wrapper"
+  [ ! -e "$shard_marker" ] || fail "the no-mistakes YAML local test route invoked the shard bridge"
+
+  rm -f "$local_marker" "$shard_marker"
+  (cd "$fixture" && env FM_AZURE_VALIDATION_CELL=1 \
+    FM_AZURE_VALIDATION_SHARD_BRIDGE="$fixture/shard-bridge" bash -c "$command") \
+    || fail "the no-mistakes YAML validation-cell test route failed"
+  [ -e "$shard_marker" ] || fail "the no-mistakes YAML validation-cell route bypassed the shard bridge"
+  [ ! -e "$local_marker" ] || fail "the no-mistakes YAML validation-cell route invoked the local wrapper"
+
+  rm -rf "$tmp"
+  pass "no-mistakes YAML test routing executes the local wrapper and validation shard bridge exclusively"
+}
+
 apt_lock_wait_contract
 dispatch_ambient_binding_contract
 no_mistakes_test_step_offload_contract
 routing_file_contract
+no_mistakes_yaml_test_route_contract
 
 echo "# fm-azure-runner.test.sh: all assertions passed"

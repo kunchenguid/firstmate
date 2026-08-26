@@ -1871,23 +1871,62 @@ SH
 }
 
 test_watcher_timeout_wrapper_uses_hard_kill_fallback() {
-  local dir state fakebin log
+  local dir state stubborn pid_file rc
   dir=$(make_case watcher-hard-timeout); state="$dir/state"
-  fakebin=$(fm_fakebin "$dir/hard-timeout")
-  log="$dir/hard-timeout.args"
-  cat > "$fakebin/timeout" <<'SH'
+  stubborn="$dir/ignore-term.sh"
+  pid_file="$dir/stubborn.pid"
+  cat > "$stubborn" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$*" > "$FM_FAKE_TIMEOUT_LOG"
+trap '' TERM
+printf '%s\n' "$$" > "$FM_FAKE_STUBBORN_PID"
+while :; do sleep 1; done
 SH
-  chmod +x "$fakebin/timeout"
-  # shellcheck disable=SC2031  # The PATH assignment intentionally scopes only the child.
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_FAKE_TIMEOUT_LOG="$log" bash -c '
+  chmod +x "$stubborn"
+  rc=0
+  FM_STATE_OVERRIDE="$state" FM_FAKE_STUBBORN_PID="$pid_file" bash -c '
     . "$1"
-    run_bounded 4 true
-  ' _ "$WATCH" || fail "watcher timeout wrapper invocation failed"
-  grep -F -- '--kill-after=1 4 true' "$log" >/dev/null \
-    || fail "watcher timeout wrapper omitted the hard KILL fallback"
+    run_bounded 1 "$2"
+  ' _ "$WATCH" "$stubborn" || rc=$?
+  [ "$rc" -eq 124 ] || fail "watcher timeout wrapper returned $rc instead of 124"
+  [ -s "$pid_file" ] || fail "watcher timeout fixture did not start"
+  ! kill -0 "$(cat "$pid_file")" 2>/dev/null \
+    || fail "watcher timeout wrapper left the TERM-resistant process alive"
   pass "watcher timeouts force-kill TERM-resistant subprocesses"
+}
+
+test_watcher_shutdown_joins_report_prune() {
+  local dir state fake_root prune_pid watcher_pid i
+  dir=$(make_case watcher-report-prune-shutdown); state="$dir/state"
+  fake_root="$dir/root"
+  mkdir -p "$fake_root/bin"
+  rm -f "$state/.last-report-retention"
+  cat > "$fake_root/bin/fm-report-stack.mjs" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_FAKE_PRUNE_PID_FILE"
+trap 'exit 0' TERM INT HUP
+while :; do sleep 1; done
+SH
+  chmod +x "$fake_root/bin/fm-report-stack.mjs"
+
+  FM_ROOT_OVERRIDE="$fake_root" FM_STATE_OVERRIDE="$state" \
+    FM_CONFIG_OVERRIDE="$dir/config" FM_FAKE_PRUNE_PID_FILE="$dir/prune.pid" \
+    FM_REPORT_STACK_ROOT="$dir/report-stack" \
+    FM_REPORT_RETENTION_TIMEOUT=30 "$WATCH" >/dev/null 2>&1 &
+  watcher_pid=$!
+  wait_numeric_file "$dir/prune.pid" 50 \
+    || { kill "$watcher_pid" 2>/dev/null || true; wait "$watcher_pid" 2>/dev/null || true; fail "report prune did not start"; }
+  prune_pid=$(cat "$dir/prune.pid")
+
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  i=0
+  while kill -0 "$prune_pid" 2>/dev/null && [ "$i" -lt 30 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! kill -0 "$prune_pid" 2>/dev/null \
+    || { kill "$prune_pid" 2>/dev/null || true; fail "watcher shutdown orphaned its report prune"; }
+  pass "watcher shutdown terminates and joins its report prune"
 }
 
 if [ "${FM_TEST_FOCUSED:-}" = review-round-10 ]; then
@@ -1902,6 +1941,11 @@ fi
 
 if [ "${FM_TEST_FOCUSED:-}" = review-round-23 ]; then
   test_account_session_sync_is_bounded_and_cadenced
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = report-prune-lifecycle ]; then
+  test_watcher_shutdown_joins_report_prune
   exit 0
 fi
 
@@ -1996,3 +2040,4 @@ test_afk_paused_changed_pane_hands_off_plain_stale
 test_account_session_sync_is_bounded_and_cadenced
 test_watcher_markers_refuse_symlinks
 test_watcher_timeout_wrapper_uses_hard_kill_fallback
+test_watcher_shutdown_joins_report_prune

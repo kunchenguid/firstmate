@@ -11,6 +11,7 @@ import re
 import stat
 import subprocess
 import sys
+import unicodedata
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -133,13 +134,29 @@ def endpoint_evidence(home, task, values):
         text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env={**os.environ, "FM_HOME": str(home), "FM_ROOT": str(home)},
     )
-    if result.returncode != 0 or result.stdout.strip() != "absent":
-        raise AuthorityError("endpoint authority did not prove the exact task endpoint absent")
-    return "{}\0{}\0{}\0absent".format(backend, target, expected).encode()
+    endpoint_state = result.stdout.strip()
+    if result.returncode == 0 and endpoint_state == "absent":
+        return "{}\0{}\0{}\0absent".format(backend, target, expected).encode()
+    # A cloud endpoint is only the local tracking monitor. Once the exact
+    # digest-bound return has reached local custody it has no guest process or
+    # steering authority left, and release must not wait on its own process to
+    # disappear before it can free the remote lease. The terminal status is
+    # produced only after report and branch custody, and unknown still refuses.
+    placement = values.get("placement", [])
+    if result.returncode == 0 and endpoint_state == "present" and placement == ["azure"]:
+        status = home / "state" / (task + ".status")
+        if status.is_symlink() or not status.is_file():
+            raise AuthorityError("cloud endpoint authority has no local terminal custody status")
+        lines = [line.strip() for line in status.read_text(encoding="utf-8").splitlines() if line.strip()]
+        if not lines or not re.match(r"^(done|failed):", lines[-1]):
+            raise AuthorityError("cloud endpoint authority has no local terminal custody status")
+        return "{}\0{}\0{}\0cloud-return-localized".format(backend, target, expected).encode()
+    raise AuthorityError("endpoint authority did not prove the exact task endpoint absent or return-localized")
 
 
-def report_evidence(home, task):
-    path = home / "data" / task / "completion.md"
+def report_evidence(home, task, kind="ship"):
+    report_name = "report.md" if kind == "scout" else "completion.md"
+    path = home / "data" / task / report_name
     if path.is_symlink() or not path.is_file() or path.stat().st_size > 16 * 1024 * 1024:
         raise AuthorityError("completion report authority is absent, redirected, or oversized")
     content = path.read_bytes()
@@ -147,6 +164,14 @@ def report_evidence(home, task):
     positions = [text.find(heading) for heading in REQUIRED_HEADINGS]
     if any(position < 0 for position in positions) or positions != sorted(positions):
         raise AuthorityError("completion report authority lacks the exact ordered contract headings")
+    for index, heading in enumerate(REQUIRED_HEADINGS):
+        start = positions[index] + len(heading)
+        end = positions[index + 1] if index + 1 < len(positions) else len(text)
+        if not any(
+            character.isalnum() or unicodedata.category(character).startswith("S")
+            for character in text[start:end]
+        ):
+            raise AuthorityError("completion report authority has an empty required section")
     return content
 
 
@@ -160,6 +185,125 @@ def worktree_evidence(task, values):
     if not common.is_absolute():
         common = (worktree / common).resolve()
     return "{}\0{}\0{}".format(worktree, common.resolve(), git(worktree, "rev-parse", "HEAD")).encode(), worktree
+
+
+def cloud_return_evidence(home, task, generation, assignment, kind, worktree, repository_generation):
+    """Prove local custody before releasing remote worker capacity.
+
+    This is intentionally not ordinary forge landing. The returned commits
+    remain protected by the ordinary task branch and later teardown gate; this
+    receipt proves only that deleting the worker cannot delete the last copy.
+    """
+    result_path = home / "state" / (task + ".worker-result.json")
+    bundle_path = home / "state" / (task + ".cloud-outcome") / "outcome.bundle"
+    manifest_path = home / "data" / task / "cloud-return.json"
+    for path, label, limit in (
+        (result_path, "result", 8 * 1024 * 1024),
+        (bundle_path, "bundle", 256 * 1024 * 1024),
+        (manifest_path, "manifest", 1024 * 1024),
+    ):
+        if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= limit:
+            raise AuthorityError("cloud return {} custody is absent, redirected, or oversized".format(label))
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    if result.get("schema") != "fm.worker-execution-result/v1":
+        raise AuthorityError("cloud return result schema is not supported")
+    unsigned = dict(result)
+    supplied = unsigned.pop("result_digest", None)
+    if supplied != digest(unsigned):
+        raise AuthorityError("cloud return result digest is not exact")
+    expected = {
+        "task": task,
+        "task_generation": generation,
+        "assignment_generation": assignment,
+        "repository_generation": repository_generation,
+        "return_present": True,
+    }
+    for field, value in expected.items():
+        if result.get(field) != value:
+            raise AuthorityError("cloud return result {} binding differs".format(field))
+    bundle = bundle_path.read_bytes()
+    if result.get("outcome_bytes") != len(bundle) or result.get("outcome_sha256") != hashlib.sha256(bundle).hexdigest():
+        raise AuthorityError("cloud return bundle differs from the digest-bound result")
+    manifest = manifest_path.read_bytes()
+    if result.get("return_manifest_sha256") != hashlib.sha256(manifest).hexdigest():
+        raise AuthorityError("cloud return manifest differs from the digest-bound result")
+    manifest_value = json.loads(manifest.decode("utf-8"))
+    manifest_expected = {
+        "schema": "fm.worker-return/v1",
+        "task": task,
+        "task_generation": generation,
+        "assignment_generation": assignment,
+        "request_digest": result.get("request_digest"),
+        "repository_generation": repository_generation,
+        "kind": kind,
+        "report_required": True,
+        "report_path": "data/{}/{}".format(
+            task, "report.md" if kind == "scout" else "completion.md",
+        ),
+        "status_path": "state/{}.status".format(task),
+        "visuals_path": "data/{}/visuals".format(task),
+        "branch": "" if kind == "scout" else "fm/{}".format(task),
+        "outcome_commits": result.get("outcome_commits"),
+        "outcome_tip": result.get("outcome_tip"),
+        "uncommitted_changes": result.get("outcome_uncommitted_changes"),
+    }
+    for field, value in manifest_expected.items():
+        if manifest_value.get(field) != value:
+            raise AuthorityError("cloud return manifest {} binding differs".format(field))
+    artifacts = manifest_value.get("artifacts")
+    if not isinstance(artifacts, dict):
+        raise AuthorityError("cloud return manifest artifact bindings are malformed")
+    status_path = home / "state" / (task + ".status")
+    if status_path.is_symlink() or not status_path.is_file():
+        raise AuthorityError("cloud return has no local terminal status")
+    status_lines = [line.strip() for line in status_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not status_lines or not re.match(r"^(done|failed):", status_lines[-1]):
+        raise AuthorityError("cloud return has no local terminal status")
+    commits = result.get("outcome_commits")
+    if not isinstance(commits, int) or isinstance(commits, bool) or commits < 0:
+        raise AuthorityError("cloud return commit count is malformed")
+    tip = result.get("outcome_tip")
+    if not isinstance(tip, str) or not re.fullmatch(r"[0-9a-f]{40}", tip):
+        raise AuthorityError("cloud return outcome tip is malformed")
+    if kind == "ship" and commits:
+        branch = "refs/heads/fm/{}".format(task)
+        branch_head = git(worktree, "rev-parse", "--verify", branch)
+        if subprocess.run(["git", "-C", str(worktree), "merge-base", "--is-ancestor", tip, branch_head]).returncode != 0:
+            raise AuthorityError("cloud return commit is not reachable from the required task branch")
+        if git(worktree, "symbolic-ref", "--quiet", "HEAD") != branch:
+            raise AuthorityError("cloud return task branch is not checked out")
+    uncommitted = result.get("outcome_uncommitted_changes")
+    if not isinstance(uncommitted, bool):
+        raise AuthorityError("cloud return working-tree disposition is malformed")
+    if uncommitted:
+        scratch_destinations = {
+            "scratch.patch": home / "data" / task / "cloud-scratch.patch",
+            "scratch-untracked.tar": home / "data" / task / "cloud-scratch-untracked.tar",
+        }
+        declared = [name for name in scratch_destinations if name in artifacts]
+        if not declared:
+            raise AuthorityError("cloud return reports uncommitted work without retained scratch custody")
+        for name in declared:
+            descriptor = artifacts[name]
+            path = scratch_destinations[name]
+            if not isinstance(descriptor, dict):
+                raise AuthorityError("cloud return scratch custody descriptor is malformed")
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 128 * 1024 * 1024:
+                raise AuthorityError("cloud return scratch custody is absent, redirected, or oversized")
+            body = path.read_bytes()
+            if (
+                descriptor.get("bytes") != len(body)
+                or descriptor.get("sha256") != hashlib.sha256(body).hexdigest()
+            ):
+                raise AuthorityError("cloud return scratch custody differs from the manifest")
+    return canonical({
+        "result_digest": supplied,
+        "bundle_sha256": result["outcome_sha256"],
+        "manifest_sha256": result["return_manifest_sha256"],
+        "outcome_tip": tip,
+        "outcome_commits": commits,
+        "terminal": status_lines[-1],
+    })
 
 
 def landing_evidence(worktree, repository_generation):
@@ -873,7 +1017,7 @@ def main():
     if worker["assignment_generation"] != args.assignment_generation:
         raise AuthorityError("worker assignment generation differs")
     kind_entries = values.get("kind", [])
-    if len(kind_entries) > 1:
+    if len(kind_entries) != 1:
         raise AuthorityError("task metadata kind identity is not exact")
     # WHICH evidence semantics apply is a release-safety decision, so it may
     # not rest on the task metadata alone: `kind` is a local, operator-writable
@@ -885,6 +1029,16 @@ def main():
     # released. Both directions refuse, fail closed, before any evidence runs.
     meta_kind = kind_entries[0] if kind_entries else ""
     worker_role = worker.get("role", "author")
+    worker_placement = worker.get("placement")
+    metadata_placement = values.get("placement", [])
+    if worker_placement == "azure":
+        if metadata_placement != ["azure"]:
+            raise AuthorityError("task metadata placement differs from the controller-owned worker placement")
+    elif worker_placement is None:
+        if metadata_placement:
+            raise AuthorityError("task metadata placement has no controller-owned worker authority")
+    else:
+        raise AuthorityError("controller-owned worker placement is unsupported")
     if meta_kind == "secondmate" and worker_role != "secondmate":
         raise AuthorityError(
             "task metadata claims a secondmate compartment but the controller-owned worker "
@@ -893,6 +1047,8 @@ def main():
         raise AuthorityError(
             "the controller-owned worker role is secondmate but the task metadata kind is "
             "{!r}; ordinary evidence is refused for a compartment".format(meta_kind))
+    if worker_role != "secondmate" and meta_kind not in ("ship", "scout"):
+        raise AuthorityError("task metadata kind is not an exact ship or scout authority")
     if worker_role == "secondmate":
         # The secondmate compartment evidence mode (design B.7): same bundle,
         # same five receipt names, compartment semantics. The bundle still
@@ -904,9 +1060,16 @@ def main():
             home, args.task, worker, home_worktree, worker["bindings"]["repository_generation"])
     else:
         worktree_info, worktree = worktree_evidence(args.task, values)
-        report_authority = lambda: report_evidence(home, args.task)
-        landing_authority = lambda: landing_evidence(
-            worktree, worker["bindings"]["repository_generation"])
+        ordinary_kind = meta_kind if meta_kind in ("ship", "scout") else "ship"
+        report_authority = lambda: report_evidence(home, args.task, ordinary_kind)
+        if worker_placement == "azure":
+            landing_authority = lambda: cloud_return_evidence(
+                home, args.task, generation, args.assignment_generation,
+                ordinary_kind, worktree, worker["bindings"]["repository_generation"],
+            )
+        else:
+            landing_authority = lambda: landing_evidence(
+                worktree, worker["bindings"]["repository_generation"])
     authorities = {
         "endpoint": receipt("endpoint", args.task, generation, args.assignment_generation, endpoint_evidence(home, args.task, values)),
         "report": receipt("report", args.task, generation, args.assignment_generation, report_authority()),

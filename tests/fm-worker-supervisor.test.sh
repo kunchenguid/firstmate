@@ -715,9 +715,139 @@ DIRTYPROBE
   pass "the supervisor collects, bounds and proves crewmate outcomes"
 }
 
+run_supervisor_existing_task_disk_recovery() {
+  local tmp work repo account base supervisor_digest out status
+  fm_test_tmproot_into tmp fm-worker-supervisor-existing-task-disk
+  work="$tmp/work"
+  repo="$work/repo"
+  account="$tmp/account"
+  mkdir -p "$work/.fm-return/data/recover-existing" "$work/.fm-return/state" "$account"
+  fm_git_init_commit "$repo"
+  base=$(git -C "$repo" rev-parse HEAD)
+  printf 'uncommitted scout evidence\n' > "$repo/scratch.txt"
+  cat > "$work/.fm-return/data/recover-existing/report.md" <<'REPORT'
+## Summary
+
+Recovered scout evidence.
+
+## What changed
+
+The retained task disk stayed intact.
+
+## Verification
+
+The existing-disk execution collected it.
+
+## Visual evidence
+
+None.
+
+## Artifacts
+
+The scratch archive is returned.
+
+## Follow-ups
+
+None.
+REPORT
+  printf 'working: recovery report authored\n' > "$work/.fm-return/state/recover-existing.status"
+  supervisor_digest=$(shasum -a 256 "$SUPERVISOR" | awk '{print $1}')
+  python3 - "$tmp/request.json" "$base" "$supervisor_digest" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+path, base, supervisor_digest = sys.argv[1:]
+request = {
+    "schema": "fm.worker-execution/v1",
+    "home_binding": "a" * 64,
+    "task": "recover-existing",
+    "task_generation": "spawn:recover-existing",
+    "assignment_generation": "asg-00000001",
+    "account_binding": "b" * 64,
+    "worktree_binding": "c" * 64,
+    "repository_binding": "d" * 64,
+    "repository_generation": base,
+    "cloud_instance_id": "vm-existing",
+    "argv": ["/usr/bin/true"],
+    "wall_seconds": 60,
+    "existing_task_disk": True,
+    "supervisor_sha256": supervisor_digest,
+    "outcome_expected": True,
+    "return_contract": {
+        "schema": "fm.worker-return-contract/v1",
+        "kind": "scout",
+        "report_required": True,
+        "report_path": "data/recover-existing/report.md",
+        "status_path": "state/recover-existing.status",
+        "visuals_path": "data/recover-existing/visuals",
+        "branch": "",
+    },
+}
+request["request_digest"] = hashlib.sha256(
+    json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
+).hexdigest()
+Path(path).write_text(json.dumps(request, sort_keys=True, separators=(",", ":")))
+PY
+  out=$(FM_WORKER_HOME_BINDING="$(printf a%.0s {1..64})" \
+    FM_WORKER_TASK=recover-existing FM_WORKER_TASK_GENERATION=spawn:recover-existing \
+    FM_WORKER_ASSIGNMENT_GENERATION=asg-00000001 \
+    FM_WORKER_ACCOUNT_BINDING="$(printf b%.0s {1..64})" \
+    FM_WORKER_WORKTREE_BINDING="$(printf c%.0s {1..64})" \
+    FM_WORKER_REPOSITORY_BINDING="$(printf d%.0s {1..64})" \
+    FM_WORKER_REPOSITORY_GENERATION="$base" FM_WORKER_CLOUD_INSTANCE_ID=vm-existing \
+    FM_WORKER_WORKTREE="$work" FM_WORKER_ACCOUNT_HOME="$account" \
+    FM_WORKER_EXECUTED_DIR="$tmp/executed" \
+    FM_WORKER_OUTCOME_URL=https://fixture.invalid/outcome \
+    FM_WORKER_OUTCOME_FILE="$tmp/outcome.bundle" \
+    python3 "$SUPERVISOR" execute --request "$tmp/request.json" --result "$tmp/result.json" 2>&1)
+  status=$?
+  expect_code 0 "$status" "existing task-disk recovery should succeed: $out"
+  assert_present "$repo/scratch.txt" "existing task-disk recovery replaced uncommitted scout work"
+  assert_present "$tmp/outcome.bundle" "existing task-disk recovery returned no bundle"
+  python3 - "$tmp/result.json" <<'PY' \
+    || fail "existing task-disk recovery result is not exact"
+import json,sys
+result=json.load(open(sys.argv[1]))
+assert result["return_present"] is True, result
+assert result["outcome_present"] is False, result
+assert result["outcome_commits"] == 0, result
+assert result["outcome_uncommitted_changes"] is True, result
+PY
+  python3 - "$tmp/request.json" "$tmp/bad-lineage.json" <<'PY'
+import hashlib,json,sys
+request=json.load(open(sys.argv[1]))
+request["repository_generation"]="0" * 40
+request.pop("request_digest")
+request["request_digest"]=hashlib.sha256(
+    json.dumps(request,sort_keys=True,separators=(",", ":")).encode()
+).hexdigest()
+open(sys.argv[2],"w").write(json.dumps(request,sort_keys=True,separators=(",", ":")))
+PY
+  out=$(FM_WORKER_HOME_BINDING="$(printf a%.0s {1..64})" \
+    FM_WORKER_TASK=recover-existing FM_WORKER_TASK_GENERATION=spawn:recover-existing \
+    FM_WORKER_ASSIGNMENT_GENERATION=asg-00000001 \
+    FM_WORKER_ACCOUNT_BINDING="$(printf b%.0s {1..64})" \
+    FM_WORKER_WORKTREE_BINDING="$(printf c%.0s {1..64})" \
+    FM_WORKER_REPOSITORY_BINDING="$(printf d%.0s {1..64})" \
+    FM_WORKER_REPOSITORY_GENERATION="$(printf 0%.0s {1..40})" FM_WORKER_CLOUD_INSTANCE_ID=vm-existing \
+    FM_WORKER_WORKTREE="$work" FM_WORKER_ACCOUNT_HOME="$account" \
+    FM_WORKER_EXECUTED_DIR="$tmp/executed-bad" \
+    FM_WORKER_OUTCOME_URL=https://fixture.invalid/outcome \
+    FM_WORKER_OUTCOME_FILE="$tmp/outcome-bad.bundle" \
+    python3 "$SUPERVISOR" execute --request "$tmp/bad-lineage.json" --result "$tmp/result-bad.json" 2>&1)
+  status=$?
+  expect_code 2 "$status" "existing task-disk recovery with foreign lineage should refuse: $out"
+  assert_contains "$out" "lost its dispatched lineage" "existing task-disk lineage refusal was not explicit"
+  assert_present "$repo/scratch.txt" "a refused existing task-disk recovery removed scout work"
+  pass "existing task-disk recovery returns reports and scratch without restaging or lineage drift"
+}
+
 run_supervisor_controls
 run_supervisor_replay_controls
 run_supervisor_steer_controls
 run_supervisor_payload_staging
 run_supervisor_outcome_collection
+run_supervisor_existing_task_disk_recovery
 echo "# fm-worker-supervisor.test.sh: all assertions passed"

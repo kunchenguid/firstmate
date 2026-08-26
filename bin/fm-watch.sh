@@ -739,16 +739,47 @@ scan_signals() {
 }
 
 run_bounded() {  # <seconds> <command> [args...]
-  local seconds=$1
+  local seconds=$1 status
   shift
   if command -v timeout >/dev/null 2>&1; then
-    timeout --kill-after=1 "$seconds" "$@"
+    timeout --kill-after=1 "$seconds" "$@" &
   elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout --kill-after=1 "$seconds" "$@"
+    gtimeout --kill-after=1 "$seconds" "$@" &
   else
     # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
-    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$seconds" "$@"
+    perl -MPOSIX=:sys_wait_h -MErrno=EINTR -e '
+      my $t = shift;
+      my $pid = fork;
+      die "fork failed" unless defined $pid;
+      if (!$pid) { setpgrp(0, 0); exec @ARGV }
+      sub terminate {
+        my ($status) = @_;
+        alarm 0;
+        kill "TERM", -$pid;
+        for (1 .. 10) {
+          my $waited = waitpid $pid, WNOHANG;
+          exit $status if $waited == $pid;
+          select undef, undef, undef, 0.1;
+        }
+        kill "KILL", -$pid;
+        my $waited;
+        do { $waited = waitpid $pid, 0 } while ($waited == -1 && $! == EINTR);
+        exit $status;
+      }
+      local $SIG{ALRM} = sub { terminate(124) };
+      local $SIG{HUP} = sub { terminate(129) };
+      local $SIG{INT} = sub { terminate(130) };
+      local $SIG{TERM} = sub { terminate(143) };
+      alarm $t;
+      my $waited;
+      do { $waited = waitpid $pid, 0 } while ($waited == -1 && $! == EINTR);
+      exit($? >> 8);
+    ' "$seconds" "$@" &
   fi
+  ACTIVE_BOUNDED_PID=$!
+  if wait "$ACTIVE_BOUNDED_PID"; then status=0; else status=$?; fi
+  ACTIVE_BOUNDED_PID=
+  return "$status"
 }
 
 run_check() {
@@ -1063,7 +1094,19 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   fi
   exit 0
 fi
-trap 'fm_lock_release "$WATCH_LOCK"' EXIT
+ACTIVE_BOUNDED_PID=
+watcher_cleanup() {
+  trap - EXIT TERM INT
+  if [ -n "${ACTIVE_BOUNDED_PID:-}" ]; then
+    kill "$ACTIVE_BOUNDED_PID" 2>/dev/null || true
+    wait "$ACTIVE_BOUNDED_PID" 2>/dev/null || true
+    ACTIVE_BOUNDED_PID=
+  fi
+  fm_lock_release "$WATCH_LOCK"
+}
+trap watcher_cleanup EXIT
+trap 'watcher_cleanup; exit 143' TERM
+trap 'watcher_cleanup; exit 130' INT
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.

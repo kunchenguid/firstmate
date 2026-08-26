@@ -1,9 +1,7 @@
 # Azure worker crewmate runtime and payload plane (design)
 
-Status: PARTLY BUILT. D1-D3 (runtime image, payload plane, worker-coordinate
-entrypoint) and D5 (landing v1) have shipped; docs/azure-workers.md is the
-authority for their built behavior and this document keeps only the decisions
-and what remains. D6 (release receipts before cloud teardown) is still open.
+Status: BUILT, with the post-2026-08-25 return path awaiting its bounded live ship and scout acceptance.
+D1-D3 (runtime image, payload plane, worker-coordinate entrypoint), D5 (landing v1), and D6 (provider-neutral local custody plus release) have shipped in code; docs/azure-workers.md is the authority for their built behavior and this document keeps the design history.
 This document owns the design for the pieces between "a worker executes a
 digest-bound argv" (proven live 2026-08-17 on vm-fm7c799d-wkr-01) and "a real
 pi crewmate does task work in the cloud".
@@ -15,10 +13,9 @@ data-disk preparation (/mnt/account lun0, /mnt/task lun1), bounded execute
 with digest-bound fm.worker-execution-result/v1, TTL, Herdr tracking endpoint
 with queued-spawn convergence (PR 227).
 
-Items 1 to 5 below were the original gap list. They are now BUILT (1 to 4 by
-D1-D3, 5 by D5) and docs/azure-workers.md owns their behavior; they are kept
-here only so the decisions that follow read against the problem they solved.
-Item 6 is the one still open.
+Items 1 to 6 below were the original gap list.
+They are now BUILT (1 to 4 by D1-D3, 5 by D5, and 6 by D6), and docs/azure-workers.md owns their behavior.
+They are kept here only so the decisions that follow read against the problem they solved.
 
 1. BUILT. Runtime: pi and node did not exist on the worker. Workers booted the
    raw Canonical Ubuntu 24.04 base; bootstrap installed only the supervisor.
@@ -34,18 +31,10 @@ Item 6 is the one still open.
    worker. The crewmate's commits ride home as a digest-verified bundle and the
    local side keeps the landing authority. Direct push from a worker remains
    explicitly deferred.
-6a. OPEN. Resume destroys uncollected commits: the executed marker is on the
-   disposable OS disk and /mnt/task is retained, so a resume reattaches a task
-   disk holding the previous run's commits to a worker with no marker. The next
-   execute re-stages and removes them. The retained outcome bundle survives but
-   is unreachable, because the only re-upload path is the marker branch and
-   there is no collect-only mode. A refusing guard was tried and reverted (it
-   wedged the slot and lost the work anyway); the fix needs collect-only, which
-   belongs with D6.
-6. OPEN. Release-after-teardown: bin/fm-worker-authority.py needs the task meta
-   and worktree that bin/fm-teardown.sh deletes in the same pass that removes
-   the endpoint, so an ordinarily torn-down cloud task can never produce its
-   release receipts (observed live: cloud-smoke-20260817 rode its TTL out).
+6a. BUILT. An explicit `execute --existing-task-disk` recovery binds the already-assigned repository without staging over it, runs one bounded continuation or no-op collection command, and returns the same authorized report, status, commit, and scratch bundle.
+   The request binds the exact landed recovery-supervisor digest, and the adapter executes those bytes without replacing the assignment's originally bootstrapped supervisor.
+6. BUILT. Release no longer waits for ordinary teardown.
+   The monitor localizes the digest-bound return, reconstructs the ship branch or retains scout scratch, writes the required report and terminal status, mints the cloud-custody release receipt while the exact tracking endpoint is finishing, and retries release/reconcile until the assignment is complete.
 
 ## Decisions
 
@@ -65,10 +54,8 @@ is inert until the parameter is supplied) and point it at the new gallery
 version. Rationale: workers are egress-sealed by posture; per-boot registry
 downloads are both a provenance hole and a boot-time failure mode, while the
 image is a cache of a recorded provenance chain (the bake doc's own model).
-The pi extension pack (multi-pass and friends) is NOT staged: those exist to
-rotate a human's many local accounts; a worker runs one leased account. The
-multi-pass OAuth-refresh patch is therefore also not needed on workers; the
-bounded wall (max 6h) sits inside a fresh access token's life.
+Ordinary author workers do not stage the local Pi extension pack because one worker runs one leased account.
+The specialized no-mistakes role instead uses the sealed runtime documented in `docs/azure-workers.md`, which includes only fast mode and Ketch and still excludes multi-pass and OAuth material.
 
 ### D2. One payload archive per assignment, over the private staging lane
 
@@ -123,12 +110,12 @@ already puts them. Direct push from workers (with a scoped deploy token) is
 explicitly deferred; it changes the custody story and should be its own
 decision when the soak data says the round-trip is too slow.
 
-### D6. Cloud teardown produces release receipts before destroying evidence
+### D6. The return monitor releases cloud capacity after local custody
 
-For placement=azure tasks, fm-teardown.sh runs authority-receipt (which needs
-the live meta and worktree) BEFORE removing them, stores the
-fm.worker-release/v2 bundle under state/, then calls release and a reconcile
-so the slot deallocates inside its cooldown instead of riding the TTL.
+For `placement=azure` tasks, the digest-bound return carries the authorized report, status, visuals, repository commits, and scratch in one provider-neutral Git bundle.
+The local monitor validates and publishes those bytes, reconstructs the required `fm/<task>` branch for ship work, synthesizes a truthful terminal status, and then mints `fm.worker-release/v2` while the task metadata and worktree still exist.
+The receipt's landing authority proves local custody, not remote forge landing, so remote worker capacity can be released before no-mistakes and the later ordinary teardown continue locally.
+Release and reconcile are idempotent retries, and local credential staging is removed only after the controller queue entry is complete.
 
 ## Sequencing
 
@@ -140,13 +127,14 @@ so the slot deallocates inside its cooldown instead of riding the TTL.
 3. Flip: workerImageId parameter supplied; one live crewmate smoke on a real
    task; the crosscheck lane reviews the whole stack (it gates its own
    producer now).
-4. Landing: outcome bundle + monitor fetch + local fast-forward (D5, SHIPPED); the
-   push stays where it always was, in the ordinary local landing flow. Then D6.
+4. Landing: authorized return bundle, exact task-branch reconstruction, local report/status publication, and release after custody (D5/D6, BUILT).
+   The push stays where it always was, in the ordinary local landing flow.
 5. Wide soak (8 then 16 lanes) only after 3 and 4 hold.
 
 ## Non-goals
 
-- No pi extension pack, fast-mode, or account rotation on workers.
+- No account rotation or OAuth material inside a worker runtime bundle.
+- Ordinary author workers keep their existing extension-free runtime; the no-mistakes role has only its sealed fast-mode and Ketch extensions.
 - No public egress from workers; every transfer stays on the private lane.
 - No captain-on-cloud changes; that is its own phase with its own custody
   design (setup-token) and is tracked outside this document.

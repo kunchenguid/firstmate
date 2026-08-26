@@ -17,6 +17,7 @@ the generation rides inside the envelope nonce and only the controller's
 exact-assignment gate enforces it today.
 """
 
+import base64
 import contextlib
 import datetime as dt
 import email.utils
@@ -427,7 +428,7 @@ def immutable_id(kind, value):
         role = value.get("roleDefinitionId") or properties.get("roleDefinitionId")
         return "{}|{}".format(principal, role) if principal and role else None
     if kind == "state-container":
-        return value.get("etag") or properties.get("etag") or value.get("version")
+        return value.get("id")
     if kind in MUTABLE_PROVISIONING_CHILD_KINDS:
         # Azure mutates provisioningState during ordinary VM lifecycle
         # transitions (including Succeeded -> Updating after deallocation).
@@ -1310,11 +1311,17 @@ def recorded_exact(
             # path stays fixed. Task commands and staging request/result blobs
             # also bind changing execution content through request/result
             # digests, so their path identity is the ownership fence here.
+            legacy_state_container = (
+                kind == "state-container"
+                and current.get("immutable_id") == current.get("id")
+                and prior.get("id") == current.get("id")
+            )
             if (
                 kind not in skip_immutable
                 and kind not in MUTABLE_PROVISIONING_CHILD_KINDS
                 and kind not in ("staging-request", "staging-result")
                 and current.get("immutable_id") != prior.get("immutable_id")
+                and not legacy_state_container
             ):
                 raise ProviderIdentityRefusal(
                     "{} immutable identity differs from the recorded assignment".format(kind)
@@ -1423,6 +1430,7 @@ def blob_identity_digest(value, volatile_fields=()):
 
 def upload_json_blob(
     controller, account, container, name, value, tags, overwrite=False, volatile_fields=(),
+    if_match=None,
 ):
     payload = canonical_bytes(value) + b"\n"
     digest = hashlib.sha256(payload).hexdigest()
@@ -1435,12 +1443,66 @@ def upload_json_blob(
         metadata = dict(tags_to_metadata(tags))
         metadata["content_digest"] = digest
         metadata["identity_digest"] = identity
-        _, rc, stderr = az(controller, [
+        upload_args = [
             "storage", "blob", "upload", "--auth-mode", "login", "--account-name", account,
             "--container-name", container, "--name", name, "--file", path,
             "--overwrite", "true" if overwrite else "false", "--metadata",
-        ] + ["{}={}".format(key, value) for key, value in sorted(metadata.items())], check=False)
+        ] + ["{}={}".format(key, value) for key, value in sorted(metadata.items())]
+        if if_match is not None:
+            upload_args += ["--if-match", if_match]
+        _, rc, stderr = az(controller, upload_args, check=False)
         if rc != 0:
+            condition_error = str(stderr).lower()
+            if if_match is not None and (
+                "conditionnotmet" in condition_error
+                or "condition specified" in condition_error
+            ):
+                current, show_rc, show_stderr = az(controller, [
+                    "storage", "blob", "show", "--auth-mode", "login",
+                    "--account-name", account, "--container-name", container,
+                    "--name", name,
+                ], check=False)
+                if show_rc != 0 or not isinstance(current, dict):
+                    raise ProviderError(
+                        "conditionally written worker staging blob is unreadable: {}".format(
+                            show_stderr
+                        )
+                    )
+                current_properties = (current or {}).get("properties") or {}
+                current_etag = (current or {}).get("etag") or current_properties.get("etag")
+                if not current_etag:
+                    raise ProviderError(
+                        "conditionally written worker staging blob is unreadable: {}".format(
+                            show_stderr
+                        )
+                    )
+                current_fd, current_path = tempfile.mkstemp(
+                    prefix="fm-worker-current-blob-", suffix=".json"
+                )
+                os.close(current_fd)
+                os.chmod(current_path, 0o600)
+                try:
+                    _, download_rc, download_stderr = az(controller, [
+                        "storage", "blob", "download", "--auth-mode", "login",
+                        "--account-name", account, "--container-name", container,
+                        "--name", name, "--file", current_path, "--overwrite", "true",
+                        "--if-match", current_etag,
+                    ], check=False)
+                    if download_rc != 0:
+                        raise ProviderError(
+                            "conditionally written worker staging blob changed during read: {}".format(
+                                download_stderr
+                            )
+                        )
+                    current_payload = Path(current_path).read_bytes()
+                    if (
+                        len(current_payload) == len(payload)
+                        and hashlib.sha256(current_payload).hexdigest() == digest
+                    ):
+                        return digest
+                finally:
+                    with contextlib.suppress(FileNotFoundError):
+                        Path(current_path).unlink()
             # A create-once blob that already carries exactly these bytes is
             # this same action replaying after a lost or timed-out response,
             # which must converge rather than wedge. Different bytes under the
@@ -2308,7 +2370,10 @@ def create_or_resume(controller, action):
                     raise ProviderError("visible worker belongs to another task or generation")
         elif reuse:
             recorded_exact(
-                action, existing, allow_missing=("vm", "nic", "os-disk"),
+                action, existing, allow_missing=(
+                    "vm", "nic", "os-disk", "monitor-extension",
+                    "bootstrap-command", "task-command", "ttl-schedule",
+                ),
                 allow_previous_cloud_generation=True,
             )
         else:
@@ -2601,6 +2666,30 @@ def build_execute_script(action):
     request = action["request"]
     request_json = json.dumps(request, sort_keys=True, separators=(",", ":"))
     bindings = action["bindings"]
+    supervisor_prelude = ""
+    supervisor_command = "/usr/local/libexec/fm-worker-supervisor"
+    if request.get("existing_task_disk"):
+        try:
+            supervisor_body = (ROOT / "bin" / "fm-worker-supervisor.py").read_bytes()
+        except OSError as exc:
+            raise ProviderError(
+                "existing task-disk recovery supervisor is unreadable: {}".format(exc)
+            ) from None
+        supervisor_digest = hashlib.sha256(supervisor_body).hexdigest()
+        if request.get("supervisor_sha256") != supervisor_digest:
+            raise ProviderError("existing task-disk recovery supervisor binding differs")
+        supervisor_path = "/var/lib/firstmate-worker/recovery-supervisor-{}.py".format(
+            supervisor_digest
+        )
+        supervisor_prelude = """printf '%s' '{body}' | /usr/bin/base64 --decode > '{path}'
+[ "$(/usr/bin/sha256sum '{path}' | /usr/bin/awk '{{print $1}}')" = '{digest}' ]
+chmod 0700 '{path}'
+""".format(
+            body=base64.b64encode(supervisor_body).decode("ascii"),
+            path=supervisor_path,
+            digest=supervisor_digest,
+        )
+        supervisor_command = "/usr/bin/python3 '{}'".format(supervisor_path)
     return """set -eu
 umask 077
 install -d -m 0700 /var/lib/firstmate-worker
@@ -2612,14 +2701,15 @@ export FM_WORKER_HOME_BINDING='{home}' FM_WORKER_TASK='{task}' FM_WORKER_TASK_GE
 export FM_WORKER_WORKTREE_BINDING='{worktree}' FM_WORKER_REPOSITORY_BINDING='{repository}'
 export FM_WORKER_REPOSITORY_GENERATION='{repository_generation}' FM_WORKER_CLOUD_INSTANCE_ID='{cloud}'
 export FM_WORKER_WORKTREE=/mnt/task FM_WORKER_ACCOUNT_HOME=/mnt/account
-/usr/local/libexec/fm-worker-supervisor execute --request /var/lib/firstmate-worker/request.json --result /var/lib/firstmate-worker/result.json
+{supervisor_prelude}{supervisor_command} execute --request /var/lib/firstmate-worker/request.json --result /var/lib/firstmate-worker/result.json
 printf 'FM-WORKER-RESULT:%s\\n' "$(cat /var/lib/firstmate-worker/result.json)"
 """.format(
         request=request_json, home=bindings["home_binding"], task=bindings["task"],
         task_generation=bindings["task_generation"], generation_line=execute_generation_line(action),
         worktree=bindings["worktree_binding"],
         repository=bindings["repository_binding"], repository_generation=bindings["repository_generation"],
-        cloud=action["cloud_instance_id"],
+        cloud=action["cloud_instance_id"], supervisor_prelude=supervisor_prelude,
+        supervisor_command=supervisor_command,
     )
 
 
@@ -2647,16 +2737,39 @@ def initial_execute_staging_pair(action):
     }
 
 
+def blob_content_is_exact(resource, value):
+    payload = canonical_bytes(value) + b"\n"
+    return (
+        resource.get("digest") == hashlib.sha256(payload).hexdigest()
+        and resource.get("length") == len(payload)
+    )
+
+
 def initial_execute_staging_is_exact(action, resources):
-    for kind, value in initial_execute_staging_pair(action).items():
-        payload = canonical_bytes(value) + b"\n"
-        resource = resources.get(kind) or {}
-        if (
-            resource.get("digest") != hashlib.sha256(payload).hexdigest()
-            or resource.get("length") != len(payload)
-        ):
-            return False
-    return True
+    # The result must still carry its assignment ETag. The request may carry
+    # that ETag or the exact request bytes from this action: the latter is a
+    # retry after Azure applied the conditional write but lost its response.
+    expected = action["resources"]
+    request_current = resources.get("staging-request") or {}
+    request_prior = expected.get("staging-request") or {}
+    if (
+        not request_current.get("id")
+        or request_current.get("id") != request_prior.get("id")
+        or not request_current.get("immutable_id")
+        or (
+            request_current.get("immutable_id") != request_prior.get("immutable_id")
+            and not blob_content_is_exact(request_current, action["request"])
+        )
+    ):
+        return False
+    result_current = resources.get("staging-result") or {}
+    result_prior = expected.get("staging-result") or {}
+    return bool(
+        result_current.get("id")
+        and result_current.get("id") == result_prior.get("id")
+        and result_current.get("immutable_id")
+        and result_current.get("immutable_id") == result_prior.get("immutable_id")
+    )
 
 
 def run_command_execution_binding(live):
@@ -2784,7 +2897,15 @@ def execute_terminal_disposition(controller, action, resources):
 
 def persist_execute_result(controller, action, names, tags, execution):
     request = action["request"]
-    if request.get("outcome_expected") and execution.get("outcome_present"):
+    storage = os.environ.get("FM_AZURE_STORAGE_NAME", "")
+    assignment_etag = (
+        (action.get("resources") or {}).get("staging-result") or {}
+    ).get("immutable_id")
+    if not assignment_etag:
+        raise ProviderError("staging-result assignment ETag is absent")
+    if request.get("outcome_expected") and (
+        execution.get("outcome_present") or execution.get("return_present")
+    ):
         outcome_target = action.get("outcome_dir")
         if not outcome_target:
             raise ProviderError("execution collected an outcome with no controller directory to land it in")
@@ -2805,13 +2926,14 @@ def persist_execute_result(controller, action, names, tags, execution):
         if not isinstance(bytes_claim, int) or isinstance(bytes_claim, bool) or not 0 < bytes_claim <= MAX_OUTCOME_BYTES:
             raise ProviderError("execution outcome size is malformed or unbounded")
         download_outcome_bundle(
-            controller, os.environ.get("FM_AZURE_STORAGE_NAME", ""), names["state-container"],
+            controller, storage, names["state-container"],
             outcome_blob_name(request["request_digest"]), digest_claim, bytes_claim,
             Path(outcome_target) / "outcome.bundle",
         )
     upload_json_blob(
-        controller, os.environ.get("FM_AZURE_STORAGE_NAME", ""), names["state-container"],
+        controller, storage, names["state-container"],
         names["staging-result"], execution, tags, overwrite=True,
+        if_match=assignment_etag,
     )
 
 
@@ -2838,6 +2960,7 @@ def mutate_execute(controller, action):
     upload_json_blob(
         controller, os.environ.get("FM_AZURE_STORAGE_NAME", ""), names["state-container"],
         names["staging-request"], request, tags, overwrite=True,
+        if_match=(action.get("resources") or {}).get("staging-request", {}).get("immutable_id"),
     )
     # Crewmate payload plane: the digest-bound request carries only manifests;
     # the archives ride private blobs and reach the guest over short-lived

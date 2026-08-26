@@ -548,6 +548,9 @@ secondmate_authority_bundle_end_to_end() {
   local tmp
   fm_test_tmproot_into tmp fm-authority-secondmate-e2e
   mkdir -p "$tmp/home" "$tmp/accounts/codex/1" "$tmp/shim"
+  cat > "$tmp/accounts/codex/1/auth.json" <<'EOF'
+{"openai-codex":{"type":"oauth","access":"fixture-access","refresh":"fixture-refresh","accountId":"fixture-account","expires":4102444800000}}
+EOF
   cat > "$tmp/shim/tmux" <<'SH'
 #!/bin/sh
 echo "no server running on /tmp/fm-secondmate-authority-test" >&2
@@ -562,6 +565,9 @@ window=fmtest:1
 worktree=$tmp/subhome
 kind=secondmate
 mode=secondmate
+placement=azure
+worker_account_home=$tmp/accounts/codex/1
+worker_account_profile=fixture-profile
 yolo=off
 generation_id=gen-s1
 account_home=$tmp/accounts/codex/1
@@ -589,6 +595,9 @@ home = Path(home_raw)
 spec = importlib.util.spec_from_file_location("controller", controller_path)
 controller = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(controller)
+authority_spec = importlib.util.spec_from_file_location("authority", authority)
+authority_module = importlib.util.module_from_spec(authority_spec)
+authority_spec.loader.exec_module(authority_module)
 
 # One assigned compartment in REAL durable controller state, hand-minted
 # through the module's own constructors so load_state/verify_state accept it.
@@ -605,9 +614,12 @@ subhome_path = Path(
 start_head = subprocess.run(
     ["git", "-C", str(subhome_path), "rev-parse", "HEAD"],
     text=True, stdout=subprocess.PIPE, check=True).stdout.strip()
+credential = json.loads((home.parent / "accounts" / "codex" / "1" / "auth.json").read_text())["openai-codex"]
+upstream_account = authority_module.load_pi_projection().account_digest(credential)
+account_binding = authority_module.digest({"provider": "pi", "upstream_account": upstream_account})
 bindings = {
     "home_binding": "1" * 64, "task": "smc-1", "task_generation": "gen-s1",
-    "assignment_generation": "asg-00000001", "account_binding": "2" * 64,
+    "assignment_generation": "asg-00000001", "account_binding": account_binding,
     "worktree_binding": "3" * 64, "repository_binding": "4" * 64,
     "repository_generation": start_head,
 }
@@ -619,13 +631,17 @@ worker = {
     "created_at": controller.iso_utc(), "assigned_at": controller.iso_utc(),
     "released_at": None, "release_proof": None, "cooldown_started_at": None,
     "reservation_usd": 1.0, "resources": resources, "cloud_instance_id": "cloud-1",
+    "account_lease": {"account_home": str(home.parent / "accounts" / "codex" / "1"),
+                      "account_profile": "fixture-profile"},
     "last_classification": "assigned", "last_refusal": None,
 }
 state["queue"]["smc-1@gen-s1"] = {
     "schema": "fm.worker-request/v1", "task": "smc-1", "task_generation": "gen-s1",
     "owner_kind": "primary", "role": "secondmate", "eligible": True,
     "discretionary": True, "status": "assigned", "slot": 1,
-    "assignment_generation": "asg-00000001", **bindings,
+    "assignment_generation": "asg-00000001",
+    "account_home": str(home.parent / "accounts" / "codex" / "1"),
+    "account_profile": "fixture-profile", **bindings,
 }
 state["workers"]["1"] = worker
 # The verified chain tip is CONTROLLER-owned. It is recorded below through the
@@ -692,7 +708,8 @@ broken = json.loads(monitor_path.read_text())
 broken["last_summary"]["reason"] = "close"
 broken["landed_bundles"] = []
 monitor_path.write_text(json.dumps(broken, sort_keys=True, separators=(",", ":")))
-assert authority_run().returncode == 0, "advisory landed_bundles changed the verdict"
+advisory = authority_run()
+assert advisory.returncode == 0, advisory.stderr
 mailbox_dir = smstate / "smc-1.cloud-mailbox"
 stashed = {}
 for entry in list(mailbox_dir.iterdir()):

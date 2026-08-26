@@ -83,10 +83,73 @@ def read_request(path):
     outcome_expected = request.get("outcome_expected", False)
     if not isinstance(outcome_expected, bool):
         raise SupervisorError("execution outcome expectation is malformed")
+    existing_task_disk = request.get("existing_task_disk", False)
+    if not isinstance(existing_task_disk, bool):
+        raise SupervisorError("execution existing task-disk disposition is malformed")
+    if existing_task_disk:
+        if "payload_files" in request or "account_files" in request:
+            raise SupervisorError("existing task-disk recovery cannot replace staged state")
+        supervisor_digest = request.get("supervisor_sha256")
+        if not isinstance(supervisor_digest, str) or not HEX.fullmatch(supervisor_digest):
+            raise SupervisorError("existing task-disk recovery supervisor binding is malformed")
+        try:
+            running_digest = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        except OSError as exc:
+            raise SupervisorError("existing task-disk recovery supervisor is unreadable: {}".format(exc))
+        if running_digest != supervisor_digest:
+            raise SupervisorError("existing task-disk recovery supervisor binding differs")
+    elif "supervisor_sha256" in request:
+        raise SupervisorError("ordinary execution cannot select a recovery supervisor")
+    return_contract = request.get("return_contract")
+    if return_contract is not None:
+        if not isinstance(return_contract, dict) or set(return_contract) != {
+            "schema", "kind", "report_required", "report_path", "status_path",
+            "visuals_path", "branch",
+        }:
+            raise SupervisorError("execution return contract is malformed")
+        if return_contract.get("schema") != "fm.worker-return-contract/v1":
+            raise SupervisorError("execution return contract schema is not supported")
+        if return_contract.get("kind") not in ("ship", "scout"):
+            raise SupervisorError("execution return kind is not supported")
+        if return_contract.get("report_required") is not True:
+            raise SupervisorError("execution return contract must require its task report")
+        for field in ("report_path", "status_path", "visuals_path"):
+            value = return_contract.get(field)
+            if (
+                not isinstance(value, str) or not value or value.startswith("/")
+                or ".." in Path(value).parts or "\x00" in value
+            ):
+                raise SupervisorError("execution return {} is unsafe".format(field))
+        branch = return_contract.get("branch")
+        if return_contract["kind"] == "ship":
+            if not isinstance(branch, str) or not branch.startswith("fm/") or not SAFE_ID.fullmatch(branch[3:]):
+                raise SupervisorError("execution return branch is malformed")
+        elif branch != "":
+            raise SupervisorError("a scout return contract must not name a task branch")
+        if not outcome_expected:
+            raise SupervisorError("execution return contract requires the outcome transport")
+    if existing_task_disk and (return_contract is None or not outcome_expected):
+        raise SupervisorError("existing task-disk recovery requires an authorized return outcome")
+    worker_role = request.get("worker_role", "author")
+    if worker_role not in ("author", "no-mistakes"):
+        raise SupervisorError("execution worker role is not supported")
+    service_contract = request.get("service_return_contract")
+    if worker_role == "no-mistakes":
+        if service_contract != {
+            "schema": "fm.no-mistakes-worker-return/v1",
+            "step_outcome_path": "outcome.json",
+            "step_outcome_max_bytes": 1024 * 1024,
+        }:
+            raise SupervisorError("no-mistakes service return contract is not exact")
+        if not outcome_expected or not isinstance(request.get("payload_files"), dict):
+            raise SupervisorError("no-mistakes execution requires staged outcome transport")
+    elif service_contract is not None:
+        raise SupervisorError("ordinary execution cannot select a service return contract")
     if outcome_expected:
-        # An outcome is bundled out of the staged repository, so the request
-        # that arms it must also be the one that stages that repository.
-        if not isinstance(request.get("payload_files"), dict):
+        # An ordinary outcome is bundled from the repository this request
+        # stages. Explicit recovery instead binds the already-assigned task
+        # disk and must never replace the repository it exists to preserve.
+        if not existing_task_disk and not isinstance(request.get("payload_files"), dict):
             raise SupervisorError("an outcome cannot be collected without a staged repository")
         # The URL is an unbound protected parameter; refusing here means a
         # control-plane actor cannot silently downgrade a landing task into a
@@ -134,6 +197,11 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 MAX_ARCHIVE_BYTES = 600 * 1024 * 1024
 MAX_OUTCOME_BYTES = 256 * 1024 * 1024
+MAX_RETURN_REPORT_BYTES = 16 * 1024 * 1024
+MAX_RETURN_STATUS_BYTES = 4 * 1024 * 1024
+MAX_RETURN_VISUAL_BYTES = 20 * 1024 * 1024
+MAX_RETURN_VISUAL_ENTRIES = 512
+MAX_RETURN_SCRATCH_BYTES = 128 * 1024 * 1024
 
 # Every bounded step that runs OUTSIDE the wall, named once and used at the
 # call site, so the budget below is the same number the code actually spends.
@@ -232,8 +300,36 @@ def extract_staged_archive(body, manifest, target, label):
 
 
 def stage_payload(request, worktree, account_home):
-    """Materialize the crewmate payload: repository from its bundle, task
-    files, and the provider-account material, all digest-verified."""
+    """Materialize a new payload or bind an explicitly retained task disk."""
+    if request.get("existing_task_disk"):
+        repo = worktree / "repo"
+        if repo.is_symlink() or not repo.is_dir():
+            raise SupervisorError("existing task-disk repository is unavailable or redirected")
+        top = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=GIT_HEAD_TIMEOUT, check=False,
+        )
+        if top.returncode != 0 or Path(top.stdout.decode().strip()).resolve() != repo.resolve():
+            raise SupervisorError("existing task-disk repository is not the exact repository root")
+        lineage = subprocess.run(
+            [
+                "git", "-C", str(repo), "merge-base", "--is-ancestor",
+                request["repository_generation"], "HEAD",
+            ],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=GIT_HEAD_TIMEOUT, check=False,
+        )
+        if lineage.returncode != 0:
+            raise SupervisorError("existing task-disk repository lost its dispatched lineage")
+        readable = subprocess.run(
+            ["git", "-C", str(repo), "status", "--porcelain"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=GIT_STATUS_TIMEOUT, check=False,
+        )
+        if readable.returncode != 0:
+            raise SupervisorError("existing task-disk working tree is unreadable")
+        return repo
     payload_manifest = request.get("payload_files")
     account_manifest = request.get("account_files")
     if payload_manifest is None and account_manifest is None:
@@ -246,19 +342,9 @@ def stage_payload(request, worktree, account_home):
     extract_staged_archive(fetch_archive("account"), account_manifest, account_target, "account")
     repo = worktree / "repo"
     if repo.exists():
-        # Staging runs when no executed marker exists, which is USUALLY the
-        # debris of an interrupted earlier staging.
-        #
-        # KNOWN GAP, not fixed here: it is not always. The executed marker
-        # lives on the disposable OS disk while /mnt/task is retained, so a
-        # resume (which replaces VM, NIC and OS disk and reattaches the task
-        # disk) destroys the marker while the previous run's commits survive
-        # here, and this removes them. A guard that merely refused was tried
-        # and reverted: it preserved the commits on a disk with no reader,
-        # since there is no collect-only mode, and wedged every later dispatch
-        # until a reset deleted them anyway. Closing it properly needs a way
-        # to collect a retained outcome without re-executing, which belongs
-        # with the release-receipt work (D6) rather than here.
+        # Explicit retained-disk recovery returned above and can never reach
+        # this remover. Ordinary staging gets here only for the repository its
+        # own payload is replacing, typically debris from interrupted staging.
         if repo.is_symlink() or not repo.is_dir():
             raise SupervisorError("staged repository target is not a removable directory")
         shutil.rmtree(repo)
@@ -281,7 +367,114 @@ def stage_payload(request, worktree, account_home):
     )
     if head.returncode != 0 or head.stdout.decode().strip() != request["repository_generation"]:
         raise SupervisorError("staged repository head differs from the bound repository generation")
+    if request.get("worker_role") == "no-mistakes":
+        stage_no_mistakes_runtime(staging / "runtime.tar.gz", worktree / ".fm-runtime")
     return repo
+
+
+def stage_no_mistakes_runtime(source, target, enforce_linux=True):
+    """Extract and re-verify the sealed credential-free runtime in the guest."""
+    if source.is_symlink() or not source.is_file():
+        raise SupervisorError("no-mistakes runtime bundle is unavailable or redirected")
+    if target.exists():
+        if target.is_symlink() or not target.is_dir():
+            raise SupervisorError("no-mistakes runtime target is unsafe")
+        shutil.rmtree(target)
+    target.mkdir(mode=0o700)
+    extracted = {}
+    total = 0
+    try:
+        with tarfile.open(source, mode="r:gz") as archive:
+            members = archive.getmembers()
+            if not members or len(members) > 4096:
+                raise SupervisorError("no-mistakes runtime member inventory is unbounded")
+            for member in members:
+                parts = Path(member.name).parts
+                if (
+                    not member.isreg() or not parts or member.name.startswith("/")
+                    or any(part in ("", ".", "..") for part in parts)
+                    or member.mode not in (0o644, 0o755)
+                    or member.name in extracted
+                ):
+                    raise SupervisorError(
+                        "no-mistakes runtime member is unsafe: {}".format(member.name))
+                handle = archive.extractfile(member)
+                body = handle.read() if handle else b""
+                total += len(body)
+                if total > 2 * 1024 * 1024 * 1024:
+                    raise SupervisorError("no-mistakes runtime expands beyond its bound")
+                destination = target.joinpath(*parts)
+                destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                destination.write_bytes(body)
+                destination.chmod(member.mode)
+                extracted[member.name] = body
+    except tarfile.TarError as exc:
+        raise SupervisorError("no-mistakes runtime archive is malformed: {}".format(exc))
+    try:
+        manifest = json.loads(extracted["runtime.json"].decode("utf-8"))
+    except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SupervisorError("no-mistakes runtime manifest is unreadable: {}".format(exc))
+    records = manifest.get("files") if isinstance(manifest, dict) else None
+    manifest_fields = {
+        "schema", "provider", "no_mistakes_version", "no_mistakes_source_commit",
+        "owner_decision_protocol", "no_mistakes_path", "provider_path", "gh_path",
+        "node_path", "gh_axi_path", "gh_axi_entrypoint", "gh_axi_closure", "files",
+    }
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != manifest_fields
+        or manifest.get("schema") != "fm.azure-validation-runtime/v1"
+        or manifest.get("provider") != "pi"
+        or manifest.get("no_mistakes_path") != "bin/no-mistakes"
+        or manifest.get("provider_path") != "bin/pi"
+        or manifest.get("node_path") != "bin/node"
+        or manifest.get("gh_path") != ""
+        or manifest.get("gh_axi_path") != ""
+        or manifest.get("gh_axi_entrypoint") != ""
+        or manifest.get("gh_axi_closure") != []
+        or manifest.get("owner_decision_protocol") != "fm.azure-validation-owner-decision/v1"
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", str(manifest.get("no_mistakes_version", "")))
+        or not re.fullmatch(r"[0-9a-f]{40}", str(manifest.get("no_mistakes_source_commit", "")))
+        or not isinstance(records, list) or not records
+    ):
+        raise SupervisorError("no-mistakes runtime manifest identity is not exact")
+    expected = {"runtime.json"}
+    for record in records:
+        if not isinstance(record, dict) or set(record) != {"path", "digest"}:
+            raise SupervisorError("no-mistakes runtime file record is malformed")
+        path = record.get("path")
+        digest_claim = record.get("digest")
+        if (
+            not isinstance(path, str) or path in expected or path not in extracted
+            or Path(path).name.lower() in {
+                ".env", ".netrc", ".npmrc", "auth.json", "credentials.json",
+                "credentials", "id_rsa", "id_ed25519",
+            }
+            or not isinstance(digest_claim, str) or not digest_claim.startswith("sha256:")
+            or hashlib.sha256(extracted[path]).hexdigest() != digest_claim[7:]
+        ):
+            raise SupervisorError("no-mistakes runtime file inventory differs")
+        expected.add(path)
+    required_executables = ("bin/no-mistakes", "bin/node", "bin/pi")
+    if (
+        set(extracted) != expected
+        or any(not os.access(target / path, os.X_OK) for path in required_executables)
+        or "lib/pi/dist/cli.js" not in extracted
+        or "extensions/pi-openai-fast-mode/src/index.ts" not in extracted
+        or "extensions/fast-mode-all-codex-accounts.ts" not in extracted
+        or "extensions/pi-ketch/src/index.ts" not in extracted
+    ):
+        raise SupervisorError("no-mistakes runtime is not exactly inventoried and executable")
+    if enforce_linux:
+        for path in ("bin/no-mistakes", "bin/node"):
+            header = extracted[path][:20]
+            if not (
+                len(header) == 20 and header[:4] == b"\x7fELF"
+                and header[4] == 2 and header[5] == 1
+                and int.from_bytes(header[18:20], "little") == 62
+            ):
+                raise SupervisorError(
+                    "no-mistakes runtime {} is not Linux amd64".format(path))
 
 
 def git_in(repo, *arguments, timeout=BUNDLE_CREATE_TIMEOUT):
@@ -290,6 +483,142 @@ def git_in(repo, *arguments, timeout=BUNDLE_CREATE_TIMEOUT):
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         timeout=timeout, check=False,
     )
+
+
+def _safe_return_file(root, relative, limit):
+    path = root / relative
+    try:
+        relative_parts = Path(relative).parts
+        current = root
+        for part in relative_parts:
+            current = current / part
+            if current.is_symlink():
+                raise SupervisorError("returned artifact is redirected: {}".format(relative))
+        if not path.is_file():
+            return None
+        body = path.read_bytes()
+    except OSError as exc:
+        raise SupervisorError("returned artifact is unreadable: {}: {}".format(relative, exc))
+    if len(body) > limit:
+        raise SupervisorError("returned artifact exceeds its byte bound: {}".format(relative))
+    return body
+
+
+def _deterministic_tar(root, relative_paths, byte_limit, entry_limit):
+    """Archive already-authorized relative paths without following redirects."""
+    output = io.BytesIO()
+    total = 0
+    with tarfile.open(fileobj=output, mode="w") as archive:
+        for relative in sorted(relative_paths):
+            if len(relative_paths) > entry_limit:
+                raise SupervisorError("returned artifact archive has too many entries")
+            source = root / relative
+            current = root
+            for part in Path(relative).parts:
+                current = current / part
+                if current.is_symlink():
+                    raise SupervisorError("returned artifact archive contains a redirect: {}".format(relative))
+            if not source.is_file():
+                raise SupervisorError("returned artifact archive entry is not a regular file: {}".format(relative))
+            body = source.read_bytes()
+            total += len(body)
+            if total > byte_limit:
+                raise SupervisorError("returned artifact archive exceeds its byte bound")
+            info = tarfile.TarInfo(relative)
+            info.size = len(body)
+            info.mode = 0o600
+            info.mtime = 0
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            archive.addfile(info, io.BytesIO(body))
+    return output.getvalue()
+
+
+def _visual_archive(return_root, relative):
+    root = return_root / relative
+    if not root.exists():
+        return None
+    if root.is_symlink() or not root.is_dir():
+        raise SupervisorError("returned visual evidence root is redirected or not a directory")
+    paths = []
+    for directory, names, files in os.walk(root, followlinks=False):
+        names.sort()
+        files.sort()
+        directory_path = Path(directory)
+        if directory_path.is_symlink():
+            raise SupervisorError("returned visual evidence contains a redirected directory")
+        for name in files:
+            source = directory_path / name
+            paths.append(str(source.relative_to(return_root)))
+    if not paths:
+        return None
+    return _deterministic_tar(
+        return_root, paths, MAX_RETURN_VISUAL_BYTES, MAX_RETURN_VISUAL_ENTRIES,
+    )
+
+
+def _scratch_artifacts(repo):
+    patch = git_in(repo, "diff", "--binary", "HEAD", timeout=GIT_STATUS_TIMEOUT)
+    if patch.returncode != 0:
+        raise SupervisorError("returned scratch diff is unreadable")
+    listed = git_in(
+        repo, "ls-files", "-z", "--others", "--exclude-standard",
+        timeout=GIT_STATUS_TIMEOUT,
+    )
+    if listed.returncode != 0:
+        raise SupervisorError("returned untracked scratch is unreadable")
+    try:
+        untracked = [item.decode("utf-8") for item in listed.stdout.split(b"\0") if item]
+    except UnicodeDecodeError as exc:
+        raise SupervisorError("returned untracked scratch path is not UTF-8: {}".format(exc))
+    archive = None
+    if untracked:
+        archive = _deterministic_tar(
+            repo, untracked, MAX_RETURN_SCRATCH_BYTES, MAX_RETURN_VISUAL_ENTRIES,
+        )
+    if len(patch.stdout) > MAX_RETURN_SCRATCH_BYTES:
+        raise SupervisorError("returned scratch diff exceeds its byte bound")
+    return patch.stdout or None, archive
+
+
+def _hash_blob(repo, body):
+    result = subprocess.run(
+        ["git", "-C", str(repo), "hash-object", "-w", "--stdin"], input=body,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=GIT_HEAD_TIMEOUT, check=False,
+    )
+    if result.returncode != 0:
+        raise SupervisorError("returned artifact could not be stored in the repository")
+    return result.stdout.decode().strip()
+
+
+def _return_commit(repo, base, artifacts, request):
+    entries = []
+    for name, body in sorted(artifacts.items()):
+        entries.append("100644 blob {}\t{}\n".format(_hash_blob(repo, body), name))
+    tree = subprocess.run(
+        ["git", "-C", str(repo), "mktree"], input="".join(entries).encode(),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=GIT_HEAD_TIMEOUT, check=False,
+    )
+    if tree.returncode != 0:
+        raise SupervisorError("returned artifact tree could not be created")
+    environment = dict(os.environ)
+    environment.update({
+        "GIT_AUTHOR_NAME": "Firstmate worker return",
+        "GIT_AUTHOR_EMAIL": "worker-return@localhost",
+        "GIT_COMMITTER_NAME": "Firstmate worker return",
+        "GIT_COMMITTER_EMAIL": "worker-return@localhost",
+        "GIT_AUTHOR_DATE": "@0 +0000",
+        "GIT_COMMITTER_DATE": "@0 +0000",
+    })
+    committed = subprocess.run(
+        ["git", "-C", str(repo), "commit-tree", tree.stdout.decode().strip(), "-p", base],
+        input=("Firstmate worker return {}\n".format(request["request_digest"])).encode(),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=GIT_HEAD_TIMEOUT,
+        check=False, env=environment,
+    )
+    if committed.returncode != 0:
+        raise SupervisorError("returned artifact commit could not be created")
+    return committed.stdout.decode().strip()
 
 
 def outcome_bundle_path(request, worktree):
@@ -365,28 +694,164 @@ def collect_outcome(request, repo, worktree_root):
         commits = int(counted.stdout.decode().strip())
     except ValueError:
         raise SupervisorError("outcome commit count is not a number")
-    if commits == 0:
-        # A crewmate that edited without committing looks identical here, so
-        # the result says so explicitly rather than reading as "nothing to do".
-        dirty = git_in(repo, "status", "--porcelain", timeout=GIT_STATUS_TIMEOUT)
-        if dirty.returncode != 0:
-            # Unknown is not clean. Reporting False here would render an
-            # unreadable tree as a tidy read-only task, which is the exact
-            # confusion this field exists to prevent.
-            raise SupervisorError(
-                "outcome working-tree state is unreadable: {}".format(
-                    dirty.stderr.decode("utf-8", errors="replace")[-200:]
-                )
+    dirty = git_in(repo, "status", "--porcelain", timeout=GIT_STATUS_TIMEOUT)
+    if dirty.returncode != 0:
+        # Unknown is not clean. Reporting False here would render an
+        # unreadable tree as a tidy read-only task, which is the exact
+        # confusion this field exists to prevent.
+        raise SupervisorError(
+            "outcome working-tree state is unreadable: {}".format(
+                dirty.stderr.decode("utf-8", errors="replace")[-200:]
             )
+        )
+    contract = request.get("return_contract")
+    service_contract = request.get("service_return_contract")
+    if commits == 0 and contract is None and service_contract is None:
         return {
             "outcome_present": False, "outcome_sha256": "", "outcome_bytes": 0,
             "outcome_commits": 0, "outcome_sink": "",
             "outcome_uncommitted_changes": bool(dirty.stdout.strip()),
         }
+
     bundle = outcome_bundle_path(request, worktree_root)
     bundle.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    bundle_refs = []
+    returned = {}
+    if contract is not None:
+        return_root = worktree_root / ".fm-return"
+        report = _safe_return_file(return_root, contract["report_path"], MAX_RETURN_REPORT_BYTES)
+        status = _safe_return_file(return_root, contract["status_path"], MAX_RETURN_STATUS_BYTES)
+        visuals = _visual_archive(return_root, contract["visuals_path"])
+        scratch_patch, scratch_untracked = _scratch_artifacts(repo)
+        artifact_bodies = {}
+        artifact_sources = {
+            "report.md": (report, contract["report_path"]),
+            "status.log": (status, contract["status_path"]),
+            "visuals.tar": (visuals, contract["visuals_path"]),
+            "scratch.patch": (scratch_patch, "git-diff"),
+            "scratch-untracked.tar": (scratch_untracked, "git-untracked"),
+        }
+        manifest_artifacts = {}
+        for name, (body, source) in artifact_sources.items():
+            if body is None:
+                continue
+            artifact_bodies[name] = body
+            manifest_artifacts[name] = {
+                "source": source, "bytes": len(body),
+                "sha256": hashlib.sha256(body).hexdigest(),
+            }
+        manifest = {
+            "schema": "fm.worker-return/v1",
+            "task": request["task"],
+            "task_generation": request["task_generation"],
+            "assignment_generation": request["assignment_generation"],
+            "request_digest": request["request_digest"],
+            "repository_generation": base,
+            "kind": contract["kind"],
+            "branch": contract["branch"],
+            "report_required": contract["report_required"],
+            "report_path": contract["report_path"],
+            "status_path": contract["status_path"],
+            "visuals_path": contract["visuals_path"],
+            "outcome_commits": commits,
+            "outcome_tip": git_in(repo, "rev-parse", "HEAD", timeout=GIT_HEAD_TIMEOUT).stdout.decode().strip(),
+            "uncommitted_changes": bool(dirty.stdout.strip()),
+            "artifacts": manifest_artifacts,
+        }
+        manifest_body = canonical(manifest) + b"\n"
+        artifact_bodies["manifest.json"] = manifest_body
+        return_commit = _return_commit(repo, base, artifact_bodies, request)
+        return_ref = "refs/fm-return/{}".format(request["request_digest"][:32])
+        updated = git_in(repo, "update-ref", return_ref, return_commit, timeout=GIT_HEAD_TIMEOUT)
+        if updated.returncode != 0:
+            raise SupervisorError("returned artifact ref could not be created")
+        bundle_refs.append(return_ref)
+        if commits:
+            outcome_ref = "refs/fm-outcome/{}".format(request["request_digest"][:32])
+            updated = git_in(repo, "update-ref", outcome_ref, manifest["outcome_tip"], timeout=GIT_HEAD_TIMEOUT)
+            if updated.returncode != 0:
+                raise SupervisorError("returned outcome ref could not be created")
+            bundle_refs.append(outcome_ref)
+        # The local repository already has the exact dispatched generation.
+        # Excluding it keeps the bundle to the artifact commit plus only the
+        # project commits this assignment added, rather than retransmitting
+        # arbitrary repository history.
+        bundle_refs.append("^{}".format(base))
+        returned = {
+            "return_present": True,
+            "return_ref": return_ref,
+            "return_commit": return_commit,
+            "return_manifest_sha256": hashlib.sha256(manifest_body).hexdigest(),
+            "outcome_tip": manifest["outcome_tip"],
+        }
+    elif service_contract is not None:
+        outcome_path = repo / service_contract["step_outcome_path"]
+        outcome_body = None
+        if outcome_path.exists():
+            if outcome_path.is_symlink() or not outcome_path.is_file():
+                raise SupervisorError("no-mistakes step outcome is redirected or not regular")
+            outcome_body = outcome_path.read_bytes()
+            if not outcome_body or len(outcome_body) > service_contract["step_outcome_max_bytes"]:
+                raise SupervisorError("no-mistakes step outcome is empty or oversized")
+        if outcome_body is not None:
+            manifest = {
+                "schema": "fm.no-mistakes-worker-return/v1",
+                "task": request["task"],
+                "task_generation": request["task_generation"],
+                "assignment_generation": request["assignment_generation"],
+                "request_digest": request["request_digest"],
+                "repository_generation": base,
+                "outcome_commits": commits,
+                "outcome_tip": git_in(
+                    repo, "rev-parse", "HEAD", timeout=GIT_HEAD_TIMEOUT
+                ).stdout.decode().strip(),
+                "step_outcome_sha256": hashlib.sha256(outcome_body).hexdigest(),
+            }
+            manifest_body = canonical(manifest) + b"\n"
+            return_commit = _return_commit(
+                repo, base,
+                {"manifest.json": manifest_body, "step-outcome.json": outcome_body},
+                request,
+            )
+            return_ref = "refs/fm-return/{}".format(request["request_digest"][:32])
+            if git_in(
+                repo, "update-ref", return_ref, return_commit, timeout=GIT_HEAD_TIMEOUT
+            ).returncode != 0:
+                raise SupervisorError("no-mistakes service return ref could not be created")
+            bundle_refs.append(return_ref)
+            if commits:
+                outcome_ref = "refs/fm-outcome/{}".format(request["request_digest"][:32])
+                if git_in(
+                    repo, "update-ref", outcome_ref, manifest["outcome_tip"],
+                    timeout=GIT_HEAD_TIMEOUT,
+                ).returncode != 0:
+                    raise SupervisorError("no-mistakes outcome ref could not be created")
+                bundle_refs.append(outcome_ref)
+            bundle_refs.append("^{}".format(base))
+            returned = {
+                "return_present": True,
+                "return_ref": return_ref,
+                "return_commit": return_commit,
+                "return_manifest_sha256": hashlib.sha256(manifest_body).hexdigest(),
+                "outcome_tip": manifest["outcome_tip"],
+                "service_return_present": True,
+                "step_outcome_sha256": manifest["step_outcome_sha256"],
+            }
+        elif commits:
+            bundle_refs.append("{}..HEAD".format(base))
+            returned = {"service_return_present": False, "step_outcome_sha256": ""}
+        else:
+            return {
+                "outcome_present": False, "outcome_sha256": "", "outcome_bytes": 0,
+                "outcome_commits": 0, "outcome_sink": "",
+                "outcome_uncommitted_changes": bool(dirty.stdout.strip()),
+                "service_return_present": False, "step_outcome_sha256": "",
+            }
+    elif commits:
+        bundle_refs.append("{}..HEAD".format(base))
+
     created = git_in(
-        repo, "bundle", "create", str(bundle), "{}..HEAD".format(base),
+        repo, "bundle", "create", str(bundle), *bundle_refs,
         timeout=BUNDLE_CREATE_TIMEOUT,
     )
     if created.returncode != 0 or not bundle.is_file():
@@ -400,11 +865,13 @@ def collect_outcome(request, repo, worktree_root):
     body = bundle.read_bytes()
     sink = put_outcome_blob(body)
     return {
-        "outcome_present": True,
+        "outcome_present": commits > 0,
         "outcome_sha256": hashlib.sha256(body).hexdigest(),
         "outcome_bytes": len(body),
         "outcome_commits": commits,
         "outcome_sink": sink,
+        "outcome_uncommitted_changes": bool(dirty.stdout.strip()),
+        **returned,
     }
 
 
@@ -418,7 +885,7 @@ def replay_outcome_upload(request, worktree, recorded):
     the crewmate's commits die with the VM. A failure here must not stop the
     replay from answering, so it is reported and swallowed.
     """
-    if not recorded.get("outcome_present"):
+    if not (recorded.get("outcome_present") or recorded.get("return_present")):
         return False
     retained = outcome_bundle_path(request, worktree)
     try:
@@ -457,9 +924,14 @@ def write_atomic(path, value):
 
 
 def execute(request, worktree, worktree_root):
+    path = "/usr/local/bin:/usr/bin:/bin"
+    if request.get("worker_role") == "no-mistakes":
+        path = str((worktree_root / ".fm-runtime" / "bin").resolve()) + ":" + path
+    account_home = Path(os.environ.get("FM_WORKER_ACCOUNT_HOME", "/nonexistent")).resolve()
     safe_env = {
-        "HOME": str(Path(os.environ.get("FM_WORKER_ACCOUNT_HOME", "/nonexistent")).resolve()),
-        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "HOME": str(account_home),
+        "PI_CODING_AGENT_DIR": str(account_home / "pi-agent"),
+        "PATH": path,
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "GIT_TERMINAL_PROMPT": "0",
@@ -484,8 +956,8 @@ def execute(request, worktree, worktree_root):
     stderr, stderr_truncated = bounded(stderr)
     # NOTHING after the task command may raise. Its effects already happened,
     # so any escape here means no executed marker is written, and the next
-    # dispatch both re-runs the command and (through stage_payload's rmtree of
-    # the staged repository) destroys the commits the first run produced.
+    # ordinary dispatch both re-runs the command and (through stage_payload's
+    # rmtree of the staged repository) destroys the commits the first run produced.
     # Every post-command failure is therefore recorded in the digest-bound
     # result instead of raised, whatever its exception class: a full disk
     # reaches the stream write, a git timeout or MemoryError reaches the

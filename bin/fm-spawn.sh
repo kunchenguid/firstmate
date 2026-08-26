@@ -41,8 +41,10 @@
 #   closed. Cloud spawns run ENTIRELY on the pi-codex runtime: harness
 #   dispatch and claude profile routing are bypassed. account_home comes from
 #   config/azure-worker-account-home when that file exists, otherwise from the
-#   pi coding-agent directory for backward compatibility; pi's extension owns
-#   multi-profile selection on the worker. With the switch off (default),
+#   pi coding-agent directory for backward compatibility. The controller
+#   load-balances usable profiles and gives each assignment one private
+#   single-profile snapshot; the worker never receives the canonical pool.
+#   With the switch off (default),
 #   spawns stay byte-identical to the local path. Secondmate and
 #   account-recovery spawns always stay local, and --backend, raw launch
 #   commands, or a non-pi harness cannot be combined with cloud placement.
@@ -688,9 +690,6 @@ faults = {name: module.entry_faults(pool[name]) for name in expected}
 broken = [f"{name}: {', '.join(items)}" for name, items in faults.items() if items]
 if broken:
     module.fail("Azure Pi pool has unusable profile shapes: " + "; ".join(broken))
-accounts = [pool[name]["accountId"].strip() for name in expected]
-if len(set(accounts)) != len(accounts):
-    module.fail("Azure Pi pool profiles must name distinct upstream accounts")
 PY
 }
 
@@ -4496,28 +4495,23 @@ spawn_cloud_record_assignment() {  # <assignment-generation>
   fi
   fm_account_meta_lock_release "$lock" || return 1
 }
-# spawn_cloud_bind_leased_account: narrow the staged provider credential to the
-# ONE Pi profile the controller leased for this placement (R5).
+# spawn_cloud_bind_account_snapshot: stage the ONE profile snapshot selected
+# for this assignment.
 #
-# The controller is the only selector: it picks a free profile under its own
-# lock, in the same act that writes the queue entry that IS the lease, and
-# prints the single-profile account home it projected (bin/fm-pi-account-home.py
-# writes it; nothing here re-derives a home or re-implements a projection).
-# This function reads that path back and makes it the credential the worker
-# actually receives, so the lease is not a paper lease: without it the pooled
-# auth.json would ride to the guest and every concurrent crewmate would resolve
-# to the pool's first slot - one account, N workers, which is the collision R5
-# exists to remove.
+# The controller load-balances profiles under its lock, checks the canonical
+# profile's twelve-hour headroom, and writes a request-private single-profile
+# home through bin/fm-pi-account-home.py.  This function rechecks that snapshot
+# immediately before copying it into the task-private staging directory.  The
+# pooled auth.json never reaches the guest, and assignments using the same
+# profile never share writable homes.
 #
-# It refuses rather than falling back. No leased path, no credential at the
-# leased path, or a leased credential carrying more than one provider slot all
-# stop the placement, because each of those is "we do not know which account
-# this worker will use".
-spawn_cloud_bind_leased_account() {  # <request-stdout-file>
+# It refuses rather than falling back.  A missing path, credential, or exact
+# one-slot shape means the selected snapshot cannot be proved.
+spawn_cloud_bind_account_snapshot() {  # <request-stdout-file>
   local out=$1 leased line tmp profile
   if spawn_test_lab_enabled && [ "${FM_TEST_CLOUD_ACCOUNT_BIND_FAIL:-0}" = 1 ]; then
-    # Test-only: the lease-handback path below has no other injection point,
-    # and an untested handback is how a pool quietly shrinks to zero.
+    # Test-only: the projection-cleanup path below has no other injection
+    # point, and an untested failure could leave credential snapshots behind.
     echo "error: test-only provider-account bind failure for $ID" >&2
     return 1
   fi
@@ -4529,19 +4523,19 @@ spawn_cloud_bind_leased_account() {  # <request-stdout-file>
       'account-profile '*) profile=${line#account-profile } ;;
     esac
   done < "$out"
-  # The controller reports the slot name separately BECAUSE the projected home
-  # is keyed on the lease identity rather than the slot name; reading the name
-  # off the path's last component would be reading the wrong thing.
+  # The controller reports the slot name separately because the projected home
+  # is keyed on the assignment-private projection binding, not the reusable
+  # profile or account identity.
   [ -n "$profile" ] || {
-    echo "error: the controller named no leased provider-account profile for $ID" >&2
+    echo "error: the controller named no provider-account snapshot profile for $ID" >&2
     return 1
   }
   [ -n "$leased" ] || {
-    echo "error: the controller named no leased provider-account home for $ID; refusing to stage a pooled credential" >&2
+    echo "error: the controller named no assignment-private provider-account home for $ID; refusing to stage a pooled credential" >&2
     return 1
   }
   [ -d "$leased" ] && [ -f "$leased/auth.json" ] || {
-    echo "error: leased provider-account home '$leased' holds no credential for $ID" >&2
+    echo "error: provider-account snapshot home '$leased' holds no credential for $ID" >&2
     return 1
   }
   # Azure's hard VM shutdown is six hours after creation. Require twice that
@@ -4552,7 +4546,7 @@ spawn_cloud_bind_leased_account() {  # <request-stdout-file>
   "$SCRIPT_DIR/fm-credential-expiry.py" check --harness pi \
     --margin-seconds "$CLOUD_ACCOUNT_MIN_HEADROOM_SECONDS" \
     --min-state usable "$leased" >/dev/null || {
-    echo "error: leased provider-account credential lacks twelve hours of access-token headroom for $ID" >&2
+    echo "error: provider-account snapshot lacks twelve hours of access-token headroom for $ID" >&2
     return 1
   }
   # Exactly one provider slot, checked by shape and never by content: a home
@@ -4565,11 +4559,11 @@ try:
     with open(sys.argv[1], encoding="utf-8") as handle:
         parsed = json.load(handle)
 except (OSError, ValueError):
-    print("error: leased provider-account credential is unreadable", file=sys.stderr)
+    print("error: provider-account snapshot credential is unreadable", file=sys.stderr)
     raise SystemExit(1)
 if not isinstance(parsed, dict) or len(parsed) != 1:
     print(
-        "error: leased provider-account credential does not hold exactly one provider slot",
+        "error: provider-account snapshot does not hold exactly one provider slot",
         file=sys.stderr,
     )
     raise SystemExit(1)
@@ -4661,7 +4655,23 @@ spawn_cloud_persist_convergence_artifacts() {
       exit 1
     }
     if [ -f "$DATA/$ID/brief.md" ]; then
-      cp "$DATA/$ID/brief.md" "$STATE/$ID.cloud-payload/brief.md" || exit 1
+      if [ "$KIND" = secondmate ]; then
+        cp "$DATA/$ID/brief.md" "$STATE/$ID.cloud-payload/brief.md" || exit 1
+      else
+        # The generated brief names the task home's authorized report, visual,
+        # and status paths. Those host paths do not exist on a worker. Rewrite
+        # only the exact task-home prefix into the fixed return staging root;
+        # the guest collector later accepts only the digest-bound task paths,
+        # so this does not authorize arbitrary worker files to come home.
+        python3 - "$DATA/$ID/brief.md" "$STATE/$ID.cloud-payload/brief.md" "$TASK_HOME" <<'PY' || exit 1
+from pathlib import Path
+import sys
+source, destination, task_home = sys.argv[1:]
+body = Path(source).read_bytes()
+prefix = task_home.encode()
+Path(destination).write_bytes(body.replace(prefix, b"/mnt/task/.fm-return"))
+PY
+      fi
     elif [ "$KIND" = secondmate ] && [ -f "$WT/data/charter.md" ]; then
       # A secondmate's standing brief is its persistent charter in the home;
       # the compartment payload carries a copy so the cloud agent's brief is
@@ -4684,12 +4694,12 @@ spawn_cloud_persist_convergence_artifacts() {
       exit 1
     fi
     # The POOLED auth.json is deliberately NOT copied here. This runs BEFORE the
-    # request creates the lease, and the tracking monitor pane already exists and
+    # request creates the assignment-private projection, and the tracking monitor pane already exists and
     # is already polling: a crash, kill, or plain slow reconcile between here and
     # the narrowing would leave every signed-in account staged in a directory the
     # monitor is willing to dispatch as --account-dir. The account directory is
-    # therefore written exactly once, by spawn_cloud_bind_leased_account, after
-    # the controller has said which single account this placement leased. That
+    # therefore written exactly once, by spawn_cloud_bind_account_snapshot, after
+    # the controller has said which single profile snapshot this placement owns. That
     # removes the window rather than guarding it.
     # settings.json is pi CONFIGURATION, not credential material, so it is staged
     # here with the rest of the payload.
@@ -4699,6 +4709,8 @@ spawn_cloud_persist_convergence_artifacts() {
     fi
     {
       printf 'export FM_SPAWN_CLOUD_WALL_SECONDS=%q\n' "$wall"
+      [ "$KIND" = secondmate ] \
+        || printf 'export FM_SPAWN_CLOUD_RETURN_KIND=%q\n' "$KIND"
       [ -z "${FM_WORKER_PROVIDER_COMMAND:-}" ] \
         || printf 'export FM_WORKER_PROVIDER_COMMAND=%q\n' "$FM_WORKER_PROVIDER_COMMAND"
       if [ "$KIND" = secondmate ]; then
@@ -4776,7 +4788,7 @@ spawn_cloud_dispatch() {
   # directory against the marker plus the primary's own registry.
   task_home_args=()
   [ "$TASK_HOME" = "$FM_HOME" ] || task_home_args=(--task-home "$TASK_HOME")
-  # The request's STDOUT carries the leased provider-account home (R5), so it is
+  # The request's STDOUT carries the assignment-private snapshot home, so it is
   # captured rather than folded into stderr; stderr still flows through
   # untouched, and the captured lines are echoed on for the operator either way.
   request_report="$STATE/$ID.worker-request.out"
@@ -4788,11 +4800,17 @@ spawn_cloud_dispatch() {
     ${task_home_args[@]+"${task_home_args[@]}"} --eligible > "$request_report" || {
     cat "$request_report" >&2 2>/dev/null || true
     rm -f "$request_report"
-    # No durable queue entry exists, so the convergence artifacts have no
-    # owner; remove them (including the copied provider credential) with the
-    # rolled-back spawn. $STATE is the directory this spawn just staged into,
-    # which on the compartment-child lane is the secondmate's and not the
-    # primary's, so the rollback needs no resolution of its own.
+    # Most refusals precede insertion, but a crash-resumable projection failure
+    # leaves a durable `projecting` owner by design.  Withdraw that exact
+    # generation when present so its private snapshot is removed; an ordinary
+    # pre-insertion refusal simply makes this best-effort probe fail harmlessly.
+    if spawn_cloud_lifecycle withdraw --task "$ID" \
+      --task-generation "$SPAWN_GENERATION_ID" --confirm-withdraw \
+      --confirm-subscription "${FM_AZURE_SUBSCRIPTION_ID:-}" >/dev/null 2>&1; then
+      echo "notice: removed the incomplete provider-account projection for $ID" >&2
+    fi
+    # Remove task-local convergence artifacts from the home this spawn staged
+    # into.  On the compartment-child lane that is the secondmate's home.
     fm_cloud_state_remove_generation "$STATE" "$ID"
   # The outcome directory is NOT transport. When the monitor cannot
   # fast-forward it tells the operator the bundle is "kept for manual
@@ -4811,27 +4829,25 @@ spawn_cloud_dispatch() {
   }
   cat "$request_report" >&2
   if spawn_test_lab_enabled && [ "${FM_TEST_CLOUD_ABORT_AFTER_REQUEST:-0}" = 1 ]; then
-    # Test-only: die exactly in the window between the durable lease and the
+    # Test-only: die exactly in the window between the durable projection and the
     # narrowing, with the tracking monitor already live. This is the window the
     # pool used to be staged in, and the only way to assert it is empty is to
     # stop the process inside it.
     kill -9 $$
   fi
-  spawn_cloud_bind_leased_account "$request_report" || {
-    # The queue entry exists and is the LEASE on a provider account. A spawn
-    # that cannot bind that account must hand it back rather than leave it held
-    # by work that will never run: an orphaned lease shrinks the pool by one
-    # every time this happens. The entry is still `queued` here (reconcile has
-    # not run), which is exactly what withdraw accepts, and withdraw also
-    # removes the staged credential.
+  spawn_cloud_bind_account_snapshot "$request_report" || {
+    # The queue entry owns one assignment-private projection.  A spawn that
+    # cannot stage it withdraws while still queued, which removes that exact
+    # projection and the task-private staged credential without touching any
+    # same-profile placement.
     if spawn_cloud_lifecycle withdraw --task "$ID" \
       --task-generation "$SPAWN_GENERATION_ID" --confirm-withdraw \
       --confirm-subscription "${FM_AZURE_SUBSCRIPTION_ID:-}" >&2; then
-      echo "notice: released the provider-account lease for $ID with its withdrawn request" >&2
+      echo "notice: removed the provider-account projection for $ID with its withdrawn request" >&2
     else
-      echo "error: the provider-account lease for $ID is still held by its queued request; withdraw it with bin/fm-worker-lifecycle.sh withdraw --task $ID --task-generation $SPAWN_GENERATION_ID" >&2
+      echo "error: the provider-account projection for $ID is still owned by its queued request; withdraw it with bin/fm-worker-lifecycle.sh withdraw --task $ID --task-generation $SPAWN_GENERATION_ID" >&2
     fi
-    echo "error: cloud placement for $ID could not be bound to its leased provider account" >&2
+    echo "error: cloud placement for $ID could not stage its provider-account snapshot" >&2
     return 1
   }
   if ! spawn_cloud_lifecycle reconcile --apply \
@@ -4868,7 +4884,7 @@ spawn_cloud_dispatch() {
     --task "$ID" --task-generation "$SPAWN_GENERATION_ID" \
     --assignment-generation "$assignment" --wall-seconds "$wall" \
     --payload-dir "$STATE/$ID.cloud-payload" --account-dir "$STATE/$ID.cloud-account" \
-    --outcome-dir "$STATE/$ID.cloud-outcome" \
+    --outcome-dir "$STATE/$ID.cloud-outcome" --return-kind "$KIND" \
     --confirm-execute --confirm-subscription "${FM_AZURE_SUBSCRIPTION_ID:-}" \
     -- /bin/bash -lc "$CLOUD_WORKER_LAUNCH" \
     > "$STATE/$ID.worker-result.json" 2> "$STATE/$ID.worker-execute.log" < /dev/null &

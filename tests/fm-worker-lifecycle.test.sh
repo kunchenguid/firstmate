@@ -71,6 +71,9 @@ for marker in (
     "roll_daily_baseline", "daily_bound_refusal", "idle_deallocate_due",
     "daily_cost_baseline", "FM_AZURE_WORKER_DAILY_BOUND_OVERRIDE", "idle_deallocated_at",
     "record_daily_override_use", "last_steer_at",
+    "CLOUD_ACCOUNT_MIN_HEADROOM_SECONDS", "credential_usable_through",
+    "placement_projection_binding", "write_placement_snapshot",
+    "cleanup_placement_projection", "profile_active_load",
     "--confirm-orphan-children", "reparented_to", "orphaned_children",
     "compartment_projection",
     "command_compartment_chain_tip", "verified_chain_tip", "refuses to rewind",
@@ -146,6 +149,9 @@ for marker in (
     "backstop on RECORDED spend",
     "an ungated reserve lane could quietly burn past the bound",
     "no power-on lane exists",
+    "least-active usable profile", "assignment-private projection",
+    "maximum of sixteen", "`fireworks-glm`",
+    "consume no worker slot and no Codex/Pi worker profile",
 ):
     assert marker in doc, marker
 assert "hosted form service" in doc and "force-delete" in doc
@@ -410,16 +416,24 @@ except module.LifecycleError as exc:
 else:
     raise AssertionError("conflicting local/provider runner reservation was accepted")
 
-# Duplicate account and worktree ownership refuse independently.
+# Reusable upstream identity is expected, while assignment-private projection
+# and worktree ownership remain exclusive.
 existing = next(iter(state["queue"].values()))
+module.ensure_unique_bindings(state, dict(
+    item, task="other", account_binding=existing["account_binding"], worktree_binding="9" * 64
+))
+existing["account_projection_binding"] = "a" * 64
+existing["account_home"] = "/tmp/assignment-a"
 try:
     module.ensure_unique_bindings(state, dict(
-        item, task="other", account_binding=existing["account_binding"], worktree_binding="9" * 64
+        item, task="other", account_binding=existing["account_binding"],
+        account_projection_binding=existing["account_projection_binding"],
+        account_home=existing["account_home"], worktree_binding="9" * 64,
     ))
 except module.LifecycleError as exc:
-    assert "provider-account" in str(exc)
+    assert "assignment-private provider projection" in str(exc)
 else:
-    raise AssertionError("shared account lease was accepted")
+    raise AssertionError("shared assignment-private projection was accepted")
 try:
     module.ensure_unique_bindings(state, dict(
         item, task="other", account_binding="9" * 64, worktree_binding=existing["worktree_binding"]
@@ -429,7 +443,7 @@ except module.LifecycleError as exc:
 else:
     raise AssertionError("shared writable worktree was accepted")
 PY
-  pass "all reconciliation classes and quota, cost, shared-account, shared-worktree refusal controls distinguish unsafe state"
+  pass "reconciliation admits reusable account identity while preserving capacity, projection, and worktree isolation"
 }
 
 azure_provider_refusal_matrix() {
@@ -831,17 +845,15 @@ finally:
     module.ROOT = real_root
 
 # Azure's actual fresh managed Run Command omits source entirely and exposes
-# the async preflight stub as Failed/-202. The exact untouched staging pair is
-# the run-owned proof that this is the one initial submission. Any other exit
-# remains ambiguous. The accepted update atomically carries both execution
-# bindings in its tags, so a replay cannot pass through this initial gate.
+# the async preflight stub as Failed/-202. The exact assignment-captured blob
+# ETags prove this is the one initial submission even if the landed supervisor
+# changed after create. A staged request changes its ETag before a replay, so
+# the accepted update still cannot pass through this initial gate twice.
 fresh_resources = copy.deepcopy(worker["resources"])
-for kind, value in module.initial_execute_staging_pair(execute_action).items():
-    body = module.canonical_bytes(value) + b"\n"
-    fresh_resources[kind]["digest"] = hashlib.sha256(body).hexdigest()
-    fresh_resources[kind]["length"] = len(body)
+fresh_resources["staging-request"]["digest"] = "7" * 64
+fresh_resources["staging-result"]["digest"] = "8" * 64
 crashed_resources = copy.deepcopy(fresh_resources)
-crashed_resources["staging-request"]["digest"] = "0" * 64
+crashed_resources["staging-request"]["immutable_id"] = "post-staging-etag"
 active_resources["value"] = crashed_resources
 retained_execute(
     {"provisioningState": "Succeeded"},
@@ -1470,6 +1482,9 @@ if request["operation"] == "mutate":
         # Additive: the digest-bound staged manifest the provider actually
         # receives, so a caller can assert what a lane staged.
         "payload_files": (action.get("request") or {}).get("payload_files"),
+        "account_files": (action.get("request") or {}).get("account_files"),
+        "existing_task_disk": bool((action.get("request") or {}).get("existing_task_disk")),
+        "supervisor_sha256": (action.get("request") or {}).get("supervisor_sha256"),
     })
     if kind == "execute" and os.environ.get("FIXTURE_TERMINAL_EXECUTE"):
         task_command["immutable_id"] = "task-command-terminal-{}".format(key[:8])
@@ -1560,6 +1575,14 @@ if request["operation"] == "mutate":
                     "outcome_commits": 0, "outcome_sha256": "", "outcome_bytes": 0,
                     "outcome_sink": "", "outcome_uncommitted_changes": False,
                 })
+                if request_value.get("return_contract"):
+                    execution.update({
+                        "return_present": True,
+                        "return_ref": "refs/fm-return/{}".format(action["request_digest"][:32]),
+                        "return_commit": "c" * 40,
+                        "return_manifest_sha256": "d" * 64,
+                        "outcome_tip": "e" * 40,
+                    })
             execution["streams_persisted"] = True
             execution["result_digest"] = hashlib.sha256(canonical(execution)).hexdigest()
             result = {"idempotency_key": key, "action": kind, "worker": state["workers"][slot], "execution": execution}
@@ -1875,6 +1898,33 @@ def armed_execute(*extra, overrides=None, command="/usr/bin/true"):
 
 refused = armed_execute("--outcome-dir", str(outcome_dir))
 assert refused.returncode != 0 and "staged repository" in refused.stderr, refused.stderr
+refused_existing = armed_execute("--existing-task-disk", "--outcome-dir", str(outcome_dir))
+assert refused_existing.returncode != 0 and "requires an authorized return" in refused_existing.stderr, (
+    refused_existing.stderr
+)
+refused_restage = armed_execute(
+    "--existing-task-disk", "--payload-dir", str(payload_dir),
+    "--account-dir", str(account_dir), "--outcome-dir", str(outcome_dir),
+    "--return-kind", "scout",
+)
+assert refused_restage.returncode != 0 and "cannot replace payload or account" in refused_restage.stderr, (
+    refused_restage.stderr
+)
+recovered = armed_execute(
+    "--existing-task-disk", "--outcome-dir", str(outcome_dir), "--return-kind", "scout",
+)
+assert recovered.returncode == 0, recovered.stderr
+recovered_result = json.loads(recovered.stdout)
+assert recovered_result["return_present"] is True, recovered_result
+recovery_action = [
+    entry for entry in fixture_state()["calls"] if entry["type"] == "execute"
+][-1]
+assert recovery_action["existing_task_disk"] is True, recovery_action
+assert recovery_action["supervisor_sha256"] == hashlib.sha256(
+    Path(controller_path).with_name("fm-worker-supervisor.py").read_bytes()
+).hexdigest(), recovery_action
+assert recovery_action["payload_files"] is None, recovery_action
+assert recovery_action["account_files"] is None, recovery_action
 skewed = armed_execute(
     "--payload-dir", str(payload_dir), "--account-dir", str(account_dir),
     "--outcome-dir", str(outcome_dir), overrides={"FIXTURE_OMIT_OUTCOME": "1"},
@@ -5226,25 +5276,21 @@ assert state["home_binding"] == hashlib.sha256(
     str(primary.resolve()).encode()).hexdigest(), state["home_binding"]
 assert item["home_binding"] != state["home_binding"]
 # The bindings are real mints from the task home's own authorities, and the
-# account lease is the CONTROLLER's placement decision over that home's pool:
-# the lowest free profile, bound to its upstream account and nothing else.
+# controller selected the least-loaded usable profile from that home's pool.
 assert item["account_profile"] == "openai-codex", item
 expected_binding = hashlib.sha256(json.dumps(
     {"provider": "pi", "upstream_account": hashlib.sha256(
         b"fixture-account-1").hexdigest()[:16]},
     sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 assert item["account_binding"] == expected_binding, item
-# The projected home is keyed on the LEASE IDENTITY, not the slot name: the
-# projection key and the exclusion key have to be the same function of the pool
-# or a re-logged slot silently overwrites a live placement's credential.
+# Writable projection identity is assignment-private rather than account-keyed.
 assert item["account_home"] == str(
-    primary / "state" / "azure-workers" / "accounts" / expected_binding), item
-# The leased home is a SINGLE-profile home, projected by the one projection
-# tool: a pooled home would put every signed-in account on the worker and let
-# the guest pick the first slot, which is the collision this requirement removes.
-leased = json.loads((Path(item["account_home"]) / "auth.json").read_text())
-assert list(leased) == ["openai-codex"], sorted(leased)
-assert leased["openai-codex"]["accountId"] == "fixture-account-1", item
+    primary / "state" / "azure-workers" / "accounts"
+    / item["account_projection_binding"]), item
+assert item["account_projection_binding"] != expected_binding, item
+snapshot = json.loads((Path(item["account_home"]) / "auth.json").read_text())
+assert list(snapshot) == ["openai-codex"], sorted(snapshot)
+assert snapshot["openai-codex"]["accountId"] == "fixture-account-1", item
 assert account.resolve() == (Path(str(root)) / "pi-pool").resolve(), account
 assert item["worktree_binding"] == hashlib.sha256(json.dumps(
     {"git_dir": str((worktree / ".git").resolve()), "worktree": str(worktree.resolve())},
@@ -5435,6 +5481,7 @@ assert result.returncode == 0, result.stderr
 controller = home / "state" / "azure-workers" / "controller.json"
 item = json.loads(controller.read_text())["queue"]["local-crew@gen-local"]
 assert item.pop("enqueued_at", None), "the queue item lost its enqueue timestamp"
+assert item.pop("projected_at", None), "the queue item lost its snapshot timestamp"
 
 
 def canonical(value):
@@ -5447,6 +5494,17 @@ def digest(value):
 
 head = subprocess.check_output(
     ["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip()
+home_identity = hashlib.sha256(str(home.resolve()).encode("utf-8")).hexdigest()
+pool_home = str(account.resolve())
+account_binding = digest({
+    "provider": "pi",
+    "upstream_account": hashlib.sha256(b"fixture-account-1").hexdigest()[:16],
+})
+projection_binding = digest({
+    "provider": "pi", "home_binding": home_identity, "task": "local-crew",
+    "task_generation": "gen-local", "account_pool_home": pool_home,
+    "account_profile": "openai-codex", "account_binding": account_binding,
+})
 expected = {
     "schema": "fm.worker-request/v1",
     "task": "local-crew",
@@ -5454,20 +5512,13 @@ expected = {
     # The parent-less lane still stamps the REQUESTING home, which on this lane
     # IS FM_HOME. --task-home changes where that identity is read from, never
     # what it is here.
-    "home_binding": hashlib.sha256(str(home.resolve()).encode("utf-8")).hexdigest(),
-    # The account lease is the CONTROLLER's placement over this task's pool:
-    # keyed on the upstream account, with the leased profile and its
-    # single-profile home recorded beside it.
-    "account_binding": digest({
-        "provider": "pi",
-        "upstream_account": hashlib.sha256(b"fixture-account-1").hexdigest()[:16],
-    }),
+    "home_binding": home_identity,
+    "account_binding": account_binding,
     "account_profile": "openai-codex",
-    "account_home": str(home / "state" / "azure-workers" / "accounts" / digest({
-        "provider": "pi",
-        "upstream_account": hashlib.sha256(b"fixture-account-1").hexdigest()[:16],
-    })),
-    "account_pool_home": str(account.resolve()),
+    "account_projection_binding": projection_binding,
+    "account_home": str(
+        home / "state" / "azure-workers" / "accounts" / projection_binding),
+    "account_pool_home": pool_home,
     "worktree_binding": digest(
         {"worktree": str(worktree.resolve()), "git_dir": str(git_dir.resolve())}),
     "repository_binding": hashlib.sha256(head.encode("ascii")).hexdigest(),
@@ -5481,7 +5532,7 @@ expected = {
 assert canonical(item) == canonical(expected), (canonical(item), canonical(expected))
 assert "parent_task" not in item and "task_home" not in item, item
 PY
-  pass "the parent-less local-secondmate request lane emits its exact pre-change queue item"
+  pass "the parent-less local-secondmate request records its exact reusable-profile snapshot identity"
 }
 
 verify_state_home_fence_golden() {
@@ -5725,9 +5776,80 @@ with (sub / "state" / "child-1.meta").open("a") as stream:
         )
     )
 
+receipt_path = root / "child-receipts.json"
+metadata_path = sub / "state" / "child-1.meta"
+metadata_text = metadata_path.read_text()
+metadata_variants = {
+    "missing placement": metadata_text.replace("placement=azure\n", ""),
+    "duplicate placement": metadata_text + "placement=azure\n",
+    "conflicting placement": metadata_text.replace("placement=azure\n", "placement=local\n"),
+    "missing kind": metadata_text.replace("kind=ship\n", ""),
+    "duplicate kind": metadata_text + "kind=ship\n",
+    "malformed kind": metadata_text.replace("kind=ship\n", "kind=unknown\n"),
+}
+for label, variant in metadata_variants.items():
+    metadata_path.write_text(variant)
+    refused_metadata = run(
+        "authority-receipt", "--task", "child-1", "--task-generation", "gen-c1",
+        "--assignment-generation", assignment, "--output", str(receipt_path), check=False)
+    assert refused_metadata.returncode != 0, "{} metadata selected release authority".format(label)
+    assert not receipt_path.exists(), "{} metadata wrote release receipts".format(label)
+metadata_path.write_text(metadata_text)
+missing_return = run(
+    "authority-receipt", "--task", "child-1", "--task-generation", "gen-c1",
+    "--assignment-generation", assignment, "--output", str(receipt_path), check=False)
+assert missing_return.returncode != 0, "Azure authority fell back to forge landing without a return"
+assert "cloud return result custody is absent" in missing_return.stderr, missing_return.stderr
+assert not receipt_path.exists(), "missing cloud return wrote release receipts"
+
+import hashlib
+bundle = b"fixture cloud return bundle\n"
+outcome_dir = sub / "state" / "child-1.cloud-outcome"
+outcome_dir.mkdir()
+(outcome_dir / "outcome.bundle").write_bytes(bundle)
+manifest = {
+    "schema": "fm.worker-return/v1",
+    "task": "child-1",
+    "task_generation": "gen-c1",
+    "assignment_generation": assignment,
+    "request_digest": "5" * 64,
+    "repository_generation": head,
+    "kind": "ship",
+    "report_required": True,
+    "report_path": "data/child-1/completion.md",
+    "status_path": "state/child-1.status",
+    "visuals_path": "data/child-1/visuals",
+    "branch": "fm/child-1",
+    "outcome_commits": 0,
+    "outcome_tip": head,
+    "uncommitted_changes": False,
+    "artifacts": {},
+}
+manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+(sub / "data" / "child-1" / "cloud-return.json").write_bytes(manifest_bytes)
+(sub / "state" / "child-1.status").write_text("done: cloud outcome returned to local custody\n")
+result = {
+    "schema": "fm.worker-execution-result/v1",
+    "task": "child-1",
+    "task_generation": "gen-c1",
+    "assignment_generation": assignment,
+    "repository_generation": head,
+    "return_present": True,
+    "request_digest": "5" * 64,
+    "outcome_bytes": len(bundle),
+    "outcome_sha256": hashlib.sha256(bundle).hexdigest(),
+    "return_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+    "outcome_commits": 0,
+    "outcome_tip": head,
+    "outcome_uncommitted_changes": False,
+}
+result["result_digest"] = hashlib.sha256(json.dumps(
+    result, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+(sub / "state" / "child-1.worker-result.json").write_text(json.dumps(
+    result, sort_keys=True, separators=(",", ":")) + "\n")
+
 # The ordinary exit, for real: authority-receipt runs the unmodified authority
 # tool, and it must find the child's metadata under the TASK home.
-receipt_path = root / "child-receipts.json"
 receipts = run("authority-receipt", "--task", "child-1", "--task-generation", "gen-c1",
                "--assignment-generation", assignment, "--output", str(receipt_path))
 assert "receipts written" in receipts.stdout, receipts.stdout
@@ -5742,7 +5864,6 @@ proof = json.loads(run(
 proof["authorities"] = minted["authorities"]
 unsigned = dict(proof)
 unsigned.pop("proof_digest", None)
-import hashlib
 proof["proof_digest"] = hashlib.sha256(json.dumps(
     unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 proof_path = root / "child-proof.json"
@@ -5777,8 +5898,19 @@ refused = run("authority-receipt", "--task", "child-1", "--task-generation", "ge
               check=False)
 assert refused.returncode != 0, "a foreign task home minted receipts: {}".format(refused.stdout)
 assert "does not match its recorded home binding" in refused.stderr, refused.stderr
+
+# Restore the exact released document, converge provider reset, and prove the
+# host cleanup removes only this completed assignment's projection.
+projection_home = Path(item["account_home"])
+assert projection_home.is_dir(), projection_home
+(primary / "state/azure-workers/controller.json").write_text(
+    json.dumps(final, sort_keys=True, separators=(",", ":")))
+run("reconcile", "--apply", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+completed = controller_state()
+assert completed["queue"]["child-1@gen-c1"]["status"] == "complete", completed
+assert not projection_home.exists(), "provider reset left the assignment projection behind"
 PY
-  pass "an admitted compartment child mints its five receipts from the task home and releases through the unchanged path"
+  pass "an admitted child releases through ordinary proofs and reset removes its exact profile projection"
 }
 
 task_home_registry_is_read_by_the_canonical_reader() {

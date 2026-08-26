@@ -6,10 +6,10 @@ The private foundation and one-shot command substrate remain owned by [Azure pil
 
 ## Boundary and topology
 
-A general worker VM runs one task-scoped crewmate plus the minimal machine supervisor required for lifecycle, event delivery, steering, and recovery.
-It never runs Firstmate, a secondmate, another supervisor, a nested team, a browser profile, validation, policy review, or a child-worker launcher.
-Persistent secondmates remain on trusted control-plane capacity and may request one task worker without moving into it.
-The primary Firstmate requests workers for tasks with no matching secondmate.
+One worker-ceiling assignment runs either one task-scoped crewmate or one bounded secondmate compartment plus the minimal machine supervisor required for lifecycle, event delivery, steering, and recovery.
+A secondmate compartment requests children only through the host controller and has no child-worker launcher or authority to create compute directly.
+No assignment runs Firstmate, an additional nested supervisor, a browser profile, validation, or policy review.
+The primary Firstmate requests ordinary workers for tasks with no matching secondmate and may request up to the separately bounded secondmate-compartment count within the same sixteen-assignment ceiling.
 Validation, review, browser, and networkless verification use their separate single-purpose compartments.
 
 The controller is provider-neutral at the queue and state-machine boundary.
@@ -32,41 +32,51 @@ The state file and lock are owner-only, atomically replaced, directory-synced, a
 The caller supplies only task, task generation, owner kind, and eligibility; the controller reads the ordinary task metadata, canonical account home/task owner, exact worktree root, physical Git-directory identity, and HEAD to derive the home, provider-account, writable-worktree, repository, and repository-generation bindings.
 Caller-supplied bindings are unsupported outside the hermetic test backstop.
 Raw provider-account identity never appears in bounded status or Azure tags.
-The account binding must be a high-entropy digest produced by the account lease owner, not a digest of a guessable profile name.
-The lease owner is the controller: it derives the binding from the profile's upstream account identity (see the placement section below), never from the profile's local slot name.
-The local slot name (`openai-codex-2` and the like) DOES appear in bounded status, because an operator has to be able to see which profile a task holds; it is a local label for a pool slot, not the upstream account identity, and it never reaches an Azure tag.
+The controller derives one high-entropy `account_binding` from the selected profile's upstream account identity, never from a guessable local profile label.
+That reusable digest remains visible in bounded placement/load status and Azure assignment bindings so provider quota pressure can be correlated without exposing identity or token material.
+The local profile label (`openai-codex-2` and the like) also appears in bounded status but never in an Azure tag.
 
-The host is the only OAuth refresh authority. Before a leased single-profile home is staged, `fm-spawn.sh` requires twelve hours of access-token headroom, twice the worker VM's six-hour hard shutdown window. A stale slot is withdrawn and refused instead of being copied to a guest that could reach Pi's automatic refresh path and rotate the pool's refresh token independently.
+The host is the only OAuth refresh authority.
+The controller uses `bin/fm-credential-expiry.py` to require twelve hours of canonical-profile access-token headroom before every snapshot, which is twice the worker VM's six-hour hard shutdown window.
+`bin/fm-spawn.sh` repeats the same check against the immutable snapshot immediately before task staging.
+A stale profile is excluded before snapshot creation, so no guest lives long enough to refresh its copied credential and no guest can change the canonical pool.
 
 ## Provider-account placement across the Pi fleet
 
-The task metadata names the provider-account POOL this task may draw from. The cloud lane reads the canonical absolute directory in `config/azure-worker-account-home` when present and otherwise falls back to the primary Pi coding-agent home for compatibility. This lets a local Firstmate keep a separate Pi login while Azure owns a disjoint worker fleet. WHICH profile of the selected pool the placement gets is decided by the controller, because that decision has to exclude every other concurrent placement and no task-local document can see them.
+Task metadata names the canonical provider-account pool this task may draw from.
+The cloud lane reads the absolute directory in `config/azure-worker-account-home` when present and otherwise falls back to the primary Pi coding-agent home for compatibility.
+This lets local Firstmate and Azure worker credentials remain disjoint.
 
-Selection happens inside `command_request`, in the same lock hold and the same `save_state` that writes the queue entry, so selection and the lease are one act.
-The queue entry IS the lease: the set of leased accounts is derived from the non-complete queue, never from a second ledger, so there is no state a crash can leave in which an account is held by something the queue does not show.
-Selection is deterministic - the first free profile in the pool's sorted (lexicographic) name order - and replaying the same task generation reuses the same profile, because the replay path short-circuits on the existing entry before selecting anything.
+Selection occurs under the controller lock and counts every non-complete placement by canonical pool, local profile label, and upstream account binding.
+It chooses the least-active usable profile with profile label and account binding as stable tie-breakers, so every usable profile is represented before one is reused.
+An upstream account binding is load identity rather than exclusion authority, and multiple simultaneous workers may carry immutable snapshots of the same profile or account.
+Replaying one exact task generation never selects again and retains its profile, account binding, and assignment-private projection binding.
 
-The unit of exclusion is the UPSTREAM ACCOUNT, not the profile name and not the account-home path.
-Eight profiles map to eight accounts today, but nothing enforces that: a re-login can point two slots at one account, and what a concurrent crewmate actually contends for - the rate limit, the ban, the session - belongs to the account.
-So `account_binding` is a digest over the profile's upstream account identity (itself a SHA-256 digest of the account id, never token material), two profiles resolving to one account are ONE lease, and the duplicate-account screen below is the same screen selection already respected.
+Every new placement computes a projection binding over its home, task, task generation, canonical pool, selected profile, and upstream account binding.
+The controller records the request in durable `projecting` state before credential bytes are written under `$FM_HOME/state/azure-workers/accounts/<account-projection-binding>` or the configured `FM_PI_ACCOUNT_HOME_ROOT`.
+A crash during projection therefore leaves a resumable and withdrawable queue owner rather than an unowned credential directory.
+A single-profile canonical pool is still copied into an assignment-private projection and is never used in place.
+No writable directory is keyed only by profile label or upstream account identity.
 
-A pool holding more than one profile is projected: the controller writes the chosen profile's single-profile account home with `bin/fm-pi-account-home.py`, under its OWN state directory (`$FM_HOME/state/azure-workers/accounts/<account-binding>`, overridable with `FM_PI_ACCOUNT_HOME_ROOT`) and deliberately not the shared crosscheck roster, which belongs to the reviewer lane and must not be rewritten under a running reviewer.
-The directory is keyed on the LEASE IDENTITY, never on the profile's local slot name, because the projection key and the exclusion key must be the same function of the pool. The slot name is not: re-logging one slot from one upstream account to another yields two placements with two correct, distinct bindings that would both project into one `accounts/<slot-name>` directory, and the second write would replace the credential the first placement's still-live lease points at, leaving the queue reporting two accounts while the disk held one. A second, defensive refusal also declines to project over an account home a live queue entry still names.
-A home already holding exactly one profile is that single-profile home already, and is leased in place with nothing written; its credential shape is not screened there, because "is this credential still good" has one owner, `bin/fm-credential-expiry.py`.
-`request` prints the leased profile and account home, and `bin/fm-spawn.sh` writes the staged account directory exactly once, from that home, after the lease exists.
-The pooled `auth.json` is never staged: the payload step deliberately does not copy it, because that step runs BEFORE the lease is created and while the tracking monitor pane is already polling, so a crash there would otherwise leave every signed-in account in a directory the monitor is willing to dispatch as `--account-dir`. The window is removed rather than guarded.
-As defence in depth at the point of USE, `bin/fm-spawn-cloud-monitor.sh` re-checks that the staged account directory holds exactly one provider slot before it dispatches, and does so BEFORE taking the shared exactly-once dispatch marker so a not-yet-narrowed directory simply retries on the next poll instead of wedging both owners.
-Staging the pool would put every signed-in account on the guest and let Pi resolve the first slot, which is a shared-account placement whatever the queue records.
+`bin/fm-pi-account-home.py` writes one fixed-key single-profile snapshot into that private projection.
+`request` prints only the selected profile label and its assignment-private home, and `bin/fm-spawn.sh` copies that credential once into the task's own staged account directory.
+The pooled `auth.json` is never staged.
+As defence in depth at use, `bin/fm-spawn-cloud-monitor.sh` checks that the staged account directory holds exactly one provider slot before taking the exactly-once dispatch marker.
 
-Every failure refuses by name and none of them falls through to a shared or arbitrary profile: an unreadable or empty pool, a pool whose profiles are all unprojectable, a home naming no upstream account, and an exhausted pool (which names each leased profile and the task holding it).
-Bounded status projects the live placements - profile, task generation, status, and account home - from `controller.json` alone.
+`withdraw` accepts both queued and interrupted `projecting` requests and removes only the exact projection binding the queue entry owns.
+Provider reset removes the same exact projection only after release and cloud-side cleanup are proved.
+Cleanup inventories no sibling path, so one assignment cannot replace, inspect, or delete another assignment that uses the same profile.
+A legacy entry with no projection binding is never inferred to own and delete a shared home.
 
-**The pool is now a concurrency ceiling, and it is lower than the worker ceiling.** Concurrent placements are bounded by `min(FM_AZURE_WORKER_MAX, distinct upstream accounts in the pool)`: with the fleet's eight Pi accounts, the ninth concurrent placement refuses even though `MAX_WORKERS` is 16 and quota, budget and capacity would all admit it.
-That is the requirement, not a regression - sixteen crewmates never could run on eight accounts without sharing one, they just used to do it silently - but it does halve the effective author parallelism, and compartments compete in the same pool: one compartment plus its four children consumes five of the eight before an ordinary crewmate is placed.
-Raising the ceiling means adding signed-in profiles on distinct upstream accounts to the pool, not raising a knob here.
-A compartment child contends in the same document as an ordinary crewmate, because `FM_HOME` still names the primary's controller for both, so the two can never be handed one account.
+Every failure refuses by name, including an unreadable pool, no usable profile with twelve-hour headroom, a changed upstream identity during projection replay, and a conflicting private projection or worktree.
+Bounded status lists every placement with profile, task generation, reusable account binding, projection binding, private home, and current per-profile/account active load.
 
-The controller rejects duplicate active account or writable-worktree bindings.
+The worker/supervisor software ceiling remains the independent `FM_AZURE_WORKER_MAX` maximum of sixteen even when fewer than sixteen Pi profiles or upstream accounts are available.
+Ordinary author workers and nested secondmate supervisors share that ceiling and the load-balanced Pi worker pool.
+No-mistakes uses its separate Azure runner, and Crosscheck uses its separately credentialed `fireworks-glm` model plus networkless tool/verifier compartments.
+Those specialized lanes consume the shared 40-vCPU specialized envelope and 128-vCPU regional accounting but consume no worker slot and no Codex/Pi worker profile.
+
+The controller permits duplicate active upstream account bindings and rejects duplicate assignment-private projection, account-home, or writable-worktree bindings.
 A general request has role `author`, is explicitly eligible, and is owned by either the primary or a secondmate; a secondmate-owned author request may carry a parent compartment pair, which marks it as a compartment child and arms the child bounds.
 A `secondmate` role request stands up a secondmate compartment, is requested only by the primary, and is capped by `FM_AZURE_SECONDMATE_MAX`.
 A compartment cannot mint that parent pair itself: its agent only emits a bounded `fm.secondmate-child-request/v1` on the outbox, and the compartment monitor validates it locally and then stamps the pair onto an ordinary `bin/fm-spawn.sh` spawn run as the secondmate, so every compartment child is admitted by the one controller under the child bounds.
@@ -87,7 +97,7 @@ The `bounded` in the compartment invariant is per message, not aggregate: each r
 Bounded status additionally projects every live compartment - task, status, slot, active and lifetime children counts, and the durable assignment TTL anchor - from `controller.json` fields only, never from the leg state the compartment monitor owns locally.
 The same task generation and exact identity is idempotent, while a changed identity under the same task generation refuses.
 An assigned request stays in the queue until its ordinary release proof is accepted and every exact cloud resource is safely reset.
-A request that never reached assignment leaves the queue by `withdraw`: it accepts an entry still in `queued`, refuses anything a worker owns or a pending provider action names, requires `--confirm-withdraw` and `--confirm-subscription`, touches no capacity, and removes the per-task cloud state including the staged provider credential.
+A request that never reached assignment leaves the queue by `withdraw`: it accepts `projecting` or `queued`, refuses anything a worker owns or a pending provider action names, requires `--confirm-withdraw` and `--confirm-subscription`, touches no capacity, and removes the exact provider projection plus per-task cloud state including the staged credential.
 Release remains the only exit for work that ever held capacity.
 Operator surrender is not a second exit: it mints that release proof for the one case where the ordinary authorities are unrecoverable, under its own refusal-first gates (below).
 Therefore a truly empty queue also means there is no active task worker and desired worker compute is zero.
@@ -190,7 +200,7 @@ All fifteen resource kinds are recorded by complete resource ID and immutable pr
 Every taggable resource is additionally bound to deployment owner, slot, home, task, task generation, assignment generation, cloud generation, account digest, worktree digest, repository digest, and repository generation.
 The container carries the equivalent exact metadata.
 
-No two active tasks share a VM, account lease, browser profile, or writable task disk.
+No two active tasks share a VM, writable account home, browser profile, or writable task disk, even when their reusable upstream account bindings match.
 The worker has exactly one slot identity and its NIC has no public-IP relation.
 The general worker contract forbids a browser profile rather than allocating one.
 The OS disk is disposable, while the account and task disks detach from VM deletion and remain encrypted by the guest contract.
@@ -209,25 +219,43 @@ A visible VM with another task or assignment binding refuses instead of being ad
 ## Outcome collection and landing
 
 A crewmate on a worker holds no forge or provider credential, so the work comes home as bytes, not as a push: nothing on the worker pushes anywhere, and the local side keeps the landing authority.
-`execute --outcome-dir` records `outcome_expected` inside the digest-bound execution request and the provider mints one short-lived user-delegation SAS with create/write on exactly one blob name, delivered as a protected Run Command parameter.
+`execute --outcome-dir --return-kind <ship|scout>` records both `outcome_expected` and one closed `fm.worker-return-contract/v1` inside the digest-bound execution request.
+The contract authorizes only that task's report, status trail, visual directory, required ship branch, and repository scratch.
+The spawned brief rewrites only the exact task-home prefix to `/mnt/task/.fm-return`, so its authorized completion paths exist on the guest without making arbitrary guest paths returnable.
+The provider mints one short-lived user-delegation SAS with create/write on exactly one blob name, delivered as a protected Run Command parameter.
 That SAS scopes the credential, not the guest: the worker identity already holds Storage Blob Data Contributor on its whole state container, so what makes a landing safe is the digest in the signed result, not the narrowness of the SAS.
 Because the expectation is digest-bound, a stripped parameter cannot silently downgrade a landing task: the guest refuses before the argv runs.
 
-After the bounded execute, the supervisor counts the commits the crewmate added over the bound repository generation, bundles exactly those commits, refuses a bundle over 256 MiB, uploads it, and records `outcome_present`, `outcome_commits`, `outcome_sha256`, `outcome_bytes`, and `outcome_error` inside the signed result.
+After the bounded execute, the supervisor counts the commits the crewmate added over the bound repository generation and records tracked and untracked scratch without applying it locally.
+It places the authorized report, status, visuals, and scratch in one synthetic Git artifact commit, places project commits on a distinct outcome ref, and creates one bundle containing both refs while excluding the already-bound repository generation.
+The result records `return_present`, the exact return ref and commit, the manifest digest, the project outcome tip, and the existing bundle digest and byte fields.
+A scout with no commits therefore still returns its report and scratch, while a ship's project history and completion artifacts remain distinguishable inside one provider-neutral blob.
 A collection failure never aborts the result: the command has already had its effects, so the failure is recorded instead, which both blocks an unverifiable landing and stops a replay from running the command a second time.
-A worker whose pinned supervisor predates this contract answers with no outcome disposition at all, and the controller refuses that result rather than reporting a task whose commits silently never came home.
+A worker whose pinned supervisor predates this contract answers with no return disposition, and the controller refuses that result rather than reporting a task whose commits or required deliverables silently never came home.
 
 The controller downloads the blob only after the digest-bound result commits to its bytes, verifies size and SHA-256, and stores it in the requesting task's outcome directory.
-The tracking monitor then fast-forwards the leased local worktree, but only when that worktree still sits on the dispatched generation and is clean; otherwise the verified bundle is kept and its path reported.
-Landing authority, push, and release receipts stay exactly where the ordinary local flow already puts them.
-The blob name carries the request digest, so a later execute against the same worker cannot overwrite an outcome the controller has not collected yet. Reset deletes the inbound staging archives by name and the outcome blobs as part of removing the whole state container.
+`bin/fm-cloud-result.py` independently validates the result, bundle, refs, manifest, and each artifact digest before publishing anything locally.
+For ship work it creates or fast-forwards `fm/<task>` and checks that branch out only when the leased worktree and any existing task branch have not diverged; a divergence keeps the fetched custody ref and never overwrites local work.
+For scout work it leaves the scratch worktree on its dispatched generation and stores any returned patch and untracked archive with the report.
+A missing or invalid authored report retains the assignment and produces no generated report or local terminal authority; collection and release resume only after the actual returned report and branch or scratch custody validate.
+Replaying the same result converges on the same refs, files, branch, and one terminal status line.
+An assigned worker whose earlier supervisor could not return its task disk uses the explicit `execute --existing-task-disk` recovery lane.
+That request carries no payload or account archive, binds the exact landed recovery-supervisor digest, and runs one bounded continuation or no-op collection command against the retained repository instead of replacing it.
+The Azure adapter executes those bound supervisor bytes from a task-command-local recovery path without changing the originally bootstrapped supervisor, while every alternate provider must preserve the same request binding and retained-disk semantics.
+A missing repository, lost dispatched lineage, unreadable working tree, payload-restaging attempt, or recovery request without an authorized return refuses before the command runs, because continuing after any of them could delete or misattribute unlanded task-disk work.
+The blob name carries the request digest, so a later execute against the same worker cannot overwrite an outcome the controller has not collected yet.
+Reset deletes the inbound staging archives by name and the outcome blobs as part of removing the whole state container.
 
 ## Release, reset, and cooldown
 
 The controller never infers safe deletion from a terminal chat line, a missing VM, elapsed time, or budget pressure.
-The ordinary Firstmate owners first remove the endpoint, publish the report, prove landed work, release the provider account, and complete their normal cleanup checks.
-`authority-receipt` invokes `bin/fm-worker-authority.py`, which reads the ordinary task metadata, endpoint backend oracle, completion-report contract, Git landing graph, account task/home binding, and clean exact worktree root rather than accepting operator-entered digests.
-For Azure placement, the task's `account_home` is the vendor-neutral Pi pool selected above, so account authority instead requires the task-recorded selected profile and single-profile home to equal the controller queue's exact lease, then reads its owner-private credential without following links and reproduces the controller-owned upstream-account binding.
+The ordinary Firstmate owners first establish the task's required local authorities, then release the provider account and complete their normal cleanup checks.
+For a local placement, that still means endpoint absence, report publication, and forge-reachable landing before release.
+For an Azure author return, the exact local tracking endpoint may still be alive only while it performs this finalization: the digest-bound result has ended remote execution, and the endpoint receipt accepts that narrow return-localized state after the terminal status exists.
+The Azure landing receipt proves local custody rather than forge landing: the return bundle and manifest match the result, the required report and terminal status exist, ship commits are reachable from the checked-out `fm/<task>` branch, and any declared uncommitted scratch has a retained artifact.
+This releases billable remote capacity without weakening the ordinary later teardown gate, which still protects the unpushed local task branch until it reaches a remote or default branch.
+`authority-receipt` invokes `bin/fm-worker-authority.py`, which reads the ordinary task metadata, endpoint backend oracle, completion-report contract, Git landing or cloud-return custody graph, account task/home binding, and clean exact worktree root rather than accepting operator-entered digests.
+For Azure placement, the task's `account_home` is the canonical Pi pool selected above, so account authority requires the task-recorded profile and assignment-private home to equal the controller queue's exact snapshot record, then reads its owner-private credential without following links and reproduces the reusable upstream-account binding.
 It produces an `fm.worker-release/v2` bundle with five independently canonical `fm.worker-authority/v1` receipts for endpoint absence, report validity, landed work, account ownership, and writable-worktree cleanliness, plus the exact home, task, generations, cloud instance, account, worktree, repository, and every resource identity.
 When the CONTROLLER-OWNED worker role is `secondmate`, the same five receipts carry compartment evidence semantics: endpoint proves the compartment monitor pane absent through the same backend oracle; report proves the session closeout - the monitor's terminal status file, the chained close ack in its durable state, and the ordered `completion.md` contract; landing proves every chained outbox bundle landed into the local secondmate home worktree (or provably none) by REACHABILITY - each collected bundle's own tip commit must be an ancestor of the home worktree's HEAD, which also descends from the assignment's exact starting repository generation; account is unchanged; and worktree proves the home quiesced - exact repository root, no uncommitted or untracked work - while staying advisory for children, whose refusal `command_release` owns.
 Which semantics apply is never decided by the task metadata alone: the worker record's `role` and the metadata's `kind` must agree, and a disagreement in either direction refuses, so flipping one local metadata line can never move an ordinary author worker onto the compartment lane and release work that was never landed.
@@ -252,6 +280,8 @@ The compartment bundle is the identical `fm.worker-release/v2` shape and verifie
 `proof-template` remains diagnostic only: its placeholders are deliberately invalid and hand-filling them is unsupported.
 A missing, stale, malformed, or conflicting receipt retains everything.
 
+The tracking monitor retries collection, receipt minting, release recording, and reconcile by re-running the same idempotent steps until the queue entry is complete.
+Only then does it remove the locally staged provider credential and convergence files; the credential-free outcome bundle and task report remain.
 After an exact release receipt, reconcile deallocates the VM promptly.
 Azure deallocation stops compute billing but not disks, NICs, public foundation meters, monitoring, or storage operations.
 After deallocation it deletes the named execute and bootstrap Run Commands and monitor extension before the VM, then proves VM absence and disk/NIC detach before deleting NIC and OS disk; the TTL remains enabled until those proofs complete and is deleted last among compute children.
@@ -314,6 +344,71 @@ The Azure adapter re-verifies the full live assignment before invoking the minim
 Its read-only inventory uses Azure CLI 2.88-compatible role-assignment syntax (`--all` without `--resource-group`), requires private Entra blob reads for reservation/request/result identities, and uses one unambiguous primary Linux on-demand USD Consumption meter while excluding Spot, Low Priority, Windows, dev/test, reservation, and savings offers.
 It never forwards arbitrary shell text, provider credentials, or a hosted control endpoint.
 
+## No-mistakes worker wrapper
+
+`bin/fm-no-mistakes-worker` is the Firstmate-owned high-level transport used by the no-mistakes coordinator.
+Its only supported invocation is:
+
+```sh
+bin/fm-no-mistakes-worker --config '<owner-private-config.json>' execute \
+  --request '<absolute-request.json>' \
+  --payload '<absolute-payload-directory>' \
+  --result '<absolute-result.json>' \
+  --outcome '<absolute-outcome.bundle>' \
+  --step-outcome '<absolute-step-outcome.json>'
+```
+
+The request, result, and semantic step outcome use `no-mistakes.firstmate-worker-request/v1`, `no-mistakes.firstmate-worker-result/v1`, and `no-mistakes.worker-step-outcome/v1` respectively.
+The request and result echo the canonical `step` (`review` or `test`) separately from job `kind`; a repair may repair either step, and the semantic artifact follows `step`, so a test repair can never assert a review-approved head.
+They also echo the caller's lowercase SHA-256 `runtime_identity`, which binds the exact wrapper bytes, private wrapper-config bytes, and transport protocol into the job's content-addressed input; a changed runtime is a new job identity, never a replay under mutable code.
+The caller payload contains exactly `repo.bundle` and `brief.md`; the wrapper verifies both against the request, stages the configured digest-bound credential-free `runtime.tar.gz`, and submits the request's exact argv without a shell.
+The owner-private config uses `fm.no-mistakes-worker-wrapper-config/v1` and names the Firstmate home, canonical Pi account pool home, sealed runtime path and digest, lifecycle executable and exact clean Firstmate source commit, bounded assignment/cleanup/wall times, and the non-secret lifecycle environment.
+The wrapper rechecks that source commit and clean tracked lifecycle closure before every lifecycle call, and re-verifies the staged guest runtime against its configured digest after copying it, so neither an ordinary Firstmate update nor a path replacement can silently change an admitted job.
+
+`docs/azure-no-mistakes-worker-config.example.json` is the copy-and-fill wrapper config template.
+
+Build the credential-free runtime on Linux amd64 from the exact custom no-mistakes binary, a compatible Linux Node binary, an installed `@earendil-works/pi-coding-agent` package closure, and the exact fast-mode and Ketch packages:
+
+```sh
+bin/fm-no-mistakes-runtime \
+  --no-mistakes /absolute/linux-amd64/no-mistakes \
+  --node /absolute/linux-amd64/node \
+  --pi-package /absolute/linux-pi-package/@earendil-works/pi-coding-agent \
+  --fast-mode-package /absolute/extensions/pi-openai-fast-mode \
+  --fast-mode-fleet-extension /absolute/fast-mode-all-codex-accounts.ts \
+  --ketch-package /absolute/extensions/pi-ketch \
+  --no-mistakes-version '<exact-version>' \
+  --no-mistakes-source-commit '<exact-40-hex-source-commit>' \
+  --output /absolute/no-mistakes-pi-runtime.tar.gz
+```
+
+The builder refuses host-native or non-amd64 Node and no-mistakes artifacts, redirected package members, native modules from another platform, credential-shaped files, duplicate paths, and unbounded inputs.
+
+It emits the established `fm.azure-validation-runtime/v1` manifest with a digest for every byte and pins Pi, fast mode, and Ketch by their package bytes and versions.
+
+Use an npm installation made on the target Linux amd64 build host as `--pi-package`; never point the builder at `~/.pi/agent`, an account pool, or a directory containing `auth.json`.
+
+The worker lifecycle selects the least-loaded usable account and projects only that account into the assignment-private HOME as the fixed `openai-codex` profile.
+
+The guest does not load multi-pass or choose an account.
+
+The sealed `bin/pi` launcher uses the bundled Node, disables ambient extension discovery, pins fast mode and Ketch from the verified runtime, and reads OAuth only from `$HOME/pi-agent/auth.json`.
+
+The builder and hermetic staged-runtime execution are proven locally; a real Azure no-mistakes run is still required before claiming the packaged Linux closure live.
+It never names an account profile: `fm-worker-lifecycle` selects the least-loaded usable profile under its controller lock and creates an assignment-private projection.
+
+The dedicated `no-mistakes` lifecycle role admits only `repo.bundle`, `brief.md`, and `runtime.tar.gz`.
+The guest verifies the runtime's exact file inventory, runs the role command with that runtime on `PATH`, and returns the bounded semantic artifact through an execution-owned `fm.no-mistakes-worker-return/v1` bundle.
+The wrapper verifies the semantic bytes and head binding before writing the controller-facing result; a process exit, missing outcome, malformed outcome, or changed read-only head is a failed result, never `CLEAR` by inference.
+Repair results return one digest-bound single-ref bundle whose head must descend from the requested head, while review and test return no code bundle and must keep the exact requested head.
+The wrapper records a retryable local candidate before cleanup, releases through `service-complete` only after the lifecycle owns the exact execution result, and replays the candidate after a lost response instead of executing the step again.
+No caller chooses an Azure account, sees a credential, invokes `fm-azure-runner.sh`, or bypasses lifecycle cleanup.
+
+The failed retained proof `azr-763d70ab8206` used the generic Azure runner, reached runtime dependency installation, then exited 125 at `guest bootstrap: isolated executor failed` without any structured result.
+That is not evidence about a no-mistakes verdict.
+This wrapper avoids that failure shape by using the worker supervisor's digest-bound execution record and returns a closed failed envelope when the guest produces no semantic artifact.
+Live Azure usability remains unclaimed until this exact wrapper/runtime/lifecycle path completes a billable zero-to-zero proof.
+
 ## Reconcile and bounded status
 
 A read-only plan is the default:
@@ -341,7 +436,7 @@ The next controller process replays that exact action before considering new wor
 
 `status` is local and bounded by default, while `status --live` refreshes Azure and cost evidence.
 The output includes author and specialized queue depths, desired and actual active workers, all five classification counts, assignment generations, worker-hours and warning threshold, actual and forecast spend, active policy phase and limit, the 128-vCPU regional ceiling plus observed and observed-plus-reserved usage, exact-family observed-plus-reserved commitments, the 64-vCPU author plan, active and reserved specialized capacity, 22-vCPU shared headroom, cooldown, warm target, retained-disk count, and the last ten cleanup refusals.
-It omits subscription IDs, resource IDs, account identities, account digests, worktree digests, private addresses, credentials, and secrets.
+It omits subscription IDs, resource IDs, raw account identities, worktree digests, private addresses, credentials, and secrets; the high-entropy reusable account binding is deliberately visible with profile load.
 
 ## Operator policy and overrides
 
@@ -357,7 +452,7 @@ Supported policy changes are deliberately narrow:
 - `FM_AZURE_WORKER_MAX` may lower the software cap but may never exceed sixteen.
 - `--required` admits already-authorized recovery or landing demand through cost pressure, but never through unreadable telemetry, quota, identity, or cleanup proofs.
 
-There is no force-adopt, force-delete, delete-by-age, kill-for-budget, public-network, shared-account, shared-worktree, shared-browser, warm-filesystem, or hosted-form override.
+There is no force-adopt, force-delete, delete-by-age, kill-for-budget, public-network, shared-account-home, shared-worktree, shared-browser, warm-filesystem, or hosted-form override.
 A human who needs a different destructive or security boundary must change and review this contract rather than bypass it at runtime.
 
 ## Lavish
@@ -374,7 +469,7 @@ Run `bin/fm-worker-lifecycle.sh acceptance-plan` for the concise checklist.
 
 The complete acceptance must record all of these outcomes:
 
-1. Start from zero and run at least three representative tasks in parallel on three distinct VMs, account bindings, and task disks.
+1. Start from zero and run at least three representative tasks in parallel on distinct VMs, assignment-private account projections, and task disks, including two tasks that reuse one upstream binding.
 2. Finish one task while another compatible task waits and prove that deallocate, VM/NIC/OS deletion, released account/task/identity/container reset, and a new assignment generation occur before the waiting task starts.
 3. Drain every request and prove desired and active worker compute reach zero after cooldown.
 4. Prove every disposable VM, NIC, OS disk, extension, Run Command, TTL, staging request/result, and active global reservation is absent, while only explicitly retained ambiguous unfinished disks remain.
@@ -385,7 +480,7 @@ The complete acceptance must record all of these outcomes:
 9. Execute one representative private command through the pinned supervisor, collect its exact result, close the real endpoint, validate/publish the report, prove landing, account release, and clean worktree through `authority-receipt`, then record bounded status plus actual and forecast cost evidence before, during, and after the exercise.
 
 Every acceptance leg needs a positive control that proves the check detects the unsafe state.
-Positive controls include a planted public-IP relation, a foreign immutable ID, a stale task generation, a duplicated account digest, a duplicated worktree digest, a deliberately retained dirty disk, a repeated provider action, a forecast above policy, and planted cross-task files, processes, sockets, browser data, cloud identities, or credentials.
+Positive controls include a planted public-IP relation, a foreign immutable ID, a stale task generation, a duplicated projection binding, a duplicated worktree digest, a deliberately retained dirty disk, a repeated provider action, a forecast above policy, and planted cross-task files, processes, sockets, browser data, cloud identities, or credentials.
 The unsafe fixture must be isolated, must trigger the expected refusal or probe failure, and must be removed without weakening the production check.
 
 A failed leg keeps cloud-default author use unaccepted.

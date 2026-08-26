@@ -443,13 +443,34 @@ if [ -z "$CONFIRM" ]; then
   CONFIRM=$FM_AZURE_SUBSCRIPTION_ID
 fi
 
+SOURCE_ARGUMENTS=()
+if [ "$ROUTING_STATE" = selected ]; then
+  # A per-run no-mistakes step executes from the gate's detached, pipeline-owned
+  # snapshot. Give that exact HEAD a deterministic private bundle ref derived
+  # from the already-proved run id instead of guessing or pushing a task branch.
+  # The direct bundle takes the ordinary standalone shared-capacity path; it is
+  # not a validation-cell child and carries no parent reservation.
+  [ -n "$ROUTING_RUN_ID" ] \
+    || refuse "selected per-run routing has no exact no-mistakes run identity"
+  SOURCE_ARGUMENTS=(
+    --source-ref "refs/heads/fm-no-mistakes/$ROUTING_RUN_ID"
+    --private-snapshot-from-head
+  )
+fi
+
 printf 'azure-runner: class=%s selected REMOTE resource-class=%s source=%s (dispatching)\n' \
   "$COMMAND_CLASS" "$RESOURCE_CLASS" "$SELECTION_SOURCE" >&2
 
-exec "$SCRIPT_DIR/fm-azure-runner.sh" run \
-  --confirm-run \
-  --confirm-subscription "$CONFIRM" \
-  --task "$TASK" \
-  --generation "$GENERATION" \
-  --resource-class "$RESOURCE_CLASS" \
-  -- "$@"
+RUNNER_ARGUMENTS=(
+  run
+  --confirm-run
+  --confirm-subscription "$CONFIRM"
+  --task "$TASK"
+  --generation "$GENERATION"
+  --resource-class "$RESOURCE_CLASS"
+)
+if [ "$ROUTING_STATE" = selected ]; then
+  RUNNER_ARGUMENTS+=("${SOURCE_ARGUMENTS[@]}")
+fi
+RUNNER_ARGUMENTS+=(-- "$@")
+exec "$SCRIPT_DIR/fm-azure-runner.sh" "${RUNNER_ARGUMENTS[@]}"
