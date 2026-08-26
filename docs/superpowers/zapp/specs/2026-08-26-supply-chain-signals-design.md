@@ -9,8 +9,7 @@ Epic [PLAT-1184](https://redventures.atlassian.net/browse/PLAT-1184), Phase 0 sh
 **This is Spec F**, the second of three. E fixes existing logic that fails open; G adds controls and
 human override.
 
-Status: **drafted 2026-08-26 for review — the design decisions below have not been discussed yet.**
-Three are flagged inline as open.
+Status: drafted 2026-08-26; three open decisions resolved in review 2026-08-26 and folded in.
 
 ## Composability
 
@@ -69,16 +68,54 @@ Advisories and deprecation share one signal rather than becoming two. They answe
 "is this specific release something the ecosystem has flagged?" — and splitting them would push the
 service to eight signals for one bit of extra resolution.
 
-**The review's "provenance regression" idea is deliberately not built here.** Detecting that a new
-version dropped the npm provenance its predecessor had requires fetching the **from** version too,
-doubling deps.dev calls from one per bump to two — 22 requests for a PR #32-shaped change, inside a
-30-second budget already shared with four GitHub calls. `slsaProvenances` and `attestations` are
-recorded raw on the eval record so the data exists when someone wants to act on it, but no grade
-derives from them yet.
+### Provenance regression — fetched and recorded, deliberately not graded
 
-> **Open decision 1.** Provenance regression is genuinely valuable against slow-burn attacks, which
-> cooldown cannot catch (event-stream sat ~2.5 months). Worth the doubled call volume now, or
-> recorded-only until the ledger shows it would have mattered?
+Detecting that a new version dropped the npm provenance its predecessor carried requires fetching the
+**from** version too, doubling deps.dev calls from one per bump to two.
+
+**That cost is affordable, and an earlier draft of this spec overstated it.** Twenty-two requests at
+concurrency 8 is three waves; at a 3-second per-request ceiling that is ~9 seconds worst case, and
+typically well under one second against 834-byte responses. The function's budget is 30 seconds and
+it also makes four GitHub calls. It fits.
+
+Worth being precise about what that budget is, because it is easy to assume otherwise: **GitHub
+imposes no limit here.** Its 10-second webhook expectation applies to the *receiver*, and since
+PLAT-1233 the worker sits behind SQS. The 30 seconds is our own choice in
+`infrastructure/terraform/main.tf`, raisable to Lambda's 15-minute ceiling if work ever justifies it,
+provided the queue's visibility timeout keeps its 6:1 ratio.
+
+So the reason not to grade provenance regression is **not** cost. It is that nobody knows its
+false-positive rate. Packages legitimately stop publishing provenance — tooling migrations,
+maintainer changes, CI rewrites — and grading on it today would be guessing at a threshold rather
+than deriving one.
+
+Therefore: **fetch the from-version, record `provenanceLost` per bump, grade nothing.** Thirty days
+of data answers the question the grade would otherwise have to assume. This is the same argument
+Spec G makes for commit authorship.
+
+## Recorded versus surfaced — the principle
+
+This spec is the first to add a meaningful amount of data that is collected but never graded, so the
+rule belongs here and the later specs reference it.
+
+**Record everything cheap to collect. Surface only what changes a reader's action.**
+
+Storage is nearly free and retroactive collection is impossible — a field not written today cannot be
+recovered for the 200 evaluations the epic's exit criteria need. But a check run someone reads on
+their own pull request is diluted by every value that does not help them decide something.
+
+Three tiers result:
+
+| Tier | Examples | Lives in |
+|---|---|---|
+| Graded and surfaced | the gates; the seven risk signals | check-run table + eval record |
+| Recorded and surfaced | each signal's observed value, in the table's right column | check-run table + eval record |
+| **Recorded only** | `provenanceLost`, `adoption`, and Spec G's commit authorship and merge window | eval record only |
+
+Tier three has no read path today: it is visible only by querying `zapp-evaluations` directly, which
+nobody will do casually. **Spec I brings the weekly shadow report forward to be that read path**,
+which is why it is sequenced alongside this work rather than left at the end of the epic. Collecting
+data with no one looking at it is how a broken recorder stays broken for six weeks.
 
 ## B1 · Tiered cooldown, and sub-day releases graded high
 
@@ -142,30 +179,35 @@ proportionate; one is.
 Recorded on the eval record as `adoption: { dependentCount, directDependentCount }` or null. No
 grade, no check-run row, no effect on any verdict.
 
-> **Open decision 2.** Record-only fields are worth having *because* they cannot be gathered
-> retroactively — the epic's exit criteria need ≥200 evaluations. But an alpha endpoint may simply
-> stop working. Accept that, or skip B6 until deps.dev promotes it to v3?
+**The alpha dependency is accepted, with one requirement: we must know when it breaks.** A shape
+change or a withdrawn endpoint degrades `adoption` to null, which by itself is silent — and a field
+that has been quietly null for six weeks is worse than one that was never collected, because it looks
+like data.
+
+So a failed or unparseable dependents response logs `adoption_unavailable` with the status and
+package. That line is what the weekly report (Spec I) counts, so a persistent failure surfaces as a
+number someone reads rather than as an absence nobody notices. It never fails a check run and never
+affects a verdict.
 
 ## The seventh signal and the six-signal criterion
 
 PLAT-1191's acceptance criterion says six signals. This makes seven, and every rendering that says
 "graded on N of 6" becomes "of 7".
 
-That is a deliberate supersession, recorded here so it reads as a decision: the criterion described
-the signals known when the ticket was written, and the review established a seventh from evidence.
-The ledger's `signalsGraded` count moves with it, so any Phase 1 query comparing evaluations across
-the change must key on `rulesSha` — which is exactly what `rulesSha` is for.
+**The deviation is accepted deliberately: more signals is a better service.** The criterion
+described the signals known when the ticket was written, and the review established a seventh from
+evidence. Folding `targetVersionHealth` into `closesFinding` to preserve the number was considered
+and rejected — one row would have to say two opposite things ("closes an advisory" and "introduces
+one"), which is worse for the human reading it than a count that moved.
 
-> **Open decision 3.** Alternatively `targetVersionHealth` could fold into the existing
-> `closesFinding` signal, keeping the count at six — "advisory posture of this change", covering both
-> what it closes and what it introduces. Tidier against the ticket, worse in the check-run table,
-> where one row would have to say two opposite things.
+The ledger's `signalsGraded` moves with it, so any Phase 1 query comparing evaluations across the
+change must key on `rulesSha` — which is exactly what `rulesSha` is for.
 
 ## Files
 
 | File | Change |
 |---|---|
-| `src/signals/publish-age.ts` | Return the full deps.dev record, not just the timestamp; tiered thresholds; sub-day `high` |
+| `src/signals/publish-age.ts` | Return the full deps.dev record, not just the timestamp; fetch the from-version too for provenance; tiered thresholds; sub-day `high` |
 | `src/signals/target-health.ts` | New — grade advisories and deprecation from the record publish-age already fetched |
 | `src/signals/adoption.ts` | New — one `v3alpha` dependents call for the governing bump, record-only |
 | `src/risk.ts` | Seventh signal in `RiskSignals` and the worst-of comparison |
@@ -208,7 +250,7 @@ exists to fix.
 
 ## Out of scope
 
-- **Provenance regression grading** — see open decision 1.
+- **Grading on provenance regression** — recorded here, graded once the data shows its false-positive rate.
 - **Socket-class behavioural diffs** (install scripts, network/fs access, ownership churn) — vendor
   territory, as the review says. Note it in the build-vs-buy discussion.
 - **Ecosystems other than npm.** deps.dev covers more, but every enrolled repo is npm today.
@@ -221,7 +263,9 @@ exists to fix.
 - [ ] A release under 24 hours old grades `high`
 - [ ] `targetVersionHealth` grades advisories `high` and deprecation `medium`, from the existing call
 - [ ] A response missing `advisoryKeys` grades `unknown`, never `low`
+- [ ] The from-version is fetched and `provenanceLost` recorded per bump, grading nothing
 - [ ] Provenance and attestation fields are recorded raw on the eval record
+- [ ] A failed dependents lookup logs `adoption_unavailable` with status and package
 - [ ] `adoption` is one call for the governing bump, record-only, null-safe against the alpha endpoint
 - [ ] Renderings say "of 7"; the ledger's `signalsGraded` matches
 - [ ] A sub-day release closing a CVE still grades `high`
