@@ -27,12 +27,12 @@ make_home() {  # <name>
 }
 
 # Build the board from <charted-json> and return what the renderer produced.
-render() {  # <home> <charted-json> [charted_more]
-  local home=$1 charted=$2 more=${3:-0} data="$1/payload.json"
-  jq -n --argjson charted "$charted" --argjson more "$more" '{
+render() {  # <home> <charted-json> [charted_more] [charted_warning_more]
+  local home=$1 charted=$2 more=${3:-0} warning_more=${4:-0} data="$1/payload.json"
+  jq -n --argjson charted "$charted" --argjson more "$more" --argjson warning_more "$warning_more" '{
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
     prs_live:false, captains_call:[], underway:[], landed:[],
-    charted:$charted, charted_more:$more}' > "$data"
+    charted:$charted, charted_more:$more, charted_warning_more:$warning_more}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
@@ -96,6 +96,22 @@ test_a_board_of_only_warnings_still_reports_nothing_queued() {
   pass "a warning-only board reports nothing queued and still shows the warning"
 }
 
+test_omitted_warnings_never_count_as_more_queued() {
+  local home out
+  home=$(make_home warning-more)
+  out=$(render "$home" '[
+    {"id":"warn-visible","repo":"sample","title":"Home unreadable","reason":"current home state unavailable","dispatchable":false,"kind":"warning"}
+  ]' 0 1)
+  [ "$(charted_next_count "$out")" = 0 ] \
+    || fail "an omitted warning was counted as queued work: $out"
+  printf '%s' "$out" | jq -e '
+    (.empty | length) == 1 and (.empty[0] | test("Nothing is queued"))
+      and (.more == ["+1 more repair warning - ask firstmate for the full chart"])
+      and ([.more[] | select(test("more queued"))] | length) == 0
+  ' >/dev/null || fail "an omitted warning was labeled as more queued: $out"
+  pass "omitted warnings remain separate from omitted queued work"
+}
+
 test_an_omitted_kind_keeps_the_existing_queued_rendering() {
   local home out
   home=$(make_home default-kind)
@@ -115,4 +131,5 @@ test_an_omitted_kind_keeps_the_existing_queued_rendering() {
 test_a_warning_row_reads_as_a_repair_not_as_queued_work
 test_warnings_are_excluded_from_the_charted_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued
+test_omitted_warnings_never_count_as_more_queued
 test_an_omitted_kind_keeps_the_existing_queued_rendering

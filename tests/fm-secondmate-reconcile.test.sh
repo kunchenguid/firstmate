@@ -96,6 +96,8 @@ test_an_inventory_mismatch_asks_the_mate_once_and_only_once() {
     || fail "the ask did not land as exactly one durable steering record"
   assert_contains "$(inbox_text "$home/state" mate)" "stale-scout" \
     "the instruction did not name the rows that disagree"
+  [ "$(find "$home/state/pending-replies" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d '[:space:]')" -eq 0 ] \
+    || fail "a fire-and-forget reconcile ask armed pending-reply recovery"
 
   # The same persistent mismatch, seen again on every later snapshot, must not
   # re-nag: this is the whole point of episode identity.
@@ -131,8 +133,8 @@ test_a_completed_send_survives_a_missing_episode_commit() {
   write_snapshot "$snap" mate '{"kind":"unowned_current","ids":["live-row"]}'
   run_notify "$home" "$fakebin" interrupted "$snap" >/dev/null || fail "the first ask failed"
 
-  corr=$(find "$home/state/pending-replies" -maxdepth 1 -type f -name '????????????????' -exec basename {} \; | head -1)
-  [ -n "$corr" ] || fail "the delivered ask has no persisted correlation identity"
+  corr=$(inbox_text "$home/state" mate | grep -oE 'delivery=[a-f0-9]{16}' | head -1 | cut -d= -f2)
+  [ -n "$corr" ] || fail "the delivered ask has no persisted delivery identity"
   printf 'pending\tunowned_current:["live-row"]\t%s\n' "$corr" > "$home/state/mate.reconcile-episode"
   out=$(run_notify "$home" "$fakebin" interrupted "$snap") \
     || fail "recovery after the missing commit failed: $out"
@@ -153,19 +155,14 @@ test_an_unconfirmed_remote_send_reuses_its_delivery_identity() {
 #!/usr/bin/env bash
 set -eu
 state=${FM_STATE_OVERRIDE:?}
-corr=${FM_PENDING_REPLY_EXISTING_CORR:-${FM_PENDING_REPLY_CORR_ID:-}}
-mkdir -p "$state/pending-replies" "$state/fake-remote-deliveries"
+[ "${2:-}" = --fire-and-forget ] || exit 2
+corr=${3:-}
+mkdir -p "$state/fake-remote-deliveries"
 printf '%s\n' "$corr" >> "${FM_RECONCILE_FAKE_SEND_LOG:?}"
 touch "$state/fake-remote-deliveries/$corr"
 if [ ! -f "$state/fake-unknown-once" ]; then
-  cat > "$state/pending-replies/$corr" <<EOF
-schema=fm-pending-reply.v1
-task_id=$1
-delivered_epoch=
-phase=delivery_unknown
-EOF
   touch "$state/fake-unknown-once"
-  exit 1
+  exit 3
 fi
 exit 0
 SH
@@ -188,10 +185,10 @@ SH
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$runtime" \
     FM_STATE_OVERRIDE="$home/state" FM_RECONCILE_FAKE_SEND_LOG="$home/send.log" \
     "$runtime/bin/fm-secondmate-reconcile.sh" notify --snapshot "$retry" >/dev/null \
-    || fail "the correlation-preserving retry failed"
+    || fail "the delivery-preserving retry failed"
   second_corr=$(tail -1 "$home/send.log")
   [ "$first_corr" = "$second_corr" ] \
-    || fail "the retry changed correlation from $first_corr to $second_corr"
+    || fail "the retry changed delivery identity from $first_corr to $second_corr"
   [ "$(find "$home/state/fake-remote-deliveries" -type f | wc -l | tr -d '[:space:]')" -eq 1 ] \
     || fail "the completion-unknown retry created a second logical delivery"
   pass "completion-unknown remote sends reuse their delivery identity"

@@ -439,6 +439,8 @@ __FM_BEARINGS_BOARD_DATA__
      so every count of queued work excludes them. */
   function isWarning(t) { return t && t.kind === "warning"; }
   function chartedQueued(rows) { return (rows || []).filter(function (t) { return !isWarning(t); }); }
+  var chartedMoreQueued = data.charted_more || 0;
+  var chartedMoreWarnings = data.charted_warning_more || 0;
   function utf8ByteLength(text) { return new TextEncoder().encode(text).length; }
   var CHECK_SVG = '<svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
 
@@ -450,7 +452,7 @@ __FM_BEARINGS_BOARD_DATA__
     { n: callTotal, l: "need you", call: true },
     { n: data.underway.length, l: "underway" },
     { n: data.landed.length, l: "landed recently" },
-    { n: chartedQueued(data.charted).length + (data.charted_more || 0), l: "charted next" }
+    { n: chartedQueued(data.charted).length + chartedMoreQueued, l: "charted next" }
   ];
   var strip = document.getElementById("bb-stats");
   stats.forEach(function (s) {
@@ -655,7 +657,7 @@ __FM_BEARINGS_BOARD_DATA__
     barBtn.disabled = !n;
   }
 
-  if (!chartedQueued(data.charted).length && !data.charted_more) {
+  if (!chartedQueued(data.charted).length && !chartedMoreQueued) {
     ch.appendChild(el("div", "bb-empty", "Nothing is queued."));
   }
   data.charted.forEach(function (t) {
@@ -688,11 +690,14 @@ __FM_BEARINGS_BOARD_DATA__
     ch.appendChild(row);
   });
   var chartedShown = chartedQueued(data.charted).length;
-  var chartedTotal = chartedShown + (data.charted_more || 0);
+  var chartedTotal = chartedShown + chartedMoreQueued;
   document.getElementById("bb-charted-sub").textContent =
-    data.charted_more ? "showing " + chartedShown + " of " + chartedTotal : "";
-  if (data.charted_more) {
-    ch.appendChild(el("span", "bb-morechip", "+" + data.charted_more + " more queued - ask firstmate for the full chart"));
+    chartedMoreQueued ? "showing " + chartedShown + " of " + chartedTotal : "";
+  if (chartedMoreQueued) {
+    ch.appendChild(el("span", "bb-morechip", "+" + chartedMoreQueued + " more queued - ask firstmate for the full chart"));
+  }
+  if (chartedMoreWarnings) {
+    ch.appendChild(el("span", "bb-morechip", "+" + chartedMoreWarnings + " more repair warning" + (chartedMoreWarnings === 1 ? "" : "s") + " - ask firstmate for the full chart"));
   }
 
   if (anyPickable) {

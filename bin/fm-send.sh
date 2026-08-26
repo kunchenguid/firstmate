@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell line into its terminal, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -93,8 +93,9 @@
 # marked - their behavior is unchanged.
 #
 # Parent-owned pending-reply expectation: every newly marked secondmate request
-# also receives a privacy-safe correlation id and a durable parent record under
-# state/pending-replies/ before delivery (bin/fm-pending-reply-lib.sh). Delivery
+# except an explicit --fire-and-forget delivery receives a privacy-safe
+# correlation id and a durable parent record under state/pending-replies/ before
+# delivery (bin/fm-pending-reply-lib.sh). Delivery
 # success and reply success are separate facts: delivery never resolves the
 # expectation. On the inbox plane the durable enqueue IS delivery to the task's
 # record, so the expectation is marked delivered at enqueue time; when that
@@ -107,7 +108,10 @@
 # it armed rather than dropping it, and only a proven send failure discards it.
 # Set FM_PENDING_REPLY_EXISTING_CORR=<id> when re-sending a recovery request
 # for an already-open expectation so a second record is not created. Direct
-# unmarked captain input never creates one.
+# unmarked captain input never creates one. A marked secondmate instruction
+# sent with --fire-and-forget <16-hex-delivery-id> uses the same inbox transport
+# without creating a reply expectation; its delivery id makes uncertain retries
+# idempotent while allowing a later identical instruction to be distinct.
 #
 # Remote secondmate delivery: the send crosses fm-on.sh to a host-local leg
 # (bin/fm-remote-secondmate-control.sh cmd_send) that writes the message as a
@@ -421,6 +425,7 @@ fi
 # must precede --key or the message text; everything after the last flag is the
 # message exactly as before, so ordinary sends are byte-identical.
 RESOLVE_KEYS=
+FIRE_AND_FORGET_ID=
 fm_send_add_resolve_key() {  # <key>
   local k=$1
   case "$k" in
@@ -446,6 +451,17 @@ while :; do
       ;;
     --resolve-key=*)
       fm_send_add_resolve_key "${1#--resolve-key=}" || exit 1
+      shift
+      ;;
+    --fire-and-forget)
+      [ $# -ge 2 ] || { echo "error: --fire-and-forget requires a delivery id" >&2; exit 1; }
+      [ -z "$FIRE_AND_FORGET_ID" ] || { echo "error: duplicate --fire-and-forget" >&2; exit 1; }
+      FIRE_AND_FORGET_ID=$2
+      shift 2
+      ;;
+    --fire-and-forget=*)
+      [ -z "$FIRE_AND_FORGET_ID" ] || { echo "error: duplicate --fire-and-forget" >&2; exit 1; }
+      FIRE_AND_FORGET_ID=${1#--fire-and-forget=}
       shift
       ;;
     *) break ;;
@@ -514,6 +530,15 @@ fm_send_hold_resolved_id() {  # <task-id> <decision-key>
   done
   return 1
 }
+
+if [ -n "$FIRE_AND_FORGET_ID" ]; then
+  printf '%s' "$FIRE_AND_FORGET_ID" | grep -Eq '^[a-f0-9]{16}$' \
+    || { echo "error: --fire-and-forget delivery id must be 16 lowercase hex characters" >&2; exit 1; }
+  [ "$MARK_FROM_FIRSTMATE" = 1 ] \
+    || { echo "error: --fire-and-forget requires a recorded secondmate task selector" >&2; exit 1; }
+  [ -z "$RESOLVE_KEYS" ] \
+    || { echo "error: --fire-and-forget cannot accompany --resolve-key" >&2; exit 1; }
+fi
 
 if [ -n "$RESOLVE_KEYS" ]; then
   if [ -z "$TARGET_SELECTOR" ] || [ -z "$TARGET_META" ]; then
@@ -604,6 +629,8 @@ fm_send_feed_resolved_holds() {  # <answer-text>
 # error with the attempted resolution attached.
 
 if [ "${1:-}" = "--key" ]; then
+  [ -z "$FIRE_AND_FORGET_ID" ] \
+    || { echo "error: --fire-and-forget cannot accompany --key" >&2; exit 1; }
   case "$*" in
     *--resolve-key*)
       echo "error: --resolve-key cannot accompany --key; answering a decision requires a text answer" >&2
@@ -628,7 +655,11 @@ else
   # The pre-marker answer text, kept for the closing resolved note so the
   # durable ledger records the plain answer without marker or corr bytes.
   RESOLVE_ANSWER_TEXT=$MESSAGE
-  if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
+  if [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ -n "$FIRE_AND_FORGET_ID" ]; then
+    fm_message_mark_from_firstmate "$MESSAGE" MESSAGE
+    MESSAGE="${FM_FROMFIRST_MARK}delivery=${FIRE_AND_FORGET_ID} ${MESSAGE#"$FM_FROMFIRST_MARK"}"
+    FM_SEND_IDEMPOTENT=1
+  elif [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never
     # resolves that expectation (see fm-pending-reply-lib.sh).
@@ -693,7 +724,7 @@ else
   # command: the pre-existing marker-first wire bytes are retained in stage 1.
   INBOX_PLANE=0
   if [ -n "$TARGET_SELECTOR" ]; then
-    if [ "$TARGET_BACKEND" = remote ]; then
+    if [ -n "$FIRE_AND_FORGET_ID" ] || [ "$TARGET_BACKEND" = remote ]; then
       INBOX_PLANE=1
     else
       case "$RESOLVE_ANSWER_TEXT" in
@@ -745,6 +776,10 @@ else
     fi
     fm_lock_release "$REMOTE_META_LOCK"
     if [ "$remote_rc" -ne 0 ] && [ "$remote_completion_unknown" -eq 1 ]; then
+      if [ -n "$FIRE_AND_FORGET_ID" ]; then
+        echo "error: fire-and-forget steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (delivery-id=$FIRE_AND_FORGET_ID); retry only with the same delivery id" >&2
+        exit 3
+      fi
       if [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
       fi

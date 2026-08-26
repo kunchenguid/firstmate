@@ -127,6 +127,8 @@ validate_payload() {  # <data.json>
     and (.charted | type == "array")
     and ((has("charted_more") | not)
       or ((.charted_more | type == "number") and (.charted_more >= 0) and (.charted_more | floor == .)))
+    and ((has("charted_warning_more") | not)
+      or ((.charted_warning_more | type == "number") and (.charted_warning_more >= 0) and (.charted_warning_more | floor == .)))
     and ([.captains_call[] | call_item] | all)
     and ([.underway[] | underway_item] | all)
     and ([.landed[] | landed_item] | all)

@@ -52,8 +52,8 @@ Board answers are acted on later under the normal authority rules; this skill's 
 
 2. **Ask any home whose own books disagree to reconcile them.**
    When the snapshot reports a secondmate home whose `invalidity` is `orphan_in_flight`, `unowned_current`, or `terminal_in_flight`, that home's backlog and its own task metadata disagree and only that home may fix it.
-   Pass that exact gathered projection without waiting on the hook with `printf '%s\n' "$snapshot" | bin/fm-secondmate-reconcile.sh notify --snapshot - >/dev/null 2>&1 &`; it sends exactly one instruction per mismatch episode through the ordinary steering transport and stays silent while the same mismatch persists.
-   Never edit another home's backlog or metadata from here, and never wait on the reply: the digest is composed from the snapshot you already have.
+   Pass that exact gathered projection without waiting on the hook with `printf '%s\n' "$snapshot" | bin/fm-secondmate-reconcile.sh notify --snapshot - >/dev/null 2>&1 &`; it sends exactly one fire-and-forget instruction per mismatch episode through the ordinary steering transport, arms no reply recovery, and stays silent while the same mismatch persists.
+   Never edit another home's backlog or metadata from here, and never expect or wait on a reply: the digest is composed from the snapshot you already have.
 
 3. **Compose the four-section chat digest from the fresh snapshot.**
    The gather step is deterministic; your judgment is scoped to ranking the command's facts by what matters right now and writing scannable captain-facing prose.
@@ -88,6 +88,7 @@ Compose the payload from the same snapshot with the same ranking judgment as the
 - Card `type` (decision, merge, credential) is your composing judgment from the row's content; no backlog field types a card for you.
 - When the card's task is a captain-gated WORK item (the answer should free it to proceed rather than complete it), set the card's `close: "release"` so the answer lifts the hold instead of closing the task; question-shaped items omit it.
 - A Charted Next row's optional `kind` separates work from alarms: omit it (or set `"queued"`) for real queued work, and set `"warning"` on every action-free fleet-integrity notice - the `(main-inventory)` gate, an unavailable secondmate home, and an inventory-mismatch repair notice. The board badges a warning row `needs repair` instead of `waiting` and leaves it out of the Charted Next count, so those rows never read as dispatchable queued work.
+- `charted_more` counts omitted queued rows only, while `charted_warning_more` counts omitted warning rows only; keep both counts separate whenever the board payload truncates Charted Next.
 - Every Captain's Call item and every Underway, Recently Landed, and Charted Next row carries an explicit `repo` field. Fill it from the snapshot and task records wherever known; use null or an empty string only as the deliberate genuinely-no-repo marker, in which case the template may show the internal id. Ids otherwise stay in the payload only as the routing channel, and composed reasons name blockers in plain words.
 
 Run `build` once after composing the payload.

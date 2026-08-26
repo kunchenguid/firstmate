@@ -34,7 +34,7 @@
 # Exit status: 0 when every due home was either notified, deduped, or cleared;
 # 1 when at least one due send failed or remained completion-unknown.
 # A known-undelivered send records no episode, while an unknown completion keeps
-# its correlation so the next fresh snapshot retries the same logical delivery.
+# its delivery identity so the next fresh snapshot retries the same logical delivery.
 #
 # Output, one line per home considered:
 #   sent: <mate-id> <episode>       one reconcile instruction was recorded
@@ -51,8 +51,6 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-# shellcheck source=bin/fm-pending-reply-lib.sh
-. "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 ACTIVE_LOCK=
 release_active_lock() {
@@ -188,8 +186,8 @@ cmd_notify() {
     | [.id, (if ($ids | length) == 0 then "" else $kind end), $ids_display, $ids_canonical, $generation]
     | join("\u001f")')
 
-  local id kind ids ids_canonical generation episode path observed_path observed prior corr pending_reply lock
-  local pending_tag pending_episode pending_corr pending_generation phase
+  local id kind ids ids_canonical generation episode path observed_path observed prior corr lock send_rc
+  local pending_tag pending_episode pending_corr pending_generation
   while IFS=$'\x1f' read -r id kind ids ids_canonical generation; do
     [ -n "${id:-}" ] || continue
     path=$(episode_path "$id")
@@ -256,42 +254,19 @@ EOF_PENDING
       release_active_lock
       continue
     fi
-    pending_reply="${FM_PENDING_REPLY_DIR_OVERRIDE:-$STATE/pending-replies}/$corr"
-    if [ -f "$pending_reply" ] && [ ! -L "$pending_reply" ]; then
-      if ! FM_SEND_IDEMPOTENT=1 FM_PENDING_REPLY_EXISTING_CORR="$corr" \
-        "$SCRIPT_DIR/fm-send.sh" "$id" "$(reconcile_text "$kind" "$ids")" >/dev/null 2>&1; then
-        phase=$(fm_pending_reply_get "$pending_reply" phase)
-        if [ "$phase" = delivery_unknown ]; then
-          write_observation "$id" "$generation" || rc=1
-          printf 'unconfirmed: %s %s\n' "$id" "$episode"
-        else
-          if write_observation "$id" "$generation"; then
-            fm_pending_reply_discard_undelivered "$STATE" "$corr" || true
-            rm -f -- "$path"
-          else
-            rc=1
-          fi
-          printf 'failed: %s %s\n' "$id" "$episode"
-        fi
-        rc=1
-        release_active_lock
-        continue
-      fi
-    elif ! FM_SEND_IDEMPOTENT=1 FM_PENDING_REPLY_CORR_ID="$corr" \
-      "$SCRIPT_DIR/fm-send.sh" "$id" "$(reconcile_text "$kind" "$ids")" >/dev/null 2>&1; then
-      phase=$(fm_pending_reply_get "$pending_reply" phase)
-      if [ "$phase" = delivery_unknown ]; then
-        write_observation "$id" "$generation" || rc=1
-        printf 'unconfirmed: %s %s\n' "$id" "$episode"
-      else
-        if write_observation "$id" "$generation"; then
-          fm_pending_reply_discard_undelivered "$STATE" "$corr" || true
-          rm -f -- "$path"
-        else
-          rc=1
-        fi
-        printf 'failed: %s %s\n' "$id" "$episode"
-      fi
+    send_rc=0
+    "$SCRIPT_DIR/fm-send.sh" "$id" --fire-and-forget "$corr" \
+      "$(reconcile_text "$kind" "$ids")" >/dev/null 2>&1 || send_rc=$?
+    if [ "$send_rc" -eq 3 ]; then
+      write_observation "$id" "$generation" || rc=1
+      printf 'unconfirmed: %s %s\n' "$id" "$episode"
+      rc=1
+      release_active_lock
+      continue
+    fi
+    if [ "$send_rc" -ne 0 ]; then
+      if write_observation "$id" "$generation"; then rm -f -- "$path"; else rc=1; fi
+      printf 'failed: %s %s\n' "$id" "$episode"
       rc=1
       release_active_lock
       continue

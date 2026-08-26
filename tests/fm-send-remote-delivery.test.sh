@@ -354,6 +354,35 @@ test_remote_retry_failure_preserves_ambiguous_expectation() {
   pass "fm-send remote: a failed retry cannot erase an earlier ambiguous delivery"
 }
 
+test_remote_fire_and_forget_never_arms_reply_recovery() {
+  local dir fb ssh_log home rhome rc count delivery
+  dir="$TMP_ROOT/remote-fire-and-forget"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home remote-fire-and-forget)
+  home=$(setup_remote_parent_home remote-fire-and-forget "$rhome")
+  delivery=0123456789abcdef
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_FAKE_SSH_AFTER_AMBIGUOUS_RC=1 \
+    "$SEND" rsm --fire-and-forget "$delivery" "reconcile your own books" \
+    >"$dir/out" 2>"$dir/err" || rc=$?
+  expect_code 3 "$rc" "an ambiguous fire-and-forget delivery must report unconfirmed"
+  [ "$(find "$home/state/pending-replies" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')" = 0 ] \
+    || fail "fire-and-forget delivery created a pending-reply expectation"
+  count=$(find "$rhome/state/parent-route/rsm.inbox" -name '*.msg' | wc -l | tr -d ' ')
+  [ "$count" = 1 ] || fail "the ambiguous fire-and-forget delivery did not land exactly once"
+
+  send_env "$fb" "$home" "$ssh_log" \
+    "$SEND" rsm --fire-and-forget "$delivery" "reconcile your own books" \
+    >"$dir/retry.out" 2>"$dir/retry.err" \
+    || fail "the fire-and-forget retry failed"
+  count=$(find "$rhome/state/parent-route/rsm.inbox" -name '*.msg' | wc -l | tr -d ' ')
+  [ "$count" = 1 ] || fail "the same fire-and-forget delivery id created a duplicate remote record"
+  grep -F "delivery=$delivery" "$(remote_inbox_records "$rhome" | head -1)" >/dev/null \
+    || fail "the remote record omitted its fire-and-forget delivery identity"
+  pass "fm-send remote: fire-and-forget delivery is idempotent without reply recovery"
+}
+
 test_remote_send_revalidates_after_retirement_lock() {
   local dir rhome meta lock ready release rc sender_pid holder_pid
   dir="$TMP_ROOT/remote-retire-race"; mkdir -p "$dir"
@@ -620,6 +649,7 @@ test_local_pending_does_not_close_resolve_key() {
 test_remote_steer_lands_in_remote_inbox
 test_remote_rerun_is_idempotent
 test_remote_retry_failure_preserves_ambiguous_expectation
+test_remote_fire_and_forget_never_arms_reply_recovery
 test_remote_send_revalidates_after_retirement_lock
 test_remote_send_revalidates_parent_route_after_retirement_lock
 test_remote_resolve_key_closes_at_enqueue
