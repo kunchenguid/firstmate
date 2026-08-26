@@ -253,6 +253,106 @@ fm_backend_orca_composer_state() {  # <terminal-id> [expected-label] -> empty|pe
   printf '%s' "$verdict"
 }
 
+# fm_backend_orca_probe: correlate one terminal's endpoint liveness with Orca's
+# own structured agent model in a single pass. Prints "<endpoint> <agent>":
+#   endpoint - alive|dead|missing|ambiguous|unreadable, the recovery-grade
+#              classifier vocabulary (bin/fm-backend.sh fm_backend_agent_state).
+#   agent    - the Orca `worktree ps` agents[] `state` for this exact pane
+#              (working|done|blocked|...), or "-" when no agent entry applies.
+# The correlation key is the pane key `tabId:leafId`, which `terminal show` and
+# `worktree ps` agents[] share. That structured array - not a rendered title or
+# `terminal wait --for tui-idle`, which cannot separate a busy agent from a
+# plain shell because both simply time out - is what distinguishes a running
+# agent from a bare shell the agent has exited to. Verified against Orca
+# v1.4.188 (docs/verification/runtime-backends.md "Orca").
+# One `terminal show` plus one `worktree ps`, reduced in one Node pass; the
+# 0x1e record separator joins the two payloads without colliding with JSON.
+fm_backend_orca_probe() {  # <terminal-id> -> "<endpoint> <agent>"
+  local terminal=$1 show ps
+  command -v orca >/dev/null 2>&1 || { printf 'unreadable -'; return 0; }
+  # `orca terminal show` exits non-zero for a stale handle but still prints the
+  # `ok:false` body carrying `terminal_handle_stale`, which the reducer needs to
+  # tell `missing` (gone endpoint) from `unreadable` (transient failure). Keep
+  # the body regardless of exit code and treat only an empty read as unreadable.
+  show=$(orca terminal show --terminal "$terminal" --json 2>/dev/null)
+  [ -n "$show" ] || { printf 'unreadable -'; return 0; }
+  ps=$(orca worktree ps --json 2>/dev/null || true)
+  printf '%s\x1e%s' "$show" "$ps" | node -e '
+const fs = require("fs");
+const raw = fs.readFileSync(0, "utf8");
+const sep = raw.indexOf("\x1e");
+const showRaw = sep < 0 ? raw : raw.slice(0, sep);
+const psRaw = sep < 0 ? "" : raw.slice(sep + 1);
+let show;
+try { show = JSON.parse(showRaw); } catch (e) { process.stdout.write("unreadable -"); process.exit(0); }
+if (show.ok === false) {
+  const code = show.error && show.error.code;
+  if (code === "terminal_handle_stale" || code === "tab_not_found") process.stdout.write("missing -");
+  else process.stdout.write("unreadable -");
+  process.exit(0);
+}
+const t = show.result && show.result.terminal;
+if (!t) { process.stdout.write("unreadable -"); process.exit(0); }
+// A closed or exited endpoint is confidently agent-free.
+if (t.connected === false || t.exitCause) { process.stdout.write("dead -"); process.exit(0); }
+// Only a positively connected endpoint can be attributed further.
+if (t.connected !== true) { process.stdout.write("ambiguous -"); process.exit(0); }
+if (!t.tabId || !t.leafId) { process.stdout.write("ambiguous -"); process.exit(0); }
+const paneKey = t.tabId + ":" + t.leafId;
+let ps;
+try { ps = JSON.parse(psRaw); } catch (e) { process.stdout.write("unreadable -"); process.exit(0); }
+if (!ps || ps.ok === false || !ps.result || !Array.isArray(ps.result.worktrees)) {
+  // Endpoint is connected but the agent model could not be read, so agent
+  // presence cannot be proven either way.
+  process.stdout.write("unreadable -");
+  process.exit(0);
+}
+let agent = null;
+for (const w of ps.result.worktrees) {
+  for (const a of (w.agents || [])) {
+    if (a && a.paneKey === paneKey) agent = a;
+  }
+}
+if (!agent) {
+  // Connected terminal with no agent entry: the agent has exited to a shell.
+  process.stdout.write("dead -");
+  process.exit(0);
+}
+const st = (typeof agent.state === "string" && agent.state) ? agent.state : "unknown";
+process.stdout.write("alive " + st);
+'
+}
+
+# fm_backend_orca_agent_state: the recovery-grade endpoint classifier for one
+# recorded terminal (see bin/fm-backend.sh fm_backend_agent_state for the shared
+# vocabulary). Reuses fm_backend_orca_probe so the agent-vs-shell distinction is
+# proven from Orca's own structured agent model, exactly as tmux uses its
+# foreground process group.
+fm_backend_orca_agent_state() {  # <terminal-id> -> alive|dead|missing|ambiguous|unreadable
+  local probe
+  probe=$(fm_backend_orca_probe "$1") || { printf 'unreadable'; return 0; }
+  printf '%s' "${probe%% *}"
+}
+
+# fm_backend_orca_busy_state: semantic busy state from Orca's native agent
+# model. Only a positively connected endpoint carrying a live agent entry has a
+# busy verdict; a `working` turn is busy, a settled `done` turn is idle, a
+# `blocked` agent (a trust or update modal) is blocked, and anything else -
+# including an endpoint with no agent - is unknown. The fleet-wide busy fold
+# (bin/fm-busy-lib.sh fm_busy_classify) trusts only the BUSY verdict as a
+# fallback, matching the herdr-native contract.
+fm_backend_orca_busy_state() {  # <terminal-id> -> busy|idle|blocked|unknown
+  local probe
+  probe=$(fm_backend_orca_probe "$1") || { printf 'unknown'; return 0; }
+  [ "${probe%% *}" = alive ] || { printf 'unknown'; return 0; }
+  case "${probe#* }" in
+    working) printf 'busy' ;;
+    done) printf 'idle' ;;
+    blocked) printf 'blocked' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 fm_backend_orca_send_key() {  # <terminal-id> <key>
   local terminal=$1 key=$2
   fm_backend_orca_tool_check || return 1

@@ -29,10 +29,13 @@ if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ];
 fi
 n=$next
 echo "$n" > "$COUNT_FILE"
+# Print the body BEFORE honoring an exit code, so a case can emulate real Orca's
+# stale-handle behavior: an `ok:false` body on stdout together with a non-zero
+# exit (fm_backend_orca_probe must read the body regardless of exit code).
+[ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
 if [ -f "$RESP/$n.exit" ]; then
   exit "$(cat "$RESP/$n.exit")"
 fi
-[ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
 exit 0
 SH
   chmod +x "$fb/orca"
@@ -296,6 +299,161 @@ test_send_helpers_reject_orca_error_json() {
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_send_text_submit term-stale "hello" 1 0.01 0.01' "$ROOT" 2>/dev/null )
   [ "$out" = send-failed ] || fail "send_text_submit should report send-failed on Orca ok:false JSON, got '$out'"
   pass "Orca send helpers: fail closed on ok:false JSON"
+}
+
+# --- native agent model: probe, agent_state, busy_state ---------------------
+#
+# fm_backend_orca_probe correlates one terminal's endpoint liveness with Orca's
+# structured `worktree ps` agents[] model, keyed by the pane key tabId:leafId.
+# The shapes pinned here match the real Orca v1.4.188 smoke recorded in
+# docs/verification/runtime-backends.md "Orca"; the live guard
+# tests/fm-orca-agent-state-live-e2e.test.sh proves them against the real app.
+
+# A `worktree ps` payload carrying one agent entry for pane tabx:leafy.
+orca_ps_with_agent() {  # <state>
+  printf '{"ok":true,"result":{"worktrees":[{"agents":[{"paneKey":"tabx:leafy","state":"%s"}]}]}}\n' "$1"
+}
+
+# A connected terminal show for pane tabx:leafy.
+orca_show_connected() {
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-123","connected":true,"tabId":"tabx","leafId":"leafy"}}}\n'
+}
+
+test_probe_alive_working_is_busy() {
+  local probe agent busy
+  orca_case probe-working
+  orca_show_connected > "$RESP/1.out"
+  orca_ps_with_agent working > "$RESP/2.out"
+  probe=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_probe term-123' "$ROOT" )
+  [ "$probe" = "alive working" ] || fail "probe should read a working agent as 'alive working', got '$probe'"
+  : > "$RESP/.count"
+  agent=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_agent_state term-123' "$ROOT" )
+  [ "$agent" = alive ] || fail "agent_state should be alive for a working agent, got '$agent'"
+  : > "$RESP/.count"
+  busy=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_busy_state term-123' "$ROOT" )
+  [ "$busy" = busy ] || fail "busy_state should be busy for a working agent, got '$busy'"
+  pass "fm_backend_orca_probe: a working agent reads alive/busy"
+}
+
+test_probe_alive_done_is_idle() {
+  local probe busy
+  orca_case probe-done
+  orca_show_connected > "$RESP/1.out"
+  orca_ps_with_agent "done" > "$RESP/2.out"
+  probe=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_probe term-123' "$ROOT" )
+  [ "$probe" = "alive done" ] || fail "probe should read a settled agent as 'alive done', got '$probe'"
+  : > "$RESP/.count"
+  busy=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_busy_state term-123' "$ROOT" )
+  [ "$busy" = idle ] || fail "busy_state should be idle for a settled agent, got '$busy'"
+  pass "fm_backend_orca_busy_state: a settled 'done' turn reads idle"
+}
+
+test_probe_blocked_agent_is_blocked() {
+  local busy
+  orca_case probe-blocked
+  orca_show_connected > "$RESP/1.out"
+  orca_ps_with_agent blocked > "$RESP/2.out"
+  busy=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_busy_state term-123' "$ROOT" )
+  [ "$busy" = blocked ] || fail "busy_state should be blocked for a blocked agent, got '$busy'"
+  pass "fm_backend_orca_busy_state: a blocked agent reads blocked"
+}
+
+test_probe_connected_no_agent_entry_is_dead() {
+  # The critical agent-vs-shell distinction: a connected terminal whose pane has
+  # NO entry in the agents[] model is a bare shell the agent has exited to -
+  # `dead`, which is what lets fm-control prove an `exit` actually stopped it.
+  local probe busy
+  orca_case probe-dead-shell
+  orca_show_connected > "$RESP/1.out"
+  # agents[] present but for a DIFFERENT pane, so tabx:leafy is absent.
+  printf '{"ok":true,"result":{"worktrees":[{"agents":[{"paneKey":"other:pane","state":"working"}]}]}}\n' > "$RESP/2.out"
+  probe=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_probe term-123' "$ROOT" )
+  [ "$probe" = "dead -" ] || fail "a connected terminal with no matching agent entry must read 'dead -', got '$probe'"
+  : > "$RESP/.count"
+  busy=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_busy_state term-123' "$ROOT" )
+  [ "$busy" = unknown ] || fail "busy_state must be unknown for a dead endpoint, not idle, got '$busy'"
+  pass "fm_backend_orca_agent_state: a connected shell with no agent entry reads dead"
+}
+
+test_probe_disconnected_is_dead() {
+  local agent
+  orca_case probe-disconnected
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-123","connected":false,"exitCause":{"kind":"operator_close"}}}}\n' > "$RESP/1.out"
+  orca_ps_with_agent working > "$RESP/2.out"
+  agent=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_agent_state term-123' "$ROOT" )
+  [ "$agent" = dead ] || fail "a disconnected/exited terminal must read dead, got '$agent'"
+  pass "fm_backend_orca_agent_state: a disconnected terminal reads dead"
+}
+
+test_probe_stale_handle_is_missing() {
+  # Real Orca prints the ok:false body AND exits non-zero for a stale handle;
+  # the probe must read the body regardless of exit code to tell missing from
+  # unreadable (the fakebin prints .out before honoring .exit).
+  local agent
+  orca_case probe-stale
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"terminal_handle_stale"}}\n' > "$RESP/1.out"
+  printf '1\n' > "$RESP/1.exit"
+  agent=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_agent_state term-stale' "$ROOT" )
+  [ "$agent" = missing ] || fail "a stale terminal handle must read missing (even with a non-zero exit), got '$agent'"
+  pass "fm_backend_orca_agent_state: a stale handle reads missing despite a non-zero exit"
+}
+
+test_probe_unreadable_worktree_ps_is_unreadable() {
+  # A connected endpoint whose agent model cannot be read proves nothing about
+  # agent presence, so it is unreadable, never a false dead.
+  local agent
+  orca_case probe-ps-unreadable
+  orca_show_connected > "$RESP/1.out"
+  printf '{"ok":false,"error":{"code":"runtime_unavailable","message":"runtime unavailable"}}\n' > "$RESP/2.out"
+  agent=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_agent_state term-123' "$ROOT" )
+  [ "$agent" = unreadable ] || fail "an unreadable agent model must read unreadable, not dead, got '$agent'"
+  pass "fm_backend_orca_agent_state: an unreadable worktree-ps read stays unreadable, never a false dead"
+}
+
+test_probe_connected_without_panekey_is_ambiguous() {
+  # Without both tabId and leafId the pane cannot be correlated to an agent
+  # entry, so the verdict is ambiguous rather than a guessed dead/alive.
+  local agent
+  orca_case probe-no-panekey
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-123","connected":true}}}\n' > "$RESP/1.out"
+  orca_ps_with_agent working > "$RESP/2.out"
+  agent=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_agent_state term-123' "$ROOT" )
+  [ "$agent" = ambiguous ] || fail "a connected terminal with no pane key must read ambiguous, got '$agent'"
+  pass "fm_backend_orca_agent_state: a connected terminal with no correlatable pane key reads ambiguous"
+}
+
+test_busy_state_dispatches_through_fm_backend() {
+  local busy
+  orca_case busy-dispatch
+  orca_show_connected > "$RESP/1.out"
+  orca_ps_with_agent working > "$RESP/2.out"
+  busy=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_busy_state orca term-123' "$ROOT" )
+  [ "$busy" = busy ] || fail "fm_backend_busy_state should route orca to the native busy verdict, got '$busy'"
+  pass "fm-backend dispatcher: fm_backend_busy_state routes orca to fm_backend_orca_busy_state"
+}
+
+test_agent_state_dispatches_through_fm_backend() {
+  local agent
+  orca_case agent-state-dispatch
+  orca_show_connected > "$RESP/1.out"
+  orca_ps_with_agent "done" > "$RESP/2.out"
+  agent=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state orca term-123' "$ROOT" )
+  [ "$agent" = alive ] || fail "fm_backend_agent_state should route orca to the recovery-grade classifier, got '$agent'"
+  pass "fm-backend dispatcher: fm_backend_agent_state routes orca to fm_backend_orca_agent_state"
 }
 
 test_send_key_enter_and_interrupt() {
@@ -1318,6 +1476,16 @@ test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_literal_constructs_non_enter_send
 test_send_text_submit_reports_send_failed
 test_send_helpers_reject_orca_error_json
+test_probe_alive_working_is_busy
+test_probe_alive_done_is_idle
+test_probe_blocked_agent_is_blocked
+test_probe_connected_no_agent_entry_is_dead
+test_probe_disconnected_is_dead
+test_probe_stale_handle_is_missing
+test_probe_unreadable_worktree_ps_is_unreadable
+test_probe_connected_without_panekey_is_ambiguous
+test_busy_state_dispatches_through_fm_backend
+test_agent_state_dispatches_through_fm_backend
 test_send_key_enter_and_interrupt
 test_send_key_refuses_unknown_key
 test_send_key_refuses_escape_until_supported
