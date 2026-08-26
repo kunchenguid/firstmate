@@ -96,8 +96,7 @@ state/               runtime records and signals; gitignored
   <id>.kimi-turnend-token   firstmate-owned Kimi hook registry token for the task; removed by teardown
   <id>.muse-session  muse busy-source binding (sessions root plus task worktree) written by fm-spawn; removed by teardown
   <id>.cursor-session  cursor busy-source binding (projects root, task worktree, prior conversations) written by fm-spawn; removed by teardown
-  <id>.reconcile-episode  the secondmate inventory-mismatch episode this home has already asked that mate to reconcile; bin/fm-secondmate-reconcile.sh owns its once-per-episode contract
-  <id>.reconcile-observed  the newest fleet-snapshot generation the reconcile hook has processed for that mate, preventing an older asynchronous hook from restoring stale mismatch state
+  <id>.reconcile-episode  the atomic secondmate inventory-reconcile state, including the newest fleet-snapshot observation and any pending or delivered mismatch episode; bin/fm-secondmate-reconcile.sh owns its once-per-episode contract
   <id>.inbox/          durable steering inbox: sequenced firstmate instruction records the worker acknowledges by moving them into its handled/ subdirectory; written by fm-send, with ordinary records re-rung and escalated by the watcher while explicit fire-and-forget records are excluded from that ladder, and removed by teardown (bin/fm-task-inbox-lib.sh)
   <id>.meta          task metadata; each producer script's header owns its exact fields and mutation contract, with docs/configuration.md routing operator-facing backend and trace-context details
   <id>.herdr-presentation  quarantinable attempt and restart-binding journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Presentation spaces"

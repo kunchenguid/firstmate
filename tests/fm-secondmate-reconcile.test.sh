@@ -135,7 +135,7 @@ test_a_completed_send_survives_a_missing_episode_commit() {
 
   corr=$(inbox_text "$home/state" mate | grep -oE 'delivery=[a-f0-9]{16}' | head -1 | cut -d= -f2)
   [ -n "$corr" ] || fail "the delivered ask has no persisted delivery identity"
-  printf 'pending\tunowned_current:["live-row"]\t%s\n' "$corr" > "$home/state/mate.reconcile-episode"
+  printf 'pending\t00000000000000000001-0000000001\tunowned_current:["live-row"]\t%s\n' "$corr" > "$home/state/mate.reconcile-episode"
   out=$(run_notify "$home" "$fakebin" interrupted "$snap") \
     || fail "recovery after the missing commit failed: $out"
   assert_contains "$out" 'sent: mate unowned_current:["live-row"]' \
@@ -353,9 +353,15 @@ test_a_failed_send_is_retried_on_the_next_run() {
   set -e
   [ "$rc" -ne 0 ] || fail "an unroutable ask reported success: $out"
   assert_contains "$out" "failed: absent-mate" "the failure was not reported: $out"
-  assert_absent "$home/state/absent-mate.reconcile-episode" \
-    "a failed ask recorded its episode and would never be retried"
-  pass "a failed ask records nothing, so the next run retries it"
+  if FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$RECONCILE" episode absent-mate >/dev/null; then
+    fail "a failed ask recorded its episode and would never be retried"
+  fi
+  set +e
+  out=$(run_notify "$home" "$fakebin" retry "$snap"); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an unroutable ask was not retried: $out"
+  assert_contains "$out" "failed: absent-mate" "the next run did not retry the failed ask: $out"
+  pass "a failed ask records no episode, so the next run retries it"
 }
 
 test_an_inventory_mismatch_asks_the_mate_once_and_only_once

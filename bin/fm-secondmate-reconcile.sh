@@ -20,8 +20,8 @@
 #     "<invalidity-kind>:<sorted mismatch ids>". A persistent mismatch keeps the
 #     same identity and is never re-sent, so a recap or digest loop cannot nag.
 #     A changed identity is a NEW episode and earns exactly one more send. A
-#     home whose mismatch clears drops its record, so a recurrence notifies
-#     again;
+#     home whose mismatch clears records that transition, so a recurrence
+#     notifies again;
 #   - sending through bin/fm-send.sh, the existing steering transport, which
 #     records the instruction durably for local and remote mates alike.
 #
@@ -83,10 +83,13 @@ observation_path() {  # <mate-id>
   printf '%s/%s.reconcile-observed\n' "$STATE" "$1"
 }
 
-write_observation() {  # <mate-id> <generation>
-  local path
-  path=$(observation_path "$1")
-  (umask 077; printf '%s\n' "$2" > "$path.tmp") && mv -f -- "$path.tmp" "$path"
+write_state() {  # <path> <state> <generation> [episode] [correlation]
+  local path=$1 state=$2 generation=$3 episode=${4:-} corr=${5:-}
+  if ! (umask 077; printf '%s\t%s\t%s\t%s\n' "$state" "$generation" "$episode" "$corr" > "$path.tmp") \
+    || ! mv -f -- "$path.tmp" "$path"; then
+    rm -f -- "$path.tmp"
+    return 1
+  fi
 }
 
 observation_is_stale() {  # <generation> <latest-generation>
@@ -94,13 +97,21 @@ observation_is_stale() {  # <generation> <latest-generation>
 }
 
 cmd_episode() {
-  local id path
+  local id path record tag generation episode corr
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   id=$1
   case "$id" in ''|*/*|.*) fail "not a task id: $id" ;; esac
   path=$(episode_path "$id")
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  cat "$path"
+  record=$(cat "$path") || return 1
+  IFS=$'\t' read -r tag generation episode corr <<EOF_STATE
+$record
+EOF_STATE
+  case "$tag" in
+    sent|pending) [ -n "$episode" ] && printf '%s\n' "$episode" ;;
+    clear) return 1 ;;
+    *) printf '%s\n' "$record" ;;
+  esac
 }
 
 # The instruction is deliberately plain: it names what disagrees and leaves the
@@ -187,7 +198,7 @@ cmd_notify() {
     | join("\u001f")')
 
   local id kind ids ids_canonical generation episode path observed_path observed prior corr lock send_rc
-  local pending_tag pending_episode pending_corr pending_generation
+  local state_tag state_generation state_episode state_corr pending_episode pending_corr pending_generation
   while IFS=$'\x1f' read -r id kind ids ids_canonical generation; do
     [ -n "${id:-}" ] || continue
     path=$(episode_path "$id")
@@ -199,33 +210,54 @@ cmd_notify() {
     if [ -f "$observed_path" ] && [ ! -L "$observed_path" ]; then observed=$(cat "$observed_path" 2>/dev/null || true); fi
     prior=
     if [ -f "$path" ] && [ ! -L "$path" ]; then prior=$(cat "$path" 2>/dev/null || true); fi
-    pending_tag=
+    state_tag=
+    state_generation=
+    state_episode=
+    state_corr=
+    IFS=$'\t' read -r state_tag state_generation state_episode state_corr <<EOF_STATE
+$prior
+EOF_STATE
+    case "$state_tag" in
+      clear|sent|pending)
+        observed=$state_generation
+        ;;
+      *)
+        state_episode=$prior
+        state_tag=sent
+        ;;
+    esac
     pending_episode=
     pending_corr=
     pending_generation=
-    IFS=$'\t' read -r pending_tag pending_episode pending_corr pending_generation <<EOF_PENDING
-$prior
-EOF_PENDING
-    if observation_is_stale "$generation" "$observed" \
-      || { [ "$pending_tag" = pending ] && [ -n "$pending_generation" ] \
-        && [[ "$generation" < "$pending_generation" ]]; }; then
+    if [ "$state_tag" = pending ]; then
+      pending_episode=$state_episode
+      pending_corr=$state_corr
+      pending_generation=$state_generation
+      if ! printf '%s' "$pending_generation" | grep -Eq '^[0-9]{20}-[0-9]{10}$'; then
+        pending_episode=$state_generation
+        pending_corr=$state_episode
+        pending_generation=$state_corr
+        observed=$pending_generation
+      fi
+    fi
+    if observation_is_stale "$generation" "$observed"; then
       printf 'stale: %s %s\n' "$id" "$generation"
       release_active_lock
       continue
     fi
     if [ -z "$kind" ]; then
-      if ! write_observation "$id" "$generation"; then
+      if write_state "$path" clear "$generation"; then
+        if [ "$state_tag" != clear ] && [ -n "$prior" ]; then printf 'cleared: %s\n' "$id"; fi
+      else
         printf 'failed: %s observation\n' "$id"
         rc=1
-      elif [ -f "$path" ] && [ ! -L "$path" ]; then
-        rm -f -- "$path" && printf 'cleared: %s\n' "$id"
       fi
       release_active_lock
       continue
     fi
     episode="$kind:$ids_canonical"
-    if [ "$prior" = "$episode" ]; then
-      if write_observation "$id" "$generation"; then
+    if [ "$state_tag" = sent ] && [ "$state_episode" = "$episode" ]; then
+      if write_state "$path" sent "$generation" "$episode"; then
         printf 'dedupe: %s %s\n' "$id" "$episode"
       else
         printf 'failed: %s observation\n' "$id"
@@ -235,7 +267,7 @@ EOF_PENDING
       continue
     fi
     corr=
-    if [ "$pending_tag" = pending ] && [ "$pending_episode" = "$episode" ] \
+    if [ "$state_tag" = pending ] && [ "$pending_episode" = "$episode" ] \
       && printf '%s' "$pending_corr" | grep -Eq '^[a-f0-9]{16}$'; then
       corr=$pending_corr
     else
@@ -246,9 +278,7 @@ EOF_PENDING
         continue
       }
     fi
-    if ! (umask 077; printf 'pending\t%s\t%s\t%s\n' "$episode" "$corr" "$generation" > "$path.tmp") \
-      || ! mv -f -- "$path.tmp" "$path"; then
-      rm -f -- "$path.tmp"
+    if ! write_state "$path" pending "$generation" "$episode" "$corr"; then
       printf 'failed: %s %s\n' "$id" "$episode"
       rc=1
       release_active_lock
@@ -258,26 +288,21 @@ EOF_PENDING
     "$SCRIPT_DIR/fm-send.sh" "$id" --fire-and-forget "$corr" \
       "$(reconcile_text "$kind" "$ids")" >/dev/null 2>&1 || send_rc=$?
     if [ "$send_rc" -eq 3 ]; then
-      write_observation "$id" "$generation" || rc=1
       printf 'unconfirmed: %s %s\n' "$id" "$episode"
       rc=1
       release_active_lock
       continue
     fi
     if [ "$send_rc" -ne 0 ]; then
-      if write_observation "$id" "$generation"; then rm -f -- "$path"; else rc=1; fi
+      if ! write_state "$path" clear "$generation"; then rc=1; fi
       printf 'failed: %s %s\n' "$id" "$episode"
       rc=1
       release_active_lock
       continue
     fi
-    if ! write_observation "$id" "$generation"; then
-      printf 'sent-unrecorded: %s %s\n' "$id" "$episode"
-      rc=1
-    elif (umask 077; printf '%s\n' "$episode" > "$path.tmp") && mv -f -- "$path.tmp" "$path"; then
+    if write_state "$path" sent "$generation" "$episode"; then
       printf 'sent: %s %s\n' "$id" "$episode"
     else
-      rm -f -- "$path.tmp"
       printf 'sent-unrecorded: %s %s\n' "$id" "$episode"
       rc=1
     fi
