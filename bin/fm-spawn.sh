@@ -2256,6 +2256,22 @@ spawn_send_key() {  # <target> <key>
   esac
 }
 
+# spawn_send_text_line answers with THREE outcomes, not two, and the third names
+# a repair the other two do not: 0 is typed and submitted, status 2 (zellij and
+# cmux, which compose the line from a literal send plus Enter) is a line that WAS
+# typed but could neither be submitted nor cleared - it is sitting in that
+# shell's input line, where it prefixes whatever is typed there next - and any
+# other nonzero status left nothing behind because the endpoint never answered.
+# Every caller reporting a failed send composes its message through here, so a
+# stranded line is never reported as one that was never typed and the operator is
+# never sent to the wrong repair.
+spawn_send_stranded() {  # <status>
+  [ "$1" -eq 2 ]
+}
+spawn_send_stranded_detail() {  # <what-was-typed>
+  printf '%s' "$1 input could not be cleared for $W: the $BACKEND backend typed it but could neither submit nor clear it, so it is sitting uncleared in that shell's input line where it would prefix whatever is typed there next"
+}
+
 kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
@@ -2444,15 +2460,19 @@ fi
 # rather than the real command: re-sending `treehouse get` would acquire a
 # second worktree, and re-sending a launch would start a second agent.
 #
-# Three distinct refusals, never conflated, because each names a different
+# Four distinct refusals, never conflated, because each names a different
 # repair. A probe that the BACKEND COULD NOT DELIVER (a pane that died, a
 # dropped server) is not shell-init latency: the send is not retried past its
 # own nonzero status, so the spawn refuses at once with the unreachable endpoint
 # named and the backend's own diagnostic immediately above it, instead of
-# burning the whole budget on a target already reporting itself gone. A marker
-# whose directory stopped being private is not proof at all and refuses rather
-# than being believed. Only a probe that was genuinely delivered and never
-# answered gets the readiness-timeout message.
+# burning the whole budget on a target already reporting itself gone. A probe
+# that WAS typed and could neither be submitted nor cleared (spawn_send_text_line
+# status 2) is the opposite failure - the endpoint answered and the probe text is
+# now sitting in its input line - so it is reported as the stranded input it is,
+# through spawn_send_stranded_detail, and is not re-sent onto the front of that
+# text. A marker whose directory stopped being private is not proof at all and
+# refuses rather than being believed. Only a probe that was genuinely delivered
+# and never answered gets the readiness-timeout message.
 #
 # Re-sends BACK OFF instead of repeating at a flat cadence: after N polls, then
 # 2N, 4N and so on, capped so no more than ten times the first gap ever passes
@@ -2486,6 +2506,10 @@ spawn_wait_shell_ready() {  # <target> <label> <what-would-be-typed>
   probe="touch $(shell_quote "$marker")"
   send_status=0
   spawn_send_text_line "$target" "$probe" || send_status=$?
+  if spawn_send_stranded "$send_status"; then
+    SPAWN_READY_REFUSAL="error: task $ID's $(spawn_send_stranded_detail 'shell-readiness probe'); refusing to type $what into it; inspect window $T"
+    return 1
+  fi
   if [ "$send_status" -ne 0 ]; then
     SPAWN_READY_REFUSAL="error: task $ID's endpoint could not be reached: the $BACKEND backend failed to deliver the shell-readiness probe (status $send_status; its own diagnostic, if any, is above), so $what was never typed; inspect window $T"
     return 1
@@ -2504,6 +2528,11 @@ spawn_wait_shell_ready() {  # <target> <label> <what-would-be-typed>
     if [ "$SPAWN_READY_RESEND" -gt 0 ] && [ "$i" -ge "$next_resend" ]; then
       send_status=0
       spawn_send_text_line "$target" "$probe" || send_status=$?
+      if spawn_send_stranded "$send_status"; then
+        rm -f "$marker"
+        SPAWN_READY_REFUSAL="error: task $ID's $(spawn_send_stranded_detail 'shell-readiness probe re-send'); refusing to type $what into it; inspect window $T"
+        return 1
+      fi
       if [ "$send_status" -ne 0 ]; then
         rm -f "$marker"
         SPAWN_READY_REFUSAL="error: task $ID's endpoint stopped being reachable while waiting for its shell: the $BACKEND backend failed to deliver the shell-readiness probe (status $send_status; its own diagnostic, if any, is above), so $what was never typed; inspect window $T"
@@ -2541,7 +2570,16 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     echo "$SPAWN_READY_REFUSAL" >&2
     exit 1
   fi
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  WT_SEND_STATUS=0
+  spawn_send_text_line "$WT_TARGET" 'treehouse get' || WT_SEND_STATUS=$?
+  if spawn_send_stranded "$WT_SEND_STATUS"; then
+    echo "error: task $ID's $(spawn_send_stranded_detail "'treehouse get'"); no worktree was acquired; inspect window $T" >&2
+    exit 1
+  fi
+  if [ "$WT_SEND_STATUS" -ne 0 ]; then
+    echo "error: task $ID's endpoint could not be reached: the $BACKEND backend failed to deliver 'treehouse get' (status $WT_SEND_STATUS; its own diagnostic, if any, is above) although its shell had just been proven ready, so no worktree was acquired; inspect window $T" >&2
+    exit 1
+  fi
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -3143,8 +3181,13 @@ fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp" \
-  || spawn_fail_after_meta "the Go temp export could not be delivered to $W although its shell had just been proven ready, so the agent was not launched"
+GOTMP_SEND_STATUS=0
+spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp" || GOTMP_SEND_STATUS=$?
+if spawn_send_stranded "$GOTMP_SEND_STATUS"; then
+  spawn_fail_after_meta "$(spawn_send_stranded_detail 'the Go temp export'); refusing to append the launch command, so the agent was not launched"
+elif [ "$GOTMP_SEND_STATUS" -ne 0 ]; then
+  spawn_fail_after_meta "the Go temp export could not be delivered to $W although its shell had just been proven ready, so the agent was not launched"
+fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.
@@ -3155,8 +3198,8 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
     fi
   else
     TRACE_SEND_STATUS=$?
-    if [ "$TRACE_SEND_STATUS" -eq 2 ]; then
-      TRACE_REFUSAL="trace-context input could not be cleared for $W; refusing to append the launch command"
+    if spawn_send_stranded "$TRACE_SEND_STATUS"; then
+      TRACE_REFUSAL="$(spawn_send_stranded_detail 'trace-context'); refusing to append the launch command"
       spawn_record_failed_status "$TRACE_REFUSAL"
       echo "error: $TRACE_REFUSAL" >&2
       exit 1

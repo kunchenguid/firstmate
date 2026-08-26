@@ -20,7 +20,12 @@
 # The stub can also refuse a send outright, which is a DIFFERENT failure: a pane
 # that cannot be reached at all is not a shell that is slow to start, and the
 # spawn must attribute it that way instead of waiting out the whole readiness
-# budget and then blaming shell-init latency.
+# budget and then blaming shell-init latency. And it can leave a line TYPED but
+# neither submitted nor cleared - what zellij and cmux report as status 2, since
+# they compose a text line from a literal send plus Enter - which is the opposite
+# failure again: the endpoint answered, the text is sitting in its input line
+# where it would prefix whatever is typed there next, and the spawn must name
+# that instead of claiming the line was never typed.
 #
 # And a marker only proves anything while nothing else can write it. /tmp is
 # world-writable and a task id is an ordinary slug, so the task temp root is a
@@ -135,6 +140,21 @@ case "${1:-}" in
       exit 0
     fi
     if [ "${5:-}" = Enter ]; then
+      # A line the endpoint TYPED but could neither submit nor clear. The
+      # backends that compose a text line from a literal send plus Enter
+      # (zellij, cmux) report that as status 2, and the text stays in the
+      # shell's input line, where it prefixes whatever is typed there next.
+      stranded=""
+      [ -f "$S/stranded" ] && stranded=$(cat "$S/stranded")
+      if [ -n "$stranded" ]; then
+        case "${4:-}" in
+          *"$stranded"*)
+            printf '%s' "${4:-}" >> "$S/buffer"
+            printf 'stranded\t%s\n' "${4:-}" >> "$S/lines.log"
+            exit 2
+            ;;
+        esac
+      fi
       : > "$S/buffer"
       submit_line "${4:-}"
       exit 0
@@ -364,6 +384,71 @@ test_unreachable_endpoint_refuses_with_the_backend_error() {
   pass "an unreachable endpoint refuses at once with the backend's own error"
 }
 
+# A probe the backend TYPED but could neither submit nor clear is the opposite of
+# an endpoint that never answered, and it names a different repair: the probe
+# text is sitting in that shell's input line, where it would prefix whatever is
+# typed there next. Reporting it as a probe that "was never typed" points the
+# operator at a pane state that is not the one they have, and hides the text they
+# have to clear before anything else is typed there. Re-sending is wrong for the
+# same reason - it would append a second probe onto the first.
+test_stranded_probe_refuses_as_uncleared_input() {
+  local rec id out status probes
+  id=shell-ready-stranded-z9-$RUN_TAG
+  use_task_tmp "$id"
+  rec=$(make_shell_case shell-ready-stranded "$id" 0 0)
+  read_shell_record "$rec"
+  printf 'worktree-entry\n' > "$STATE_DIR/stranded"
+
+  out=$(run_shell_spawn "$id" \
+    FM_SPAWN_SHELL_READY_POLLS=4 FM_SPAWN_SHELL_READY_INTERVAL=0.05 \
+    FM_SPAWN_SHELL_READY_RESEND=2)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should refuse when its probe can be neither submitted nor cleared"
+  assert_contains "$out" "input could not be cleared" \
+    "the refusal did not name the probe text left sitting in the endpoint shell's input line"
+  assert_not_contains "$out" "was never typed" \
+    "a probe that WAS typed was reported as one that was never typed"
+  assert_not_contains "$out" "could not be reached" \
+    "an endpoint that answered the send was reported as unreachable"
+  assert_not_contains "$out" "never confirmed it was reading input" \
+    "stranded probe text was misreported as a slow shell"
+  assert_no_grep "$(printf 'ran\ttreehouse get')" "$STATE_DIR/lines.log" \
+    "a worktree was acquired through a shell holding unsubmitted probe text"
+  assert_absent "$STATE_DIR/launched.log" \
+    "an agent was launched into a shell holding unsubmitted probe text"
+  probes=$(grep -c 'touch ' "$STATE_DIR/lines.log" | tr -d ' ')
+  [ "$probes" = 1 ] \
+    || fail "the probe was sent $probes times, so a re-send was appended onto text the endpoint could not clear"
+  pass "a probe that could not be submitted or cleared refuses as uncleared input"
+}
+
+# The same rule on the far side of meta publication, where the spawn's callers
+# read <id>.status rather than stderr: the export is sitting uncleared in the
+# worktree shell's input line, so the launch command must not be appended to it
+# and the task's last state must name the input to clear.
+test_stranded_export_is_recorded_as_uncleared_input() {
+  local rec id out status
+  id=shell-ready-stranded-export-zc-$RUN_TAG
+  use_task_tmp "$id"
+  rec=$(make_shell_case shell-ready-stranded-export "$id" 0 0)
+  read_shell_record "$rec"
+  printf 'export GOTMPDIR=\n' > "$STATE_DIR/stranded"
+
+  out=$(run_shell_spawn "$id" FM_SPAWN_SHELL_READY_INTERVAL=0.05)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should refuse when the Go temp export can be neither submitted nor cleared"
+  assert_contains "$out" "input could not be cleared" \
+    "the refusal did not name the export text left sitting in the worktree shell's input line"
+  assert_present "$HOME_DIR/state/$id.meta" \
+    "a stranded export dropped the meta, leaving its live window unreapable by id"
+  assert_grep "failed: the Go temp export input could not be cleared" \
+    "$HOME_DIR/state/$id.status" \
+    "uncleared export input was not recorded as the task's last state"
+  assert_absent "$STATE_DIR/launched.log" \
+    "the launch command was appended onto an export the endpoint could not clear"
+  pass "an export that could not be submitted or cleared is recorded as uncleared input"
+}
+
 # The probe is a typed line, so every re-send lands in the pane's scrollback and
 # in its interactive shell history - the very scrollback an operator reads when a
 # spawn is slow, which is the case this gate exists for. So re-sends back off
@@ -499,6 +584,8 @@ test_shell_that_never_reads_refuses_loudly
 test_launch_gate_refusal_is_recorded_as_the_tasks_last_state
 test_lost_launch_send_after_meta_is_recorded_as_the_tasks_last_state
 test_unreachable_endpoint_refuses_with_the_backend_error
+test_stranded_probe_refuses_as_uncleared_input
+test_stranded_export_is_recorded_as_uncleared_input
 test_unconfirmed_probe_backs_off_instead_of_flooding_the_pane
 test_planted_temp_root_keeps_its_mode_and_the_marker_stays_private
 test_temp_root_that_cannot_hold_a_private_marker_refuses_the_spawn
