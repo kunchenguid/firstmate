@@ -639,10 +639,30 @@ handle_paused_stale() {  # <window> <task> <hash>
 # alter the separate non-busy classification. handle_paused_stale keeps the
 # exception bounded by re-surfacing it once per PAUSE_RESURFACE_SECS. Away mode
 # remains daemon-owned and receives the undecorated wake identity for its own
-# classification.
+# classification, which is why the declaration is read before the afk branch
+# rather than after it.
 busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-file>
-  local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5
-  if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+  local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5 key
+  if status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+    if afk_present; then
+      # Away mode is daemon-owned, so this bound hands off the PLAIN wake identity
+      # and lets the daemon classify the declaration itself - the same one-shot
+      # per distinct stale hash the idle away-mode path uses, and the undecorated
+      # identity the rest of this function's contract promises. Running the wedge
+      # timer here instead would decorate the wake as a possible wedge, and that
+      # decoration overrides the daemon's own pause verdict for the pane: the
+      # ladder then climbs on every re-arm, escalating a crew that declared the
+      # wait itself once per FM_STALE_ESCALATE_SECS for as long as the wait lasts.
+      # Normal-mode pause tracking stays unwritten here, exactly as the idle
+      # away-mode handoff leaves it, because the daemon owns that bookkeeping.
+      key=$(window_key "$win")
+      if [ "$(cat "$STATE/.stale-$key" 2>/dev/null || true)" != "$h" ]; then
+        fm_wake_append stale "$win" "stale: $win" || exit 1
+        printf '%s' "$h" > "$STATE/.stale-$key"
+        wake "stale: $win"
+      fi
+      return 0
+    fi
     handle_paused_stale "$win" "$task" "$h"
     return 0
   fi
