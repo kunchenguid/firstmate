@@ -532,45 +532,6 @@ test_lost_launch_send_after_meta_is_recorded_as_the_tasks_last_state() {
   pass "a launch send lost after meta publication is recorded as the task's last state"
 }
 
-# The residue the gate itself cannot cover, and the reason the launch needs a
-# proof of its own rather than a delivery receipt. The gate proves the shell was
-# reading input immediately BEFORE the launch line was typed; one pre-prompt
-# cycle later - exactly where a project loading direnv or devenv spends its
-# seconds - that shell can flush its input queue, so the line the backend
-# delivered successfully never reaches the line editor and the Enter after it
-# submits nothing. The pty already echoed the text, so the pane looks identical
-# either way. The worktree half has the settle loop as its backstop; the launch
-# half had none for any harness but kimi, and a spawn that printed `spawned` for
-# a task with a live window, a real worktree and no agent is the reported symptom
-# with a narrower window rather than a closed one.
-test_flushed_launch_line_refuses_instead_of_reporting_a_spawn() {
-  local rec id out status
-  id=shell-ready-flushed-launch-zd-$RUN_TAG
-  use_task_tmp "$id"
-  rec=$(make_shell_case shell-ready-flushed-launch "$id" 0 0)
-  read_shell_record "$rec"
-  printf '%s\n' '--dangerously-bypass-approvals-and-sandbox' > "$STATE_DIR/flush-literal"
-
-  out=$(run_shell_spawn "$id" \
-    FM_SPAWN_SHELL_READY_INTERVAL=0.05 \
-    FM_SPAWN_LAUNCH_CONFIRM_POLLS=4 FM_SPAWN_LAUNCH_CONFIRM_INTERVAL=0.25)
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn should refuse when its launch line was flushed away unrun"
-  assert_grep flushed "$STATE_DIR/lines.log" \
-    "the case did not actually exercise a launch line the shell flushed away"
-  assert_not_contains "$out" "spawned $id" \
-    "a spawn whose launch line never ran reported a started worker"
-  assert_contains "$out" "reads positively agent-free" \
-    "the refusal did not name the agent-free endpoint it read"
-  assert_present "$HOME_DIR/state/$id.meta" \
-    "a refused launch dropped the meta, leaving its live window unreapable by id"
-  assert_grep "failed: the agent launch command was typed into" \
-    "$HOME_DIR/state/$id.status" \
-    "the unconfirmed launch was not recorded as the task's last state"
-  assert_absent "$STATE_DIR/launched.log" \
-    "the harness ran even though its launch line was flushed away"
-  pass "a launch line flushed away after the gate refuses instead of reporting a spawn"
-}
 
 # An endpoint that cannot be reached at all is a different failure from a shell
 # that is slow to start, and it must be reported as itself. The regression this
@@ -801,7 +762,6 @@ test_swallowed_launch_still_starts_the_agent
 test_shell_that_never_reads_refuses_loudly
 test_launch_gate_refusal_is_recorded_as_the_tasks_last_state
 test_lost_launch_send_after_meta_is_recorded_as_the_tasks_last_state
-test_flushed_launch_line_refuses_instead_of_reporting_a_spawn
 test_unreachable_endpoint_refuses_with_the_backend_error
 test_stranded_probe_refuses_as_uncleared_input
 test_stranded_export_is_recorded_as_uncleared_input

@@ -1269,16 +1269,9 @@ launch_template() {
   esac
 }
 
-# Whether the launch line came from a verified adapter's own template. The
-# post-launch agent confirmation below reads it: the backends' agent-state
-# classifiers recognise exactly the verified harness process names, so a raw
-# escape-hatch command is the one launch whose absence from that vocabulary
-# proves nothing about whether it started.
-SPAWN_LAUNCH_TEMPLATED=1
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
-    SPAWN_LAUNCH_TEMPLATED=0
     HARNESS=""
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
@@ -2582,60 +2575,6 @@ spawn_wait_shell_ready() {  # <target> <label> <what-would-be-typed>
   return 1
 }
 
-# The launch line's own backstop, and the missing half of the pair above. The
-# gate proves the shell was reading input immediately BEFORE the launch line was
-# typed; it cannot promise the shell was still reading one pre-prompt cycle
-# later, which is exactly where a project loading direnv or devenv spends its
-# seconds and where a typeahead flush can still swallow what was typed. The
-# worktree half already has a backstop for that residue - the settle loop
-# refuses when `treehouse get` never took effect - and without this the launch
-# half had none for any harness but kimi, so a discarded launch line printed
-# `spawned` for a task with a live window, a real worktree and no agent.
-#
-# The question is asked through fm_backend_agent_state (bin/fm-backend.sh), the
-# same recovery-grade classifier fm-control's relaunch transaction and the
-# liveness paths use, rather than a per-harness reading of pane text. `dead` is
-# the one verdict that positively proves an agent-free endpoint, so it is the
-# only one that refuses, and it is polled rather than sampled once because a
-# launch line spends its first moments in shell work (a command substitution
-# building the brief, an `env` exec) that reads agent-free while being perfectly
-# on its way. `alive` confirms and stops waiting. Every other verdict -
-# `ambiguous`, `unreadable`, `missing`, and the `unverified` that every backend
-# without a classifier returns - cannot settle the question in either direction,
-# so the spawn proceeds rather than inventing a verdict: refusing there would
-# turn an unreadable endpoint into a failed spawn for a worker that is running.
-# A raw escape-hatch launch command is skipped for that same reason - the
-# classifiers know the verified harness names and nothing else, so its absence
-# from that vocabulary proves nothing.
-#
-# The budget is deliberately far longer than any harness needs to reach its own
-# exec, because it is only ever spent when the launch has ALREADY failed: a
-# working launch answers `alive` on the first poll and pays one. It is also kept
-# at or under what the control plane already tolerates for the same transition
-# after a relaunch (FM_CONTROL_LAUNCH_WAIT, bin/fm-control.sh), so a relaunch
-# cannot be refused here for a delay that verb was written to wait out.
-#
-# Tuning knobs (test and pathological-host use, defaults are the contract):
-# FM_SPAWN_LAUNCH_CONFIRM_POLLS (0 disables the confirmation entirely),
-# FM_SPAWN_LAUNCH_CONFIRM_INTERVAL (seconds per poll).
-SPAWN_LAUNCH_CONFIRM_POLLS=${FM_SPAWN_LAUNCH_CONFIRM_POLLS:-120}
-SPAWN_LAUNCH_CONFIRM_INTERVAL=${FM_SPAWN_LAUNCH_CONFIRM_INTERVAL:-0.25}
-SPAWN_LAUNCH_CONFIRM_BUDGET=$(awk -v p="$SPAWN_LAUNCH_CONFIRM_POLLS" \
-  -v i="$SPAWN_LAUNCH_CONFIRM_INTERVAL" 'BEGIN { printf "%.0f", p * i }')
-
-spawn_confirm_launched_agent() {
-  local i=0 state
-  [ "$SPAWN_LAUNCH_TEMPLATED" -eq 1 ] || return 0
-  [ "$SPAWN_LAUNCH_CONFIRM_POLLS" -gt 0 ] || return 0
-  while :; do
-    state=$(fm_backend_agent_state "$BACKEND" "$T" 2>/dev/null) || state=unreadable
-    [ "$state" = dead ] || return 0
-    i=$((i + 1))
-    [ "$i" -lt "$SPAWN_LAUNCH_CONFIRM_POLLS" ] || break
-    sleep "$SPAWN_LAUNCH_CONFIRM_INTERVAL"
-  done
-  spawn_fail_after_meta "the agent launch command was typed into $W and submitted, but that endpoint still reads positively agent-free ${SPAWN_LAUNCH_CONFIRM_BUDGET}s later, so its shell discarded the line after proving it was reading input and no $HARNESS agent is running"
-}
 
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
@@ -3305,7 +3244,6 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
 fi
 spawn_send_key "$T" Enter \
   || spawn_fail_after_meta "the agent launch command was typed into $W but its submitting Enter could not be delivered, so the command is sitting unsubmitted and no agent started"
-spawn_confirm_launched_agent
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     spawn_fail_after_meta "kimi did not show a verified ready signal before brief delivery"
