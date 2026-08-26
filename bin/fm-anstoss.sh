@@ -61,6 +61,18 @@
 #     makes the Automat quieter, never louder. A lane closing with a terminal
 #     verb resets everything.
 #
+# Work without an order (Flottenordnung v2, L98) is a THIRD, separate class,
+# owned by bin/fm-anstoss-auftrag-lib.sh: a live lane that cannot name a
+# commissioned post is not stuck, it is unaccounted for, so it is reported to
+# firstmate and NEVER nudged. That library's header owns what counts as a post
+# reference, the Bestand transition rule, the arming flag, and its own report
+# ladder (state/.anstoss-auftrag-<id>, state/.anstoss-auftragzeit-<id>); this
+# script only hooks it in per lane, logs its verdicts into the check log below,
+# and feeds its backlog reading into condition 1 and the stage-2 fingerprint.
+# A lane with an ACTIVE machine wait field keeps being silenced entirely,
+# including for this class: it made a statement about what it waits for, and the
+# missing order surfaces on the sweep after that wait expires.
+#
 # O-0018 ladder per lane, counted in state/.anstoss-o18n-<id> (separate from
 # the standing-lane counter above; a lane classifies as EITHER standing OR
 # O-0018 on a given sweep, never both):
@@ -77,9 +89,9 @@
 #     standing ladder, through the same shared note_liveness_recovery() path.
 #
 # Every sweep prints NOTHING to STDOUT unless firstmate must act: exactly one
-# line for a standing-lane stage-2 escalation, an O-0018 escalation, or a
-# dialog-blocked O-0018 first sighting. Fleet stop (state/.fleet-stop) silences
-# all nudges and reports (U0.1).
+# line for a standing-lane stage-2 escalation, an O-0018 escalation, a
+# dialog-blocked O-0018 first sighting, or a work-without-an-order report.
+# Fleet stop (state/.fleet-stop) silences all nudges and reports (U0.1).
 #
 # Check observability (O-0041 root cause, captain's word 25.08.: he nudged
 # worker 6 past an API error BY HAND because it was undecidable whether past
@@ -90,10 +102,14 @@
 # is suspicious when its capture carries an API-error signature (whatever the
 # outcome: nudge typed, spaced out with reason, escalated, dialog reported,
 # or silenced by the harness working marker) or when it classifies as a
-# standing lane. Each line carries: timestamp, lane id, matched signature,
-# busy/idle verdict, O-0018 counter as of AFTER the action, and the action
-# (stufe1-getippt / stufe2-getippt / eskaliert / erstbefund-gemeldet /
-# uebersprungen with reason). Healthy panes log nothing, so volume is bounded
+# standing lane, and whenever the work-without-an-order class reports or first
+# inventories a Bestand lane. Each line carries: timestamp, lane id, matched
+# signature, busy/idle verdict, O-0018 counter as of AFTER the action, and the
+# action (stufe1-getippt / stufe2-getippt / eskaliert / erstbefund-gemeldet /
+# gemeldet / inventur / uebersprungen with reason). Gate decisions of the
+# work-without-an-order class additionally appear as JSONL in
+# state/tor-log/arbeit-ohne-auftrag.jsonl (that library's header owns the
+# contract). Healthy panes log nothing, so volume is bounded
 # by stuck lanes x sweep rounds and shrinks with every recovery; an ignored
 # stuck lane keeps waking firstmate long before unbounded history could
 # accumulate, so this log needs no rotation.
@@ -158,6 +174,8 @@ O18_NUDGE_INTERVAL=${FM_ANSTOSS_O18_NUDGE_INTERVAL:-120}
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-wait-lib.sh
 . "$SCRIPT_DIR/fm-wait-lib.sh"
+# shellcheck source=bin/fm-anstoss-auftrag-lib.sh
+. "$SCRIPT_DIR/fm-anstoss-auftrag-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -165,7 +183,9 @@ Usage:
   fm-anstoss.sh check        one state-based sweep: detect silently exited
                              lanes, run the two-step nudge ladder, run the
                              O-0018 API-error ladder (two auto-nudges, then
-                             escalate; open dialogs are reported, never typed);
+                             escalate; open dialogs are reported, never typed),
+                             and report every live lane that cannot name a
+                             commissioned post (never nudged);
                              appends one audit line per suspicious pane to
                              state/.anstoss-check.log
   fm-anstoss.sh arm          write and register state/anstoss.check.sh
@@ -265,20 +285,20 @@ anstoss_state_reset_all() {  # <id>
   rm -f "$STATE/.anstoss-last-$1" "$STATE/.anstoss-backoff-$1"
 }
 
-# Backlog post state for <id>, or empty when unreadable (which skips the lane:
-# an unreadable premise is never resolved toward a nudge).
-backlog_task_state() {  # <id> <home>
-  (cd "$2" 2>/dev/null &&
-    tasks-axi show "$1" --file "$2/data/backlog.md" 2>/dev/null ||
-    true) |
-    sed -n 's/^[[:space:]]*state:[[:space:]]*//p' | head -1
-}
+# Backlog post state for <id>: read once per lane by fm_auftrag_check (owner:
+# bin/fm-anstoss-auftrag-lib.sh) and reused here, so one sweep asks the backlog
+# once per lane. Empty means unreadable, which skips the lane: an unreadable
+# premise is never resolved toward a nudge.
 
-# Fingerprint of the lane situation: status tail plus whitespace-normalized
-# full capture, so repaint noise on unchanged content does not fake change.
-situation_fingerprint() {  # <status-line> <capture-text>
+# Fingerprint of the lane situation: status tail, backlog post state, and the
+# whitespace-normalized full capture, so repaint noise on unchanged content does
+# not fake change - while a post that moved underneath a silent lane (in_flight
+# -> done, or out of the backlog entirely) DOES count as a changed situation and
+# restarts the stage-2 clock against the current state.
+situation_fingerprint() {  # <status-line> <capture-text> [<backlog-post-state>]
   {
     printf '%s\n' "$1"
+    printf 'posten=%s\n' "${3:-}"
     printf '%s\n' "$2" | sed 's/[[:space:]]*$//' | grep -v '^$' || true
   } | _anstoss_hash
 }
@@ -363,6 +383,20 @@ classify_lane() {  # <id> <meta> ; sets globals: LANE_VERDICT LANE_DETAIL
   if status_is_terminal_verb "$status_line"; then
     note_liveness_recovery "$id" 1
     return 0
+  fi
+
+  # Work-without-an-order class (header; contract owned by
+  # bin/fm-anstoss-auftrag-lib.sh). Runs for every LIVE lane before any nudge
+  # path can be reached, and also caches this lane's backlog post state for
+  # condition 1 and the stage-2 fingerprint.
+  if ! fm_auftrag_check "$id" "$meta" "$FM_HOME" "$STATE"; then
+    LANE_VERDICT=ohneauftrag
+    LANE_DETAIL=$FM_AUFTRAG_DETAIL
+    LANE_STATE=idle-ohne-auftrag
+    return 0
+  fi
+  if [ "${FM_AUFTRAG_INVENTUR:-0}" = 1 ]; then
+    anstoss_log "$id" - bestand-lane inventur uebergangsregel-meta-ohne-account
   fi
 
   # Full visible capture, once, untrimmed (2026-08-24: a tail-cut was blind
@@ -456,7 +490,7 @@ classify_lane() {  # <id> <meta> ; sets globals: LANE_VERDICT LANE_DETAIL
   fi
 
   # Condition 1: the backlog post must be in_flight; unreadable skips.
-  [ "$(backlog_task_state "$id" "$FM_HOME")" = in_flight ] || return 0
+  [ "${FM_AUFTRAG_POSTEN:-}" = in_flight ] || return 0
 
   reason_detail="Posten in_flight, Endpunkt lebt, kein Arbeitszeichen im Pane, keine arbeitenden Kinder, keine terminale Statuszeile, kein Wartefeld"
 
@@ -474,7 +508,8 @@ run_ladder() {  # <id> <detail> ; reads CAPTURE_TEXT from classify_lane;
   case "$count" in '' | *[!0-9]*) count=0 ;; esac
   last=$(cat "$STATE/.anstoss-last-$id" 2>/dev/null || echo 0)
   case "$last" in '' | *[!0-9]*) last=0 ;; esac
-  fp=$(situation_fingerprint "$(last_status_line "$STATE/$id.status")" "${CAPTURE_TEXT:-}")
+  fp=$(situation_fingerprint "$(last_status_line "$STATE/$id.status")" "${CAPTURE_TEXT:-}" \
+    "${FM_AUFTRAG_POSTEN:-}")
 
   if [ "$count" -eq 0 ]; then
     # Spacing guard after a refutation (L34): stay quiet until the doubled
@@ -606,8 +641,15 @@ action_check() {
     LANE_STATE=''
     LADDER_ACTION=''
     LADDER_REASON=''
+    FM_AUFTRAG_POSTEN=''
     classify_lane "$id" "$meta" || true
     case "$LANE_VERDICT" in
+      ohneauftrag)
+        # Report-only class: never a nudge (owner lib's header).
+        fm_auftrag_ladder "$id" "$LANE_DETAIL" "$STATE" "$(effective_interval "$id")"
+        LADDER_ACTION=$FM_AUFTRAG_ACTION
+        LADDER_REASON=$FM_AUFTRAG_REASON
+        ;;
       standing)
         # Reuse the classification capture for the ladder fingerprint.
         run_ladder "$id" "$LANE_DETAIL"
@@ -620,7 +662,7 @@ action_check() {
         ;;
     esac
     # Check-round audit line (header owns the scope); stdout stays untouched.
-    if [ -n "$SIG_HIT" ] || [ "$LANE_VERDICT" = standing ]; then
+    if [ -n "$SIG_HIT" ] || [ "$LANE_VERDICT" = standing ] || [ "$LANE_VERDICT" = ohneauftrag ]; then
       anstoss_log "$id" "$SIG_HIT" "${LANE_STATE:-idle}" \
         "${LADDER_ACTION:-keine}" "$LADDER_REASON"
     fi
@@ -635,7 +677,7 @@ action_check() {
     b=${b#.anstoss-}
     kind2=${b%%-*}
     case "$kind2" in
-      count | last | fp | backoff | o0018 | o18n) ;;
+      count | last | fp | backoff | o0018 | o18n | auftrag | auftragzeit | inventur) ;;
       *) continue ;;
     esac
     id=${b#"$kind2"-}
