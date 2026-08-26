@@ -42,6 +42,8 @@ test_family_selection() {
   [ -n "$listed" ] || fail "--family pure-contract-unit selected nothing"
   printf '%s\n' "$listed" | grep -Fq 'tests/fm-test-run.test.sh' \
     || fail "pure-contract-unit must include fm-test-run.test.sh"
+  printf '%s\n' "$listed" | grep -Fq 'tests/fm-omp-harness.test.sh' \
+    || fail "pure-contract-unit must include fm-omp-harness.test.sh"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case "$line" in
@@ -103,6 +105,7 @@ init_changed_fixture_repo() {
     fm-session-start.test.sh \
     fm-afk-pi-herdr-return-e2e.test.sh \
     fm-backend.test.sh \
+    fm-omp-harness.test.sh \
     fm-pr-merge.test.sh \
     fm-pi-watch-extension.test.sh \
     fm-afk-return.test.sh \
@@ -115,6 +118,7 @@ init_changed_fixture_repo() {
   done
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
+  : >"$repo/bin/fm-spawn.sh"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
@@ -158,6 +162,12 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-afk-return.test.sh" "supervisor target selects afk coverage"
   git -C "$repo" add bin/fm-supervisor-target-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm supervisor-change
+
+  printf '\n' >>"$repo/bin/fm-spawn.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-omp-harness.test.sh" "spawn changes select OMP policy coverage"
+  git -C "$repo" add bin/fm-spawn.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm spawn-change
 
   printf '\n' >>"$repo/.agents/skills/example/SKILL.md"
   printf '\n' >>"$repo/.claude/settings.json"

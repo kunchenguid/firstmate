@@ -140,7 +140,8 @@ family_for_basename() {
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
-    fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
+    fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-omp-harness.test.sh|\
+    fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-lint-workflows.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
@@ -192,6 +193,7 @@ family_for_basename() {
     fm-cursor-primary-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-muse-signals-live-e2e.test.sh|\
+    fm-omp-tools-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|\
@@ -437,6 +439,7 @@ tests/fm-muse-signals-live-e2e.test.sh 21
 tests/fm-on.test.sh 8602
 tests/fm-opencode-primary-live-e2e.test.sh 22
 tests/fm-operational-input.test.sh 246
+tests/fm-omp-tools-live-e2e.test.sh 20
 tests/fm-peek-remote.test.sh 848
 tests/fm-pending-reply.test.sh 19488
 tests/fm-pi-primary-live-e2e.test.sh 41

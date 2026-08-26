@@ -99,6 +99,8 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
 - `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
+- `fm-spawn --relaunch` acquires the task lifecycle and metadata locks, then binds one read-only snapshot of that record: it must be a regular non-symlink file whose identity and bytes are stable across the read.
+  The snapshot and final endpoint validation remain inside those locks, and adapter policy gates refuse before watcher, endpoint, worktree, task-state, or config mutation.
 
 ## Capability matrix
 

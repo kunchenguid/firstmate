@@ -29,6 +29,9 @@
 # task's recorded harness classifies unknown, so one adapter's writer can
 # never classify another adapter):
 #   pi-ext           Pi/pi-signed per-task extension (agent_start/agent_settled)
+#   omp-ext          dormant omp candidate extension (untrusted until both a
+#                    supported session-free omp/17.2.9 consumer proof and
+#                    ATX-2170 First Mate interrupt/exit/relaunch proof pass)
 #   opencode-plugin  OpenCode per-task plugin (session.status)
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
 #   codex-hook, codex-appserver  reserved: Codex, gated by
@@ -192,6 +195,7 @@ fm_busy_sources_for_harness() {  # <harness>
       ;;
     opencode*) adapter=opencode-plugin ;;
     pi|pi-signed) adapter=pi-ext ;;
+    omp) printf ''; return 0 ;;
     kimi*)
       fm_busy_kimi_verified || { printf ''; return 0; }
       adapter='kimi-wire kimi-hook'
@@ -841,6 +845,10 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
   local out rc r_state r_source native log
   case "$harness" in
+    omp)
+      printf 'unknown omp-unverified'
+      return 0
+      ;;
     kimi*)
       if ! fm_busy_kimi_verified; then
         printf 'unknown kimi-unverified'

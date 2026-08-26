@@ -196,9 +196,15 @@ A silent bootstrap section needs no action; for any printed actionable diagnosti
 
 Load `harness-adapters` before every spawn or recovery and before trust handling, skill invocation, interrupt, exit, resume, or adapter verification.
 The verified harnesses are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, and `cursor`, plus `muse` for crewmates and scouts only; never dispatch on an unverified adapter.
+`omp` (Oh My Pi) is a CANDIDATE crewmate/scout adapter, not a verified one.
+Its pinned 17.2.9 effective configuration and effective tool registry remain unproven because no supported matching session-free importable consumer artifact is available.
+Keep every runnable selection dormant until that consumer proof and the separate ATX-2170 First Mate interrupt, exit, and relaunch proof both pass; neither mandatory gate substitutes for the other.
+Do not dispatch real work on it or describe it as containment-complete, supervised, or live-verified.
+It is reachable only through an explicit `--harness omp`, is refused for a secondmate, and is never a coordinator, backend, or implicit default.
 If static `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, report it and fall back only to a verified adapter rather than launching it.
 
-`docs/configuration.md` owns dispatch-profile and runtime-backend schemas, `bin/fm-harness.sh` owns static resolution, and `bin/fm-spawn.sh` owns launch flags and fail-closed validation.
+`docs/configuration.md` owns dispatch-profile and runtime-backend schemas, `bin/fm-harness.sh` owns static resolution, and `bin/fm-spawn.sh` owns general launch flags and fail-closed validation.
+For OMP specifically, `bin/fm-spawn.sh` owns selection, hard dormancy, and version/model/backend ordering, while `bin/fm-omp-candidate-artifacts.sh` owns exact flags, environment isolation, requested tool containment, and input policy.
 When dispatch profiles exist, consult them at every crewmate or scout intake and pass the resolved concrete profile required by `fm-spawn`.
 Routing precedence is an explicit per-task captain override, then the best-fit configured rule, then the configured default, then the static crewmate harness.
 Firstmate alone resolves a matched profile array: begin with `quota-axi`'s default TOON at that intake, using the skill's narrow TOON-then-`--json` fallback only for genuine ambiguity, evaluate every configured candidate against that current output, and choose with inspectable `spendPriority` as the one quota-perspective ranker after the skill's eligibility, reasoning-class, and runway-feasibility gates.

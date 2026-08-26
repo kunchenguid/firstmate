@@ -24,7 +24,8 @@ This feature parents no SDK span by itself.
 
 Because the injected carrier and the recorded carrier are the same string, an observer that reads the metadata reconstructs exactly the identity the child received.
 The injection sits at the unconditional pre-launch export site, so it covers ship and scout spawns across `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, `cursor`, and `muse`, plus Secondmate spawns across that same set except the deliberately crewmate-only `muse` adapter.
-This is the same coverage `GOTMPDIR` already has and requires no trace-specific `launch_template()` behavior.
+This is the same coverage `GOTMPDIR` already has and requires no trace-specific `launch_template()` behavior for those adapters.
+The dormant candidate `omp` adapter is the one deliberate exception: its candidate launch contract forces trace off and strips `TRACEPARENT`, while [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) owns hard dormancy and the ordering of the two mandatory gates - supported session-free OMP 17.2.9 consumer-containment proof and separate ATX-2170 First Mate lifecycle-control proof - ahead of any runnable launch.
 Ship and scout spawns reach that site on every spawn backend (`tmux`, `herdr`, `zellij`, `orca`, `cmux`); a Secondmate reaches it on every backend that accepts a Secondmate spawn (`tmux`, `herdr`, `zellij`), because `bin/fm-spawn.sh` rejects a Secondmate on `orca` and `cmux`.
 
 ### Remote Secondmate routes

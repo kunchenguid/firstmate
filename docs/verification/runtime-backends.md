@@ -666,7 +666,7 @@ The real lifecycle smoke proved spawn, metadata, nested-subshell worktree discov
 
 ## Orca
 
-Real readiness was verified against `/usr/local/bin/orca` with `/Applications/Orca.app` bundle version 1.4.116.
+On 2026-08-23, real readiness was refreshed against `/opt/homebrew/bin/orca` with `/Applications/Orca.app` bundle version 1.4.188.
 
 ```sh
 orca status --json
@@ -679,9 +679,47 @@ result.runtime.reachable=true
 result.runtime.state=ready
 ```
 
+The active 1.4.188 profile returned this sanitized composite worktree handle from the exact read-only query below:
+
+```sh
+orca worktree list --repo 'path:<registered-firstmate-project>' --limit 1 --json | jq -r '.result.worktrees[0] | [.id, .path] | @tsv'
+```
+
+```text
+8764824d-2f62-4fe5-b755-2c5ea87ea61e::<absolute-worktree-path>    <absolute-worktree-path>
+```
+
+The earlier 1.4.116 profile used a repository-identity prefix containing both a colon and a slash; its sanitized read-only capture was:
+
+```sh
+orca worktree list --repo 'id:github:kunchenguid/firstmate' --json | jq -r '.result.worktrees[] | select(.path == "<absolute-worktree-path>") | .id'
+```
+
+```text
+github:kunchenguid/firstmate::<absolute-worktree-path>
+```
+
 `orca terminal create --json` returned `result.terminal.handle`.
 `orca worktree create` returned `result.worktree.id` and `result.worktree.path`.
 Speculative bare ids and nested terminal fields were deliberately rejected.
+
+On 2026-08-24, the installed Orca app still reported 1.4.188.
+Read-only `terminal list --json` and `worktree list --json` inventories first established that separate UUID-qualified synthetic terminal and worktree identifiers had no exact collision.
+Bounded cleanup probes then used only those verified-nonexistent identifiers:
+
+```sh
+orca terminal list --json
+orca worktree list --json
+orca terminal close --terminal 'fm-review-absent-terminal-<uuid>' --json
+orca worktree rm --worktree 'id:fm-review-absent-worktree-<uuid>' --force --json
+```
+
+```text
+terminal close: exit=1 ok=false error.code=terminal_handle_stale
+worktree rm: exit=1 ok=false error.code=selector_not_found
+```
+
+Those two observed structured codes are the only Orca cleanup errors classified as already absent by the adapter; other `ok:false` codes remain failures.
 
 ```sh
 tests/fm-backend-orca.test.sh
@@ -963,3 +1001,22 @@ Evidence produced 2026-08-25 on macOS 26.5.2 arm64, Node v24.13.1:
 
 Scope of this evidence: the installed signed `pi` CLI (0.82.0 at verification time) is a compiled binary whose bundled SDK is not importable from Node, so the importable npm package is the only surface the guard and the typecheck can pin.
 The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh this record after every Pi upgrade by re-running both commands above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists) and by watching the branch's own fallback line - every branch failure degrades to the pre-branch wake-to-main path by construction, which `tests/fm-pi-branch-extension.test.sh` holds with a broken generator and the live guard holds with the real SDK.
+
+## OMP candidate tool containment
+
+On 2026-08-24, source review invalidated the earlier RPC-based consumer result: OMP RPC mode constructs an agent session and may initialize a provider connection, so it is outside this candidate's no-session and no-network verification authority.
+
+The installed exact-version bundle contains the compiled `omp/17.2.9` executable, provenance, and notice, but no importable matching SDK surface.
+The unrelated Bun cache contains `@oh-my-pi/pi-coding-agent` 18.0.4, which cannot prove 17.2.9 behavior.
+The opt-in proof gate executes only a bounded `omp --version` identity probe, then fails closed before any agent session or provider startup:
+
+```sh
+FM_OMP_TOOLS_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-omp-tools-live-e2e.test.sh
+```
+
+```text
+not ok - exact omp/17.2.9 has no available importable session-free configuration and tool consumer; candidate remains dormant
+```
+
+No effective-configuration or effective-tool-registry containment proof is claimed.
+A matching importable session-free consumer and separately gated ATX-2170 interrupt, exit, and relaunch verification are independent mandatory prerequisites; OMP remains dormant until both pass, and neither substitutes for the other.

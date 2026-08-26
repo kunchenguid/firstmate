@@ -74,6 +74,10 @@
 # routing a remote "/..." or "$..." through the record changes nothing the
 # parser would have seen); only --key still crosses to the remote pane as a
 # keystroke.
+# OMP is the exception to the harness-native text path: every slash or bang
+# command, including a leading-whitespace form, is refused before typed or
+# inbox submission. First Mate lifecycle control remains on the --key and
+# fm-control paths rather than OMP's command parser.
 #
 # Stage-1 compatibility boundary: classification uses the original pre-marker
 # text, but secondmate marking still precedes every typed submission. Therefore
@@ -625,6 +629,9 @@ if [ "${1:-}" = "--key" ]; then
   fm_send_record_interrupt "$semantic_key" || exit 1
 else
   MESSAGE=$*
+  if [ "$TARGET_HARNESS" = omp ]; then
+    "$SCRIPT_DIR/fm-omp-candidate-artifacts.sh" validate-submission "$MESSAGE" || exit 1
+  fi
   # The pre-marker answer text, kept for the closing resolved note so the
   # durable ledger records the plain answer without marker or corr bytes.
   RESOLVE_ANSWER_TEXT=$MESSAGE

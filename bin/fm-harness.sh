@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|omp|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -65,6 +65,13 @@ detect_own() {
   # identified, and any rule that must be RELIABLE under grok has to test the hook
   # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
+  # omp publishes no identity marker of its own, so FM_OMP_HARNESS=1 is a
+  # FIRSTMATE-owned launch marker set by bin/fm-spawn.sh, which also clears the
+  # foreign markers above so their higher precedence cannot mask it. It is
+  # checked last among the markers precisely so it cannot change how any
+  # pre-existing marker resolves. omp is a crewmate/scout adapter only; this
+  # answers "what is this worker", never "who supervises".
+  [ "${FM_OMP_HARNESS:-}" = "1" ] && { echo omp; return; }
   # muse (Muse Code) publishes no harness-identity marker of its own. The only
   # MUSE_* variable it is documented to hand a child is MUSE_CURRENT_SESSION_LOG,
   # a per-session log PATH rather than an identity, and its export to tool
@@ -93,6 +100,10 @@ detect_own() {
       # prefix rather than any exact name. Deliberately anchored, never *muse*, so
       # unrelated commands (musescore, amuse) cannot be misread as this harness.
       muse|muse-bin-*) echo muse; return ;;
+      # Anchored, never *omp*: `omp` is a substring of ordinary shell machinery
+      # (compinit, compdef, composer). Matched before the Pi family below and
+      # kept as its own token so this Pi fork is never normalized to pi.
+      omp) echo omp; return ;;
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
       node*|python*)

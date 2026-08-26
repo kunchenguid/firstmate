@@ -41,11 +41,15 @@ worktree=<absolute Orca worktree path>
 ```
 
 `window=` remains the caller-facing Firstmate alias.
-`terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
+`terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths for a complete endpoint.
+If abort cleanup cannot release a partial allocation, spawn preserves an atomic cleanup-only recovery record so ordinary teardown can retry without treating it as a live endpoint.
+The `bin/fm-spawn.sh` usage contract owns the exact recovery fields and variants.
+Current Orca releases emit `orca_worktree_id=` as a composite `<repo-id>::<absolute-worktree-path>` handle; endpoint validation accepts that shape only when the embedded path is exactly the recorded `worktree=` value, and still accepts the opaque ids older releases emit.
 
 ## Current lifecycle and safety
 
 Spawn registers the repository, creates an independent worktree, reuses only the verified `result.terminal.handle` returned by Orca or creates a terminal explicitly, installs harness hooks, records metadata, and launches the selected harness.
+A failed metadata publication aborts the launch rather than leaving an unrecorded endpoint: the created terminal is closed and the worktree released, and when either cleanup operation fails a minimal record is preserved so ordinary cleanup can still find every allocation that remains.
 Exact command flags and response parsing are owned by `bin/backends/orca.sh` and script help.
 
 `fm-peek.sh` reads with `orca terminal read`.

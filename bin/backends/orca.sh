@@ -112,6 +112,47 @@ fm_backend_orca_run_json() {
   printf '%s' "$out" | fm_backend_orca_json_ok
 }
 
+fm_backend_orca_json_cleanup_ok() {  # <already-absent-error-code>
+  local absent_code=$1
+  node -e '
+const fs = require("fs");
+const absentCode = process.argv[1];
+const input = fs.readFileSync(0, "utf8").trim();
+if (!input) process.exit(0);
+let data;
+try {
+  data = JSON.parse(input);
+} catch (err) {
+  console.error("invalid Orca JSON: " + err.message);
+  process.exit(2);
+}
+if (data.ok === false) {
+  const error = data.error || {};
+  if (error.code === absentCode) process.exit(3);
+  const msg = error.message || error.code;
+  if (msg) console.error(msg);
+  process.exit(2);
+}
+' "$absent_code"
+}
+
+fm_backend_orca_run_cleanup_json() {  # <already-absent-error-code> <command...>
+  local absent_code=$1 out command_status=0 verdict
+  shift
+  out=$("$@") || command_status=$?
+  if [ -z "$out" ]; then
+    [ "$command_status" -eq 0 ]
+    return
+  fi
+  if printf '%s' "$out" | fm_backend_orca_json_cleanup_ok "$absent_code"; then
+    verdict=0
+  else
+    verdict=$?
+  fi
+  [ "$verdict" -eq 3 ] && return 0
+  [ "$command_status" -eq 0 ] && [ "$verdict" -eq 0 ]
+}
+
 fm_backend_orca_repo_ensure() {  # <project-path>
   local project=$1 out repo_id
   fm_backend_orca_tool_check || return 1
@@ -181,7 +222,8 @@ fm_backend_orca_remove_worktree() {  # <worktree-id>
   local worktree_id=${1:-}
   [ -n "$worktree_id" ] || { echo "error: missing Orca worktree id; cannot remove worktree" >&2; return 1; }
   fm_backend_orca_tool_check || return 1
-  fm_backend_orca_run_json orca worktree rm --worktree "id:$worktree_id" --force --json
+  fm_backend_orca_run_cleanup_json selector_not_found \
+    orca worktree rm --worktree "id:$worktree_id" --force --json
 }
 
 fm_backend_orca_worktree_path() {
@@ -284,7 +326,12 @@ fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sl
     "$terminal" "$retries" "$sleep_s"
 }
 
+fm_backend_orca_close_terminal() {  # <terminal-id>
+  fm_backend_orca_tool_check || return 1
+  fm_backend_orca_run_cleanup_json terminal_handle_stale \
+    orca terminal close --terminal "$1" --json
+}
+
 fm_backend_orca_kill() {  # <terminal-id>
-  fm_backend_orca_tool_check || return 0
-  orca terminal close --terminal "$1" --json >/dev/null 2>&1 || true
+  fm_backend_orca_close_terminal "$1" || true
 }

@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse.
+  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse, plus the candidate omp adapter.
 user-invocable: false
 metadata:
   internal: true
@@ -534,3 +534,21 @@ A teardown refusal naming muse scratch is therefore correct behavior: inspect it
 muse is a day-0 `0.1.0` beta whose launcher polls a release channel hourly and can replace the running binary underneath the fleet, changing the process name with it.
 The captain accepted that risk, so firstmate does NOT set `MUSE_NO_AUTO_UPDATE=1`; a fleet that later wants stability can set it in the launch environment without any adapter change.
 Its plugin/hook engine reports `plugins are not available in this build` unless `MUSE_EXPERIMENTAL_PLUGINS=on`, which is why the busy source reads the session log instead of installing a hook.
+
+## omp (CANDIDATE, NOT LIVE-VERIFIED - Oh My Pi v17.2.9)
+
+Oh My Pi is a candidate crewmate/scout adapter, not a live-verified worker.
+Its pinned 17.2.9 effective configuration and effective tool registry remain unproven because no supported matching session-free importable consumer artifact is available.
+It remains dormant: every runnable selection is refused until that consumer proof and separately gated ATX-2170 First Mate interrupt, exit, and relaunch proof both pass; neither mandatory gate substitutes for the other.
+Until both proofs exist, OMP operational verdicts are untrusted and classify unknown; do not dispatch work or describe the adapter as containment-complete, supervised, or live-ready.
+
+The candidate is designed to preserve Orca as the only execution backend and First Mate as the only supervisor.
+Its requested launch boundary requires an explicit qualified provider/model, requests disabled model and usage-aware fallback with cleared fallback chains, forces trace propagation off, and requests exclusion of command execution, delegation, network, MCP, browser, and desktop tools.
+These requested settings are not consumer-behavior proof.
+It is never a secondmate, coordinator, backend, implicit default, or live pilot.
+
+`bin/fm-spawn.sh --help` owns selection, ordering, model/backend validation, version pinning, dormancy, and state paths.
+`bin/fm-omp-candidate-artifacts.sh` owns the exact launch flags, environment boundary, requested per-launch fallback settings and tool containment, candidate input policy, and lifecycle extension.
+`bin/fm-busy-lib.sh` owns the untrusted operational verdict.
+`bin/fm-teardown.sh` owns artifact cleanup.
+Portable policy regressions live in `tests/fm-omp-harness.test.sh`, `tests/fm-send-inbox.test.sh`, and `tests/fm-busy-adapter-wiring.test.sh`; the unresolved session-free consumer proof gate lives in `tests/fm-omp-tools-live-e2e.test.sh`.
