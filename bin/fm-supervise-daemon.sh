@@ -1460,7 +1460,7 @@ fm_super_main() {
   migrate_watcher_pause_markers "$STATE"
 
   # --- shutdown: flush buffered escalations, reap child, release lock -------
-  local WATCHER_PID="" CUR_TMP=""
+  local WATCHER_PID="" CUR_TMP="" WATCH_CONFIRM_TOKEN=""
   cleanup() {
     trap - TERM INT
     wedge_alarm_stop_active_notifier
@@ -1499,9 +1499,17 @@ fm_super_main() {
     fi
   }
 
+  confirm_watch_delivery() {
+    FM_STATE_OVERRIDE="$STATE" FM_HOME="${FM_HOME:-}" FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-}" \
+      bash -c '. "$1"; watch_delivery_progress_confirm "$2"' \
+      _ "$FM_DAEMON_DIR/fm-push-transition-lib.sh" "$WATCH_CONFIRM_TOKEN"
+  }
+
   start_watcher() {
     CUR_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-watch.XXXXXX") || { log "error: mktemp failed; retrying in 5s"; sleep 5; return 1; }
-    "$WATCH" >"$CUR_TMP" 2>>"$WATCH_ERR" &
+    WATCH_CONFIRM_TOKEN="${BASHPID:-$$}.$(date +%s).${RANDOM:-0}"
+    FM_WATCH_DELIVERY_CONFIRM_TOKEN="$WATCH_CONFIRM_TOKEN" FM_WATCH_DELIVERY_CONFIRM_PID="${BASHPID:-$$}" \
+      "$WATCH" >"$CUR_TMP" 2>>"$WATCH_ERR" &
     WATCHER_PID=$!
   }
 
@@ -1554,6 +1562,8 @@ fm_super_main() {
         log "wake: $reason"
         if ! handle_durable_wakes "$reason" "$STATE"; then
           log "durable wake handling was not acknowledged; restarting for recovery"
+        else
+          confirm_watch_delivery >/dev/null 2>&1 || true
         fi
         trim_log
       fi

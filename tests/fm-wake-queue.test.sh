@@ -14,6 +14,7 @@ set -u
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 GRANT="$ROOT/bin/fm-wake-grant.sh"
+DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
@@ -598,6 +599,68 @@ SH
   ! grep -F 'secondmate wake-loop stalled: mate=directmate row=8' "$dir/direct-stall.out" >/dev/null \
     || fail "a directly delivered wake did not commit handoff progress: $(cat "$dir/direct-stall.out")"
   pass "checkpoint progress commits only after forwarding while direct delivery still commits"
+}
+
+test_secondmate_away_daemon_crash_does_not_commit_progress() {
+  local dir state sub fakebin daemon_pid i marker_state
+  dir=$(make_case secondmate-away-daemon-crash)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  fakebin="$dir/fakebin"
+  mkdir -p "$sub/state" "$sub/data" "$sub/bin"
+  printf '# Firstmate\n' > "$sub/AGENTS.md"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  : > "$sub/state/.afk"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message) printf 'fakepane\n' ;;
+  list-windows) printf 'firstmate:fm-mate\n' ;;
+  capture-pane) printf 'idle prompt $\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  PATH="$fakebin:$PATH" FM_HOME="$sub" FM_STATE_OVERRIDE="$sub/state" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=firstmate:0 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_HOUSEKEEPING_TICK=999999 \
+    "$DAEMON" > "$dir/daemon.out" 2> "$dir/daemon.err" &
+  daemon_pid=$!
+  i=0
+  while [ ! -s "$sub/state/.watch.lock/pid" ] && [ "$i" -lt 100 ]; do
+    kill -0 "$daemon_pid" 2>/dev/null || fail "the away daemon exited before starting its watcher: $(cat "$dir/daemon.err")"
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$sub/state/.watch.lock/pid" ] || fail "the away daemon did not start its watcher"
+  kill -STOP "$daemon_pid" || fail "the away daemon could not be paused before durable handling"
+  append_wake "$sub/state" check routed "check: routed row" \
+    || fail "the away daemon crash fixture could not append its wake"
+  i=0
+  marker_state=
+  while [ "$i" -lt 100 ]; do
+    marker_state=$(awk -F '\t' 'NR == 1 { print $1 }' "$sub/state/.watch-delivery-progress" 2>/dev/null || true)
+    [ "$marker_state" = inflight ] && break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$marker_state" = inflight ] || fail "the daemon-managed watcher did not publish in-flight progress"
+  kill -KILL "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  awk -F '\t' -v OFS='\t' -v old="$(( $(date +%s) - 600 ))" 'NR == 1 { $1 = old } { print }' \
+    "$sub/state/.wake-queue" > "$sub/state/.wake-queue.aged"
+  mv "$sub/state/.wake-queue.aged" "$sub/state/.wake-queue"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/daemon-crash-stall.out" \
+    2> "$dir/daemon-crash-stall.err" || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=1' "$dir/daemon-crash-stall.out" >/dev/null \
+    || fail "an away daemon crash committed optimistic progress: $(cat "$dir/daemon-crash-stall.out"); err=$(cat "$dir/daemon-crash-stall.err")"
+  pass "away daemon progress remains uncommitted until durable handling"
 }
 
 test_secondmate_stall_marker_rejects_symlink() {
@@ -1484,6 +1547,7 @@ test_self_held_lock_reclaims_instead_of_deadlocking
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
 test_secondmate_stall_follows_actionable_handoff_progress
 test_secondmate_unforwarded_checkpoint_does_not_commit_progress
+test_secondmate_away_daemon_crash_does_not_commit_progress
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash
 test_empty_prefix_mate_preserves_other_mate_receipt
