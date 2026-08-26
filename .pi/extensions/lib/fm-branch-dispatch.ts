@@ -35,13 +35,13 @@ export interface UnreadWakeScope {
   /**
    * True only when this scan itself is untrustworthy: the queue or its
    * metadata could not be read, a line fails the structural tab-field check,
-   * an unresolvable signal/stale row was found, or - for a heartbeat review
-   * only - a main-owned row sits anywhere in the unread queue. False whenever
-   * the scan completed cleanly and simply found nothing (or nothing further)
-   * eligible for the branch right now: status "unsafe" with corrupted false
-   * is the ordinary "ordinary main-only content, nothing here for the
-   * branch" case, not a fault, and callers should treat it as ordinary
-   * absence rather than escalating.
+   * or an unresolvable signal/stale row was found. False whenever the scan
+   * completed cleanly and simply found nothing (or nothing further) eligible
+   * for the branch right now: status "unsafe" with corrupted false is the
+   * ordinary "ordinary main-only content, nothing here for the branch" case,
+   * not a fault, and callers should treat it as ordinary absence rather than
+   * escalating. A main-owned check row is never a source of corruption in
+   * either mode.
    */
   corrupted: boolean;
 }
@@ -55,21 +55,29 @@ const UNSAFE_SCOPE: UnreadWakeScope = { status: "unsafe", eligible: false, proje
 // itself - it only consumes the exact sequence-number snapshot this function
 // (via writeEligibleRowsSnapshot) hands it.
 //
-// heartbeat=true keeps the ORIGINAL all-or-nothing rule byte-for-byte: a
-// heartbeat review needs the whole fleet's context, so a single check-kind or
-// unresolvable row anywhere in the unread queue still makes the entire scan
-// unsafe (docs/pi-supervision-branch.md "Heartbeat routing").
+// A check-kind row - merge-confirmation polls, Relay mentions, credential/auth
+// failures, and every other legitimately main-only class - never vetoes a scan
+// in either mode. It is simply excluded from eligibleSeqs and left queued for
+// main, which is woken for it on that check's own watcher cycle
+// (fm-primary-pi-watch.ts forces every check-kind TRIGGER to main), so nothing
+// starves by being left behind.
 //
-// heartbeat=false is the changed half of this contract. A check-kind row -
-// merge-confirmation polls, Relay mentions, credential/auth failures, and
-// every other legitimately main-only class - no longer vetoes the whole scan;
-// it is simply excluded from eligibleSeqs and left for main. An unresolvable
-// signal/stale row (unmapped project) still vetoes the whole scan exactly as
-// before, because that is a data/metadata problem this function cannot safely
-// reason past, not an ordinary main-only event. A row this repo's
-// fm_wake_append could never have produced (an unknown kind, or a line that
-// fails the structural tab-field check) also still vetoes the whole scan -
-// that is queue corruption, not an everyday mixed queue.
+// That applies to a heartbeat review too, and it is the whole point: a
+// heartbeat used to be deferred to main merely because some unrelated check
+// row happened to be sitting unread, which put a routine fleet review in the
+// captain's chat for a reason that had nothing to do with the fleet. A
+// permanently main-owned row is not fleet context the branch is missing, so it
+// no longer rides the heartbeat into main (docs/pi-supervision-branch.md
+// "Heartbeat routing").
+//
+// The heartbeat's all-or-nothing contract is unchanged in what it actually
+// guarantees: a heartbeat review takes EVERY branch-ownable unread row or none
+// of them. An unresolvable signal/stale row (unmapped project) still vetoes the
+// whole scan in both modes, because that is a data/metadata problem this
+// function cannot safely reason past, not an ordinary main-only event. A row
+// this repo's fm_wake_append could never have produced (an unknown kind, or a
+// line that fails the structural tab-field check) also still vetoes the whole
+// scan - that is queue corruption, not an everyday mixed queue.
 export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWakeScope {
   let queue = "";
   try {
@@ -111,10 +119,9 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
       continue;
     }
     if (kind === "check") {
-      // Always main-owned. Vetoes an all-or-nothing heartbeat review (it
-      // needs the whole fleet's context); otherwise simply excluded, never a
-      // reason to reject the rest of the queue.
-      if (heartbeat) return UNSAFE_SCOPE;
+      // Always main-owned, in every mode: excluded from what the branch may
+      // claim, never a reason to reject the rest of the queue and never a
+      // reason to send an otherwise-eligible heartbeat review to main.
       continue;
     }
     let project = "";
@@ -132,11 +139,14 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
     projects.add(project);
     eligibleSeqs.push(seq);
   }
-  const eligible = heartbeat ? true : eligibleSeqs.length > 0;
-  // Reached only after every row passed classification without a veto: a
-  // heartbeat review is always eligible here, and a non-heartbeat scan that
-  // ends up ineligible simply found no signal/stale rows to offer - ordinary
-  // main-only content, not a fault.
+  const eligible = eligibleSeqs.length > 0;
+  // Reached only after every row passed classification without a veto. A scan
+  // that ends up ineligible simply found nothing the branch may claim - a
+  // queue of purely main-only content, not a fault. (Before check rows stopped
+  // vetoing a heartbeat, this point was unreachable for a heartbeat with an
+  // empty eligible set, so reading eligibility off the claim set rather than
+  // off the heartbeat flag changes no pre-existing outcome and keeps a
+  // heartbeat from being offered with nothing to hand over.)
   return { status: eligible ? "safe" : "unsafe", eligible, projects: [...projects], eligibleSeqs, corrupted: false };
 }
 
