@@ -3702,7 +3702,7 @@ EOF
       ;;
     cursor-agent*)
       # Cursor composes task-root-local hooks with the operator's global hooks.
-      # beforeSubmitPrompt opens the semantic turn; stop and SessionEnd close it.
+      # beforeSubmitPrompt opens the semantic turn; stop and sessionEnd close it.
       # Stop also preserves the watcher's turn-end notification. Only the generated
       # hooks file is excluded through git info/exclude in writer worktrees, so
       # real project-owned Cursor configuration remains visible in diffs and pull
@@ -3714,7 +3714,7 @@ EOF
       j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
       j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
       cat > "$WT/.cursor/hooks.json" <<EOF
-{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":"$j_submit"}],"stop":[{"command":"$j_stop"}],"SessionEnd":[{"command":"$j_sessionend"}]}}
+{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":"$j_submit"}],"stop":[{"command":"$j_stop"}],"sessionEnd":[{"command":"$j_sessionend"}]}}
 EOF
       exclude_path '.cursor/hooks.json'
       ;;

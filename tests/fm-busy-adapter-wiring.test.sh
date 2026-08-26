@@ -268,7 +268,7 @@ run_cursor_hook() {  # <hooks.json> <hook-event>
 }
 
 test_cursor_hooks_semantic_lifecycle() {
-  local rec id=busy-cursor-1 out state hooks status
+  local rec id=busy-cursor-1 out state hooks status unsupported
   rec=$(make_spawn_case cursor-lifecycle cursor-agent "$id")
   read_case_record "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
@@ -276,8 +276,18 @@ test_cursor_hooks_semantic_lifecycle() {
   state="$HOME_DIR/state"
   hooks="$WT_DIR/.cursor/hooks.json"
   assert_present "$hooks" "cursor-agent spawn did not write project-local hooks"
-  jq -e '.version == 1 and .hooks.beforeSubmitPrompt and .hooks.stop and .hooks.SessionEnd' "$hooks" >/dev/null \
+  jq -e '.version == 1 and .hooks.beforeSubmitPrompt and .hooks.stop and .hooks.sessionEnd' "$hooks" >/dev/null \
     || fail "cursor-agent hooks do not expose the verified lifecycle"
+  unsupported=$(jq -r '.hooks | keys[]' "$hooks" | while IFS= read -r key; do
+    case "$key" in
+      beforeShellExecution|beforeMCPExecution|afterShellExecution|afterMCPExecution|beforeReadFile|afterFileEdit|beforeTabFileRead|afterTabFileEdit|stop|beforeSubmitPrompt|afterAgentResponse|afterAgentThought|sessionStart|sessionEnd|preCompact|subagentStart|subagentStop|preToolUse|postToolUse|postToolUseFailure|workspaceOpen)
+        ;;
+      *)
+        printf '%s\n' "$key"
+        ;;
+    esac
+  done)
+  [ -z "$unsupported" ] || fail "cursor-agent hooks contain unsupported Cursor hook key(s): $unsupported"
 
   status=$(git -C "$WT_DIR" status --short --untracked-files=all)
   [ -z "$status" ] || fail "project-local Cursor hooks surfaced in the worktree diff: $status"
@@ -301,16 +311,16 @@ test_cursor_hooks_semantic_lifecycle() {
   [ "$out" = "busy cursor-hook" ] \
     || fail "beforeSubmitPrompt must classify 'busy cursor-hook', got '$out'"
 
-  run_cursor_hook "$hooks" SessionEnd || fail "SessionEnd hook command failed"
+  run_cursor_hook "$hooks" sessionEnd || fail "sessionEnd hook command failed"
   out=$(classify cursor-agent "$id" "$state")
   [ "$out" = "idle cursor-hook" ] \
-    || fail "SessionEnd must classify 'idle cursor-hook', got '$out'"
+    || fail "sessionEnd must classify 'idle cursor-hook', got '$out'"
 
   run_cursor_hook "$hooks" beforeSubmitPrompt || fail "final beforeSubmitPrompt hook command failed"
   run_cursor_hook "$hooks" stop || fail "final stop hook command failed"
   out=$(classify cursor-agent "$id" "$state")
   [ "$out" = "idle cursor-hook" ] || fail "final stop must classify 'idle cursor-hook', got '$out'"
-  pass "cursor-agent project hooks stay out of diffs and close semantic turns on stop and SessionEnd"
+  pass "cursor-agent project hooks stay out of diffs, use supported Cursor hook keys, and close semantic turns on stop and sessionEnd"
 }
 
 test_claude_hooks_semantic_lifecycle() {

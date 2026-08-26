@@ -73,6 +73,7 @@ printf '%s\n' "$*" >> "$FM_HERDR_LOG"
 case "${1:-} ${2:-}" in
   "status --json") printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true}}\n' ;;
   "pane get") printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}" ;;
+  "pane read") printf '%b' "${FM_HERDR_COMPOSER:-}" ;;
   "pane send-keys") : ;;
 esac
 SH
@@ -231,6 +232,40 @@ test_key_send_exit_status_follows_delivery() {
   pass "fm-send --key: exit status follows delivery, and an undelivered key never reports success"
 }
 
+test_cursor_residual_composer_preserves_inbox_and_refuses_typed_delivery() {
+  local dir fb home err herdr_log rc rec body record_count
+  dir="$TMP_ROOT/cursor-residual"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home cursor-residual); err="$dir/send.err"; herdr_log="$dir/herdr.log"
+  : > "$herdr_log"
+  fm_write_meta "$home/state/cursor-residual.meta" \
+    "window=default:w1:p2" "backend=herdr" "herdr_session=default" "herdr_pane_id=w1:p2" "harness=cursor-agent" "kind=ship"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_HERDR_LOG="$herdr_log" \
+    FM_HERDR_COMPOSER='  ❯ restored cancelled prompt\n' FM_SEND_SETTLE=0 \
+    "$SEND" cursor-residual "new steer" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "an ordinary Cursor steer is delivered by durable enqueue even when the composer holds restored text"
+  rec="$home/state/cursor-residual.inbox/001.msg"
+  assert_present "$rec" "the ordinary Cursor steer was not durably recorded"
+  body=$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$rec")
+  [ "$body" = "new steer" ] || fail "the durable Cursor inbox body differs: $body"
+  assert_contains "$(cat "$err")" "doorbell skipped (composer visibly holds pending text)" "residual Cursor composer text should defer the inbox doorbell"
+  assert_contains "$(cat "$err")" "watcher will re-ring" "a deferred Cursor doorbell should retain the established re-ring contract"
+  assert_no_grep 'pane send-text' "$herdr_log" "residual Cursor composer text must prevent the inbox doorbell from being appended"
+
+  : > "$herdr_log"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_HERDR_LOG="$herdr_log" \
+    FM_HERDR_COMPOSER='  ❯ restored cancelled prompt\n' FM_SEND_SETTLE=0 \
+    "$SEND" cursor-residual "/new-steer" >/dev/null 2>"$err"; rc=$?
+  expect_code 1 "$rc" "a typed Cursor invocation should refuse delivery while restored composer text remains"
+  assert_contains "$(cat "$err")" "refusing Cursor text delivery because the composer contains restored text" "residual Cursor composer refusal should name the unsafe state"
+  assert_contains "$(cat "$err")" "text not sent" "residual Cursor composer refusal should report the invocation as known-undelivered"
+  assert_not_contains "$(cat "$err")" "text delivered" "a pre-send Cursor refusal must not claim the invocation was delivered"
+  assert_no_grep 'pane send-text' "$herdr_log" "residual Cursor composer text must prevent typed Herdr delivery from appending the invocation"
+  record_count=$(find "$home/state/cursor-residual.inbox" -maxdepth 1 -name '*.msg' -print | wc -l | tr -d ' ')
+  [ "$record_count" -eq 1 ] || fail "a typed Cursor invocation should not enqueue another record, found $record_count"
+  pass "fm-send strict: Cursor residual text defers inbox ringing and refuses typed delivery before Herdr can append text"
+}
+
 test_exact_lane_id_send_still_works
 test_key_send_exit_status_follows_delivery
 test_unset_fm_home_fails
@@ -239,3 +274,4 @@ test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_fm_prefixed_herdr_session_is_an_explicit_target
 test_healthy_fm_id_send_still_works
+test_cursor_residual_composer_preserves_inbox_and_refuses_typed_delivery
