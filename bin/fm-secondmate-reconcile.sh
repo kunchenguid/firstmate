@@ -46,6 +46,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+
+ACTIVE_LOCK=
+release_active_lock() {
+  [ -z "$ACTIVE_LOCK" ] || fm_lock_release "$ACTIVE_LOCK"
+  ACTIVE_LOCK=
+}
+trap release_active_lock EXIT
+trap 'release_active_lock; exit 130' INT TERM
+
 usage() {
   cat <<'EOF'
 usage: fm-secondmate-reconcile.sh notify [--snapshot <file>|-]
@@ -53,8 +64,8 @@ usage: fm-secondmate-reconcile.sh notify [--snapshot <file>|-]
 
 notify   ask every secondmate home with a NEW inventory-mismatch episode to
          reconcile its own backlog against its own task metadata, exactly once
-         per episode. Reads a fleet snapshot from --snapshot (or runs
-         fm-fleet-snapshot.sh --json when omitted).
+         per episode. Reads an fm-fleet-snapshot.v1 or fm-bearings.v1 document
+         from --snapshot (or runs fm-fleet-snapshot.sh --json when omitted).
 episode  print the episode identity already notified for <mate-id>, if any.
 EOF
 }
@@ -77,6 +88,24 @@ cmd_episode() {
 
 # The instruction is deliberately plain: it names what disagrees and leaves the
 # repair entirely to the mate, which is the only home allowed to change it.
+episode_corr() {
+  local raw digest
+  if command -v openssl >/dev/null 2>&1; then
+    raw=$(openssl rand -hex 8 2>/dev/null || true)
+  fi
+  if [ -z "${raw:-}" ]; then
+    if command -v shasum >/dev/null 2>&1; then
+      digest=$(printf '%s' "$$:$(date +%s%N 2>/dev/null || date +%s):$RANDOM:$RANDOM" | shasum -a 256 | awk '{print $1}') || return 1
+    elif command -v sha256sum >/dev/null 2>&1; then
+      digest=$(printf '%s' "$$:$(date +%s%N 2>/dev/null || date +%s):$RANDOM:$RANDOM" | sha256sum | awk '{print $1}') || return 1
+    else
+      return 1
+    fi
+    raw=${digest:0:16}
+  fi
+  printf '%s' "$raw"
+}
+
 reconcile_text() {  # <kind> <ids-csv>
   local kind=$1 ids=$2 what
   case "$kind" in
@@ -114,29 +143,37 @@ cmd_notify() {
     [ -f "$snapshot_src" ] || fail "snapshot does not exist: $snapshot_src"
     snapshot=$(cat "$snapshot_src")
   fi
-  printf '%s' "$snapshot" | jq -e '.schema == "fm-fleet-snapshot.v1"' >/dev/null 2>&1 \
-    || fail "input is not an fm-fleet-snapshot.v1 document"
+  printf '%s' "$snapshot" | jq -e '.schema == "fm-fleet-snapshot.v1" or .schema == "fm-bearings.v1"' >/dev/null 2>&1 \
+    || fail "input is not an fm-fleet-snapshot.v1 or fm-bearings.v1 document"
 
-  # Only a readable structured home can be asked to reconcile: a home the parent
-  # could not read has a different problem, and its record carries no invalidity.
   rows=$(printf '%s' "$snapshot" | jq -r '
-    (.secondmate_current.records // [])[]
-    | select(.provenance.selected == "structured-home")
+    (if .schema == "fm-bearings.v1" then
+       (.secondmate_reconcile // [])[]
+       | {id, kind:(.kind // ""), ids:(.ids // [])}
+     else
+       (.secondmate_current.records // [])[]
+       | select(.provenance.selected == "structured-home")
+       | {id, kind:(.invalidity.kind // ""), ids:(.invalidity.ids // [])}
+     end)
     | select((.id | type) == "string" and (.id | test("^[A-Za-z0-9._-]+$")))
-    | (.invalidity.kind // "") as $kind
+    | .kind as $kind
     | (if ["orphan_in_flight","unowned_current","terminal_in_flight"] | index($kind)
-       then ((.invalidity.ids // []) | map(select(type == "string")) | sort | join(","))
+       then (.ids | map(select(type == "string")) | sort | join(","))
        else "" end) as $ids
     | [.id, (if $ids == "" then "" else $kind end), $ids] | @tsv')
 
-  local id kind ids episode path prior
+  local id kind ids episode path prior corr pending_reply lock pending_tag pending_episode pending_corr
   while IFS=$'\t' read -r id kind ids; do
     [ -n "${id:-}" ] || continue
     path=$(episode_path "$id")
+    lock="$STATE/.$id.reconcile.lock"
+    fm_lock_acquire_wait "$lock" || { printf 'failed: %s lock\n' "$id"; rc=1; continue; }
+    ACTIVE_LOCK=$lock
     if [ -z "$kind" ]; then
       if [ -f "$path" ] && [ ! -L "$path" ]; then
         rm -f -- "$path" && printf 'cleared: %s\n' "$id"
       fi
+      release_active_lock
       continue
     fi
     episode="$kind:$ids"
@@ -144,24 +181,58 @@ cmd_notify() {
     if [ -f "$path" ] && [ ! -L "$path" ]; then prior=$(cat "$path" 2>/dev/null || true); fi
     if [ "$prior" = "$episode" ]; then
       printf 'dedupe: %s %s\n' "$id" "$episode"
+      release_active_lock
       continue
     fi
-    if ! "$SCRIPT_DIR/fm-send.sh" "$id" "$(reconcile_text "$kind" "$ids")" >/dev/null 2>&1; then
+    corr=
+    IFS=$'\t' read -r pending_tag pending_episode pending_corr <<EOF_PENDING
+$prior
+EOF_PENDING
+    if [ "$pending_tag" = pending ] && [ "$pending_episode" = "$episode" ] \
+      && printf '%s' "$pending_corr" | grep -Eq '^[a-f0-9]{16}$'; then
+      corr=$pending_corr
+    else
+      corr=$(episode_corr) || {
+        printf 'failed: %s %s\n' "$id" "$episode"
+        rc=1
+        release_active_lock
+        continue
+      }
+    fi
+    if ! (umask 077; printf 'pending\t%s\t%s\n' "$episode" "$corr" > "$path.tmp") \
+      || ! mv -f -- "$path.tmp" "$path"; then
+      rm -f -- "$path.tmp"
       printf 'failed: %s %s\n' "$id" "$episode"
       rc=1
+      release_active_lock
       continue
     fi
-    # Record the episode only after the instruction is durably recorded, so a
-    # failed send is retried rather than silently deduped away.
+    pending_reply="${FM_PENDING_REPLY_DIR_OVERRIDE:-$STATE/pending-replies}/$corr"
+    if [ -f "$pending_reply" ] && [ ! -L "$pending_reply" ]; then
+      if ! FM_SEND_IDEMPOTENT=1 FM_PENDING_REPLY_EXISTING_CORR="$corr" \
+        "$SCRIPT_DIR/fm-send.sh" "$id" "$(reconcile_text "$kind" "$ids")" >/dev/null 2>&1; then
+        rm -f -- "$path"
+        printf 'failed: %s %s\n' "$id" "$episode"
+        rc=1
+        release_active_lock
+        continue
+      fi
+    elif ! FM_SEND_IDEMPOTENT=1 FM_PENDING_REPLY_CORR_ID="$corr" \
+      "$SCRIPT_DIR/fm-send.sh" "$id" "$(reconcile_text "$kind" "$ids")" >/dev/null 2>&1; then
+      rm -f -- "$path"
+      printf 'failed: %s %s\n' "$id" "$episode"
+      rc=1
+      release_active_lock
+      continue
+    fi
     if (umask 077; printf '%s\n' "$episode" > "$path.tmp") && mv -f -- "$path.tmp" "$path"; then
       printf 'sent: %s %s\n' "$id" "$episode"
     else
       rm -f -- "$path.tmp"
-      # The mate has the instruction; only this home's dedupe record is missing,
-      # so say so rather than letting the next run repeat the ask in silence.
       printf 'sent-unrecorded: %s %s\n' "$id" "$episode"
       rc=1
     fi
+    release_active_lock
   done <<EOF
 $rows
 EOF

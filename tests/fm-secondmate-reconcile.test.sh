@@ -107,6 +107,40 @@ test_an_inventory_mismatch_asks_the_mate_once_and_only_once() {
   pass "one inventory-mismatch episode asks the mate exactly once, however often it is seen"
 }
 
+test_concurrent_recaps_send_one_instruction() {
+  local home mate fakebin snap p1 p2
+  { read -r home; read -r mate; read -r fakebin; } < <(make_main_home concurrent mate)
+  snap="$home/snapshot.json"
+  write_snapshot "$snap" mate '{"kind":"orphan_in_flight","ids":["ghost"]}'
+
+  run_notify "$home" "$fakebin" concurrent "$snap" > "$home/first.out" & p1=$!
+  run_notify "$home" "$fakebin" concurrent "$snap" > "$home/second.out" & p2=$!
+  wait "$p1" || fail "the first concurrent recap failed"
+  wait "$p2" || fail "the second concurrent recap failed"
+  [ "$(inbox_records "$home/state" mate)" -eq 1 ] \
+    || fail "concurrent recaps sent more than one instruction for one episode"
+  pass "concurrent recaps serialize one reconcile instruction per episode"
+}
+
+test_a_completed_send_survives_a_missing_episode_commit() {
+  local home mate fakebin snap out corr
+  { read -r home; read -r mate; read -r fakebin; } < <(make_main_home interrupted mate)
+  snap="$home/snapshot.json"
+  write_snapshot "$snap" mate '{"kind":"unowned_current","ids":["live-row"]}'
+  run_notify "$home" "$fakebin" interrupted "$snap" >/dev/null || fail "the first ask failed"
+
+  corr=$(find "$home/state/pending-replies" -maxdepth 1 -type f -name '????????????????' -exec basename {} \; | head -1)
+  [ -n "$corr" ] || fail "the delivered ask has no persisted correlation identity"
+  printf 'pending\tunowned_current:live-row\t%s\n' "$corr" > "$home/state/mate.reconcile-episode"
+  out=$(run_notify "$home" "$fakebin" interrupted "$snap") \
+    || fail "recovery after the missing commit failed: $out"
+  assert_contains "$out" "sent: mate unowned_current:live-row" \
+    "the interrupted episode was not recovered: $out"
+  [ "$(inbox_records "$home/state" mate)" -eq 1 ] \
+    || fail "recovery after a delivered send duplicated the instruction"
+  pass "an interrupted episode commit resumes without duplicating delivery"
+}
+
 test_the_ids_order_does_not_split_one_episode_in_two() {
   local home mate fakebin snap
   { read -r home; read -r mate; read -r fakebin; } < <(make_main_home order mate)
@@ -195,6 +229,8 @@ test_a_failed_send_is_retried_on_the_next_run() {
 }
 
 test_an_inventory_mismatch_asks_the_mate_once_and_only_once
+test_concurrent_recaps_send_one_instruction
+test_a_completed_send_survives_a_missing_episode_commit
 test_the_ids_order_does_not_split_one_episode_in_two
 test_a_changed_or_cleared_mismatch_is_a_new_episode
 test_a_readable_home_without_a_mismatch_is_never_asked

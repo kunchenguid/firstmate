@@ -660,7 +660,7 @@ __FM_BEARINGS_BOARD_DATA__
   }
   data.charted.forEach(function (t) {
     var row = el("div", "bb-row");
-    if (t.dispatchable) {
+    if (t.dispatchable && !isWarning(t)) {
       anyPickable = true;
       var pick = document.createElement("input");
       pick.type = "checkbox"; pick.className = "bb-pick"; pick.value = t.id;

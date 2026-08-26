@@ -16,8 +16,8 @@ Generate a complete current snapshot from the fleet's current state, so the capt
 Plain `/bearings` returns only the concise four-section chat digest.
 Only `/bearings file` writes the dated markdown report artifact and then returns the concise four-section chat digest linked to that report.
 Only `/bearings lavish` builds the interactive fleet board beside that digest, through `bin/fm-bearings-board.sh` (its header owns every board mechanic and the fm-bearings-board.v1 payload contract).
-A digest/build invocation is operationally read-only apart from those explicit per-mode artifacts: the dated report in file mode, and in lavish mode the board file plus the answer binding and source registration that `bin/fm-bearings-board.sh build` records through their own owners.
-During that invocation it never tears down a task, merges a PR, dispatches new work, steers a worker, answers a decision, cleans up work, or mutates backlog or task state.
+A digest/build invocation is operationally read-only apart from the once-per-episode reconcile instruction and its `state/<id>.reconcile-episode` dedupe record, plus the explicit per-mode artifacts: the dated report in file mode, and in lavish mode the board file plus the answer binding and source registration that `bin/fm-bearings-board.sh build` records through their own owners.
+During that invocation it never tears down a task, merges a PR, dispatches new work, steers a worker except through that reconcile hook, answers a decision, cleans up work, or mutates backlog or task state beyond the reconcile dedupe record.
 Board answers are acted on later under the normal authority rules; this skill's board-wake section explicitly owns the guarded routing at that time.
 
 ## Invocation modes
@@ -34,8 +34,8 @@ Board answers are acted on later under the normal authority rules; this skill's 
 ## What it does
 
 1. **Gather live fleet state with one deterministic command.**
-   Run `bin/fm-bearings-snapshot.sh` at invocation time and read its compact output.
-   It is the single bounded, deterministic fleet-state source for Bearings and renders TOON by default.
+   Run `snapshot=$(bin/fm-bearings-snapshot.sh --json)` at invocation time and read that compact output.
+   It is the single bounded, deterministic fleet-state source for Bearings.
    Do not create or consult a second fleet-state reader, parser contract, status-event-tail interpretation, visible-session recap, ad-hoc project probe, or ad-hoc `gh-axi`/`gh` query.
    The command's header and `--help` output own its exact fields, bounds, opt-ins, and output contract.
    Keep the default local-only read unless the captain asks to include PRs.
@@ -52,7 +52,7 @@ Board answers are acted on later under the normal authority rules; this skill's 
 
 2. **Ask any home whose own books disagree to reconcile them.**
    When the snapshot reports a secondmate home whose `invalidity` is `orphan_in_flight`, `unowned_current`, or `terminal_in_flight`, that home's backlog and its own task metadata disagree and only that home may fix it.
-   Run `bin/fm-secondmate-reconcile.sh notify` after the snapshot is in hand; it sends exactly one instruction per mismatch episode through the ordinary steering transport and stays silent while the same mismatch persists.
+   Pass that exact gathered projection without waiting on the hook with `printf '%s\n' "$snapshot" | bin/fm-secondmate-reconcile.sh notify --snapshot - >/dev/null 2>&1 &`; it sends exactly one instruction per mismatch episode through the ordinary steering transport and stays silent while the same mismatch persists.
    Never edit another home's backlog or metadata from here, and never wait on the reply: the digest is composed from the snapshot you already have.
 
 3. **Compose the four-section chat digest from the fresh snapshot.**
@@ -151,7 +151,7 @@ Rules that keep the contract unambiguous:
 
 ## Supervision discipline
 
-During a digest/build invocation, this skill changes no fleet state beyond its explicit report or board artifacts, binding, and source registration.
-Do not tear down a task, merge a PR, dispatch queued work, steer a worker, answer a queued decision, clean up work, or mutate any other `state/` or `data/` file during that invocation.
+During a digest/build invocation, this skill changes no fleet state beyond its reconcile instruction and dedupe record, explicit report or board artifacts, binding, and source registration.
+Do not tear down a task, merge a PR, dispatch queued work, steer a worker except through the reconcile hook, answer a queued decision, clean up work, or mutate any other `state/` or `data/` file during that invocation.
 If the state gathered for the digest suggests an action, name it in its section and leave it to the normal lifecycle and configured authority.
 On a later board wake, this read-only invocation rule yields to "Handling a board wake" and its guarded authority for captain-selected dispatches and merges.

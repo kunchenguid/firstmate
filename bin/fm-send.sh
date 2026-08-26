@@ -640,7 +640,9 @@ else
       existing_corr=$(fm_pending_reply_extract_corr "$MESSAGE")
     fi
     if [ -n "$existing_corr" ] \
-      && fm_pending_reply_corr_reusable "$STATE" "$existing_corr" "$TARGET_TASK_ID"; then
+      && { fm_pending_reply_corr_reusable "$STATE" "$existing_corr" "$TARGET_TASK_ID" \
+        || { [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ] \
+          && [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$STATE" "$existing_corr")" task_id)" = "$TARGET_TASK_ID" ]; }; }; then
       PENDING_REPLY_CORR=$existing_corr
     else
       if [ "$existing_corr_explicit" = 1 ]; then
@@ -651,7 +653,7 @@ else
         echo "error: cannot create pending-reply expectation without a resolvable secondmate task id" >&2
         exit 1
       fi
-      PENDING_REPLY_CORR=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$TARGET_TASK_ID" "$MESSAGE") \
+      PENDING_REPLY_CORR=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$TARGET_TASK_ID" "$MESSAGE" "${FM_PENDING_REPLY_CORR_ID:-}") \
         || { echo "error: failed to create parent pending-reply expectation for $TARGET_TASK_ID" >&2; exit 1; }
       PENDING_REPLY_CREATED=1
     fi
@@ -663,7 +665,7 @@ else
           echo "error: pending-reply delivery for $TARGET_TASK_ID could not be reset for an idempotent remote resend of correlation $PENDING_REPLY_CORR" >&2
           exit 1
         fi
-      else
+      elif [ "${FM_SEND_IDEMPOTENT:-0}" != 1 ]; then
         echo "error: pending-reply delivery for $TARGET_TASK_ID is unresolved; refusing to resend correlation $PENDING_REPLY_CORR" >&2
         exit 1
       fi
@@ -815,7 +817,12 @@ else
       echo "error: steer not sent to $INBOX_TASK_ID: the task retired or changed endpoint during target resolution" >&2
       exit 1
     fi
-    if ! INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$INBOX_TASK_ID" "$MESSAGE"); then
+    if [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ]; then
+      INBOX_RECORD=$(fm_task_inbox_write_idempotent "$STATE" "$INBOX_TASK_ID" "$MESSAGE") || inbox_write_rc=$?
+    else
+      INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$INBOX_TASK_ID" "$MESSAGE") || inbox_write_rc=$?
+    fi
+    if [ "${inbox_write_rc:-0}" -ne 0 ]; then
       fm_lock_release "$INBOX_META_LOCK"
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
