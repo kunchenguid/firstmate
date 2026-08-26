@@ -92,6 +92,10 @@ nudge_path() {  # <mate-id>
   printf '%s/%s.reconcile-nudged\n' "$STATE" "$1"
 }
 
+meta_spawn_gen() {
+  grep '^spawn_gen=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
 cmd_nudged() {
   local id path
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
@@ -168,21 +172,22 @@ cmd_notify() {
   rows=$(printf '%s' "$snapshot" | jq -r '
     (if .schema == "fm-bearings.v1" then
        (.secondmate_reconcile // [])[]
-       | {id, kind:(.kind // ""), ids:(.ids // [])}
+       | {id, spawn_gen:(.spawn_gen // ""), kind:(.kind // ""), ids:(.ids // [])}
      else
        (.secondmate_current.records // [])[]
        | select(.reconcile_inventory != null)
-       | {id, kind:(.reconcile_inventory.kind // ""), ids:(.reconcile_inventory.ids // [])}
+       | {id, spawn_gen:(.spawn_gen // ""), kind:(.reconcile_inventory.kind // ""), ids:(.reconcile_inventory.ids // [])}
      end)
     | select((.id | type) == "string" and (.id | test("^[A-Za-z0-9._-]+$")))
+    | select((.spawn_gen | type) == "string" and (.spawn_gen | test("^[A-Za-z0-9._-]+$")))
     | .kind as $kind
     | select(["orphan_in_flight","unowned_current","terminal_in_flight"] | index($kind))
-    | [.id, $kind, (.ids | map(select(type == "string")) | sort | join(", "))]
+    | [.id, .spawn_gen, $kind, (.ids | map(select(type == "string")) | sort | join(", "))]
     | @tsv')
 
   now=$(date +%s)
-  local id kind ids path last age reconcile_lock control_lock meta meta_lock did send_rc
-  while IFS=$'\t' read -r id kind ids; do
+  local id sampled_spawn_gen kind ids path last age reconcile_lock control_lock meta meta_lock current_spawn_gen did send_rc
+  while IFS=$'\t' read -r id sampled_spawn_gen kind ids; do
     [ -n "${id:-}" ] || continue
     path=$(nudge_path "$id")
     reconcile_lock="$STATE/.$id.reconcile.lock"
@@ -208,6 +213,35 @@ cmd_notify() {
       continue
     }
     ACTIVE_CONTROL_LOCK=$control_lock
+    meta="$STATE/$id.meta"
+    meta_lock=$(fm_meta_lock_path "$meta") || {
+      printf 'stale: %s %s\n' "$id" "$kind"
+      release_active_locks
+      continue
+    }
+    fm_lock_acquire_wait "$meta_lock" || {
+      printf 'stale: %s %s\n' "$id" "$kind"
+      release_active_locks
+      continue
+    }
+    ACTIVE_META_LOCK=$meta_lock
+    current_spawn_gen=
+    if [ -f "$meta" ] && [ ! -L "$meta" ]; then
+      current_spawn_gen=$(meta_spawn_gen "$meta")
+    fi
+    if [ -z "$current_spawn_gen" ]; then
+      printf 'failed: %s %s\n' "$id" "$kind"
+      rc=1
+      release_active_locks
+      continue
+    fi
+    if [ "$current_spawn_gen" != "$sampled_spawn_gen" ]; then
+      printf 'stale: %s %s\n' "$id" "$kind"
+      release_active_locks
+      continue
+    fi
+    fm_lock_release "$ACTIVE_META_LOCK"
+    ACTIVE_META_LOCK=
     did=$(delivery_id) || {
       printf 'failed: %s %s\n' "$id" "$kind"
       rc=1
@@ -225,13 +259,6 @@ cmd_notify() {
       release_active_locks
       continue
     fi
-    meta="$STATE/$id.meta"
-    meta_lock=$(fm_meta_lock_path "$meta") || {
-      printf 'sent-unrecorded: %s %s\n' "$id" "$kind"
-      rc=1
-      release_active_locks
-      continue
-    }
     fm_lock_acquire_wait "$meta_lock" || {
       printf 'sent-unrecorded: %s %s\n' "$id" "$kind"
       rc=1
@@ -239,7 +266,11 @@ cmd_notify() {
       continue
     }
     ACTIVE_META_LOCK=$meta_lock
-    if [ -f "$meta" ] && [ ! -L "$meta" ] \
+    current_spawn_gen=
+    if [ -f "$meta" ] && [ ! -L "$meta" ]; then
+      current_spawn_gen=$(meta_spawn_gen "$meta")
+    fi
+    if [ "$current_spawn_gen" = "$sampled_spawn_gen" ] \
       && (umask 077; printf '%s\n' "$now" > "$path.tmp") \
       && mv -f -- "$path.tmp" "$path"; then
       printf 'sent: %s %s\n' "$id" "$kind"

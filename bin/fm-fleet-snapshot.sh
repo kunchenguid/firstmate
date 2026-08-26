@@ -430,7 +430,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 task_json_lines() {
-  local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
+  local meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
@@ -448,6 +448,7 @@ task_json_lines() {
     worktree=$(meta_value "$meta" worktree)
     home=$(meta_value "$meta" home)
     projects=$(meta_value "$meta" projects)
+    spawn_gen=$(meta_value "$meta" spawn_gen)
     remote_host=$(meta_value "$meta" remote_host)
     remote_root=$(meta_value "$meta" remote_root)
     remote_home_present=null
@@ -567,6 +568,7 @@ task_json_lines() {
       --arg worktree "$worktree" \
       --arg home "$home" \
       --arg projects "$projects" \
+      --arg spawn_gen "$spawn_gen" \
       --arg backend "$backend" \
       --arg target "$target" \
       --arg remote_host "$remote_host" \
@@ -594,6 +596,7 @@ task_json_lines() {
         mode:($mode // ""),
         yolo:($yolo // ""),
         project:($project // ""),
+        spawn_gen:($spawn_gen | if . == "" then null else . end),
         backend:$backend,
         remote:(if $remote_host == "" then null else {host:$remote_host,root:$remote_root} end),
         paths:{
@@ -1149,7 +1152,7 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
 
 secondmate_current_json() {  # <parent-tasks-json>
   local tasks=$1 registry union rows total_registered total shown truncated
-  local row id home host remote registered registry_error task status_file event_raw event_note event_epoch event_age
+  local row id home host remote registered registry_error task sampled_spawn_gen status_file event_raw event_note event_epoch event_age
   local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_sampled summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
   local records='[]' seen_homes=''
   registry=$(registry_secondmates_json) || return 1
@@ -1183,6 +1186,7 @@ secondmate_current_json() {  # <parent-tasks-json>
     registered=$(printf '%s' "$row" | jq -r '.registered')
     registry_error=$(printf '%s' "$row" | jq -r '.registry_error // ""')
     task=$(printf '%s' "$row" | jq -c '.parent_task // {}')
+    sampled_spawn_gen=$(printf '%s' "$task" | jq -r '.spawn_gen // ""')
     status_file=$(printf '%s' "$task" | jq -r '.paths.status_log.path // ""')
     event_raw=$(printf '%s' "$task" | jq -r '.paths.status_log.last_event.raw // ""')
     event_note=$(printf '%s' "$task" | jq -r '.paths.status_log.last_event.note // ""')
@@ -1298,11 +1302,13 @@ secondmate_current_json() {  # <parent-tasks-json>
       if printf '%s' "$terminal" | jq -e '.contradiction == true' >/dev/null; then contradiction=true; fi
       record=$(jq -n \
         --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg state "$state" --arg current_reason "$current_reason" --arg observed "$SNAPSHOT_NOW" \
+        --arg spawn_gen "$sampled_spawn_gen" \
         --argjson registered "$registered" --argjson summary "$summary" --argjson summary_valid "$summary_valid" --argjson decisions "$decisions" \
         --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
         --argjson reconciliation "$reconciliation" --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
         --arg event_raw "$event_raw" --arg event_note "$event_note" --argjson event_age "$event_age" '
         {id:$id,home:$home,host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
+         spawn_gen:($spawn_gen | if . == "" then null else . end),
          current:{state:$state,reason:($current_reason | if . == "" then null else . end)},invalidity:$summary.invalidity,
          reconcile_inventory:$summary.invalidity,
          provenance:{selected:"structured-home",structured_home:$home,summary_valid:$summary_valid,
@@ -1329,10 +1335,12 @@ secondmate_current_json() {  # <parent-tasks-json>
       fi
       record=$(jq -n \
         --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
+        --arg spawn_gen "$sampled_spawn_gen" \
         --arg provenance "$provenance" --arg freshness "$freshness" --arg event_raw "$event_raw" --arg event_note "$event_note" \
         --argjson registered "$registered" --argjson event_age "$event_age" --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
         --argjson decisions "$decisions" --argjson terminal "$terminal" --argjson summary "$summary" --argjson summary_sampled "$summary_sampled" '
         {id:$id,home:($home | if . == "" then null else . end),host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
+         spawn_gen:($spawn_gen | if . == "" then null else . end),
          current:{state:"unknown",reason:$reason},invalidity:null,
          reconcile_inventory:(if $summary_sampled then $summary.invalidity else null end),
          provenance:{selected:$provenance,structured_home:($home | if . == "" then null else . end),parent_event_role:"fallback-only-not-current"},

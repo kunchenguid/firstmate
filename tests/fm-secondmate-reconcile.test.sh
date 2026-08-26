@@ -33,6 +33,7 @@ window=firstmate:fm-$id
 kind=secondmate
 harness=claude
 backend=tmux
+spawn_gen=spawn-$id
 home=$abs
 worktree=$abs
 META
@@ -45,7 +46,7 @@ write_snapshot() {  # <path> <mate-id> <invalidity-json> [state]
   jq -n --arg id "$2" --argjson inv "$3" --arg state "${4:-captain_decision}" '{
     schema:"fm-fleet-snapshot.v1", generated:"2026-08-26T00:00:00Z",
     secondmate_current:{records:[{
-      id:$id, home:("/tmp/" + $id),
+      id:$id, home:("/tmp/" + $id), spawn_gen:("spawn-" + $id),
       current:{state:$state, reason:null},
       invalidity:$inv, reconcile_inventory:($inv // {kind:null,ids:[]}),
       provenance:{selected:"structured-home", trust:"partial-structured"}}]}}' > "$1"
@@ -161,11 +162,11 @@ test_each_home_carries_its_own_cooldown() {
   snap="$home/snapshot.json"
   jq -n '{schema:"fm-fleet-snapshot.v1", generated:"2026-08-26T00:00:00Z",
     secondmate_current:{records:[
-      {id:"mate", home:"/tmp/mate", current:{state:"captain_decision",reason:null},
+      {id:"mate", home:"/tmp/mate", spawn_gen:"spawn-mate", current:{state:"captain_decision",reason:null},
        invalidity:{kind:"orphan_in_flight",ids:["a"]},
        reconcile_inventory:{kind:"orphan_in_flight",ids:["a"]},
        provenance:{selected:"structured-home",trust:"partial-structured"}},
-      {id:"other", home:"/tmp/other", current:{state:"captain_decision",reason:null},
+      {id:"other", home:"/tmp/other", spawn_gen:"spawn-mate", current:{state:"captain_decision",reason:null},
        invalidity:{kind:"unowned_current",ids:["b"]},
        reconcile_inventory:{kind:"unowned_current",ids:["b"]},
        provenance:{selected:"structured-home",trust:"partial-structured"}}]}}' > "$snap"
@@ -275,6 +276,26 @@ test_concurrent_recaps_send_one_instruction() {
   pass "simultaneous recaps still ask the mate only once"
 }
 
+test_a_stale_snapshot_never_targets_a_replacement_mate() {
+  local home mate fakebin snap out
+  { read -r home; read -r mate; read -r fakebin; } < <(make_main_home stale mate)
+  snap="$home/snapshot.json"
+  write_snapshot "$snap" mate '{"kind":"orphan_in_flight","ids":["old-ghost"]}'
+  awk '{ sub(/^spawn_gen=.*/, "spawn_gen=spawn-replacement"); print }' \
+    "$home/state/mate.meta" > "$home/state/mate.meta.tmp"
+  mv "$home/state/mate.meta.tmp" "$home/state/mate.meta"
+
+  out=$(run_notify "$home" "$fakebin" stale "$snap") \
+    || fail "a stale snapshot made reconcile fail: $out"
+  assert_contains "$out" "stale: mate orphan_in_flight" \
+    "the stale snapshot was not identified: $out"
+  [ "$(inbox_records "$home/state" mate)" -eq 0 ] \
+    || fail "a replacement mate received its predecessor's reconcile ask"
+  assert_absent "$home/state/mate.reconcile-nudged" \
+    "a replacement mate inherited cooldown from a stale snapshot"
+  pass "a stale snapshot cannot ask or silence a replacement mate"
+}
+
 test_teardown_cannot_leave_its_replacement_in_cooldown() {
   local home mate fakebin snap signal release lifecycle_done notify_pid lifecycle_pid
   { read -r home; read -r mate; read -r fakebin; } < <(make_main_home lifecycle mate)
@@ -311,6 +332,7 @@ window=firstmate:fm-mate
 kind=secondmate
 harness=claude
 backend=tmux
+spawn_gen=spawn-replacement
 home=$mate
 worktree=$mate
 META
@@ -339,4 +361,5 @@ test_a_readable_home_without_a_mismatch_is_never_asked
 test_the_parent_never_changes_the_mates_own_files
 test_a_failed_send_is_retried_on_the_next_run
 test_concurrent_recaps_send_one_instruction
+test_a_stale_snapshot_never_targets_a_replacement_mate
 test_teardown_cannot_leave_its_replacement_in_cooldown
