@@ -108,12 +108,13 @@ The extension registers exactly eight strict JSON-schema constrained sequential 
 For model inspection, `repo_read` renders the identity-bound snapshot manifest as deterministic pretty JSON, so an exclusion inventory larger than one response remains line-pageable without changing the archive or manifest digest.
 The Pi generation schema represents `evidence_files` as bounded path/content records because strict-tool preparation does not support schema-valued object properties.
 The host refuses duplicate paths, converts those records to the existing manifest dictionary, and then applies the unchanged path, content, and aggregate bounds.
-The guest requires at least one turn, exactly one completed agent, and an accepted digest-bound event log ending in exactly one `finish_review` call. A final prose turn after a mixed tool batch cannot override that log.
+The guest requires at least one turn, exactly one completed agent, and an accepted digest-bound event log ending in exactly one `finish_review` call. The only exception is a provisional Pi pass ending in one `request_lookup`, which carries no verdict, findings, or evidence authority. A final prose turn after a mixed tool batch cannot override that log.
 The final terminal event must report the exact `fireworks-glm` provider and `accounts/fireworks/models/glm-5p2` model selector requested by the compartment.
 Reporting the historical Fast selector or another route fails before a verdict can publish.
 Pi's explicit `auto_retry_start` may open a continuation only after a completed attempt executed a turn and did not stop successfully.
 The continuation resets attempt-local terminal and verdict state, preserves aggregate usage for economics, and must execute its own turn before completing.
 The bounded verdict-repair contract owned by [`docs/crosscheck.md`](crosscheck.md) applies unchanged inside the isolated model compartment.
+When a provisional pass requests public context, its model compartment is cleaned before the controller invokes the fixed local Ketch wrapper. The same held reviewer lane then starts a fresh model compartment with the same exact-head snapshot, diff, and base guidance plus digest-bound untrusted lookup results. The follow-up request has a distinct request digest and VM identity, must finalize, and refuses another lookup. Lookup never runs in Azure, never changes the model subnet egress policy, and lookup failure still proceeds to the final pass.
 The prompt is passed by `@file`, and every Pi attempt starts with `--offline` in a fresh ephemeral session with no persisted conversation.
 The stable system prompt and byte-stable verdict tool schema precede all untrusted pull-request material.
 The guest returns input, output, cache-read, cache-write, turn, and Pi-calculated cost data from the complete event stream when available.

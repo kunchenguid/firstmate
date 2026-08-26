@@ -91,6 +91,8 @@ expected_tools = (
 )
 if value.get("tool_protocol", {}).get("model_tools") != expected_tools:
     raise SystemExit("model guest: model tool allowlist mismatch")
+if not isinstance(value.get("tool_protocol", {}).get("lookup_allowed"), bool):
+    raise SystemExit("model guest: lookup allowance is malformed")
 runtime = value.get("pi_reviewer_runtime")
 runtime_source = runtime.get("source") if isinstance(runtime, dict) else None
 runtime_digest = runtime.get("sha256") if isinstance(runtime, dict) else None
@@ -457,6 +459,8 @@ export FM_CROSSCHECK_ELIGIBLE_EQUIVALENT_IDS
 FM_CROSSCHECK_ELIGIBLE_EQUIVALENT_IDS=$(jq -c '.tool_protocol.eligible_equivalent_ids' "$INPUT")
 export FM_CROSSCHECK_ACTIVE_FINDING_IDS
 FM_CROSSCHECK_ACTIVE_FINDING_IDS=$(jq -c '.tool_protocol.active_finding_ids' "$INPUT")
+export FM_CROSSCHECK_LOOKUP_ALLOWED
+FM_CROSSCHECK_LOOKUP_ALLOWED=$(jq -r 'if .tool_protocol.lookup_allowed then "1" else "0" end' "$INPUT")
 export FM_CROSSCHECK_TRUST_SNAPSHOT_MANIFEST=1
 export FM_CROSSCHECK_EXECUTING_ACCOUNT_HOME="$ACCOUNT"
 export FM_CROSSCHECK_EXECUTION_HOME="$HOME_DIR"
@@ -505,12 +509,9 @@ import sys
 request = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 review = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
 identity = request["identity"]
-if not isinstance(review, dict) or not isinstance(review.get("verdict"), dict):
-    raise SystemExit("model guest: reviewer omitted its verdict")
+if not isinstance(review, dict):
+    raise SystemExit("model guest: reviewer result is malformed")
 harness = request.get("reviewer", {}).get("harness")
-expected_evidence_type = list if harness == "pi" else dict
-if not isinstance(review.get("evidence_files"), expected_evidence_type):
-    raise SystemExit("model guest: reviewer omitted its evidence manifest")
 if harness == "pi" and not isinstance(review.get("tool_events"), list):
     raise SystemExit("model guest: reviewer omitted its replayable tool events")
 output = {
@@ -519,11 +520,24 @@ output = {
     "request_digest": request["request_digest"],
     "model_resource_id": sys.argv[4],
     "model_vm_instance_id": sys.argv[5],
-    "verdict": review["verdict"],
-    "evidence_files": review["evidence_files"],
     **({"tool_events": review["tool_events"]} if harness == "pi" else {}),
     "telemetry": review.get("telemetry"),
 }
+lookup = review.get("lookup_request")
+if lookup is not None:
+    if harness != "pi" or not isinstance(lookup, list) or not lookup:
+        raise SystemExit("model guest: lookup request is malformed")
+    if "verdict" in review or "evidence_files" in review:
+        raise SystemExit("model guest: provisional lookup carried authority")
+    output["lookup_request"] = lookup
+else:
+    expected_evidence_type = list if harness == "pi" else dict
+    if not isinstance(review.get("verdict"), dict):
+        raise SystemExit("model guest: reviewer omitted its verdict")
+    if not isinstance(review.get("evidence_files"), expected_evidence_type):
+        raise SystemExit("model guest: reviewer omitted its evidence manifest")
+    output["verdict"] = review["verdict"]
+    output["evidence_files"] = review["evidence_files"]
 path = pathlib.Path(sys.argv[3])
 path.write_text(json.dumps(output, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
 PY

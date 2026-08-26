@@ -118,6 +118,7 @@ export default function registerCrosscheckTools(pi) {
 	const knownFindingIds = new Set(JSON.parse(process.env.FM_CROSSCHECK_FINDING_IDS || "[]"));
 	const eligibleEquivalentIds = new Set(JSON.parse(process.env.FM_CROSSCHECK_ELIGIBLE_EQUIVALENT_IDS || "[]"));
 	const activeFindingIds = new Set(JSON.parse(process.env.FM_CROSSCHECK_ACTIVE_FINDING_IDS || "[]"));
+	const lookupAllowed = process.env.FM_CROSSCHECK_LOOKUP_ALLOWED === "1";
 	const properties = reviewSchema.properties;
 	const finding = properties.new_findings.items;
 	const suspicion = properties.suspicions.items;
@@ -393,7 +394,7 @@ export default function registerCrosscheckTools(pi) {
 		return response;
 	});
 
-	register(pi, "request_lookup", "Request a bounded controller lookup. This release records the request but does not perform it.", {
+	register(pi, "request_lookup", "Request the single bounded controller-side public lookup round.", {
 		type: "object", additionalProperties: false, required: ["queries"], properties: {
 			queries: {
 				type: "array", minItems: 1, maxItems: 2,
@@ -408,11 +409,12 @@ export default function registerCrosscheckTools(pi) {
 		},
 	}, (args) => {
 		if (!exactObject(args, ["queries"]) || !Array.isArray(args.queries) || args.queries.length < 1 || args.queries.length > 2) throw new Error("request_lookup arguments are malformed");
+		if (!lookupAllowed) throw new Error("the single controller-side lookup round is unavailable or already used");
 		for (const [index, query] of args.queries.entries()) {
 			if (!exactObject(query, ["type", "query"]) || !["code", "search"].includes(query.type)) throw new Error(`queries[${index}] is malformed`);
 			nonempty(query.query, `queries[${index}].query`, 200);
 		}
-		return accepted("request_lookup", args, { available: false, message: "lookup unavailable in this release" });
+		return accepted("request_lookup", args, { requested: true }, true);
 	});
 
 	register(pi, "finish_review", "Finalize the review exactly once after a skeptical re-check of every candidate finding.", {
