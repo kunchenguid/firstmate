@@ -1484,6 +1484,9 @@ if request["operation"] == "mutate":
         # Additive: the digest-bound staged manifest the provider actually
         # receives, so a caller can assert what a lane staged.
         "payload_files": (action.get("request") or {}).get("payload_files"),
+        "account_files": (action.get("request") or {}).get("account_files"),
+        "existing_task_disk": bool((action.get("request") or {}).get("existing_task_disk")),
+        "supervisor_sha256": (action.get("request") or {}).get("supervisor_sha256"),
     })
     if kind == "execute" and os.environ.get("FIXTURE_TERMINAL_EXECUTE"):
         task_command["immutable_id"] = "task-command-terminal-{}".format(key[:8])
@@ -1574,6 +1577,14 @@ if request["operation"] == "mutate":
                     "outcome_commits": 0, "outcome_sha256": "", "outcome_bytes": 0,
                     "outcome_sink": "", "outcome_uncommitted_changes": False,
                 })
+                if request_value.get("return_contract"):
+                    execution.update({
+                        "return_present": True,
+                        "return_ref": "refs/fm-return/{}".format(action["request_digest"][:32]),
+                        "return_commit": "c" * 40,
+                        "return_manifest_sha256": "d" * 64,
+                        "outcome_tip": "e" * 40,
+                    })
             execution["streams_persisted"] = True
             execution["result_digest"] = hashlib.sha256(canonical(execution)).hexdigest()
             result = {"idempotency_key": key, "action": kind, "worker": state["workers"][slot], "execution": execution}
@@ -1889,6 +1900,33 @@ def armed_execute(*extra, overrides=None, command="/usr/bin/true"):
 
 refused = armed_execute("--outcome-dir", str(outcome_dir))
 assert refused.returncode != 0 and "staged repository" in refused.stderr, refused.stderr
+refused_existing = armed_execute("--existing-task-disk", "--outcome-dir", str(outcome_dir))
+assert refused_existing.returncode != 0 and "requires an authorized return" in refused_existing.stderr, (
+    refused_existing.stderr
+)
+refused_restage = armed_execute(
+    "--existing-task-disk", "--payload-dir", str(payload_dir),
+    "--account-dir", str(account_dir), "--outcome-dir", str(outcome_dir),
+    "--return-kind", "scout",
+)
+assert refused_restage.returncode != 0 and "cannot replace payload or account" in refused_restage.stderr, (
+    refused_restage.stderr
+)
+recovered = armed_execute(
+    "--existing-task-disk", "--outcome-dir", str(outcome_dir), "--return-kind", "scout",
+)
+assert recovered.returncode == 0, recovered.stderr
+recovered_result = json.loads(recovered.stdout)
+assert recovered_result["return_present"] is True, recovered_result
+recovery_action = [
+    entry for entry in fixture_state()["calls"] if entry["type"] == "execute"
+][-1]
+assert recovery_action["existing_task_disk"] is True, recovery_action
+assert recovery_action["supervisor_sha256"] == hashlib.sha256(
+    Path(controller_path).with_name("fm-worker-supervisor.py").read_bytes()
+).hexdigest(), recovery_action
+assert recovery_action["payload_files"] is None, recovery_action
+assert recovery_action["account_files"] is None, recovery_action
 skewed = armed_execute(
     "--payload-dir", str(payload_dir), "--account-dir", str(account_dir),
     "--outcome-dir", str(outcome_dir), overrides={"FIXTURE_OMIT_OUTCOME": "1"},

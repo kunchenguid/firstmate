@@ -83,6 +83,23 @@ def read_request(path):
     outcome_expected = request.get("outcome_expected", False)
     if not isinstance(outcome_expected, bool):
         raise SupervisorError("execution outcome expectation is malformed")
+    existing_task_disk = request.get("existing_task_disk", False)
+    if not isinstance(existing_task_disk, bool):
+        raise SupervisorError("execution existing task-disk disposition is malformed")
+    if existing_task_disk:
+        if "payload_files" in request or "account_files" in request:
+            raise SupervisorError("existing task-disk recovery cannot replace staged state")
+        supervisor_digest = request.get("supervisor_sha256")
+        if not isinstance(supervisor_digest, str) or not HEX.fullmatch(supervisor_digest):
+            raise SupervisorError("existing task-disk recovery supervisor binding is malformed")
+        try:
+            running_digest = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        except OSError as exc:
+            raise SupervisorError("existing task-disk recovery supervisor is unreadable: {}".format(exc))
+        if running_digest != supervisor_digest:
+            raise SupervisorError("existing task-disk recovery supervisor binding differs")
+    elif "supervisor_sha256" in request:
+        raise SupervisorError("ordinary execution cannot select a recovery supervisor")
     return_contract = request.get("return_contract")
     if return_contract is not None:
         if not isinstance(return_contract, dict) or set(return_contract) != {
@@ -111,10 +128,13 @@ def read_request(path):
             raise SupervisorError("a scout return contract must not name a task branch")
         if not outcome_expected:
             raise SupervisorError("execution return contract requires the outcome transport")
+    if existing_task_disk and (return_contract is None or not outcome_expected):
+        raise SupervisorError("existing task-disk recovery requires an authorized return outcome")
     if outcome_expected:
-        # An outcome is bundled out of the staged repository, so the request
-        # that arms it must also be the one that stages that repository.
-        if not isinstance(request.get("payload_files"), dict):
+        # An ordinary outcome is bundled from the repository this request
+        # stages. Explicit recovery instead binds the already-assigned task
+        # disk and must never replace the repository it exists to preserve.
+        if not existing_task_disk and not isinstance(request.get("payload_files"), dict):
             raise SupervisorError("an outcome cannot be collected without a staged repository")
         # The URL is an unbound protected parameter; refusing here means a
         # control-plane actor cannot silently downgrade a landing task into a
@@ -265,8 +285,36 @@ def extract_staged_archive(body, manifest, target, label):
 
 
 def stage_payload(request, worktree, account_home):
-    """Materialize the crewmate payload: repository from its bundle, task
-    files, and the provider-account material, all digest-verified."""
+    """Materialize a new payload or bind an explicitly retained task disk."""
+    if request.get("existing_task_disk"):
+        repo = worktree / "repo"
+        if repo.is_symlink() or not repo.is_dir():
+            raise SupervisorError("existing task-disk repository is unavailable or redirected")
+        top = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=GIT_HEAD_TIMEOUT, check=False,
+        )
+        if top.returncode != 0 or Path(top.stdout.decode().strip()).resolve() != repo.resolve():
+            raise SupervisorError("existing task-disk repository is not the exact repository root")
+        lineage = subprocess.run(
+            [
+                "git", "-C", str(repo), "merge-base", "--is-ancestor",
+                request["repository_generation"], "HEAD",
+            ],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=GIT_HEAD_TIMEOUT, check=False,
+        )
+        if lineage.returncode != 0:
+            raise SupervisorError("existing task-disk repository lost its dispatched lineage")
+        readable = subprocess.run(
+            ["git", "-C", str(repo), "status", "--porcelain"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=GIT_STATUS_TIMEOUT, check=False,
+        )
+        if readable.returncode != 0:
+            raise SupervisorError("existing task-disk working tree is unreadable")
+        return repo
     payload_manifest = request.get("payload_files")
     account_manifest = request.get("account_files")
     if payload_manifest is None and account_manifest is None:
@@ -279,19 +327,9 @@ def stage_payload(request, worktree, account_home):
     extract_staged_archive(fetch_archive("account"), account_manifest, account_target, "account")
     repo = worktree / "repo"
     if repo.exists():
-        # Staging runs when no executed marker exists, which is USUALLY the
-        # debris of an interrupted earlier staging.
-        #
-        # KNOWN GAP, not fixed here: it is not always. The executed marker
-        # lives on the disposable OS disk while /mnt/task is retained, so a
-        # resume (which replaces VM, NIC and OS disk and reattaches the task
-        # disk) destroys the marker while the previous run's commits survive
-        # here, and this removes them. A guard that merely refused was tried
-        # and reverted: it preserved the commits on a disk with no reader,
-        # since there is no collect-only mode, and wedged every later dispatch
-        # until a reset deleted them anyway. Closing it properly needs a way
-        # to collect a retained outcome without re-executing, which belongs
-        # with the release-receipt work (D6) rather than here.
+        # Explicit retained-disk recovery returned above and can never reach
+        # this remover. Ordinary staging gets here only for the repository its
+        # own payload is replacing, typically debris from interrupted staging.
         if repo.is_symlink() or not repo.is_dir():
             raise SupervisorError("staged repository target is not a removable directory")
         shutil.rmtree(repo)
@@ -727,8 +765,8 @@ def execute(request, worktree, worktree_root):
     stderr, stderr_truncated = bounded(stderr)
     # NOTHING after the task command may raise. Its effects already happened,
     # so any escape here means no executed marker is written, and the next
-    # dispatch both re-runs the command and (through stage_payload's rmtree of
-    # the staged repository) destroys the commits the first run produced.
+    # ordinary dispatch both re-runs the command and (through stage_payload's
+    # rmtree of the staged repository) destroys the commits the first run produced.
     # Every post-command failure is therefore recorded in the digest-bound
     # result instead of raised, whatever its exception class: a full disk
     # reaches the stream write, a git timeout or MemoryError reaches the

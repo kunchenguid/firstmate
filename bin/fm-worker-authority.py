@@ -228,8 +228,31 @@ def cloud_return_evidence(home, task, generation, assignment, kind, worktree, re
     if result.get("return_manifest_sha256") != hashlib.sha256(manifest).hexdigest():
         raise AuthorityError("cloud return manifest differs from the digest-bound result")
     manifest_value = json.loads(manifest.decode("utf-8"))
-    if manifest_value.get("task") != task or manifest_value.get("kind") != kind:
-        raise AuthorityError("cloud return manifest task contract differs")
+    manifest_expected = {
+        "schema": "fm.worker-return/v1",
+        "task": task,
+        "task_generation": generation,
+        "assignment_generation": assignment,
+        "request_digest": result.get("request_digest"),
+        "repository_generation": repository_generation,
+        "kind": kind,
+        "report_required": True,
+        "report_path": "data/{}/{}".format(
+            task, "report.md" if kind == "scout" else "completion.md",
+        ),
+        "status_path": "state/{}.status".format(task),
+        "visuals_path": "data/{}/visuals".format(task),
+        "branch": "" if kind == "scout" else "fm/{}".format(task),
+        "outcome_commits": result.get("outcome_commits"),
+        "outcome_tip": result.get("outcome_tip"),
+        "uncommitted_changes": result.get("outcome_uncommitted_changes"),
+    }
+    for field, value in manifest_expected.items():
+        if manifest_value.get(field) != value:
+            raise AuthorityError("cloud return manifest {} binding differs".format(field))
+    artifacts = manifest_value.get("artifacts")
+    if not isinstance(artifacts, dict):
+        raise AuthorityError("cloud return manifest artifact bindings are malformed")
     status_path = home / "state" / (task + ".status")
     if status_path.is_symlink() or not status_path.is_file():
         raise AuthorityError("cloud return has no local terminal status")
@@ -249,10 +272,30 @@ def cloud_return_evidence(home, task, generation, assignment, kind, worktree, re
             raise AuthorityError("cloud return commit is not reachable from the required task branch")
         if git(worktree, "symbolic-ref", "--quiet", "HEAD") != branch:
             raise AuthorityError("cloud return task branch is not checked out")
-    if result.get("outcome_uncommitted_changes") is True:
-        artifacts = manifest_value.get("artifacts") or {}
-        if not ({"scratch.patch", "scratch-untracked.tar"} & set(artifacts)):
+    uncommitted = result.get("outcome_uncommitted_changes")
+    if not isinstance(uncommitted, bool):
+        raise AuthorityError("cloud return working-tree disposition is malformed")
+    if uncommitted:
+        scratch_destinations = {
+            "scratch.patch": home / "data" / task / "cloud-scratch.patch",
+            "scratch-untracked.tar": home / "data" / task / "cloud-scratch-untracked.tar",
+        }
+        declared = [name for name in scratch_destinations if name in artifacts]
+        if not declared:
             raise AuthorityError("cloud return reports uncommitted work without retained scratch custody")
+        for name in declared:
+            descriptor = artifacts[name]
+            path = scratch_destinations[name]
+            if not isinstance(descriptor, dict):
+                raise AuthorityError("cloud return scratch custody descriptor is malformed")
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 128 * 1024 * 1024:
+                raise AuthorityError("cloud return scratch custody is absent, redirected, or oversized")
+            body = path.read_bytes()
+            if (
+                descriptor.get("bytes") != len(body)
+                or descriptor.get("sha256") != hashlib.sha256(body).hexdigest()
+            ):
+                raise AuthorityError("cloud return scratch custody differs from the manifest")
     return canonical({
         "result_digest": supplied,
         "bundle_sha256": result["outcome_sha256"],
