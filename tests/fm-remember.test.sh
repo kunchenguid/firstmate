@@ -121,8 +121,44 @@ test_empty_text_is_a_noop() {
   pass "empty decision text: no call, exit 0"
 }
 
+# Regression for the leak this suite once caused: a remember whose caller did NOT
+# pin its own $BRAIN_STORE must land in the harness sandbox (lib.sh default),
+# never $HOME/.brain - the captain-private real fleet store (memval-04). HOME is
+# redirected so a leak would be an observable, harmless fixture write here rather
+# than a silent append to the real store.
+test_unpinned_store_never_hits_home() {
+  local dir fakebin fakehome rc
+  dir="$TMP_ROOT/unpinned"; mkdir -p "$dir"
+  fakehome="$dir/home"; mkdir -p "$fakehome/.brain"
+  # A brain-axi that honors --store and appends the fact to <store>/facts.md, so
+  # we can see exactly which store the wrapper resolved.
+  fakebin="$dir/fakebin"; mkdir -p "$fakebin"
+  cat > "$fakebin/brain-axi" <<'SH'
+#!/usr/bin/env bash
+store=
+while [ $# -gt 0 ]; do
+  case "$1" in --store) store=$2; shift 2 ;; *) shift ;; esac
+done
+[ -n "$store" ] || exit 0
+mkdir -p "$store"
+printf 'fact\n' >> "$store/facts.md"
+exit 0
+SH
+  chmod +x "$fakebin/brain-axi"
+  # BRAIN_STORE is intentionally NOT set: the lib.sh sandbox default must govern.
+  HOME="$fakehome" PATH="$fakebin:$BASE_PATH" "$REMEMBER" "an unpinned decision"; rc=$?
+  expect_code 0 "$rc" "unpinned remember must still exit 0"
+  assert_absent "$fakehome/.brain/facts.md" \
+    "an unpinned remember must never write \$HOME/.brain (the real fleet store)"
+  [ -n "${BRAIN_STORE:-}" ] || fail "lib.sh must export a sandbox \$BRAIN_STORE for tests"
+  assert_present "$BRAIN_STORE/facts.md" \
+    "the unpinned remember must land in the harness sandbox store"
+  pass "unpinned remember lands in the sandbox, never \$HOME/.brain"
+}
+
 test_absent_binary_does_nothing
 test_present_binary_receives_text
 test_failing_binary_is_swallowed
 test_slow_binary_is_bounded
 test_empty_text_is_a_noop
+test_unpinned_store_never_hits_home

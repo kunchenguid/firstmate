@@ -61,7 +61,12 @@ Standing catch-all for tasks without a derivable epic; matches production's
 `ops` epic (plan §2.6 F1 fallback).
 EOF
   fakebin=$(fm_fakebin "$home")
-  fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
+  # brain-axi is stubbed to a no-op so remember_decision (fm-captain-hold.sh)
+  # never invokes the real fleet-memory binary during this suite. Combined with
+  # lib.sh's sandbox $BRAIN_STORE default this keeps the real store (~/.brain)
+  # untouched and makes the decision-lifecycle assertions independent of whether
+  # brain-axi is installed.
+  fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi brain-axi
   printf '%s\n' "$home"
 }
 

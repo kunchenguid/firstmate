@@ -71,6 +71,50 @@ pass() {
 FM_TEST_CLEANUP_DIRS=()
 FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-cleanup.$$.XXXXXX") || return 1
 
+# --- brain-axi store isolation (memval-04: protect the real fleet store) -----
+#
+# Every test's brain-axi store is redirected to a disposable sandbox so no test
+# can ever write the captain-private fleet store (~/.brain) by simply forgetting
+# to set $BRAIN_STORE. fm-remember.sh runs `brain-axi remember --store <store>`
+# whenever the binary is on PATH and does NOT gate on the store existing, so a
+# test that drives the real captain-hold or /stow path with the real brain-axi
+# reachable would otherwise append fixture facts to the live store. A test that
+# needs its own store still overrides $BRAIN_STORE per command.
+#
+# Belt and suspenders: snapshot the real store's facts file and fail the run
+# loudly on EXIT if any test mutated it, so a future call site that escapes the
+# sandbox cannot leak silently.
+FM_TEST_REAL_BRAIN_FACTS="${HOME:-}/.brain/facts.md"
+
+fm_test_brain_fingerprint() {
+  if [ -f "$FM_TEST_REAL_BRAIN_FACTS" ]; then
+    stat -c '%s:%Y' "$FM_TEST_REAL_BRAIN_FACTS" 2>/dev/null \
+      || stat -f '%z:%m' "$FM_TEST_REAL_BRAIN_FACTS" 2>/dev/null \
+      || printf 'UNREADABLE\n'
+  else
+    printf 'ABSENT\n'
+  fi
+}
+
+FM_TEST_REAL_BRAIN_FINGERPRINT=$(fm_test_brain_fingerprint)
+
+fm_test_assert_brain_untouched() {
+  local now
+  now=$(fm_test_brain_fingerprint)
+  if [ "$now" != "$FM_TEST_REAL_BRAIN_FINGERPRINT" ]; then
+    printf 'not ok - a test wrote the real fleet store %s (set BRAIN_STORE to a temp dir)\n' \
+      "$FM_TEST_REAL_BRAIN_FACTS" >&2
+    exit 1
+  fi
+}
+
+# Redirect the store unless the caller already pinned one in the environment.
+if [ -z "${BRAIN_STORE:-}" ]; then
+  FM_TEST_BRAIN_SANDBOX=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-brain.XXXXXX") || return 1
+  FM_TEST_CLEANUP_DIRS+=("$FM_TEST_BRAIN_SANDBOX")
+  export BRAIN_STORE="$FM_TEST_BRAIN_SANDBOX"
+fi
+
 fm_test_pid_identity() {
   local pid=$1
   FM_STATE_OVERRIDE="${TMPDIR:-/tmp}" bash -c \
@@ -106,7 +150,7 @@ fm_test_tmproot() {
   printf '%s\n' "$root"
 }
 
-trap fm_test_cleanup EXIT
+trap 'fm_test_cleanup; fm_test_assert_brain_untouched' EXIT
 trap 'fm_test_cleanup; exit 130' INT
 trap 'fm_test_cleanup; exit 143' TERM
 
