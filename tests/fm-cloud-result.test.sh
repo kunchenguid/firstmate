@@ -178,6 +178,25 @@ EOF
   pass "ship return reconstructs and preserves its continued branch, transports deliverables, synthesizes status, and replays idempotently"
 }
 
+test_ship_materializes_an_already_checked_out_task_branch() {
+  local record root home repo id out
+  id=cloud-return-checked-out
+  record=$(make_return_case checked-out "$id" ship yes no yes)
+  IFS='|' read -r root home repo <<EOF
+$record
+EOF
+  git -C "$repo" checkout --quiet -b "fm/$id"
+  out=$(run_collect "$home" "$id" 2>&1) \
+    || fail "an already-checked-out task branch should localize: $out"
+  assert_present "$repo/cloud-change.txt" \
+    "returned files were not materialized in the already-checked-out task branch"
+  test -z "$(git -C "$repo" status --porcelain=v1 --untracked-files=all)" \
+    || fail "already-checked-out task branch was left with an index/worktree mismatch"
+  test "$(git -C "$repo" symbolic-ref --quiet HEAD)" = "refs/heads/fm/$id" \
+    || fail "already-checked-out task branch lost symbolic HEAD custody"
+  pass "ship return materializes an already-checked-out task branch without dirtying it"
+}
+
 test_scout_success_with_uncommitted_scratch() {
   local record root home repo id out
   id=cloud-return-scout
@@ -617,6 +636,7 @@ SH
 }
 
 test_ship_success_and_replay
+test_ship_materializes_an_already_checked_out_task_branch
 test_scout_success_with_uncommitted_scratch
 test_terminal_status_stays_last_on_replay
 test_absent_report_blocks_collection

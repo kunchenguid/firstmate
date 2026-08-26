@@ -389,25 +389,34 @@ def branch_custody(worktree, task, result, kind):
         ).returncode != 0:
             raise ReturnError("local task branch diverged from the returned outcome")
     else:
-        branch_head = ""
+        branch_head = None
     head = git(worktree, "rev-parse", "HEAD").stdout.decode().strip()
     if head not in (base, tip, branch_head):
         raise ReturnError("local worktree diverged from the dispatched generation")
     if git(worktree, "status", "--porcelain=v1", "--untracked-files=all").stdout.strip():
         raise ReturnError("local worktree is dirty; returned work remains in the custody ref")
-    if not branch_head or branch_head == base:
-        git(worktree, "update-ref", branch, tip, branch_head or "0" * 40)
+    if branch_head is None:
+        created = git(worktree, "update-ref", branch, tip, "0" * 40, check=False)
+        if created.returncode != 0:
+            raise ReturnError("returned task branch could not be created at the exact outcome tip")
         branch_head = tip
-    if head in (base, tip, branch_head):
-        switched = git(worktree, "checkout", "--quiet", "fm/{}".format(task), check=False)
-        if switched.returncode != 0:
-            raise ReturnError("returned task branch exists but cannot be checked out in its worktree")
+    switched = git(worktree, "checkout", "--quiet", "fm/{}".format(task), check=False)
+    if switched.returncode != 0:
+        raise ReturnError("returned task branch exists but cannot be checked out in its worktree")
+    checked_out_head = git(worktree, "rev-parse", "HEAD").stdout.decode().strip()
+    if checked_out_head != branch_head:
+        raise ReturnError("returned task branch moved while it was being checked out")
+    advanced = git(worktree, "merge", "--quiet", "--ff-only", tip, check=False)
+    if advanced.returncode != 0:
+        raise ReturnError("returned task branch could not fast-forward to the exact outcome tip")
     final_branch = git(worktree, "symbolic-ref", "--quiet", "HEAD", check=False)
     if final_branch.returncode != 0 or final_branch.stdout.decode().strip() != branch:
         raise ReturnError("returned task branch is not checked out in its worktree")
     final_head = git(worktree, "rev-parse", "HEAD").stdout.decode().strip()
     if git(worktree, "merge-base", "--is-ancestor", tip, final_head, check=False).returncode != 0:
         raise ReturnError("returned outcome is not reachable from the task branch")
+    if git(worktree, "status", "--porcelain=v1", "--untracked-files=all").stdout.strip():
+        raise ReturnError("returned task branch was not cleanly materialized in its worktree")
 
 
 def merge_status(local_path, raw_status, terminal):
