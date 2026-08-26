@@ -32,6 +32,7 @@ service_complete_front_door() {
 service_complete_replay_contract() {
   python3 - "$CONTROLLER" <<'PY' || fail "service completion replay contract failed"
 import contextlib
+import copy
 import importlib.util
 from types import SimpleNamespace
 import sys
@@ -103,13 +104,16 @@ module.command_service_complete(env, args)
 item["status"] = "complete"
 # The released slot may already belong to a later task. Its presence cannot
 # invalidate the old queue item's exact, self-digested completion receipt.
-state["workers"] = {"1": {
+replacement_worker = {
     "queue_key": "later-task@later-generation",
     "role": "author",
     "assignment_generation": "asg-00000002",
     "release_proof": None,
-}}
+}
+state["workers"] = {"1": replacement_worker}
+replacement_before = copy.deepcopy(replacement_worker)
 module.command_service_complete(env, args)
+assert replacement_worker == replacement_before, replacement_worker
 wrong = SimpleNamespace(**vars(args))
 wrong.assignment_generation = "asg-99999999"
 try:
