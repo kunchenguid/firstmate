@@ -53,7 +53,8 @@ Board answers are acted on later under the normal authority rules; this skill's 
 2. **Ask any home whose own books disagree to reconcile them.**
    When the snapshot reports a secondmate home whose `invalidity` is `orphan_in_flight`, `unowned_current`, or `terminal_in_flight`, that home's backlog and its own task metadata disagree and only that home may fix it.
    Run `printf '%s\n' "$snapshot" | bin/fm-secondmate-reconcile.sh notify --snapshot -` inline immediately after gathering the snapshot, so the durable fire-and-forget enqueue finishes before digest composition without spawning any child or second snapshot.
-   The script header owns the cooldown window, retry, and fire-and-forget delivery contract; this hook arms no reply recovery or inbox escalation.
+   The script header owns the cooldown window, non-blocking lock skips, stale-endpoint checks, retry, and fire-and-forget delivery contract; this hook arms no reply recovery or inbox escalation.
+   If the hook reports a skip or failure, continue composing the digest from the captured snapshot; a lock skip or known-undelivered send leaves the cooldown unset for a later recap.
    A home is asked at most once per four-hour window, so running this on every recap costs nothing and cannot nag, while a mismatch still sitting there after the window earns one gentle re-nudge.
    Never edit another home's backlog or metadata from here, and never expect or wait on a reply: the mate acts asynchronously from its durable inbox while the digest is composed from the snapshot already in hand.
 

@@ -35,15 +35,26 @@
 #   - block a snapshot or digest. The enqueue is a fast local durable write, and
 #     a send failure is reported, never fatal to the caller's own work.
 #
-# Exit status: 0 when every home in mismatch was nudged or was inside its
-# cooldown; 1 when at least one due send failed. A known-undelivered send
-# records nothing, so the next snapshot retries it; an unconfirmed send records
-# the nudge, because a duplicate ask is worse than one the mate may already have.
+# Lock acquisition is non-blocking. A busy reconcile, lifecycle-control, or
+# metadata lock skips that home without starting its cooldown, so a later recap
+# can retry. The sampled spawn generation is revalidated before delivery and
+# before the cooldown commit so a retired endpoint is never nudged or allowed to
+# silence its replacement.
 #
-# Output, one line per home in mismatch:
+# Exit status: 0 when no delivery or cooldown-recording failure is known,
+# including when a home was skipped for lock contention or a stale endpoint;
+# 1 when at least one due send failed or its cooldown could not be recorded.
+# A known-undelivered send records nothing, so the next snapshot retries it; an
+# unconfirmed send records the nudge, because a duplicate ask is worse than one
+# the mate may already have.
+#
+# Output, one line per selected home in mismatch:
 #   sent: <mate-id> <kind>          one reconcile instruction was recorded
 #   cooldown: <mate-id> <seconds>   nudged this recently; nothing sent
+#   skipped: <mate-id> lock         a required lock was busy; cooldown unchanged
+#   stale: <mate-id> <kind>         the sampled endpoint retired or changed
 #   failed: <mate-id> <kind>        the steer could not be recorded
+#   sent-unrecorded: <mate-id> <kind>  sent, but cooldown commit failed
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
