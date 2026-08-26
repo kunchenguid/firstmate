@@ -153,6 +153,11 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
               mcp_error=true
               ;;
             zero) printf '%s\t%s\tcompleted\t%s\n' "$session" "$marker" "$marker" >"$sessions"; result=$(printf '{"status":"success","data":{"session_id":%s,"task_id":%s,"created_session":true,"answer":""},"error":null}' "$session" "$remote_task") ;;
+            step-answer-only)
+              printf '%s\t%s\tcompleted\t%s\n' "$session" "$marker" "$marker" >"$sessions"
+              result=$(printf '{"status":"error","data":null,"error":{"code":"IDA_EMPTY_RESULT","message":"completed without a compact answer","details":{"session_id":%s,"task_id":%s}}}' "$session" "$remote_task")
+              mcp_error=true
+              ;;
             *) printf '%s\t%s\tcompleted\t%s\n' "$session" "$marker" "$marker" >"$sessions"; result=$(printf '{"status":"success","data":{"session_id":%s,"task_id":%s,"created_session":true,"answer":"%s"},"error":null}' "$session" "$remote_task" "${FM_IDA_FAKE_ANSWER:-Verified iDA answer. PRIVATE_PROMPT_alpha OECID_sensitive token=top-secret OECID=123456789012345678 user@example.com}") ;;
           esac
           mcp_error=${mcp_error:-false}
@@ -189,17 +194,46 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
     row=$(head -1 "$sessions" 2>/dev/null || true); [ -n "$row" ] || { error HTTP_404 'not found'; exit 1; }
     name=$(printf '%s' "$row" | cut -f2); status=$(printf '%s' "$row" | cut -f3); marker=$(printf '%s' "$row" | cut -f4)
     [ -n "$marker" ] || marker=$name
-    case "$mode" in running) status=running ;; failed) status=failed ;; cancelled) status=cancelled ;; ambiguous-status) status=mystery_state ;; zero|structured-artifact|structured-empty|structured-malformed|structured-unsupported) status=completed ;; failed-answered) status=failed ;; cancelled-answered) status=cancelled ;; closed-answered) status=closed ;; esac
+    case "$mode" in
+      running) status=running ;;
+      failed) status=failed ;;
+      cancelled) status=cancelled ;;
+      ambiguous-status) status=mystery_state ;;
+      zero|structured-artifact|structured-text|structured-empty|structured-malformed|structured-unsupported|step-answer-only) status=completed ;;
+      failed-answered) status=failed ;;
+      cancelled-answered) status=cancelled ;;
+      closed-answered) status=closed ;;
+      recorded-task-conflict|aggregate-error-running|aggregate-error-success|recorded-task-missing) status=error ;;
+    esac
     user="[Firstmate session marker: $marker]"$'\n\n'"PRIVATE_PROMPT_alpha OECID_sensitive"
-    if { [ "$status" = completed ] && [ "$mode" != zero ] && [ "$mode" != renamed-empty ] && [ "${mode#structured-}" = "$mode" ]; } \
+    if { [ "$status" = completed ] && [ "$mode" != zero ] && [ "$mode" != renamed-empty ] \
+        && [ "$mode" != step-answer-only ] && [ "${mode#structured-}" = "$mode" ]; } \
       || [ "$mode" = failed-answered ] || [ "$mode" = cancelled-answered ] || [ "$mode" = closed-answered ]; then answer=${FM_IDA_FAKE_ANSWER:-'Verified iDA answer. PRIVATE_PROMPT_alpha OECID_sensitive token=top-secret OECID=123456789012345678 user@example.com'}; else answer=''; fi
-    jq -cn --argjson sid "$session" --arg name "$name" --arg status "$status" --arg user "$user" --arg answer "$answer" --arg mode "$mode" '
+    structured_answer=${FM_IDA_FAKE_ANSWER:-'FM_IDA_READINESS_V1 {"status":"ok","instruction_received":true,"business_data_accessed":false,"external_write_performed":false,"echo":"sg-ida-e2e-20260825-v1"}'}
+    jq -cn --argjson sid "$session" --arg name "$name" --arg status "$status" --arg user "$user" \
+      --arg answer "$answer" --arg structured_answer "$structured_answer" --arg mode "$mode" --arg task "$remote_task" '
+      def task_status:
+        if $mode=="aggregate-error-running" or $mode=="recorded-task-missing" then "running"
+        elif $mode=="aggregate-error-success" or $mode=="recorded-task-conflict" then "success"
+        else $status
+        end;
+      def recorded_task_message:
+        {id:91,type:8,status:1,visible:true,
+         deep_research_content:{taskId:$task,terminalStatus:task_status}};
       {status:"success",data:{session:{id:$sid,name:$name,agent_id:9001,agent_name:"iDA Test",latest_task_status:$status},
        messages:([{id:90,type:0,status:0,visible:true,text:$user}]
-         + (if $answer=="" then [] else [{id:91,type:8,status:1,visible:true,text:$answer}] end)
-         + (if $mode=="structured-artifact" then [{
+         + (if $answer=="" then [] else [(recorded_task_message + {text:$answer})] end)
+         + (if $mode=="step-answer-only" then [{
              id:92,type:8,status:1,visible:true,
-             deep_research_content:{finalAnswer:[{artifact:{
+             deep_research_content:{taskId:$task,terminalStatus:task_status,
+               steps:[
+                 {id:1,status:1,content:""},
+                 {id:2,status:1,content:($structured_answer + "\nAdditional provider text.")}
+               ]}
+           }]
+           elif $mode=="structured-artifact" then [{
+             id:92,type:8,status:1,visible:true,
+             deep_research_content:{taskId:$task,terminalStatus:task_status,finalAnswer:[{artifact:{
                artifactId:"PRIVATE_ARTIFACT_ID_92",name:"PRIVATE_ARTIFACT_NAME_92",
                parts:[
                  {type:"file",file:{fileUri:"PRIVATE_FILE_URI_92",fileName:"PRIVATE_FILE_NAME_92",mimeType:"application/json"}},
@@ -207,19 +241,43 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
                ]
              }}]}
            }]
+           elif $mode=="structured-text" or $mode=="aggregate-error-success" or $mode=="recorded-task-conflict" then [{
+             id:92,type:8,status:1,visible:true,
+             deep_research_content:{taskId:$task,terminalStatus:task_status,
+               finalAnswer:[{result:{answer:$structured_answer}}]}
+           }]
            elif $mode=="structured-empty" then [{
              id:92,type:8,status:1,visible:true,
-             deep_research_content:{finalAnswer:[{artifact:{parts:[{type:"file",file:{}},{type:"data",data:{}}]}}]}
+             deep_research_content:{taskId:$task,terminalStatus:task_status,
+               finalAnswer:[{artifact:{parts:[{type:"file",file:{}},{type:"data",data:{}}]}}]}
            }]
            elif $mode=="structured-malformed" then [{
              id:92,type:8,status:1,visible:true,
-             deep_research_content:{finalAnswer:[{artifact:{parts:"PRIVATE_MALFORMED_PARTS_92"}}]}
+             deep_research_content:{taskId:$task,terminalStatus:task_status,
+               finalAnswer:[{artifact:{parts:"PRIVATE_MALFORMED_PARTS_92"}}]}
            }]
            elif $mode=="structured-unsupported" then [{
              id:92,type:8,status:1,visible:true,
-             deep_research_content:{finalAnswer:[{artifact:{parts:[{type:"image",image:{bytes:"PRIVATE_UNSUPPORTED_BYTES_92"}}]}}]}
+             deep_research_content:{taskId:$task,terminalStatus:task_status,
+               finalAnswer:[{artifact:{parts:[{type:"image",image:{bytes:"PRIVATE_UNSUPPORTED_BYTES_92"}}]}}]}
            }]
-           else [] end)),
+           elif $mode=="recorded-task-missing" then [{
+             id:92,type:8,status:1,visible:true,
+             deep_research_content:{taskId:(($task|tonumber)+1|tostring),terminalStatus:"success",
+               finalAnswer:[{answer:"PRIVATE_OTHER_TASK_ANSWER"}]}
+           }]
+           else [] end)
+         + (if $answer=="" and ($mode | startswith("structured-") | not)
+                and $mode!="aggregate-error-success" and $mode!="recorded-task-conflict"
+                and $mode!="recorded-task-missing" then
+              [{id:91,type:8,status:1,visible:true,
+                deep_research_content:{taskId:$task,terminalStatus:task_status,finalAnswer:[]}}]
+            else [] end)
+         + (if $mode=="recorded-task-conflict" then [{
+             id:93,type:8,status:1,visible:true,
+             deep_research_content:{taskId:(($task|tonumber)+1|tostring),terminalStatus:"error",
+               finalAnswer:[{answer:"PRIVATE_OTHER_TASK_ANSWER"}]}
+           }] else [] end)),
        queue_locked:false,queue_tasks:[]},error:null}'
     ;;
   *" ida --region sg chat completion close "*)
@@ -529,6 +587,149 @@ test_structured_final_answer_readback() {
   assert_contains "$replay" 'duplicate=true' "structured result replay was applied twice"
   [ "$(jq -r '.revision' "$(state_file "$home" "$id")")" = "$revision" ] || fail "structured replay mutated terminal state"
   pass "completed structured final answers are privately recovered as artifacts without provider mutation or content leakage"
+}
+
+test_completed_step_answer_fallback() {
+  local home fakebin id=ida-step-answer-only readiness prompt state report status_count creates
+  home=$(new_home step-answer-only); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"
+  readiness='FM_IDA_READINESS_V1 {"status":"ok","instruction_received":true,"business_data_accessed":false,"external_write_performed":false,"echo":"sg-ida-e2e-20260825-v1"}'
+  prompt=$(printf 'Return exactly this readiness record and nothing else:\n%s' "$readiness")
+  new_task "$home" "$id" "$prompt"; : >"$home/bytedcli.log"; : >"$home/sessions.tsv"
+
+  FM_IDA_FAKE_MODE=step-answer-only FM_IDA_FAKE_ANSWER="$readiness" \
+    FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    FM_IDA_FAKE_LOG="$home/bytedcli.log" FM_IDA_FAKE_SESSIONS="$home/sessions.tsv" \
+    FM_IDA_FAKE_SESSION_ID="$SESSION_ID" FM_IDA_FAKE_TASK_ID="$REMOTE_TASK_ID" \
+    PATH="$fakebin:$BASE_PATH" "$DISPATCH" remote-agent/ida "$id" \
+      --instructions "$home/data/$id/instructions.txt" >/dev/null \
+    || fail "step-only official result did not dispatch"
+  wait_phase "$home" "$id" terminal-success || fail "step-only official result did not terminalize"
+
+  state=$(state_file "$home" "$id"); report="$home/data/$id/report.md"
+  jq -e --arg task "$REMOTE_TASK_ID" --arg readiness "$readiness" '
+    .phase == "terminal-success" and .provider_state.task_id == $task
+    and .provider_state.provider_status == "completed"
+    and .result_availability == "available"
+    and (.result_path | type == "string" and length > 0)
+  ' "$state" >/dev/null || {
+    jq -c '{phase,outcome,result_availability,result_path,
+      provider_status:.provider_state.provider_status,task_id:.provider_state.task_id}' "$state" >&2
+    fail "step-only official result lost its normalized terminal state"
+  }
+  jq -e --arg readiness "$readiness" '
+    .terminal == true and .result_availability == "available" and .result_kind == "text"
+    and (.answer | split("\n")[0]) == $readiness
+    and .artifact_reference == null and .error_class == null
+  ' "$(jq -r '.result_path' "$state")" >/dev/null \
+    || fail "step-only official result did not preserve the exact readiness marker"
+  assert_grep "$readiness" "$report" "step-only official result was absent from the report"
+  assert_no_grep 'exact empty final answer' "$report" "step-only official result was reported as exact zero"
+  if grep -R -F 'Return exactly this readiness record' "$home/state" "$report" "$home/bytedcli.log" >/dev/null; then
+    fail "private readiness instruction leaked through step-only normalization"
+  fi
+  status_count=$(grep -F -c 'done: iDA remote research complete' "$home/state/$id.status" || true)
+  [ "$status_count" -eq 1 ] || fail "step-only official result emitted $status_count terminal notifications"
+  creates=$(grep -F -c 'command:ida-region-sg-deep-research-create' "$home/bytedcli.log" || true)
+  [ "$creates" -eq 1 ] || fail "step-only official result crossed $creates create boundaries"
+  pass "task-bound completed-step text fills exact-zero session readback without leakage or duplicate creation"
+}
+
+test_task_bound_terminal_and_monotonic_generations() {
+  local home fakebin id=ida-task-bound sha marker provider unavailable source mode_file result seq
+  local report state revision report_sha status_count result_count
+  home=$(new_home task-bound-terminal); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"
+  new_task "$home" "$id"; : >"$home/bytedcli.log"
+  sha=$(sha256sum "$home/data/$id/instructions.txt" | awk '{print $1}')
+  marker="firstmate:$id:${sha:0:16}"
+  printf '%s\t%s\terror\t%s\n' "$SESSION_ID" "$marker" "$marker" >"$home/sessions.tsv"
+  provider=$(jq -cn --arg marker "$marker" \
+    '{region:"sg",identity:"user",session_marker:$marker,session_id:"70001",task_id:"80001",
+      agent_id:"9001",agent_name:"iDA Test",model:null,provider_status:null}')
+  FM_HOME="$home" bash -c '
+    set -u
+    . "$1/bin/fm-remote-agent-lib.sh"
+    STATE="$2/state"; DATA="$2/data"
+    fm_remote_state_initialize "$3" ida research "$2/data/$3/instructions.txt" "$4" "$5" || exit 10
+    fm_remote_meta_write "$3" ida research || exit 11
+  ' _ "$ROOT" "$home" "$id" "$sha" "$provider" || fail "task-bound state fixture failed"
+
+  unavailable="$home/recorded-task-unavailable.json"
+  FM_IDA_FAKE_MODE=recorded-task-missing FM_HOME="$home" \
+    FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    FM_IDA_FAKE_LOG="$home/bytedcli.log" FM_IDA_FAKE_SESSIONS="$home/sessions.tsv" \
+    FM_IDA_FAKE_SESSION_ID="$SESSION_ID" FM_IDA_FAKE_TASK_ID="$REMOTE_TASK_ID" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-procevent-ida.sh" observe "$id" >"$unavailable" \
+    || fail "recorded-task-unavailable observation failed"
+  jq -e --arg task "$REMOTE_TASK_ID" '
+    .task_id_remote == $task and .terminal == false and .ambiguous == false
+    and .result_availability == "unavailable" and .error_class == "recorded-task-unavailable"
+    and .answer == null
+  ' "$unavailable" >/dev/null || fail "a conflicting unrecorded task became authoritative"
+  assert_no_grep 'PRIVATE_OTHER_TASK_ANSWER' "$unavailable" "unrecorded task answer escaped normalization"
+
+  FM_IDA_FAKE_MODE=aggregate-error-running run_ida "$home" "$fakebin" adopt "$id" >/dev/null \
+    || fail "aggregate-error running observation could not be armed"
+  wait_phase "$home" "$id" running || fail "session aggregate error prematurely terminalized the recorded running task"
+  state=$(state_file "$home" "$id")
+  jq -e --arg task "$REMOTE_TASK_ID" '
+    .phase == "running" and .provider_state.task_id == $task
+    and .provider_state.provider_status == "running"
+    and .report_path == null
+  ' "$state" >/dev/null || fail "task-level running authority was not preserved over aggregate error"
+  run_ida "$home" "$fakebin" interrupt-wait "$id" >/dev/null || fail "task-bound running waiter cleanup failed"
+
+  FM_IDA_FAKE_MODE=recorded-task-conflict run_ida "$home" "$fakebin" adopt "$id" >/dev/null \
+    || fail "recorded task success could not be armed"
+  wait_phase "$home" "$id" terminal-success || fail "same recorded task success did not terminalize"
+  report="$home/data/$id/report.md"
+  assert_grep 'FM_IDA_READINESS_V1 {"status":"ok","instruction_received":true,"business_data_accessed":false,"external_write_performed":false,"echo":"sg-ida-e2e-20260825-v1"}' \
+    "$report" "structured readiness marker was not preserved exactly"
+  if grep -R -F 'PRIVATE_OTHER_TASK_ANSWER' "$home/state" >/dev/null; then
+    fail "conflicting task answer leaked into normalized state"
+  fi
+  assert_no_grep 'PRIVATE_OTHER_TASK_ANSWER' "$report" "conflicting task answer leaked into the report"
+  jq -e --arg task "$REMOTE_TASK_ID" '
+    .phase == "terminal-success" and .provider_state.task_id == $task
+    and .provider_state.provider_status == "success"
+    and .result_availability == "available"
+  ' "$state" >/dev/null || fail "recorded task success lost its exact normalized terminal state"
+  revision=$(jq -r '.revision' "$state")
+  report_sha=$(sha256sum "$report" | awk '{print $1}')
+  status_count=$(grep -F -c 'done: iDA remote research complete' "$home/state/$id.status" || true)
+  [ "$status_count" -eq 1 ] || fail "recorded task success emitted $status_count terminal notifications"
+
+  source="ida-$id"; mode_file="$home/mode"
+  for mode in aggregate-error-running recorded-task-conflict; do
+    printf '%s\n' "$mode" >"$mode_file"
+    run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" \
+      register ida "$source" -- "$ROOT/bin/fm-procevent-ida.sh" observe "$id" >/dev/null \
+      || fail "could not register post-terminal $mode generation"
+    run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" start "$source" >/dev/null \
+      || fail "could not capture post-terminal $mode generation"
+    FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+      "$ROOT/bin/fm-procevent-ida.sh" retire "$id" >/dev/null \
+      || fail "could not retire post-terminal $mode source"
+  done
+  find "$home/state/procevent-inbox" -name "$source.*.result" -print | while IFS= read -r result; do
+    [ -f "${result%.result}.handled" ] && continue
+    seq=${result%.result}; seq=${seq##*.}
+    FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+      "$ROOT/bin/fm-procevent-ida.sh" autohandle "$source" "$seq" "$result" >/dev/null \
+      || exit 1
+  done || fail "a queued task-bound generation could not be handled idempotently"
+  [ "$(jq -r '.revision' "$state")" = "$revision" ] || fail "post-terminal generation regressed durable state"
+  [ "$(sha256sum "$report" | awk '{print $1}')" = "$report_sha" ] || fail "duplicate generation rewrote the terminal report"
+  status_count=$(grep -F -c 'done: iDA remote research complete' "$home/state/$id.status" || true)
+  [ "$status_count" -eq 1 ] || fail "duplicate generation emitted another terminal notification"
+  result_count=$(find "$home/state/procevent-inbox" -name "$source.*.result" | wc -l | tr -d '[:space:]')
+  [ "$result_count" -ge 3 ] || fail "task-bound timeline did not exercise distinct process-event generations"
+  find "$home/state/procevent-inbox" -name "$source.*.result" -print | while IFS= read -r result; do
+    [ -f "${result%.result}.handled" ] || exit 1
+  done || fail "a duplicate or post-terminal generation remained unacknowledged"
+  if grep -R -E 'PRIVATE_(PROMPT|OTHER_TASK)|OECID_sensitive' "$home/state" "$report" "$home/bytedcli.log" >/dev/null; then
+    fail "private provider or prompt content leaked through task-bound handling"
+  fi
+  pass "recorded task authority survives aggregate conflicts and post-terminal generations without empty results, regression, duplicate notification, or leakage"
 }
 
 test_terminal_outcomes_with_visible_answer() {
@@ -975,6 +1176,8 @@ test_dispatch_success_and_redaction
 test_legacy_version_and_proxy_do_not_block_readiness
 test_provider_rename_and_structured_empty_result
 test_structured_final_answer_readback
+test_completed_step_answer_fallback
+test_task_bound_terminal_and_monotonic_generations
 test_terminal_outcomes_with_visible_answer
 test_provider_states_and_zero_result
 test_timeout_reconciliation_and_no_duplicate

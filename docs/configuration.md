@@ -165,7 +165,10 @@ Terminal results, available answers, cancellation, ambiguous identity, submissio
 Suppressed attempts create no new captured generation, task artifact, notification, or event log, while every generation captured before the suppression boundary and every already queued notification remains intact and generation-keyed.
 Terminal success, failure, and provider-confirmed cancellation produce a mode-`0600` `data/<id>/report.md` bound by task state.
 The report preserves `available`, exact `zero`, `unavailable`, and `error` distinctions and includes normalized session, remote-task, agent, model, outcome, result kind, and error-class fields when available.
-Legacy visible type-8 text remains a `text` result, while a supported non-empty `deep_research_content.finalAnswer` artifact becomes an `artifact` result whose private mode-`0600` boundary retains only a safe session-readback reference with artifact and supported-part counts.
+Legacy visible type-8 text remains a `text` result.
+Textual `deep_research_content.finalAnswer` content - a non-empty string or an array carrying answer-bearing text - is redacted and recovered as a `text` result for the recorded task before its structured artifact classification is consulted.
+When a successful recorded task has no `finalAnswer`, the last non-empty completed step content in its task-bound visible type-8 message is also a `text` result.
+A supported non-empty `deep_research_content.finalAnswer` artifact becomes an `artifact` result whose private mode-`0600` boundary retains only a safe session-readback reference with artifact and supported-part counts.
 Malformed or unsupported structured results remain explicit errors, and artifact identifiers, names, file URIs, inline data, provider messages, and raw session JSON never enter the normalized result, report, status, log, or metadata boundary.
 If an existing durable iDA task contains `bytedcli_version`, a report may label it as legacy informational metadata; the value never participates in state validity or a lifecycle decision.
 It never embeds the prompt, credentials, raw provider streams, or private payloads.
