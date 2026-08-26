@@ -40,8 +40,8 @@
 #     against current_state; hints.pending_decision and hints.blocked_event are
 #     booleans derived from that set.
 #     endpoint.exists is the cheap backend endpoint-presence read.
-#     endpoint.agent_alive is populated for secondmates only, where it is useful
-#     return-channel supervision data; other tasks use "not_checked".
+#     endpoint.agent_alive is populated for every local task with a recorded
+#     backend target.
 #     endpoint.probe names how liveness was observed: local, remote, skipped, or
 #     none. Remote tasks never treat a local placeholder window as remote
 #     liveness. FM_SNAPSHOT_REMOTE_PROBES=0 skips SSH probes and records
@@ -557,7 +557,7 @@ task_json_lines() {
           endpoint_exists=false
         fi
       fi
-      if [ "$kind" = secondmate ] && [ -n "$target" ]; then
+      if [ -n "$target" ]; then
         agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
       fi
     fi
@@ -935,9 +935,10 @@ BASH
         | (($local == null) and ($remote != null)) as $is_remote
         | {id:$id.id,home:($route.home // null),host:(if $is_remote then $remote.host else null end),root:(if $is_remote then $remote.root else null end),
            remote:$is_remote,registered:true,
-           registry_error:(if $route == null or ($route.home | length) == 0 then "registry entry has no home" else null end)} ]
+           registry_error:(if $route == null or ($route.home | length) == 0 then "registry entry has no home" else null end),
+           registry_failure_kind:(if $route == null or ($route.home | length) == 0 then "invalid" else null end)} ]
       | group_by(.id)
-      | map(if length > 1 then .[0] + {registry_error:"duplicate secondmate id in registry"} else .[0] end)
+      | map(if length > 1 then .[0] + {registry_error:"duplicate secondmate id in registry",registry_failure_kind:"invalid"} else .[0] end)
 JQ
   )
   output_filter=$(cat <<'JQ'
@@ -1172,8 +1173,8 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
 
 secondmate_current_json() {  # <parent-tasks-json>
   local tasks=$1 registry union rows total_registered total shown truncated
-  local row id home host remote registered registry_error task sampled_spawn_gen status_file event_raw event_note event_epoch event_age
-  local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_sampled summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
+  local row id home host remote registered registry_error registry_failure_kind task sampled_spawn_gen status_file event_raw event_note event_epoch event_age
+  local activity_scan activities decisions reconciliation provenance freshness reason failure_kind summary summary_rc summary_bytes summary_sampled summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
   local records='[]' seen_homes=''
   registry=$(registry_secondmates_json) || return 1
   union=$(jq -n --argjson registry "$registry" --argjson tasks "$tasks" '
@@ -1188,6 +1189,7 @@ secondmate_current_json() {  # <parent-tasks-json>
               registry_error:(if $registry.complete == true
                               then "secondmate metadata is not registered"
                               else "secondmate registration is unknown because the registry read is incomplete or unavailable" end),
+              registry_failure_kind:(if $registry.complete == true then "invalid" else "unavailable" end),
               parent_task:$t} ])
     | sort_by(.id)
     | {registry:$registry,records:.}') || return 1
@@ -1205,6 +1207,7 @@ secondmate_current_json() {  # <parent-tasks-json>
     remote=$(printf '%s' "$row" | jq -r '.remote // false')
     registered=$(printf '%s' "$row" | jq -r '.registered')
     registry_error=$(printf '%s' "$row" | jq -r '.registry_error // ""')
+    registry_failure_kind=$(printf '%s' "$row" | jq -r '.registry_failure_kind // ""')
     task=$(printf '%s' "$row" | jq -c '.parent_task // {}')
     sampled_spawn_gen=$(printf '%s' "$task" | jq -r '.spawn_gen // ""')
     status_file=$(printf '%s' "$task" | jq -r '.paths.status_log.path // ""')
@@ -1221,29 +1224,34 @@ secondmate_current_json() {  # <parent-tasks-json>
     fi
 
     reason=$registry_error
+    failure_kind=
+    if [ -n "$reason" ]; then
+      failure_kind=${registry_failure_kind:-invalid}
+    fi
     summary='{}'
     summary_sampled=false
     summary_valid=false
-    if [ -z "$reason" ] && [ -z "$home" ]; then reason="no recorded secondmate home"; fi
+    if [ -z "$reason" ] && [ -z "$home" ]; then reason="no recorded secondmate home"; failure_kind=invalid; fi
     if [ -z "$reason" ]; then
       case "$home" in
         /*) : ;;
-        *) reason="invalid home: registered path is not absolute" ;;
+        *) reason="invalid home: registered path is not absolute"; failure_kind=invalid ;;
       esac
     fi
     if [ -z "$reason" ]; then
       if [ "$remote" = true ]; then
-        [ -n "$host" ] || reason="invalid remote route: missing SSH host"
+        if [ -z "$host" ]; then reason="invalid remote route: missing SSH host"; failure_kind=invalid; fi
         case " $seen_homes " in
-          *" $host:$home "*) reason="invalid home: duplicate resolved remote route" ;;
+          *" $host:$home "*) reason="invalid home: duplicate resolved remote route"; failure_kind=invalid ;;
           *) seen_homes="$seen_homes $host:$home" ;;
         esac
       elif ! validate_secondmate_home "$id" "$home" 2>/dev/null; then
         reason="invalid home: $VALIDATION_ERROR"
+        failure_kind=invalid
       else
         home=$VALIDATED_HOME
         case " $seen_homes " in
-          *" local:$home "*) reason="invalid home: duplicate resolved home route" ;;
+          *" local:$home "*) reason="invalid home: duplicate resolved home route"; failure_kind=invalid ;;
           *) seen_homes="$seen_homes local:$home" ;;
         esac
       fi
@@ -1254,6 +1262,7 @@ secondmate_current_json() {  # <parent-tasks-json>
           summary=''
           summary_rc=1
           reason="remote structured home snapshot was not collected"
+          failure_kind=not_collected
         else
           summary=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
             "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary < /dev/null 2>/dev/null)
@@ -1279,12 +1288,19 @@ secondmate_current_json() {  # <parent-tasks-json>
       if [ "$summary_rc" -ne 0 ]; then
         summary='{}'
         if [ -z "$reason" ]; then
-          [ "$summary_rc" -eq 124 ] && reason="structured home snapshot timed out" || reason="structured home snapshot failed"
+          if [ "$summary_rc" -eq 124 ]; then
+            reason="structured home snapshot timed out"
+            failure_kind=timeout
+          else
+            reason="structured home snapshot failed"
+            failure_kind=unavailable
+          fi
         fi
       else
         summary_bytes=$(printf '%s' "$summary" | LC_ALL=C wc -c | tr -d ' ')
         if [ "$summary_bytes" -gt "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES" ]; then
           reason="structured home snapshot exceeded byte limit"
+          failure_kind=unavailable
         elif ! printf '%s' "$summary" | jq -e --arg home "$home" --arg generated "$SNAPSHOT_NOW" --argjson remote "$remote" '
           .schema == "fm-secondmate-home-summary.v1" and .home == $home
           and (($remote == true) or .generated == $generated)
@@ -1296,6 +1312,7 @@ secondmate_current_json() {  # <parent-tasks-json>
           and (.counts | type) == "object" and (.omitted | type) == "array"
         ' >/dev/null 2>&1; then
           reason="structured home snapshot was malformed or stale"
+          failure_kind=invalid
         else
           summary_sampled=true
           summary_valid=$(printf '%s' "$summary" | jq -r '.valid')
@@ -1304,7 +1321,7 @@ secondmate_current_json() {  # <parent-tasks-json>
             summary_invalidity=$(printf '%s' "$summary" | jq -r '.invalidity.kind // "unknown"')
             case "$summary_invalidity" in
               child_current_unavailable|orphan_in_flight|unowned_current|terminal_in_flight) : ;;
-              *) reason="structured home state invalid: $summary_reason" ;;
+              *) reason="structured home state invalid: $summary_reason"; failure_kind=invalid ;;
             esac
           fi
         fi
@@ -1316,6 +1333,7 @@ secondmate_current_json() {  # <parent-tasks-json>
       current_reason=
       if [ "$summary_valid" != true ]; then
         current_reason="structured home state invalid: $(printf '%s' "$summary" | jq -r '.reason // "unknown reason"')"
+        failure_kind=child_unavailable
       fi
       reconciliation=$(parent_evidence_reconciliation_json "$summary" "$activities" "$decisions")
       contradiction=$(printf '%s' "$reconciliation" | jq -r '.contradiction')
@@ -1331,13 +1349,14 @@ secondmate_current_json() {  # <parent-tasks-json>
       record=$(jq -n \
         --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg state "$state" --arg current_reason "$current_reason" --arg observed "$SNAPSHOT_NOW" \
         --arg spawn_gen "$sampled_spawn_gen" \
+        --arg failure_kind "$failure_kind" \
         --argjson registered "$registered" --argjson summary "$summary" --argjson summary_valid "$summary_valid" --argjson decisions "$decisions" \
         --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
         --argjson reconciliation "$reconciliation" --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
         --arg event_raw "$event_raw" --arg event_note "$event_note" --argjson event_age "$event_age" '
         {id:$id,home:$home,host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
          spawn_gen:($spawn_gen | if . == "" then null else . end),
-         current:{state:$state,reason:($current_reason | if . == "" then null else . end)},invalidity:$summary.invalidity,
+         current:{state:$state,reason:($current_reason | if . == "" then null else . end),failure_kind:($failure_kind | if . == "" then null else . end)},invalidity:$summary.invalidity,
          reconcile_inventory:$summary.invalidity,
          provenance:{selected:"structured-home",structured_home:$home,summary_valid:$summary_valid,
            trust:(if $summary_valid then "complete" else "partial-structured" end),parent_event_role:"historical-only"},
@@ -1364,12 +1383,13 @@ secondmate_current_json() {  # <parent-tasks-json>
       record=$(jq -n \
         --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
         --arg spawn_gen "$sampled_spawn_gen" \
+        --arg failure_kind "$failure_kind" \
         --arg provenance "$provenance" --arg freshness "$freshness" --arg event_raw "$event_raw" --arg event_note "$event_note" \
         --argjson registered "$registered" --argjson event_age "$event_age" --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
         --argjson decisions "$decisions" --argjson terminal "$terminal" --argjson summary "$summary" --argjson summary_sampled "$summary_sampled" '
         {id:$id,home:($home | if . == "" then null else . end),host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
          spawn_gen:($spawn_gen | if . == "" then null else . end),
-         current:{state:"unknown",reason:$reason},invalidity:null,
+         current:{state:"unknown",reason:$reason,failure_kind:$failure_kind},invalidity:null,
          reconcile_inventory:(if $summary_sampled then $summary.invalidity else null end),
          provenance:{selected:$provenance,structured_home:($home | if . == "" then null else . end),parent_event_role:"fallback-only-not-current"},
          freshness:{status:$freshness,observed_at:$observed,age_seconds:$event_age},

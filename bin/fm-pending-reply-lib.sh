@@ -1411,7 +1411,7 @@ fm_pending_reply_task_has_open() {  # <state-dir> <task_id>
 # Read-only list of open (non-resolved) pending-reply records.
 # Does not tick, recover, escalate, or otherwise mutate records.
 fm_pending_reply_open_json() {  # <state-dir>
-  local state=$1 dir rec corr phase task_id created delivered completed recovery_completed
+  local state=$1 dir rec corr phase task_id created delivered completed recovery_completed grace
   local now age
   dir=$(fm_pending_reply_dir "$state")
   now=$(fm_pending_reply_now)
@@ -1436,6 +1436,8 @@ fm_pending_reply_open_json() {  # <state-dir>
       delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
       completed=$(fm_pending_reply_get "$rec" request_turn_completed_epoch)
       recovery_completed=$(fm_pending_reply_get "$rec" recovery_turn_completed_epoch)
+      grace=$(fm_pending_reply_get "$rec" grace_secs)
+      case "$grace" in ''|*[!0-9]*) grace=$(fm_pending_reply_grace_secs) ;; esac
       age=null
       case "$created" in
         ''|*[!0-9]*) ;;
@@ -1449,6 +1451,7 @@ fm_pending_reply_open_json() {  # <state-dir>
         --arg delivered "$delivered" \
         --arg completed "$completed" \
         --arg recovery_completed "$recovery_completed" \
+        --arg grace "$grace" \
         --argjson age "$age" \
         '{
           corr_id:$corr,
@@ -1458,6 +1461,7 @@ fm_pending_reply_open_json() {  # <state-dir>
           delivered_epoch:(if $delivered == "" then null else (try ($delivered | tonumber) catch null) end),
           request_turn_completed_epoch:(if $completed == "" then null else (try ($completed | tonumber) catch null) end),
           recovery_turn_completed_epoch:(if $recovery_completed == "" then null else (try ($recovery_completed | tonumber) catch null) end),
+          grace_secs:($grace | tonumber),
           age_seconds:$age
         }'
     done

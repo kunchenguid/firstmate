@@ -30,12 +30,12 @@
 # symptoms for one owner/cause collapse to one finding.
 #
 # Exit status:
-#   0  healthy: no high-confidence findings (inconclusive rows may still print)
+#   0  healthy: no findings
 #   1  actionable: at least one high-confidence finding
 #   2  usage error
-#   3  incomplete: the checker failed or could not finish
+#   3  inconclusive/incomplete: evidence is unavailable or checking did not finish
 #
-# Bounds: FM_FLEET_HEALTH_TIMEOUT (default 120) bounds snapshot collection.
+# Bounds: FM_FLEET_HEALTH_TIMEOUT (default 120) bounds the complete check.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -92,6 +92,24 @@ case "$FM_FLEET_HEALTH_TIMEOUT" in
     ;;
 esac
 
+if [ "${FM_FLEET_HEALTH_TIMED_WORKER:-0}" != 1 ]; then
+  WRAPPED_RC=0
+  WRAPPED_OUTPUT=$(FM_FLEET_HEALTH_TIMED_WORKER=1 \
+    fm_run_timed "$FM_FLEET_HEALTH_TIMEOUT" "$0" "${1:-}") || WRAPPED_RC=$?
+  if [ "$WRAPPED_RC" -eq 124 ]; then
+    NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    if [ "$OUTPUT_MODE" = json ]; then
+      jq -n --arg generated "$NOW" --arg home "$FM_HOME" \
+        '{schema:"fm-fleet-health.v1",generated:$generated,fm_home:$home,status:"incomplete",snapshot_generated:null,reason:"fleet health check timed out",findings:[]}'
+    else
+      printf '# Fleet Health\nStatus: incomplete\nHome: %s\nfleet health check timed out\n' "$FM_HOME"
+    fi
+    exit 3
+  fi
+  printf '%s\n' "$WRAPPED_OUTPUT"
+  exit "$WRAPPED_RC"
+fi
+
 fingerprint_hex() {
   local key=$1 digest
   if command -v shasum >/dev/null 2>&1; then
@@ -124,8 +142,10 @@ collect_pr_listeners_json() {
     case "$id" in
       x-watch|tool-updates) continue ;;
     esac
-    records=$(jq -n --argjson records "$records" --arg id "$id" \
-      '$records + [{id:$id,armed:true}]')
+    if fm_pr_poll_artifacts_valid "$state" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+      records=$(jq -n --argjson records "$records" --arg id "$id" \
+        '$records + [{id:$id,armed:true}]')
+    fi
   done
   jq -n --argjson records "$records" '{available:true,records:$records}'
 }
@@ -196,7 +216,6 @@ PR_JSON=$(collect_pr_listeners_json "$STATE") \
 SUPERVISION_JSON=$(collect_supervision_json "$STATE" "$SCRIPT_DIR/fm-watch.sh") \
   || SUPERVISION_JSON='{"available":false,"needed":false,"ok":false,"reason":null,"model":null}'
 
-PENDING_GRACE=$(fm_pending_reply_grace_secs)
 INBOX_GRACE=$(fm_task_inbox_grace_secs)
 
 EVALUATED=$(jq -n \
@@ -207,7 +226,6 @@ EVALUATED=$(jq -n \
   --argjson listeners "$LISTENERS_JSON" \
   --argjson prs "$PR_JSON" \
   --argjson supervision "$SUPERVISION_JSON" \
-  --argjson pending_grace "$PENDING_GRACE" \
   --argjson inbox_grace "$INBOX_GRACE" \
   '
   def finding($kind; $subject; $severity; $confidence; $evidence; $cause; $count):
@@ -246,15 +264,16 @@ EVALUATED=$(jq -n \
       ($snapshot.tasks[]?
         | select(remote(.) | not)
         | select(.kind != "secondmate")
-        | select(exists(.) == false)
+        | select(exists(.) == false or alive(.) == "dead")
         | select(terminal_state(.current_state.state) | not)
         | finding("dead-direct-report";.id;"error";"high";
-                  ("recorded endpoint is absent while current state is " + .current_state.state);
-                  "absent";1)),
+                  (if exists(.) == false then "recorded endpoint is absent while current state is " + .current_state.state
+                   else "direct-report agent is dead while its endpoint remains present" end);
+                  (if exists(.) == false then "absent" else "dead" end);1)),
       ($snapshot.tasks[]?
         | select(remote(.) | not)
         | select(.kind != "secondmate")
-        | select(exists(.) == null)
+        | select(exists(.) == null or alive(.) == "unknown")
         | select(terminal_state(.current_state.state) | not)
         | finding("endpoint-inconclusive";.id;"notice";"inconclusive";
                   "endpoint presence could not be established";"unknown";1)),
@@ -292,19 +311,20 @@ EVALUATED=$(jq -n \
       ($snapshot.secondmate_current.records[]?
         | select(.current.state == "unknown")
         | . as $row
-        | (($row.current.reason // "") ) as $reason
-        | if ($reason | test("not collected")) then
+        | ($row.current.reason // "secondmate current state is unknown") as $reason
+        | ($row.current.failure_kind // "unknown") as $failure
+        | if $failure == "not_collected" then
             empty
-          elif ($reason | test("timed out")) then
+          elif $failure == "timeout" then
             finding("secondmate-summary-unavailable";$row.id;"warning";"high";
                     $reason;"timeout";1)
-          elif ($reason | test("invalid home|malformed|invalid remote|not registered")) then
+          elif $failure == "invalid" then
             finding("secondmate-summary-invalid";$row.id;"error";"high";
                     $reason;"invalid";1)
-          elif ($reason | test("child current state unavailable")) then
+          elif $failure == "child_unavailable" then
             finding("secondmate-summary-inconclusive";$row.id;"notice";"inconclusive";
                     $reason;"child_unavailable";1)
-          elif ($reason | test("failed|unreadable|unavailable")) then
+          elif $failure == "unavailable" then
             finding("secondmate-summary-unavailable";$row.id;"warning";"high";
                     $reason;"unavailable";1)
           else
@@ -313,9 +333,17 @@ EVALUATED=$(jq -n \
                     "unknown";1)
           end),
       (if ($snapshot.secondmate_current.registry.available == false) then
-        finding("secondmate-summary-unavailable";"secondmate-registry";"warning";"high";
+        finding("secondmate-summary-inconclusive";"secondmate-registry";"notice";"inconclusive";
                 ($snapshot.secondmate_current.registry.reason // "registered secondmate table is unavailable");
                 "registry";1)
+      else empty end),
+      (if (($snapshot.secondmate_current.truncated // 0) > 0
+           or $snapshot.secondmate_current.registry.complete == false
+           or $snapshot.secondmate_current.registry.input_truncated == true
+           or $snapshot.secondmate_current.registry.records_truncated == true) then
+        finding("secondmate-summary-inconclusive";"secondmate-inventory";"notice";"inconclusive";
+                "bounded secondmate inventory omitted records or source data";"truncated";
+                (($snapshot.secondmate_current.truncated // 0) + 1))
       else empty end),
       ((($pending.records // [])
         | map(select(.phase == "delivery_unknown" or .phase == "recovery_failed" or .phase == "recovery_unknown"))
@@ -329,14 +357,14 @@ EVALUATED=$(jq -n \
         | map(select(.phase != "escalated"))
         | map(select(
             (.phase == "awaiting_report" and .request_turn_completed_epoch != null
-             and $now != 0 and (($now - .request_turn_completed_epoch) >= $pending_grace))
+             and $now != 0 and (($now - .request_turn_completed_epoch) >= .grace_secs))
             or (.phase == "recovery_sent" and .recovery_turn_completed_epoch != null
-                and $now != 0 and (($now - .recovery_turn_completed_epoch) >= $pending_grace))
+                and $now != 0 and (($now - .recovery_turn_completed_epoch) >= .grace_secs))
           ))
         | group_by(.task_id)[]) as $g
         | ($g | length) as $n
         | finding("pending-reply-overdue";$g[0].task_id;"warning";"high";
-                  ("reply delivery is overdue by at least the pending-reply grace (" + ($pending_grace|tostring) + "s)");
+                  "reply delivery is overdue by at least its recorded pending-reply grace";
                   "overdue";$n)),
       ((($inbox.records // [])
         | map(select(.age_seconds != null and .age_seconds >= $inbox_grace))
@@ -399,9 +427,10 @@ REPORT=$(jq -n \
   --argjson base "$EVALUATED" \
   --argjson findings "$FINDINGS_OUT" '
   ($findings | any(.confidence == "high")) as $actionable
+  | ($findings | any(.confidence == "inconclusive")) as $inconclusive
   | $base
   | .findings = $findings
-  | .status = (if $actionable then "actionable" else "healthy" end)
+  | .status = (if $actionable then "actionable" elif $inconclusive then "inconclusive" else "healthy" end)
 ')
 
 if [ "$OUTPUT_MODE" = json ]; then

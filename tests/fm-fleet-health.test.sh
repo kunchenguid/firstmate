@@ -91,8 +91,8 @@ run_health() {  # <home> <fakebin>
   PATH="$2:$PATH" FM_HOME="$1" "$HEALTH" --json
 }
 
-write_pending() {  # <home> <corr> <task> <phase> [completed_epoch]
-  local home=$1 corr=$2 task=$3 phase=$4 completed=${5-}
+write_pending() {  # <home> <corr> <task> <phase> [completed_epoch] [grace]
+  local home=$1 corr=$2 task=$3 phase=$4 completed=${5-} grace=${6:-120}
   mkdir -p "$home/state/pending-replies"
   cat > "$home/state/pending-replies/$corr" <<EOF
 schema=fm-pending-reply.v1
@@ -121,7 +121,7 @@ resolved_via=
 wrong_home_hits=0
 wrong_home_sightings=
 wrong_home_scan_signature=
-grace_secs=120
+grace_secs=$grace
 EOF
 }
 
@@ -183,6 +183,21 @@ test_actionable_dead_direct_report() {
   pass "dead local worker is an actionable finding"
 }
 
+test_dead_agent_with_live_endpoint() {
+  local home fakebin out rc=0
+  home=$(make_home dead-agent-live-endpoint)
+  write_live_ship "$home" dead-worker
+  printf 'fm-dead-worker\n' > "$home/state/.fake-windows"
+  fakebin=$(make_fakebin "$home")
+  out=$(run_health "$home" "$fakebin") || rc=$?
+  expect_code 1 "$rc" "dead agent behind a live endpoint should be actionable"
+  printf '%s' "$out" | jq -e '
+    any(.findings[]; .kind == "dead-direct-report" and .subject == "dead-worker"
+        and .evidence == "direct-report agent is dead while its endpoint remains present")
+  ' >/dev/null || fail "dead agent behind live endpoint was missed: $out"
+  pass "dead agent is detected even when its endpoint remains present"
+}
+
 test_grouped_inbox_and_stable_fingerprints() {
   local home fakebin out1 out2 rc=0 fp1 fp2 count
   home=$(make_home grouped-inbox)
@@ -231,9 +246,9 @@ EOF
   fresh_autoarm_supervision "$home"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
-  expect_code 0 "$rc" "inconclusive remote liveness is not actionable"
+  expect_code 3 "$rc" "inconclusive remote liveness should use the incomplete exit"
   printf '%s' "$out" | jq -e '
-    .status == "healthy"
+    .status == "inconclusive"
       and any(.findings[]; .kind == "remote-liveness-inconclusive" and .subject == "remote-mate" and .confidence == "inconclusive")
       and (any(.findings[]; .kind == "dead-secondmate") | not)
       and (any(.findings[]; .kind == "dead-direct-report") | not)
@@ -298,13 +313,79 @@ EOF
   fresh_autoarm_supervision "$home"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
-  expect_code 0 "$rc" "uncollected remote summary is not a definite break"
+  expect_code 3 "$rc" "uncollected remote summary should be inconclusive"
   printf '%s' "$out" | jq -e '
     any(.findings[]; .kind == "remote-liveness-inconclusive" and .confidence == "inconclusive")
       and (any(.findings[]; .kind == "secondmate-summary-invalid") | not)
       and (any(.findings[]; .kind == "secondmate-summary-unavailable" and .confidence == "high") | not)
   ' >/dev/null || fail "uncollected remote summary was marked broken: $out"
   pass "uncollected remote secondmate summary is inconclusive"
+}
+
+test_invalid_secondmate_summary_uses_normalized_kind() {
+  local home fakebin out rc=0
+  home=$(make_home invalid-summary)
+  printf '%s\n' '- missing-home' > "$home/data/secondmates.md"
+  fm_write_meta "$home/state/missing-home.meta" \
+    "window=firstmate:fm-missing-home" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=secondmate" \
+    "mode=secondmate"
+  printf 'working: watching scope\n' > "$home/state/missing-home.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(run_health "$home" "$fakebin") || rc=$?
+  expect_code 1 "$rc" "missing recorded secondmate home should be invalid"
+  printf '%s' "$out" | jq -e '
+    any(.findings[]; .kind == "secondmate-summary-invalid" and .subject == "missing-home"
+        and .evidence == "registry entry has no home")
+  ' >/dev/null || fail "normalized secondmate failure kind was not projected: $out"
+  pass "normalized snapshot failure kinds drive secondmate health findings"
+}
+
+test_truncated_secondmate_inventory_is_inconclusive() {
+  local home fakebin out rc=0 id
+  home=$(make_home truncated-secondmates)
+  cat > "$home/data/secondmates.md" <<'EOF'
+- mate-a (host: example.invalid; root: /remote/firstmate; home: /remote/mate-a; scope: work; projects: alpha; added 2026-08-01)
+- mate-b (host: example.invalid; root: /remote/firstmate; home: /remote/mate-b; scope: work; projects: alpha; added 2026-08-01)
+EOF
+  for id in mate-a mate-b; do
+    fm_write_meta "$home/state/$id.meta" \
+      "window=firstmate:fm-$id" \
+      "project=alpha" \
+      "harness=codex" \
+      "kind=secondmate" \
+      "mode=secondmate" \
+      "home=/remote/$id" \
+      "remote_host=example.invalid" \
+      "remote_root=/remote/firstmate"
+    printf 'working: watching scope\n' > "$home/state/$id.status"
+  done
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm FM_SNAPSHOT_SECONDMATES=1 "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "truncated secondmate inventory should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "secondmate-summary-inconclusive" and .subject == "secondmate-inventory")
+  ' >/dev/null || fail "truncated secondmate inventory was not disclosed: $out"
+  pass "bounded secondmate omissions make fleet health inconclusive"
+}
+
+test_pending_reply_uses_recorded_grace() {
+  local home fakebin out rc=0
+  home=$(make_home recorded-grace)
+  write_live_ship "$home" grace-task
+  write_pending "$home" fedcfedcfedcfedc grace-task awaiting_report 1000 600
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm FM_PENDING_REPLY_NOW=1300 "$HEALTH" --json) || rc=$?
+  expect_code 0 "$rc" "recorded pending-reply grace should suppress a premature overdue finding"
+  printf '%s' "$out" | jq -e '
+    .status == "healthy" and (any(.findings[]; .kind == "pending-reply-overdue") | not)
+  ' >/dev/null || fail "checker ignored the record-owned pending grace: $out"
+  pass "pending-reply health uses each record's authoritative grace"
 }
 
 test_inventory_and_missing_listener() {
@@ -329,6 +410,8 @@ EOF
     "yolo=off" \
     "pr=https://github.com/example/alpha/pull/9"
   printf 'working: waiting on CI\n' > "$home/state/pr-ship.status"
+  printf '#!/usr/bin/env bash\nprintf "OPEN\\n"\n' > "$home/state/pr-ship.check.sh"
+  chmod 0600 "$home/state/pr-ship.check.sh"
   mkdir -p "$home/state/procevent"
   printf 'adapter=lavish\nargc=1\nargv:\npoll\n' > "$home/state/procevent/board-src.source"
   fakebin=$(make_fakebin "$home")
@@ -343,6 +426,25 @@ EOF
   assert_contains "$view" "result-listener-missing" "human view must print listener findings"
   assert_contains "$view" "inventory-inconsistent" "human view must print inventory findings"
   pass "inconsistent inventory and missing listeners are actionable"
+}
+
+test_complete_timeout_covers_fingerprinting() {
+  local home fakebin out rc=0
+  home=$(make_home complete-timeout)
+  write_live_ship "$home" hash-task
+  : > "$home/state/.fake-windows"
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/shasum" <<'SH'
+#!/usr/bin/env bash
+sleep 3
+SH
+  chmod +x "$fakebin/shasum"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FLEET_HEALTH_TIMEOUT=1 "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "the complete health check should honor its timeout"
+  printf '%s' "$out" | jq -e '
+    .status == "incomplete" and .reason == "fleet health check timed out"
+  ' >/dev/null || fail "post-snapshot timeout did not produce incomplete output: $out"
+  pass "the timeout bounds collection, evaluation, and fingerprinting"
 }
 
 test_human_view_and_incomplete_exit() {
@@ -361,9 +463,14 @@ test_human_view_and_incomplete_exit() {
 test_usage_exit
 test_healthy_empty_fleet
 test_actionable_dead_direct_report
+test_dead_agent_with_live_endpoint
 test_grouped_inbox_and_stable_fingerprints
 test_remote_liveness_is_inconclusive
 test_pending_reply_broken_and_historical_noise_omitted
 test_inconclusive_secondmate_summary_not_broken
+test_invalid_secondmate_summary_uses_normalized_kind
+test_truncated_secondmate_inventory_is_inconclusive
+test_pending_reply_uses_recorded_grace
 test_inventory_and_missing_listener
+test_complete_timeout_covers_fingerprinting
 test_human_view_and_incomplete_exit
