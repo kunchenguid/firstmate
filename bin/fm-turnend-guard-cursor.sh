@@ -103,6 +103,13 @@ case "$SESSION_ID" in ''|*[!A-Za-z0-9._-]*) SESSION_ID=unknown ;; esac
 
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
+# Pi-with-Cursor-provider (pi-cursor-sdk) loads project `.cursor/hooks.json` into the
+# Pi process. That must never park a second watcher: Pi's tracked extensions own
+# continuity via fm_watch_arm_pi. A Cursor park under PI_CODING_AGENT races the
+# extension arm, emits rearm-resurface wakes, and aborts in-flight asks.
+# Native cursor-agent primaries clear PI_CODING_AGENT at launch, so they still park.
+[ "${PI_CODING_AGENT:-}" = "true" ] && exit 0
+
 lock_acquire_bounded() {  # <lock>
   local lock=$1 attempt=0
   while [ "$attempt" -lt "$LOCK_ATTEMPTS" ]; do
