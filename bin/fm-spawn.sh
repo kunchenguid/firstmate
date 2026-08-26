@@ -1782,7 +1782,7 @@ describe_stale_submodule_pins() {  # <worktree> <status>
     want=$(git -C "$worktree" rev-parse --verify --quiet "HEAD:$path" 2>/dev/null) || return 1
     have=$(git -C "$worktree/$path" rev-parse --verify --quiet HEAD 2>/dev/null) || return 1
     [ "$want" != "$have" ] || return 1
-    unpushed=$(git -C "$worktree/$path" log --format=%H "$have" --not --remotes -- 2>/dev/null) || return 1
+    unpushed=$(git -C "$worktree/$path" log --format=%H --max-count=1 "$have" --not --remotes -- 2>/dev/null) || return 1
     [ -z "$unpushed" ] || return 1
     lines+="error: submodule '$path' is checked out at $have, but this base records $want"$'\n'
   done <<EOF
