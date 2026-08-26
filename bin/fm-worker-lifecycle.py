@@ -23,6 +23,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -38,6 +39,11 @@ AZURE_PROVIDER = ROOT / "bin" / "fm-azure-worker-provider.py"
 # account home is exactly how a credential stager and its remover once resolved
 # different directories and leaked a credential.
 PI_ACCOUNT_HOME_TOOL = ROOT / "bin" / "fm-pi-account-home.py"
+CREDENTIAL_EXPIRY_TOOL = ROOT / "bin" / "fm-credential-expiry.py"
+# Azure's hard worker shutdown is six hours.  Every canonical Pi profile must
+# retain twice that headroom before the controller writes an assignment-private
+# snapshot, so a guest never reaches the refresh path before the VM is dark.
+CLOUD_ACCOUNT_MIN_HEADROOM_SECONDS = 12 * 60 * 60
 LEGACY_STATE_SCHEMA = "fm.worker-lifecycle/v1"
 STATE_SCHEMA = "fm.worker-lifecycle/v2"
 # The scalar pending_action slot this schema carried is superseded by the
@@ -376,13 +382,12 @@ def environment():
         "daily_bound_override": daily_override,
         "idle_release_seconds": idle_release,
         "provider_argv": provider_argv,
-        # Where placement writes the single-profile account homes it leases.
+        # Where placement writes assignment-private single-profile snapshots.
         # CONTROLLER-owned, under the same state directory as the document that
-        # records the lease, and deliberately NOT the shared crosscheck roster
-        # under ~/.local/share/agent-fleet/accounts/pi: those homes belong to
-        # the reviewer lane, and a placement rewriting one mid-review would
-        # swap a running reviewer's credential underneath it. It also makes the
-        # root follow FM_HOME, so a fixture home cannot write into a real one.
+        # records each projection, and deliberately NOT a shared reviewer or
+        # worker pool home.  Reusing one upstream profile therefore never makes
+        # two assignments share writable storage.  The root follows FM_HOME so
+        # a fixture home cannot write into a real one.
         "pi_account_root": Path(os.environ.get(
             "FM_PI_ACCOUNT_HOME_ROOT", str(state_dir / "accounts")
         )).expanduser(),
@@ -742,14 +747,15 @@ def verify_request(request):
         raise LifecycleError("worker request account pool home must be one absolute path")
     profile = request.get("account_profile")
     account_home = request.get("account_home")
-    if (profile is None) != (account_home is None):
-        # The pair IS the lease record. Half of it would let a reader see a
-        # leased profile with no home to stage, or a staged home no exclusion
-        # covers; both read as "placed" while one of the two is missing.
+    projection_binding = request.get("account_projection_binding")
+    if (profile is None) != (account_home is None) or (
+        profile is None and projection_binding is not None
+    ):
         raise LifecycleError(
-            "account_profile and account_home travel together or not at all")
+            "account_profile, account_home, and account_projection_binding travel together")
     if profile is not None:
         require_id("account_profile", profile)
+        require_binding("account_projection_binding", projection_binding)
         if not isinstance(account_home, str) or not account_home.startswith("/") \
                 or len(account_home) > 4096:
             raise LifecycleError("worker request account home must be one absolute path")
@@ -795,51 +801,97 @@ def pi_projection():
     return module
 
 
-def placement_account_binding(account_digest):
-    """The lease identity, keyed on the UPSTREAM ACCOUNT.
+_CREDENTIAL_EXPIRY = {}
 
-    Not the profile name and not the account-home path, both of which are
-    handles that can point at the same account. Eight profiles map to eight
-    accounts today; nothing enforces that, and a re-login can point two slots
-    at one account. The thing a concurrent crewmate actually contends for -
-    the rate limit, the ban, the session - belongs to the account, so the
-    account is the unit of exclusion. `account_digest` is already a truncated
-    SHA-256 of the upstream account id and never carries token material.
+
+def credential_expiry():
+    """Load the credential-expiry owner without copying its token semantics."""
+    module = _CREDENTIAL_EXPIRY.get("module")
+    if module is not None:
+        return module
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "fm_credential_expiry", str(CREDENTIAL_EXPIRY_TOOL))
+    if spec is None or spec.loader is None:
+        raise LifecycleError(
+            "the credential-expiry tool is unavailable at {}".format(
+                CREDENTIAL_EXPIRY_TOOL))
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # noqa: BLE001 - any import failure is a refusal
+        raise LifecycleError(
+            "the credential-expiry tool could not be loaded from {}: {}".format(
+                CREDENTIAL_EXPIRY_TOOL, type(exc).__name__))
+    _CREDENTIAL_EXPIRY["module"] = module
+    return module
+
+
+def placement_account_binding(account_digest):
+    """The reusable, non-secret identity of one upstream Pi account.
+
+    The binding stays stable and travels through queue, worker, Azure, release,
+    and status records, but it is no longer an exclusion key.  Multiple
+    assignments may use immutable snapshots of the same canonical profile
+    while retaining this exact provider-quota identity.
     """
     return digest_value({"provider": "pi", "upstream_account": account_digest})
 
 
-def leased_placement_accounts(state):
-    """Which upstream accounts non-complete queue work already holds.
+def leased_placement_accounts(state, pool_home=None):
+    """Active load per reusable profile/account pair, derived from the queue.
 
-    Derived from the queue, never from a separate ledger: the queue entry IS
-    the lease, so there is no second document that a crash could leave holding
-    a profile nothing owns.
+    The compatibility name remains because callers already know it, but the
+    result is load evidence rather than an exclusive lease set.  Pool identity
+    is part of the key so equal local slot names in separate canonical homes do
+    not distort each other's selection.
     """
-    held = {}
+    loads = {}
     for item in state["queue"].values():
         if item.get("status") == "complete":
             continue
+        item_pool = item.get("account_pool_home")
+        profile = item.get("account_profile")
         binding = item.get("account_binding")
-        if isinstance(binding, str):
-            held.setdefault(binding, (item.get("account_profile"), item.get("task")))
-    return held
+        if pool_home is not None and item_pool != str(pool_home):
+            continue
+        if not all(isinstance(value, str) and value for value in (
+            item_pool, profile, binding,
+        )):
+            continue
+        key = (item_pool, profile, binding)
+        load = loads.setdefault(key, {"active": 0, "tasks": []})
+        load["active"] += 1
+        load["tasks"].append(item.get("task"))
+    return loads
 
 
-def select_placement_account(env, state, pool_home, task):
-    """Lease one free Pi profile for this placement, under the controller lock.
+def placement_projection_binding(item, profile, account_binding):
+    """Stable assignment-private writable-home identity for one request."""
+    return digest_value({
+        "provider": "pi",
+        "home_binding": item["home_binding"],
+        "task": item["task"],
+        "task_generation": item["task_generation"],
+        "account_pool_home": item["account_pool_home"],
+        "account_profile": profile,
+        "account_binding": account_binding,
+    })
 
-    Called from `command_request` inside the same lock hold and the same
-    `save_state` that writes the queue entry, so selection and the lease are
-    one atomic act: no window exists in which a profile is held by anything
-    that is not a queue entry.
 
-    Fails closed at every step. An unreadable pool, a pool of unusable
-    credentials, and an exhausted pool all raise by name; none of them falls
-    through to a shared or arbitrary profile, because a silent fallthrough
-    here is an account collision with extra steps.
+def select_placement_account(env, state, pool_home, item):
+    """Snapshot the least-loaded usable Pi profile for one placement.
+
+    Selection and queue ownership remain inside one controller lock hold, and
+    projection begins only after that owner is durable.  Reusable upstream
+    bindings are load evidence, while the writable projection is keyed by the
+    exact task generation and selected
+    profile so no two assignments ever share a home.
     """
     projection = pi_projection()
+    expiry = credential_expiry()
+    pool_home = str(pool_home)
     pool_file = Path(pool_home) / "auth.json"
     try:
         pool = projection.read_pool(pool_file)
@@ -850,136 +902,218 @@ def select_placement_account(env, state, pool_home, task):
     if not pool:
         raise LifecycleError(
             "provider-account placement pool at {} declares no profile".format(pool_file))
-    held = leased_placement_accounts(state)
-    if len(pool) == 1:
-        # Already a single-profile account home - the exact shape every Pi
-        # consumer reads, and what the projection tool produces. There is
-        # nothing to select and nothing to write: lease it in place. Its SHAPE
-        # is deliberately not screened here, because projecting is the only
-        # operation that needs a writable credential and "is this credential
-        # still good" has one owner, bin/fm-credential-expiry.py. What IS
-        # required is the one thing exclusion depends on: an upstream account
-        # this lease can name.
-        name, entry = next(iter(pool.items()))
-        digest = projection.account_digest(entry) if isinstance(entry, dict) else "none"
-        if digest == "none":
-            raise LifecycleError(
-                "provider-account home at {} names no upstream account, so a placement "
-                "on it could not be excluded from any other".format(pool_file))
-        binding = placement_account_binding(digest)
-        if binding in held:
-            raise LifecycleError(
-                "provider-account placement is exhausted: the single account home {} is "
-                "already leased ({} holds profile {}); refusing to place {} on a shared "
-                "upstream account. Sign in additional Pi profiles on distinct upstream "
-                "accounts to raise the ceiling, or release the placement above with "
-                "`bin/fm-worker-lifecycle.sh withdraw`".format(
-                    pool_file, held[binding][1] or "unknown-task",
-                    held[binding][0] or name, task))
-        return {
-            "account_profile": name,
-            "account_home": str(Path(pool_home)),
-            "account_binding": binding,
-        }
-    usable = []
+
+    loads = leased_placement_accounts(state, pool_home)
+    deadline = time.time() + CLOUD_ACCOUNT_MIN_HEADROOM_SECONDS
+    candidates = []
     faults = {}
     for name in sorted(pool):
-        entry_faults = projection.entry_faults(pool[name])
+        entry = pool[name]
+        entry_faults = projection.entry_faults(entry)
         if entry_faults:
             faults[name] = "; ".join(entry_faults)
             continue
-        usable.append(name)
-    if not usable:
+        digest = projection.account_digest(entry)
+        if digest == "none":
+            faults[name] = "exposes no upstream account identity"
+            continue
+        # The expiry owner interprets the credential in memory BEFORE any
+        # assignment snapshot is written.  A guest cannot refresh the
+        # canonical profile, and a token that would need refresh inside the
+        # worker lifetime never reaches a projection at all.
+        shaped = {projection.CONSUMER_KEY: entry}
+        if not expiry.credential_usable_through(
+            shaped, harness="pi", deadline=deadline,
+        ):
+            faults[name] = "lacks twelve hours of access-token headroom"
+            continue
+        binding = placement_account_binding(digest)
+        active = loads.get((pool_home, name, binding), {}).get("active", 0)
+        candidates.append((active, name, binding))
+    if not candidates:
         raise LifecycleError(
-            "provider-account placement pool at {} holds no projectable profile ({})".format(
+            "provider-account placement pool at {} holds no usable profile ({})".format(
                 pool_file,
                 ", ".join("{}: {}".format(name, faults[name]) for name in sorted(faults))))
-    bindings = {}
-    for name in usable:
-        digest = projection.account_digest(pool[name])
-        if digest == "none":
-            # entry_faults already requires a non-blank accountId, so this is
-            # unreachable through the loop above; refuse rather than mint a
-            # lease identity that names no account.
-            raise LifecycleError(
-                "Pi profile {} exposes no upstream account identity".format(name))
-        # Deliberately setdefault, not assignment: two profiles that resolve to
-        # ONE upstream account are one lease, and the first name in sorted
-        # order owns it. That is the whole reason the unit is the account.
-        bindings.setdefault(placement_account_binding(digest), name)
-    for binding, name in sorted(bindings.items(), key=lambda pair: pair[1]):
-        if binding in held:
+
+    # Least active first, then the stable local profile label, then the stable
+    # upstream digest.  Every usable profile is represented before any is
+    # reused, and equal loads converge on the same choice after a restart.
+    _, name, binding = min(candidates)
+    projection_binding = placement_projection_binding(item, name, binding)
+    root = Path(env["pi_account_root"]).resolve()
+    destination = root / projection_binding
+    for active in state["queue"].values():
+        if active.get("status") == "complete":
             continue
-        root = Path(env["pi_account_root"]).resolve()
-        # The projected home is keyed on the LEASE IDENTITY, never on the
-        # profile's local slot name. The two must be the same function of the
-        # pool or the projection is not injective over live leases, and the
-        # slot name is not: an operator re-logging slot `openai-codex` from one
-        # upstream account to another gives two placements two distinct
-        # bindings (correctly, they ARE two accounts) that both project into
-        # `accounts/openai-codex`, so the second write silently replaces the
-        # credential the first placement's still-live lease points at. The
-        # queue then reports two accounts while the disk holds one. Keying on
-        # the binding makes the directory name and the exclusion key the same
-        # string, so that state is unrepresentable.
-        destination = root / binding
-        for entry in state["queue"].values():
-            if entry.get("status") == "complete":
-                continue
-            if entry.get("account_home") == str(destination):
-                # Unreachable while the two keys agree, because a binding that
-                # is free by definition is named by no live entry. Kept as the
-                # second line: if a future change re-keys the projection, this
-                # refuses instead of clobbering a live placement's credential.
-                raise LifecycleError(
-                    "refusing to project Pi profile {} over the account home a live "
-                    "placement already holds ({} holds {})".format(
-                        name, entry.get("task") or "an unnamed task", destination))
-        try:
-            projection.prepare_root(root)
-            credential = projection.write_home(destination, pool[name])
-        except projection.ProjectionError as exc:
+        if (
+            active.get("account_projection_binding") == projection_binding
+            or active.get("account_home") == str(destination)
+        ):
             raise LifecycleError(
-                "Pi profile {} could not be projected into its account home: {}".format(
-                    name, exc))
-        except OSError as exc:
-            raise LifecycleError(
-                "Pi profile {} could not be projected into its account home: {}".format(
-                    name, exc.strerror or exc))
-        return {
-            "account_profile": name,
-            "account_home": str(Path(credential).parent),
-            "account_binding": binding,
-        }
-    raise LifecycleError(
-        "provider-account placement is exhausted: all {} distinct upstream accounts in {} "
-        "are leased ({}); refusing to place {} on a shared upstream account. Sign in "
-        "additional Pi profiles on distinct upstream accounts to raise the ceiling, or "
-        "release a placement above with `bin/fm-worker-lifecycle.sh withdraw`".format(
-            len(bindings), pool_file,
-            ", ".join(
-                "{} -> {}".format(name, held[binding][1] or "unknown-task")
-                for binding, name in sorted(bindings.items(), key=lambda pair: pair[1])
-            ),
-            task))
+                "assignment-private provider projection is already owned by {}".format(
+                    active.get("task") or "an unnamed task"))
+    return {
+        "account_profile": name,
+        "account_home": str(destination),
+        "account_binding": binding,
+        "account_projection_binding": projection_binding,
+    }
+
+
+def write_placement_snapshot(env, item):
+    """Write or replay one queue-owned canonical-profile snapshot."""
+    projection = pi_projection()
+    expiry = credential_expiry()
+    pool_home = item.get("account_pool_home")
+    profile = item.get("account_profile")
+    if not isinstance(pool_home, str) or not isinstance(profile, str):
+        raise LifecycleError("provider-account snapshot source identity is unavailable")
+    pool_file = Path(pool_home) / "auth.json"
+    try:
+        pool = projection.read_pool(pool_file)
+    except projection.ProjectionError as exc:
+        raise LifecycleError(
+            "provider-account snapshot source is unusable: {}".format(exc))
+    entry = pool.get(profile)
+    if entry is None or projection.entry_faults(entry):
+        raise LifecycleError(
+            "selected Pi profile {} is no longer usable for its snapshot".format(profile))
+    account_digest = projection.account_digest(entry)
+    if placement_account_binding(account_digest) != item.get("account_binding"):
+        raise LifecycleError(
+            "selected Pi profile {} changed upstream identity before snapshot".format(profile))
+    if not expiry.credential_usable_through(
+        {projection.CONSUMER_KEY: entry}, harness="pi",
+        deadline=time.time() + CLOUD_ACCOUNT_MIN_HEADROOM_SECONDS,
+    ):
+        raise LifecycleError(
+            "selected Pi profile {} lacks twelve hours of access-token headroom".format(
+                profile))
+    projected = placement_projection_path(env, item)
+    if projected is None:
+        raise LifecycleError("assignment-private provider projection identity is unavailable")
+    root, destination = projected
+    try:
+        projection.prepare_root(root)
+        credential = projection.write_home(destination, entry)
+    except projection.ProjectionError as exc:
+        raise LifecycleError(
+            "Pi profile {} could not be snapshotted into its assignment-private home: {}".format(
+                profile, exc))
+    except OSError as exc:
+        raise LifecycleError(
+            "Pi profile {} could not be snapshotted into its assignment-private home: {}".format(
+                profile, exc.strerror or exc))
+    if str(Path(credential).parent) != item["account_home"]:
+        raise LifecycleError("provider-account snapshot destination changed identity")
 
 
 def ensure_unique_bindings(state, candidate, ignore_key=None):
+    """Refuse shared writable custody while allowing reusable account identity."""
     for key, item in state["queue"].items():
         if key == ignore_key or item.get("status") == "complete":
             continue
-        if item.get("account_binding") == candidate["account_binding"]:
-            # The account-collision screen. It is the SAME screen selection
-            # already respected; keeping it means a hand-edited queue, a
-            # replayed old binary, or a broken selector still cannot seat two
-            # concurrent tasks on one upstream account.
+        candidate_projection = candidate.get("account_projection_binding")
+        if candidate_projection is not None and (
+            item.get("account_projection_binding") == candidate_projection
+            or item.get("account_home") == candidate.get("account_home")
+        ):
             raise LifecycleError(
-                "provider-account lease binding is already owned by another queued or "
-                "active task ({} holds profile {})".format(
-                    item.get("task") or "an unnamed task",
-                    item.get("account_profile") or "an unnamed profile"))
+                "assignment-private provider projection is already owned by another "
+                "queued or active task")
         if item.get("worktree_binding") == candidate["worktree_binding"]:
-            raise LifecycleError("writable worktree binding is already owned by another queued or active task")
+            raise LifecycleError(
+                "writable worktree binding is already owned by another queued or active task")
+
+
+def placement_projection_path(env, item):
+    """Return one new-style projection path, never a legacy shared home."""
+    binding = item.get("account_projection_binding")
+    account_home = item.get("account_home")
+    if binding is None:
+        # Existing assignments created before reusable snapshots may point at a
+        # canonical single-profile home or an account-keyed projection.  This
+        # release must never infer ownership of either and delete it.
+        return None
+    require_binding("account projection binding", binding)
+    root = Path(env["pi_account_root"]).resolve()
+    expected = root / binding
+    if account_home != str(expected):
+        raise LifecycleError(
+            "assignment-private provider projection path differs from its binding")
+    return root, expected
+
+
+def cleanup_placement_projection(env, item):
+    """Remove exactly one assignment-private snapshot without traversing peers."""
+    projected = placement_projection_path(env, item)
+    if projected is None:
+        return
+    root, destination = projected
+    try:
+        root_info = root.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise LifecycleError(
+            "provider projection root is unreadable during cleanup: {}".format(
+                exc.strerror or exc))
+    if not stat.S_ISDIR(root_info.st_mode) or root.is_symlink():
+        raise LifecycleError("provider projection root changed identity during cleanup")
+    try:
+        destination_info = destination.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise LifecycleError(
+            "assignment-private provider projection is unreadable during cleanup: {}".format(
+                exc.strerror or exc))
+    if (
+        not stat.S_ISDIR(destination_info.st_mode)
+        or destination.is_symlink()
+        or destination_info.st_uid != os.geteuid()
+        or destination_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    ):
+        raise LifecycleError(
+            "assignment-private provider projection changed identity during cleanup")
+    try:
+        entries = list(os.scandir(destination))
+    except OSError as exc:
+        raise LifecycleError(
+            "assignment-private provider projection cannot be inventoried: {}".format(
+                exc.strerror or exc))
+    if len(entries) > 8:
+        raise LifecycleError(
+            "assignment-private provider projection holds unexpected cleanup state")
+    for entry in entries:
+        if entry.name != "auth.json" and not (
+            entry.name.startswith(".auth-") and entry.name.endswith(".tmp")
+        ):
+            raise LifecycleError(
+                "assignment-private provider projection holds unexpected cleanup state")
+        info = entry.stat(follow_symlinks=False)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
+        ):
+            raise LifecycleError(
+                "assignment-private provider credential changed identity during cleanup")
+    try:
+        for entry in entries:
+            os.unlink(entry.path)
+        os.rmdir(destination)
+        descriptor = os.open(str(root), os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise LifecycleError(
+            "assignment-private provider projection cleanup failed: {}".format(
+                exc.strerror or exc))
 
 
 def provider_action_timeout(action):
@@ -1969,7 +2103,15 @@ def apply_pending(env, action, result):
     claimed = state["pending_actions"].get(slot)
     if not isinstance(claimed, dict) or claimed.get("idempotency_key") != action["idempotency_key"]:
         raise LifecycleError("durable claim for slot {} is no longer this action".format(slot))
+    worker = state.get("workers", {}).get(slot) or {}
+    queue_key = worker.get("queue_key")
     apply_result_transactionally(env, state, action, result)
+    if action.get("type") == "reset" and queue_key is not None:
+        # Provider reset already proved cloud-side absence.  Retire only this
+        # queue owner's host snapshot before making completion durable.  A
+        # crash after unlink but before save is an idempotent missing-path
+        # retry; no same-profile peer path is ever inventoried.
+        cleanup_placement_projection(env, state["queue"].get(queue_key) or {})
     state["pending_actions"].pop(slot, None)
     save_state(env, state)
     return state
@@ -2570,6 +2712,42 @@ def status_projection(env, state, inventory=None):
         for worker in state["workers"].values()
         if worker.get("idle_deallocated_at") and not worker.get("released_at")
     ]
+    selected_loads = leased_placement_accounts(state)
+    profile_loads = {}
+    for (_, profile, binding), load in selected_loads.items():
+        aggregate = profile_loads.setdefault(
+            (profile, binding), {"active": 0, "tasks": []})
+        aggregate["active"] += load["active"]
+        aggregate["tasks"].extend(load["tasks"])
+    account_placements = []
+    for item in state["queue"].values():
+        if item.get("status") == "complete" or not item.get("account_profile"):
+            continue
+        load_key = (item.get("account_profile"), item.get("account_binding"))
+        account_placements.append({
+            "task": item.get("task"),
+            "task_generation": item.get("task_generation"),
+            "status": item.get("status"),
+            "account_profile": item.get("account_profile"),
+            "account_binding": item.get("account_binding"),
+            "account_home": item.get("account_home"),
+            "account_projection_binding": item.get("account_projection_binding"),
+            "profile_active_load": profile_loads.get(load_key, {}).get("active", 0),
+        })
+    account_placements.sort(key=lambda entry: (
+        entry["account_profile"], entry.get("account_binding") or "",
+        entry["task"] or "",
+    ))
+    account_profile_loads = [
+        {
+            "account_profile": profile,
+            "account_binding": binding,
+            "active_placements": load["active"],
+        }
+        for (profile, binding), load in sorted(
+            profile_loads.items(), key=lambda pair: (pair[0][0], pair[0][1])
+        )
+    ]
     return {
         "schema": "fm.worker-status/v1",
         "daily_bound_usd": env["daily_bound_usd"],
@@ -2608,23 +2786,11 @@ def status_projection(env, state, inventory=None):
         "family_observed_plus_reserved_vcpus": family_committed,
         "shared_headroom_vcpus": SHARED_HEADROOM_VCPUS,
         "compartments": compartment_projection(state),
-        # Who holds which provider account right now. Read straight off the
-        # queue, because the queue entry IS the lease: a profile that shows
-        # here and nowhere else does not exist.
-        "account_placements": sorted(
-            (
-                {
-                    "task": item.get("task"),
-                    "task_generation": item.get("task_generation"),
-                    "status": item.get("status"),
-                    "account_profile": item.get("account_profile"),
-                    "account_home": item.get("account_home"),
-                }
-                for item in state["queue"].values()
-                if item.get("status") != "complete" and item.get("account_profile")
-            ),
-            key=lambda entry: (entry["account_profile"], entry["task"] or ""),
-        ),
+        # Every placement remains visible even when several use one upstream
+        # identity.  The reusable digest and per-profile active load expose
+        # provider-quota pressure without raw account identity or token bytes.
+        "account_placements": account_placements,
+        "account_profile_loads": account_profile_loads,
         "idle_cooldown_seconds": env["cooldown_seconds"],
         "warm_idle_target": env["warm_idle"],
         "retained_disks": retained_disks,
@@ -2676,12 +2842,22 @@ def print_status(status, json_output):
         if "session_legs" in compartment:
             line += " legs={}".format(compartment["session_legs"])
         print(line)
-    for placement in status.get("account_placements") or []:
-        print("account-placement: profile={} task={}@{} status={} home={}".format(
-            placement["account_profile"], placement["task"],
-            placement["task_generation"], placement["status"],
-            placement["account_home"],
+    for load in status.get("account_profile_loads") or []:
+        print("account-profile-load: profile={} active={} account-binding={}".format(
+            load["account_profile"], load["active_placements"],
+            load["account_binding"],
         ))
+    for placement in status.get("account_placements") or []:
+        print(
+            "account-placement: profile={} load={} task={}@{} status={} "
+            "account-binding={} projection={} home={}".format(
+                placement["account_profile"], placement["profile_active_load"],
+                placement["task"], placement["task_generation"],
+                placement["status"], placement["account_binding"],
+                placement.get("account_projection_binding") or "legacy",
+                placement["account_home"],
+            )
+        )
     if status["pending_mutations"]:
         print("pending-mutations: {}".format(json.dumps(
             status["pending_mutations"], sort_keys=True, separators=(",", ":"))))
@@ -2731,7 +2907,7 @@ def parser():
     request.add_argument("--required", action="store_true", help="mark non-discretionary recovery/landing work")
 
     withdraw_parser = sub.add_parser(
-        "withdraw", help="retire one exact queued request no worker ever took")
+        "withdraw", help="retire one exact projecting/queued request no worker ever took")
     withdraw_parser.add_argument("--task", required=True)
     withdraw_parser.add_argument("--task-generation", required=True)
     withdraw_parser.add_argument("--confirm-withdraw", action="store_true")
@@ -2954,12 +3130,10 @@ def authoritative_request_bindings(env, task, generation, task_home=None):
         raise LifecycleError("ordinary worktree Git-directory identity differs")
     return {
         "home_binding": home_binding(origin),
-        # The POOL, not the lease. The task's own metadata proves which provider
-        # account source this task is entitled to draw from; WHICH profile of
-        # that pool it gets is decided by the controller under its lock, because
-        # that decision has to exclude every other concurrent placement and no
-        # task-local document can see them. The account lease identity
-        # (`account_binding`) is minted from the selected profile in
+        # The POOL, not one snapshot.  The task metadata proves which canonical
+        # host-owned source it may draw from; the controller selects the
+        # least-loaded usable profile under its lock and mints a reusable
+        # account binding plus an assignment-private projection in
         # `command_request`.
         "account_pool_home": str(account_home),
         "worktree_binding": digest_value({"worktree": str(worktree), "git_dir": str(git_dir)}),
@@ -3203,10 +3377,9 @@ def command_request(env, args):
     else:
         bindings = authoritative_request_bindings(
             env, args.task, args.task_generation, task_home=task_home)
-    # DURABLE on the item, not consumed here: the queue entry should record
-    # which provider-account pool its lease was drawn from, so an audit of a
-    # placement never has to re-read a task metadata file that teardown may
-    # already have removed.
+    # DURABLE on the item, not consumed here: the queue entry records which
+    # canonical provider-account pool its immutable snapshot came from, so an
+    # audit never has to re-read task metadata teardown may already have removed.
     pool_home = bindings.get("account_pool_home")
     item = {
         "schema": REQUEST_SCHEMA,
@@ -3238,9 +3411,9 @@ def command_request(env, args):
         state = load_state(env)
         existing = state["queue"].get(key)
         if existing is not None:
-            # Replay reuses the SAME profile, because the lease it took is this
-            # very entry. Selection happens only on the branch that creates a
-            # new entry, so a replayed request cannot consume a second account.
+            # Replay reuses the SAME profile and assignment-private snapshot,
+            # because selection runs only on the branch that creates this
+            # entry.  A replay cannot consume another load-balanced placement.
             identity_fields = (
                 "schema", "task", "task_generation", "home_binding",
                 "worktree_binding", "repository_binding", "repository_generation",
@@ -3252,21 +3425,30 @@ def command_request(env, args):
                 identity_fields += ("account_binding",)
             if any(existing.get(field) != item.get(field) for field in identity_fields):
                 raise LifecycleError("task generation already exists with different queue identity")
+            if existing.get("status") == "projecting":
+                # A crash may interrupt the snapshot write, but never before
+                # the queue owns its exact path.  The same request resumes from
+                # that state, retaining profile, upstream binding, and private
+                # projection identity.
+                write_placement_snapshot(env, existing)
+                existing["status"] = "queued"
+                existing["projected_at"] = iso_utc()
+                save_state(env, state)
             if existing.get("account_home"):
-                # The profile NAME is reported separately because the home is
-                # keyed on the lease identity, not on the name: the caller can
-                # no longer read the profile off the path's last component.
+                # The profile name is reported separately because the home is
+                # keyed on an assignment-private projection binding, not on the
+                # reusable local label or upstream account digest.
                 print("account-profile {}".format(existing.get("account_profile") or ""))
                 print("account-home {}".format(existing["account_home"]))
             print("request already exists with exact identity")
             return
         if pool_home is not None:
-            # Selection and the lease are ONE act under ONE lock over ONE
-            # document: the queue entry written below IS the lease, so no
-            # window exists where a profile is held by something the queue does
-            # not show, and no concurrent request can read the same free set.
-            item.update(select_placement_account(env, state, pool_home, item["task"]))
-            verify_request(item)
+            # Selection is one act under one lock over one document.  The
+            # durable `projecting` state is saved before credential bytes are
+            # written, so a crash leaves a resumable owner rather than an
+            # orphan snapshot.
+            item.update(select_placement_account(env, state, pool_home, item))
+        verify_request(item)
         ensure_unique_bindings(state, item)
         if item.get("parent_task") is not None:
             if task_home is not None:
@@ -3277,24 +3459,31 @@ def command_request(env, args):
         if item.get("role") == "secondmate":
             active_compartments = sum(
                 1 for entry in state["queue"].values()
-                if entry.get("role") == "secondmate" and entry.get("status") != "complete"
+                if entry.get("role") == "secondmate"
+                and entry.get("status") != "complete"
             )
             if active_compartments >= env["secondmate_max"]:
                 raise LifecycleError(
                     "secondmate compartment cap reached ({} active, cap {})".format(
                         active_compartments, env["secondmate_max"]))
+        if pool_home is not None:
+            item["status"] = "projecting"
         state["queue"][key] = item
         if item.get("parent_task") is not None:
             parent_key = request_key(item["parent_task"], item["parent_task_generation"])
             parent_worker = state["workers"][str(state["queue"][parent_key].get("slot"))]
             parent_worker["children_total"] = int(parent_worker.get("children_total", 0)) + 1
         save_state(env, state)
+        if pool_home is not None:
+            write_placement_snapshot(env, item)
+            item["status"] = "queued"
+            item["projected_at"] = iso_utc()
+            save_state(env, state)
     if item.get("account_home"):
-        # The caller stages the provider credential from the home the
-        # controller leased, so the leased profile is the ONE credential that
-        # reaches the worker. Printed as a path and a slot name, never as
-        # contents; the home is keyed on the lease identity, so the slot name
-        # is not recoverable from the path.
+        # The caller stages the provider credential from this request's
+        # assignment-private snapshot.  Printed as a path and slot name, never
+        # as contents; another placement using the same profile has another
+        # path and cleanup authority.
         print("account-profile {}".format(item.get("account_profile") or ""))
         print("account-home {}".format(item["account_home"]))
     print("queued {} generation {} for one isolated author worker".format(item["task"], item["task_generation"]))
@@ -4035,13 +4224,16 @@ def command_release(env, args):
 
 
 def command_withdraw(env, args):
-    """Retire a queued request that no worker ever took.
+    """Retire a projecting or queued request that no worker ever took.
 
     A task can finish, be cancelled, or be superseded locally long before any
     cloud capacity is built for it, and its queue entry then keeps counting as
     demand: reconcile sees eligible depth and builds a worker for work that is
     already done. That is not merely wasted spend. Re-running a task that has
     side effects outside this fleet, posting or sending or filing, repeats them.
+
+    It also retires a `projecting` request whose process died after the queue
+    took ownership but before the assignment-private snapshot completed.
 
     `release` cannot cover this: it requires an ASSIGNED item with a durable
     worker owner and a release proof describing that worker. An entry that was
@@ -4063,8 +4255,8 @@ def command_withdraw(env, args):
         if item is None:
             raise LifecycleError("withdraw requires one exact queued task generation")
         status = item.get("status")
-        if status != "queued":
-            # Anything past `queued` has cloud capacity or a live assignment
+        if status not in ("queued", "projecting"):
+            # Anything past the queue has cloud capacity or a live assignment
             # behind it, and dropping the entry would strand that worker with no
             # queue owner. Those go out through release.
             # `release` only accepts `assigned`, so pointing a `complete` or
@@ -4104,6 +4296,11 @@ def command_withdraw(env, args):
                             pending.get("type", "provider"), slot_key)
                     )
         withdrawn = item
+        # This request never held provider capacity, so its projection is the
+        # only controller-owned assignment artifact.  Remove exactly that
+        # private directory before deleting its durable owner; a same-profile
+        # request lives at another projection binding and is not inspected.
+        cleanup_placement_projection(env, withdrawn)
         del state["queue"][key]
         save_state(env, state)
     # A machine-readable receipt naming the exact entry that was deleted. The

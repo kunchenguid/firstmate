@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # shellcheck source=tests/test-entry.sh
 . "$(dirname "$0")/test-entry.sh"
-# Behavior: multi-profile provider-account placement for crewmate and worker
-# requests (R5). Concurrent placements land on DISTINCT upstream accounts, an
-# exhausted pool refuses by name instead of sharing one, a crashed placement
-# leaves a lease the queue still shows, and a compartment child contends for the
-# same pool as an ordinary crewmate.
+# Behavior: reusable host-owned Pi profile snapshots for Azure worker requests.
+# Placement load-balances usable profiles through sixteen concurrent requests,
+# gives every request a private writable projection, preserves replay identity,
+# and cleans only the exact projection its queue entry owns.
 #
 # EVERY unit runs against an explicit fixture provider AND a fake `az` that
 # records any invocation and fails; each unit asserts the fixture was the one
@@ -156,7 +155,7 @@ SH
 }
 
 # placement_world <var> <prefix> <profiles> - a hermetic controller home whose
-# tasks all draw from one Pi pool of <profiles> distinct upstream accounts.
+# tasks all draw reusable snapshots from one Pi pool of <profiles> slots.
 placement_world() {
   # The scratch variable is deliberately NOT named like the caller's: bash
   # locals are dynamically scoped, so a local named `world` here would shadow
@@ -305,9 +304,9 @@ PY
 
 # --- units ------------------------------------------------------------------
 
-concurrent_placements_take_distinct_accounts() {
-  local world tasks=8 index pids=()
-  placement_world world fm-placement-concurrent "$tasks" || fail "world setup failed"
+sixteen_placements_reuse_fewer_profiles() {
+  local world tasks=16 profiles=3 index status pids=()
+  placement_world world fm-placement-concurrent "$profiles" || fail "world setup failed"
   for index in $(seq 1 "$tasks"); do
     placement_task "$world" "$world/home" "task-$index" "gen-$index" \
       || fail "task-$index authorities were not seeded"
@@ -326,14 +325,16 @@ concurrent_placements_take_distinct_accounts() {
   assert_no_cloud_call "$world" "the concurrent placement unit"
   echo "# concurrent placement result, read back from the durable controller document:"
   placements "$world" | sed 's/^/#   /'
-  python3 - "$world/home/state/azure-workers/controller.json" "$world/home" "$tasks" <<'PY' \
-    || fail "concurrent placements did not take distinct upstream accounts"
+  python3 - "$world/home/state/azure-workers/controller.json" "$world/home" "$tasks" "$profiles" <<'PY' \
+    || fail "sixteen placements did not reuse fewer profiles safely"
 import hashlib
 import json
 import pathlib
 import sys
 
-controller, home, expected = sys.argv[1], pathlib.Path(sys.argv[2]), int(sys.argv[3])
+controller, home, expected, profile_count = (
+    sys.argv[1], pathlib.Path(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+)
 state = json.load(open(controller, encoding="utf-8"))
 items = [item for item in state["queue"].values() if item.get("status") != "complete"]
 assert len(items) == expected, (len(items), expected)
@@ -341,104 +342,133 @@ assert len(items) == expected, (len(items), expected)
 profiles = [item["account_profile"] for item in items]
 bindings = [item["account_binding"] for item in items]
 homes = [item["account_home"] for item in items]
-assert len(set(profiles)) == expected, sorted(profiles)
-assert len(set(bindings)) == expected, sorted(bindings)
+loads = {name: profiles.count(name) for name in set(profiles)}
+assert len(loads) == profile_count, sorted(loads)
+assert sorted(loads.values()) == [5, 5, 6], loads
+assert len(set(bindings)) == profile_count, sorted(bindings)
 assert len(set(homes)) == expected, sorted(homes)
+assert len({item["account_projection_binding"] for item in items}) == expected
 
 root = (home / "state" / "azure-workers" / "accounts").resolve()
 seen_accounts = set()
 for item in items:
-    leased = pathlib.Path(item["account_home"])
-    # Hermeticity: every projected home is under THIS controller's own state
-    # directory, never a shared machine-wide roster.
-    assert root in leased.resolve().parents or leased.resolve() == root, leased
-    credential = json.load(open(leased / "auth.json", encoding="utf-8"))
-    # The staged credential is single-profile. A pooled one would put every
-    # signed-in account on the worker and let the guest pick the first slot.
+    projected = pathlib.Path(item["account_home"])
+    assert projected.parent.resolve() == root, projected
+    assert projected.name == item["account_projection_binding"], item
+    credential = json.load(open(projected / "auth.json", encoding="utf-8"))
     assert list(credential) == ["openai-codex"], (item["task"], sorted(credential))
     account = credential["openai-codex"]["accountId"]
-    assert account not in seen_accounts, ("two placements share an upstream account", account)
     seen_accounts.add(account)
-    # The lease identity is the upstream account and nothing else.
     assert item["account_binding"] == hashlib.sha256(json.dumps(
         {"provider": "pi", "upstream_account": hashlib.sha256(
             account.encode()).hexdigest()[:16]},
         sort_keys=True, separators=(",", ":")).encode()).hexdigest(), item
-assert len(seen_accounts) == expected, sorted(seen_accounts)
+assert len(seen_accounts) == profile_count, sorted(seen_accounts)
 PY
-  pass "concurrent placements race the controller lock and land on distinct upstream accounts"
+  status=$(run_placement "$world" status --json) || fail "sixteen-placement status failed"
+  python3 - "$status" <<'PY' || fail "sixteen placements did not reach the independent worker ceiling"
+import json
+import sys
+status = json.loads(sys.argv[1])
+assert status["queue_depth"] == 16, status
+assert status["desired_active_workers"] == 16, status
+assert sorted(row["active_placements"] for row in status["account_profile_loads"]) == [5, 5, 6], status
+assert len(status["account_placements"]) == 16, status
+PY
+  run_placement "$world" capacity-reserve \
+    --reservation-id azr-validation001 --fence-binding "$(printf 'a%.0s' {1..64})" \
+    --role validation --sku Standard_D4as_v7 --sku-family StandardDasv7Family \
+    --vcpus 4 --amount-usd 1 --confirm-subscription "$SUB" > /dev/null \
+    || fail "no-mistakes specialized capacity was counted as a worker slot"
+  run_placement "$world" capacity-reserve \
+    --reservation-id azr-crosscheck001 --fence-binding "$(printf 'b%.0s' {1..64})" \
+    --role crosscheck --sku Standard_D4s_v6 --sku-family StandardDsv6Family \
+    --vcpus 4 --amount-usd 1 --confirm-subscription "$SUB" > /dev/null \
+    || fail "Crosscheck specialized capacity consumed a worker profile or slot"
+  status=$(run_placement "$world" status --json) || fail "combined capacity status failed"
+  python3 - "$status" "$world/home/state/azure-workers/controller.json" <<'PY' \
+    || fail "specialized lanes changed worker/profile admission"
+import json
+import sys
+status = json.loads(sys.argv[1])
+state = json.load(open(sys.argv[2], encoding="utf-8"))
+assert status["queue_depth"] == 16 and status["desired_active_workers"] == 16, status
+assert status["specialized_reserved_reservations"] == 2, status
+assert status["specialized_reserved_vcpus"] == 8, status
+assert {row["role"] for row in state["capacity_reservations"].values()} == {"specialized"}, state
+assert {row["workload_role"] for row in state["capacity_reservations"].values()} == {
+    "validation", "crosscheck",
+}, state
+assert len(status["account_placements"]) == 16, status
+PY
+  pass "sixteen workers reuse three profiles while no-mistakes and Crosscheck reserve specialized capacity independently"
 }
 
-exhaustion_refuses_by_name() {
-  local world index status out
-  placement_world world fm-placement-exhaustion 3 || fail "world setup failed"
+placements_reuse_after_every_profile_is_active() {
+  local world index
+  placement_world world fm-placement-reuse 2 || fail "world setup failed"
   for index in 1 2 3 4; do
     placement_task "$world" "$world/home" "task-$index" "gen-$index" \
       || fail "task-$index authorities were not seeded"
-  done
-  for index in 1 2 3; do
     run_placement "$world" request --task "task-$index" \
       --task-generation "gen-$index" --owner-kind primary --eligible \
       > /dev/null 2> "$world/err-$index" \
       || fail "placement $index was refused: $(cat "$world/err-$index")"
   done
-  out=$(run_placement "$world" request --task task-4 --task-generation gen-4 \
-    --owner-kind primary --eligible 2>&1) && status=0 || status=$?
-  expect_code 2 "$status" "a placement with no free account was admitted: $out"
-  echo "# exhaustion refusal, verbatim:"
-  printf '%s\n' "$out" | sed 's/^/#   /'
-  assert_contains "$out" "provider-account placement is exhausted" \
-    "the exhaustion refusal does not name itself: $out"
-  assert_contains "$out" "refusing to place task-4 on a shared upstream account" \
-    "the exhaustion refusal does not name the placement it refused: $out"
-  for index in 1 2 3; do
-    assert_contains "$out" "task-$index" \
-      "the exhaustion refusal does not name the task holding each account: $out"
-  done
-  assert_contains "$out" "openai-codex" \
-    "the exhaustion refusal does not name the leased profiles: $out"
   python3 - "$world/home/state/azure-workers/controller.json" <<'PY' \
-    || fail "the refused placement still mutated the queue"
+    || fail "placements beyond the profile count were not balanced"
+import collections
 import json
 import sys
-
 state = json.load(open(sys.argv[1], encoding="utf-8"))
-assert "task-4@gen-4" not in state["queue"], sorted(state["queue"])
-assert len(state["queue"]) == 3, sorted(state["queue"])
+items = [item for item in state["queue"].values() if item["status"] != "complete"]
+assert len(items) == 4, items
+assert collections.Counter(item["account_profile"] for item in items) == {
+    "openai-codex": 2, "openai-codex-2": 2,
+}, items
+assert len({item["account_home"] for item in items}) == 4, items
 PY
-  assert_no_cloud_call "$world" "the exhaustion unit"
-  pass "an exhausted account pool refuses the next placement by name instead of sharing an account"
+  assert_no_cloud_call "$world" "the profile-reuse unit"
+  pass "placements beyond the profile count reuse the least-loaded profile with stable tie-breaking"
 }
 
-a_withdrawn_placement_returns_its_account() {
-  local world index out status
-  placement_world world fm-placement-return 2 || fail "world setup failed"
-  for index in 1 2 3; do
+withdraw_cleans_only_its_private_projection() {
+  local world index first_home second_home canonical_before canonical_after
+  placement_world world fm-placement-cleanup 1 || fail "world setup failed"
+  for index in 1 2; do
     placement_task "$world" "$world/home" "task-$index" "gen-$index" \
       || fail "task-$index authorities were not seeded"
-  done
-  for index in 1 2; do
     run_placement "$world" request --task "task-$index" \
       --task-generation "gen-$index" --owner-kind primary --eligible \
       > /dev/null 2>&1 || fail "placement $index was refused"
   done
-  out=$(run_placement "$world" request --task task-3 --task-generation gen-3 \
-    --owner-kind primary --eligible 2>&1) && status=0 || status=$?
-  expect_code 2 "$status" "a third placement was admitted into a two-account pool: $out"
+  first_home=$(python3 - "$world/home/state/azure-workers/controller.json" <<'PY'
+import json, sys
+state = json.load(open(sys.argv[1], encoding="utf-8"))
+print(state["queue"]["task-1@gen-1"]["account_home"])
+PY
+)
+  second_home=$(python3 - "$world/home/state/azure-workers/controller.json" <<'PY'
+import json, sys
+state = json.load(open(sys.argv[1], encoding="utf-8"))
+print(state["queue"]["task-2@gen-2"]["account_home"])
+PY
+)
+  [ "$first_home" != "$second_home" ] || fail "same-profile placements shared a writable projection"
+  canonical_before=$(shasum -a 256 "$world/pool/auth.json" | awk '{print $1}')
   run_placement "$world" withdraw --task task-1 --task-generation gen-1 \
     --confirm-withdraw --confirm-subscription "$SUB" > /dev/null 2>"$world/withdraw.err" \
     || fail "withdrawing a queued placement failed: $(cat "$world/withdraw.err")"
-  run_placement "$world" request --task task-3 --task-generation gen-3 \
-    --owner-kind primary --eligible > /dev/null 2>"$world/retry.err" \
-    || fail "the freed account was not available to the next placement: $(cat "$world/retry.err")"
-  assert_contains "$(placements "$world")" "openai-codex task-3" \
-    "the freed profile did not return to the pool: $(placements "$world")"
-  assert_no_cloud_call "$world" "the account-return unit"
-  pass "a released account returns to the pool and the next placement takes exactly it"
+  canonical_after=$(shasum -a 256 "$world/pool/auth.json" | awk '{print $1}')
+  [ ! -e "$first_home" ] || fail "withdraw left its assignment-private projection behind"
+  [ -f "$second_home/auth.json" ] || fail "withdraw deleted another same-profile projection"
+  [ "$canonical_before" = "$canonical_after" ] || fail "withdraw changed the canonical host profile"
+  assert_no_cloud_call "$world" "the assignment cleanup unit"
+  pass "cleanup removes one private projection without inspecting or deleting its same-profile peer"
 }
 
-a_killed_placement_never_orphans_an_account() {
-  local world victim observed=0 index
+interrupted_snapshot_remains_owned_and_resumable() {
+  local world victim observed=0 index crashed_home replay_out replay_home
   placement_world world fm-placement-crash 3 || fail "world setup failed"
   placement_task "$world" "$world/home" task-1 gen-1 || fail "task-1 authorities were not seeded"
   placement_task "$world" "$world/home" task-2 gen-2 || fail "task-2 authorities were not seeded"
@@ -464,40 +494,45 @@ a_killed_placement_never_orphans_an_account() {
   }
   kill -9 "$victim" 2>/dev/null || fail "the placement escaped before the synchronized kill"
   wait "$victim" 2>/dev/null || true
+  crashed_home=$(python3 - "$world/home/state/azure-workers/controller.json" <<'PY'
+import json, sys
+state = json.load(open(sys.argv[1], encoding="utf-8"))
+item = state["queue"]["task-1@gen-1"]
+assert item["status"] == "projecting", item
+print(item["account_home"])
+PY
+) || fail "the interrupted projection has no durable owner"
+  replay_out=$(run_placement "$world" request --task task-1 --task-generation gen-1 \
+    --owner-kind primary --eligible 2>&1) \
+    || fail "the interrupted projection did not resume: $replay_out"
+  replay_home=$(printf '%s\n' "$replay_out" | awk '$1 == "account-home" { print $2; exit }')
+  [ "$crashed_home" = "$replay_home" ] \
+    || fail "projection replay changed path: before=$crashed_home after=$replay_home"
   run_placement "$world" request --task task-2 --task-generation gen-2 \
     --owner-kind primary --eligible > /dev/null 2>"$world/survivor.err" \
     || fail "the uninterrupted placement was refused: $(cat "$world/survivor.err")"
   python3 - "$world/home/state/azure-workers/controller.json" "$world/home" <<'PY' \
-    || fail "a killed placement orphaned an account"
+    || fail "a killed snapshot write lost its durable cleanup owner"
 import json
 import pathlib
 import sys
 
 controller = pathlib.Path(sys.argv[1])
 home = pathlib.Path(sys.argv[2])
-state = json.loads(controller.read_text(encoding="utf-8")) if controller.exists() else {"queue": {}}
-items = [item for item in state.get("queue", {}).values() if item.get("status") != "complete"]
-held = [item["account_profile"] for item in items]
-assert [item["task"] for item in items] == ["task-2"], items
-# The lease IS the queue entry: every account that is held is held BY a visible
-# entry, so a kill can leave work queued but can never leave an account held by
-# nothing. Duplicates would mean two entries share an account.
-assert len(held) == len(set(held)), sorted(held)
-print("# survived-the-kill placements: {}".format(
-    ", ".join("{}={}".format(item["account_profile"], item["task"])
-              for item in sorted(items, key=lambda entry: entry["account_profile"]))
-    or "none"))
-# Every projected account home that exists on disk is either free or named by an
-# entry; a home with no entry is inert, not a lease, so the pool is intact.
+state = json.loads(controller.read_text(encoding="utf-8"))
+items = {item["task"]: item for item in state["queue"].values()
+         if item.get("status") != "complete"}
+assert set(items) == {"task-1", "task-2"}, items
+assert items["task-1"]["status"] == "queued", items
+assert items["task-2"]["status"] == "queued", items
 root = home / "state" / "azure-workers" / "accounts"
-projected = sorted(path.name for path in root.iterdir()) if root.is_dir() else []
-print("# projected account homes: {}".format(", ".join(projected) or "none"))
-orphaned = sorted(set(projected) - set(held))
-# A projected home that no queue entry names is inert, not a lease: it holds
-# nothing and the next placement may take it. Reported, not refused, because
-# the question this unit answers is whether an ACCOUNT can be held by nothing.
-print("# projected but unleased (free for the next placement): {}".format(
-    ", ".join(orphaned) or "none"))
+projected = {path.name for path in root.iterdir()} if root.is_dir() else set()
+owned = {item["account_projection_binding"] for item in items.values()}
+assert projected == owned, (projected, owned)
+assert len({item["account_home"] for item in items.values()}) == 2, items
+print("# survived-the-kill projections: {}".format(
+    ", ".join("{}={}".format(item["status"], item["account_projection_binding"])
+              for item in items.values())))
 PY
   # Recovery: withdraw every survivor and prove the whole pool is free again.
   python3 - "$world/home/state/azure-workers/controller.json" > "$world/survivors" <<'PY'
@@ -515,19 +550,19 @@ PY
     [ -n "$task" ] || continue
     run_placement "$world" withdraw --task "$task" --task-generation "$generation" \
       --confirm-withdraw --confirm-subscription "$SUB" > /dev/null 2>&1 \
-      || fail "a crashed placement's account could not be recovered by withdraw"
+      || fail "a crashed placement's private projection could not be recovered by withdraw"
   done < "$world/survivors"
   placement_task "$world" "$world/home" recovered rgen || fail "recovery task not seeded"
   run_placement "$world" request --task recovered --task-generation rgen \
     --owner-kind primary --eligible > /dev/null 2>"$world/recovered.err" \
-    || fail "the pool did not recover after every crashed lease was withdrawn: $(cat "$world/recovered.err")"
+    || fail "the pool did not recover after every crashed projection was withdrawn: $(cat "$world/recovered.err")"
   assert_contains "$(placements "$world")" "openai-codex recovered" \
     "recovery did not return the first account to the pool: $(placements "$world")"
   assert_no_cloud_call "$world" "the crash-safety unit"
-  pass "a placement killed between account selection and its durable lease orphans no account, and withdraw recovers every survivor"
+  pass "a killed snapshot write remains queue-owned, resumable, and exactly removable"
 }
 
-a_compartment_child_contends_with_a_crewmate() {
+compartments_and_crewmates_share_balanced_worker_profiles() {
   local world compartment out
   placement_world world fm-placement-compartment 4 || fail "world setup failed"
   compartment="$world/compartment"
@@ -579,11 +614,11 @@ assert len(set(profiles.values())) == 3, profiles
 assert items["child-1"]["parent_task"] == "smc-1", items["child-1"]
 PY
   assert_no_cloud_call "$world" "the compartment unit"
-  pass "a compartment child, its compartment, and an ordinary crewmate hold three distinct upstream accounts"
+  pass "a compartment child, its parent, and an ordinary crewmate share the same load-balanced worker pool"
 }
 
-replay_reuses_its_account_and_a_new_generation_takes_another() {
-  local world out
+replay_reuses_its_exact_profile_and_projection() {
+  local world out first_home replay_home
   placement_world world fm-placement-replay 4 || fail "world setup failed"
   placement_task "$world" "$world/home" task-1 gen-1 || fail "authorities not seeded"
   run_placement "$world" request --task task-1 --task-generation gen-1 \
@@ -596,7 +631,12 @@ replay_reuses_its_account_and_a_new_generation_takes_another() {
     "a replayed placement was not recognised as the same request: $out"
   assert_contains "$out" "account-home" \
     "a replayed placement did not report the account home it already holds: $out"
-  # A DIFFERENT generation is a different placement and takes its own account.
+  first_home=$(awk '$1 == "account-home" { print $2; exit }' "$world/first.out")
+  replay_home=$(printf '%s\n' "$out" | awk '$1 == "account-home" { print $2; exit }')
+  [ -n "$first_home" ] && [ "$first_home" = "$replay_home" ] \
+    || fail "replay changed its assignment-private projection: first=$first_home replay=$replay_home"
+  # A DIFFERENT generation is a different placement and takes the next
+  # least-loaded profile plus another private projection.
   placement_task "$world" "$world/home" task-1b gen-2 || fail "authorities not seeded"
   run_placement "$world" request --task task-1b --task-generation gen-2 \
     --owner-kind primary --eligible > /dev/null 2>&1 \
@@ -606,15 +646,15 @@ replay_reuses_its_account_and_a_new_generation_takes_another() {
   assert_contains "$(placements "$world")" "openai-codex-2 task-1b" \
     "a second placement did not take the next free account: $(placements "$world")"
   assert_no_cloud_call "$world" "the replay unit"
-  pass "replaying one placement reuses its account, and a new generation takes the next free one"
+  pass "replay preserves its profile and private projection while a new generation takes the next least-loaded profile"
 }
 
-two_profiles_on_one_account_are_one_lease() {
-  local world out status
+two_profiles_on_one_account_remain_reusable() {
+  local world
   placement_world world fm-placement-shared-account 2 || fail "world setup failed"
-  # The 1:1 profile-to-account mapping is a fact of today's fleet, not an
-  # invariant. Point both profiles at ONE upstream account and the pool must
-  # collapse to one lease, because the account is what a placement contends for.
+  # The 1:1 profile-to-account mapping is not an invariant.  Two local slots
+  # may identify one upstream account; the digest remains equal and visible,
+  # while each assignment still receives a distinct writable projection.
   python3 - "$world/pool/auth.json" <<'PY' || fail "shared-account pool not written"
 import json
 import pathlib
@@ -631,43 +671,65 @@ PY
   run_placement "$world" request --task task-1 --task-generation gen-1 \
     --owner-kind primary --eligible > /dev/null 2>&1 \
     || fail "the first placement was refused"
-  out=$(run_placement "$world" request --task task-2 --task-generation gen-2 \
-    --owner-kind primary --eligible 2>&1) && status=0 || status=$?
-  expect_code 2 "$status" "two profiles sharing one upstream account admitted two placements: $out"
-  assert_contains "$out" "provider-account placement is exhausted" \
-    "the shared-account refusal is not the exhaustion refusal: $out"
+  run_placement "$world" request --task task-2 --task-generation gen-2 \
+    --owner-kind primary --eligible > /dev/null 2>&1 \
+    || fail "the second same-account placement was refused"
+  python3 - "$world/home/state/azure-workers/controller.json" <<'PY' \
+    || fail "same-account profiles did not retain private assignment custody"
+import json
+import sys
+state = json.load(open(sys.argv[1], encoding="utf-8"))
+one = state["queue"]["task-1@gen-1"]
+two = state["queue"]["task-2@gen-2"]
+assert one["account_binding"] == two["account_binding"], (one, two)
+assert one["account_profile"] != two["account_profile"], (one, two)
+assert one["account_home"] != two["account_home"], (one, two)
+assert one["account_projection_binding"] != two["account_projection_binding"], (one, two)
+PY
   assert_no_cloud_call "$world" "the shared-account unit"
-  pass "two profiles resolving to one upstream account are one lease, not two"
+  pass "one upstream account binding may back multiple isolated assignment snapshots"
 }
 
 status_shows_who_holds_which_account() {
   local world out
-  placement_world world fm-placement-status 3 || fail "world setup failed"
+  placement_world world fm-placement-status 1 || fail "world setup failed"
   placement_task "$world" "$world/home" task-1 gen-1 || fail "authorities not seeded"
+  placement_task "$world" "$world/home" task-2 gen-2 || fail "authorities not seeded"
   run_placement "$world" request --task task-1 --task-generation gen-1 \
     --owner-kind primary --eligible > /dev/null 2>&1 || fail "placement refused"
+  run_placement "$world" request --task task-2 --task-generation gen-2 \
+    --owner-kind primary --eligible > /dev/null 2>&1 || fail "reused placement refused"
   out=$(run_placement "$world" status 2>&1) || fail "status failed: $out"
-  assert_contains "$out" "account-placement: profile=openai-codex task=task-1@gen-1" \
-    "status does not report who holds which account: $out"
+  assert_contains "$out" "account-profile-load: profile=openai-codex active=2 account-binding=" \
+    "status does not report reusable profile load: $out"
+  assert_contains "$out" "account-placement: profile=openai-codex load=2 task=task-1@gen-1" \
+    "status does not report each placement under shared load: $out"
+  assert_contains "$out" "account-placement: profile=openai-codex load=2 task=task-2@gen-2" \
+    "status collapsed two same-profile placements: $out"
   out=$(run_placement "$world" status --json 2>&1) || fail "json status failed: $out"
-  assert_contains "$out" '"account_placements"' \
-    "the machine-readable status omits the account placements: $out"
+  python3 - "$out" <<'PY' || fail "machine-readable multi-placement status is inaccurate"
+import json, sys
+status = json.loads(sys.argv[1])
+assert len(status["account_placements"]) == 2, status
+assert status["account_profile_loads"][0]["active_placements"] == 2, status
+assert {row["profile_active_load"] for row in status["account_placements"]} == {2}, status
+assert all(row["account_binding"] for row in status["account_placements"]), status
+assert len({row["account_home"] for row in status["account_placements"]}) == 2, status
+PY
   assert_no_cloud_call "$world" "the status unit"
   pass "status names the account each live placement holds, in both renderings"
 }
 
-a_relogged_slot_never_clobbers_a_live_placements_credential() {
+host_refresh_never_rewrites_a_live_snapshot() {
   local world
-  placement_world world fm-placement-relogin 2 || fail "world setup failed"
+  placement_world world fm-placement-relogin 1 || fail "world setup failed"
   placement_task "$world" "$world/home" task-1 gen-1 || fail "authorities not seeded"
   placement_task "$world" "$world/home" task-2 gen-2 || fail "authorities not seeded"
   run_placement "$world" request --task task-1 --task-generation gen-1 \
     --owner-kind primary --eligible > /dev/null 2>&1 || fail "the first placement was refused"
-  # The exact case the exclusion unit is chosen for: an operator re-logs the
-  # SAME slot name into a DIFFERENT upstream account. Both placements are
-  # correct and distinct leases. If the projected home were keyed on the slot
-  # name the second projection would overwrite the credential the first
-  # placement's still-live lease points at.
+  # Simulate a host-side refresh/re-login after the first immutable snapshot.
+  # The next placement snapshots the new canonical bytes, while the first
+  # assignment keeps its exact old bytes and private path.
   python3 - "$world/pool/auth.json" <<'PY2' || fail "re-login rewrite failed"
 import json
 import pathlib
@@ -694,10 +756,10 @@ items = {item["task"]: item for item in state["queue"].values()
 assert set(items) == {"task-1", "task-2"}, sorted(items)
 one, two = items["task-1"], items["task-2"]
 assert one["account_binding"] != two["account_binding"], (one, two)
-# The two leases are two accounts, so they must be two directories.
+# The two snapshots bind two observed account identities and private homes.
 assert one["account_home"] != two["account_home"], (one["account_home"], two["account_home"])
-# And the FIRST placement's credential must still be the account it leased,
-# read off the disk rather than off the queue.
+# The first snapshot remains immutable when the host updates the canonical
+# profile, and the later assignment receives the refreshed canonical identity.
 first = json.load(open(pathlib.Path(one["account_home"]) / "auth.json", encoding="utf-8"))
 second = json.load(open(pathlib.Path(two["account_home"]) / "auth.json", encoding="utf-8"))
 assert list(first) == ["openai-codex"] and list(second) == ["openai-codex"], (first, second)
@@ -706,7 +768,7 @@ assert second["openai-codex"]["accountId"] == "fixture-account-relogged", \
     second["openai-codex"]["accountId"]
 PY2
   assert_no_cloud_call "$world" "the re-login unit"
-  pass "re-logging one slot into another account never overwrites the credential a live placement leased"
+  pass "host refresh changes only later snapshots and never rewrites a live assignment projection"
 }
 
 two_pools_with_the_same_slot_names_stay_two_placements() {
@@ -766,14 +828,51 @@ PY2
   pass "two pools carrying the same slot names resolve to two account homes, not one"
 }
 
-concurrent_placements_take_distinct_accounts
-exhaustion_refuses_by_name
-a_withdrawn_placement_returns_its_account
-a_killed_placement_never_orphans_an_account
-a_compartment_child_contends_with_a_crewmate
-replay_reuses_its_account_and_a_new_generation_takes_another
-two_profiles_on_one_account_are_one_lease
+headroom_refuses_before_snapshot() {
+  local world out status canonical_before canonical_after
+  placement_world world fm-placement-headroom 1 || fail "world setup failed"
+  placement_task "$world" "$world/home" task-1 gen-1 || fail "authorities not seeded"
+  python3 - "$world/pool/auth.json" <<'PY' || fail "near-expiry profile not written"
+import json
+import pathlib
+import sys
+import time
+path = pathlib.Path(sys.argv[1])
+pool = json.loads(path.read_text(encoding="utf-8"))
+pool["openai-codex"]["expires"] = int((time.time() + 11 * 60 * 60) * 1000)
+path.write_text(json.dumps(pool, sort_keys=True, indent=2), encoding="utf-8")
+PY
+  canonical_before=$(shasum -a 256 "$world/pool/auth.json" | awk '{print $1}')
+  out=$(run_placement "$world" request --task task-1 --task-generation gen-1 \
+    --owner-kind primary --eligible 2>&1) && status=0 || status=$?
+  expect_code 2 "$status" "a profile below twelve-hour headroom produced a snapshot: $out"
+  assert_contains "$out" "lacks twelve hours of access-token headroom" \
+    "the pre-snapshot headroom refusal was not explicit: $out"
+  canonical_after=$(shasum -a 256 "$world/pool/auth.json" | awk '{print $1}')
+  [ "$canonical_before" = "$canonical_after" ] || fail "headroom preflight mutated the host profile"
+  if [ -d "$world/home/state/azure-workers/accounts" ] \
+    && find "$world/home/state/azure-workers/accounts" -mindepth 1 -print -quit | grep -q .; then
+    fail "headroom refusal wrote an assignment snapshot before checking expiry"
+  fi
+  [ ! -e "$world/home/state/azure-workers/controller.json" ] \
+    || python3 - "$world/home/state/azure-workers/controller.json" <<'PY' \
+      || fail "headroom refusal still inserted a queue entry"
+import json, sys
+assert not json.load(open(sys.argv[1], encoding="utf-8"))["queue"]
+PY
+  assert_no_cloud_call "$world" "the headroom unit"
+  pass "twelve-hour headroom is proved on the host before any assignment snapshot is written"
+}
+
+sixteen_placements_reuse_fewer_profiles
+placements_reuse_after_every_profile_is_active
+headroom_refuses_before_snapshot
+withdraw_cleans_only_its_private_projection
+interrupted_snapshot_remains_owned_and_resumable
+compartments_and_crewmates_share_balanced_worker_profiles
+replay_reuses_its_exact_profile_and_projection
+two_profiles_on_one_account_remain_reusable
 status_shows_who_holds_which_account
-a_relogged_slot_never_clobbers_a_live_placements_credential
+host_refresh_never_rewrites_a_live_snapshot
 two_pools_with_the_same_slot_names_stay_two_placements
 echo "# fm-worker-placement.test.sh: all assertions passed"
