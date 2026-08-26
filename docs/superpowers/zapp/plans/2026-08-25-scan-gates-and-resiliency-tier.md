@@ -1225,9 +1225,23 @@ Expected: `Would have been a candidate — dep-minor`, a 15-row table, `15 of 15
 
 - [ ] **Step 6: Prove the tier gate actually bites**
 
-The deliberate negative. In repository Settings → Custom properties, set the demo repo's
-`resiliency_tier` to **`Platinum`**, push another empty commit, and confirm the PR becomes a
-non-candidate with `resiliencyTierPermits` named as the first failure:
+The deliberate negative. Set the demo repo's `resiliency_tier` to **`Platinum`** — via the API, not
+the settings UI, so this step is scriptable:
+
+```bash
+gh api --method PATCH repos/bankrate/platform-cicd-v2-demo/properties/values \
+  -f 'properties[][property_name=resiliency_tier]' -f 'properties[][value]=Platinum'
+gh api repos/bankrate/platform-cicd-v2-demo/properties/values \
+  --jq '.[] | select(.property_name=="resiliency_tier") | .value'
+```
+
+Expected: `Platinum`. **Note the Title Case** — the property's allowed values are
+`Platinum`/`Gold`/`Silver`/`Bronze`/`Paper`, and a lowercase value is rejected by GitHub as outside
+the `single_select` list. That is the whole reason the code lowercases on read rather than expecting
+lowercase from the API.
+
+Then push another empty commit and confirm the PR becomes a non-candidate with
+`resiliencyTierPermits` named as the first failure:
 
 ```bash
 SHA=$(gh api repos/bankrate/platform-cicd-v2-demo/pulls/27 --jq .head.sha)
@@ -1237,8 +1251,20 @@ gh api "repos/bankrate/platform-cicd-v2-demo/commits/$SHA/check-runs" \
 
 Expected: `Not a candidate — dep-minor`.
 
-**Then set it back to `Paper`** and confirm the next evaluation returns to candidate. A gate that
-only ever passes has not been tested.
+**Then set it back to `Paper`** and confirm the next evaluation returns to candidate:
+
+```bash
+gh api --method PATCH repos/bankrate/platform-cicd-v2-demo/properties/values \
+  -f 'properties[][property_name=resiliency_tier]' -f 'properties[][value]=Paper'
+gh api repos/bankrate/platform-cicd-v2-demo/properties/values \
+  --jq '.[] | select(.property_name=="resiliency_tier") | .value'
+```
+
+Expected: `Paper`. **Do not skip the revert** — leaving the demo repo on `Platinum` makes every
+subsequent evaluation a non-candidate, and the next person to look will read it as a regression in
+the service rather than as leftover test state.
+
+A gate that only ever passes has not been tested.
 
 - [ ] **Step 7: Read the rendered table in a browser**
 
