@@ -40,8 +40,9 @@
 #     against current_state; hints.pending_decision and hints.blocked_event are
 #     booleans derived from that set.
 #     endpoint.exists is the cheap backend endpoint-presence read.
-#     endpoint.agent_alive is populated for every local task with a recorded
-#     backend target.
+#     endpoint.agent_state preserves the recovery-grade backend verdict for
+#     every local task with a recorded target; endpoint.agent_alive is its
+#     backward-compatible three-state projection.
 #     endpoint.probe names how liveness was observed: local, remote, skipped, or
 #     none. Remote tasks never treat a local placeholder window as remote
 #     liveness. FM_SNAPSHOT_REMOTE_PROBES=0 skips SSH probes and records
@@ -446,7 +447,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
-  local pr pr_source event_json current_json endpoint_exists agent_alive probe meta_json status_json report_json worktree_json home_json
+  local pr pr_source event_json current_json endpoint_exists agent_state agent_alive probe meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
@@ -525,6 +526,7 @@ task_json_lines() {
     blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end')
 
     endpoint_exists=null
+    agent_state=not_checked
     agent_alive=not_checked
     probe=none
     if [ -n "$remote_host" ]; then
@@ -532,6 +534,7 @@ task_json_lines() {
       if [ "$FM_SNAPSHOT_REMOTE_PROBES" = 0 ]; then
         probe=skipped
         endpoint_exists=null
+        agent_state=not_collected
         agent_alive=not_collected
         remote_home_present=null
       elif remote_state=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
@@ -539,13 +542,14 @@ task_json_lines() {
         remote_home_present=true
         remote_state=$(printf '%s\n' "$remote_state" | tail -1)
         case "$remote_state" in
-          alive) endpoint_exists=true; agent_alive=alive ;;
-          dead) endpoint_exists=true; agent_alive=dead ;;
-          missing) endpoint_exists=false; agent_alive=dead ;;
-          *) endpoint_exists=null; agent_alive=unknown ;;
+          alive) endpoint_exists=true; agent_state=alive; agent_alive=alive ;;
+          dead) endpoint_exists=true; agent_state=dead; agent_alive=dead ;;
+          missing) endpoint_exists=false; agent_state=missing; agent_alive=dead ;;
+          *) endpoint_exists=null; agent_state=unreadable; agent_alive=unknown ;;
         esac
       else
         endpoint_exists=null
+        agent_state=unreadable
         agent_alive=unknown
       fi
     else
@@ -558,7 +562,12 @@ task_json_lines() {
         fi
       fi
       if [ -n "$target" ]; then
-        agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
+        agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || printf unreadable)
+        case "$agent_state" in
+          alive) agent_alive=alive ;;
+          dead|missing) agent_alive=dead ;;
+          *) agent_alive=unknown ;;
+        esac
       fi
     fi
 
@@ -592,6 +601,7 @@ task_json_lines() {
       --arg remote_root "$remote_root" \
       --arg pr "$pr" \
       --arg pr_source "$pr_source" \
+      --arg agent_state "$agent_state" \
       --arg agent_alive "$agent_alive" \
       --arg probe "$probe" \
       --arg observed_at "$SNAPSHOT_NOW" \
@@ -626,10 +636,10 @@ task_json_lines() {
         },
         secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
         current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
-        endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
+        endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_state:$agent_state,agent_alive:$agent_alive,
           probe:$probe,
           status:(if $probe == "skipped" or $agent_alive == "not_collected" then "not_collected"
-                  elif $endpoint_exists == false then "absent"
+                  elif $endpoint_exists == false and $agent_state == "missing" then "absent"
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
                   else "unknown" end),
           observed_at:$observed_at,freshness:(if $probe == "skipped" then "not_collected" else "fresh" end)},
@@ -1189,7 +1199,7 @@ secondmate_current_json() {  # <parent-tasks-json>
               registry_error:(if $registry.complete == true
                               then "secondmate metadata is not registered"
                               else "secondmate registration is unknown because the registry read is incomplete or unavailable" end),
-              registry_failure_kind:(if $registry.complete == true then "invalid" else "unavailable" end),
+              registry_failure_kind:(if $registry.complete == true then "invalid" else "registry_incomplete" end),
               parent_task:$t} ])
     | sort_by(.id)
     | {registry:$registry,records:.}') || return 1

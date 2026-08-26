@@ -235,6 +235,12 @@ EVALUATED=$(jq -n \
   def remote($t): ($t.remote != null);
   def probe($t): ($t.endpoint.probe // "none");
   def alive($t): ($t.endpoint.agent_alive // "not_checked");
+  def agent_state($t): ($t.endpoint.agent_state //
+    (if alive($t) == "alive" then "alive"
+     elif alive($t) == "dead" and $t.endpoint.exists == false then "missing"
+     elif alive($t) == "dead" then "dead"
+     elif alive($t) == "not_collected" then "not_collected"
+     else "unreadable" end));
   def exists($t): $t.endpoint.exists;
   def terminal_state($s): ($s == "done" or $s == "failed");
   def skip_wait($s): ($s == "parked" or $s == "paused" or $s == "blocked");
@@ -257,43 +263,45 @@ EVALUATED=$(jq -n \
                 "supervision continuity could not be established";"unreadable";1)
       else empty end),
       ($snapshot.tasks[]?
-        | select(remote(.) and (probe(.) == "skipped" or alive(.) == "not_collected" or alive(.) == "unknown"))
+        | select(remote(.) and (probe(.) == "skipped" or agent_state(.) == "not_collected" or agent_state(.) == "unreadable"))
         | finding("remote-liveness-inconclusive";.id;"notice";"inconclusive";
                   "remote liveness was not collected; a local placeholder is not remote evidence";
                   "not_collected";1)),
       ($snapshot.tasks[]?
         | select(remote(.) | not)
         | select(.kind != "secondmate")
-        | select(exists(.) == false or alive(.) == "dead")
+        | select(agent_state(.) == "dead" or agent_state(.) == "missing")
         | select(terminal_state(.current_state.state) | not)
         | finding("dead-direct-report";.id;"error";"high";
-                  (if exists(.) == false then "recorded endpoint is absent while current state is " + .current_state.state
+                  (if agent_state(.) == "missing" then "recorded endpoint is absent while current state is " + .current_state.state
                    else "direct-report agent is dead while its endpoint remains present" end);
-                  (if exists(.) == false then "absent" else "dead" end);1)),
+                  agent_state(.);1)),
       ($snapshot.tasks[]?
         | select(remote(.) | not)
         | select(.kind != "secondmate")
-        | select(exists(.) == null or alive(.) == "unknown")
+        | select(agent_state(.) == "ambiguous" or agent_state(.) == "unreadable"
+                 or agent_state(.) == "unverified" or agent_state(.) == "not_checked")
         | select(terminal_state(.current_state.state) | not)
         | finding("endpoint-inconclusive";.id;"notice";"inconclusive";
-                  "endpoint presence could not be established";"unknown";1)),
+                  "agent or endpoint liveness could not be established";agent_state(.);1)),
       ($snapshot.tasks[]?
         | select(.kind == "secondmate")
         | select(remote(.) | not)
-        | select(alive(.) == "dead" or exists(.) == false)
+        | select(agent_state(.) == "dead" or agent_state(.) == "missing")
         | finding("dead-secondmate";.id;"error";"high";
-                  (if exists(.) == false then "recorded secondmate endpoint is absent"
+                  (if agent_state(.) == "missing" then "recorded secondmate endpoint is absent"
                    else "secondmate agent is dead" end);
-                  (if exists(.) == false then "absent" else "dead" end);1)),
+                  agent_state(.);1)),
       ($snapshot.tasks[]?
         | select(.kind == "secondmate")
         | select(remote(.) | not)
-        | select(alive(.) == "unknown" or (alive(.) == "not_checked" and exists(.) == null))
+        | select(agent_state(.) == "ambiguous" or agent_state(.) == "unreadable"
+                 or agent_state(.) == "unverified" or agent_state(.) == "not_checked")
         | finding("endpoint-inconclusive";.id;"notice";"inconclusive";
-                  "secondmate liveness could not be established";"unknown";1)),
+                  "secondmate liveness could not be established";agent_state(.);1)),
       ($snapshot.tasks[]?
         | select(remote(.))
-        | select(probe(.) == "remote" and alive(.) == "dead")
+        | select(probe(.) == "remote" and (agent_state(.) == "dead" or agent_state(.) == "missing"))
         | finding("dead-secondmate";.id;"error";"high";
                   "remote secondmate agent is dead";"remote-dead";1)),
       ($snapshot.tasks[]?
@@ -324,6 +332,9 @@ EVALUATED=$(jq -n \
           elif $failure == "child_unavailable" then
             finding("secondmate-summary-inconclusive";$row.id;"notice";"inconclusive";
                     $reason;"child_unavailable";1)
+          elif $failure == "registry_incomplete" then
+            finding("secondmate-summary-inconclusive";$row.id;"notice";"inconclusive";
+                    $reason;"registry_incomplete";1)
           elif $failure == "unavailable" then
             finding("secondmate-summary-unavailable";$row.id;"warning";"high";
                     $reason;"unavailable";1)

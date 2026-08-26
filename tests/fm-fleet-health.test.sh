@@ -198,6 +198,31 @@ test_dead_agent_with_live_endpoint() {
   pass "dead agent is detected even when its endpoint remains present"
 }
 
+test_unreadable_local_endpoint_is_inconclusive() {
+  local home fakebin out rc=0
+  home=$(make_home unreadable-local-endpoint)
+  mkdir -p "$home/projects/unreadable-wt"
+  fm_write_meta "$home/state/unreadable-worker.meta" \
+    "backend=herdr" \
+    "window=malformed-herdr-target" \
+    "worktree=$home/projects/unreadable-wt" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship"
+  printf 'working: implementing\n' > "$home/state/unreadable-worker.status"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "unreadable local endpoint evidence should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "endpoint-inconclusive" and .subject == "unreadable-worker")
+      and (any(.findings[]; .kind == "dead-direct-report" and .subject == "unreadable-worker") | not)
+  ' >/dev/null || fail "unreadable Herdr evidence was classified as dead: $out"
+  pass "unreadable local endpoint evidence remains inconclusive"
+}
+
 test_grouped_inbox_and_stable_fingerprints() {
   local home fakebin out1 out2 rc=0 fp1 fp2 count
   home=$(make_home grouped-inbox)
@@ -373,6 +398,31 @@ EOF
   pass "bounded secondmate omissions make fleet health inconclusive"
 }
 
+test_incomplete_registry_does_not_break_secondmate_summary() {
+  local home fakebin out rc=0
+  home=$(make_home incomplete-registry)
+  printf '%s\n' '- some-other-mate' > "$home/data/secondmates.md"
+  chmod 000 "$home/data/secondmates.md"
+  fm_write_meta "$home/state/omitted-mate.meta" \
+    "window=firstmate:fm-omitted-mate" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=$home/omitted-home"
+  printf 'working: watching scope\n' > "$home/state/omitted-mate.status"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "incomplete registry evidence should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "secondmate-summary-inconclusive" and .subject == "omitted-mate")
+      and (any(.findings[]; .kind == "secondmate-summary-unavailable" and .subject == "omitted-mate") | not)
+  ' >/dev/null || fail "incomplete registry evidence became an actionable summary failure: $out"
+  pass "incomplete registry evidence stays distinct from summary failure"
+}
+
 test_pending_reply_uses_recorded_grace() {
   local home fakebin out rc=0
   home=$(make_home recorded-grace)
@@ -464,12 +514,14 @@ test_usage_exit
 test_healthy_empty_fleet
 test_actionable_dead_direct_report
 test_dead_agent_with_live_endpoint
+test_unreadable_local_endpoint_is_inconclusive
 test_grouped_inbox_and_stable_fingerprints
 test_remote_liveness_is_inconclusive
 test_pending_reply_broken_and_historical_noise_omitted
 test_inconclusive_secondmate_summary_not_broken
 test_invalid_secondmate_summary_uses_normalized_kind
 test_truncated_secondmate_inventory_is_inconclusive
+test_incomplete_registry_does_not_break_secondmate_summary
 test_pending_reply_uses_recorded_grace
 test_inventory_and_missing_listener
 test_complete_timeout_covers_fingerprinting
