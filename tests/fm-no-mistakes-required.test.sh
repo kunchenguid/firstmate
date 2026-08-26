@@ -70,7 +70,7 @@ test_missing_head_fails() {
 # The workflow must re-read the current PR body rather than permanently judging
 # that stale event payload.
 test_required_workflow_reads_the_current_pr_body() {
-  local workflow script metadata fakebin output attempts attested body
+  local workflow script metadata fakebin output attempts attested body stale_attempts
   workflow="$ROOT/.github/workflows/no-mistakes-required.yml"
   script="$TMP_ROOT/read-current-pr.sh"
   metadata="$TMP_ROOT/read-current-pr.json"
@@ -98,7 +98,7 @@ RUBY
   printf '%s\n' '#!/usr/bin/env bash' \
     'count=$(cat "$CURRENT_PR_ATTEMPTS" 2>/dev/null || printf 0)' \
     'printf "%s\\n" "$((count + 1))" > "$CURRENT_PR_ATTEMPTS"' \
-    'if [ "$count" -eq 0 ]; then' \
+    'if [ "$count" -lt "$STALE_ATTEMPTS" ]; then' \
     '  printf "%s\\n" "$UNATTESTED_BODY"' \
     'else' \
     '  printf "%s\\n" "$ATTESTED_BODY"' \
@@ -106,14 +106,18 @@ RUBY
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fakebin/sleep"
   chmod +x "$fakebin/gh" "$fakebin/sleep"
   body='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
+  # Thirty stale reads consume the previous one-minute retry budget. The next
+  # response proves the workflow keeps polling long enough for a normally
+  # delayed pipeline attestation rather than failing its opening-event body.
+  stale_attempts=30
   PATH="$fakebin:$PATH" GITHUB_REPOSITORY=kunchenguid/firstmate PR_NUMBER=3135 \
-    PR_HEAD_SHA="$NEW_SHA" GITHUB_OUTPUT="$output" CURRENT_PR_ATTEMPTS="$attempts" UNATTESTED_BODY="$body" \
+    PR_HEAD_SHA="$NEW_SHA" GITHUB_OUTPUT="$output" CURRENT_PR_ATTEMPTS="$attempts" STALE_ATTEMPTS="$stale_attempts" UNATTESTED_BODY="$body" \
     ATTESTED_BODY="$attested" bash "$script" \
     || fail "required-check current-PR reader did not poll successfully"
   assert_contains "$(cat "$output")" "no-mistakes-pipeline-attestation:v1" \
     "required-check current-PR reader retained the live attestation"
-  [ "$(cat "$attempts")" -eq 2 ] \
-    || fail "required-check current-PR reader did not retry after the stale PR body"
+  [ "$(cat "$attempts")" -eq $((stale_attempts + 1)) ] \
+    || fail "required-check current-PR reader did not outlast the former one-minute retry budget"
   assert_contains "$(cat "$metadata")" 'steps.current-pr.outputs.body' \
     "required-check verifier is not bound to the current PR body"
   pass "required-check workflow waits for and verifies the current PR body"
