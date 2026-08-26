@@ -1,0 +1,58 @@
+# regeln/INVARIANTEN.tsv - the core invariants an update must not silently break.
+#
+# ONE OWNER: bin/fm-update-guard-lib.sh (fm_update_guard) is the only reader and
+# the only owner of this file's format. Nothing else parses it; a second reader
+# would make this list two lists.
+#
+# WHY: an update is a fast-forward of tracked files, so a commit that deletes a
+# gate, drops a hook registration, or removes the rule database lands as quietly
+# as a typo fix and disarms the fleet without a single refusal. This list is the
+# short answer to "what must still be there after the advance"; the guard checks
+# it inside a throwaway worktree of the TARGET commit, before the home moves.
+#
+# FORMAT: one row per invariant, tab-separated, comments and blank lines ignored:
+#   <art>\t<ziel>\t<beschreibung>
+#
+#   art = pfad    <ziel> is a repo-relative path that must EXIST at the target
+#                 commit (a data file: rulebook, config, package definition).
+#   art = exec    <ziel> is a repo-relative tool that must exist AND be runnable
+#                 at the target commit. Runnable is read per call convention:
+#                 a *-lib.sh is sourced by its callers, so it must parse clean
+#                 (bash -n); every other exec target must additionally carry the
+#                 executable bit, because its callers invoke it as a program.
+#   art = hook    <ziel> is "<event>:<script-basename>" and must appear as a
+#                 registered hook command for <event> in the target commit's
+#                 .claude/settings.json (read with jq, matched on the basename).
+#   art = golden  <ziel> is a golden-suite fixture that must exist at the target
+#                 commit. TRANSITION: a missing golden target is a WARNING, not a
+#                 refusal, until the file lands - a permanently red gate only
+#                 trains people to bypass it (L22).
+#
+# ARMING: this list may legitimately run ahead of the fleet. The update-guard
+# passes in total silence until $FM_HOME/state/.tor-update-scharf exists, so a
+# row can be written the moment its target is agreed and becomes enforceable when
+# the fleet arms the gate - no half-enforced middle state, and no window in which
+# a not-yet-wired row blocks every update.
+#
+# ADDING A ROW: only for something whose absence actually disarms the fleet -
+# a gate, a hook registration, the rule database, the rule CLI. Ordinary source
+# files do not belong here; the guard is not a file census.
+
+pfad	regeln/VERFASSUNG.yaml	the cap rulebook (captain class) - without it no cap has a source
+pfad	regeln/kern.yaml	the core rule set SessionStart injects into every session
+pfad	tools/writ-fm/pyproject.toml	package definition of the writ-fm rule engine bin/fm-regeln drives
+exec	bin/fm-regeln	rule CLI - ingest, session-start injection, retrieval, streich
+exec	bin/fm-order-gate-lib.sh	shared order-gate library every gate script sources
+exec	bin/fm-abnahme.sh	acceptance gate (HR2) - point-by-point answer plus product proof
+exec	bin/fm-mandat-check.sh	captain-class path gate (HR2) - a hit or a missing mandate holds
+exec	bin/fm-git-guard.sh	destruction gate (HR1, HR3) - salvage before force-push or delete
+exec	bin/fm-kill-pretool-check.sh	kill gate (HR3) - refuses kill targets outside registered ownership
+exec	bin/fm-brett-vollzug.sh	board completion check (also sourced as fm_brett_vollzug_check)
+exec	bin/fm-owned.sh	ownership registry the kill gate reads (state/<task>.owned)
+exec	bin/fm-prompt-regeln.sh	UserPromptSubmit injection of contextually matching rules
+exec	bin/fm-sitzwechsel.sh	the only path that moves the firstmate seat in config/konten.tsv
+hook	UserPromptSubmit:fm-prompt-regeln.sh	rule injection must stay registered, or contextual rules stop arriving
+hook	PreToolUse:fm-git-guard.sh	the destruction gate is only law while it is registered as a hook
+hook	PreToolUse:fm-kill-pretool-check.sh	the kill gate is only law while it is registered as a hook
+hook	Stop:fm-turnend-guard.sh	turn-end guard closes the turn; unregistered it fails open silently
+golden	tests/regel-retrieval-golden.tsv	golden retrieval suite - the rulebook stays a test-covered artifact

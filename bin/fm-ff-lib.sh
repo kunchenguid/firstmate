@@ -28,6 +28,16 @@ SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-secondmate-registry-lib.sh"
 
+# TOR "update" (bin/fm-update-guard-lib.sh): refuses an advance onto a commit
+# that would disarm the fleet. Missing on an older checkout => a no-op stand-in,
+# so this library keeps working exactly as before.
+if [ -f "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-update-guard-lib.sh" ]; then
+  # shellcheck source=bin/fm-update-guard-lib.sh
+  . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-update-guard-lib.sh"
+else
+  fm_update_guard() { :; }
+fi
+
 # --- helpers ---------------------------------------------------------------
 
 first_line() {
@@ -52,9 +62,10 @@ default_branch() {
 
 # Resolve the PRIMARY checkout's current default-branch commit - the local-HEAD
 # sync target every secondmate follows. Reads the default branch *ref* rather than
-# HEAD, so even a primary stranded on a feature branch (the worktree tangle of
-# section 8) still yields the true default-branch tip instead of propagating a
-# stray feature branch to the fleet. Echoes the commit SHA, or returns 1.
+# HEAD, so even a primary stranded on a feature branch (the worktree tangle,
+# see bin/fm-tangle-lib.sh) still yields the true default-branch tip instead of
+# propagating a stray feature branch to the fleet. Echoes the commit SHA, or
+# returns 1.
 primary_head_commit() {
   local root=$1 default
   default=$(default_branch "$root") || return 1
@@ -340,6 +351,21 @@ ff_target() {
   fi
   if ! git -C "$dir" merge-base --is-ancestor HEAD "$base" 2>/dev/null; then
     echo "$label: skipped: diverged from $base"
+    return 0
+  fi
+
+  # TOR "update": the LAST point before any home actually moves. ff_target is the
+  # ONE place every advance passes - /updatefirstmate's origin mode and the
+  # local-HEAD secondmate sync of fm-spawn.sh / fm-bootstrap.sh all fast-forward
+  # through here - so the gate is hooked in once, here, instead of at each
+  # caller. Everything above this line has already established that the advance
+  # would be a clean fast-forward; the only question left is whether the target
+  # commit is one the fleet may run. Unarmed (no state/.tor-update-scharf) the
+  # call is a silent pass, so this changes nothing until the gate goes live.
+  local guard_short
+  if ! fm_update_guard "$dir" "$base_rev"; then
+    guard_short=$(git -C "$dir" rev-parse --short "$base_rev" 2>/dev/null || printf '%s' "$base_rev")
+    echo "$label: skipped: update-guard red at $guard_short"
     return 0
   fi
 
