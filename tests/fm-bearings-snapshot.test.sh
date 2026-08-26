@@ -512,6 +512,8 @@ test_bad_secondmate_homes_never_revive_parent_work() {
       and (.secondmates | any(.[]; .id == "unreadable" and (.reason | test("invalid home|unreadable"))))
       and (.secondmates | any(.[]; .id == "malformed" and (.reason | contains("unstructured current backlog row"))))
       and (.secondmates | any(.[]; .id == "timedout" and (.reason | contains("timed out"))))
+      and ([.secondmate_reconcile[].id] == ["malformed"])
+      and (.secondmate_reconcile[0].kind == "unstructured_current")
   ' >/dev/null || fail "bad home outcomes revived stale work or lacked provenance: $json"
   pass "missing, invalid, unreadable, malformed, and timed-out homes stay explicit unknowns"
 }

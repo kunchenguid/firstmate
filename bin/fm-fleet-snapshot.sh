@@ -56,7 +56,9 @@
 #     failure reasons. Parent status and bounded terminal evidence are historical,
 #     untrusted supplements only and never override readable structured-home facts.
 #     Each structured-home record carries active_children, decisions_open, holds,
-#     queued, landed, endpoints, counts, and omitted. Actionable captain holds
+#     queued, landed, endpoints, counts, and omitted. Every successfully sampled
+#     home also carries reconcile_inventory independently of projection trust.
+#     Actionable captain holds
 #     appear in decisions_open; blocked captain holds remain queued with metadata.
 #   secondmate_landed: {records[],truncated[],unreadable[],partial[]} - the
 #     compatibility landed-work roll-up derived from secondmate_current. Readable
@@ -1164,7 +1166,7 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
 secondmate_current_json() {  # <parent-tasks-json>
   local tasks=$1 registry union rows total_registered total shown truncated
   local row id home host remote registered registry_error task status_file event_raw event_note event_epoch event_age
-  local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
+  local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_sampled summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
   local records='[]' seen_homes=''
   registry=$(registry_secondmates_json) || return 1
   union=$(jq -n --argjson registry "$registry" --argjson tasks "$tasks" '
@@ -1212,6 +1214,7 @@ secondmate_current_json() {  # <parent-tasks-json>
 
     reason=$registry_error
     summary='{}'
+    summary_sampled=false
     summary_valid=false
     if [ -z "$reason" ] && [ -z "$home" ]; then reason="no recorded secondmate home"; fi
     if [ -z "$reason" ]; then
@@ -1260,6 +1263,7 @@ secondmate_current_json() {  # <parent-tasks-json>
         summary_rc=$?
       fi
       if [ "$summary_rc" -ne 0 ]; then
+        summary='{}'
         [ "$summary_rc" -eq 124 ] && reason="structured home snapshot timed out" || reason="structured home snapshot failed"
       else
         summary_bytes=$(printf '%s' "$summary" | LC_ALL=C wc -c | tr -d ' ')
@@ -1277,6 +1281,7 @@ secondmate_current_json() {  # <parent-tasks-json>
         ' >/dev/null 2>&1; then
           reason="structured home snapshot was malformed or stale"
         else
+          summary_sampled=true
           summary_valid=$(printf '%s' "$summary" | jq -r '.valid')
           if [ "$summary_valid" != true ]; then
             summary_reason=$(printf '%s' "$summary" | jq -r '.reason // "unknown reason"')
@@ -1315,6 +1320,7 @@ secondmate_current_json() {  # <parent-tasks-json>
         --arg event_raw "$event_raw" --arg event_note "$event_note" --argjson event_age "$event_age" '
         {id:$id,home:$home,host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
          current:{state:$state,reason:($current_reason | if . == "" then null else . end)},invalidity:$summary.invalidity,
+         reconcile_inventory:$summary.invalidity,
          provenance:{selected:"structured-home",structured_home:$home,summary_valid:$summary_valid,
            trust:(if $summary_valid then "complete" else "partial-structured" end),parent_event_role:"historical-only"},
          freshness:{status:"fresh",observed_at:$observed,age_seconds:0},
@@ -1341,9 +1347,10 @@ secondmate_current_json() {  # <parent-tasks-json>
         --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
         --arg provenance "$provenance" --arg freshness "$freshness" --arg event_raw "$event_raw" --arg event_note "$event_note" \
         --argjson registered "$registered" --argjson event_age "$event_age" --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
-        --argjson decisions "$decisions" --argjson terminal "$terminal" '
+        --argjson decisions "$decisions" --argjson terminal "$terminal" --argjson summary "$summary" --argjson summary_sampled "$summary_sampled" '
         {id:$id,home:($home | if . == "" then null else . end),host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
          current:{state:"unknown",reason:$reason},invalidity:null,
+         reconcile_inventory:(if $summary_sampled then $summary.invalidity else null end),
          provenance:{selected:$provenance,structured_home:($home | if . == "" then null else . end),parent_event_role:"fallback-only-not-current"},
          freshness:{status:$freshness,observed_at:$observed,age_seconds:$event_age},
          active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],

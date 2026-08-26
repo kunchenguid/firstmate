@@ -49,7 +49,7 @@ write_snapshot() {  # <path> <mate-id> <invalidity-json> [state] [generated] [ob
     secondmate_current:{records:[{
       id:$id, home:("/tmp/" + $id),
       current:{state:$state, reason:null},
-      invalidity:$inv,
+      invalidity:$inv, reconcile_inventory:($inv // {kind:null,ids:[]}),
       provenance:{selected:"structured-home", trust:"partial-structured"}}]}}' > "$1"
 }
 
@@ -284,6 +284,36 @@ test_a_changed_or_cleared_mismatch_is_a_new_episode() {
   pass "a changed mismatch earns one more ask, and a repaired one is forgotten"
 }
 
+test_a_strict_invalidity_still_clears_the_prior_episode() {
+  local home mate fakebin first strict recurrence out
+  { read -r home; read -r mate; read -r fakebin; } < <(make_main_home strict-clear mate)
+  first="$home/first.json"
+  strict="$home/strict.json"
+  recurrence="$home/recurrence.json"
+  write_snapshot "$first" mate '{"kind":"orphan_in_flight","ids":["ghost"]}' captain_decision \
+    2026-08-26T00:00:00Z 00000000000000000001-0000000001
+  write_snapshot "$strict" mate null unknown \
+    2026-08-26T00:00:00Z 00000000000000000002-0000000001
+  jq '.secondmate_current.records[0]
+      |= (.provenance.selected = "parent-event-fallback"
+          | .invalidity = null
+          | .reconcile_inventory = {kind:"unstructured_current",ids:["free-form-row"]})' \
+    "$strict" > "$strict.tmp" && mv "$strict.tmp" "$strict"
+  write_snapshot "$recurrence" mate '{"kind":"orphan_in_flight","ids":["ghost"]}' captain_decision \
+    2026-08-26T00:00:00Z 00000000000000000003-0000000001
+
+  run_notify "$home" "$fakebin" strict-clear "$first" >/dev/null || fail "the first episode failed"
+  out=$(run_notify "$home" "$fakebin" strict-clear "$strict") \
+    || fail "the strict-invalidity clear failed: $out"
+  assert_contains "$out" "cleared: mate" \
+    "a sampled strict-invalidity home did not clear its prior mismatch episode: $out"
+  run_notify "$home" "$fakebin" strict-clear "$recurrence" >/dev/null \
+    || fail "the recurrence after strict invalidity failed"
+  [ "$(inbox_records "$home/state" mate)" -eq 2 ] \
+    || fail "a stale episode marker suppressed recurrence after strict invalidity"
+  pass "sampled strict-invalidity homes still clear prior mismatch episodes"
+}
+
 test_a_readable_home_without_a_mismatch_is_never_asked() {
   local home mate fakebin snap out
   { read -r home; read -r mate; read -r fakebin; } < <(make_main_home quiet mate)
@@ -336,6 +366,7 @@ test_an_older_snapshot_cannot_restore_a_cleared_episode
 test_distinct_id_sets_never_share_an_episode_identity
 test_the_ids_order_does_not_split_one_episode_in_two
 test_a_changed_or_cleared_mismatch_is_a_new_episode
+test_a_strict_invalidity_still_clears_the_prior_episode
 test_a_readable_home_without_a_mismatch_is_never_asked
 test_the_parent_never_changes_the_mates_own_files
 test_a_failed_send_is_retried_on_the_next_run

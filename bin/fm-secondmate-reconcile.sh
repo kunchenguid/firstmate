@@ -173,8 +173,8 @@ cmd_notify() {
        | {id, kind:(.kind // ""), ids:(.ids // [])}
      else
        (.secondmate_current.records // [])[]
-       | select(.provenance.selected == "structured-home")
-       | {id, kind:(.invalidity.kind // ""), ids:(.invalidity.ids // [])}
+       | select(.reconcile_inventory != null)
+       | {id, kind:(.reconcile_inventory.kind // ""), ids:(.reconcile_inventory.ids // [])}
      end)
     | select((.id | type) == "string" and (.id | test("^[A-Za-z0-9._-]+$")))
     | .kind as $kind

@@ -454,8 +454,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       in_flight: (if $all_in_flight == 1 then $in_flight_all else $in_flight_all[:$in_flight_n] end),
       secondmates: (if $all_secondmates == 1 then $secondmates_all else $secondmates_all[:$secondmates_n] end),
       secondmate_reconcile: [ (.secondmate_current.records // [])[]
-        | select(.provenance.selected == "structured-home")
-        | {id, kind:(.invalidity.kind // null), ids:((.invalidity.ids // []) | map(select(type == "string")) | sort)} ],
+        | select(.reconcile_inventory != null)
+        | {id, kind:(.reconcile_inventory.kind // null), ids:((.reconcile_inventory.ids // []) | map(select(type == "string")) | sort)} ],
       decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end),
       landed: ($done | map({id, what:(.title | trunc(70)),
                             artifact:(.pr_url // .report_path // .local_note // "-"),owner:.home_id})),
