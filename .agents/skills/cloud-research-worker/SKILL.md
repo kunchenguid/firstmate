@@ -122,7 +122,7 @@ A successful close response is only a request acknowledgement; do not claim canc
 
 ## Retirement
 
-Before retirement, require a provider-terminal state, a private single-link `data/<id>/report.md` bound by task state, a retired provider source, and the ordinary decision-hold completion gate.
+Before retirement, require a provider-terminal state, a private single-link `data/<id>/report.md` bound by task state, a retired provider source, and the ordinary captain-hold completion gate.
 Retire through `bin/fm-task-retire.sh` so local tasks continue through `fm-teardown.sh` while remote tasks use provider-specific safety checks.
 Preserve the durable report and any provider-owned quarantine evidence.
 Never delete an ambiguous or nonterminal record, treat interruption as provider cancellation, or bypass an open captain decision.

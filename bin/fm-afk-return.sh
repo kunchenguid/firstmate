@@ -2,22 +2,21 @@
 # fm-afk-return.sh - deterministic away-mode return catch-up gate.
 #
 # Usage:
-#   fm-afk-return.sh          Stop away mode, drain catch-up, and open/check gate.
+#   fm-afk-return.sh          Stop away mode, present catch-up, and open/check gate.
 #   fm-afk-return.sh begin    Same as the default command.
-#   fm-afk-return.sh check    Re-drain and close the gate only after blockers resolve.
+#   fm-afk-return.sh check    Re-present and close the gate only after blockers resolve.
 #   fm-afk-return.sh guard    Read-only refusal while away or catch-up is pending.
 #
 # `blocked:` is the crewmate protocol's firstmate-actionable verb. A live task's
 # open blocked event must be remediated and closed with `resolved [key=...]`, or
 # explicitly reclassified in the status stream with a durable reason, before an
-# ordinary captain request may proceed. `needs-decision:` belongs to the
-# configured approval authority and is deliberately not part of this blocker
-# gate; normal reporting routes it through the AGENTS.md section 7 contract.
+# ordinary captain request may proceed. `needs-decision:` is deliberately not
+# part of this blocker gate.
 #
 # The durable state/.afk-return-catchup file is written BEFORE daemon shutdown,
-# so a crash between stopping, draining, and blocker handling fails closed. It
-# retains the drained wake, buffered-escalation, and wedge-marker evidence until
-# every live open blocker is closed and `check` succeeds. Repeated begin/check
+# so a crash between stopping, wake presentation, and blocker handling fails closed.
+# It retains the presented wake, buffered-escalation, and wedge-marker evidence
+# until every live open blocker is closed and `check` succeeds. Repeated begin/check
 # calls are idempotent. `guard` never mutates state and is suitable for ordinary
 # read entrypoints such as fm-bearings-snapshot.sh.
 set -u
@@ -141,9 +140,10 @@ return_guard() {
 }
 
 return_reconcile() {
-  local evidence blockers drained wedge escalations lifecycle_ok=1
+  local evidence blockers drain_err drained wake_ack_line wake_ack_through wake_ack_generation wedge escalations lifecycle_ok=1
   evidence=$(mktemp "$STATE/.afk-return-evidence.XXXXXX") || return 1
   blockers=$(mktemp "$STATE/.afk-return-blockers.XXXXXX") || { rm -f "$evidence"; return 1; }
+  drain_err=$(mktemp "$STATE/.afk-return-drain.XXXXXX") || { rm -f "$evidence" "$blockers"; return 1; }
   preserve_evidence "$evidence"
 
   if [ -e "$STATE/.afk" ] || [ -e "$STATE/.afk-daemon-terminal" ]; then
@@ -153,11 +153,19 @@ return_reconcile() {
     fi
   fi
 
-  drained=$("$SCRIPT_DIR/fm-wake-drain.sh") || {
+  drained=$("$SCRIPT_DIR/fm-wake-drain.sh" 2> "$drain_err") || {
     append_evidence lifecycle 'durable wake drain failed; retry catch-up before ordinary work' "$evidence"
     lifecycle_ok=0
     drained=""
   }
+  grep -v '^WAKE_ACK_REQUIRED:' "$drain_err" >&2 || true
+  wake_ack_line=$(grep '^WAKE_ACK_REQUIRED:' "$drain_err" | tail -1)
+  wake_ack_through=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$drain_err" | tail -1)
+  wake_ack_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$drain_err" | tail -1)
+  if [ -n "$wake_ack_line" ] && { [ -z "$wake_ack_through" ] || [ -z "$wake_ack_generation" ]; }; then
+    append_evidence lifecycle 'durable wake drain returned an invalid acknowledgement; retry catch-up before ordinary work' "$evidence"
+    lifecycle_ok=0
+  fi
   append_evidence wake "$drained" "$evidence"
 
   if [ -s "$STATE/.subsuper-inject-wedged" ]; then
@@ -171,19 +179,33 @@ return_reconcile() {
 
   scan_open_blockers > "$blockers"
   if [ "$lifecycle_ok" -ne 1 ] || [ -s "$blockers" ]; then
-    write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers"; return 1; }
+    write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
     printf 'fm-afk-return: catch-up must finish before the captain request\n' >&2
     print_evidence "$GATE" >&2
     print_blockers "$GATE" >&2
     printf 'fm-afk-return: handle each blocker now, or close it with resolved [key=...] and append a durable reclassification reason, then run bin/fm-afk-return.sh check\n' >&2
-    rm -f "$evidence" "$blockers"
+    rm -f "$evidence" "$blockers" "$drain_err"
     return 3
   fi
 
-  print_evidence "$evidence"
+  if ! print_evidence "$evidence"; then
+    append_evidence lifecycle 'recovery evidence publication failed; retry catch-up before ordinary work' "$evidence"
+    write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
+    printf 'fm-afk-return: recovery evidence could not be published; catch-up remains pending\n' >&2
+    rm -f "$evidence" "$blockers" "$drain_err"
+    return 3
+  fi
+
+  if [ -n "$wake_ack_line" ] && ! printf '%s\n' "$wake_ack_line" >&2; then
+    append_evidence lifecycle 'durable wake acknowledgement command publication failed; retry catch-up before ordinary work' "$evidence"
+    write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
+    rm -f "$evidence" "$blockers" "$drain_err"
+    return 3
+  fi
+
   rm -f "$GATE"
   clear_delivery_artifacts
-  rm -f "$evidence" "$blockers"
+  rm -f "$evidence" "$blockers" "$drain_err"
   printf 'fm-afk-return: catch-up clear; ordinary captain work may proceed\n'
   return 0
 }

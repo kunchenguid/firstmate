@@ -19,6 +19,9 @@
 #  10. fm-send secondmate path embeds corr and creates durable pending records
 #  11. Backend busy/idle observation works through the shared busy abstraction
 #      used by Pi/Claude secondmate backends (no conversation scrape)
+#  12. A remote mate's repost waits for its asynchronous reply mirror to be read
+#      past the turn, so a mirrored reply is never nagged and a real miss still
+#      gets its one repost
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -92,6 +95,16 @@ run_send() {
 
 phase_of() {  # <state> <corr>
   fm_pending_reply_get "$(fm_pending_reply_path "$1" "$2")" phase
+}
+
+# A local steer now rides the durable steering inbox rather than the typed
+# channel, so marker/corr assertions read the latest enqueued record through
+# the production owner (bin/fm-task-inbox-lib.sh).
+latest_record_body() {  # <home> <task>
+  local rec
+  rec=$(find "$1/state/$2.inbox" -maxdepth 1 -name '*.msg' 2>/dev/null | sort | tail -1)
+  [ -n "$rec" ] || return 1
+  bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$rec"
 }
 
 # --- tests ------------------------------------------------------------------
@@ -304,6 +317,53 @@ test_second_missed_turn_escalates_once_and_stays_durable() {
   fi
   [ "$(phase_of "$state" "$corr")" = escalated ] || fail "must remain escalated after unrelated status"
   pass "second missed turn escalates once and remains durable"
+}
+
+# Wake-gate helpers reading the production seen-signature owner directly, so
+# these assertions consume the exact gate the watcher's signal scan uses.
+seen_gate() {  # <state> <file>: 0 when every byte is already announced
+  FM_STATE_OVERRIDE="$1" bash -c '. "$1"; fm_wake_signal_seen_current "$2" "$3"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$2"
+}
+prime_seen() {  # <state> <file>
+  FM_STATE_OVERRIDE="$1" bash -c '
+    . "$1"; sig=$(fm_wake_signal_sig "$3") || exit 1
+    printf "%s" "$sig" > "$(fm_wake_signal_seen_path "$2" "$3")"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$2"
+}
+
+test_escalation_wakes_and_its_close_stays_quiet() {
+  local home state corr
+  home=$(setup_parent escalation-wake-gate)
+  state="$home/state"
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  export FM_PENDING_REPLY_NOW=4200
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "confirm the notarization")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery send failed"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
+  : > "$state/hibit.status"
+  prime_seen "$state" "$state/hibit.status" || fail "could not prime the announced baseline"
+  # A NEW blocker must wake: the escalation append leaves unannounced bytes.
+  fm_pending_reply_maybe_escalate "$state" "$corr" || fail "escalation should fire"
+  if seen_gate "$state" "$state/hibit.status"; then
+    fail "a new pending-reply escalation was hidden from the watcher's signal gate"
+  fi
+  prime_seen "$state" "$state/hibit.status" || fail "could not mark the escalation announced"
+  # A genuinely new correlated reply must wake too.
+  printf 'done [corr=%s]: notarization confirmed\n' "$corr" >> "$state/hibit.status"
+  if seen_gate "$state" "$state/hibit.status"; then
+    fail "a new correlated reply was hidden from the watcher's signal gate"
+  fi
+  prime_seen "$state" "$state/hibit.status" || fail "could not mark the reply announced"
+  # The home's own escalation CLOSE is bookkeeping and stays quiet.
+  fm_pending_reply_try_resolve "$state" "$corr" || fail "correlated reply should resolve"
+  grep -Fq "resolved [key=pending-reply-$corr]" "$state/hibit.status" \
+    || fail "resolution did not close the escalation decision"
+  seen_gate "$state" "$state/hibit.status" \
+    || fail "the home's own escalation close re-woke its own watcher gate"
+  pass "escalations and replies wake; the home's own escalation close stays quiet"
 }
 
 test_escalation_publication_failure_retries() {
@@ -614,6 +674,60 @@ test_delivery_confirmation_fallback_reconciles() {
   pass "delivery confirmation fallback reconciles durably"
 }
 
+test_delivery_confirmation_serializes_with_reconciliation() {
+  (
+    local home state corr rec calls entered release confirm_pid reconcile_pid count i
+    home=$(setup_parent delivery-confirm-reconcile-race)
+    state="$home/state"
+    # This fixture clock is intentionally scoped to the isolated subshell.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=5900
+    corr=$(fm_pending_reply_create "$home" "$state" hibit "serialized delivery")
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    calls="$home/mark-delivered.calls"
+    entered="$home/mark-delivered.entered"
+    release="$home/mark-delivered.release"
+    fm_pending_reply_mark_delivered() {
+      local pending_state=$1 pending_corr=$2 epoch=$3 pending_rec phase
+      printf '%s\n' "$BASHPID" >> "$calls"
+      : > "$entered"
+      while [ ! -e "$release" ]; do /bin/sleep 0.01; done
+      pending_rec=$(fm_pending_reply_path "$pending_state" "$pending_corr")
+      fm_pending_reply_set "$pending_rec" delivered_epoch "$epoch" || return 1
+      phase=$(fm_pending_reply_get "$pending_rec" phase)
+      [ "$phase" != delivery_unknown ] \
+        || fm_pending_reply_set "$pending_rec" phase awaiting_report
+    }
+    fm_pending_reply_confirm_delivery "$state" "$corr" &
+    # The background PID is consumed within this isolated test subshell.
+    # shellcheck disable=SC2031
+    confirm_pid=$!
+    for i in $(seq 1 100); do
+      [ -e "$entered" ] && break
+      /bin/sleep 0.01
+    done
+    [ -e "$entered" ] || fail "delivery confirmation did not reach its commit boundary"
+    fm_pending_reply_reconcile_delivery "$state" "$corr" &
+    # The background PID is consumed within this isolated test subshell.
+    # shellcheck disable=SC2031
+    reconcile_pid=$!
+    /bin/sleep 0.1
+    : > "$release"
+    wait "$confirm_pid" || fail "delivery confirmation should commit"
+    wait "$reconcile_pid" || fail "reconciliation should observe committed delivery"
+    count=$(wc -l < "$calls" | tr -d ' ')
+    [ "$count" = 1 ] \
+      || fail "confirmation and reconciliation raced through $count delivery commits"
+    [ "$(fm_pending_reply_get "$rec" delivered_epoch)" = 5900 ] \
+      || fail "serialized confirmation should retain delivered_epoch"
+    [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+      || fail "serialized confirmation should retain awaiting_report phase"
+    [ ! -e "$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")" ] \
+      || fail "serialized delivery marker should be removed"
+  ) || fail "delivery confirmation serialization regression failed"
+  pass "delivery confirmation serializes with reconciliation"
+}
+
 test_unrelated_and_stale_corr_cannot_resolve() {
   local home state corr other
   home=$(setup_parent stale-corr)
@@ -715,8 +829,8 @@ test_unmarked_captain_input_creates_no_expectation() {
     "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
   run_send "$fb" "$home" "$log" "build" "captain says hello"; rc=$?
   expect_code 0 "$rc" "unmarked crewmate send should succeed"
-  [ "$(cat "$log")" = "captain says hello" ] \
-    || fail "crewmate send should stay unmarked"$'\n'"$(cat "$log" | od -An -c)"
+  [ "$(latest_record_body "$home" build)" = "captain says hello" ] \
+    || fail "crewmate steer should be recorded unmarked"$'\n'"$(latest_record_body "$home" build | od -An -c)"
   pending_count=$(find "$home/state/pending-replies" -type f 2>/dev/null | wc -l | tr -d ' ')
   [ "$pending_count" = 0 ] || fail "unmarked input must create no pending-reply records (got $pending_count)"
   pass "direct unmarked captain input creates no expectation"
@@ -730,10 +844,10 @@ test_fm_send_marked_secondmate_creates_pending_and_embeds_corr() {
   fm_write_secondmate_meta "$home/state/hibit.meta" "$home/sm" "sess:fm-hibit"
   run_send "$fb" "$home" "$log" "hibit" "audit the build"; rc=$?
   expect_code 0 "$rc" "secondmate send should succeed"
-  got=$(cat "$log")
+  got=$(latest_record_body "$home" hibit)
   case "$got" in
     "$FM_FROMFIRST_MARK"corr=*) : ;;
-    *) fail "secondmate send must embed marker+corr"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
+    *) fail "secondmate steer record must embed marker+corr"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
   esac
   corr=$(fm_pending_reply_extract_corr "$got")
   [ "${#corr}" -eq 16 ] || fail "corr id should be 16 hex chars, got '$corr'"
@@ -956,12 +1070,19 @@ test_correlations_reuse_only_for_matching_open_task() {
   fm_write_secondmate_meta "$state/domain.meta" "$home/domain" "sess:fm-domain"
   fm_write_secondmate_meta "$state/other.meta" "$home/other" "sess:fm-other"
   run_send "$fb" "$home" "$log" domain "first request" || fail "first marked send failed"
-  got=$(cat "$log")
+  got=$(latest_record_body "$home" domain)
   corr1=$(fm_pending_reply_extract_corr "$got")
   export FM_PENDING_REPLY_EXISTING_CORR=$corr1
-  run_send "$fb" "$home" "$log" other "forwarded request" || fail "cross-task send failed"
+  if run_send "$fb" "$home" "$log" other "forwarded request"; then
+    fail "an explicit cross-task correlation must be refused"
+  fi
   unset FM_PENDING_REPLY_EXISTING_CORR
-  corr2=$(fm_pending_reply_extract_corr "$(cat "$log")")
+  if latest_record_body "$home" other >/dev/null 2>&1; then
+    fail "a refused cross-task correlation must not enqueue a steer"
+  fi
+  run_send "$fb" "$home" "$log" other "forwarded request" \
+    || fail "fresh cross-task send failed"
+  corr2=$(fm_pending_reply_extract_corr "$(latest_record_body "$home" other)")
   [ -n "$corr2" ] && [ "$corr2" != "$corr1" ] \
     || fail "cross-task send must receive a new correlation"
   rec=$(fm_pending_reply_path "$state" "$corr2")
@@ -971,7 +1092,7 @@ test_correlations_reuse_only_for_matching_open_task() {
   fm_pending_reply_try_resolve "$state" "$corr1" || fail "first expectation should resolve"
   run_send "$fb" "$home" "$log" domain "${FM_FROMFIRST_MARK}corr=${corr1} follow-up" \
     || fail "resolved-correlation follow-up failed"
-  corr3=$(fm_pending_reply_extract_corr "$(cat "$log")")
+  corr3=$(fm_pending_reply_extract_corr "$(latest_record_body "$home" domain)")
   [ -n "$corr3" ] && [ "$corr3" != "$corr1" ] \
     || fail "resolved correlation must not guard a new send"
   rec=$(fm_pending_reply_path "$state" "$corr3")
@@ -1019,6 +1140,97 @@ test_tick_end_to_end_missed_then_escalate() {
   pass "tick end-to-end: miss -> one recovery -> escalate -> durable"
 }
 
+test_remote_repost_waits_for_the_reply_channel() {
+  local home state corr hook_log rec lines
+  home=$(setup_parent remote-repost)
+  state="$home/state"
+  hook_log="$TMP_ROOT/remote-repost.log"
+  : > "$hook_log"
+  export FM_PENDING_REPLY_NOW=5000
+  # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+  # shellcheck disable=SC2329
+  remote_repost_hook() {
+    printf '%s\t%s\n' "$1" "$2" >> "$hook_log"
+  }
+  export -f remote_repost_hook
+  export FM_PENDING_REPLY_SEND_HOOK=remote_repost_hook
+
+  fm_write_meta "$state/ios.meta" \
+    "window=fm-remote:w1:p1" "harness=claude" "kind=secondmate" "mode=secondmate" \
+    "remote_host=remote-mac" "remote_root=/remote/root" "remote_backend=herdr"
+  corr=$(fm_pending_reply_create "$home" "$state" "ios" "status of the iOS build")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_observe_busy "$state" "$corr" busy
+  fm_pending_reply_observe_busy "$state" "$corr" idle
+  rec=$(fm_pending_reply_path "$state" "$corr")
+
+  # The mate's turn ended, but nothing proves the parent has read the remote
+  # reply log since: a repost here would nag for a reply already written there.
+  if fm_pending_reply_send_recovery "$state" "$corr" 2>/dev/null; then
+    fail "a remote repost must not fire before the reply channel is known caught up"
+  fi
+  [ ! -s "$hook_log" ] || fail "no repost may be sent while the reply channel is behind"
+  [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+    || fail "the expectation must stay armed while the reply channel is behind"
+
+  # A watermark from BEFORE the turn ended is still not evidence.
+  fm_pending_reply_note_remote_channel_caught_up "$state" ios 4000
+  if fm_pending_reply_send_recovery "$state" "$corr" 2>/dev/null; then
+    fail "a stale reply-channel watermark must not license a repost"
+  fi
+  [ ! -s "$hook_log" ] || fail "a stale watermark must not release a repost"
+
+  # Read through the end of the remote log after the turn: the report really is
+  # missing, so the one recovery repost fires.
+  fm_pending_reply_note_remote_channel_caught_up "$state" ios \
+    "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)"
+  fm_pending_reply_send_recovery "$state" "$corr" \
+    || fail "a genuinely missed remote report must still trigger its recovery repost"
+  [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+    || fail "phase should be recovery_sent, got $(phase_of "$state" "$corr")"
+  lines=$(wc -l < "$hook_log" | tr -d ' ')
+  [ "$lines" = 1 ] || fail "expected exactly one repost, got $lines"
+  case "$(cat "$hook_log")" in
+    *REPOST\ REQUIRED*) : ;;
+    *) fail "the recovery message must ask for a repost"$'\n'"$(cat "$hook_log")" ;;
+  esac
+  unset FM_PENDING_REPLY_SEND_HOOK
+  pass "a remote repost waits for the reply channel and still fires on a real miss"
+}
+
+test_mirrored_remote_reply_never_triggers_a_repost() {
+  local home state corr hook_log
+  home=$(setup_parent remote-mirrored-reply)
+  state="$home/state"
+  hook_log="$TMP_ROOT/remote-mirrored-reply.log"
+  : > "$hook_log"
+  export FM_PENDING_REPLY_NOW=6000
+  # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+  # shellcheck disable=SC2329
+  mirrored_reply_hook() {
+    printf '%s\t%s\n' "$1" "$2" >> "$hook_log"
+  }
+  export -f mirrored_reply_hook
+  export FM_PENDING_REPLY_SEND_HOOK=mirrored_reply_hook
+
+  fm_write_meta "$state/ios.meta" \
+    "window=fm-remote:w1:p1" "harness=claude" "kind=secondmate" "mode=secondmate" \
+    "remote_host=remote-mac" "remote_root=/remote/root" "remote_backend=herdr"
+  corr=$(fm_pending_reply_create "$home" "$state" "ios" "did the build go green")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  # The mirror caught up AND carried the mate's correlated answer.
+  printf 'done [corr=%s]: build is green\n' "$corr" > "$state/ios.status"
+  fm_pending_reply_note_remote_channel_caught_up "$state" ios 6000
+
+  fm_pending_reply_tick_one "$state" "$corr" idle || fail "tick should succeed"
+  [ "$(phase_of "$state" "$corr")" = resolved ] \
+    || fail "a mirrored correlated reply must resolve, got $(phase_of "$state" "$corr")"
+  [ ! -s "$hook_log" ] || fail "a correlated remote reply must never trigger a repost"
+  unset FM_PENDING_REPLY_SEND_HOOK
+  pass "a mirrored correlated remote reply resolves without any repost"
+}
+
 test_failed_send_discards_undelivered_expectation() {
   local home state corr
   home=$(setup_parent discard)
@@ -1046,6 +1258,7 @@ test_completed_turn_no_report_triggers_one_recovery
 test_recovery_attempt_is_never_reinjected
 test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable
+test_escalation_wakes_and_its_close_stays_quiet
 test_escalation_publication_failure_retries
 test_legacy_escalation_closes_default_decision
 test_legacy_escalation_does_not_close_taken_default_decision
@@ -1055,6 +1268,7 @@ test_concurrent_escalation_yields_to_late_reply
 test_transport_success_is_not_reply_success
 test_undelivered_records_are_scan_immutable
 test_delivery_confirmation_fallback_reconciles
+test_delivery_confirmation_serializes_with_reconciliation
 test_unrelated_and_stale_corr_cannot_resolve
 test_restart_preserves_expectation_and_parent_destination
 test_wrong_home_detected_not_acknowledged
@@ -1069,5 +1283,7 @@ test_tick_skips_terminal_and_reuses_target_observation
 test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation
+test_remote_repost_waits_for_the_reply_channel
+test_mirrored_remote_reply_never_triggers_a_repost
 
 printf 'ok - all pending-reply tests passed\n'

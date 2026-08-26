@@ -94,7 +94,8 @@ case "${1:-} ${2:-}" in
     esac
     ;;
   "pane read")
-    cat <<'EOF'
+    case "$phase" in
+      blocked) cat <<'EOF'
 > You are in the isolated task copy
 
   Do you trust the contents of this directory?
@@ -104,6 +105,10 @@ case "${1:-} ${2:-}" in
 
   Press enter to continue
 EOF
+        ;;
+      idle) printf '  ╭────────────────────────╮\n  │ ❯                      │\n  ╰──────── Composer ──────╯\n' ;;
+      *) printf 'Working... ctrl+c to stop\n' ;;
+    esac
     ;;
   "agent get")
     case "$phase" in
@@ -321,7 +326,7 @@ test_raw_traex_refuses_without_breaking_other_raw_launches() {
 }
 
 test_generic_steer_interrupt_and_keys() {
-  local rec out status verdict
+  local rec out status verdict inbox_record inbox_body
   rec=$(make_spawn_case controls)
   read_spawn_case "$rec"
   run_traex_spawn >/dev/null || fail "control fixture spawn failed"
@@ -329,7 +334,14 @@ test_generic_steer_interrupt_and_keys() {
   out=$(run_traex_send 'reply with exactly STEER_OK')
   status=$?
   expect_code 0 "$status" "generic TraeX steer failed: $out"
-  assert_grep 'reply with exactly STEER_OK' "$CASE_DIR/input.log" "steer text never reached Herdr"
+  inbox_record="$HOME_DIR/state/$TASK_ID.inbox/001.msg"
+  [ -f "$inbox_record" ] || fail "steer was not recorded in the task inbox"
+  # shellcheck source=bin/fm-task-inbox-lib.sh
+  . "$ROOT/bin/fm-task-inbox-lib.sh"
+  inbox_body=$(fm_task_inbox_body "$inbox_record")
+  [ "$inbox_body" = 'reply with exactly STEER_OK' ] || fail "steer inbox body changed: $inbox_body"
+  assert_no_grep 'reply with exactly STEER_OK' "$CASE_DIR/input.log" "steer payload leaked onto the Herdr terminal"
+  assert_grep 'Firstmate instruction waiting:' "$CASE_DIR/input.log" "steer doorbell never reached Herdr"
   assert_grep enter "$CASE_DIR/key.log" "steer Enter never reached Herdr"
   [ "$(cat "$CASE_DIR/phase")" = working ] || fail "steer was not observed working"
 

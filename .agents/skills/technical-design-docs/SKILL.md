@@ -14,7 +14,7 @@ This skill owns the evidence model, review presentation intent, design content, 
 It does not own generic project intake, implementation delivery, review, or merge procedure.
 For a Feishu document, load `lark-doc` and follow its current scenario reference before reading history, creating, editing, or manipulating a whiteboard; `lark-doc` owns Feishu API, XML, block selection, create, update, revision-precondition, whiteboard, export, preview, and readback mechanics.
 Load `lark-drive` and follow its current comment references before reading, locating, replying to, resolving, restoring, or rechecking Feishu comments; `lark-drive` owns comment identity, pagination, location, reply, and resolution mechanics.
-Before completing an investigation or review that exposed a genuine captain decision, or when routing the answer, load `decision-hold-lifecycle`; it owns the durable decision-record mechanics.
+Before completing an investigation or review that exposed a genuine captain decision, or when routing the answer, load `captain-hold-lifecycle`; it owns the durable captain-call record mechanics.
 
 ## Review shape and template fidelity
 
@@ -271,7 +271,7 @@ Do not resolve a thread before its document change and evidence reply have both 
 ### Preserve unresolved review state
 
 Keep unresolved comments visibly unresolved in Feishu and reflect their implementation consequence in the document's unresolved-decision section when appropriate.
-Route genuine captain choices through `decision-hold-lifecycle` without copying its mechanics here.
+Route genuine captain choices through `captain-hold-lifecycle` without copying its mechanics here.
 When authority answers outside Feishu, durably route the decision, update the document, and reply in the original comment thread so chat does not become the only record a reviewer can see.
 Do not replace a reviewer question with a speculative implementation answer merely to empty the comment queue.
 
@@ -294,7 +294,7 @@ For each genuine decision:
 - Assign a stable privacy-safe key.
 - State the exact choice, evidence, options, consequences, recommendation, and dependent document sections.
 - Keep unresolved language out of the decided architecture until authority answers.
-- Follow `decision-hold-lifecycle` for durable routing when its trigger applies.
+- Follow `captain-hold-lifecycle` for durable routing when its trigger applies.
 
 After the answer, update the invariant ledger and every dependent section in one revision sequence.
 Remove stale option language, obsolete decision headings, contradictory tests, and superseded rollout claims.

@@ -93,6 +93,103 @@ test_invalid_endpoint_records_refuse_before_mutation() {
   pass "fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call"
 }
 
+test_control_lock_contention_refuses_before_mutation() {
+  local dir id=locked-task lock holder i=0 rc
+  dir=$(make_case control-lock)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  lock="$dir/home/state/.control-$id.lock"
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$lock" || exit 1
+    sleep 30
+  ) &
+  holder=$!
+  while [ ! -e "$lock" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$lock" ] || {
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    fail "could not stage a held lifecycle lock"
+  }
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "endpoint_task_id=other-task" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown unexpectedly succeeded under lifecycle lock contention"
+  assert_present "$dir/home/state/$id.meta" "contended teardown removed task metadata"
+  assert_present "$dir/worktree/sentinel" "contended teardown changed the worktree"
+  assert_present "$lock" "contended teardown removed another action's lock"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "contended teardown reached the runtime: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "another lifecycle action is already running" \
+    "contended teardown should serialize before reading mutable task metadata"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "fm-teardown: a concurrent lifecycle action refuses before mutation"
+}
+
+test_metadata_lock_serializes_destructive_cleanup() {
+  local dir id=metadata-locked-task lock ready release holder teardown_pid i=0 rc
+  dir=$(make_case metadata-lock)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  lock="$dir/home/state/.meta-$id.lock"
+  ready="$dir/meta-lock-ready"
+  release="$dir/meta-lock-release"
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$lock" || exit 1
+    trap 'fm_lock_release "$lock"' EXIT
+    : > "$ready"
+    while [ ! -e "$release" ]; do
+      sleep 0.01
+    done
+  ) &
+  holder=$!
+  while [ ! -e "$ready" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$ready" ] || {
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    fail "could not stage a held metadata lock"
+  }
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" &
+  teardown_pid=$!
+  sleep 0.2
+  if ! kill -0 "$teardown_pid" 2>/dev/null; then
+    : > "$release"
+    wait "$holder" 2>/dev/null || true
+    wait "$teardown_pid" 2>/dev/null || true
+    fail "teardown did not wait for the shared metadata writer lock"
+  fi
+  assert_present "$dir/home/state/$id.meta" "metadata-lock contention removed task metadata"
+  assert_present "$dir/worktree/sentinel" "metadata-lock contention changed the worktree"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "metadata-lock contention reached the runtime: $(cat "$dir/runtime.log")"
+
+  : > "$release"
+  wait "$holder" || fail "metadata lock holder failed"
+  wait "$teardown_pid"; rc=$?
+  expect_code 0 "$rc" "teardown should complete after the metadata writer releases"
+  assert_absent "$dir/home/state/$id.meta" \
+    "serialized teardown left a task record that a completed writer could resurrect"
+  pass "fm-teardown: destructive cleanup serializes with metadata writers"
+}
+
 test_supported_backend_endpoint_records_validate() {
   local dir id backend target
   dir=$(make_case valid-backends)
@@ -269,6 +366,8 @@ SH
 }
 
 test_invalid_endpoint_records_refuse_before_mutation
+test_control_lock_contention_refuses_before_mutation
+test_metadata_lock_serializes_destructive_cleanup
 test_supported_backend_endpoint_records_validate
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact

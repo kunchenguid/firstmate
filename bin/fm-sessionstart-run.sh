@@ -48,6 +48,8 @@ COMPLETION_FILE="$STATE/.session-start-complete"
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-hook-host-lib.sh
+. "$SCRIPT_DIR/fm-hook-host-lib.sh"
 
 SOURCE=
 while [ $# -gt 0 ]; do
@@ -90,6 +92,14 @@ if [ -z "$SOURCE" ] && [ ! -t 0 ]; then
   # without depending on greedy-regex luck, and it cannot mistake a string VALUE
   # of "source" for the key, because only a key is followed by a bare colon.
   PAYLOAD=$(cat 2>/dev/null || true)
+  # Cursor loads the tracked Claude settings as well as its own registration,
+  # so a Cursor-delivered payload here is the duplicate: bin/fm-sessionstart-
+  # cursor.sh already owns that session open and calls this wrapper with an
+  # explicit --source and no payload. Running twice would take the helm twice
+  # and repeat every startup sweep.
+  if fm_hook_payload_is_foreign_host "$PAYLOAD"; then
+    exit 0
+  fi
   SOURCE=$(printf '%s' "$PAYLOAD" | awk '
     BEGIN { RS = "\"" }
     seen == 2 { print; exit }
@@ -105,13 +115,13 @@ case "$SOURCE" in
     ;;
   clear|compact)
     if session_start_completed; then
-      "$SCRIPT_DIR/fm-session-start.sh" --reemit || true
+      "$SCRIPT_DIR/fm-session-start.sh" --reemit --source "$SOURCE" || true
     else
-      "$SCRIPT_DIR/fm-session-start.sh" || true
+      "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" || true
     fi
     ;;
   *)
-    "$SCRIPT_DIR/fm-session-start.sh" || true
+    "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" || true
     ;;
 esac
 exit 0

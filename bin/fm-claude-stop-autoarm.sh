@@ -23,7 +23,10 @@
 #   - Single-flight: Claude does not dedupe async hooks, so a home-scoped owner
 #     lock (state/.claude-autoarm.lock) admits exactly one owner; every other
 #     concurrent firing exits 0 without translating, which keeps one event
-#     epoch on exactly one recovery turn.
+#     epoch on exactly one recovery turn. A lock left behind by a claim whose
+#     ledger outcome is already terminal, or whose recorded pid-identity no
+#     longer matches its live pid, is reclaimed once rather than deferred to
+#     forever (fm_autoarm_claim_abandoned in bin/fm-wake-lib.sh).
 #   - Foreground arm: the owner runs bin/fm-watch-arm.sh in the FOREGROUND of
 #     this hook-owned process tree (never shell &); Claude owns the process
 #     group, so its timeout/session teardown kills arm and watcher together.
@@ -78,10 +81,21 @@ esac
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-hook-host-lib.sh
+. "$SCRIPT_DIR/fm-hook-host-lib.sh"
 
 # Consume the Stop payload once. The decisions below are state-based; the
-# payload is read so a slow writer can never wedge on a full pipe.
-cat >/dev/null 2>&1 || true
+# payload is read so a slow writer can never wedge on a full pipe, and its host
+# is inspected before anything else runs.
+PAYLOAD=$(cat 2>/dev/null || true)
+
+# Cursor loads the tracked Claude settings too. Cursor has no asyncRewake, so if
+# a future Cursor build starts firing the Claude-shaped Stop entry, this arm
+# would run SYNCHRONOUSLY inside Cursor's stop step and hold that turn open for
+# the declared multi-hour timeout - the exact wedge grok 1.0.0 produced
+# (docs/turnend-guard.md "Harness integrations"). Cursor's own park adapter owns
+# its turn boundary, so stand down on a Cursor-delivered payload.
+fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
 
 # --- scope: genuine primary checkout only -----------------------------------
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
@@ -124,7 +138,24 @@ fi
 # Claude runs one background process per firing with no dedupe. Exactly one
 # owner foregrounds the arm and translates its close; every other firing exits
 # 0 so one watcher cycle maps to at most one exit-2 rewake.
-fm_lock_try_acquire "$OWNER_LOCK" || exit 0
+#
+# A claim whose own ledger entry or recorded pid-identity proves its supervision
+# decision already finished is abandoned, not in flight: deferring to it forever
+# is what leaves a home unsupervised with no watcher and no lock
+# (fm_autoarm_claim_abandoned in bin/fm-wake-lib.sh owns that proof and its
+# race-free reclaim). Reclaim it once and retry; anything still genuinely
+# deciding keeps the lock and this firing stays inert.
+if ! fm_lock_try_acquire "$OWNER_LOCK"; then
+  fm_autoarm_release_abandoned "$STATE" || exit 0
+  fm_lock_try_acquire "$OWNER_LOCK" || exit 0
+fi
+# Record WHO this claim is before publishing the role both Stop participants read
+# as ownership. A bare pid the operating system later hands to an unrelated live
+# process is exactly what makes a killed claim look in flight forever, in the two
+# shapes the ledger cannot settle: an entry still reading arming, and no entry at
+# all. Best effort; a home whose identity cannot be recorded keeps the ledger-only
+# boundary rather than losing its claim.
+fm_autoarm_claim_record_identity "$STATE" || true
 if ! fm_lock_set_role "$OWNER_LOCK" autoarm; then
   fm_lock_release "$OWNER_LOCK"
   exit 0
@@ -230,7 +261,7 @@ if [ "$ACTIONABLE" -eq 1 ]; then
   {
     printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
     [ -n "$OUT" ] && grep -E '^(signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
-    printf 'Run bin/fm-wake-drain.sh first and handle the wake. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
+    printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
   } >&2
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 2

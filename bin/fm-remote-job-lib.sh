@@ -20,17 +20,20 @@
 # fm_remote_job_command_preemptible names the read-only long-poll class
 # (fm-remote-delta-read.sh, the reply-log delta read). The worker preempts a
 # running preemptible job as soon as a non-preemptible job is queued and
-# publishes exit 75 with emptied stdout and stderr, identical to the poll's own
-# elapsed-window-with-no-data result. The delta read is non-destructive and
-# cursor-anchored, so the caller's normal re-arm re-reads the same data and a
-# preempted poll loses nothing.
+# publishes exit 76 with emptied stdout and stderr, distinct from the poll's
+# exit 75 elapsed-window-with-no-data result. The delta read is non-destructive
+# and cursor-anchored, so the caller's normal re-arm re-reads the same data and
+# a preempted poll loses nothing.
 #
 # The worker accepts only a tracked, non-symlink executable named fm-*.sh below
 # its configured FM_ROOT/bin. Every child receives env -i with the composed
 # PATH, HOME, FM_HOME, FM_ROOT_OVERRIDE, and FM_REMOTE_JOB_ACTIVE=1. The PATH
 # is intentionally filesystem-discovered rather than login-shell-derived:
 # ~/.local/bin; nvm, asdf, and mise shims/install bins; Nix; Homebrew; and the
-# system tail. No shell startup files are evaluated.
+# system tail. No shell startup files are evaluated. Each discovered set is
+# appended in the shell's own sorted pathname-expansion order, so which install
+# of a multi-version tool wins is fixed by this composition rather than by the
+# order the filesystem happens to return.
 #
 # On macOS the worker is Firstmate's Aqua LaunchAgent
 # dev.firstmate.remote-job at ~/Library/LaunchAgents/dev.firstmate.remote-job.plist
@@ -57,6 +60,8 @@ FM_REMOTE_JOB_TIMEOUT=${FM_REMOTE_JOB_TIMEOUT:-360}
 FM_REMOTE_JOB_WAIT_GRACE=${FM_REMOTE_JOB_WAIT_GRACE:-30}
 FM_REMOTE_JOB_POLL_SECONDS=${FM_REMOTE_JOB_POLL_SECONDS:-0.05}
 FM_REMOTE_JOB_REAP_SECONDS=${FM_REMOTE_JOB_REAP_SECONDS:-3600}
+# shellcheck disable=SC2034 # Shared protocol constant consumed by the worker and sourcing callers.
+FM_REMOTE_JOB_PREEMPTED_EXIT=76
 FM_REMOTE_JOB_OPERATOR_PATH=
 FM_REMOTE_JOB_CHILD_PATH=
 FM_REMOTE_JOB_STATE=
@@ -128,11 +133,18 @@ fm_remote_job_path_append_resolved_dir() { # <directory>
   fm_remote_job_path_append "$physical"
 }
 
-fm_remote_job_append_glob_dirs() { # <glob whose matches are directories>
-  local pattern=$1 directory
-  while IFS= read -r directory; do
+# Callers pass an already-expanded glob rather than the pattern, because only
+# the shell's own pathname expansion sorts its matches: bash sorts
+# glob_filename's result in pathexp.c, while `compgen -G` reaches the same
+# glob_filename through pcomplete.c, which does not sort. On bash 3.2 (macOS
+# /bin/bash) that handed back raw readdir order, so which install of a
+# multi-version tool a remote job resolved depended on the filesystem instead
+# of on this composition.
+fm_remote_job_append_dirs() { # <expanded glob matches>
+  local directory
+  for directory in "$@"; do
     fm_remote_job_path_append_if_dir "$directory"
-  done < <(compgen -G "$pattern" || true)
+  done
 }
 
 fm_remote_job_nvm_default_selector() { # <account-home>
@@ -215,11 +227,11 @@ fm_remote_job_compose_operator_path() { # <account-home>
   nvm_bin=$(fm_remote_job_nvm_selected_bin "$account_home" 2>/dev/null || true)
   [ -z "$nvm_bin" ] || fm_remote_job_path_append "$nvm_bin"
   fm_remote_job_path_append_if_dir "$account_home/.asdf/shims"
-  fm_remote_job_append_glob_dirs "$account_home/.asdf/installs/*/*/bin"
+  fm_remote_job_append_dirs "$account_home"/.asdf/installs/*/*/bin
   fm_remote_job_path_append_if_dir "$account_home/.local/share/mise/shims"
   fm_remote_job_path_append_if_dir "$account_home/.mise/shims"
-  fm_remote_job_append_glob_dirs "$account_home/.local/share/mise/installs/*/*/bin"
-  fm_remote_job_append_glob_dirs "$account_home/.mise/installs/*/*/bin"
+  fm_remote_job_append_dirs "$account_home"/.local/share/mise/installs/*/*/bin
+  fm_remote_job_append_dirs "$account_home"/.mise/installs/*/*/bin
   fm_remote_job_path_append_resolved_dir "$account_home/.nix-profile/bin"
   account_user=$(id -un 2>/dev/null || true)
   if [ -n "$account_user" ]; then
@@ -742,25 +754,36 @@ fm_remote_job_worker_process_group() { # <pid>
 
 # Stop a worker and every descendant it leaked, TERM first and KILL only for a
 # survivor. Signals the isolated worker group when one is provable and the lone
-# process otherwise. Returns non-zero when the worker is still alive afterwards.
+# process otherwise. Returns non-zero when any verified worker-group member is
+# still alive afterwards.
 fm_remote_job_stop_worker_tree() { # <pid>
   local pid=$1 pgid i=0
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$pid" -gt 1 ] || return 1
   pgid=$(fm_remote_job_worker_process_group "$pid" 2>/dev/null || true)
   if [ -n "$pgid" ]; then kill -TERM -- "-$pgid" 2>/dev/null || true; else kill -TERM "$pid" 2>/dev/null || true; fi
-  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 50 ]; do
+  while { [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null || [ -z "$pgid" ] && kill -0 "$pid" 2>/dev/null; } \
+    && [ "$i" -lt 50 ]; do
     i=$((i + 1))
     sleep 0.1
   done
-  kill -0 "$pid" 2>/dev/null || return 0
+  if [ -n "$pgid" ]; then
+    kill -0 -- "-$pgid" 2>/dev/null || return 0
+  else
+    kill -0 "$pid" 2>/dev/null || return 0
+  fi
   if [ -n "$pgid" ]; then kill -KILL -- "-$pgid" 2>/dev/null || true; else kill -KILL "$pid" 2>/dev/null || true; fi
   i=0
-  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 50 ]; do
+  while { [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null || [ -z "$pgid" ] && kill -0 "$pid" 2>/dev/null; } \
+    && [ "$i" -lt 50 ]; do
     i=$((i + 1))
     sleep 0.1
   done
-  ! kill -0 "$pid" 2>/dev/null
+  if [ -n "$pgid" ]; then
+    ! kill -0 -- "-$pgid" 2>/dev/null
+  else
+    ! kill -0 "$pid" 2>/dev/null
+  fi
 }
 
 fm_remote_job_read_single_line() {

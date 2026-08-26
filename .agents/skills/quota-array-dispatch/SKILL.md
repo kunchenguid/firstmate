@@ -2,7 +2,8 @@
 name: quota-array-dispatch
 description: >-
   Agent-only decision procedure for resolving a matched crew-dispatch profile
-  array from current quota-axi output, including effective headroom, usable runway, and configured telemetry constraints.
+  array from quota-axi's default TOON, ranking by spendPriority after three
+  orthogonal gates and any configured TraeX telemetry preference.
   Load when a dispatch rule or default resolves to more than one profile candidate.
 user-invocable: false
 metadata:
@@ -14,17 +15,30 @@ metadata:
 This skill is the single owner of the completion-aware profile-array selection procedure.
 `AGENTS.md` section 4 owns the always-loaded intake boundary, load trigger, malformed-config refusal, every-candidate accounting, and strongest-reasoning/tie safety rules.
 `harness-adapters` owns harness verification, model/provider discovery, and effort fallback.
-`quota-axi` remains data-only, reports whatever granularity the vendor supplies, and never recommends, selects, ranks, or infers a route.
+`quota-axi` remains data-only: it publishes `spendPriority` as a comparable scalar and never recommends, selects, ranks, or infers a route.
 Do not add a daemon, opaque composite score, routing wrapper, hard-coded model-specific policy, or producer-side route recommendation.
 Deterministic shell owns only schema, configuration, and version validation plus concrete spawn safeguards; every model-to-provider, provider-to-credential, and quota-applicability relation is yours to establish transparently and to show your evidence for.
 The optional per-candidate `preferWhileLoadBelowPercent` field is a local profile-array policy input, not provider data or shared product policy.
 It is valid only for a TraeX candidate with an explicit model and a positive numeric threshold.
 
-## Collect facts
+## Read the default TOON
 
-Run `quota-axi --json` once per intake and reuse that snapshot for every candidate.
-Do not take a second snapshot to settle a candidate, and read `quota-axi auth --json` when a candidate's credential surface is in question.
-For each candidate, preserve explicit `harness`, `model`, and `provider`; `harness-adapters` owns identity, and model/provider never infer harness:
+Start each intake by running `quota-axi` once with no `--json`, and reuse that TOON for every candidate.
+Post-consolidation quota-axi (the floor owned by `bin/fm-quota-axi-lib.sh`) puts `spendPriority` in the default `quota[]` block beside `effectivePercentRemaining`, `runway`, `confidence`, `limitedBy`, and `resetsAt`.
+Sparse `exhaustion[]` carries finite-runway seconds only for `projected_exhaustion` and `exhausted_now`.
+Sparse `attention[]` names auth, stale, and unmeasurable facts.
+`spendPriority` is THE quota-perspective ranker.
+It already computes the economics that older instructions reconstructed by hand from headroom, pace, reserve, and window-id lists; do not recompute those.
+Do not read `--json` on the normal path, and do not reach for `--full` to rebuild that economics.
+
+After reading the TOON, fall back to one `quota-axi --json` call only when that TOON is genuinely ambiguous for the decision, or when the installed quota-axi is somehow below the floor so its TOON lacks `spendPriority`.
+Ambiguous means a candidate's `spendPriority` is the literal `unknown` or unmeasurable, a real tie still needs extra evidence, or a candidate's eligibility is unclear from `quota[]` plus `attention[]`.
+The fallback therefore has an explicit TOON-then-JSON call sequence; reuse its JSON result and do not take any further quota snapshots.
+Below-floor is rare: bootstrap enforces `FM_QUOTA_AXI_MIN` and normally reports `MISSING` before dispatch; if an intake somehow reaches an older build whose TOON lacks `spendPriority`, use the defensive `--json` fallback rather than treating the missing scalar as healthy.
+`--json` is a defensive belt, not a habit; never reach for it because it feels more complete.
+Read `quota-axi auth --json` only when a candidate's credential surface is in question.
+
+When the JSON fallback is needed, preserve these facts for each candidate:
 
 - task/profile fit and required reasoning class
 - applicable effective headroom (`effectivePercentRemaining`) from the established provider/model scope
@@ -35,15 +49,19 @@ For each candidate, preserve explicit `harness`, `model`, and `provider`; `harne
 - the configured `preferWhileLoadBelowPercent` value, when present
 - schema notes when runway, pace, or model telemetry fields are absent
 
-Stale raw windows are diagnostic, never headroom or fabricated runway.
-Grok's `credits.remaining` is a prepaid balance unrelated to `percentRemaining`; never read it as exhaustion.
-Read all windows named by `boundedBy`, `limitingWindowIds`, `aheadWindowIds`, `behindWindowIds`, `onPaceWindowIds`, `unknownWindowIds`, and `unmeasurableWindowIds`.
-The compact default output intentionally omits numeric reserve, while `--json` and `--full` retain reserve diagnostics.
+For each candidate, preserve explicit `harness`, `model`, and `provider`; `harness-adapters` owns identity, and model/provider never infer harness.
 
-## Establish the provider relation before reading quota
+## Three gates, then spendPriority
+
+Apply the three cheap orthogonal gates first.
+`spendPriority` ranks only among candidates that pass all three.
+It cannot override a hard-gate failure, and it is never hidden inside a new composite score.
+
+### 1. Eligibility
 
 Deterministic shell must never map a model to a provider, a provider to a credential store, or a name prefix to a family.
 You establish those relations yourself, in the open, from the candidate's own authoritative catalog (`harness-adapters` owns the per-harness discovery surface) plus the one intake snapshot.
+
 Name the evidence for each relation you assert so the conclusion is inspectable.
 
 1. Confirm the catalog lists the candidate's model and record the provider family it reports.
@@ -57,7 +75,7 @@ Name the evidence for each relation you assert so the conclusion is inspectable.
 
 ### TraeX model joins
 
-For TraeX, the same `quota-axi --json` snapshot normalizes the harness's read-only model catalog into `providers[].models[]`.
+For TraeX, the permitted `quota-axi --json` fallback normalizes the harness's read-only model catalog into `providers[].models[]`; a configured TraeX model or load preference whose eligibility cannot be established from TOON is genuine ambiguity that requires that fallback.
 Join the configured model to exactly one `models[].catalogId`; do not match by display label, backend name, array position, or the captain-approved display-name mapping.
 A fresh TraeX provider record whose normalized catalog does not contain that exact `catalogId` is concrete unsupported-model evidence.
 An unavailable, errored, rate-limited, auth-required, or stale provider record does not prove catalog absence and remains explicit uncertainty unless its selected credential is separately proven unusable.
@@ -65,7 +83,7 @@ Do not run another catalog command for this array decision: the one quota snapsh
 
 TraeX `load.percent` is provider-reported model load, can exceed 100, and is never quota usage, quota used, or quota remaining.
 Only a fresh record with `load.status: "known"`, `load.stale: false`, and a numeric `load.percent` can satisfy or violate `preferWhileLoadBelowPercent`.
-A value strictly below the configured threshold makes that otherwise viable TraeX candidate the explicit local preference; a value at or above the threshold blocks it.
+A value strictly below the configured threshold makes that otherwise viable TraeX candidate the explicit local preference after the three gates and before `spendPriority`; a value at or above the threshold blocks it at eligibility.
 Missing, invalid, or stale load neither satisfies the preference nor blocks the candidate; disclose the uncertainty and continue with quota, runway, pace, fit, and reasoning evidence.
 
 Join `quota.status: "authoritative"` through its exact `quota.scope` to `quotaSemantics.effectiveAvailability[].scope`, and use `quota.windowIds` only as exact joins to `windows[]`.
@@ -81,8 +99,8 @@ A Pi-hosted family may authenticate through the vendor's own store with no `pi:`
 
 Uncertainty and ineligibility are different findings:
 
-- No model-level window, no matching auth source, an absent `state.authStatus`, an unmeasurable or `unknown` scope, or a surface quota-axi does not model at all is disclosed uncertainty.
-  Keep the candidate eligible, state the unknown, and prefer known sustainable evidence when otherwise comparable.
+- No model-level window, no matching auth source, an unmeasurable or `unknown` scope, or a surface quota-axi does not model at all is disclosed uncertainty.
+  Keep the candidate eligible, state the unknown, and prefer known viable evidence when otherwise comparable.
 - An expired credential is a short-lived session token the owning vendor renews on next use, not a sign-out.
 - Only concrete contradictory evidence blocks: an authoritative catalog proving the model unsupported, or proof that the credential the candidate actually selects is unusable.
 - Reserve login wording for that proven-unusable case, and name the harness, model, surface, and evidence.
@@ -91,55 +109,46 @@ When a credential's local classification is the only thing standing between a ca
 `bin/fm-vendor-auth-probe.sh` is the only approved vendor-credential probe; its `--help` owns the registered probes and mechanics.
 It takes no harness, model, or provider and returns a fact, not a route: only `authenticated` and `unauthenticated` are ground truth, while `indeterminate`, `timeout`, and `unavailable` establish nothing and must never be read as either outcome.
 Never launch a vendor CLI yourself, and never probe a credential store the candidate does not use.
+Grok prepaid `credits` are unrelated to paid-window headroom; never read them as exhaustion.
 
-## Pace semantics
+Malformed configuration is an actionable error, not a candidate to rank around.
 
-`reservePercentPoints = percentRemaining - timeRemainingPercent`.
-Negative reserve means usage is ahead of reset pace and creates conservation pressure.
-Positive reserve means usage is behind reset pace.
-`on_pace` is neutral.
-Conservation pressure is present for effective pace status `ahead`, effective pace status is `mixed` and any `aheadWindowIds` remain, or a bounding window is `ahead`.
-When pace is the first unresolved comparison, known `behind` evidence has less conservation pressure than `on_pace`, which has less than `ahead`; compare signed reserve within the same pace class without turning it into a score.
-`unknown` is valid explicit uncertainty from quota-axi, not parser failure or permission to assume health.
-A candidate with unknown pace remains eligible, but known lower conservation pressure can justify the choice when all earlier completion evidence is otherwise comparable.
+### 2. Reasoning-class fit
 
-## Selection order
+Keep only candidates that meet the required reasoning class for this task (a simple bug fix versus very-difficult design).
+Never use `spendPriority` or remaining quota to silently replace that class.
+When every remaining candidate is tight, dispatch inside the strongest-reasoning class if one of those candidates can proceed, or stop and report that the strongest-class choice cannot proceed rather than downgrading it to spend or conserve quota.
 
-Apply only among candidates satisfying required fit and strongest reasoning class.
-Never use headroom, runway, pace, or reserve to silently replace that reasoning class.
+### 3. Runway feasibility floor
 
-1. Concrete contradictory evidence or malformed configuration: stop and report the tuple and that evidence.
-   Block only the affected candidate when the contradiction is candidate-scoped and another configured candidate remains usable; refuse the whole array only for malformed configuration or when no candidate can proceed.
-   A fresh authoritative applicable scope with `effectivePercentRemaining` at zero, `runway.status: "exhausted_now"`, or a joined provider depletion flag is concrete depleted-quota evidence for that candidate.
-   Unmeasurable quota, a missing model-level window, an absent runway field, and a credential surface quota-axi does not model are uncertainty, never this rule.
-2. Apply `preferWhileLoadBelowPercent` only through the exact fresh TraeX model join above.
-   A known value below the threshold establishes the configured preference only when the candidate has no known completion shortfall; it never rescues depleted quota, a known runway that ends before likely completion, unsupported model evidence, an unusable credential, incompatible task fit, or a weaker-than-required reasoning class.
-   A known value at or above the threshold blocks that candidate, while unknown load leaves it eligible without preference.
-   Never invent a generic percentage floor or apply a configured threshold to quota remaining.
-3. Honor any explicit captain instruction that sets a floor for that candidate before the generic comparison.
-   The current concrete instruction overrides a conflicting local profile preference within its exact scope.
-4. Keep the strongest-reasoning class when every candidate is tight or completion evidence is poor.
-   Dispatch inside that class when a candidate can proceed, or report that its strongest-class choice cannot proceed rather than downgrading it to conserve quota.
-5. Compare comparable-fit candidates on their applicable effective headroom and usable runway.
-   Eliminate a candidate only when another candidate Pareto-dominates it on both dimensions, with at least one dimension strictly better.
-   Establish dominance only from comparable known evidence, never by treating absent, `unknown`, or unmeasurable headroom or runway as zero or as a healthy value.
-6. Prefer supported runway evidence that projects availability through the inspectable likely-completion horizon.
-   `projected_exhaustion` reaches only its finite `usableRunwaySeconds`; `through_reset` means every authoritative current-cycle bound reaches its own reset without exhaustion and has no synthetic finite deadline.
-   When a bound resets before the likely completion horizon, `through_reset` is positive evidence that the candidate crosses that reset, while a finite projection ending before completion is a known shortfall.
-   Known evidence that does not reach that horizon is inferior to known evidence that does, even when its signed reserve is less negative.
-   Preserve projection confidence, the cycle-average basis, the limiting window when finite, and the horizon estimate in the rationale rather than hiding them in a score or model-specific heuristic.
-7. Resolve remaining uncertainty explicitly.
-   An authenticated candidate with unknown or unmeasurable headroom or runway stays eligible and cannot be silently excluded or assumed sustainable.
-   Prefer known viable evidence when otherwise comparable, and report uncertainty or ask the captain when it still prevents a justified choice.
-8. Use pace and signed reserve only as later diagnostic tie-break evidence among candidates still unresolved after headroom, runway, likely-completion viability, and uncertainty.
-   Pace and reserve never rescue a clearly inferior completion prospect.
-   Do not collapse these facts, `selection.spendPriority`, or any other aggregate into an opaque routing score.
-9. Older schemas or absent runway, pace, or normalized TraeX model fields: do not crash, fabricate evidence, treat absence as healthy, or silently exclude a candidate.
-   State which evidence is unavailable, retain the candidate unless separate concrete evidence blocks it, and apply only the comparisons the snapshot supports.
-10. Genuine ties: stop and report every tied candidate for captain choice.
-   Do not select by array order, harness name, or another arbitrary identity ordering.
-   Report duplicate concrete profiles as a configuration error.
+Known runway that will not last until the inspectable likely-completion horizon fails this gate, even when that candidate has the highest `spendPriority`.
+Read `runway` from the `quota[]` row: `through_reset` passes this generic feasibility floor because the window reaches its refill without exhausting; never compare its `resetsAt` with the completion horizon as though reset were an exhaustion deadline.
+`exhausted_now` is zero, and `projected_exhaustion` uses the matching `exhaustion[]` row's `usableRunwaySeconds`.
+A high `spendPriority` on a nearly empty window that will exhaust soon must not route into a mid-task stall.
+Unknown or unmeasurable runway stays eligible with disclosed uncertainty and is never assumed to pass.
+Do not invent a generic percentage floor, and honor an explicit captain floor for a candidate when one exists.
 
-Account for every candidate visibly before selecting or escalating, naming its catalog evidence, provider relation, applicable quota and authentication facts, remaining uncertainty, fit and reasoning class, effective headroom, usable runway, likely-completion reasoning, and later pace or reserve evidence when used.
+## Apply a configured TraeX preference, then rank by spendPriority
+
+Among candidates that pass all three gates, first honor a fresh satisfied `preferWhileLoadBelowPercent` preference as defined above.
+If no candidate has that explicit local preference, pick the highest known `spendPriority`.
+A higher known scalar is better: positive means paid allowance is on track to reach reset unused, `0` is exact utilization, and negative means overdrawn against the reset clock.
+Rank only from comparable known scalars.
+Never treat absent, `unknown`, or unmeasurable `spendPriority` as zero or as healthy; `0` means exact utilization, a different claim from unknown.
+An unknown `spendPriority` keeps the candidate eligible with disclosed uncertainty.
+Prefer known viable evidence when otherwise comparable.
+After the permitted TOON-to-JSON fallback, escalate to Firstmate instead of routing if no candidate can be ranked or runway uncertainty prevents proving the feasibility floor for any candidate that could be selected.
+Never resolve that terminal uncertainty by treating unknown as healthy or by choosing arbitrarily.
+Show the scalar or the literal `unknown` in the rationale; do not hide it in a score.
+
+Do not compare headroom against runway by hand.
+Do not use pace or signed reserve as a later tie-break layer.
+Do not read `aheadWindowIds`, `behindWindowIds`, `onPaceWindowIds`, `limitingWindowIds`, or other window-id lists to reconstruct what `spendPriority` already computed.
+
+Genuine ties: stop and report every tied candidate for captain choice.
+Do not select by array order, harness name, or another arbitrary identity ordering.
+Report duplicate concrete profiles as a configuration error.
+
+Account for every candidate visibly before selecting or escalating, naming its catalog evidence, provider relation, applicable quota and authentication facts, remaining uncertainty, fit and reasoning class, configured load preference and fresh telemetry when applicable, `spendPriority`, and runway-versus-horizon result.
 A blocked credential report must name `harness`, `model`, authentication surface, and concrete failure evidence; never emit a bare `Grok unauthenticated` statement.
 Never conclude with an unexplained "best quota" label.

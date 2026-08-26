@@ -107,6 +107,64 @@ test_retire_serializes_and_rejects_stale_gen() {
   pass "retire waits for the writer lock and cannot remove a new incarnation"
 }
 
+# Regression for issue #2625: the writer lock's stale-lock branch resolved the
+# lock's mtime with `stat -f %m ... || stat -c %Y ...`. On GNU coreutils `-f` is
+# *filesystem* stat, so it consumes the format string as a path, complains on
+# stderr, prints "  File: ..." on stdout, and still exits 0 - the GNU form in the
+# fallback never ran. The following `$((now - mtime))` then evaluated the word
+# `File`, which under `set -u` aborted the writer with "File: unbound variable".
+# fm-teardown.sh died there after returning the worktree, leaving state/<id>.meta
+# and friends behind to generate stale wakes forever, and every re-run died
+# identically because the abandoned lock directory was never broken.
+#
+# The stat and uname stubs make this deterministic on any host: the writer must
+# take the Linux path and still break a provably stale lock.
+test_stale_lock_broken_under_gnu_stat() {
+  local state gen fakebin real_uname out status
+  state=$(new_state_dir gnu-stat-lock)
+  gen=$("$EV" arm "$state" t1)
+  fakebin=$(fm_fakebin "$TMP_ROOT/gnu-stat-lock")
+  real_uname=$(command -v uname)
+
+  # GNU coreutils semantics, self-contained so no real stat is consulted.
+  cat > "$fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -c ] && [ "${2:-}" = %Y ]; then
+  printf '%s\n' 1000000000   # long-abandoned lock
+  exit 0
+fi
+if [ "${1:-}" = -f ]; then
+  echo "stat: cannot read file system information for '$2': No such file or directory" >&2
+  shift 2
+  printf '  File: "%s"\n' "${1:-}"
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$fakebin/stat"
+  cat > "$fakebin/uname" <<SH
+#!/usr/bin/env bash
+if [ \$# -eq 0 ]; then printf 'Linux\n'; exit 0; fi
+exec "$real_uname" "\$@"
+SH
+  chmod +x "$fakebin/uname"
+
+  mkdir "$state/t1.busy-state.lock"
+  out=$(PATH="$fakebin:$PATH" "$EV" retire "$state" t1 --gen "$gen" 2>&1) && status=0 || status=$?
+  case "$out" in
+    *'unbound variable'*) fail "the writer still dies on GNU stat output: $out" ;;
+  esac
+  [ "$status" = 0 ] || fail "retire did not break a provably stale writer lock: $out"
+  [ ! -e "$state/t1.busy-state" ] || fail "retire left the record behind"
+  [ ! -e "$state/t1.busy-gen" ] || fail "retire left the gen sidecar behind"
+  [ ! -e "$state/t1.busy-state.lock" ] || fail "retire left the stale lock behind"
+
+  # Teardown must be able to run again over the same task without failing.
+  PATH="$fakebin:$PATH" "$EV" retire "$state" t1 --current-gen \
+    || fail "a repeated retire over already-cleaned state was not idempotent"
+  pass "the writer breaks a stale lock instead of dying on GNU stat output"
+}
+
 test_retire_missing_sidecar_is_idempotent() {
   local state gen
   state=$(new_state_dir retire-missing)
@@ -272,6 +330,31 @@ test_kimi_unverified_gate() {
   pass "standalone kimi classifies unknown until the live verification gate opens"
 }
 
+test_cursor_ignores_rendered_and_native_signals() {
+  local state out
+  state=$(new_state_dir cursor-gate)
+  # Cursor's verdict comes from its own transcript, never from rendered text.
+  # With no binding to fold, the honest answer is unknown - and a rendered
+  # busy-looking footer must not change that.
+  out=$(fm_busy_classify tmux w1 cursor t1 "$state" 'Working')
+  [ "$out" = "unknown cursor-transcript" ] \
+    || fail "cursor must not classify from its rendered footer, got '$out'"
+  out=$(fm_busy_classify tmux w1 cursor t1 "$state" 'ctrl+c to stop')
+  [ "$out" = "unknown cursor-transcript" ] \
+    || fail "cursor must not classify from the ctrl+c busy token either, got '$out'"
+  # Herdr's narrower native streaming state is not cursor's turn lifecycle.
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_busy_state() { printf '%s' busy; }
+  out=$(fm_busy_classify herdr s:p cursor t1 "$state")
+  [ "$out" = "unknown cursor-transcript" ] \
+    || fail "cursor must not borrow herdr's native busy verdict, got '$out'"
+  unset -f fm_backend_busy_state
+  # The fold is a PULL source: nothing is armed, so no stored record is trusted.
+  [ -z "$(fm_busy_sources_for_harness cursor)" ] \
+    || fail "cursor must trust no stored record source; its fold has no writer"
+  pass "cursor classifies only from its transcript fold, never rendered text or native state"
+}
+
 # --- endpoint death and native fallbacks ----------------------------------------
 
 test_dead_endpoint_overrides() {
@@ -362,6 +445,7 @@ test_apply_current_gen_reset
 test_apply_unarmed_refused
 test_retire_serializes_and_rejects_stale_gen
 test_retire_missing_sidecar_is_idempotent
+test_stale_lock_broken_under_gnu_stat
 test_stale_gen_event_rejected
 test_stale_gen_record_unknown
 test_missing_record_unknown_not_idle
@@ -372,6 +456,7 @@ test_converted_adapters_ignore_footer_text
 test_grok_regex_isolated
 test_codex_unverified_gate
 test_kimi_unverified_gate
+test_cursor_ignores_rendered_and_native_signals
 test_dead_endpoint_overrides
 test_herdr_native_busy_only
 test_record_read_leaves_caller_shell_intact

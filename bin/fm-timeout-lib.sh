@@ -87,18 +87,25 @@ fm_run_bash_timeout() {
 }
 
 fm_run_external_timeout() {
-  local runner=$1 seconds=$2 status_file runner_rc command_rc
+  local runner=$1 seconds=$2 status_file runner_pid runner_rc command_rc
   shift 2
   status_file=$(mktemp "${TMPDIR:-/tmp}/fm-timeout-status.XXXXXX" 2>/dev/null) || return 124
+  # Run timeout asynchronously so its pid - also the process-group id created
+  # by GNU/BSD timeout without --foreground - remains available for cleanup.
+  # A shell wrapper can exit promptly on TERM while one of its descendants
+  # ignores TERM; timeout then considers the command finished and does not send
+  # its configured KILL. Explicitly reap that leftover group on a real timeout.
   # shellcheck disable=SC2016  # Expansion is deliberately deferred to the child shell.
-  if "$runner" -k 1 "$seconds" bash -c '
+  "$runner" -k 1 "$seconds" bash -c '
     status_file=$1
     shift
     "$@"
     command_rc=$?
     printf "%s\n" "$command_rc" > "$status_file"
     exit "$command_rc"
-  ' _ "$status_file" "$@"; then
+  ' _ "$status_file" "$@" &
+  runner_pid=$!
+  if wait "$runner_pid"; then
     runner_rc=0
   else
     runner_rc=$?
@@ -110,7 +117,10 @@ fm_run_external_timeout() {
     *) [ "$command_rc" -le 255 ] && return "$command_rc" ;;
   esac
   case "$runner_rc" in
-    124|137) return 124 ;;
+    124|137)
+      kill -KILL -- "-$runner_pid" 2>/dev/null || true
+      return 124
+      ;;
     *) return "$runner_rc" ;;
   esac
 }
