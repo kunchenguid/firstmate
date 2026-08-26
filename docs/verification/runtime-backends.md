@@ -972,7 +972,7 @@ FM_CALM_BRANCH_OUTCOMES_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-calm-branch-outco
 Observed output:
 
 ```text
-ok - real Pi 0.84.3 keeps the whole stock branch-outcome row, raw records and clip-and-expand shape included, while Calm is off
+ok - real Pi 0.84.3 keeps the complete upstream branch-outcome row and raw records while Calm is off
 ok - real Pi 0.84.3 collapses a branch-outcome read under Calm to one dim line per outcome that still needs the captain, and nothing else
 ok - real Pi 0.84.3 exports every branch-outcome record from a session where Calm collapsed that row on screen
 ok - real Pi 0.84.3 keeps a failed branch-outcome read visible under Calm instead of collapsing it to nothing

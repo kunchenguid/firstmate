@@ -164,8 +164,8 @@ outcome() { # <verdict> <task> <summary>
     || fail "the real outcome writer refused a $1 record for $2"
 }
 
-# More records than Pi previews unexpanded, so the Calm-off path also proves the
-# stock clip-and-expand shape survived taking the render slots over.
+# Enough records to make any accidental Calm-off filtering visible: the
+# upstream branch-outcomes renderer shows the complete sanitized store listing.
 outcome captain task-12 "PR https://example.com/pr/12 checks green, ready for review"
 i=1
 while [ "$i" -le 14 ]; do
@@ -228,9 +228,9 @@ test_calm_off_keeps_the_stock_row() {
     "pi $PI_VERSION dropped the branch-outcome tool row while Calm was off"
   assert_grep '"verdict":"routine"' "$snapshot" \
     "pi $PI_VERSION no longer shows the raw branch-outcome records while Calm is off"
-  assert_grep 'more lines,' "$snapshot" \
-    "pi $PI_VERSION lost the stock clip-and-expand shape for a long branch-outcome read while Calm was off"
-  pass "real Pi $PI_VERSION keeps the whole stock branch-outcome row, raw records and clip-and-expand shape included, while Calm is off"
+  assert_grep 'CALM_OUTCOMES_ROUTINE_14' "$snapshot" \
+    "pi $PI_VERSION clipped or filtered the upstream branch-outcome renderer while Calm was off"
+  pass "real Pi $PI_VERSION keeps the complete upstream branch-outcome row and raw records while Calm is off"
 }
 
 test_calm_on_collapses_to_what_needs_attention() {
@@ -268,17 +268,26 @@ if (!match) {
   process.exit(1);
 }
 const session = JSON.parse(Buffer.from(match[1], "base64").toString("utf8"));
-const entries = JSON.stringify(session.session?.entries ?? session.entries ?? []);
-const rowsIn = (text) => (String(text).match(/&quot;verdict&quot;/g) || []).length;
-const rendered = session.renderedTools?.call_calm_outcomes_read;
+const entries = session.session?.entries ?? session.entries ?? [];
+const outcomeResult = entries
+  .filter((entry) => entry?.message?.role === "toolResult")
+  .find((entry) => entry.message.toolCallId === "call_calm_outcomes_read");
+const rawOutput = outcomeResult?.message?.content
+  ?.filter((item) => item.type === "text")
+  .map((item) => item.text)
+  .join("\n");
+const records = rawOutput ? rawOutput.trim().split("\n") : [];
 const problems = [];
-if (!entries.includes('\\"verdict\\":\\"routine\\"') && !entries.includes('"verdict":"routine"')) {
-  problems.push("the exported session entries lost the raw outcome records");
-}
-if (!rendered?.resultHtmlExpanded) {
-  problems.push("the export rendered no result for the branch-outcome row");
-} else if (rowsIn(rendered.resultHtmlExpanded) !== 16) {
-  problems.push(`the exported branch-outcome row carried ${rowsIn(rendered.resultHtmlExpanded)} of 16 records`);
+if (records.length !== 16) {
+  problems.push(`the exported branch-outcome result carried ${records.length} of 16 records`);
+} else if (!records.every((record) => {
+  try {
+    return ["routine", "captain"].includes(JSON.parse(record).verdict);
+  } catch {
+    return false;
+  }
+})) {
+  problems.push("the exported branch-outcome result changed the raw JSONL records");
 }
 if (problems.length > 0) {
   console.error(`pi ${version}: ${problems.join("; ")}`);
