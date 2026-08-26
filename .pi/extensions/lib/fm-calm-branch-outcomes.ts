@@ -31,6 +31,10 @@ type BranchOutcomeRecord = {
 
 const OUTCOME_KEYS = new Set(["seq", "epoch", "task", "wake", "verdict", "summary", "silent"]);
 
+function singleLineText(value: string): string {
+  return value.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
+}
+
 function parseOutcomeRecord(line: string): BranchOutcomeRecord | undefined {
   let parsed: unknown;
   try {
@@ -70,7 +74,10 @@ export function calmBranchOutcomeAttention(
 ): CalmBranchOutcomeLine[] {
   const trimmedOutput = output.trim();
   if (isError) {
-    return [{ glyph: true, text: trimmedOutput || "could not read the outcome store" }];
+    return [{
+      glyph: true,
+      text: singleLineText(trimmedOutput || "could not read the outcome store"),
+    }];
   }
   if (!trimmedOutput || trimmedOutput === NO_OUTCOMES_TEXT) return [];
 
@@ -82,7 +89,10 @@ export function calmBranchOutcomeAttention(
       continue;
     }
     if (record.verdict !== "captain") continue;
-    lines.push({ glyph: true, text: `${record.task}: ${record.summary}` });
+    lines.push({
+      glyph: true,
+      text: `${singleLineText(record.task)}: ${singleLineText(record.summary)}`,
+    });
   }
   return lines;
 }

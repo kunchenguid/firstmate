@@ -54,15 +54,18 @@ store_listing 4 > "$TMP_ROOT/mixed.txt"
 [ "$(wc -l < "$TMP_ROOT/mixed.txt")" -eq 4 ] || fail "the store fixture did not produce 4 records"
 grep '"verdict":"routine"' "$TMP_ROOT/mixed.txt" > "$routine_only" \
   || fail "the store fixture produced no routine records"
+outcome captain task-15 $'first line\nsecond\t  line\rthird'
+store_listing 1 > "$TMP_ROOT/multiline.txt"
 
 test_collapse_and_preserve() {
   local out status
-  out=$(MODULE="$MODULE" MIXED="$TMP_ROOT/mixed.txt" ROUTINE="$routine_only" node --input-type=module <<'JS'
+  out=$(MODULE="$MODULE" MIXED="$TMP_ROOT/mixed.txt" MULTILINE="$TMP_ROOT/multiline.txt" ROUTINE="$routine_only" node --input-type=module <<'JS'
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const { calmBranchOutcomeAttention } = await import(pathToFileURL(process.env.MODULE).href);
 const mixed = readFileSync(process.env.MIXED, "utf8");
+const multiline = readFileSync(process.env.MULTILINE, "utf8");
 const routineOnly = readFileSync(process.env.ROUTINE, "utf8");
 const check = (label, actual, expected) => {
   const a = JSON.stringify(actual);
@@ -87,12 +90,15 @@ check("mixed store", calmBranchOutcomeAttention(mixed, false), [
   { glyph: true, text: "task-12: PR https://example.com/pr/12 checks green, ready for review" },
   { glyph: true, text: "task-4: blocked: cannot reach the forge, credentials rejected" },
 ]);
+check("multiline captain record", calmBranchOutcomeAttention(multiline, false), [
+  { glyph: true, text: "task-15: first line second line third" },
+]);
 
 // A failed read is never collapsed away: the captain who cannot see the fleet
 // has to be told, and the tool's own message is what says why.
 check(
   "failed read",
-  calmBranchOutcomeAttention("could not read the outcome store: exit 2", true),
+  calmBranchOutcomeAttention("could not read\nthe\t outcome store:\r exit 2", true),
   [{ glyph: true, text: "could not read the outcome store: exit 2" }],
 );
 check("failed read with no detail", calmBranchOutcomeAttention("", true), [
