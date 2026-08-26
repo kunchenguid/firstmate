@@ -136,13 +136,12 @@ a { color: inherit; text-decoration: none; }
 .bb-meta-mono { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-faint); white-space: nowrap; }
 
 /* open PRs, nav right slot - links only, the page never fetches anything */
-.bb-prs { display: flex; align-items: center; gap: 10px; min-width: 0; overflow: hidden; }
+.bb-prs, .bb-prs__list { display: flex; align-items: center; gap: 10px; min-width: 0; overflow: hidden; }
 .bb-prs[hidden] { display: none; }
 .bb-prs__count, .bb-prs__more {
   font-family: var(--font-mono); font-size: var(--fs-2xs); letter-spacing: 0.04em;
   text-transform: uppercase; color: var(--text-muted); white-space: nowrap; flex: none;
 }
-.bb-prs__list { display: flex; align-items: center; gap: 10px; min-width: 0; overflow: hidden; }
 /* links keep their own width; the list clips instead of pushing the nav wider,
    and the list and its overflow chip drop together once the nav is too narrow
    to show any of them, leaving the count alone */
