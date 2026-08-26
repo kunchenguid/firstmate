@@ -37,7 +37,6 @@ SNAPSHOT=$("$SCRIPT_DIR/fm-fleet-snapshot.sh" --json) || exit $?
 HEADROOM=$("$SCRIPT_DIR/fm-usage-wall.sh" headroom 2>/dev/null) \
   || HEADROOM='HEADROOM: (all providers) unknown reason=the headroom read did not complete'
 
-
 printf '%s\n' "$SNAPSHOT" | jq -r '
   def dash($v): if $v == null or $v == "" then "-" else $v end;
   def endpoint_exists($t):
@@ -105,4 +104,4 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   .secondmate_guidance.note
 '
 
-printf '\n## Headroom\n\n```\n%s\n```\n' "$HEADROOM"
+printf '\n## Headroom\n\n%s\n' "$HEADROOM"

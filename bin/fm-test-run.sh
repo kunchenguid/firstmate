@@ -212,7 +212,7 @@ family_for_basename() {
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
     fm-transition-lib.test.sh|\
-    fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
+    fm-test-run.test.sh|fm-test-isolation-proof.test.sh|fm-usage-wall.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
@@ -1198,6 +1198,13 @@ families_for_changed_path() {
       ;;
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh|\
     bin/fm-home-summary-refresh.sh)
+      printf '%s\n' snapshot-bearings
+      ;;
+    bin/fm-usage-wall.sh)
+      # The usage-wall surface is read from three places: its own contract
+      # tests, the session-start digest, and the heartbeat fleet view.
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' session-bootstrap
       printf '%s\n' snapshot-bearings
       ;;
     bin/fm-install-herdr.sh|bin/fm-install-treehouse.sh|bin/fm-herdr-ci-cleanup.sh)
