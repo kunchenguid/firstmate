@@ -429,7 +429,8 @@ EVALUATED=$(jq -n \
         | select(terminal_state(.current_state.state) | not)
         | select($prs.available == true)
         | .id as $id
-        | select([$prs.records[]?.id] | index($id) | not)
+        | select(any($prs.records[]?;
+                     .id == $id and (.armed == true or .terminal_notified == true)) | not)
         | finding("result-listener-missing";$id;"error";"high";
                   "in-flight ship with a recorded PR has no armed merge-poll listener";
                   "pr-poll";1)),

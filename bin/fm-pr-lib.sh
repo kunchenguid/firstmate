@@ -619,7 +619,7 @@ fm_pr_poll_artifacts_valid() {
 }
 
 fm_pr_poll_listeners_json() {
-  local state=$1 template=$2 f id records='[]'
+  local state=$1 template=$2 f id meta records='[]'
   if [ ! -d "$state" ]; then
     jq -n '{available:true,records:[]}'
     return 0
@@ -636,7 +636,19 @@ fm_pr_poll_listeners_json() {
     esac
     if fm_pr_poll_artifacts_valid "$state" "$id" "$template"; then
       records=$(jq -n --argjson records "$records" --arg id "$id" \
-        '$records + [{id:$id,armed:true}]')
+        '$records + [{id:$id,armed:true,terminal_notified:false}]')
+    fi
+  done
+  for f in "$state"/*.pr-poll-merge-notified; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    id=$(basename "$f" .pr-poll-merge-notified)
+    fm_pr_task_id_valid "$id" || continue
+    meta="$state/$id.meta"
+    if fm_pr_metadata_identity_parse "$meta" \
+      && fm_pr_poll_merge_already_notified "$state" "$id" \
+        "$FM_PR_META_PROVIDER" "$FM_PR_META_HOST" "$FM_PR_META_PATH" "$FM_PR_META_NUMBER"; then
+      records=$(jq -n --argjson records "$records" --arg id "$id" \
+        '$records + [{id:$id,armed:false,terminal_notified:true}]')
     fi
   done
   jq -n --argjson records "$records" '{available:true,records:$records}'

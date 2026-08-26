@@ -750,6 +750,36 @@ test_paused_ship_still_requires_pr_listener() {
   pass "declared waits retain their required PR listeners"
 }
 
+test_matching_retired_pr_listener_is_not_missing() {
+  local home fakebin marker out rc=0
+  home=$(make_home retired-pr-listener)
+  write_live_ship "$home" retired-pr
+  printf 'pr=https://github.com/example/alpha/pull/19\n' >> "$home/state/retired-pr.meta"
+  marker="$home/state/retired-pr.pr-poll-merge-notified"
+  printf '%s\n' fm-pr-poll-merge-notified-v1 github github.com example/alpha 19 > "$marker"
+  chmod 0600 "$marker"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
+  expect_code 0 "$rc" "matching terminal PR notification should retire the listener requirement"
+  printf '%s' "$out" | jq -e '
+    .status == "healthy"
+      and (any(.findings[]; .kind == "result-listener-missing"
+               and .subject == "retired-pr") | not)
+  ' >/dev/null || fail "matching retired PR listener was reported missing: $out"
+
+  printf '%s\n' fm-pr-poll-merge-notified-v1 github github.com example/alpha 18 > "$marker"
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
+  expect_code 1 "$rc" "a terminal notification for another PR must not retire the current listener"
+  printf '%s' "$out" | jq -e '
+    .status == "actionable"
+      and any(.findings[]; .kind == "result-listener-missing"
+              and .subject == "retired-pr")
+  ' >/dev/null || fail "mismatched terminal PR notification suppressed a missing listener: $out"
+  pass "only matching terminal PR notifications retire listener requirements"
+}
+
 test_inconclusive_dominates_actionable_status() {
   local home fakebin out rc=0
   home=$(make_home mixed-confidence)
@@ -876,6 +906,7 @@ test_invalid_pending_reply_is_inconclusive
 test_inventory_and_missing_listener
 test_invalid_procevent_registration_is_reported
 test_paused_ship_still_requires_pr_listener
+test_matching_retired_pr_listener_is_not_missing
 test_inconclusive_dominates_actionable_status
 test_unreadable_supervision_lock_is_inconclusive
 test_internal_worker_failure_returns_json
