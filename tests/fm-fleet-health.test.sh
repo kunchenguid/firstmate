@@ -358,6 +358,48 @@ test_grouped_inbox_and_stable_fingerprints() {
   pass "aged inbox messages group by task and keep a stable fingerprint"
 }
 
+test_invalid_inbox_records_are_inconclusive() {
+  local home fakebin real_stat out rc=0
+  home=$(make_home invalid-inbox-records)
+  mkdir -p "$home/state/broken.inbox"
+  cat > "$home/state/broken.inbox/bad.msg" <<'EOF'
+schema=fm-task-inbox.v1
+at=2026-08-26T12:00:00Z
+--
+invalid sequence
+EOF
+  printf 'schema=fm-task-inbox.v1\n' > "$home/state/broken.inbox/001.msg"
+  cat > "$home/state/broken.inbox/002.msg" <<'EOF'
+schema=fm-task-inbox.v1
+at=2026-08-26T12:00:00Z
+--
+unageable record
+EOF
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  real_stat=$(command -v stat)
+  cat > "$fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+case "${!#}" in
+  */002.msg) exit 1 ;;
+esac
+exec "$FM_TEST_REAL_STAT" "$@"
+SH
+  chmod +x "$fakebin/stat"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm \
+    FM_TEST_REAL_STAT="$real_stat" "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "invalid or unageable inbox records should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "steering-inbox-inconclusive"
+              and .count == 2 and (.evidence | contains("are invalid")))
+      and any(.findings[]; .kind == "steering-inbox-inconclusive"
+              and .count == 1 and (.evidence | contains("could not be aged")))
+      and (any(.findings[]; .kind == "steering-inbox-aged") | not)
+  ' >/dev/null || fail "malformed inbox evidence was hidden: $out"
+  pass "invalid and unageable inbox records remain inconclusive"
+}
+
 test_remote_liveness_is_inconclusive() {
   local home fakebin out rc=0
   home=$(make_home remote-liveness)
@@ -709,6 +751,7 @@ test_unreadable_local_endpoint_is_inconclusive
 test_terminal_unreadable_endpoint_is_inconclusive
 test_historical_status_pr_does_not_require_listener
 test_grouped_inbox_and_stable_fingerprints
+test_invalid_inbox_records_are_inconclusive
 test_remote_liveness_is_inconclusive
 test_pending_reply_broken_and_historical_noise_omitted
 test_inconclusive_secondmate_summary_not_broken

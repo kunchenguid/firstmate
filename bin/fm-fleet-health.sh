@@ -184,7 +184,7 @@ fi
 PENDING_JSON=$(fm_pending_reply_open_json "$STATE") \
   || PENDING_JSON='{"available":false,"now_epoch":null,"invalid_count":0,"records":[]}'
 INBOX_JSON=$(fm_task_inbox_unhandled_json "$STATE") \
-  || INBOX_JSON='{"available":false,"records":[]}'
+  || INBOX_JSON='{"available":false,"invalid_count":0,"unreadable_count":0,"records":[]}'
 LISTENERS_JSON=$(fm_procevent_listeners_json "$STATE") \
   || LISTENERS_JSON='{"available":false,"records":[]}'
 PR_JSON=$(fm_pr_poll_listeners_json "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh") \
@@ -233,6 +233,16 @@ EVALUATED=$(jq -n \
       (if $inbox.available == false then
         finding("steering-inbox-inconclusive";"steering-inbox";"notice";"inconclusive";
                 "steering-inbox records could not be read";"unreadable";1)
+      else empty end),
+      (if ($inbox.invalid_count // 0) > 0 then
+        finding("steering-inbox-inconclusive";"steering-inbox";"notice";"inconclusive";
+                (($inbox.invalid_count | tostring) + " steering-inbox record(s) are invalid");
+                "invalid";$inbox.invalid_count)
+      else empty end),
+      (if ($inbox.unreadable_count // 0) > 0 then
+        finding("steering-inbox-inconclusive";"steering-inbox";"notice";"inconclusive";
+                (($inbox.unreadable_count | tostring) + " steering-inbox record(s) could not be aged");
+                "unreadable-record";$inbox.unreadable_count)
       else empty end),
       (if $listeners.available == false then
         finding("result-listener-inconclusive";"procevent";"notice";"inconclusive";

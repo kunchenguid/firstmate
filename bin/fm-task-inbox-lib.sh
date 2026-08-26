@@ -105,6 +105,24 @@ fm_task_inbox_seq_of() {  # <basename>
   printf '%s' "$((10#$n))"
 }
 
+fm_task_inbox_record_valid() {  # <record-path>
+  local rec=$1 line
+  FM_TASK_INBOX_RECORD_FAILURE=invalid
+  fm_task_inbox_seq_of "${rec##*/}" >/dev/null || return 1
+  [ -f "$rec" ] && [ ! -L "$rec" ] || return 1
+  if [ ! -r "$rec" ]; then
+    FM_TASK_INBOX_RECORD_FAILURE=unreadable
+    return 1
+  fi
+  {
+    IFS= read -r line && [ "$line" = "schema=$FM_TASK_INBOX_SCHEMA" ] || return 1
+    IFS= read -r line || return 1
+    case "$line" in at=????-??-??T??:??:??Z) ;; *) return 1 ;; esac
+    IFS= read -r line && [ "$line" = -- ] || return 1
+  } < "$rec"
+  FM_TASK_INBOX_RECORD_FAILURE=
+}
+
 # Next unused sequence, scanning the inbox root AND handled/ so an
 # acknowledged sequence is never reissued. Caller must hold .seq.lock.
 fm_task_inbox_next_seq() {  # <inbox-dir>
@@ -404,35 +422,71 @@ fm_task_inbox_record_escalated() {  # <state-dir> <task-id> <record-path>
 # Read-only list of unhandled steering-inbox records with age.
 # Does not ring, escalate, or rewrite ladder bookkeeping.
 fm_task_inbox_unhandled_json() {  # <state-dir>
-  local state=$1 dir task rec seq age available=true
+  local state=$1 dir task rec seq age mtime now available=true
+  local invalid_count=0 unreadable_count=0 records='[]' row
   if [ ! -d "$state" ]; then
-    jq -n '{available:true,records:[]}'
+    jq -n '{available:true,invalid_count:0,unreadable_count:0,records:[]}'
     return 0
   fi
   if [ ! -r "$state" ] || [ ! -x "$state" ]; then
-    jq -n '{available:false,records:[]}'
+    jq -n '{available:false,invalid_count:0,unreadable_count:0,records:[]}'
     return 0
   fi
+  now=$(date +%s)
+  case "$now" in
+    ''|*[!0-9]*)
+      jq -n '{available:false,invalid_count:0,unreadable_count:0,records:[]}'
+      return 0
+      ;;
+  esac
   for dir in "$state"/*.inbox; do
     [ -d "$dir" ] || continue
     [ -r "$dir" ] && [ -x "$dir" ] || available=false
   done
-  {
-    for dir in "$state"/*.inbox; do
-      [ -d "$dir" ] && [ -r "$dir" ] && [ -x "$dir" ] || continue
-      task=$(basename "$dir" .inbox)
-      for rec in "$dir"/*.msg; do
-        [ -f "$rec" ] || continue
-        seq=$(fm_task_inbox_seq_of "${rec##*/}") || continue
-        age=$(fm_path_age "$rec")
-        case "$age" in ''|*[!0-9]*) age=null ;; esac
-        jq -n \
-          --arg task "$task" \
-          --arg rec "$rec" \
-          --arg seq "$seq" \
-          --argjson age "$age" \
-          '{task_id:$task,path:$rec,seq:($seq | tonumber),age_seconds:$age}'
-      done
+  for dir in "$state"/*.inbox; do
+    [ -d "$dir" ] && [ -r "$dir" ] && [ -x "$dir" ] || continue
+    task=$(basename "$dir" .inbox)
+    for rec in "$dir"/*.msg; do
+      [ -e "$rec" ] || [ -L "$rec" ] || continue
+      if ! fm_task_inbox_record_valid "$rec"; then
+        [ -e "$rec" ] || [ -L "$rec" ] || continue
+        case "$FM_TASK_INBOX_RECORD_FAILURE" in
+          unreadable) unreadable_count=$((unreadable_count + 1)) ;;
+          *) invalid_count=$((invalid_count + 1)) ;;
+        esac
+        continue
+      fi
+      seq=$(fm_task_inbox_seq_of "${rec##*/}") || {
+        invalid_count=$((invalid_count + 1))
+        continue
+      }
+      mtime=$(fm_path_mtime "$rec") || {
+        [ -e "$rec" ] || [ -L "$rec" ] || continue
+        unreadable_count=$((unreadable_count + 1))
+        continue
+      }
+      case "$mtime" in
+        ''|*[!0-9]*)
+          unreadable_count=$((unreadable_count + 1))
+          continue
+          ;;
+      esac
+      age=$((now - mtime))
+      [ "$age" -ge 0 ] || age=0
+      row=$(jq -n \
+        --arg task "$task" \
+        --arg rec "$rec" \
+        --arg seq "$seq" \
+        --argjson age "$age" \
+        '{task_id:$task,path:$rec,seq:($seq | tonumber),age_seconds:$age}') || return 1
+      records=$(jq -n --argjson records "$records" --argjson row "$row" \
+        '$records + [$row]') || return 1
     done
-  } | jq -s --argjson available "$available" '{available:$available,records:.}'
+  done
+  jq -n \
+    --argjson available "$available" \
+    --argjson invalid "$invalid_count" \
+    --argjson unreadable "$unreadable_count" \
+    --argjson records "$records" \
+    '{available:$available,invalid_count:$invalid,unreadable_count:$unreadable,records:$records}'
 }
