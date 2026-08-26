@@ -432,15 +432,18 @@ The cycle runs in its own verified process group, and a timeout or a supervisor 
 The skill remains the owner of live Jira pagination, GitHub discovery, watermark checks, review content, comment publication, own-comment minimization, and the exact Slack author notification.
 The supervisor accepts success only when no task metadata remains and the cycle writes a valid receipt binding every reviewed PR to its exact head, direct GitHub comment URL, and either a direct Slack permalink or a reason the author was not notified.
 
-Slack author notifications may leave this job through exactly one route: the captain's private direct Web API helper at `data/tools/fm-slack-message.sh`, which the supervisor provisions into the automation home from the source home and names in the host contract along with whether it was actually provisioned for this cycle.
-The ChatGPT Slack connector is forbidden for every message in this job, because it appends agent attribution to the delivered message even when the submitted payload is exact, and the captain prohibits agent attribution everywhere.
-No other Slack transport, tool, connector, or MCP server may be used, and there is no fallback: if the helper is missing or not executable, if `SLACK_BOT_TOKEN` is unavailable, or if the helper fails or returns no permalink, the cycle sends nothing and records that PR's notification as `blocked` with the exact reason, in both the receipt and the captain-facing result.
+Slack author notification is ordered and best-effort for every successfully published review comment.
+The exact message is `Review posted: <direct PR comment URL>`, with no agent or AI attribution.
+The cycle first tries the captain's private direct Web API helper at `data/tools/fm-slack-message.sh` when that helper and its private credential are usable.
+If the credential is absent, the helper is unavailable or unsafe, the helper send fails, or the helper returns no direct Slack permalink, the cycle records that outcome and falls back to an available Slack connector.
+If the connector is unavailable, its send fails, or it returns no direct permalink, the cycle records the notification as `ignored` with concrete outcomes for both transports and continues.
+A Slack notification failure never invalidates or retries an otherwise valid receipt, blocks GitHub review publication or task reconciliation, or prevents guarded teardown.
 
 The helper's credential comes from an optional private `config/slack-bot-token` in the source home, which must be a regular non-symlinked file with mode `0600` holding exactly one non-empty whitespace-free line.
 The supervisor provisions it into the automation home at the same mode and exports `SLACK_BOT_TOKEN` only inside the cycle process, so the value never reaches the LaunchAgent property list, the host contract, `status` output, receipts, prompts, or logs - a launchd agent does not read a login shell profile, so without this the scheduled cycle would have no credential at all.
-`slack_transport_state` therefore reports `available` only when both the helper and a valid credential are present, `credentials-missing` when the helper exists but the token does not, and `unavailable` when the helper itself is absent or unsafe; `install` and `status` print that state and never the secret.
-A missing or unsafe helper or credential never fails the sweep: reviews are still published and the affected notifications are recorded `blocked`.
-A receipt row is therefore `sent` with the permalink the helper returned, `skipped` when no unique author matched, or `blocked` when the author was known but the authorized transport could not be used.
+`slack_transport_state` reports only the preferred helper: `available` means the helper and a valid credential are present, `credentials-missing` means the helper exists but the token does not, and `unavailable` means the helper itself is absent or unsafe; `install` and `status` print that state and never the secret.
+A version 2 receipt row is `sent` with the successful `helper` or `connector` transport and its direct Slack permalink, `skipped` when no unique author matched, or `ignored` when both transports failed.
+The row's ordered `attempts` array proves that the helper preceded any connector fallback, and a fully failed notification retains concrete outcomes for both transports.
 A missing receipt (74), a receipt that is not readable JSON (76), a receipt that violates the publication contract (75), and a receipt gate that `jq` itself could not run (77) are distinct failures, so a tooling problem is never reported as a publication problem.
 A receipt whose field types make the contract unevaluable counts as a contract violation, not as a tooling failure.
 The receipt is read and recorded on every cycle, whatever else went wrong, and the verdict is kept in the slot ledger and reported by `status`.

@@ -64,12 +64,12 @@
 #   * The cycle receipt is read and recorded whatever else went wrong. A slot
 #     whose publication verified is never re-run, so a stray surviving process
 #     is reported and the lock retained without duplicating comments or DMs.
-#   * Slack author notifications may leave this job through exactly one route:
-#     the captain's private direct Web API helper, provisioned into the
-#     automation home and named in the host contract. The ChatGPT Slack
-#     connector is forbidden because it appends agent attribution, and no
-#     fallback transport exists: a notification that cannot use the authorized
-#     helper is recorded as blocked in the receipt and in the captain's result.
+#   * Slack author notifications are ordered and best-effort. The captain's
+#     private direct Web API helper is tried first when it and its credential are
+#     usable, then an available Slack connector is the fallback. A notification
+#     that neither transport can deliver is recorded with both attempt outcomes
+#     but never invalidates an otherwise complete receipt or blocks publication,
+#     task reconciliation, or teardown.
 #     That helper's credential is read from a private owner-only single-line
 #     file in the source home, provisioned into the automation home, and
 #     exported only inside the cycle process. It never reaches the LaunchAgent
@@ -477,10 +477,10 @@ sync_private_context() {
     copy_private_file "$SOURCE_HOME/data/$name" "$AUTOMATION_HOME/data/$name" \
       || die "failed to synchronize data/$name"
   done
-  # The only Slack transport this job may use is the captain's private direct
-  # Web API helper, and its only credential is a private owner-only token file.
-  # Both are optional: an absent or unsafe one leaves the transport unusable and
-  # the cycle records blocked notifications, rather than losing the whole sweep.
+  # The preferred Slack transport is the captain's private direct Web API
+  # helper, and its only credential is a private owner-only token file. Both are
+  # optional: an absent or unsafe one leaves the helper unusable, and the cycle
+  # proceeds to the connector fallback without losing the whole sweep.
   provision_optional_private_file "$SOURCE_HOME/$SLACK_TRANSPORT_RELATIVE" \
     "$AUTOMATION_HOME/$SLACK_TRANSPORT_RELATIVE" 0700
   if slack_token_source_is_usable "$SOURCE_HOME/$SLACK_TOKEN_RELATIVE"; then
@@ -534,7 +534,7 @@ slack_transport_state() {
 
 host_contract_text() {
   cat <<EOF
-version=1
+version=2
 enabled=1
 timezone=$TIMEZONE
 schedule=$START_HOUR:00-$END_HOUR:00/$INTERVAL_MINUTES-minutes-final-at-end-hour
@@ -547,8 +547,9 @@ slack_transport=$SLACK_TRANSPORT_RELATIVE
 slack_transport_state=$(slack_transport_state)
 slack_transport_requires=SLACK_BOT_TOKEN
 slack_transport_credentials=$SLACK_TOKEN_RELATIVE
-slack_chatgpt_connector=forbidden
-slack_any_other_transport=forbidden
+slack_notification_order=helper,connector
+slack_connector_fallback=authorized
+slack_notification_failure=best-effort
 agent_attribution=forbidden
 edit_code=forbidden
 merge_pull_requests=forbidden
@@ -1144,21 +1145,30 @@ First reconcile every task already recorded in this isolated home. Recover unfin
 
 Then refresh Jira live with complete pagination, discover eligible open PR heads, and execute one idempotent sweep. Dispatch no more than $MAX_CONCURRENT_REVIEWS focused reviewers at once. Review only: do not edit project code, merge, push, mutate Jira, or publish anything other than the skill's authorized review comments, minimization of the configured reviewer's own superseded watermark comments, and exact PR-author Slack direct message.
 
-Slack notification transport is restricted to exactly one route: run $AUTOMATION_HOME/$SLACK_TRANSPORT_RELATIVE with an available SLACK_BOT_TOKEN, send the exact authorized message, and capture the direct permalink that helper returns. The ChatGPT Slack connector is forbidden for every message in this job, because it appends agent attribution the captain prohibits; no message may carry any agent or AI attribution. Any other Slack transport, tool, connector, or MCP server is forbidden too. If that helper is missing or not executable, if SLACK_BOT_TOKEN is unavailable, or if the helper fails or returns no permalink, send nothing at all: do not retry through another route, and record that PR's notification as blocked with the exact reason. The host contract's slack_transport_state field states whether the transport was provisioned for this cycle: available means the helper and its credential are both present, credentials-missing means the helper exists but SLACK_BOT_TOKEN was not provisioned, and unavailable means the helper itself is absent. Treat anything other than available as a certainty that every author notification must be recorded blocked. Never print, echo, log, or repeat the token value anywhere.
+For each successfully published review comment, send the exact Slack message Review posted: <direct PR comment URL>. Add no agent or AI attribution. Use the transports in order: when $AUTOMATION_HOME/$SLACK_TRANSPORT_RELATIVE is executable and SLACK_BOT_TOKEN is available, try the private helper first and require the direct Slack permalink it returns. If credentials are absent, the helper is unavailable or unsafe, the helper send fails, or it returns no permalink, record the helper attempt outcome and concrete reason, then fall back to the available Slack connector. A connector send counts only when it returns the direct Slack permalink. If the connector is unavailable, its send fails, or it returns no permalink, record the notification ignored with both ordered transport outcomes and their concrete reasons, then continue the sweep lifecycle. Slack notification failure must never fail or retry an otherwise valid sweep receipt, block GitHub review publication, block task reconciliation, or prevent teardown. The host contract's slack_transport_state field describes only the preferred helper: available means the helper and credential are present, credentials-missing means the helper exists without a provisioned credential, and unavailable means the helper is absent or unsafe. Never print, echo, log, or repeat the token value anywhere.
 
 After dispatch, supervise in the foreground until every task from this cycle is terminal. Reconcile reports and receipts, complete publication followed immediately by Slack notification, close task records, and run guarded teardown. Do not finish while this home's state contains task metadata. If coverage is partial or an author identity is ambiguous, record that plainly and leave no fabricated success. If no PR needs review, send no Slack message and finish as a verified no-op.
 
-Return the skill's required review table plus totals for discovered, reviewed, skipped, failed, comments published, Slack messages sent, Slack notifications blocked, and tasks left in flight. Name every blocked notification and its reason in that result so the captain sees which authors were not told. The final in-flight total must be zero for a successful cycle.
+Return the skill's required review table plus totals for discovered, reviewed, skipped, failed, comments published, Slack messages sent, Slack notifications skipped or ignored, and tasks left in flight. Name every ignored notification and both transport outcomes in that result so the captain sees which authors were not told. The final in-flight total must be zero for a successful cycle.
 
-Before finishing, atomically write this machine receipt to $AUTOMATION_HOME/state/review-sweep-cycle-receipts/$slot.json. Use version 1, slot "$slot", coverage "complete" only after full Jira and GitHub verification, nonnegative integer fields discovered/reviewed/skipped/comments_published/slack_messages_sent, integer failed 0, integer tasks_left_in_flight 0, and a reviews array with exactly one row per reviewed PR. Each row must contain pr, full head, direct comment_url, and slack. slack is exactly one of {"status":"sent","message_url":"<direct Slack permalink returned by the transport>"}, {"status":"skipped","reason":"<no unique author match reason>"}, or {"status":"blocked","reason":"<why the authorized transport could not be used>"}. Use blocked, never skipped, when the author was identified but the private transport was unavailable or failed. comments_published must equal reviewed. slack_messages_sent must equal the number of sent rows, and every sent row must carry the permalink the transport returned. A no-op sweep uses zero counts and an empty reviews array. Do not write coverage complete when any required coverage, publication, notification decision, metadata reconciliation, or teardown is unresolved.
+Before finishing, atomically write this machine receipt to $AUTOMATION_HOME/state/review-sweep-cycle-receipts/$slot.json. Use version 2, slot "$slot", coverage "complete" only after full Jira and GitHub verification, nonnegative integer fields discovered/reviewed/skipped/comments_published/slack_messages_sent, integer failed 0, integer tasks_left_in_flight 0, and a reviews array with exactly one row per reviewed PR. Each row must contain pr, full head, direct comment_url, and slack. Every slack object has status and an ordered attempts array. A helper success is {"status":"sent","transport":"helper","message_url":"<direct Slack permalink>","attempts":[{"transport":"helper","outcome":"sent"}]}. A connector fallback success is {"status":"sent","transport":"connector","message_url":"<direct Slack permalink>","attempts":[{"transport":"helper","outcome":"unavailable|failed","reason":"<concrete reason>"},{"transport":"connector","outcome":"sent"}]}. A review with no unique author match is {"status":"skipped","reason":"<concrete reason>","attempts":[]}. A fully failed notification is {"status":"ignored","attempts":[{"transport":"helper","outcome":"unavailable|failed","reason":"<concrete reason>"},{"transport":"connector","outcome":"unavailable|failed","reason":"<concrete reason>"}]}. comments_published must equal reviewed. slack_messages_sent must equal the number of sent rows, and every sent row must carry the transport and permalink that succeeded. A no-op sweep uses zero counts and an empty reviews array. Notification failure alone never increments failed or prevents coverage complete; do not write coverage complete when any required coverage, review publication, notification outcome recording, metadata reconciliation, or teardown is unresolved.
 EOF
 }
 
 receipt_gate_program() {
   cat <<'JQ'
+def sent_attempt($transport):
+  type == "object" and
+  .transport == $transport and
+  .outcome == "sent";
+def unsuccessful_attempt($transport):
+  type == "object" and
+  .transport == $transport and
+  (.outcome == "unavailable" or .outcome == "failed") and
+  (.reason | type == "string" and length > 0);
 . as $receipt |
 ($receipt | type) == "object" and
-$receipt.version == 1 and
+$receipt.version == 2 and
 $receipt.slot == $slot and
 $receipt.coverage == "complete" and
 ($receipt.discovered | type == "number" and . >= 0 and floor == .) and
@@ -1176,11 +1186,26 @@ all($receipt.reviews[];
   (.head | type == "string" and test("^[0-9a-f]{40}([0-9a-f]{24})?$")) and
   (.comment_url | type == "string" and test("^https://github[.]com/[^/]+/[^/]+/pull/[0-9]+#issuecomment-[0-9]+$")) and
   ((.slack | type) == "object") and
-  (.slack.status == "sent" or .slack.status == "skipped" or .slack.status == "blocked") and
+  (.slack.status == "sent" or .slack.status == "skipped" or .slack.status == "ignored") and
+  ((.slack.attempts | type) == "array") and
   (if .slack.status == "sent" then
-     (.slack.message_url | type == "string" and test("^https://[^/]*slack[.]com/archives/"))
+     (.slack.transport == "helper" or .slack.transport == "connector") and
+     (.slack.message_url | type == "string" and test("^https://[^/]*slack[.]com/archives/")) and
+     (if .slack.transport == "helper" then
+        ((.slack.attempts | length) == 1) and
+        (.slack.attempts[0] | sent_attempt("helper"))
+      else
+        ((.slack.attempts | length) == 2) and
+        (.slack.attempts[0] | unsuccessful_attempt("helper")) and
+        (.slack.attempts[1] | sent_attempt("connector"))
+      end)
+   elif .slack.status == "skipped" then
+     (.slack.reason | type == "string" and length > 0) and
+     ((.slack.attempts | length) == 0)
    else
-     (.slack.reason | type == "string" and length > 0)
+     ((.slack.attempts | length) == 2) and
+     (.slack.attempts[0] | unsuccessful_attempt("helper")) and
+     (.slack.attempts[1] | unsuccessful_attempt("connector"))
    end)) and
 $receipt.slack_messages_sent == ([$receipt.reviews[] | select(.slack.status == "sent")] | length)
 JQ

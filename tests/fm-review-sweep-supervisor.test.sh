@@ -36,7 +36,9 @@ CASE_CODEX_LINGER="$TMP_ROOT/codex.linger"
 CASE_CODEX_LINGER_PID="$TMP_ROOT/codex.linger-pid"
 CASE_CODEX_MALFORMED_SLACK="$TMP_ROOT/codex.malformed-slack"
 CASE_CODEX_SLOW="$TMP_ROOT/codex.slow"
-CASE_CODEX_BLOCKED_SLACK="$TMP_ROOT/codex.blocked-slack"
+CASE_CODEX_HELPER_SUCCESS="$TMP_ROOT/codex.helper-success"
+CASE_CODEX_CONNECTOR_FALLBACK="$TMP_ROOT/codex.connector-fallback"
+CASE_CODEX_NOTIFICATION_FAILURE="$TMP_ROOT/codex.notification-failure"
 CASE_CODEX_TOKEN_PROBE="$TMP_ROOT/codex.token-probe"
 CASE_SLACK_SECRET='xoxb-test-not-a-real-token-0001'
 CASE_CLOCK_FILE="$TMP_ROOT/clock.fields"
@@ -127,29 +129,49 @@ if [ -f "$FM_FAKE_CODEX_BAD_JSON" ]; then
   printf 'unparseable receipt for %s\n' "$slot" > "$out"
   exit 0
 fi
-if [ -f "$FM_FAKE_CODEX_BLOCKED_SLACK" ]; then
+if [ -f "$FM_FAKE_CODEX_HELPER_SUCCESS" ]; then
+  printf 'active\n' > "$FM_HOME/state/notification-review.meta"
   cat > "$receipts/$slot.json" <<EOF
-{"version":1,"slot":"$slot","coverage":"complete","discovered":1,"reviewed":1,"skipped":0,"failed":0,"comments_published":1,"slack_messages_sent":0,"tasks_left_in_flight":0,"reviews":[{"pr":"https://github.com/acme/widget/pull/9","head":"0123456789abcdef0123456789abcdef01234567","comment_url":"https://github.com/acme/widget/pull/9#issuecomment-91","slack":{"status":"blocked","reason":"private slack transport unavailable"}}]}
+{"version":2,"slot":"$slot","coverage":"complete","discovered":1,"reviewed":1,"skipped":0,"failed":0,"comments_published":1,"slack_messages_sent":1,"tasks_left_in_flight":0,"reviews":[{"pr":"https://github.com/acme/widget/pull/9","head":"0123456789abcdef0123456789abcdef01234567","comment_url":"https://github.com/acme/widget/pull/9#issuecomment-91","slack":{"status":"sent","transport":"helper","message_url":"https://example.slack.com/archives/C0/p1","attempts":[{"transport":"helper","outcome":"sent"}]}}]}
 EOF
-  printf 'review published, author notification blocked for %s\n' "$slot" > "$out"
+  rm -f -- "$FM_HOME/state/notification-review.meta"
+  printf 'review published and helper notification sent for %s\n' "$slot" > "$out"
+  exit 0
+fi
+if [ -f "$FM_FAKE_CODEX_CONNECTOR_FALLBACK" ]; then
+  printf 'active\n' > "$FM_HOME/state/notification-review.meta"
+  cat > "$receipts/$slot.json" <<EOF
+{"version":2,"slot":"$slot","coverage":"complete","discovered":1,"reviewed":1,"skipped":0,"failed":0,"comments_published":1,"slack_messages_sent":1,"tasks_left_in_flight":0,"reviews":[{"pr":"https://github.com/acme/widget/pull/10","head":"0123456789abcdef0123456789abcdef01234567","comment_url":"https://github.com/acme/widget/pull/10#issuecomment-92","slack":{"status":"sent","transport":"connector","message_url":"https://example.slack.com/archives/C0/p2","attempts":[{"transport":"helper","outcome":"failed","reason":"helper send failed"},{"transport":"connector","outcome":"sent"}]}}]}
+EOF
+  rm -f -- "$FM_HOME/state/notification-review.meta"
+  printf 'review published and connector fallback notification sent for %s\n' "$slot" > "$out"
+  exit 0
+fi
+if [ -f "$FM_FAKE_CODEX_NOTIFICATION_FAILURE" ]; then
+  printf 'active\n' > "$FM_HOME/state/notification-review.meta"
+  cat > "$receipts/$slot.json" <<EOF
+{"version":2,"slot":"$slot","coverage":"complete","discovered":1,"reviewed":1,"skipped":0,"failed":0,"comments_published":1,"slack_messages_sent":0,"tasks_left_in_flight":0,"reviews":[{"pr":"https://github.com/acme/widget/pull/11","head":"0123456789abcdef0123456789abcdef01234567","comment_url":"https://github.com/acme/widget/pull/11#issuecomment-93","slack":{"status":"ignored","attempts":[{"transport":"helper","outcome":"unavailable","reason":"helper unavailable or unsafe"},{"transport":"connector","outcome":"failed","reason":"connector send failed"}]}}]}
+EOF
+  rm -f -- "$FM_HOME/state/notification-review.meta"
+  printf 'review published and notification failure ignored for %s\n' "$slot" > "$out"
   exit 0
 fi
 if [ -f "$FM_FAKE_CODEX_MALFORMED_SLACK" ]; then
   cat > "$receipts/$slot.json" <<EOF
-{"version":1,"slot":"$slot","coverage":"complete","discovered":1,"reviewed":1,"skipped":0,"failed":0,"comments_published":1,"slack_messages_sent":1,"tasks_left_in_flight":0,"reviews":[{"pr":"https://github.com/acme/widget/pull/7","head":"0123456789abcdef0123456789abcdef01234567","comment_url":"https://github.com/acme/widget/pull/7#issuecomment-42","slack":"sent"}]}
+{"version":2,"slot":"$slot","coverage":"complete","discovered":1,"reviewed":1,"skipped":0,"failed":0,"comments_published":1,"slack_messages_sent":1,"tasks_left_in_flight":0,"reviews":[{"pr":"https://github.com/acme/widget/pull/7","head":"0123456789abcdef0123456789abcdef01234567","comment_url":"https://github.com/acme/widget/pull/7#issuecomment-42","slack":"sent"}]}
 EOF
   printf 'receipt with a malformed slack field for %s\n' "$slot" > "$out"
   exit 0
 fi
 if [ -f "$FM_FAKE_CODEX_BAD_RECEIPT" ]; then
   cat > "$receipts/$slot.json" <<EOF
-{"version":1,"slot":"$slot","coverage":"partial","discovered":3,"reviewed":1,"skipped":0,"failed":0,"comments_published":1,"slack_messages_sent":0,"tasks_left_in_flight":0,"reviews":[]}
+{"version":2,"slot":"$slot","coverage":"partial","discovered":3,"reviewed":1,"skipped":0,"failed":0,"comments_published":1,"slack_messages_sent":0,"tasks_left_in_flight":0,"reviews":[]}
 EOF
   printf 'semantically invalid receipt for %s\n' "$slot" > "$out"
   exit 0
 fi
 cat > "$receipts/$slot.json" <<EOF
-{"version":1,"slot":"$slot","coverage":"complete","discovered":0,"reviewed":0,"skipped":0,"failed":0,"comments_published":0,"slack_messages_sent":0,"tasks_left_in_flight":0,"reviews":[]}
+{"version":2,"slot":"$slot","coverage":"complete","discovered":0,"reviewed":0,"skipped":0,"failed":0,"comments_published":0,"slack_messages_sent":0,"tasks_left_in_flight":0,"reviews":[]}
 EOF
 printf 'verified no-op for %s\n' "$slot" > "$out"
 # Publish first, then outlive the configured runtime bound.
@@ -194,7 +216,9 @@ run_subject() {
   FM_FAKE_CODEX_LINGER_PID="$CASE_CODEX_LINGER_PID" \
   FM_FAKE_CODEX_MALFORMED_SLACK="$CASE_CODEX_MALFORMED_SLACK" \
   FM_FAKE_CODEX_SLOW="$CASE_CODEX_SLOW" \
-  FM_FAKE_CODEX_BLOCKED_SLACK="$CASE_CODEX_BLOCKED_SLACK" \
+  FM_FAKE_CODEX_HELPER_SUCCESS="$CASE_CODEX_HELPER_SUCCESS" \
+  FM_FAKE_CODEX_CONNECTOR_FALLBACK="$CASE_CODEX_CONNECTOR_FALLBACK" \
+  FM_FAKE_CODEX_NOTIFICATION_FAILURE="$CASE_CODEX_NOTIFICATION_FAILURE" \
   FM_FAKE_CODEX_TOKEN_PROBE="$CASE_CODEX_TOKEN_PROBE" \
   "$SUBJECT" "$@"
 }
@@ -213,8 +237,9 @@ assert_contains "$INSTALL_OUT" 'source-branch: main' 'install did not pin the so
 assert_contains "$INSTALL_OUT" 'retention-days: 90' 'install did not report bounded artifact retention'
 assert_contains "$INSTALL_OUT" 'slack-transport: data/tools/fm-slack-message.sh (unavailable)' 'install did not report the Slack transport state'
 assert_no_grep 'SLACK_BOT_TOKEN' "$CASE_LAUNCH_AGENT_DIR/dev.firstmate.review-sweep.plist" 'the LaunchAgent carries a Slack credential'
-assert_grep 'slack_chatgpt_connector=forbidden' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not forbid the ChatGPT Slack connector'
-assert_grep 'slack_any_other_transport=forbidden' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not restrict the Slack transport'
+assert_grep 'slack_notification_order=helper,connector' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not order helper before connector'
+assert_grep 'slack_connector_fallback=authorized' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not authorize connector fallback'
+assert_grep 'slack_notification_failure=best-effort' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not make notification failure best-effort'
 assert_grep 'agent_attribution=forbidden' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not forbid agent attribution'
 assert_grep 'slack_transport=data/tools/fm-slack-message.sh' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not name the authorized Slack transport'
 assert_grep 'slack_transport_state=unavailable' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not report an absent Slack transport'
@@ -327,10 +352,10 @@ assert_eq 1 "$(codex_runs)" 'first due slot did not invoke Codex exactly once'
 assert_grep 'maximum of 10 concurrent independent PR reviews' "$CASE_CODEX_LOG" 'cycle prompt did not carry approved large-swarm cap'
 assert_grep 'publication-and-Slack notification sequence' "$CASE_CODEX_LOG" 'cycle prompt did not bind publication to notification'
 assert_grep "Do not finish while this home's state contains task metadata" "$CASE_CODEX_LOG" 'cycle prompt did not require teardown'
-assert_grep 'The ChatGPT Slack connector is forbidden' "$CASE_CODEX_LOG" 'cycle prompt did not forbid the attributing Slack connector'
-assert_grep 'data/tools/fm-slack-message.sh with an available SLACK_BOT_TOKEN' "$CASE_CODEX_LOG" 'cycle prompt did not require the authorized Slack transport'
-assert_grep 'send nothing at all' "$CASE_CODEX_LOG" 'cycle prompt did not forbid a fallback transport'
-assert_grep 'record that PR' "$CASE_CODEX_LOG" 'cycle prompt did not require a blocked notification record'
+assert_grep 'Review posted: <direct PR comment URL>' "$CASE_CODEX_LOG" 'cycle prompt did not carry the exact Slack message template'
+assert_grep 'try the private helper first' "$CASE_CODEX_LOG" 'cycle prompt did not prefer the private helper'
+assert_grep 'fall back to the available Slack connector' "$CASE_CODEX_LOG" 'cycle prompt did not require connector fallback'
+assert_grep 'must never fail or retry an otherwise valid sweep receipt' "$CASE_CODEX_LOG" 'cycle prompt did not make notification failure best-effort'
 assert_present "$CASE_APP/home/state/review-sweep-cycle-receipts/20260826-0700.json" 'cycle receipt was not retained'
 pass 'a due slot runs once and requires publication, notification, receipt, and teardown'
 
@@ -610,16 +635,14 @@ cat > "$CASE_SOURCE/data/tools/fm-slack-message.sh" <<'SH'
 printf 'https://example.slack.com/archives/C0/p1\n'
 SH
 chmod +x "$CASE_SOURCE/data/tools/fm-slack-message.sh"
-touch "$CASE_CODEX_BLOCKED_SLACK"
-BLOCKED_OUT=$(run_tick '20260828 14 00 13400 -0500') || fail "blocked notification tick failed: $BLOCKED_OUT"
-rm -f -- "$CASE_CODEX_BLOCKED_SLACK"
-assert_contains "$BLOCKED_OUT" 'slot=20260828-1400 status=succeeded' 'a published review with a blocked notification was rejected'
-assert_eq 17 "$(codex_runs)" 'the blocked-notification case did not run exactly once'
+CREDENTIALLESS_OUT=$(run_tick '20260828 14 00 13400 -0500') || fail "credentialless tick failed: $CREDENTIALLESS_OUT"
+assert_contains "$CREDENTIALLESS_OUT" 'slot=20260828-1400 status=succeeded' 'a missing helper credential cost the sweep'
+assert_eq 17 "$(codex_runs)" 'the credentialless case did not run exactly once'
 assert_present "$CASE_APP/home/data/tools/fm-slack-message.sh" 'the private Slack transport was not provisioned'
 [ -x "$CASE_APP/home/data/tools/fm-slack-message.sh" ] || fail 'the provisioned Slack transport is not executable'
 assert_grep 'slack_transport_state=credentials-missing' "$CASE_APP/home/config/review-sweep-host-contract" 'a transport without a credential was reported available'
 assert_eq absent "$(sed -n '1p' "$CASE_CODEX_TOKEN_PROBE")" 'the cycle saw a credential that was never provisioned'
-pass 'a provisioned transport without a credential is reported credentials-missing and still publishes reviews'
+pass 'a provisioned helper without a credential is reported credentials-missing without failing the sweep'
 
 # Every rejected credential shape must degrade to credentials-missing, never leak.
 for CASE_BAD_TOKEN in 'mode' 'symlink' 'multiline' 'empty'; do
@@ -661,10 +684,18 @@ assert_contains "$TOKEN_INSTALL" 'slack-transport: data/tools/fm-slack-message.s
 assert_present "$CASE_APP/home/config/slack-bot-token" 'a valid credential was not provisioned'
 assert_eq 600 "$(stat -f %Lp "$CASE_APP/home/config/slack-bot-token" 2>/dev/null || stat -c %a "$CASE_APP/home/config/slack-bot-token")" \
   'the provisioned credential is not owner-only'
+touch "$CASE_CODEX_HELPER_SUCCESS"
 TOKEN_OUT=$(run_tick '20260828 14 30 13450 -0500') || fail "credentialed tick failed: $TOKEN_OUT"
+rm -f -- "$CASE_CODEX_HELPER_SUCCESS"
 assert_contains "$TOKEN_OUT" 'slot=20260828-1430 status=succeeded' 'the credentialed cycle did not complete'
 assert_eq 18 "$(codex_runs)" 'the credentialed cycle did not run exactly once'
 assert_eq "present ${#CASE_SLACK_SECRET}" "$(sed -n '1p' "$CASE_CODEX_TOKEN_PROBE")" 'the cycle did not receive the provisioned credential'
+assert_eq helper "$(jq -r '.reviews[0].slack.transport' "$CASE_APP/home/state/review-sweep-cycle-receipts/20260828-1430.json")" \
+  'helper success did not record its transport'
+assert_eq 'https://example.slack.com/archives/C0/p1' \
+  "$(jq -r '.reviews[0].slack.message_url' "$CASE_APP/home/state/review-sweep-cycle-receipts/20260828-1430.json")" \
+  'helper success did not retain its direct Slack permalink'
+assert_absent "$CASE_APP/home/state/notification-review.meta" 'helper success left task metadata behind'
 # The secret must exist only in the two private files and the cycle environment.
 assert_no_grep "$CASE_SLACK_SECRET" "$CASE_LAUNCH_AGENT_DIR/dev.firstmate.review-sweep.plist" 'the LaunchAgent leaked the credential'
 assert_no_grep "$CASE_SLACK_SECRET" "$CASE_APP/home/config/review-sweep-host-contract" 'the host contract leaked the credential'
@@ -675,24 +706,50 @@ assert_not_contains "$TOKEN_OUT" "$CASE_SLACK_SECRET" 'the cycle output leaked t
 TOKEN_STATUS=$(run_subject status) || fail "credentialed status failed: $TOKEN_STATUS"
 assert_contains "$TOKEN_STATUS" 'slack-transport: data/tools/fm-slack-message.sh (available)' 'status did not report the usable transport'
 assert_not_contains "$TOKEN_STATUS" "$CASE_SLACK_SECRET" 'status leaked the credential'
-pass 'a valid credential reaches only the cycle process and never any artifact'
+pass 'a valid credential reaches only the cycle process and helper success reconciles with its permalink'
 
-# A symlinked helper is unusable but must not cost the sweep its reviews.
+touch "$CASE_CODEX_CONNECTOR_FALLBACK"
+FALLBACK_OUT=$(run_tick '20260828 15 00 13500 -0500') || fail "connector fallback tick failed: $FALLBACK_OUT"
+rm -f -- "$CASE_CODEX_CONNECTOR_FALLBACK"
+assert_contains "$FALLBACK_OUT" 'slot=20260828-1500 status=succeeded' 'helper-to-connector fallback invalidated the sweep receipt'
+assert_eq 19 "$(codex_runs)" 'the connector-fallback case did not run exactly once'
+assert_eq connector \
+  "$(jq -r '.reviews[0].slack.transport' "$CASE_APP/home/state/review-sweep-cycle-receipts/20260828-1500.json")" \
+  'connector fallback did not record its successful transport'
+assert_eq 'https://example.slack.com/archives/C0/p2' \
+  "$(jq -r '.reviews[0].slack.message_url' "$CASE_APP/home/state/review-sweep-cycle-receipts/20260828-1500.json")" \
+  'connector fallback did not retain its direct Slack permalink'
+assert_eq 'helper:failed,connector:sent' \
+  "$(jq -r '[.reviews[0].slack.attempts[] | .transport + ":" + .outcome] | join(",")' "$CASE_APP/home/state/review-sweep-cycle-receipts/20260828-1500.json")" \
+  'connector fallback did not retain its ordered attempt outcomes'
+assert_absent "$CASE_APP/home/state/notification-review.meta" 'connector fallback left task metadata behind'
+pass 'a helper send failure falls back to the connector and reconciles with its permalink'
+
+# A symlinked helper and failed connector must not cost the sweep its reviews.
 rm -f -- "$CASE_SOURCE/data/tools/fm-slack-message.sh"
 ln -s "$TMP_ROOT/linked-token" "$CASE_SOURCE/data/tools/fm-slack-message.sh"
-SYMLINK_OUT=$(run_tick '20260828 15 00 13500 -0500') || fail "symlinked transport tick failed: $SYMLINK_OUT"
-assert_contains "$SYMLINK_OUT" 'slot=20260828-1500 status=succeeded' 'a symlinked Slack helper cost the whole sweep'
-assert_eq 19 "$(codex_runs)" 'the symlinked-transport case did not run exactly once'
+touch "$CASE_CODEX_NOTIFICATION_FAILURE"
+SYMLINK_OUT=$(run_tick '20260828 15 30 13550 -0500') || fail "symlinked transport tick failed: $SYMLINK_OUT"
+rm -f -- "$CASE_CODEX_NOTIFICATION_FAILURE"
+assert_contains "$SYMLINK_OUT" 'slot=20260828-1530 status=succeeded' 'total notification failure invalidated the sweep receipt'
+assert_eq 20 "$(codex_runs)" 'the total-notification-failure case did not run exactly once'
 assert_absent "$CASE_APP/home/data/tools/fm-slack-message.sh" 'an unsafe Slack helper was provisioned'
 assert_grep 'slack_transport_state=unavailable' "$CASE_APP/home/config/review-sweep-host-contract" 'an unsafe Slack helper was reported usable'
+assert_eq 'helper:unavailable:helper unavailable or unsafe,connector:failed:connector send failed' \
+  "$(jq -r '[.reviews[0].slack.attempts[] | .transport + ":" + .outcome + ":" + .reason] | join(",")' "$CASE_APP/home/state/review-sweep-cycle-receipts/20260828-1530.json")" \
+  'total notification failure did not retain both concrete attempt outcomes'
+assert_absent "$CASE_APP/home/state/notification-review.meta" 'total notification failure left task metadata behind'
+FAILED_NOTIFICATION_AGAIN=$(run_tick '20260828 15 30 13551 -0500') || fail "failed-notification duplicate tick failed: $FAILED_NOTIFICATION_AGAIN"
+assert_contains "$FAILED_NOTIFICATION_AGAIN" 'noop: slot 20260828-1530 already succeeded' 'a total notification failure retried a verified sweep receipt'
+assert_eq 20 "$(codex_runs)" 'a total notification failure retried the sweep'
 rm -f -- "$CASE_SOURCE/data/tools/fm-slack-message.sh" "$CASE_SOURCE/config/slack-bot-token"
-pass 'an unsafe Slack helper degrades to an unavailable transport instead of failing the cycle'
+pass 'total notification failure preserves both outcomes and still completes reconciliation and teardown'
 
 sed 's/^max_runtime_seconds=.*/max_runtime_seconds=1/' "$CASE_APP/config/supervisor.conf" > "$TMP_ROOT/bounded.conf"
 cp "$TMP_ROOT/bounded.conf" "$CASE_APP/config/supervisor.conf"
 touch "$CASE_CODEX_SLOW"
 set +e
-BOUNDED_OUT=$(run_tick '20260828 15 30 13600 -0500' 2>&1)
+BOUNDED_OUT=$(run_tick '20260828 16 00 13600 -0500' 2>&1)
 BOUNDED_RC=$?
 set -e
 rm -f -- "$CASE_CODEX_SLOW"
@@ -700,12 +757,12 @@ sed 's/^max_runtime_seconds=.*/max_runtime_seconds=10800/' "$CASE_APP/config/sup
 cp "$TMP_ROOT/bounded.conf" "$CASE_APP/config/supervisor.conf"
 assert_eq 124 "$BOUNDED_RC" 'a cycle past its runtime bound did not report the timeout'
 assert_contains "$BOUNDED_OUT" 'exceeded 1 seconds' 'the runtime bound was not enforced'
-assert_contains "$BOUNDED_OUT" 'slot=20260828-1530 status=succeeded exit=124 publication=verified' 'a verified publication was discarded with the failed cycle'
-assert_eq 0 "$(sed -n '1p' "$CASE_APP/state/slots/20260828-1530/receipt-status")" 'the receipt verdict was not recorded for a failed cycle'
-assert_eq 20 "$(codex_runs)" 'the bounded cycle did not run exactly once'
-REPUBLISH_OUT=$(run_tick '20260828 15 45 13610 -0500') || fail "post-timeout tick failed: $REPUBLISH_OUT"
-assert_contains "$REPUBLISH_OUT" 'noop: slot 20260828-1530 already succeeded' 'a verified publication was scheduled again'
-assert_eq 20 "$(codex_runs)" 'a verified publication was published twice'
+assert_contains "$BOUNDED_OUT" 'slot=20260828-1600 status=succeeded exit=124 publication=verified' 'a verified publication was discarded with the failed cycle'
+assert_eq 0 "$(sed -n '1p' "$CASE_APP/state/slots/20260828-1600/receipt-status")" 'the receipt verdict was not recorded for a failed cycle'
+assert_eq 21 "$(codex_runs)" 'the bounded cycle did not run exactly once'
+REPUBLISH_OUT=$(run_tick '20260828 16 15 13610 -0500') || fail "post-timeout tick failed: $REPUBLISH_OUT"
+assert_contains "$REPUBLISH_OUT" 'noop: slot 20260828-1600 already succeeded' 'a verified publication was scheduled again'
+assert_eq 21 "$(codex_runs)" 'a verified publication was published twice'
 pass 'a cycle that verified its publication is never re-run, even when it ended badly'
 
 touch "$CASE_CODEX_MALFORMED_SLACK"
@@ -735,7 +792,7 @@ set -e
 rm -f -- "$CASE_BIN/jq"
 assert_eq 77 "$JQ_BROKEN_RC" 'an unrunnable receipt gate was not reported as a tooling failure'
 assert_contains "$JQ_BROKEN_OUT" 'receipt gate could not be run by jq' 'an unrunnable receipt gate was not named'
-assert_eq 22 "$(codex_runs)" 'the receipt classification cases did not run once each'
+assert_eq 23 "$(codex_runs)" 'the receipt classification cases did not run once each'
 pass 'a malformed receipt field is a contract violation and only an unrunnable gate is a tooling failure'
 
 mkdir -p "$CASE_APP/state/slots/20200101-0700" "$CASE_APP/results/20200101-0700" "$TMP_ROOT/linked-slot"
@@ -752,7 +809,7 @@ touch -t 202001010000 "$CASE_APP/state/slots/20200101-0700" "$CASE_APP/results/2
 touch -h -t 202001010000 "$CASE_APP/results/20200101-0900"
 RETAIN_OUT=$(run_tick '20260828 13 30 13300 -0500') || fail "retention tick failed: $RETAIN_OUT"
 assert_contains "$RETAIN_OUT" 'slot=20260828-1330 status=succeeded' 'the retention cycle did not complete'
-assert_eq 23 "$(codex_runs)" 'the retention cycle did not invoke Codex once'
+assert_eq 24 "$(codex_runs)" 'the retention cycle did not invoke Codex once'
 assert_absent "$CASE_APP/state/slots/20200101-0700" 'an expired slot record was retained'
 assert_absent "$CASE_APP/results/20200101-0700" 'an expired result directory was retained'
 assert_absent "$CASE_APP/home/state/review-sweep-cycle-receipts/20200101-0700.json" 'an expired receipt was retained'
