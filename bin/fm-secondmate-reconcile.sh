@@ -165,10 +165,11 @@ cmd_notify() {
   printf '%s' "$snapshot" | jq -e '
     (.schema == "fm-fleet-snapshot.v1" or .schema == "fm-bearings.v1")
     and (.generated | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+    and (.observation | type == "string" and test("^[0-9]{20}-[0-9]{10}$"))
   ' >/dev/null 2>&1 || fail "input is not a generated fm-fleet-snapshot.v1 or fm-bearings.v1 document"
 
   rows=$(printf '%s' "$snapshot" | jq -r '
-    .generated as $generation
+    .observation as $generation
     | (if .schema == "fm-bearings.v1" then
        (.secondmate_reconcile // [])[]
        | {id, kind:(.kind // ""), ids:(.ids // [])}
@@ -180,13 +181,16 @@ cmd_notify() {
     | select((.id | type) == "string" and (.id | test("^[A-Za-z0-9._-]+$")))
     | .kind as $kind
     | (if ["orphan_in_flight","unowned_current","terminal_in_flight"] | index($kind)
-       then (.ids | map(select(type == "string")) | sort | join(","))
-       else "" end) as $ids
-    | [.id, (if $ids == "" then "" else $kind end), $ids, $generation] | join("\u001f")')
+       then (.ids | map(select(type == "string")) | sort)
+       else [] end) as $ids
+    | ($ids | map(@json) | join(", ")) as $ids_display
+    | ($ids | @json) as $ids_canonical
+    | [.id, (if ($ids | length) == 0 then "" else $kind end), $ids_display, $ids_canonical, $generation]
+    | join("\u001f")')
 
-  local id kind ids generation episode path observed_path observed prior corr pending_reply lock
+  local id kind ids ids_canonical generation episode path observed_path observed prior corr pending_reply lock
   local pending_tag pending_episode pending_corr pending_generation phase
-  while IFS=$'\x1f' read -r id kind ids generation; do
+  while IFS=$'\x1f' read -r id kind ids ids_canonical generation; do
     [ -n "${id:-}" ] || continue
     path=$(episode_path "$id")
     observed_path=$(observation_path "$id")
@@ -221,7 +225,7 @@ EOF_PENDING
       release_active_lock
       continue
     fi
-    episode="$kind:$ids"
+    episode="$kind:$ids_canonical"
     if [ "$prior" = "$episode" ]; then
       if write_observation "$id" "$generation"; then
         printf 'dedupe: %s %s\n' "$id" "$episode"

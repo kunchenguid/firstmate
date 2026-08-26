@@ -8,7 +8,8 @@
 #
 # Top-level fields:
 #   schema: stable schema id.
-#   generated: UTC observation time for this fresh command execution.
+#   generated: UTC display time for this fresh command execution.
+#   observation: collision-free monotonic identity for ordering this snapshot.
 #   fm_home: resolved operational home.
 #   roots: resolved root/config/data/state/projects directories.
 #   backlog: {path,present,records[]} where records are ordered as written in
@@ -87,6 +88,21 @@ else
     || date +%s)
 fi
 case "$SNAPSHOT_EPOCH" in ''|*[!0-9]*) SNAPSHOT_EPOCH=$(date +%s) ;; esac
+SNAPSHOT_OBSERVATION=${FM_SNAPSHOT_OBSERVATION:-}
+if [ -z "$SNAPSHOT_OBSERVATION" ]; then
+  if command -v perl >/dev/null 2>&1; then
+    SNAPSHOT_OBSERVATION=$(perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e \
+      'printf "%020.0f-%010d", clock_gettime(CLOCK_MONOTONIC) * 1000000000, $$') || exit 1
+  else
+    SNAPSHOT_OBSERVATION=$(date +%s%N 2>/dev/null || true)
+    case "$SNAPSHOT_OBSERVATION" in ''|*[!0-9]*) echo "fm-fleet-snapshot: cannot create an observation identity" >&2; exit 1 ;; esac
+    SNAPSHOT_OBSERVATION=$(printf '%020d-%010d' "$SNAPSHOT_OBSERVATION" "$$")
+  fi
+fi
+case "$SNAPSHOT_OBSERVATION" in
+  [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+  *) echo "fm-fleet-snapshot: invalid observation identity" >&2; exit 2 ;;
+esac
 # The observation date gates captain-hold deferral: a `hold-until` date still in
 # the future keeps a captain hold out of captain_actionable until it is due
 # (tasks-axi's own contract: the hold is inactive on and after that date).
@@ -1400,6 +1416,7 @@ SECONDMATE_LANDED_JSON=$(secondmate_landed_from_current_json "$SECONDMATE_CURREN
 
 jq -n \
   --arg generated "$SNAPSHOT_NOW" \
+  --arg observation "$SNAPSHOT_OBSERVATION" \
   --arg fm_home "$FM_HOME" \
   --arg fm_root "$FM_ROOT" \
   --arg state "$STATE" \
@@ -1418,6 +1435,7 @@ jq -n \
    {
      schema:"fm-fleet-snapshot.v1",
      generated:$generated,
+     observation:$observation,
      fm_home:$fm_home,
      roots:{fm_root:$fm_root,state:$state,data:$data,config:$config,projects:$projects},
      backlog:$backlog,

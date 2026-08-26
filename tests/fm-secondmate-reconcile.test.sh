@@ -41,10 +41,11 @@ META
 }
 
 # A minimal but schema-true fleet snapshot carrying one structured-home record.
-write_snapshot() {  # <path> <mate-id> <invalidity-json> [state] [generated]
+write_snapshot() {  # <path> <mate-id> <invalidity-json> [state] [generated] [observation]
   jq -n --arg id "$2" --argjson inv "$3" --arg state "${4:-captain_decision}" \
-    --arg generated "${5:-2026-08-26T00:00:00Z}" '{
-    schema:"fm-fleet-snapshot.v1", generated:$generated,
+    --arg generated "${5:-2026-08-26T00:00:00Z}" \
+    --arg observation "${6:-00000000000000000001-0000000001}" '{
+    schema:"fm-fleet-snapshot.v1", generated:$generated, observation:$observation,
     secondmate_current:{records:[{
       id:$id, home:("/tmp/" + $id),
       current:{state:$state, reason:null},
@@ -89,7 +90,7 @@ test_an_inventory_mismatch_asks_the_mate_once_and_only_once() {
 
   out=$(run_notify "$home" "$fakebin" once "$snap") \
     || fail "the first reconcile ask failed: $out"
-  assert_contains "$out" "sent: mate orphan_in_flight:stale-scout,watch-row" \
+  assert_contains "$out" 'sent: mate orphan_in_flight:["stale-scout","watch-row"]' \
     "the first ask did not report the episode it sent: $out"
   [ "$(inbox_records "$home/state" mate)" -eq 1 ] \
     || fail "the ask did not land as exactly one durable steering record"
@@ -100,7 +101,7 @@ test_an_inventory_mismatch_asks_the_mate_once_and_only_once() {
   # re-nag: this is the whole point of episode identity.
   out=$(run_notify "$home" "$fakebin" once "$snap") \
     || fail "the repeat reconcile run failed: $out"
-  assert_contains "$out" "dedupe: mate orphan_in_flight:stale-scout,watch-row" \
+  assert_contains "$out" 'dedupe: mate orphan_in_flight:["stale-scout","watch-row"]' \
     "a repeated snapshot did not dedupe the episode: $out"
   out=$(run_notify "$home" "$fakebin" once "$snap")
   [ "$(inbox_records "$home/state" mate)" -eq 1 ] \
@@ -132,10 +133,10 @@ test_a_completed_send_survives_a_missing_episode_commit() {
 
   corr=$(find "$home/state/pending-replies" -maxdepth 1 -type f -name '????????????????' -exec basename {} \; | head -1)
   [ -n "$corr" ] || fail "the delivered ask has no persisted correlation identity"
-  printf 'pending\tunowned_current:live-row\t%s\n' "$corr" > "$home/state/mate.reconcile-episode"
+  printf 'pending\tunowned_current:["live-row"]\t%s\n' "$corr" > "$home/state/mate.reconcile-episode"
   out=$(run_notify "$home" "$fakebin" interrupted "$snap") \
     || fail "recovery after the missing commit failed: $out"
-  assert_contains "$out" "sent: mate unowned_current:live-row" \
+  assert_contains "$out" 'sent: mate unowned_current:["live-row"]' \
     "the interrupted episode was not recovered: $out"
   [ "$(inbox_records "$home/state" mate)" -eq 1 ] \
     || fail "recovery after a delivered send duplicated the instruction"
@@ -181,7 +182,7 @@ SH
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "completion-unknown transport reported success: $out"
-  assert_contains "$out" "unconfirmed: mate unowned_current:live-row" \
+  assert_contains "$out" 'unconfirmed: mate unowned_current:["live-row"]' \
     "completion uncertainty was not preserved: $out"
   first_corr=$(head -1 "$home/send.log")
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$runtime" \
@@ -203,15 +204,15 @@ test_an_older_snapshot_cannot_restore_a_cleared_episode() {
   cleared="$home/cleared.json"
   stale="$home/stale.json"
   recurrence="$home/recurrence.json"
-  write_snapshot "$first" mate '{"kind":"orphan_in_flight","ids":["ghost"]}' captain_decision 2026-08-26T00:00:01Z
-  write_snapshot "$cleared" mate null no_active_work 2026-08-26T00:00:03Z
-  write_snapshot "$stale" mate '{"kind":"orphan_in_flight","ids":["ghost"]}' captain_decision 2026-08-26T00:00:02Z
-  write_snapshot "$recurrence" mate '{"kind":"orphan_in_flight","ids":["ghost"]}' captain_decision 2026-08-26T00:00:04Z
+  write_snapshot "$first" mate '{"kind":"orphan_in_flight","ids":["ghost"]}' captain_decision 2026-08-26T00:00:00Z 00000000000000000001-0000000001
+  write_snapshot "$cleared" mate null no_active_work 2026-08-26T00:00:00Z 00000000000000000003-0000000001
+  write_snapshot "$stale" mate '{"kind":"orphan_in_flight","ids":["ghost"]}' captain_decision 2026-08-26T00:00:00Z 00000000000000000002-0000000001
+  write_snapshot "$recurrence" mate '{"kind":"orphan_in_flight","ids":["ghost"]}' captain_decision 2026-08-26T00:00:00Z 00000000000000000004-0000000001
 
   run_notify "$home" "$fakebin" stale "$first" >/dev/null || fail "the first episode failed"
   run_notify "$home" "$fakebin" stale "$cleared" >/dev/null || fail "the clear observation failed"
   out=$(run_notify "$home" "$fakebin" stale "$stale") || fail "the stale observation failed: $out"
-  assert_contains "$out" "stale: mate 2026-08-26T00:00:02Z" \
+  assert_contains "$out" "stale: mate 00000000000000000002-0000000001" \
     "an older observation was not rejected: $out"
   [ "$(inbox_records "$home/state" mate)" -eq 1 ] \
     || fail "an older snapshot sent a stale reconcile instruction"
@@ -220,6 +221,27 @@ test_an_older_snapshot_cannot_restore_a_cleared_episode() {
   [ "$(inbox_records "$home/state" mate)" -eq 2 ] \
     || fail "a stale snapshot prevented a later recurrence from being asked"
   pass "older snapshots cannot restore cleared reconcile episodes"
+}
+
+test_distinct_id_sets_never_share_an_episode_identity() {
+  local home mate fakebin first second out
+  { read -r home; read -r mate; read -r fakebin; } < <(make_main_home id-collision mate)
+  first="$home/first.json"
+  second="$home/second.json"
+  write_snapshot "$first" mate '{"kind":"orphan_in_flight","ids":["a,b","c"]}' captain_decision \
+    2026-08-26T00:00:00Z 00000000000000000001-0000000001
+  write_snapshot "$second" mate '{"kind":"orphan_in_flight","ids":["a","b,c"]}' captain_decision \
+    2026-08-26T00:00:00Z 00000000000000000002-0000000001
+
+  run_notify "$home" "$fakebin" id-collision "$first" >/dev/null \
+    || fail "the first comma-bearing id set failed"
+  out=$(run_notify "$home" "$fakebin" id-collision "$second") \
+    || fail "the distinct comma-bearing id set failed: $out"
+  assert_contains "$out" 'sent: mate orphan_in_flight:["a","b,c"]' \
+    "a distinct sorted id set was deduped through a joined-string collision: $out"
+  [ "$(inbox_records "$home/state" mate)" -eq 2 ] \
+    || fail "distinct id sets that render similarly shared one delivery"
+  pass "canonical id arrays keep distinct mismatch episodes separate"
 }
 
 test_the_ids_order_does_not_split_one_episode_in_two() {
@@ -246,7 +268,7 @@ test_a_changed_or_cleared_mismatch_is_a_new_episode() {
   # A different mismatch is genuinely new information and earns one more ask.
   write_snapshot "$snap" mate '{"kind":"terminal_in_flight","ids":["done-row","failed-row"]}'
   out=$(run_notify "$home" "$fakebin" change "$snap")
-  assert_contains "$out" "sent: mate terminal_in_flight:done-row,failed-row" \
+  assert_contains "$out" 'sent: mate terminal_in_flight:["done-row","failed-row"]' \
     "a changed mismatch did not earn a fresh ask: $out"
   [ "$(inbox_records "$home/state" mate)" -eq 2 ] \
     || fail "a changed episode did not send exactly one more instruction"
@@ -258,7 +280,7 @@ test_a_changed_or_cleared_mismatch_is_a_new_episode() {
   assert_contains "$out" "cleared: mate" "a repaired home was not cleared: $out"
   write_snapshot "$snap" mate '{"kind":"terminal_in_flight","ids":["done-row"]}'
   out=$(run_notify "$home" "$fakebin" change "$snap")
-  assert_contains "$out" "sent: mate terminal_in_flight:done-row" \
+  assert_contains "$out" 'sent: mate terminal_in_flight:["done-row"]' \
     "a recurrence after a repair was not asked about again: $out"
   [ "$(inbox_records "$home/state" mate)" -eq 3 ] \
     || fail "the recurrence did not send exactly one more instruction"
@@ -314,6 +336,7 @@ test_concurrent_recaps_send_one_instruction
 test_a_completed_send_survives_a_missing_episode_commit
 test_an_unconfirmed_remote_send_reuses_its_delivery_identity
 test_an_older_snapshot_cannot_restore_a_cleared_episode
+test_distinct_id_sets_never_share_an_episode_identity
 test_the_ids_order_does_not_split_one_episode_in_two
 test_a_changed_or_cleared_mismatch_is_a_new_episode
 test_a_readable_home_without_a_mismatch_is_never_asked
