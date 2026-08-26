@@ -211,7 +211,7 @@ fetch_once() {
 
 # Which watched instruction paths changed between HEAD and BASE (comma list).
 # These are the files a running agent actually reads or runs: its instructions
-# (AGENTS.md, which CLAUDE.md symlinks), its agent-loaded skills
+# (AGENTS.md, which CLAUDE.md imports via @AGENTS.md), its agent-loaded skills
 # (.agents/skills/), and its tooling (bin/). Public skills/ is installer-facing
 # and intentionally not part of this watched instruction surface.
 changed_instr() {

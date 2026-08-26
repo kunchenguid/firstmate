@@ -3,8 +3,8 @@
 #
 # WHY THIS EXISTS. Every external-network call a session start makes used to run
 # BEFORE the digest printed, on a hook that blocks session initialization: `gh
-# auth status`, the secondmate liveness and convergence sweeps (11 sequential,
-# individually unbounded SSH connections per REMOTE secondmate), pending remote
+# auth status`, the secondmate liveness and convergence sweeps (per-secondmate
+# remote probes, which bootstrap runs concurrently), pending remote
 # handoff delivery, and the fleet-sync fetch of every project clone. None of
 # those calls is individually bounded, so one unreachable host could consume the
 # whole FM_SESSION_START_TIMEOUT budget and truncate the digest outright, turning
@@ -24,10 +24,17 @@
 #     undelivered handoff. There is no once-only signal to miss.
 #   - The result is durable and always surfaces. It lands in
 #     state/.startup-network.report and reaches the agent either inline in the
-#     digest or as a `check: startup-network` wake. Only a durable acknowledgement
-#     written after harvest prints the finished result suppresses that wake, so a
-#     claimant that exits first cannot lose the result. While the worker is still
-#     running the digest states by name what is not yet confirmed.
+#     digest or, when it finishes too late for the digest to inline it, as a
+#     `check: startup-network` wake - but only when the late result is itself
+#     actionable (state is not "done", or bootstrap emitted something other
+#     than its explicit BOOTSTRAP_INFO no-action record; report_requires_wake
+#     owns that transport test). A late-finishing clean run is not captain-facing progress
+#     (AGENTS.md section 8) and never becomes a wake row; it is still durable
+#     in the report file for `... report` to read on demand. Only a durable
+#     acknowledgement written after harvest prints the finished result
+#     suppresses the wake, so a claimant that exits first cannot lose the
+#     result. While the worker is still running the digest states by name what
+#     is not yet confirmed.
 #   - Mutation authority is leased. The worker outlives the command that launched
 #     it, so it takes the same acquisition lease a new session must hold before
 #     replacing a dead owner, re-checks the captured owner under that lease, and
@@ -294,6 +301,19 @@ lock_unchanged() {  # <expected-pid>
   [ "$current" = "$expected" ]
 }
 
+# Bootstrap owns the meaning of its output protocol: silence is success,
+# BOOTSTRAP_INFO is an explicit completed no-action fact, and every other line
+# is a diagnostic. This delivery layer does not maintain a second semantic
+# prefix list or decide what a diagnostic means; it only applies that producer-
+# supplied transport type. Unknown non-empty output fails safe by waking.
+report_requires_wake() {  # <state>
+  local state=$1
+  [ "$state" = "done" ] || return 0
+  [ -s "$REPORT_FILE" ] || return 1
+  awk 'NF && $0 !~ /^BOOTSTRAP_INFO:/ { found=1; exit } END { exit !found }' \
+    "$REPORT_FILE" 2>/dev/null
+}
+
 await_delivery() {  # <generation> <state>
   local generation=$1 state=$2 limit waited=0 claim_record claim_generation claim_pid claim_live
   limit=$(( $(delivery_budget) * 10 ))
@@ -322,9 +342,11 @@ EOF
       [ "$claim_live" -eq 1 ] || rm -f "$CLAIM_FILE" 2>/dev/null || true
     fi
     if [ "$claim_live" -eq 0 ]; then
-      fm_wake_append check startup-network \
-        "check: startup-network: deferred startup network checks finished ($state); read them with $FM_ROOT/bin/fm-startup-network.sh report" \
-        || true
+      if report_requires_wake "$state"; then
+        fm_wake_append check startup-network \
+          "check: startup-network: deferred startup network checks finished ($state); read them with $FM_ROOT/bin/fm-startup-network.sh report" \
+          || true
+      fi
       fm_lock_release "$PUBLISH_LOCK"
       return 0
     fi
@@ -337,9 +359,11 @@ EOF
     fm_lock_release "$PUBLISH_LOCK"
     return 0
   fi
-  fm_wake_append check startup-network \
-    "check: startup-network: deferred startup network checks finished ($state); read them with $FM_ROOT/bin/fm-startup-network.sh report" \
-    || true
+  if report_requires_wake "$state"; then
+    fm_wake_append check startup-network \
+      "check: startup-network: deferred startup network checks finished ($state); read them with $FM_ROOT/bin/fm-startup-network.sh report" \
+      || true
+  fi
   fm_lock_release "$PUBLISH_LOCK"
 }
 
@@ -523,8 +547,8 @@ print_pending() {
   printf 'NOT yet confirmed: %s.\n' "$(phase_label "$phases")"
   [ -z "$age" ] || printf 'Started %ss ago, bounded at %ss.\n' "$age" "$(stage_budget)"
   # shellcheck disable=SC2016  # The backticked wake name is literal digest text.
-  printf 'The result is durable in state/.startup-network.report and arrives as a `check: startup-network` wake.\n'
-  printf 'Read it now with %s/bin/fm-startup-network.sh report; until it lands, treat none of it as confirmed.\n' "$FM_ROOT"
+  printf 'Only a FAILED or otherwise actionable result arrives as a `check: startup-network` wake; a clean success stays silent.\n'
+  printf 'The durable result is readable on demand with %s/bin/fm-startup-network.sh report; until it finishes, treat none of it as confirmed.\n' "$FM_ROOT"
 }
 
 print_state() {

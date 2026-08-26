@@ -404,7 +404,10 @@ test_full_scan_budget_includes_wake_lock_wait() {
   FM_INACTIVE_RECONCILE_BUDGET_SECS=1 FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
   elapsed=$(( $(date +%s) - started ))
   reap "$holder"
-  [ "$elapsed" -le 3 ] || fail "wake lock wait exceeded aggregate scan budget (${elapsed}s)"
+  # The unbounded wake-lock wait is ended by the process-group backstop, which
+  # fires one second after the budget; the bound proves the scan cannot ride
+  # the 30-second lock hold.
+  [ "$elapsed" -le 4 ] || fail "wake lock wait exceeded aggregate scan budget (${elapsed}s)"
   pass "aggregate scan budget includes durable wake operations"
 }
 

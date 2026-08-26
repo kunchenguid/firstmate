@@ -27,7 +27,8 @@
 # Usage:
 #   fm-public-followup.sh active
 #       Silent gate probe. Exit 0 when this home has live public-followup work
-#       worth looking at, 1 otherwise. Safe to call unconditionally.
+#       worth looking at, including a delivered open loop, 1 otherwise. Safe to
+#       call unconditionally.
 #
 #   fm-public-followup.sh register <obligation-id> --relation <relation-id>
 #         --work-home <main|secondmate:<id>> --work-id <task-id> --generation <n>
@@ -42,7 +43,8 @@
 #   fm-public-followup.sh brief <obligation-id>
 #       Print the exact fm-public-followup-emit.sh command line the bound worker
 #       must run when its work reaches the promised terminal outcome, so the
-#       binding is copied into a brief instead of hand-assembled.
+#       binding is copied into a brief instead of hand-assembled. The
+#       --deliverable flags name the obligation's actual required keys.
 #
 #   fm-public-followup.sh consume
 #       Drain every pending typed terminal event: validate its derived identity,
@@ -54,43 +56,60 @@
 #       replay are no-ops.
 #
 #   fm-public-followup.sh pending
-#       One bounded public-safe line per unresolved commitment, for the session
-#       start digest. Prunes registrations whose obligation is already closed.
-#       Silent when nothing is unresolved.
+#       One bounded public-safe line per open public loop, for the session
+#       start digest. Unresolved commitments print as "unresolved" (a reply is
+#       still owed). Delivered or settled registrations print as "open-loop"
+#       (the thread is still open with nothing owed). Registrations are never
+#       pruned here; only `retire` removes one. Silent when nothing is open.
 #
 #   fm-public-followup.sh deliver <obligation-id> [--text-file <path>]
-#       Post the final public reply into the ORIGINAL thread and close the
-#       obligation. Uses the stored platform and opaque context binding, so the
-#       destination is never guessed. Without --text-file the accepted terminal
-#       event's bounded public-safe outcome is reused exactly, which keeps the
-#       common path deterministic. The sequence is begin-delivery with the
-#       payload hash, post, then record the posted receipt or a typed error.
-#       A validated receipt also clears any bound legacy X link before the
-#       registration is removed.
-#       An already-posted obligation is an idempotent success without another
-#       post; an obligation left in delivery-posting by a crash is REFUSED
-#       rather than posted again.
+#       Post the final public reply into the ORIGINAL thread. Uses the stored
+#       platform and opaque context binding, so the destination is never guessed.
+#       Without --text-file the accepted terminal event's bounded public-safe
+#       outcome is reused exactly, which keeps the common path deterministic.
+#       The sequence is begin-delivery with the payload hash, post, then record
+#       the posted receipt or a typed error. A validated receipt also clears any
+#       bound legacy X link, then stamps the registration state=delivered. Delivery
+#       does not close the public loop; `retire` is the only close. Prints a
+#       disposition line so the loop is handed on with `rechain` or closed
+#       explicitly. An already-posted obligation is an idempotent success
+#       without another post; an obligation left in delivery-posting by a crash
+#       is REFUSED rather than posted again.
 #
 #   fm-public-followup.sh record-posted <obligation-id> --attempt <n> --chunks <n>
-#       Close an obligation whose post is known to have landed on exactly
+#       Record an obligation whose post is known to have landed on exactly
 #       attempt <n> with exactly <n> messages, without posting anything. This is
 #       the late-receipt path: use it when a post succeeded but its receipt was
-#       lost, never to paper over an unknown outcome.
+#       lost, never to paper over an unknown outcome. Stamps the registration
+#       delivered; does not remove it.
 #
 #   fm-public-followup.sh guard-work <work-home-id> <work-id>
 #       Exit 3 when this home has an unresolved public commitment bound to that
 #       exact work, printing one line per blocking obligation. Exit 0 otherwise.
 #       Cleanup paths call this so bound work is never treated as finished while
-#       its public promise is still open.
+#       its public promise is still open. A delivered registration is not a
+#       block: that work's reply already landed.
 #
-#   fm-public-followup.sh retire <obligation-id> [--force]
-#       Drop the registration once its obligation is closed. --force is the
-#       explicit discard-approved escape hatch for an unresolved or missing
-#       obligation.
+#   fm-public-followup.sh rechain <new-obligation-id> --from <delivered-id>
+#         --work-home <main|secondmate:<id>> --work-id <task-id>
+#         --expected <pr-merged|report-ready|local-main>
+#         [--deliverable-key <k>]...
+#       Hand a delivered public loop on to follow-on work against the same
+#       thread. Decodes the retained request context, creates and binds a fresh
+#       promised-final obligation, registers it, retires the source with reason
+#       "handed on to <new-id>", and prints `brief` for the new obligation.
+#       Refuses unless the source is state=delivered, the follow-up window is
+#       still open, and the relay is active. A pre-change record without
+#       request_context_b64 is un-rechainable.
 #
-# Requires jq and a compatible tasks-axi for registration, reconciliation,
-# delivery, cleanup guards, and retirement; `active` and `brief` only inspect
-# local state.
+#   fm-public-followup.sh retire <obligation-id> --reason "<why the loop is done>" [--force]
+#       The only close. Drops the registration after recording --reason.
+#       --force is the explicit discard-approved escape hatch for an unresolved
+#       or missing obligation. --reason is required.
+#
+# Requires jq and a compatible tasks-axi for registration, briefs,
+# reconciliation, delivery, cleanup guards, and retirement; only `active`
+# inspects local state alone.
 # FM_PF_RETRY_BACKOFF_SECS (default 900) sets the next-attempt time recorded with
 # a retryable delivery error.
 set -u
@@ -110,7 +129,7 @@ RETRY_BACKOFF=${FM_PF_RETRY_BACKOFF_SECS:-900}
 case "$RETRY_BACKOFF" in ''|*[!0-9]*) RETRY_BACKOFF=900 ;; esac
 
 usage() {
-  echo "usage: fm-public-followup.sh <active|register|brief|consume|pending|deliver|record-posted|guard-work|retire> [args]" >&2
+  echo "usage: fm-public-followup.sh <active|register|brief|consume|pending|deliver|record-posted|guard-work|rechain|retire> [args]" >&2
 }
 
 # The header comment IS the help text, so the two can never drift apart.
@@ -119,12 +138,40 @@ help() { sed -n '2,/^set -u$/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
 die() { printf 'fm-public-followup: %s\n' "$1" >&2; exit "${2:-2}"; }
 
 PF_TEMP_FILES=()
-pf_cleanup_temp_files() {
+PF_REGISTRY_LOCK_IDS=()
+pf_registry_lock_held() {
+  local wanted=$1 held
+  for held in "${PF_REGISTRY_LOCK_IDS[@]}"; do
+    [ "$held" = "$wanted" ] && return 0
+  done
+  return 1
+}
+pf_registry_lock_acquire() {
+  local id=$1
+  pf_registry_lock_held "$id" && return 0
+  fm_pf_registry_lock_acquire "$STATE" "$id" || return 1
+  PF_REGISTRY_LOCK_IDS+=("$id")
+}
+pf_registry_lock_release() {
+  local id=$1 held
+  local -a remaining=()
+  pf_registry_lock_held "$id" || return 0
+  fm_pf_registry_lock_release "$STATE" "$id"
+  for held in "${PF_REGISTRY_LOCK_IDS[@]}"; do
+    [ "$held" = "$id" ] || remaining+=("$held")
+  done
+  PF_REGISTRY_LOCK_IDS=("${remaining[@]}")
+}
+pf_cleanup() {
+  local i
+  for ((i=${#PF_REGISTRY_LOCK_IDS[@]}-1; i>=0; i--)); do
+    fm_pf_registry_lock_release "$STATE" "${PF_REGISTRY_LOCK_IDS[$i]}" 2>/dev/null || true
+  done
   [ "${#PF_TEMP_FILES[@]}" -eq 0 ] || rm -f -- "${PF_TEMP_FILES[@]}"
 }
-trap pf_cleanup_temp_files EXIT
+trap pf_cleanup EXIT
 
-now_rfc3339() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+now_rfc3339() { fm_pf_now_rfc3339; }
 
 # next_attempt_rfc3339: the retry time recorded with a retryable delivery error.
 # BSD and GNU date disagree on the flag, so try both and print nothing when
@@ -143,7 +190,7 @@ require_tools() {
 }
 
 # Every tasks-axi call runs from the home whose backlog owns the obligation, the
-# same convention bin/fm-decision-hold.sh uses for typed backlog state.
+# same convention bin/fm-captain-hold.sh uses for typed backlog state.
 tx() { (cd "$FM_HOME" && tasks-axi "$@"); }
 
 # obligation_json <id>: the complete typed obligation payload on stdout, empty
@@ -233,17 +280,48 @@ cmd_register() {
   [ -n "$request" ] || request=$(pf_field "$payload" '.public_followup.request.request_id')
   [ -z "$request" ] || fm_pf_slug_valid "$request" || die "unsafe request id: $request"
 
-  local mkdir_target
+  local followup_expires_at request_json request_context_b64 work_home_path
+  followup_expires_at=$(pf_field "$payload" '.public_followup.request.followup_expires_at')
+  request_json=$(printf '%s' "$payload" | jq -c '.public_followup.request // empty' 2>/dev/null || true)
+  request_context_b64=
+  if [ -n "$request_json" ]; then
+    request_context_b64=$(printf '%s' "$request_json" | fm_pf_b64_encode)
+  fi
+  work_home_path=
+  case "$work_home" in
+    secondmate:*)
+      work_home_path=$(public_followup_secondmate_home "${work_home#secondmate:}" 2>/dev/null || true)
+      case "$work_home_path" in
+        *$'\n'*|*$'\r'*) work_home_path= ;;
+      esac
+      ;;
+  esac
+
+  local mkdir_target registry_state retired_file
   for mkdir_target in "$(fm_pf_registry_dir "$STATE")" "$(fm_pf_events_dir "$STATE")" \
                       "$(fm_pf_consumed_dir "$STATE")" "$(fm_pf_rejected_dir "$STATE")"; do
     fmx_private_artifact_dir_prepare "$mkdir_target" >/dev/null \
       || die "could not prepare $mkdir_target" 1
   done
 
-  printf 'obligation_id=%s\nrelation_id=%s\nwork_home=%s\nwork_id=%s\ngeneration=%s\nplatform=%s\nrequest_id=%s\n' \
-    "$id" "$relation" "$work_home" "$work_id" "$generation" "$platform" "$request" \
+  pf_registry_lock_acquire "$id" \
+    || die "could not lock registration '$id'" 1
+  retired_file="$(fm_pf_retired_dir "$STATE")/$id"
+  if [ -e "$retired_file" ] || [ -L "$retired_file" ]; then
+    die "public loop '$id' has already been retired and cannot be registered again" 1
+  fi
+  registry_state=$(fm_pf_registry_loop_state "$STATE" "$id")
+  if [ "$registry_state" = delivered ]; then
+    pf_registry_lock_release "$id"
+    printf 'already registered %s state=delivered\n' "$id"
+    return 0
+  fi
+  printf 'obligation_id=%s\nrelation_id=%s\nwork_home=%s\nwork_home_path=%s\nwork_id=%s\ngeneration=%s\nplatform=%s\nrequest_id=%s\nstate=open\nfollowup_expires_at=%s\nrequest_context_b64=%s\n' \
+    "$id" "$relation" "$work_home" "$work_home_path" "$work_id" "$generation" "$platform" "$request" \
+    "$followup_expires_at" "$request_context_b64" \
     | fmx_private_artifact_publish_stdin "$(fm_pf_registry_dir "$STATE")" "$id" 600 \
     || die "could not write the registration record" 1
+  pf_registry_lock_release "$id"
 
   printf 'registered %s %s/%s generation=%s platform=%s\n' \
     "$id" "$work_home" "$work_id" "$generation" "${platform:-unknown}"
@@ -252,7 +330,7 @@ cmd_register() {
 # --- subcommand: brief ------------------------------------------------------
 
 cmd_brief() {
-  local id=${1:-} relation work_home work_id generation
+  local id=${1:-} relation work_home work_id generation payload outcome keys key deliverable_flags
   [ -n "$id" ] || { usage; exit 2; }
   fm_pf_slug_valid "$id" || die "unsafe obligation id: $id"
   fm_pf_relay_active "$FM_HOME" || die "the relay is not active for this home" 1
@@ -263,6 +341,29 @@ cmd_brief() {
   work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
   work_id=$(fm_pf_registry_get "$STATE" "$id" work_id)
   generation=$(fm_pf_registry_get "$STATE" "$id" generation)
+
+  require_tools
+  payload=$(obligation_json "$id") \
+    || die "could not read public-followup obligation '$id' through tasks-axi" 1
+  [ -n "$payload" ] \
+    || die "public-followup obligation '$id' is missing from tasks-axi" 1
+  outcome=$(pf_field "$payload" '.public_followup.expected_final.type')
+  [ -n "$outcome" ] \
+    || die "public-followup obligation '$id' has no expected final type" 1
+  keys=$(printf '%s' "$payload" \
+    | jq -er '.public_followup.expected_final.required_deliverables
+        | select(type == "array" and length > 0
+            and (map(type == "string" and test("^[a-z0-9_]+$")) | all))
+        | .[]' 2>/dev/null) \
+    || die "public-followup obligation '$id' has no readable required deliverable keys" 1
+  deliverable_flags=
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    deliverable_flags="${deliverable_flags}    --deliverable ${key}=<value> \\
+"
+  done <<EOF
+$keys
+EOF
 
   cat <<EOF
 When this work reaches its promised terminal outcome, report it as typed data
@@ -275,9 +376,8 @@ When this work reaches its promised terminal outcome, report it as typed data
     --source-home $work_home \\
     --work-id $work_id \\
     --generation $generation \\
-    --outcome <pr-merged|report-ready|local-main|failed> \\
-    --deliverable <key>=<value> \\
-    --outcome-text '<one bounded public-safe sentence>'
+    --outcome $outcome \\
+${deliverable_flags}    --outcome-text '<one bounded public-safe sentence>'
 
 Do not post anything publicly yourself and do not look for the public thread:
 the home above owns the reply.
@@ -426,10 +526,52 @@ cmd_consume() {
 
 # --- subcommand: pending ----------------------------------------------------
 
+# print_open_loop <id> <payload>: the session-start line for a public loop that
+# is still open after delivery (or whose obligation has left the backlog).
+print_window_escalation() {
+  local expires=$1 window
+  window=$(fm_pf_followup_window_class "$expires")
+  case "$window" in
+    expired)
+      printf '  DEADLINE: thread can no longer be reached (window closed %s); this needs a captain decision\n' \
+        "${expires:-unknown}"
+      ;;
+    closing)
+      printf '  DEADLINE: window closes %s (under 48 hours)\n' "${expires:-unknown}"
+      ;;
+  esac
+}
+
+print_open_loop() {
+  local id=$1 payload=$2 request platform summary delivered expires ctx
+  request=$(fm_pf_registry_get "$STATE" "$id" request_id)
+  [ -n "$request" ] || request=$(pf_field "$payload" '.public_followup.request.request_id')
+  platform=$(fm_pf_registry_get "$STATE" "$id" platform)
+  [ -n "$platform" ] || platform=$(pf_field "$payload" '.public_followup.request.platform')
+  delivered=$(fm_pf_registry_get "$STATE" "$id" delivered_at)
+  expires=$(fm_pf_registry_get "$STATE" "$id" followup_expires_at)
+  [ -n "$expires" ] || expires=$(pf_field "$payload" '.public_followup.request.followup_expires_at')
+  summary=$(pf_field "$payload" '.public_followup.request.public_safe_summary' | fm_pf_clean_outcome_text)
+  if [ -z "$summary" ]; then
+    ctx=$(fm_pf_registry_get "$STATE" "$id" request_context_b64)
+    if [ -n "$ctx" ]; then
+      summary=$(printf '%s' "$ctx" | fm_pf_b64_decode | jq -r '.public_safe_summary // empty' 2>/dev/null | fm_pf_clean_outcome_text)
+    fi
+  fi
+  printf 'open-loop %s request=%s platform=%s\n' "$id" "${request:-unknown}" "${platform:-unknown}"
+  printf '  delivered=%s window-closes=%s\n' "${delivered:-unknown}" "${expires:-unknown}"
+  printf '  summary=%s\n' "$summary"
+  if ! fm_pf_registry_rechainable "$STATE" "$id"; then
+    printf '  unrechainable: pre-change registration lacks request_context_b64\n'
+  fi
+  print_window_escalation "$expires"
+  printf '  -> bind the follow-on with rechain, or close the loop with retire %s --reason ...\n' "$id"
+}
+
 cmd_pending() {
   gate_or_exit
 
-  local listing id payload delivery task_state summary platform request printed=0
+  local listing id payload delivery task_state summary platform request expires printed=0 loop_state settled stamp_rc
   # An unreadable backlog with registrations present is exactly the silence this
   # whole path exists to prevent, so say so rather than printing nothing.
   if ! command -v jq >/dev/null 2>&1 || ! command -v tasks-axi >/dev/null 2>&1 \
@@ -460,26 +602,32 @@ cmd_pending() {
     [ -n "$id" ] || continue
     payload=$(printf '%s' "$listing" | jq -ce --arg id "$id" \
       '(.public_followups // []) | map(select(.id == $id)) | .[0] // empty' 2>/dev/null)
-    if [ -z "$payload" ]; then
-      # The obligation is gone from the backlog (pruned after Done): the
-      # registration is stale bookkeeping, not evidence, so drop it.
-      if ! clear_public_followup_link "$id"; then
-        printf 'cannot clear the legacy X link for closed public commitment %s; registration retained for reconciliation\n' "$id"
-        printed=1
-        continue
-      fi
-      rm -f -- "$(fm_pf_registry_dir "$STATE")/$id" 2>/dev/null || true
-      continue
-    fi
+    loop_state=$(fm_pf_registry_loop_state "$STATE" "$id")
     delivery=$(pf_field "$payload" '.public_followup.delivery.state')
     task_state=$(pf_field "$payload" '.state')
-    if [ "$task_state" = 'done' ] || [ "$delivery" = 'posted' ] || [ "$delivery" = 'waived' ]; then
-      if ! clear_public_followup_link "$id"; then
-        printf 'cannot clear the legacy X link for closed public commitment %s; registration retained for reconciliation\n' "$id"
-        printed=1
-        continue
+    settled=0
+    if [ -z "$payload" ] || [ "$task_state" = 'done' ] \
+        || [ "$delivery" = 'posted' ] || [ "$delivery" = 'waived' ] \
+        || [ "$loop_state" = delivered ]; then
+      settled=1
+    fi
+    if [ "$settled" -eq 1 ]; then
+      if [ "$loop_state" != delivered ]; then
+        stamp_rc=0
+        fm_pf_registry_stamp_delivered "$STATE" "$id" "$(now_rfc3339)" || stamp_rc=$?
+        if [ "$stamp_rc" -eq 3 ] && fm_pf_retirement_receipt_exists "$STATE" "$id"; then
+          continue
+        fi
+        [ "$stamp_rc" -eq 0 ] \
+          || die "could not stamp settled registration '$id' as delivered" 1
       fi
-      rm -f -- "$(fm_pf_registry_dir "$STATE")/$id" 2>/dev/null || true
+      # Keep the registration. Clearing a leftover legacy link is best-effort
+      # and never the close; only retire removes the record.
+      if public_followup_registration_valid "$id"; then
+        clear_public_followup_link "$id" >/dev/null 2>&1 || true
+      fi
+      print_open_loop "$id" "$payload"
+      printed=1
       continue
     fi
     summary=$(pf_field "$payload" '.public_followup.request.public_safe_summary' | fm_pf_clean_outcome_text)
@@ -487,6 +635,12 @@ cmd_pending() {
     request=$(pf_field "$payload" '.public_followup.request.request_id')
     printf 'unresolved %s state=%s platform=%s request=%s summary=%s\n' \
       "$id" "${delivery:-unknown}" "${platform:-unknown}" "${request:-unknown}" "$summary"
+    expires=$(fm_pf_registry_get "$STATE" "$id" followup_expires_at)
+    [ -n "$expires" ] || expires=$(pf_field "$payload" '.public_followup.request.followup_expires_at')
+    print_window_escalation "$expires"
+    if ! fm_pf_registry_rechainable "$STATE" "$id"; then
+      printf '  unrechainable: pre-change registration lacks request_context_b64\n'
+    fi
     printed=1
   done <<EOF
 $(fm_pf_registry_ids "$STATE")
@@ -518,24 +672,33 @@ public_followup_registration_valid() {
 }
 
 public_followup_secondmate_home() {
-  local id=$1 meta home marker
+  local id=$1 include_absent=${2:-} meta_home registry_home home marker
   fm_pf_home_id_valid "secondmate:$id" || return 1
-  meta="$STATE/$id.meta"
-  home=$(fmx_meta_get "$meta" home)
-  if [ -z "$home" ] && [ -f "$DATA/secondmates.md" ] && [ ! -L "$DATA/secondmates.md" ]; then
-    home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home || true)
+  meta_home=$(fmx_meta_get "$STATE/$id.meta" home)
+  registry_home=
+  if [ -f "$DATA/secondmates.md" ] && [ ! -L "$DATA/secondmates.md" ]; then
+    registry_home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home || true)
   fi
-  [ -n "$home" ] || return 1
-  case "$home" in /*) ;; *) return 1 ;; esac
-  home=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
-  [ -f "$home/.fm-secondmate-home" ] && [ ! -L "$home/.fm-secondmate-home" ] || return 1
+  if [ -n "$meta_home" ] && [ -n "$registry_home" ] && [ "$meta_home" != "$registry_home" ]; then
+    return 2
+  fi
+  home=${meta_home:-$registry_home}
+  [ -n "$home" ] || return 4
+  case "$home" in /*) ;; *) return 2 ;; esac
+  if [ ! -e "$home" ]; then
+    [ ! -L "$home" ] || return 2
+    [ "$include_absent" = include-absent ] && printf '%s\n' "$home"
+    return 3
+  fi
+  home=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 2
+  [ -f "$home/.fm-secondmate-home" ] && [ ! -L "$home/.fm-secondmate-home" ] || return 2
   marker=$(sed -n '1p' "$home/.fm-secondmate-home" 2>/dev/null)
-  [ "$marker" = "$id" ] || return 1
+  [ "$marker" = "$id" ] || return 2
   printf '%s\n' "$home"
 }
 
 clear_public_followup_link() {
-  local id=$1 work_home work_id home state
+  local id=$1 work_home work_home_path work_id home state rc
   public_followup_registration_valid "$id" || return 1
   work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
   work_id=$(fm_pf_registry_get "$STATE" "$id" work_id)
@@ -546,7 +709,22 @@ clear_public_followup_link() {
       state=$STATE
       ;;
     secondmate:*)
-      home=$(public_followup_secondmate_home "${work_home#secondmate:}") || return 1
+      work_home_path=$(fm_pf_registry_get "$STATE" "$id" work_home_path)
+      case "$work_home_path" in /*) ;; *) return 1 ;; esac
+      case "$work_home_path" in *$'\n'*|*$'\r'*) return 1 ;; esac
+      rc=0
+      home=$(public_followup_secondmate_home "${work_home#secondmate:}" include-absent) || rc=$?
+      if [ "$rc" -eq 3 ]; then
+        [ "$home" = "$work_home_path" ] || return 1
+        [ ! -e "$work_home_path" ] && [ ! -L "$work_home_path" ] || return 1
+        return 0
+      fi
+      if [ "$rc" -eq 4 ]; then
+        [ ! -e "$work_home_path" ] && [ ! -L "$work_home_path" ] || return 1
+        return 0
+      fi
+      [ "$rc" -eq 0 ] || return 1
+      [ "$home" = "$work_home_path" ] || return 1
       state="$home/state"
       ;;
     *) return 1 ;;
@@ -619,6 +797,24 @@ record_posted() {
   return "$rc"
 }
 
+# Delivery keeps the registration. Stamp it delivered and tell the caller the
+# public loop is still open.
+mark_loop_delivered() {
+  local id=$1 rc=0
+  fm_pf_registry_stamp_delivered "$STATE" "$id" "$(now_rfc3339)" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    3) return 3 ;;
+    *) die "could not stamp registration '$id' as delivered after the public reply landed" 1 ;;
+  esac
+}
+
+print_loop_open_disposition() {
+  local id=$1 request=$2
+  printf "thread %s is still OPEN: hand it on with 'rechain ...' or close it with 'retire %s --reason ...'\n" \
+    "${request:-unknown}" "$id"
+}
+
 cmd_deliver() {
   local id=${1:-} text_file=
   [ -n "$id" ] || { usage; exit 2; }
@@ -637,6 +833,7 @@ cmd_deliver() {
   require_tools
 
   local payload delivery attempt request platform text tmp_text hash chunks rc receipt receipt_fields receipt_dry_run link_status
+  local loop_retained=0
   payload=$(obligation_json "$id") || die "could not read the backlog through tasks-axi" 1
   [ -n "$payload" ] || die "no public-followup obligation '$id' in this home's backlog" 1
 
@@ -661,8 +858,9 @@ cmd_deliver() {
           *) die "obligation '$id' is already $delivery, but its registration is missing or invalid and the legacy X link cannot be verified; reconcile it before any later terminal follow-up" 1 ;;
         esac
       fi
-      rm -f -- "$(fm_pf_registry_dir "$STATE")/$id" 2>/dev/null || true
+      if mark_loop_delivered "$id"; then loop_retained=1; fi
       printf 'already delivered %s state=%s\n' "$id" "$delivery"
+      [ "$loop_retained" -eq 0 ] || print_loop_open_disposition "$id" "$request"
       return 0
       ;;
     ready|retry-due|context-blocked|unknown|partial)
@@ -743,8 +941,9 @@ EOF
       if ! clear_public_followup_link "$id"; then
         die "the public reply for '$id' POSTED and its receipt was recorded, but its legacy X link could not be cleared; the registration was retained for reconciliation" 1
       fi
-      rm -f -- "$(fm_pf_registry_dir "$STATE")/$id" 2>/dev/null || true
+      if mark_loop_delivered "$id"; then loop_retained=1; fi
       printf 'delivered %s request=%s platform=%s chunks=%s\n' "$id" "$request" "$platform" "$chunks"
+      [ "$loop_retained" -eq 0 ] || print_loop_open_disposition "$id" "$request"
       return 0
     fi
     die "the public reply for '$id' POSTED but its receipt could not be recorded; close it with 'record-posted $id --attempt $attempt --chunks <exact-count>' before any retry, or the thread will get a second reply" 1
@@ -789,7 +988,7 @@ cmd_record_posted() {
     || die "public-followup registration for '$id' is missing or invalid; reconcile it before recording a receipt so any legacy X link can be cleared" 1
   require_tools
 
-  local payload request platform
+  local payload request platform loop_retained=0
   payload=$(obligation_json "$id") || die "could not read the backlog through tasks-axi" 1
   [ -n "$payload" ] || die "no public-followup obligation '$id' in this home's backlog" 1
   request=$(pf_field "$payload" '.public_followup.request.request_id')
@@ -800,8 +999,9 @@ cmd_record_posted() {
   if ! clear_public_followup_link "$id"; then
     die "the receipt for '$id' was recorded, but its legacy X link could not be cleared; the registration was retained for reconciliation" 1
   fi
-  rm -f -- "$(fm_pf_registry_dir "$STATE")/$id" 2>/dev/null || true
+  if mark_loop_delivered "$id"; then loop_retained=1; fi
   printf 'recorded %s attempt=%s request=%s\n' "$id" "$attempt" "$request"
+  [ "$loop_retained" -eq 0 ] || print_loop_open_disposition "$id" "$request"
 }
 
 # --- subcommand: guard-work -------------------------------------------------
@@ -847,22 +1047,229 @@ EOF
   [ "$blocked" -eq 0 ] || exit 3
 }
 
+# --- subcommand: rechain ----------------------------------------------------
+
+rechain_default_deliverable_key() {
+  case "$1" in
+    pr-merged) printf 'pr_url\n' ;;
+    report-ready) printf 'report_path\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+cmd_rechain() {
+  local new_id=${1:-} from='' work_home='' work_id='' expected=''
+  local -a deliverable_keys=()
+  [ -n "$new_id" ] || { usage; exit 2; }
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --from) shift; from=${1:-} ;;
+      --work-home) shift; work_home=${1:-} ;;
+      --work-id) shift; work_id=${1:-} ;;
+      --expected) shift; expected=${1:-} ;;
+      --deliverable-key) shift; deliverable_keys+=("${1:-}") ;;
+      *) die "unknown argument '$1'" ;;
+    esac
+    shift || true
+  done
+
+  fm_pf_relay_active "$FM_HOME" \
+    || die "this home has not opted into the myfirstmate relay, so it cannot own a public commitment" 1
+  require_tools
+  fm_pf_slug_valid "$new_id" || die "unsafe obligation id: $new_id"
+  fm_pf_slug_valid "$from" || die "unsafe source obligation id: $from"
+  fm_pf_slug_valid "$work_id" || die "unsafe work id: $work_id"
+  fm_pf_home_id_valid "$work_home" \
+    || die "work home must be 'main' or 'secondmate:<stable-id>', got '$work_home'"
+  case "$expected" in
+    pr-merged|report-ready|local-main) ;;
+    *) die "--expected must be pr-merged, report-ready, or local-main, got '$expected'" ;;
+  esac
+  [ "$new_id" != "$from" ] || die "the new obligation id must differ from --from" 2
+
+  pf_registry_lock_acquire "$from" \
+    || die "could not lock source registration '$from' for rechain" 1
+  local src_file loop_state expires window ctx rechain_to source_record first_claim=0 existing
+  src_file="$(fm_pf_registry_dir "$STATE")/$from"
+  [ -f "$src_file" ] && [ ! -L "$src_file" ] \
+    || die "no registration for '$from' in this home" 1
+  loop_state=$(fm_pf_registry_loop_state "$STATE" "$from")
+  [ "$loop_state" = delivered ] \
+    || die "source '$from' is not state=delivered (got '$loop_state'); nothing to hand on until that final lands" 1
+  fm_pf_registry_rechainable "$STATE" "$from" \
+    || die "source '$from' is un-rechainable: a pre-change registration has no request_context_b64. Close it with retire --reason or reconstruct the request context by hand." 1
+
+  expires=$(fm_pf_registry_get "$STATE" "$from" followup_expires_at)
+  [ -n "$expires" ] || die "source '$from' has no followup_expires_at; the thread window cannot be checked" 1
+  window=$(fm_pf_followup_window_class "$expires")
+  case "$window" in
+    ok|closing) ;;
+    expired)
+      die "followup_expires_at $expires is in the past: the thread can no longer be reached, so this loop cannot be closed publicly. This is a captain decision." 1
+      ;;
+    *)
+      die "followup_expires_at $expires could not be parsed: the thread window cannot be checked, so this loop cannot be rechained" 1
+      ;;
+  esac
+
+  if [ "${#deliverable_keys[@]}" -eq 0 ]; then
+    local default_key
+    default_key=$(rechain_default_deliverable_key "$expected") \
+      || die "--expected $expected needs --deliverable-key <k> (no default key)"
+    deliverable_keys+=("$default_key")
+  fi
+  local key
+  for key in "${deliverable_keys[@]}"; do
+    case "$key" in
+      ''|*[!a-z0-9_]*) die "deliverable key must be lowercase [a-z0-9_], got '$key'" ;;
+    esac
+  done
+
+  # Claim the delivered baton before publishing its destination. The claim is
+  # retained if any later retirement step fails, so a retry may resume the same
+  # destination but can never fork this thread into a second obligation.
+  rechain_to=$(fm_pf_registry_get "$STATE" "$from" rechain_to)
+  if [ -n "$rechain_to" ] && [ "$rechain_to" != "$new_id" ]; then
+    die "source '$from' is already claimed by rechain destination '$rechain_to'; resume that destination" 1
+  fi
+  if [ -z "$rechain_to" ]; then
+    existing=$(obligation_json "$new_id") \
+      || die "could not check whether rechain destination '$new_id' is unused" 1
+    [ -z "$existing" ] \
+      || die "'$new_id' already exists and was not created by this rechain; choose another id" 1
+    [ ! -e "$(fm_pf_registry_dir "$STATE")/$new_id" ] \
+      && [ ! -L "$(fm_pf_registry_dir "$STATE")/$new_id" ] \
+      && [ ! -e "$(fm_pf_retired_dir "$STATE")/$new_id" ] \
+      && [ ! -L "$(fm_pf_retired_dir "$STATE")/$new_id" ] \
+      || die "'$new_id' already has local public-loop state; choose another id" 1
+    source_record=$(grep -v -E '^rechain_to=' "$src_file" 2>/dev/null) \
+      || die "could not read source registration '$from' while claiming it" 1
+    printf '%s\nrechain_to=%s\n' "$source_record" "$new_id" \
+      | fmx_private_artifact_publish_stdin "$(fm_pf_registry_dir "$STATE")" "$from" 600 \
+      || die "could not claim source registration '$from' for '$new_id'" 1
+    first_claim=1
+  fi
+
+  local ctx_file expected_file relation_file keys_json project src_payload
+  ctx=$(fm_pf_registry_get "$STATE" "$from" request_context_b64)
+  ctx_file=$(mktemp "${TMPDIR:-/tmp}/fm-pf-rechain-ctx.XXXXXX") \
+    || die "could not stage the retained request context" 1
+  expected_file=$(mktemp "${TMPDIR:-/tmp}/fm-pf-rechain-exp.XXXXXX") \
+    || die "could not stage the expected-final document" 1
+  relation_file=$(mktemp "${TMPDIR:-/tmp}/fm-pf-rechain-rel.XXXXXX") \
+    || die "could not stage the relation document" 1
+  PF_TEMP_FILES+=("$ctx_file" "$expected_file" "$relation_file")
+  printf '%s' "$ctx" | fm_pf_b64_decode > "$ctx_file" \
+    || die "could not decode request_context_b64 for '$from'" 1
+  jq -e 'type == "object" and (.request_id | type == "string")' "$ctx_file" >/dev/null 2>&1 \
+    || die "decoded request context for '$from' is not usable" 1
+
+  keys_json=$(printf '%s\n' "${deliverable_keys[@]}" | jq -R . | jq -s -c .)
+  project=
+  if src_payload=$(obligation_json "$from") && [ -n "$src_payload" ]; then
+    project=$(pf_field "$src_payload" '.public_followup.expected_final.project')
+  fi
+  if [ -n "$project" ]; then
+    jq -n --arg t "$expected" --arg p "$project" --argjson keys "$keys_json" \
+      '{type:$t, project:$p, required_deliverables:$keys, completion_policy:"all-required"}' \
+      > "$expected_file"
+  else
+    jq -n --arg t "$expected" --argjson keys "$keys_json" \
+      '{type:$t, required_deliverables:$keys, completion_policy:"all-required"}' \
+      > "$expected_file"
+  fi
+  jq -n --arg h "$work_home" --arg w "$work_id" \
+    '{relation_id:"rel-1", work_ref:{home_id:$h, task_id:$w},
+      role:"fulfills", required:true, generation:1}' > "$relation_file"
+
+  local relation_count new_registry
+  if [ "$first_claim" -eq 1 ]; then
+    existing=
+  else
+    existing=$(obligation_json "$new_id") \
+      || die "could not read the backlog through tasks-axi" 1
+  fi
+  if [ -n "$existing" ]; then
+    printf '%s' "$existing" | jq -e \
+      --slurpfile request "$ctx_file" --slurpfile expected "$expected_file" \
+      --arg expires "$expires" \
+      '.public_followup as $pf
+       | $pf.request == $request[0]
+         and $pf.purpose == "promised-final"
+         and $pf.expected_final == $expected[0]
+         and $pf.obligation_expires_at == $expires' >/dev/null 2>&1 \
+      || die "'$new_id' already exists with different public-followup data; choose another id" 1
+  else
+    tx public-followup add "$new_id" --request-context-file "$ctx_file" \
+      --purpose promised-final --expected-final-file "$expected_file" \
+      --expires-at "$expires" >/dev/null \
+      || die "tasks-axi refused to add '$new_id' on the retained thread binding" 1
+    existing=$(obligation_json "$new_id") \
+      || die "added '$new_id' but could not read it back through tasks-axi; retry this same rechain command" 1
+  fi
+
+  relation_count=$(printf '%s' "$existing" \
+    | jq -r '(.public_followup.work_relations // []) | length' 2>/dev/null) \
+    || die "could not inspect work bindings for '$new_id'" 1
+  if [ "$relation_count" -eq 0 ]; then
+    tx public-followup bind-work "$new_id" --relation-file "$relation_file" >/dev/null \
+      || die "tasks-axi refused to bind '$new_id' to $work_home/$work_id; retry this same rechain command" 1
+  else
+    printf '%s' "$existing" | jq -e --arg h "$work_home" --arg w "$work_id" \
+      '(.public_followup.work_relations // []) as $relations
+       | ($relations | length) == 1
+         and $relations[0].relation_id == "rel-1"
+         and $relations[0].work_ref.home_id == $h
+         and $relations[0].work_ref.task_id == $w
+         and $relations[0].role == "fulfills"
+         and $relations[0].required == true
+         and $relations[0].generation == 1' >/dev/null 2>&1 \
+      || die "'$new_id' already has a different work binding; choose another id" 1
+  fi
+
+  new_registry="$(fm_pf_registry_dir "$STATE")/$new_id"
+  if [ -f "$new_registry" ] && [ ! -L "$new_registry" ]; then
+    [ "$(fm_pf_registry_get "$STATE" "$new_id" relation_id)" = rel-1 ] \
+      && [ "$(fm_pf_registry_get "$STATE" "$new_id" work_home)" = "$work_home" ] \
+      && [ "$(fm_pf_registry_get "$STATE" "$new_id" work_id)" = "$work_id" ] \
+      && [ "$(fm_pf_registry_get "$STATE" "$new_id" generation)" = 1 ] \
+      || die "registration '$new_id' already names different work; choose another id" 1
+  else
+    cmd_register "$new_id" --relation rel-1 --work-home "$work_home" \
+      --work-id "$work_id" --generation 1 >/dev/null \
+      || die "could not register '$new_id'; retry this same rechain command" 1
+  fi
+
+  cmd_retire "$from" --reason "handed on to $new_id" \
+    || die "registered '$new_id' but could not retire '$from'; both loops are open until '$from' is retired" 1
+
+  cmd_brief "$new_id"
+}
+
 # --- subcommand: retire -----------------------------------------------------
 
 cmd_retire() {
-  local id=${1:-} force=0 payload delivery task_state
+  local id=${1:-} force=0 reason='' payload delivery task_state registry_file retired_dir retired_at
+  local retirement_rc=0
   [ -n "$id" ] || { usage; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --force) force=1 ;;
+      --reason) shift; reason=${1:-} ;;
       *) die "unknown argument '$1'" ;;
     esac
     shift || true
   done
   fm_pf_slug_valid "$id" || die "unsafe obligation id: $id"
   fm_pf_relay_active "$FM_HOME" || exit 0
+  [ -n "$reason" ] || die "retire requires --reason \"<why the public loop is done>\"" 2
+  reason=$(printf '%s' "$reason" | fm_pf_clean_outcome_text)
+  [ -n "$reason" ] || die "retire requires --reason \"<why the public loop is done>\"" 2
   require_tools
+  pf_registry_lock_acquire "$id" \
+    || die "could not lock registration '$id' for retirement" 1
 
   payload=$(obligation_json "$id") || die "could not read the backlog through tasks-axi" 1
   if [ -n "$payload" ]; then
@@ -879,8 +1286,24 @@ cmd_retire() {
   if ! clear_public_followup_link "$id"; then
     die "could not clear the legacy X link for '$id'; its registration was retained for reconciliation" 1
   fi
-  rm -f -- "$(fm_pf_registry_dir "$STATE")/$id" 2>/dev/null || true
-  printf 'retired %s\n' "$id"
+  retired_dir=$(fm_pf_retired_dir "$STATE")
+  retired_at=$(now_rfc3339)
+  registry_file="$(fm_pf_registry_dir "$STATE")/$id"
+  printf 'reason=%s\nretired_at=%s\n' "$reason" "$retired_at" \
+    | fmx_private_artifact_publish_stdin "$retired_dir" "$id" 600 \
+    || retirement_rc=1
+  if [ "$retirement_rc" -eq 0 ]; then
+    if ! rm -f -- "$registry_file" 2>/dev/null \
+        || [ -e "$registry_file" ] || [ -L "$registry_file" ]; then
+      retirement_rc=2
+    fi
+  fi
+  pf_registry_lock_release "$id"
+  case "$retirement_rc" in
+    1) die "could not record the retirement reason for '$id'; the public loop remains open" 1 ;;
+    2) die "could not remove registration for '$id'; the public loop remains open" 1 ;;
+  esac
+  printf 'retired %s reason=%s\n' "$id" "$reason"
 }
 
 # --- dispatch ---------------------------------------------------------------
@@ -901,6 +1324,7 @@ case "$CMD" in
   deliver)       cmd_deliver "$@" ;;
   record-posted) cmd_record_posted "$@" ;;
   guard-work)    cmd_guard_work "$@" ;;
+  rechain)       cmd_rechain "$@" ;;
   retire)        cmd_retire "$@" ;;
   *) usage; exit 2 ;;
 esac
