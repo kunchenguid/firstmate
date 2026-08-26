@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
 
 # GitHub concurrency groups retain at most one pending run, replacing older
 # pending runs even when cancel-in-progress is false. Give body-bearing events
@@ -27,44 +26,5 @@ jobs:
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
-      # no-mistakes creates the PR before it can append the completed-pipeline
-      # attestation. Actions started by the initial open event receive that
-      # earlier body, and GitHub does not dispatch a second pull_request event
-      # when the same token updates it. Read the current body until the
-      # attestation arrives, so this required check judges the final pipeline
-      # metadata rather than the stale event payload.
-      - name: Read current pull request body
-        id: current-pr
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          body=''
-          # The PR can spend more than one minute moving from the opening body
-          # to the signed attestation while no-mistakes records its pipeline.
-          # Keep the required check bounded, but leave enough room for that
-          # normal asynchronous update before judging the body stale.
-          for attempt in $(seq 1 150); do
-            body=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq .body)
-            if [[ "$body" == *'<!-- no-mistakes-pipeline-attestation:v1 '* \
-              && "$body" == *"\"head_sha\":\"$PR_HEAD_SHA\""* ]]; then
-              break
-            fi
-            sleep 2
-          done
-          marker="no-mistakes-body-$(date +%s%N)-$RANDOM"
-          {
-            printf 'body<<%s\n' "$marker"
-            printf '%s\n' "$body"
-            printf '%s\n' "$marker"
-          } >> "$GITHUB_OUTPUT"
       - name: Verify no-mistakes signature and pipeline attestation
         uses: kunchenguid/no-mistakes/.github/actions/require-no-mistakes@32d396ac0f29135daf7fcb9964aba9d5f4e796d6 # post-v1.57.1, untagged (action added in #819)
-        with:
-          pr-body: ${{ steps.current-pr.outputs.body }}
-          pr-head-sha: ${{ github.event.pull_request.head.sha }}
-          pr-head-ref: ${{ github.event.pull_request.head.ref }}
-          pr-author: ${{ github.event.pull_request.user.login }}
-          pr-number: ${{ github.event.pull_request.number }}
