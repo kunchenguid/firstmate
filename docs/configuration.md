@@ -487,14 +487,17 @@ For example, `bin/fm-runner-health-check.sh arm connectwithclayton/toolroll tool
 Arming writes `state/runner-health.check.sh` and binds its bytes through `bin/fm-check-register.sh`.
 The existing watcher polls that private check on its ordinary cadence and turns a report into a `check:` wake.
 It does not add work to session start, start a watcher by itself, or introduce another scheduler.
+It reads every page from the repository runners endpoint before deriving the verdict, so a matching online runner on any page keeps the poll healthy.
 The command refuses an existing symlinked or otherwise invalid state path before creating, reading, writing, or cleaning up runner-health artifacts, and does not normalize or repair unsafe paths.
 
 The check prints `runner health: <owner/repo> runner label <runner-label> is offline` when a matching registration exists but none is online.
 It prints `runner health: <owner/repo> has no registered runner with label <runner-label>` when no registration carries the label.
 An online runner is healthy whether idle or busy, so healthy polls print nothing.
+The check validates every runner's status and label shape before deriving a verdict, so malformed data anywhere is treated as a missed poll.
 Network errors, authentication errors, timeouts, and malformed API envelopes or runner/label payloads also print nothing and leave the last known report state unchanged.
 
 `state/.runner-health` records the target and last reported finding.
+The report record is persisted before an outage line is printed, so a failed state write stays silent and cannot cause repeated wakes.
 The same outage therefore reports once, recovery clears the finding silently, and a later outage reports again.
 Changing between offline and missing is a changed finding and reports once in its new form.
 `bin/fm-runner-health-check.sh disarm` removes the shim, trust binding, and report record.
