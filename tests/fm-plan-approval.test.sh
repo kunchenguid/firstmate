@@ -80,6 +80,15 @@ make_fleet() {  # <name> [<secondmate-id>]
     "$sid" "$officer" > "$primary/data/secondmates.md"
   printf '{"hasCompletedOnboarding":true,"projects":{"%s":{"hasTrustDialogAccepted":true},"%s":{"hasTrustDialogAccepted":true}}}\n' \
     "$project" "$officer" > "$store/.claude.json"
+  # The fake tmux this header promises: it refuses loudly AFTER the gate, so a
+  # spawn that clears the plan gate still creates nothing real - twelve runs of
+  # this suite once left twelve windows on the operator's live tmux server.
+  cat > "$fakebin/tmux" <<'FAKE'
+#!/usr/bin/env bash
+echo "fake tmux: refusing '$*' (plan-approval fixture creates no real windows)" >&2
+exit 1
+FAKE
+  chmod +x "$fakebin/tmux"
   printf '# speicher\tpfad\tanthropic_konto\trolle\tbemerkung\n' > "$base/konten.tsv"
   printf 'basis\t%s\tfixture@example.invalid\toffiziere-worker\ttest fixture seat\n' \
     "$store" >> "$base/konten.tsv"
