@@ -4420,6 +4420,220 @@ test_wait_transition_clean_timeout_returns_1() {
   pass "fm_backend_herdr_wait_transition: stock macOS Bash clean timeout closes fd 9 and returns 1"
 }
 
+test_cli_bound_kills_hung_rpc() {
+  local dir fb start rc elapsed out
+  dir="$TMP_ROOT/cli-bound"; fb="$dir/fakebin"; mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+exec sleep 60
+SH
+  chmod +x "$fb/herdr"
+  start=$(date +%s)
+  PATH="$fb:$PATH" FM_BACKEND_HERDR_CLI_TIMEOUT=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_cli sess status --json' "$ROOT" >/dev/null 2>&1
+  rc=$?
+  elapsed=$(( $(date +%s) - start ))
+  [ "$rc" -ne 0 ] || fail "a hung herdr RPC must fail under the CLI bound, got success"
+  [ "$elapsed" -lt 15 ] || fail "the CLI bound must kill a hung herdr RPC promptly, took ${elapsed}s"
+  # 0 disables the bound: a fast RPC still passes through untouched.
+  printf '#!/usr/bin/env bash\nprintf "ok\\n"\n' > "$fb/herdr"
+  chmod +x "$fb/herdr"
+  out=$(PATH="$fb:$PATH" FM_BACKEND_HERDR_CLI_TIMEOUT=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_cli sess status --json' "$ROOT" 2>/dev/null) \
+    || fail "FM_BACKEND_HERDR_CLI_TIMEOUT=0 must disable the bound, not fail the call"
+  [ "$out" = ok ] || fail "unbounded passthrough lost the RPC output, got '$out'"
+  pass "fm_backend_herdr_cli: a hung control-socket RPC dies at FM_BACKEND_HERDR_CLI_TIMEOUT (${elapsed}s), 0 disables the bound"
+}
+
+test_cli_bound_preserves_failure_status() {
+  local dir fb rc
+  dir="$TMP_ROOT/cli-bound-status"; fb="$dir/fakebin"; mkdir -p "$fb"
+  # A herdr client killed by a signal (an OOM kill, a SIGSEGV, an operator or
+  # supervisor kill) must surface as a FAILED RPC, never as exit 0 with empty
+  # stdout: fm_backend_herdr_capture guards with `out=$(...) || return 1`, so a
+  # masked signal death would hand the watcher an empty pane as a real capture
+  # and hash it into a false "stale:" wake. Asserted on the host's own
+  # mechanism and again on the dependency-free fallback, because the bound is
+  # only trustworthy if every mechanism agrees on what failure looks like.
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+kill -9 $$
+SH
+  chmod +x "$fb/herdr"
+  rc=0
+  PATH="$fb:$PATH" FM_BACKEND_HERDR_CLI_TIMEOUT=5 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_cli sess status --json' "$ROOT" >/dev/null 2>&1 \
+    || rc=$?
+  [ "$rc" = 137 ] || fail "a SIGKILLed herdr RPC must report 128+signal, got $rc"
+  rc=0
+  PATH="$fb:$PATH" FM_BACKEND_HERDR_CLI_TIMEOUT=5 FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_cli sess status --json' "$ROOT" >/dev/null 2>&1 \
+    || rc=$?
+  [ "$rc" = 137 ] || fail "the dependency-free bound must also report 128+signal for a SIGKILLed RPC, got $rc"
+  rc=0
+  PATH="$fb:$PATH" FM_BACKEND_HERDR_CLI_TIMEOUT=5 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_bounded fm-no-such-command-xyz' "$ROOT" >/dev/null 2>&1 \
+    || rc=$?
+  [ "$rc" = 127 ] || fail "a bounded command with no executable must report 127, got $rc"
+  pass "fm_backend_herdr_bounded: signal deaths stay non-zero (137) on every mechanism and a missing executable reports 127"
+}
+
+test_events_capable_large_schema_is_pipe_noise_free() {
+  local dir fb err rc
+  dir="$TMP_ROOT/cap-schema"; fb="$dir/fakebin"; mkdir -p "$fb"
+  # The schema fake pads well past the 64KiB pipe buffer with both needles at
+  # the very front, the shape that made the old `printf | grep -Fq` chain take
+  # EPIPE mid-write when grep exited on its first match under ignored SIGPIPE
+  # (the watcher inherits SIG_IGN from a Node-based arm chain).
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"client":{"version":"0.7.3","protocol":16},"server":{"running":true}}\n' ;;
+  "api schema")
+    printf '{"methods":["events.subscribe","pane.agent_status_changed"'
+    i=0
+    while [ "$i" -lt 20000 ]; do printf ',"padding-entry-%s"' "$i"; i=$((i + 1)); done
+    printf ']}\n'
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  err="$dir/err"
+  PATH="$fb:$PATH" FM_BACKEND_HERDR_EVENT_READER=/bin/cat \
+    bash -c 'trap "" PIPE; . "$0/bin/backends/herdr.sh"; fm_backend_herdr_events_capable sess' "$ROOT" 2> "$err"
+  rc=$?
+  [ "$rc" = 0 ] || fail "events_capable must accept a large schema carrying both needles, got rc $rc"
+  if grep -qi "broken pipe" "$err"; then
+    fail "events_capable emitted broken-pipe noise: $(cat "$err")"
+  fi
+  pass "fm_backend_herdr_events_capable: large-schema capability read stays capable with no broken-pipe noise under ignored SIGPIPE"
+}
+
+test_wait_transition_hung_reader_bounded() {
+  local dir state agent temp fb reader start rc elapsed
+  dir="$TMP_ROOT/wt-hung-reader"; state="$dir/state"; agent="$dir/agents"; temp="$dir/temp"; mkdir -p "$state" "$agent" "$temp"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" idle
+  # A reader that acknowledges, then wedges far past its own budget without
+  # ever closing the stream - the fd shape a hung socket write leaves behind.
+  reader="$dir/hung-reader.sh"
+  cat > "$reader" <<'SH'
+#!/usr/bin/env bash
+printf '@subscribed\n'
+exec sleep 120
+SH
+  chmod +x "$reader"
+  start=$(date +%s)
+  PATH="$fb:$PATH" TMPDIR="$temp" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_BACKEND_HERDR_EVENT_READ_SLACK=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ' "$ROOT" "$state" >/dev/null
+  rc=$?
+  elapsed=$(( $(date +%s) - start ))
+  [ "$rc" = 2 ] || fail "a reader wedged past its budget must classify the event path unusable (rc 2), got $rc"
+  [ "$elapsed" -lt 30 ] || fail "a wedged reader must not hang the wait; took ${elapsed}s"
+  pass "fm_backend_herdr_wait_transition: a reader wedged past its budget is killed and classified unusable (rc 2 after ${elapsed}s)"
+}
+
+# make_server_ensure_fakebin: a `herdr` stub for the server_ensure poll alone,
+# counting every status call in $FM_FAKE_STATE. Three shapes, selected by env:
+# FM_FAKE_COLD_CALLS makes the first N status calls fail INSTANTLY (the
+# connection-refused a cold control socket gives while the server is binding)
+# before reporting running; FM_FAKE_STATUS_HANGS=1 makes every status call hang
+# (the wedged socket); FM_FAKE_ALTERNATE=1 hangs on every SECOND call and
+# answers a fast running=false on the others (the partially responsive server
+# that trips neither the attempt count nor the consecutive-bound-hit bail).
+# The backgrounded `server` launch always returns at once so the unbounded
+# launch never holds the test.
+make_server_ensure_fakebin() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  server) exit 0 ;;
+  status)
+    n=$(( $(cat "${FM_FAKE_STATE:?}" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$FM_FAKE_STATE"
+    if [ "${FM_FAKE_ALTERNATE:-0}" = 1 ]; then
+      [ $((n % 2)) -eq 0 ] && exec sleep 60
+      printf '{"server":{"running":false}}\n'
+      exit 0
+    fi
+    [ "${FM_FAKE_STATUS_HANGS:-0}" = 1 ] && exec sleep 60
+    [ "$n" -le "${FM_FAKE_COLD_CALLS:-0}" ] && exit 1
+    printf '{"server":{"running":true}}\n'
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  printf '%s' "$fb"
+}
+
+test_server_ensure_polls_through_cold_socket_failures() {
+  local dir fb start rc elapsed
+  dir="$TMP_ROOT/server-ensure-cold"; mkdir -p "$dir"
+  fb=$(make_server_ensure_fakebin "$dir")
+  # A just-launched server is not listening yet, so its first status RPCs fail
+  # instantly. Those failures cost NOTHING, so they must not shorten the poll:
+  # bailing on a raw failure count would abort the ensure about a second in and
+  # fail every fm_backend_herdr_target_ready consumer on the cycle - capture,
+  # agent_alive, spawn - for a server that comes up moments later.
+  start=$(date +%s)
+  PATH="$fb:$PATH" FM_FAKE_STATE="$dir/count" FM_FAKE_COLD_CALLS=6 FM_BACKEND_HERDR_CLI_TIMEOUT=5 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure sess' "$ROOT" >/dev/null 2>&1
+  rc=$?
+  elapsed=$(( $(date +%s) - start ))
+  [ "$rc" = 0 ] || fail "instant cold-socket status failures must keep polling the full budget, got rc $rc"
+  [ "$elapsed" -lt 15 ] || fail "the cold-socket poll must not burn the RPC bound; took ${elapsed}s"
+  pass "fm_backend_herdr_server_ensure: instant cold-socket status failures keep polling and the server is picked up when it binds (${elapsed}s)"
+}
+
+test_server_ensure_bails_on_repeated_bound_hits() {
+  local dir fb start rc elapsed err
+  dir="$TMP_ROOT/server-ensure-wedged"; mkdir -p "$dir"; err="$dir/err"
+  fb=$(make_server_ensure_fakebin "$dir")
+  # The wedged socket the bail exists for: every status RPC accepts and then
+  # never answers, so each one burns the whole bound. Polling all 20 attempts
+  # would multiply the bound by the poll budget - the multi-minute hang that
+  # blocked fm-peek, teardown chains, and the watcher's stale scan.
+  start=$(date +%s)
+  PATH="$fb:$PATH" FM_FAKE_STATE="$dir/count" FM_FAKE_STATUS_HANGS=1 FM_BACKEND_HERDR_CLI_TIMEOUT=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure sess' "$ROOT" >/dev/null 2> "$err"
+  rc=$?
+  elapsed=$(( $(date +%s) - start ))
+  [ "$rc" -ne 0 ] || fail "a wedged control socket must fail server_ensure, got success"
+  [ "$elapsed" -lt 15 ] || fail "repeated bound hits must cut the poll short; took ${elapsed}s"
+  assert_contains "$(cat "$err")" "RPC bound" "the wedged-socket bail must name the bound it kept hitting"
+  pass "fm_backend_herdr_server_ensure: consecutive RPC-bound hits bail out of a wedged socket instead of polling the whole budget (${elapsed}s)"
+}
+
+test_server_ensure_poll_stops_at_its_wall_clock_budget() {
+  local dir fb start rc elapsed err calls
+  dir="$TMP_ROOT/server-ensure-budget"; mkdir -p "$dir"; err="$dir/err"
+  fb=$(make_server_ensure_fakebin "$dir")
+  # The partially responsive server: a fast running=false between bound hits
+  # resets the consecutive-bound-hit counter, so that bail never fires and the
+  # attempt count alone would let this poll multiply the RPC bound across all
+  # 20 attempts - the very multiplication the bound exists to prevent, and a
+  # span that sits inside one gap between watcher beats. The poll's own
+  # wall-clock budget is what has to stop it.
+  start=$(date +%s)
+  PATH="$fb:$PATH" FM_FAKE_STATE="$dir/count" FM_FAKE_ALTERNATE=1 FM_BACKEND_HERDR_CLI_TIMEOUT=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure sess' "$ROOT" >/dev/null 2> "$err"
+  rc=$?
+  elapsed=$(( $(date +%s) - start ))
+  calls=$(cat "$dir/count" 2>/dev/null || printf '0')
+  [ "$rc" -ne 0 ] || fail "a server that never reports running must fail server_ensure, got success"
+  [ "$calls" -lt 20 ] || fail "the poll budget must stop the loop before its attempt count is exhausted, made $calls status calls"
+  [ "$elapsed" -lt 20 ] || fail "the poll must end at its wall-clock budget plus one in-flight bound; took ${elapsed}s"
+  assert_contains "$(cat "$err")" "poll budget" "the give-up message must report the budget it actually applied"
+  pass "fm_backend_herdr_server_ensure: a wall-clock budget caps the whole poll when fast answers keep resetting the bound-hit bail (${elapsed}s, $calls status calls)"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
@@ -4604,3 +4818,10 @@ test_wait_transition_stream_absorb_clears_then_timeout
 test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
+test_cli_bound_kills_hung_rpc
+test_cli_bound_preserves_failure_status
+test_events_capable_large_schema_is_pipe_noise_free
+test_wait_transition_hung_reader_bounded
+test_server_ensure_polls_through_cold_socket_failures
+test_server_ensure_bails_on_repeated_bound_hits
+test_server_ensure_poll_stops_at_its_wall_clock_budget

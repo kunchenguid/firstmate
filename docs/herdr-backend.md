@@ -203,8 +203,14 @@ Workspace and tab ids support verification and cleanup but are not inferred from
 ## Current transport behavior
 
 The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
-Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
+Every session-scoped Herdr invocation goes through `fm_backend_herdr_cli` or its identically routed twin, which set the environment and pass an explicit trailing `--session <name>`.
 An environment variable alone is not reliable when another Herdr server is running.
+Every control-socket RPC is time-bounded (`FM_BACKEND_HERDR_CLI_TIMEOUT`, default 20 seconds), because a wedged server that accepts connections but never responds otherwise blocks callers - peek reads, teardown chains, and the watcher's supervision cycle - for unbounded time; only the long-lived backgrounded server launch bypasses the bound.
+`fm_backend_herdr_bounded` in `bin/backends/herdr.sh` owns only the knob and what disables it; the bound's mechanics come from `bin/fm-timeout-lib.sh`, this repo's single owner of bounded execution.
+The server start-up poll reads that bound too: only status calls that actually burn it count toward giving up on a wedged socket, so the instant connection-refused answers a cold control socket gives while a just-launched server is still binding keep the poll running for its whole budget.
+That poll is itself capped by a wall-clock budget rather than by its attempt count alone, so no mix of outcomes - in particular a partially responsive server alternating fast `running:false` answers with bound hits, which resets the consecutive-hit bail - can multiply the per-RPC bound across the whole poll and stretch one supervision cycle toward the guard grace.
+`tests/fm-backend-herdr.test.sh` covers that bound: a hung RPC killed at it, `0` passing the call through unbounded, and a signal death still reported non-zero so a killed read is never mistaken for a successful empty capture.
+The same suite covers the start-up poll on three sides: instant cold-socket failures polled through to a server that comes up, consecutive bound hits cut short instead of multiplying the bound by the poll budget, and an alternating fast/hung server stopped by the wall-clock budget before its attempt count runs out.
 
 Literal text and Enter are separate operations on `fm-send.sh`'s typed plane; ordinary local text steers instead use the durable steering inbox and send only its best-effort constant doorbell through this adapter.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
@@ -281,8 +287,10 @@ The watcher maps the pane back to the task and skips secondmate endpoints, decla
 The push path only shortens latency.
 Polling runs every cycle and remains the permanent fallback when protocol 16, the event schema, Python, connection, subscription, or repeated reader execution is unavailable.
 There is still one watcher process; the event reader is a bounded child of that watcher.
+The watcher's reads from that child are themselves bounded to the reader's budget plus slack, so a reader wedged past its own deadlines classifies the event path unusable instead of hanging the supervision cycle.
 
 `tests/fm-backend-herdr-eventwait-smoke.test.sh`, `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh` cover capability, subscribe-then-reconcile ordering, dedupe, exemptions, and polling fallback.
+`tests/fm-backend-herdr.test.sh` additionally covers the capability probe reading a large schema with no broken-pipe noise under ignored SIGPIPE, and a reader wedged past its budget being killed and classified unusable within the bound.
 
 ## Away-mode supervisor support
 

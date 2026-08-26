@@ -37,6 +37,36 @@ _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"
 # or no-mistakes install; absent, it points at the real sibling script.
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 
+# FM_LIVENESS_BEAT_HOOK / fm_liveness_beat: the shared liveness-beat hook for
+# the supervision loops that live in this library and its consumers.
+#
+# The costly triage paths here (crew_absorb_class, and by extension
+# signal_crew_provably_working) run one bounded backend probe PER TASK, so their
+# wall time scales with the fleet and, against a degraded backend, with the
+# per-RPC bound. A supervisor whose own liveness is judged by a beacon
+# (bin/fm-watch.sh) must therefore be able to refresh that beacon from inside
+# those loops, without this library knowing what a beacon is: the caller sets
+# FM_LIVENESS_BEAT_HOOK to a command, and the loops call it between per-task
+# units of work. Unset means no-op, which is what every other consumer (the
+# away-mode daemon, tests) gets. A hook that merely fails never breaks the loop;
+# a hook that must stop the process exits by itself.
+#
+# The hook is a COMMAND WORD plus optional arguments, invoked directly - never
+# evaluated as shell source text. Every consumer of this library
+# (fm-crew-state.sh, fm-brief.sh, fm-inactive-reconcile.sh, fm-fleet-snapshot.sh,
+# fm-captain-hold.sh, ...) inherits this call, and none of them may start running
+# environment-derived strings as shell code just because they source the shared
+# classifier. Word splitting is therefore the whole of the contract: pipelines,
+# redirections, and separators in the hook string are arguments, not syntax. A
+# caller needing those wraps them in a function - which is exactly what
+# fm-watch.sh's watcher_beat is.
+fm_liveness_beat() {
+  [ -n "${FM_LIVENESS_BEAT_HOOK:-}" ] || return 0
+  # shellcheck disable=SC2086 # Deliberate word splitting: the hook is a command plus arguments.
+  $FM_LIVENESS_BEAT_HOOK || true
+  return 0
+}
+
 # fm_run_timed, the shared hard bound the worktree write probe below puts around
 # its one filesystem walk. bin/fm-timeout-lib.sh owns bounded execution for this
 # repo, so nothing here re-derives the coreutils/BSD/perl selection. That library
@@ -1430,6 +1460,7 @@ signal_crew_provably_working() {  # <file> ...
     esac
     case " $seen " in *" $task "*) continue ;; esac
     seen="$seen $task"
+    fm_liveness_beat
     crew_is_provably_working "$task" || return 1
   done
   [ -n "$seen" ] || return 1
