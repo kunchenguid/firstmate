@@ -2534,11 +2534,29 @@ fm_backend_herdr_target_ready() {  # <target>
 # the project directory, since `cwd` stays frozen at the original path forever.
 # `.result.pane.foreground_cwd` tracks the ACTUALLY RUNNING foreground
 # process's cwd instead, which is what changes when `treehouse get` enters its
-# worktree subshell - confirmed live against a real treehouse acquisition.
+# worktree subshell. Native Windows Herdr omits that field, so process-info's
+# exact foreground group leader supplies the only safe cwd fallback.
 fm_backend_herdr_current_path() {  # <target>
+  local out path
   fm_backend_herdr_target_ready "$1" || return 0
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
-    | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 0
+  path=$(printf '%s\n' "$out" | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null)
+  if [ -n "$path" ]; then
+    printf '%s\n' "$path"
+    return 0
+  fi
+
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 0
+  printf '%s\n' "$out" | jq -r '
+    .result.process_info as $info
+    | [
+        $info.foreground_processes[]?
+        | select(.pid == $info.foreground_process_group_id)
+        | .cwd // empty
+        | select(type == "string" and length > 0)
+      ]
+    | if length == 1 then .[0] else empty end
+  ' 2>/dev/null
 }
 
 # fm_backend_herdr_send_text_line: send one line of TEXT then submit,

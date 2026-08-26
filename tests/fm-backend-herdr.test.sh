@@ -3001,7 +3001,33 @@ test_current_path_reads_cwd() {
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_current_path default:w1:p2' "$ROOT" )
   [ "$out" = "/tmp/fake-worktree" ] || fail "current_path should read foreground_cwd (the live process), not the frozen creation-time cwd, got '$out'"
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''get'$'\x1f''w1:p2' "current_path did not call pane get"
+  assert_not_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''process-info' "current_path should not call pane process-info when pane get supplies foreground_cwd"
   pass "fm_backend_herdr_current_path: reads pane foreground_cwd (the live running process), not the frozen creation-time cwd"
+}
+
+test_current_path_falls_back_to_foreground_process_cwd() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/cwd-process-info"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"pane":{"cwd":"C:\\src\\firstmate"}}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"process_info":{"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"powershell.exe","cwd":"C:\\Users\\captain\\.treehouse\\project"}]}}}' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_current_path default:w1:p2' "$ROOT" )
+  [ "$out" = 'C:\Users\captain\.treehouse\project' ] || fail "current_path should fall back to the foreground process cwd when pane get omits foreground_cwd, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''process-info'$'\x1f''--pane'$'\x1f''w1:p2' "current_path did not fall back to pane process-info"
+  pass "fm_backend_herdr_current_path: falls back to the foreground process cwd when pane get omits foreground_cwd"
+}
+
+test_current_path_refuses_non_leader_process_cwd() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/cwd-non-leader"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"pane":{"cwd":"C:\\src\\firstmate"}}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"process_info":{"foreground_process_group_id":4242,"foreground_processes":[{"pid":5151,"name":"powershell.exe","cwd":"C:\\Users\\captain\\.treehouse\\project"}]}}}' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_current_path default:w1:p2' "$ROOT" )
+  [ -z "$out" ] || fail "current_path must not guess from a process cwd that does not belong to the foreground group leader, got '$out'"
+  pass "fm_backend_herdr_current_path: refuses a process cwd that does not belong to the foreground group leader"
 }
 
 # --- busy_state (semantic agent state) ---------------------------------------
@@ -4601,6 +4627,8 @@ test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
 test_current_path_reads_cwd
+test_current_path_falls_back_to_foreground_process_cwd
+test_current_path_refuses_non_leader_process_cwd
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent

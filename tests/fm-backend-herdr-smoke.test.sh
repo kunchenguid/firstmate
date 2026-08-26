@@ -280,9 +280,16 @@ fm_backend_herdr_send_text_line "$TARGET" "cd /tmp"
 sleep 0.3
 p=$(fm_backend_herdr_current_path "$TARGET") || fail "current_path failed"
 case "$p" in
-  */tmp) : ;;
-  *) fail "real herdr: current_path did not report the pane's cwd after cd /tmp, got '$p'" ;;
+  [A-Za-z]:[\\/]*)
+    command -v cygpath >/dev/null 2>&1 || fail "current_path returned a native Windows path but cygpath is unavailable"
+    p=$(cygpath -u "$p") || fail "could not normalize current_path's native Windows path"
+    ;;
 esac
+p=$(cd "$p" 2>/dev/null && pwd -P) \
+  || fail "current_path did not return a usable cwd after cd /tmp: '${p:-empty}'"
+expected_path=$(cd /tmp && pwd -P)
+[ "$p" = "$expected_path" ] \
+  || fail "real herdr: current_path did not report the pane's cwd after cd /tmp, got '$p'"
 pass "real herdr: current_path reads the pane's live cwd"
 
 # --- busy_state on a real claude harness (verified in herdr-verification-p2.md) ---
