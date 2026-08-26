@@ -926,6 +926,123 @@ test_stale_terminal_done_without_armed_merge_poll_still_surfaces() {
   pass "a terminal-done task with no armed merge poll still surfaces exactly as before"
 }
 
+# --- stale pane, working-to-done transition on a STATIC hash: existing wedge
+# timer is absorbed and cleared, not just a fresh-hash sighting -------------
+# The provably-working override (crew_is_provably_working) can itself already
+# have started a wedge timer for a busy run sitting on a static pane. If that
+# run then finishes into terminal-done with an armed merge poll while the pane
+# hash never changes, no NEW hash ever arrives to re-run the first-sighting
+# exemption above - only the repeat "$ssf already exists" branch ever sees
+# this transition. It must re-check the same terminal-done + armed-merge-poll
+# exemption there too, absorbing and clearing the wedge timer instead of
+# ticking it toward a possible-wedge escalation for a task that is done.
+test_stale_terminal_done_transition_absorbs_existing_wedge_timer() {
+  local dir state fakebin out capture_file window id key pane_hash pid
+  dir=$(make_case terminal-done-wedge-transition); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-wedge-transition"
+  id=wedge-transition
+  printf 'idle shell, nothing to do' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/$id.meta"
+  printf 'done: implementation complete, ready to validate\n' > "$state/$id.status"
+  prime_status_seen "$state" "$state/$id.status" || fail "could not prime the fixture status baseline"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle shell, nothing to do")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  # Phase A: the run-step reports working, so the stale captain-relevant status
+  # line is overridden and absorbed with a wedge timer started ($ssf) - the
+  # sibling provably-working absorb path this fix must not disturb.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited on the provably-working absorb phase: $(cat "$out")"
+  fi
+  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "wedge timer was not started by the provably-working override"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A watcher stop"
+
+  # Phase B: the run genuinely finishes (done/run-step) with an armed merge
+  # poll while the pane hash never changes - the same idle shell - so the
+  # repeat "$ssf exists" branch is the only one that ever sees this
+  # transition. Backdate the wedge timer well past a tight escalation
+  # threshold first: the pre-fix code would immediately fire a "possible
+  # wedge" wake here, since it never re-checked the exemption on this branch.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  FM_STATE_OVERRIDE="$state" "$PR_CHECK" "$id" "https://github.com/example/repo/pull/11" >/dev/null \
+    || fail "could not arm a real merge poll for the fixture task"
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · run passed: PR merged/closed'
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited on the working-to-done transition with an armed merge poll (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "the working-to-done transition printed a wake reason during absorb: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "the working-to-done transition enqueued a wake during absorb"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "the existing wedge timer was not cleared on the working-to-done transition"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-B watcher stop"
+  unset FM_FAKE_CREW_STATE
+  pass "an existing wedge timer is absorbed and cleared once a provably-working task transitions to terminal-done with an armed merge poll, on a static pane hash"
+}
+
+# --- same transition, but with NO armed merge poll: keeps escalating -------
+# The repeat-branch exemption must not become a general terminal-done
+# exemption either: a task that is done but never had (or lost) its merge
+# poll must keep ticking toward - and reaching - a possible-wedge escalation
+# exactly as before.
+test_stale_terminal_done_transition_without_armed_poll_still_escalates() {
+  local dir state fakebin out capture_file window id key pane_hash pid
+  dir=$(make_case terminal-done-wedge-transition-no-poll); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-wedge-transition-no-poll"
+  id=wedge-transition-no-poll
+  printf 'idle shell, nothing to do' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/$id.meta"
+  printf 'done: implementation complete, ready to validate\n' > "$state/$id.status"
+  prime_status_seen "$state" "$state/$id.status" || fail "could not prime the fixture status baseline"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle shell, nothing to do")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  # Phase A: identical provably-working absorb, wedge timer started.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited on the provably-working absorb phase: $(cat "$out")"
+  fi
+  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "wedge timer was not started by the provably-working override"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A watcher stop"
+
+  # Phase B: the run reports done/run-step but NEVER had an armed merge poll -
+  # the swallowed-finish case the wedge timer exists to catch - so it must
+  # still escalate on the repeat branch exactly as it always has.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · run passed: PR merged/closed'
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not escalate a done-without-armed-poll task past the wedge threshold on the repeat branch"
+  grep -F "stale: $window" "$out" >/dev/null || fail "escalation did not print a stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "escalation did not flag a possible wedge"
+  unset FM_FAKE_CREW_STATE
+  pass "a done task with no armed merge poll still wedge-escalates on the repeat branch exactly as before"
+}
+
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
 # A provably-working crew (an actively-running pipeline) legitimately sits on a
 # static pane (e.g. waiting on CI), so a non-terminal stale is absorbed and only
@@ -2734,6 +2851,8 @@ test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_stale_terminal_done_with_armed_merge_poll_absorbed
 test_stale_terminal_done_without_armed_merge_poll_still_surfaces
+test_stale_terminal_done_transition_absorbs_existing_wedge_timer
+test_stale_terminal_done_transition_without_armed_poll_still_escalates
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active

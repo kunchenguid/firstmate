@@ -1426,7 +1426,20 @@ EOF
             # wedge timer is running for it) - keep treating it that way
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
-            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task"
+            # But a provably-working run can finish into terminal-done with an
+            # armed merge poll while the pane hash stays static (no new hash
+            # ever arrives to trigger the first-sighting branch above) - so
+            # re-check that exemption here too, and drop the wedge timer the
+            # moment it now qualifies instead of letting it keep ticking
+            # toward a possible-wedge escalation for a task that is done.
+            if crew_is_terminal_done "$task" \
+              && fm_pr_poll_artifacts_valid "$STATE" "$task" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+              rm -f "$ssf"
+              clear_write_tracking "$key"
+              triage_log "absorbed stale (terminal done, merge poll armed): $w"
+            else
+              wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task"
+            fi
           fi
           # else: already surfaced as genuinely terminal on a prior poll of
           # this same hash - nothing left to do (matches the original,
