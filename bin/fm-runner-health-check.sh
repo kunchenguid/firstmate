@@ -117,7 +117,7 @@ record_read() {
   state_device=$(fm_pr_file_device "$STATE") || return 1
   fm_pr_regular_destination_on_device_or_absent "$RECORD" "$state_device" || return 1
   [ -f "$RECORD" ] || return 0
-  while IFS= read -r line; do
+  while IFS= read -r line || [ -n "$line" ]; do
     if [ "$first" -eq 1 ]; then
       first=0
       [ "$line" = "$RECORD_SCHEMA" ] || return 0

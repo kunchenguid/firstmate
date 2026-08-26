@@ -187,6 +187,25 @@ test_offline_runner_reports_once_and_reports_again_after_recovery() {
   pass "one outage reports once, recovery is silent, and a later outage reports again"
 }
 
+test_repeat_outage_stays_silent_when_record_has_no_final_newline() {
+  local home fakebin response out record_contents
+  home=$(make_home unterminated-record)
+  fakebin=$(make_fake_gh_axi unterminated-record)
+  response="$home/runners.json"
+  out="$home/out.txt"
+
+  write_runners "$response" offline false
+  run_check "$home" "$fakebin" "$response" "$out"
+  expect_reported "$home" offline
+
+  record_contents=$(cat "$home/state/.runner-health")
+  printf '%s' "$record_contents" > "$home/state/.runner-health"
+  run_check "$home" "$fakebin" "$response" "$out"
+  [ ! -s "$out" ] || fail "an unterminated durable record caused a repeated outage report: $(cat "$out")"
+  expect_reported "$home" offline
+  pass "an unterminated durable report record still suppresses the same outage"
+}
+
 test_missing_label_is_a_distinct_once_only_finding() {
   local home fakebin response out
   home=$(make_home missing)
@@ -562,6 +581,7 @@ test_armed_check_reaches_the_existing_watcher() {
 
 test_online_runner_is_silent_even_when_busy
 test_offline_runner_reports_once_and_reports_again_after_recovery
+test_repeat_outage_stays_silent_when_record_has_no_final_newline
 test_missing_label_is_a_distinct_once_only_finding
 test_api_failures_are_silent_and_do_not_clear_an_outage
 test_malformed_matching_runner_status_is_silent
