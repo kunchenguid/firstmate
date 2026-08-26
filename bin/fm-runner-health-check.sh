@@ -140,7 +140,8 @@ record_write() {
 }
 
 api_state() {
-  local repository=$1 label=$2 query output status body_count truncated_count
+  local repository=$1 label=$2 query output status page state pages
+  local has_online=0 has_offline=0
   local max_probe=$((CHECK_TIMEOUT - 3))
 
   # Leave room for whole-second rounding, process cleanup, and record handling
@@ -152,17 +153,71 @@ api_state() {
 
   command -v gh-axi >/dev/null 2>&1 || return 1
   query="[.runners[] | select(any(.labels[]; .name == \"$label\"))] as \$matching | if (\$matching | length) == 0 then \"missing\" elif ([\$matching[] | select(.status == \"online\")] | length) > 0 then \"online\" else \"offline\" end"
-  output=$(fm_run_timed "$max_probe" gh-axi api "/repos/$repository/actions/runners" --jq "$query" --full 2>/dev/null)
+  output=$(fm_run_timed "$max_probe" gh-axi api "/repos/$repository/actions/runners" --paginate --jq "$query" --full 2>/dev/null)
   status=$?
   [ "$status" -eq 0 ] || return 1
 
-  # gh-axi wraps a scalar API projection in this small response envelope.
-  # Accept only one complete body so a changed, cut, or diagnostic response is
-  # an unavailable poll rather than an invented runner verdict.
-  body_count=$(printf '%s\n' "$output" | grep -c '^  body: ' || true)
-  truncated_count=$(printf '%s\n' "$output" | grep -c '^  truncated: false$' || true)
-  [ "$body_count" -eq 1 ] && [ "$truncated_count" -eq 1 ] || return 1
-  printf '%s\n' "$output" | sed -n 's/^  body: //p'
+  pages=$(api_response_states "$output") || return 1
+  while IFS= read -r page; do
+    case "$page" in
+      online) has_online=1 ;;
+      offline) has_offline=1 ;;
+      missing) ;;
+      *) return 1 ;;
+    esac
+  done <<< "$pages"
+
+  if [ "$has_online" -eq 1 ]; then
+    state=online
+  elif [ "$has_offline" -eq 1 ]; then
+    state=offline
+  else
+    state=missing
+  fi
+  printf '%s\n' "$state"
+}
+
+api_response_states() {
+  local output=$1 body separator segment
+  local -a lines
+  lines=()
+  while IFS= read -r line; do
+    lines+=("$line")
+  done <<< "$output"
+  [ "${#lines[@]}" -eq 3 ] || return 1
+  [ "${lines[0]}" = 'api_response:' ] || return 1
+  case "${lines[1]}" in
+    '  body: '*) body=${lines[1]#  body: } ;;
+    *) return 1 ;;
+  esac
+  [ "${lines[2]}" = '  truncated: false' ] || return 1
+  [ -n "$body" ] || return 1
+
+  case "$body" in
+    \"*\")
+      [ "${#body}" -ge 2 ] || return 1
+      body=${body:1:${#body}-2}
+      ;;
+  esac
+
+  separator='\n'
+  while :; do
+    case "$body" in
+      *"$separator"*)
+        segment=${body%%"$separator"*}
+        body=${body#*"$separator"}
+        ;;
+      *)
+        segment=$body
+        body=
+        ;;
+    esac
+    case "$segment" in
+      online|offline|missing) printf '%s\n' "$segment" ;;
+      *) return 1 ;;
+    esac
+    [ -n "$body" ] || break
+  done
 }
 
 action_check() {
@@ -203,6 +258,30 @@ shim_content() {
 }
 
 SHIM_WRITE_TMP=
+
+state_private_valid() {
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
+  local device
+  device=$(fm_pr_file_device "$STATE") || return 1
+  [ -n "$device" ]
+}
+
+safe_remove_state_file() {
+  local path=$1 device
+  state_private_valid || return 1
+  device=$(fm_pr_file_device "$STATE") || return 1
+  fm_pr_regular_destination_on_device_or_absent "$path" "$device" || return 1
+  rm -f -- "$path"
+}
+
+safe_restore_state_file() {
+  local backup=$1 destination=$2 device
+  state_private_valid || return 1
+  device=$(fm_pr_file_device "$STATE") || return 1
+  fm_pr_regular_destination_on_device_or_absent "$backup" "$device" || return 1
+  fm_pr_regular_destination_on_device_or_absent "$destination" "$device" || return 1
+  mv -f -- "$backup" "$destination"
+}
 
 shim_write() {
   local want=$1 device tmp
@@ -250,16 +329,19 @@ shim_backup() {
 ARM_BACKUP=
 
 arm_rollback() {
-  [ -z "$SHIM_WRITE_TMP" ] || rm -f -- "$SHIM_WRITE_TMP"
+  [ -z "$SHIM_WRITE_TMP" ] || safe_remove_state_file "$SHIM_WRITE_TMP" || true
   SHIM_WRITE_TMP=
   if [ -n "$ARM_BACKUP" ]; then
-    mv -f -- "$ARM_BACKUP" "$CHECK_SHIM" 2>/dev/null || rm -f -- "$ARM_BACKUP"
-    ARM_BACKUP=
-    if fm_custom_check_registered "$STATE" "$CHECK_ID"; then
-      return 0
+    if safe_restore_state_file "$ARM_BACKUP" "$CHECK_SHIM" 2>/dev/null; then
+      ARM_BACKUP=
+      if fm_custom_check_registered "$STATE" "$CHECK_ID"; then
+        return 0
+      fi
+    else
+      return 1
     fi
   fi
-  rm -f -- "$CHECK_SHIM"
+  safe_remove_state_file "$CHECK_SHIM"
 }
 
 # shellcheck disable=SC2329  # Registered by action_arm's signal trap.
@@ -276,6 +358,10 @@ action_arm() {
     return 1
   }
   mkdir -p "$STATE" || return 1
+  state_private_valid || {
+    printf 'fm-runner-health-check: state directory is unavailable\n' >&2
+    return 1
+  }
   case "$FM_HOME" in
     /*) home=$FM_HOME ;;
     *)
@@ -313,7 +399,19 @@ action_arm() {
 }
 
 action_disarm() {
-  rm -f -- "$CHECK_SHIM" "$CHECK_TRUST" "$RECORD"
+  local device path
+  state_private_valid || {
+    printf 'fm-runner-health-check: state directory is unavailable\n' >&2
+    return 1
+  }
+  device=$(fm_pr_file_device "$STATE") || return 1
+  for path in "$CHECK_SHIM" "$CHECK_TRUST" "$RECORD"; do
+    fm_pr_regular_destination_on_device_or_absent "$path" "$device" || {
+      printf 'fm-runner-health-check: state artifact is unavailable\n' >&2
+      return 1
+    }
+  done
+  rm -f -- "$CHECK_SHIM" "$CHECK_TRUST" "$RECORD" || return 1
   printf 'disarmed: state/%s.check.sh\n' "$CHECK_ID"
 }
 

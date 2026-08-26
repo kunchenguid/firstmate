@@ -501,6 +501,10 @@ Changing between offline and missing is a changed finding and reports once in it
 `FM_RUNNER_HEALTH_PROBE_SECS` sets the API probe bound from 1 to 20 seconds and defaults to 8.
 The probe is cut further when necessary to leave three seconds inside `FM_CHECK_TIMEOUT` for process cleanup and local record handling.
 
+The installed launchd service was inspected without rebooting or logging out: `~/actions-runner-toolroll/.service` points to `~/Library/LaunchAgents/actions.runner.connectwithclayton-toolroll.toolroll-mac.plist`; the plist `Label` is `actions.runner.connectwithclayton-toolroll.toolroll-mac`, `RunAtLoad` is true, and `KeepAlive` is absent.
+This configuration does come back after a reboot once the captain logs in because it is a per-user `LaunchAgent`, not a system daemon. It starts at login rather than boot, so a machine sitting at the login screen has no runner.
+Because `KeepAlive` is absent, a later runner exit is not automatically relaunched within that same login session.
+
 ## Relay (.env)
 
 Relay lets a firstmate instance answer public mentions and act on normal reversible mention requests through firstmate's normal lifecycle.

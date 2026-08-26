@@ -39,6 +39,7 @@ esac
 
 query=
 full=0
+paginate=0
 shift 2
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -51,14 +52,30 @@ while [ "$#" -gt 0 ]; do
       full=1
       shift
       ;;
+    --paginate)
+      paginate=1
+      shift
+      ;;
     *) exit 9 ;;
   esac
 done
 [ -n "$query" ] && [ "$full" -eq 1 ] || exit 9
+if [ "${FAKE_GH_AXI_MODE:-answer}" = pagination ]; then
+  [ "$paginate" -eq 1 ] || exit 9
+  body_one=$(jq -r "$query" "$FAKE_GH_AXI_RESPONSE/page-1.json") || exit 9
+  body_two=$(jq -r "$query" "$FAKE_GH_AXI_RESPONSE/page-2.json") || exit 9
+  printf 'api_response:\n'
+  printf '  body: "%s\\n%s"\n' "$body_one" "$body_two"
+  printf '  truncated: false\n'
+  exit 0
+fi
 body=$(jq -r "$query" "$FAKE_GH_AXI_RESPONSE") || exit 9
 printf 'api_response:\n'
 printf '  body: %s\n' "$body"
 printf '  truncated: false\n'
+if [ "${FAKE_GH_AXI_MODE:-answer}" = malformed-trailing ]; then
+  printf 'diagnostic: unexpected trailing output\n'
+fi
 SH
   chmod 0755 "$fakebin/gh-axi"
   printf '%s\n' "$fakebin"
@@ -180,6 +197,36 @@ test_api_failures_are_silent_and_do_not_clear_an_outage() {
   pass "network, authentication, and malformed responses stay silent without changing known health"
 }
 
+test_paginated_api_results_are_aggregated_before_verdict() {
+  local home fakebin response out
+  home=$(make_home pagination)
+  fakebin=$(make_fake_gh_axi pagination)
+  response="$home/pages"
+  out="$home/out.txt"
+  mkdir -p "$response"
+  write_runners "$response/page-1.json" offline false
+  write_runners "$response/page-2.json" online true
+
+  run_check "$home" "$fakebin" "$response" "$out" FAKE_GH_AXI_MODE=pagination
+  [ ! -s "$out" ] || fail "an online runner on a later page was reported unavailable: $(cat "$out")"
+  expect_reported "$home" ''
+  pass "paginated runner pages are aggregated before deciding health"
+}
+
+test_malformed_envelope_with_trailing_diagnostics_is_silent() {
+  local home fakebin response out
+  home=$(make_home malformed-envelope)
+  fakebin=$(make_fake_gh_axi malformed-envelope)
+  response="$home/runners.json"
+  out="$home/out.txt"
+  write_runners "$response" offline false
+
+  run_check "$home" "$fakebin" "$response" "$out" FAKE_GH_AXI_MODE=malformed-trailing
+  [ ! -s "$out" ] || fail "a response with trailing diagnostics produced a health report: $(cat "$out")"
+  assert_absent "$home/state/.runner-health" "a malformed response wrote a health verdict"
+  pass "a valid-looking envelope with trailing diagnostics is rejected"
+}
+
 test_api_timeout_finishes_inside_the_watcher_bound() {
   local home fakebin response out before after elapsed
   home=$(make_home timeout)
@@ -264,6 +311,31 @@ test_arm_refuses_a_symlink_at_the_shim_path() {
   pass "arm refuses a symlink instead of writing outside the private state file"
 }
 
+test_arm_and_disarm_refuse_a_symlinked_state_directory() {
+  local home fakebin target status
+  home=$(make_home symlinked-state)
+  fakebin=$(make_fake_gh_axi symlinked-state)
+  target="$home/state-target"
+  mkdir -p "$target"
+  printf 'do not delete me\n' > "$target/runner-health.check.sh"
+  mv "$home/state" "$home/state-real"
+  ln -s "$target" "$home/state"
+
+  status=0
+  env FM_HOME="$home" PATH="$fakebin:$PATH" "$CHECK" arm "$REPOSITORY" "$LABEL" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "arm with symlinked state exit"
+  [ "$(cat "$target/runner-health.check.sh")" = 'do not delete me' ] \
+    || fail "arm removed an artifact through a symlinked state directory"
+
+  status=0
+  env FM_HOME="$home" PATH="$fakebin:$PATH" "$CHECK" disarm >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "disarm with symlinked state exit"
+  [ "$(cat "$target/runner-health.check.sh")" = 'do not delete me' ] \
+    || fail "disarm removed an artifact through a symlinked state directory"
+  [ -L "$home/state" ] || fail "symlinked state directory was replaced"
+  pass "arm and disarm refuse a symlinked state directory without cleanup"
+}
+
 test_armed_check_reaches_the_existing_watcher() {
   local home fakebin response out err status
   home=$(make_home watcher)
@@ -293,8 +365,11 @@ test_online_runner_is_silent_even_when_busy
 test_offline_runner_reports_once_and_reports_again_after_recovery
 test_missing_label_is_a_distinct_once_only_finding
 test_api_failures_are_silent_and_do_not_clear_an_outage
+test_paginated_api_results_are_aggregated_before_verdict
+test_malformed_envelope_with_trailing_diagnostics_is_silent
 test_api_timeout_finishes_inside_the_watcher_bound
 test_target_validation_refuses_unsafe_or_ambiguous_values
 test_arm_registers_a_targeted_shim_and_disarm_removes_it
 test_arm_refuses_a_symlink_at_the_shim_path
+test_arm_and_disarm_refuse_a_symlinked_state_directory
 test_armed_check_reaches_the_existing_watcher
