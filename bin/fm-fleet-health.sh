@@ -182,8 +182,24 @@ snapshot_shape_valid() {
     and .schema == "fm-fleet-snapshot.v1"
     and (.generated | type) == "string"
     and (.fm_home | type) == "string"
+    and (.roots | type) == "object"
+    and (.roots.fm_root | type) == "string"
+    and (.roots.state | type) == "string"
+    and (.roots.data | type) == "string"
+    and (.roots.config | type) == "string"
+    and (.roots.projects | type) == "string"
+    and (.backlog | type) == "object"
+    and (.backlog.path | type) == "string"
+    and (.backlog.present | type) == "boolean"
+    and (.backlog.records | type) == "array"
+    and (.backlog.records | all(.[]; type == "object"))
     and (.tasks | type) == "array"
     and (.tasks | all(.[]; task_valid))
+    and (.scout_reports | type) == "array"
+    and (.scout_reports | all(.[]; type == "object"
+      and (.id | type) == "string"
+      and (.path | type) == "string"
+      and (.kind | type) == "string"))
     and (.collection | type) == "object"
     and (.collection.state | type) == "object"
     and (.collection.state.present | type) == "boolean"
@@ -202,6 +218,13 @@ snapshot_shape_valid() {
     and (.secondmate_current.registry.complete | type) == "boolean"
     and (.secondmate_current.registry.input_truncated | type) == "boolean"
     and (.secondmate_current.registry.records_truncated | type) == "boolean"
+    and (.secondmate_landed | type) == "object"
+    and (.secondmate_landed.records | type) == "array"
+    and (.secondmate_landed.truncated | type) == "array"
+    and (.secondmate_landed.unreadable | type) == "array"
+    and (.secondmate_landed.partial | type) == "array"
+    and (.secondmate_guidance | type) == "object"
+    and (.secondmate_guidance.note | type) == "string"
   '
 }
 

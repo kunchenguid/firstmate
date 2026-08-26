@@ -114,6 +114,26 @@ SH
   printf '%s\n' "$root"
 }
 
+make_snapshot_fixture_root() {  # <name>
+  local name=$1 root=$TMP_ROOT/snapshot-command-$1 source base
+  mkdir -p "$root/bin"
+  cp "$ROOT/bin/fm-fleet-snapshot.sh" "$root/bin/fm-fleet-snapshot.sh"
+  for source in "$ROOT"/bin/*.sh; do
+    base=${source##*/}
+    case "$base" in
+      fm-fleet-snapshot.sh|fm-on.sh) continue ;;
+    esac
+    ln -s "$source" "$root/bin/$base"
+  done
+  cat > "$root/bin/fm-on.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_TEST_REMOTE_CALL_LOG:?}" >> "$FM_TEST_REMOTE_CALL_LOG"
+exit 1
+SH
+  chmod +x "$root/bin/fm-fleet-snapshot.sh" "$root/bin/fm-on.sh"
+  printf '%s\n' "$root"
+}
+
 write_pending() {  # <home> <corr> <task> <phase> [completed_epoch] [grace] [sender-pid] [sender-identity]
   local home=$1 corr=$2 task=$3 phase=$4 completed=${5-} grace=${6:-120}
   local sender_pid=${7-} sender_identity=${8-}
@@ -209,18 +229,53 @@ test_missing_state_home_remains_unmodified() {
 }
 
 test_malformed_snapshot_is_incomplete() {
-  local home fixture out rc=0
+  local home fixture out rc=0 field snapshot
   home=$(make_home malformed-snapshot)
   fixture=$(make_health_fixture_root malformed-snapshot)
-  out=$(FM_HOME="$home" FM_TEST_SNAPSHOT='{"schema":"fm-fleet-snapshot.v1"}' \
-    FM_FLEET_HEALTH_TIMED_WORKER=1 "$fixture/bin/fm-fleet-health.sh" --json) || rc=$?
-  expect_code 3 "$rc" "a schema-tagged incomplete snapshot should be incomplete"
+  snapshot='{"schema":"fm-fleet-snapshot.v1","generated":"2026-01-01T00:00:00Z","fm_home":"/tmp/home","roots":{"fm_root":"/tmp/root","state":"/tmp/state","data":"/tmp/data","config":"/tmp/config","projects":"/tmp/projects"},"backlog":{"path":"/tmp/backlog.md","present":false,"records":[]},"tasks":[],"scout_reports":[],"collection":{"state":{"present":false,"available":true,"invalid_metadata_count":0,"invalid_metadata":[]}},"main_inventory":{"valid":true,"reason":null},"secondmate_current":{"records":[],"truncated":0,"registry":{"available":true,"complete":true,"input_truncated":false,"records_truncated":false}},"secondmate_landed":{"records":[],"truncated":[],"unreadable":[],"partial":[]},"secondmate_guidance":{"note":"fixture"}}'
+  for field in roots backlog secondmate_landed; do
+    rc=0
+    out=$(FM_HOME="$home" FM_TEST_SNAPSHOT="$(printf '%s' "$snapshot" | jq --arg field "$field" 'del(.[$field])')" \
+      FM_FLEET_HEALTH_TIMED_WORKER=1 "$fixture/bin/fm-fleet-health.sh" --json) || rc=$?
+    expect_code 3 "$rc" "a snapshot missing $field should be incomplete"
+    printf '%s' "$out" | jq -e '
+      .status == "incomplete"
+        and .reason == "fleet snapshot was malformed"
+        and (.findings | length) == 0
+    ' >/dev/null || fail "snapshot missing $field was treated as usable: $out"
+  done
+  pass "schema-tagged snapshots require the complete top-level shape"
+}
+
+test_remote_snapshot_probe_disabled_skips_remote_state() {
+  local home fixture out rc=0 log
+  home=$(make_home remote-probe-disabled)
+  mkdir -p "$home/secondmate-home"
+  fm_write_meta "$home/state/remote-mate.meta" \
+    "window=firstmate:fm-remote-mate" \
+    "worktree=$home/secondmate-home" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=/remote/secondmate-home" \
+    "remote_host=example.invalid" \
+    "remote_root=/remote/firstmate"
+  printf 'working: watching scope\n' > "$home/state/remote-mate.status"
+  fixture=$(make_snapshot_fixture_root remote-probe-disabled)
+  log=$TMP_ROOT/remote-probe-disabled.log
+  out=$(PATH="$fixture/bin:$PATH" FM_HOME="$home" FM_SNAPSHOT_REMOTE_PROBES=0 \
+    FM_TEST_REMOTE_CALL_LOG="$log" "$fixture/bin/fm-fleet-snapshot.sh" --json) || rc=$?
+  expect_code 0 "$rc" "disabled remote probes should still produce a snapshot"
+  [ ! -e "$log" ] || fail "disabled remote probes invoked the remote transport"
   printf '%s' "$out" | jq -e '
-    .status == "incomplete"
-      and .reason == "fleet snapshot was malformed"
-      and (.findings | length) == 0
-  ' >/dev/null || fail "incomplete snapshot was treated as usable: $out"
-  pass "schema-tagged incomplete snapshots remain incomplete"
+    any(.tasks[]; .id == "remote-mate"
+        and .current_state.state == "unknown"
+        and .current_state.source == "remote-not-collected"
+        and .endpoint.probe == "skipped"
+        and .endpoint.agent_state == "not_collected")
+  ' >/dev/null || fail "remote current-state evidence was not explicitly unavailable: $out"
+  pass "disabled remote probes skip remote current-state collection"
 }
 
 test_dangling_state_path_is_inconclusive() {
@@ -902,6 +957,20 @@ test_incomplete_registry_does_not_break_secondmate_summary() {
   pass "incomplete registry evidence stays distinct from summary failure"
 }
 
+test_dangling_secondmate_registry_is_inconclusive() {
+  local home fakebin out rc=0
+  home=$(make_home dangling-secondmate-registry)
+  ln -s "$home/data/missing-secondmates-target" "$home/data/secondmates.md"
+  fakebin=$(make_fakebin "$home")
+  out=$(run_health "$home" "$fakebin") || rc=$?
+  expect_code 3 "$rc" "dangling secondmate registry should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "secondmate-summary-inconclusive")
+  ' >/dev/null || fail "dangling secondmate registry was treated as healthy: $out"
+  pass "dangling secondmate registry remains unavailable"
+}
+
 test_pending_reply_uses_recorded_grace() {
   local home fakebin out rc=0
   home=$(make_home recorded-grace)
@@ -1029,6 +1098,22 @@ test_dangling_procevent_claim_root_is_inconclusive() {
   pass "dangling process-event claim root remains inconclusive"
 }
 
+test_dangling_procevent_registry_is_inconclusive() {
+  local home fakebin out rc=0
+  home=$(make_home dangling-procevent-registry)
+  ln -s "$home/state/missing-procevent-target" "$home/state/procevent"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm \
+    "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "dangling process-event registry should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "result-listener-inconclusive" and .subject == "procevent")
+      and (any(.findings[]; .kind == "result-listener-missing") | not)
+  ' >/dev/null || fail "dangling process-event registry was treated as healthy: $out"
+  pass "dangling process-event registry remains unavailable"
+}
+
 test_paused_ship_still_requires_pr_listener() {
   local home fakebin out rc=0
   home=$(make_home paused-pr-listener)
@@ -1153,6 +1238,25 @@ test_unreadable_supervision_lock_is_inconclusive() {
   pass "unreadable watcher-lock evidence remains inconclusive"
 }
 
+test_malformed_supervision_pid_is_inconclusive() {
+  local home fakebin out rc=0
+  home=$(make_home malformed-supervision-pid)
+  write_live_ship "$home" supervised-worker
+  fresh_autoarm_supervision "$home"
+  mkdir -p "$home/state/.watch.lock"
+  printf 'not-a-pid\n' > "$home/state/.watch.lock/pid"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=persistent \
+    "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "malformed watcher-lock PID should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "supervision-inconclusive")
+      and (any(.findings[]; .kind == "supervision-unhealthy") | not)
+  ' >/dev/null || fail "malformed supervision PID became actionable: $out"
+  pass "malformed watcher-lock PID remains unavailable"
+}
+
 test_internal_worker_failure_returns_json() {
   local home fakebin out rc=0
   home=$(make_home internal-worker-failure)
@@ -1210,6 +1314,7 @@ test_usage_exit
 test_healthy_empty_fleet
 test_missing_state_home_remains_unmodified
 test_malformed_snapshot_is_incomplete
+test_remote_snapshot_probe_disabled_skips_remote_state
 test_dangling_state_path_is_inconclusive
 test_unsearchable_state_is_inconclusive
 test_dangling_metadata_is_inconclusive
@@ -1239,17 +1344,20 @@ test_inconclusive_secondmate_summary_not_broken
 test_invalid_secondmate_summary_uses_normalized_kind
 test_truncated_secondmate_inventory_is_inconclusive
 test_incomplete_registry_does_not_break_secondmate_summary
+test_dangling_secondmate_registry_is_inconclusive
 test_pending_reply_uses_recorded_grace
 test_invalid_pending_reply_is_inconclusive
 test_dangling_pending_reply_directory_is_inconclusive
 test_inventory_and_missing_listener
 test_invalid_procevent_registration_is_reported
 test_dangling_procevent_claim_root_is_inconclusive
+test_dangling_procevent_registry_is_inconclusive
 test_paused_ship_still_requires_pr_listener
 test_unknown_worker_state_does_not_create_missing_pr_listener
 test_matching_retired_pr_listener_is_not_missing
 test_inconclusive_dominates_actionable_status
 test_unreadable_supervision_lock_is_inconclusive
+test_malformed_supervision_pid_is_inconclusive
 test_internal_worker_failure_returns_json
 test_complete_timeout_covers_fingerprinting
 test_human_view_and_incomplete_exit

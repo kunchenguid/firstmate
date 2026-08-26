@@ -108,7 +108,7 @@ fm_procevent_any_registered() {
 fm_procevent_listeners_json() {  # <state>
   local state=$1 reg root rec id adapter owner status records='[]' available=true
   reg=$(fm_procevent_registry_dir "$state")
-  if [ ! -e "$reg" ]; then
+  if [ ! -e "$reg" ] && [ ! -L "$reg" ]; then
     jq -n '{available:true,records:[]}'
     return 0
   fi

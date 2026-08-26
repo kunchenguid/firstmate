@@ -135,7 +135,7 @@ fm_watcher_lock_evidence_unreadable() {  # <state> <watch-path> [home]
   [ -e "$lockdir/pid" ] || [ -L "$lockdir/pid" ] || return 1
   [ -f "$lockdir/pid" ] && [ ! -L "$lockdir/pid" ] && [ -r "$lockdir/pid" ] || return 0
   pid=$(cat "$lockdir/pid" 2>/dev/null) || return 0
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
   fm_pid_alive "$pid" || return 1
   for file in fm-home watcher-path pid-identity; do
     if [ -e "$lockdir/$file" ] || [ -L "$lockdir/$file" ]; then

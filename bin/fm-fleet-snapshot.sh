@@ -605,7 +605,11 @@ task_json_lines() {
       pr_source=absent
     fi
 
-    current_json=$(crew_state_json "$id")
+    if [ -n "$remote_host" ] && [ "$FM_SNAPSHOT_REMOTE_PROBES" = 0 ]; then
+      current_json=$(jq -n '{state:"unknown",source:"remote-not-collected",raw:""}')
+    else
+      current_json=$(crew_state_json "$id")
+    fi
     event_json=$(status_event_json "$status_log")
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
@@ -995,9 +999,19 @@ fi
 
 registry_secondmates_json() {
   local reg="$DATA/secondmates.md" out rc reason mode script parse_filter output_filter
-  if [ ! -f "$reg" ]; then
+  if [ ! -e "$reg" ] && [ ! -L "$reg" ]; then
     jq -n --arg path "$reg" --arg observed "$SNAPSHOT_NOW" \
       '{present:false,available:true,complete:true,reason:null,provenance:"registered-table",path:$path,freshness:{status:"fresh",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[],lines_in_window:0,records_in_window:0}'
+    return 0
+  fi
+  if [ -L "$reg" ] && [ ! -e "$reg" ]; then
+    reason="registered secondmate table is dangling"
+  elif [ ! -f "$reg" ]; then
+    reason="registered secondmate table is not a regular file"
+  fi
+  if [ -n "${reason:-}" ]; then
+    jq -n --arg path "$reg" --arg observed "$SNAPSHOT_NOW" --arg reason "$reason" \
+      '{present:true,available:false,complete:false,reason:$reason,provenance:"registered-table",path:$path,freshness:{status:"unavailable",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[$reason],lines_in_window:0,records_in_window:0}'
     return 0
   fi
   mode=$(file_mode_octal "$reg")
