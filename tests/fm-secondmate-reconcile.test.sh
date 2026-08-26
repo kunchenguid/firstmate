@@ -137,6 +137,29 @@ test_a_mismatch_still_there_after_the_window_earns_one_more_nudge() {
   pass "a mismatch outliving the cooldown earns one re-nudge, then goes quiet again"
 }
 
+test_the_cooldown_starts_when_delivery_finishes() {
+  local home mate fakebin snap started nudged
+  { read -r home; read -r mate; read -r fakebin; } < <(make_main_home deliverytime mate)
+  snap="$home/snapshot.json"
+  write_snapshot "$snap" mate '{"kind":"orphan_in_flight","ids":["ghost"]}'
+  mv "$fakebin/tmux" "$fakebin/tmux-real"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = send-keys ]; then sleep 2; fi
+exec "$(dirname "$0")/tmux-real" "$@"
+SH
+  chmod +x "$fakebin/tmux"
+
+  started=$(date +%s)
+  run_notify "$home" "$fakebin" deliverytime "$snap" >/dev/null \
+    || fail "the delayed reconcile ask failed"
+  nudged=$(cat "$home/state/mate.reconcile-nudged")
+  [ "$nudged" -ge "$((started + 2))" ] \
+    || fail "the cooldown began before delivery finished: start=$started nudged=$nudged"
+  pass "the cooldown begins when delivery finishes"
+}
+
 test_the_window_is_four_hours() {
   local home mate fakebin snap out
   { read -r home; read -r mate; read -r fakebin; } < <(make_main_home fourhours mate)
@@ -354,6 +377,7 @@ META
 
 test_an_inventory_mismatch_asks_the_mate_once_per_window
 test_a_mismatch_still_there_after_the_window_earns_one_more_nudge
+test_the_cooldown_starts_when_delivery_finishes
 test_the_window_is_four_hours
 test_each_home_carries_its_own_cooldown
 test_the_ask_never_arms_a_reply_expectation_or_a_re_ring

@@ -185,14 +185,14 @@ cmd_notify() {
     | [.id, .spawn_gen, $kind, (.ids | map(select(type == "string")) | sort | join(", "))]
     | @tsv')
 
-  now=$(date +%s)
-  local id sampled_spawn_gen kind ids path last age reconcile_lock control_lock meta meta_lock current_spawn_gen did send_rc
+  local id sampled_spawn_gen kind ids path last age now delivered_at reconcile_lock control_lock meta meta_lock current_spawn_gen did send_rc
   while IFS=$'\t' read -r id sampled_spawn_gen kind ids; do
     [ -n "${id:-}" ] || continue
     path=$(nudge_path "$id")
     reconcile_lock="$STATE/.$id.reconcile.lock"
     fm_lock_acquire_wait "$reconcile_lock" || { printf 'failed: %s lock\n' "$id"; rc=1; continue; }
     ACTIVE_RECONCILE_LOCK=$reconcile_lock
+    now=$(date +%s)
     last=
     if [ -f "$path" ] && [ ! -L "$path" ]; then last=$(cat "$path" 2>/dev/null || true); fi
     case "$last" in ''|*[!0-9]*) last= ;; esac
@@ -259,6 +259,7 @@ cmd_notify() {
       release_active_locks
       continue
     fi
+    delivered_at=$(date +%s)
     fm_lock_acquire_wait "$meta_lock" || {
       printf 'sent-unrecorded: %s %s\n' "$id" "$kind"
       rc=1
@@ -271,7 +272,7 @@ cmd_notify() {
       current_spawn_gen=$(meta_spawn_gen "$meta")
     fi
     if [ "$current_spawn_gen" = "$sampled_spawn_gen" ] \
-      && (umask 077; printf '%s\n' "$now" > "$path.tmp") \
+      && (umask 077; printf '%s\n' "$delivered_at" > "$path.tmp") \
       && mv -f -- "$path.tmp" "$path"; then
       printf 'sent: %s %s\n' "$id" "$kind"
     else
