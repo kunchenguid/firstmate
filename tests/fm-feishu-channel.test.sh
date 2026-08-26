@@ -347,6 +347,31 @@ assert(!pi.sends[0].content.includes("ou_captain1234") && !pi.sends[0].content.i
 assert(renderFeishuSourceBadge(pi.sends[0].content, "user").includes("Feishu - authorized P2P"));
 assert.equal(ingressCounts(home).queued, 1, "native Pi submission was not recorded without a custom scheduler ACK");
 
+const textOnlyPost = publishFeishuInbound(home, remote({
+  event_id: "evt_text_only_post",
+  message_id: "om_textOnlyPost1234",
+  message_type: "post",
+  content: [{ type: "text", text: "Observed title\nfirst text second text" }],
+}));
+assert.equal(textOnlyPost.status, "published", "authorized text-only post was not durably accepted");
+for (let attempt = 0; attempt < 30 && !pi.sends.some(({ content }) => parseFeishuMarker(Array.isArray(content) ? content[0]?.text : content)?.deliveryRef === textOnlyPost.deliveryRef); attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+const textOnlyPostSends = () => pi.sends.filter(({ content }) => parseFeishuMarker(Array.isArray(content) ? content[0]?.text : content)?.deliveryRef === textOnlyPost.deliveryRef);
+assert.equal(textOnlyPostSends().length, 1, "text-only post did not produce exactly one native Pi offer");
+const textOnlyPostSend = textOnlyPostSends()[0];
+assert.equal(textOnlyPostSend.options?.deliverAs, "steer", "text-only post did not use Pi's native steering queue");
+assert(Array.isArray(textOnlyPostSend.content), "text-only post did not retain the rich-message native content seam");
+const textOnlyPostMarker = parseFeishuMarker(textOnlyPostSend.content[0]?.text);
+assert.equal(textOnlyPostMarker?.deliveryRef, textOnlyPost.deliveryRef, "text-only post lost its source marker");
+assert.equal(textOnlyPostSend.content.at(-1)?.text.trim(), "Observed title\nfirst text second text", "text-only post changed normalized text at Pi delivery");
+session.entries.push({ type: "message", id: "10000000", parentId: session.entries.at(-1)?.id ?? null, timestamp: "2026-08-12T00:00:00.050Z", message: { role: "user", content: textOnlyPostSend.content } });
+await emit(pi, "message_start", { message: session.entries.at(-1).message }, session.ctx);
+assert.equal(findInboundByDeliveryRef(home, textOnlyPost.deliveryRef)?.delivery_ref, textOnlyPost.deliveryRef, "delivered text-only post lost its durable source identity");
+assert.equal(ingressCounts(home).delivered, 1, "text-only post did not reconcile to delivered");
+await new Promise((resolve) => setTimeout(resolve, 800));
+assert.equal(textOnlyPostSends().length, 1, "repeated bridge pumps duplicated the text-only post delivery");
+
 const PNG_BYTES = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 const mediaFence = { ownerNonce: transportNonce, bindingId: binding.binding_id, bindingGeneration: binding.generation, sessionId };
 const image = publishFeishuInbound(home, remote({
@@ -402,6 +427,7 @@ await emit(pi, "message_start", { message: session.entries.at(-1).message }, ses
 assert.equal(publishFeishuInbound(home, remote({ event_id: "evt_image_replay", message_id: "om_imageA1234", message_type: "image", content: [{ type: "image", resource_key: "img_v2_substitute" }] })).status, "duplicate", "message replay substituted media bytes");
 assert.equal(publishFeishuInbound(home, remote({ event_id: "evt_too_many", message_id: "om_tooMany1234", message_type: "post", content: Array.from({ length: 9 }, (_, index) => ({ type: "image", resource_key: `img_v2_${index}xxxx` })) })).reason, "attachment-count-limit");
 assert.equal(publishFeishuInbound(home, remote({ event_id: "evt_bad_key", message_id: "om_badKey1234", message_type: "image", content: [{ type: "image", resource_key: "../../escape" }] })).reason, "malformed-content");
+assert.equal(publishFeishuInbound(home, remote({ event_id: "evt_image_text", message_id: "om_imageText1234", message_type: "image", content: [{ type: "image", resource_key: "img_v2_strict_one" }, { type: "text", text: "not allowed" }] })).reason, "malformed-content", "standalone image accepted extra text");
 assert.equal(publishFeishuInbound(home, remote({ event_id: "evt_unsupported", message_id: "om_unsupported1234", message_type: "post", content: [{ type: "unsupported", media_type: "file" }], content_size_bytes: 42 })).reason, "unsupported-content");
 
 const mismatch = publishFeishuInbound(home, remote({ event_id: "evt_mismatch", message_id: "om_mismatch1234", message_type: "image", content: [{ type: "image", resource_key: "img_v2_mismatch" }] }));
@@ -673,7 +699,7 @@ assert(!resumedPi.sends.some((send) => parseFeishuMarker(send.content)?.delivery
 assert.equal(resumedPi.sends.filter((send) => parseFeishuMarker(send.content)?.deliveryRef === bridgeHardlinkEvent.deliveryRef).length, 1, "preserved hardlink-blocked input was not offered exactly once after a lifecycle recovery boundary");
 await new Promise((resolve) => setTimeout(resolve, 500));
 assert.equal(resumedPi.sends.filter((send) => parseFeishuMarker(send.content)?.deliveryRef === bridgeHardlinkEvent.deliveryRef).length, 1, "repeated pump ticks duplicated the recovered hardlink-blocked native offer");
-assert.equal(ingressCounts(home).delivered, 3, "session markers did not reconcile prior native-queue submissions");
+assert.equal(ingressCounts(home).delivered, 4, "session markers did not reconcile prior native-queue submissions");
 assert.equal(claimNextOutbound(home), undefined, "persisted Assistant entries were mirrored again after exact session resume");
 await emit(resumedPi, "session_shutdown", {}, resumed.ctx);
 
@@ -2673,6 +2699,8 @@ SDK_RESOURCE_MARK="$TMP_ROOT/mock-sdk-resource-mark"
 cat > "$SDK_MEDIA_EVENTS" <<'JSON'
 [
   {"kind":"event","data":{"event_id":"evt_sdk_post_bad","app_id":"cli_0123456789abcdef","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkBadPost12","create_time":"30","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"post","content":"{\"zh_cn\":{\"title\":\"bad\",\"content\":[[{\"tag\":\"text\",\"text\":\"ok\"}],\"not-a-paragraph\"]}}"}}},
+  {"kind":"event","data":{"event_id":"evt_sdk_post_text_only","app_id":"cli_0123456789abcdef","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkTextPost12","create_time":"30","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"post","content":"{\"zh_cn\":{\"title\":\"Observed title\",\"content\":[[{\"tag\":\"text\",\"text\":\"first text \"},{\"tag\":\"text\",\"text\":\"second text\"}]],\"content_v2\":[[{\"tag\":\"text\",\"text\":\"first text \"},{\"tag\":\"text\",\"text\":\"second text\"}]]}}"}}},
+  {"kind":"event","data":{"event_id":"evt_sdk_post_unsupported","app_id":"cli_0123456789abcdef","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkUnsupported12","create_time":"30","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"post","content":"{\"zh_cn\":{\"title\":\"unsupported\",\"content\":[[{\"tag\":\"file\",\"file_key\":\"file_v2_unsupported\"}]]}}"}}},
   {"kind":"event","data":{"event_id":"evt_sdk_post_en","app_id":"cli_0123456789abcdef","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkEnPost1234","create_time":"31","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"post","content":"{\"en_us\":{\"title\":\"english\",\"content\":[[{\"tag\":\"text\",\"text\":\"english body\"},{\"tag\":\"img\",\"image_key\":\"img_v2_sdk_fixture\"}]]}}"}}},
   {"kind":"event","data":{"event_id":"evt_sdk_after_bad","app_id":"cli_0123456789abcdef","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkAfterBad12","create_time":"32","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"text","content":"{\"text\":\"survived malformed post\"}"}}},
   {"kind":"event","data":{"event_id":"evt_sdk_retry_img","app_id":"cli_0123456789abcdef","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkRetryImg12","create_time":"33","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"image","content":"{\"image_key\":\"img_v2_flaky_retry\"}"}}},
@@ -2701,6 +2729,11 @@ import { join } from "node:path";
 const sha = (value) => createHash("sha256").update(String(value)).digest("hex");
 const stateRoot = join(process.env.FM_HOME, "state", "feishu");
 const inbox = readdirSync(join(stateRoot, "inbox")).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(stateRoot, "inbox", name), "utf8")));
+const textOnlyPost = inbox.find((event) => event.message_id === "om_sdkTextPost12");
+assert.ok(textOnlyPost, "server-realistic text-only post was not durably accepted");
+assert.equal(textOnlyPost.message_type, "post");
+assert.deepEqual(textOnlyPost.content, [{ type: "text", text: "Observed title\nfirst text second text" }], "text-only post title or multiple text elements changed during SDK normalization");
+assert.equal(inbox.filter((event) => event.message_id === "om_sdkTextPost12").length, 1, "SDK replay duplicated the text-only post");
 const enPost = inbox.find((event) => event.message_id === "om_sdkEnPost1234");
 assert.ok(enPost, "well-formed en_us post was not accepted");
 assert.deepEqual(enPost.content.map((part) => part.type), ["text", "image"], "en_us post text/image order was lost");
@@ -2711,6 +2744,8 @@ assert.ok(badPost, "malformed post structure was not quarantined");
 assert.equal(badPost.kind, "malformed-content");
 assert.equal(badPost.data.message_type, "post");
 assert.ok(Number.isSafeInteger(badPost.data.content_size_bytes) && badPost.data.content_size_bytes > 0, "malformed post quarantine lost non-sensitive size metadata");
+const unsupported = readdirSync(join(stateRoot, "quarantine", "unsupported-content")).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(stateRoot, "quarantine", "unsupported-content", name), "utf8")));
+assert.ok(unsupported.some((record) => record.data?.message_id_hash === sha("om_sdkUnsupported12")), "unsupported post element was not quarantined");
 const media = readdirSync(join(stateRoot, "inbound-media")).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(stateRoot, "inbound-media", name), "utf8")));
 const retryMedia = media.find((record) => record.message_id === "om_sdkRetryImg12");
 assert.ok(retryMedia, "flaky retry image never produced a durable media record");
