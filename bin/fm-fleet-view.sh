@@ -4,6 +4,13 @@
 # This command intentionally does not parse fleet state itself.
 # It shells out to fm-fleet-snapshot.sh --json and renders that stable
 # structured contract for humans.
+#
+# It also prints the provider-headroom gauge, because this view is the one
+# AGENTS.md section 8 has firstmate read at every heartbeat, and that is where
+# queued work gets dispatched. A limit reached mid-flight kills every worker on
+# that account inside the same minute, so the gauge belongs next to the
+# dispatch decision rather than in a command someone has to think of running.
+# bin/fm-usage-wall.sh owns the reading, including every unmeasurable case.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,6 +34,9 @@ esac
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-view: jq not found" >&2; exit 1; }
 
 SNAPSHOT=$("$SCRIPT_DIR/fm-fleet-snapshot.sh" --json) || exit $?
+HEADROOM=$("$SCRIPT_DIR/fm-usage-wall.sh" headroom 2>/dev/null) \
+  || HEADROOM='HEADROOM: (all providers) unknown reason=the headroom read did not complete'
+
 
 printf '%s\n' "$SNAPSHOT" | jq -r '
   def dash($v): if $v == null or $v == "" then "-" else $v end;
@@ -94,3 +104,5 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   "## Secondmates",
   .secondmate_guidance.note
 '
+
+printf '\n## Headroom\n\n```\n%s\n```\n' "$HEADROOM"

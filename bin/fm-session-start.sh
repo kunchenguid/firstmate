@@ -42,10 +42,13 @@
 #                       detected primary harness.
 #   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
-#   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#   6. fleet digest   - a compact data/backlog.md identity/metadata listing, the
+#                       bounded provider-headroom gauge, every state/*.meta, a
+#                       bounded state/*.status tail, state/.afk, and a cheap
+#                       per-task endpoint-liveness read plus, for any endpoint
+#                       that is not alive, the cheap usage-wall scan that keeps
+#                       a provider limit from reading as a crash: read-only,
+#                       always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -351,6 +354,13 @@ case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
 QUEUED_LIMIT=${FM_SESSION_START_QUEUED_LIMIT:-20}
 case "$QUEUED_LIMIT" in ''|*[!0-9]*|0) QUEUED_LIMIT=20 ;; esac
 BACKLOG_FIELDS=blocked_by,hold_kind,hold_reason
+# Bounds for the two usage-wall reads in the fleet-state section. Both are local
+# and fast (a gauge read and a terminal capture), but "local" is not "bounded",
+# and this digest runs on a session-open hook that blocks the first turn.
+SESSION_START_HEADROOM_TIMEOUT=${FM_SESSION_START_HEADROOM_TIMEOUT:-20}
+case "$SESSION_START_HEADROOM_TIMEOUT" in ''|*[!0-9]*|0) SESSION_START_HEADROOM_TIMEOUT=20 ;; esac
+SESSION_START_WALL_TIMEOUT=${FM_SESSION_START_WALL_TIMEOUT:-15}
+case "$SESSION_START_WALL_TIMEOUT" in ''|*[!0-9]*|0) SESSION_START_WALL_TIMEOUT=15 ;; esac
 
 RULE='================================================================================'
 SUBRULE='--------------------------------------------------------------------------------'
@@ -807,8 +817,21 @@ stage fleet-state
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
+# Headroom before dispatch. Deliberately here, at the top of the live-fleet
+# section and ahead of the inventory: this is where the next dispatch decision
+# gets made, and a provider limit reached mid-flight kills every worker on that
+# account inside the same minute. One bounded local gauge read; the command owns
+# every unmeasurable case and never reports an unread gauge as healthy.
+subsection "Headroom before dispatch"
+if ! fm_run_timed "$SESSION_START_HEADROOM_TIMEOUT" "$SCRIPT_DIR/fm-usage-wall.sh" headroom 2>/dev/null; then
+  printf 'HEADROOM: (all providers) unknown reason=the headroom read did not complete within %ss\n' \
+    "$SESSION_START_HEADROOM_TIMEOUT"
+  printf 'HEADROOM_NOTE: headroom is UNMEASURED, not healthy - treat every provider as unproven when deciding what to dispatch.\n'
+fi
+
 subsection "Work under way (state/*.meta)"
 META_FOUND=0
+NOT_ALIVE_FOUND=0
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
   META_FOUND=1
@@ -824,6 +847,16 @@ for meta in "$STATE"/*.meta; do
       printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
     else
       printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
+      # A dead endpoint is the observable condition a usage limit produces, and
+      # it reads exactly like a crash. The cheap endpoint-only scan runs here so
+      # the distinction is on the page rather than depending on anyone
+      # remembering to look for it; a negative from it is deliberately
+      # `unknown`, because the deciding evidence is in the pipeline step logs.
+      NOT_ALIVE_FOUND=1
+      fm_run_timed "$SESSION_START_WALL_TIMEOUT" \
+        "$SCRIPT_DIR/fm-usage-wall.sh" diagnose "$id" --endpoint-only 2>/dev/null |
+        grep '^USAGE_WALL:' ||
+        printf 'USAGE_WALL: %s unknown reason=scan-did-not-complete checked=none\n' "$id"
     fi
   else
     printf 'endpoint: unknown (no window recorded)\n'
@@ -837,6 +870,10 @@ for meta in "$STATE"/*.meta; do
   fi
 done
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
+if [ "$NOT_ALIVE_FOUND" -eq 1 ]; then
+  printf '\nA USAGE_WALL line above is a first read, not a verdict: run %s/bin/fm-usage-wall.sh diagnose <id>\n' "$FM_ROOT"
+  printf 'for the pipeline step logs, and load usage-limit-recovery before treating any of it as a crash.\n'
+fi
 
 subsection "Orphan status logs (state/*.status without matching .meta)"
 ORPHAN_STATUS_FOUND=0

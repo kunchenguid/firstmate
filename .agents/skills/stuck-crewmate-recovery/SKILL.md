@@ -13,6 +13,10 @@ metadata:
 
 Use this playbook when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or when a direct report is stale, looping, repeatedly confused, asking a question its brief already answers, unresponsive, or when a steer failed to land.
 
+Rule out a provider usage limit first, with `bin/fm-usage-wall.sh diagnose <task-id>`.
+A usage limit kills every worker on that account within minutes and leaves evidence that reads exactly like a crash, so a `wall` verdict means the work is intact and `usage-limit-recovery` owns what happens next.
+That skill also owns the case where the recorded endpoint is gone rather than merely idle, which the control plane refuses and this playbook's relaunch step therefore cannot reach.
+
 Interrupt, stop, and relaunch a worker through `bin/fm-control.sh <task-id> interrupt|exit|relaunch`, which resolves the recorded runtime itself, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](../../../docs/agent-control.md)).
 That plane covers workers running in this home; a remotely placed secondmate is refused by name and reconciled through `secondmate-provisioning` instead.
 Load `harness-adapters` before a resume command or a harness-specific skill invocation, and whenever the adapter's own quirks matter.
