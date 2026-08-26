@@ -72,7 +72,8 @@ In the default Codex mode, a true value lets the second stop finish after one fo
 
 Claude runs the guard with `--claude`, which ignores `stop_hook_active` and cooperates with the Stop-owned auto-arm.
 Claude Code sets `stop_hook_active=true` on every stop after any stop-hook continuation, including `asyncRewake` rewakes, which re-opened the 2026-07-21 blind window under the default one-shot behavior.
-The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 milliseconds) and allows the stop when the watcher is healthy, `state/.claude-autoarm.lock` has a live `autoarm` role owner whose supervision decision is still open and whose eventual failure must exit 2, or `state/.claude-autoarm-epoch` contains a fresh actionable rewake owned by this event epoch.
+The Claude mode retries for up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 milliseconds of elapsed wall clock, not a count of passes) and allows the stop when the watcher is healthy, `state/.claude-autoarm-claim` names a live auto-arm process whose identity still matches, `state/.claude-autoarm.lock` has a live `autoarm` role owner whose supervision decision is still open and whose eventual failure must exit 2, or `state/.claude-autoarm-epoch` contains a fresh `rewake` outcome owned by this event epoch.
+A fresh `arming` outcome is not accepted here: `bin/fm-claude-stop-autoarm.sh` writes it only after it already holds the owner lock, so the live-owner branch above has already returned recovery-under-way whenever that record is genuinely fresh; reaching this case with `arming` means the arm died mid-flight, and treating that as recovery is exactly the silent-drop failure this guard exists to block.
 A live owner counts as that proof only while its decision is open, which the ledger settles: an entry naming that owner's own pid with any outcome other than `arming` means the claim already finished, so the lock is abandoned rather than in flight.
 The guard then stops reading it as recovery under way, the terminal check clears it instead of stepping aside for it, and the next Stop-owned firing reclaims it and arms rather than deferring.
 Without that boundary a cycle that armed, delivered one rewake, and exited left both Stop participants deferring to its leftover lock indefinitely, so on 2026-08-14 a home with two tasks in flight and a beacon 40 minutes cold ended every turn blind until an operator intervened.
@@ -92,6 +93,42 @@ After that alarm, the Stop auto-arm suppresses further exit-2 continuations unti
 The alarm cannot repeat during that failure episode, and a later unhealthy stop blocks again.
 A positively verified healthy watcher clears the failure notice, alarm, and block budget for a future independent episode.
 A Claude failure notice describes the automatic mechanism as broken and does not direct a routine manual background arm.
+
+## Claim publication ordering
+
+Both Claude Stop hooks fire on the same event, so the guard reaches its verdict while the auto-arm is still starting.
+Everything the guard can observe must therefore be published before the auto-arm's most expensive gate, not after it.
+
+`bin/fm-claude-stop-autoarm.sh` publishes `state/.claude-autoarm-claim` immediately after its three cheap read-only gates - primary scope, away mode, and supervision need - and before the identity gate that proves this session owns the home.
+That ordering is the point.
+The identity gate walks the harness ancestry through `fm_harness_ancestry_pids`, which forks `ps` three times per hop, and on a loaded host that walk measured 0.9 to 3.5 seconds against a nominal 800 millisecond cooperative window.
+Until the claim existed, the earliest evidence of a running auto-arm was the owner lock taken after that walk, so for the whole window the guard saw an unclaimed home, announced that no recovery was under way while recovery was under way, and spent a forced continuation on every turn.
+Repeated silent supervision drops on 2026-08-17 and 2026-08-18 were that window, not a failure of the arm path.
+
+The claim is a hint, never authority.
+It records the publishing pid and its `fm_pid_identity`, and the guard accepts it only while that pid is alive and its identity still matches, the same standard it applies to the owner lock, so a dead publisher or a reused pid proves nothing.
+It is removed by the publisher's own exit trap and only by a process that still owns it, so a concurrent hook never clears another's claim.
+
+Publishing this early trades the identity gate's authority for speed, so a session that does not own the home must still be kept from publishing a claim the guard would read as recovery under way.
+`bin/fm-claude-stop-autoarm.sh` therefore runs a bounded shallow ownership pre-check before publishing: it walks the claim pid's own parent chain, capped at eight hops, looking for the pid recorded in `state/.lock`.
+The owning session is that pid's near ancestor in an ordinary Stop firing, so this walk is a fraction of the identity gate's cost - one `ps` fork per hop instead of three, and bounded instead of sixteen hops deep.
+When the walk finds the lock owner within the bound, the claim publishes; when it does not - the lock is missing, malformed, or the owner sits beyond the bound - the result is inconclusive and the claim is never published.
+An inconclusive result costs a false alarm the guard already tolerates on this path; publishing on inconclusive would cost the silent drop this claim exists to prevent, for exactly the competing-session case this ordering would otherwise leave unguarded.
+The identity gate below remains the authoritative ownership test and is unchanged by this pre-check, which only decides whether the early claim is published.
+An auto-arm that cannot publish one still arms; the guard simply falls back to the evidence it had before.
+The claim never advances the block budget, never substitutes for watcher health, and never reaches the failure progression: only genuine watcher health clears those.
+
+The guard's own wait is bounded by elapsed time for the same reason.
+Each pass forks through `fm_watcher_healthy` and `fm_pid_identity`, so a budget spent as a fixed number of passes runs for an unbounded multiple of the milliseconds it names - a nominal 800 milliseconds ran for 29.8 seconds at a real turn boundary during the reproduction.
+`fm_timing_now_ms` in `bin/fm-timing-lib.sh` is the shared fork-free clock that deadline reads.
+
+The budget bounds the retrying and nothing else, and is not a promise about how long the Stop hook takes.
+The hook pays a fixed cost whatever the budget is - sourcing its libraries, the primary-scope checks, and on the blocking path the budget accounting and banner - and with the budget set to zero that fixed cost alone measured about 5 seconds on a loaded host.
+One complete evaluation is irreducible, because the guard cannot conclude a proof is absent without looking for all of them, so the deadline is checked after each evaluation rather than inside one; the loop's last act before breaking is therefore a full evaluation, and no re-evaluation follows it.
+
+The designed gap is separate and remains: a Claude home is unwatched for the duration of every turn, because the Stop hook is `asyncRewake` and the next turn's start ends the arm and its watcher together.
+A long turn therefore looks like a drop in the beacon record and is not one.
+The reproduction distinguished them by driving the guard's blocking path with a healthy auto-arm running concurrently in the same event.
 
 OpenCode, Pi, and pi-signed expose passive callbacks for this purpose.
 Their adapters fail open at the hook boundary to protect the user session but schedule one bounded follow-up when the predicate blocks.
@@ -158,6 +195,9 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 ## Regression coverage
 
 `tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the live-lock and fresh-beacon guard predicate, the cooperative `--claude` claim wait, monotonic failed-epoch progression, bounded attended fail-open, post-alarm continuation suppression, positive recovery reset, the abandoned auto-arm claim cases that must block or clear instead of allowing a blind stop, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
+Its claim-ordering group is the reproduction of the drop above, run as real concurrent processes: a `ps` shim parks a real auto-arm inside its identity gate, and the guard is asked for a verdict with the claim as the only evidence on disk, with the same instant asserted both ways to keep the claim the whole difference.
+Alongside it the group pins that a dead or pid-reused publisher is rejected, that a fresh `arming` epoch with no live arm, watcher, or claim still blocks, and that the cooperative wait is bounded by elapsed time rather than by a pass count, the last by differencing a real budget against a zero one on the same host so it measures the wait rather than the hook's fixed cost.
+`FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` is the opt-in guard for the harness-emitted half, since only the real Stop boundary decides whether a continuation was forced: it runs the whole session behind an unconditionally slowed pid-query shim, proves from the delay log that the identity gate outlasted the cooperative wait, and fails naming the harness and version.
 `tests/fm-guard-stale-banner.test.sh` covers the pull-guard predicate, including the persistent-model fresh-leftover-beacon negative control, the auto-arm model's healthy fresh-beacon-without-a-watcher case and stale-beacon alarm, and the extension model's live-watcher path, ownership-qualified fresh hand-off, held-lock failures, independently broken ownership signals, stale-beacon alarm, queued-wake warning, and Pi and pi-signed harness routing.
 It also covers true-reason banner wording and reason-keyed episode dedup surviving a beacon mtime change.
 `tests/fm-cursor-primary.test.sh` covers the Cursor park end to end over real processes with no harness installed: each tracked Claude-shaped entrypoint standing down on a Cursor payload, both follow-up sources, the bounded repair nag and its reset, the nested loop bounds, supersession, away-mode and lock-ownership inertness, Pi-host stand-down without Cursor identity and continued parking when `PI_CODING_AGENT` leaks alongside `CURSOR_AGENT` or `CURSOR_INVOKED_AS`, child-worktree exclusion, and that the adapter never exits 2.
@@ -165,4 +205,4 @@ It also covers true-reason banner wording and reason-keyed episode dedup survivi
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.
-[`verification/supervision.md`](verification/supervision.md#turn-end-guard) records the active cross-harness empirical evidence, including the 2026-07-24 Claude `asyncRewake` revalidation.
+[`verification/supervision.md`](verification/supervision.md#turn-end-guard) records the active cross-harness empirical evidence, including the 2026-07-24 Claude `asyncRewake` revalidation and the 2026-08-18 claim-ordering reproduction and its measurements.

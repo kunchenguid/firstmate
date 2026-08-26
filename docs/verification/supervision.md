@@ -411,6 +411,117 @@ Observed output:
 fm-claude-stop-autoarm: ok
 ```
 
+### Claude Stop claim publication ordering, 2026-08-18
+
+Repeated silent supervision drops in the primary home on 2026-08-17 and 2026-08-18 were reproduced end to end against Claude Code 2.1.234 with the real tracked Stop registration, then driven to one cause.
+Two reported premises were disproven by measurement before any fix was written.
+The `asyncRewake` sibling fires within about a millisecond of the blocking hook and runs to completion even when that sibling exits 2, so the auto-arm was never absent.
+The exit-2 continuation turn does not start until the outstanding `asyncRewake` hook completes, observed as a block at 941.25s, the async hook ending at 961.92s, and the first model tool call at 965.90s, so the next turn's start does not race the arm.
+
+What did happen is a visibility window.
+In the instrumented lab the guard printed its blind-turn banner and exited 2 on two consecutive cycles while the auto-arm was healthy and completed successfully in the same event, recording `epoch=2 outcome=rewake` and then `epoch=4 outcome=rewake`.
+The identity gate's ancestry walk measured 1.375 to 1.624 seconds live and 8.857 seconds under xtrace, the gate as a whole 0.946 to 3.511 seconds, and the auto-arm's first durable evidence at 11.300 seconds under xtrace, against a nominal 800 millisecond cooperative window.
+A sampler run measured the owner lock appearing at +1.70s and its `autoarm` role at +1.77s while the guard gave up at +1.81s, a 20 millisecond margin.
+The guard's own wait was an iteration count over fork-heavy passes, so it ran for 2.87s and 29.85s on those two cycles for the same nominal 800 milliseconds.
+
+Three field samples from the primary home bound the window from the other side, each taken by inspecting durable records moments after the guard printed that no recovery was under way.
+Two on 2026-08-21 fired at 390 and 297 seconds of beacon staleness, and one on 2026-08-22 at 03:42 UTC fired at 815 seconds, all with seven tasks in flight.
+In the third the epoch ledger recorded `epoch=1041 owner_pid=1108506 outcome=arming` written in the same second the guard declared the home unclaimed, that pid alive, both the arm wrapper and the watcher live at 40 and 39 seconds old, and the beacon 35 seconds old.
+The spread rules out a near-threshold beacon and therefore a threshold-tuning fix: the staleness was genuine at every sample, and the auto-arm healed it within the same second regardless of how stale the beacon had become.
+It also shows the `arming` outcome reaching the ledger while the guard was still reporting the home unclaimed, which is the case the guard's pre-fix outcome filter dropped.
+
+An unrelated firstmate home reported the same defect independently on 2026-08-22, which is what establishes it as structural rather than local to one home or to any load condition there.
+That home saw the banner fire six times in one session and be wrong every time, quoting beacon ages of 168, 422, 697, 1001 and 214 seconds where the ages measured immediately afterwards were 3 to 21 seconds, with the rewake counter advancing across every firing, exactly one monitor pair scoped to that home live, and no failure marker present.
+It reached the same mechanism from its own evidence: the guard samples beacon age and claim status at the turn boundary, before the recovery hook firing on that same boundary has claimed the home, so it reports a state that is already obsolete when the reader sees it.
+It also separated this defect from the wake-queue lock deadlock, because nothing deadlocked and recovery always completed on its own.
+
+The cost that makes this worth fixing is that a false alarm every time makes a genuine failure indistinguishable from the noise, so the fix must not buy quiet by weakening the predicate.
+No arm, no live watcher and no claim still blocks loudly, pinned by the re-block, dead-publisher, X-mode, stale-epoch, and exhausted-budget cases in `tests/fm-turnend-guard.test.sh`.
+
+The portable regression reproduces that window with real concurrent processes rather than fixtures, parking a real auto-arm inside its identity gate behind a `ps` shim and asking the guard for a verdict with the claim as the only evidence on disk.
+
+```sh
+tests/fm-turnend-guard.test.sh
+```
+
+Observed output, last four lines:
+
+```text
+ok - fm-turnend-guard --claude: the early claim is the whole difference in the pre-identity window (incident regression)
+ok - fm-turnend-guard --claude: an in-progress claim is trusted only while its publisher is alive and unchanged
+ok - fm-turnend-guard --claude: a fresh arming epoch with no live arm, watcher or claim still blocks
+ok - fm-turnend-guard --claude: the cooperative wait is bounded by elapsed time, not by a pass count
+```
+
+Each of the four fails against an unpacked pre-fix tree, checked by running them there one at a time:
+
+```text
+not ok - no in-progress claim appeared before the auto-arm's identity gate: firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism is broken after 2 bounded attempts, and no live watcher with a fresh beacon was verified.
+not ok - a live identity-matched claim must be accepted as recovery under way: expected exit 0, got 2
+not ok - --claude must force a turn against a fresh arming epoch with no live arm, watcher, or claim: expected exit 2, got 0
+not ok - the cooperative wait spent 24818ms of 3s sleeps for an 800ms budget (baseline 1887ms, total 26705ms): it is counting passes, not elapsed time
+```
+
+The harness-emitted half is the opt-in live guard, which now runs its whole session behind a shim that costs every pid query a fixed slice, so the identity gate reliably outlasts the cooperative wait.
+The run below recorded 86 delayed pid queries and no forced continuation.
+
+```sh
+FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - Claude 2.1.234 (Claude Code) live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles under a loaded identity gate, and preserved the competing-live-owner boundary
+```
+
+Two adjacent defects were repaired in the same change rather than left silent.
+`bin/fm-test-run.sh --check-coverage` compared `LC_ALL=C sort` inventories with a locale-sensitive `comm`, so it warned and failed on any host whose locale is not C; it now reports `FM_TEST_COVERAGE ok total=149 parallel=24 serial=113 serial_shards=4 herdr=12` under `en_US.UTF-8`.
+The live auto-arm regression still asserted that the model types the session start command, which the run-tier `SessionStart` hook has made unnecessary, so it could not pass at all; it now asserts that session start ran for that home and that the model issued exactly its two wake drains.
+
+The repo lint gate completes here once actionlint is installed, and did on 2026-08-22.
+
+```sh
+bin/fm-lint.sh
+```
+
+Observed output, exit 0:
+
+```text
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint-workflows.sh: actionlint 1.7.12 (pinned 1.7.12)
+fm-lint-workflows.sh: 3 workflow files valid
+```
+
+An earlier run of the same gate on 2026-08-18 exited 127 because actionlint was absent from that host, which was a missing tool rather than a result.
+`tests/fm-test-run.test.sh` still cannot complete on this host because its CI YAML assertion requires ruby, which is absent.
+
+
+### What the cooperative wait budget does and does not bound, 2026-08-22
+
+The first version of the elapsed-time regression asserted the hook's TOTAL wall clock, which made it assert fixed cost rather than the defect and fail under load.
+Measured on the same fixture, varying only the budget, three runs each:
+
+```text
+FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=0      5889 4861 5386 ms
+FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100    5017 5671 5374 ms
+FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=800    6642 7148 6243 ms
+FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=3000   6754 6698 7372 ms
+```
+
+A budget of zero forbids every retry, so the roughly 5 seconds it still spends is fixed cost the hook pays regardless: sourcing its libraries, the primary-scope checks, and on the blocking path the budget accounting and banner.
+The budget therefore bounds the retrying only, and `docs/turnend-guard.md` "Claim publication ordering" states that limit rather than claiming the hook completes within the budget.
+
+The regression now measures the difference between a zero budget and the real one on the same host, which is exactly what the wait spent, behind a `sleep` shim charging 3 seconds per interval:
+
+```text
+base_ms=2595 waited_ms=6924 delta_ms=4329
+base_ms=4389 waited_ms=6645 delta_ms=2256
+base_ms=3064 waited_ms=7337 delta_ms=4273
+```
+
+A deadline-bounded wait spends one shimmed interval past its budget; the pass-count loop this replaced would spend `SYNC_WAIT_MS/100` of them, eight here for 24 seconds, so the assertion's three-interval ceiling separates the two by more than a factor of two in both directions.
+
 ## Watcher continuity
 
 The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-07-24, all against isolated project and home state.
