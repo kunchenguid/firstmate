@@ -91,7 +91,11 @@ case "${1:-} ${2:-}" in
     ;;
 esac
 case " $* " in
-  *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+  *" headRefOid,baseRefName "*)
+    printf '%s\t%s\n' \
+      "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" \
+      "${FM_TEST_GH_DEST:-main}"
+    ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
@@ -530,9 +534,16 @@ test_invalid_entrypoints_have_zero_side_effects() {
   set -e
   [ "$rc" -ne 0 ] || fail "direct entrypoint accepted zero arguments"
   set +e
-  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 extra > /dev/null 2> "$dir/stderr"; rc=$?
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 extra too-many > /dev/null 2> "$dir/stderr"; rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "direct entrypoint accepted extra arguments"
+  # A third argument is now the optional destination branch, so it must still
+  # be rejected when it is not a valid branch name shape rather than silently
+  # ignored or accepted as data.
+  set +e
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 '../not-a-branch' > /dev/null 2> "$dir/stderr"; rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "direct entrypoint accepted a malformed destination branch"
   set +e
   run_merge_entry "$dir" > /dev/null 2> "$dir/stderr"; rc=$?
   set -e
@@ -3676,6 +3687,166 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+# --- Bitbucket support and the git-based primary landed-work detector -----
+#
+# Bitbucket Cloud has no forge CLI integration at all (bin/fm-pr-lib.sh's
+# header owns why), so bin/fm-pr-poll.sh's git-based test - not any forge API -
+# must be what actually detects a Bitbucket merge. These tests build a real,
+# small git repository because that git test is the only thing under test.
+
+# A minimal real git fixture: <dir>/origin.git (bare, default branch main) and
+# <dir>/wt (a worktree of a fresh task branch off main, with one unpushed
+# commit so the content test has something meaningful to compare).
+make_git_fixture() {
+  local dir=$1
+  mkdir -p "$dir"
+  git init -q --bare "$dir/origin.git"
+  git -C "$dir/origin.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$dir/origin.git" "$dir/_seed" 2>/dev/null
+  git -C "$dir/_seed" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "origin baseline"
+  git -C "$dir/_seed" push -q origin main
+  rm -rf "$dir/_seed"
+  git clone -q "$dir/origin.git" "$dir/project"
+  git -C "$dir/project" worktree add -q -b task-branch "$dir/wt" main
+  printf 'hello\n' > "$dir/wt/feature.txt"
+  git -C "$dir/wt" add -- feature.txt
+  git -C "$dir/wt" -c user.email=t@t -c user.name=t commit -q -m "add feature"
+}
+
+# Push <file>=<content> as one new commit directly to origin's <branch>
+# (creating it off main if it does not exist yet), simulating a squash merge
+# landing there without ever touching the task worktree - exactly the shape a
+# real Bitbucket merge takes, and the reason a patch-identity test would not
+# do: the commit here is not the worktree's own commit, only its net content.
+land_on_branch() {
+  local dir=$1 branch=$2 file=$3 content=$4 tmp
+  tmp="$dir/_land"
+  git clone -q "$dir/origin.git" "$tmp"
+  git -C "$tmp" checkout -q -B "$branch"
+  printf '%s\n' "$content" > "$tmp/$file"
+  git -C "$tmp" add -- "$file"
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "land $file"
+  git -C "$tmp" push -q origin "HEAD:$branch"
+  rm -rf "$tmp"
+}
+
+# Invoke the real bin/fm-pr-poll.sh exactly as bin/fm-watch.sh's --validated
+# call shape does, with a plain restricted PATH: the git-based test needs only
+# git, never gh or glab.
+run_poll_validated() {
+  PATH="$BASE_PATH" "$POLL" --validated "$@"
+}
+
+test_bitbucket_url_parses_and_arms() {
+  local dir rc
+  dir=$(make_case bitbucket-arm)
+  write_task_meta "$dir"
+
+  fm_pr_url_parse "https://bitbucket.org/team/app/pull-requests/42" \
+    || fail "bitbucket-arm: fm_pr_url_parse rejected a canonical Bitbucket PR URL"
+  [ "$FM_PR_PROVIDER" = bitbucket ] || fail "bitbucket-arm: provider was not tagged bitbucket"
+  [ "$FM_PR_HOST" = bitbucket.org ] || fail "bitbucket-arm: host was not bitbucket.org"
+  [ "$FM_PR_PATH" = team/app ] || fail "bitbucket-arm: path was not team/app"
+  [ "$FM_PR_NUMBER" = 42 ] || fail "bitbucket-arm: number was not 42"
+
+  run_check_entry "$dir" task-a https://bitbucket.org/team/app/pull-requests/42 \
+    > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "bitbucket-arm: arming refused: $(cat "$dir/stderr")"
+  [ "$(cat "$dir/stdout")" = "armed: state/task-a.check.sh" ] || fail "bitbucket-arm: unexpected stdout"
+  [ "$(cat "$dir/home/state/task-a.pr-poll")" = "$(printf '%s\n%s\n%s\n%s\n%s' bitbucket \
+    https://bitbucket.org/team/app/pull-requests/42 bitbucket.org team/app 42)" ] \
+    || fail "bitbucket-arm: sidecar did not record the bitbucket identity"
+  grep -qxF 'pr=https://bitbucket.org/team/app/pull-requests/42' "$dir/home/state/task-a.meta" \
+    || fail "bitbucket-arm: pr= was not recorded"
+  [ ! -s "$dir/gh.log" ] || fail "bitbucket-arm: arming called gh"
+  [ ! -s "$dir/glab.log" ] || fail "bitbucket-arm: arming called glab"
+  pass "a Bitbucket pull request URL parses and arms a watch with no forge CLI involved"
+}
+
+test_pr_dest_explicit_argument_recorded() {
+  local dir rc
+  dir=$(make_case bitbucket-dest-explicit)
+  write_task_meta "$dir" task-a
+  write_task_meta "$dir" task-b
+
+  run_check_entry "$dir" task-a https://bitbucket.org/team/app/pull-requests/42 stage-v2 \
+    > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "bitbucket-dest-explicit: arming with an explicit destination failed: $(cat "$dir/stderr")"
+  grep -qxF 'pr_dest=stage-v2' "$dir/home/state/task-a.meta" \
+    || fail "bitbucket-dest-explicit: pr_dest= was not recorded"
+
+  set +e
+  run_check_entry "$dir" task-b https://bitbucket.org/team/app/pull-requests/43 '../not-a-branch' \
+    > "$dir/stdout2" 2> "$dir/stderr2"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "bitbucket-dest-explicit: a malformed destination branch was accepted"
+  ! grep -q '^pr=' "$dir/home/state/task-b.meta" \
+    || fail "bitbucket-dest-explicit: malformed destination still recorded pr="
+  pass "an explicit destination argument is recorded, and a malformed one is rejected"
+}
+
+test_pr_dest_auto_derived_for_github() {
+  local dir
+  dir=$(make_case github-dest-auto)
+  write_task_meta "$dir"
+
+  FM_TEST_GH_DEST=release run_check_entry "$dir" task-a https://github.com/o/r/pull/9 \
+    > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "github-dest-auto: arming failed: $(cat "$dir/stderr")"
+  grep -qxF 'pr_dest=release' "$dir/home/state/task-a.meta" \
+    || fail "github-dest-auto: pr_dest= was not auto-derived from gh"
+  pass "fm-pr-check.sh auto-derives pr_dest from gh for GitHub"
+}
+
+test_git_primary_detector_finds_bitbucket_merge() {
+  local dir out cache
+  dir=$(make_case bitbucket-git-primary)
+  make_git_fixture "$dir/repo"
+  cache="$dir/repo/tip-cache"
+
+  # The destination does not exist on origin yet: inconclusive, so silent.
+  out=$(run_poll_validated bitbucket \
+    https://bitbucket.org/team/app/pull-requests/1 bitbucket.org team/app 1 \
+    "$dir/repo/wt" release "$cache")
+  [ -z "$out" ] || fail "bitbucket-git-primary: poll reported merged before the destination even existed"
+  [ ! -e "$cache" ] || fail "bitbucket-git-primary: cache was written despite never reaching an evaluation"
+
+  # Land the same net content on "release" via a different commit (squash
+  # shape), never touching the task worktree itself.
+  land_on_branch "$dir/repo" release feature.txt hello
+
+  out=$(run_poll_validated bitbucket \
+    https://bitbucket.org/team/app/pull-requests/1 bitbucket.org team/app 1 \
+    "$dir/repo/wt" release "$cache")
+  [ "$out" = merged ] || fail "bitbucket-git-primary: git-based detector did not find the landed merge (out='$out')"
+  [ -s "$cache" ] || fail "bitbucket-git-primary: destination tip cache was not written after an evaluation"
+
+  # Same destination tip, second cycle: the cheap ls-remote probe must skip
+  # the fetch and stay silent rather than re-evaluate every cycle.
+  out=$(run_poll_validated bitbucket \
+    https://bitbucket.org/team/app/pull-requests/1 bitbucket.org team/app 1 \
+    "$dir/repo/wt" release "$cache")
+  [ -z "$out" ] || fail "bitbucket-git-primary: an unchanged destination tip should be skipped, not re-evaluated"
+  pass "the git-based primary detector finds a Bitbucket merge with no forge API involved"
+}
+
+test_git_primary_detector_defaults_to_default_branch() {
+  local dir out
+  dir=$(make_case bitbucket-git-default-branch)
+  make_git_fixture "$dir/repo"
+
+  land_on_branch "$dir/repo" main feature.txt hello
+
+  # Empty destination (never recorded): falls back to the repository's
+  # default branch exactly like bin/fm-teardown.sh's content_in_branch does.
+  out=$(run_poll_validated bitbucket \
+    https://bitbucket.org/team/app/pull-requests/1 bitbucket.org team/app 1 \
+    "$dir/repo/wt" "" "$dir/repo/tip-cache")
+  [ "$out" = merged ] || fail "bitbucket-git-default-branch: an empty destination did not fall back to the default branch"
+  pass "the git-based primary detector falls back to the default branch when no destination is recorded"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
@@ -3690,6 +3861,11 @@ test_external_merge_transition_retires_only_terminal_poll
 test_retirement_refuses_replacement_and_nonterminal_results
 test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
+test_bitbucket_url_parses_and_arms
+test_pr_dest_explicit_argument_recorded
+test_pr_dest_auto_derived_for_github
+test_git_primary_detector_finds_bitbucket_merge
+test_git_primary_detector_defaults_to_default_branch
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert

@@ -38,6 +38,9 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (z1) content landed on a non-default branch, no pr_dest=    -> REFUSE (wrong-branch defect)
+#   (z2) content landed on a non-default branch, pr_dest= set   -> ALLOW  (recorded destination)
+#   (z3) pr_dest= set to a non-default branch, content on main  -> REFUSE (destination narrows)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -255,6 +258,21 @@ land_on_origin_main() {
   rm -rf "$tmp"
 }
 
+# Same as land_on_origin_main, but on a NEW branch other than the repository's
+# default - the shape a pull request targeting a non-default destination
+# needs. Args: case_dir branch file content
+land_on_origin_branch() {
+  local case_dir=$1 branch=$2 file=$3 content=$4 tmp
+  tmp="$case_dir/_land"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  git -C "$tmp" checkout -q -b "$branch"
+  printf '%s\n' "$content" > "$tmp/$file"
+  git -C "$tmp" add -- "$file"
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash $file"
+  git -C "$tmp" push -q origin "HEAD:$branch"
+  rm -rf "$tmp"
+}
+
 # Override GitHub lookups to report PR 7 as merged with the supplied head.
 add_gh_pr_merged_for_head() {
   local case_dir=$1 head=$2
@@ -274,6 +292,7 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *"state,headRefOid"*) printf '%s\t%s\n' 'MERGED' '$head' ; exit 0 ;;
+      *"headRefOid,baseRefName"*) printf '%s\t%s\n' '$head' 'main' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
     ;;
@@ -904,6 +923,71 @@ test_content_fallback_refreshes_stale_origin_ref() {
   expect_code 0 "$rc" "content-stale-ref: teardown should use the freshly fetched default branch"
   ! grep -q REFUSED "$case_dir/stderr" || fail "content-stale-ref: teardown printed a REFUSED line"
   pass "content fallback refreshes origin default before comparing trees"
+}
+
+# The bug fixed here: a recorded pull request destination that is NOT the
+# repository's default branch. Content lands only on that destination
+# ("release"), never on the default branch ("main"). With no pr_dest=
+# recorded, the fallback can only compare against "main", where the content
+# never arrives, so it refuses - the exact defect the recorded destination
+# fixes below.
+test_content_in_default_wrong_branch_refuses_without_recorded_dest() {
+  local case_dir rc
+  case_dir=$(make_case content-wrong-branch)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_branch "$case_dir" release feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "content-wrong-branch: teardown should refuse when content only landed on a branch not recorded as the destination"
+  grep -q REFUSED "$case_dir/stderr" || fail "content-wrong-branch: no REFUSED line in stderr"
+  pass "content landed only on a non-default branch is refused when no destination is recorded"
+}
+
+# Same content-landed-on-a-non-default-branch shape, but pr_dest=release is
+# recorded (as bin/fm-pr-check.sh now does at arm time). The fallback must
+# compare against the recorded destination instead of always assuming main.
+test_content_in_recorded_destination_allows() {
+  local case_dir rc
+  case_dir=$(make_case content-recorded-dest)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr_dest=release' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_branch "$case_dir" release feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "content-recorded-dest: teardown should succeed once content lands on the recorded destination"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "content-recorded-dest: teardown printed a REFUSED line"
+  pass "content landed on a recorded non-default destination is torn down"
+}
+
+# The recorded destination narrows the test rather than widening it: content
+# that landed only on the DEFAULT branch must not satisfy a task recorded
+# against a different destination.
+test_content_in_recorded_destination_does_not_fall_back_to_default() {
+  local case_dir rc
+  case_dir=$(make_case content-recorded-dest-mismatch)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr_dest=release' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "content-recorded-dest-mismatch: teardown should refuse when content landed on main but the recorded destination is release"
+  grep -q REFUSED "$case_dir/stderr" || fail "content-recorded-dest-mismatch: no REFUSED line in stderr"
+  pass "a recorded destination is not satisfied by content that only landed on the default branch"
 }
 
 test_dirty_worktree_refuses() {
@@ -2620,6 +2704,9 @@ test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
+test_content_in_default_wrong_branch_refuses_without_recorded_dest
+test_content_in_recorded_destination_allows
+test_content_in_recorded_destination_does_not_fall_back_to_default
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds

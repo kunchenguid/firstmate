@@ -133,13 +133,15 @@ group/subgroup/project
 70:957244
 ```
 
+`bin/fm-pr-poll.sh`'s header now owns a git-based primary landed-work test that runs before any forge call, so `--validated` takes three more trailing fields after `number`: a worktree path, the recorded destination branch, and a tip-cache path.
+Passing all three empty - as below - makes that primary test immediately inconclusive (no worktree to inspect), so it falls straight through to exactly the forge-fallback path this transcript exists to demonstrate; the git-based test itself is exercised, with a real worktree, in `tests/fm-pr-check-security.test.sh`'s `test_git_primary_detector_*` cases rather than here.
 Running each published poll the way the watcher does, where an empty result means the poll stayed silent and produced no wake:
 
 ```
-$ fm-pr-poll.sh --validated $(tr '\n' ' ' < state/e1.pr-poll)
+$ fm-pr-poll.sh --validated $(tr '\n' ' ' < state/e1.pr-poll) '' '' ''
 merged
-$ fm-pr-poll.sh --validated $(tr '\n' ' ' < state/e2.pr-poll)
-$ fm-pr-poll.sh --validated $(tr '\n' ' ' < state/e3.pr-poll)
+$ fm-pr-poll.sh --validated $(tr '\n' ' ' < state/e2.pr-poll) '' '' ''
+$ fm-pr-poll.sh --validated $(tr '\n' ' ' < state/e3.pr-poll) '' '' ''
 ```
 
 The merged fixture merge request produces exactly one `merged` line.
@@ -158,8 +160,8 @@ The poll is silent on every error by design, so a missing `glab` would otherwise
 With `glab` removed from `PATH`, the poll stays silent even for the merge request that is genuinely merged:
 
 ```
-$ PATH="$noglab" fm-pr-poll.sh --validated $(tr '\n' ' ' < state/e1.pr-poll)
-$ PATH="$noglab" fm-pr-poll.sh --validated $(tr '\n' ' ' < state/e3.pr-poll)
+$ PATH="$noglab" fm-pr-poll.sh --validated $(tr '\n' ' ' < state/e1.pr-poll) '' '' ''
+$ PATH="$noglab" fm-pr-poll.sh --validated $(tr '\n' ' ' < state/e3.pr-poll) '' '' ''
 ```
 
 Arming is the one point where that can be reported, so it refuses there instead of arming a watch that can never fire:
@@ -200,7 +202,7 @@ task t1: canonical legacy poll rebuilt and armed
 The rebuilt poll works, verified against a pull request that is genuinely merged:
 
 ```
-$ fm-pr-poll.sh --validated $(tr '\n' ' ' < state/t1.pr-poll)
+$ fm-pr-poll.sh --validated $(tr '\n' ' ' < state/t1.pr-poll) '' '' ''
 merged
 ```
 
