@@ -799,6 +799,38 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+test_large_fleet_snapshot_streams_composite_json() {
+  local home fakebin out view payload id i
+  home=$(make_home large-fleet)
+  fakebin=$(make_fakebin "$home")
+  payload=$(printf '%*s' 100000 '' | tr ' ' x)
+  for i in $(seq 1 24); do
+    id=$(printf 'large-task-%02d' "$i")
+    fm_write_meta "$home/state/$id.meta" \
+      "window=firstmate:fm-$id" \
+      "project=alpha" \
+      "harness=codex" \
+      "kind=ship" \
+      "mode=ship"
+    printf 'needs-decision [key=%s]: %s\n' "$id" "$payload" > "$home/state/$id.status"
+  done
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "large synthetic fleet snapshot should not fail"
+  printf '%s' "$out" | jq -e '
+    .schema == "fm-fleet-snapshot.v1"
+      and (.tasks | length) == 24
+      and ([.tasks[].hints.open_decisions[] | .summary | length] | max) == 100000
+      and .main_inventory.valid == true
+  ' >/dev/null || fail "large synthetic fleet snapshot lost tasks or decision payloads"
+
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW") \
+    || fail "large synthetic fleet view should not fail"
+  assert_contains "$view" "| large-task-01 | unknown / none |" \
+    "large synthetic fleet view should render task rows"
+  pass "large fleet snapshot and view stream composite JSON through jq stdin"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
@@ -810,6 +842,7 @@ test_open_decision_transfers_to_captain_hold
 test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
+test_large_fleet_snapshot_streams_composite_json
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
