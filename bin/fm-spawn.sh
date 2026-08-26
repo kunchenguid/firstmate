@@ -835,6 +835,12 @@ clear_relaunch_harness_wiring() {
   if [ -n "$auth_path" ]; then
     rm -f -- "$auth_path" || return 1
   fi
+  # claude is not in fm_control_harness_wiring_paths' generic rm -f table: its
+  # wiring file may hold a project's own committed content, so retiring it
+  # strips only firstmate's own "hooks" key (fm-control-lib.sh header comment).
+  if [ "$harness" = claude ]; then
+    fm_control_claude_settings_clear "$wt/.claude/settings.local.json" || return 1
+  fi
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     rm -f -- "$path" || return 1
@@ -2424,9 +2430,15 @@ if [ "$KIND" != secondmate ]; then
       j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
       j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
       j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
-      cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
-EOF
+      claude_hooks_json="{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_submit\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stop\"}]}],\"StopFailure\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stopfail\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_sessionend\"}]}]}"
+      # A project may commit its own .claude/settings.local.json (permissions,
+      # env, enabledPlugins); merge our hooks into it rather than replacing the
+      # whole file, or a real spawn destroys that committed configuration
+      # (fm_control_claude_settings_merged owns the merge contract).
+      claude_existing_settings=
+      [ ! -f "$WT/.claude/settings.local.json" ] || claude_existing_settings=$(cat "$WT/.claude/settings.local.json")
+      fm_control_claude_settings_merged "$claude_existing_settings" "$claude_hooks_json" \
+        > "$WT/.claude/settings.local.json"
       exclude_path '.claude/settings.local.json'
       ;;
     opencode*)

@@ -284,6 +284,101 @@ test_harness_family_resolution() {
   pass "fm-control-lib: a recorded harness resolves to its verified adapter without guessing"
 }
 
+# fm-spawn.sh's claude branch is the one caller of these three; issue: a
+# wholesale settings.local.json write destroys a project's committed content.
+# Ownership is per hook-group entry (the entry's command names
+# bin/fm-busy-event.sh), so these fixtures use a realistic-looking command for
+# firstmate's own entries and a distinct one for a project's own entries.
+test_claude_settings_merge_preserves_project_keys_and_replaces_own_hooks() {
+  local project merged gen1 gen2 hooks1 hooks2
+  project='{"permissions":{"allow":["Bash(npm test)"]},"enabledPlugins":{"context7":true},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"project-own-stop-hook"}]}],"PreToolUse":[{"hooks":[{"type":"command","command":"project-lint-on-pretooluse"}]}]}}'
+  hooks1='{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen1"}]}]}'
+  merged=$(fm_control_claude_settings_merged "$project" "$hooks1")
+  [ "$(printf '%s' "$merged" | jq -r '.permissions.allow[0]')" = "Bash(npm test)" ] \
+    || fail "merge must preserve the project's own permissions.allow"
+  [ "$(printf '%s' "$merged" | jq -r '.enabledPlugins.context7')" = true ] \
+    || fail "merge must preserve an unrelated top-level key"
+  [ "$(printf '%s' "$merged" | jq -r '.hooks.PreToolUse[0].hooks[0].command')" = "project-lint-on-pretooluse" ] \
+    || fail "merge must preserve a project's own hook on an event firstmate does not manage"
+  [ "$(printf '%s' "$merged" | jq '.hooks.Stop | length')" = 2 ] \
+    || fail "merge must keep a project's own hook group alongside firstmate's on a shared event, got $(printf '%s' "$merged" | jq -c '.hooks.Stop')"
+  assert_contains "$(printf '%s' "$merged" | jq -c '.hooks.Stop')" "project-own-stop-hook" \
+    "merge must not drop a project's own Stop hook group"
+  assert_contains "$(printf '%s' "$merged" | jq -c '.hooks.Stop')" "fm-busy-event.sh apply gen1" \
+    "merge must install firstmate's own hooks key"
+
+  # A respawn (a fresh busy-gen re-arms the same task) must replace, not
+  # accumulate, firstmate's own hooks entries, while still leaving the
+  # project's own Stop hook and PreToolUse event untouched.
+  hooks2='{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen2"}]}]}'
+  gen2=$(fm_control_claude_settings_merged "$merged" "$hooks2")
+  [ "$(printf '%s' "$gen2" | jq '.hooks.Stop | length')" = 2 ] \
+    || fail "a respawn must not accumulate stale hook entries, got $(printf '%s' "$gen2" | jq -c '.hooks.Stop')"
+  assert_not_contains "$(printf '%s' "$gen2" | jq -c '.hooks.Stop')" "gen1" \
+    "a respawn must fully replace the previous incarnation's own hook command"
+  assert_contains "$(printf '%s' "$gen2" | jq -c '.hooks.Stop')" "fm-busy-event.sh apply gen2" \
+    "a respawn must carry the fresh generation's command"
+  assert_contains "$(printf '%s' "$gen2" | jq -c '.hooks.Stop')" "project-own-stop-hook" \
+    "a respawn must still preserve the project's own hook on the same event"
+  [ "$(printf '%s' "$gen2" | jq -r '.hooks.PreToolUse[0].hooks[0].command')" = "project-lint-on-pretooluse" ] \
+    || fail "a respawn must still preserve a project's own hook on an unmanaged event"
+  [ "$(printf '%s' "$gen2" | jq -r '.permissions.allow[0]')" = "Bash(npm test)" ] \
+    || fail "a respawn must still preserve the project's own keys"
+
+  gen1=$(fm_control_claude_settings_merged '' "$hooks1")
+  [ "$(printf '%s' "$gen1" | jq -c .)" = '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen1"}]}]}}' ] \
+    || fail "an absent existing file must merge into a bare hooks document"
+  [ "$(fm_control_claude_settings_merged '' "$hooks1" | jq -r 'keys[0]')" = hooks ] \
+    || fail "an absent existing file must not fabricate any other top-level key"
+  [ "$(fm_control_claude_settings_merged 'not json' "$hooks1" | jq -r '.hooks.Stop[0].hooks[0].command')" = "fm-busy-event.sh apply gen1" ] \
+    || fail "malformed existing content must fall back to a bare hooks document rather than refusing"
+  pass "fm-control-lib: claude settings merge preserves a project's own keys, other hook events, and co-located hooks, and fully replaces firstmate's own hooks on respawn"
+}
+
+test_claude_settings_clear_strips_own_hooks_and_diff_predicate() {
+  local dir=$TMP_ROOT/claude-settings-clear
+  mkdir -p "$dir"
+
+  printf '%s\n' '{"permissions":{"allow":["Bash(npm test)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"project-own-stop-hook"}]},{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen1"}]}],"PreToolUse":[{"hooks":[{"type":"command","command":"project-lint-on-pretooluse"}]}]}}' \
+    > "$dir/tracked.json"
+  fm_control_claude_settings_clear "$dir/tracked.json" \
+    || fail "clearing a mixed file must succeed"
+  [ -f "$dir/tracked.json" ] \
+    || fail "clearing must not delete a file that still holds a project's own content"
+  [ "$(jq -r '.permissions.allow[0]' "$dir/tracked.json")" = "Bash(npm test)" ] \
+    || fail "clearing must preserve the project's own top-level content"
+  [ "$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$dir/tracked.json")" = "project-lint-on-pretooluse" ] \
+    || fail "clearing must preserve a project's own hook on an event firstmate does not manage"
+  [ "$(jq -c '.hooks.Stop' "$dir/tracked.json")" = '[{"hooks":[{"type":"command","command":"project-own-stop-hook"}]}]' ] \
+    || fail "clearing must remove only firstmate's own Stop entry, keeping the project's, got $(jq -c '.hooks.Stop' "$dir/tracked.json")"
+
+  printf '%s\n' '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen1"}]}]}}' \
+    > "$dir/firstmate-only.json"
+  fm_control_claude_settings_clear "$dir/firstmate-only.json" \
+    || fail "clearing a firstmate-only file must succeed"
+  [ ! -e "$dir/firstmate-only.json" ] \
+    || fail "clearing a file with nothing left after stripping hooks must delete it (the untracked, firstmate-created case)"
+
+  fm_control_claude_settings_clear "$dir/does-not-exist.json" \
+    || fail "clearing a missing file must be a silent no-op"
+
+  fm_control_claude_settings_only_hooks_differ \
+    '{"permissions":{"allow":["x"]},"hooks":{"Stop":[{"hooks":[{"command":"fm-busy-event.sh apply gen1"}]}]}}' \
+    '{"permissions":{"allow":["x"]},"hooks":{"Stop":[{"hooks":[{"command":"fm-busy-event.sh apply gen2"}]}]}}' \
+    || fail "documents that differ only in firstmate's own hooks must be recognized as hooks-only"
+  ! fm_control_claude_settings_only_hooks_differ \
+    '{"permissions":{"allow":["x"]},"hooks":{}}' \
+    '{"permissions":{"allow":["y"]},"hooks":{"Stop":[]}}' \
+    || fail "a real permissions difference must never be reported as hooks-only"
+  ! fm_control_claude_settings_only_hooks_differ \
+    '{"hooks":{"Stop":[{"hooks":[{"command":"project-own-stop-hook"}]}]}}' \
+    '{"hooks":{"Stop":[{"hooks":[{"command":"a-real-worker-edit"}]}]}}' \
+    || fail "a real difference in a non-firstmate-owned hook entry must never be reported as hooks-only"
+  ! fm_control_claude_settings_only_hooks_differ 'not json' '{"hooks":{}}' \
+    || fail "malformed JSON on either side must never be reported as hooks-only"
+  pass "fm-control-lib: claude settings clear preserves a project's own content, other hook events, and co-located hooks, and the hooks-only diff predicate is exact"
+}
+
 test_prefixed_recorded_harness_reaches_each_control_verb() {
   local dir out rc
   dir=$(new_case prefixed-interrupt)
@@ -878,6 +973,8 @@ test_interrupt_sends_each_harness_verified_key
 test_opencode_interrupts_twice_and_others_once
 test_unverified_harness_is_refused
 test_harness_family_resolution
+test_claude_settings_merge_preserves_project_keys_and_replaces_own_hooks
+test_claude_settings_clear_strips_own_hooks_and_diff_predicate
 test_prefixed_recorded_harness_reaches_each_control_verb
 test_backend_key_capability_matrix
 test_harness_kind_capability

@@ -430,6 +430,30 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
   pass "fm-control relaunch: switching harness is one ordinary relaunch, and the old wiring goes with the old agent"
 }
 
+# issue: fm-spawn destroyed a project's committed .claude/settings.local.json;
+# the arm/re-arm side of the fix must also never accumulate a superseded
+# incarnation's hook commands instead of replacing them.
+test_same_harness_relaunch_replaces_own_hooks_without_losing_project_settings() {
+  local dir out rc settings
+  dir=$(new_case respawn-merge rl31)
+  add_ship_task "$dir" rl31 claude
+  settings="$dir/wt/.claude/settings.local.json"
+  mkdir -p "${settings%/*}"
+  printf '%s\n' '{"permissions":{"allow":["Bash(npm test)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"project-own-stop-hook"}]},{"hooks":[{"type":"command","command":"fm-busy-event.sh apply stale-gen"}]}]}}' \
+    > "$settings"
+  out=$(run_control "$dir" rl31 relaunch --note "restart after wiring merge"); rc=$?
+  expect_code 0 "$rc" "a same-harness relaunch over a committed settings file should succeed"$'\n'"$out"
+  [ "$(jq -r '.permissions.allow[0]' "$settings")" = "Bash(npm test)" ] \
+    || fail "relaunch must preserve the project's own committed permissions"
+  [ "$(jq '.hooks.Stop | length' "$settings")" = 2 ] \
+    || fail "relaunch must replace, not accumulate, firstmate's own hook entries, got $(jq -c '.hooks.Stop' "$settings")"
+  assert_contains "$(jq -c '.hooks.Stop' "$settings")" "project-own-stop-hook" \
+    "relaunch must preserve the project's own Stop hook alongside firstmate's"
+  assert_not_contains "$(jq -c '.hooks.Stop' "$settings")" "stale-gen" \
+    "relaunch must fully replace the previous incarnation's hook command"
+  pass "fm-control relaunch: a same-harness relaunch replaces firstmate's own hooks without losing a project's committed settings"
+}
+
 test_harness_switch_does_not_carry_the_old_profile_axes() {
   local dir out rc
   dir=$(new_case profile rl5)
@@ -1319,6 +1343,7 @@ test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
+test_same_harness_relaunch_replaces_own_hooks_without_losing_project_settings
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement

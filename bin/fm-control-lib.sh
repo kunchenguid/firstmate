@@ -199,12 +199,14 @@ fm_control_backend_state_verified() {  # <backend>
 # clear the previous incarnation's wiring instead of leaving a stale hook
 # pointing at a retired generation. Prints zero or more absolute paths, one per
 # line: worktree-resident hook files and firstmate-owned state tokens only,
-# never a harness's own managed config.
+# never a harness's own managed config. claude is deliberately absent: its
+# wiring lives inside a file a project may commit and merge real content
+# into, so a blind rm -f is unsafe there and fm_control_claude_settings_clear
+# (below) is the one owner of clearing it instead.
 fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
   local harness=${1-} wt=${2-} state=${3-} id=${4-}
   [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] || return 1
   case "$harness" in
-    claude) printf '%s\n' "$wt/.claude/settings.local.json" ;;
     opencode) printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js" ;;
     pi|pi-signed) printf '%s\n' "$state/$id.pi-ext.ts" ;;
     grok)
@@ -248,4 +250,99 @@ fm_control_harness_turnend_auth_path() {  # <harness> <token>
     kimi) printf '%s\n' "$HOME/.kimi-code/fm-turn-end.d/$token" ;;
     *) return 0 ;;
   esac
+}
+
+# claude's per-task busy hooks live inside <worktree>/.claude/settings.local.json,
+# a path a project may itself commit (permissions, env, enabledPlugins, and even
+# its own OTHER Claude Code hooks, e.g. a PreToolUse linter). The functions below
+# are the one owner of installing and retiring firstmate's own content there
+# without ever destroying a project's: fm-spawn.sh calls
+# fm_control_claude_settings_merged to arm or re-arm, clear_relaunch_harness_wiring
+# calls fm_control_claude_settings_clear to retire, and bin/fm-teardown.sh calls
+# fm_control_claude_settings_only_hooks_differ to decide whether a tracked file's
+# only working-tree difference from HEAD is firstmate's own hook entries.
+#
+# Ownership is per hook-group ENTRY, not per top-level key: a hook-group under one
+# of firstmate's four managed events (UserPromptSubmit, Stop, StopFailure,
+# SessionEnd) is firstmate's own iff one of its commands names
+# bin/fm-busy-event.sh - the fixed script every incarnation's hook shells out
+# through, regardless of the --gen token embedded alongside it. Merging or
+# clearing touches only entries that pass that test, so a project's own hook for
+# the same managed event, any OTHER hook event entirely, and every other
+# top-level key all pass through untouched. That per-entry rule is also what
+# keeps a respawn or a harness relaunch from accumulating a superseded
+# incarnation's stale hook commands: each managed event's own entries are always
+# fully replaced, never appended to.
+# shellcheck disable=SC2016  # single quotes are deliberate: this is a jq program whose $managed/$k/$h are jq variables, not shell ones
+_FM_CONTROL_CLAUDE_SETTINGS_STRIP_JQ='
+  def fm_owned: any(.hooks[]?.command // ""; test("fm-busy-event\\.sh"));
+  ["UserPromptSubmit","Stop","StopFailure","SessionEnd"] as $managed |
+  ((.hooks // {})
+    | with_entries(
+        if (.key as $k | $managed | index($k)) then
+          .value |= map(select(fm_owned | not))
+        else . end
+      )
+    | with_entries(select(.value | length > 0))
+  ) as $h |
+  if ($h | length) == 0 then del(.hooks) else . + {hooks: $h} end
+'
+
+# fm_control_claude_settings_merged <existing-json-or-empty> <hooks-fragment-json>:
+# print a settings.local.json document with <hooks-fragment-json> - a
+# {"UserPromptSubmit":[...],"Stop":[...],...} object holding exactly firstmate's
+# four managed events - merged into <existing-json>. Within each managed event,
+# firstmate's own entries are replaced by the fragment's; every other top-level
+# key, every other hook event, and every non-owned entry within a managed event
+# passes through unchanged. Absent, empty, or unparseable existing content is
+# treated as {} rather than refused, since an unreadable committed file cannot be
+# merged into and firstmate must still be able to arm its own hooks.
+fm_control_claude_settings_merged() {
+  local existing=${1-} fresh=$2 base
+  if [ -n "$existing" ] \
+      && printf '%s' "$existing" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    base=$existing
+  else
+    base='{}'
+  fi
+  printf '%s' "$base" | jq -c --argjson fresh "$fresh" '
+    def fm_owned: any(.hooks[]?.command // ""; test("fm-busy-event\\.sh"));
+    ($fresh | keys) as $managed |
+    ((.hooks // {}) as $existing_hooks
+      | reduce $managed[] as $k
+          ($existing_hooks; .[$k] = ((.[$k] // []) | map(select(fm_owned | not))) + $fresh[$k])
+    ) as $merged_hooks |
+    . + {hooks: $merged_hooks}
+  '
+}
+
+# fm_control_claude_settings_clear <settings-path>: remove firstmate's own hook
+# entries from an installed settings.local.json, in place, so a relaunch or a
+# harness switch never deletes a project's own committed content the way a blind
+# rm -f would. Deletes the file only when nothing is left after stripping - the
+# untracked, firstmate-created case teardown already removes outright. A missing
+# or unparseable file is left alone.
+fm_control_claude_settings_clear() {
+  local path=$1 stripped
+  [ -f "$path" ] || return 0
+  stripped=$(jq -c "$_FM_CONTROL_CLAUDE_SETTINGS_STRIP_JQ" "$path" 2>/dev/null) || return 0
+  if [ "$stripped" = '{}' ]; then
+    rm -f -- "$path" || return 1
+  else
+    printf '%s\n' "$stripped" > "$path" || return 1
+  fi
+}
+
+# fm_control_claude_settings_only_hooks_differ <a-json> <b-json>: true when two
+# settings.local.json documents become identical once firstmate's own hook
+# entries are stripped from each (the same per-entry rule
+# fm_control_claude_settings_clear uses) - i.e. the only possible difference
+# between them is firstmate's own installed hooks. Malformed JSON on either side
+# is never provably hooks-only, so it returns false: keep a real dirty refusal
+# rather than risk discarding content teardown cannot parse.
+fm_control_claude_settings_only_hooks_differ() {
+  local a=$1 b=$2 a_stripped b_stripped
+  a_stripped=$(printf '%s' "$a" | jq -S -c "$_FM_CONTROL_CLAUDE_SETTINGS_STRIP_JQ" 2>/dev/null) || return 1
+  b_stripped=$(printf '%s' "$b" | jq -S -c "$_FM_CONTROL_CLAUDE_SETTINGS_STRIP_JQ" 2>/dev/null) || return 1
+  [ "$a_stripped" = "$b_stripped" ]
 }

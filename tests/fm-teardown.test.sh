@@ -653,6 +653,95 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
+# Fast-forward the project's local main to the worktree's current HEAD, same
+# helper as test_local_only_merged_to_local_main_allows, factored out for the
+# claude-settings cases below.
+land_wt_head_on_local_main() {
+  local case_dir=$1 wt_head
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+}
+
+# issue: fm-spawn destroyed a project's committed .claude/settings.local.json;
+# the false "uncommitted changes" refusal this produced is the teardown half
+# of that bug. Simulates the mid-task state a real fm-spawn merge write
+# leaves: a project's own committed file, with firstmate's own hooks key
+# added on top as an uncommitted change.
+test_tracked_claude_settings_restored_not_deleted_on_teardown() {
+  local case_dir rc settings
+  case_dir=$(make_case claude-settings-restore)
+  write_meta "$case_dir" local-only ship
+  mkdir -p "$case_dir/wt/.claude"
+  wt_commit_file "$case_dir" .claude/settings.local.json \
+    '{"permissions":{"allow":["Bash(npm test)"]}}' "commit project claude settings"
+  land_wt_head_on_local_main "$case_dir"
+  settings="$case_dir/wt/.claude/settings.local.json"
+  printf '%s\n' '{"permissions":{"allow":["Bash(npm test)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen1"}]}]}}' \
+    > "$settings"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "claude-settings-restore: teardown should succeed over firstmate's own hooks diff"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "claude-settings-restore: teardown printed a REFUSED line: $(cat "$case_dir/stderr")"
+  [ -f "$settings" ] \
+    || fail "claude-settings-restore: teardown deleted a tracked, project-committed file instead of restoring it"
+  [ "$(cat "$settings")" = '{"permissions":{"allow":["Bash(npm test)"]}}' ] \
+    || fail "claude-settings-restore: settings file was not restored to its committed content, got $(cat "$settings")"
+  pass "a project-committed .claude/settings.local.json survives teardown restored to HEAD, not deleted, and does not false-refuse the dirty check"
+}
+
+test_untracked_claude_settings_removed_on_teardown() {
+  local case_dir rc settings
+  case_dir=$(make_case claude-settings-untracked)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unrelated work"
+  land_wt_head_on_local_main "$case_dir"
+  settings="$case_dir/wt/.claude/settings.local.json"
+  mkdir -p "${settings%/*}"
+  printf '%s\n' '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen1"}]}]}}' \
+    > "$settings"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "claude-settings-untracked: teardown should succeed over an untracked settings file"
+  [ ! -e "$settings" ] \
+    || fail "claude-settings-untracked: an untracked, firstmate-only settings file must still be removed on teardown"
+  pass "an untracked .claude/settings.local.json (no project commit) is still removed on teardown"
+}
+
+test_claude_settings_real_edit_still_refuses_teardown() {
+  local case_dir rc settings
+  case_dir=$(make_case claude-settings-real-edit)
+  write_meta "$case_dir" local-only ship
+  mkdir -p "$case_dir/wt/.claude"
+  wt_commit_file "$case_dir" .claude/settings.local.json \
+    '{"permissions":{"allow":["Bash(npm test)"]}}' "commit project claude settings"
+  land_wt_head_on_local_main "$case_dir"
+  settings="$case_dir/wt/.claude/settings.local.json"
+  # A real change beyond firstmate's own hooks key - e.g. a worker or the
+  # project editing permissions.allow - must still refuse, exactly like any
+  # other uncommitted change (AGENTS.md hard rule 3: never tear down unlanded
+  # work).
+  printf '%s\n' '{"permissions":{"allow":["Bash(npm test)","Bash(npm run lint)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen1"}]}]}}' \
+    > "$settings"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "claude-settings-real-edit: teardown should refuse a real edit beyond firstmate's own hooks"
+  grep -q REFUSED "$case_dir/stderr" || fail "claude-settings-real-edit: no REFUSED line in stderr"
+  pass "a real edit to .claude/settings.local.json beyond firstmate's own hooks key still refuses teardown"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -2596,6 +2685,9 @@ test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_tracked_claude_settings_restored_not_deleted_on_teardown
+test_untracked_claude_settings_removed_on_teardown
+test_claude_settings_real_edit_still_refuses_teardown
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed

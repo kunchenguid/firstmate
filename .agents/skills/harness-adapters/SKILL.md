@@ -526,7 +526,7 @@ Both halves of the fold are trusted with no opt-in: an open run reads `busy`, a 
 
 muse fans out to its own sub-agents, but worktree isolation is per-child and opt-in: `--subagent-worktree-isolation` is a compatibility flag whose capability "defaults on" while "omission stays shared", and no nested git worktree appeared in any verified lab run.
 Firstmate deliberately does NOT exclude any muse path from `fm-teardown.sh`'s uncommitted-work check.
-Firstmate writes `.claude/settings.local.json` itself, which is why that path is excluded for claude; it does not write muse's, so a nested muse worktree or leftover scratch is the agent's own work product and MUST be able to refuse teardown.
+Firstmate owns and reconciles `.claude/settings.local.json` itself (`bin/fm-control-lib.sh`'s claude-settings functions), which is why that path can never wrongly refuse teardown for claude; it does not reconcile muse's, so a nested muse worktree or leftover scratch is the agent's own work product and MUST be able to refuse teardown.
 A teardown refusal naming muse scratch is therefore correct behavior: inspect it rather than forcing past it.
 
 ### Maturity caveats

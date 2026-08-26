@@ -310,6 +310,47 @@ test_claude_hooks_stale_incarnation_harmless() {
   pass "claude hook events from a superseded incarnation are rejected without breaking the hook"
 }
 
+# issue: fm-spawn wrote .claude/settings.local.json wholesale, destroying a
+# project's own committed permissions/env/enabledPlugins content instead of
+# merging its busy hooks into it.
+test_claude_hooks_merge_preserves_committed_project_settings() {
+  local rec id=busy-cl-3 out state settings
+  rec=$(make_spawn_case claude-project-settings claude "$id")
+  read_case_record "$rec"
+  # fm-spawn freshens a pooled worktree by fetching and hard-resetting to
+  # origin's default branch (freshen_spawn_worktree_base), so a project's
+  # committed file must be pushed to that origin - not just committed
+  # locally - to survive into the spawned worktree.
+  mkdir -p "$PROJ_DIR/.claude"
+  printf '%s\n' '{"permissions":{"allow":["Bash(npm test)"]},"enabledPlugins":{"context7":true}}' \
+    > "$PROJ_DIR/.claude/settings.local.json"
+  git -C "$PROJ_DIR" add .claude/settings.local.json
+  git -C "$PROJ_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'project commits its own claude settings'
+  git -C "$PROJ_DIR" push -q origin HEAD:main
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn should succeed over a committed project settings file: $out"
+  state="$HOME_DIR/state"
+  settings="$WT_DIR/.claude/settings.local.json"
+  jq -e . "$settings" >/dev/null || fail "claude hook settings are not valid JSON"
+  [ "$(jq -r '.permissions.allow[0]' "$settings")" = "Bash(npm test)" ] \
+    || fail "spawn must preserve the project's own committed permissions.allow"
+  [ "$(jq -r '.enabledPlugins.context7' "$settings")" = true ] \
+    || fail "spawn must preserve the project's own committed enabledPlugins"
+  for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
+    jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "claude hook settings lack $ev"
+  done
+
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
+  run_claude_hook "$settings" Stop || fail "Stop hook command failed"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "idle claude-hook" ] \
+    || fail "Stop must still classify 'idle claude-hook' when merged into a committed file, got '$out'"
+  pass "claude spawn merges its busy hooks into a project's committed settings.local.json instead of destroying it"
+}
+
 test_codex_unverified_until_a_semantic_source_exists() {
   local rec id=busy-cx-1 out state
   rec=$(make_spawn_case codex-unverified codex "$id")
@@ -349,6 +390,7 @@ test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
+test_claude_hooks_merge_preserves_committed_project_settings
 test_codex_unverified_until_a_semantic_source_exists
 
 echo "all fm-busy-adapter-wiring tests passed"
