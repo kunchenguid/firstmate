@@ -690,13 +690,30 @@ Speculative bare ids and nested terminal fields were deliberately rejected.
 `orca terminal read --json` returned `result.terminal.tail` as a plain-text string array with zero ANSI escape bytes, confirming the adapter's `styled=0` capability.
 `orca terminal send --terminal <h> --interrupt --json` reported `bytesWritten=1` (a single 0x03 Ctrl-C byte) and killed a running foreground process, confirming `docs/orca-backend.md` "Enter and Ctrl-C are supported".
 
+### Agent-state and native busy signal (v1.4.188, 2026-08-26)
+
+Real Claude Code was launched in an isolated Orca worktree and driven through every state transition the recovery-grade classifier and native busy signal depend on.
+
+`orca worktree ps --json` returns an `agents[]` array, each entry keyed by a pane key `tabId:leafId` that `orca terminal show --json` also exposes.
+The observed per-turn transitions were `agents[].state` `working` while a turn ran, `done` once it settled, and the entry disappearing entirely when the agent exited to a shell.
+This is the structured signal `fm_backend_orca_agent_state` correlates: a connected terminal with a live agent entry reads `alive`, connected with no entry reads `dead` (agent exited to a shell), a `terminal_handle_stale` error reads `missing`, and an unreadable agent model reads `unreadable` rather than a false `dead`.
+`fm_backend_orca_busy_state` maps the same entry's state: `working`->busy, `done`->idle.
+`orca terminal show`'s `agentWait` field was `null` in every observed state (idle, working, and the first-run trust modal), so it is not used as a busy or blocked signal.
+For a stale handle, `orca terminal show` prints the `ok:false` body carrying `terminal_handle_stale` while exiting non-zero, so the classifier reads the body regardless of exit code.
+
+Interrupt boundary: Orca's `agents[]` model is turn-hook driven and does NOT observe a raw-ESC interrupt.
+After a lone ESC byte (`orca terminal send --text $'\033'`), Claude returned to its idle prompt (screen showed `Interrupted`) but `agents[].state` stayed `working` with `interrupted:false` until the next completed turn, and a single ESC did not reliably cancel the turn across repeated trials.
+So a raw ESC is not a verified mid-turn interrupt on Orca; `docs/orca-backend.md` "Active limits" records the boundary.
+
 ```sh
 tests/fm-backend-orca.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
+FM_ORCA_AGENT_STATE_LIVE=1 tests/fm-orca-agent-state-live-e2e.test.sh
 ```
 
-The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
+The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, path-matched release refusal, and the agent-state/busy-state matrix.
+`tests/fm-orca-agent-state-live-e2e.test.sh` is the opt-in live guard that reproduces the transitions above against the real app; run it after an Orca or Claude upgrade to refresh this entry.
 
 ## cmux
 

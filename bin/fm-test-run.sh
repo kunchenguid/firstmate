@@ -194,6 +194,7 @@ family_for_basename() {
     fm-grok-stop-live-e2e.test.sh|fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-muse-signals-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
+    fm-orca-agent-state-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
@@ -931,7 +932,14 @@ families_for_changed_path() {
       printf '%s\n' cmux
       printf '%s\n' backend-dispatch
       ;;
-    bin/backends/orca*|bin/backends/tmux.sh)
+    bin/backends/orca*)
+      printf '%s\n' backend-dispatch
+      printf '%s\n' orca
+      # Orca's agent-state and native-busy classifiers read the real app's
+      # structured output, so a change re-selects the live guard.
+      printf '%s\n' live-harness-optin
+      ;;
+    bin/backends/tmux.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' orca
       ;;
