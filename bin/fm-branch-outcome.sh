@@ -51,6 +51,13 @@ STORE="$STATE/branch-outcomes.jsonl"
 CURSOR="$STATE/.branch-outcomes-cursor"
 LOCK="$STATE/.branch-outcomes.lock"
 
+lock_store() {
+  [ ! -L "$STATE" ] || return 1
+  mkdir -p "$STATE"
+  [ -d "$STATE" ] && [ ! -L "$STATE" ]
+  fm_lock_acquire_wait "$LOCK"
+}
+
 usage() {
   echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | list [--recent <n>] | startup-replay" >&2
   exit 2
@@ -145,7 +152,7 @@ case "$CMD" in
     [ -n "$SUMMARY" ] || usage
     case "$VERDICT" in routine|captain) ;; *) usage ;; esac
     case "$SILENT" in true|false) ;; *) usage ;; esac
-    fm_lock_acquire_wait "$LOCK"
+    lock_store
     if ! LAST_SEQ=$(last_seq); then
       fm_lock_release "$LOCK"
       echo "error: refusing append because the outcome store has a malformed final record" >&2
@@ -160,7 +167,7 @@ case "$CMD" in
     ;;
   unread)
     [ "$#" -eq 0 ] || usage
-    fm_lock_acquire_wait "$LOCK"
+    lock_store
     print_unread
     fm_lock_release "$LOCK"
     ;;
@@ -169,7 +176,7 @@ case "$CMD" in
     THROUGH=${2:-}
     case "$THROUGH" in ''|*[!0-9]*) usage ;; esac
     [ "$#" -eq 2 ] || usage
-    fm_lock_acquire_wait "$LOCK"
+    lock_store
     advance_cursor "$THROUGH"
     fm_lock_release "$LOCK"
     ;;
@@ -186,7 +193,7 @@ case "$CMD" in
     ;;
   startup-replay)
     [ "$#" -eq 0 ] || usage
-    fm_lock_acquire_wait "$LOCK"
+    lock_store
     UNREAD=$(print_unread)
     if [ -n "$UNREAD" ]; then
       VISIBLE=$(printf '%s\n' "$UNREAD" | jq -c 'select(.silent != true)')

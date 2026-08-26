@@ -202,6 +202,22 @@ test_unsearchable_state_is_inconclusive() {
   pass "unsearchable state inventory remains inconclusive"
 }
 
+test_dangling_metadata_is_inconclusive() {
+  local home fakebin out rc=0
+  home=$(make_home dangling-metadata)
+  ln -s "$home/state/missing-target" "$home/state/dangling.meta"
+  fakebin=$(make_fakebin "$home")
+  out=$(run_health "$home" "$fakebin") || rc=$?
+  expect_code 3 "$rc" "dangling task metadata should make health inconclusive"
+  [ -L "$home/state/dangling.meta" ] || fail "read-only health changed dangling metadata"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "fleet-inventory-inconclusive"
+              and .subject == "metadata" and .count == 1)
+  ' >/dev/null || fail "dangling task metadata was treated as healthy: $out"
+  pass "dangling task metadata remains visible and inconclusive"
+}
+
 test_unsearchable_nested_inventories_are_inconclusive() {
   local home fakebin claim_root out rc=0
   home=$(make_home unsearchable-nested)
@@ -884,6 +900,7 @@ test_usage_exit
 test_healthy_empty_fleet
 test_missing_state_home_remains_unmodified
 test_unsearchable_state_is_inconclusive
+test_dangling_metadata_is_inconclusive
 test_unsearchable_nested_inventories_are_inconclusive
 test_actionable_dead_direct_report
 test_dead_agent_with_live_endpoint

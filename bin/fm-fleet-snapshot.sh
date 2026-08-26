@@ -11,7 +11,8 @@
 #   generated: UTC observation time for this fresh command execution.
 #   fm_home: resolved operational home.
 #   roots: resolved root/config/data/state/projects directories.
-#   collection.state: whether the state inventory was absent or fully accessible.
+#   collection.state: whether the state inventory was absent or fully accessible,
+#     plus invalid metadata entries that could not produce task rows.
 #   backlog: {path,present,records[]} where records are ordered as written in
 #     data/backlog.md and cover In flight, Queued, and Done.
 #     Canonical tasks-axi rows are structured; free-form non-empty lines in
@@ -229,12 +230,29 @@ path_present_json() {  # <path>
 }
 
 state_collection_json() {
+  local meta id reason invalid='[]'
   if [ ! -e "$STATE" ]; then
-    jq -n '{present:false,available:true,reason:null}'
+    jq -n '{present:false,available:true,reason:null,invalid_metadata_count:0,invalid_metadata:[]}'
   elif [ ! -d "$STATE" ] || [ ! -r "$STATE" ] || [ ! -x "$STATE" ]; then
-    jq -n '{present:true,available:false,reason:"state directory is not readable and searchable"}'
+    jq -n '{present:true,available:false,reason:"state directory is not readable and searchable",invalid_metadata_count:0,invalid_metadata:[]}'
   else
-    jq -n '{present:true,available:true,reason:null}'
+    for meta in "$STATE"/*.meta; do
+      [ -e "$meta" ] || [ -L "$meta" ] || continue
+      reason=
+      if [ -L "$meta" ]; then
+        reason="metadata entry is a symlink"
+      elif [ ! -f "$meta" ]; then
+        reason="metadata entry is not a regular file"
+      elif [ ! -r "$meta" ]; then
+        reason="metadata entry is unreadable"
+      fi
+      [ -n "$reason" ] || continue
+      id=$(basename "$meta" .meta)
+      invalid=$(jq -n --argjson invalid "$invalid" --arg id "$id" --arg reason "$reason" \
+        '$invalid + [{id:$id,reason:$reason}]')
+    done
+    jq -n --argjson invalid "$invalid" \
+      '{present:true,available:true,reason:null,invalid_metadata_count:($invalid | length),invalid_metadata:$invalid}'
   fi
 }
 
@@ -463,7 +481,7 @@ task_json_lines() {
   local open_decisions_tsv open_decisions_json
 
   for meta in "$STATE"/*.meta; do
-    [ -e "$meta" ] || continue
+    [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || continue
     id=$(basename "$meta" .meta)
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship

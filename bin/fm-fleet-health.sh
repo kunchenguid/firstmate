@@ -273,6 +273,11 @@ EVALUATED=$(jq -n \
                 ($snapshot.collection.state.reason // "fleet state could not be inventoried");
                 "unavailable";1)
       else empty end),
+      (if ($snapshot.collection.state.invalid_metadata_count // 0) > 0 then
+        finding("fleet-inventory-inconclusive";"metadata";"notice";"inconclusive";
+                (($snapshot.collection.state.invalid_metadata_count | tostring) + " task metadata entrie(s) are invalid or unreadable");
+                "invalid-metadata";$snapshot.collection.state.invalid_metadata_count)
+      else empty end),
       (if $supervision.needed == true and $supervision.available == false then
         finding("supervision-inconclusive";"supervision";"notice";"inconclusive";
                 "supervision continuity could not be established";"unreadable";1)

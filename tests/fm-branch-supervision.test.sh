@@ -10,6 +10,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-branch-supervision)
 
@@ -138,6 +140,33 @@ test_outcome_startup_replay_preserves_silence() {
   [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" ] \
     || fail "startup replay did not mark the legacy row read"
   pass "startup replay skips silent outcomes and preserves visible and legacy rows"
+}
+
+test_outcome_store_initializes_fresh_home_before_locking() {
+  local home out rc=0
+  home="$TMP_ROOT/fresh-unread"
+  mkdir -p "$home"
+  out=$(fm_run_timed 2 env FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread) || rc=$?
+  [ "$rc" -ne 124 ] || fail "unread hung while locking a fresh home"
+  [ "$rc" -eq 0 ] && [ -z "$out" ] || fail "fresh unread did not return an empty result"
+  [ -d "$home/state" ] || fail "unread did not initialize state before locking"
+
+  home="$TMP_ROOT/fresh-append"
+  mkdir -p "$home"
+  rc=0
+  out=$(fm_run_timed 2 env FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict routine --summary ready) || rc=$?
+  [ "$rc" -ne 124 ] || fail "append hung while locking a fresh home"
+  [ "$rc" -eq 0 ] && [ "$out" = 1 ] || fail "fresh append did not create its first record"
+
+  home="$TMP_ROOT/fresh-replay"
+  mkdir -p "$home"
+  rc=0
+  out=$(fm_run_timed 2 env FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || rc=$?
+  [ "$rc" -ne 124 ] || fail "startup replay hung while locking a fresh home"
+  [ "$rc" -eq 0 ] && [ -z "$out" ] || fail "fresh startup replay did not return an empty result"
+  [ -d "$home/state" ] || fail "startup replay did not initialize state before locking"
+  pass "branch outcome commands initialize fresh homes before locking"
 }
 
 # --- lease contract -----------------------------------------------------------
@@ -535,6 +564,7 @@ test_branch_cannot_force_teardown_or_directly_relaunch() {
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_startup_replay_preserves_silence
+test_outcome_store_initializes_fresh_home_before_locking
 test_lease_exclusivity_release_stale_and_sweep
 test_mutating_scripts_refuse_the_other_actors_lease
 test_main_owned_actions_refuse_the_branch_actor
