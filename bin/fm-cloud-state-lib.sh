@@ -58,7 +58,8 @@ fm_cloud_state_dispatch_paths() {  # <state_dir> <task_id>
 # returned artifacts.
 fm_cloud_state_result_paths() {  # <state_dir> <task_id>
   printf '%s\n' "$1/$2.worker-request.out" "$1/$2.worker-result.json" \
-    "$1/$2.worker-execute.log" "$1/$2.worker-reconcile.json"
+    "$1/$2.worker-execute.log" "$1/$2.worker-reconcile.json" \
+    "$1/$2.worker-release.json"
 }
 
 # The leased local worktree pointer. It used to be excluded from the task-end
