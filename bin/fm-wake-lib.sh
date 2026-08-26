@@ -127,6 +127,26 @@ fm_watcher_healthy() {
   return 0
 }
 
+fm_watcher_lock_evidence_unreadable() {  # <state> <watch-path> [home]
+  local state=$1 watch_path=$2 home=${3:-$FM_HOME} lockdir file pid
+  lockdir="$state/.watch.lock"
+  [ -e "$lockdir" ] || [ -L "$lockdir" ] || return 1
+  [ -d "$lockdir" ] && [ -r "$lockdir" ] && [ -x "$lockdir" ] || return 0
+  [ -e "$lockdir/pid" ] || [ -L "$lockdir/pid" ] || return 1
+  [ -f "$lockdir/pid" ] && [ ! -L "$lockdir/pid" ] && [ -r "$lockdir/pid" ] || return 0
+  pid=$(cat "$lockdir/pid" 2>/dev/null) || return 0
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  fm_pid_alive "$pid" || return 1
+  for file in fm-home watcher-path pid-identity; do
+    if [ -e "$lockdir/$file" ] || [ -L "$lockdir/$file" ]; then
+      [ -f "$lockdir/$file" ] && [ ! -L "$lockdir/$file" ] && [ -r "$lockdir/$file" ] || return 0
+    fi
+  done
+  fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" && return 1
+  fm_pid_identity "$pid" >/dev/null 2>&1 || { fm_pid_alive "$pid" && return 0; }
+  return 1
+}
+
 # fm_watcher_healthy above is the PID-STRICT primitive: true only when a live,
 # identity-matched watcher PROCESS holds this home's lock with a fresh beacon. The
 # arm layer (bin/fm-watch-arm.sh, bin/fm-claude-stop-autoarm.sh) needs exactly
@@ -250,12 +270,15 @@ fm_pi_extension_owns_supervision() {
 # shellcheck disable=SC2034 # Read by callers after the function returns.
 FM_WATCHER_VERDICT_OK=false
 # shellcheck disable=SC2034 # Read by callers after the function returns.
+FM_WATCHER_VERDICT_AVAILABLE=true
+# shellcheck disable=SC2034 # Read by callers after the function returns.
 FM_WATCHER_VERDICT_REASON=stale-beacon
 fm_watcher_supervision_verdict() {
   local state=$1 watch=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME}
   local root=${5:-$FM_ROOT}
   local beat age fresh=false model
   FM_WATCHER_VERDICT_OK=false
+  FM_WATCHER_VERDICT_AVAILABLE=true
   FM_WATCHER_VERDICT_REASON=stale-beacon
   beat="$state/.last-watcher-beat"
   age=$(fm_path_age "$beat")
@@ -272,7 +295,10 @@ fm_watcher_supervision_verdict() {
     # shellcheck disable=SC2034 # Read by callers after the function returns.
     FM_WATCHER_VERDICT_OK=true
   elif [ "$fresh" = true ]; then
-    if [ "$model" = extension ] && fm_watcher_lock_unheld "$state" \
+    if fm_watcher_lock_evidence_unreadable "$state" "$watch" "$home"; then
+      FM_WATCHER_VERDICT_AVAILABLE=false
+      FM_WATCHER_VERDICT_REASON=no-watcher
+    elif [ "$model" = extension ] && fm_watcher_lock_unheld "$state" \
       && fm_pi_extension_owns_supervision "$state" "$root"; then
       # shellcheck disable=SC2034 # Read by callers after the function returns.
       FM_WATCHER_VERDICT_OK=true

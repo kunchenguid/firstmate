@@ -960,12 +960,42 @@ fm_pending_reply_pid_identity() {  # <pid>
 }
 
 fm_pending_reply_sender_alive() {  # <record-path>
+  [ "$(fm_pending_reply_sender_state "$1")" = alive ]
+}
+
+fm_pending_reply_sender_state() {  # <record-path>
   local rec=$1 pid expected actual
   pid=$(fm_pending_reply_get "$rec" recovery_sender_pid)
   expected=$(fm_pending_reply_get "$rec" recovery_sender_identity)
-  [ -n "$expected" ] || return 1
-  actual=$(fm_pending_reply_pid_identity "$pid") || return 1
-  [ "$actual" = "$expected" ]
+  case "$pid" in ''|*[!0-9]*) printf 'unreadable\n'; return 0 ;; esac
+  [ -n "$expected" ] || { printf 'unreadable\n'; return 0; }
+  if ! fm_pid_alive "$pid"; then
+    printf 'orphaned\n'
+    return 0
+  fi
+  if ! actual=$(fm_pending_reply_pid_identity "$pid"); then
+    if fm_pid_alive "$pid"; then printf 'unreadable\n'; else printf 'orphaned\n'; fi
+    return 0
+  fi
+  if [ "$actual" = "$expected" ]; then printf 'alive\n'; else printf 'orphaned\n'; fi
+}
+
+fm_pending_reply_recovery_verdict() {  # <record-path>
+  local rec=$1 phase outcome
+  phase=$(fm_pending_reply_get "$rec" phase)
+  [ "$phase" = recovery_sending ] || { printf 'none\n'; return 0; }
+  outcome=$(fm_pending_reply_get "$rec" recovery_delivery_outcome)
+  case "$outcome" in
+    confirmed|failed|unknown) printf '%s\n' "$outcome" ;;
+    '')
+      case "$(fm_pending_reply_sender_state "$rec")" in
+        alive) printf 'sending\n' ;;
+        orphaned) printf 'orphaned\n' ;;
+        *) printf 'unreadable\n' ;;
+      esac
+      ;;
+    *) printf 'unreadable\n' ;;
+  esac
 }
 
 fm_pending_reply_finish_recovery() {  # <state-dir> <corr_id> <confirmed|failed>
@@ -1445,7 +1475,7 @@ fm_pending_reply_task_has_open() {  # <state-dir> <task_id>
 # Does not tick, recover, escalate, or otherwise mutate records.
 fm_pending_reply_open_json() {  # <state-dir>
   local state=$1 dir rec corr phase task_id created delivered completed recovery_completed grace
-  local now age row records='[]' invalid_count=0
+  local now age recovery_verdict row records='[]' invalid_count=0
   dir=$(fm_pending_reply_dir "$state")
   now=$(fm_pending_reply_now)
   if [ ! -e "$dir" ]; then
@@ -1471,6 +1501,7 @@ fm_pending_reply_open_json() {  # <state-dir>
       delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
       completed=$(fm_pending_reply_get "$rec" request_turn_completed_epoch)
       recovery_completed=$(fm_pending_reply_get "$rec" recovery_turn_completed_epoch)
+      recovery_verdict=$(fm_pending_reply_recovery_verdict "$rec")
       grace=$(fm_pending_reply_get "$rec" grace_secs)
       case "$grace" in ''|*[!0-9]*) grace=$(fm_pending_reply_grace_secs) ;; esac
       age=null
@@ -1486,6 +1517,7 @@ fm_pending_reply_open_json() {  # <state-dir>
         --arg delivered "$delivered" \
         --arg completed "$completed" \
         --arg recovery_completed "$recovery_completed" \
+        --arg recovery_verdict "$recovery_verdict" \
         --arg grace "$grace" \
         --argjson age "$age" \
         '{
@@ -1496,6 +1528,7 @@ fm_pending_reply_open_json() {  # <state-dir>
           delivered_epoch:(if $delivered == "" then null else (try ($delivered | tonumber) catch null) end),
           request_turn_completed_epoch:(if $completed == "" then null else (try ($completed | tonumber) catch null) end),
           recovery_turn_completed_epoch:(if $recovery_completed == "" then null else (try ($recovery_completed | tonumber) catch null) end),
+          recovery_verdict:(if $recovery_verdict == "none" then null else $recovery_verdict end),
           grace_secs:($grace | tonumber),
           age_seconds:$age
         }') || return 1

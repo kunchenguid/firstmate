@@ -106,6 +106,17 @@ if [ "${FM_FLEET_HEALTH_TIMED_WORKER:-0}" != 1 ]; then
     fi
     exit 3
   fi
+  if [ "$OUTPUT_MODE" = json ] \
+    && ! printf '%s' "$WRAPPED_OUTPUT" | jq -e '.schema == "fm-fleet-health.v1"' >/dev/null 2>&1; then
+    NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    jq -n --arg generated "$NOW" --arg home "$FM_HOME" \
+      '{schema:"fm-fleet-health.v1",generated:$generated,fm_home:$home,status:"incomplete",snapshot_generated:null,reason:"fleet health check failed",findings:[]}'
+    exit 3
+  fi
+  if [ "$OUTPUT_MODE" != json ] && [ -z "$WRAPPED_OUTPUT" ] && [ "$WRAPPED_RC" -ne 0 ]; then
+    printf '# Fleet Health\nStatus: incomplete\nHome: %s\nfleet health check failed\n' "$FM_HOME"
+    exit 3
+  fi
   printf '%s\n' "$WRAPPED_OUTPUT"
   exit "$WRAPPED_RC"
 fi
@@ -127,11 +138,15 @@ fingerprint_hex() {
 }
 
 collect_supervision_json() {
-  local state=$1 watch=$2 needed ok reason model
+  local state=$1 watch=$2 needed available ok reason model
   fm_supervision_status "$state" >/dev/null
   needed=$FM_SUP_NEEDED
   fm_watcher_supervision_verdict "$state" "$watch"
-  if [ "$FM_WATCHER_VERDICT_OK" = true ]; then
+  available=$FM_WATCHER_VERDICT_AVAILABLE
+  if [ "$available" != true ]; then
+    ok=false
+    reason=unreadable
+  elif [ "$FM_WATCHER_VERDICT_OK" = true ]; then
     ok=true
     reason=null
   else
@@ -141,11 +156,12 @@ collect_supervision_json() {
   model=$(fm_supervision_model)
   jq -n \
     --argjson needed "$( [ "$needed" = true ] && printf true || printf false )" \
+    --argjson available "$( [ "$available" = true ] && printf true || printf false )" \
     --argjson ok "$( [ "$ok" = true ] && printf true || printf false )" \
     --arg reason "${reason:-}" \
     --arg model "$model" \
     '{
-      available:true,
+      available:$available,
       needed:$needed,
       ok:$ok,
       reason:(if $reason == "null" or $reason == "" then null else $reason end),
@@ -257,7 +273,7 @@ EVALUATED=$(jq -n \
                 ($snapshot.collection.state.reason // "fleet state could not be inventoried");
                 "unavailable";1)
       else empty end),
-      (if $supervision.available == false then
+      (if $supervision.needed == true and $supervision.available == false then
         finding("supervision-inconclusive";"supervision";"notice";"inconclusive";
                 "supervision continuity could not be established";"unreadable";1)
       else empty end),
@@ -355,13 +371,22 @@ EVALUATED=$(jq -n \
                 (($snapshot.secondmate_current.truncated // 0) + 1))
       else empty end),
       ((($pending.records // [])
-        | map(select(.phase == "delivery_unknown" or .phase == "recovery_failed" or .phase == "recovery_unknown"))
+        | map(select(.phase == "delivery_unknown" or .phase == "recovery_failed" or .phase == "recovery_unknown"
+                     or .recovery_verdict == "orphaned" or .recovery_verdict == "failed"
+                     or .recovery_verdict == "unknown"))
         | group_by(.task_id)[]) as $g
         | ($g | length) as $n
         | ($g[0].task_id) as $task
         | finding("pending-reply-broken";$task;"error";"high";
                   ("broken reply delivery (" + ([ $g[].phase ] | unique | join(", ")) + ")");
                   "broken";$n)),
+      ((($pending.records // [])
+        | map(select(.recovery_verdict == "unreadable"))
+        | group_by(.task_id)[]) as $g
+        | ($g | length) as $n
+        | finding("pending-reply-inconclusive";$g[0].task_id;"notice";"inconclusive";
+                  "recovery sender or delivery identity could not be established";
+                  "recovery-unreadable";$n)),
       ((($pending.records // [])
         | map(select(.phase != "escalated"))
         | map(select(
@@ -403,7 +428,8 @@ EVALUATED=$(jq -n \
         | select(.owner == "uncertain" or .owner == "unreadable")
         | finding("result-listener-inconclusive";.id;"notice";"inconclusive";
                   "process-event listener liveness or registration could not be established";.owner;1)),
-      (if $supervision.needed == true and $supervision.ok == false then
+      (if $supervision.needed == true and $supervision.available == true
+          and $supervision.ok == false then
         finding("supervision-unhealthy";"supervision";"error";"high";
                 ("supervision is required but unhealthy (" + ($supervision.reason // "unknown") + ")");
                 ($supervision.reason // "unhealthy");1)

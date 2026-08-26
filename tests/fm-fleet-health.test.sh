@@ -94,8 +94,9 @@ run_health() {  # <home> <fakebin>
   PATH="$2:$PATH" FM_HOME="$1" "$HEALTH" --json
 }
 
-write_pending() {  # <home> <corr> <task> <phase> [completed_epoch] [grace]
+write_pending() {  # <home> <corr> <task> <phase> [completed_epoch] [grace] [sender-pid] [sender-identity]
   local home=$1 corr=$2 task=$3 phase=$4 completed=${5-} grace=${6:-120}
+  local sender_pid=${7-} sender_identity=${8-}
   mkdir -p "$home/state/pending-replies"
   cat > "$home/state/pending-replies/$corr" <<EOF
 schema=fm-pending-reply.v1
@@ -111,8 +112,8 @@ phase=$phase
 turn_seen_busy=1
 request_turn_completed_epoch=$completed
 recovery_attempted_epoch=
-recovery_sender_pid=
-recovery_sender_identity=
+recovery_sender_pid=$sender_pid
+recovery_sender_identity=$sender_identity
 recovery_sent_epoch=
 recovery_delivery_outcome=
 recovery_turn_seen_busy=0
@@ -467,6 +468,34 @@ EOF
   pass "broken replies group by owner and product blockers stay out"
 }
 
+test_recovery_sending_owner_verdicts() {
+  local home fakebin real_ps out rc=0
+  home=$(make_home recovery-sending-verdicts)
+  write_pending "$home" 1111111111111111 orphaned-recovery recovery_sending "" 120 999999 dead-sender
+  write_pending "$home" 2222222222222222 unreadable-recovery recovery_sending "" 120 "$$" unreadable-sender
+  fakebin=$(make_fakebin "$home")
+  real_ps=$(command -v ps)
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" -p $FM_TEST_UNREADABLE_PID "*) exit 1 ;;
+esac
+exec "$FM_TEST_REAL_PS" "$@"
+SH
+  chmod +x "$fakebin/ps"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_TEST_REAL_PS="$real_ps" \
+    FM_TEST_UNREADABLE_PID="$$" "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "unreadable recovery ownership should dominate an orphaned sender"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "pending-reply-broken"
+              and .subject == "orphaned-recovery")
+      and any(.findings[]; .kind == "pending-reply-inconclusive"
+              and .subject == "unreadable-recovery")
+  ' >/dev/null || fail "recovery_sending ownership evidence was hidden: $out"
+  pass "recovery sender ownership distinguishes orphaned and unreadable"
+}
+
 test_inconclusive_secondmate_summary_not_broken() {
   local home fakebin out rc=0
   home=$(make_home remote-summary)
@@ -708,6 +737,47 @@ test_inconclusive_dominates_actionable_status() {
   pass "inconclusive evidence dominates overall status without hiding findings"
 }
 
+test_unreadable_supervision_lock_is_inconclusive() {
+  local home fakebin out rc=0
+  home=$(make_home unreadable-supervision-lock)
+  write_live_ship "$home" supervised-worker
+  fresh_autoarm_supervision "$home"
+  mkdir -p "$home/state/.watch.lock"
+  printf '999999\n' > "$home/state/.watch.lock/pid"
+  chmod 000 "$home/state/.watch.lock"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=persistent "$HEALTH" --json) || rc=$?
+  chmod 700 "$home/state/.watch.lock"
+  expect_code 3 "$rc" "unreadable watcher-lock evidence should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "supervision-inconclusive")
+      and (any(.findings[]; .kind == "supervision-unhealthy") | not)
+  ' >/dev/null || fail "unreadable supervision evidence became actionable: $out"
+  pass "unreadable watcher-lock evidence remains inconclusive"
+}
+
+test_internal_worker_failure_returns_json() {
+  local home fakebin out rc=0
+  home=$(make_home internal-worker-failure)
+  write_live_ship "$home" hash-failure
+  : > "$home/state/.fake-windows"
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/shasum" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/shasum"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "internal worker failure should use the incomplete exit"
+  printf '%s' "$out" | jq -e '
+    .schema == "fm-fleet-health.v1"
+      and .status == "incomplete"
+      and .reason == "fleet health check failed"
+  ' >/dev/null || fail "internal worker failure omitted stable JSON: $out"
+  pass "internal worker failures retain the stable JSON contract"
+}
+
 test_complete_timeout_covers_fingerprinting() {
   local home fakebin out rc=0
   home=$(make_home complete-timeout)
@@ -754,6 +824,7 @@ test_grouped_inbox_and_stable_fingerprints
 test_invalid_inbox_records_are_inconclusive
 test_remote_liveness_is_inconclusive
 test_pending_reply_broken_and_historical_noise_omitted
+test_recovery_sending_owner_verdicts
 test_inconclusive_secondmate_summary_not_broken
 test_invalid_secondmate_summary_uses_normalized_kind
 test_truncated_secondmate_inventory_is_inconclusive
@@ -764,5 +835,7 @@ test_inventory_and_missing_listener
 test_invalid_procevent_registration_is_reported
 test_paused_ship_still_requires_pr_listener
 test_inconclusive_dominates_actionable_status
+test_unreadable_supervision_lock_is_inconclusive
+test_internal_worker_failure_returns_json
 test_complete_timeout_covers_fingerprinting
 test_human_view_and_incomplete_exit
