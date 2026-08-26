@@ -246,6 +246,10 @@ action = {
     "request_digest": request["request_digest"],
     "idempotency_key": "e" * 64, "outcome_dir": str(root / "outcome"),
     "payload_dir": str(payload_dir), "account_dir": str(account_dir),
+    "resources": {
+        "staging-request": {"id": "/blob/request", "immutable_id": "assignment-request-etag"},
+        "staging-result": {"id": "/blob/result", "immutable_id": "assignment-result-etag"},
+    },
 }
 
 # Recovery of an already-assigned task disk cannot rely on the supervisor that
@@ -459,6 +463,7 @@ run_outcome_call_sites
 run_initial_stub_adoption_after_source_update() {
   python3 - "$PROVIDER" <<'PY' || fail "fresh source-absent execute stub was not adopted exactly once"
 import copy
+import hashlib
 import importlib.util
 import sys
 
@@ -503,28 +508,44 @@ provider.run_command_instance_view = lambda *_args, **_kwargs: {
 disposition, recovered = provider.execute_terminal_disposition(controller, action, resources)
 assert disposition == provider.EXECUTE_DISPOSITION_SUBMIT and recovered is None
 
-provider.inventory = lambda *_args, **_kwargs: {"workers": []}
-provider.worker_by_slot = lambda *_args, **_kwargs: {"slot": 6}
-provider.recorded_exact = lambda *_args, **_kwargs: resources
-execute_terminal_disposition = provider.execute_terminal_disposition
-provider.execute_terminal_disposition = lambda *_args, **_kwargs: (
-    provider.EXECUTE_DISPOSITION_SUBMIT, None,
-)
-provider.action_tags = lambda *_args, **_kwargs: {}
 upload_calls = []
-def reject_changed_etag(_controller, args, **_kwargs):
+existing_payload = b"foreign bytes\n"
+def conditional_response(_controller, args, **_kwargs):
     upload_calls.append(args)
-    return None, 1, "ConditionNotMet"
-provider.az = reject_changed_etag
+    if args[:3] == ["storage", "blob", "upload"]:
+        return None, 1, "ConditionNotMet"
+    if args[:3] == ["storage", "blob", "show"]:
+        return {
+            "etag": "current-etag",
+            "metadata": {"content_digest": hashlib.sha256(request_payload).hexdigest()},
+        }, 0, ""
+    assert args[:3] == ["storage", "blob", "download"], args
+    assert args[-2:] == ["--if-match", "current-etag"], args
+    with open(args[args.index("--file") + 1], "wb") as handle:
+        handle.write(existing_payload)
+    return None, 0, ""
+request_payload = provider.canonical_bytes(action["request"]) + b"\n"
+provider.az = conditional_response
 try:
-    provider.mutate_execute(controller, action)
+    provider.upload_json_blob(
+        controller, "storage", "container", "request.json", action["request"], {},
+        overwrite=True, if_match="assignment-request-etag",
+    )
 except provider.ProviderError as exc:
     assert "exact worker staging upload failed" in str(exc), exc
 else:
     raise AssertionError("a concurrent staging overwrite was accepted")
-assert len(upload_calls) == 1, upload_calls
+assert len(upload_calls) == 3, upload_calls
 assert upload_calls[0][-2:] == ["--if-match", "assignment-request-etag"], upload_calls[0]
-provider.execute_terminal_disposition = execute_terminal_disposition
+
+existing_payload = request_payload
+existing_digest = hashlib.sha256(existing_payload).hexdigest()
+upload_calls = []
+assert provider.upload_json_blob(
+    controller, "storage", "container", "request.json", action["request"], {},
+    overwrite=True, if_match="assignment-request-etag",
+) == existing_digest
+assert len(upload_calls) == 3, upload_calls
 
 changed = copy.deepcopy(resources)
 changed["staging-request"]["immutable_id"] = "post-staging-etag"
@@ -534,8 +555,40 @@ except provider.ProviderError as exc:
     assert "outside the exact initial staging state" in str(exc), exc
 else:
     raise AssertionError("a post-staging replay passed through the initial stub gate")
+
+claimed = copy.deepcopy(changed)
+claimed["staging-request"]["digest"] = existing_digest
+claimed["staging-request"]["length"] = len(request_payload)
+disposition, recovered = provider.execute_terminal_disposition(controller, action, claimed)
+assert disposition == provider.EXECUTE_DISPOSITION_SUBMIT and recovered is None
+
+execution = {
+    "schema": provider.EXECUTION_RESULT_SCHEMA,
+    "request_digest": action["request_digest"], "exit_code": 0,
+}
+terminal_payload = provider.canonical_bytes(execution) + b"\n"
+terminal_digest = hashlib.sha256(terminal_payload).hexdigest()
+
+existing_payload = b"foreign terminal bytes\n"
+upload_calls = []
+try:
+    provider.persist_execute_result(
+        controller, action, provider.expected_names(controller, action["slot"]), {}, execution,
+    )
+except provider.ProviderError as exc:
+    assert "exact worker staging upload failed" in str(exc), exc
+else:
+    raise AssertionError("a result mutation during guest execution was overwritten")
+assert upload_calls[0][-2:] == ["--if-match", "assignment-result-etag"], upload_calls
+
+existing_payload = terminal_payload
+upload_calls = []
+provider.persist_execute_result(
+    controller, action, provider.expected_names(controller, action["slot"]), {}, execution,
+)
+assert len(upload_calls) == 3, upload_calls
 PY
-  pass "source-absent -202 stub uses assignment-captured blob identity and rejects post-staging replay"
+  pass "request/result ETags reject foreign writes and converge only after an exact lost response"
 }
 
 run_initial_stub_adoption_after_source_update

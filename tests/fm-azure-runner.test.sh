@@ -1390,6 +1390,10 @@ assert value("--task")==sys.argv[2]
 assert value("--generation")==sys.argv[3]
 assert value("--confirm-subscription")==sys.argv[4]
 assert value("--resource-class")=="behavior-heavy"
+assert "bin/fm-azure-runner-command.sh" in argv, "the Azure command lost its guest-relative wrapper"
+assert not any(item.endswith("/bin/fm-azure-runner-command.sh") for item in argv), (
+    "the Azure payload serialized a host-absolute wrapper", argv
+)
 assert any("tests/run.sh --skip-herdr" in item for item in argv), "the Azure shard lost the non-Herdr suite"
 PY
   assert_capability_derived_local_host_set "$fixture/local-runs"

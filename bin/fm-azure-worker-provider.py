@@ -1446,6 +1446,57 @@ def upload_json_blob(
             upload_args += ["--if-match", if_match]
         _, rc, stderr = az(controller, upload_args, check=False)
         if rc != 0:
+            condition_error = str(stderr).lower()
+            if if_match is not None and (
+                "conditionnotmet" in condition_error
+                or "condition specified" in condition_error
+            ):
+                current, show_rc, show_stderr = az(controller, [
+                    "storage", "blob", "show", "--auth-mode", "login",
+                    "--account-name", account, "--container-name", container,
+                    "--name", name,
+                ], check=False)
+                if show_rc != 0 or not isinstance(current, dict):
+                    raise ProviderError(
+                        "conditionally written worker staging blob is unreadable: {}".format(
+                            show_stderr
+                        )
+                    )
+                current_properties = (current or {}).get("properties") or {}
+                current_etag = (current or {}).get("etag") or current_properties.get("etag")
+                if not current_etag:
+                    raise ProviderError(
+                        "conditionally written worker staging blob is unreadable: {}".format(
+                            show_stderr
+                        )
+                    )
+                current_fd, current_path = tempfile.mkstemp(
+                    prefix="fm-worker-current-blob-", suffix=".json"
+                )
+                os.close(current_fd)
+                os.chmod(current_path, 0o600)
+                try:
+                    _, download_rc, download_stderr = az(controller, [
+                        "storage", "blob", "download", "--auth-mode", "login",
+                        "--account-name", account, "--container-name", container,
+                        "--name", name, "--file", current_path, "--overwrite", "true",
+                        "--if-match", current_etag,
+                    ], check=False)
+                    if download_rc != 0:
+                        raise ProviderError(
+                            "conditionally written worker staging blob changed during read: {}".format(
+                                download_stderr
+                            )
+                        )
+                    current_payload = Path(current_path).read_bytes()
+                    if (
+                        len(current_payload) == len(payload)
+                        and hashlib.sha256(current_payload).hexdigest() == digest
+                    ):
+                        return digest
+                finally:
+                    with contextlib.suppress(FileNotFoundError):
+                        Path(current_path).unlink()
             # A create-once blob that already carries exactly these bytes is
             # this same action replaying after a lost or timed-out response,
             # which must converge rather than wedge. Different bytes under the
@@ -2680,24 +2731,39 @@ def initial_execute_staging_pair(action):
     }
 
 
+def blob_content_is_exact(resource, value):
+    payload = canonical_bytes(value) + b"\n"
+    return (
+        resource.get("digest") == hashlib.sha256(payload).hexdigest()
+        and resource.get("length") == len(payload)
+    )
+
+
 def initial_execute_staging_is_exact(action, resources):
-    # The controller captured each assignment blob's ETag before it minted the
-    # execute action. That identity survives a later source checkout update,
-    # while any request/result overwrite changes it before a replay can submit.
-    # Re-deriving the assignment body from today's supervisor bytes rejects a
-    # real untouched initial stub whenever code landed between create and run.
-    expected = action.get("resources") or {}
-    for kind in ("staging-request", "staging-result"):
-        current = resources.get(kind) or {}
-        prior = expected.get(kind) or {}
-        if (
-            not current.get("id")
-            or current.get("id") != prior.get("id")
-            or not current.get("immutable_id")
-            or current.get("immutable_id") != prior.get("immutable_id")
-        ):
-            return False
-    return True
+    # The result must still carry its assignment ETag. The request may carry
+    # that ETag or the exact request bytes from this action: the latter is a
+    # retry after Azure applied the conditional write but lost its response.
+    expected = action["resources"]
+    request_current = resources.get("staging-request") or {}
+    request_prior = expected.get("staging-request") or {}
+    if (
+        not request_current.get("id")
+        or request_current.get("id") != request_prior.get("id")
+        or not request_current.get("immutable_id")
+        or (
+            request_current.get("immutable_id") != request_prior.get("immutable_id")
+            and not blob_content_is_exact(request_current, action["request"])
+        )
+    ):
+        return False
+    result_current = resources.get("staging-result") or {}
+    result_prior = expected.get("staging-result") or {}
+    return bool(
+        result_current.get("id")
+        and result_current.get("id") == result_prior.get("id")
+        and result_current.get("immutable_id")
+        and result_current.get("immutable_id") == result_prior.get("immutable_id")
+    )
 
 
 def run_command_execution_binding(live):
@@ -2825,6 +2891,12 @@ def execute_terminal_disposition(controller, action, resources):
 
 def persist_execute_result(controller, action, names, tags, execution):
     request = action["request"]
+    storage = os.environ.get("FM_AZURE_STORAGE_NAME", "")
+    assignment_etag = (
+        (action.get("resources") or {}).get("staging-result") or {}
+    ).get("immutable_id")
+    if not assignment_etag:
+        raise ProviderError("staging-result assignment ETag is absent")
     if request.get("outcome_expected") and (
         execution.get("outcome_present") or execution.get("return_present")
     ):
@@ -2848,13 +2920,14 @@ def persist_execute_result(controller, action, names, tags, execution):
         if not isinstance(bytes_claim, int) or isinstance(bytes_claim, bool) or not 0 < bytes_claim <= MAX_OUTCOME_BYTES:
             raise ProviderError("execution outcome size is malformed or unbounded")
         download_outcome_bundle(
-            controller, os.environ.get("FM_AZURE_STORAGE_NAME", ""), names["state-container"],
+            controller, storage, names["state-container"],
             outcome_blob_name(request["request_digest"]), digest_claim, bytes_claim,
             Path(outcome_target) / "outcome.bundle",
         )
     upload_json_blob(
-        controller, os.environ.get("FM_AZURE_STORAGE_NAME", ""), names["state-container"],
+        controller, storage, names["state-container"],
         names["staging-result"], execution, tags, overwrite=True,
+        if_match=assignment_etag,
     )
 
 
