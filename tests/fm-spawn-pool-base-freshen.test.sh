@@ -4,8 +4,8 @@
 # A treehouse pool can return a clean detached worktree whose origin/main was
 # advanced after the worktree was allocated.
 # These tests drive the real spawn path with a fake terminal, then prove it
-# starts the worker from the fetched origin/main tip or stops when origin is
-# unreachable.
+# starts the worker from the fetched origin/main tip, uses a local default base
+# for origin-less local-only work, or stops when the required origin is unsafe.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -35,7 +35,7 @@ SH
 }
 
 make_case() {
-  local name=$1 id=$2 default=${3:-main} case_dir home project origin pool publisher fakebin initial
+  local name=$1 id=$2 default=${3:-main} origin_mode=${4:-with-origin} case_dir home project origin pool publisher fakebin initial
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   project="$case_dir/project"
@@ -53,16 +53,24 @@ make_case() {
   printf 'base\n' > "$project/README.md"
   git -C "$project" add README.md
   git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
-  git clone --quiet --bare "$project" "$origin"
-  git -C "$project" remote add origin "file://$origin"
   initial=$(git -C "$project" rev-parse HEAD)
+  if [ "$origin_mode" = with-origin ]; then
+    git clone --quiet --bare "$project" "$origin"
+    git -C "$project" remote add origin "file://$origin"
+  fi
   git -C "$project" worktree add --quiet --detach "$pool" "$initial"
 
-  git clone --quiet "file://$origin" "$publisher"
-  printf 'must survive a newly spawned branch\n' > "$publisher/advanced-main.txt"
-  git -C "$publisher" add advanced-main.txt
-  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-main
-  git -C "$publisher" push --quiet origin "$default"
+  if [ "$origin_mode" = with-origin ]; then
+    git clone --quiet "file://$origin" "$publisher"
+    printf 'must survive a newly spawned branch\n' > "$publisher/advanced-main.txt"
+    git -C "$publisher" add advanced-main.txt
+    git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-main
+    git -C "$publisher" push --quiet origin "$default"
+  else
+    printf 'must survive a newly spawned branch\n' > "$project/advanced-main.txt"
+    git -C "$project" add advanced-main.txt
+    git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-local-default
+  fi
 
   printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
 }
@@ -159,15 +167,17 @@ test_unreachable_origin_refuses_stale_pool_base() {
 }
 
 test_direct_pr_and_scout_refresh_before_launch() {
-  local rec id out status contract current
-  for contract in direct-pr scout; do
+  local rec id out status contract current mode
+  for contract in direct-pr local-only scout; do
     id="pool-${contract}-r3"
     rec=$(make_case "$contract" "$id")
     read_case_record "$rec"
     if [ "$contract" = scout ]; then
       out=$(run_spawn "$id" --scout)
     else
-      out=$(run_spawn "$id" --mode direct-PR --yolo off)
+      mode=direct-PR
+      [ "$contract" = local-only ] && mode=local-only
+      out=$(run_spawn "$id" --mode "$mode" --yolo off)
     fi
     status=$?
     expect_code 0 "$status" "$contract spawn should refresh a stale pooled worktree"
@@ -180,7 +190,53 @@ test_direct_pr_and_scout_refresh_before_launch() {
       printf '# observed %s spawn: %s\n' "$contract" "$(printf '%s\n' "$out" | tail -n 1)"
     fi
   done
-  pass "direct-PR ships and scouts both refresh stale pooled worktrees before launch"
+  pass "remote-backed ships, local-only ships, and scouts refresh stale pooled worktrees before launch"
+}
+
+test_local_only_without_origin_uses_local_default() {
+  local rec id out status expected head
+  id='pool-local-only-no-origin-r6'
+  rec=$(make_case local-only-no-origin "$id" main no-origin)
+  read_case_record "$rec"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "local-only spawn should proceed without origin"
+  assert_contains "$out" "spawned $id" "local-only spawn without origin did not report success"
+  [ -z "$(git -C "$POOL_DIR" remote)" ] || fail "local-only spawn created or inferred a remote"
+  expected=$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$DEFAULT_BRANCH")
+  head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$expected" != "$INITIAL_SHA" ] \
+    || fail "fixture did not prove the local default branch advanced past the pool base"
+  [ "$head" != "$INITIAL_SHA" ] \
+    || fail "local-only spawn without origin left the pooled worktree on stale history"
+  [ "$head" = "$expected" ] \
+    || fail "local-only spawn without origin did not use the local default base"
+  assert_grep 'must survive a newly spawned branch' "$POOL_DIR/advanced-main.txt" \
+    "local-only spawn without origin omitted the local default branch tip content"
+  pass "a local-only spawn without origin uses the clean local default base"
+}
+
+test_remote_backed_without_origin_refuses() {
+  local rec id out status contract before
+  for contract in no-mistakes scout; do
+    id="pool-${contract}-no-origin-r7"
+    rec=$(make_case "${contract}-no-origin" "$id" main no-origin)
+    read_case_record "$rec"
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
+    if [ "$contract" = scout ]; then
+      out=$(run_spawn "$id" --scout)
+    else
+      out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+    fi
+    status=$?
+    [ "$status" -ne 0 ] || fail "$contract spawn succeeded without origin"
+    assert_contains "$out" "could not fetch origin" \
+      "$contract spawn did not refuse a missing origin"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+      || fail "$contract spawn moved the pooled worktree after origin was missing"
+  done
+  pass "remote-backed ships and scouts refuse pooled worktrees without origin"
 }
 
 test_dirty_pool_refuses_without_discarding_work() {
@@ -230,6 +286,8 @@ test_unresolved_remote_default_refuses_pool() {
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
+test_local_only_without_origin_uses_local_default
+test_remote_backed_without_origin_refuses
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
