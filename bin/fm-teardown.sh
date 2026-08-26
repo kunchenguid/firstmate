@@ -2518,14 +2518,18 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   if teardown_herdr_session_lock_held "$HERDR_PRESENTATION_SESSION"; then
     # stderr is deliberately NOT discarded here. This is the highest-frequency
     # projected-close call site, and the helper's only stderr output is a real
-    # warning - unverifiable workspace.move support, a refused focus-unsafe
-    # close, an unconfirmed repositioned-workspace removal, or a failed exact
-    # restore.
+    # warning - unverifiable workspace.move support, an unconfirmed
+    # repositioned-workspace removal, or a failed exact restore.
     # Swallowing them left a wrong active workspace with no operator-visible
     # signal at all. The close stays non-fatal exactly as before: the presence
     # gate below is what decides whether any durable record may be removed.
+    # "retreat" is the operator-requested-termination mode: when the doomed
+    # task tab is the active tab (the operator was looking at the crewmate
+    # they terminated), focus retreats to this process's own launcher tab and
+    # the close proceeds instead of refusing and leaving the tab open for a
+    # manual rerun.
     fm_backend_herdr_projection_close_pane_focus_preserving \
-      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" || true
+      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" "" retreat || true
   else
     echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
   fi

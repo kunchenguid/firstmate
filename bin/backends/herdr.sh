@@ -39,7 +39,11 @@
 # behind the focused one when needed, and ends its verified lone idle shell
 # so Herdr removes the emptied workspace through the focus-preserving
 # pane-death path, with the exact pre-close tab restore as the backstop and a
-# refusal to close the active tab itself.
+# refusal to close the active tab itself - except in the opt-in "retreat"
+# mode used by fm-teardown for the task's own operator-requested
+# termination, which retreats focus to the terminating process's launcher
+# tab (or accepts the plain close's legitimate focus move when no launcher
+# is provable) instead of leaving the doomed tab open.
 #
 # Target string shape: "<herdr-session>:<pane-id>", e.g. "default:w1:p2" (the
 # pane id itself contains a colon; the session is always the FIRST field, the
@@ -850,7 +854,16 @@ fm_backend_herdr_projection_focus_restore() {  # <session> <snapshot> <operation
 # response-derived projection pane without leaving the captain focused
 # anywhere else.
 # If the target belongs to the active tab, exact tab preservation is
-# impossible, so cleanup refuses instead of changing focus.
+# impossible. The default mode ("refuse") refuses instead of changing focus,
+# which is right for incidental cleanup (prune, reclaim) that must never
+# yank the tab the captain is reading. The opt-in "retreat" mode is for the
+# operator-requested termination of that exact task (fm-teardown), where the
+# tab is doomed either way: it first retreats focus to the terminating
+# process's own launcher tab (fm_backend_herdr_launcher_identity) and then
+# runs the standard focus-safe plan anchored there; when no in-session
+# launcher is provable it falls back to the plain confirmed close, whose
+# focus move on emptying the focused workspace is legitimate (the same
+# contract fm_backend_herdr_kill_serialized already keeps).
 # When the close would empty the target workspace, Herdr 0.7.5's explicit
 # close moves focus to the workspace's neighbor, so the close is planned by
 # fm_backend_herdr_emptying_close_plan: reposition the doomed workspace
@@ -859,9 +872,9 @@ fm_backend_herdr_projection_focus_restore() {  # <session> <snapshot> <operation
 # pane-death path. The exact-tab restore below remains the backstop, and any
 # ambiguity falls back to the plain explicit close, which the backstop masks
 # exactly as before this hardening.
-fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state]
-  local session=$1 pane_id=$2 required_agent_state=${3:-}
-  local before active_tab info target_pane target_tab target_ws close_status state plan plan_shell_pid plan_move_record workspace_presence
+fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state] [active-target-mode: refuse|retreat]
+  local session=$1 pane_id=$2 required_agent_state=${3:-} active_target_mode=${4:-refuse}
+  local before active_tab info target_pane target_tab target_ws close_status state plan plan_shell_pid plan_move_record workspace_presence retreated
   FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=""
   [ -n "$pane_id" ] || return 0
   before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
@@ -881,8 +894,40 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
     return 1
   fi
   if [ "$target_tab" = "$active_tab" ]; then
-    echo "warning: herdr presentation cleanup target is the captain's active tab; refusing a close that cannot preserve focus" >&2
-    return 1
+    if [ "$active_target_mode" != retreat ]; then
+      echo "warning: herdr presentation cleanup target is the captain's active tab; refusing a close that cannot preserve focus" >&2
+      return 1
+    fi
+    # Operator-requested termination of the focused tab: retreat focus to the
+    # terminating process's own launcher tab when it is provably in this
+    # session and not itself the doomed tab, then continue with the standard
+    # focus-safe plan anchored on the fresh snapshot.
+    retreated=0
+    if fm_backend_herdr_launcher_identity "$session" 2>/dev/null \
+       && [ -n "$FM_BACKEND_HERDR_LAUNCHER_TAB_ID" ] \
+       && [ "$FM_BACKEND_HERDR_LAUNCHER_TAB_ID" != "$target_tab" ]; then
+      if fm_backend_herdr_cli "$session" tab focus "$FM_BACKEND_HERDR_LAUNCHER_TAB_ID" >/dev/null 2>&1; then
+        before=$(fm_backend_herdr_projection_focus_snapshot "$session") || before=
+        if [ -n "$before" ] && [ "${before#*$'\t'}" != "$target_tab" ]; then
+          active_tab=${before#*$'\t'}
+          retreated=1
+        fi
+      fi
+    fi
+    if [ "$retreated" -ne 1 ]; then
+      # No provable in-session launcher tab to land on: fall back to the
+      # plain confirmed close. Emptying the focused workspace moves focus
+      # legitimately (same contract as fm_backend_herdr_kill_serialized), so
+      # no exact restore is attempted - the pre-close snapshot names the
+      # doomed tab itself.
+      if [ -n "$required_agent_state" ]; then
+        state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
+        FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=$state
+        [ "$state" = "$required_agent_state" ] || return 1
+      fi
+      fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane_id"
+      return
+    fi
   fi
   if [ -n "$required_agent_state" ]; then
     state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")

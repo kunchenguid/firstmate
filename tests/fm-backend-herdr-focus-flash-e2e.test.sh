@@ -349,6 +349,42 @@ else
   pass 'fallback on a focus-preserving release: the plain explicit close preserved exact focus throughout'
 fi
 
+# --- Part D: operator-requested termination of the ACTIVE tab (retreat) -----
+# The teardown case the focus-safety refusal used to leave open: the doomed
+# tab IS the session's active tab. Default mode must still refuse without
+# touching the pane; the opt-in retreat mode (fm-teardown's operator-requested
+# termination) must close it. This test process holds no launcher identity in
+# the lab session, so retreat falls back to the plain confirmed close, whose
+# focus move away from the emptied focused workspace is the legitimate one.
+read -r D_DOOMED_WS D_DOOMED_TAB D_DOOMED_PANE <<<"$(mkws flash-d-doomed)" \
+  || fail 'could not create the Part D doomed workspace'
+lab tab focus "$D_DOOMED_TAB" >/dev/null || fail 'could not focus the Part D doomed tab'
+if D_OUT=$(PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" bash -c '
+  unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH HERDR_SESSION
+  . "$1/bin/backends/herdr.sh"
+  fm_backend_herdr_projection_close_pane_focus_preserving "$2" "$3"
+' _ "$ROOT" "$HERDR_LAB_SESSION" "$D_DOOMED_PANE" 2>&1); then
+  fail 'default mode closed the active tab instead of refusing'
+fi
+printf '%s' "$D_OUT" | grep -q "captain's active tab" \
+  || fail "the default-mode refusal did not name the active-tab boundary: $D_OUT"
+lab pane get "$D_DOOMED_PANE" >/dev/null 2>&1 \
+  || fail 'the default-mode refusal still removed the pane'
+pass 'active target: default mode refuses and leaves the pane intact'
+D_OUT=$(PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" bash -c '
+  unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH HERDR_SESSION
+  . "$1/bin/backends/herdr.sh"
+  fm_backend_herdr_projection_close_pane_focus_preserving "$2" "$3" "" retreat
+' _ "$ROOT" "$HERDR_LAB_SESSION" "$D_DOOMED_PANE" 2>&1)
+D_STATUS=$?
+[ "$D_STATUS" -eq 0 ] \
+  || fail "retreat mode failed to close the active target (status $D_STATUS): $D_OUT"
+wait_ws_gone "$D_DOOMED_WS" || fail 'retreat mode left the doomed workspace behind'
+if lab pane get "$D_DOOMED_PANE" >/dev/null 2>&1; then
+  fail 'retreat mode left the doomed pane behind'
+fi
+pass 'active target: retreat mode closes the doomed tab through the plain confirmed close'
+
 # The live guard on the version floor itself: Part A measured whether THIS
 # release steals focus. Every above-floor release must preserve focus, while a
 # below-floor release may conservatively include the known post-fix protocol-18

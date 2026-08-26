@@ -1975,12 +1975,21 @@ case "${1:-} ${2:-}" in
       printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":false}]}}'
     elif [ -e "${FM_FAKE_HERDR_CLOSED:?}" ]; then
       printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":false},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":true}]}}'
+    elif [ "${FM_FAKE_HERDR_TASK_FOCUSED:-0}" = 1 ]; then
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t2","label":"firstmate/task-x1 · p:AbCdEfGhIjKlMnOpQrStUv","focused":true},{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":false},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":false}]}}'
     else
       printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t2","label":"firstmate/task-x1 · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":false}]}}'
     fi
     ;;
   "tab list")
     case "$*" in
+      *"--workspace w1"*)
+        if [ "${FM_FAKE_HERDR_TASK_FOCUSED:-0}" = 1 ] && [ ! -e "${FM_FAKE_HERDR_CLOSED:?}" ]; then
+          printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","focused":true}]}}'
+        else
+          printf '%s\n' '{"result":{"tabs":[]}}'
+        fi
+        ;;
       *"--workspace w2"*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","focused":true}]}}' ;;
       *"--workspace w3"*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w3:t1","focused":true}]}}' ;;
       *) printf '%s\n' '{"result":{"tabs":[]}}' ;;
@@ -2045,6 +2054,33 @@ test_herdr_projection_teardown_retires_journal_only_after_confirmed_close() {
   assert_contains "$(cat "$log")" "tab focus w2:t2" \
     "projected teardown did not restore the exact pre-close active tab"
   pass "herdr projection teardown retires its journal only after confirming the exact recorded pane is gone"
+}
+
+test_herdr_projection_teardown_closes_the_focused_task_tab() {
+  local case_dir log closed restored
+  case_dir=$(make_case herdr-projection-active-target)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_projection_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+
+  # The operator terminates the crewmate whose tab they are looking at: the
+  # task tab w1:t2 is the session's active tab. The doomed tab must still be
+  # closed (retreat mode; with no in-session launcher identity the close
+  # falls back to the plain confirmed close), never left open behind a
+  # focus-safety refusal that demands a manual rerun.
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    FM_FAKE_HERDR_TASK_FOCUSED=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "herdr-projection-active-target: teardown failed while the task tab was focused"
+  [ -e "$closed" ] \
+    || fail "herdr-projection-active-target: teardown left the focused crewmate tab open"
+  [ ! -e "$case_dir/state/task-x1.herdr-presentation" ] \
+    || fail "herdr-projection-active-target: confirmed close did not retire the presentation journal"
+  assert_not_contains "$(cat "$case_dir/stderr")" "refusing a close that cannot preserve focus" \
+    "herdr-projection-active-target: the active-tab refusal fired on the task's own teardown"
+  assert_not_contains "$(cat "$log")" "workspace close" \
+    "herdr-projection-active-target: projected teardown must never call workspace close"
+  pass "herdr projection teardown closes the crewmate tab even when it is the active tab"
 }
 
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
@@ -2914,6 +2950,7 @@ test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
+test_herdr_projection_teardown_closes_the_focused_task_tab
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 test_squash_merged_branch_deleted_allows

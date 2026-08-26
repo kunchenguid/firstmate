@@ -1387,6 +1387,68 @@ test_projection_close_refuses_active_tab() {
   pass "herdr presentation focus: cleanup refuses rather than close the captain's active tab"
 }
 
+test_projection_close_active_target_retreats_to_launcher_tab() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/projection-active-retreat"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Snapshot: the doomed task tab w9:t2 is the active tab.
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w7","active_tab_id":"w7:t3","focused":false},{"workspace_id":"w9","active_tab_id":"w9:t2","focused":true}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t1","focused":false},{"tab_id":"w9:t2","focused":true}]}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w9:p2","tab_id":"w9:t2","workspace_id":"w9"}}}' > "$resp/3.out"
+  # Launcher identity: the terminating captain's own pane w7:p3 in this session.
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fm-herdr-unit/fmtest.sock"}]}' > "$resp/4.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w7:p3","tab_id":"w7:t3","workspace_id":"w7"}}}' > "$resp/5.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w7:t3","workspace_id":"w7"}}}' > "$resp/6.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w7","label":"firstmate"},{"workspace_id":"w9","label":"fm-task"}]}}' > "$resp/7.out"
+  # 8: tab focus w7:t3 (silent success). Re-snapshot lands on the launcher tab.
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w7","active_tab_id":"w7:t3","focused":true},{"workspace_id":"w9","active_tab_id":"w9:t2","focused":false}]}}' > "$resp/9.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w7:t3","focused":true}]}}' > "$resp/10.out"
+  # The emptying-close plan sees a second tab in w9, so the close stays plain.
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t1","workspace_id":"w9"},{"tab_id":"w9:t2","workspace_id":"w9"}]}}' > "$resp/11.out"
+  # 12: pane close w9:p2 (silent). 13: presence proves the exact pane gone.
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/13.out"
+  # Restore verification: focus stayed on the launcher tab.
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w7","active_tab_id":"w7:t3","focused":true},{"workspace_id":"w9","active_tab_id":"w9:t2","focused":false}]}}' > "$resp/14.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w7:t3","focused":true}]}}' > "$resp/15.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=fmtest HERDR_SOCKET_PATH=/tmp/fm-herdr-unit/fmtest.sock \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2 "" retreat' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "retreat-mode close of the active target should succeed after landing on the launcher tab: $out"
+  assert_contains "$(cat "$log")" $'tab\x1ffocus\x1fw7:t3' \
+    "retreat-mode close did not move focus to the terminating captain's own tab first"
+  assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p2' \
+    "retreat-mode close did not close the exact doomed pane"
+  [ "$(grep -n $'tab\x1ffocus\x1fw7:t3' "$log" | head -1 | cut -d: -f1)" -lt \
+    "$(grep -n $'pane\x1fclose\x1fw9:p2' "$log" | head -1 | cut -d: -f1)" ] \
+    || fail "retreat-mode close closed the pane before retreating focus"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fclose' \
+    "retreat-mode close introduced workspace-close authority"
+  pass "herdr presentation focus: retreat mode lands on the launcher tab, then closes the active target"
+}
+
+test_projection_close_active_target_plain_close_without_launcher() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/projection-active-plain-fallback"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w9","active_tab_id":"w9:t2","focused":true}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t2","focused":true}]}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w9:p2","tab_id":"w9:t2","workspace_id":"w9"}}}' > "$resp/3.out"
+  # 4: pane close w9:p2 (silent). 5: presence proves the exact pane gone.
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2 "" retreat' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "retreat-mode close without a launcher should fall back to the plain close: $out"
+  assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p2' \
+    "launcher-less retreat fallback did not close the exact doomed pane"
+  assert_not_contains "$(cat "$log")" $'tab\x1ffocus' \
+    "launcher-less retreat fallback attempted a focus move with nowhere provable to land"
+  pass "herdr presentation focus: retreat mode without a launcher falls back to the plain close"
+}
+
 test_projection_close_reports_focus_restore_failure() {
   local dir log resp fb out status
   dir="$TMP_ROOT/projection-focus-restore-failure"; mkdir -p "$dir/responses"
@@ -4270,6 +4332,8 @@ test_projection_create_never_closes_a_concurrent_same_label_tab
 test_projection_focus_snapshot_requires_exact_workspace_and_tab
 test_projection_close_restores_exact_prior_focus
 test_projection_close_refuses_active_tab
+test_projection_close_active_target_retreats_to_launcher_tab
+test_projection_close_active_target_plain_close_without_launcher
 test_projection_close_reports_focus_restore_failure
 test_projection_close_rechecks_required_agent_state_at_boundary
 test_projection_close_emptying_after_focus_uses_pane_death_without_move

@@ -434,6 +434,17 @@ Part C is the case the suite could not reach before: a doomed pane whose shell h
 On 0.7.5 that fallback exposed a bounded four-sample wrong-focus window and restored the anchor exactly; on 0.8.0 the same fallback exposed none, which is why default-on projection is floored at 0.8.0 rather than mitigated further below it.
 The suite also cross-checks its own Part A measurement against the floor classifier on whatever release it runs, so a drifted protocol-to-release mapping fails there rather than silently gating on the wrong thing.
 
+Part D covers the active-target modes of the projected close when the doomed tab is the session's active tab: the default mode must refuse without touching the pane, and the opt-in "retreat" mode used by fm-teardown's operator-requested termination must close it; the suite's test process holds no launcher identity in the lab session, so its retreat case proves the launcherless plain-confirmed-close fallback.
+Both Part D outcomes were probed directly on 2026-08-25 against the pinned Herdr 0.8.0-preview.2026-08-04-d78e3d3b5126 protocol 19 in a guarded `fm-lab-` session:
+
+```text
+default-mode stderr: warning: herdr presentation cleanup target is the captain's active tab; refusing a close that cannot preserve focus
+ok - real herdr: default mode refuses the focused doomed tab and the pane survives
+ok - real herdr: retreat mode closes the focused doomed tab (launcherless plain-close fallback)
+```
+
+The same suite command above refreshes this evidence on the installed release.
+
 ### Presentation version floor
 
 Default-on presentation projection is floored at Herdr 0.8.0.
