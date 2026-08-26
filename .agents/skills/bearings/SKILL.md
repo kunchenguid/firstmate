@@ -52,10 +52,9 @@ Board answers are acted on later under the normal authority rules; this skill's 
 
 2. **Ask any home whose own books disagree to reconcile them.**
    When the snapshot reports a secondmate home whose `invalidity` is `orphan_in_flight`, `unowned_current`, or `terminal_in_flight`, that home's backlog and its own task metadata disagree and only that home may fix it.
-   Start `bin/fm-secondmate-reconcile.sh notify --snapshot -` as its own harness-native tracked background task through the current adapter's existing tracked-background boundary, provide that exact gathered projection on its standard input, and do not wait for it before composing the digest.
-   Never launch the hook with a shell `&`, `nohup`, or another untracked child that can be reaped when the tool call returns.
-   The hook sends exactly one fire-and-forget instruction per mismatch episode through the ordinary steering transport, arms no reply recovery or inbox escalation, and stays silent while the same mismatch persists.
-   Never edit another home's backlog or metadata from here, and never expect or wait on a reply: the digest is composed from the snapshot you already have.
+   Run `printf '%s\n' "$snapshot" | bin/fm-secondmate-reconcile.sh notify --snapshot -` inline immediately after gathering the snapshot, so the durable fire-and-forget enqueue finishes before digest composition without spawning any child or second snapshot.
+   The hook sends exactly one instruction per mismatch episode through the ordinary secondmate steering inbox, arms no reply recovery or inbox escalation, and stays silent while the same mismatch persists.
+   Never edit another home's backlog or metadata from here, and never expect or wait on a reply: the mate acts asynchronously from its durable inbox while the digest is composed from the snapshot already in hand.
 
 3. **Compose the four-section chat digest from the fresh snapshot.**
    The gather step is deterministic; your judgment is scoped to ranking the command's facts by what matters right now and writing scannable captain-facing prose.
