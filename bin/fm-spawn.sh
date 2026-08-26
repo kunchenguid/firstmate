@@ -141,6 +141,9 @@
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule,
 #   both pins, and the command that clears it; nothing is converged or removed.
+#   That report is only reached when each submodule's checked-out commit is
+#   already contained in one of its remotes, so a submodule carrying an unpushed
+#   commit keeps the conservative uncommitted-work refusal instead.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1750,10 +1753,15 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 # the pin the previous base recorded. The refusal still stands and this gate
 # never touches the slot; it only names the cause, because "is not clean" while
 # the operator's own `git status` reads clean gives neither a cause nor a remedy.
-# Returns 1 unless EVERY reported entry is exactly that, so a submodule holding
-# real work is still reported as uncommitted work and never called stale.
+# A pin is only stale when the commit the slot holds is already contained in one
+# of the submodule's remotes, so the `submodule update --checkout` this refusal
+# prints can never orphan unlanded work. Anything that cannot be proven contained
+# - an unpushed commit, a submodule with no remote, a git error - falls through to
+# the conservative uncommitted-work refusal, as does any entry that is not exactly
+# a clean submodule sitting on a different pin. The diagnosis is buffered and only
+# emitted once every entry qualifies, so it can never contradict the verdict.
 describe_stale_submodule_pins() {  # <worktree> <status>
-  local worktree=$1 status=$2 line path want have found=0
+  local worktree=$1 status=$2 line path want have unpushed lines=
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case $line in ' M '*) path=${line#' M '} ;; *) return 1 ;; esac
@@ -1762,12 +1770,14 @@ describe_stale_submodule_pins() {  # <worktree> <status>
     want=$(git -C "$worktree" rev-parse --verify --quiet "HEAD:$path" 2>/dev/null) || return 1
     have=$(git -C "$worktree/$path" rev-parse --verify --quiet HEAD 2>/dev/null) || return 1
     [ "$want" != "$have" ] || return 1
-    echo "error: submodule '$path' is checked out at $have, but this base records $want" >&2
-    found=1
+    unpushed=$(git -C "$worktree/$path" log --format=%H "$have" --not --remotes -- 2>/dev/null) || return 1
+    [ -z "$unpushed" ] || return 1
+    lines+="error: submodule '$path' is checked out at $have, but this base records $want"$'\n'
   done <<EOF
 $status
 EOF
-  [ "$found" = 1 ]
+  [ -n "$lines" ] || return 1
+  printf '%s' "$lines" >&2
 }
 
 freshen_spawn_worktree_base() {  # <worktree>
