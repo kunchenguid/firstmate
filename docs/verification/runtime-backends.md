@@ -366,6 +366,67 @@ tab=w5:t1
 workspace=w5
 ```
 
+### Windows live task cwd
+
+The native Windows current-path fallback was verified on 2026-08-26 against Herdr 0.8.2 under Git for Windows.
+The guarded lab changed a pane to the Firstmate repository, confirmed that `pane get` omitted `foreground_cwd`, and confirmed that the adapter returned the cwd of the exact process whose pid matched `foreground_process_group_id`.
+
+```sh
+ROOT=/c/src/firstmate
+HELPER="$ROOT/bin/fm-herdr-lab.sh"
+LAB=$("$HELPER" name cwd-win)
+cleanup() {
+  if "$HELPER" teardown "$LAB" >/dev/null; then
+    printf 'teardown=pass\n'
+  else
+    printf 'teardown=fail\n'
+    return 1
+  fi
+}
+trap cleanup EXIT
+"$HELPER" provision "$LAB"
+CREATE=$("$HELPER" run "$LAB" workspace create --cwd /tmp --label cwd-probe --no-focus)
+PANE=$(printf '%s' "$CREATE" | jq -er '.result.root_pane.pane_id')
+"$HELPER" run "$LAB" pane run "$PANE" 'cd C:\src\firstmate' >/dev/null
+. "$ROOT/bin/backends/herdr.sh"
+ADAPTER_PATH=
+for _ in $(seq 1 50); do
+  ADAPTER_PATH=$(fm_backend_herdr_current_path "$LAB:$PANE" || true)
+  [ -n "$ADAPTER_PATH" ] && break
+  sleep 0.1
+done
+PANE_GET=$("$HELPER" run "$LAB" pane get "$PANE")
+PROCESS_INFO=$("$HELPER" run "$LAB" pane process-info --pane "$PANE")
+GROUP_ID=$(printf '%s' "$PROCESS_INFO" | jq -r '.result.process_info.foreground_process_group_id')
+NORMALIZED_PATH=$(cygpath -u "$ADAPTER_PATH")
+EXPECTED_PATH=$(cd "$ROOT" && pwd -P)
+[ "$NORMALIZED_PATH" = "$EXPECTED_PATH" ]
+printf 'herdr_version=%s\n' "$(herdr --version)"
+printf 'session=%s\npane=%s\n' "$LAB" "$PANE"
+printf 'pane_foreground_cwd_present=%s\n' "$(printf '%s' "$PANE_GET" | jq -r '(.result.pane | has("foreground_cwd")) and ((.result.pane.foreground_cwd // "") != "")')"
+printf 'foreground_process_group_id=%s\n' "$GROUP_ID"
+printf 'leader_pid=%s\n' "$(printf '%s' "$PROCESS_INFO" | jq -r --arg gid "$GROUP_ID" '.result.process_info.foreground_processes[] | select((.pid | tostring) == $gid) | .pid')"
+printf 'leader_cwd=%s\n' "$(printf '%s' "$PROCESS_INFO" | jq -r --arg gid "$GROUP_ID" '.result.process_info.foreground_processes[] | select((.pid | tostring) == $gid) | .cwd')"
+printf 'adapter_path=%s\n' "$ADAPTER_PATH"
+printf 'normalized_adapter_path=%s\n' "$NORMALIZED_PATH"
+printf 'expected_path=%s\nresult=pass\n' "$EXPECTED_PATH"
+```
+
+```text
+herdr_version=herdr 0.8.2
+session=fm-lab-cwd-win-950-32594
+pane=w1:p1
+pane_foreground_cwd_present=false
+foreground_process_group_id=43376
+leader_pid=43376
+leader_cwd=C:\src\firstmate\
+adapter_path=C:\src\firstmate\
+normalized_adapter_path=/c/src/firstmate
+expected_path=/c/src/firstmate
+result=pass
+teardown=pass
+```
+
 `pane get` reports the pane's current owning tab and workspace, which is what placement resolves from; the injected `HERDR_TAB_ID` and `HERDR_WORKSPACE_ID` are creation-time snapshots and are not read as current identity:
 
 ```sh
