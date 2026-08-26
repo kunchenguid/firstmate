@@ -275,6 +275,7 @@ assert set(schema["properties"]) == {"verdict", "evidence_files"}, schema
 assert schema["additionalProperties"] is False
 assert schema["properties"]["verdict"] == verdict_schema
 assert schema["properties"]["evidence_files"]["type"] == "array"
+assert schema["properties"]["evidence_files"]["minItems"] == 0
 evidence_item = schema["properties"]["evidence_files"]["items"]
 assert evidence_item["required"] == ["path", "content"]
 assert evidence_item["additionalProperties"] is False
@@ -285,6 +286,7 @@ manifest = [
 assert module.normalize_pi_evidence_files(manifest) == {
     item["path"]: item["content"] for item in manifest
 }
+assert module.normalize_pi_evidence_files([]) == {}
 for malformed in (
     [manifest[0], manifest[0]],
     [{**manifest[0], "extra": True}],
@@ -298,7 +300,6 @@ for malformed in (
         raise AssertionError(f"Pi evidence normalization admitted {malformed!r}")
 assert "Your final response must satisfy the supplied JSON schema" in host_prompt
 assert "The constrained verdict submitter is the only enabled tool." in prompt
-assert "credentialless tool VM's HOME and account selector are not model-identity evidence" in prompt
 assert "record the schema's fixed model execution-home" not in prompt
 assert commands[0][0] == [
     "git", "-C", "/unused-review-checkout", "diff", "--no-ext-diff",
@@ -1063,6 +1064,7 @@ PY
 cross_family_provider_host_unit() {
   python3 - "$ADAPTER" "$CORE" <<'PY' || fail "model-aware provider host derivation failed"
 import importlib.util
+import copy
 import sys
 
 spec = importlib.util.spec_from_file_location("azure_crosscheck", sys.argv[1])
@@ -1525,13 +1527,18 @@ PY
 }
 
 identity_outcome_unit() {
-  python3 - "$ADAPTER" <<'PY' || fail "Azure ledger identity contract failed"
+  python3 - "$ADAPTER" "$CORE" <<'PY' || fail "Azure ledger identity contract failed"
 import importlib.util
+import copy
 import sys
 
 spec = importlib.util.spec_from_file_location("azure_crosscheck", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+core_spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[2])
+core = importlib.util.module_from_spec(core_spec)
+sys.modules["fm_crosscheck"] = core
+core_spec.loader.exec_module(core)
 identity = {
     "home_binding": "sha256:" + "1" * 64,
     "task_id": "task-one",
@@ -1603,8 +1610,118 @@ base = {
 }
 run = {"head_sha": "a" * 40, "base_sha": "b" * 40, "claims_sha256": "c" * 64}
 module.validate_azure_reviewer_record(base, run, "run")
+
+# The conditional contract admits a zero-proof identity-only record without
+# inventing tool/verifier VMs, while the successful-attempt mode remains exact.
+generation_fields = (
+    "home_binding", "task_id", "pull_request", "head_sha", "base_sha",
+    "base_branch_sha", "claims_sha256", "deployment_generation",
+    "model_image_id", "reviewer_sku", "provider_host", "provider_port",
+    "reviewer_harness", "reviewer_model", "reviewer_effort",
+    "reviewer_account_digest", "ledger_digest", "evidence_policy",
+)
+conditional = copy.deepcopy(base)
+conditional["evidence_policy"] = "conditional-v1"
+conditional["evidence_mode"] = "isolated-proof-v1"
+conditional_identity = conditional["azure_identity"]
+conditional_identity["evidence_policy"] = "conditional-v1"
+conditional_identity["review_generation"] = module.digest_bytes(
+    module.canonical_bytes(
+        {field: conditional_identity[field] for field in generation_fields}
+    )
+).split(":", 1)[1][:24]
+for child_label in ("tool", "verifier"):
+    conditional_identity[child_label]["review_generation"] = conditional_identity[
+        "review_generation"
+    ]
+    conditional_identity["evidence_attempts"][0][child_label][
+        "review_generation"
+    ] = conditional_identity["review_generation"]
+conditional_identity["evidence_attempts_digest"] = module.digest_bytes(
+    module.canonical_bytes(conditional_identity["evidence_attempts"])
+)
+conditional_identity["failed_evidence_attempts"] = []
+conditional_identity["failed_evidence_attempts_digest"] = module.digest_bytes(
+    module.canonical_bytes([])
+)
+module.validate_azure_reviewer_record(conditional, run, "conditional")
+
+discarded_clean = copy.deepcopy(conditional)
+discarded_clean["evidence_mode"] = "identity-only-v1"
+module.validate_azure_reviewer_record(
+    discarded_clean, run, "semantically-discarded-clean-attempt"
+)
+
+identity_only = copy.deepcopy(conditional)
+identity_only["evidence_mode"] = "identity-only-v1"
+identity_only_identity = identity_only["azure_identity"]
+identity_only_identity["tool"] = None
+identity_only_identity["verifier"] = None
+identity_only_identity["evidence_attempts"] = []
+identity_only_identity["evidence_attempts_digest"] = module.digest_bytes(
+    module.canonical_bytes([])
+)
+module.validate_azure_reviewer_record(identity_only, run, "identity-only")
+
+contradictory = copy.deepcopy(identity_only)
+contradictory["evidence_mode"] = "isolated-proof-v1"
+try:
+    module.validate_azure_reviewer_record(contradictory, run, "contradictory")
+except RuntimeError as exc:
+    assert "has no successful attempt" in str(exc), str(exc)
+else:
+    raise AssertionError("isolated mode with zero successful attempts validated")
+
+failed = copy.deepcopy(identity_only)
+failed_identity = failed["azure_identity"]
+failed_tool = child("failed-tool")
+failed_verifier = child("failed-verifier")
+for candidate in (failed_tool, failed_verifier):
+    candidate["review_generation"] = failed_identity["review_generation"]
+failed_result = {**result, "exit_code": 1}
+failed_identity["failed_evidence_attempts"] = [{
+    "tool": failed_tool,
+    "tool_result": failed_result,
+    "verifier": failed_verifier,
+    "verifier_result": failed_result,
+    "failure": "evidence command did not pass cleanly",
+}]
+failed_identity["failed_evidence_attempts_digest"] = module.digest_bytes(
+    module.canonical_bytes(failed_identity["failed_evidence_attempts"])
+)
+module.validate_azure_reviewer_record(failed, run, "failed-attempt")
+
+# A paid failed pair remains loadable through the complete core ledger path.
+failed_config = copy.deepcopy(failed)
+failed_config.update({
+    "credential_source": "fixture-source",
+    "credential_identifier": "fixture-id",
+    "review_family_mode": core.REVIEW_FAMILY_CODEX_FALLBACK,
+    "model_independence": None,
+})
+core.refresh_reviewer_identity(failed_config)
+failed_ledger = core.new_ledger(
+    "task-one", "https://github.com/example/repo/pull/1"
+)
+core.append_failed_run(
+    failed_ledger,
+    {
+        "head_sha": "a" * 40,
+        "base_sha": "b" * 40,
+        "base_branch_sha": "d" * 40,
+        "claims_sha256": "c" * 64,
+    },
+    "fixture paid evidence failure",
+    failed_config,
+    "tool-failure",
+)
+reloaded = core.validate_ledger(
+    failed_ledger, "task-one", "https://github.com/example/repo/pull/1"
+)
+recorded = reloaded["runs"][-1]["reviewer"]["azure_identity"]
+assert recorded["evidence_attempts"] == []
+assert len(recorded["failed_evidence_attempts"]) == 1
 for cleanup_phase in ("pending", "ambiguous"):
-    import copy
     candidate = copy.deepcopy(base)
     candidate["azure_identity"]["model"]["cleanup_phase"] = cleanup_phase
     candidate["azure_identity"]["staging_cleanup_phase"] = cleanup_phase
@@ -1801,12 +1918,10 @@ executor = module.RemoteEvidenceExecutor(
 )
 executor.validate_declared_paths(
     {".crosscheck/reproductions/proof.sh", ".crosscheck/mutations/proof.patch"},
-    receipt_path=".crosscheck/reproductions/receipt.txt",
 )
 try:
     executor.validate_declared_paths(
         {".crosscheck/reproductions/proof.sh"},
-        receipt_path=".crosscheck/reproductions/receipt.txt",
     )
 except module.BridgeError as exc:
     assert "exactly match" in str(exc)
@@ -1848,6 +1963,35 @@ except module.BridgeError as exc:
     assert "reused" in str(exc)
 else:
     raise AssertionError("stale tool endpoint reuse became accepted evidence")
+
+# A completed nonclean pair is durable failed evidence, never certification.
+def dispatch_failed(runner, request, suffix, command, wall_seconds):
+    identity, result = dispatch(
+        runner, request, suffix, command, wall_seconds
+    )
+    result["exit_code"] = 1
+    return identity, result
+module.dispatch_once = dispatch_failed
+failed = module.RemoteEvidenceExecutor(
+    repository_root=Path("."), remote="https://github.com/example/repo.git",
+    source_ref="refs/pull/7/head", head_sha="a" * 40, base_sha="b" * 40,
+    review_generation="e" * 24, evidence_files=files,
+)
+try:
+    failed(
+        {"test_path":".crosscheck/reproductions/proof.sh","command":"bash --noprofile --norc .crosscheck/reproductions/proof.sh " + "b"*40 + " " + "a"*40,"expected_exit":0,"output_contains":"marker"},
+        Path("."), "failed", time.monotonic() + 300,
+    )
+except module.BridgeError as exc:
+    assert "failed closed" in str(exc)
+else:
+    raise AssertionError("a nonclean evidence pair became certifying")
+assert failed.attempts == []
+assert len(failed.failed_attempts) == 1
+record = failed.failed_attempts[0]
+assert record["tool_result"]["exit_code"] == 1
+assert record["verifier_result"]["exit_code"] == 1
+assert record["failure"] == "evidence command did not pass cleanly"
 PY
   pass "host bridge rejects hostile evidence and requires distinct cleaned exact-head tool/verifier attempts"
 }
@@ -2707,8 +2851,15 @@ attempts = [{
 class BridgeError(RuntimeError):
     pass
 class EvidenceExecutor:
+    instances = []
     def __init__(self, **_kwargs):
         self.attempts = attempts
+        self.failed_attempts = []
+        self.calls = 0
+        self.__class__.instances.append(self)
+    def __call__(self, *_args, **_kwargs):
+        self.calls += 1
+        raise AssertionError("identity-only review launched a proof executor")
 
 bridge = SimpleNamespace(
     BridgeError=BridgeError,
@@ -2723,7 +2874,23 @@ core.unavailable_run_telemetry = lambda: {}
 core.normalize_pi_review = lambda *_args: {}
 core.assert_review_checkout_intact = lambda *_args: None
 core.validate_review_shape = lambda *_args, **_kwargs: {}
-def apply_review(ledger, *_args, **_kwargs):
+def apply_review(
+    ledger,
+    _review,
+    _review_dir,
+    _proof_root,
+    _snapshot,
+    review_config,
+    *,
+    evidence_executor,
+    **_kwargs,
+):
+    if review_config.get("_fixture_apply_failure"):
+        evidence_executor.executor.failed_attempts.append({
+            "tool": {"vm_instance_id": "failed-tool-vm"},
+            "verifier": {"vm_instance_id": "failed-verifier-vm"},
+        })
+        raise core.CrosscheckError("fixture paid evidence failure")
     working = {**ledger, "runs": list(ledger.get("runs", []))}
     run = {"reviewer": {}, "state": "blocking"}
     working["runs"].append(run)
@@ -2767,10 +2934,78 @@ persisted_run = events[1]
 assert persisted_run["reviewer"]["azure_identity"]["model"]["cleanup_phase"] == "ambiguous"
 assert persisted_run["reviewer"]["azure_identity"]["staging_cleanup_phase"] == "ambiguous"
 
+# With no admitted evidence, the adapter persists the model identity without
+# dispatching either proof compartment.
+events.clear()
+attempts.clear()
+adapter.cleanup_model_vm = lambda *_args: events.append("cleanup")
+identity_config = {
+    **config,
+    "evidence_policy": "conditional-v1",
+    "evidence_mode": "identity-only-v1",
+}
+working, identity_run = adapter._run_azure_review_in_lane(
+    core=core,
+    root=root,
+    home=home,
+    task_id="identity-only-no-proof-vms",
+    pr_url="https://github.com/ruby-dlee/firstmate/pull/327",
+    review_dir=review,
+    proof_root=proof,
+    snapshot_value=snapshot,
+    ledger={"runs": []},
+    config=identity_config,
+    author_account_identity="",
+    lane=0,
+    persist_result=persist_result,
+)
+assert working["runs"][-1] is identity_run
+identity_record = identity_run["reviewer"]["azure_identity"]
+assert identity_record["tool"] is None
+assert identity_record["verifier"] is None
+assert identity_record["evidence_attempts"] == []
+assert identity_record["failed_evidence_attempts"] == []
+assert identity_record["model"]["cleanup_phase"] == "complete"
+assert identity_record["staging_cleanup_phase"] == "complete"
+assert EvidenceExecutor.instances[-1].calls == 0
+
+# Proof-application failure still returns the paid attempt identity to the
+# core config that appends the failed run after this adapter unwinds.
+failed_config = {
+    **identity_config,
+    "_fixture_apply_failure": True,
+}
+try:
+    adapter._run_azure_review_in_lane(
+        core=core,
+        root=root,
+        home=home,
+        task_id="failed-proof-attempt-durable",
+        pr_url="https://github.com/ruby-dlee/firstmate/pull/327",
+        review_dir=review,
+        proof_root=proof,
+        snapshot_value=snapshot,
+        ledger={"runs": []},
+        config=failed_config,
+        author_account_identity="",
+        lane=0,
+        persist_result=persist_result,
+    )
+except core.CrosscheckError as exc:
+    assert "paid evidence failure" in str(exc), str(exc)
+else:
+    raise AssertionError("fixture proof failure unexpectedly produced a run")
+failed_identity = failed_config["azure_identity"]
+assert failed_identity["evidence_attempts"] == []
+assert len(failed_identity["failed_evidence_attempts"]) == 1
+assert failed_identity["model"]["cleanup_phase"] == "complete"
+assert failed_identity["staging_cleanup_phase"] == "complete"
+
 # A bridge failure must enter the core's item-scoped CrosscheckError family so
 # apply_review can degrade one proof without discarding the semantic review.
 class FailingExecutor:
     attempts = []
+    failed_attempts = []
     batch_deadline = 1.0
     def __call__(self, *_args, **_kwargs):
         raise BridgeError("fixture evidence refusal")
@@ -2784,7 +3019,7 @@ normalized = adapter.NormalizedRemoteEvidenceExecutor(
 )
 for operation in (
     lambda: normalized(None),
-    lambda: normalized.validate_declared_paths(set(), receipt_path="fixture"),
+    lambda: normalized.validate_declared_paths(set()),
     lambda: normalized.execute_mutation(None),
 ):
     try:

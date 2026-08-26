@@ -571,14 +571,6 @@ base = {
     "head_sha": head,
     "executing_account_home": str(Path(account_selector).resolve()),
     "execution_home": str(Path(os.environ["HOME"]).resolve()),
-    "executed_reproduction": {
-        "test_path": ".crosscheck/reproductions/review-execution.sh",
-        "command": command,
-        "expected_exit": 0,
-        "output_contains": "CROSSCHECK-REVIEW-EXECUTED",
-        "receipt_path": ".crosscheck/reproductions/review-execution.receipt",
-        "receipt_contains": "CROSSCHECK-REVIEW-EXECUTED",
-    },
     "summary": "review complete",
     "citations": [{"path": "app.txt", "line": 1}],
     "finding_updates": [],
@@ -853,6 +845,18 @@ elif scenario == "reviewer-env-dependent-execution":
         capture_output=True,
         text=True,
     )
+    base["new_findings"] = [{
+        "title": "Reviewer-only environment dependency",
+        "severity": "blocking",
+        "description": "The proposed helper requires reviewer-only state.",
+        "citations": [{"path": "app.txt", "line": 1}],
+        "reproduction": {
+            "test_path": ".crosscheck/reproductions/review-execution.sh",
+            "command": command,
+            "expected_exit": 0,
+            "output_contains": "CROSSCHECK-REVIEW-EXECUTED",
+        },
+    }]
 elif scenario == "unfound-reproduction-command":
     reproduction = protocol / "reproductions" / "missing-tool.sh"
     reproduction.parent.mkdir(parents=True, exist_ok=True)
@@ -924,7 +928,6 @@ elif scenario == "reading-only-suspicion":
         "description": "The reviewer reported a concern without executing a command.",
         "citations": [{"path": "app.txt", "line": 1}],
     }]
-    del base["executed_reproduction"]
     execution.unlink()
     receipt.unlink(missing_ok=True)
 
@@ -1117,10 +1120,9 @@ select_cross_family_reviewer() {
 EOF
 }
 
-test_non_codex_prompt_addendum_preserves_codex_prompt_bytes() {
+test_conditional_prompt_is_one_shot_and_model_neutral() {
   "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" <<'PY' \
-    || fail "the lane-specific exact-SHA prompt addendum regressed"
-import hashlib
+    || fail "the conditional evidence prompt contract regressed"
 import importlib.util
 import sys
 
@@ -1142,22 +1144,6 @@ codex_prompt = module.make_prompt(
     ledger,
     {"account_selector": "CODEX_HOME", "model": "gpt-5.6-sol"},
 )
-# Golden bytes captured immediately before the lane addendum landed. This
-# makes an accidental edit to the shared Codex prompt observable even when a
-# refactor leaves the cross-family assertions below green.
-assert len(codex_prompt.encode("utf-8")) == 5358, len(codex_prompt.encode("utf-8"))
-assert hashlib.sha256(codex_prompt.encode("utf-8")).hexdigest() == (
-    "97599f6a8fb3415847c70cc046130993d643ad831ddcb468d7b10ce8e95e3bc0"
-)
-
-addendum = f"""
-REPRODUCTION COMMAND FORMAT - EXACT REQUIREMENT:
-The literal string you place in `executed_reproduction.command` MUST contain, verbatim, both
-full 40-character SHAs: exact base {base_sha} and exact head {head_sha}.
-Example: bash .crosscheck/reproductions/repro.sh {base_sha} {head_sha}
-A command that omits either SHA, abbreviates it, or references it through a shell variable is
-refused and the entire review is discarded as UNREVIEWED.
-"""
 pi_codex_prompt = module.make_prompt(
     snapshot,
     ledger,
@@ -1171,16 +1157,18 @@ cross_family_prompt = module.make_prompt(
         "model": "accounts/fireworks/models/glm-5p2",
     },
 )
-assert cross_family_prompt == pi_codex_prompt + addendum
-assert base_sha in addendum and head_sha in addendum
-print("PROMPT ADDENDUM OK")
+assert pi_codex_prompt == cross_family_prompt
+assert codex_prompt.replace("CODEX_HOME", "PI_CODING_AGENT_DIR") == pi_codex_prompt
+assert "executed_reproduction" not in codex_prompt
+assert base_sha in codex_prompt and head_sha in codex_prompt
+print("CONDITIONAL PROMPT OK")
 PY
-  pass "the non-Codex addendum names both full SHAs without changing Codex prompt bytes"
+  pass "the conditional evidence prompt is one-shot and model-neutral"
 }
 
-test_full_sha_verdict_gate_is_not_relaxed_by_the_prompt_addendum() {
+test_one_shot_verdict_needs_no_verdict_level_reproduction() {
   "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$TMP_ROOT" <<'PY' \
-    || fail "the full-SHA verdict gate was weakened or lost its mutation pin"
+    || fail "the one-shot verdict still required legacy execution evidence"
 import importlib.util
 from pathlib import Path
 import subprocess
@@ -1199,9 +1187,8 @@ subprocess.run(["git", "-C", str(review_dir), "add", "app.txt"], check=True)
 
 
 class EvidenceExecutor:
-    def validate_declared_paths(self, paths, *, receipt_path):
-        assert paths == {".crosscheck/reproductions/repro.sh"}, paths
-        assert receipt_path == ".crosscheck/reproductions/repro.receipt"
+    def validate_declared_paths(self, paths):
+        assert paths == set(), paths
 
 
 base_sha = "b" * 40
@@ -1211,44 +1198,30 @@ verdict = {
     "head_sha": head_sha,
     "executing_account_home": "/reviewer/account",
     "execution_home": "/reviewer/home",
-    "executed_reproduction": {
-        "test_path": ".crosscheck/reproductions/repro.sh",
-        # Otherwise-valid shape, but neither required literal SHA is present.
-        # Deleting the implementation's full-SHA check makes this validation
-        # return successfully and therefore makes this mutation pin fail.
-        "command": "bash .crosscheck/reproductions/repro.sh BASE HEAD",
-        "expected_exit": 0,
-        "output_contains": "REPRODUCED",
-        "receipt_path": ".crosscheck/reproductions/repro.receipt",
-        "receipt_contains": "REPRODUCED",
-    },
     "summary": "review complete",
     "citations": [{"path": "app.txt", "line": 1}],
     "finding_updates": [],
     "new_findings": [],
     "suspicions": [],
 }
-try:
-    module.validate_review_shape(
-        verdict,
-        {"base_sha": base_sha, "head_sha": head_sha},
-        review_dir,
+validated = module.validate_review_shape(
+    verdict,
+    {"base_sha": base_sha, "head_sha": head_sha},
+    review_dir,
         {
             "executing_account_home": "/reviewer/account",
             "execution_home": "/reviewer/home",
+            "evidence_policy": module.EVIDENCE_POLICY_CONDITIONAL_V1,
         },
-        evidence_executor=EvidenceExecutor(),
-    )
-except module.CrosscheckError as exc:
-    assert str(exc) == (
-        "reviewer verdict executed reproduction command must name the exact "
-        "base and head SHAs"
-    ), str(exc)
-else:
-    raise AssertionError("a verdict command omitting both full SHAs was accepted")
-print("FULL SHA GATE PINNED")
+    evidence_executor=EvidenceExecutor(),
+)
+assert "executed_reproduction" not in validated
+schema = module.review_output_schema("/reviewer/account", "/reviewer/home")
+assert "executed_reproduction" not in schema["required"]
+assert "executed_reproduction" not in schema["properties"]
+print("ONE-SHOT VERDICT ACCEPTED")
 PY
-  pass "the full-SHA verdict gate remains independently mutation-pinned"
+  pass "the one-shot verdict relies on controller identity without legacy execution evidence"
 }
 
 test_status_reports_serving_family_relaxation_and_latest_run() {
@@ -2273,14 +2246,12 @@ assert reviewer["execution_home"].endswith("/.crosscheck/pi-home")
 assert reviewer["account_selector"] == "PI_CODING_AGENT_DIR"
 assert reviewer["credential_source"] == "pi-openai-codex-oauth-file"
 assert reviewer["reviewer_turn_count"] == "1"
-assert reviewer["execution_proof"]["actual_exit"] == 0
-receipt = reviewer["execution_proof"]["reviewer_receipt"]["output"]
-assert sys.argv[2] in receipt
-assert sys.argv[3] in reviewer["execution_proof"]["command"]
-assert sys.argv[4] in reviewer["execution_proof"]["command"]
+assert reviewer["evidence_policy"] == "conditional-v1"
+assert reviewer["evidence_mode"] == "identity-only-v1"
+assert "execution_proof" not in reviewer
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     "$case_dir/pi-home" "$base" "$head" \
-    || fail "Pi review did not record its bound account, nonzero turn, and executed command"
+    || fail "Pi review did not record its bound account and conditional evidence identity"
   assert_absent "$case_dir/codex.log" "Codex launched instead of the selected Pi reviewer"
   pass "Pi reviewer executes a bound nonzero-turn exact-head review"
 }
@@ -2483,7 +2454,9 @@ assert reviewer["terminal_model"] == model
 assert reviewer["review_depth_passes"] == "2"
 assert reviewer["review_depth_mode"] == "two-pass-independent-synthesis-v1"
 assert reviewer["reviewer_turn_count"] == "2"
-assert reviewer["execution_proof"]["actual_exit"] == 0
+assert reviewer["evidence_policy"] == "conditional-v1"
+assert reviewer["evidence_mode"] == "identity-only-v1"
+assert "execution_proof" not in reviewer
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" "$case_dir/pi-home" "$slot" "$model" \
       || fail "$model review did not record its bound provider, terminal route, depth, and non-secret credential binding"
     [ "$(wc -l < "$case_dir/pi.log")" -eq 2 ] \
@@ -4169,10 +4142,16 @@ test_reviewer_env_dependent_evidence_names_the_difference() {
   rc=$?
   set -e
   expect_code 1 "$rc" "reviewer evidence depending on reviewer-only environment"
-  assert_grep 'none of the reviewer' "$case_dir/err" \
-    "the refusal did not name the independent re-execution environment"
-  assert_grep 'CODEX_HOME' "$case_dir/err" \
-    "the refusal did not surface the command output that explains the exit"
+  python3 - "$case_dir/data/task-x1/crosscheck-ledger.json" <<'PY' \
+    || fail "the degraded proof did not retain its execution diagnosis"
+import json
+import sys
+
+run = json.load(open(sys.argv[1]))["runs"][-1]
+description = run["suspicions"][0]["description"]
+assert "CODEX_HOME" in description, description
+assert "reviewer" in description, description
+PY
   pass "evidence that needs reviewer-only environment is diagnosable, not a bare exit"
 }
 
@@ -5188,7 +5167,7 @@ assert run["suspicions"][0]["description"] == "The reviewer could not finish a r
   pass "a completed review that declines clearance is blocking code evidence"
 }
 
-test_reading_only_suspicion_is_a_tool_failure() {
+test_reading_only_suspicion_is_identity_only_blocking() {
   local record case_dir base head rc
   record=$(make_case reading-only-suspicion)
   IFS=$'\t' read -r case_dir base head <<< "$record"
@@ -5198,23 +5177,24 @@ test_reading_only_suspicion_is_a_tool_failure() {
   rc=$?
   set -e
   expect_code 1 "$rc" "reading-only reviewer suspicion"
-  assert_grep 'CROSSCHECK TOOL-FAILURE:' "$case_dir/err" \
-    "a verdict without command execution was not classified as a tool failure"
-  assert_grep 'reviewer verdict carries no executed reproduction' "$case_dir/err" \
-    "the command-execution failure did not name the missing inspected artifact"
-  assert_no_grep 'CROSSCHECK BLOCKING' "$case_dir/err" \
-    "a reading-only concern was accepted as blocking code evidence"
+  assert_grep 'CROSSCHECK BLOCKING:' "$case_dir/err" \
+    "a reading-only concern was not preserved as blocking code evidence"
+  assert_no_grep 'CROSSCHECK TOOL-FAILURE' "$case_dir/err" \
+    "a valid identity-only review collapsed into a tool failure"
   assert_no_grep 'CROSSCHECK UNREVIEWED' "$case_dir/err" \
     "a reviewer runtime failure collapsed into a generic review outcome"
   python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1]))
 run = value["runs"][-1]
-assert run["state"] == "tool-failure"
-assert run["suspicions"] == []
+assert run["state"] == "blocking"
+assert run["suspicions"][0]["description"] == "The reviewer reported a concern without executing a command."
+assert run["reviewer"]["evidence_policy"] == "conditional-v1"
+assert run["reviewer"]["evidence_mode"] == "identity-only-v1"
+assert "execution_proof" not in run["reviewer"]
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
-    || fail "reading-only verdict was not durably classified as a tool failure"
-  pass "a verdict without an executed reproduction is a tool failure, never blocking code evidence"
+    || fail "reading-only verdict was not durably recorded as identity-only blocking"
+  pass "a reading-only suspicion is a valid identity-only blocking review"
 }
 
 test_launcher_requires_supported_python() {
@@ -6260,7 +6240,6 @@ with open(path, encoding="utf-8") as handle:
     ledger = json.load(handle)
 reviewer = ledger["runs"][1]["reviewer"]
 for field in (
-    "execution_proof",
     "terminal_provider",
     "terminal_model",
     "review_depth_passes",
@@ -6279,7 +6258,7 @@ PY
   expect_code 1 "$rc" "reused current contract missing review evidence"
   assert_grep 'current regular review contract is missing terminal or depth fields' \
     "$case_dir/reuse-omission.err" \
-    "a reused current-contract record omitted its proof and depth evidence"
+    "a reused current-contract record omitted its terminal and depth evidence"
   pass "current regular records missing terminal or depth evidence cannot be reused"
 }
 
@@ -6345,8 +6324,8 @@ PY
 
 if [ -n "${FM_TEST_CASE:-}" ]; then
   case "$FM_TEST_CASE" in
-    test_non_codex_prompt_addendum_preserves_codex_prompt_bytes|\
-    test_full_sha_verdict_gate_is_not_relaxed_by_the_prompt_addendum|\
+    test_conditional_prompt_is_one_shot_and_model_neutral|\
+    test_one_shot_verdict_needs_no_verdict_level_reproduction|\
     test_status_reports_serving_family_relaxation_and_latest_run|\
     test_reviewer_policy_profiles_and_independence|\
     test_same_model_relaxation_does_not_require_author_identity|\
@@ -6379,7 +6358,7 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_codex_reviewer_requires_bound_auth_and_clears_ambient_credentials|\
     test_launcher_requires_supported_python|\
     test_completed_reviewer_suspicion_is_blocking|\
-    test_reading_only_suspicion_is_a_tool_failure|\
+    test_reading_only_suspicion_is_identity_only_blocking|\
     test_new_finding_requires_executed_reproduction|\
     test_failed_new_finding_reproduction_becomes_a_suspicion|\
     test_silence_never_closes_prior_finding|\
@@ -6495,8 +6474,8 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-3 ]; then
 fi
 
 test_launcher_requires_supported_python
-test_non_codex_prompt_addendum_preserves_codex_prompt_bytes
-test_full_sha_verdict_gate_is_not_relaxed_by_the_prompt_addendum
+test_conditional_prompt_is_one_shot_and_model_neutral
+test_one_shot_verdict_needs_no_verdict_level_reproduction
 test_status_reports_serving_family_relaxation_and_latest_run
 test_reviewer_policy_profiles_and_independence
 test_same_model_relaxation_does_not_require_author_identity
@@ -6582,7 +6561,7 @@ test_claims_lookup_error_never_reaches_reviewer
 test_reviewer_configuration_failures_are_tool_failures
 test_stopped_reviewer_and_wrong_head_are_unreviewed
 test_completed_reviewer_suspicion_is_blocking
-test_reading_only_suspicion_is_a_tool_failure
+test_reading_only_suspicion_is_identity_only_blocking
 test_pytest_runner_resolves_through_a_uv_aware_ladder
 test_moved_default_branch_stays_reviewable
 test_unavailable_reviewer_fails_over_to_the_next_account

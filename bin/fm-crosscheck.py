@@ -151,6 +151,15 @@ LEGACY_CROSS_FAMILY_MODELS = {
 # diff, lowering reasoning, or weakening evidence.
 LOCAL_REGULAR_REVIEW_DEPTH_PASSES = 2
 LOCAL_REGULAR_REVIEW_DEPTH_MODE = "two-pass-independent-synthesis-v1"
+KNOWN_REVIEW_DEPTH_CONTRACTS = frozenset(
+    {("2", "two-pass-independent-synthesis-v1")}
+)
+EVIDENCE_POLICY_CONDITIONAL_V1 = "conditional-v1"
+EVIDENCE_MODE_IDENTITY_ONLY_V1 = "identity-only-v1"
+EVIDENCE_MODE_ISOLATED_PROOF_V1 = "isolated-proof-v1"
+EVIDENCE_MODES = frozenset(
+    {EVIDENCE_MODE_IDENTITY_ONLY_V1, EVIDENCE_MODE_ISOLATED_PROOF_V1}
+)
 # The model decides the Pi provider slot. An unmapped model is refused rather
 # than guessed, so a roster typo can never route a review to a provider the
 # policy never named.
@@ -3551,10 +3560,15 @@ def validate_ledger(value: Any, task_id: str, url: str) -> dict[str, Any]:
                 f"{label}.reviewer current regular review contract is "
                 "missing terminal or depth fields",
             )
+        local_semantic_reviewer = (
+            isinstance(reviewer, dict)
+            and reviewer.get("execution_mode") != "azure-compartment-v1"
+            and run["state"] in {"clear", "blocking"}
+        )
         if (
             isinstance(reviewer, dict)
-            and "execution_proof" in reviewer
             and reviewer.get("execution_mode") != "azure-compartment-v1"
+            and (local_semantic_reviewer or "execution_proof" in reviewer)
         ):
             execution_home = reviewer.get("execution_home")
             require(
@@ -3590,6 +3604,17 @@ def validate_ledger(value: Any, task_id: str, url: str) -> dict[str, Any]:
                 )
                 terminal_provider = reviewer.get("terminal_provider")
                 terminal_model = reviewer.get("terminal_model")
+                if (
+                    reviewer.get("evidence_policy")
+                    == EVIDENCE_POLICY_CONDITIONAL_V1
+                    and local_semantic_reviewer
+                ):
+                    require(
+                        terminal_provider is not None
+                        and terminal_model is not None,
+                        f"{label}.reviewer current Pi review is missing its "
+                        "terminal route",
+                    )
                 if terminal_provider is not None or terminal_model is not None:
                     require(
                         terminal_provider
@@ -3606,13 +3631,11 @@ def validate_ledger(value: Any, task_id: str, url: str) -> dict[str, Any]:
                 depth_mode = reviewer.get("review_depth_mode")
                 if depth_passes is not None or depth_mode is not None:
                     require(
-                        depth_passes == str(LOCAL_REGULAR_REVIEW_DEPTH_PASSES),
-                        f"{label}.reviewer.review_depth_passes must equal the "
-                        "fixed regular review depth",
-                    )
-                    require(
-                        depth_mode == LOCAL_REGULAR_REVIEW_DEPTH_MODE,
-                        f"{label}.reviewer.review_depth_mode is invalid",
+                        isinstance(depth_passes, str)
+                        and isinstance(depth_mode, str)
+                        and (depth_passes, depth_mode)
+                        in KNOWN_REVIEW_DEPTH_CONTRACTS,
+                        f"{label}.reviewer review depth contract is unknown",
                     )
                     require(
                         reviewer.get("model")
@@ -3627,24 +3650,26 @@ def validate_ledger(value: Any, task_id: str, url: str) -> dict[str, Any]:
                         f"{label}.reviewer.reviewer_turn_count does not cover "
                         "every depth pass",
                     )
-            execution_proof = reviewer.get("execution_proof")
-            require(
-                isinstance(execution_proof, dict),
-                f"{label}.reviewer.execution_proof must be an object",
-            )
-            require(
-                execution_proof.get("expected_exit") == 0
-                and execution_proof.get("actual_exit") == 0,
-                f"{label}.reviewer.execution_proof did not succeed",
-            )
-            receipt = execution_proof.get("reviewer_receipt")
-            require(
-                isinstance(receipt, dict)
-                and isinstance(receipt.get("sha256"), str)
-                and re.fullmatch(r"[0-9a-f]{64}", receipt["sha256"])
-                is not None,
-                f"{label}.reviewer.execution_proof has no reviewer Bash receipt",
-            )
+            if "execution_proof" in reviewer:
+                execution_proof = reviewer.get("execution_proof")
+                require(
+                    isinstance(execution_proof, dict),
+                    f"{label}.reviewer.execution_proof must be an object",
+                )
+                require(
+                    execution_proof.get("expected_exit") == 0
+                    and execution_proof.get("actual_exit") == 0,
+                    f"{label}.reviewer.execution_proof did not succeed",
+                )
+                receipt = execution_proof.get("reviewer_receipt")
+                require(
+                    isinstance(receipt, dict)
+                    and isinstance(receipt.get("sha256"), str)
+                    and re.fullmatch(r"[0-9a-f]{64}", receipt["sha256"])
+                    is not None,
+                    f"{label}.reviewer.execution_proof has no reviewer Bash receipt",
+                )
+        validate_reviewer_evidence_contract(value, run, label)
     return copy.deepcopy(value)
 
 
@@ -3869,18 +3894,6 @@ def review_output_schema(
             "output_contains": {"type": "string"},
         },
     }
-    verdict_reproduction = copy.deepcopy(reproduction)
-    verdict_reproduction["required"] = [
-        *verdict_reproduction["required"],
-        "receipt_path",
-        "receipt_contains",
-    ]
-    verdict_reproduction["properties"].update(
-        {
-            "receipt_path": {"type": "string"},
-            "receipt_contains": {"type": "string", "minLength": 1},
-        }
-    )
     mutation = {
         "type": "object",
         "additionalProperties": False,
@@ -3915,7 +3928,6 @@ def review_output_schema(
             "head_sha",
             "executing_account_home",
             "execution_home",
-            "executed_reproduction",
             "summary",
             "citations",
             "finding_updates",
@@ -3935,7 +3947,6 @@ def review_output_schema(
                 if stable_identity
                 else {"type": "string", "const": execution_home}
             ),
-            "executed_reproduction": verdict_reproduction,
             "summary": {"type": "string", "minLength": 1},
             "citations": {
                 "type": "array",
@@ -4065,6 +4076,18 @@ def proof_sha256(proof: Any) -> str | None:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def evidence_mode_for_admitted_proofs(admitted: int) -> str:
+    require(
+        isinstance(admitted, int) and not isinstance(admitted, bool) and admitted >= 0,
+        "admitted evidence count must be a non-negative integer",
+    )
+    return (
+        EVIDENCE_MODE_ISOLATED_PROOF_V1
+        if admitted
+        else EVIDENCE_MODE_IDENTITY_ONLY_V1
+    )
+
+
 def review_contract_sha256(use_azure: bool, harness: str) -> str:
     """Bind reuse to the exact host, prompt, schema, and guest implementation."""
 
@@ -4110,26 +4133,48 @@ def bind_reviewer_identity(
         else:
             source, identifier = inspect_pi_credential(account_home)
             account = account_identity(config["harness"], account_home)
+    config["credential_source"] = source
+    config["credential_identifier"] = identifier
+    config["reviewer_account_identity_sha256"] = hashlib.sha256(
+        account.encode("utf-8")
+    ).hexdigest()
+    refresh_reviewer_identity(config)
+
+
+def reviewer_identity_material(config: dict[str, Any]) -> dict[str, Any]:
     material = {
         "harness": config["harness"],
         "model": config["model"],
         "effort": config["effort"],
-        "account_home": str(account_home.resolve()),
-        "credential_source": source,
-        "credential_identifier": identifier,
-        "reviewer_account_identity_sha256": hashlib.sha256(
-            account.encode("utf-8")
-        ).hexdigest(),
+        "account_home": str(Path(config["account_home"]).resolve()),
+        "credential_source": config["credential_source"],
+        "credential_identifier": config["credential_identifier"],
+        "reviewer_account_identity_sha256": config[
+            "reviewer_account_identity_sha256"
+        ],
         "review_family_mode": config.get("review_family_mode"),
         "model_independence": config.get("model_independence"),
     }
-    config["credential_source"] = source
-    config["credential_identifier"] = identifier
-    config["reviewer_account_identity_sha256"] = material[
-        "reviewer_account_identity_sha256"
-    ]
+    policy = config.get("evidence_policy")
+    if policy is not None:
+        require(
+            policy == EVIDENCE_POLICY_CONDITIONAL_V1,
+            "reviewer evidence_policy is invalid",
+        )
+        mode = config.get("evidence_mode")
+        require(mode in EVIDENCE_MODES, "reviewer evidence_mode is invalid")
+        material["evidence_policy"] = policy
+        material["evidence_mode"] = mode
+    return material
+
+
+def refresh_reviewer_identity(config: dict[str, Any]) -> None:
     config["reviewer_identity_sha256"] = hashlib.sha256(
-        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json.dumps(
+            reviewer_identity_material(config),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
     ).hexdigest()
 
 
@@ -4137,6 +4182,87 @@ def run_sha256(run: dict[str, Any]) -> str:
     return hashlib.sha256(
         json.dumps(run, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def run_has_admitted_proof(
+    ledger: dict[str, Any], run: dict[str, Any]
+) -> bool:
+    indexed = {finding["id"]: finding for finding in ledger["findings"]}
+    for finding_id in (*run["updated_findings"], *run["new_findings"]):
+        finding = indexed.get(finding_id)
+        if not isinstance(finding, dict):
+            continue
+        events = [
+            event
+            for event in finding.get("history", [])
+            if event.get("at") == run["at"]
+            and event.get("head_sha") == run["head_sha"]
+        ]
+        if not events:
+            continue
+        event = events[-1]
+        proof = event.get("proof")
+        if event.get("status") == "verified-fixed" and isinstance(proof, dict):
+            return True
+        if (
+            isinstance(proof, dict)
+            and isinstance(proof.get("expected_exit"), int)
+            and proof.get("actual_exit") == proof.get("expected_exit")
+        ):
+            return True
+    return False
+
+
+def validate_reviewer_evidence_contract(
+    ledger: dict[str, Any], run: dict[str, Any], label: str
+) -> None:
+    reviewer = run.get("reviewer")
+    if not isinstance(reviewer, dict):
+        return
+    policy = reviewer.get("evidence_policy")
+    mode = reviewer.get("evidence_mode")
+    if policy is None:
+        require(mode is None, f"{label}.reviewer legacy evidence mode is mixed")
+        if run["state"] in {"clear", "blocking"}:
+            require(
+                isinstance(reviewer.get("execution_proof"), dict),
+                f"{label}.reviewer legacy semantic run needs execution_proof",
+            )
+        return
+    require(
+        policy == EVIDENCE_POLICY_CONDITIONAL_V1,
+        f"{label}.reviewer.evidence_policy is invalid",
+    )
+    require(mode in EVIDENCE_MODES, f"{label}.reviewer.evidence_mode is invalid")
+    require(
+        "execution_proof" not in reviewer,
+        f"{label}.reviewer new evidence contract carries legacy execution_proof",
+    )
+    if reviewer.get("reviewer_identity_sha256") is None:
+        require(
+            run["state"] in {"tool-failure", "unreviewed", "cannot-certify"}
+            and mode == EVIDENCE_MODE_IDENTITY_ONLY_V1,
+            f"{label}.reviewer semantic evidence identity is incomplete",
+        )
+        return
+    require(
+        reviewer.get("reviewer_identity_sha256")
+        == hashlib.sha256(
+            json.dumps(
+                reviewer_identity_material(reviewer),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+        f"{label}.reviewer evidence identity digest mismatches",
+    )
+    expected = evidence_mode_for_admitted_proofs(
+        int(run_has_admitted_proof(ledger, run))
+    )
+    require(
+        mode == expected,
+        f"{label}.reviewer.evidence_mode contradicts admitted proofs",
+    )
 
 
 def reusable_clear_run(
@@ -4178,6 +4304,10 @@ def reusable_clear_run(
             )
         ):
             continue
+        if reviewer.get("evidence_policy") == EVIDENCE_POLICY_CONDITIONAL_V1:
+            if reviewer.get("evidence_mode") != EVIDENCE_MODE_IDENTITY_ONLY_V1:
+                continue
+            return run
         proof = reviewer.get("execution_proof")
         if not (
             isinstance(proof, dict)
@@ -4443,16 +4573,8 @@ If you cannot reproduce a concern, return it as a suspicion; suspicions block th
 Silence never closes an existing finding.
 Use closed-equivalent only when equivalent_to names a currently verified-fixed ledger finding.
 Your final response must satisfy the supplied JSON schema and must name exact head {snapshot_value['head_sha']}.
-Every verdict, including CLEAR or a suspicion, must carry `executed_reproduction`.
-Use Bash to create its helper under `.crosscheck/reproductions/`, actually run it, and make its command name exact base {snapshot_value['base_sha']} and exact head {snapshot_value['head_sha']}.
-The helper must execute `git diff` between those two SHAs and emit a distinctive success marker.
-The helper must also write a separate receipt under `.crosscheck/reproductions/` while it runs.
-The receipt must name both exact SHAs, HOME, and the provider account selector, and `executed_reproduction` must name that receipt and a distinctive receipt marker.
-The gate reads that receipt and then independently re-runs every helper and command you supply, with no network and none of your provider credentials or account environment.
-So every helper must still exit as declared and emit its marker there: record context values like HOME or {config['account_selector']} into the receipt without requiring them to be set, never fail when they are absent (guard every expansion, for instance `${{VAR:-}}` under `set -u`), and depend on nothing outside the repository and its tracked files.
 Report `execution_home` from HOME.
 Report `executing_account_home` from {config['account_selector']}.
-The gate will independently re-execute this verdict-level reproduction before treating the response as code evidence.
 If you cannot complete the review, do not claim a clear result.
 
 REVIEW BINDING:
@@ -4472,19 +4594,6 @@ Inspect the full diff, then execute focused reproductions and positive controls 
 
 Bounded durable-finding lifecycle metadata and proof digests:
 {json.dumps(projection, indent=2, sort_keys=True)}
-"""
-    # The shared prompt is intentionally byte-identical for every Codex-family
-    # reviewer. Cross-family models receive only this appended clarification:
-    # the exact-SHA verdict check below remains the authority and is not
-    # weakened to accommodate a reviewer that omitted its required literals.
-    if model_family(config["model"]) != "openai":
-        prompt += f"""
-REPRODUCTION COMMAND FORMAT - EXACT REQUIREMENT:
-The literal string you place in `executed_reproduction.command` MUST contain, verbatim, both
-full 40-character SHAs: exact base {snapshot_value['base_sha']} and exact head {snapshot_value['head_sha']}.
-Example: bash .crosscheck/reproductions/repro.sh {snapshot_value['base_sha']} {snapshot_value['head_sha']}
-A command that omits either SHA, abbreviates it, or references it through a shell variable is
-refused and the entire review is discarded as UNREVIEWED.
 """
     depth_pass = config.get("_review_depth_pass")
     if depth_pass is not None:
@@ -5422,23 +5531,22 @@ def validate_review_shape(
     evidence_executor: Any | None = None,
 ) -> dict[str, Any]:
     require(isinstance(value, dict), "reviewer verdict must be an object")
-    if "executed_reproduction" not in value:
-        tool_fail(
-            "reviewer verdict carries no executed reproduction; reviewer command "
-            "execution was not established"
-        )
+    new_contract = (
+        config.get("evidence_policy") == EVIDENCE_POLICY_CONDITIONAL_V1
+    )
     required = {
         "schema",
         "head_sha",
         "executing_account_home",
         "execution_home",
-        "executed_reproduction",
         "summary",
         "citations",
         "finding_updates",
         "new_findings",
         "suspicions",
     }
+    if not new_contract:
+        required.add("executed_reproduction")
     require_exact_keys(value, required, "reviewer verdict")
     require(value.get("schema") == REVIEW_SCHEMA, f"reviewer verdict schema must equal {REVIEW_SCHEMA}")
     require(
@@ -5455,57 +5563,55 @@ def validate_review_shape(
             "reviewer execution-HOME inspection found a verdict HOME that does "
             "not match the sandbox-bound private reviewer HOME"
         )
-    execution = value.get("executed_reproduction")
-    require(
-        isinstance(execution, dict),
-        "reviewer verdict executed_reproduction must be an object",
-    )
-    execution_command = require_string(
-        execution.get("command"),
-        "reviewer verdict executed_reproduction.command",
-    )
-    require(
-        snapshot_value["base_sha"] in execution_command
-        and snapshot_value["head_sha"] in execution_command,
-        "reviewer verdict executed reproduction command must name the exact base and head SHAs",
-    )
-    require(
-        execution.get("expected_exit") == 0,
-        "reviewer verdict executed reproduction must expect a successful command",
-    )
-    require_string(
-        execution.get("receipt_path"),
-        "reviewer verdict executed_reproduction.receipt_path",
-    )
-    require_string(
-        execution.get("receipt_contains"),
-        "reviewer verdict executed_reproduction.receipt_contains",
-    )
     require_string(value.get("summary"), "reviewer verdict summary")
     value["citations"] = validate_citations(value.get("citations"), review_dir, "reviewer verdict citations")
     evidence_paths: set[str] = set()
-    execution_path = require_string(
-        execution.get("test_path"),
-        "reviewer verdict executed_reproduction.test_path",
-    )
-    execution_file = test_file_path(
-        execution_path, "reviewer verdict executed_reproduction"
-    )
-    evidence_paths.add(execution_file)
-    receipt_path = require_string(
-        execution.get("receipt_path"),
-        "reviewer verdict executed_reproduction.receipt_path",
-    )
-    if evidence_executor is None:
-        safe_artifact(review_dir, execution_file, ".crosscheck/reproductions/")
-        safe_artifact(review_dir, receipt_path, ".crosscheck/reproductions/")
+    receipt_path: str | None = None
+    if not new_contract:
+        execution = value.get("executed_reproduction")
+        require(
+            isinstance(execution, dict),
+            "reviewer verdict executed_reproduction must be an object",
+        )
+        execution_command = require_string(
+            execution.get("command"),
+            "reviewer verdict executed_reproduction.command",
+        )
+        require(
+            snapshot_value["base_sha"] in execution_command
+            and snapshot_value["head_sha"] in execution_command,
+            "reviewer verdict executed reproduction command must name the exact base and head SHAs",
+        )
+        require(
+            execution.get("expected_exit") == 0,
+            "reviewer verdict executed reproduction must expect a successful command",
+        )
+        execution_path = require_string(
+            execution.get("test_path"),
+            "reviewer verdict executed_reproduction.test_path",
+        )
+        execution_file = test_file_path(
+            execution_path, "reviewer verdict executed_reproduction"
+        )
+        evidence_paths.add(execution_file)
+        receipt_path = require_string(
+            execution.get("receipt_path"),
+            "reviewer verdict executed_reproduction.receipt_path",
+        )
+        require_string(
+            execution.get("receipt_contains"),
+            "reviewer verdict executed_reproduction.receipt_contains",
+        )
+        if evidence_executor is None:
+            safe_artifact(review_dir, execution_file, ".crosscheck/reproductions/")
+            safe_artifact(review_dir, receipt_path, ".crosscheck/reproductions/")
     for key in ("finding_updates", "new_findings", "suspicions"):
         require(isinstance(value.get(key), list), f"reviewer verdict {key} must be an array")
         require(
             len(value[key]) <= MAX_REVIEW_ITEMS,
             f"reviewer verdict {key} has too many entries",
         )
-    evidence_items = 1 + len(value["new_findings"])
+    evidence_items = int(not new_contract) + len(value["new_findings"])
     for update in value["finding_updates"]:
         if isinstance(update, dict):
             evidence_items += int(update.get("reproduction") is not None)
@@ -5539,7 +5645,12 @@ def validate_review_shape(
             )
             evidence_paths.add(test_file_path(path, f"reviewer verdict new_findings[{index}].reproduction"))
     if evidence_executor is not None:
-        evidence_executor.validate_declared_paths(evidence_paths, receipt_path=receipt_path)
+        if new_contract:
+            evidence_executor.validate_declared_paths(evidence_paths)
+        else:
+            evidence_executor.validate_declared_paths(
+                evidence_paths, receipt_path=receipt_path
+            )
     return value
 
 
@@ -5593,84 +5704,88 @@ def apply_review(
         and not isinstance(executor_deadline, bool)
         else time.monotonic() + evidence_run_timeout()
     )
-    try:
-        execution = review["executed_reproduction"]
-        receipt_path = require_string(
-            execution.get("receipt_path"),
-            "reviewer verdict executed_reproduction.receipt_path",
-        )
-        receipt_contains = require_string(
-            execution.get("receipt_contains"),
-            "reviewer verdict executed_reproduction.receipt_contains",
-        )
-        receipt_markers = [
-            receipt_contains,
-            snapshot_value["base_sha"],
-            snapshot_value["head_sha"],
-        ]
-        # A local receipt observes the credentialed reviewer's real HOME and
-        # account selector. An Azure evidence VM is intentionally
-        # credentialless and has a different HOME, while the controller binds
-        # the model compartment's identity independently. Requiring the tool
-        # VM to echo model-only paths would prove only a copied literal and
-        # makes a correct isolated replay impossible.
-        if evidence_executor is None:
-            receipt_markers.extend(
-                [config["execution_home"], config["executing_account_home"]]
+    new_contract = (
+        config.get("evidence_policy") == EVIDENCE_POLICY_CONDITIONAL_V1
+    )
+    execution_proof: dict[str, Any] | None = None
+    if not new_contract:
+        try:
+            execution = review["executed_reproduction"]
+            receipt_path = require_string(
+                execution.get("receipt_path"),
+                "reviewer verdict executed_reproduction.receipt_path",
             )
-        if evidence_executor is not None:
-            execution_proof = execute_bound_reproduction(
-                {
-                    key: execution[key]
-                    for key in (
-                        "test_path",
-                        "command",
-                        "expected_exit",
-                        "output_contains",
-                    )
-                },
-                "reviewer verdict executed_reproduction",
-                evidence_deadline,
-                receipt={"path": receipt_path, "contains": receipt_markers},
+            receipt_contains = require_string(
+                execution.get("receipt_contains"),
+                "reviewer verdict executed_reproduction.receipt_contains",
             )
-        else:
-            receipt = safe_artifact(
-                review_dir, receipt_path, ".crosscheck/reproductions/"
-            )
-            receipt_text = receipt.read_text(encoding="utf-8", errors="replace")
-            for expected, inspected in (
-                (receipt_contains, "receipt marker"),
-                (snapshot_value["base_sha"], "exact base SHA"),
-                (snapshot_value["head_sha"], "exact head SHA"),
-                (config["execution_home"], "execution HOME"),
-                (config["executing_account_home"], "executing account home"),
-            ):
-                require(
-                    expected in receipt_text,
-                    "reviewer Bash execution receipt did not record the inspected "
-                    f"{inspected}: {receipt_path}",
+            receipt_markers = [
+                receipt_contains,
+                snapshot_value["base_sha"],
+                snapshot_value["head_sha"],
+            ]
+            if evidence_executor is None:
+                receipt_markers.extend(
+                    [config["execution_home"], config["executing_account_home"]]
                 )
-            execution_proof = execute_bound_reproduction(
-                {
-                    key: execution[key]
-                    for key in (
-                        "test_path",
-                        "command",
-                        "expected_exit",
-                        "output_contains",
+            if evidence_executor is not None:
+                execution_proof = execute_bound_reproduction(
+                    {
+                        key: execution[key]
+                        for key in (
+                            "test_path",
+                            "command",
+                            "expected_exit",
+                            "output_contains",
+                        )
+                    },
+                    "reviewer verdict executed_reproduction",
+                    evidence_deadline,
+                    receipt={"path": receipt_path, "contains": receipt_markers},
+                )
+            else:
+                receipt = safe_artifact(
+                    review_dir, receipt_path, ".crosscheck/reproductions/"
+                )
+                receipt_text = receipt.read_text(
+                    encoding="utf-8", errors="replace"
+                )
+                for expected, inspected in (
+                    (receipt_contains, "receipt marker"),
+                    (snapshot_value["base_sha"], "exact base SHA"),
+                    (snapshot_value["head_sha"], "exact head SHA"),
+                    (config["execution_home"], "execution HOME"),
+                    (config["executing_account_home"], "executing account home"),
+                ):
+                    require(
+                        expected in receipt_text,
+                        "reviewer Bash execution receipt did not record the "
+                        f"inspected {inspected}: {receipt_path}",
                     )
-                },
-                "reviewer verdict executed_reproduction",
-                evidence_deadline,
-            )
-            execution_proof["reviewer_receipt"] = {
-                "path": receipt_path,
-                "contains": receipt_contains,
-                "sha256": hashlib.sha256(receipt_text.encode("utf-8")).hexdigest(),
-                "output": receipt_text[:MAX_CAPTURE],
-            }
-    except CrosscheckError as exc:
-        tool_fail(f"reviewer command execution proof failed: {exc}")
+                execution_proof = execute_bound_reproduction(
+                    {
+                        key: execution[key]
+                        for key in (
+                            "test_path",
+                            "command",
+                            "expected_exit",
+                            "output_contains",
+                        )
+                    },
+                    "reviewer verdict executed_reproduction",
+                    evidence_deadline,
+                )
+                execution_proof["reviewer_receipt"] = {
+                    "path": receipt_path,
+                    "contains": receipt_contains,
+                    "sha256": hashlib.sha256(
+                        receipt_text.encode("utf-8")
+                    ).hexdigest(),
+                    "output": receipt_text[:MAX_CAPTURE],
+                }
+        except CrosscheckError as exc:
+            tool_fail(f"reviewer command execution proof failed: {exc}")
+    admitted_proofs = 0
 
     for index, update in enumerate(review["finding_updates"]):
         label = f"finding_updates[{index}]"
@@ -5687,12 +5802,22 @@ def apply_review(
         mutation = update.get("mutation_proof")
         equivalent_to = update.get("equivalent_to")
         proof: dict[str, Any] | None = None
+        if status == "closed-equivalent":
+            require(
+                reproduction is None,
+                f"{label}.reproduction must be null for closed-equivalent",
+            )
         if reproduction is not None:
             proof = execute_bound_reproduction(
                 reproduction,
                 f"{label}.reproduction",
                 evidence_deadline,
             )
+            # A verified-fixed request is certified only by its mutation
+            # proof. Its optional reproduction is superseded by that outcome
+            # and is not durable evidence when the mutation degrades.
+            if status != "verified-fixed":
+                admitted_proofs += 1
         if status == "verified-fixed":
             require(mutation is not None, f"{label} needs executed mutation proof")
             try:
@@ -5721,6 +5846,7 @@ def apply_review(
                         f"{label}.mutation_proof",
                         evidence_deadline,
                     )
+                admitted_proofs += 1
             except CrosscheckError as exc:
                 status = "claimed-fixed"
                 proof = (
@@ -5823,6 +5949,7 @@ def apply_review(
             )
             continue
         new["citations"] = citations
+        admitted_proofs += 1
         identifier = finding_id(new)
         require(identifier not in by_id, f"{label} duplicates existing finding {identifier}; update it instead")
         finding = {
@@ -5866,6 +5993,14 @@ def apply_review(
     active = active_findings_for_head(working_ledger, snapshot_value["head_sha"])
     state = "blocking" if suspicions or active else "clear"
     reviewer_record = copy.deepcopy(config)
+    if new_contract:
+        reviewer_record["evidence_policy"] = EVIDENCE_POLICY_CONDITIONAL_V1
+        reviewer_record["evidence_mode"] = evidence_mode_for_admitted_proofs(
+            admitted_proofs
+        )
+        refresh_reviewer_identity(reviewer_record)
+    elif execution_proof is not None:
+        reviewer_record["execution_proof"] = execution_proof
     raw_telemetry = reviewer_record.pop("_run_telemetry", None)
     run = {
         "at": now,
@@ -5877,7 +6012,6 @@ def apply_review(
         "claims_sha256": snapshot_value["claims_sha256"],
         "reviewer": {
             **reviewer_record,
-            "execution_proof": execution_proof,
         },
         "state": state,
         "summary": review["summary"],
@@ -6389,6 +6523,11 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
                     except CrosscheckError as exc:
                         tool_fail(f"review checkout preflight failed: {exc}")
                 try:
+                    config["evidence_policy"] = EVIDENCE_POLICY_CONDITIONAL_V1
+                    # Reuse is possible only for a clear run, which by this
+                    # policy has no admitted proofs. apply_review replaces
+                    # this controller-owned prediction after proof replay.
+                    config["evidence_mode"] = EVIDENCE_MODE_IDENTITY_ONLY_V1
                     config["review_contract_sha256"] = review_contract_sha256(
                         use_azure, config["harness"]
                     )
@@ -6639,18 +6778,27 @@ def verified_crosscheck_head(root: Path, home: Path, task_id: str, url: str) -> 
             "no valid review exists for the exact head; reviewer execution identity "
             "was not credential-bound to its selected account home",
         )
-    execution_proof = reviewer.get("execution_proof")
-    require(
-        isinstance(execution_proof, dict)
-        and execution_proof.get("expected_exit") == 0
-        and execution_proof.get("actual_exit") == 0
-        and reviewed_run["base_sha"] in str(execution_proof.get("command", ""))
-        and snapshot_value["head_sha"] in str(execution_proof.get("command", ""))
-        and isinstance(execution_proof.get("reviewer_receipt"), dict)
-        and bool(execution_proof["reviewer_receipt"].get("sha256")),
-        "no valid review exists for the exact head; the reviewer verdict has no "
-        "successful exact-base/exact-head execution proof",
-    )
+    if reviewer.get("evidence_policy") == EVIDENCE_POLICY_CONDITIONAL_V1:
+        require(
+            reviewer.get("evidence_mode") in EVIDENCE_MODES,
+            "no valid review exists for the exact head; reviewer evidence mode "
+            "is invalid",
+        )
+    else:
+        execution_proof = reviewer.get("execution_proof")
+        require(
+            isinstance(execution_proof, dict)
+            and execution_proof.get("expected_exit") == 0
+            and execution_proof.get("actual_exit") == 0
+            and reviewed_run["base_sha"]
+            in str(execution_proof.get("command", ""))
+            and snapshot_value["head_sha"]
+            in str(execution_proof.get("command", ""))
+            and isinstance(execution_proof.get("reviewer_receipt"), dict)
+            and bool(execution_proof["reviewer_receipt"].get("sha256")),
+            "no valid review exists for the exact head; the reviewer verdict has "
+            "no successful exact-base/exact-head execution proof",
+        )
     require(not latest.get("active_blockers"), "clear crosscheck run records active blockers")
     require(not latest.get("suspicions"), "clear crosscheck run records unresolved suspicions")
     return snapshot_value["head_sha"]

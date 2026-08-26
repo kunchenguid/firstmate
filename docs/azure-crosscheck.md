@@ -17,7 +17,8 @@ Azure Crosscheck moves only policy review from the local Mac.
 Firstmate, authors, no-mistakes, browsers, and the primary supervisor remain local.
 Remote Herdr is not required.
 
-One review uses at least three fresh compartments with different immutable resource, VM, and boot identities: one model compartment plus one tool/verifier pair for every accepted evidence item.
+One review always uses one fresh model compartment and adds one fresh tool/verifier pair for every proposed evidence item that reaches execution.
+An identity-only review with no proposed evidence therefore uses only the model compartment; failed and semantically discarded attempts remain noncertifying even though their cleaned compartment identities are retained.
 
 - The credentialed model compartment receives exactly one independently selected reviewer account plus a bounded static packet containing the claims, ledger projection, and complete exact-base/exact-head diff.
 - A fresh private-controller `crosscheck-tool` runner receives a digest-bound bundle of the authenticated exact PR-head checkout and executes one accepted reproduction with no provider credential or repository network.
@@ -130,10 +131,12 @@ The runner's explicit public-source-ref seam accepts the freshly advertised `ref
 It also binds and fetches the reviewed merge base as an exact proven ancestor so the evidence helper's exact base/head diff is available inside the otherwise shallow clean checkout.
 Every accepted reproduction creates one fresh `crosscheck-tool` invocation VM in `snet-validation-shards`, and its independent replay creates a second new invocation with a different VM and boot identity.
 
-The allow-listed repository-controlled vocabulary is one non-profile Bash helper under `.crosscheck/reproductions/`, with a bounded reviewer-supplied UTF-8 body, exact expected exit, exact output marker, and optional exact identity receipt.
+When the semantic result proposes evidence, the allow-listed repository-controlled vocabulary is one non-profile Bash helper under `.crosscheck/reproductions/`, with a bounded reviewer-supplied UTF-8 body, exact expected exit, and exact output marker.
+An identity-only result may supply an empty manifest and launches no proof VMs.
 For durable finding closure it also accepts a pytest mutation proof with no runner arguments after locally validating the patch applies, changes only cited non-test implementation, and leaves the named tracked test untouched.
 Each remote mutation attempt creates independent clean baseline and mutated clones, requires the baseline to pass, accepts only pytest's measured test-failure exit after mutation, and refuses collection, usage, internal, or no-test exits.
-The trusted replay wrapper materializes only bounded regular files below `.crosscheck/reproductions/` or `.crosscheck/mutations/`, rejects symlinks and path escapes, sanitizes the environment, bounds output, and emits only the validated receipt or a constant success marker.
+The trusted replay wrapper materializes only bounded regular files below `.crosscheck/reproductions/` or `.crosscheck/mutations/`, rejects symlinks and path escapes, sanitizes the environment, and bounds output.
+Clean matching tool/verifier pairs enter `evidence_attempts`; complete but non-clean pairs enter `failed_evidence_attempts` and remain non-certifying.
 No dynamic model-side read, free-form login shell, generic command launcher, arbitrary absolute path, symlink traversal, SSH, Azure CLI, container runtime, package install, background daemon interface, or mutable endpoint is exposed.
 Every command child is further bounded by the `crosscheck-tool` runner class: three CPU cores, 12 GiB memory, zero swap, 1,024 PIDs, 40-GiB task filesystem, 8-MiB per-stream logs, 128-MiB artifacts, and two-hour wall time.
 Repository networking is zero bytes.

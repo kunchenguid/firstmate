@@ -58,7 +58,7 @@ def load_runner() -> Any:
 
 
 def validate_evidence_files(value: Any) -> dict[str, bytes]:
-    if not isinstance(value, dict) or not value or len(value) > MAX_EVIDENCE_FILES:
+    if not isinstance(value, dict) or len(value) > MAX_EVIDENCE_FILES:
         raise BridgeError("Azure review evidence manifest is missing or oversized")
     result: dict[str, bytes] = {}
     total = 0
@@ -246,7 +246,7 @@ def dispatch_once(
     # The runner accepts the cost-admission confirmation only as the
     # commissioning double-confirmation; a strict-mode dispatch must omit it.
     admission_mode = state["request"].get("cost_admission_mode")
-    exit_code = runner.dispatch_prepared(
+    runner.dispatch_prepared(
         env, state, env["subscription"],
         confirm_cost_admission_mode=(
             admission_mode
@@ -259,8 +259,6 @@ def dispatch_once(
     result = state.get("result")
     if not isinstance(result, dict):
         raise BridgeError("Azure runner produced no verified bounded result")
-    if exit_code != 0 or result.get("exit_code") != 0:
-        raise BridgeError("Azure evidence wrapper failed closed")
     identity = {
         "invocation": state["invocation"],
         "resource_id": result["vm_resource_id"],
@@ -327,16 +325,11 @@ class RemoteEvidenceExecutor:
         }
         self.evidence_files = evidence_files
         self.attempts: list[dict[str, Any]] = []
+        self.failed_attempts: list[dict[str, Any]] = []
 
     def validate_declared_paths(
-        self, declared: set[str], *, receipt_path: str
+        self, declared: set[str]
     ) -> None:
-        if (
-            not isinstance(receipt_path, str)
-            or not receipt_path.startswith(".crosscheck/reproductions/")
-            or receipt_path in self.evidence_files
-        ):
-            raise BridgeError("Azure evidence receipt must be created only by its helper")
         if set(self.evidence_files) != declared:
             raise BridgeError(
                 "Azure evidence manifest must exactly match every declared helper and mutation path"
@@ -362,14 +355,35 @@ class RemoteEvidenceExecutor:
         )
         if tool_identity["vm_instance_id"] == verifier_identity["vm_instance_id"]:
             raise BridgeError("tool and verifier attempts reused one VM instance")
-        if comparable_result(tool_result) != comparable_result(verifier_result):
-            raise BridgeError("fresh networkless verifier disagrees with tool evidence")
-        if tool_result.get("stdout_truncated") or tool_result.get("stderr_truncated"):
-            raise BridgeError("accepted Azure evidence was truncated")
+        tool_comparable = comparable_result(tool_result)
+        verifier_comparable = comparable_result(verifier_result)
+        clean = (
+            tool_comparable == verifier_comparable
+            and tool_comparable["exit_code"] == 0
+            and tool_comparable["timed_out"] is False
+            and tool_comparable["signal"] is None
+            and tool_comparable["stdout_truncated"] is False
+            and tool_comparable["stderr_truncated"] is False
+        )
+        if not clean:
+            self.failed_attempts.append(
+                {
+                    "tool": tool_identity,
+                    "tool_result": tool_comparable,
+                    "verifier": verifier_identity,
+                    "verifier_result": verifier_comparable,
+                    "failure": (
+                        "fresh verifier disagreed"
+                        if tool_comparable != verifier_comparable
+                        else "evidence command did not pass cleanly"
+                    ),
+                }
+            )
+            raise BridgeError("Azure evidence wrapper failed closed")
         attempt = {
             "tool": tool_identity,
             "verifier": verifier_identity,
-            "result": comparable_result(tool_result),
+            "result": tool_comparable,
         }
         self.attempts.append(attempt)
         return attempt
