@@ -427,6 +427,29 @@ result=pass
 teardown=pass
 ```
 
+### Windows Treehouse task acquisition
+
+The full native Windows spawn path was verified on 2026-08-26 against Herdr 0.8.2 and Treehouse 2.1.1 under Git for Windows.
+The opt-in test creates a temporary local project and isolated named Herdr lab, drives `bin/fm-spawn.sh`, proves the recorded copy equals the exact foreground PowerShell leader cwd, then stops the lab and returns the clean lease.
+
+```sh
+FM_HERDR_WINDOWS_TREEHOUSE_LIVE=1 \
+  tests/fm-backend-herdr-windows-treehouse-live-e2e.test.sh
+```
+
+```text
+herdr_version=herdr 0.8.2
+treehouse_version=v2.1.1
+treehouse_mode=lease
+target=fm-lab-windows-treehous-948-32034:w1:p2
+worktree=/c/Users/v-tibarreto/.treehouse/project-49e284/1/project
+adapter_path=C:\Users\v-tibarreto\.treehouse\project-49e284\1\project\
+leader_name=powershell.exe
+leader_cwd=C:\Users\v-tibarreto\.treehouse\project-49e284\1\project\
+cleanup=guarded-lab-and-treehouse-return
+result=pass
+```
+
 `pane get` reports the pane's current owning tab and workspace, which is what placement resolves from; the injected `HERDR_TAB_ID` and `HERDR_WORKSPACE_ID` are creation-time snapshots and are not read as current identity:
 
 ```sh

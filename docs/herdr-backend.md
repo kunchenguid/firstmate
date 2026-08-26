@@ -50,7 +50,11 @@ The first workspace in a completely empty Herdr session must become focused beca
 Herdr does not enforce workspace or tab label uniqueness, so a label can never decide where a worker goes.
 Herdr 0.7.5 exports `HERDR_ENV`, `HERDR_PANE_ID`, `HERDR_SESSION`, `HERDR_SOCKET_PATH`, `HERDR_TAB_ID`, and `HERDR_WORKSPACE_ID` into every process it manages a pane for, and a Firstmate or secondmate agent's own commands inherit them.
 On Windows, Herdr supplies `HERDR_SOCKET_PATH` as a native drive path, which Firstmate normalizes through Git for Windows before comparing it with the session's live socket identity.
-For task-copy discovery, Firstmate prefers `pane get`'s live `foreground_cwd`, then falls back to the exact foreground group leader's cwd from `pane process-info` when native Windows Herdr omits that field.
+On Unix-like hosts, task-copy discovery prefers `pane get`'s live `foreground_cwd` and otherwise accepts only the exact foreground group leader's cwd from `pane process-info`.
+Native Windows uses a different acquisition path because interactive `treehouse get` keeps PowerShell in the project and opens a nested `cmd.exe` in the task copy, while Herdr reports only the parent PowerShell.
+Firstmate instead acquires `treehouse get --lease --lease-holder <task-id>` itself, sends `Set-Location -LiteralPath` with the returned native path safely quoted, and requires two matching reads proving the owning PowerShell reached that exact leased copy.
+If launch stops before task metadata is published, Firstmate closes its new endpoint and returns that unpublished lease, retaining recovery metadata for guarded cleanup if the return fails.
+After publication, ordinary task cleanup owns the lease.
 The pane's creation-time `cwd` and cwd values from processes outside the foreground group leader are never accepted as the task copy.
 Older injection shapes are unverified, so a claimed launcher pane without the injected socket identity cannot be trusted.
 With presentation spaces disabled, a crewmate or scout is created in the exact workspace that identity currently resolves to, read live from Herdr rather than from the injected snapshot, so the worker always appears beside the agent that launched it.

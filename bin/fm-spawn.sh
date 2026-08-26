@@ -80,7 +80,9 @@
 #   The journal, visible token, and labels alone are never endpoint or ownership
 #   authority, and every ambiguous recovery stays on the flat fallback after
 #   duplicate-agent risk is independently absent. Treehouse allocation and task
-#   metadata are unchanged.
+#   metadata are unchanged except on native Windows Herdr, where Firstmate
+#   acquires a durable Treehouse lease and moves the owning PowerShell into the
+#   known path because Herdr cannot observe Treehouse's nested cmd.exe cwd.
 #   A clean projected create or exact resume makes one bounded attempt to hold
 #   the one session-scoped presentation-order lock (keyed by named session plus
 #   canonical socket, outside any home's state/) through launch handoff. Lock
@@ -649,6 +651,8 @@ BACKEND=
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+TREEHOUSE_ABORT_RETURN=0
+TREEHOUSE_ABORT_WORKTREE=
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -689,6 +693,40 @@ parse_orca_worktree_result() {
   else
     ORCA_TERMINAL=
   fi
+}
+
+spawn_publish_treehouse_recovery_meta() {
+  local recovery_tmp="$STATE/.$ID.meta.treehouse-recovery.${BASHPID:-$$}"
+  [ -n "${T:-}" ] \
+    && [ -n "$TREEHOUSE_ABORT_WORKTREE" ] \
+    && [ -n "${PROJ_ABS:-}" ] \
+    && [ -n "${HERDR_SES:-}" ] \
+    && [ -n "${HERDR_WORKSPACE_ID:-}" ] \
+    && [ -n "${HERDR_TAB_ID:-}" ] \
+    && [ -n "${HERDR_PANE_ID:-}" ] \
+    || return 1
+  mkdir -p "$STATE" || return 1
+  {
+    echo "window=${T:-}"
+    echo "endpoint_task_id=$ID"
+    echo "worktree=$TREEHOUSE_ABORT_WORKTREE"
+    echo "project=$PROJ_ABS"
+    echo "harness=$HARNESS"
+    echo "kind=$KIND"
+    [ -z "${MODE:-}" ] || echo "mode=$MODE"
+    [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
+    echo "model=${MODEL:-default}"
+    echo "effort=${EFFORT:-default}"
+    echo "backend=herdr"
+    echo "herdr_session=${HERDR_SES:-}"
+    echo "herdr_workspace_id=${HERDR_WORKSPACE_ID:-}"
+    echo "herdr_tab_id=${HERDR_TAB_ID:-}"
+    echo "herdr_pane_id=${HERDR_PANE_ID:-}"
+  } > "$recovery_tmp" || {
+    rm -f "$recovery_tmp" 2>/dev/null || true
+    return 1
+  }
+  mv -f "$recovery_tmp" "$STATE/$ID.meta"
 }
 
 spawn_abort_cleanup() {
@@ -734,6 +772,16 @@ spawn_abort_cleanup() {
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+  fi
+  if [ "$TREEHOUSE_ABORT_RETURN" = 1 ]; then
+    TREEHOUSE_ABORT_RETURN=0
+    if ! fm_backend_herdr_return_unpublished_treehouse_lease "${T:-}" "$TREEHOUSE_ABORT_WORKTREE" >/dev/null 2>&1; then
+      if spawn_publish_treehouse_recovery_meta; then
+        echo "warning: could not return unpublished Treehouse lease '$TREEHOUSE_ABORT_WORKTREE' after aborted spawn; retained task metadata for guarded cleanup" >&2
+      else
+        echo "warning: could not return unpublished Treehouse lease '$TREEHOUSE_ABORT_WORKTREE' or retain recovery metadata after aborted spawn" >&2
+      fi
+    fi
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
@@ -2250,50 +2298,100 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  treehouse_mode=interactive
+  if [ "$BACKEND" = herdr ]; then
+    treehouse_mode=$(fm_backend_herdr_treehouse_acquisition_mode)
+  fi
+  if [ "$treehouse_mode" = lease ]; then
+    leased_wt=$(fm_backend_herdr_acquire_treehouse_lease "$PROJ_ABS_REAL" "$ID") || {
+      echo "error: treehouse could not acquire a durable worktree lease for $ID" >&2
+      exit 1
+    }
+    if [ -z "$leased_wt" ]; then
+      echo "error: treehouse returned no path for durable worktree lease $ID" >&2
+      exit 1
+    fi
+    WT=$(real_path_or_raw "$leased_wt")
+    TREEHOUSE_ABORT_WORKTREE=$WT
+    TREEHOUSE_ABORT_RETURN=1
+    enter_worktree=$(fm_backend_herdr_windows_enter_worktree_command "$leased_wt")
+    if ! spawn_send_text_line "$WT_TARGET" "$enter_worktree"; then
+      echo "error: could not move the Herdr PowerShell pane into leased worktree '$WT'" >&2
+      exit 1
+    fi
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  # Target the stable window id, not the name: if the name is ever lost (e.g. an
-  # automatic-rename slips through), display-message -t <bad-name> falls back to the
-  # active client's window, which would misread firstmate's OWN pane path as the
-  # worktree and tangle a hook into the primary checkout. The window id never lies.
-  # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
-  # prefix would otherwise make the pane's OS-level cwd read differ from
-  # PROJ_ABS on the very first poll, before the pane has actually moved.
-  #
-  # A single read that already differs from PROJ_ABS_REAL is not proof the pane
-  # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
-  # transiently reports an unrelated stale path (seen live as another real git
-  # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
-  # below (it resolves to a real, distinct worktree top-level too), so accepting it
-  # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
-  # two consecutive reads to agree on the same non-project path before accepting it;
-  # a mismatch just becomes the new candidate rather than resetting the wait, so a
-  # pane that is already settled by the first real read only costs the one existing
-  # inter-poll sleep as confirmation, not a whole extra cycle on top.
-  candidate=""
-  for _ in $(seq 1 60); do
-    p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ]; then
-      p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
-        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-          WT="$p"
-          break
+    # Confirm the owning PowerShell reached the exact leased path. Two equal
+    # reads preserve the same transient-cwd protection as the interactive path.
+    candidate=
+    settled=0
+    for _ in $(seq 1 60); do
+      p=$(spawn_current_path "$WT_TARGET" || true)
+      if [ -n "$p" ]; then
+        p_real=$(real_path_or_raw "$p")
+        if [ "$p_real" = "$WT" ]; then
+          if [ "$candidate" = "$p_real" ]; then
+            settled=1
+            break
+          fi
+          candidate=$p_real
+        else
+          candidate=
         fi
-        candidate="$p_real"
+      else
+        candidate=
+      fi
+      sleep 1
+    done
+    if [ "$settled" != 1 ]; then
+      echo "error: Herdr PowerShell did not enter leased worktree '$WT' within 60s; inspect window $T" >&2
+      exit 1
+    fi
+  else
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+
+    # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+    # Target the stable window id, not the name: if the name is ever lost (e.g. an
+    # automatic-rename slips through), display-message -t <bad-name> falls back to the
+    # active client's window, which would misread firstmate's OWN pane path as the
+    # worktree and tangle a hook into the primary checkout. The window id never lies.
+    # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
+    # prefix would otherwise make the pane's OS-level cwd read differ from
+    # PROJ_ABS on the very first poll, before the pane has actually moved.
+    #
+    # A single read that already differs from PROJ_ABS_REAL is not proof the pane
+    # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
+    # transiently reports an unrelated stale path (seen live as another real git
+    # checkout entirely) before the shell catches up with treehouse get's cd. That
+    # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
+    # below (it resolves to a real, distinct worktree top-level too), so accepting it
+    # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
+    # two consecutive reads to agree on the same non-project path before accepting it;
+    # a mismatch just becomes the new candidate rather than resetting the wait, so a
+    # pane that is already settled by the first real read only costs the one existing
+    # inter-poll sleep as confirmation, not a whole extra cycle on top.
+    candidate=""
+    for _ in $(seq 1 60); do
+      p=$(spawn_current_path "$WT_TARGET" || true)
+      if [ -n "$p" ]; then
+        p_real=$(real_path_or_raw "$p")
+        if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
+          if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
+            WT="$p"
+            break
+          fi
+          candidate="$p_real"
+        else
+          candidate=""
+        fi
       else
         candidate=""
       fi
-    else
-      candidate=""
+      sleep 1
+    done
+    if [ -z "$WT" ]; then
+      echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+      exit 1
     fi
-    sleep 1
-  done
-  if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
-    exit 1
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
@@ -2755,6 +2853,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
 fi
+TREEHOUSE_ABORT_RETURN=0
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   # The record is published, so this task is now part of the set a teardown
   # enumerates and locks per task. The set lock is only needed across that
