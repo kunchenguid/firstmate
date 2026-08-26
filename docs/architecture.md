@@ -171,6 +171,9 @@ Independently, `fm-spawn.sh`, `fm-send.sh`, and `fm-teardown.sh` source `bin/fm-
 A normal primary checkout or child task environment has neither signal and remains unaffected.
 The helper's header owns the exact signal detection, relocated-home limitation, test-harness bypass, and relationship to no-mistakes' HEAD-continuity guard.
 [`docs/configuration.md`](configuration.md) owns the no-mistakes operational-home, per-task binding, permissions, rollout, and migration-limitation contract.
+The pipeline's required-check wait during PR validation is owned by no-mistakes' `internal/scm/github/github.go` `(*Host).GetChecks`, which constructs and invokes the `gh pr checks --required` probe inside the separately installed binary; this repo has no config key or code seam that reaches that call.
+A repository with a genuinely empty required-check set (for example after a branch ruleset removal) makes that probe fail deterministically forever, which is an upstream no-mistakes defect to fix there, not a gap this repo's tracked material can close.
+The separate audit of Firstmate-owned probes found that `bin/fm-pr-merge.sh`'s merge-time `CHECKS_GREEN` regex requires `[1-9][0-9]* total`, so it likewise treats a genuinely zero-total-check result as non-green; that unrelated merge-gate finding remains intentionally unfixed here, preserving its existing no-red-merge guard.
 
 ## Two task shapes
 
