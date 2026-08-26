@@ -437,6 +437,7 @@ The exact message is `Review posted: <direct PR comment URL>`, with no agent or 
 The cycle first tries the captain's private direct Web API helper at `data/tools/fm-slack-message.sh` when that helper and its private credential are usable.
 If the credential is absent, the helper is unavailable or unsafe, the helper send fails, or the helper returns no direct Slack permalink, the cycle records that outcome and falls back to an available Slack connector.
 If the connector is unavailable, its send fails, or it returns no direct permalink, the cycle records the notification as `ignored` with concrete outcomes for both transports and continues.
+The helper and connector are the complete notification transport allowlist; no third transport is authorized.
 A Slack notification failure never invalidates or retries an otherwise valid receipt, blocks GitHub review publication or task reconciliation, or prevents guarded teardown.
 
 The helper's credential comes from an optional private `config/slack-bot-token` in the source home, which must be a regular non-symlinked file with mode `0600` holding exactly one non-empty whitespace-free line.

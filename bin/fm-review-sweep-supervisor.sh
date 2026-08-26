@@ -98,8 +98,6 @@
 # clock query, so a fixture can advance the logical clock across a cycle.
 set -eu
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 LABEL=dev.firstmate.review-sweep
 DEFAULT_TIMEZONE=America/Chicago
 DEFAULT_START_HOUR=7
@@ -384,7 +382,7 @@ validate_source_home() { # <path>
 source_default_branch() { # <path>
   # Resolve the repository's default branch, never the transient working branch,
   # so a captain switching branches in the source home cannot disable the job.
-  local home=$1 ref branch= candidate
+  local home=$1 ref branch='' candidate
   ref=$(git -C "$home" symbolic-ref --short --quiet refs/remotes/origin/HEAD 2>/dev/null || true)
   case $ref in origin/?*) branch=${ref#origin/} ;; esac
   if [ -z "$branch" ]; then
@@ -505,15 +503,19 @@ sync_projects() {
     safe_project_name "$name" || die "unsafe project name in registry: $name"
     src="$SOURCE_HOME/projects/$name"
     dst="$AUTOMATION_HOME/projects/$name"
-    [ -d "$src" ] && git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
-      || die "registered source project is unavailable: $name"
+    if [ ! -d "$src" ] || ! git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      die "registered source project is unavailable: $name"
+    fi
     origin=$(git -C "$src" remote get-url origin 2>/dev/null || true)
-    [ -n "$origin" ] && fm_project_origin_safe "$origin" || die "project $name has an unsafe or missing origin"
+    if [ -z "$origin" ] || ! fm_project_origin_safe "$origin"; then
+      die "project $name has an unsafe or missing origin"
+    fi
     if [ ! -e "$dst" ]; then
       git clone --quiet --filter=blob:none "$origin" "$dst" || die "failed to clone project $name"
     fi
-    [ -d "$dst" ] && git -C "$dst" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
-      || die "automation project is not a git worktree: $name"
+    if [ ! -d "$dst" ] || ! git -C "$dst" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      die "automation project is not a git worktree: $name"
+    fi
     dst_origin=$(git -C "$dst" remote get-url origin 2>/dev/null || true)
     [ "$dst_origin" = "$origin" ] || die "automation project $name has unexpected origin $dst_origin"
   done < <(awk '$1 == "-" { print $2 }' "$registry")
@@ -548,6 +550,7 @@ slack_transport_state=$(slack_transport_state)
 slack_transport_requires=SLACK_BOT_TOKEN
 slack_transport_credentials=$SLACK_TOKEN_RELATIVE
 slack_notification_order=helper,connector
+slack_notification_allowed_transports=helper,connector
 slack_connector_fallback=authorized
 slack_notification_failure=best-effort
 agent_attribution=forbidden
@@ -743,21 +746,22 @@ reload_launchagent() {
 
 read_clock_fields() {
   local fields=${FM_REVIEW_SWEEP_NOW_FIELDS:-} file=${FM_REVIEW_SWEEP_NOW_FIELDS_FILE:-}
+  local -a parts
   if [ -n "$file" ] && [ -f "$file" ] && [ ! -L "$file" ]; then
     fields=$(sed -n '1p' "$file")
   fi
   if [ -n "$fields" ]; then
-    set -- $fields
-    [ "$#" -eq 5 ] || die 'a review-sweep clock override must have five fields'
-    printf '%s %s %s %s %s\n' "$1" "$2" "$3" "$4" "$5"
+    read -r -a parts <<< "$fields"
+    [ "${#parts[@]}" -eq 5 ] || die 'a review-sweep clock override must have five fields'
+    printf '%s %s %s %s %s\n' "${parts[0]}" "${parts[1]}" "${parts[2]}" "${parts[3]}" "${parts[4]}"
     return
   fi
   TZ="$TIMEZONE" date '+%Y%m%d %H %M %s %z'
 }
 
 current_epoch() {
-  local day hour minute epoch offset
-  read -r day hour minute epoch offset <<EOF
+  local _day _hour _minute epoch _offset
+  read -r _day _hour _minute epoch _offset <<EOF
 $(read_clock_fields)
 EOF
   safe_nonnegative_integer "$epoch" || die 'clock epoch is invalid'
@@ -1145,7 +1149,7 @@ First reconcile every task already recorded in this isolated home. Recover unfin
 
 Then refresh Jira live with complete pagination, discover eligible open PR heads, and execute one idempotent sweep. Dispatch no more than $MAX_CONCURRENT_REVIEWS focused reviewers at once. Review only: do not edit project code, merge, push, mutate Jira, or publish anything other than the skill's authorized review comments, minimization of the configured reviewer's own superseded watermark comments, and exact PR-author Slack direct message.
 
-For each successfully published review comment, send the exact Slack message Review posted: <direct PR comment URL>. Add no agent or AI attribution. Use the transports in order: when $AUTOMATION_HOME/$SLACK_TRANSPORT_RELATIVE is executable and SLACK_BOT_TOKEN is available, try the private helper first and require the direct Slack permalink it returns. If credentials are absent, the helper is unavailable or unsafe, the helper send fails, or it returns no permalink, record the helper attempt outcome and concrete reason, then fall back to the available Slack connector. A connector send counts only when it returns the direct Slack permalink. If the connector is unavailable, its send fails, or it returns no permalink, record the notification ignored with both ordered transport outcomes and their concrete reasons, then continue the sweep lifecycle. Slack notification failure must never fail or retry an otherwise valid sweep receipt, block GitHub review publication, block task reconciliation, or prevent teardown. The host contract's slack_transport_state field describes only the preferred helper: available means the helper and credential are present, credentials-missing means the helper exists without a provisioned credential, and unavailable means the helper is absent or unsafe. Never print, echo, log, or repeat the token value anywhere.
+For each successfully published review comment, send the exact Slack message Review posted: <direct PR comment URL>. Add no agent or AI attribution. Use the transports in order: when $AUTOMATION_HOME/$SLACK_TRANSPORT_RELATIVE is executable and SLACK_BOT_TOKEN is available, try the private helper first and require the direct Slack permalink it returns. If credentials are absent, the helper is unavailable or unsafe, the helper send fails, or it returns no permalink, record the helper attempt outcome and concrete reason, then fall back to the available Slack connector. A connector send counts only when it returns the direct Slack permalink. If the connector is unavailable, its send fails, or it returns no permalink, record the notification ignored with both ordered transport outcomes and their concrete reasons, then continue the sweep lifecycle. The helper and connector are the only authorized notification transports; never try a third transport. Slack notification failure must never fail or retry an otherwise valid sweep receipt, block GitHub review publication, block task reconciliation, or prevent teardown. The host contract's slack_transport_state field describes only the preferred helper: available means the helper and credential are present, credentials-missing means the helper exists without a provisioned credential, and unavailable means the helper is absent or unsafe. Never print, echo, log, or repeat the token value anywhere.
 
 After dispatch, supervise in the foreground until every task from this cycle is terminal. Reconcile reports and receipts, complete publication followed immediately by Slack notification, close task records, and run guarded teardown. Do not finish while this home's state contains task metadata. If coverage is partial or an author identity is ambiguous, record that plainly and leave no fabricated success. If no PR needs review, send no Slack message and finish as a verified no-op.
 
@@ -1479,10 +1483,10 @@ run_supervised_cycle() { # <slot> <now-epoch>
 }
 
 tick() {
-  local day hour minute epoch offset slot rc=0
+  local day hour minute epoch _offset slot rc=0
   load_config
   [ "$ENABLED" = 1 ] || { printf 'disabled: review-sweep supervisor\n'; return 0; }
-  read -r day hour minute epoch offset <<EOF
+  read -r day hour minute epoch _offset <<EOF
 $(read_clock_fields)
 EOF
   safe_nonnegative_integer "$epoch" || die 'clock epoch is invalid'
@@ -1493,10 +1497,10 @@ EOF
 }
 
 run_now() {
-  local day hour minute epoch offset slot rc=0
+  local day hour minute epoch _offset slot rc=0
   load_config
   [ "$ENABLED" = 1 ] || die 'review-sweep supervisor is disabled'
-  read -r day hour minute epoch offset <<EOF
+  read -r day hour minute epoch _offset <<EOF
 $(read_clock_fields)
 EOF
   safe_nonnegative_integer "$epoch" || die 'clock epoch is invalid'
@@ -1506,7 +1510,7 @@ EOF
 }
 
 install_supervisor() {
-  local source= branch= changed=0
+  local source='' branch='' changed=0
   while [ "$#" -gt 0 ]; do
     case $1 in
       --source-home) [ "$#" -ge 2 ] || usage; source=$2; shift 2 ;;
@@ -1559,7 +1563,7 @@ install_supervisor() {
 }
 
 status_supervisor() {
-  local loaded=no lock=idle owner= pgid cycle_rc cycle_age latest=none slot_status=unknown slot_receipt=unknown
+  local loaded=no lock=idle owner='' pgid='' cycle_rc cycle_age latest=none slot_status=unknown slot_receipt=unknown
   if [ -f "$CONFIG_PATH" ] && [ ! -L "$CONFIG_PATH" ]; then
     load_config
   else

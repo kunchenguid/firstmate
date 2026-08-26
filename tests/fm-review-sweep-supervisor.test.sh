@@ -238,6 +238,7 @@ assert_contains "$INSTALL_OUT" 'retention-days: 90' 'install did not report boun
 assert_contains "$INSTALL_OUT" 'slack-transport: data/tools/fm-slack-message.sh (unavailable)' 'install did not report the Slack transport state'
 assert_no_grep 'SLACK_BOT_TOKEN' "$CASE_LAUNCH_AGENT_DIR/dev.firstmate.review-sweep.plist" 'the LaunchAgent carries a Slack credential'
 assert_grep 'slack_notification_order=helper,connector' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not order helper before connector'
+assert_grep 'slack_notification_allowed_transports=helper,connector' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not forbid a third notification transport'
 assert_grep 'slack_connector_fallback=authorized' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not authorize connector fallback'
 assert_grep 'slack_notification_failure=best-effort' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not make notification failure best-effort'
 assert_grep 'agent_attribution=forbidden' "$CASE_APP/home/config/review-sweep-host-contract" 'host contract did not forbid agent attribution'
@@ -355,6 +356,7 @@ assert_grep "Do not finish while this home's state contains task metadata" "$CAS
 assert_grep 'Review posted: <direct PR comment URL>' "$CASE_CODEX_LOG" 'cycle prompt did not carry the exact Slack message template'
 assert_grep 'try the private helper first' "$CASE_CODEX_LOG" 'cycle prompt did not prefer the private helper'
 assert_grep 'fall back to the available Slack connector' "$CASE_CODEX_LOG" 'cycle prompt did not require connector fallback'
+assert_grep 'never try a third transport' "$CASE_CODEX_LOG" 'cycle prompt did not forbid a third notification transport'
 assert_grep 'must never fail or retry an otherwise valid sweep receipt' "$CASE_CODEX_LOG" 'cycle prompt did not make notification failure best-effort'
 assert_present "$CASE_APP/home/state/review-sweep-cycle-receipts/20260826-0700.json" 'cycle receipt was not retained'
 pass 'a due slot runs once and requires publication, notification, receipt, and teardown'
@@ -560,7 +562,7 @@ STRAY_OWNER_PID=$(bash -c 'echo $$')
 set -m
 bash -c 'exec -a "$0" /bin/sleep 300' "$CASE_BIN/codex" >/dev/null 2>&1 </dev/null &
 CODEX_LIKE_PGID=$!
-/bin/sleep 300 >/dev/null 2>&1 </dev/null &
+/bin/sleep 300 >/dev/null 2>&1 &
 STRAY_PGID=$!
 set +m
 disown -a 2>/dev/null || true
