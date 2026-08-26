@@ -6,7 +6,7 @@
 # MECHANICAL CONSUMERS ONLY. This answers "what posture did the captain register
 # for this project", never "how does this task ship". A task's delivery mode and
 # yolo are resolved by firstmate at intake and passed explicitly to
-# bin/fm-brief.sh, bin/fm-spawn.sh, and bin/fm-promote.sh (AGENTS.md section 7).
+# bin/fm-brief.sh, bin/fm-spawn.sh, and bin/fm-promote.sh (the project-management skill).
 # The consumers are bin/fm-fleet-sync.sh (skip local-only clones),
 # bin/fm-home-seed.sh (refuse local-only seeding, run no-mistakes init), and
 # bin/fm-spawn.sh's advisory registry-deviation notice.
@@ -27,7 +27,7 @@
 #                          no-mistakes, so sync, seeding, and init treat such a
 #                          project as the remote-backed pipeline project it is.
 # yolo (orthogonal) = merge authority only: when on, firstmate merges green,
-#   in-scope work itself (AGENTS.md section 7).
+#   in-scope work itself (the project-management skill).
 #
 # --raw prints the registered annotation unmapped, so a caller that must tell a
 # conditional policy apart from a flat mode sees "no-mistakes-prod-only" itself.

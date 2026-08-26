@@ -60,7 +60,7 @@
 #   caller-supplied repo string cannot reliably identify this repo. Briefs made
 #   without it carry a loud declaration so an omitted contract cannot be silent.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
-# resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
+# resolves it per task at intake (the project-management skill); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
@@ -76,7 +76,7 @@
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
-# a spawn-time and firstmate-side input only (AGENTS.md section 7).
+# a spawn-time and firstmate-side input only (the project-management skill).
 # Every scaffold's status protocol distinguishes a declared external wait from
 # "blocked:": a known external wait expected to clear on its own is declared
 # through bin/fm-wait.sh (the machine wait field with reason and deadline,
@@ -189,7 +189,7 @@ for a in "$@"; do
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
 
-# Ship delivery mode is an explicit per-task decision (AGENTS.md section 7). A
+# Ship delivery mode is an explicit per-task decision (the project-management skill). A
 # missing or invalid value stops the scaffold rather than silently defaulting.
 if [ "$KIND" = ship ]; then
   [ "$MODE_SET" -eq 1 ] || {

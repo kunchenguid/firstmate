@@ -5,8 +5,8 @@
 # ONE OWNER for the bounded-line shape both digests use. The wake digest's
 # OPEN DECISIONS section (bin/fm-wake-drain.sh) and the session-start digest's
 # per-task status tails (bin/fm-session-start.sh) render the same kind of
-# content - an agent-written status line, which AGENTS.md section 8 treats as a
-# wake EVENT rather than current state - into a size-bounded view. An agent
+# content - an agent-written status line, which is a wake EVENT rather than
+# current state (docs/architecture.md) - into a size-bounded view. An agent
 # reading both must recognize one truncation marker, and the two caps must not
 # drift apart, so the cut and its marker live here.
 #

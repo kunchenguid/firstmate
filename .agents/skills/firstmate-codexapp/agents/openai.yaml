@@ -1,4 +1,0 @@
-interface:
-  display_name: "Firstmate Codex App"
-  short_description: "Operate visible Codex Desktop threads"
-  default_prompt: "Use $firstmate-codexapp to coordinate visible Codex Desktop threads without pretending they are a shell backend."

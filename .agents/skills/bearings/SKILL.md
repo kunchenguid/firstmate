@@ -5,6 +5,7 @@ description: >-
   Use when the captain invokes /bearings or asks for a bearings report, morning brief, status report, catch-up, "where did I leave off", or "what's in the works".
   Plain /bearings is chat-only by default, /bearings file explicitly writes the dated data/status-report-<YYYY-MM-DD>.md artifact, and /bearings lavish additionally builds and arms the interactive fleet board; live PR enrichment remains opt-in and composes with the other modes.
   Also load this skill's board-wake handling when a procevent lavish wake's source id matches the canonical source id of the stable bearings board path.
+  Also owns /ahoy, the session-only recap of what happened since the captain's last message.
 user-invocable: true
 metadata:
   internal: true
@@ -105,10 +106,11 @@ A board "Merge now" answer IS the captain's explicit merge word for that one exa
 The safeguards are mandatory, not optional: resolve the PR from the task's own `state/<task-id>.meta` `pr=` record, never from board bytes; re-verify at wake time that the PR is still open and CI-green; refuse and report a red or changed PR rather than merging it; merge only through `bin/fm-pr-merge.sh`; and echo every merge in chat with the full PR URL.
 Only the exact answer value `merge` authorizes a merge; an answer carrying a freeform note is the captain's instruction text to read and act on with judgment, never an auto-merge.
 
-## Chat-response contract
+## Chat-response shape
 
-This skill is the one owner of the `/bearings` chat-response format; the snapshot and classifier own the data that feeds it, and no other file restates this contract.
-Every `/bearings` chat response renders EXACTLY these four sections, in THIS order, and nothing else structural (there is no At Anchor section):
+This skill is the one owner of the `/bearings` chat-response shape; the snapshot and classifier own the data that feeds it, and no other file restates it.
+The mandatory four-section format contract was abolished on 2026-08-26 (`regeln/ABGESCHAFFT.md`, `vier-sektionen-formatkontrakt`): the four buckets below are how a bearings digest is organized, not a form whose violation voids a correct answer.
+Use these four sections, in this order, and nothing else structural (there is no At Anchor section):
 
 1. **Captain's Call** - ONLY items that need the captain's own action now: a decision to make, a PR to approve or merge, a credential or login to provide, or a blocker only the captain can clear.
    Empty-state: "Nothing needs your action right now."
@@ -119,9 +121,9 @@ Every `/bearings` chat response renders EXACTLY these four sections, in THIS ord
 4. **Charted Next** - queued or gated work waiting on the fleet or a date, plus action-free fleet-integrity warnings, never on the captain.
    Empty-state: "Nothing is queued."
 
-Rules that keep the contract unambiguous:
+Rules that keep the shape unambiguous:
 
-- Every section ALWAYS renders, even when empty, with its short empty-state sentence; never omit a section.
+- Render every section, even when empty, with its short empty-state sentence - a missing section reads as "nothing to report there", which is exactly the ambiguity the buckets remove.
 - Every chat digest and file-mode report is a complete current snapshot, never a delta against a prior report.
 - Recently Landed always renders the bounded current baseline, even when the same completions appeared in an earlier report.
 - The four buckets are mutually exclusive, so every item is forced into exactly one: needs-your-action is Captain's Call, done is Recently Landed, self-progressing is Underway, and not-yet-started work or an action-free fleet-integrity warning is Charted Next.
@@ -130,10 +132,32 @@ Rules that keep the contract unambiguous:
 - Do not suppress separately projected decisions, landed records, or gates from a `partial-structured` home merely because that secondmate's own row is `unknown`.
 - Include the required direct address to the captain inside one item or empty-state sentence.
 - Every PR appears as the full `https://...` URL; a shorthand `#number` is fine only as a back-reference after the full URL has already appeared in the same digest.
-- The chat follows `AGENTS.md` section 9 and carries one scannable line per item.
+- The chat is captain-facing: outcomes in his terms, never internal mechanics, one scannable line per item.
 - Detailed decisions, plans, full gate reasons, and evidence stay out of chat; file mode puts them in the report, while lavish mode puts only its payload-backed interactive detail on the board.
 - In file mode, include the report path or link inside the four-section digest without adding another heading.
 - In lavish mode, include the board URL inside the four-section digest the same way.
+
+## Session recap (/ahoy)
+
+`/ahoy` is the cheap sibling of `/bearings`: a recap of this session, not a fresh look at the fleet.
+It reads only conversation history already visible to this firstmate.
+It runs no command, reads no file, writes nothing, and never guesses live state beyond the last visible event.
+If `/ahoy` is the session's first real captain message, there is nothing to recap - run the ordinary `/bearings` digest above instead and say so.
+
+Find the most recent real captain-authored message before this `/ahoy`.
+An ordinary user-role message is a captain message; system, developer, tool, watcher, guard, away-mode, and other injected operational messages are not, and custom-role messages such as Pi's session-start nudge are not.
+Never infer captain authorship merely because a synthetic message appears in the user-role transcript, and never treat an operational injection as the interval boundary.
+
+Then report two things:
+
+1. What happened between that message and now - concrete outcomes, landed work, failures, decisions made, work still running - in captain-facing outcome language, preserving every full PR URL that appears in the interval.
+   If nothing happened, say so in one sentence rather than padding.
+2. Every explicit captain decision still visibly unanswered, including ones raised before that boundary.
+   A later unrelated captain message sets a new recap interval but does not close an earlier decision; treat a decision as closed only when a later visible response resolves it, chooses an option, declines it, or grants or denies the approval.
+   Deduplicate by substance, then present them one at a time, most impactful first by your own judgment, each with enough context to decide easily: the decision, why it matters, the options, and a recommendation.
+   Present the next one only after the captain answers the current one.
+
+If compaction hid the boundary, say the exact boundary is unavailable and summarize only what is visibly supported; compacted history supports an open decision only when both its request and its unanswered status are still visible.
 
 ## Tone and content rules
 

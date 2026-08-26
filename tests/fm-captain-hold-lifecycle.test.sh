@@ -1515,6 +1515,96 @@ test_keyed_answer_carries_the_bemerkung() {
   pass "the keyed intake carries the captain's remark mandatorily and refuses oversize remarks loudly"
 }
 
+# A Vorfuehrungs-Karte shows the captain a product SURFACE. The plan's rule is
+# that such a card is refused until someone has walked the surface themselves
+# and filed the walk in the product repo, so the captain's click is never the
+# first walk. Cards carry no type today, so the kind is declared with
+# --vorfuehrung and the walk with --begehung; the gate arms through
+# state/.tor-begehung-scharf and is a warning until then.
+test_vorfuehrung_demands_a_walked_begehung() {
+  local home out show begehung
+  home=$(make_home vorfuehrung)
+  begehung='docs/begehungen/2026-08-26-erstnutzer.md'
+
+  # Unarmed: the same call passes, loudly, and creates the card.
+  out=$(run_captain "$home" hold sample-demo-unarmed --title "Show the new board" \
+    --reason "captain looks at the board" --repo sample --vorfuehrung 2>&1) \
+    || fail "an unarmed Begehung gate must not refuse: $out"
+  assert_contains "$out" "Vorfuehrungs-Karte without a --begehung" \
+    "the unarmed pass must still warn about the missing walk"
+  assert_contains "$(cat "$home/state/tor-log/begehung.jsonl")" '"verdikt":"warn"' \
+    "the unarmed passage must be logged as warn, not silence"
+
+  : > "$home/state/.tor-begehung-scharf"
+
+  # Armed and walked: green, and the walk is written into the card.
+  run_captain "$home" hold sample-demo-walked --title "Show the walked board" \
+    --reason "captain looks at the walked board" --repo sample \
+    --vorfuehrung --begehung "$begehung" >/dev/null \
+    || fail "an armed gate must pass a Vorfuehrung that names its Begehung"
+  show=$(tasks_in "$home" show sample-demo-walked --full)
+  assert_contains "$show" "Vorfuehrung: ja" "the card does not declare itself a Vorfuehrung"
+  assert_contains "$show" "Begehung: $begehung" "the card lost the walk it rests on"
+  assert_contains "$(cat "$home/state/tor-log/begehung.jsonl")" '"verdikt":"gruen"' \
+    "a walked Vorfuehrung must be logged green"
+
+  # Repeating the same hold must not stack a second Begehung block.
+  run_captain "$home" hold sample-demo-walked \
+    --reason "captain looks at the walked board" \
+    --vorfuehrung --begehung "$begehung" >/dev/null \
+    || fail "repeating a walked Vorfuehrung hold must stay idempotent"
+  show=$(tasks_in "$home" show sample-demo-walked --full)
+  [ "$(printf '%s' "$show" | grep -o "Begehung: $begehung" | wc -l)" = 1 ] \
+    || fail "a repeated hold duplicated the Begehung record"
+
+  # Armed and unwalked: refused, with its exit named, and nothing created.
+  if out=$(run_captain "$home" hold sample-demo-unwalked --title "Show the unwalked board" \
+    --reason "captain looks at an unwalked board" --repo sample --vorfuehrung 2>&1); then
+    fail "an armed gate must refuse a Vorfuehrung with no Begehung: $out"
+  fi
+  assert_contains "$out" "REFUSED" "the refusal must be loud"
+  assert_contains "$out" "docs/begehungen/" "the refusal must name where the walk artifact belongs"
+  assert_contains "$out" "--begehung" "the refusal must name the exit that lifts it"
+  assert_contains "$out" "deferred, never lost" "the refusal must say the call survives"
+  if tasks_in "$home" show sample-demo-unwalked --full >/dev/null 2>&1; then
+    fail "a refused Vorfuehrung left a half-made card behind"
+  fi
+  assert_contains "$(cat "$home/state/tor-log/begehung.jsonl")" '"verdikt":"rot"' \
+    "the refusal must be logged as rot"
+
+  # A walk with no demonstration is a mislabelled call, not an ignored flag.
+  if out=$(run_captain "$home" hold sample-demo-stray --title "Stray walk" \
+    --reason "no demonstration here" --repo sample --begehung "$begehung" 2>&1); then
+    fail "--begehung without --vorfuehrung must be refused: $out"
+  fi
+  assert_contains "$out" "belongs to a Vorfuehrungs-Karte" \
+    "the stray-flag refusal must say what the flag belongs to"
+
+  # The path is repo-relative and lives under docs/begehungen/.
+  if out=$(run_captain "$home" hold sample-demo-abs --title "Absolute walk" \
+    --reason "absolute path" --repo sample --vorfuehrung \
+    --begehung "/home/somebody/$begehung" 2>&1); then
+    fail "an absolute Begehung path must be refused: $out"
+  fi
+  assert_contains "$out" "relative to the product repo" "the path refusal must name the rule"
+  if out=$(run_captain "$home" hold sample-demo-elsewhere --title "Misplaced walk" \
+    --reason "wrong place" --repo sample --vorfuehrung \
+    --begehung "notes/walk.md" 2>&1); then
+    fail "a Begehung outside docs/begehungen/ must be refused: $out"
+  fi
+  assert_contains "$out" "docs/begehungen/" "the placement refusal must name the required location"
+
+  # An ordinary captain call is completely unaffected by the armed gate.
+  run_captain "$home" hold sample-plain-call --title "An ordinary question" \
+    --reason "captain decides a plain question" --repo sample >/dev/null \
+    || fail "the armed Begehung gate must not touch an ordinary captain call"
+  show=$(tasks_in "$home" show sample-plain-call --full)
+  if printf '%s' "$show" | grep -F 'Vorfuehrung:' >/dev/null; then
+    fail "an ordinary captain call grew a Vorfuehrung marker"
+  fi
+  pass "a Vorfuehrungs-Karte is refused until its Begehung is walked, and carries it afterwards"
+}
+
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
@@ -1537,3 +1627,4 @@ test_keyed_answer_carries_the_bemerkung
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
 test_legitimate_holds_produce_no_divergence_signal
+test_vorfuehrung_demands_a_walked_begehung

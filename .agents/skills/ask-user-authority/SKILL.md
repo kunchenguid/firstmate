@@ -4,7 +4,7 @@ description: >-
   Agent-only decision procedure for ask-user findings.
   Use before deciding any ask-user finding.
   This skill is the single owner of finding-decision policy: firstmate always applies judgment, decides findings that are unambiguous toward accepted intent, and escalates only genuinely ambiguous, expanding, or destructive ones.
-  Finding authority is this skill's criteria, not the project's yolo posture.
+  Finding authority is this skill's criteria plus the repo's MANDAT.md path list, never a blanket per-project posture.
 user-invocable: false
 metadata:
   internal: true
@@ -13,8 +13,15 @@ metadata:
 # ask-user-authority
 
 This skill is the single owner of the decision policy for no-mistakes ask-user findings.
-`AGENTS.md` section 7 points here and does not restate this procedure.
-Finding authority is determined by the criteria below, not by `yolo`.
+Finding authority is determined by the criteria below.
+The blanket per-project `yolo` exception was abolished on 2026-08-26 (`regeln/ABGESCHAFFT.md`, `projekt-yolo`) and no longer widens or narrows anything here.
+
+What replaced it is HR2' and its two readers: a landing passes `bin/fm-abnahme.sh` point by point with its product proof, and `bin/fm-mandat-check.sh` tests the diff against that repo's `MANDAT.md` path patterns.
+Those readers and this procedure answer different questions and both must pass.
+This skill decides whether the finding's Fix stays inside the accepted contract; the mandate check decides whether the resulting change touches a captain class - money or payment, user data, security or access, the publicly visible, a vision no-go, or destruction.
+A mandate hit or a missing mandate file holds for the captain no matter how unambiguous the finding is, and a red state never merges.
+Where a finding's Fix would move the change onto a captain-class path, say so in the escalation and name the pattern it hits.
+
 Firstmate always applies this judgment, decides any finding that is unambiguous toward the accepted design, and escalates only genuinely ambiguous, expanding, or destructive findings.
 
 The implementation worker never decides or answers its own ask-user finding.
