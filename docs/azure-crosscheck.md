@@ -20,14 +20,14 @@ Remote Herdr is not required.
 One review always uses one fresh model compartment and adds one fresh tool/verifier pair for every proposed evidence item that reaches execution.
 An identity-only review with no proposed evidence therefore uses only the model compartment; failed and semantically discarded attempts remain noncertifying even though their cleaned compartment identities are retained.
 
-- The credentialed model compartment receives exactly one independently selected reviewer account plus a bounded static packet containing the claims, ledger projection, and complete exact-base/exact-head diff.
+- The credentialed model compartment receives exactly one independently selected reviewer account, a bounded static packet containing the claims, ledger projection, and complete exact-base/exact-head diff, and a read-only digest-bound snapshot of tracked exact-head files.
 - A fresh private-controller `crosscheck-tool` runner receives a digest-bound bundle of the authenticated exact PR-head checkout and executes one accepted reproduction with no provider credential or repository network.
 - A second newly created `crosscheck-tool` runner independently replays that accepted helper with no repository network or provider credential.
 
-The model compartment never receives a repository checkout, dynamic repository tool, shell against the repository, Azure CLI, MCP server, ambient extension, skill, container client, or local control authority.
+The model compartment never receives Git metadata, a dynamic repository command tool, shell against the repository, Azure CLI, MCP server, ambient extension, skill, container client, or local control authority.
 Its only extension is the tracked digest-bound verdict submitter, which exposes no repository or command capability.
 Its Codex and Pi launches explicitly disable their command tools; the interim claude launch lane is retired (R6).
-The static packet is assembled from a fresh exact remote PR checkout, is byte-bounded, and is delimited as untrusted data.
+The static packet and snapshot are assembled from a fresh exact remote PR checkout, are byte-bounded, and remain untrusted data.
 The tool and verifier repository children never receive the reviewer credential, their trusted controller's storage identity/token, a GitHub credential, author worktree, control home, sibling task data, browser profile, shared temporary state, container socket, SSH agent, or machine-wide validation socket.
 A single VM containing both provider credentials and repository commands is not accepted by this adapter.
 
@@ -46,6 +46,7 @@ Every attempt binds these values into one canonical review generation:
 - Stable PR claims digest.
 - Reviewer harness, model, effort, and executing upstream-account digest.
 - Complete pre-run v2 ledger digest.
+- Exact-head and reviewed-base repository snapshot identity, archive and exclusion-manifest digests, measured sizes and counts, plus the one bounded merge-base review-guidance section and its digest.
 - Deployment generation, exact model image and SKU, provider endpoint, request digest, exact credential/archive digests, and model result digest.
 - Model, tool, and verifier resource IDs, immutable VM instance IDs, boot IDs, bounded result digests, source refs, and complete cleanup phases.
 
@@ -78,6 +79,14 @@ No package or executable is downloaded after the VM begins review.
 The reviewer credential is staged as a short-lived exact-object capability.
 It exists only in the model compartment and is removed before result publication.
 The macOS Keychain is never copied.
+
+### Exact-head snapshot and review guidance
+
+Before lane admission or any billable resource, the controller builds a deterministic gzip tar from Git blobs in the fresh exact-head checkout. It includes tracked files only, excludes `.git`, and refuses absolute paths, traversal, devices, hard links, unsafe symlinks, more than 15,000 tracked files, more than 384 MiB uncompressed, more than 128 MiB compressed, or an overlong path. Ordinary files are capped at 2 MiB and files changed by the reviewed diff at 8 MiB. Binary and individually oversized files are omitted deterministically without reading oversized blob bodies and are recorded by path, blob id, size, and reason in the digest-bound `.crosscheck-snapshot/manifest.json` exposed inside the snapshot. The manifest itself is capped at 4 MiB and counts toward the 384 MiB uncompressed archive total.
+
+The guest downloads the archive through its one exact read capability, verifies the archive and manifest identities, repeats all member and size checks, materializes files without a general tar extraction call, and makes the repository tree read-only before starting the reviewer. The archive is a run-command input, so this transport requires no model-image rebuild and does not change network policy.
+
+Review guidance comes only from the root `AGENTS.md` at the proven merge base. The controller accepts zero or one section between `<!-- crosscheck-review:start -->` and `<!-- crosscheck-review:end -->`, caps its UTF-8 content at 8 KiB, and binds both content and digest into the review generation. Head-branch AGENTS files remain untrusted snapshot data and are not loaded as reviewer rules.
 
 ### Cross-family primary reviewer (R6)
 
@@ -117,8 +126,8 @@ That current version was published 2026-08-18T22:38:08Z from managed image `img-
 Both readings were guesses about an image that admission never inspected. It does now: the harness attestation guard described under Operator setup reads `pi-tarball-sha256` and `node-tarball-sha256` off the configured image before any model VM exists, so the next time this question is asked the lane answers it from the image rather than from a document, and a wrong `model_image_id` is refused for free instead of discovered on a paid VM.
 The 25K TPM quota cap (DataZoneStandard capacity 25) bounds review throughput until quota is raised.
 
-The model process has no Azure CLI credential, managed identity, SSH agent, Docker socket, repository checkout, control-home mount, MCP configuration, or shell/read tool.
-It reaches only the provider through the model subnet's fixed egress policy; all source metadata and exact diff content are already in its bounded prompt packet.
+The model process has no Azure CLI credential, managed identity, SSH agent, Docker socket, Git checkout, control-home mount, MCP configuration, or shell tool.
+It reaches only the provider through the model subnet's fixed egress policy; source metadata and the exact diff are in its bounded prompt, while the exact-head tracked-file snapshot is local and read-only for the bounded repository tools introduced separately.
 Reviewer-supplied helpers return only as bounded UTF-8 data and cannot execute until the trusted local controller validates them.
 
 The compartment is bounded by a 4-vCPU/16-GiB reviewed SKU, 12-GiB process memory, zero swap, 1,024 PIDs, private temporary state, strict system/home/kernel protection, a 7,200-second maximum review deadline, a 16-MiB transcript ceiling, a 2-MiB verdict/result ceiling, and a 24-hour independent self-shutdown backstop.
@@ -193,7 +202,7 @@ proof are normalized into the core evidence error family so closure and
 new-finding degradation keep their item-scoped semantics.
 If cleanup is ambiguous, the admitted run remains durable and a separate nonzero tool-failure alarm is appended; retrying publication or cleanup never reruns the model.
 The controller re-reads tags and ETags before conditional deletion.
-It deletes only the attempt's review and safety Managed Run Commands, model VM, NIC, OS disk, exact staged request, exact staged credential, and exact staged result.
+It deletes only the attempt's review and safety Managed Run Commands, model VM, NIC, OS disk, exact staged request, exact staged credential, exact staged repository snapshot, and exact staged result.
 Every conditional deletion is followed by an exact absence proof, and an authorization, transport, or inventory error remains ambiguity rather than being treated as absence.
 The reused Azure runner independently performs the same identity-pinned cleanup for tool and verifier invocations.
 Foreign, missing, replaced, unreadable, or partially deleted resources retain state and fail closed.
@@ -204,7 +213,7 @@ No resource group, subnet, shared storage account, foundation resource, sibling 
 This lane measures the four phases only it performs into the core run record's `durations_ms` (C1, `docs/azure-requirements.md`), alongside the `reviewer` and `proofs` phases the local lane also records:
 
 - `create`: shared-allocator capacity reservation plus model VM provisioning.
-- `stage`: the credential archive, the request document, and their two blob uploads.
+- `stage`: the credential archive, request document, repository snapshot, and their three blob uploads.
 - `boot`: the Managed Run Command dispatch that starts the guest.
 - `reviewer`: polling that run command to completion, which is the remote review itself.
 - `collect`: the result download and its digest-bound parse.

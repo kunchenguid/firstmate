@@ -557,13 +557,20 @@ def attach_run_telemetry(
         },
         "reuse": copy.deepcopy(reuse),
     }
+    snapshot_fields = {
+        "compressed_bytes": measured.get("snapshot_compressed_bytes"),
+        "uncompressed_bytes": measured.get("snapshot_uncompressed_bytes"),
+        "file_count": measured.get("snapshot_file_count"),
+        "excluded_count": measured.get("snapshot_excluded_count"),
+        "build_ms": measured.get("snapshot_build_ms"),
+    }
+    if any(item is not None for item in snapshot_fields.values()):
+        run["telemetry"]["snapshot"] = snapshot_fields
 
 
 def validate_run_telemetry(value: Any, label: str) -> None:
     require(isinstance(value, dict), f"{label} must be an object")
-    require_exact_keys(
-        value,
-        {
+    telemetry_keys = {
             "schema",
             "tokens",
             "costs_usd",
@@ -573,7 +580,10 @@ def validate_run_telemetry(value: Any, label: str) -> None:
             "failure_category",
             "finding_disposition",
             "reuse",
-        },
+    }
+    require_exact_keys(
+        value,
+        telemetry_keys | (set(value) & {"snapshot"}),
         label,
     )
     require(value.get("schema") == TELEMETRY_SCHEMA, f"{label}.schema is invalid")
@@ -693,6 +703,25 @@ def validate_run_telemetry(value: Any, label: str) -> None:
         ),
         f"{label}.reuse is invalid",
     )
+    if "snapshot" in value:
+        snapshot = value["snapshot"]
+        require(isinstance(snapshot, dict), f"{label}.snapshot must be an object")
+        snapshot_keys = {
+            "compressed_bytes",
+            "uncompressed_bytes",
+            "file_count",
+            "excluded_count",
+            "build_ms",
+        }
+        require_exact_keys(snapshot, snapshot_keys, f"{label}.snapshot")
+        for name in snapshot_keys:
+            measured = snapshot.get(name)
+            require(
+                isinstance(measured, int)
+                and not isinstance(measured, bool)
+                and measured >= 0,
+                f"{label}.snapshot.{name} must be nonnegative",
+            )
 
 
 def normalized_failure_category(state: str, reason: str) -> str:

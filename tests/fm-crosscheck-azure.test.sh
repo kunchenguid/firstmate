@@ -1663,6 +1663,59 @@ identity_only_identity["evidence_attempts_digest"] = module.digest_bytes(
 )
 module.validate_azure_reviewer_record(identity_only, run, "identity-only")
 
+snapshot_bound = copy.deepcopy(identity_only)
+snapshot_identity = snapshot_bound["azure_identity"]
+snapshot_identity.update({
+    "repository_snapshot_digest": "sha256:" + "a" * 64,
+    "repository_snapshot_manifest_digest": "sha256:" + "b" * 64,
+    "repository_snapshot_head_sha": "a" * 40,
+    "repository_snapshot_base_sha": "b" * 40,
+    "repository_snapshot_compressed_bytes": "1024",
+    "repository_snapshot_uncompressed_bytes": "4096",
+    "repository_snapshot_file_count": "3",
+    "repository_snapshot_excluded_count": "1",
+    "review_guidance": "review exact behavior",
+    "review_guidance_digest": module.digest_bytes(b"review exact behavior"),
+    "review_guidance_source": "b" * 40 + ":AGENTS.md",
+})
+snapshot_generation_fields = generation_fields + (
+    "repository_snapshot_digest",
+    "repository_snapshot_manifest_digest",
+    "repository_snapshot_head_sha",
+    "repository_snapshot_base_sha",
+    "repository_snapshot_compressed_bytes",
+    "repository_snapshot_uncompressed_bytes",
+    "repository_snapshot_file_count",
+    "repository_snapshot_excluded_count",
+    "review_guidance",
+    "review_guidance_digest",
+    "review_guidance_source",
+)
+snapshot_identity["review_generation"] = module.digest_bytes(
+    module.canonical_bytes(
+        {field: snapshot_identity[field] for field in snapshot_generation_fields}
+    )
+).split(":", 1)[1][:24]
+module.validate_azure_reviewer_record(snapshot_bound, run, "snapshot-bound")
+tampered_base = copy.deepcopy(snapshot_bound)
+tampered_base["azure_identity"]["repository_snapshot_base_sha"] = "9" * 40
+try:
+    module.validate_azure_reviewer_record(tampered_base, run, "tampered-base")
+except RuntimeError as exc:
+    assert "snapshot or guidance identity" in str(exc), str(exc)
+else:
+    raise AssertionError("snapshot base drift validated")
+tampered_guidance = copy.deepcopy(snapshot_bound)
+tampered_guidance["azure_identity"]["review_guidance"] += " changed"
+try:
+    module.validate_azure_reviewer_record(
+        tampered_guidance, run, "tampered-guidance"
+    )
+except RuntimeError as exc:
+    assert "guidance identity" in str(exc), str(exc)
+else:
+    raise AssertionError("tampered merge-base guidance validated")
+
 contradictory = copy.deepcopy(identity_only)
 contradictory["evidence_mode"] = "isolated-proof-v1"
 try:
@@ -2071,6 +2124,284 @@ with tempfile.TemporaryDirectory() as temporary:
     assert not observed["bundle"].exists()
 PY
   pass "Azure evidence bridge privately bundles an exact detached PR checkout without GitHub credentials"
+}
+
+repository_snapshot_unit() {
+  python3 - "$ADAPTER" "$MODEL_GUEST" <<'PY' \
+    || fail "Azure repository snapshot and guidance contract failed"
+import gzip
+import hashlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+spec = importlib.util.spec_from_file_location("adapter", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+guest = Path(sys.argv[2]).read_text(encoding="utf-8")
+marker = 'python3 - "$SNAPSHOT" "$REPOSITORY" "$INPUT" <<\'PY\'\n'
+start = guest.index(marker) + len(marker)
+end = guest.index('\nPY\nrm -f "$SNAPSHOT"', start)
+extractor = guest[start:end]
+
+def run(*argv, cwd):
+    return subprocess.run(
+        list(argv), cwd=cwd, check=True, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+def git(repo, *argv):
+    return run("git", "-C", str(repo), *argv, cwd=repo).stdout.decode().strip()
+
+def extract(archive, output, built):
+    request = {
+        "repository_snapshot": {
+            "schema": module.SNAPSHOT_SCHEMA,
+            "digest": built["digest"],
+            "manifest_digest": built["manifest_digest"],
+            "head_sha": built["head_sha"],
+            "base_sha": built["base_sha"],
+            "compressed_bytes": built["compressed_bytes"],
+            "uncompressed_bytes": built["uncompressed_bytes"],
+            "file_count": built["file_count"],
+            "excluded_count": built["excluded_count"],
+        },
+        "identity": {
+            "repository_snapshot_digest": built["digest"],
+            "repository_snapshot_manifest_digest": built["manifest_digest"],
+        },
+    }
+    request_path = archive.parent / (output.name + "-request.json")
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    script = archive.parent / (output.name + "-extract.py")
+    script.write_text(extractor, encoding="utf-8")
+    return subprocess.run(
+        [sys.executable, str(script), str(archive), str(output), str(request_path)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    repo = root / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    git(repo, "config", "user.name", "snapshot fixture")
+    git(repo, "config", "user.email", "snapshot@example.invalid")
+    (repo / "AGENTS.md").write_text(
+        "outside\n<!-- crosscheck-review:start -->\ncheck exact behavior\n"
+        "<!-- crosscheck-review:end -->\noutside\n",
+        encoding="utf-8",
+    )
+    (repo / "plain.txt").write_text("plain\n", encoding="utf-8")
+    (repo / "changed.txt").write_text("small\n", encoding="utf-8")
+    (repo / "binary.dat").write_bytes(b"binary\0payload")
+    (repo / "ordinary-big.txt").write_bytes(b"o" * (2 * 1024 * 1024 + 1))
+    os.symlink("plain.txt", repo / "safe-link")
+    git(repo, "add", "AGENTS.md", "plain.txt", "changed.txt", "binary.dat", "ordinary-big.txt", "safe-link")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    (repo / "changed.txt").write_bytes(b"c" * (3 * 1024 * 1024))
+    git(repo, "add", "changed.txt")
+    git(repo, "commit", "-qm", "head")
+    head = git(repo, "rev-parse", "HEAD")
+    oversized_blob = git(repo, "rev-parse", "HEAD:ordinary-big.txt")
+    first = root / "first.tar.gz"
+    second = root / "second.tar.gz"
+    original_git_bytes = module._git_bytes
+    def bounded_git_bytes(repository, *arguments, **kwargs):
+        if arguments[:2] == ("cat-file", "blob") and arguments[2] == oversized_blob:
+            raise AssertionError("oversized blob was materialized before exclusion")
+        return original_git_bytes(repository, *arguments, **kwargs)
+    module._git_bytes = bounded_git_bytes
+    built = module.build_repository_snapshot(
+        repo, base_sha=base, head_sha=head, destination=first
+    )
+    repeated = module.build_repository_snapshot(
+        repo, base_sha=base, head_sha=head, destination=second
+    )
+    assert built["digest"] == repeated["digest"]
+    assert built["manifest_digest"] == repeated["manifest_digest"]
+    module._git_bytes = original_git_bytes
+    exclusions = {item["path"]: item for item in built["manifest"]["exclusions"]}
+    assert exclusions["binary.dat"]["reason"] == "binary"
+    assert exclusions["ordinary-big.txt"]["reason"] == "oversized"
+    included = {item["path"]: item for item in built["manifest"]["included"]}
+    assert included["changed.txt"]["changed"] is True
+    assert included["changed.txt"]["size"] == 3 * 1024 * 1024
+    assert included["safe-link"]["kind"] == "symlink"
+    manifest_bytes = module.canonical_bytes(built["manifest"]) + b"\n"
+    assert built["uncompressed_bytes"] == (
+        sum(item["size"] for item in built["manifest"]["included"])
+        + len(manifest_bytes)
+    )
+    assert module.review_guidance(repo, base) == {
+        "content": "check exact behavior",
+        "digest": module.digest_bytes(b"check exact behavior"),
+        "source": base + ":AGENTS.md",
+    }
+    (repo / "AGENTS.md").write_text(
+        "<!-- crosscheck-review:end -->\nreversed\n"
+        "<!-- crosscheck-review:start -->\n",
+        encoding="utf-8",
+    )
+    git(repo, "add", "AGENTS.md")
+    git(repo, "commit", "-qm", "reversed guidance")
+    reversed_guidance = git(repo, "rev-parse", "HEAD")
+    try:
+        module.review_guidance(repo, reversed_guidance)
+    except module.AzureCrosscheckError as exc:
+        assert "reversed" in str(exc)
+    else:
+        raise AssertionError("reversed guidance markers raw-raised or validated")
+    git(repo, "checkout", "-q", head)
+    with tarfile.open(first, "r:gz") as archive:
+        names = archive.getnames()
+        assert all(".git" not in Path(name).parts for name in names)
+        assert "repository/.crosscheck-snapshot/manifest.json" in names
+        manifest = archive.extractfile(
+            "repository/.crosscheck-snapshot/manifest.json"
+        ).read()
+        assert module.digest_bytes(manifest) == built["manifest_digest"]
+    output = root / "extracted"
+    result = extract(first, output, built)
+    assert result.returncode == 0, result.stderr
+    assert (output / "plain.txt").read_text() == "plain\n"
+    assert (output / "changed.txt").stat().st_size == 3 * 1024 * 1024
+    assert os.readlink(output / "safe-link") == "plain.txt"
+    assert (output / ".crosscheck-snapshot/manifest.json").is_file()
+    assert (output / "plain.txt").stat().st_mode & 0o222 == 0
+    assert output.stat().st_mode & 0o222 == 0
+
+    # Host build refuses hard-link and symlink escape shapes before staging.
+    (repo / "plain.txt").unlink()
+    os.link(repo / "changed.txt", repo / "plain.txt")
+    try:
+        module.build_repository_snapshot(
+            repo, base_sha=base, head_sha=head, destination=root / "hard.tar.gz"
+        )
+    except module.AzureCrosscheckError as exc:
+        assert "hard link" in str(exc)
+    else:
+        raise AssertionError("hard-linked tracked file entered the snapshot")
+    (repo / "plain.txt").unlink()
+    (repo / "plain.txt").write_text("plain\n", encoding="utf-8")
+    os.symlink("../../escape", repo / "unsafe-link")
+    git(repo, "add", "unsafe-link")
+    git(repo, "commit", "-qm", "unsafe link")
+    unsafe_head = git(repo, "rev-parse", "HEAD")
+    try:
+        module.build_repository_snapshot(
+            repo, base_sha=base, head_sha=unsafe_head,
+            destination=root / "unsafe.tar.gz",
+        )
+    except module.AzureCrosscheckError as exc:
+        assert "symlink escapes" in str(exc)
+    else:
+        raise AssertionError("escaping symlink entered the snapshot")
+
+    # Guest extraction independently rejects hard links and traversal.
+    for label, member_name, member_type in (
+        ("hardlink", "repository/evil", tarfile.LNKTYPE),
+        ("traversal", "repository/../evil", tarfile.REGTYPE),
+    ):
+        hostile = root / (label + ".tar.gz")
+        with hostile.open("wb") as raw:
+            with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as compressed:
+                with tarfile.open(fileobj=compressed, mode="w") as archive:
+                    info = tarfile.TarInfo(member_name)
+                    info.type = member_type
+                    info.linkname = "repository/plain.txt"
+                    info.size = 0
+                    archive.addfile(info, io.BytesIO(b"") if member_type == tarfile.REGTYPE else None)
+                    manifest_bytes = module.canonical_bytes(built["manifest"]) + b"\n"
+                    info = tarfile.TarInfo("repository/.crosscheck-snapshot/manifest.json")
+                    info.size = len(manifest_bytes)
+                    archive.addfile(info, io.BytesIO(manifest_bytes))
+        hostile_built = dict(built)
+        hostile_built["digest"] = module.digest_file(hostile)
+        hostile_built["compressed_bytes"] = hostile.stat().st_size
+        refused = extract(hostile, root / (label + "-out"), hostile_built)
+        assert refused.returncode != 0
+        assert "unsafe repository snapshot" in refused.stderr
+
+    original_bound = module.MAX_SNAPSHOT_UNCOMPRESSED_BYTES
+    module.MAX_SNAPSHOT_UNCOMPRESSED_BYTES = 10
+    git(repo, "checkout", "-q", head)
+    try:
+        module.build_repository_snapshot(
+            repo, base_sha=base, head_sha=head, destination=root / "over.tar.gz"
+        )
+    except module.AzureCrosscheckError as exc:
+        assert "measured" in str(exc) and "above" in str(exc)
+    else:
+        raise AssertionError("oversized aggregate snapshot passed preflight")
+    finally:
+        module.MAX_SNAPSHOT_UNCOMPRESSED_BYTES = original_bound
+
+    original_manifest_bound = module.MAX_SNAPSHOT_MANIFEST_BYTES
+    module.MAX_SNAPSHOT_MANIFEST_BYTES = 100
+    try:
+        module.build_repository_snapshot(
+            repo, base_sha=base, head_sha=head,
+            destination=root / "manifest-over.tar.gz",
+        )
+    except module.AzureCrosscheckError as exc:
+        assert "manifest bytes" in str(exc) and "above" in str(exc)
+    else:
+        raise AssertionError("over-limit manifest reached the guest")
+    finally:
+        module.MAX_SNAPSHOT_MANIFEST_BYTES = original_manifest_bound
+
+    # Every expected pre-spend refusal is normalized into the core's durable
+    # tool-failure path, and non-UTF8 changed paths are classified there too.
+    class Core:
+        class CrosscheckToolError(RuntimeError):
+            pass
+    original_builder = module.build_repository_snapshot
+    module.build_repository_snapshot = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        module.AzureCrosscheckError("fixture preflight refusal")
+    )
+    try:
+        module.run_azure_review(
+            core=Core, root=repo, home=root, task_id="task-one",
+            pr_url="https://github.com/example/repo/pull/1",
+            review_dir=repo, proof_root=root,
+            snapshot_value={"base_sha": base, "head_sha": head},
+            ledger={}, config={}, author_account_identity="",
+        )
+    except Core.CrosscheckToolError as exc:
+        assert "repository snapshot preflight failed" in str(exc)
+    else:
+        raise AssertionError("snapshot preflight escaped the durable tool-failure path")
+    finally:
+        module.build_repository_snapshot = original_builder
+
+    def invalid_changed_path(repository, *arguments, **kwargs):
+        if arguments[0] == "rev-parse":
+            return (head + "\n").encode()
+        if arguments[0] == "diff":
+            return b"\xff\0"
+        return original_git_bytes(repository, *arguments, **kwargs)
+    module._git_bytes = invalid_changed_path
+    try:
+        module.build_repository_snapshot(
+            repo, base_sha=base, head_sha=head,
+            destination=root / "non-utf8.tar.gz",
+        )
+    except module.AzureCrosscheckError as exc:
+        assert "changed path is not UTF-8" in str(exc)
+    else:
+        raise AssertionError("non-UTF8 changed path escaped classification")
+    finally:
+        module._git_bytes = original_git_bytes
+PY
+  pass "exact-head snapshots are deterministic, bounded, read-only, and safe on both sides"
 }
 
 replay_positive_and_failure_unit() {
@@ -3254,7 +3585,7 @@ for handle in (handle_c,handle_d):
     m.release_review_lane(handle)
 # The review entrypoint queues before any Azure mutation and pins the lane
 # SKU unless config fixed one; reviewers copy auth in and never sync back.
-source=inspect.getsource(m.run_azure_review)
+source=inspect.getsource(m._run_azure_review_after_snapshot)
 assert source.index("acquire_review_lane")<source.index("_run_azure_review_in_lane")
 assert "finally:" in source and "release_review_lane" in source
 in_lane=inspect.getsource(m._run_azure_review_in_lane)
@@ -3689,7 +4020,7 @@ parameter_contract_unit() {
   # The model run-command parameter contract is env-vars-only and split
   # across two files: the adapter SUBMITS named (protected) parameters and
   # the guest CONSUMES them as lowercase environment variables, refusing
-  # everything else with exit 125. This pins both halves to the same seven
+  # everything else with exit 125. This pins both halves to the same eight
   # names so a rename on either side fails here instead of as an opaque
   # live provisioning failure.
   python3 - "$ADAPTER" "$MODEL_GUEST" <<'PY' || fail "run-command parameter contract diverged"
@@ -3703,7 +4034,7 @@ guest = Path(sys.argv[2]).read_text(encoding="utf-8")
 produced = set(re.findall(r'\{"name": "([a-z_]+)", "value"', adapter))
 expected = {
     "review_generation", "vm_resource_id", "vm_instance_id", "guest_digest",
-    "input_url", "credential_url", "output_url",
+    "input_url", "credential_url", "snapshot_url", "output_url",
 }
 assert produced == expected, ("adapter submits", sorted(produced))
 
@@ -3725,7 +4056,7 @@ scrubbed = set()
 for line in re.findall(r"^unset ([a-z_ ]+)$", code, re.M):
     scrubbed.update(line.split())
 assert scrubbed == expected, ("guest scrubs", sorted(scrubbed))
-assert "expected seven bound parameters" in code
+assert "expected eight bound parameters" in code
 # The refusal itself, not the word: this must match the guard construct and
 # its bounded exit.
 positional_guard = re.search(
@@ -3733,7 +4064,7 @@ positional_guard = re.search(
 )
 assert positional_guard, "the guest no longer refuses positional parameters"
 PY
-  pass "the adapter and guest agree on the exact seven-parameter contract"
+  pass "the adapter and guest agree on the exact eight-parameter contract"
 }
 
 static_contract
@@ -3749,6 +4080,7 @@ identity_outcome_unit
 account_and_cleanup_identity_unit
 bridge_security_unit
 bridge_private_snapshot_unit
+repository_snapshot_unit
 manifest_bounds_unit
 template_expiry_render_unit
 replay_positive_and_failure_unit
