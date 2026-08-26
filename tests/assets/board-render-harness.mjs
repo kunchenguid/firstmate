@@ -3,7 +3,8 @@
 // asserted through the real template rather than by reading its source.
 //
 // Usage: node board-render-harness.mjs <built-board.html>
-// Prints one JSON document: { stats:[{n,label}], charted:[{title,sub,badges,pickable}] }
+// Prints one JSON document:
+//   { stats:[{n,label}], charted:[{title,sub,badges,pickable}], prs:{...} }
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -65,6 +66,9 @@ globalThis.document = {
   getElementById: (id) => {
     if (!byId.has(id)) {
       const n = new Node("div");
+      // carry the element's initial `hidden` attribute over from the document,
+      // so a renderer that forgets to reveal an element still reads as hidden
+      n.hidden = new RegExp('id="' + id + '"[^>]*\\shidden[\\s>]').test(html);
       new Node("div").appendChild(n);
       byId.set(id, n);
     }
@@ -111,7 +115,18 @@ const errorText = [...byId.entries()]
   .filter(([k]) => k.startsWith("sel:"))
   .flatMap(([, n]) => n.children.map((c) => c.textContent))
   .join(" ");
+const prBox = document.getElementById("bb-prs");
+const prText = (cls) => prBox.children.find((c) => c.className.includes(cls))?.textContent ?? "";
+const prs = {
+  hidden: prBox.hidden,
+  count: prText("bb-prs__count"),
+  overflow: prText("bb-prs__more"),
+  links: (prBox.children.find((c) => c.className.includes("bb-prs__list"))?.children ?? []).map((a) => ({
+    text: a.textContent, href: a.href, title: a.title, target: a.target, rel: a.rel,
+  })),
+};
+
 const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
-process.stdout.write(JSON.stringify({ stats, charted, empty, more, error: errorText }) + "\n");
+process.stdout.write(JSON.stringify({ stats, charted, empty, more, prs, error: errorText }) + "\n");

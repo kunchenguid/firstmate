@@ -137,15 +137,17 @@ a { color: inherit; text-decoration: none; }
 
 /* open PRs, nav right slot - links only, the page never fetches anything */
 .bb-prs { display: flex; align-items: center; gap: 10px; min-width: 0; overflow: hidden; }
-.bb-prs__count {
+.bb-prs[hidden] { display: none; }
+.bb-prs__count, .bb-prs__more {
   font-family: var(--font-mono); font-size: var(--fs-2xs); letter-spacing: 0.04em;
   text-transform: uppercase; color: var(--text-muted); white-space: nowrap; flex: none;
 }
 .bb-prs__list { display: flex; align-items: center; gap: 10px; min-width: 0; overflow: hidden; }
 /* links keep their own width; the list clips instead of pushing the nav wider,
-   and drops entirely once the nav is too narrow to show any of them */
+   and the list and its overflow chip drop together once the nav is too narrow
+   to show any of them, leaving the count alone */
 .bb-prs__list a { flex: none; }
-@media (max-width: 900px) { .bb-prs__list { display: none; } }
+@media (max-width: 900px) { .bb-prs__list, .bb-prs__more { display: none; } }
 
 .bb-main {
   max-width: var(--container-app); margin: 0 auto;
@@ -474,7 +476,7 @@ __FM_BEARINGS_BOARD_DATA__
     });
     prBox.appendChild(prList);
     if (prs.length > PR_INLINE_MAX) {
-      prBox.appendChild(el("span", "bb-prs__count", "+" + (prs.length - PR_INLINE_MAX) + " more"));
+      prBox.appendChild(el("span", "bb-prs__more", "+" + (prs.length - PR_INLINE_MAX) + " more"));
     }
   }
 
