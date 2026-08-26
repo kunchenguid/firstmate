@@ -1559,19 +1559,24 @@ test_missing_herdr_recovery_refuses_ambiguous_state() {
 }
 
 test_missing_herdr_recovery_rolls_back_after_launch_failure() {
-  local dir out rc before attempt
+  local dir out rc before brief_before attempt
   unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
   dir=$(new_herdr_case rollback mr4)
   before=$(cat "$dir/home/state/mr4.meta")
+  brief_before=$(cat "$dir/home/data/mr4/brief.md")
   FM_FAKE_LAUNCH_FAIL=1 out=$(run_herdr_control "$dir" mr4 recover-missing --captain-authorized --note 'retain this recovery evidence'); rc=$?
   expect_code 1 "$rc" "a failed replacement launch must fail closed"$'\n'"$out"
   assert_contains "$out" "could not be launched" "the launch failure should be reported without claiming recovery"
   [ "$(cat "$dir/home/state/mr4.meta")" = "$before" ] || fail "launch failure must retain the prior durable record"
+  [ "$(cat "$dir/home/data/mr4/brief.md")" = "$brief_before" ] \
+    || fail "launch failure must restore the saved brief after retiring replacement wiring"
   attempt=$(find "$dir/home/state" -maxdepth 1 -type f -name 'mr4.recover-missing.*.attempt' -print -quit)
   [ -n "$attempt" ] || fail "launch failure must retain exact replacement evidence"
   assert_grep "phase=cleanup-complete" "$attempt" "the exact fresh endpoint should be cleaned after an unambiguous launch failure"
+  assert_grep "rollback=prior-record-kept-instructions-restored" "$dir/home/state/mr4.control-recover-missing" \
+    "the transaction should record that the saved instructions were restored"
   assert_grep "phase=failed:launching" "$dir/home/state/mr4.control-recover-missing" "the transaction should retain its failed phase"
-  pass "missing Herdr recovery: launch failure rolls back without changing the recorded task identity"
+  pass "missing Herdr recovery: launch failure rolls back without changing the recorded task identity or instructions"
 }
 
 test_missing_herdr_recovery_distinguishes_missing_from_normal_relaunch() {

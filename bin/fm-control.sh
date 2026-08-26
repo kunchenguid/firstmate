@@ -910,8 +910,16 @@ recover_missing_rollback() {
         recovery_journal_write "failed:$RECOVERY_PHASE" "rollback=new-record-kept" || true
         echo "error: missing-endpoint recovery of $ID published a replacement record but did not complete its transaction; the replacement evidence and local copy were retained for reconciliation" >&2
       else
-        recovery_journal_write "failed:$RECOVERY_PHASE" "rollback=prior-record-kept" || true
-        echo "error: missing-endpoint recovery of $ID did not publish a replacement; the recorded task copy and durable record were preserved" >&2
+        if [ -f "$RECOVERY_BRIEF_PRIOR" ] \
+           && cp -p "$RECOVERY_BRIEF_PRIOR" "$RECOVERY_BRIEF" 2>/dev/null; then
+          recovery_journal_write "failed:$RECOVERY_PHASE" \
+            "rollback=prior-record-kept-instructions-restored" || true
+          echo "error: missing-endpoint recovery of $ID did not publish a replacement; the recorded task copy, instructions, and durable record were preserved" >&2
+        else
+          recovery_journal_write "failed:$RECOVERY_PHASE" \
+            "rollback=prior-record-kept-instructions-restore-failed" || true
+          echo "error: missing-endpoint recovery of $ID did not publish a replacement; its durable record and recovery evidence were retained, but the prior instructions could not be restored" >&2
+        fi
       fi
       ;;
     *)
