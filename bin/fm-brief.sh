@@ -6,7 +6,8 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only>
+#          [--checks-dormant <why>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -43,6 +44,17 @@
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
+# --checks-dormant <why> is firstmate's declaration that this project's automated
+# checks cannot currently run, and <why> is the one-line reason (for example
+# "GitHub Actions minutes exhausted until 1 September"). This script never probes
+# for that condition: firstmate knows it, and a wrong automatic answer would tell
+# a worker to skip real checks on a healthy project. The declaration replaces the
+# generated finish line - which otherwise ends at a check result the worker would
+# wait forever for - with the action to take instead: stop waiting, verify
+# locally, and state in the PR that the checks did not run and what replaced them.
+# It applies only to a ship task that publishes a PR, so scout, secondmate, and
+# local-only scaffolds refuse it rather than accept a declaration that changes
+# nothing.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
 # Every scaffold's status protocol distinguishes the configured
@@ -109,6 +121,8 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+CHECKS_DORMANT=
+CHECKS_DORMANT_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -118,6 +132,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      checks-dormant) CHECKS_DORMANT=$a; CHECKS_DORMANT_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -130,6 +145,8 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --checks-dormant) want_value=checks-dormant ;;
+    --checks-dormant=*) CHECKS_DORMANT=${a#--checks-dormant=}; CHECKS_DORMANT_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -156,6 +173,29 @@ if [ "$KIND" = ship ]; then
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
+fi
+
+# A dormant-checks declaration only has somewhere to land on a ship task that
+# publishes a PR: it rewrites the check-shaped finish line and requires the PR to
+# say the checks did not run. Anywhere else it would be accepted and silently
+# change nothing, which is exactly the failure this flag exists to prevent.
+if [ "$CHECKS_DORMANT_SET" -eq 1 ]; then
+  if [ "$KIND" != ship ]; then
+    echo "error: --checks-dormant applies only to ship briefs; a scout raises no PR and a secondmate charter is not a delivery contract" >&2
+    exit 1
+  fi
+  if [ "$MODE" = local-only ]; then
+    echo "error: --checks-dormant does not apply to local-only, which never pushes and so never waits on checks" >&2
+    exit 1
+  fi
+  case "$CHECKS_DORMANT" in
+    '')
+      echo "error: --checks-dormant requires the one-line reason the checks cannot run, e.g. --checks-dormant 'GitHub Actions minutes exhausted until 1 September'" >&2
+      exit 1 ;;
+    *$'\n'*)
+      echo "error: --checks-dormant takes a single line; give the reason in one sentence" >&2
+      exit 1 ;;
+  esac
 fi
 ID=${POS[0]}
 
@@ -370,6 +410,43 @@ echo "scaffolded: $BRIEF (scout; replace {TASK})"
 exit 0
 fi
 
+# A declared dormant-checks state is composed into the delivery mode's own
+# finish line rather than added as one more warning sentence: the pipeline, not
+# the worker's reading, is what drives waiting on a check result, so only
+# replacing the instruction changes what the worker does.
+CHECKS_DORMANT_SECTION=""
+if [ -n "$CHECKS_DORMANT" ]; then
+  if [ "$MODE" = no-mistakes ]; then
+    DORMANT_WAIT="Never wait for, poll, or re-run checks at any point, including when the pipeline reaches its own CI step: that step is what does the waiting, and you are the one who must not sit on it."
+    DORMANT_STEP="If the pipeline can finish or move on without check results, let it; if it can only sit waiting for them, leave it there and complete the two obligations below."
+    DORMANT_PR_WRITE="The pipeline's generated description knows none of this, so add it yourself with \`gh-axi\` once the run is no longer active."
+    DORMANT_INTENT=$'\n'"Carry this dormancy statement into your \`--intent\` as well, so the pipeline is not left inferring that a missing check is a defect in your change."
+  else
+    DORMANT_WAIT="Never wait for, poll, or re-run checks after you push."
+    DORMANT_STEP="There is nothing to watch once the PR is up; complete the two obligations below and report."
+    DORMANT_PR_WRITE="Write that statement into the PR description yourself when you open the PR."
+    DORMANT_INTENT=""
+  fi
+  IFS= read -r -d '' CHECKS_DORMANT_SECTION <<EOF || true
+## Automated checks are dormant on this project
+Firstmate has established that this project's automated checks cannot run: $CHECKS_DORMANT.
+Runs may still be created and then die within seconds with no runner, no logs, and no steps; that is the dormancy, not a flake worth retrying.
+Take this as given: do not verify it, investigate the checks, or try to make them run.
+
+Your finish line here is NOT a green check, because no green can arrive.
+$DORMANT_WAIT
+This is not a declared external wait either, so never park on it with \`$PAUSED_VERB:\`: waiting delivers nothing.
+$DORMANT_STEP
+
+Local evidence is what replaces the checks, and a dormant check is never permission to ship unverified work.
+Run this project's own tests, lint, and build yourself, record the exact commands and their results, and fix a local failure before you report done.
+The PR description MUST state plainly, in its own section, that the automated checks did NOT run, why, which commands you ran in their place, and their results.
+$DORMANT_PR_WRITE
+A PR that quietly omits it is not done.$DORMANT_INTENT
+EOF
+  CHECKS_DORMANT_SECTION=${CHECKS_DORMANT_SECTION%$'\n'}
+fi
+
 # Ship task: shape Setup / Rule 1 / Definition of done by this task's explicit
 # delivery mode, validated above. The generated DOD opens with the fixed
 # "Delivery contract: mode=<mode>" line that bin/fm-spawn.sh checks against its own
@@ -378,13 +455,20 @@ case "$MODE" in
   direct-PR)
     SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    if [ -n "$CHECKS_DORMANT" ]; then
+      DIRECT_DONE='done: PR {url} - automated checks did not run, verified locally'
+      DORMANT_APPENDIX=$'\n\n'"$CHECKS_DORMANT_SECTION"
+    else
+      DIRECT_DONE='done: PR {url}'
+      DORMANT_APPENDIX=""
+    fi
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`$DIRECT_DONE\` to the status file and stop.
+Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.$DORMANT_APPENDIX
 EOF
     ;;
   local-only)
@@ -404,6 +488,18 @@ EOF
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
+    if [ -n "$CHECKS_DORMANT" ]; then
+      IFS= read -r -d '' DOD_TAIL <<EOF || true
+$CHECKS_DORMANT_SECTION
+
+When the PR exists and its description carries that statement, append \`done: PR {url} - automated checks did not run, verified locally\` to the status file and stop. You are finished.
+EOF
+    else
+      IFS= read -r -d '' DOD_TAIL <<'EOF' || true
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append `done: PR {url} checks green` and stop. You are finished.
+EOF
+    fi
+    DOD_TAIL=${DOD_TAIL%$'\n'}
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=no-mistakes
@@ -422,7 +518,7 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+$DOD_TAIL
 EOF
     ;;
 esac
