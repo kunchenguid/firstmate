@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -39,9 +40,35 @@ def _ensure_state_dir(state: Path) -> bool:
 
 
 def _persistent_cli_launch() -> bool:
+    args = sys.argv[1:]
+    cli = False
+    rooted = False
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in {"-m", "--model", "--provider", "--reasoning", "-r", "--resume", "-s", "--skills"}:
+            index += 1
+            if index >= len(args) or not args[index]:
+                return False
+        elif arg.startswith(("--model=", "--provider=", "--reasoning=", "--resume=", "--skills=")):
+            if not arg.partition("=")[2]:
+                return False
+        elif arg in {"-c", "--continue"}:
+            if index + 1 < len(args) and not args[index + 1].startswith("-"):
+                index += 1
+        elif arg.startswith("--continue="):
+            if not arg.partition("=")[2]:
+                return False
+        elif arg == "--cli":
+            cli = True
+        elif arg == "--no-restore-cwd":
+            rooted = True
+        elif arg not in {"--accept-hooks", "--yolo", "--pass-session-id"}:
+            return False
+        index += 1
     return (
-        "--cli" in sys.argv[1:]
-        and "--no-restore-cwd" in sys.argv[1:]
+        cli
+        and rooted
         and os.environ.get("FM_HERMES_PRIMARY_POLICY") == "pi-herdr-v1"
         and os.environ.get("FM_HERMES_PRIMARY_PID") == str(os.getpid())
     )
@@ -119,22 +146,66 @@ def _process_identity() -> str | None:
     return identity
 
 
+def _live_marker_owner(state: Path) -> int | None:
+    process_lib = _ROOT / "bin" / "fm-harness-process-lib.sh"
+    try:
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                '. "$1"; pid=$(fm_hermes_marker_pid "$2" "$3") && '
+                'fm_process_is_hermes_primary_pid "$pid" "$2" "$3" && printf "%s" "$pid"',
+                "firstmate-hermes-marker-owner",
+                str(process_lib),
+                str(state),
+                str(_ROOT),
+            ],
+            cwd=str(_ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    try:
+        return int(result.stdout) if result.returncode == 0 else None
+    except ValueError:
+        return None
+
+
 def _write_loaded_marker() -> None:
     identity = _process_identity()
     if identity is None:
         return
     payload = f"{_marker_digest()}\n{os.getpid()}\n{_ROOT}\n{identity}\n"
-    for state in {_state_dir(), _ROOT / "state"}:
-        marker = state / _MARKER_NAME
-        tmp = marker.with_name(f"{marker.name}.{os.getpid()}.tmp")
-        try:
-            tmp.write_text(payload, encoding="utf-8")
-            os.replace(tmp, marker)
-        except OSError:
+    canonical_state = _ROOT / "state"
+    lock_path = canonical_state / ".hermes-primary-marker.lock"
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        lock_fd = os.open(lock_path, flags, 0o600)
+    except OSError:
+        return
+    with os.fdopen(lock_fd, "r+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        owner = _live_marker_owner(canonical_state)
+        if owner is not None and owner != os.getpid():
+            return
+        for state in {_state_dir(), canonical_state}:
+            marker = state / _MARKER_NAME
+            tmp = marker.with_name(f"{marker.name}.{os.getpid()}.tmp")
             try:
-                tmp.unlink()
+                tmp.write_text(payload, encoding="utf-8")
+                os.replace(tmp, marker)
             except OSError:
-                pass
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
 
 
 def _run_checker(path: Path, *args: str, payload: str | None = None) -> subprocess.CompletedProcess[str] | None:

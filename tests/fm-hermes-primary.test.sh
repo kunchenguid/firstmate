@@ -34,7 +34,10 @@ make_fake_hermes() {
 set -u
 printf '%s\n' "HERMES_ENABLE_PROJECT_PLUGINS=\${HERMES_ENABLE_PROJECT_PLUGINS:-} FM_BACKEND=\${FM_BACKEND:-} FM_HERMES_PRIMARY_POLICY=\${FM_HERMES_PRIMARY_POLICY:-} CLAUDECODE=\${CLAUDECODE:-} PI_CODING_AGENT=\${PI_CODING_AGENT:-} FM_PI_HARNESS=\${FM_PI_HARNESS:-} GROK_AGENT=\${GROK_AGENT:-} CURSOR_AGENT=\${CURSOR_AGENT:-} CURSOR_INVOKED_AS=\${CURSOR_INVOKED_AS:-} ARGS=\$*" >> '$dir/calls'
 if [ "\${1:-}" = config ] && [ "\${2:-}" = get ]; then
-  [ '$status' = enabled ] && printf '%s\n' '- firstmate-primary'
+  case "\${3:-}:$status" in
+    plugins.enabled:enabled|plugins.enabled:both) printf '%s\n' '- firstmate-primary' ;;
+    plugins.disabled:disabled|plugins.disabled:both) printf '%s\n' '- firstmate-primary' ;;
+  esac
   exit 0
 fi
 if [ "\${1:-}" = config ] && [ "\${2:-}" = path ]; then
@@ -172,7 +175,13 @@ test_launcher_scope_and_fail_closed() {
   out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-disabled" 2>&1) || rc=$?
   [ "$rc" -eq 1 ] || fail "disabled plugin must fail closed, got $rc"
   assert_contains "$out" '--setup' "disabled launcher omitted setup guidance"
-  pass "Hermes launcher is explicit, scoped, and fail-closed"
+
+  fakebin=$(make_fake_hermes "$TMP_ROOT/launcher-both" both)
+  rc=0
+  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-both" --check 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "a plugin in both enabled and disabled lists must be reported disabled"
+  assert_contains "$out" 'not enabled' "effective disabled-list precedence was not reported"
+  pass "Hermes launcher is explicit, effectively enabled, scoped, and fail-closed"
 }
 
 test_setup_keeps_normal_wrapper_plugin_discoverable() {
@@ -193,7 +202,10 @@ test_plugin_scope_guard_and_recovery() {
   mkdir -p "$fixture"
   cp -R "$ROOT/bin" "$fixture/bin"
   cp "$ROOT/AGENTS.md" "$fixture/AGENTS.md"
-  mkdir -p "$fixture/state" "$fixture/config" "$fixture/docs"
+  mkdir -p "$fixture/state" "$fixture/config" "$fixture/docs" \
+    "$fixture/.hermes/plugins/firstmate-primary"
+  cp "$ROOT/.hermes/plugins/firstmate-primary/__init__.py" \
+    "$fixture/.hermes/plugins/firstmate-primary/__init__.py"
   git -C "$fixture" init -q
   git -C "$fixture" add AGENTS.md
   git -C "$fixture" -c user.name=fixture -c user.email=fixture@example.invalid commit -qm fixture
@@ -205,6 +217,7 @@ test_plugin_scope_guard_and_recovery() {
 import importlib.util
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 source = Path(os.environ["FM_PLUGIN_SOURCE"])
@@ -254,9 +267,40 @@ ctx = Context()
 module.register(ctx)
 assert ctx.hooks == {}
 
+ctx = activate(
+    primary,
+    ["hermes", "--cli", "--no-restore-cwd", "--ignore-rules"],
+)
+assert ctx.hooks == {}
+assert not (primary / "state").exists()
+
+(primary / "state").mkdir()
+holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+try:
+    identity = subprocess.check_output(
+        [
+            "bash",
+            "-c",
+            '. "$1"; fm_pid_identity "$2"',
+            "holder-identity",
+            str(primary / "bin" / "fm-process-identity-lib.sh"),
+            str(holder.pid),
+        ],
+        text=True,
+    ).strip()
+    marker = primary / "state" / ".hermes-primary-plugin-loaded"
+    marker.write_text(
+        f"{module._marker_digest()}\n{holder.pid}\n{primary}\n{identity}\n"
+    )
+    ctx = activate(primary)
+    assert set(ctx.hooks) == {"pre_tool_call", "on_session_end", "on_session_finalize"}
+    assert marker.read_text().splitlines()[1] == str(holder.pid)
+finally:
+    holder.terminate()
+    holder.wait()
+
 ctx = activate(primary)
 assert set(ctx.hooks) == {"pre_tool_call", "on_session_end", "on_session_finalize"}
-marker = primary / "state" / ".hermes-primary-plugin-loaded"
 lines = marker.read_text().splitlines()
 assert lines[0].startswith("sha256:")
 assert lines[1] == str(os.getpid())

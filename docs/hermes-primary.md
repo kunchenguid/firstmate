@@ -23,7 +23,7 @@ bin/fm-hermes-primary.sh --check
 
 Setup links the tracked plugin into the active Hermes home and enables its exact plugin key.
 It refuses to replace an existing non-matching plugin path.
-Normal launches only check that enablement and do not rewrite Hermes configuration.
+Normal launches require the plugin in `plugins.enabled` and absent from the higher-precedence `plugins.disabled` list without rewriting Hermes configuration.
 Setup and launch create the checkout state directory when absent and refuse a symlinked or non-directory state path.
 
 Configure the required Pi workers and Herdr backend before launching Hermes:
@@ -49,7 +49,8 @@ bin/fm-hermes-primary.sh
 ```
 
 The launcher forces the persistent classic CLI and keeps resumed sessions in the checkout root.
-It accepts only bounded classic-session options and refuses profiles, subcommands, one-shot mode, the TUI, safe mode, ignored rules or user configuration, Hermes-managed worktrees, and alternate starting directories because those shapes would disable or escape the Firstmate integration.
+The project plugin independently enforces the same bounded classic-session argument contract before it publishes trusted identity.
+Profiles, subcommands, one-shot mode, the TUI, safe mode, ignored rules or user configuration, Hermes-managed worktrees, and alternate starting directories are refused because those shapes would disable or escape the Firstmate integration.
 
 The plugin then:
 
@@ -57,7 +58,7 @@ The plugin then:
 - validates watcher-arm terminal calls through Firstmate's shared command policy;
 - requires `terminal(background=true, notify_on_complete=true)` for the one managed watcher process;
 - runs the shared turn-end predicate after successful, failed, and interrupted turns and injects one bounded recovery turn when active work lacks healthy supervision;
-- publishes an exact-build, checkout-bound process marker with process-incarnation identity for the lifetime of the CLI process so detection and session start can reject stale PID reuse across `/new` and reset boundaries.
+- publishes an exact-build, checkout-bound process marker with process-incarnation identity for the lifetime of the CLI process, preserving any other live checkout owner so concurrent startup cannot invalidate session-lock ownership.
 
 ## Verification and upgrades
 

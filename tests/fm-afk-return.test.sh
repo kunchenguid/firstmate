@@ -17,7 +17,8 @@ install_runner() {  # <case-dir>
   local dir=$1
   mkdir -p "$dir/bin" "$dir/home/state" "$dir/home/data" "$dir/home/config"
   cp "$ROOT/bin/fm-afk-return.sh" "$dir/bin/"
-  cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-process-identity-lib.sh" \
+    "$ROOT/bin/fm-adapter-marker-lib.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-classify-lib.sh" "$dir/bin/"
   # fm-timeout-lib.sh: the shared hard bound fm-classify-lib.sh sources for the
   # wedge detector's bounded worktree write probe.

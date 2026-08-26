@@ -367,9 +367,9 @@ Grok's primary watcher protocol remains background-notify around `bin/fm-watch-a
 ## hermes (VERIFIED PRIMARY ONLY 2026-08-25, Hermes Agent 0.20.5)
 
 Hermes runs only the captain-facing primary Firstmate session.
-Launch it from the trusted checkout with `bin/fm-hermes-primary.sh`, after the one-time `bin/fm-hermes-primary.sh --setup` enables the tracked project plugin.
+Launch it from the trusted checkout with `bin/fm-hermes-primary.sh`, after the one-time `bin/fm-hermes-primary.sh --setup` effectively enables the tracked project plugin; the plugin independently refuses any argv outside the launcher's classic-session allowlist before publishing identity.
 The launcher forces the persistent classic CLI, preserves the checkout root on resume, and refuses one-shot, safe-mode, rule-skipping, user-config-skipping, worktree, alternate-directory, and TUI options that would disable or escape the integration.
-Detection and session-lock ownership require the current project-plugin marker to bind the checkout root, exact plugin digest, and live Hermes ancestor incarnation; `HERMES_HOME`, caller-selected state paths, flattened process arguments, prompt text, profiles, subcommands, direct CLI launches, and one-shot `-z` processes are not identity.
+Detection and session-lock ownership require the current project-plugin marker to bind the checkout root, exact plugin digest, and live Hermes ancestor incarnation; publication preserves another live checkout owner, while `HERMES_HOME`, caller-selected roots or state paths, flattened process arguments, prompt text, profiles, subcommands, unsafe direct CLI launches, and one-shot `-z` processes are not identity.
 The project plugin blocks `delegate_task`, so all implementation work continues through visible Firstmate workers.
 It also routes watcher-arm commands through the shared pre-tool checker and requires Hermes's managed background terminal with completion notification.
 `on_session_end` runs the shared turn-end predicate and injects at most one recovery turn per blind boundary, including provider failures and interruptions.

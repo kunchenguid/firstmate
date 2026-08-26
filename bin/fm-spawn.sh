@@ -400,7 +400,7 @@ else
 fi
 
 hermes_primary_policy_session_active() {
-  fm_hermes_primary_ancestry_pid "$FM_ROOT/state" "$FM_ROOT" >/dev/null
+  fm_hermes_primary_ancestry_pid "$SCRIPT_ROOT/state" "$SCRIPT_ROOT" >/dev/null
 }
 
 HERMES_PRIMARY_POLICY_ACTIVE=0
@@ -1253,21 +1253,45 @@ launch_template() {
   esac
 }
 
+validate_raw_worker_launch() {
+  local launch=$1 executable=$2 resolved base
+  case "$launch" in
+    *'$'*|*'`'*|*';'*|*'|'*|*'&'*|*'('*|*')'*|*'<'*|*'>'*|*$'\n'*|*$'\r'*)
+      echo "error: raw worker launch commands must name one direct executable without dynamic shell syntax" >&2
+      return 1
+      ;;
+  esac
+  resolved=$(type -P -- "$executable" 2>/dev/null) || {
+    echo "error: raw worker launch executable cannot be resolved: $executable" >&2
+    return 1
+  }
+  base=$(basename "$resolved" | tr '[:upper:]' '[:lower:]')
+  case "$base" in
+    *hermes*|sh|bash|dash|zsh|fish|env|nohup|sudo|python|python[0-9]*|node|nodejs|perl|ruby)
+      echo "error: raw worker launch executable is not an eligible direct worker runtime: $resolved" >&2
+      return 1
+      ;;
+  esac
+}
+
 RAW_LAUNCH=0
+RAW_EXECUTABLE=
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
+      case "$word" in
+        [A-Za-z_]*=*) continue ;;
+        *) RAW_EXECUTABLE=$word; HARNESS=$(basename "$word"); break ;;
+      esac
     done
-    case "$(printf '%s' "$LAUNCH" | tr '[:upper:]' '[:lower:]')" in
-      *hermes*)
-        echo "error: Hermes is primary-only and cannot appear in a raw worker launch command" >&2
-        exit 1
-        ;;
-    esac
+    [ -n "$RAW_EXECUTABLE" ] || {
+      echo "error: raw worker launch command does not name an executable" >&2
+      exit 1
+    }
+    validate_raw_worker_launch "$LAUNCH" "$RAW_EXECUTABLE" || exit 1
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the

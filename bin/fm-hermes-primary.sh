@@ -40,7 +40,11 @@ require_root() {
 }
 
 plugin_status() {
-  hermes config get plugins.enabled 2>/dev/null | grep -Fx -- "- $PLUGIN" >/dev/null
+  hermes config get plugins.enabled 2>/dev/null | grep -Fx -- "- $PLUGIN" >/dev/null \
+    || return 1
+  if hermes config get plugins.disabled 2>/dev/null | grep -Fx -- "- $PLUGIN" >/dev/null; then
+    return 1
+  fi
 }
 
 require_state_dir() {
