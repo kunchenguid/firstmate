@@ -315,6 +315,7 @@ FM_SESSION_LOCK_DECLARATION_DRIFT=1 bin/fm-test-run.sh tests/fm-session-lock-dec
 # background agent: without the declaration the writer would have recorded 90256, the shared plumbing above this session
 ok - session-lock: claude 2.1.241 (Claude Code) declares its own session process in both a print-mode and a daemon-hosted background session, and the writer records it
 ```
+
 `tests/fm-watch-arm.test.sh` runs real watcher and arm cycles against durable on-disk state to verify that a delivered reason survives until post-handling acknowledgement and stops replaying after acknowledgement, while an unrelated queue append cannot make a watcher cycle that delivered nothing look successful.
 The same suite ingests a keyed remote-secondmate parent reply through the real adapter, establishes the incremental OPEN DECISIONS cursor, interrupts supervision, and proves re-arm replays every unacknowledged queue row plus the still-open decision through the ordinary drain path.
 It also covers decision-only recovery, interrupted handling, handling-window generation reuse, non-fatal moved-generation acknowledgement with sequence-bounded consumption, and a persistent successor remaining live after recovery is acknowledged.
