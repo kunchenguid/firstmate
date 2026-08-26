@@ -324,14 +324,19 @@ Observed recovery output:
 ```text
 ok - missing Herdr recovery: explicit captain authorization is mandatory
 ok - missing Herdr recovery: dirty existing copy is preserved and a fresh endpoint is published atomically
+ok - missing Herdr recovery: Claude worktree settings are merged, not overwritten
+ok - missing Herdr recovery: incomplete create responses reconcile durably
+ok - missing Herdr recovery: publication is the irreversible cleanup boundary
+ok - missing Herdr recovery: OpenCode project plugins are preserved
 ok - missing Herdr recovery: an unrelated live agent in the recorded copy is refused
 ok - missing Herdr recovery: endpoint allocation failure retains recoverable evidence
 ok - missing Herdr recovery: live endpoint ownership is refused
 ok - missing Herdr recovery: ambiguous endpoint evidence is refused
-ok - missing Herdr recovery: launch failure rolls back without changing the recorded task identity
+ok - missing Herdr recovery: launch failure rolls back without changing the recorded task identity or instructions
 ok - missing Herdr recovery: ordinary relaunch refuses the distinct missing-endpoint state
 ok - missing Herdr recovery: ordinary dead-endpoint relaunch remains unchanged
 ok - fm-spawn --recover-missing: the launch half cannot be used as a direct escape hatch
+ok - missing Herdr recovery: secondmate, remote, and missing-copy boundaries refuse
 ```
 
 Before this operation, `bin/fm-spawn.sh <task-id> --relaunch` refused a recorded Herdr endpoint classified as `missing` rather than allocating a replacement.
@@ -343,6 +348,7 @@ A pane with no native registration is considered clear only when Herdr's strict 
 The dirty-copy regression proved that uncommitted files, branch identity, task identity, instructions, and the existing project copy survive the fresh endpoint allocation.
 The publication regression proved that the prior metadata remains authoritative until the new pane enters the existing worktree and reads alive, after which a same-directory atomic replacement publishes the new endpoint.
 The allocation- and launch-failure regressions proved that partial recovery evidence remains available, the prior metadata remains in place when no replacement was published, and an exact replacement endpoint is cleaned when its state is unambiguous.
+When a launch failure retires the fresh harness wiring before publication, the rollback also restores the saved brief from its preserved copy and records in the transaction journal whether that restoration succeeded (`rollback=prior-record-kept-instructions-restored` or `-instructions-restore-failed`), so a prior record is never left pointing at a brief still carrying the failed replacement's appended recovery instructions.
 The operation refuses remote and secondmate records and does not change normal relaunch, automatic recovery, watcher, teardown, or discard behavior.
 
 The real lifecycle opt-in for this path must use the named non-default Herdr lab helper and its default-session tripwire:

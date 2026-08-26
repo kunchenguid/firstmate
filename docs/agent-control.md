@@ -97,6 +97,7 @@ The durable transaction is recorded at `state/<id>.control-recover-missing` and 
 The prior metadata remains authoritative while the new pane is created, moved into the existing copy, wired to the recorded harness, and positively classified as alive.
 Only then does the launch owner atomically publish a replacement metadata file carrying the same task id, project, worktree, kind, and a fresh Herdr endpoint.
 A launch or publication failure never claims recovery, keeps the prior record when it was not published, and retains the attempt evidence for reconciliation.
+When a launch failure retires the fresh replacement wiring before publication, the rollback also restores the saved brief from its preserved copy and records in the transaction journal whether that restoration succeeded, so the prior record is never left pointing at a brief still carrying the failed replacement's appended recovery instructions.
 A replacement record that was published before a later failure is kept rather than rewritten to the disappeared endpoint.
 
 The `fm-spawn.sh --recover-missing` half is internal and accepts only the live parent transaction owned by `fm-control.sh`; direct invocation is refused before endpoint allocation.
@@ -151,8 +152,7 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 ## Verification
 
 - `tests/fm-control.test.sh` - the adapter contract for every verified harness, the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
-- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, rollback after a failed launch, and the explicit missing-Herdr recovery path.
+- `tests/fm-control-relaunch.test.sh` - the relaunch transaction (identity preservation, harness switching, the progress note, checkpoint refusals, rollback after a failed launch) and the explicit missing-Herdr recovery path (ownership proof, endpoint replacement, copy and instructions preservation, rollback, refusal boundaries, and relaunch/secondmate non-regressions).
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.
 - `tests/fm-backend-herdr.test.sh` - Herdr's missing, dead, live, and ambiguous pane-state classifier.
-- `tests/fm-control-relaunch.test.sh` - the recovery ownership proof, endpoint replacement, copy preservation, rollback, refusal boundaries, and relaunch/secondmate non-regressions.
 - The real lifecycle opt-in for this recovery path must use `bin/fm-herdr-lab.sh` with a generated non-default session and verify the default-session tripwire after teardown.
