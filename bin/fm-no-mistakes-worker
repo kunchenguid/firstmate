@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -364,11 +365,23 @@ def request_assignment(config, task, generation):
         timeout=120,
     )
     deadline = time.monotonic() + config["assignment_timeout_seconds"]
+    last_reconcile_error = None
     while time.monotonic() < deadline:
-        lifecycle(
-            config, "reconcile", "--apply", "--confirm-subscription", subscription,
-            timeout=min(900, max(1, int(deadline - time.monotonic()))),
-        )
+        remaining = deadline - time.monotonic()
+        try:
+            lifecycle(
+                config, "reconcile", "--apply", "--confirm-subscription", subscription,
+                timeout=max(1, math.ceil(remaining)),
+            )
+            last_reconcile_error = None
+        except WrapperError as error:
+            if not error.retryable:
+                raise
+            # Reconcile mutations are durably claimed before the provider call.
+            # A transient refusal or caller timeout must therefore be resumed
+            # under this same task identity, not escaped to no-mistakes where a
+            # new attempt would enqueue a second Azure job.
+            last_reconcile_error = error
         status = last_json(lifecycle(config, "status", "--json", timeout=120), "lifecycle status")
         matches = [
             item for item in status.get("account_placements", [])
@@ -383,8 +396,11 @@ def request_assignment(config, task, generation):
             ):
                 raise WrapperError("assigned account placement is incomplete", "infrastructure", True)
             return item["assignment_generation"], item["account_home"]
-        time.sleep(config["poll_seconds"])
-    raise WrapperError("Azure worker assignment timed out", "assignment_timeout", True)
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(config["poll_seconds"], remaining))
+    detail = ": {}".format(last_reconcile_error) if last_reconcile_error is not None else ""
+    raise WrapperError("Azure worker assignment timed out{}".format(detail), "assignment_timeout", True)
 
 
 def extract_service_return(root, execution, request):
@@ -586,11 +602,23 @@ def cleanup_service(config, task, generation, assignment, request_digest):
         "--confirm-subscription", subscription, timeout=120,
     )
     deadline = time.monotonic() + config["cleanup_timeout_seconds"]
+    last_reconcile_error = None
     while time.monotonic() < deadline:
-        lifecycle(
-            config, "reconcile", "--apply", "--confirm-subscription", subscription,
-            timeout=min(900, max(1, int(deadline - time.monotonic()))),
-        )
+        remaining = deadline - time.monotonic()
+        try:
+            lifecycle(
+                config, "reconcile", "--apply", "--confirm-subscription", subscription,
+                timeout=max(1, math.ceil(remaining)),
+            )
+            last_reconcile_error = None
+        except WrapperError as error:
+            if not error.retryable:
+                raise
+            # Cleanup is also a durable lifecycle claim. Keep replaying it in
+            # this invocation so a finished review cannot turn into another
+            # independently queued review merely because Azure briefly
+            # refused one convergence pass.
+            last_reconcile_error = error
         status = last_json(lifecycle(config, "status", "--json", timeout=120), "lifecycle status")
         matches = [
             item for item in status.get("account_placements", [])
@@ -598,8 +626,11 @@ def cleanup_service(config, task, generation, assignment, request_digest):
         ]
         if not matches:
             return
-        time.sleep(config["poll_seconds"])
-    raise WrapperError("Azure worker cleanup timed out", "cleanup_timeout", True)
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(config["poll_seconds"], remaining))
+    detail = ": {}".format(last_reconcile_error) if last_reconcile_error is not None else ""
+    raise WrapperError("Azure worker cleanup timed out{}".format(detail), "cleanup_timeout", True)
 
 
 def execute(args):
