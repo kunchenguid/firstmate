@@ -1705,15 +1705,17 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # isolation guard refuses a spawn that never actually tangled). Canonicalize
 # once here so every downstream comparison uses the same physical form
 # (docs/herdr-backend.md "Known gaps").
-PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
+#
+# fm_canonical_path (bin/fm-wake-lib.sh) is used rather than `cd … && pwd -P`
+# because pwd -P preserves the CALLER's spelling of each component. On a
+# case-insensitive filesystem a session opened as .../Firstmate and a treehouse
+# path spelled .../firstmate are one directory, and a pwd -P compare calls them
+# different - which let a crewmate be placed directly in the primary clone with
+# no refusal. See fm_canonical_path's header for why realpath(1) is required.
+PROJ_ABS_REAL=$(fm_canonical_path "$PROJ_ABS")
 
 real_path_or_raw() {  # <path>
-  local path=$1 real
-  if real=$(cd "$path" 2>/dev/null && pwd -P); then
-    printf '%s\n' "$real"
-  else
-    printf '%s\n' "$path"
-  fi
+  fm_canonical_path "$1"
 }
 
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
@@ -1727,19 +1729,49 @@ real_path_or_raw() {  # <path>
 validate_spawn_worktree() {  # <source> <inspect-target>
   local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
   wt_real=
-  if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
-    wt_real=
+  if [ -d "$WT" ]; then
+    wt_real=$(fm_canonical_path "$WT")
   fi
   proj_real=$PROJ_ABS_REAL
   wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
   wt_top_real=
-  if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
-    wt_top_real=
+  if [ -n "$wt_top" ] && [ -d "$wt_top" ]; then
+    wt_top_real=$(fm_canonical_path "$wt_top")
   fi
   if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
+}
+
+# warn_worktree_double_leased <worktree> <task-id>
+# Check AFTER acquisition whether the slot treehouse actually handed us is one that
+# another task's metadata already records. A pool slot is a reusable lease, so
+# the slot printed at request time is not proof of what the lease landed on; only
+# reading back the settled path and checking it against the recorded fleet is.
+# Recorded worktree= values and the landed path are compared in canonical physical
+# form so two spellings of one slot cannot read as two different slots.
+#
+# This WARNS rather than refuses, deliberately. A lingering record is usually just
+# a finished task whose teardown has not run yet, and a pool slot is legitimately
+# reused after that; hard-failing here would block routine spawns on stale
+# metadata. The destructive end is where the ambiguity actually causes damage, and
+# bin/fm-teardown.sh's validate_worktree_branch_identity refuses there on positive
+# proof. Surfacing it at spawn gives the supervisor the chance to reconcile the
+# stale pointer before two records name one slot.
+warn_worktree_double_leased() {  # <worktree> <task-id>
+  local wt=$1 id=$2 wt_real other_meta other_id other_wt
+  wt_real=$(fm_canonical_path "$wt")
+  for other_meta in "$STATE"/*.meta; do
+    [ -e "$other_meta" ] || continue
+    other_id=$(basename "$other_meta" .meta)
+    [ "$other_id" != "$id" ] || continue
+    other_wt=$(fm_meta_get "$other_meta" worktree)
+    [ -n "$other_wt" ] || continue
+    [ "$(fm_canonical_path "$other_wt")" = "$wt_real" ] || continue
+    echo "warning: task $id landed in worktree '$wt_real', which task '$other_id' also records." >&2
+    echo "If '$other_id' is finished, tear it down so one workspace is not recorded by two tasks; cleanup refuses a slot holding another task's branch." >&2
+  done
 }
 
 freshen_spawn_worktree_base() {  # <worktree>
@@ -2256,7 +2288,12 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       p_real=$(real_path_or_raw "$p")
       if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
         if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-          WT="$p"
+          # Record the CANONICAL landed path, not the raw pane string: this value
+          # becomes worktree= in state/<id>.meta, and teardown later aims
+          # destructive operations at it. Keeping the same physical form that was
+          # just validated means the recorded pointer and the checked path are
+          # never two different spellings of the lease.
+          WT="$p_real"
           break
         fi
         candidate="$p_real"
@@ -2274,6 +2311,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  warn_worktree_double_leased "$WT" "$ID"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1

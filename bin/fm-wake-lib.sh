@@ -78,6 +78,60 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+# fm_canonical_path <path>
+# Print <path> in its physical, on-disk form: symlinked components resolved AND,
+# on a case-insensitive filesystem (APFS/HFS+), the filesystem's own spelling of
+# every component. Falls back to the deepest form it can compute so a caller
+# comparing a since-removed path still gets a deterministic value.
+#
+# `cd … && pwd -P` is NOT sufficient here and must not be substituted back in. It
+# resolves symlinks but echoes the CALLER's spelling: on APFS, `cd /x/Home && pwd -P`
+# prints /x/Home while `cd /x/home && pwd -P` prints /x/home, even though both name
+# one directory (same inode). realpath(3) is what folds the spelling to the on-disk
+# name. Perl's Cwd::realpath and Python's os.path.realpath share pwd -P's behavior
+# and are equally unsuitable, so this deliberately shells out to realpath(1).
+#
+# Identity checks comparing a LIVE value (an ambient FM_HOME, a resolved script dir)
+# against a DURABLE one recorded earlier must send both sides through this: their
+# provenance differs, so one directory can reach them under two spellings and a raw
+# compare reports two different homes. Same-provenance comparisons (two recorded
+# paths from one writer) do not need it.
+#
+# On a case-SENSITIVE filesystem the variant path simply does not exist, so this
+# case cannot arise there and the helper degrades to plain symlink resolution.
+fm_canonical_path() {
+  local path=${1-} real
+  [ -n "$path" ] || return 1
+  if real=$(realpath -- "$path" 2>/dev/null) && [ -n "$real" ]; then
+    printf '%s\n' "$real"
+    return 0
+  fi
+  # realpath(1) absent, or the path no longer exists: keep the best available
+  # physical form rather than an empty string.
+  if real=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P); then
+    printf '%s\n' "$real"
+  else
+    printf '%s\n' "$path"
+  fi
+}
+
+# fm_canonical_file_path <path>
+# fm_canonical_path for a path whose final component is a FILE (the watcher script
+# itself). realpath(1) handles files directly; the fallback canonicalizes the
+# containing directory and re-appends the basename, since `cd` cannot enter a file.
+fm_canonical_file_path() {
+  local path=${1-} dir base real
+  [ -n "$path" ] || return 1
+  if real=$(realpath -- "$path" 2>/dev/null) && [ -n "$real" ]; then
+    printf '%s\n' "$real"
+    return 0
+  fi
+  dir=$(dirname -- "$path")
+  base=$(basename -- "$path")
+  dir=$(fm_canonical_path "$dir") || return 1
+  printf '%s/%s\n' "${dir%/}" "$base"
+}
+
 # fm_watcher_lock_unheld <state>
 # True when the watcher lock or its symlinked owner directory is absent, or when
 # the existing lock records no pid at all. Any non-empty pid remains held here;
@@ -99,8 +153,8 @@ fm_watcher_lock_matches_pid() {
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
   lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
-  [ "$lock_home" = "$home" ] || return 1
-  [ "$lock_path" = "$watch_path" ] || return 1
+  [ "$(fm_canonical_path "$lock_home")" = "$(fm_canonical_path "$home")" ] || return 1
+  [ "$(fm_canonical_file_path "$lock_path")" = "$(fm_canonical_file_path "$watch_path")" ] || return 1
   [ -n "$lock_identity" ] || return 1
   current_identity=$(fm_pid_identity "$pid") || return 1
   [ "$current_identity" = "$lock_identity" ] || return 1

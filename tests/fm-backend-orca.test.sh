@@ -1030,6 +1030,75 @@ test_ship_teardown_removes_orca_worktree_when_id_path_matches() {
   pass "fm-teardown.sh backend=orca: ship teardown requires a matching Orca id path"
 }
 
+test_ship_teardown_refuses_orca_recycled_pool_slot_other_task_branch() {
+  local proj wt data state config id out rc neutral
+  id="orcashiprecycledz3"
+  proj="$TMP_ROOT/ship-recycled-project"
+  wt="$TMP_ROOT/ship-recycled-wt"
+  data="$TMP_ROOT/ship-recycled-data"
+  state="$TMP_ROOT/ship-recycled-state"
+  config="$TMP_ROOT/ship-recycled-config"
+  fm_git_worktree "$proj" "$wt" "fm/other-live-task"
+  mkdir -p "$data/$id" "$state" "$config"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-ship-recycled" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=ship" "mode=local-only" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-ship-recycled"
+  orca_case ship-recycled
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-ship-recycled","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "Orca ship teardown should refuse a recycled pool slot holding another task's branch"
+  assert_contains "$out" "belongs to task 'other-live-task'" \
+    "recycled Orca pool slot refusal should name the conflicting task"
+  [ "$(git -C "$wt" rev-parse --abbrev-ref HEAD)" = "fm/other-live-task" ] \
+    || fail "recycled Orca pool slot: the other task's branch was mutated"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+    "refused recycled Orca ship teardown should not close terminals"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "refused recycled Orca ship teardown should not remove worktrees"
+  assert_present "$state/$id.meta" "refused recycled Orca ship teardown should preserve metadata"
+  pass "fm-teardown.sh backend=orca: ship teardown refuses a recycled pool slot holding another task's branch, even with --force"
+}
+
+test_ship_teardown_proceeds_orca_own_task_branch() {
+  local proj wt data state config id out rc neutral
+  id="orcashipownbranchz4"
+  proj="$TMP_ROOT/ship-ownbranch-project"
+  wt="$TMP_ROOT/ship-ownbranch-wt"
+  data="$TMP_ROOT/ship-ownbranch-data"
+  state="$TMP_ROOT/ship-ownbranch-state"
+  config="$TMP_ROOT/ship-ownbranch-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-ship-ownbranch" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=ship" "mode=local-only" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-ship-ownbranch"
+  orca_case ship-ownbranch
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-ship-ownbranch","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "Orca ship teardown should proceed when the worktree holds the task's own branch"$'\n'"$out"
+  assert_not_contains "$out" "belongs to task" \
+    "own-branch Orca ship teardown must not report a foreign-branch conflict"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-ship-ownbranch'$'\x1f''--force'$'\x1f''--json' \
+    "own-branch Orca ship teardown did not remove the worktree"
+  pass "fm-teardown.sh backend=orca: ship teardown proceeds past the branch identity check on its own branch"
+}
+
 test_ship_teardown_refuses_orca_unresolvable_worktree_id() {
   local proj wt data state config id out rc neutral
   id="orcashipunresolvedz1"
@@ -1347,6 +1416,8 @@ test_teardown_preserves_metadata_when_orca_remove_error_json
 test_scout_teardown_refuses_orca_missing_report_when_path_missing
 test_ship_teardown_refuses_orca_missing_worktree_path
 test_ship_teardown_removes_orca_worktree_when_id_path_matches
+test_ship_teardown_refuses_orca_recycled_pool_slot_other_task_branch
+test_ship_teardown_proceeds_orca_own_task_branch
 test_ship_teardown_refuses_orca_unresolvable_worktree_id
 test_ship_teardown_refuses_orca_id_path_mismatch
 test_teardown_refuses_orca_missing_worktree_id

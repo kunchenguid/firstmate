@@ -1213,7 +1213,7 @@ canonical_existing_dir() {
   local target=$1
   [ -n "$target" ] || return 1
   [ -d "$target" ] || return 1
-  ( cd "$target" && pwd -P )
+  fm_canonical_path "$target"
 }
 
 retry_wait_secs_is_valid() {
@@ -1370,6 +1370,43 @@ teardown_treehouse_return() {
   fi
 
   echo "teardown: $label return failed: git index.lock signature persisted across ${max_retries} retries (waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s each) even after the lock file disappeared" >&2
+  return 1
+}
+
+# validate_worktree_branch_identity <worktree> <task-id>
+# Refuse to tear down a pooled worktree that is demonstrably ANOTHER task's
+# workspace. fm-spawn records worktree= in state/<id>.meta, but a treehouse pool
+# slot is a reusable lease: under pool churn a recorded slot can already have been
+# returned and re-leased to a different live task. Teardown's next steps delete the
+# checked-out branch and hard-reset the worktree, so aiming at a recycled slot
+# destroys another crewmate's unlanded work.
+#
+# The identity signal is the checked-out branch against the fm/<id> convention the
+# generated brief establishes (bin/fm-brief.sh). This refuses ONLY on positive proof
+# of a conflict - the worktree is on some OTHER task's fm/<other-id> branch. A
+# detached HEAD, a non-fm/ branch name, or an unreadable branch is NOT proof of a
+# mismatch (a landed task legitimately ends detached, and crewmates may pick their
+# own branch names), so those keep teardown on its existing checks rather than
+# blocking routine cleanup on a weak signal.
+#
+# This runs before the destructive block and is deliberately NOT exempted by
+# --force or by kind=scout: those exemptions exist to authorize discarding THIS
+# task's own work, never to authorize touching a different task's workspace.
+validate_worktree_branch_identity() {  # <worktree> <task-id>
+  local wt=$1 id=$2 branch other
+  [ -d "$wt" ] || return 0
+  branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  # No branch, unreadable, or detached: not positive proof of a conflict.
+  [ -n "$branch" ] && [ "$branch" != HEAD ] || return 0
+  case "$branch" in
+    fm/*) ;;
+    *) return 0 ;;
+  esac
+  other=${branch#fm/}
+  [ "$other" != "$id" ] || return 0
+  echo "REFUSED: task $id's recorded worktree $wt is checked out on branch '$branch', which belongs to task '$other'." >&2
+  echo "The recorded workspace was most likely returned to the pool and re-leased to another task, so tearing it down would destroy that task's work." >&2
+  echo "Confirm which workspace really belongs to $id (bin/fm-crew-state.sh $id) and correct worktree= in $META before retrying; --force does not override this." >&2
   return 1
 }
 
@@ -2678,6 +2715,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     ORCA_PATH_MATCH_VERIFIED=1
   fi
   if [ -d "$WT" ]; then
+    validate_worktree_branch_identity "$WT" "$ID" || exit 1
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
       if git -C "$WT" checkout --detach -q 2>/dev/null; then
@@ -2691,6 +2729,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  validate_worktree_branch_identity "$WT" "$ID" || exit 1
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then

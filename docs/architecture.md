@@ -175,8 +175,12 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
+Both sides of that comparison, and the watcher-lock identity checks in `fm-wake-lib.sh` and `fm-watch-arm.sh`, go through `fm_canonical_path`/`fm_canonical_file_path` (`bin/fm-wake-lib.sh`), which shells out to `realpath(1)` rather than `cd … && pwd -P`: on a case-insensitive filesystem (APFS/HFS+), `pwd -P` resolves symlinks but still echoes the caller's spelling of each path component, so two spellings of one on-disk directory would otherwise compare unequal.
 `fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
 Its header owns the exact refusal mechanics, while `tests/fm-spawn-pool-base-freshen.test.sh` owns the portable regression coverage.
+
+Because a treehouse pool slot is a reusable lease, `fm-spawn.sh` records the canonical settled worktree path in `state/<id>.meta`'s `worktree=` field and warns (without refusing) when that path is already recorded against a different live task, so a stale pointer left by a finished-but-untorn-down task can be reconciled before it names two tasks' workspaces at once.
+On the destructive end, `fm-teardown.sh` refuses outright when the recorded worktree is checked out on another task's `fm/<id>` branch, since that is positive proof the slot was returned to the pool and re-leased; a detached `HEAD` or a non-`fm/` branch name is not treated as proof, and `--force` does not override this refusal because it authorizes discarding only the task's own work.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.

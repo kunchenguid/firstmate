@@ -1121,6 +1121,92 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+# A case-insensitive filesystem (APFS/HFS+) lets one directory be reached under
+# several spellings. FM_HOME arrives from the ambient environment while the lock's
+# fm-home was written by an earlier session, so the two sides can legitimately
+# disagree on spelling and a raw string compare then reports a live watcher as a
+# different home's - the false "watcher down" alarm seen after a session resume.
+# Skipped where the filesystem is case-sensitive, because the variant path simply
+# does not exist there and the case cannot arise.
+fs_is_case_insensitive() {  # <dir>
+  local dir=$1
+  mkdir -p "$dir/CaseProbe" || return 1
+  [ -d "$dir/caseprobe" ]
+}
+
+test_watcher_lock_identity_is_case_insensitive_path_safe() {
+  local dir state lockdir variant out
+  dir=$(make_case case-variant-home)
+  state="$dir/state"
+  if ! fs_is_case_insensitive "$dir"; then
+    printf 'ok - watcher lock case-variant home (skipped: case-sensitive filesystem)\n'
+    return 0
+  fi
+  lockdir="$state/.watch.lock"
+  mkdir -p "$lockdir"
+  # Lock recorded by a session that reached the home as .../Home.
+  printf '%s\n' "$dir/Home" > "$lockdir/fm-home"
+  printf '%s\n' "$ROOT/bin/fm-watch.sh" > "$lockdir/watcher-path"
+  printf '%s\n' "recorded-identity" > "$lockdir/pid-identity"
+  printf '%s\n' 4242 > "$lockdir/pid"
+  mkdir -p "$dir/Home"
+
+  # This session reached the same directory as .../home.
+  variant="$dir/home"
+  out=$(FM_TEST_LOCKDIR="$state" bash -c '
+    # shellcheck disable=SC1090
+    . "$1"
+    fm_pid_identity() { printf "recorded-identity\n"; }
+    if fm_watcher_lock_matches_pid "$2" "$3" 4242 "$4"; then echo MATCH; else echo NOMATCH; fi
+  ' _ "$LIB" "$state" "$ROOT/bin/fm-watch.sh" "$variant")
+  [ "$out" = MATCH ] || fail "case-variant FM_HOME spelling must still match its own watcher lock (got $out)"
+
+  # A genuinely different home must still be rejected: the fix folds spelling, not identity.
+  mkdir -p "$dir/Other"
+  out=$(bash -c '
+    # shellcheck disable=SC1090
+    . "$1"
+    fm_pid_identity() { printf "recorded-identity\n"; }
+    if fm_watcher_lock_matches_pid "$2" "$3" 4242 "$4"; then echo MATCH; else echo NOMATCH; fi
+  ' _ "$LIB" "$state" "$ROOT/bin/fm-watch.sh" "$dir/Other")
+  [ "$out" = NOMATCH ] || fail "an unrelated home must never match this home's watcher lock (got $out)"
+  printf 'ok - watcher lock identity folds case-variant path spellings\n'
+}
+
+test_canonical_path_folds_case_but_not_identity() {
+  local dir out
+  dir=$(make_case canonical-path)
+  if ! fs_is_case_insensitive "$dir"; then
+    printf 'ok - fm_canonical_path case folding (skipped: case-sensitive filesystem)\n'
+    return 0
+  fi
+  mkdir -p "$dir/Alpha"
+  out=$(bash -c '
+    # shellcheck disable=SC1090
+    . "$1"
+    a=$(fm_canonical_path "$2/Alpha")
+    b=$(fm_canonical_path "$2/alpha")
+    [ "$a" = "$b" ] && echo SAME || echo "DIFF a=$a b=$b"
+  ' _ "$LIB" "$dir")
+  [ "$out" = SAME ] || fail "fm_canonical_path must fold case-variant spellings of one directory ($out)"
+
+  # pwd -P alone is NOT sufficient; assert the property that motivated realpath.
+  out=$( ( cd "$dir/alpha" && pwd -P ) )
+  [ "$out" != "$(cd "$dir/Alpha" && pwd -P)" ] \
+    || fail "expected pwd -P to preserve caller spelling; the realpath-based helper is what folds it"
+
+  mkdir -p "$dir/Beta"
+  out=$(bash -c '
+    # shellcheck disable=SC1090
+    . "$1"
+    a=$(fm_canonical_path "$2/Alpha")
+    b=$(fm_canonical_path "$2/Beta")
+    [ "$a" = "$b" ] && echo SAME || echo DIFF
+  ' _ "$LIB" "$dir")
+  [ "$out" = DIFF ] || fail "fm_canonical_path must keep genuinely different directories distinct"
+  printf 'ok - fm_canonical_path folds spelling without collapsing distinct paths\n'
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
@@ -1150,3 +1236,5 @@ test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
+test_watcher_lock_identity_is_case_insensitive_path_safe
+test_canonical_path_folds_case_but_not_identity
