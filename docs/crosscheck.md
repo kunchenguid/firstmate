@@ -50,7 +50,7 @@ The declared regular-lane rates are 1.40 dollars per million input tokens, 0.14 
 The declaration tracks Fireworks serverless pricing at https://docs.fireworks.ai/serverless/pricing.
 Fireworks publishes no separate cache-write price, so emitted cache-write tokens are charged at the uncached input rate of 1.40 dollars per million rather than silently treated as free.
 A truncated reviewer turn is a failed review, never a verdict.
-The strict verdict tool is the primary submission path, and the terminal assistant turn must stop with `toolUse` after exactly one call.
+The accepted sequential tool log is the submission authority and must end with exactly one `finish_review` call. Pi may emit one final prose turn after a mixed tool batch; that turn cannot change the accepted log.
 Pi's provider-generation schema makes nullable structured finding-update fields optional and non-null so Pi can prepare its supported strict subset.
 The host restores omitted nullable fields to explicit null before applying the unchanged full review validation.
 The host still validates the complete outer review schema and every evidence contract after constrained sampling.
@@ -76,25 +76,22 @@ For Pi, the terminal event must also report the exact provider slot and model se
 A run that reports the historical Fast selector, another provider, or no model identity is a tool failure rather than a regular-lane verdict.
 That proves which dedicated reviewer home executed the review without comparing it to an author account.
 Every reviewer disables reviewed-repository instruction discovery at launch: Codex sets `project_doc_max_bytes=0`, and Pi uses `--no-context-files`.
-Pi is launched through the resolved installed executable at `xhigh` with JSON event output, offline startup, an ephemeral session, and only the read and Bash-capable review tools plus the explicit verdict tool.
+Pi is launched through the resolved installed executable at `xhigh` with JSON event output, offline startup, an ephemeral session, and exactly eight explicit sequential tools: bounded repository search/read, evidence-file submission, finding/suspicion/update reporting, unavailable lookup, and finalization.
 The prompt is passed by `@file` so repository and claim size cannot exceed the process argument limit.
 Extension discovery remains disabled while the tracked verdict extension is loaded explicitly.
-That extension registers a strict JSON-schema-constrained `submit_crosscheck_verdict` tool whose successful execution terminates that attempt without another model turn.
-The local regular GLM lane runs a fixed two-pass full-diff protocol: an isolated advisory challenge followed by an authoritative synthesis that independently inspects the same exact-base/exact-head diff and receives only a bounded projection of the challenge's untrusted hypotheses.
-Only the synthesis supplies the ledger verdict, and it must reproduce any challenge concern it carries forward rather than treating the challenge as execution proof.
-The two passes never wait or sleep to affect timing, and Crosscheck aggregates their token, cost, turn, and reviewer-latency telemetry without inventing unavailable values.
-The regular-lane reviewer record binds `review_depth_passes: "2"`, `review_depth_mode: two-pass-independent-synthesis-v1`, and the terminal provider/model readback to the registered regular cross-family lane.
+The extension validates each call immediately, returns correctable errors in-session, and appends only accepted calls to a 512-call, 2 MiB digest-bound log. It exposes no shell, edit, Git, GitHub, cloud, credential, MCP, or general network tool. Evidence helpers are data until the trusted controller validates and executes them after finalization.
+The local regular GLM lane runs one substantive full-diff pass with an in-session skeptical re-challenge before finalization. The reviewer record binds `review_depth_passes: "1"`, `review_depth_mode: single-pass-skeptical-rechallenge-v1`, and exact terminal provider/model readback to the registered regular cross-family lane.
 Ledger validation checks that pair against a frozen historical registry rather than today's active depth constants, so a later review protocol cannot make old records unreadable.
 Successful current-contract `clear` and `blocking` records, including reusable records, fail validation when any of those fields is missing or contradictory.
 Failed `tool-failure`, `unreviewed`, and `cannot-certify` attempts may omit terminal and depth evidence they never earned, so their ledgers remain reloadable for a later retry; they are never reusable.
-Crosscheck accepts exactly one verdict tool call from each successful pass and preserves usage across Pi auto-retries.
+Crosscheck accepts exactly one finalization in the successful attempt and preserves usage across Pi auto-retries.
 If an attempt reaches the model but ends without exactly one well-formed verdict call, including an output-limit or provider terminal error, one fresh ephemeral low-reasoning attempt receives a fixed repair instruction plus the identical exact-head review packet.
 The repair is attempted once per pass, its usage is included in the run economics, and a second protocol miss fails closed instead of selecting a convenient call or rotating to another reviewer.
 Provider terminal-error diagnostics have credential-shaped values redacted, are whitespace-normalized and stripped of non-printable characters, and are limited to 512 characters before they reach operator-visible failure output.
 The model decides the provider slot through an explicit mapping derived from the lane registry that maps each registered model to its own slot, maps `gpt-5.6-sol` to `openai-codex`, and refuses an unmapped model rather than guessing.
 For the installed npm entrypoint, Crosscheck also resolves Pi's sibling Node runtime before launch instead of allowing the reviewer environment's `PATH` to substitute another interpreter.
 That pin recognizes every `env`-based Node shebang, including `#!/usr/bin/env -S node --flag`, and preserves the flags; an `env` shebang naming no interpreter fails closed rather than silently falling back to `PATH`.
-Its event stream must contain at least one completed turn, end with a successful `toolUse` assistant turn, and complete the agent before Crosscheck accepts the single submitted verdict.
+Its event stream must contain at least one completed turn and a completed agent with the expected provider/model. The controller independently replays every accepted tool event against the exact snapshot and requires the final accepted event to be `finish_review`.
 Pi credential provisioning is a captain-owned prerequisite, and its shape depends on the lane: a codex-family fallback home must contain a usable `openai-codex` OAuth entry in `auth.json`, while a cross-family lane home must instead contain an api-key `models.json` declaring exactly that lane's provider slot and no `auth.json` is required. Firstmate does not create or copy either credential.
 Because reviewer launches disable extension discovery, a Pi reviewer home holds exactly one account and exactly one provider; a multi-provider Pi home is refused for a cross-family lane and reviews as its default slot for the codex fallback, not as whichever slot has capacity.
 
@@ -150,7 +147,7 @@ It fetches `refs/pull/<number>/head` from the base repository into a disposable 
 New run records carry additive telemetry for input, output, cache-read, and cache-write tokens when Pi reports them.
 The record keeps provider-reported cost, Pi-calculated cost, and cost recomputed from the pinned declared rates as separate fields with explicit provenance.
 Pi events do not currently expose a provider-reported billing value, so that field remains null instead of relabeling Pi's calculated value.
-The same record carries completed turns, reviewer latency, outcome, normalized failure category, finding disposition, and optional reuse provenance; regular-lane totals aggregate both full-diff passes.
+The same record carries completed turns, reviewer latency, outcome, normalized failure category, finding disposition, and optional reuse provenance.
 Use `bin/fm-crosscheck.sh economics <task-id>` for a read-only per-run table and totals.
 
 Crosscheck can reuse an already accepted original review without another provider request only when the exact head SHA, reviewed base, stable claims digest, reviewer credential identity, and byte-derived review-contract digest are unchanged.

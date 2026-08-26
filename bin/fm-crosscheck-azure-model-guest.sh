@@ -81,7 +81,11 @@ pathlib.Path(sys.argv[4]).write_text(source, encoding="utf-8")
 if value.get("tool_protocol", {}).get("network_bytes") != 0:
     raise SystemExit("model guest: repository tool contract is not networkless")
 expected_tools = (
-    ["submit_crosscheck_verdict"]
+    [
+        "repo_search", "repo_read", "submit_evidence_file",
+        "report_finding", "report_suspicion", "update_finding",
+        "request_lookup", "finish_review",
+    ]
     if value.get("reviewer", {}).get("harness") == "pi"
     else []
 )
@@ -443,6 +447,19 @@ export XDG_CACHE_HOME="$BASE/cache"
 install -d -m 0700 -o root -g root "$TMPDIR" "$XDG_CACHE_HOME"
 export FM_CROSSCHECK_REVIEW_GENERATION="$REVIEW_GENERATION"
 export FM_CROSSCHECK_REPOSITORY="$REPOSITORY"
+export FM_CROSSCHECK_HEAD_SHA
+FM_CROSSCHECK_HEAD_SHA=$(jq -r '.identity.head_sha' "$INPUT")
+export FM_CROSSCHECK_BASE_SHA
+FM_CROSSCHECK_BASE_SHA=$(jq -r '.identity.base_sha' "$INPUT")
+export FM_CROSSCHECK_FINDING_IDS
+FM_CROSSCHECK_FINDING_IDS=$(jq -c '.tool_protocol.known_finding_ids' "$INPUT")
+export FM_CROSSCHECK_ELIGIBLE_EQUIVALENT_IDS
+FM_CROSSCHECK_ELIGIBLE_EQUIVALENT_IDS=$(jq -c '.tool_protocol.eligible_equivalent_ids' "$INPUT")
+export FM_CROSSCHECK_ACTIVE_FINDING_IDS
+FM_CROSSCHECK_ACTIVE_FINDING_IDS=$(jq -c '.tool_protocol.active_finding_ids' "$INPUT")
+export FM_CROSSCHECK_TRUST_SNAPSHOT_MANIFEST=1
+export FM_CROSSCHECK_EXECUTING_ACCOUNT_HOME="$ACCOUNT"
+export FM_CROSSCHECK_EXECUTION_HOME="$HOME_DIR"
 unset AZURE_CONFIG_DIR ARM_CLIENT_ID ARM_CLIENT_SECRET AZURE_CLIENT_ID AZURE_CLIENT_SECRET SSH_AUTH_SOCK DOCKER_HOST
 
 RESULT=$BASE/reviewer-result.json
@@ -494,6 +511,8 @@ harness = request.get("reviewer", {}).get("harness")
 expected_evidence_type = list if harness == "pi" else dict
 if not isinstance(review.get("evidence_files"), expected_evidence_type):
     raise SystemExit("model guest: reviewer omitted its evidence manifest")
+if harness == "pi" and not isinstance(review.get("tool_events"), list):
+    raise SystemExit("model guest: reviewer omitted its replayable tool events")
 output = {
     "schema": "fm.azure-crosscheck-result/v1",
     **identity,
@@ -502,6 +521,7 @@ output = {
     "model_vm_instance_id": sys.argv[5],
     "verdict": review["verdict"],
     "evidence_files": review["evidence_files"],
+    **({"tool_events": review["tool_events"]} if harness == "pi" else {}),
     "telemetry": review.get("telemetry"),
 }
 path = pathlib.Path(sys.argv[3])

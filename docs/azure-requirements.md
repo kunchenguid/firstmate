@@ -1087,11 +1087,10 @@ The final Pi terminal event must report the exact `fireworks-glm` provider and r
 A terminal event reporting the historical Fast selector, another provider, or no model identity becomes a tool failure.
 The same readback check runs in both the local Pi lane and the Azure model guest.
 
-The 654.190-second measurement established that one regular full-diff pass falls below the owner-set floor, so the local regular lane now performs the smallest fixed substantive depth: one isolated full-diff challenge followed by one authoritative full-diff synthesis.
-The synthesis receives only bounded untrusted hypotheses from the challenge, independently inspects the complete diff, and must reproduce every concern it carries forward.
-Only the synthesis supplies the ledger verdict.
-The reviewer record binds the two-pass depth mode and exact terminal provider/model readback fail-closed to the registered regular cross-family lane.
-Token, cost, completed-turn, and reviewer-latency telemetry aggregate both passes, while exact-head reuse remains available only under its existing unchanged contract.
+The local regular lane now performs one substantive full-diff pass with an in-session skeptical re-challenge before finalization.
+The reviewer uses bounded exact-head repository search/read, submits evidence helpers only as data, records findings and suspicions incrementally, and finalizes once.
+The controller replays the accepted digest-bound event log independently before any review becomes durable.
+The reviewer record binds the one-pass depth mode and exact terminal provider/model readback fail-closed to the registered regular cross-family lane, while exact-head reuse remains available only under its existing unchanged contract.
 
 The former Fast selector remains readable only as historical provenance, including local and Azure ledgers written before this change.
 It is not in the new-review allowlist and cannot silently continue serving from an old roster.
@@ -1110,7 +1109,7 @@ A missing phase means the work did not run rather than that it took zero time, a
 `bin/fm-crosscheck.sh economics <task-id>` is the parallel read-only table for tokens, costs, turns, reviewer latency, finding disposition, outcomes, and reuse provenance.
 
 After this implementation lands on public `main`, the acceptance owner must update the operator roster and the dedicated `models.json` to the exact regular selector, compat, and declared costs, then read `bin/fm-crosscheck.sh status` back before launch.
-The owner must run one real fresh adversarial review of a current exact PR head under the fixed two-pass protocol, retain the complete phase breakdown and aggregated economics, and verify the final ledger still carries the exact-head clear or blocking verdict, evidence execution, mutation proof where required, cross-family primary identity, terminal route, and review-depth fields.
+The owner must run one real fresh adversarial review of a current exact PR head under the single-pass skeptical-rechallenge protocol, retain the complete phase breakdown and economics, and verify the final ledger still carries the exact-head clear or blocking verdict, evidence execution, mutation proof where required, cross-family primary identity, terminal route, and review-depth fields.
 Only a genuine 20-to-30-minute completion closes C1.
 A run below 20 minutes or above 30 minutes is recorded honestly and leaves C1 NOT MET.
 The implementation never sleeps to enter the band, truncates work, narrows the diff, lowers reasoning, or weakens a gate.

@@ -3,6 +3,7 @@ import copy
 import json
 from pathlib import Path
 import re
+import subprocess
 import tempfile
 import time
 import unittest
@@ -18,8 +19,233 @@ assert SPEC is not None and SPEC.loader is not None
 CROSSCHECK = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CROSSCHECK)
 
+REVIEWER_SPEC = importlib.util.spec_from_file_location(
+    "fm_crosscheck_pi_reviewer_tested",
+    ROOT / "bin" / "fm-crosscheck-pi-reviewer.py",
+)
+assert REVIEWER_SPEC is not None and REVIEWER_SPEC.loader is not None
+PI_REVIEWER = importlib.util.module_from_spec(REVIEWER_SPEC)
+REVIEWER_SPEC.loader.exec_module(PI_REVIEWER)
+
 
 class CrosscheckLedgerValidationTests(unittest.TestCase):
+    def test_eight_tool_events_reach_durable_finding_and_verified_fix(self) -> None:
+        task_id = "eight-tool-ledger-reachability"
+        pull_request = "https://github.com/example/project/pull/8"
+        head = "a" * 40
+        base = "b" * 40
+        snapshot = {
+            "head_sha": head,
+            "base_sha": base,
+            "base_branch_sha": base,
+            "claims_sha256": "c" * 64,
+        }
+        config = {
+            "harness": "pi",
+            "model": CROSSCHECK.CROSS_FAMILY_LANES["fireworks-glm"]["model"],
+            "effort": "xhigh",
+            "account_home": "/reviewer-account",
+            "executing_account_home": "/reviewer-account",
+            "execution_home": "/review-execution",
+            "account_selector": "PI_CODING_AGENT_DIR",
+            "credential_source": "fixture",
+            "credential_identifier": "fixture-id",
+            "reviewer_account_identity_sha256": "1" * 64,
+            "review_family_mode": CROSSCHECK.REVIEW_FAMILY_CROSS_FAMILY_PRIMARY,
+            "model_independence": None,
+            "execution_mode": "local",
+            "reviewer_turn_count": "1",
+            "terminal_provider": "fireworks-glm",
+            "terminal_model": CROSSCHECK.CROSS_FAMILY_LANES["fireworks-glm"]["model"],
+            "evidence_policy": CROSSCHECK.EVIDENCE_POLICY_CONDITIONAL_V1,
+            "evidence_mode": CROSSCHECK.EVIDENCE_MODE_IDENTITY_ONLY_V1,
+        }
+
+        def event(sequence, name, arguments, result):
+            return {
+                "seq": sequence,
+                "name": name,
+                "arguments": arguments,
+                "result_sha256": PI_REVIEWER.value_digest(result),
+            }
+
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            review_dir = Path(raw_tmp) / "repository"
+            review_dir.mkdir()
+            (review_dir / "source.py").write_text(
+                "value = 1\n", encoding="utf-8"
+            )
+            subprocess.run(
+                ["git", "-C", str(review_dir), "init", "--quiet"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(review_dir), "add", "source.py"],
+                check=True,
+            )
+            proof_root = Path(raw_tmp) / "proofs"
+            proof_root.mkdir()
+            reproduction_path = ".crosscheck/reproductions/defect.sh"
+            reproduction_content = "#!/usr/bin/env bash\necho REPRODUCED\nexit 7\n"
+            reproduction = {
+                "test_path": reproduction_path,
+                "command": (
+                    "bash --noprofile --norc "
+                    f"{reproduction_path} {base} {head}"
+                ),
+                "expected_exit": 7,
+                "output_contains": "REPRODUCED",
+            }
+            submit_reproduction = {
+                "path": reproduction_path,
+                "content": reproduction_content,
+            }
+            finding = {
+                "severity": "blocking",
+                "title": "Reproduced defect",
+                "citations": [{"path": "source.py", "line": 1}],
+                "explanation": "The exact-head implementation reproduces the defect.",
+                "reproduction": reproduction,
+            }
+            finish_blocking = {
+                "verdict": "BLOCKING",
+                "summary": "One reproduced release blocker remains.",
+                "citations": [{"path": "source.py", "line": 1}],
+            }
+            records = [
+                event(1, "submit_evidence_file", submit_reproduction, {
+                    "path": reproduction_path,
+                    "bytes": len(reproduction_content.encode("utf-8")),
+                    "digest": PI_REVIEWER.value_digest(reproduction_content),
+                }),
+                event(2, "report_finding", finding, {"admitted": True}),
+                event(3, "finish_review", finish_blocking, {"finalized": True}),
+            ]
+            replayed = PI_REVIEWER.replay_tool_log(
+                records,
+                repository=review_dir,
+                head_sha=head,
+                base_sha=base,
+                executing_account_home=config["executing_account_home"],
+                execution_home=config["execution_home"],
+            )
+            for artifact in replayed["evidence_files"]:
+                destination = review_dir / artifact["path"]
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text(artifact["content"], encoding="utf-8")
+
+            class EvidenceExecutor:
+                batch_deadline = time.monotonic() + 300
+
+                def __init__(self) -> None:
+                    self.calls = 0
+
+                def __call__(self, value, *_args, **_kwargs):
+                    self.calls += 1
+                    return {
+                        "test_path": value["test_path"],
+                        "command": value["command"],
+                        "expected_exit": value["expected_exit"],
+                        "actual_exit": value["expected_exit"],
+                        "output_contains": value["output_contains"],
+                        "output": "REPRODUCED",
+                    }
+
+            evidence_executor = EvidenceExecutor()
+            ledger, blocking_run = CROSSCHECK.apply_review(
+                CROSSCHECK.new_ledger(task_id, pull_request),
+                replayed["verdict"],
+                review_dir,
+                proof_root,
+                snapshot,
+                copy.deepcopy(config),
+                evidence_executor=evidence_executor,
+            )
+            self.assertEqual(evidence_executor.calls, 1)
+            self.assertEqual(blocking_run["state"], "blocking")
+            self.assertEqual(len(ledger["findings"]), 1)
+            finding_id = ledger["findings"][0]["id"]
+            self.assertEqual(ledger["findings"][0]["lifecycle"], "open")
+
+            mutation_path = ".crosscheck/mutations/revert.patch"
+            mutation_content = (
+                "diff --git a/source.py b/source.py\n"
+                "--- a/source.py\n+++ b/source.py\n"
+                "@@ -1 +1 @@\n-value = 1\n+value = 0\n"
+            )
+            submit_mutation = {
+                "path": mutation_path,
+                "content": mutation_content,
+            }
+            update = {
+                "id": finding_id,
+                "requested_status": "verified-fixed",
+                "explanation": "The regression test catches the reverted implementation.",
+                "mutation": {
+                    "test_path": "tests/test_source.py",
+                    "test_invocation": {"runner": "pytest", "arguments": []},
+                    "mutation_patch_path": mutation_path,
+                },
+            }
+            finish_clear = {
+                "verdict": "CLEAR",
+                "summary": "The prior blocker is verified fixed.",
+                "citations": [{"path": "source.py", "line": 1}],
+            }
+            update_records = [
+                event(1, "submit_evidence_file", submit_mutation, {
+                    "path": mutation_path,
+                    "bytes": len(mutation_content.encode("utf-8")),
+                    "digest": PI_REVIEWER.value_digest(mutation_content),
+                }),
+                event(2, "update_finding", update, {"admitted": True}),
+                event(3, "finish_review", finish_clear, {"finalized": True}),
+            ]
+            replayed_update = PI_REVIEWER.replay_tool_log(
+                update_records,
+                repository=review_dir,
+                head_sha=head,
+                base_sha=base,
+                executing_account_home=config["executing_account_home"],
+                execution_home=config["execution_home"],
+                known_finding_ids={finding_id},
+                active_finding_ids={finding_id},
+            )
+            for artifact in replayed_update["evidence_files"]:
+                destination = review_dir / artifact["path"]
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text(artifact["content"], encoding="utf-8")
+
+            mutation_calls = []
+
+            def mutation_executor(value, *_args, **_kwargs):
+                mutation_calls.append(value)
+                return {
+                    "test_path": value["test_path"],
+                    "test_invocation": value["test_invocation"],
+                    "mutation_patch_sha256": "d" * 64,
+                    "mutated_files": ["source.py"],
+                    "baseline_exit": 0,
+                    "mutated_exit": 1,
+                    "baseline_output": "passed",
+                    "mutated_output": "failed as expected",
+                }
+
+            ledger, clear_run = CROSSCHECK.apply_review(
+                ledger,
+                replayed_update["verdict"],
+                review_dir,
+                proof_root,
+                snapshot,
+                copy.deepcopy(config),
+                evidence_executor=evidence_executor,
+                mutation_executor=mutation_executor,
+            )
+            self.assertEqual(len(mutation_calls), 1)
+            self.assertEqual(clear_run["state"], "clear")
+            self.assertEqual(ledger["findings"][0]["lifecycle"], "verified-fixed")
+            CROSSCHECK.validate_ledger(ledger, task_id, pull_request)
+
     def test_pr327_fixture_retains_sanitized_failure_shapes(self) -> None:
         import json
 

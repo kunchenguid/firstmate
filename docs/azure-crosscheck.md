@@ -25,7 +25,7 @@ An identity-only review with no proposed evidence therefore uses only the model 
 - A second newly created `crosscheck-tool` runner independently replays that accepted helper with no repository network or provider credential.
 
 The model compartment never receives Git metadata, a dynamic repository command tool, shell against the repository, Azure CLI, MCP server, ambient extension, skill, container client, or local control authority.
-Its only extension is the tracked digest-bound verdict submitter, which exposes no repository or command capability.
+Its only extension exposes bounded read-only search/read over the staged exact-head snapshot, evidence submission as inert data, structured review reporting, an unavailable lookup request, and finalization. It exposes no command or credential capability.
 Its Codex and Pi launches explicitly disable their command tools; the interim claude launch lane is retired (R6).
 The static packet and snapshot are assembled from a fresh exact remote PR checkout, are byte-bounded, and remain untrusted data.
 The tool and verifier repository children never receive the reviewer credential, their trusted controller's storage identity/token, a GitHub credential, author worktree, control home, sibling task data, browser profile, shared temporary state, container socket, SSH agent, or machine-wide validation socket.
@@ -104,10 +104,10 @@ The executing identity is the non-secret provider-slot, endpoint, and model bind
 The interim claude reviewer lane is retired end to end: no `api.anthropic.com` host derivation, no `.credentials.json` packaging or boot copy, and no claude launch branch in the model guest.
 The request embeds the tracked verdict extension and Pi reviewer runtime with their SHA-256 digests because the model VM has no repository checkout.
 The guest byte-checks both sources before writing them, then the digest-bound runtime launches Pi with `--offline`, `--no-extensions`, and the exact explicit `--extension` path and validates the terminating tool event stream.
-The extension registers only `submit_crosscheck_verdict` with strict JSON-schema constrained sampling and terminates the run after the call, so no paid follow-up turn is needed.
+The extension registers exactly eight strict JSON-schema constrained sequential tools: `repo_search`, `repo_read`, `submit_evidence_file`, `report_finding`, `report_suspicion`, `update_finding`, `request_lookup`, and `finish_review`.
 The Pi generation schema represents `evidence_files` as bounded path/content records because strict-tool preparation does not support schema-valued object properties.
 The host refuses duplicate paths, converts those records to the existing manifest dictionary, and then applies the unchanged path, content, and aggregate bounds.
-The guest requires at least one turn, a final assistant `toolUse` stop, exactly one completed agent, and exactly one verdict call in the successful final attempt.
+The guest requires at least one turn, exactly one completed agent, and an accepted digest-bound event log ending in exactly one `finish_review` call. A final prose turn after a mixed tool batch cannot override that log.
 The final terminal event must report the exact `fireworks-glm` provider and `accounts/fireworks/models/glm-5p2` model selector requested by the compartment.
 Reporting the historical Fast selector or another route fails before a verdict can publish.
 Pi's explicit `auto_retry_start` may open a continuation only after a completed attempt executed a turn and did not stop successfully.
@@ -130,7 +130,7 @@ The model process has no Azure CLI credential, managed identity, SSH agent, Dock
 It reaches only the provider through the model subnet's fixed egress policy; source metadata and the exact diff are in its bounded prompt, while the exact-head tracked-file snapshot is local and read-only for the bounded repository tools introduced separately.
 Reviewer-supplied helpers return only as bounded UTF-8 data and cannot execute until the trusted local controller validates them.
 
-The compartment is bounded by a 4-vCPU/16-GiB reviewed SKU, 12-GiB process memory, zero swap, 1,024 PIDs, private temporary state, strict system/home/kernel protection, a 7,200-second maximum review deadline, a 16-MiB transcript ceiling, a 2-MiB verdict/result ceiling, and a 24-hour independent self-shutdown backstop.
+The compartment is bounded by a 4-vCPU/16-GiB reviewed SKU, 12-GiB process memory, zero swap, 1,024 PIDs, private temporary state, strict system/home/kernel protection, a 7,200-second maximum review deadline, a 16-MiB transcript ceiling, a 2-MiB accepted tool-event ceiling inside a 4-MiB result envelope, and a 24-hour independent self-shutdown backstop.
 The command implementation may lower these bounds but may not raise them.
 
 ## Tool and verifier compartments

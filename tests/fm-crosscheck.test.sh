@@ -418,10 +418,10 @@ done
 [ "$mode" = json ] || exit 64
 [ "$provider" = "${FM_TEST_PI_EXPECT_PROVIDER:-openai-codex}" ] || exit 65
 [ "$model" = "${FM_TEST_PI_EXPECT_MODEL:-gpt-5.6-sol}" ] || exit 66
-[ "$thinking" = xhigh ] || exit 67
-[ "$tools" = read,bash,grep,find,ls,submit_crosscheck_verdict ] || exit 68
+[ "$thinking" = xhigh ] || [ "$thinking" = low ] || exit 67
+[ "$tools" = repo_search,repo_read,submit_evidence_file,report_finding,report_suspicion,update_finding,request_lookup,finish_review ] || exit 68
 [ -f "$extension" ] && [ -f "${FM_CROSSCHECK_REVIEW_SCHEMA:-}" ] \
-  && [ -n "$session_id" ] && [ -n "$system_prompt" ] || exit 97
+  && [ -n "$system_prompt" ] || exit 97
 [ "$context_isolated" = yes ] || {
   [ ! -f "$PWD/AGENTS.md" ] || cat "$PWD/AGENTS.md" > "$FM_TEST_CONTEXT_LOG"
   exit 69
@@ -429,13 +429,33 @@ done
 [ "$ephemeral" = yes ] && [ "$isolated" -eq 6 ] \
   && [ "${prompt#@}" != "$prompt" ] && [ -f "${prompt#@}" ] || exit 69
 cat "${prompt#@}" >> "$FM_TEST_PROMPT_LOG"
-temporary=$(mktemp "${TMPDIR:-/tmp}/fm-crosscheck-pi.XXXXXX") || exit 70
-python3 "$FM_TEST_REVIEW_DRIVER" "$PWD" "$temporary" "$FM_TEST_REVIEW_SCENARIO" "$FM_TEST_HEAD" || exit 71
-python3 - "$temporary" "${FM_TEST_PI_STOP_REASON:-toolUse}" <<'PY'
+python3 - "${FM_TEST_PI_STOP_REASON:-toolUse}" <<'PY'
+import hashlib
 import json
 import os
 import sys
-structured = json.load(open(sys.argv[1]))
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+def digest(value):
+    return "sha256:" + hashlib.sha256(canonical(value).encode()).hexdigest()
+
+active = json.loads(os.environ.get("FM_CROSSCHECK_ACTIVE_FINDING_IDS", "[]"))
+arguments = {
+    "verdict": "BLOCKING" if active else "CLEAR",
+    "summary": "review complete",
+    "citations": [{"path": "app.txt", "line": 1}],
+}
+result = {"finalized": True}
+record = {
+    "seq": 1,
+    "name": "finish_review",
+    "arguments": arguments,
+    "result_sha256": digest(result),
+}
+with open(os.environ["FM_CROSSCHECK_TOOL_EVENT_LOG"], "w", encoding="utf-8") as handle:
+    handle.write(canonical(record) + "\n")
 print(json.dumps({"type": "session", "version": 3, "id": "test-pi-session"}))
 print(json.dumps({"type": "agent_start"}))
 print(json.dumps({"type": "turn_start"}))
@@ -448,10 +468,10 @@ print(json.dumps({
         "content": [{
             "type": "toolCall",
             "id": "crosscheck-verdict-1",
-            "name": "submit_crosscheck_verdict",
-            "arguments": structured,
+            "name": "finish_review",
+            "arguments": arguments,
         }],
-        "stopReason": sys.argv[2],
+        "stopReason": sys.argv[1],
         "usage": {
             "input": 100,
             "output": 20,
@@ -467,11 +487,10 @@ print(json.dumps({
             },
         },
     },
-    "toolResults": [{"toolName": "bash", "isError": False}],
+    "toolResults": [{"toolName": "finish_review", "isError": False}],
 }))
 print(json.dumps({"type": "agent_end", "messages": []}))
 PY
-rm -f "$temporary"
 SH
   chmod +x "$case_dir/fakebin/pi"
 }
@@ -497,6 +516,11 @@ case "${3:-}" in
   */pi)
     grep -qxF '(allow network*)' "$profile" || exit 79
     grep -qF "(subpath \"$FM_TEST_PI_HOME\")" "$profile" || exit 80
+    ;;
+  */python|*/python3|*/python3.*)
+    [ "${4##*/}" = fm-crosscheck-pi-reviewer.py ] || exit 81
+    grep -qxF '(allow network*)' "$profile" || exit 82
+    grep -qF "(subpath \"$FM_TEST_PI_HOME\")" "$profile" || exit 83
     ;;
   *)
     ! grep -qxF '(allow network*)' "$profile" || exit 76
@@ -2228,7 +2252,7 @@ test_pi_reviewer_executes_bound_policy_profile() {
     || fail "Pi reviewer did not complete"
   assert_contains "$output" 'crosscheck clear' \
     "Pi reviewer did not earn a clear result"
-  assert_grep '--mode json --offline --provider openai-codex --model gpt-5.6-sol --thinking xhigh --tools read,bash,grep,find,ls,submit_crosscheck_verdict --extension' \
+  assert_grep '--mode json --offline --provider openai-codex --model gpt-5.6-sol --thinking xhigh --tools repo_search,repo_read,submit_evidence_file,report_finding,report_suspicion,update_finding,request_lookup,finish_review --extension' \
     "$case_dir/pi.log" \
     "Pi reviewer was not invoked with its pinned provider, model, effort, and tools"
   assert_grep '--no-context-files' "$case_dir/pi.log" \
@@ -2294,7 +2318,7 @@ test_pi_reviewer_failures_are_tool_failures() {
   rc=$?
   set -e
   expect_code 1 "$rc" "Pi launch failure"
-  assert_grep 'CROSSCHECK TOOL-FAILURE: Pi reviewer exited 47' \
+  assert_grep 'model guest: Pi reviewer exited 47' \
     "$case_dir/err" "Pi launch failure was not a named tool failure"
 
   "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" <<'PY' \
@@ -2427,7 +2451,7 @@ PY
       || fail "$model reviewer did not complete"
     assert_contains "$output" 'crosscheck clear' \
       "$model reviewer did not earn a clear result"
-    assert_grep "--mode json --offline --provider $slot --model $model --thinking xhigh --tools read,bash,grep,find,ls,submit_crosscheck_verdict --extension" \
+    assert_grep "--mode json --offline --provider $slot --model $model --thinking xhigh --tools repo_search,repo_read,submit_evidence_file,report_finding,report_suspicion,update_finding,request_lookup,finish_review --extension" \
       "$case_dir/pi.log" \
       "$model reviewer was not invoked on the $slot provider with its pinned model, effort, and tools"
     assert_no_grep 'CROSSCHECK DEGRADED' "$case_dir/err" \
@@ -2451,22 +2475,20 @@ binding = hashlib.sha256(
 assert reviewer["credential_identifier"] == "provider-binding:" + slot + ":" + binding
 assert reviewer["terminal_provider"] == slot
 assert reviewer["terminal_model"] == model
-assert reviewer["review_depth_passes"] == "2"
-assert reviewer["review_depth_mode"] == "two-pass-independent-synthesis-v1"
-assert reviewer["reviewer_turn_count"] == "2"
+assert reviewer["review_depth_passes"] == "1"
+assert reviewer["review_depth_mode"] == "single-pass-skeptical-rechallenge-v1"
+assert reviewer["reviewer_turn_count"] == "1"
 assert reviewer["evidence_policy"] == "conditional-v1"
 assert reviewer["evidence_mode"] == "identity-only-v1"
 assert "execution_proof" not in reviewer
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" "$case_dir/pi-home" "$slot" "$model" \
       || fail "$model review did not record its bound provider, terminal route, depth, and non-secret credential binding"
-    [ "$(wc -l < "$case_dir/pi.log")" -eq 2 ] \
-      || fail "$model did not execute exactly one challenge and one synthesis pass"
-    assert_grep 'REGULAR GLM REVIEW DEPTH - PASS 1 OF 2' "$case_dir/prompt.log" \
-      "$model challenge pass was not independently prompted"
-    assert_grep 'REGULAR GLM REVIEW DEPTH - PASS 2 OF 2' "$case_dir/prompt.log" \
-      "$model synthesis pass was not independently prompted"
-    assert_grep 'BEGIN UNTRUSTED PRIOR REVIEW ANALYSIS' "$case_dir/prompt.log" \
-      "$model synthesis did not receive a delimited bounded challenge projection"
+    [ "$(wc -l < "$case_dir/pi.log")" -eq 1 ] \
+      || fail "$model did not execute exactly one substantive review pass"
+    assert_grep 'skeptical re-challenge happens in the same session' "$case_dir/prompt.log" \
+      "$model was not prompted for the in-session skeptical re-challenge"
+    assert_grep 'accepted reports are append-only' "$case_dir/prompt.log" \
+      "$model was not told to re-challenge candidates before reporting them"
     assert_no_grep 'review-execution.sh' "$case_dir/prompt.log" \
       "$model synthesis received a challenge execution claim instead of hypotheses"
     assert_no_grep 'CODEX FALLBACK' "$case_dir/data/task-x1/crosscheck.md" \
@@ -2503,8 +2525,10 @@ test_truncated_cross_family_verdict_is_never_a_verdict() {
   expect_code 1 "$rc" "truncated cross-family verdict"
   assert_no_grep 'crosscheck clear' "$case_dir/out" \
     "a truncated reviewer turn was accepted as a clear verdict"
-  assert_grep "stopReason='length'" "$case_dir/err" \
+  assert_grep "stopReason was 'length'" "$case_dir/err" \
     "the truncated reviewer turn was not refused by its stop reason"
+  [ "$(wc -l < "$case_dir/pi.log")" -eq 2 ] \
+    || fail "the truncated turn did not receive exactly one bounded repair"
   "$CROSSCHECK_PYTHON" - "$case_dir/data/task-x1/crosscheck-ledger.json" <<'PY' \
     || fail "a truncated review was recorded as anything but a tool failure"
 import json
@@ -5399,7 +5423,7 @@ print(" ".join(run["state"] for run in ledger["runs"]))
   [ "$states" = "tool-failure clear" ] \
     || fail "ledger recorded runs '$states', expected 'tool-failure clear'"
 
-  assert_grep 'Pi reviewer exited 42 without an earned verdict' \
+  assert_grep 'Pi reviewer exited 125 without an earned verdict: model guest: Pi reviewer exited 42' \
     "$case_dir/data/task-x1/crosscheck-ledger.json" \
     "the abandoned reviewer did not record its reported reason"
   pass "an unreachable reviewer fails over to the next policy-screened account"
@@ -6024,12 +6048,18 @@ PY
     echo "# note: installed Pi unavailable; deterministic strict-schema fallback passed"
     return
   fi
-  printf '%s\n' '{"type":"object","additionalProperties":false,"properties":{}}' \
-    > "$probe_dir/schema.json"
-  if ! FM_CROSSCHECK_REVIEW_SCHEMA="$probe_dir/schema.json" \
+  mkdir -p "$probe_dir/repository"
+  printf 'review line\n' > "$probe_dir/repository/review.txt"
+  : > "$probe_dir/tool-events.jsonl"
+  pi_tool_names=repo_search,repo_read,submit_evidence_file,report_finding,report_suspicion,update_finding,request_lookup,finish_review
+  if ! FM_CROSSCHECK_REVIEW_SCHEMA="$probe_dir/local-schema.json" \
+    FM_CROSSCHECK_REPOSITORY="$probe_dir/repository" \
+    FM_CROSSCHECK_TOOL_EVENT_LOG="$probe_dir/tool-events.jsonl" \
+    FM_CROSSCHECK_BASE_SHA="$(printf 'b%.0s' {1..40})" \
+    FM_CROSSCHECK_HEAD_SHA="$(printf 'a%.0s' {1..40})" \
     "$pi_bin" --offline --no-extensions \
       --extension "$ROOT/bin/fm-crosscheck-pi-verdict-extension.mjs" \
-      --tools submit_crosscheck_verdict --help \
+      --tools "$pi_tool_names" --help \
       > "$probe_dir/tracked-help" 2> "$probe_dir/tracked-help.err"; then
     echo "# note: installed Pi is not runnable; deterministic strict-schema fallback passed"
     return
@@ -6070,18 +6100,39 @@ if (typeof strict.makeStrictJsonSchema === "function") {
   throw new Error(`Pi ${version} unexpectedly lacks makeStrictJsonSchema`);
 }
 JS
-  FM_CROSSCHECK_REVIEW_SCHEMA="$probe_dir/schema.json" \
+  FM_CROSSCHECK_REVIEW_SCHEMA="$probe_dir/local-schema.json" \
+    FM_CROSSCHECK_REPOSITORY="$probe_dir/repository" \
+    FM_CROSSCHECK_TOOL_EVENT_LOG="$probe_dir/tool-events.jsonl" \
+    FM_CROSSCHECK_BASE_SHA="$(printf 'b%.0s' {1..40})" \
+    FM_CROSSCHECK_HEAD_SHA="$(printf 'a%.0s' {1..40})" \
     "$node_bin" --input-type=module - \
       "$ROOT/bin/fm-crosscheck-pi-verdict-extension.mjs" <<'JS'
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-let tool;
+const tools = [];
 const extension = await import(pathToFileURL(process.argv[2]));
-extension.default({ registerTool(value) { tool = value; } });
-if (tool?.name !== "submit_crosscheck_verdict") throw new Error("tool name drifted");
-if (tool?.constrainedSampling?.type !== "json_schema") throw new Error("tool is unconstrained");
-if (tool?.constrainedSampling?.strict !== "require") throw new Error("tool is not strict");
-const result = await tool.execute("probe", {});
-if (result?.terminate !== true) throw new Error("tool requires another model turn");
+extension.default({ registerTool(value) { tools.push(value); } });
+const expected = [
+  "repo_search", "repo_read", "submit_evidence_file", "report_finding",
+  "report_suspicion", "update_finding", "request_lookup", "finish_review",
+];
+if (JSON.stringify(tools.map((tool) => tool.name)) !== JSON.stringify(expected)) throw new Error("tool names drifted");
+for (const tool of tools) {
+  if (tool?.executionMode !== "sequential") throw new Error(`${tool.name} is not sequential`);
+  if (tool?.constrainedSampling?.type !== "json_schema") throw new Error(`${tool.name} is unconstrained`);
+  if (tool?.constrainedSampling?.strict !== "require") throw new Error(`${tool.name} is not strict`);
+}
+const finish = tools.find((tool) => tool.name === "finish_review");
+const invalid = await finish.execute("invalid", {
+  verdict: "CLEAR", summary: "complete", citations: [],
+});
+if (invalid?.details?.correctable !== true || invalid?.terminate) throw new Error("invalid finalization was not correctable");
+const result = await finish.execute("finish", {
+  verdict: "CLEAR", summary: "complete",
+  citations: [{ path: "review.txt", line: 1 }],
+});
+if (result?.terminate !== true || result?.details?.accepted !== true) throw new Error("finish did not terminate");
+if (!readFileSync(process.env.FM_CROSSCHECK_TOOL_EVENT_LOG, "utf8").includes('"name":"finish_review"')) throw new Error("accepted finalization was not logged");
 JS
   cat > "$probe_dir/probe.mjs" <<'JS'
 export default function (pi) {
@@ -6131,7 +6182,7 @@ test_telemetry_economics_and_exact_head_reuse() {
     run_case "$case_dir" "$base" "$head" clear run > "$case_dir/reuse.out" \
     || fail "the exact-head reuse failed"
   after=$(wc -l < "$case_dir/pi.log")
-  [ "$before" -eq 2 ] && [ "$after" -eq 2 ] \
+  [ "$before" -eq 1 ] && [ "$after" -eq 1 ] \
     || fail "exact-head reuse launched another paid reviewer"
   "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" \
     "$case_dir/data/task-x1/crosscheck-ledger.json" "$head" <<'PY' \
@@ -6146,13 +6197,13 @@ source, reused = ledger["runs"]
 assert source["state"] == reused["state"] == "clear"
 assert reused["telemetry"]["reuse"]["source_run_sha256"] == module.run_sha256(source)
 tokens = source["telemetry"]["tokens"]
-assert tokens == {"input": 200, "output": 40, "cache_read": 160,
+assert tokens == {"input": 100, "output": 20, "cache_read": 80,
                   "cache_write": 0, "source": "pi-turn-end-message-usage"}
 costs = source["telemetry"]["costs_usd"]
 assert costs["provider_reported"] is None
-assert costs["pi_calculated"] == 0.0004784
-assert costs["declared"] == 0.0004784
-assert source["telemetry"]["turns"] == 2
+assert costs["pi_calculated"] == 0.0002392
+assert costs["declared"] == 0.0002392
+assert source["telemetry"]["turns"] == 1
 assert source["telemetry"]["reviewer_latency_ms"] >= 0
 config = dict(source["reviewer"])
 snapshot = {"head_sha": head, "base_sha": source["base_sha"],
@@ -6178,9 +6229,9 @@ PY
   output=$(run_economics "$case_dir") || fail "the read-only economics report failed"
   assert_contains "$output" "provider-reported total: \$0.000000 across 0 run(s)." \
     "economics hid provider-cost provenance"
-  assert_contains "$output" "Pi-calculated total: \$0.000478 across 1 run(s)." \
+  assert_contains "$output" "Pi-calculated total: \$0.000239 across 1 run(s)." \
     "economics omitted Pi-calculated cost"
-  assert_contains "$output" "declared-rate total: \$0.000478 across 2 run(s)." \
+  assert_contains "$output" "declared-rate total: \$0.000239 across 2 run(s)." \
     "economics omitted declared regular-lane cost and zero-cost reuse"
   verified=$(run_case "$case_dir" "$base" "$head" clear verify) \
     || fail "verify did not follow the reused run to its source proof"

@@ -256,14 +256,14 @@ prompt = module.azure_review_prompt(
 )
 expected = module.canonical_bytes(schema).decode("utf-8")
 trusted_header = "AZURE REVIEW OUTPUT FORMAT (TRUSTED FINAL INSTRUCTION):"
-packet_close = "</AZURE_EXACT_HEAD_REVIEW_PACKET_UNTRUSTED>"
+packet_close = "</AZURE_EXACT_HEAD_REVIEW_PACKET_UNTRUSTED_"
 
 
 def assert_pi_bound(candidate):
     assert candidate.startswith(host_prompt)
     assert candidate.rfind(trusted_header) > candidate.rfind(packet_close)
     assert expected not in candidate
-    assert "Use `submit_crosscheck_verdict` exactly once" in candidate
+    assert "call `finish_review` exactly once" in candidate
     assert "supplied Crosscheck verdict schema" not in candidate
     trusted_tail = candidate[candidate.rfind(trusted_header):]
     assert "supplied" not in trusted_tail.lower()
@@ -299,7 +299,8 @@ for malformed in (
     else:
         raise AssertionError(f"Pi evidence normalization admitted {malformed!r}")
 assert "Your final response must satisfy the supplied JSON schema" in host_prompt
-assert "The constrained verdict submitter is the only enabled tool." in prompt
+assert "Only the bounded snapshot read/search" in prompt
+assert "emit only surviving reports and updates" in prompt
 assert "record the schema's fixed model execution-home" not in prompt
 assert commands[0][0] == [
     "git", "-C", "/unused-review-checkout", "diff", "--no-ext-diff",
@@ -320,7 +321,10 @@ with tempfile.TemporaryDirectory() as temporary:
     request = json.loads(request_path.read_text(encoding="utf-8"))
 assert request["prompt"] == prompt
 assert request["review_schema"] == schema
-assert request["tool_protocol"]["model_tools"] == ["submit_crosscheck_verdict"]
+assert request["tool_protocol"]["model_tools"] == [
+    "repo_search", "repo_read", "submit_evidence_file", "report_finding",
+    "report_suspicion", "update_finding", "request_lookup", "finish_review",
+]
 assert request["verdict_extension"]["sha256"] == module.digest_bytes(
     request["verdict_extension"]["source"].encode("utf-8")
 )
@@ -3039,7 +3043,7 @@ try:
         review_dir=review,
         proof_root=proof,
         snapshot_value=dict(snapshot),
-        ledger={"runs":[]},
+        ledger={"findings":[],"runs":[]},
         config=dict(config),
         author_account_identity="",
         lane=0,
@@ -3093,7 +3097,7 @@ try:
         core=core,root=root,home=home,task_id="task-expired",
         pr_url="https://github.com/ruby-dlee/firstmate/pull/302",
         review_dir=review,proof_root=proof,snapshot_value=dict(snapshot),
-        ledger={"runs":[]},config=dict(config),author_account_identity="",lane=0,
+        ledger={"findings":[],"runs":[]},config=dict(config),author_account_identity="",lane=0,
     )
 except core.CrosscheckToolError as exc:
     assert "expired while capacity waited" in str(exc)
@@ -3220,6 +3224,7 @@ bridge = SimpleNamespace(
 )
 adapter.load_tool_bridge = lambda: bridge
 adapter.normalize_pi_evidence_files = lambda _value: {}
+adapter.replay_pi_result = lambda *_args, **_kwargs: {}
 adapter.remote_mutation_executor = lambda *_args: None
 core.pi_review_output_schema = lambda *_args: {}
 core.unavailable_run_telemetry = lambda: {}
@@ -3271,7 +3276,7 @@ try:
         review_dir=review,
         proof_root=proof,
         snapshot_value=snapshot,
-        ledger={"runs": []},
+        ledger={"findings": [], "runs": []},
         config=config,
         author_account_identity="",
         lane=0,
@@ -3305,7 +3310,7 @@ working, identity_run = adapter._run_azure_review_in_lane(
     review_dir=review,
     proof_root=proof,
     snapshot_value=snapshot,
-    ledger={"runs": []},
+    ledger={"findings": [], "runs": []},
     config=identity_config,
     author_account_identity="",
     lane=0,
@@ -3337,7 +3342,7 @@ try:
         review_dir=review,
         proof_root=proof,
         snapshot_value=snapshot,
-        ledger={"runs": []},
+        ledger={"findings": [], "runs": []},
         config=failed_config,
         author_account_identity="",
         lane=0,
@@ -3402,7 +3407,7 @@ try:
         review_dir=review,
         proof_root=proof,
         snapshot_value=snapshot,
-        ledger={"runs": []},
+        ledger={"findings": [], "runs": []},
         config=dict(config),
         author_account_identity="",
         lane=0,
@@ -3725,7 +3730,7 @@ PY
   pass "the safety-shutdown expiry script renders real newlines with the exact unit text"
 }
 
-pi_reviewer_runtime_unit() {
+pi_reviewer_runtime_legacy_unused() {
   python3 - "$PI_REVIEWER_RUNTIME" "$PI_VERDICT_EXTENSION" <<'PY' \
     || fail "digest-bound Pi reviewer runtime contract failed"
 import hashlib
@@ -4011,6 +4016,485 @@ PY
   pass "the digest-bound Pi runtime bounds verdict repair and remains fail closed"
 }
 
+pi_reviewer_runtime_unit() {
+  python3 - "$PI_REVIEWER_RUNTIME" <<'PY' \
+    || fail "incremental Pi replay contract failed"
+import copy
+import importlib.util
+import json
+from pathlib import Path
+import tempfile
+import sys
+
+spec = importlib.util.spec_from_file_location("pi_replay", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+with tempfile.TemporaryDirectory() as temporary:
+    repository = Path(temporary) / "repository"
+    repository.mkdir()
+    (repository / "review.py").write_text("first\nneedle\n", encoding="utf-8")
+    head = "a" * 40
+    base = "b" * 40
+    read_args = {"path": "review.py", "start_line": 1, "end_line": 2}
+    read_result = {
+        "path": "review.py",
+        "start_line": 1,
+        "end_line": 2,
+        "lines": [
+            {"line": 1, "text": "first"},
+            {"line": 2, "text": "needle"},
+        ],
+    }
+    finish_args = {
+        "verdict": "CLEAR",
+        "summary": "No release blocker survived the skeptical re-check.",
+        "citations": [{"path": "review.py", "line": 2}],
+    }
+    records = [
+        {
+            "seq": 1,
+            "name": "repo_read",
+            "arguments": read_args,
+            "result_sha256": module.value_digest(read_result),
+        },
+        {
+            "seq": 2,
+            "name": "finish_review",
+            "arguments": finish_args,
+            "result_sha256": module.value_digest({"finalized": True}),
+        },
+    ]
+    replayed = module.replay_tool_log(
+        records,
+        repository=repository,
+        head_sha=head,
+        base_sha=base,
+        executing_account_home="/account",
+        execution_home="/home",
+        known_finding_ids=set(),
+        eligible_equivalent_ids=set(),
+    )
+    assert replayed["verdict"]["schema"] == "firstmate.crosscheck-review.v2"
+    assert replayed["verdict"]["head_sha"] == head
+    assert replayed["evidence_files"] == []
+
+    search_args = {"query": "absent", "paths": ["review.py"]}
+    empty_search = {"matches": [], "truncated": False}
+    search_records = [
+        {
+            "seq": index,
+            "name": "repo_search",
+            "arguments": search_args,
+            "result_sha256": module.value_digest(empty_search),
+        }
+        for index in (1, 2)
+    ] + [{
+        "seq": 3,
+        "name": "finish_review",
+        "arguments": finish_args,
+        "result_sha256": module.value_digest({"finalized": True}),
+    }]
+    original_scan_budget = module.MAX_SEARCH_SCAN_BYTES
+    module.MAX_SEARCH_SCAN_BYTES = 20
+    try:
+        module.replay_tool_log(
+            search_records,
+            repository=repository,
+            head_sha=head,
+            base_sha=base,
+            executing_account_home="/account",
+            execution_home="/home",
+        )
+    except module.ReviewError as exc:
+        assert "aggregate scan budget" in str(exc)
+    else:
+        raise AssertionError("repeated full-repository searches escaped the scan budget")
+    finally:
+        module.MAX_SEARCH_SCAN_BYTES = original_scan_budget
+
+    blocking = copy.deepcopy(records)
+    blocking[-1]["arguments"] = {
+        **finish_args,
+        "verdict": "BLOCKING",
+    }
+    blocking[-1]["result_sha256"] = module.value_digest({"finalized": True})
+    replayed = module.replay_tool_log(
+        blocking,
+        repository=repository,
+        head_sha=head,
+        base_sha=base,
+        executing_account_home="/account",
+        execution_home="/home",
+        known_finding_ids={"cc-active"},
+        active_finding_ids={"cc-active"},
+    )
+    assert replayed["verdict"]["summary"] == finish_args["summary"]
+
+    try:
+        module.replay_tool_log(
+            records,
+            repository=repository,
+            head_sha=head,
+            base_sha=base,
+            executing_account_home="/account",
+            execution_home="/home",
+            known_finding_ids={"cc-active"},
+            active_finding_ids={"cc-active"},
+        )
+    except module.ReviewError as exc:
+        assert "contradicts" in str(exc)
+    else:
+        raise AssertionError("CLEAR ignored an untouched active finding")
+
+    too_many_citations = copy.deepcopy(records)
+    too_many_citations[-1]["arguments"]["citations"] = [
+        {"path": "review.py", "line": 1} for _ in range(33)
+    ]
+    try:
+        module.replay_tool_log(
+            too_many_citations,
+            repository=repository,
+            head_sha=head,
+            base_sha=base,
+            executing_account_home="/account",
+            execution_home="/home",
+        )
+    except module.ReviewError:
+        pass
+    else:
+        raise AssertionError("33 citations escaped the immediate bound")
+
+    (repository / "target.py").write_text("target\n", encoding="utf-8")
+    (repository / "link.py").symlink_to("target.py")
+    manifest = {
+        "included": [
+            {"path": "review.py", "kind": "file"},
+            {"path": "link.py", "kind": "symlink"},
+        ],
+        "exclusions": [],
+    }
+    symlink_citation = copy.deepcopy(records)
+    symlink_citation[-1]["arguments"]["citations"] = [
+        {"path": "link.py", "line": 1}
+    ]
+    try:
+        module.replay_tool_log(
+            symlink_citation,
+            repository=repository,
+            manifest=manifest,
+            head_sha=head,
+            base_sha=base,
+            executing_account_home="/account",
+            execution_home="/home",
+        )
+    except module.ReviewError:
+        pass
+    else:
+        raise AssertionError("a snapshot symlink citation was accepted")
+
+    event_path = repository / "mixed-events.jsonl"
+    event_path.write_text("\n".join(json.dumps(event) for event in [
+        {
+            "type": "turn_end",
+            "message": {
+                "role": "assistant",
+                "provider": "fireworks-glm",
+                "model": "model",
+                "stopReason": "toolUse",
+                "content": [
+                    {"type": "toolCall", "id": "read", "name": "repo_read", "arguments": read_args},
+                    {"type": "toolCall", "id": "finish", "name": "finish_review", "arguments": finish_args},
+                ],
+                "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0.0}},
+            },
+        },
+        {
+            "type": "turn_end",
+            "message": {
+                "role": "assistant",
+                "provider": "fireworks-glm",
+                "model": "model",
+                "stopReason": "stop",
+                "content": [{"type": "text", "text": "done"}],
+                "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0.0}},
+            },
+        },
+        {"type": "agent_end", "messages": []},
+    ]) + "\n", encoding="utf-8")
+    completion = module.parse_events(event_path, "fireworks-glm", "model")
+    assert finish_args in completion["finishes"]
+
+    malformed = copy.deepcopy(records)
+    malformed[0]["seq"] = 2
+    try:
+        module.replay_tool_log(
+            malformed,
+            repository=repository,
+            head_sha=head,
+            base_sha=base,
+            executing_account_home="/account",
+            execution_home="/home",
+        )
+    except module.ReviewError:
+        pass
+    else:
+        raise AssertionError("malformed event ordering was accepted")
+
+    after_finish = copy.deepcopy(records) + [copy.deepcopy(records[0])]
+    after_finish[-1]["seq"] = 3
+    try:
+        module.replay_tool_log(
+            after_finish,
+            repository=repository,
+            head_sha=head,
+            base_sha=base,
+            executing_account_home="/account",
+            execution_home="/home",
+        )
+    except module.ReviewError:
+        pass
+    else:
+        raise AssertionError("a tool after finish_review was accepted")
+PY
+  pass "incremental Pi events replay into one schema-v2 review and fail closed"
+}
+
+pi_extension_protocol_unit() {
+  node --input-type=module - "$PI_VERDICT_EXTENSION" <<'JS' \
+    || fail "Pi extension immediate-validation contract failed"
+import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
+
+const root = mkdtempSync(`${tmpdir()}/crosscheck-extension-`);
+mkdirSync(`${root}/.crosscheck-snapshot`);
+writeFileSync(`${root}/review.py`, "first\nsecond\n");
+writeFileSync(`${root}/target.py`, "target\n");
+symlinkSync("target.py", `${root}/link.py`);
+writeFileSync(`${root}/.crosscheck-snapshot/manifest.json`, JSON.stringify({
+  included: [
+    { path: "review.py", kind: "file" },
+    { path: "link.py", kind: "symlink" },
+  ],
+  exclusions: [],
+}));
+const schema = `${root}/schema.json`;
+const citation = { type: "array", items: { type: "object" } };
+const review = {
+  properties: {
+    summary: { type: "string" },
+    citations: citation,
+    new_findings: { items: { properties: {
+      severity: {}, title: {}, citations: citation, description: {}, reproduction: {},
+    } } },
+    suspicions: { items: { properties: { description: {}, citations: citation } } },
+    finding_updates: { items: { properties: {
+      id: {}, status: {}, note: {}, reproduction: {}, mutation_proof: {}, equivalent_to: {},
+    } } },
+  },
+};
+writeFileSync(schema, JSON.stringify(review));
+const log = `${root}/events.jsonl`;
+Object.assign(process.env, {
+  FM_CROSSCHECK_REVIEW_SCHEMA: schema,
+  FM_CROSSCHECK_REPOSITORY: root,
+  FM_CROSSCHECK_TOOL_EVENT_LOG: log,
+  FM_CROSSCHECK_BASE_SHA: "b".repeat(40),
+  FM_CROSSCHECK_HEAD_SHA: "a".repeat(40),
+  FM_CROSSCHECK_FINDING_IDS: '["cc-active"]',
+  FM_CROSSCHECK_ACTIVE_FINDING_IDS: '["cc-active"]',
+  FM_CROSSCHECK_ELIGIBLE_EQUIVALENT_IDS: "[]",
+  FM_CROSSCHECK_TRUST_SNAPSHOT_MANIFEST: "1",
+});
+const tools = [];
+const extension = await import(pathToFileURL(process.argv[2]).href + `?test=${Date.now()}`);
+extension.default({ registerTool(tool) { tools.push(tool); } });
+assert.deepEqual(tools.map((tool) => tool.name), [
+  "repo_search", "repo_read", "submit_evidence_file", "report_finding",
+  "report_suspicion", "update_finding", "request_lookup", "finish_review",
+]);
+assert(tools.every((tool) => tool.executionMode === "sequential"));
+const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
+const citations = Array.from({ length: 33 }, () => ({ path: "review.py", line: 1 }));
+const oversized = await byName.finish_review.execute("oversized", {
+  verdict: "BLOCKING", summary: "blocked", citations,
+});
+assert.deepEqual(oversized.details, { accepted: false, correctable: true });
+assert.equal(oversized.terminate, undefined);
+const trailingSlash = await byName.submit_evidence_file.execute("trailing", {
+  path: ".crosscheck/reproductions/proof/", content: "true\n",
+});
+assert.deepEqual(trailingSlash.details, { accepted: false, correctable: true });
+const symlink = await byName.finish_review.execute("symlink", {
+  verdict: "BLOCKING", summary: "blocked", citations: [{ path: "link.py", line: 1 }],
+});
+assert.deepEqual(symlink.details, { accepted: false, correctable: true });
+const lookup = await byName.request_lookup.execute("lookup", {
+  queries: [{ type: "search", query: "upstream behavior" }],
+});
+assert.deepEqual(lookup.details, { accepted: true });
+assert.match(lookup.content[0].text, /"available":false/);
+const finish = await byName.finish_review.execute("finish", {
+  verdict: "BLOCKING", summary: "Existing blocker remains active.",
+  citations: [{ path: "review.py", line: 2 }],
+});
+assert.equal(finish.terminate, true);
+assert.deepEqual(finish.details, { accepted: true });
+const postFinish = await byName.repo_read.execute("after", { path: "review.py" });
+assert.equal(postFinish.terminate, true);
+assert.deepEqual(postFinish.details, { accepted: false, correctable: false });
+const events = readFileSync(log, "utf8").trim().split("\n").map(JSON.parse);
+assert.deepEqual(events.map((event) => event.name), ["request_lookup", "finish_review"]);
+JS
+  pass "Pi extension exposes exactly eight sequential tools with immediate bounded correction"
+}
+
+pi_reviewer_runtime_run_unit() {
+  python3 - "$PI_REVIEWER_RUNTIME" "$PI_VERDICT_EXTENSION" <<'PY' \
+    || fail "executable Pi runtime repair contract failed"
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+runtime = Path(sys.argv[1])
+extension = Path(sys.argv[2])
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    repository = root / "repository"
+    repository.mkdir()
+    (repository / "review.py").write_text("review\n", encoding="utf-8")
+    prompt = root / "prompt.md"
+    prompt.write_text("review the packet", encoding="utf-8")
+    schema = root / "schema.json"
+    schema.write_text("{}\n", encoding="utf-8")
+    account = root / "account"
+    account.mkdir()
+    fake = root / "pi"
+    fake.write_text(r'''#!/usr/bin/env python3
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+def digest(value):
+    return "sha256:" + hashlib.sha256(canonical(value).encode()).hexdigest()
+
+capture = Path(os.environ["CAPTURE"])
+launches = json.loads(capture.read_text()) if capture.is_file() else []
+launches.append(sys.argv[1:])
+capture.write_text(json.dumps(launches))
+attempt = len(launches)
+scenario = os.environ["SCENARIO"]
+provider = sys.argv[sys.argv.index("--provider") + 1]
+model = sys.argv[sys.argv.index("--model") + 1]
+finish = {
+    "verdict": "CLEAR",
+    "summary": "review complete",
+    "citations": [{"path": "review.py", "line": 1}],
+}
+valid = scenario in {"valid", "mixed"} or (scenario == "repair" and attempt == 2)
+if scenario in {"malformed-log", "contradiction"}:
+    valid = True
+if valid:
+    log = Path(os.environ["FM_CROSSCHECK_TOOL_EVENT_LOG"])
+    if scenario == "malformed-log":
+        log.write_text("not-json\n")
+    else:
+        log.write_text(canonical({
+            "seq": 1,
+            "name": "finish_review",
+            "arguments": finish,
+            "result_sha256": digest({"finalized": True}),
+        }) + "\n")
+content = (
+    [{"type": "toolCall", "id": "finish", "name": "finish_review", "arguments": finish}]
+    if valid else [{"type": "text", "text": "done without finalization"}]
+)
+print(json.dumps({
+    "type": "turn_end",
+    "message": {
+        "role": "assistant", "provider": provider, "model": model,
+        "stopReason": "toolUse" if valid else "stop", "content": content,
+        "usage": {"input": 10, "output": 2, "cacheRead": 4, "cacheWrite": 0,
+                  "cost": {"total": 0.00002336}},
+    },
+}))
+if scenario == "mixed":
+    print(json.dumps({
+        "type": "turn_end",
+        "message": {
+            "role": "assistant", "provider": provider, "model": model,
+            "stopReason": "stop", "content": [{"type": "text", "text": "done"}],
+            "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0,
+                      "cost": {"total": 0.0}},
+        },
+    }))
+print(json.dumps({"type": "agent_end", "messages": []}))
+''', encoding="utf-8")
+    fake.chmod(0o700)
+
+    def execute(scenario, *, active=False):
+        result = root / f"{scenario}-result.json"
+        capture = root / f"{scenario}-launches.json"
+        environment = os.environ.copy()
+        environment.update({
+            "CAPTURE": str(capture),
+            "SCENARIO": scenario,
+            "FM_CROSSCHECK_PI_COMMAND_JSON": json.dumps([str(fake)]),
+            "FM_CROSSCHECK_REPOSITORY": str(repository),
+            "FM_CROSSCHECK_HEAD_SHA": "a" * 40,
+            "FM_CROSSCHECK_BASE_SHA": "b" * 40,
+            "FM_CROSSCHECK_EXECUTING_ACCOUNT_HOME": str(account),
+            "FM_CROSSCHECK_EXECUTION_HOME": str(root / "home"),
+            "FM_CROSSCHECK_FINDING_IDS": '["cc-active"]' if active else "[]",
+            "FM_CROSSCHECK_ACTIVE_FINDING_IDS": '["cc-active"]' if active else "[]",
+            "FM_CROSSCHECK_ELIGIBLE_EQUIVALENT_IDS": "[]",
+        })
+        completed = subprocess.run(
+            [sys.executable, str(runtime), str(account), "model", "xhigh",
+             "fireworks-glm", str(extension), str(prompt), str(schema), str(result)],
+            env=environment, capture_output=True, text=True,
+        )
+        launches = json.loads(capture.read_text())
+        value = json.loads(result.read_text()) if result.is_file() else None
+        return completed, launches, value
+
+    completed, launches, value = execute("valid")
+    assert completed.returncode == 0 and value["verdict"]["summary"] == "review complete"
+    assert len(launches) == 1 and launches[0][launches[0].index("--thinking") + 1] == "xhigh"
+    assert launches[0][launches[0].index("--tools") + 1].split(",") == [
+        "repo_search", "repo_read", "submit_evidence_file", "report_finding",
+        "report_suspicion", "update_finding", "request_lookup", "finish_review",
+    ]
+
+    completed, launches, value = execute("repair")
+    assert completed.returncode == 0 and value is not None
+    assert len(launches) == 2
+    assert launches[1][launches[1].index("--thinking") + 1] == "low"
+    assert value["telemetry"]["turns"] == 2
+
+    completed, launches, value = execute("mixed")
+    assert completed.returncode == 0 and value is not None and len(launches) == 1
+
+    for scenario, active in (("missing", False), ("malformed-log", False), ("contradiction", True)):
+        completed, launches, value = execute(scenario, active=active)
+        assert completed.returncode == 125 and value is None, (scenario, completed.stderr)
+        assert len(launches) == 2, scenario
+        assert "one bounded verdict repair was exhausted" in completed.stderr, completed.stderr
+PY
+  pass "the executable Pi runtime repairs once and never persists failed finalization"
+}
+
 azure_pi_review_contract_unit() {
   python3 - "$CORE" "$PI_REVIEWER_RUNTIME" <<'PY' \
     || fail "Azure Pi review contract digest did not bind the reviewer runtime"
@@ -4032,9 +4516,9 @@ with tempfile.TemporaryDirectory() as raw_tmp:
     local_before = module.review_contract_sha256(False, "pi")
     candidate.write_bytes(candidate.read_bytes() + b"\n")
     assert module.review_contract_sha256(True, "pi") != azure_before
-    assert module.review_contract_sha256(False, "pi") == local_before
+    assert module.review_contract_sha256(False, "pi") != local_before
 PY
-  pass "Azure Pi review reuse is bound to the executable reviewer runtime"
+  pass "local and Azure Pi review reuse bind the executable reviewer runtime"
 }
 
 parameter_contract_unit() {
@@ -4093,6 +4577,8 @@ parameter_contract_unit
 adapter_mode_unit
 azure_prompt_wrapper_schema_unit
 pi_reviewer_runtime_unit
+pi_extension_protocol_unit
+pi_reviewer_runtime_run_unit
 azure_pi_review_contract_unit
 cross_family_provider_host_unit
 cross_family_credential_lane_unit
