@@ -151,28 +151,30 @@
 #   shell in a quote continuation, and discards its own stderr so that probes a
 #   blocked shell drains after the gate has already passed and removed the probe
 #   directory leave no failure debris on the pane ahead of the guarded command.
-#   The probe directory is created under TMPDIR
-#   when that yields a plain absolute marker path, and otherwise under the same
-#   fixed /tmp root TASK_TMP uses, with one stderr notice; only a /tmp that also
-#   cannot yield a plain path refuses the spawn. A probe the backend cannot even
-#   deliver refuses on the SEND CHANNEL rather than spending the poll budget and
-#   blaming the pane: two CONSECUTIVE send failures name the endpoint, a lone
-#   hiccup between delivered probes does not, and on zellij and cmux - the only
-#   adapters that define it - a reported uncleared input line is terminal on
-#   sight. The gate sends no interrupt of its own, on either gated path. It is
+#   The probe directory is created under TMPDIR when that root both accepts a
+#   temp directory and yields a plain absolute marker path, and otherwise under
+#   the same fixed /tmp root TASK_TMP uses, with one stderr notice naming which
+#   of the two it failed; only a /tmp that fails the same way refuses the spawn,
+#   before any probe is sent and naming that local fault rather than the pane.
+#   A probe the backend cannot even deliver refuses on the SEND CHANNEL rather
+#   than spending the poll budget and blaming the pane: two CONSECUTIVE send
+#   failures name the endpoint, a lone hiccup between delivered probes does not,
+#   and on zellij and cmux - the only adapters that define it - a reported
+#   uncleared input line is terminal on sight.
+#   The gate sends no interrupt of its own, on either gated path. It is
 #   not interrupt-free end to end, though: the zellij and cmux send_text_line
 #   adapters clear their own failed submit with C-c, and gating both first sends
 #   roughly doubles the number of send_text_line calls that can reach that
-#   pre-existing adapter path. Every gate refusal names the window and says
-#   whether it survives, and the gate removes nothing itself, so on every flat
-#   layout that pane is still there afterwards. A refusal also names the task
-#   record, because the second gate runs after that record is published and no
-#   refusal retracts it: it names $STATE/<id>.meta and says the record stands,
-#   and it prescribes no remedy on any path, because whether that record is now
-#   orphaned or still describes a live task is not knowable here. Absence of
-#   --relaunch does not make it a fresh record: bin/fm-bootstrap.sh's secondmate
-#   liveness respawn and bin/fm-remote-secondmate-control.sh both re-launch over
-#   a pre-existing record without that flag.
+#   pre-existing adapter path. Every refusal the probe loop itself raises names
+#   the window and says whether it survives, and the gate removes nothing itself,
+#   so on every flat layout that pane is still there afterwards. Such a refusal
+#   also names the task record, because the second gate runs after that record is
+#   published and no refusal retracts it: it names $STATE/<id>.meta and says the
+#   record stands, and it prescribes no remedy on any path, because whether that
+#   record is now orphaned or still describes a live task is not knowable here.
+#   Absence of --relaunch does not make it a fresh record: bin/fm-bootstrap.sh's
+#   secondmate liveness respawn and bin/fm-remote-secondmate-control.sh both
+#   re-launch over a pre-existing record without that flag.
 #   Known residuals on the herdr presentation-projection path: both gates run
 #   while this session's presentation-order lock is held, so an unresponsive pane
 #   can add up to two full poll budgets to that hold window; and the shared
