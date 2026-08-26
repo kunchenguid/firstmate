@@ -10,12 +10,15 @@
 # repository's default branch when no destination was recorded (bin/fm-pr-lib.sh
 # and bin/fm-pr-check.sh's headers own where that destination comes from;
 # bin/fm-teardown.sh's header owns the equivalent teardown-time test)? Each
-# forge's own API - gh for GitHub, glab for GitLab - runs only as a FALLBACK
-# when the git test could not run at all (no worktree, no resolvable
-# destination or default branch, or a git failure), never as a second vote
-# once the git test has already answered. Bitbucket gets no forge case at all
-# below: the git test is its only path to a merged verdict, so watching a
-# Bitbucket pull request needs no Bitbucket credential or CLI.
+# forge's own API - gh for GitHub, glab for GitLab - is consulted as a safety
+# net whenever the git test has not itself confirmed a merge: both when it
+# could not run at all (no worktree, no resolvable destination or default
+# branch, or a git failure) and when it ran to a conclusion and found HEAD not
+# yet landed. Forge can only ever ADD a merged detection the git test missed;
+# it never overrides or contradicts a merge the git test already confirmed.
+# Bitbucket gets no forge case at all below: the git test is its only path to
+# a merged verdict, so watching a Bitbucket pull request needs no Bitbucket
+# credential or CLI.
 #
 # The git test stays cheap enough for FM_CHECK_TIMEOUT (enforced by the
 # caller, which runs this whole script under a timeout, per
@@ -167,33 +170,47 @@ git_tip_cache_write() {
 }
 
 # The primary, provider-agnostic merge detector. <dest> is a branch NAME, not
-# a full ref; empty means "use the repository's default branch". Returns
-# non-zero - printing nothing - when the test cannot run at all or ran and
-# found HEAD not yet landed, so the caller always has a forge fallback to try.
+# a full ref; empty means "use the repository's default branch". Returns one
+# of three distinct outcomes so the caller can tell "confirmed not yet landed"
+# apart from "could not run at all": 0 = landed, 1 = not-landed (the test ran
+# to a conclusion - either a real negative or a cache-skip reusing a prior
+# real negative - and HEAD is not yet contained), 2 = unusable (no worktree,
+# no resolvable destination, no origin remote, an unreadable destination tip,
+# or a failed fetch). The caller falls through to its forge fallback on both
+# 1 and 2, since forge may only ever add a detection the git test missed and
+# never override one it already confirmed.
 git_merge_check() {
-  local wt=$1 dest=$2 cache=$3 cached tip landed=1
-  git_worktree_valid "$wt" || return 1
+  local wt=$1 dest=$2 cache=$3 cached tip
+  git_worktree_valid "$wt" || return 2
   if [ -z "$dest" ]; then
-    dest=$(git_default_branch "$wt") || return 1
+    dest=$(git_default_branch "$wt") || return 2
   fi
-  git check-ref-format --branch "$dest" >/dev/null 2>&1 || return 1
-  git -C "$wt" remote get-url origin >/dev/null 2>&1 || return 1
+  git check-ref-format --branch "$dest" >/dev/null 2>&1 || return 2
+  git -C "$wt" remote get-url origin >/dev/null 2>&1 || return 2
   cached=$(git_tip_cache_read "$cache")
   tip=$(git_dest_tip "$wt" "$dest")
-  [ -n "$tip" ] || return 1
+  [ -n "$tip" ] || return 2
   if [ -n "$cached" ] && [ "$tip" = "$cached" ]; then
     return 1
   fi
-  git -C "$wt" fetch --quiet origin "+refs/heads/$dest:refs/remotes/origin/$dest" >/dev/null 2>&1 || return 1
-  git_ref_contains_head "$wt" "refs/remotes/origin/$dest" && landed=0
+  git -C "$wt" fetch --quiet origin "+refs/heads/$dest:refs/remotes/origin/$dest" >/dev/null 2>&1 || return 2
+  if git_ref_contains_head "$wt" "refs/remotes/origin/$dest"; then
+    git_tip_cache_write "$cache" "$tip"
+    return 0
+  fi
   git_tip_cache_write "$cache" "$tip"
-  return "$landed"
+  return 1
 }
 
-if git_merge_check "$worktree" "$dest" "$tip_cache"; then
-  printf '%s\n' merged
-  exit 0
-fi
+git_merge_check "$worktree" "$dest" "$tip_cache"
+git_status=$?
+case $git_status in
+  0)
+    printf '%s\n' merged
+    exit 0
+    ;;
+  1|2) ;;
+esac
 
 # Every component is revalidated here rather than trusted from the sidecar, and
 # the stored URL must then be exactly reconstructible from those components, so
