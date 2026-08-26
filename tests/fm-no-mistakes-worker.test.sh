@@ -286,6 +286,7 @@ request = {
   "schema":"no-mistakes.firstmate-worker-request/v1", "job_id":job,
   "run_id":"run-1", "step_result_id":"step-1", "step":step, "kind":kind, "round":0,
   "desired_head_sha":head, "input_digest":hashlib.sha256(brief).hexdigest(),
+  "runtime_identity":"c" * 64,
   "owner_decision_head":"", "desired_generation":1, "attempt":1, "lease_fence":1,
   "lease_owner":"owner-1", "source_ref":"HEAD",
   "source_bundle_sha256":hashlib.sha256(bundle).hexdigest(), "source_bundle_size":len(bundle),
@@ -312,6 +313,7 @@ result = json.loads(pathlib.Path(sys.argv[1]).read_text())
 step = pathlib.Path(sys.argv[2]).read_bytes()
 assert result["schema"] == "no-mistakes.firstmate-worker-result/v1"
 assert result["step"] == "review"
+assert result["runtime_identity"] == "c" * 64
 assert result["outcome"] == "succeeded" and result["output_head_sha"] == sys.argv[3]
 assert result["step_outcome_sha256"] == hashlib.sha256(step).hexdigest()
 assert "return_ref" not in result and "return_bundle_sha256" not in result
@@ -337,6 +339,7 @@ result = json.loads(pathlib.Path(sys.argv[1]).read_text())
 step = json.loads(pathlib.Path(sys.argv[2]).read_text())
 bundle = pathlib.Path(sys.argv[3])
 assert result["kind"] == "repair" and result["step"] == "test"
+assert result["runtime_identity"] == "c" * 64
 assert step["step"] == "test" and step.get("review_approved_head_sha", "") == ""
 assert result["output_head_sha"] != sys.argv[4]
 assert result["return_bundle_sha256"] == hashlib.sha256(bundle.read_bytes()).hexdigest()
@@ -357,6 +360,7 @@ python3 - "$TMP_ROOT/result-failure.json" <<'PY' \
 import json, pathlib, sys
 result = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert result["outcome"] == "failed"
+assert result["runtime_identity"] == "c" * 64
 assert result["error_category"] == "guest_execution" and result["retryable"] is True
 assert result["output_head_sha"] == ""
 assert "step_outcome_sha256" not in result

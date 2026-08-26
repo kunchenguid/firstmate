@@ -360,6 +360,7 @@ bin/fm-no-mistakes-worker --config '<owner-private-config.json>' execute \
 
 The request, result, and semantic step outcome use `no-mistakes.firstmate-worker-request/v1`, `no-mistakes.firstmate-worker-result/v1`, and `no-mistakes.worker-step-outcome/v1` respectively.
 The request and result echo the canonical `step` (`review` or `test`) separately from job `kind`; a repair may repair either step, and the semantic artifact follows `step`, so a test repair can never assert a review-approved head.
+They also echo the caller's lowercase SHA-256 `runtime_identity`, which binds the exact wrapper bytes, private wrapper-config bytes, and transport protocol into the job's content-addressed input; a changed runtime is a new job identity, never a replay under mutable code.
 The caller payload contains exactly `repo.bundle` and `brief.md`; the wrapper verifies both against the request, stages the configured digest-bound credential-free `runtime.tar.gz`, and submits the request's exact argv without a shell.
 The owner-private config uses `fm.no-mistakes-worker-wrapper-config/v1` and names the Firstmate home, canonical Pi account pool home, sealed runtime path and digest, lifecycle executable, bounded assignment/cleanup/wall times, and the non-secret lifecycle environment.
 

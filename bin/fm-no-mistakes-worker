@@ -26,7 +26,7 @@ SAFE_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
 MAX_JSON = 1024 * 1024
 REQUEST_FIELDS = {
     "schema", "job_id", "run_id", "step_result_id", "step", "kind", "round",
-    "desired_head_sha", "input_digest", "owner_decision_head",
+    "desired_head_sha", "input_digest", "runtime_identity", "owner_decision_head",
     "desired_generation", "attempt", "lease_fence", "lease_owner", "source_ref",
     "source_bundle_sha256", "source_bundle_size", "guest_argv",
     "expected_result_schema", "expected_firstmate_return",
@@ -130,6 +130,7 @@ def validate_request(value):
         or value["source_ref"] != "HEAD"
         or not HEX40.fullmatch(str(value["desired_head_sha"]))
         or not HEX64.fullmatch(str(value["input_digest"]))
+        or not HEX64.fullmatch(str(value["runtime_identity"]))
         or not HEX64.fullmatch(str(value["source_bundle_sha256"]))
     ):
         raise WrapperError("worker request identity is malformed", "input_invalid", False)
@@ -436,7 +437,7 @@ def result_base(request):
         "step_result_id": request["step_result_id"], "step": request["step"],
         "kind": request["kind"],
         "round": request["round"], "desired_head_sha": request["desired_head_sha"],
-        "input_digest": request["input_digest"],
+        "input_digest": request["input_digest"], "runtime_identity": request["runtime_identity"],
         "owner_decision_head": request["owner_decision_head"],
         "desired_generation": request["desired_generation"], "attempt": request["attempt"],
         "lease_fence": request["lease_fence"], "lease_owner": request["lease_owner"],
