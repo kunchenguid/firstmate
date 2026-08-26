@@ -8414,21 +8414,15 @@ def mark(_controller, _action, key, value):
     state["marks"] += 1
     state["worker"]["resources"]["state-container"]["tags"][key] = value
 provider.mark_cleanup_container = mark
-def delete(_controller, kind, resource):
-    assert kind == "task-command"
-    assert resource["id"] == action["resources"]["task-command"]["id"]
-    state["deletes"] += 1
-    state["worker"]["resources"].pop("task-command")
-provider.conditional_delete = delete
-provider.wait_absent = lambda _controller, resource_id: (
-    resource_id == action["resources"]["task-command"]["id"]
-) or (_ for _ in ()).throw(AssertionError("wrong task-command absence proof"))
+provider.conditional_delete = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+    AssertionError("never-started retirement tried to mutate a deallocated VM child"))
 
 result = provider.abandon_execute(controller, action)
-assert state == {"worker": state["worker"], "views": 2, "marks": 1, "deletes": 1}, state
+assert state == {"worker": state["worker"], "views": 2, "marks": 1, "deletes": 0}, state
 assert result["action"] == "abandon-execute"
 assert result["execution"]["disposition"] == "provider-never-started-retired"
-assert "task-command" not in result["worker"]["resources"]
+assert result["worker"]["resources"]["task-command"]["id"] == (
+    action["resources"]["task-command"]["id"])
 lifecycle.validate_abandon_execute_result(action, result)
 for label, mutate in (
     ("VM resource ID", lambda value: value["worker"]["resources"]["vm"].update(
@@ -8449,10 +8443,37 @@ for label, mutate in (
     else:
         raise AssertionError("retirement accepted a foreign {}".format(label))
 
-# Crash replay after marker + child deletion is terminal and performs no new mutation.
+# Once marked, every ordinary execute is fenced before submission.
+try:
+    provider.mutate_execute(controller, action)
+except provider.ProviderError as exc:
+    assert "fenced by retired never-started claim" in str(exc), exc
+else:
+    raise AssertionError("a retired execute marker allowed another guest submission")
+
+# The controller-carried key is independently permanent: a supported resume
+# may rebuild cloud metadata, but must never make the retired execute runnable.
+state["worker"]["resources"]["state-container"]["tags"].pop(
+    provider.EXECUTE_ABANDON_MARKER)
+durable_only_action = copy.deepcopy(action)
+durable_only_action["retired_execute_key"] = action["idempotency_key"]
+empty_show = provider.show_full
+provider.show_full = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+    AssertionError("durably retired execute reached a terminal probe or submission"))
+try:
+    provider.mutate_execute(controller, durable_only_action)
+except provider.ProviderError as exc:
+    assert "fenced by retired never-started claim" in str(exc), exc
+else:
+    raise AssertionError("a durable retired key allowed another guest submission")
+provider.show_full = empty_show
+state["worker"]["resources"]["state-container"]["tags"][
+    provider.EXECUTE_ABANDON_MARKER] = action["idempotency_key"]
+
+# Crash replay after marker landing is terminal and performs no new mutation.
 replayed = provider.abandon_execute(controller, action)
 assert replayed["execution"] == result["execution"]
-assert state["views"] == 2 and state["marks"] == 1 and state["deletes"] == 1, state
+assert state["views"] == 4 and state["marks"] == 1 and state["deletes"] == 0, state
 
 # Any evidence of execution keeps custody and does not mark or delete.
 state["worker"] = copy.deepcopy(original_worker)

@@ -522,13 +522,13 @@ def validate_abandon_execute_result(action, result):
     worker = result.get("worker")
     resources = worker.get("resources") if isinstance(worker, dict) else None
     claimed_resources = action.get("resources") or {}
-    expected_resource_kinds = set(claimed_resources) - {"task-command"}
+    expected_resource_kinds = set(claimed_resources)
     if (
         not isinstance(worker, dict)
         or worker.get("slot") != action.get("slot")
         or not isinstance(resources, dict)
         or set(resources) != expected_resource_kinds
-        or resources.get("task-command") is not None
+        or (resources.get("task-command") or {}).get("id") != expected_task_command_id
         or "deallocated" not in str((resources.get("vm") or {}).get("power_state", "")).lower()
         or (resources.get("state-container") or {}).get("tags", {}).get(
             EXECUTE_ABANDON_MARKER
@@ -5024,7 +5024,6 @@ def command_abandon_claim(env, args):
                     )
                 worker = clean["workers"].get(slot)
                 validate_durable_abandon_execute_worker(action, worker)
-                worker.setdefault("resources", {}).pop("task-command", None)
                 worker["retired_execute_key"] = action["idempotency_key"]
                 record_refusal(clean, worker, LifecycleError(
                     "claim abandoned by operator: exact never-started execute retired"

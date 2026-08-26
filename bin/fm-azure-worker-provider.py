@@ -2465,17 +2465,17 @@ def mutate_delete_compute(controller, action):
     if not marked:
         retired_execute_key = action.get("retired_execute_key")
         task_command_missing = resources.get("task-command") is None
-        if task_command_missing and (
+        if retired_execute_key is not None and (
             not isinstance(retired_execute_key, str)
             or not re.fullmatch(r"[0-9a-f]{64}", retired_execute_key)
             or container is None
             or not cleanup_marker(container, EXECUTE_ABANDON_MARKER, retired_execute_key)
         ):
+            raise ProviderError("retired-execute custody marker is not exact")
+        if task_command_missing and retired_execute_key is None:
             raise ProviderError(
                 "missing task-command has no exact retired-execute custody proof"
             )
-        if not task_command_missing and retired_execute_key is not None:
-            raise ProviderError("retired task-command unexpectedly reappeared")
         resources = recorded_exact(
             action, worker,
             allow_missing=("task-command",) if task_command_missing else (),
@@ -2880,8 +2880,9 @@ def abandon_execute(controller, action):
     This is intentionally not an ordinary execute replay. It is reachable only
     from the operator-confirmed abandon lane, and only while the VM is dark,
     the assignment blobs remain at their initial values, and two fresh Azure
-    views prove that the empty Run Command never started. The durable marker is
-    written before deleting the child, so a crash at either side converges.
+    views prove that the empty Run Command never started. The durable marker
+    permanently fences every future execute until ordinary VM cleanup cascades
+    the child, so a crash at either side converges without powering the VM on.
     """
     if validate_mutation_action(controller, action) != "execute":
         raise ProviderError("execute abandonment requires an exact execute action")
@@ -2898,22 +2899,7 @@ def abandon_execute(controller, action):
         container, EXECUTE_ABANDON_MARKER, action["idempotency_key"]
     )
     if current.get("task-command") is None:
-        if not marked:
-            raise ProviderError("absent task-command has no exact execute-abandon marker")
-        resources = recorded_exact(
-            action, worker, allow_missing=("task-command",),
-            skip_immutable=("state-container",), require_ready_children=False,
-        )
-        if "deallocated" not in str(resources["vm"].get("power_state", "")).lower():
-            raise ProviderError("execute abandonment requires exact deallocated compute")
-        if not initial_execute_staging_is_exact(action, resources):
-            raise ProviderError("execute abandonment staging is not the exact initial assignment")
-        return {
-            "idempotency_key": action["idempotency_key"],
-            "action": "abandon-execute",
-            "worker": worker,
-            "execution": retired_execute_result(action, expected_task),
-        }
+        raise ProviderError("execute abandonment lost the exact empty task Run Command")
 
     resources = recorded_exact(action, worker, require_ready_children=False)
     task_command = resources["task-command"]
@@ -2958,26 +2944,12 @@ def abandon_execute(controller, action):
     if not exact_unstarted_execute_view(second_view):
         raise ProviderError("execute abandonment second view is not the exact never-started state")
 
-    conditional_delete(controller, "task-command", bracketed_resources["task-command"])
-    wait_absent(controller, expected_task)
-    final = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
-    final_resources = recorded_exact(
-        action, final, allow_missing=("task-command",),
-        skip_immutable=("state-container",), require_ready_children=False,
-    )
-    if final_resources.get("task-command") is not None:
-        raise ProviderError("execute abandonment left the task Run Command child present")
-    if not cleanup_marker(
-        final_resources["state-container"], EXECUTE_ABANDON_MARKER,
-        action["idempotency_key"],
-    ):
-        raise ProviderError("execute abandonment lost its durable marker")
-    if "deallocated" not in str(final_resources["vm"].get("power_state", "")).lower():
+    if "deallocated" not in str(bracketed_resources["vm"].get("power_state", "")).lower():
         raise ProviderError("execute abandonment changed worker power state")
     return {
         "idempotency_key": action["idempotency_key"],
         "action": "abandon-execute",
-        "worker": final,
+        "worker": bracketed,
         "execution": retired_execute_result(action, expected_task),
     }
 
@@ -3117,6 +3089,29 @@ def mutate_execute(controller, action):
     snapshot = inventory(controller, include_metrics=False)
     worker = worker_by_slot(snapshot, action["slot"])
     resources = recorded_exact(action, worker)
+    durable_retired_key = action.get("retired_execute_key")
+    marker_retired_key = (resources.get("state-container") or {}).get("tags", {}).get(
+        EXECUTE_ABANDON_MARKER
+    )
+    for label, retired_key in (
+        ("durable", durable_retired_key), ("marker", marker_retired_key),
+    ):
+        if retired_key is not None and (
+            not isinstance(retired_key, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", retired_key)
+        ):
+            raise ProviderError("worker {} execute-abandon key is malformed".format(label))
+    if (
+        durable_retired_key is not None
+        and marker_retired_key is not None
+        and durable_retired_key != marker_retired_key
+    ):
+        raise ProviderError("durable and marker execute-abandon keys disagree")
+    retired_key = durable_retired_key or marker_retired_key
+    if retired_key is not None:
+        raise ProviderError(
+            "worker execution is fenced by retired never-started claim {}".format(retired_key)
+        )
     request = action.get("request")
     if not isinstance(request, dict) or request.get("request_digest") != action.get("request_digest"):
         raise ProviderError("execution request identity is not exact")
