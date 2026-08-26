@@ -6,17 +6,22 @@
 # next line is working [key=<workstream>], never resolved [key=<decision>].
 # fm-send's --resolve-key removes that writer-dependency at its source: the
 # ANSWERING firstmate closes the decision in this home's own ledger at answer
-# time. These tests drive the real fm-send executable over stubbed transports
-# and assert closure through the real consumer (fm-wake-drain.sh's OPEN
-# DECISIONS section), never through source text:
+# time - for a local target that is ENQUEUE time, because the durable inbox
+# write is delivery to the task's record. These tests drive the real fm-send
+# executable over stubbed transports and assert closure through the real
+# consumer (fm-wake-drain.sh's OPEN DECISIONS section), never through source
+# text:
 #   1. An answer send closes the open decision, including the answer-starts-work
 #      scenario where the worker never writes a matching resolved line.
 #   2. A routine steer without the flag never closes anything, and a working:/
 #      done: line still cannot clear a captain decision.
 #   3. A key that is not open refuses BEFORE anything is sent (mistype safety).
-#   4. A failed or unconfirmed send never closes a key.
-#   5. A local secondmate answer is marked+corr'd yet closes the same way, and
-#      the closing line carries the plain answer, not marker or corr bytes.
+#   4. The close happens at enqueue: a failed doorbell ring still closes the
+#      answered key (the record is durably sent), while a failed ENQUEUE - the
+#      real local failure - closes nothing and leaves the decision open.
+#   5. A local secondmate answer is marked+corr'd in its record yet closes the
+#      same way, and the closing line carries the plain answer, not marker or
+#      corr bytes.
 #   6. A remote secondmate answer differs only at the transport layer: the
 #      message crosses the stubbed ssh transport while the close is the same
 #      local ledger append; a failed transport closes nothing.
@@ -121,7 +126,9 @@ test_answer_send_closes_open_decision() {
 
   run_send "$fb" "$home" "$log" t1 --resolve-key api-shape "go with REST"; rc=$?
   expect_code 0 "$rc" "an answer send with --resolve-key should succeed"
-  assert_contains "$(cat "$log")" "go with REST" "the answer text should reach the worker"
+  grep -qF "go with REST" "$home/state/t1.inbox/001.msg" \
+    || fail "the answer text should reach the worker's durable inbox record"
+  assert_contains "$(cat "$log")" "Firstmate instruction waiting" "the doorbell should be rung for the answer"
   grep -F 'resolved [key=api-shape]: answered: go with REST' "$home/state/t1.status" >/dev/null \
     || fail "fm-send did not append the closing resolved line:"$'\n'"$(cat "$home/state/t1.status")"
 
@@ -258,6 +265,7 @@ test_not_open_key_refuses_before_send() {
   assert_contains "$(cat "$err")" "--resolve-key 'mistyped'" "the refusal should name the bad key"
   assert_contains "$(cat "$err")" "nothing was sent" "the refusal should state nothing was sent"
   [ ! -s "$log" ] || fail "a refused answer still typed text: $(cat "$log")"
+  [ ! -d "$home/state/t4.inbox" ] || fail "a refused answer still enqueued an inbox record"
   if grep -F 'resolved' "$home/state/t4.status" >/dev/null; then
     fail "a refused answer still closed something: $(cat "$home/state/t4.status")"
   fi
@@ -267,11 +275,14 @@ test_not_open_key_refuses_before_send() {
   pass "fm-send --resolve-key: a key that is not open refuses loudly before anything is sent"
 }
 
-test_failed_send_does_not_close() {
+# The close is an enqueue-time fact: the durable record IS the delivery, so a
+# failed doorbell keystroke must not reopen the split-brain where the close
+# waited on an unconfirmable submit.
+test_failed_ring_still_closes_at_enqueue() {
   local dir fb log home rc out
-  dir="$TMP_ROOT/send-fail"; mkdir -p "$dir"
+  dir="$TMP_ROOT/ring-fail"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
-  home=$(setup_home send-fail)
+  home=$(setup_home ring-fail)
   fm_write_meta "$home/state/t5.meta" "window=sess:fm-t5" "kind=ship"
   printf 'blocked [key=creds]: need the deploy token\n' > "$home/state/t5.status"
 
@@ -279,14 +290,42 @@ test_failed_send_does_not_close() {
   env PATH="$fb:$PATH" FM_FAKE_TMUX_SEND_FAIL=1 \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
     "$SEND" t5 --resolve-key creds "token is in the vault now" >/dev/null 2>&1; rc=$?
-  [ "$rc" -ne 0 ] || fail "a failed backend send should exit nonzero"
-  if grep -F 'resolved' "$home/state/t5.status" >/dev/null; then
-    fail "a failed send still closed the decision: $(cat "$home/state/t5.status")"
+  expect_code 0 "$rc" "a failed doorbell must not fail the durably enqueued answer"
+  grep -qF 'token is in the vault now' "$home/state/t5.inbox/001.msg" \
+    || fail "the answer must be durably recorded despite the failed ring"
+  grep -F 'resolved [key=creds]' "$home/state/t5.status" >/dev/null \
+    || fail "the enqueued answer must close the decision at answer time: $(cat "$home/state/t5.status")"
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F '[key=creds]' >/dev/null; then
+    fail "the answered blocker still lists as open after an enqueue-time close: $out"
   fi
+  pass "fm-send --resolve-key: the close happens at enqueue, surviving a failed doorbell"
+}
+
+# The real local failure - an unwritable record - is the case that must never
+# close anything: nothing durable was sent.
+test_failed_enqueue_does_not_close() {
+  local dir fb log home rc out
+  dir="$TMP_ROOT/enqueue-fail"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home enqueue-fail)
+  fm_write_meta "$home/state/t5.meta" "window=sess:fm-t5" "kind=ship"
+  printf 'blocked [key=creds]: need the deploy token\n' > "$home/state/t5.status"
+  : > "$home/state/t5.inbox"   # a FILE where the inbox dir must go
+
+  : > "$log"
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t5 --resolve-key creds "token is in the vault now" >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail "a failed enqueue should exit nonzero"
+  if grep -F 'resolved' "$home/state/t5.status" >/dev/null; then
+    fail "a failed enqueue still closed the decision: $(cat "$home/state/t5.status")"
+  fi
+  [ ! -s "$log" ] || fail "a failed enqueue still typed something: $(cat "$log")"
   out=$(drain_out "$home")
   printf '%s' "$out" | grep -F '[key=creds]' >/dev/null \
-    || fail "the blocker vanished after a failed send: $out"
-  pass "fm-send --resolve-key: a failed send never closes the decision"
+    || fail "the blocker vanished after a failed enqueue: $out"
+  pass "fm-send --resolve-key: a failed enqueue never closes the decision"
 }
 
 test_multiple_keys_close_together() {
@@ -323,10 +362,11 @@ test_local_secondmate_answer_marked_and_closed() {
 
   run_send "$fb" "$home" "$log" fm-domain --resolve-key fleet-split "shard by team"; rc=$?
   expect_code 0 "$rc" "a secondmate answer send should succeed"
-  got=$(cat "$log")
+  got=$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" \
+    "$home/state/domain.inbox/001.msg")
   case "$got" in
     "$FM_FROMFIRST_MARK"corr=*) : ;;
-    *) fail "the secondmate answer lost its from-firstmate marker/corr framing" ;;
+    *) fail "the secondmate answer's record lost its from-firstmate marker/corr framing: $got" ;;
   esac
   closing=$(grep -F 'resolved [key=fleet-split]' "$home/state/domain.status" || true)
   [ -n "$closing" ] || fail "the secondmate decision was not closed: $(cat "$home/state/domain.status")"
@@ -502,7 +542,8 @@ test_colon_first_key_position_is_answerable
 test_answer_starts_work_never_orphans
 test_routine_steer_never_closes
 test_not_open_key_refuses_before_send
-test_failed_send_does_not_close
+test_failed_ring_still_closes_at_enqueue
+test_failed_enqueue_does_not_close
 test_multiple_keys_close_together
 test_local_secondmate_answer_marked_and_closed
 test_remote_secondmate_answer_closes_locally

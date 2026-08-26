@@ -17,6 +17,11 @@ import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Text, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
+  createBranchDispatchOffer,
+  FM_BRANCH_DISPATCH_EVENT,
+  scopeForUnreadWake,
+} from "./lib/fm-branch-dispatch.ts";
+import {
   type CalmPresentationState,
   calmTranscriptClassIsVisible,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
@@ -292,9 +297,18 @@ export default function (pi: ExtensionAPI) {
     return confirmHandlingDelivery(snapshot());
   }
 
+  function offerWakeToBranch(message: string): boolean {
+    const heartbeat = /^heartbeat($|:)/.test(message);
+    const scope = scopeForUnreadWake(state, heartbeat);
+    const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, scope.eligible);
+    pi.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
+    return offer.accepted;
+  }
+
   async function deliverActionableWake(
     owner: SessionGeneration,
     message: string,
+    repairFailed: boolean,
     recovery?: { generation: string; watcherPid: string },
   ): Promise<void> {
     if (!generationIsLive(owner)) return;
@@ -309,6 +323,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
     }
+    if (!repairFailed && offerWakeToBranch(message)) return;
     await sendWake(owner, message);
   }
 
@@ -506,7 +521,7 @@ export default function (pi: ExtensionAPI) {
             const restoration = await restoreAfterActionableClose(owner, predecessor);
             if (!generationIsLive(owner)) return;
             const message = restoration.failure ? `${classification.message}\n\n${restoration.failure}` : classification.message;
-            await deliverActionableWake(owner, message, restoration.recovery);
+            await deliverActionableWake(owner, message, Boolean(restoration.failure), restoration.recovery);
           } catch (error) {
             const detail = error instanceof Error ? error.message : String(error);
             surfaceFailure(owner, `watcher: FAILED - Pi extension could not deliver an actionable wake\n${detail}`);

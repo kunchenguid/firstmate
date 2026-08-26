@@ -194,6 +194,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".greptile/rules.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "AGENTS.md",
       "audience": "agent-runtime"
     },
@@ -266,6 +270,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/examples/watched-tools.json",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/wedge-alarm",
       "audience": "operator-example"
     },
@@ -292,6 +300,10 @@
     {
       "path": "docs/orca-backend.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/pi-supervision-branch.md",
+      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/remote-secondmates.md",
@@ -380,6 +392,10 @@
     {
       "path": "docs/verification/trace-context.md",
       "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/voice-relay.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/watcher-continuity.md",
