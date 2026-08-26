@@ -36,9 +36,16 @@ NAMED_CLAUDE="$FAKEBIN/claude"
 
 # Run one library expression with <fakebin> shadowing ps. kill is stubbed so
 # liveness questions are decided by the process table alone.
+#
+# The harness declaration is cleared unless the case sets FM_TEST_DECLARED_PID,
+# so no assertion here depends on the ambient CLAUDE_PID of whatever session runs
+# this suite - a real one colliding with a fixture pid would otherwise decide the
+# outcome silently.
 lib_eval() {  # <fakebin> <expression>
   local fakebin=$1 expr=$2
-  PATH="$fakebin:$PATH" bash -c "
+  local -a declaration=(-u CLAUDE_PID)
+  [ -z "${FM_TEST_DECLARED_PID+x}" ] || declaration=("CLAUDE_PID=$FM_TEST_DECLARED_PID")
+  env "${declaration[@]}" PATH="$fakebin:$PATH" bash -c "
     . \"\$0\"
     kill() { return 0; }
     $expr
@@ -218,6 +225,89 @@ SH
   lib_eval "$fakebin" 'fm_harness_pid_alive 600' \
     || fail "a live competing version-named session was classified as a dead lock owner"
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
+}
+
+test_declaration_is_trusted_only_inside_this_live_ancestry() {
+  local dir fakebin got bogus
+  dir="$TMP_ROOT/declaration-guards"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+# Nothing runs under 410: real ps reports nothing and fails for a dead pid.
+[ "$pid" != 410 ] || exit 1
+case "$pid:$field" in
+  300:comm=) printf '%s\n' claude ;;
+  300:args=) printf '%s\n' claude ;;
+  300:ppid=) printf '%s\n' 310 ;;
+  310:comm=) printf '%s\n' claude ;;
+  310:args=) printf '%s\n' claude ;;
+  310:ppid=) printf '%s\n' 320 ;;
+  320:comm=) printf '%s\n' claude ;;
+  320:args=) printf '%s\n' claude ;;
+  320:ppid=) printf '%s\n' 1 ;;
+  400:comm=) printf '%s\n' claude ;;
+  400:args=) printf '%s\n' claude ;;
+  400:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=) printf '%s\n' 300 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  # The contiguous run is session 300 -> daemon 310 -> launching session 320, so
+  # the ancestry fallback always answers 320 while every declaration below names
+  # something else. Which branch decided the identity is therefore readable off
+  # the answer, and no assertion here can pass for both branches at once.
+  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "the contiguous harness run was not resolved without a declaration"
+  [ "$got" = 320 ] \
+    || fail "with nothing declared the identity must be the outermost pid 320, got '$got'"
+
+  got=$(FM_TEST_DECLARED_PID=300 lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "a session pid declared inside the ancestry left identity unresolved"
+  [ "$got" = 300 ] \
+    || fail "a live declaration inside the ancestry must beat the fallback 320, got '$got'"
+
+  # Alive, harness-named, and not in this ancestry: the shape an inherited value
+  # from an unrelated session takes. Membership alone must reject it.
+  lib_eval "$fakebin" 'fm_harness_pid_alive 400' \
+    || fail "fixture is wrong: 400 must be a live harness for the membership guard to be what rejects it"
+  got=$(FM_TEST_DECLARED_PID=400 lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "a declaration outside the ancestry left identity unresolved instead of falling back"
+  [ "$got" != 400 ] \
+    || fail "a live harness pid outside this ancestry was recorded as this session's identity"
+  [ "$got" = 320 ] \
+    || fail "a declaration outside the ancestry must fall back to 320, got '$got'"
+
+  # Dead: recording it would name an owner no liveness check can ever confirm.
+  if lib_eval "$fakebin" 'fm_harness_pid_alive 410'; then
+    fail "fixture is wrong: 410 must be dead for the liveness guard to be what rejects it"
+  fi
+  got=$(FM_TEST_DECLARED_PID=410 lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "a dead declaration left identity unresolved instead of falling back"
+  [ "$got" != 410 ] \
+    || fail "a dead declared pid was recorded as this session's live identity"
+  [ "$got" = 320 ] \
+    || fail "a dead declaration must fall back to 320, got '$got'"
+
+  for bogus in '' claude-300 '30 0' -300; do
+    got=$(FM_TEST_DECLARED_PID="$bogus" lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+      || fail "a non-numeric declaration '$bogus' left identity unresolved instead of falling back"
+    [ "$got" = 320 ] \
+      || fail "a non-numeric declaration '$bogus' must fall back to 320, got '$got'"
+  done
+  pass "session-lock: a declared session pid is used only while it is live and inside this ancestry"
 }
 
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
@@ -449,10 +539,11 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$$" > "$FM_HOME/state/session-pid"
 # The harness names the session process to everything it spawns; the fixture
-# stands in for that. FM_FIXTURE_STALE_DECLARATION models an inherited value
-# from the launching session instead of a per-session one.
-if [ "${FM_FIXTURE_STALE_DECLARATION:-0}" = 1 ]; then
-  export CLAUDE_PID=$(cat "$FM_HOME/state/launcher-pid")
+# stands in for that. FM_FIXTURE_DECLARED_PID_FILE overrides it with whatever
+# the case planted there, which is how an inherited value from somewhere else
+# is modelled.
+if [ -n "${FM_FIXTURE_DECLARED_PID_FILE:-}" ]; then
+  export CLAUDE_PID=$(cat "$FM_FIXTURE_DECLARED_PID_FILE")
 else
   export CLAUDE_PID=$$
 fi
@@ -583,30 +674,55 @@ test_bg_session_stays_inert_while_away_mode_owns_supervision() {
   pass "session-lock: away mode still owns supervision for a background session"
 }
 
-test_bg_session_falls_back_when_no_per_session_identity_is_declared() {
-  local dir launcher recorded
+test_bg_session_ignores_a_declaration_outside_its_own_ancestry() {
+  local dir launcher session recorded outsider
   dir="$TMP_ROOT/bg-session-stale-declaration"
   make_bg_session_home "$dir"
-  run_bg_session_tree "$dir" FM_FIXTURE_STALE_DECLARATION=1
+
+  # A live harness process the fixture's session does not descend from: the shape
+  # a genuinely stale inherited declaration takes, such as a tmux server started
+  # from another session and every pane below it. It outlives the lock write so
+  # liveness cannot be what rejects it - only ancestry membership can.
+  "$NAMED_CLAUDE" -c '
+i=0
+while [ "$i" -lt 900 ] && [ ! -e "$0" ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+' "$dir/state/outsider-stop" &
+  outsider=$!
+  printf '%s\n' "$outsider" > "$dir/state/declared-pid"
+
+  run_bg_session_tree "$dir" FM_FIXTURE_DECLARED_PID_FILE="$dir/state/declared-pid"
   assert_distinct_chain "$dir"
   launcher=$(fixture_pid "$dir" launcher-pid)
+  session=$(fixture_pid "$dir" session-pid)
   recorded=$(fixture_pid "$dir" lock-after-start)
+  ( . "$LIB" && fm_harness_pid_alive "$outsider" ) \
+    || fail "fixture is wrong: the declared pid $outsider was not a live harness across the lock write"
+  : > "$dir/state/outsider-stop"
+  wait "$outsider" 2>/dev/null || true
 
-  # An inherited declaration naming the launching session is indistinguishable
-  # from a genuine one, so identity falls back to the contiguous run's outermost
-  # pid. This case pins that fallback as unchanged prior behavior rather than a
-  # silent new failure mode: the recorded owner is the launching session, and the
-  # auto-arm consequently stays inert.
+  # The three candidate answers are deliberately three different pids, so the
+  # recorded owner names which rule decided. Trusting the declaration would
+  # record the outsider; the guard rejects it and the ancestry fallback answers
+  # the launching session instead, exactly as before this branch. The auto-arm
+  # consequently stays inert rather than arming blind.
+  [ "$outsider" != "$launcher" ] && [ "$outsider" != "$session" ] && [ "$launcher" != "$session" ] \
+    || fail "fixture did not diverge: outsider=$outsider launcher=$launcher session=$session"
+  [ "$recorded" != "$outsider" ] \
+    || fail "a live harness outside this session's ancestry was recorded as its identity: $outsider"
   [ "$recorded" = "$launcher" ] \
     || fail "an inherited declaration did not fall back to prior behavior: got '$recorded', expected $launcher"
   expect_code 0 "$(hook_rc "$dir")" "the documented fallback keeps the hook inert, not arming blind"
-  pass "session-lock: an inherited session declaration falls back to the prior identity unchanged"
+  pass "session-lock: a declaration outside this session's ancestry is ignored for the prior identity"
 }
 
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_declaration_is_trusted_only_inside_this_live_ancestry
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
@@ -614,4 +730,4 @@ test_bg_session_records_its_own_identity_and_keeps_arming
 test_bg_session_never_claims_a_home_a_live_session_owns
 test_bg_session_recovers_a_genuinely_dead_owner
 test_bg_session_stays_inert_while_away_mode_owns_supervision
-test_bg_session_falls_back_when_no_per_session_identity_is_declared
+test_bg_session_ignores_a_declaration_outside_its_own_ancestry

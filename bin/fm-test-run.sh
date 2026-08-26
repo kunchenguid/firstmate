@@ -970,11 +970,16 @@ families_for_changed_path() {
       ;;
     bin/fm-session-lock-lib.sh)
       # Session-lock identity: the writer at session start (session-bootstrap),
-      # the Stop auto-arm's self-ownership check (watcher-wake-lock), and the
-      # harness-declared session pid the writer prefers, which only a real
-      # harness can prove (live-harness-optin).
+      # the Stop auto-arm's self-ownership check (watcher-wake-lock and its
+      # dedicated unclassified suite), the secondmate harness's own use of the
+      # ancestry pid (secondmate), and the harness-declared session pid the
+      # writer prefers, which only a real harness can prove (live-harness-optin).
+      # This must stay a superset of what the bin/*) reference scan below would
+      # select, per this map's over-select contract.
       printf '%s\n' session-bootstrap
       printf '%s\n' watcher-wake-lock
+      printf '%s\n' secondmate
+      printf '%s\n' unclassified
       printf '%s\n' live-harness-optin
       ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
