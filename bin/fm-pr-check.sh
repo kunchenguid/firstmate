@@ -147,12 +147,19 @@ META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ "$META_DEVICE" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }
 META_TMP=$(mktemp "$STATE/.fm-pr-meta.XXXXXX") || exit 1
+EXISTING_PR=
+EXISTING_DEST=
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
-    pr=*|pr_head=*|pr_dest=*) ;;
+    pr=*) EXISTING_PR=${line#pr=} ;;
+    pr_head=*) ;;
+    pr_dest=*) EXISTING_DEST=${line#pr_dest=} ;;
     *) printf '%s\n' "$line" >> "$META_TMP" || exit 1 ;;
   esac
 done < "$META"
+if [ -z "$PR_DEST" ] && [ -n "$EXISTING_DEST" ] && [ "$EXISTING_PR" = "$URL" ]; then
+  PR_DEST=$EXISTING_DEST
+fi
 printf 'pr=%s\n' "$URL" >> "$META_TMP" || exit 1
 [ -z "$PR_HEAD" ] || printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_TMP" || exit 1
 [ -z "$PR_DEST" ] || printf 'pr_dest=%s\n' "$PR_DEST" >> "$META_TMP" || exit 1
