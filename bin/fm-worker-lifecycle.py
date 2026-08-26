@@ -3384,6 +3384,34 @@ def refuse_retired_capacity_fence(state, fence):
         raise LifecycleError("retired capacity fence cannot admit another reservation")
 
 
+def matching_capacity_reservation(state, candidate):
+    reservation_id = candidate["reservation_id"]
+    existing = state["capacity_reservations"].get(reservation_id)
+    if existing is None:
+        return None, None
+    identity_fields = (
+        "schema", "reservation_id", "fence_binding", "role", "workload_role", "sku",
+        "sku_family", "vcpus", "discretionary",
+    )
+    # A shape constituent is reserved by its parent with a cushioned
+    # worst-case amount; the child's exact bound may re-admit at or below that
+    # cushion without weakening the held accounting. A reservation outside a
+    # shape still requires the exact amount.
+    if existing.get("shape_id"):
+        amount_exact = candidate["amount_usd"] <= existing.get("amount_usd", -1.0) + 1e-6
+    else:
+        amount_exact = math.isclose(
+            float(existing.get("amount_usd", -1.0)), float(candidate["amount_usd"]),
+            rel_tol=0.0, abs_tol=1e-6,
+        )
+    if any(existing.get(field) != candidate.get(field) for field in identity_fields) or not amount_exact:
+        raise LifecycleError("capacity reservation id already has a different exact identity")
+    if existing.get("status") == "released":
+        raise LifecycleError("released capacity reservation identity cannot be reused")
+    readmission_id = reservation_id if existing.get("status") == "reserved" else None
+    return existing, readmission_id
+
+
 def command_capacity_reserve(env, args):
     if args.confirm_subscription != env["subscription"]:
         raise LifecycleError("--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
@@ -3392,39 +3420,31 @@ def command_capacity_reserve(env, args):
     with controller_lock(env):
         state = load_state(env)
         refuse_retired_capacity_fence(state, candidate["fence_binding"])
-        existing = state["capacity_reservations"].get(reservation_id)
-        readmission_id = None
-        identity_fields = (
-            "schema", "reservation_id", "fence_binding", "role", "workload_role", "sku",
-            "sku_family", "vcpus", "discretionary",
-        )
-        if existing is not None:
-            # A shape constituent is reserved by its parent with a cushioned
-            # worst-case amount; the child's exact bound may re-admit at or
-            # below that cushion without weakening the held accounting. A
-            # reservation outside a shape still requires the exact amount.
-            if existing.get("shape_id"):
-                amount_exact = candidate["amount_usd"] <= existing.get("amount_usd", -1.0) + 1e-6
-            else:
-                amount_exact = math.isclose(
-                    float(existing.get("amount_usd", -1.0)), float(candidate["amount_usd"]),
-                    rel_tol=0.0, abs_tol=1e-6,
-                )
-            if any(existing.get(field) != candidate.get(field) for field in identity_fields) or not amount_exact:
-                raise LifecycleError("capacity reservation id already has a different exact identity")
-            if existing.get("status") == "released":
-                raise LifecycleError("released capacity reservation identity cannot be reused")
-            if existing.get("status") == "reserved":
-                readmission_id = reservation_id
-            candidate = existing
-        else:
+        existing, _ = matching_capacity_reservation(state, candidate)
+        if existing is None:
             state["capacity_reservations"][reservation_id] = candidate
             save_state(env, state)
+    # Azure inventory can take minutes. The queued reservation above makes
+    # this attempt durable while leaving the controller lock available to
+    # unrelated admissions, releases, status reads, and cleanup.
+    inventory = None
+    inventory_error = None
+    try:
+        inventory = provider_call(env, "inventory")["inventory"]
+    except LifecycleError as exc:
+        inventory_error = str(exc)
+    with controller_lock(env):
+        state = load_state(env)
+        refuse_retired_capacity_fence(state, candidate["fence_binding"])
+        candidate, readmission_id = matching_capacity_reservation(state, candidate)
+        if candidate is None:
+            raise LifecycleError("capacity reservation disappeared during inventory inspection")
         actual = None
         forecast = None
         override_day = None
         try:
-            inventory = provider_call(env, "inventory")["inventory"]
+            if inventory_error is not None:
+                raise LifecycleError(inventory_error)
             state["last_metrics"] = metrics_from_inventory(inventory)
             actual = inventory["metrics"].get("actual_usd")
             forecast = inventory["metrics"].get("forecast_usd")
