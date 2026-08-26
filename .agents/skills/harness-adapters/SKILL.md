@@ -83,7 +83,7 @@ The subagent tool presents to the model as `Agent`, and on Claude Code 2.1.217 b
 
 ## Primary session-start and post-compaction nudges
 
-AGENTS.md section 3 remains the behavioral owner for session start, while AGENTS.md section 8's existing always-loaded operational-input sentence owns trust and required handling for the `post-compact` kind; tracked native adapters invoke `bin/fm-sessionstart-nudge.sh` as an idempotent enforcement layer.
+AGENTS.md section 3 remains the behavioral owner for session start, while AGENTS.md section 8's away-mode stub owns trust and routes required `post-compact` handling to `afk`; tracked native adapters invoke `bin/fm-sessionstart-nudge.sh` as an idempotent enforcement layer.
 The wrapper prints one canonically typed `session-start` instruction to run `bin/fm-session-start.sh`; it never runs the digest, wake drain, bootstrap sweeps, lock, or supervision arm itself.
 The same wrapper's exact `post-compact` mode prints a separately typed, bounded instruction to re-read the durable captain, learnings, and active-task metadata without running `bin/fm-session-start.sh`.
 Full mechanics, scoping, and fail-open behavior live in `docs/sessionstart-nudge.md`.

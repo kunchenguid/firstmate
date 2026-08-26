@@ -148,6 +148,14 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/crewmate-briefing/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/delivery-completion/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -205,6 +213,10 @@
     },
     {
       "path": ".agents/skills/updatefirstmate/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/validation-lifecycle/SKILL.md",
       "audience": "agent-runtime"
     },
     {

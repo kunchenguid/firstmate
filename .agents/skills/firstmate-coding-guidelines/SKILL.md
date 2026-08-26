@@ -12,7 +12,7 @@ metadata:
 # firstmate-coding-guidelines
 
 Load this before changing firstmate's shared, tracked material, as defined by `AGENTS.md` section 1.
-It exists because `AGENTS.md` is 573 lines at this head (`wc -l AGENTS.md`), down from a historical peak of 968 lines on 2026-07-04, after conditional detail was added inline instead of routed to its right home.
+It exists to prevent conditional detail from accumulating inline instead of being routed to its right home.
 Applying the rules below on every change is what keeps that from happening again.
 
 ## Knowledge-placement decision tree

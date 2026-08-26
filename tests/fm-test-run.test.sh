@@ -152,6 +152,7 @@ init_changed_fixture_repo() {
   printf '# .pi/extensions/fm-primary-pi-watch.ts\n' >>"$repo/tests/fm-pi-watch-extension.test.sh"
   mkdir -p "$repo/.agents/skills/example" "$repo/.claude" "$repo/.pi/extensions" "$repo/src"
   : >"$repo/.agents/skills/example/SKILL.md"
+  printf '{}\n' >"$repo/.backpassrc.json"
   : >"$repo/.claude/settings.json"
   : >"$repo/.pi/extensions/fm-primary-pi-watch.ts"
   : >"$repo/.pi/extensions/fm-primary-turnend-guard.ts"
@@ -280,6 +281,13 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-pi-watch-extension.test.sh" "Pi source selects watcher coverage"
   git -C "$repo" add .agents .claude .pi
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm non-bin-source-change
+
+  printf ' { }\n' >"$repo/.backpassrc.json"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-ask-user-authority.test.sh" \
+    "Backpass configuration changes select pure contract coverage"
+  git -C "$repo" add .backpassrc.json
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm backpass-config-change
 
   opencode_plugin="$repo/.opencode/plugins/fm-primary-"
   printf '\n' >>"${opencode_plugin}cd-check.js"

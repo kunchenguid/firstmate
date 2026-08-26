@@ -10,7 +10,7 @@ That instruction tells the agent to re-read `data/captain.md`, `data/captain-sha
 The wrapper also appends the same bounded `RECORD CONTRADICTIONS` section as session start when backlog, metadata, last status events, endpoint liveness, recorded pull-request reality, or old orphan status logs disagree.
 It prints no contradiction heading or healthy row when those records agree.
 It explicitly forbids running `bin/fm-session-start.sh`, and the wrapper itself performs no fleet mutation.
-The existing operational-input sentence in AGENTS.md section 8 is the always-loaded trust and required-handling owner for this kind, while this document owns its transport mechanics and compatibility limits.
+The away-mode stub in AGENTS.md section 8 is the always-loaded trust pointer and routes required handling for this kind to `afk`, while this document owns its transport mechanics and compatibility limits.
 
 Firstmate ships two session-open tiers, selected by harness capability: run-tier adapters execute `bin/fm-session-start.sh` before the first turn, while nudge-tier adapters ask the agent to run it.
 The run tier blocks initialization while the digest runs, so the digest is bounded by `FM_SESSION_START_TIMEOUT` and performs no external-network call on its blocking path.

@@ -29,7 +29,7 @@ When no authoritative run accounts for the task, inspect only its recorded backe
 Use `treehouse status` for treehouse-backed tmux, herdr, zellij, or cmux tasks, and use the recorded `orca_worktree_id=` and `terminal=` for Orca tasks.
 A reader scout (`access=reader` in its metadata) holds no treehouse entry by design: its recorded `worktree=` is a disposable scratch directory, so verify that directory directly.
 Only a recovery-grade dead or missing result licenses relaunch; re-pass the same `--access reader` flag because the brief cross-check in `bin/fm-spawn.sh` refuses a writer relaunch.
-An `unknown` liveness result preserves the recorded worktree or reader scratch, metadata, and any unlanded work and surfaces the task for targeted inspection; never relaunch under uncertainty, following `AGENTS.md` section 3's secondmate-liveness rule and `process-event-sources`' uncertain-process-identity rule.
+An `unknown` liveness result preserves the recorded worktree or reader scratch, metadata, and any unlanded work and surfaces the task for targeted inspection; never relaunch under uncertainty, following `AGENTS.md` section 5's reconciliation rule and `process-event-sources`' uncertain-process-identity rule.
 Do not sweep another home's endpoints or infer ownership from a matching window label.
 
 Before relaunch, prove that no live agent still owns the recorded task and that its recorded writer worktree or reader scratch remains available.
@@ -78,4 +78,4 @@ Act on the verdict:
 - `escalate-captain` - the ladder hit a ceiling (`effort-ceiling`, `effort-capped`, `effort-unsupported`, `attempt-budget`, `harness-not-rotatable`, or `account-profile-harness-bound`): follow step 5.
   `effort-capped` and `effort-unsupported` mean the harness would launch identically at the higher rung, so a stronger tier is not available on this adapter without the captain choosing a different one.
 
-The ladder never selects `max` effort on its own; that level requires the captain's explicit preference, exactly as `AGENTS.md` section 4 states.
+The ladder never selects `max` effort on its own; that level requires the captain's explicit preference, as enforced by `bin/fm-harness.sh`.
