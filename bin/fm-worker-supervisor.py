@@ -130,6 +130,21 @@ def read_request(path):
             raise SupervisorError("execution return contract requires the outcome transport")
     if existing_task_disk and (return_contract is None or not outcome_expected):
         raise SupervisorError("existing task-disk recovery requires an authorized return outcome")
+    worker_role = request.get("worker_role", "author")
+    if worker_role not in ("author", "no-mistakes"):
+        raise SupervisorError("execution worker role is not supported")
+    service_contract = request.get("service_return_contract")
+    if worker_role == "no-mistakes":
+        if service_contract != {
+            "schema": "fm.no-mistakes-worker-return/v1",
+            "step_outcome_path": "outcome.json",
+            "step_outcome_max_bytes": 1024 * 1024,
+        }:
+            raise SupervisorError("no-mistakes service return contract is not exact")
+        if not outcome_expected or not isinstance(request.get("payload_files"), dict):
+            raise SupervisorError("no-mistakes execution requires staged outcome transport")
+    elif service_contract is not None:
+        raise SupervisorError("ordinary execution cannot select a service return contract")
     if outcome_expected:
         # An ordinary outcome is bundled from the repository this request
         # stages. Explicit recovery instead binds the already-assigned task
@@ -352,7 +367,75 @@ def stage_payload(request, worktree, account_home):
     )
     if head.returncode != 0 or head.stdout.decode().strip() != request["repository_generation"]:
         raise SupervisorError("staged repository head differs from the bound repository generation")
+    if request.get("worker_role") == "no-mistakes":
+        stage_no_mistakes_runtime(staging / "runtime.tar.gz", worktree / ".fm-runtime")
     return repo
+
+
+def stage_no_mistakes_runtime(source, target):
+    """Extract and re-verify the sealed credential-free runtime in the guest."""
+    if source.is_symlink() or not source.is_file():
+        raise SupervisorError("no-mistakes runtime bundle is unavailable or redirected")
+    if target.exists():
+        if target.is_symlink() or not target.is_dir():
+            raise SupervisorError("no-mistakes runtime target is unsafe")
+        shutil.rmtree(target)
+    target.mkdir(mode=0o700)
+    extracted = {}
+    total = 0
+    try:
+        with tarfile.open(source, mode="r:gz") as archive:
+            members = archive.getmembers()
+            if not members or len(members) > 4096:
+                raise SupervisorError("no-mistakes runtime member inventory is unbounded")
+            for member in members:
+                parts = Path(member.name).parts
+                if (
+                    not member.isreg() or not parts or member.name.startswith("/")
+                    or any(part in ("", ".", "..") for part in parts)
+                    or member.mode not in (0o644, 0o755)
+                    or member.name in extracted
+                ):
+                    raise SupervisorError(
+                        "no-mistakes runtime member is unsafe: {}".format(member.name))
+                handle = archive.extractfile(member)
+                body = handle.read() if handle else b""
+                total += len(body)
+                if total > 2 * 1024 * 1024 * 1024:
+                    raise SupervisorError("no-mistakes runtime expands beyond its bound")
+                destination = target.joinpath(*parts)
+                destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                destination.write_bytes(body)
+                destination.chmod(member.mode)
+                extracted[member.name] = body
+    except tarfile.TarError as exc:
+        raise SupervisorError("no-mistakes runtime archive is malformed: {}".format(exc))
+    try:
+        manifest = json.loads(extracted["runtime.json"].decode("utf-8"))
+    except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SupervisorError("no-mistakes runtime manifest is unreadable: {}".format(exc))
+    records = manifest.get("files") if isinstance(manifest, dict) else None
+    if (
+        manifest.get("schema") != "fm.azure-validation-runtime/v1"
+        or manifest.get("no_mistakes_path") != "bin/no-mistakes"
+        or not isinstance(records, list) or not records
+    ):
+        raise SupervisorError("no-mistakes runtime manifest identity is not exact")
+    expected = {"runtime.json"}
+    for record in records:
+        if not isinstance(record, dict) or set(record) != {"path", "digest"}:
+            raise SupervisorError("no-mistakes runtime file record is malformed")
+        path = record.get("path")
+        digest_claim = record.get("digest")
+        if (
+            not isinstance(path, str) or path in expected or path not in extracted
+            or not isinstance(digest_claim, str) or not digest_claim.startswith("sha256:")
+            or hashlib.sha256(extracted[path]).hexdigest() != digest_claim[7:]
+        ):
+            raise SupervisorError("no-mistakes runtime file inventory differs")
+        expected.add(path)
+    if set(extracted) != expected or not os.access(target / "bin" / "no-mistakes", os.X_OK):
+        raise SupervisorError("no-mistakes runtime is not exactly inventoried and executable")
 
 
 def git_in(repo, *arguments, timeout=BUNDLE_CREATE_TIMEOUT):
@@ -583,7 +666,8 @@ def collect_outcome(request, repo, worktree_root):
             )
         )
     contract = request.get("return_contract")
-    if commits == 0 and contract is None:
+    service_contract = request.get("service_return_contract")
+    if commits == 0 and contract is None and service_contract is None:
         return {
             "outcome_present": False, "outcome_sha256": "", "outcome_bytes": 0,
             "outcome_commits": 0, "outcome_sink": "",
@@ -661,6 +745,69 @@ def collect_outcome(request, repo, worktree_root):
             "return_manifest_sha256": hashlib.sha256(manifest_body).hexdigest(),
             "outcome_tip": manifest["outcome_tip"],
         }
+    elif service_contract is not None:
+        outcome_path = repo / service_contract["step_outcome_path"]
+        outcome_body = None
+        if outcome_path.exists():
+            if outcome_path.is_symlink() or not outcome_path.is_file():
+                raise SupervisorError("no-mistakes step outcome is redirected or not regular")
+            outcome_body = outcome_path.read_bytes()
+            if not outcome_body or len(outcome_body) > service_contract["step_outcome_max_bytes"]:
+                raise SupervisorError("no-mistakes step outcome is empty or oversized")
+        if outcome_body is not None:
+            manifest = {
+                "schema": "fm.no-mistakes-worker-return/v1",
+                "task": request["task"],
+                "task_generation": request["task_generation"],
+                "assignment_generation": request["assignment_generation"],
+                "request_digest": request["request_digest"],
+                "repository_generation": base,
+                "outcome_commits": commits,
+                "outcome_tip": git_in(
+                    repo, "rev-parse", "HEAD", timeout=GIT_HEAD_TIMEOUT
+                ).stdout.decode().strip(),
+                "step_outcome_sha256": hashlib.sha256(outcome_body).hexdigest(),
+            }
+            manifest_body = canonical(manifest) + b"\n"
+            return_commit = _return_commit(
+                repo, base,
+                {"manifest.json": manifest_body, "step-outcome.json": outcome_body},
+                request,
+            )
+            return_ref = "refs/fm-return/{}".format(request["request_digest"][:32])
+            if git_in(
+                repo, "update-ref", return_ref, return_commit, timeout=GIT_HEAD_TIMEOUT
+            ).returncode != 0:
+                raise SupervisorError("no-mistakes service return ref could not be created")
+            bundle_refs.append(return_ref)
+            if commits:
+                outcome_ref = "refs/fm-outcome/{}".format(request["request_digest"][:32])
+                if git_in(
+                    repo, "update-ref", outcome_ref, manifest["outcome_tip"],
+                    timeout=GIT_HEAD_TIMEOUT,
+                ).returncode != 0:
+                    raise SupervisorError("no-mistakes outcome ref could not be created")
+                bundle_refs.append(outcome_ref)
+            bundle_refs.append("^{}".format(base))
+            returned = {
+                "return_present": True,
+                "return_ref": return_ref,
+                "return_commit": return_commit,
+                "return_manifest_sha256": hashlib.sha256(manifest_body).hexdigest(),
+                "outcome_tip": manifest["outcome_tip"],
+                "service_return_present": True,
+                "step_outcome_sha256": manifest["step_outcome_sha256"],
+            }
+        elif commits:
+            bundle_refs.append("{}..HEAD".format(base))
+            returned = {"service_return_present": False, "step_outcome_sha256": ""}
+        else:
+            return {
+                "outcome_present": False, "outcome_sha256": "", "outcome_bytes": 0,
+                "outcome_commits": 0, "outcome_sink": "",
+                "outcome_uncommitted_changes": bool(dirty.stdout.strip()),
+                "service_return_present": False, "step_outcome_sha256": "",
+            }
     elif commits:
         bundle_refs.append("{}..HEAD".format(base))
 
@@ -738,9 +885,12 @@ def write_atomic(path, value):
 
 
 def execute(request, worktree, worktree_root):
+    path = "/usr/local/bin:/usr/bin:/bin"
+    if request.get("worker_role") == "no-mistakes":
+        path = str((worktree_root / ".fm-runtime" / "bin").resolve()) + ":" + path
     safe_env = {
         "HOME": str(Path(os.environ.get("FM_WORKER_ACCOUNT_HOME", "/nonexistent")).resolve()),
-        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "PATH": path,
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "GIT_TERMINAL_PROMPT": "0",

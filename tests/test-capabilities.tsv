@@ -69,6 +69,7 @@ fm-lock.test.sh	hermetic
 fm-macos-permissions.test.sh	hermetic
 fm-nm-step-liveness.test.sh	hermetic
 fm-no-mistakes-reattach.test.sh	hermetic
+fm-no-mistakes-worker.test.sh	hermetic
 fm-pi-account-home.test.sh	hermetic
 fm-pi-primary-live-e2e.test.sh	hermetic
 fm-pi-primary-types.test.sh	hermetic

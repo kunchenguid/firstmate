@@ -709,8 +709,8 @@ def verify_request(request):
     for field in ("home_binding", "account_binding", "worktree_binding", "repository_binding"):
         require_binding(field, request.get(field))
     role = request.get("role")
-    if role not in ("author", "secondmate"):
-        raise LifecycleError("worker request role must be author or secondmate")
+    if role not in ("author", "secondmate", "no-mistakes"):
+        raise LifecycleError("worker request role must be author, secondmate, or no-mistakes")
     if request.get("owner_kind") not in ("primary", "secondmate"):
         raise LifecycleError("worker request owner_kind must be primary or secondmate")
     if role == "secondmate" and request.get("owner_kind") != "primary":
@@ -720,6 +720,8 @@ def verify_request(request):
         raise LifecycleError(
             "a secondmate compartment is requested only by the primary; "
             "secondmates own author crewmates, never another secondmate")
+    if role == "no-mistakes" and request.get("owner_kind") != "primary":
+        raise LifecycleError("a no-mistakes worker is requested only by the primary")
     parent = request.get("parent_task")
     parent_generation = request.get("parent_task_generation")
     if (parent is None) != (parent_generation is None):
@@ -2318,6 +2320,31 @@ def apply_action_result(env, state, action, result):
                 raise LifecycleError(
                     "provider execution working-tree disposition is malformed"
                 )
+        if execution_request.get("service_return_contract"):
+            present = execution.get("service_return_present")
+            if not isinstance(present, bool):
+                raise LifecycleError(
+                    "provider execution reports no no-mistakes service return disposition")
+            if present:
+                if execution.get("return_present") is not True:
+                    raise LifecycleError("no-mistakes service artifact has no return bundle")
+                expected_return_ref = "refs/fm-return/{}".format(
+                    action["request_digest"][:32])
+                if execution.get("return_ref") != expected_return_ref:
+                    raise LifecycleError("no-mistakes service return ref is not exact")
+                for field in (
+                    "return_commit", "outcome_tip", "return_manifest_sha256",
+                    "step_outcome_sha256",
+                ):
+                    if not re.fullmatch(r"[0-9a-f]{40}" if field in (
+                        "return_commit", "outcome_tip") else r"[0-9a-f]{64}",
+                        str(execution.get(field)),
+                    ):
+                        raise LifecycleError(
+                            "no-mistakes service return {} is malformed".format(field))
+            elif execution.get("step_outcome_sha256") not in (None, ""):
+                raise LifecycleError(
+                    "absent no-mistakes service return asserted a step outcome digest")
         state["executions"][action["request_digest"]] = execution
         worker["last_execution_digest"] = supplied
         worker["last_execution_at"] = iso_utc()
@@ -2754,6 +2781,10 @@ def status_projection(env, state, inventory=None):
             "account_binding": item.get("account_binding"),
             "account_home": item.get("account_home"),
             "account_projection_binding": item.get("account_projection_binding"),
+            "assignment_generation": (
+                state["workers"].get(str(item.get("slot")), {}).get("assignment_generation")
+                if item.get("slot") is not None else None
+            ),
             "profile_active_load": profile_loads.get(load_key, {}).get("active", 0),
         })
     account_placements.sort(key=lambda entry: (
@@ -2918,7 +2949,8 @@ def parser():
     request.add_argument("--repository-binding", help=argparse.SUPPRESS)
     request.add_argument("--repository-generation", help=argparse.SUPPRESS)
     request.add_argument("--owner-kind", choices=("primary", "secondmate"), required=True)
-    request.add_argument("--role", choices=("author", "secondmate"), default="author")
+    request.add_argument(
+        "--role", choices=("author", "secondmate", "no-mistakes"), default="author")
     request.add_argument("--parent-task", default=None)
     request.add_argument("--parent-task-generation", default=None)
     request.add_argument(
@@ -3044,6 +3076,16 @@ def parser():
     release.add_argument("--task", required=True)
     release.add_argument("--task-generation", required=True)
     release.add_argument("--proof-file", required=True)
+
+    service_complete = sub.add_parser(
+        "service-complete",
+        help="release one no-mistakes service worker after its exact execution is recorded",
+    )
+    service_complete.add_argument("--task", required=True)
+    service_complete.add_argument("--task-generation", required=True)
+    service_complete.add_argument("--assignment-generation", required=True)
+    service_complete.add_argument("--request-digest", required=True)
+    service_complete.add_argument("--confirm-subscription", required=True)
 
     resume = sub.add_parser("resume", help="reattach exact retained dirty task capacity")
     resume.add_argument("--task", required=True)
@@ -4009,6 +4051,11 @@ COMPARTMENT_PAYLOAD_REQUIRED = PAYLOAD_REQUIRED + (
     "fm-secondmate-session.py",
     "fm-secondmate-spawn.pi-ext.ts",
 )
+NO_MISTAKES_PAYLOAD_FILE_BOUNDS = {
+    **PAYLOAD_FILE_BOUNDS,
+    "runtime.tar.gz": 1024 * 1024 * 1024,
+}
+NO_MISTAKES_PAYLOAD_REQUIRED = PAYLOAD_REQUIRED + ("runtime.tar.gz",)
 ACCOUNT_TOTAL_BOUND = 1024 * 1024
 
 
@@ -4022,6 +4069,8 @@ def payload_contract(role):
     """
     if role == "secondmate":
         return COMPARTMENT_PAYLOAD_FILE_BOUNDS, COMPARTMENT_PAYLOAD_REQUIRED
+    if role == "no-mistakes":
+        return NO_MISTAKES_PAYLOAD_FILE_BOUNDS, NO_MISTAKES_PAYLOAD_REQUIRED
     return PAYLOAD_FILE_BOUNDS, PAYLOAD_REQUIRED
 
 
@@ -4162,6 +4211,15 @@ def command_execute(env, args):
                 "visuals_path": "data/{}/visuals".format(args.task),
                 "branch": "fm/{}".format(args.task) if args.return_kind == "ship" else "",
             }
+        if worker.get("role") == "no-mistakes":
+            if args.outcome_dir is None:
+                raise LifecycleError("a no-mistakes execution requires an outcome directory")
+            request["worker_role"] = "no-mistakes"
+            request["service_return_contract"] = {
+                "schema": "fm.no-mistakes-worker-return/v1",
+                "step_outcome_path": "outcome.json",
+                "step_outcome_max_bytes": 1024 * 1024,
+            }
         request["request_digest"] = digest_value(request)
         existing = state["executions"].get(request["request_digest"])
         if existing is not None:
@@ -4260,6 +4318,67 @@ def command_release(env, args):
         item["status"] = "releasing"
         save_state(env, state)
     print("release proofs recorded; only exact idle capacity is now eligible for deallocation and reset")
+
+
+def command_service_complete(env, args):
+    """Release a service assignment from execution evidence the lifecycle owns.
+
+    Ordinary crewmates return through task reports and landing receipts.  A
+    no-mistakes worker instead returns a digest-bound service envelope to its
+    controller, so asking it to manufacture ordinary task authority would be
+    ceremony and, worse, a false claim.  This narrow role-owned boundary only
+    accepts an execution already stored under the exact assigned worker.
+    """
+    if args.confirm_subscription != env["subscription"]:
+        raise LifecycleError(
+            "--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
+    request_digest = require_binding("execution request digest", args.request_digest)
+    with controller_lock(env):
+        state = load_state(env)
+        key = request_key(
+            require_id("task", args.task),
+            require_id("task generation", args.task_generation),
+        )
+        item = state["queue"].get(key)
+        worker = state["workers"].get(str((item or {}).get("slot")))
+        if item is None or item.get("status") != "assigned" or worker is None:
+            raise LifecycleError("service completion requires one exact assigned worker")
+        if item.get("role") != "no-mistakes" or worker.get("role") != "no-mistakes":
+            raise LifecycleError("service completion is owned by no-mistakes workers only")
+        if worker.get("assignment_generation") != args.assignment_generation:
+            raise LifecycleError("service completion assignment generation is not exact")
+        execution = state["executions"].get(request_digest)
+        if not isinstance(execution, dict):
+            raise LifecycleError("service completion has no exact recorded execution")
+        if (
+            execution.get("request_digest") != request_digest
+            or execution.get("result_digest") != worker.get("last_execution_digest")
+            or execution.get("assignment_generation") != args.assignment_generation
+        ):
+            raise LifecycleError("service completion execution identity differs")
+        proof = {
+            "schema": "fm.worker-service-release/v1",
+            **worker["bindings"],
+            "assignment_generation": args.assignment_generation,
+            "cloud_instance_id": worker["cloud_instance_id"],
+            "resources": worker["resources"],
+            "request_digest": request_digest,
+            "result_digest": execution["result_digest"],
+            "verdict": "proved",
+        }
+        proof["proof_digest"] = digest_value(proof)
+        held = worker.get("release_proof")
+        if held is not None:
+            if held != proof:
+                raise LifecycleError("worker already has a different service release proof")
+            print("service release proof already recorded with exact identity")
+            return
+        worker["release_proof"] = proof
+        worker["released_at"] = iso_utc()
+        worker["phase"] = "release-proved"
+        item["status"] = "releasing"
+        save_state(env, state)
+    print("service execution proved; exact idle capacity is eligible for cleanup")
 
 
 def command_withdraw(env, args):
@@ -5085,6 +5204,8 @@ def main(argv=None):
         command_proof_template(env, args)
     elif args.command == "release":
         command_release(env, args)
+    elif args.command == "service-complete":
+        command_service_complete(env, args)
     elif args.command == "withdraw":
         command_withdraw(env, args)
     elif args.command == "surrender":

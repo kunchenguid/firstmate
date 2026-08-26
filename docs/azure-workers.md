@@ -344,6 +344,38 @@ The Azure adapter re-verifies the full live assignment before invoking the minim
 Its read-only inventory uses Azure CLI 2.88-compatible role-assignment syntax (`--all` without `--resource-group`), requires private Entra blob reads for reservation/request/result identities, and uses one unambiguous primary Linux on-demand USD Consumption meter while excluding Spot, Low Priority, Windows, dev/test, reservation, and savings offers.
 It never forwards arbitrary shell text, provider credentials, or a hosted control endpoint.
 
+## No-mistakes worker wrapper
+
+`bin/fm-no-mistakes-worker` is the Firstmate-owned high-level transport used by the no-mistakes coordinator.
+Its only supported invocation is:
+
+```sh
+bin/fm-no-mistakes-worker --config '<owner-private-config.json>' execute \
+  --request '<absolute-request.json>' \
+  --payload '<absolute-payload-directory>' \
+  --result '<absolute-result.json>' \
+  --outcome '<absolute-outcome.bundle>' \
+  --step-outcome '<absolute-step-outcome.json>'
+```
+
+The request, result, and semantic step outcome use `no-mistakes.firstmate-worker-request/v1`, `no-mistakes.firstmate-worker-result/v1`, and `no-mistakes.worker-step-outcome/v1` respectively.
+The request and result echo the canonical `step` (`review` or `test`) separately from job `kind`; a repair may repair either step, and the semantic artifact follows `step`, so a test repair can never assert a review-approved head.
+The caller payload contains exactly `repo.bundle` and `brief.md`; the wrapper verifies both against the request, stages the configured digest-bound credential-free `runtime.tar.gz`, and submits the request's exact argv without a shell.
+The owner-private config uses `fm.no-mistakes-worker-wrapper-config/v1` and names the Firstmate home, canonical Pi account pool home, sealed runtime path and digest, lifecycle executable, bounded assignment/cleanup/wall times, and the non-secret lifecycle environment.
+It never names an account profile: `fm-worker-lifecycle` selects the least-loaded usable profile under its controller lock and creates an assignment-private projection.
+
+The dedicated `no-mistakes` lifecycle role admits only `repo.bundle`, `brief.md`, and `runtime.tar.gz`.
+The guest verifies the runtime's exact file inventory, runs the role command with that runtime on `PATH`, and returns the bounded semantic artifact through an execution-owned `fm.no-mistakes-worker-return/v1` bundle.
+The wrapper verifies the semantic bytes and head binding before writing the controller-facing result; a process exit, missing outcome, malformed outcome, or changed read-only head is a failed result, never `CLEAR` by inference.
+Repair results return one digest-bound single-ref bundle whose head must descend from the requested head, while review and test return no code bundle and must keep the exact requested head.
+The wrapper records a retryable local candidate before cleanup, releases through `service-complete` only after the lifecycle owns the exact execution result, and replays the candidate after a lost response instead of executing the step again.
+No caller chooses an Azure account, sees a credential, invokes `fm-azure-runner.sh`, or bypasses lifecycle cleanup.
+
+The failed retained proof `azr-763d70ab8206` used the generic Azure runner, reached runtime dependency installation, then exited 125 at `guest bootstrap: isolated executor failed` without any structured result.
+That is not evidence about a no-mistakes verdict.
+This wrapper avoids that failure shape by using the worker supervisor's digest-bound execution record and returns a closed failed envelope when the guest produces no semantic artifact.
+Live Azure usability remains unclaimed until this exact wrapper/runtime/lifecycle path completes a billable zero-to-zero proof.
+
 ## Reconcile and bounded status
 
 A read-only plan is the default:
