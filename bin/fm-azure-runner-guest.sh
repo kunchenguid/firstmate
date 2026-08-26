@@ -18,10 +18,11 @@ OUTPUT_BLOB=${output_blob:-}
 INPUT_BLOB=${input_blob:-}
 IDENTITY_CLIENT_ID=${identity_client_id:-}
 EXECUTOR_B64=${executor_b64:-}
+AGENT_FLEET_INSTALLER_B64=${agent_fleet_installer_b64:-}
 unset request_b64 vm_resource_id vm_instance_id guest_digest storage_account
-unset container output_blob input_blob identity_client_id executor_b64
-for bound in "$REQUEST_B64" "$VM_RESOURCE_ID" "$VM_INSTANCE_ID" "$GUEST_DIGEST" "$STORAGE_ACCOUNT" "$CONTAINER" "$OUTPUT_BLOB" "$INPUT_BLOB" "$IDENTITY_CLIENT_ID" "$EXECUTOR_B64"; do
-  [ -n "$bound" ] || { echo "guest bootstrap: expected ten bound parameters" >&2; exit 125; }
+unset container output_blob input_blob identity_client_id executor_b64 agent_fleet_installer_b64
+for bound in "$REQUEST_B64" "$VM_RESOURCE_ID" "$VM_INSTANCE_ID" "$GUEST_DIGEST" "$STORAGE_ACCOUNT" "$CONTAINER" "$OUTPUT_BLOB" "$INPUT_BLOB" "$IDENTITY_CLIENT_ID" "$EXECUTOR_B64" "$AGENT_FLEET_INSTALLER_B64"; do
+  [ -n "$bound" ] || { echo "guest bootstrap: expected eleven bound parameters" >&2; exit 125; }
 done
 unset bound
 case "$GUEST_DIGEST" in sha256:[0-9a-f][0-9a-f]*) ;; *) echo "guest bootstrap: bad protocol digest" >&2; exit 125 ;; esac
@@ -169,22 +170,26 @@ rm -rf "$BASE"
 install -d -m 0700 -o root -g root "$BASE"
 REQUEST=$BASE/request.json
 EXECUTOR=$BASE/runner-exec.py
+AGENT_FLEET_INSTALLER=$BASE/agent-fleet-install.py
 printf '%s' "$REQUEST_B64" | base64 -d >"$REQUEST"
 printf '%s' "$EXECUTOR_B64" | base64 -d >"$EXECUTOR"
-unset REQUEST_B64 EXECUTOR_B64
+printf '%s' "$AGENT_FLEET_INSTALLER_B64" | base64 -d >"$AGENT_FLEET_INSTALLER"
+unset REQUEST_B64 EXECUTOR_B64 AGENT_FLEET_INSTALLER_B64
 
-python3 - "$REQUEST" "$EXECUTOR" "$GUEST_DIGEST" <<'PY'
+python3 - "$REQUEST" "$EXECUTOR" "$AGENT_FLEET_INSTALLER" "$GUEST_DIGEST" <<'PY'
 import hashlib, json, pathlib, sys
-request_path, executor_path = map(pathlib.Path, sys.argv[1:3])
+request_path, executor_path, installer_path = map(pathlib.Path, sys.argv[1:4])
 request = json.loads(request_path.read_text(encoding="utf-8"))
 unsigned = dict(request); supplied = unsigned.pop("request_digest", None)
 canonical = json.dumps(unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 if supplied != "sha256:" + hashlib.sha256(canonical).hexdigest(): raise SystemExit("guest bootstrap: request digest mismatch")
 if "sha256:" + hashlib.sha256(executor_path.read_bytes()).hexdigest() != request["protocol"]["executor_digest"]: raise SystemExit("guest bootstrap: executor digest mismatch")
-if request["protocol"]["guest_digest"] != sys.argv[3]: raise SystemExit("guest bootstrap: guest digest mismatch")
+if "sha256:" + hashlib.sha256(installer_path.read_bytes()).hexdigest() != request["protocol"]["agent_fleet_installer_digest"]: raise SystemExit("guest bootstrap: Agent Fleet installer digest mismatch")
+if request["protocol"]["guest_digest"] != sys.argv[4]: raise SystemExit("guest bootstrap: guest digest mismatch")
 repo = request["repository"]
-if repo.get("source_mode") not in ("public-github-https", "private-parent-bundle", "private-exact-bundle") or not repo.get("remote", "").startswith("https://github.com/"): raise SystemExit("guest bootstrap: source mode mismatch")
-if repo.get("source_mode") in ("private-parent-bundle", "private-exact-bundle"):
+private_modes = ("private-parent-bundle", "private-exact-bundle", "private-direct-bundle")
+if repo.get("source_mode") not in ("public-github-https",) + private_modes or not repo.get("remote", "").startswith("https://github.com/"): raise SystemExit("guest bootstrap: source mode mismatch")
+if repo.get("source_mode") in private_modes:
     if not repo.get("input_blob") or not repo.get("snapshot_digest") or not repo.get("snapshot_bytes"): raise SystemExit("guest bootstrap: private snapshot binding is incomplete")
 else:
     if repo.get("input_blob") is not None or repo.get("snapshot_bytes") != 0: raise SystemExit("guest bootstrap: public source carries private staging")
@@ -234,7 +239,7 @@ runuser -u fmrunner -- git -C /work/repo remote add origin "$REMOTE"
 # repository as dubious (CVE-2022-24765); scope the exception through the
 # environment exactly as the validation cell guest does.
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=/work/repo
-if [ "$SOURCE_MODE" = private-parent-bundle ] || [ "$SOURCE_MODE" = private-exact-bundle ]; then
+if [ "$SOURCE_MODE" = private-parent-bundle ] || [ "$SOURCE_MODE" = private-exact-bundle ] || [ "$SOURCE_MODE" = private-direct-bundle ]; then
   [ "$INPUT_BLOB" = "$(read_request repository.input_blob)" ] || { echo "guest bootstrap: private snapshot blob mismatch" >&2; exit 125; }
   SNAPSHOT=$BASE/snapshot.bundle
   TOKEN_FILE=$BASE/input-token
@@ -260,11 +265,11 @@ if [ "$SOURCE_MODE" = private-parent-bundle ] || [ "$SOURCE_MODE" = private-exac
   rm -f /work/snapshot.bundle
 elif [ "$SOURCE_REF" != none ] && [ "$SOURCE_HEAD" = "$COMMIT" ]; then
   [ "$INPUT_BLOB" = none ] || { echo "guest bootstrap: public source received a private snapshot blob" >&2; exit 125; }
-  run_bootstrap_network runuser -u fmrunner -- git -C /work/repo fetch --depth=1 origin "$SOURCE_REF"
+  run_bootstrap_network runuser -u fmrunner -- git -C /work/repo fetch origin "$SOURCE_REF"
   [ "$(git -C /work/repo rev-parse FETCH_HEAD)" = "$COMMIT" ] || { echo "guest bootstrap: source ref moved after admission" >&2; exit 125; }
 else
   [ "$INPUT_BLOB" = none ] || { echo "guest bootstrap: public source received a private snapshot blob" >&2; exit 125; }
-  run_bootstrap_network runuser -u fmrunner -- git -C /work/repo fetch --depth=1 origin "$COMMIT"
+  run_bootstrap_network runuser -u fmrunner -- git -C /work/repo fetch origin "$COMMIT"
 fi
 runuser -u fmrunner -- git -C /work/repo checkout --detach "$COMMIT" >/dev/null
 python3 - "$REQUEST" <<'PY' >"$BASE/source-ancestors"
@@ -274,12 +279,12 @@ PY
 while IFS= read -r ancestor; do
   [ -n "$ancestor" ] || continue
   if [ "$SOURCE_MODE" = public-github-https ]; then
-    run_bootstrap_network runuser -u fmrunner -- git -C /work/repo fetch --depth=1 origin "$ancestor"
+    run_bootstrap_network runuser -u fmrunner -- git -C /work/repo fetch origin "$ancestor"
     [ "$(git -C /work/repo rev-parse FETCH_HEAD)" = "$ancestor" ] || { echo "guest bootstrap: source ancestor identity mismatch" >&2; exit 125; }
     git -C /work/repo cat-file -e "$ancestor^{commit}" || { echo "guest bootstrap: source ancestor is absent" >&2; exit 125; }
   fi
 done <"$BASE/source-ancestors"
-if [ "$SOURCE_MODE" = private-parent-bundle ] || [ "$SOURCE_MODE" = private-exact-bundle ]; then
+if [ "$SOURCE_MODE" = private-parent-bundle ] || [ "$SOURCE_MODE" = private-exact-bundle ] || [ "$SOURCE_MODE" = private-direct-bundle ]; then
   /usr/bin/python3 "$EXECUTOR" --verify-private-source-ancestors "$REQUEST" /work/repo
 fi
 [ "$(git -C /work/repo rev-parse HEAD)" = "$COMMIT" ] && [ "$(git -C /work/repo rev-parse 'HEAD^{tree}')" = "$TREE" ] || { echo "guest bootstrap: source identity mismatch" >&2; exit 125; }
@@ -296,13 +301,15 @@ if [ "$DEFAULT_REF" != none ] && [ "$DEFAULT_HEAD" != none ]; then
   case "$DEFAULT_REF" in refs/heads/?*) DEFAULT_NAME=${DEFAULT_REF#refs/heads/} ;; *) DEFAULT_NAME= ;; esac
   if [ -n "$DEFAULT_NAME" ]; then
     if ! git -C /work/repo cat-file -e "$DEFAULT_HEAD^{commit}" 2>/dev/null; then
-      run_bootstrap_network runuser -u fmrunner -- git -C /work/repo fetch --depth=1 origin "$DEFAULT_HEAD"
+      run_bootstrap_network runuser -u fmrunner -- git -C /work/repo fetch origin "$DEFAULT_HEAD"
       [ "$(git -C /work/repo rev-parse FETCH_HEAD)" = "$DEFAULT_HEAD" ] || { echo "guest bootstrap: default head identity mismatch" >&2; exit 125; }
     fi
     runuser -u fmrunner -- git -C /work/repo update-ref "refs/remotes/origin/$DEFAULT_NAME" "$DEFAULT_HEAD"
     runuser -u fmrunner -- git -C /work/repo symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$DEFAULT_NAME"
   fi
 fi
+[ "$(git -C /work/repo rev-parse --is-shallow-repository)" = false ] \
+  || { echo "guest bootstrap: sealed source graph is shallow" >&2; exit 125; }
 
 fetch_exact() { local url=$1 path=$2 bytes=$3 digest=$4 redirects=${5:-no} args=(); [ "$redirects" != yes ] || args+=(--location); run_bootstrap_network curl --fail --silent --show-error "${args[@]}" --connect-timeout 30 --max-time 300 --max-filesize "$bytes" --output "$path" "$url"; [ "$(stat -c %s "$path")" = "$bytes" ] && [ "sha256:$(sha256sum "$path" | awk '{print $1}')" = "$digest" ] || { echo "guest bootstrap: pinned download mismatch" >&2; exit 125; }; }
 # The golden image stages the pinned archives under /opt/fm-tools; a copy
@@ -341,6 +348,9 @@ if [ "$LOCK_DIGEST" != None ]; then
   cd /work/repo
   runuser -u fmrunner -- /work/home/.fm-runner-tools/uv/uv venv --python /usr/bin/python3 /work/repo/tools/agent-fleet/.venv >/dev/null
   runuser -u fmrunner -- env UV_OFFLINE=1 UV_NO_INDEX=1 /work/home/.fm-runner-tools/uv/uv pip install --python /work/repo/tools/agent-fleet/.venv/bin/python --offline --no-index --find-links /work/home/.fm-runner-tools/wheelhouse pytest ruff >/dev/null
+  /work/repo/tools/agent-fleet/.venv/bin/python "$AGENT_FLEET_INSTALLER" /work/repo/tools/agent-fleet /work/repo/tools/agent-fleet/.venv >/dev/null
+  chown -R fmrunner:fmrunner /work/repo/tools/agent-fleet/.venv
+  runuser -u fmrunner -- /work/repo/tools/agent-fleet/.venv/bin/agent-fleet --help >/dev/null
 elif [ -s "$BASE/wheels.tsv" ]; then
   echo "guest bootstrap: unbound Python wheels" >&2
   exit 125

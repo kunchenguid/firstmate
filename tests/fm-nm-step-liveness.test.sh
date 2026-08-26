@@ -228,13 +228,42 @@ pass "a missing run id is a usage error"
 # (j1) The exact incident signature: a step whose log is quiet, whose agent_pid
 # is empty and whose round reads `starting` - i.e. nothing in `axi status` says
 # it is alive - is still reported ALIVE while its processes are working.
-# A one-shot call has no stored baseline. The fixture turns over children during
-# the short in-invocation sample, matching a suite loop beginning new units.
-( cd "$WT" && exec bash -c 'while :; do sleep 0.2; done' ) &
+# A one-shot call has no stored baseline, so membership turnover is its positive
+# signal. The original fixture hoped `sleep 0.2` would turn over within the
+# one-second sample. Under the loaded Azure C2 run that child stayed scheduled
+# for the whole sample and the assertion saw stable presence, even though the
+# probe was correct to refuse `alive`. Drive one exact post-baseline membership
+# change through the test barrier instead. This preserves the same positive
+# signal without relying on scheduler timing.
+( cd "$WT" && exec sleep 120 ) &
 LIVE=$!
 STARTED_PIDS="$STARTED_PIDS $LIVE"
 SNAP_J="$TMP_ROOT/snap-j1"
-out=$(FM_NM_SNAP_DIR="$SNAP_J" "$PROBE" "$RUN_ID" --worktree "$WT" --sample 1)
+LIVE_BARRIER="$TMP_ROOT/live-barrier"
+LIVE_OUT="$TMP_ROOT/live.out"
+mkdir -p "$LIVE_BARRIER"
+FM_NM_SNAP_DIR="$SNAP_J" \
+  FM_NM_TEST_BARRIER_DIR="$LIVE_BARRIER" \
+  FM_NM_TEST_BARRIER_PHASE=before-progress-sample \
+  "$PROBE" "$RUN_ID" --worktree "$WT" --sample 1 >"$LIVE_OUT" &
+LIVE_PROBE=$!
+STARTED_PIDS="$STARTED_PIDS $LIVE_PROBE"
+wait_for_barrier "$LIVE_BARRIER" "$LIVE_PROBE" \
+  || fail "the one-shot liveness probe never captured its initial membership"
+( cd "$WT" && exec sleep 120 ) &
+LIVE_SUCCESSOR=$!
+STARTED_PIDS="$STARTED_PIDS $LIVE_SUCCESSOR"
+out=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  out=$("$PROBE" "$RUN_ID" --worktree "$WT" --sample 0)
+  case "$out" in *"procs: 2"*) break ;; esac
+  sleep 0.2
+done
+assert_contains "$out" "procs: 2" \
+  "the barrier-controlled successor was not observable before the sample"
+printf 'before-progress-sample\n' >"$LIVE_BARRIER/release"
+wait "$LIVE_PROBE" || fail "the one-shot liveness probe failed after release"
+out=$(cat "$LIVE_OUT")
 [ "$(verdict_of "$out")" = alive ] \
   || fail "REGRESSION: a one-shot working step with no prior sample must read alive, got: $out"
 assert_contains "$out" "process membership changed in 1s" \
@@ -244,8 +273,7 @@ pass "regression: a one-shot call proves a quiet working step alive from child t
 # (j2) A momentary gap between units of work must NOT read dead. The scan barrier
 # proves the first scan was empty before the successor is allowed to appear, so
 # this cannot pass merely because a load-delayed first scan found the successor.
-kill_tree "$LIVE"
-wait "$LIVE" 2>/dev/null || true
+kill_started
 GAP_BARRIER="$TMP_ROOT/gap-barrier"
 mkdir -p "$GAP_BARRIER"
 GAP_OUT="$TMP_ROOT/gap.out"

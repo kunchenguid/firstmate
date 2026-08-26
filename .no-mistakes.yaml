@@ -21,7 +21,8 @@ disable_project_settings: true
 # The ordinary local test command derives every herdr-lab and herdr-mixed file
 # from tests/test-capabilities.tsv, admits those files through tests/run.sh's
 # sealed safety and lab-ownership boundary, and runs them serially on the
-# real-Herdr path before Agent Fleet's locked pytest and compileall checks.
+# real-Herdr path concurrently with Agent Fleet's locked pytest and compileall
+# checks.
 # It deliberately does not duplicate hermetic-only behavior files on the Mac.
 # The required Behavior tests CI job owns the complete behavior inventory:
 # eight isolated runners admit every selected path through tests/run.sh, run
@@ -36,6 +37,8 @@ disable_project_settings: true
 # bypasses worktree scripts and delegates lint plus every behavior shard to the
 # root-owned bridge, so command children receive neither provider nor GitHub
 # credentials and never execute on the credentialed coordinator VM.
+# tests/fm-azure-runner.test.sh executes this test command in an isolated fixture
+# and proves that its two branches exclusively reach those respective owners.
 commands:
   lint: 'if [ "${FM_AZURE_VALIDATION_CELL:-0}" = 1 ]; then exec "$FM_AZURE_VALIDATION_SHARD_BRIDGE" lint -- bin/fm-azure-runner-command.sh bash -c ''bin/fm-lint.sh && uv run --directory tools/agent-fleet --locked ruff check .''; else exec bin/fm-azure-runner-dispatch.sh lint -- bin/fm-azure-runner-command.sh bash -c ''bin/fm-lint.sh && uv run --directory tools/agent-fleet --locked ruff check .''; fi'
   test: 'if [ "${FM_AZURE_VALIDATION_CELL:-0}" = 1 ]; then exec "$FM_AZURE_VALIDATION_SHARD_BRIDGE" behavior --count "${FM_AZURE_VALIDATION_SHARD_COUNT:-8}"; else exec bin/fm-no-mistakes-test-command.sh; fi'

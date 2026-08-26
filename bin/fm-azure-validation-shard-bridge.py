@@ -48,7 +48,7 @@ MAX_ARCHIVE = 1024**3
 # that executes these shards sets PrivateNetwork=yes,
 # RestrictAddressFamilies=AF_UNIX and IPAddressDeny=any, so bin/fm-teardown.sh's
 # secondmate upstream-authority probe can never resolve or reach the origin
-# remote's host. That skips THIRTY-THREE units, the whole secondmate
+# remote's host. That skips THIRTY-SEVEN units, the whole secondmate
 # teardown/retirement family in tests/fm-teardown-suite.sh. The set was
 # enumerated to convergence - both teardown files run to completion with the
 # network off, 143 of 143 cases - and those units are SKIPPED in the cell, not

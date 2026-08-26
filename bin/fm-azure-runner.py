@@ -38,6 +38,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE = ROOT / "docs" / "azure-runner" / "invocation.json"
 GUEST = ROOT / "bin" / "fm-azure-runner-guest.sh"
 EXECUTOR = ROOT / "bin" / "fm-azure-runner-exec.py"
+AGENT_FLEET_INSTALLER = ROOT / "bin" / "fm-azure-runner-agent-fleet-install.py"
 WORKER_LIFECYCLE = ROOT / "bin" / "fm-worker-lifecycle.py"
 CONTAINER = "validation-shards"
 CONTROL_CONTAINER = "runner-control"
@@ -752,6 +753,45 @@ def locked_python_manifest(repo):
 
 
 
+def verify_self_contained_private_bundle(bundle, commit, source_ref):
+    heads = git(ROOT, "bundle", "list-heads", str(bundle)).stdout.splitlines()
+    expected_head = "{} {}".format(commit, source_ref)
+    if heads != [expected_head]:
+        raise RunnerError("private snapshot must contain only the exact source-ref head")
+    with tempfile.TemporaryDirectory(prefix="fm-azure-bundle-verify-") as temporary:
+        verification_repo = Path(temporary) / "repo.git"
+        run(["git", "init", "--bare", str(verification_repo)])
+        run(["git", "-C", str(verification_repo), "bundle", "verify", str(bundle)])
+        run([
+            "git", "-C", str(verification_repo), "fetch", "--no-tags", str(bundle),
+            "+{}:refs/fm-azure-runner/verified".format(source_ref),
+        ])
+        verified = git(
+            verification_repo, "rev-parse", "--verify", "refs/fm-azure-runner/verified"
+        ).stdout.strip()
+        shallow = git(verification_repo, "rev-parse", "--is-shallow-repository").stdout.strip()
+        if verified != commit or shallow != "false":
+            raise RunnerError("private snapshot source graph is incomplete or has the wrong head")
+
+
+def create_private_snapshot_from_head(repo, destination, commit, source_ref):
+    shallow = git(repo, "rev-parse", "--is-shallow-repository").stdout.strip()
+    if shallow != "false":
+        raise RunnerError("direct private snapshot requires a complete non-shallow source graph")
+    with tempfile.TemporaryDirectory(prefix="fm-azure-bundle-stage-") as temporary:
+        staging_repo = Path(temporary) / "repo.git"
+        run(["git", "init", "--bare", str(staging_repo)])
+        run([
+            "git", "-C", str(staging_repo), "fetch", "--no-tags", "--force", str(repo),
+            "+{}:{}".format(commit, source_ref),
+        ])
+        staged = git(staging_repo, "rev-parse", "--verify", source_ref).stdout.strip()
+        if staged != commit:
+            raise RunnerError("direct private snapshot staging changed the exact source head")
+        run(["git", "-C", str(staging_repo), "bundle", "create", str(destination), source_ref])
+    verify_self_contained_private_bundle(destination, commit, source_ref)
+
+
 def tree_digest(repo, relative):
     path = repo / relative
     if not path.exists():
@@ -802,15 +842,18 @@ def prepare(env, args, parent_state=None):
     branch = git(repo, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
     if (
         branch.returncode != 0
-        and args.public_ref is None
-        and not args.private_snapshot_bundle
+        and getattr(args, "public_ref", None) is None
+        and getattr(args, "source_ref", None) is None
     ):
         raise RunnerError(
-            "repository must be on a named committed branch unless an exact public ref or private snapshot is supplied"
+            "repository must be on a named committed branch unless an exact source ref is supplied"
         )
     commit = git(repo, "rev-parse", "HEAD").stdout.strip()
     remote = git(repo, "remote", "get-url", "origin").stdout.strip()
     private_snapshot_source = None
+    private_snapshot_from_head = bool(getattr(args, "private_snapshot_from_head", False))
+    if args.private_snapshot_bundle and private_snapshot_from_head:
+        raise RunnerError("choose one private snapshot input: bundle or exact HEAD")
     if args.private_snapshot_bundle:
         private_snapshot_arg = Path(args.private_snapshot_bundle)
         private_snapshot_source = private_snapshot_arg.resolve()
@@ -846,6 +889,16 @@ def prepare(env, args, parent_state=None):
             source_ancestors=source_ancestors,
             private_source=private_snapshot_source is not None,
         )
+    if private_snapshot_from_head:
+        if args.capacity_parent or not args.source_ref:
+            raise RunnerError("direct private HEAD snapshot requires one exact source ref and no capacity parent")
+        public = public_origin_proof(
+            repo, remote, commit,
+            source_ref=args.source_ref,
+            source_ancestors=source_ancestors,
+            private_source=True,
+        )
+    private_snapshot_requested = private_snapshot_source is not None or private_snapshot_from_head
     tree = public["tree"]
 
     task = require_identifier("task", args.task)
@@ -875,12 +928,19 @@ def prepare(env, args, parent_state=None):
     private_snapshot_path = None
     private_snapshot_digest = None
     private_snapshot_bytes = 0
-    if private_snapshot_source is not None:
+    if private_snapshot_requested:
         private_snapshot_path = payload_dir / "snapshot.bundle"
-        shutil.copyfile(str(private_snapshot_source), str(private_snapshot_path))
+        if private_snapshot_from_head:
+            create_private_snapshot_from_head(
+                repo, private_snapshot_path, commit, args.source_ref
+            )
+        else:
+            shutil.copyfile(str(private_snapshot_source), str(private_snapshot_path))
         os.chmod(private_snapshot_path, 0o600)
         private_snapshot_digest = "sha256:" + sha256_file(private_snapshot_path)
         private_snapshot_bytes = private_snapshot_path.stat().st_size
+        if private_snapshot_bytes > MAX_STAGING_INPUT_BYTES:
+            raise RunnerError("private snapshot exceeds the one-GiB staging bound")
     source_identity = {
         "remote": remote,
         "default_ref": public["default_ref"],
@@ -958,7 +1018,11 @@ def prepare(env, args, parent_state=None):
                 (
                     "private-parent-bundle"
                     if args.capacity_parent
-                    else "private-exact-bundle"
+                    else (
+                        "private-direct-bundle"
+                        if private_snapshot_from_head
+                        else "private-exact-bundle"
+                    )
                 )
                 if private_snapshot_path
                 else "public-github-https"
@@ -988,6 +1052,7 @@ def prepare(env, args, parent_state=None):
             "shellcheck_archive_digest": "sha256:8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198",
             "uv_archive_digest": "sha256:440c4215b171e64061d65d16a23753dd25c29a7f7b1b0446c9e9aed0fa372f27",
             "agent_fleet_python": locked_python,
+            "agent_fleet_installer_digest": "sha256:" + sha256_file(AGENT_FLEET_INSTALLER),
         },
         "created_at": iso_utc(prepared_at),
         "compute_deallocation_deadline": iso_utc(expires_at),
@@ -1069,7 +1134,9 @@ def reprove_public_request(state):
     repository = state["request"]["repository"]
     repo = Path(state["repository_root"]).resolve()
     source_mode = repository.get("source_mode")
-    private_source = source_mode in ("private-parent-bundle", "private-exact-bundle")
+    private_source = source_mode in (
+        "private-parent-bundle", "private-exact-bundle", "private-direct-bundle",
+    )
     expected = {
         "remote": repository["remote"],
         "default_ref": repository["default_ref"],
@@ -2645,9 +2712,13 @@ def create_run_command(env, state):
     current_guest_digest = "sha256:" + sha256_file(GUEST)
     if current_guest_digest != state["request"]["protocol"]["guest_digest"]:
         raise RunnerError("trusted guest protocol changed after request preparation")
+    current_installer_digest = "sha256:" + sha256_file(AGENT_FLEET_INSTALLER)
+    if current_installer_digest != state["request"]["protocol"]["agent_fleet_installer_digest"]:
+        raise RunnerError("trusted Agent Fleet installer changed after request preparation")
     script = GUEST.read_text(encoding="utf-8")
     request_b64 = base64.b64encode(Path(state["input_path"]).read_bytes()).decode("ascii")
     executor_b64 = base64.b64encode(EXECUTOR.read_bytes()).decode("ascii")
+    agent_fleet_installer_b64 = base64.b64encode(AGENT_FLEET_INSTALLER.read_bytes()).decode("ascii")
     properties = {
         "location": "eastus",
         "tags": ownership_tags(env, state),
@@ -2664,6 +2735,7 @@ def create_run_command(env, state):
                 {"name": "input_blob", "value": state["staging"].get("input_blob") or "none"},
                 {"name": "identity_client_id", "value": env["controller_identity_client_id"]},
                 {"name": "executor_b64", "value": executor_b64},
+                {"name": "agent_fleet_installer_b64", "value": agent_fleet_installer_b64},
             ],
             "asyncExecution": False,
             "timeoutInSeconds": state["request"]["limits"]["wall_seconds"] + 1200,
@@ -3265,7 +3337,11 @@ def retry(env, old_state, args):
     private_source = repository.get("source_mode") in (
         "private-parent-bundle",
         "private-exact-bundle",
+        "private-direct-bundle",
     )
+    private_parent_source = repository.get("source_mode") == "private-parent-bundle"
+    private_exact_source = repository.get("source_mode") == "private-exact-bundle"
+    private_direct_source = repository.get("source_mode") == "private-direct-bundle"
     selected_source_ref = (
         repository["source_ref"]
         if repository["source_ref"] != repository["default_ref"]
@@ -3278,9 +3354,10 @@ def retry(env, old_state, args):
         args.source_ref = None
         args.public_ref = selected_source_ref
     args.public_ancestor = list(repository.get("source_ancestors", []))
+    args.private_snapshot_from_head = private_direct_source
     args.private_snapshot_bundle = (
         str(Path(old_state["input_path"]).parent / "snapshot.bundle")
-        if private_source
+        if private_parent_source or private_exact_source
         else None
     )
     args.wall_seconds = old_state["request"]["limits"]["wall_seconds"]
@@ -3352,6 +3429,11 @@ def add_request_arguments(parser, require_command=True):
     parser.add_argument(
         "--private-snapshot-bundle",
         help="exact parent-cell Git bundle staged privately for an unpushed validation head",
+    )
+    parser.add_argument(
+        "--private-snapshot-from-head",
+        action="store_true",
+        help="seal the exact clean non-shallow HEAD into a direct one-ref private bundle",
     )
     parser.add_argument("--dependency", action="append", default=[])
     parser.add_argument("--artifact", action="append", default=[])

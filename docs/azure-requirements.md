@@ -250,19 +250,11 @@ neither was the receipts strand:
    approval markers), alongside 377 passing units. Until those units skipped loudly off macOS, no
    intent could reach a green test step there.
 
-   Partially closed. The retained shard responses under
-   `$FM_HOME/state/azure-validation/shards/azv-36b2726cbcf3/*/response/` are the measurement, and
-   they name eleven failing test files, not three. Three classes are genuine host capabilities the
-   cell does not have, and those are now gated: a real tmux server it can create windows in
-   (`server exited unexpectedly` on the shard-2 and shard-4 workers), passwordless sudo with
-   `systemd-run` (`Linux systemd integration requires passwordless sudo`), and the `/usr/bin/cpp`
-   binding `bin/fm-account-directory.sh` needs before it can validate any Claude quota-axi
-   Keychain approval marker (`system openat binding unavailable`). Fifteen units across six test
-   files are bound to those three capabilities in `tests/host-capabilities.tsv`; the cell declares
-   the three absences by name in `bin/fm-azure-validation-shard-bridge.py`, and
-   `tests/host-capability-gate.sh` turns each into a loud `FM_HOST_CAPABILITY_SKIP`. The gate
-   refuses that declaration on Darwin, so macOS coverage is unchanged and cannot be switched off,
-   and CI declares nothing, so its coverage is unchanged too.
+   Partially closed.
+   The retained shard responses under `$FM_HOME/state/azure-validation/shards/azv-36b2726cbcf3/*/response/` are the measurement, and they name eleven failing test files, not three.
+   Four classes are genuine host capabilities the cell does not have, and those are now gated: a real tmux server it can create windows in (`server exited unexpectedly` on the shard-2 and shard-4 workers), passwordless sudo with `systemd-run` (`Linux systemd integration requires passwordless sudo`), the `/usr/bin/cpp` binding `bin/fm-account-directory.sh` needs before it can validate any Claude quota-axi Keychain approval marker (`system openat binding unavailable`), and outbound reach to the origin remote's host (`origin-egress`).
+   Fifty-two units across seven test files are bound to those four capabilities in `tests/host-capabilities.tsv`; the cell declares the four absences by name in `bin/fm-azure-validation-shard-bridge.py`, and `tests/host-capability-gate.sh` turns each into a loud `FM_HOST_CAPABILITY_SKIP`.
+   The gate refuses that declaration on Darwin, so macOS coverage is unchanged and cannot be switched off, and CI declares nothing, so its coverage is unchanged too.
 
    The other five failing files have now been MEASURED rather than inferred, by running the
    whole sealed suite in a local reproduction of the cell's own package closure (Ubuntu 24.04
@@ -297,11 +289,11 @@ neither was the receipts strand:
    iteration: the suite invokes every case through a single choke point, `run_partitioned_test`,
    so running each case in a subshell there reports every failure in one run instead of stopping
    at the first. Both files were run to completion with the network off - 143 of 143 cases - and
-   the result is exactly 33 units, all in the secondmate teardown/retirement family. An earlier
+   the result is exactly 37 units, all in the secondmate teardown/retirement family. An earlier
    one-at-a-time iteration had found only 19 and had not converged; the difference is why the
    partial set was not shipped.
 
-   BE CLEAR ABOUT WHAT THIS COSTS. Those 33 units are SKIPPED in the cell, not preserved by some
+   BE CLEAR ABOUT WHAT THIS COSTS. Those 37 units are SKIPPED in the cell, not preserved by some
    other route. The cell does not verify secondmate teardown or retirement authority at all: not
    the landed-work refusals, not the registry locking, not the network-authority pinning, not the
    child quiescence ordering. macOS and CI still run every one of them, and CI is where that
