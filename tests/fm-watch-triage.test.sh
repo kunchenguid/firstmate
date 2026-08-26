@@ -1405,11 +1405,16 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold() {
   while [ "$n" -le 3 ]; do
     # Backdate the wedge timer past the threshold before each round, mirroring
     # the existing wedge-escalation tests' Phase B (the subsequent-sight timer
-    # path does not re-read the crew state).
+    # path does not re-read the crew state). Each round IS acknowledged below, so
+    # the acknowledged-repeat backoff applies: the cap is pinned to 480s here so
+    # every round's interval stays inside the same backdated 500s and the ladder
+    # itself - counter, threshold, demand-deep-inspection marker - is what this
+    # fixture measures. The backoff's own timing has its own fixture below.
     echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
     : > "$out"
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+      FM_WEDGE_ACKED_BACKOFF_MAX_SECS=480 FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
     pid=$!
     wait_for_exit "$pid" 100 || fail "watcher did not escalate on consecutive wedge round $n: $(cat "$out")"
@@ -1425,6 +1430,225 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold() {
   [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 3 ] || fail "escalation counter did not persist across consecutive rounds"
   unset FM_FAKE_CREW_STATE
   pass "consecutive wedge escalations on the same pane accumulate and demand deep inspection at the threshold"
+}
+
+# --- acknowledged wedge escalations back off; unacknowledged ones do not -------
+# Root cause half 2 of the 2026-08-25/26 stale-churn incidents. wedge_timer_check
+# deletes its own timer when it escalates, so the next poll restarted the SAME
+# short STALE_ESCALATE_SECS countdown against a pane that had not changed, and the
+# escalation counter kept compounding. Nothing in the bookkeeping consumed the one
+# fact that mattered: firstmate had already drained the previous escalation,
+# inspected the pane, found it healthy, and acknowledged it. A live crew was
+# therefore alarmed on every ~250s ~35 minutes running, reaching
+# demand-deep-inspection, with every single wake handled. Repeating an escalation
+# the supervisor already handled is churn, so an ACKNOWLEDGED repeat now doubles
+# the required quiet interval up to WEDGE_ACKED_BACKOFF_MAX_SECS. The
+# unacknowledged ladder above keeps the short cadence, because nothing has read it.
+test_acknowledged_wedge_escalation_backs_off() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case wedge-acked-backoff); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-acked"
+  printf 'idle building output' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/acked.meta"
+  printf 'working: still monitoring ci\n' > "$state/acked.status"
+  sig=$(seen_sig "$state/acked.status"); printf '%s' "$sig" > "$state/.seen-acked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle building output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  # Round 1: no escalation history, so the ordinary detection cadence fires.
+  echo $(( $(date +%s) - 300 )) > "$state/.stale-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "an unescalated stale pane did not escalate on the detection cadence: $(cat "$out")"
+  grep -F "escalation 1" "$out" >/dev/null || fail "first escalation did not report escalation 1: $(cat "$out")"
+
+  # The supervisor drains, handles and acknowledges it, and the pane has not
+  # changed since. A second identical escalation on the same short cadence tells
+  # firstmate nothing it has not already inspected, so it must not fire.
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first wedge escalation"
+  echo $(( $(date +%s) - 300 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"
+    fail "an acknowledged, unchanged pane re-fired on the same short cadence: $(cat "$out")"
+  fi
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 1 ] \
+    || { reap "$pid"; fail "the backed-off round advanced the escalation counter"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional backed-off stop"
+
+  # The backoff is a longer interval, not an amnesty: past the doubled interval
+  # the same pane still escalates, and the ladder keeps its accumulated count.
+  echo $(( $(date +%s) - 900 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "the backed-off pane never escalated past its longer interval: $(cat "$out")"
+  grep -F "escalation 2" "$out" >/dev/null || fail "the backed-off escalation lost its ladder position: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the backed-off wedge escalation"
+  unset FM_FAKE_CREW_STATE
+  pass "an acknowledged wedge escalation backs off on an unchanged pane and still fires past the longer interval"
+}
+
+# --- a declared pause survives a pane that keeps redrawing --------------------
+# Root cause half 1 of the same incidents. A live declared wait earns ONE prompt
+# surface so an external-decision gate is never hidden behind the pause cadence -
+# but that allowance was keyed to the pane HASH, and a quiet pane that redraws (a
+# progress tick, a token counter, a resized footer) produces a new hash every few
+# seconds, each one re-earning the same immediate wake. A crew that declared a
+# 40-60 minute external wait was surfaced every few seconds and never once reached
+# the long PAUSE_RESURFACE_SECS cadence its declaration is supposed to buy. The
+# allowance is now keyed to the DECLARATION, so a redrawing pane under a wait
+# firstmate already knows about is absorbed, and a fresh append re-arms it.
+test_declared_pause_survives_a_redrawing_pane() {
+  local dir state fakebin out capture_file statusf window key sig pid round wakes
+  dir=$(make_case declared-pause-redraw); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/redraw.status"
+  window="test:fm-redraw"
+  printf 'benchmark arm tick 0\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/redraw.meta"
+  printf 'paused: benchmark batch running, ~40-60 min expected\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-redraw_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text "benchmark arm tick 0")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # A LIVE agent (an exited one has its own bounded fixture): the declaration is
+  # the only thing that may quiet this pane.
+  export FM_FAKE_TMUX_CURRENT_COMMAND=grok
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable'
+
+  # Round 1 spends the declaration's one prompt surface.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+    FM_PAUSE_RESURFACE_SECS=1200 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a first-seen declared wait was not surfaced once: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the declared wait's one prompt surface"
+  [ "$(cat "$state/.paused-declared-$key" 2>/dev/null || true)" = "$(seen_sig "$statusf")" ] \
+    || fail "the surfaced declaration was not recorded by its own signature"
+
+  # Now the pane redraws repeatedly under the SAME standing declaration. None of
+  # these ticks is new evidence about the wait, so none may wake firstmate.
+  round=1
+  while [ "$round" -le 4 ]; do
+    printf 'benchmark arm tick %s\n' "$round" > "$capture_file"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+      FM_PAUSE_RESURFACE_SECS=1200 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    # Two cycles per round: one sees the changed hash, the next sees it settle.
+    if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
+      reap "$pid"
+      fail "a redraw under a standing declared wait re-surfaced on round $round: $(cat "$out")"
+    fi
+    [ ! -e "$state/.stale-since-$key" ] \
+      || { reap "$pid"; fail "a declared wait was put on the wedge timer on round $round"; }
+    reap "$pid"
+    ack_stopped_cycle "$state" || fail "could not acknowledge the intentional redraw round $round stop"
+    round=$((round + 1))
+  done
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 0 ] || fail "four redraws under one declared wait queued $wakes extra stale wakes"
+
+  # A FRESH declaration is new evidence and re-arms the prompt surface.
+  printf 'paused: second arm running, ETA ~150m\n' >> "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-redraw_status"
+  printf 'benchmark arm tick 99\n' > "$capture_file"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+    FM_PAUSE_RESURFACE_SECS=1200 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a fresh declared wait did not re-arm the one prompt surface: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a declared wait was reported as a possible wedge: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the re-armed declared wait surface"
+
+  # `blocked:` is NOT a declared wait - it means the crew is stuck and needs
+  # firstmate - so none of the cadence above may cover it, even on the very pane
+  # that just held a standing pause. The .seen-* prime keeps the status append's
+  # own signal from masking what the stale path does with it.
+  printf 'blocked: the upstream credential is rejected\n' >> "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-redraw_status"
+  printf 'benchmark arm tick 100\n' > "$capture_file"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+    FM_PAUSE_RESURFACE_SECS=1200 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a blocked: crew was quieted by the declared-wait cadence: $(cat "$out")"
+  grep -F "awaiting external" "$out" >/dev/null \
+    && fail "a blocked: crew was reported as a declared external wait: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the blocked: surface"
+  unset FM_FAKE_CREW_STATE FM_FAKE_TMUX_CURRENT_COMMAND
+  pass "a standing declared wait keeps its long cadence across pane redraws, a fresh declaration re-arms one prompt surface, and blocked: never earns the cadence"
+}
+
+# --- a lost endpoint is never covered by a declared wait ----------------------
+# `paused:` says an EXTERNAL dependency is pending, never that the worker itself
+# may disappear. A recorded window that is absent from a successful backend
+# inventory is proof the worker's process is gone, and before this fixture the
+# stale loop simply skipped such a window on the pane-capture failure - a crew
+# that died mid-wait produced no wake at all, indefinitely, with its own last
+# words explaining the silence.
+test_endpoint_gone_alarms_despite_a_declared_pause() {
+  local dir state fakebin out statusf window key pid wakes
+  dir=$(make_case endpoint-gone-paused); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; statusf="$state/gone.status"
+  window="test:fm-gone"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/gone.meta"
+  printf 'paused: benchmark batch running, ~40-60 min expected\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gone_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # The window is gone: the backend inventory is readable and does not list it, and
+  # the capture fails - exactly what real tmux does for an absent target, verified
+  # against tmux 3.6a in docs/verification/runtime-backends.md.
+  unset FM_FAKE_TMUX_WINDOW FM_FAKE_TMUX_CAPTURE 2>/dev/null || true
+  export FM_FAKE_TMUX_MISSING_WINDOW=1
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable'
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=1200 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a lost endpoint under a declared wait never alarmed: $(cat "$out")"
+  grep -F "endpoint gone" "$out" >/dev/null || fail "a lost endpoint did not name itself in the wake: $(cat "$out")"
+  grep -F "awaiting external" "$out" >/dev/null \
+    && fail "a lost endpoint was reported as a declared external wait: $(cat "$out")"
+  [ -e "$state/.endpoint-gone-$key" ] || fail "the lost-endpoint marker was not recorded"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the lost-endpoint alarm"
+
+  # One wake, not a flood: the marker suppresses the repeat while it stays gone.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=1200 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a still-gone endpoint alarmed a second time: $(cat "$out")"
+  fi
+  reap "$pid"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 0 ] || fail "a still-gone endpoint queued $wakes repeat alarms"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional lost-endpoint suppression stop"
+  unset FM_FAKE_CREW_STATE FM_FAKE_TMUX_MISSING_WINDOW
+  pass "a lost endpoint alarms once on its own evidence even under a standing declared pause"
 }
 
 test_wedge_escalation_resets_when_pane_becomes_active() {
@@ -1650,10 +1874,13 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
 
   n=1
   while [ "$n" -le 3 ]; do
+    # Acknowledged each round, so the same backoff cap pin as the non-busy ladder
+    # keeps every round's interval inside this backdated 500s.
     echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
     : > "$out"
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-      FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 \
+      FM_WEDGE_ACKED_BACKOFF_MAX_SECS=480 FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
     pid=$!
     wait_for_exit "$pid" 100 || fail "busy turn-age escalation round $n did not escalate: $(cat "$out")"
@@ -2840,6 +3067,9 @@ test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
+test_acknowledged_wedge_escalation_backs_off
+test_declared_pause_survives_a_redrawing_pane
+test_endpoint_gone_alarms_despite_a_declared_pause
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
