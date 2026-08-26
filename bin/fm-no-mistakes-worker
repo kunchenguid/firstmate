@@ -33,7 +33,7 @@ REQUEST_FIELDS = {
 }
 CONFIG_FIELDS = {
     "schema", "fm_home", "account_pool_home", "runtime_bundle",
-    "runtime_bundle_sha256", "lifecycle_path", "lifecycle_env",
+    "runtime_bundle_sha256", "lifecycle_path", "lifecycle_source_commit", "lifecycle_env",
     "assignment_timeout_seconds", "cleanup_timeout_seconds", "poll_seconds",
     "wall_seconds",
 }
@@ -96,6 +96,8 @@ def validate_config(value):
             raise WrapperError("config {} must be one clean absolute path".format(field), "config_invalid", False)
     if not HEX64.fullmatch(str(value["runtime_bundle_sha256"])):
         raise WrapperError("runtime bundle digest is malformed", "config_invalid", False)
+    if not HEX40.fullmatch(str(value["lifecycle_source_commit"])):
+        raise WrapperError("lifecycle source commit is malformed", "config_invalid", False)
     env = value["lifecycle_env"]
     if not isinstance(env, dict) or not env or not set(env) <= LIFECYCLE_ENV_KEYS:
         raise WrapperError("lifecycle environment contains unsupported fields", "config_invalid", False)
@@ -212,7 +214,42 @@ def lifecycle(config, *arguments, timeout=900):
         "FM_HOME": config["fm_home"],
         **config["lifecycle_env"],
     }
-    return run([config["lifecycle_path"], *arguments], env, timeout)
+    return run([str(verified_lifecycle_source(config)), *arguments], env, timeout)
+
+
+def verified_lifecycle_source(config):
+    lifecycle_path = regular(config["lifecycle_path"], "lifecycle executable", executable=True)
+    probe = subprocess.run(
+        ["git", "-C", str(lifecycle_path.parent), "rev-parse", "--show-toplevel"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    if probe.returncode != 0:
+        raise WrapperError("lifecycle executable is not in a Git source checkout", "config_invalid", False)
+    try:
+        root = Path(probe.stdout.decode("utf-8", errors="strict").strip()).resolve()
+        relative = lifecycle_path.resolve().relative_to(root).as_posix()
+    except (UnicodeDecodeError, ValueError):
+        raise WrapperError("lifecycle source checkout identity is malformed", "config_invalid", False)
+    head = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    status = subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    tracked = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "--error-unmatch", "--", relative],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    observed = head.stdout.decode("utf-8", errors="replace").strip()
+    if (
+        head.returncode != 0 or observed != config["lifecycle_source_commit"]
+        or status.returncode != 0 or status.stdout
+        or tracked.returncode != 0
+    ):
+        raise WrapperError("lifecycle source checkout is not the exact clean configured commit", "config_invalid", False)
+    return lifecycle_path
 
 
 def last_json(output, label):
@@ -292,6 +329,8 @@ def prepare_task(config, request, bundle, brief, runtime):
         else:
             shutil.copyfile(source, target)
             target.chmod(0o600)
+    if sha256_file(staged / "runtime.tar.gz") != config["runtime_bundle_sha256"]:
+        raise WrapperError("durable staged runtime differs from config", "config_invalid", False)
     return task, generation, root, staged
 
 
@@ -395,7 +434,7 @@ def extract_service_return(root, execution, request):
         "schema", "step", "needs_approval", "auto_fixable", "exit_code", "skipped",
         "skip_remaining",
     }
-    allowed_optional = {"findings_json", "fix_summary", "review_approved_head_sha"}
+    allowed_optional = {"findings_json", "fix_summary", "review_approved_head_sha", "quality_outcome"}
     if (
         not isinstance(step, dict) or not step_fields <= set(step)
         or not set(step) - step_fields <= allowed_optional
@@ -428,6 +467,31 @@ def extract_service_return(root, execution, request):
         or any(character in summary for character in "\r\n\x00")
     ):
         raise WrapperError("step outcome semantic fields are malformed", "malformed_result", False)
+    quality = step.get("quality_outcome")
+    if quality is not None:
+        quality_fields = {
+            "fix_attempt_id", "root_id", "classification", "fixed_head_sha",
+            "observed_head_sha", "evidence_digest", "evidence_provenance",
+        }
+        if (
+            request["kind"] != "repair" or expected_step != "review"
+            or not isinstance(quality, dict) or set(quality) != quality_fields
+            or quality.get("classification") not in (
+                "clean_fix", "same_root_followup", "introduced_regression", "primary_handoff")
+            or quality.get("fixed_head_sha") != output_head
+            or quality.get("observed_head_sha") != output_head
+            or quality.get("evidence_provenance") != "semantic_rereview"
+            or not isinstance(quality.get("fix_attempt_id"), str)
+            or not quality["fix_attempt_id"].startswith("review-fix-")
+            or len(quality["fix_attempt_id"]) > 64
+            or any(character in quality["fix_attempt_id"] for character in "\r\n\x00")
+            or not isinstance(quality.get("root_id"), str) or len(quality["root_id"]) > 128
+            or any(character in quality["root_id"] for character in "\r\n\x00")
+            or not isinstance(quality.get("evidence_digest"), str)
+            or not quality["evidence_digest"].startswith("sha256:")
+            or not HEX64.fullmatch(quality["evidence_digest"][7:])
+        ):
+            raise WrapperError("semantic quality outcome is malformed or unauthorized", "malformed_result", False)
     return bundle, scratch, manifest, step_body, output_head
 
 
@@ -520,7 +584,7 @@ def execute(args):
     config = read_json(args.config, "wrapper config", CONFIG_FIELDS)
     validate_config(config)
     regular(args.config, "wrapper config", MAX_JSON)
-    regular(config["lifecycle_path"], "lifecycle executable", executable=True)
+    verified_lifecycle_source(config)
     runtime = regular(config["runtime_bundle"], "runtime bundle", 1024 * 1024 * 1024)
     if sha256_file(runtime) != config["runtime_bundle_sha256"]:
         raise WrapperError("runtime bundle bytes differ from config", "config_invalid", False)

@@ -5,6 +5,7 @@
   "runtime_bundle": "/absolute/path/to/no-mistakes-pi-runtime.tar.gz",
   "runtime_bundle_sha256": "replace-with-64-lowercase-hex",
   "lifecycle_path": "/absolute/path/to/firstmate/bin/fm-worker-lifecycle.sh",
+  "lifecycle_source_commit": "replace-with-exact-40-hex-firstmate-commit",
   "lifecycle_env": {
     "FM_AZURE_SUBSCRIPTION_ID": "replace-with-subscription-uuid",
     "FM_AZURE_DEPLOYMENT_GENERATION": "replace-with-deployment-generation",

@@ -362,7 +362,8 @@ The request, result, and semantic step outcome use `no-mistakes.firstmate-worker
 The request and result echo the canonical `step` (`review` or `test`) separately from job `kind`; a repair may repair either step, and the semantic artifact follows `step`, so a test repair can never assert a review-approved head.
 They also echo the caller's lowercase SHA-256 `runtime_identity`, which binds the exact wrapper bytes, private wrapper-config bytes, and transport protocol into the job's content-addressed input; a changed runtime is a new job identity, never a replay under mutable code.
 The caller payload contains exactly `repo.bundle` and `brief.md`; the wrapper verifies both against the request, stages the configured digest-bound credential-free `runtime.tar.gz`, and submits the request's exact argv without a shell.
-The owner-private config uses `fm.no-mistakes-worker-wrapper-config/v1` and names the Firstmate home, canonical Pi account pool home, sealed runtime path and digest, lifecycle executable, bounded assignment/cleanup/wall times, and the non-secret lifecycle environment.
+The owner-private config uses `fm.no-mistakes-worker-wrapper-config/v1` and names the Firstmate home, canonical Pi account pool home, sealed runtime path and digest, lifecycle executable and exact clean Firstmate source commit, bounded assignment/cleanup/wall times, and the non-secret lifecycle environment.
+The wrapper rechecks that source commit and clean tracked lifecycle closure before every lifecycle call, and re-verifies the staged guest runtime against its configured digest after copying it, so neither an ordinary Firstmate update nor a path replacement can silently change an admitted job.
 
 `docs/azure-no-mistakes-worker-config.example.json` is the copy-and-fill wrapper config template.
 

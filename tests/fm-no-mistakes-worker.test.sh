@@ -89,7 +89,7 @@ elif command == "execute":
     mode = (root / "mode").read_text().strip()
     output_head = head
     outcome_commits = 0
-    if mode == "test-repair":
+    if mode in ("test-repair", "review-repair"):
         (repo / "repair.txt").write_text("repair\n")
         run("git", "-C", str(repo), "add", "repair.txt")
         author = dict(os.environ)
@@ -108,6 +108,14 @@ elif command == "execute":
     }
     if mode != "test-repair":
         step["review_approved_head_sha"] = output_head
+    if mode == "review-repair":
+        step["quality_outcome"] = {
+            "fix_attempt_id": "review-fix-1", "root_id": "fixture-root",
+            "classification": "clean_fix", "fixed_head_sha": output_head,
+            "observed_head_sha": output_head,
+            "evidence_digest": "sha256:" + "a" * 64,
+            "evidence_provenance": "semantic_rereview",
+        }
     step_body = canonical(step) + b"\n"
     manifest = {
         "schema": "fm.no-mistakes-worker-return/v1",
@@ -163,6 +171,13 @@ else:
 PY
 chmod 755 "$FAKE"
 mkdir -p "$TMP_ROOT/account"
+printf '*\n!.gitignore\n!fake-lifecycle\n' > "$TMP_ROOT/.gitignore"
+git -C "$TMP_ROOT" init -q
+git -C "$TMP_ROOT" config user.name fixture
+git -C "$TMP_ROOT" config user.email fixture@example.invalid
+git -C "$TMP_ROOT" add -f .gitignore fake-lifecycle
+git -C "$TMP_ROOT" commit -qm lifecycle-fixture
+LIFECYCLE_COMMIT=$(git -C "$TMP_ROOT" rev-parse HEAD)
 
 python3 - "$ROOT" <<'PY' || fail "no-mistakes role is not wired into the real lifecycle contract"
 import contextlib
@@ -271,7 +286,7 @@ pass "guest supervisor re-verifies the sealed runtime inventory and executable"
 
 RUNTIME_SHA=$(shasum -a 256 "$TMP_ROOT/runtime.tar.gz" | awk '{print $1}')
 cat > "$TMP_ROOT/config.json" <<JSON
-{"schema":"fm.no-mistakes-worker-wrapper-config/v1","fm_home":"$HOME_DIR","account_pool_home":"$HOME_DIR/accounts","runtime_bundle":"$TMP_ROOT/runtime.tar.gz","runtime_bundle_sha256":"$RUNTIME_SHA","lifecycle_path":"$FAKE","lifecycle_env":{"FM_AZURE_SUBSCRIPTION_ID":"11111111-1111-4111-8111-111111111111","FM_AZURE_DEPLOYMENT_GENERATION":"dep-fixture","FM_AZURE_OWNER_TAG":"owner","FM_AZURE_NAMING_PREFIX":"fixture","FM_AZURE_STORAGE_NAME":"fixturestorage"},"assignment_timeout_seconds":30,"cleanup_timeout_seconds":30,"poll_seconds":1,"wall_seconds":60}
+{"schema":"fm.no-mistakes-worker-wrapper-config/v1","fm_home":"$HOME_DIR","account_pool_home":"$HOME_DIR/accounts","runtime_bundle":"$TMP_ROOT/runtime.tar.gz","runtime_bundle_sha256":"$RUNTIME_SHA","lifecycle_path":"$FAKE","lifecycle_source_commit":"$LIFECYCLE_COMMIT","lifecycle_env":{"FM_AZURE_SUBSCRIPTION_ID":"11111111-1111-4111-8111-111111111111","FM_AZURE_DEPLOYMENT_GENERATION":"dep-fixture","FM_AZURE_OWNER_TAG":"owner","FM_AZURE_NAMING_PREFIX":"fixture","FM_AZURE_STORAGE_NAME":"fixturestorage"},"assignment_timeout_seconds":30,"cleanup_timeout_seconds":30,"poll_seconds":1,"wall_seconds":60}
 JSON
 chmod 600 "$TMP_ROOT/config.json"
 
@@ -347,6 +362,27 @@ heads = subprocess.check_output(["git", "bundle", "list-heads", str(bundle)], te
 assert heads == [result["output_head_sha"] + " " + result["return_ref"]], heads
 PY
 pass "repair kind preserves canonical test-step semantics and returns one descendant ref"
+
+printf 'review-repair\n' > "$TMP_ROOT/mode"
+write_request "$TMP_ROOT/request-review-repair.json" job-review-repair review repair
+"$WRAPPER" --config "$TMP_ROOT/config.json" execute \
+  --request "$TMP_ROOT/request-review-repair.json" --payload "$PAYLOAD" \
+  --result "$TMP_ROOT/result-review-repair.json" --outcome "$TMP_ROOT/outcome-review-repair.bundle" \
+  --step-outcome "$TMP_ROOT/step-outcome-review-repair.json" \
+  || fail "a semantic review repair was not transported"
+python3 - "$TMP_ROOT/result-review-repair.json" "$TMP_ROOT/step-outcome-review-repair.json" <<'PY' \
+  || fail "semantic quality authority was not preserved in the digest-bound step outcome"
+import json, pathlib, sys
+result = json.loads(pathlib.Path(sys.argv[1]).read_text())
+step = json.loads(pathlib.Path(sys.argv[2]).read_text())
+quality = step["quality_outcome"]
+assert result["kind"] == "repair" and result["step"] == "review"
+assert quality["classification"] == "clean_fix"
+assert quality["fixed_head_sha"] == result["output_head_sha"]
+assert quality["observed_head_sha"] == result["output_head_sha"]
+assert quality["evidence_provenance"] == "semantic_rereview"
+PY
+pass "semantic review-repair quality outcome survives the Firstmate transport"
 
 printf 'missing\n' > "$TMP_ROOT/mode"
 write_request "$TMP_ROOT/request-failure.json" job-failure
