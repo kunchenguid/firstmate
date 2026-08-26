@@ -299,7 +299,7 @@ for malformed in (
     else:
         raise AssertionError(f"Pi evidence normalization admitted {malformed!r}")
 assert "Your final response must satisfy the supplied JSON schema" in host_prompt
-assert "Only the bounded snapshot read/search" in prompt
+assert "For Pi, only the bounded snapshot read/search" in prompt
 assert "emit only surviving reports and updates" in prompt
 assert "record the schema's fixed model execution-home" not in prompt
 assert commands[0][0] == [
@@ -1701,6 +1701,50 @@ snapshot_identity["review_generation"] = module.digest_bytes(
     )
 ).split(":", 1)[1][:24]
 module.validate_azure_reviewer_record(snapshot_bound, run, "snapshot-bound")
+lookup_bound = copy.deepcopy(snapshot_bound)
+lookup_identity = lookup_bound["azure_identity"]
+lookup_identity.update({
+    "lookup_follow_up_pass": "1",
+    "lookup_results_digest": "sha256:" + "d" * 64,
+    "lookup_initial_request_digest": "sha256:" + "e" * 64,
+    "lookup_initial_result_digest": "sha256:" + "f" * 64,
+    "lookup_initial_model": {
+        **copy.deepcopy(lookup_identity["model"]),
+        "resource_id": "/initial-model",
+        "vm_instance_id": "initial-model",
+        "boot_id": "boot-initial-model",
+        "request_digest": "sha256:" + "e" * 64,
+        "result_digest": "sha256:" + "f" * 64,
+        "cleanup_phase": "complete",
+    },
+})
+lookup_generation_fields = snapshot_generation_fields + (
+    "lookup_follow_up_pass",
+    "lookup_results_digest",
+    "lookup_initial_request_digest",
+    "lookup_initial_result_digest",
+)
+lookup_identity["review_generation"] = module.digest_bytes(
+    module.canonical_bytes(
+        {field: lookup_identity[field] for field in lookup_generation_fields}
+    )
+).split(":", 1)[1][:24]
+module.validate_azure_reviewer_record(lookup_bound, run, "lookup-bound")
+for field in ("resource_id", "vm_instance_id", "boot_id"):
+    reused_lookup_identity = copy.deepcopy(lookup_bound)
+    reused_lookup_identity["azure_identity"]["lookup_initial_model"][field] = (
+        reused_lookup_identity["azure_identity"]["model"][field]
+    )
+    try:
+        module.validate_azure_reviewer_record(
+            reused_lookup_identity, run, "reused-lookup-" + field
+        )
+    except RuntimeError as exc:
+        assert "provisional lookup model identity" in str(exc), str(exc)
+    else:
+        raise AssertionError(
+            "lookup follow-up reused its provisional model " + field
+        )
 tampered_base = copy.deepcopy(snapshot_bound)
 tampered_base["azure_identity"]["repository_snapshot_base_sha"] = "9" * 40
 try:
@@ -1914,6 +1958,162 @@ module.delete_exact_resource({}, "/resource", "1", {}, "fixture")
 module.az = original
 PY
   pass "review generation binds the executing account and ambiguous cleanup never becomes absence"
+}
+
+lookup_followup_orchestration_unit() {
+  python3 - "$ADAPTER" "$CORE" <<'PY' \
+    || fail "Azure lookup follow-up orchestration contract failed"
+import importlib.util
+from pathlib import Path
+import sys
+import tempfile
+
+spec = importlib.util.spec_from_file_location("azure_lookup_orchestration", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+core_spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[2])
+core = importlib.util.module_from_spec(core_spec)
+sys.modules["fm_crosscheck"] = core
+core_spec.loader.exec_module(core)
+
+module.preflight_reviewer_credential = lambda *_args, **_kwargs: None
+module.runtime_config = lambda _home: {"lanes": 3, "queue_wait_seconds": 1}
+module.acquire_review_lane = lambda *_args, **_kwargs: (2, "lane-handle")
+released = []
+module.release_review_lane = released.append
+module.static_review_packet = lambda *_args, **_kwargs: "bounded diff"
+lookup_calls = []
+def lookup(requests, **kwargs):
+    lookup_calls.append((requests, kwargs))
+    return {
+        "schema": "firstmate.crosscheck-lookup.v1",
+        "queries": [{
+            "type": "search", "query": "public parser behavior",
+            "status": "complete", "result": "{}", "cache_hit": False,
+            "cache_key": "sha256:" + "1" * 64,
+        }],
+        "digest": "sha256:" + "2" * 64,
+    }
+core.perform_ketch_lookups = lookup
+
+telemetry = core.unavailable_run_telemetry()
+initial_model = {
+    "resource_id": "/initial", "vm_instance_id": "initial-vm",
+    "boot_id": "initial-boot", "request_digest": "sha256:" + "3" * 64,
+    "result_digest": "sha256:" + "4" * 64, "cleanup_phase": "complete",
+}
+calls = []
+def two_pass(**kwargs):
+    calls.append(kwargs)
+    if len(calls) == 1:
+        assert kwargs["lookup_context"] is None
+        raise module.LookupPassRequested(
+            [{"type": "search", "query": "public parser behavior"}],
+            telemetry,
+            initial_model,
+        )
+    assert kwargs["lookup_context"]["digest"] == "sha256:" + "2" * 64
+    assert kwargs["provisional_lookup_pass"]["model"] is initial_model
+    assert kwargs["provisional_lookup_pass"]["model"]["cleanup_phase"] == "complete"
+    return {"verdict": "CLEAR"}, {"execution_mode": module.EXECUTION_MODE}
+module._run_azure_review_in_lane = two_pass
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    outcome = module._run_azure_review_after_snapshot(
+        core=core, root=root, home=root, task_id="lookup-task",
+        pr_url="https://github.com/example/repo/pull/1",
+        review_dir=root, proof_root=root,
+        snapshot_value={
+            "head_sha": "a" * 40, "base_sha": "b" * 40,
+            "base_repo": "example/repo", "head_repo": "example/repo",
+        },
+        ledger={"findings": [], "runs": []},
+        config={"harness": "pi"}, author_account_identity="author",
+        phase_timer=None, persist_result=None,
+        repository_snapshot={"manifest": {}}, guidance={},
+    )
+assert outcome[0]["verdict"] == "CLEAR"
+assert len(calls) == 2 and len(lookup_calls) == 1
+assert released == ["lane-handle"]
+
+calls.clear()
+lookup_calls.clear()
+released.clear()
+failure_config = {"harness": "pi"}
+def failed_followup(**kwargs):
+    calls.append(kwargs)
+    if len(calls) == 1:
+        raise module.LookupPassRequested(
+            [{"type": "search", "query": "public parser behavior"}],
+            telemetry,
+            initial_model,
+        )
+    raise core.CrosscheckToolError("fresh follow-up launch failed")
+module._run_azure_review_in_lane = failed_followup
+try:
+    module._run_azure_review_after_snapshot(
+        core=core, root=Path("."), home=Path("."), task_id="lookup-failure",
+        pr_url="https://github.com/example/repo/pull/1",
+        review_dir=Path("."), proof_root=Path("."),
+        snapshot_value={
+            "head_sha": "a" * 40, "base_sha": "b" * 40,
+            "base_repo": "example/repo", "head_repo": "example/repo",
+        },
+        ledger={"findings": [], "runs": []}, config=failure_config,
+        author_account_identity="author", phase_timer=None,
+        persist_result=None, repository_snapshot={"manifest": {}}, guidance={},
+    )
+except core.CrosscheckToolError as exc:
+    assert "follow-up launch failed" in str(exc), str(exc)
+else:
+    raise AssertionError("failed Azure lookup follow-up produced a review")
+failed_telemetry = failure_config["_run_telemetry"]
+assert failed_telemetry["lookup"] == {
+    "requested": True,
+    "completed": 1,
+    "failed": 0,
+    "follow_up_pass": True,
+    "digest": "sha256:" + "2" * 64,
+}
+assert failed_telemetry["tokens"] == telemetry["tokens"]
+assert len(calls) == 2 and len(lookup_calls) == 1
+assert released == ["lane-handle"]
+
+calls.clear()
+lookup_calls.clear()
+released.clear()
+def second_lookup(**kwargs):
+    calls.append(kwargs)
+    model = dict(initial_model)
+    model["vm_instance_id"] = f"vm-{len(calls)}"
+    raise module.LookupPassRequested(
+        [{"type": "search", "query": "public parser behavior"}],
+        telemetry,
+        model,
+    )
+module._run_azure_review_in_lane = second_lookup
+try:
+    module._run_azure_review_after_snapshot(
+        core=core, root=Path("."), home=Path("."), task_id="lookup-twice",
+        pr_url="https://github.com/example/repo/pull/1",
+        review_dir=Path("."), proof_root=Path("."),
+        snapshot_value={
+            "head_sha": "a" * 40, "base_sha": "b" * 40,
+            "base_repo": "example/repo", "head_repo": "example/repo",
+        },
+        ledger={"findings": [], "runs": []}, config={"harness": "pi"},
+        author_account_identity="author", phase_timer=None,
+        persist_result=None, repository_snapshot={"manifest": {}}, guidance={},
+    )
+except core.CrosscheckToolError as exc:
+    assert "second lookup" in str(exc), str(exc)
+else:
+    raise AssertionError("Azure follow-up admitted a second lookup request")
+assert len(calls) == 2 and len(lookup_calls) == 1
+assert released == ["lane-handle"]
+PY
+  pass "Azure holds one lane, uses a cleaned fresh follow-up, and refuses a second lookup"
 }
 
 bridge_security_unit() {
@@ -3201,8 +3401,14 @@ adapter.parse_result = lambda *_args: {
 }
 
 attempts = [{
-    "tool": {"vm_instance_id": "tool-vm"},
-    "verifier": {"vm_instance_id": "verifier-vm"},
+    "tool": {
+        "vm_instance_id": "tool-vm", "boot_id": "tool-boot",
+        "resource_id": "/tool",
+    },
+    "verifier": {
+        "vm_instance_id": "verifier-vm", "boot_id": "verifier-boot",
+        "resource_id": "/verifier",
+    },
 }]
 class BridgeError(RuntimeError):
     pass
@@ -3244,8 +3450,14 @@ def apply_review(
 ):
     if review_config.get("_fixture_apply_failure"):
         evidence_executor.executor.failed_attempts.append({
-            "tool": {"vm_instance_id": "failed-tool-vm"},
-            "verifier": {"vm_instance_id": "failed-verifier-vm"},
+            "tool": {
+                "vm_instance_id": "failed-tool-vm", "boot_id": "failed-tool-boot",
+                "resource_id": "/failed-tool",
+            },
+            "verifier": {
+                "vm_instance_id": "failed-verifier-vm",
+                "boot_id": "failed-verifier-boot", "resource_id": "/failed-verifier",
+            },
         })
         raise core.CrosscheckError("fixture paid evidence failure")
     working = {**ledger, "runs": list(ledger.get("runs", []))}
@@ -4369,6 +4581,7 @@ Object.assign(process.env, {
   FM_CROSSCHECK_ACTIVE_FINDING_IDS: '["cc-active"]',
   FM_CROSSCHECK_ELIGIBLE_EQUIVALENT_IDS: "[]",
   FM_CROSSCHECK_TRUST_SNAPSHOT_MANIFEST: "1",
+  FM_CROSSCHECK_LOOKUP_ALLOWED: "1",
 });
 const tools = [];
 const extension = await import(pathToFileURL(process.argv[2]).href + `?test=${Date.now()}`);
@@ -4404,18 +4617,38 @@ const lookup = await byName.request_lookup.execute("lookup", {
   queries: [{ type: "search", query: "upstream behavior" }],
 });
 assert.deepEqual(lookup.details, { accepted: true });
-assert.match(lookup.content[0].text, /"available":false/);
-const finish = await byName.finish_review.execute("finish", {
+assert.equal(lookup.terminate, true);
+assert.match(lookup.content[0].text, /"requested":true/);
+const postLookup = await byName.finish_review.execute("after-lookup", {
+  verdict: "BLOCKING", summary: "Existing blocker remains active.",
+  citations: [{ path: "review.py", line: 2 }],
+});
+assert.equal(postLookup.terminate, true);
+assert.deepEqual(postLookup.details, { accepted: false, correctable: false });
+const events = readFileSync(log, "utf8").trim().split("\n").map(JSON.parse);
+assert.deepEqual(events.map((event) => event.name), ["repo_read", "request_lookup"]);
+
+const finalLog = `${root}/final-events.jsonl`;
+process.env.FM_CROSSCHECK_TOOL_EVENT_LOG = finalLog;
+process.env.FM_CROSSCHECK_LOOKUP_ALLOWED = "0";
+const finalTools = [];
+extension.default({ registerTool(tool) { finalTools.push(tool); } });
+const finalByName = Object.fromEntries(finalTools.map((tool) => [tool.name, tool]));
+const refusedLookup = await finalByName.request_lookup.execute("second-lookup", {
+  queries: [{ type: "search", query: "upstream behavior" }],
+});
+assert.deepEqual(refusedLookup.details, { accepted: false, correctable: true });
+const finish = await finalByName.finish_review.execute("finish", {
   verdict: "BLOCKING", summary: "Existing blocker remains active.",
   citations: [{ path: "review.py", line: 2 }],
 });
 assert.equal(finish.terminate, true);
 assert.deepEqual(finish.details, { accepted: true });
-const postFinish = await byName.repo_read.execute("after", { path: "review.py" });
+const postFinish = await finalByName.repo_read.execute("after", { path: "review.py" });
 assert.equal(postFinish.terminate, true);
 assert.deepEqual(postFinish.details, { accepted: false, correctable: false });
-const events = readFileSync(log, "utf8").trim().split("\n").map(JSON.parse);
-assert.deepEqual(events.map((event) => event.name), ["repo_read", "request_lookup", "finish_review"]);
+const finalEvents = readFileSync(finalLog, "utf8").trim().split("\n").map(JSON.parse);
+assert.deepEqual(finalEvents.map((event) => event.name), ["finish_review"]);
 JS
   pass "Pi extension exposes exactly eight sequential tools with immediate bounded correction"
 }
@@ -4471,33 +4704,95 @@ finish = {
     "summary": "review complete",
     "citations": [{"path": "review.py", "line": 1}],
 }
-valid = scenario in {"valid", "mixed"} or (scenario == "repair" and attempt == 2)
+blocking_finish = {**finish, "verdict": "BLOCKING"}
+suspicion = {
+    "description": "public contract remains unresolved",
+    "citations": [{"path": "review.py", "line": 1}],
+}
+lookup = {
+    "queries": [{"type": "search", "query": "upstream parser behavior"}],
+}
+valid = scenario in {
+    "valid", "mixed", "rejected-lookup-then-finish",
+    "rejected-identical-finish",
+} or (scenario == "repair" and attempt == 2)
 if scenario in {"malformed-log", "contradiction"}:
     valid = True
-if valid:
+lookup_scenario = scenario.startswith("lookup")
+if valid or lookup_scenario:
     log = Path(os.environ["FM_CROSSCHECK_TOOL_EVENT_LOG"])
     if scenario == "malformed-log":
         log.write_text("not-json\n")
+    elif scenario == "rejected-identical-finish":
+        log.write_text("\n".join(canonical(record) for record in [
+            {"seq": 1, "name": "report_suspicion", "arguments": suspicion,
+             "result_sha256": digest({"admitted": True})},
+            {"seq": 2, "name": "finish_review", "arguments": blocking_finish,
+             "result_sha256": digest({"finalized": True})},
+        ]) + "\n")
     else:
+        terminal_name = "request_lookup" if lookup_scenario else "finish_review"
+        terminal_args = lookup if lookup_scenario else finish
+        terminal_result = {"requested": True} if lookup_scenario else {"finalized": True}
         log.write_text(canonical({
             "seq": 1,
-            "name": "finish_review",
-            "arguments": finish,
-            "result_sha256": digest({"finalized": True}),
+            "name": terminal_name,
+            "arguments": terminal_args,
+            "result_sha256": digest(terminal_result),
         }) + "\n")
 content = (
-    [{"type": "toolCall", "id": "finish", "name": "finish_review", "arguments": finish}]
-    if valid else [{"type": "text", "text": "done without finalization"}]
+    [{"type": "toolCall", "id": "terminal",
+      "name": "request_lookup" if lookup_scenario else "finish_review",
+      "arguments": lookup if lookup_scenario else finish}]
+    if valid or lookup_scenario else [{"type": "text", "text": "done without finalization"}]
 )
+if scenario == "rejected-lookup-then-finish":
+    content = [{
+        "type": "toolCall", "id": "refused-lookup", "name": "request_lookup",
+        "arguments": lookup,
+    }]
+elif scenario == "rejected-identical-finish":
+    content = [{
+        "type": "toolCall", "id": "refused-finish", "name": "finish_review",
+        "arguments": blocking_finish,
+    }]
 print(json.dumps({
     "type": "turn_end",
     "message": {
         "role": "assistant", "provider": provider, "model": model,
-        "stopReason": "toolUse" if valid else "stop", "content": content,
+            "stopReason": "toolUse" if valid or lookup_scenario else "stop", "content": content,
         "usage": {"input": 10, "output": 2, "cacheRead": 4, "cacheWrite": 0,
                   "cost": {"total": 0.00002336}},
     },
 }))
+if scenario == "rejected-lookup-then-finish":
+    print(json.dumps({
+        "type": "turn_end",
+        "message": {
+            "role": "assistant", "provider": provider, "model": model,
+            "stopReason": "toolUse",
+            "content": [{"type": "toolCall", "id": "accepted-finish",
+                         "name": "finish_review", "arguments": finish}],
+            "usage": {"input": 10, "output": 2, "cacheRead": 4,
+                      "cacheWrite": 0, "cost": {"total": 0.00002336}},
+        },
+    }))
+if scenario == "rejected-identical-finish":
+    for call_id, name, arguments in (
+        ("accepted-suspicion", "report_suspicion", suspicion),
+        ("accepted-finish", "finish_review", blocking_finish),
+    ):
+        print(json.dumps({
+            "type": "turn_end",
+            "message": {
+                "role": "assistant", "provider": provider, "model": model,
+                "stopReason": "toolUse",
+                "content": [{"type": "toolCall", "id": call_id,
+                             "name": name, "arguments": arguments}],
+                "usage": {"input": 10, "output": 2, "cacheRead": 4,
+                          "cacheWrite": 0, "cost": {"total": 0.00002336}},
+            },
+        }))
 if scenario == "mixed":
     print(json.dumps({
         "type": "turn_end",
@@ -4512,7 +4807,7 @@ print(json.dumps({"type": "agent_end", "messages": []}))
 ''', encoding="utf-8")
     fake.chmod(0o700)
 
-    def execute(scenario, *, active=False):
+    def execute(scenario, *, active=False, lookup_allowed=False):
         result = root / f"{scenario}-result.json"
         capture = root / f"{scenario}-launches.json"
         environment = os.environ.copy()
@@ -4528,6 +4823,7 @@ print(json.dumps({"type": "agent_end", "messages": []}))
             "FM_CROSSCHECK_FINDING_IDS": '["cc-active"]' if active else "[]",
             "FM_CROSSCHECK_ACTIVE_FINDING_IDS": '["cc-active"]' if active else "[]",
             "FM_CROSSCHECK_ELIGIBLE_EQUIVALENT_IDS": "[]",
+            "FM_CROSSCHECK_LOOKUP_ALLOWED": "1" if lookup_allowed else "0",
         })
         completed = subprocess.run(
             [sys.executable, str(runtime), str(account), "model", "xhigh",
@@ -4554,6 +4850,37 @@ print(json.dumps({"type": "agent_end", "messages": []}))
 
     completed, launches, value = execute("mixed")
     assert completed.returncode == 0 and value is not None and len(launches) == 1
+
+    completed, launches, value = execute("rejected-lookup-then-finish")
+    assert completed.returncode == 0 and value is not None, completed.stderr
+    assert len(launches) == 1, launches
+    assert value["telemetry"]["turns"] == 2, value["telemetry"]
+    assert value["telemetry"]["finish_repairs"] == 0, value["telemetry"]
+    assert [event["name"] for event in value["tool_events"]] == ["finish_review"]
+
+    completed, launches, value = execute("rejected-identical-finish")
+    assert completed.returncode == 0 and value is not None, completed.stderr
+    assert len(launches) == 1, launches
+    assert value["verdict"]["suspicions"] == [{
+        "description": "public contract remains unresolved",
+        "citations": [{"path": "review.py", "line": 1}],
+    }], value
+    assert value["telemetry"]["turns"] == 3, value["telemetry"]
+    assert value["telemetry"]["finish_repairs"] == 0, value["telemetry"]
+    assert [event["name"] for event in value["tool_events"]] == [
+        "report_suspicion", "finish_review",
+    ]
+
+    completed, launches, value = execute("lookup", lookup_allowed=True)
+    assert completed.returncode == 0 and value["lookup_request"] == [
+        {"type": "search", "query": "upstream parser behavior"}
+    ], (completed.returncode, completed.stderr, value)
+    assert value.get("verdict") is None and len(launches) == 1
+
+    completed, launches, value = execute("lookup-refused")
+    assert completed.returncode == 125 and value is None
+    assert len(launches) == 2
+    assert "one bounded verdict repair was exhausted" in completed.stderr
 
     for scenario, active in (("missing", False), ("malformed-log", False), ("contradiction", True)):
         completed, launches, value = execute(scenario, active=active)
@@ -4654,6 +4981,7 @@ cross_family_credential_lane_unit
 model_guest_executing_account_unit
 identity_outcome_unit
 account_and_cleanup_identity_unit
+lookup_followup_orchestration_unit
 bridge_security_unit
 bridge_private_snapshot_unit
 repository_snapshot_unit

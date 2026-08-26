@@ -383,6 +383,9 @@ esac
 for selector in OPENAI_API_KEY CODEX_API_KEY CODEX_ACCESS_TOKEN CODEX_REFRESH_TOKEN CODEX_REVOKE_TOKEN; do
   [ -z "$(printenv "$selector" 2>/dev/null)" ] || exit 63
 done
+[ "${FM_TEST_PI_FAIL_FOLLOWUP:-0}" != 1 ] \
+  || [ "${FM_CROSSCHECK_LOOKUP_ALLOWED:-0}" = 1 ] \
+  || exit 43
 [ -z "${FM_TEST_PI_EXIT:-}" ] || exit "$FM_TEST_PI_EXIT"
 mode=
 provider=
@@ -442,15 +445,23 @@ def digest(value):
     return "sha256:" + hashlib.sha256(canonical(value).encode()).hexdigest()
 
 active = json.loads(os.environ.get("FM_CROSSCHECK_ACTIVE_FINDING_IDS", "[]"))
-arguments = {
-    "verdict": "BLOCKING" if active else "CLEAR",
-    "summary": "review complete",
-    "citations": [{"path": "app.txt", "line": 1}],
-}
-result = {"finalized": True}
+lookup = (
+    os.environ.get("FM_TEST_PI_REQUEST_LOOKUP") == "1"
+    and os.environ.get("FM_CROSSCHECK_LOOKUP_ALLOWED") == "1"
+)
+arguments = (
+    {"queries": [{"type": "search", "query": "firstmate internal behavior"}]}
+    if lookup
+    else {
+        "verdict": "BLOCKING" if active else "CLEAR",
+        "summary": "review complete",
+        "citations": [{"path": "app.txt", "line": 1}],
+    }
+)
+result = {"requested": True} if lookup else {"finalized": True}
 record = {
     "seq": 1,
-    "name": "finish_review",
+    "name": "request_lookup" if lookup else "finish_review",
     "arguments": arguments,
     "result_sha256": digest(result),
 }
@@ -468,7 +479,7 @@ print(json.dumps({
         "content": [{
             "type": "toolCall",
             "id": "crosscheck-verdict-1",
-            "name": "finish_review",
+            "name": "request_lookup" if lookup else "finish_review",
             "arguments": arguments,
         }],
         "stopReason": sys.argv[1],
@@ -487,7 +498,10 @@ print(json.dumps({
             },
         },
     },
-    "toolResults": [{"toolName": "finish_review", "isError": False}],
+    "toolResults": [{
+        "toolName": "request_lookup" if lookup else "finish_review",
+        "isError": False,
+    }],
 }))
 print(json.dumps({"type": "agent_end", "messages": []}))
 PY
@@ -2278,6 +2292,115 @@ assert "execution_proof" not in reviewer
     || fail "Pi review did not record its bound account and conditional evidence identity"
   assert_absent "$case_dir/codex.log" "Codex launched instead of the selected Pi reviewer"
   pass "Pi reviewer executes a bound nonzero-turn exact-head review"
+}
+
+test_pi_lookup_refusal_still_reaches_fresh_final_review() {
+  local record case_dir base head output launches
+  record=$(make_case pi-lookup-refusal)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  select_pi_reviewer "$case_dir"
+  output=$(FM_TEST_PI_BIN=pi PATH="$case_dir/fakebin:$PATH" \
+    FM_TEST_PI_REQUEST_LOOKUP=1 \
+    run_case "$case_dir" "$base" "$head" clear run) \
+    || fail "a refused lookup prevented the required final review"
+  assert_contains "$output" 'crosscheck clear' \
+    "the fresh post-lookup pass did not earn a clear result"
+  launches=$(wc -l < "$case_dir/pi.log" | tr -d ' ')
+  [ "$launches" = 2 ] || fail "lookup flow launched Pi $launches times, expected 2"
+  assert_grep 'LOOKUP FOLLOW-UP PASS' "$case_dir/prompt.log" \
+    "the final pass did not receive the bound lookup follow-up"
+  assert_grep 'lookup query names the private repository' "$case_dir/prompt.log" \
+    "the mechanical lookup refusal was not delivered as bounded context"
+  "$CROSSCHECK_PYTHON" - "$case_dir/data/task-x1/crosscheck-ledger.json" <<'PY' \
+    || fail "the two-pass lookup telemetry was not durable"
+import json
+import sys
+
+run = json.load(open(sys.argv[1], encoding="utf-8"))["runs"][-1]
+lookup = run["telemetry"]["lookup"]
+assert run["state"] == "clear", run
+assert lookup["requested"] is True and lookup["follow_up_pass"] is True, lookup
+assert lookup["completed"] == 0 and lookup["failed"] == 1, lookup
+assert lookup["digest"].startswith("sha256:"), lookup
+assert run["telemetry"]["turns"] == 2, run["telemetry"]
+assert run["telemetry"]["finish_repairs"] == 0, run["telemetry"]
+assert run["reviewer"]["reviewer_turn_count"] == "2", run["reviewer"]
+PY
+  pass "a refused lookup has no authority and still reaches a fresh final review"
+}
+
+test_pi_lookup_followup_failure_keeps_incurred_telemetry() {
+  local record case_dir base head rc
+  record=$(make_case pi-lookup-followup-failure)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  select_pi_reviewer "$case_dir"
+  set +e
+  FM_TEST_PI_BIN=pi PATH="$case_dir/fakebin:$PATH" \
+    FM_TEST_PI_REQUEST_LOOKUP=1 FM_TEST_PI_FAIL_FOLLOWUP=1 \
+    run_case "$case_dir" "$base" "$head" clear run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a failed lookup follow-up produced a verdict"
+  "$CROSSCHECK_PYTHON" - "$case_dir/data/task-x1/crosscheck-ledger.json" <<'PY' \
+    || fail "the failed lookup follow-up lost already-incurred telemetry"
+import json
+import sys
+
+run = json.load(open(sys.argv[1], encoding="utf-8"))["runs"][-1]
+telemetry = run["telemetry"]
+lookup = telemetry["lookup"]
+assert run["state"] == "tool-failure", run
+assert lookup["requested"] is True and lookup["follow_up_pass"] is True, lookup
+assert lookup["completed"] == 0 and lookup["failed"] == 1, lookup
+assert lookup["digest"].startswith("sha256:"), lookup
+assert telemetry["turns"] == 1 and telemetry["finish_repairs"] == 0, telemetry
+assert telemetry["costs_usd"]["declared"] is not None, telemetry
+PY
+  pass "a failed fresh follow-up preserves provisional spend and lookup identity"
+}
+
+test_pi_lookup_identity_failure_keeps_both_passes_telemetry() {
+  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" <<'PY' \
+    || fail "identity failure lost telemetry from a completed follow-up"
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+telemetry = {
+    "tokens": {"input": 200, "output": 40, "cache_read": 160,
+               "cache_write": 0, "source": "fixture"},
+    "costs_usd": {"provider_reported": None,
+                  "provider_reported_source": "unavailable",
+                  "pi_calculated": 0.0004784,
+                  "pi_calculated_source": "fixture",
+                  "declared": 0.0004784,
+                  "declared_source": "fixture"},
+    "turns": 2,
+}
+lookup = {"requested": True, "completed": 1, "failed": 0,
+          "follow_up_pass": True, "digest": "sha256:" + "1" * 64}
+config = {}
+try:
+    module.bind_lookup_followup_telemetry(
+        config=config,
+        first_result={"terminal_identity": {"provider": "one", "model": "m"}},
+        runtime_result={"terminal_identity": {"provider": "two", "model": "m"},
+                        "telemetry": telemetry},
+        reviewer_latency_ms=123,
+        lookup_measurement=lookup,
+    )
+except module.CrosscheckToolError as exc:
+    assert "different provider/model identities" in str(exc), str(exc)
+else:
+    raise AssertionError("mismatched lookup identities were accepted")
+assert config["_run_telemetry"]["turns"] == 2, config
+assert config["_run_telemetry"]["costs_usd"]["declared"] == 0.0004784, config
+assert config["_run_telemetry"]["lookup"] == lookup, config
+PY
+  pass "a completed follow-up identity failure preserves both passes' telemetry"
 }
 
 test_pi_reviewer_failures_are_tool_failures() {
@@ -5423,7 +5546,7 @@ print(" ".join(run["state"] for run in ledger["runs"]))
   [ "$states" = "tool-failure clear" ] \
     || fail "ledger recorded runs '$states', expected 'tool-failure clear'"
 
-  assert_grep 'Pi reviewer exited 125 without an earned verdict: model guest: Pi reviewer exited 42' \
+  assert_grep 'Pi reviewer initial exited 125 without an earned terminal event: model guest: Pi reviewer exited 42' \
     "$case_dir/data/task-x1/crosscheck-ledger.json" \
     "the abandoned reviewer did not record its reported reason"
   pass "an unreachable reviewer fails over to the next policy-screened account"
@@ -6396,6 +6519,144 @@ PY
   pass "an admitted semantic review is never rerun after its cleanup alarm"
 }
 
+test_controller_lookup_is_bounded_and_private_safe() {
+  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" <<'PY' \
+    || fail "controller-side lookup bounds or privacy filters regressed"
+import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+spec = importlib.util.spec_from_file_location("fm_crosscheck_lookup", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    repository = root / "repository"
+    repository.mkdir()
+    private_fragment = "private snapshot sentence spanning enough bytes"
+    (repository / "private.py").write_text(private_fragment + "\n", encoding="utf-8")
+    large_fragment = "private phrase beyond the former eight mebibyte cutoff"
+    (repository / "large-private.txt").write_text(
+        "x" * (8 * 1024 * 1024 + 1) + large_fragment,
+        encoding="utf-8",
+    )
+    private_path = repository / "private-path-name-spanning-more-than-24-chars.txt"
+    private_path.write_text("ordinary contents\n", encoding="utf-8")
+    capture = root / "capture.json"
+    fake = root / "ketch"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        f"open({str(capture)!r}, 'w').write(json.dumps({{'argv': sys.argv[1:], 'env': dict(os.environ)}}))\n"
+        "print(json.dumps({'matches': [{'source': 'public'}]}))\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o700)
+    module.KETCH_BIN = fake
+    requests = [
+        {"type": "code", "query": "python hashlib semantics"},
+        {"type": "code", "query": "python hashlib semantics"},
+    ]
+    result = module.perform_ketch_lookups(
+        requests,
+        review_dir=repository,
+        diff_text="diff contains another private sentence of sufficient length",
+        private_repository="ruby-dlee/firstmate",
+    )
+    assert [item["status"] for item in result["queries"]] == ["complete", "complete"]
+    assert result["queries"][1]["cache_hit"] is True
+    observed = json.loads(capture.read_text(encoding="utf-8"))
+    assert observed["argv"] == [
+        "code", "--backend", "grepapp", "--json", "--limit", "5",
+        "python hashlib semantics",
+    ]
+    assert set(observed["env"]) <= {
+        "HOME", "XDG_CONFIG_HOME", "PATH", "LC_ALL", "LC_CTYPE",
+        "__CF_USER_TEXT_ENCODING", "FM_BOUNDED_IO_OWNERSHIP",
+    }, observed["env"]
+    assert not any(
+        marker in name.upper()
+        for name in observed["env"]
+        for marker in ("TOKEN", "SECRET", "KEY", "GITHUB", "AZURE", "OPENAI")
+    )
+    isolated_home = Path(observed["env"]["HOME"])
+    assert isolated_home.name.startswith("crosscheck-ketch-")
+    assert not isolated_home.exists()
+
+    cases = [
+        ("line one\nline two", "non-printable"),
+        ("x" * 201, "exceeds 200"),
+        ("https://example.com docs", "URL"),
+        ("ftp://host.local/path", "URL"),
+        ("ssh://git@example.local/repo", "URL"),
+        ("docs.python.ai/guide", "URL"),
+        ("example.co.uk/path", "URL"),
+        ("localhost:8080/path", "URL"),
+        ("--scrape", "command-line option"),
+        ("--multi=all", "command-line option"),
+        ("--random=all", "command-line option"),
+        ("--cookie-file=/etc/passwd", "command-line option"),
+        ("commit deadbeef behavior", "hex"),
+        ("firstmate internal behavior", "private repository"),
+        ("access token format", "secret-like"),
+        ("another private sentence of sufficient length", "private diff"),
+        (private_fragment, "private snapshot"),
+        (large_fragment, "private snapshot"),
+        ("private-path-name-spanning-more-than-24-chars", "private snapshot"),
+    ]
+    for query, expected in cases:
+        normalized, refusal = module.validate_lookup_query(
+            query,
+            review_dir=repository,
+            diff_text="diff contains another private sentence of sufficient length",
+            private_repository="ruby-dlee/firstmate",
+        )
+        assert normalized == "" and expected in refusal, (query, refusal)
+
+    for query in ("private-org", "private-base", "contrib-user", "public-fork"):
+        normalized, refusal = module.validate_lookup_query(
+            query + " parser behavior",
+            review_dir=repository,
+            diff_text="",
+            private_repository=[
+                "private-org/private-base", "contrib-user/public-fork",
+            ],
+        )
+        assert normalized == "" and "private repository" in refusal, (
+            query, refusal,
+        )
+
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "print('{\"integer\":' + '9' * 5000 + '}')\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o700)
+    malformed = module.perform_ketch_lookups(
+        [{"type": "search", "query": "python numeric parser behavior"}],
+        review_dir=repository,
+        diff_text="",
+        private_repository="ruby-dlee/firstmate",
+    )
+    assert malformed["queries"][0]["status"] == "unavailable", malformed
+
+    module.KETCH_BIN = root / "missing-ketch"
+    unavailable = module.perform_ketch_lookups(
+        [{"type": "search", "query": "python release notes"}],
+        review_dir=repository,
+        diff_text="",
+        private_repository="ruby-dlee/firstmate",
+    )
+    assert unavailable["queries"][0]["status"] == "unavailable"
+    assert unavailable["digest"].startswith("sha256:")
+PY
+  pass "controller lookup uses fixed Ketch argv, isolated config, caching, and strict filters"
+}
+
 if [ -n "${FM_TEST_CASE:-}" ]; then
   case "$FM_TEST_CASE" in
     test_conditional_prompt_is_one_shot_and_model_neutral|\
@@ -6410,6 +6671,9 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_pi_reviewer_pins_sibling_node_before_path|\
     test_pi_reviewer_executes_bound_policy_profile|\
     test_pi_reviewer_failures_are_tool_failures|\
+    test_pi_lookup_refusal_still_reaches_fresh_final_review|\
+    test_pi_lookup_followup_failure_keeps_incurred_telemetry|\
+    test_pi_lookup_identity_failure_keeps_both_passes_telemetry|\
     test_clear_review_uses_policy_contract|\
     test_missing_author_identity_reaches_normal_verdict|\
     test_claude_reviewer_profile_is_retired|\
@@ -6502,7 +6766,8 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_telemetry_economics_and_exact_head_reuse|\
     test_current_regular_contract_requires_reuse_evidence|\
     test_failed_current_regular_contract_remains_reloadable|\
-    test_post_admission_alarm_never_rotates_reviewer)
+    test_post_admission_alarm_never_rotates_reviewer|\
+    test_controller_lookup_is_bounded_and_private_safe)
       "$FM_TEST_CASE"
       exit 0
       ;;
@@ -6559,6 +6824,9 @@ test_pi_reviewer_accepts_only_successful_terminal_turn
 test_pi_reviewer_follows_auto_retry_contract
 test_pi_reviewer_pins_sibling_node_before_path
 test_pi_reviewer_executes_bound_policy_profile
+test_pi_lookup_refusal_still_reaches_fresh_final_review
+test_pi_lookup_followup_failure_keeps_incurred_telemetry
+test_pi_lookup_identity_failure_keeps_both_passes_telemetry
 test_pi_reviewer_failures_are_tool_failures
 test_clear_review_uses_policy_contract
 test_missing_author_identity_reaches_normal_verdict
@@ -6652,3 +6920,4 @@ test_telemetry_economics_and_exact_head_reuse
 test_current_regular_contract_requires_reuse_evidence
 test_failed_current_regular_contract_remains_reloadable
 test_post_admission_alarm_never_rotates_reviewer
+test_controller_lookup_is_bounded_and_private_safe
