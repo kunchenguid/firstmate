@@ -89,13 +89,13 @@
 #          the fleet lock, so a second concurrent session never race-mutates
 #          PR-check artifacts, secondmate homes, pending handoff outboxes,
 #          X-mode artifacts, project clones, or repair instructions.
-#          Unset/0 (the default) runs every sweep exactly as before - this flag
-#          is purely additive.
+#          Unset/0 (the default) runs all six sweeps - this flag is purely
+#          additive.
 #          Set FM_BOOTSTRAP_NETWORK to split this run by whether a step talks to
 #          the network, so a session start can print its digest from local reads
-#          alone and run the network half concurrently:
-#            all  (default, and any unrecognized value) - everything, exactly as
-#                 before. Unrecognized values fall back here on purpose: a typo
+#          alone and run the network half off the digest's blocking path:
+#            all  (default, and any unrecognized value) - every local and network
+#                 step. Unrecognized values fall back here on purpose: a typo
 #                 must never silently skip a safety sweep.
 #            skip - every LOCAL step, and none of the network ones. Skips
 #                 `gh auth status`, secondmate_liveness_sweep, secondmate_sync,
@@ -108,7 +108,13 @@
 #          bin/fm-startup-network.sh owns the deferral: it runs the `only` phase
 #          in a detached bounded worker and publishes the result. This file stays
 #          the single owner of every sweep, and the split changes only WHEN each
-#          runs, never WHETHER.
+#          runs, never WHETHER. During the network phase, project clone refresh
+#          overlaps the independent secondmate work. Per-secondmate remote
+#          liveness workers run concurrently and finish before per-secondmate
+#          remote convergence workers run concurrently, because convergence
+#          consumes respawned ids. Worker output is captured separately and
+#          replayed in spawn order; failure to create that private capture
+#          directory selects the sequential fallback.
 #          A relaunch that the liveness sweep performs during an `only` run is
 #          always reported, because a digest composed before that run already
 #          printed the superseded endpoint record.
@@ -183,6 +189,55 @@ network_sweep_authorized() {
   fi
   echo "NETWORK_CHECKS: fleet lock ownership changed before $label, so this stale worker skipped that sweep"
   return 1
+}
+
+# Concurrent per-item runner for the deferred network sweeps. Each worker's
+# stdout and stderr are captured to private files and replayed in original
+# order after every worker finishes, so concurrent probes cannot interleave
+# or mis-attribute SECONDMATE_LIVENESS / SECONDMATE_SYNC lines. Respawned ids
+# are collected from per-id files because background workers cannot mutate
+# the parent's SECONDMATE_RESPAWNED_IDS.
+bootstrap_parallel_begin() {
+  BOOTSTRAP_PAR_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-bootstrap-par.XXXXXX") || return 1
+  BOOTSTRAP_PAR_N=0
+  FM_BOOTSTRAP_PARALLEL_DIR=$BOOTSTRAP_PAR_DIR
+  export FM_BOOTSTRAP_PARALLEL_DIR
+}
+
+bootstrap_parallel_spawn() {
+  BOOTSTRAP_PAR_N=$((BOOTSTRAP_PAR_N + 1))
+  (
+    "$@"
+  ) >"$BOOTSTRAP_PAR_DIR/$BOOTSTRAP_PAR_N.out" 2>"$BOOTSTRAP_PAR_DIR/$BOOTSTRAP_PAR_N.err" &
+  printf '%s\n' "$!" > "$BOOTSTRAP_PAR_DIR/$BOOTSTRAP_PAR_N.pid"
+}
+
+bootstrap_parallel_finish() {
+  local i pid f
+  i=1
+  while [ "$i" -le "$BOOTSTRAP_PAR_N" ]; do
+    pid=$(cat "$BOOTSTRAP_PAR_DIR/$i.pid")
+    wait "$pid" || true
+    i=$((i + 1))
+  done
+  i=1
+  while [ "$i" -le "$BOOTSTRAP_PAR_N" ]; do
+    cat "$BOOTSTRAP_PAR_DIR/$i.out"
+    cat "$BOOTSTRAP_PAR_DIR/$i.err" >&2
+    i=$((i + 1))
+  done
+  for f in "$BOOTSTRAP_PAR_DIR"/respawned.*; do
+    [ -f "$f" ] || continue
+    SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $(tr -d '\n' < "$f")"
+  done
+  rm -rf "$BOOTSTRAP_PAR_DIR"
+  unset FM_BOOTSTRAP_PARALLEL_DIR BOOTSTRAP_PAR_DIR BOOTSTRAP_PAR_N
+}
+
+secondmate_note_respawned() {  # <id>
+  SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $1"
+  [ -n "${FM_BOOTSTRAP_PARALLEL_DIR:-}" ] || return 0
+  printf '%s\n' "$1" > "$FM_BOOTSTRAP_PARALLEL_DIR/respawned.$1"
 }
 
 fleet_sync_origin_backed_project_count() {
@@ -549,17 +604,30 @@ secondmate_sync() {
     return 0
   }
 
+  secondmate_sync_remote_one_timed() {  # <id> <home> <remote-host>
+    local id=$1 home=$2 remote_host=$3 __fm_timing_stamp
+    __fm_timing_stamp=$(fm_timing_now_ms)
+    secondmate_sync_remote_one "$id" "$home" "$remote_host"
+    fm_timing_record secondmate convergence "$__fm_timing_stamp" "$id@$remote_host"
+  }
+
   # Remote routes converge through the generic transport. Their code root and
   # inherited files are authoritative on that host; no local path probe or
   # local fast-forward is attempted for them.
-  local remote_host __fm_timing_stamp
+  local remote_host __fm_timing_stamp parallel=0
+  if bootstrap_parallel_begin; then
+    parallel=1
+  fi
   while IFS='|' read -r id _home _window meta; do
     remote_host=$(fm_meta_get "$meta" remote_host)
     [ -n "$remote_host" ] || continue
-    __fm_timing_stamp=$(fm_timing_now_ms)
-    secondmate_sync_remote_one "$id" "$_home" "$remote_host"
-    fm_timing_record secondmate convergence "$__fm_timing_stamp" "$id@$remote_host"
+    if [ "$parallel" -eq 1 ]; then
+      bootstrap_parallel_spawn secondmate_sync_remote_one_timed "$id" "$_home" "$remote_host"
+    else
+      secondmate_sync_remote_one_timed "$id" "$_home" "$remote_host"
+    fi
   done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
+  [ "$parallel" -eq 0 ] || bootstrap_parallel_finish
   return 0
 }
 
@@ -586,8 +654,11 @@ secondmate_liveness_sweep() {
   # primary-only no-op there. Mid-session liveness remains explicitly out of
   # scope and requires a separate periodic signal.
   [ -d "$STATE" ] || return 0
-  local meta id remote_host label __fm_timing_stamp
+  local meta id remote_host label __fm_timing_stamp parallel=0
   SECONDMATE_RESPAWNED_IDS=""
+  if bootstrap_parallel_begin; then
+    parallel=1
+  fi
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
@@ -597,18 +668,27 @@ secondmate_liveness_sweep() {
     remote_host=$(fm_meta_get "$meta" remote_host)
     label=$id
     [ -z "$remote_host" ] || label="$id@$remote_host"
-    __fm_timing_stamp=$(fm_timing_now_ms)
-    secondmate_liveness_one "$meta" "$id"
-    fm_timing_record secondmate liveness "$__fm_timing_stamp" "$label"
+    if [ "$parallel" -eq 1 ]; then
+      bootstrap_parallel_spawn secondmate_liveness_one_timed "$meta" "$id" "$label"
+    else
+      secondmate_liveness_one_timed "$meta" "$id" "$label"
+    fi
   done
+  [ "$parallel" -eq 0 ] || bootstrap_parallel_finish
   return 0
+}
+
+secondmate_liveness_one_timed() {  # <meta> <id> <label>
+  local meta=$1 id=$2 label=$3 __fm_timing_stamp
+  __fm_timing_stamp=$(fm_timing_now_ms)
+  secondmate_liveness_one "$meta" "$id"
+  fm_timing_record secondmate liveness "$__fm_timing_stamp" "$label"
 }
 
 # One secondmate's liveness check. Split out of the sweep so each is individually
 # timed; every `return` here was a `continue` in the loop and means exactly the
-# same thing - move on to the next secondmate. SECONDMATE_RESPAWNED_IDS stays a
-# global that this appends to, so the sweep's hand-off to secondmate_sync is
-# unchanged.
+# same thing - move on to the next secondmate. Respawned ids are recorded through
+# secondmate_note_respawned so a concurrent sweep can collect them after wait.
 secondmate_liveness_one() {  # <meta> <id>
   local meta=$1 id=$2
   local window harness backend target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend
@@ -670,7 +750,7 @@ secondmate_liveness_one() {  # <meta> <id>
       dead|missing)
         cause="remote endpoint $agent_state on its configured host"
         if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
-          SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
+          secondmate_note_respawned "$id"
           report_relaunch "$id" "$cause" "host=$remote_host"
         else
           echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
@@ -707,7 +787,7 @@ secondmate_liveness_one() {  # <meta> <id>
         cause="recorded endpoint confidently missing"
       fi
       if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
-        SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
+        secondmate_note_respawned "$id"
         report_relaunch "$id" "$cause" "backend=$backend"
       else
         echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
@@ -1200,8 +1280,9 @@ detect_local_config() {
 # Each network owner below is bracketed by an elapsed-time record, so a deferred
 # stage that ran long can be attributed to the phase that spent the time.
 # fm-timing-lib.sh discards the record unless the caller asked for timings, and
-# every sweep is still called directly and in the same order, so nothing about
-# what runs, in what sequence, or what it returns changes.
+# every sweep is still called directly. Per-secondmate remote probes run
+# concurrently; clone refresh overlaps them. Diagnostic lines are replayed in
+# original order so attribution is unchanged.
 # The stamp variable is named for the library rather than `start` on purpose:
 # fleet_sync and others assign plain names like `start` without `local`, and
 # bash's dynamic scoping would let them overwrite a stamp held by a caller.
@@ -1215,7 +1296,25 @@ local_phase && detect_local_config
 
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   # secondmate_sync consumes SECONDMATE_RESPAWNED_IDS from the liveness sweep, so
-  # those two always run together in the same phase.
+  # those two always run together in the same phase. Clone refresh does not
+  # depend on them, so it starts in the background and overlaps their wall clock.
+  fleet_sync_pid=
+  fleet_sync_out=
+  if network_phase && network_sweep_authorized 'project clone refresh'; then
+    fleet_sync_out=$(mktemp "${TMPDIR:-/tmp}/fm-bootstrap-fleet.XXXXXX") || fleet_sync_out=
+    if [ -n "$fleet_sync_out" ]; then
+      (
+        __fm_timing_stamp=$(fm_timing_now_ms)
+        fleet_sync
+        fm_timing_record phase fleet-sync "$__fm_timing_stamp"
+      ) >"$fleet_sync_out" 2>&1 &
+      fleet_sync_pid=$!
+    else
+      __fm_timing_stamp=$(fm_timing_now_ms)
+      fleet_sync
+      fm_timing_record phase fleet-sync "$__fm_timing_stamp"
+    fi
+  fi
   if network_phase; then
     if network_sweep_authorized 'dead-secondmate relaunch'; then
       __fm_timing_stamp=$(fm_timing_now_ms)
@@ -1235,10 +1334,10 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   fi
   # x_mode_setup writes local Relay artifacts only and never leaves the machine.
   local_phase && x_mode_setup
-  if network_phase && network_sweep_authorized 'project clone refresh'; then
-    __fm_timing_stamp=$(fm_timing_now_ms)
-    fleet_sync
-    fm_timing_record phase fleet-sync "$__fm_timing_stamp"
+  if [ -n "$fleet_sync_pid" ]; then
+    wait "$fleet_sync_pid" || true
+    cat "$fleet_sync_out"
+    rm -f "$fleet_sync_out"
   fi
 fi
 local_phase && secondmate_handoff_detect

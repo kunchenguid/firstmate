@@ -136,7 +136,7 @@ wait_for_startup_network_wake() {  # <home> [tenths]
 # path, so this asserts both halves: start returns fast, AND the pipe closes
 # while the worker is still running.
 test_start_returns_without_holding_the_callers_stdout() {
-  local rec home root log started elapsed
+  local rec home root log started elapsed pending
   rec=$(new_world start-nonblocking)
   IFS='|' read -r home root log <<EOF
 $rec
@@ -151,8 +151,13 @@ EOF
 
   [ "$elapsed" -lt 4 ] || fail "start blocked for ${elapsed}s behind a 10s worker"
   await_worker_record "$home"
-  [ "$(run_stage "$home" "$root" report | head -1)" = "IN PROGRESS - the deferred network checks have not finished yet." ] \
-    || fail "the worker was not actually still running: $(run_stage "$home" "$root" report)"
+  pending=$(run_stage "$home" "$root" report)
+  [ "$(printf '%s\n' "$pending" | head -1)" = "IN PROGRESS - the deferred network checks have not finished yet." ] \
+    || fail "the worker was not actually still running: $pending"
+  assert_contains "$pending" "Only a FAILED or otherwise actionable result arrives as a \`check: startup-network\` wake; a clean success stays silent." \
+    "the pending guidance still promised a wake for clean success"
+  assert_contains "$pending" "$root/bin/fm-startup-network.sh report" \
+    "the pending guidance omitted the durable on-demand report path"
   run_stage "$home" "$root" wait 30 >/dev/null || fail "the worker never published"
   assert_grep 'network=only' "$log" "the worker did not run bootstrap's network-only phase"
   pass "fm-startup-network: start returns immediately and never holds the caller's stdout open"
@@ -189,20 +194,24 @@ EOF
     || fail "a result harvest acknowledged also queued a wake: $(cat "$home/state/.wake-queue")"
 
   # Harvest releases that claim, so the NEXT publication has nobody to print it.
+  # An actionable result (not a clean success) is used here so the assertion
+  # stays about the claim mechanism; test_a_successful_result_never_queues_a_wake
+  # below owns the separate "a clean success never wakes" contract.
   assert_absent "$home/state/.startup-network.claim" "harvest did not release its own claim"
-  FM_FAKE_BOOTSTRAP_LOG="$log" run_stage "$home" "$root" run --locked 0
+  FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_OUT='MISSING: some-tool (install: brew install some-tool)' \
+    run_stage "$home" "$root" run --locked 0
   assert_grep 'check	startup-network' "$home/state/.wake-queue" \
-    "an unclaimed result never reached the wake queue"
+    "an unclaimed actionable result never reached the wake queue"
 
   : > "$home/state/.wake-queue"
-  FM_FAKE_BOOTSTRAP_LOG="$log" \
+  FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_OUT='MISSING: some-tool (install: brew install some-tool)' \
     run_stage "$home" "$root" start --locked 0 --harvest-pid 999999999
   run_stage "$home" "$root" wait 30 >/dev/null || fail "the dead-claim worker never published"
   wait_for_startup_network_wake "$home" || fail "the dead-claim worker never settled delivery"
   assert_grep 'check	startup-network' "$home/state/.wake-queue" \
     "a dead session's stale claim swallowed the result"
   assert_absent "$home/state/.startup-network.claim" "a dead claim was not reaped"
-  pass "fm-startup-network: exactly one of the digest and the wake reports each result"
+  pass "fm-startup-network: exactly one of the digest and the wake reports each actionable result"
 }
 
 test_a_claimant_crash_after_publish_still_queues_the_wake() {
@@ -213,7 +222,10 @@ $rec
 EOF
   sleep 10 &
   claimant=$!
+  # Actionable output: a clean success in this same crash window must stay
+  # silent (test_a_successful_result_never_queues_a_wake owns that case).
   FM_SESSION_START_TIMEOUT=4 FM_FAKE_BOOTSTRAP_LOG="$log" \
+    FM_FAKE_BOOTSTRAP_OUT='MISSING: some-tool (install: brew install some-tool)' \
     run_stage "$home" "$root" start --locked 0 --harvest-pid "$claimant"
   run_stage "$home" "$root" wait 30 >/dev/null || fail "the crash-window worker never published"
   kill -0 "$claimant" 2>/dev/null \
@@ -261,6 +273,74 @@ EOF
   wait "$claimant" 2>/dev/null || true
   chmod 700 "$home/state/.startup-network.report"
   pass "fm-startup-network: a report-publication failure is failed, diagnosed, and still wakes"
+}
+
+# A clean success is not captain-facing progress (AGENTS.md section 8): it must
+# never become a main-blocking wake row, whether or not a session was there to
+# claim and harvest it inline. The result stays durable and readable through
+# `report` either way.
+test_a_successful_result_never_queues_a_wake() {
+  local rec home root log claimant report
+  rec=$(new_world successful-result-silent)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  sleep 10 &
+  claimant=$!
+  FM_SESSION_START_TIMEOUT=4 FM_FAKE_BOOTSTRAP_LOG="$log" \
+    run_stage "$home" "$root" start --locked 0 --harvest-pid "$claimant"
+  run_stage "$home" "$root" wait 30 >/dev/null || fail "the unclaimed successful worker never published"
+  kill "$claimant" 2>/dev/null || true
+  wait "$claimant" 2>/dev/null || true
+
+  # Give the same settling window the crash-window test uses, then confirm no
+  # wake ever lands - not a race that just hasn't finished yet.
+  sleep 1
+  [ ! -s "$home/state/.wake-queue" ] \
+    || fail "a clean successful network-checks result queued a main-blocking wake: $(cat "$home/state/.wake-queue")"
+  report=$(run_stage "$home" "$root" report)
+  assert_contains "$report" "(silent - no problems found)" \
+    "a successful result was not durably readable through report: $report"
+
+  # Bootstrap itself explicitly types completed benign work as BOOTSTRAP_INFO.
+  # That producer-owned no-action record is durable but must remain just as
+  # quiet as a fully silent success.
+  FM_FAKE_BOOTSTRAP_LOG="$log" \
+    FM_FAKE_BOOTSTRAP_OUT='BOOTSTRAP_INFO: fixture completed benign work' \
+    run_stage "$home" "$root" run --locked 0
+  [ ! -s "$home/state/.wake-queue" ] \
+    || fail "a BOOTSTRAP_INFO-only success queued a main-blocking wake: $(cat "$home/state/.wake-queue")"
+  report=$(run_stage "$home" "$root" report)
+  assert_contains "$report" "BOOTSTRAP_INFO: fixture completed benign work" \
+    "the completed no-action fact was not retained in the durable report"
+
+  pass "fm-startup-network: silent and explicitly informational successes never queue a main-blocking wake"
+}
+
+# The FAILED/actionable half of the same contract, paired with the success
+# test above: an actionable report (here, a MISSING: line bootstrap-diagnostics
+# would load a skill for) still reaches the wake queue even when unclaimed.
+test_an_actionable_successful_result_still_queues_a_wake() {
+  local rec home root log claimant
+  rec=$(new_world actionable-result-wakes)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  sleep 10 &
+  claimant=$!
+  FM_SESSION_START_TIMEOUT=4 FM_FAKE_BOOTSTRAP_LOG="$log" \
+    FM_FAKE_BOOTSTRAP_OUT='MISSING: some-tool (install: brew install some-tool)' \
+    run_stage "$home" "$root" start --locked 0 --harvest-pid "$claimant"
+  run_stage "$home" "$root" wait 30 >/dev/null || fail "the unclaimed actionable worker never published"
+  kill "$claimant" 2>/dev/null || true
+  wait "$claimant" 2>/dev/null || true
+
+  wait_for_startup_network_wake "$home" \
+    || fail "an actionable successful (state=done) result never queued a wake"
+  assert_grep 'check	startup-network' "$home/state/.wake-queue" \
+    "an actionable result did not reach the wake queue"
+
+  pass "fm-startup-network: an actionable state=done report still queues a wake"
 }
 
 # The worker outlives the command that launched it. If another session took the
@@ -616,6 +696,8 @@ test_start_returns_without_holding_the_callers_stdout
 test_harvest_acknowledgement_suppresses_the_wake_and_no_claim_produces_it
 test_a_claimant_crash_after_publish_still_queues_the_wake
 test_a_report_publication_failure_is_failed_and_still_wakes
+test_a_successful_result_never_queues_a_wake
+test_an_actionable_successful_result_still_queues_a_wake
 test_mutating_sweeps_are_refused_when_the_lock_changed_hands
 test_the_stage_bound_is_reported_not_swallowed
 test_an_abandoned_run_reads_as_needing_a_rerun

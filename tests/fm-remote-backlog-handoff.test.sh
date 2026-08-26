@@ -15,6 +15,7 @@ REMOTE_ROOT="$TMP_ROOT/remote-root"
 REMOTE="$TMP_ROOT/remote"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fake")
 SSH_COUNT="$TMP_ROOT/ssh.count"
+WAKE_LOG="$TMP_ROOT/wake.log"
 mkdir -p "$PARENT/data" "$PARENT/state" "$REMOTE_ROOT/bin" \
   "$REMOTE/data" "$REMOTE/state" "$REMOTE/config" "$REMOTE/projects" "$REMOTE/bin"
 # Tear down deterministically. Releasing the blocked stages and killing the
@@ -66,6 +67,19 @@ printf 'ios\n' > "$REMOTE/.fm-secondmate-home"
 cat > "$PARENT/data/secondmates.md" <<EOF
 - ios - iOS delivery (host: remote-mac; root: $REMOTE_ROOT; home: $REMOTE; scope: iOS work; projects: alpha; added 2026-08-02)
 EOF
+cat > "$PARENT/state/ios.meta" <<EOF
+window=fm-remote:w1:p1
+endpoint_task_id=ios
+harness=claude
+kind=secondmate
+mode=secondmate
+remote_host=remote-mac
+remote_root=$REMOTE_ROOT
+remote_backend=herdr
+remote_herdr_session=fm-remote
+remote_target=fm-remote:w1:p1
+EOF
+: > "$WAKE_LOG"
 
 cat > "$FAKEBIN/fake-ssh" <<'SH'
 #!/usr/bin/env bash
@@ -86,6 +100,11 @@ shift 2
 argv_b64=$4
 command_name=$(perl -MMIME::Base64=decode_base64 -e '$d=decode_base64($ARGV[0]); ($c)=split(/\0/, $d); print $c' "$argv_b64")
 case "${FM_FAKE_SSH_MODE:-normal}:$command_name" in
+  *:fm-remote-secondmate-control.sh)
+    printf '%s\n' "$command_name" >> "$FM_FAKE_REMOTE_WAKE_LOG"
+    [ "${FM_FAKE_REMOTE_WAKE_RC:-0}" -eq 0 ] || printf 'remote receiver wake failed\n' >&2
+    exit "${FM_FAKE_REMOTE_WAKE_RC:-0}"
+    ;;
   unreachable:*) exit 255 ;;
   serialize:fm-backlog-receive.sh)
     if mkdir "$FM_FAKE_SERIALIZE_ONCE" 2>/dev/null; then
@@ -112,6 +131,8 @@ handoff_env() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_SSH_BIN="$FAKEBIN/fake-ssh" \
   FM_FAKE_SSH_COUNT="$SSH_COUNT" \
+  FM_FAKE_REMOTE_WAKE_LOG="$WAKE_LOG" \
+  FM_FAKE_REMOTE_WAKE_RC="${FM_FAKE_REMOTE_WAKE_RC:-0}" \
   FM_FAKE_SERIALIZE_ONCE="$TMP_ROOT/serialize.once" \
   FM_FAKE_SERIALIZE_ENTERED="$TMP_ROOT/serialize.entered" \
   FM_FAKE_SERIALIZE_RELEASE="$TMP_ROOT/serialize.release" \
@@ -222,6 +243,8 @@ pass "ambiguous receipt leaves one durable outbox and no duplicate dispatchable 
 
 out=$(handoff_env "$ROOT/bin/fm-backlog-handoff.sh" --resume-pending)
 assert_contains "$out" 'received: ios moved=0 already=2' "retry did not classify already-delivered keys idempotently"
+[ "$(grep -cF fm-remote-secondmate-control.sh "$WAKE_LOG")" -eq 1 ] \
+  || fail "confirmed remote receipt did not wake its supported receiver endpoint exactly once"
 assert_absent "$PARENT/data/handoff/ios.outbox.md" "confirmed retry did not clean the local outbox"
 [ "$(grep -cF -- '- [ ] ios-a - first iOS task' "$REMOTE/data/backlog.md")" -eq 1 ] \
   || fail "receipt retry duplicated ios-a"
@@ -314,6 +337,69 @@ assert_contains "$bootstrap_out" 'SECONDMATE_HANDOFF: secondmate ios: pending de
 handoff_env "$ROOT/bin/fm-backlog-handoff.sh" --resume-pending >/dev/null \
   || fail "pending bootstrap-visible outbox did not later converge"
 pass "bootstrap detects pending outbox handoffs without a journal"
+
+write_backlog '- [ ] remote-wake-fail - receiver failure stays recoverable (repo: alpha)'
+set +e
+FM_FAKE_REMOTE_WAKE_RC=1 handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios remote-wake-fail \
+  > "$TMP_ROOT/remote-wake-fail.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "remote handoff claimed success after its receiver wake failed"
+assert_contains "$(cat "$TMP_ROOT/remote-wake-fail.out")" 'receiver wake failed' \
+  "remote receiver wake failure was not surfaced"
+assert_present "$PARENT/data/handoff/ios.outbox.md" \
+  "remote receiver wake failure discarded the recoverable outbox"
+handoff_env "$ROOT/bin/fm-backlog-handoff.sh" --resume-pending >/dev/null \
+  || fail "remote receiver wake failure did not recover through resume-pending"
+assert_absent "$PARENT/data/handoff/ios.outbox.md" \
+  "remote receiver wake recovery left its outbox pending"
+pass "remote handoff wakes its supported endpoint or remains loudly recoverable"
+
+RM_FAKEBIN="$TMP_ROOT/rm-fakebin"
+mkdir -p "$RM_FAKEBIN"
+REAL_RM=$(command -v rm)
+cat > "$RM_FAKEBIN/rm" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+if [ "$last" = "$FM_FAIL_RM_PATH" ]; then
+  exit 1
+fi
+exec "$FM_REAL_RM" "$@"
+SH
+chmod +x "$RM_FAKEBIN/rm"
+write_backlog '- [ ] cleanup-retry - confirmed wake survives cleanup retry (repo: alpha)'
+wakes_before=$(grep -cF fm-remote-secondmate-control.sh "$WAKE_LOG")
+set +e
+PATH="$RM_FAKEBIN:$PATH" FM_REAL_RM="$REAL_RM" \
+  FM_FAIL_RM_PATH="$PARENT/data/handoff/ios.outbox.md" \
+  handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios cleanup-retry \
+  > "$TMP_ROOT/cleanup-retry.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "remote handoff ignored local outbox cleanup failure"
+assert_present "$PARENT/data/handoff/ios.outbox.md" \
+  "remote cleanup failure did not preserve the outbox"
+case "$(cat "$PARENT/state/.backlog-handoff-ios.wake-pending")" in
+  confirmed:*) ;;
+  *) fail "remote cleanup failure did not preserve confirmed wake state" ;;
+esac
+wakes_after=$(grep -cF fm-remote-secondmate-control.sh "$WAKE_LOG")
+[ "$wakes_after" -eq $((wakes_before + 1)) ] \
+  || fail "remote cleanup failure did not perform exactly one receiver wake"
+write_backlog '- [ ] after-cleanup - fresh work after confirmed cleanup failure (repo: alpha)'
+handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios after-cleanup >/dev/null \
+  || fail "fresh handoff did not converge an older confirmed cleanup failure"
+[ "$(grep -cF fm-remote-secondmate-control.sh "$WAKE_LOG")" -eq $((wakes_after + 1)) ] \
+  || fail "fresh handoff reused the older confirmed wake instead of waking its receiver"
+[ "$(grep -cF cleanup-retry "$REMOTE/data/backlog.md")" -eq 1 ] \
+  || fail "cleanup recovery lost or duplicated the older delivered item"
+[ "$(grep -cF after-cleanup "$REMOTE/data/backlog.md")" -eq 1 ] \
+  || fail "fresh handoff after cleanup recovery was lost or duplicated"
+assert_absent "$PARENT/data/handoff/ios.outbox.md" \
+  "fresh handoff left the recovered outbox pending"
+assert_absent "$PARENT/state/.backlog-handoff-ios.wake-pending" \
+  "fresh handoff left confirmed wake state behind"
+pass "fresh remote work gets a new wake after confirmed cleanup recovery"
 
 write_backlog '- [ ] route-race - remains dispatchable through retirement (repo: alpha)'
 registry_lock="$PARENT/state/.secondmate-registry.lock"

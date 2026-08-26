@@ -863,7 +863,10 @@ test_fm_send_still_marks_the_same_secondmate_task() {
     FM_SEND_SETTLE=0 FM_ROOT_OVERRIDE="$dir/home" \
     "$SEND" domain "audit the build" 2>&1); rc=$?
   expect_code 0 "$rc" "fm-send to a secondmate should still succeed"$'\n'"$out"
-  case "$(literals "$dir")" in
+  # The marked steer rides fm-send's durable inbox plane; only the doorbell is
+  # typed, so the marker is asserted on the recorded body.
+  case "$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" \
+    "$dir/home/state/domain.inbox/001.msg")" in
     "$FM_FROMFIRST_MARK"*) : ;;
     *) fail "fm-send must still mark a kind=secondmate target: $(literals "$dir")" ;;
   esac

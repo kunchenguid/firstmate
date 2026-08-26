@@ -131,7 +131,7 @@ test_path_skew_is_reported_from_every_copy() {
   assert_contains "$report" "0.8.2 is installed at $fresh/$TOOL" "the report does not name the newer installed copy, so no other PATH copy was asked for its version"
   assert_not_contains "$report" "update available" "PATH skew must not be reported as a published update"
   assert_contains "$report" "$(printf 'tool updates:')" "the report is missing its one-line prefix"
-  [ "$(wc -l < "$out")" = 1 ] || fail "the report must be exactly one line for the wake record"
+  [ "$(wc -l < "$out" | tr -d '[:space:]')" = 1 ] || fail "the report must be exactly one line for the wake record"
   pass "PATH skew is reported by asking every copy on PATH for its own version"
 }
 
@@ -311,7 +311,7 @@ test_one_broken_pattern_does_not_blind_the_rest_of_the_sweep() {
   report=$(cat "$out")
   assert_contains "$report" "herdr update not in effect: PATH resolves 0.8.0 at $stale/$TOOL" "a broken pattern on another tool suppressed the PATH skew report"
   assert_contains "$report" "no-mistakes check failed: announce_pattern is not a usable extended regular expression" "the tool whose pattern cannot be used was not named"
-  [ "$(wc -l < "$out")" = 1 ] || fail "the report must stay exactly one line"
+  [ "$(wc -l < "$out" | tr -d '[:space:]')" = 1 ] || fail "the report must stay exactly one line"
   pass "a broken pattern is reported for its own tool and the rest of the sweep still reports"
 }
 
@@ -690,7 +690,7 @@ test_an_overlong_report_says_it_was_cut() {
   run_check "$home" "$PATH" "$out"
   report=$(cat "$out")
   assert_contains "$report" "[truncated]" "an over-long report was cut without saying so"
-  [ "$(wc -l < "$out")" = 1 ] || fail "the cut report must still be exactly one line"
+  [ "$(wc -l < "$out" | tr -d '[:space:]')" = 1 ] || fail "the cut report must still be exactly one line"
   pass "an over-long report is cut with the shared truncation marker"
 }
 

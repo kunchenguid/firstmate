@@ -120,10 +120,11 @@ wrong instant rather than printing a number that looks fast.
 
 ## Setting up the laptop
 
-**None of this is verified.** No worker can reach the captain's laptop, so the
-capture and playback paths have never run. Everything else in the client is
-exercised with files. Treat the first live run as the test, and expect the audio
-device setup to be where it fails.
+**The audio devices are not verified.** No worker can reach the captain's laptop, so neither the microphone nor the speaker has ever been opened.
+Treat the first live run as their test, and expect the device setup to be where it fails.
+Everything around them is exercised with files.
+That includes the speaker's own byte accounting, the arithmetic deciding which turn a chunk of reply audio is credited to and whose first-audio clock it stamps, which runs against a stub stream in the test suite.
+Covering that arithmetic says nothing about how a real output device behaves.
 
 Copy the two files the laptop needs, and install the one dependency:
 
@@ -150,6 +151,15 @@ Press Enter to start talking, press Enter again when you have finished. It print
 the timings for each turn as JSON on stdout and everything human on stderr, so
 `--runs 5 > runs.jsonl` gives you your own spread to compare against the table
 above.
+
+Every record carries `relay_error`, which is null when nothing broke and otherwise names what did.
+Where this end is left to infer what happened, it tells the two mid-turn failures apart, because they are not the same fault: a turn that got no reply audio at all says the connection ended, or was lost, or the relay stopped, or the session ended, before that turn was answered, while a turn whose answer had already started playing says the same thing happened before the reply finished.
+The second still reads `answered: true`, because sound did reach you and `first_audio_s` is a real measurement of when.
+Two other shapes carry neither clause, so do not read the pair above as the whole list: a fault the relay names itself arrives as the relay's own words, which point at the desktop and are kept unaltered because it knows what this end can only guess at.
+A reason opening `this end could not handle the relay's reply` is the one that points at your laptop instead, so a healthy relay is not where to look for it.
+
+The exit code is non-zero if any turn went unanswered, if any record carries a `relay_error`, or if the session stopped before it had taken the runs you asked for.
+A truncated answer therefore fails the run rather than passing it, so a spread computed from `runs.jsonl` cannot quietly average an infrastructure failure into a latency figure.
 
 If the audio devices are not the ones you want, `--input-device` and `--output-device` take a name or an index.
 Neither the client nor this guide can yet tell you which device it resolved, so an unexpected device is diagnosed by trying the other name or index rather than by reading a log line.
@@ -229,8 +239,8 @@ it, six turns in a row all answered.
 The same path covers a session the model ends on its own, mid-conversation: that
 costs the turn it was in and not the relay, and the next talk key builds a
 replacement. Either way the client hears about it at once rather than waiting out
-the whole reply timeout in silence, and a turn that broke rather than merely
-ending carries the reason on its own JSON record.
+the whole reply timeout in silence.
+A turn still waiting for its answer when either happens names why in its own `relay_error`, and [setting up the laptop](#setting-up-the-laptop) describes those reasons.
 
 **What it gives up is memory.** Every question starts fresh, so "and what about
 that one" will not work. Carrying context across turns means handling
