@@ -406,7 +406,13 @@ fm_lock_claim() {
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
-  ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
+  FM_LOCK_CREATE_ERROR=
+  if ! ownerdir=$(fm_lock_owner_dir "$lockdir"); then
+    if [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
+      FM_LOCK_CREATE_ERROR=uncreatable
+    fi
+    return 1
+  fi
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
@@ -787,9 +793,15 @@ fm_lock_try_acquire() {
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
+  FM_LOCK_ERROR=
 
   if fm_lock_try_create "$lockdir"; then
     return 0
+  fi
+  if [ "${FM_LOCK_CREATE_ERROR:-}" = uncreatable ] \
+     && [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    FM_LOCK_ERROR=uncreatable-path
+    return 1
   fi
 
   # Compare against ${BASHPID:-$$} inline, never via a command substitution:
@@ -886,6 +898,7 @@ fm_lock_try_acquire() {
 fm_lock_acquire_wait() {
   local lockdir=$1
   while ! fm_lock_try_acquire "$lockdir"; do
+    [ "${FM_LOCK_ERROR:-}" = uncreatable-path ] && return 1
     sleep 0.1
   done
 }

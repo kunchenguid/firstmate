@@ -1159,6 +1159,18 @@ teardown_task aflat "$SECOND_HOME_A" > "$TMP_ROOT/aflat-teardown.out" 2> "$TMP_R
   || fail "flat cross-home contention fixture teardown failed"
 pass "real Herdr lab: session lock contention from a secondmate home falls back flat with no journal"
 
+# The projection anchor above is deliberately never torn down so every earlier
+# projection could nest under its persistent firstmate workspace; its assertions
+# are complete by here. Its pooled worktree can be recycled to a later task, so
+# release the anchor's now-stale ownership record (and return the copy) before
+# the same-identity restarts below - otherwise a restart landing on a worktree
+# still recorded to 'anchor' is refused as a shared copy.
+ANCHOR_WT=$(grep '^worktree=' "$ANCHOR_META" | cut -d= -f2-)
+rm -f "$ANCHOR_META"
+if [ -n "$ANCHOR_WT" ]; then
+  "$REAL_TREEHOUSE" return --force "$ANCHOR_WT" >/dev/null 2>&1 || true
+fi
+
 # Same-identity recovery replaces only one exact agent-free husk in its
 # original projected workspace.
 # Exercise both the leading fm- identity style seen in Hi Bit work and the

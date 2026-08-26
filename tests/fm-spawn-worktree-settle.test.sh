@@ -141,7 +141,30 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+test_duplicate_worktree_owner_is_refused() {
+  local rec id out status owner wt_real
+  id=settle-duplicate-owner-z3
+  owner=ship-existing-z3
+  rec=$(make_settle_case settle-duplicate-owner "$id" 0)
+  read_settle_record "$rec"
+  printf 'window=test:existing\nworktree=%s\nkind=ship\n' "$WT_DIR" \
+    > "$HOME_DIR/state/$owner.meta"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "spawn must refuse a worktree already owned by another task"
+  assert_contains "$out" "already owned by task '$owner'" \
+    "duplicate-worktree refusal did not name the existing owner"
+  wt_real=$(cd "$WT_DIR" && pwd -P)
+  assert_contains "$out" "$wt_real" \
+    "duplicate-worktree refusal did not name the canonical worktree"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "duplicate-worktree refusal published metadata for the new task"
+  pass "spawn refuses a canonical worktree already owned by another task record"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_duplicate_worktree_owner_is_refused
 
 echo "# all fm-spawn-worktree-settle tests passed"

@@ -1149,6 +1149,54 @@ test_self_held_lock_reclaims_instead_of_deadlocking() {
   pass "an abandoned same-process lock hold is reclaimed; a parent's live hold is not"
 }
 
+test_uncreatable_lock_path_fails_without_recursive_steal() {
+  local dir state missing out pid rc lock stale_lock
+  dir=$(make_case uncreatable-lock)
+  state="$dir/state"
+  missing="$dir/missing/.fixture.lock"
+  out="$dir/missing.out"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_acquire_wait "$2"; then
+      exit 10
+    fi
+    printf "error=%s\n" "${FM_LOCK_ERROR:-}"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$missing" > "$out" 2>&1 &
+  pid=$!
+  rc=0
+  wait_for_exit "$pid" 30 || rc=$?
+  [ "$rc" -eq 0 ] || fail "an uncreatable lock path did not fail within three seconds (rc=$rc)"
+  assert_grep 'error=uncreatable-path' "$out" \
+    "uncreatable lock path did not expose its bounded failure reason"
+  if find "$dir" -name '*.steal*' -print | grep . >/dev/null; then
+    fail "uncreatable lock path created recursive steal artifacts"
+  fi
+
+  lock="$dir/present/.fixture.lock"
+  mkdir -p "$dir/present"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 11
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" || rc=$?
+  [ "$rc" -eq 0 ] || fail "an absent lock with a valid parent no longer acquires (rc=$rc)"
+
+  stale_lock="$dir/present/.stale.lock"
+  mkdir "$stale_lock"
+  printf '999999\n' > "$stale_lock/pid"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 12
+    [ "$FM_LOCK_RECOVERED_PID" = 999999 ] || exit 13
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$stale_lock" || rc=$?
+  [ "$rc" -eq 0 ] || fail "a stale dead-pid lock no longer recovers (rc=$rc)"
+  pass "an uncreatable lock fails boundedly while valid and stale lock paths still acquire"
+}
+
 # Drain-time historical annotation staleness: a turn-ended-only wake row must
 # not present an already-announced status line as a new update, while a status
 # file with unannounced bytes keeps its annotation and a direct status row is
@@ -1198,6 +1246,7 @@ test_historical_annotation_skips_announced_status() {
   pass "historical annotations replay nothing already announced and keep everything new"
 }
 
+test_uncreatable_lock_path_fails_without_recursive_steal
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
 test_secondmate_stall_marker_rejects_symlink

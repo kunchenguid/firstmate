@@ -37,12 +37,34 @@ make_spawn_fakebin() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    # A real batch hands every task its own pooled worktree. When
+    # FM_FAKE_PANE_MAP_DIR is set, route each window's pane to a distinct
+    # worktree keyed by its window id (@<window-name>) so co-spawned tasks do
+    # not resolve to one shared copy; otherwise fall back to one fixed path.
+    if [ -n "${FM_FAKE_PANE_MAP_DIR:-}" ]; then
+      target= prev=
+      for a in "$@"; do [ "$prev" = "-t" ] && target=$a; prev=$a; done
+      key=${target#@}
+      if [ -n "$key" ] && [ -d "$FM_FAKE_PANE_MAP_DIR/$key" ]; then
+        printf '%s\n' "$FM_FAKE_PANE_MAP_DIR/$key"; exit 0
+      fi
+    fi
+    printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  new-window)
+    # Echo a stable window id only when per-window routing is requested, so the
+    # pane query above can map it back to that task's worktree.
+    if [ -n "${FM_FAKE_PANE_MAP_DIR:-}" ]; then
+      name= prev=
+      for a in "$@"; do [ "$prev" = "-n" ] && name=$a; prev=$a; done
+      [ -n "$name" ] && printf '@%s\n' "$name"
+    fi
+    exit 0 ;;
+  has-session|new-session|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -244,6 +266,10 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
 
   linked_home="$CASE_DIR/home-link"
   ln -s "$HOME_DIR" "$linked_home"
+  # The two spawns deliberately reuse one worktree to compare home-path
+  # spellings, not to co-own it. Release the first task's recorded ownership so
+  # the second spawn is not refused as a duplicate owner of the shared copy.
+  rm -f "$HOME_DIR/state/$relative_id.meta"
   : > "$LAUNCH_LOG"
   out=$(
     FM_ROOT_OVERRIDE='' FM_HOME="$linked_home" \
@@ -741,14 +767,21 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
 }
 
 test_batch_forwards_shared_profile_flags() {
-  local rec id1 id2 out status
+  local rec id1 id2 out status map
   id1=profile-batch-a-z9
   id2=profile-batch-b-z10
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+  # Each batch task gets its own real worktree, keyed by its fm-<id> window, so
+  # the pair is not refused for co-owning a single copy (as a real pool would).
+  map="$CASE_DIR/panes"
+  mkdir -p "$map"
+  git -C "$PROJ_DIR" worktree add --quiet -b "batch-$id1" "$map/fm-$id1"
+  git -C "$PROJ_DIR" worktree add --quiet -b "batch-$id2" "$map/fm-$id2"
+  out=$(FM_FAKE_PANE_MAP_DIR="$map" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
   status=$?
   expect_code 0 "$status" "batch spawn with shared profile flags should succeed"

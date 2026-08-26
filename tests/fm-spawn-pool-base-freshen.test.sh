@@ -104,6 +104,10 @@ test_stale_pool_base_refreshes_before_branching() {
       "$branch_head" "$current" "$(cat "$POOL_DIR/advanced-main.txt")"
   fi
 
+  # The repeat exercises a fresh task reusing the same pooled base after the
+  # first owner released it; drop the prior owner's record so the reuse is not
+  # refused as a duplicate owner of the shared copy.
+  rm -f "$HOME_DIR/state/pool-current-base-r1.meta"
   id='pool-current-base-repeat-r1'
   mkdir -p "$HOME_DIR/data/$id"
   printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"

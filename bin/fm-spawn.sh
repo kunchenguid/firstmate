@@ -134,6 +134,12 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Every non-secondmate spawn additionally refuses, before branch prep, launch,
+#   or metadata publication, a candidate worktree whose canonical path already
+#   matches another task's recorded worktree= in state/*.meta (plain files only;
+#   symlinked meta is ignored and endpoint liveness is never an ownership
+#   bypass), so two tasks never share one isolated copy. A same-task relaunch
+#   into its own recorded worktree is exempt.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -1742,6 +1748,26 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+assert_spawn_worktree_unowned() {
+  local wt_real meta owner owner_wt owner_real
+  wt_real=$(cd "$WT" 2>/dev/null && pwd -P) || {
+    echo "error: could not canonicalize candidate worktree '$WT' before ownership validation" >&2
+    exit 1
+  }
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    owner=$(basename "$meta" .meta)
+    [ "$owner" = "$ID" ] && continue
+    owner_wt=$(sed -n 's/^worktree=//p' "$meta" | head -n 1)
+    [ -n "$owner_wt" ] || continue
+    owner_real=$(cd "$owner_wt" 2>/dev/null && pwd -P) || continue
+    if [ "$owner_real" = "$wt_real" ]; then
+      echo "error: candidate worktree '$wt_real' is already owned by task '$owner'; refusing to launch '$ID' in a shared copy" >&2
+      exit 1
+    fi
+  done
+}
+
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status
   if ! git -C "$worktree" fetch --quiet origin; then
@@ -2274,6 +2300,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+fi
+if [ "$KIND" != secondmate ]; then
+  assert_spawn_worktree_unowned
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
