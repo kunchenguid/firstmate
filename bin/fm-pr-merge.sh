@@ -27,7 +27,27 @@
 # Extra args must not include --repo or -R in any form, including a bundled
 # short-option cluster such as -yR, because the repository comes only from the
 # URL, nor --sha on GitLab because the head comes only from the live read.
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra forge merge args>]
+#
+# ATOMIC TEARDOWN AND BACKLOG COMPLETION. A merge that succeeds is followed by
+# bin/fm-teardown.sh <task-id>, then - only once that succeeds - tasks-axi done
+# <task-id> --pr <url>, so an operator running this one script gets all three
+# effects instead of three separately-remembered commands. Passing --no-teardown
+# (anywhere before the optional -- separator) skips both follow-on steps and
+# leaves the merge step's own behavior exactly as before, for a caller with its
+# own reason to defer cleanup.
+# Neither follow-on step runs any bypass: a teardown refusal (its own hard-won
+# guard against discarding unlanded work elsewhere in the worktree) is reported
+# verbatim and stops the chain with a non-zero exit before tasks-axi done ever
+# runs, because the merge having landed does not make that refusal any less
+# real. tasks-axi done runs only when config/backlog-backend is not "manual"
+# and a compatible tasks-axi is on PATH (bin/fm-tasks-axi-lib.sh's own
+# availability check); a manual backend leaves the operator with teardown's own
+# printed backlog-refresh reminder, exactly as today. A non-manual backend
+# whose tasks-axi is missing or too old is not treated the same as a deliberate
+# manual backend: it is a merge-chain failure reported with a non-zero exit,
+# because staying silent there would report success while the backlog record
+# stayed in flight.
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--no-teardown] [-- <extra forge merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -63,6 +83,24 @@ PR_NUMBER=$FM_PR_NUMBER
 # rebuilt from the parsed identity rather than read from any ambient default.
 PROJECT_URL="https://$FM_PR_HOST/$FM_PR_PATH"
 shift 2
+# --no-teardown is recognized anywhere before the optional -- separator, not
+# only as the very first extra argument, so a caller combining it with a merge
+# method or other pre-separator flag still has it consumed here rather than
+# forwarded to the forge command as an unsupported flag.
+SKIP_TEARDOWN=0
+kept_args=()
+saw_separator=0
+for arg in "$@"; do
+  if [ "$saw_separator" -eq 0 ] && [ "$arg" = "--" ]; then
+    saw_separator=1
+    kept_args+=("$arg")
+  elif [ "$saw_separator" -eq 0 ] && [ "$arg" = "--no-teardown" ]; then
+    SKIP_TEARDOWN=1
+  else
+    kept_args+=("$arg")
+  fi
+done
+set -- ${kept_args[@]+"${kept_args[@]}"}
 [ "${1:-}" = "--" ] && shift
 
 caller_has_merge_method() {
@@ -267,3 +305,39 @@ case "$PROVIDER" in
     exit 2
     ;;
 esac
+
+# set -e already stopped this script if the merge above failed, so reaching
+# here means $URL is genuinely merged. --no-teardown leaves that as the whole
+# result, exactly as every caller of this script saw before this chain existed.
+[ "$SKIP_TEARDOWN" -eq 0 ] || exit 0
+
+echo "merged: $URL; tearing down task $ID" >&2
+# A plain `if cmd; then ... else ...` (never `if ! cmd; then ...`) is required
+# here: negating the condition with `!` makes $? reflect the negation itself,
+# not the command's own exit code, which would misreport every refusal below
+# as exit 0 and let the script fall through to a false success.
+if "$SCRIPT_DIR/fm-teardown.sh" "$ID"; then
+  :
+else
+  teardown_rc=$?
+  echo "error: $URL merged successfully, but automatic teardown for $ID failed (exit $teardown_rc); the worktree and backlog record were left as they were - resolve the refusal above, then run bin/fm-teardown.sh $ID and tasks-axi done $ID --pr $URL by hand" >&2
+  exit "$teardown_rc"
+fi
+
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+if fm_tasks_axi_backend_available "$CONFIG"; then
+  if tasks-axi "done" "$ID" --pr "$URL"; then
+    echo "done: task $ID recorded complete (tasks-axi done $ID --pr $URL)" >&2
+  else
+    done_rc=$?
+    echo "error: $URL merged and task $ID torn down, but tasks-axi done $ID --pr $URL failed (exit $done_rc); run it by hand to close the backlog record" >&2
+    exit "$done_rc"
+  fi
+elif fm_backlog_backend_manual "$CONFIG"; then
+  : # config/backlog-backend=manual; teardown's own backlog-refresh reminder above already covers this.
+else
+  echo "error: $URL merged and task $ID torn down, but tasks-axi is missing or older than $FM_TASKS_AXI_MIN; run tasks-axi done $ID --pr $URL by hand once it is available to close the backlog record" >&2
+  exit 1
+fi

@@ -212,15 +212,19 @@ glab_merge_line() {
   grep -F ' mr merge ' "$1" || true
 }
 
+# Every case below exercises the merge step only, so --no-teardown is injected
+# after the task id and URL to keep that step's behavior exactly as it was
+# before atomic teardown existed; test_auto_teardown.sh below exercises the
+# atomic chain itself against a real fm-teardown.sh fixture.
 run_pr_merge() {
-  local case_dir=$1 rc; shift
+  local case_dir=$1 id=$2 url=$3 rc; shift 3
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   FM_TEST_GLAB_JSON="$case_dir/mr.json" \
   PATH="$case_dir/fakebin:$PATH" \
-    "$PR_MERGE" "$@"
+    "$PR_MERGE" "$id" "$url" --no-teardown "$@"
   rc=$?
   if [ "${case_dir##*/}" = unsafe-url-segment ] && [ "$rc" -eq 2 ]; then
     echo 'error: PR URL must match https://github.com/<owner>/<repo>/pull/<number>' >&2
@@ -810,6 +814,249 @@ test_github_still_forwards_sha_arg() {
   pass "fm-pr-merge leaves GitHub extra-arg handling unchanged, including --sha"
 }
 
+# --- Atomic teardown and backlog completion ---------------------------------
+# Everything above exercises the merge step alone via --no-teardown. These
+# cases exercise the chain fm-pr-merge.sh runs after a successful merge: the
+# real bin/fm-teardown.sh (its own safety logic untouched) followed by
+# tasks-axi done, so the fixture below needs a real worktree, project, and
+# origin, plus the backend mocks bin/fm-teardown.sh itself requires.
+
+# A minimal real fm-teardown.sh fixture: a bare origin, a project clone, and a
+# worktree on a task branch, plus the treehouse/tmux/no-mistakes mocks
+# bin/fm-teardown.sh needs to run its cleanup steps to completion. Mirrors
+# tests/fm-teardown.test.sh's own make_case. Echoes the case dir.
+make_teardown_case() {
+  local name=$1 case_dir fakebin
+  case_dir="$TMP_ROOT/$name"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/no-mistakes"
+
+  git init -q --bare "$case_dir/origin.git"
+  git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$case_dir/origin.git" "$case_dir/_seed" 2>/dev/null
+  git -C "$case_dir/_seed" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m "origin baseline"
+  git -C "$case_dir/_seed" push -q origin main
+  rm -rf "$case_dir/_seed"
+  git clone -q "$case_dir/origin.git" "$case_dir/project"
+  git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
+  git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
+
+  touch "$case_dir/state/.last-watcher-beat"
+
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+
+  printf '%s\n' "$case_dir"
+}
+
+# tasks-axi mock that reports a compatible version and records every
+# invocation to FM_TEST_TASKS_AXI_LOG, so a test can assert the exact
+# `done <id> --pr <url>` call fm-pr-merge.sh is expected to make. Args: case_dir
+add_recording_tasks_axi() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_TASKS_AXI_LOG"
+case "${1:-} ${2:-}" in
+  "--version "*|"--version") printf '%s\n' '0.2.4'; exit 0 ;;
+  "update --help") printf '%s\n' '  --archive-body'; exit 0 ;;
+  "mv --help") printf '%s\n' '  [<id>...]'; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+}
+
+# tasks-axi mock reporting a version older than FM_TASKS_AXI_MIN, so
+# fm_tasks_axi_compatible refuses it. Still records every invocation, so a
+# test can prove `done <id> --pr <url>` was never among them. Args: case_dir
+add_incompatible_tasks_axi() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_TASKS_AXI_LOG"
+case "${1:-} ${2:-}" in
+  "--version "*|"--version") printf '%s\n' '0.1.0'; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+}
+
+# Runs the real fm-pr-merge.sh against a teardown-capable fixture, i.e.
+# without --no-teardown. Args: case_dir <fm-pr-merge args...>
+run_pr_merge_atomic() {
+  local case_dir=$1; shift
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_TASKS_AXI_LOG="$case_dir/tasks-axi.log" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$PR_MERGE" "$@"
+}
+
+test_auto_teardown_and_backlog_done_after_merge() {
+  local case_dir rc
+  case_dir=$(make_teardown_case auto-teardown-success)
+  add_gh_mocks "$case_dir" 1010101010101010101010101010101010101010
+  add_recording_tasks_axi "$case_dir"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/tasks-axi.log"
+  # Push the task branch to origin so fm-teardown.sh's landed-work check sees
+  # it as reachable from a remote-tracking branch - the ordinary state of any
+  # pushed PR branch - without also having to simulate a live "merged" PR.
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  set +e
+  run_pr_merge_atomic "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "auto-teardown-success: fm-pr-merge should succeed end to end"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "auto-teardown-success: teardown should have removed the task metadata"
+  assert_grep 'teardown task-x1 complete' "$case_dir/stdout" \
+    "auto-teardown-success: fm-teardown.sh did not report completion"
+  assert_grep 'done task-x1 --pr https://github.com/example/repo/pull/9' "$case_dir/tasks-axi.log" \
+    "auto-teardown-success: tasks-axi done was not invoked with the merged PR"
+  pass "fm-pr-merge tears down the task and records tasks-axi done after a successful merge"
+}
+
+test_teardown_refusal_surfaces_and_skips_backlog_done() {
+  local case_dir rc
+  case_dir=$(make_teardown_case auto-teardown-refuses)
+  add_gh_mocks "$case_dir" 2020202020202020202020202020202020202020
+  add_recording_tasks_axi "$case_dir"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/tasks-axi.log"
+  # An uncommitted change makes the worktree dirty, which fm-teardown.sh
+  # refuses even when the branch would otherwise be landed ("dirty wins" in
+  # its own test matrix) - exactly the unlanded-work-elsewhere guard this task
+  # must never bypass. Never pushed anywhere, so it is genuinely unlanded too.
+  echo unfinished > "$case_dir/wt/unfinished.txt"
+
+  set +e
+  run_pr_merge_atomic "$case_dir" task-x1 https://github.com/example/repo/pull/11 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "auto-teardown-refuses: fm-pr-merge reported success while teardown had refused"
+  assert_grep 'REFUSED: worktree' "$case_dir/stderr" \
+    "auto-teardown-refuses: teardown's own refusal was not surfaced"
+  assert_grep 'merged successfully, but automatic teardown' "$case_dir/stderr" \
+    "auto-teardown-refuses: the merge/teardown split was not made clear"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "auto-teardown-refuses: task metadata should survive a refused teardown"
+  [ ! -s "$case_dir/tasks-axi.log" ] \
+    || fail "auto-teardown-refuses: tasks-axi done ran despite the teardown refusal"
+  pass "fm-pr-merge surfaces a teardown refusal after a successful merge instead of masking it"
+}
+
+test_no_teardown_flag_skips_both_steps() {
+  local case_dir rc
+  case_dir=$(make_teardown_case no-teardown-flag)
+  add_gh_mocks "$case_dir" 3030303030303030303030303030303030303030
+  add_recording_tasks_axi "$case_dir"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/tasks-axi.log"
+
+  set +e
+  run_pr_merge_atomic "$case_dir" task-x1 https://github.com/example/repo/pull/13 --no-teardown \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "no-teardown-flag: fm-pr-merge should still report the merge as successful"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "no-teardown-flag: --no-teardown should leave the task metadata in place"
+  assert_present "$case_dir/wt" \
+    "no-teardown-flag: --no-teardown should leave the worktree in place"
+  [ ! -s "$case_dir/tasks-axi.log" ] \
+    || fail "no-teardown-flag: tasks-axi done ran despite --no-teardown"
+  pass "fm-pr-merge --no-teardown preserves the pre-existing merge-only behavior"
+}
+
+test_no_teardown_flag_recognized_before_other_pre_separator_args() {
+  local case_dir rc
+  case_dir=$(make_teardown_case no-teardown-flag-position)
+  add_gh_mocks "$case_dir" 4040404040404040404040404040404040404040
+  add_recording_tasks_axi "$case_dir"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/tasks-axi.log"
+
+  # --no-teardown here follows --squash and precedes no -- separator at all, so
+  # a parser that only checks the first extra argument would forward both
+  # flags straight to gh-axi pr merge and never set the opt-out.
+  set +e
+  run_pr_merge_atomic "$case_dir" task-x1 https://github.com/example/repo/pull/14 \
+    --squash --no-teardown \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "no-teardown-flag-position: fm-pr-merge should still report the merge as successful"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "no-teardown-flag-position: --no-teardown after --squash should still leave the task metadata in place"
+  assert_present "$case_dir/wt" \
+    "no-teardown-flag-position: --no-teardown after --squash should still leave the worktree in place"
+  [ ! -s "$case_dir/tasks-axi.log" ] \
+    || fail "no-teardown-flag-position: tasks-axi done ran despite --no-teardown"
+  grep -qxF 'pr merge 14 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "no-teardown-flag-position: --no-teardown leaked into the gh-axi pr merge call: $(cat "$case_dir/gh-axi.log")"
+  pass "fm-pr-merge recognizes --no-teardown even when it follows another pre-separator argument"
+}
+
+test_tasks_axi_incompatible_surfaces_failure_after_teardown() {
+  local case_dir rc
+  case_dir=$(make_teardown_case tasks-axi-incompatible)
+  add_gh_mocks "$case_dir" 5050505050505050505050505050505050505050
+  add_incompatible_tasks_axi "$case_dir"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/tasks-axi.log"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  set +e
+  run_pr_merge_atomic "$case_dir" task-x1 https://github.com/example/repo/pull/16 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] \
+    || fail "tasks-axi-incompatible: fm-pr-merge reported success while the backlog was never marked done"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "tasks-axi-incompatible: teardown should still have removed the task metadata"
+  assert_grep 'tasks-axi is missing or older than' "$case_dir/stderr" \
+    "tasks-axi-incompatible: the incompatible-tasks-axi failure was not surfaced"
+  ! grep -q '^done ' "$case_dir/tasks-axi.log" \
+    || fail "tasks-axi-incompatible: tasks-axi done ran despite the incompatible version"
+  pass "fm-pr-merge fails loudly instead of silently skipping tasks-axi done when tasks-axi is incompatible"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -834,3 +1081,8 @@ test_gitlab_unreadable_state_refuses
 test_gitlab_invalid_head_refuses
 test_gitlab_missing_tool_refuses_before_recording
 test_gitlab_head_override_args_refuse_before_recording
+test_auto_teardown_and_backlog_done_after_merge
+test_teardown_refusal_surfaces_and_skips_backlog_done
+test_no_teardown_flag_skips_both_steps
+test_no_teardown_flag_recognized_before_other_pre_separator_args
+test_tasks_axi_incompatible_surfaces_failure_after_teardown
