@@ -55,6 +55,10 @@ make_fake_root() {
   # tmux adapter; both are unchanged by this suite's fixture, just newly
   # required siblings since the P1 backend extraction).
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
+  # fm-proctree-lib.sh: fm-backend.sh sources it unconditionally (parent-chain
+  # climbing for the cmux ancestor walk), pre-existing (vendor import), just
+  # never symlinked into this fixture until now.
+  ln -s "$ROOT/bin/fm-proctree-lib.sh" "$fake/bin/fm-proctree-lib.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-cursor-lib.sh" "$fake/bin/fm-cursor-lib.sh"
@@ -149,6 +153,10 @@ test_teardown_skips_gracefully_without_tasktmp() {
   mkdir -p "$fake/bin/backends" "$fake/state"
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
+  # fm-proctree-lib.sh: fm-backend.sh sources it unconditionally (parent-chain
+  # climbing for the cmux ancestor walk), pre-existing (vendor import), just
+  # never symlinked into this fixture until now.
+  ln -s "$ROOT/bin/fm-proctree-lib.sh" "$fake/bin/fm-proctree-lib.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-cursor-lib.sh" "$fake/bin/fm-cursor-lib.sh"

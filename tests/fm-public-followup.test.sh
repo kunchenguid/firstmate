@@ -2139,8 +2139,46 @@ test_x_request_teardown_warns_when_final_unposted() {
   pass "teardown reports an unreconciled legacy Relay link"
 }
 
+# Promotion in a secondmate home is gated by bin/fm-plan-approval.sh (that
+# file's header owns the whole contract; tests/fm-plan-approval*.test.sh pin the
+# gate itself). This suite only needs a passing approval as a precondition for
+# exercising parent-binding resolution, so a minimal v=2 record is minted here
+# with the same fixture shape those suites use.
+pf_plan_approval_notiz() {  # <file>
+  {
+    printf 'F1 Praemissen: fixture note for a public-followup promotion test.\n'
+    printf 'F2 Abnahme: no acceptance block is bound; the fixture brief carries none.\n'
+    printf 'F3 Vision: exercises parent-binding resolution, not a product.\n'
+    printf 'F4 Budget: one fixture run.\n'
+    printf 'F5 Betroffene: nobody outside this temporary directory.\n'
+  } > "$1"
+}
+
+pf_plan_approve() {  # <primary> <secondmate-id> <target-home> <task-id>
+  local primary=$1 sid=$2 target=$3 task=$4 out
+  mkdir -p "$target/data/$task"
+  [ -f "$target/data/$task/brief.md" ] \
+    || printf 'You are a crewmate.\n\n# Goal\nFixture.\n' > "$target/data/$task/brief.md"
+  pf_plan_approval_notiz "$primary/notiz-$task.md"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$primary" \
+    FM_STATE_OVERRIDE="$primary/state" FM_DATA_OVERRIDE="$primary/data" \
+    FM_CONFIG_OVERRIDE="$primary/config" \
+    "$ROOT/bin/fm-plan-approval.sh" approve "$sid" "$task" \
+    --plan-file "$target/data/$task/brief.md" --klasse routine --order O-0042 \
+    --notiz "$primary/notiz-$task.md" --home "$target" 2>&1) \
+    || fail "plan-approval fixture setup failed for $task: $out"
+}
+
 test_secondmate_promotion_uses_teardown_parent_resolution() {
   local parent stale child remote_child out
+  # This case promotes inside a secondmate home, which bin/fm-plan-approval.sh
+  # gates on a signed ed25519 record; skip gracefully rather than failing
+  # opaquely where that is unavailable, matching the sibling plan-approval
+  # suites' own guard.
+  if ! command -v openssl >/dev/null 2>&1; then
+    pass "secondmate promotion matches teardown parent resolution (skipped: openssl not found)"
+    return 0
+  fi
   parent=$(make_home promote-parent)
   stale=$(make_home promote-stale-parent)
   child=$(make_home promote-child relay-off)
@@ -2160,6 +2198,10 @@ test_secondmate_promotion_uses_teardown_parent_resolution() {
 
   fm_write_meta "$child/state/promote-conflict.meta" \
     "window=firstmate:fm-promote-conflict" "kind=scout"
+  # child's live .fm-secondmate-parent names $stale as its local parent, so the
+  # plan-approval gate trusts $stale's key for this promotion (same precedence
+  # bin/fm-plan-approval.sh documents for public-followup's own resolution).
+  pf_plan_approve "$stale" mate "$child" promote-conflict
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" \
     "$PROMOTE" promote-conflict --mode local-only --yolo off 2>&1) \
@@ -2174,6 +2216,10 @@ test_secondmate_promotion_uses_teardown_parent_resolution() {
   rm -f "$child/.fm-secondmate-parent"
   fm_write_meta "$child/state/promote-legacy.meta" \
     "window=firstmate:fm-promote-legacy" "kind=scout"
+  # With no live parent binding, the gate falls back to child's own inherited
+  # key, so mint under $parent and place its public half as inheritance would.
+  pf_plan_approve "$parent" mate "$child" promote-legacy
+  cp "$parent/config/plan-approval-key.pub" "$child/config/plan-approval-key.pub"
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" \
     "$PROMOTE" promote-legacy --mode local-only --yolo off 2>&1) \
@@ -2190,6 +2236,10 @@ test_secondmate_promotion_uses_teardown_parent_resolution() {
   printf 'FMX_PAIRING_TOKEN=child-local-token\n' > "$remote_child/.env"
   fm_write_meta "$remote_child/state/promote-remote.meta" \
     "window=firstmate:fm-promote-remote" "kind=scout"
+  # A remote parent route carries no local key either, so it falls back the
+  # same way the legacy case above does.
+  pf_plan_approve "$parent" remote-mate "$remote_child" promote-remote
+  cp "$parent/config/plan-approval-key.pub" "$remote_child/config/plan-approval-key.pub"
   out=$(PATH="$remote_child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$remote_child" \
     FM_STATE_OVERRIDE="$remote_child/state" \
     "$PROMOTE" promote-remote --mode local-only --yolo off 2>&1) \

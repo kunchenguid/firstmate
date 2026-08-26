@@ -259,6 +259,7 @@ install_guard_scripts() {  # <dir>
   for script in fm-turnend-guard.sh fm-turnend-guard-grok.sh \
     fm-operational-input.sh fm-supervision-instructions.sh fm-harness.sh \
     fm-primary-scope-lib.sh fm-supervision-lib.sh fm-wake-lib.sh \
+    fm-delivery-proof-lib.sh \
     fm-hook-host-lib.sh fm-corr-abgleich.sh fm-pending-reply-lib.sh \
     fm-marker-lib.sh fm-backend.sh fm-proctree-lib.sh fm-tmux-lib.sh \
     fm-composer-lib.sh fm-cursor-lib.sh fm-classify-lib.sh fm-nm-run-lib.sh \

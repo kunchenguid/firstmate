@@ -41,6 +41,36 @@ case "${1:-}" in
       *) printf 'all quiet\n> \n' ;;
     esac
     ;;
+  list-windows)
+    # fm_backend_tmux_agent_state requires the recorded window to appear in a
+    # successful session inventory before it trusts any foreground-process
+    # read for it (bin/backends/tmux.sh); an inventory that never lists a
+    # fixture's window makes every such window read as "missing" -> "dead",
+    # which fm-crew-state.sh's agent-liveness gate (bin/fm-crew-state.sh,
+    # "process-evidence liveness") turns into a hard unknown/agent-gone
+    # verdict for ANY task whose kind isn't secondmate, regardless of its
+    # real busy-event or status-log state. Answer with every window a real
+    # spawn would hold open for this fixture tree: one per state/*.meta in
+    # this home, plus one level of registered secondmate homes (data/
+    # secondmates.md's "(home: <path>)" field) - deep enough for every
+    # fixture in this suite without hardcoding task ids.
+    fb_dir=$(cd "$(dirname "$0")" && pwd)
+    fb_home=$(cd "$fb_dir/.." && pwd)
+    list_meta_windows() {  # <home>
+      local m
+      for m in "$1"/state/*.meta; do
+        [ -e "$m" ] || continue
+        printf 'fm-%s\n' "$(basename "$m" .meta)"
+      done
+    }
+    list_meta_windows "$fb_home"
+    if [ -f "$fb_home/data/secondmates.md" ]; then
+      while IFS= read -r mate_home; do
+        [ -n "$mate_home" ] || continue
+        list_meta_windows "$mate_home"
+      done < <(sed -n 's/.*(home: \([^;)]*\).*/\1/p' "$fb_home/data/secondmates.md")
+    fi
+    ;;
 esac
 exit 0
 SH
