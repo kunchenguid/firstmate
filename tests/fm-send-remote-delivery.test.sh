@@ -37,6 +37,8 @@ set -u
 . "$ROOT/bin/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-marker-lib.sh
 . "$ROOT/bin/fm-marker-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$ROOT/bin/fm-task-inbox-lib.sh"
 
 SEND="$ROOT/bin/fm-send.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -355,7 +357,7 @@ test_remote_retry_failure_preserves_ambiguous_expectation() {
 }
 
 test_remote_fire_and_forget_never_arms_reply_recovery() {
-  local dir fb ssh_log home rhome rc count delivery
+  local dir fb ssh_log home rhome rc count delivery action
   dir="$TMP_ROOT/remote-fire-and-forget"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
   rhome=$(setup_remote_secondmate_home remote-fire-and-forget)
@@ -371,6 +373,9 @@ test_remote_fire_and_forget_never_arms_reply_recovery() {
     || fail "fire-and-forget delivery created a pending-reply expectation"
   count=$(find "$rhome/state/parent-route/rsm.inbox" -name '*.msg' | wc -l | tr -d ' ')
   [ "$count" = 1 ] || fail "the ambiguous fire-and-forget delivery did not land exactly once"
+  action=$(FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_RING_MAX=0 \
+    fm_task_inbox_due_action "$rhome/state/parent-route" rsm)
+  [ "$action" = quiet ] || fail "the remote fire-and-forget record armed inbox escalation: $action"
 
   send_env "$fb" "$home" "$ssh_log" \
     "$SEND" rsm --fire-and-forget "$delivery" "reconcile your own books" \

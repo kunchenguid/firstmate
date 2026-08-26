@@ -766,13 +766,15 @@ else
     fi
     remote_rc=0
     remote_completion_unknown=0
+    REMOTE_SEND_ARGS=("$TARGET_REMOTE_ID" "$MESSAGE")
+    [ -z "$FIRE_AND_FORGET_ID" ] || REMOTE_SEND_ARGS+=(fire-and-forget)
     "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send \
-      "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null || remote_rc=$?
+      "${REMOTE_SEND_ARGS[@]}" < /dev/null || remote_rc=$?
     if [ "$remote_rc" -eq 255 ]; then
       remote_completion_unknown=1
       remote_rc=0
       "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send \
-        "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null || remote_rc=$?
+        "${REMOTE_SEND_ARGS[@]}" < /dev/null || remote_rc=$?
     fi
     fm_lock_release "$REMOTE_META_LOCK"
     if [ "$remote_rc" -ne 0 ] && [ "$remote_completion_unknown" -eq 1 ]; then
@@ -853,9 +855,11 @@ else
       exit 1
     fi
     if [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ]; then
-      INBOX_RECORD=$(fm_task_inbox_write_idempotent "$STATE" "$INBOX_TASK_ID" "$MESSAGE") || inbox_write_rc=$?
+      INBOX_RECORD=$(fm_task_inbox_write_idempotent "$STATE" "$INBOX_TASK_ID" "$MESSAGE" \
+        "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
     else
-      INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$INBOX_TASK_ID" "$MESSAGE") || inbox_write_rc=$?
+      INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$INBOX_TASK_ID" "$MESSAGE" \
+        "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
     fi
     if [ "${inbox_write_rc:-0}" -ne 0 ]; then
       fm_lock_release "$INBOX_META_LOCK"
