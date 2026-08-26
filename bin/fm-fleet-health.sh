@@ -155,8 +155,12 @@ snapshot_shape_valid() {
     def nullable($expected): (. == null or type == $expected);
     def nullable_key($key; $expected): has($key)
       and (.[ $key ] == null or (.[ $key] | type) == $expected);
-    def task_state_valid: ["working","parked","done","blocked","paused","failed","unknown"] | index(.) != null;
-    def secondmate_state_valid: ["active_child_work","captain_decision","externally_held","no_active_work","unknown"] | index(.) != null;
+    def enum($values): . as $value | ($values | index($value)) != null;
+    def task_state_valid: enum(["working","parked","done","blocked","paused","failed","unknown"]);
+    def secondmate_state_valid: enum(["active_child_work","captain_decision","externally_held","no_active_work","unknown"]);
+    def endpoint_agent_state_valid: enum(["not_checked","not_collected","alive","dead","missing","ambiguous","unreadable","unverified"]);
+    def endpoint_agent_alive_valid: enum(["not_checked","not_collected","alive","dead","unknown"]);
+    def endpoint_probe_valid: enum(["none","local","remote","skipped"]);
     def task_valid:
       type == "object"
       and (.id | type) == "string"
@@ -168,8 +172,11 @@ snapshot_shape_valid() {
       and (.endpoint | type) == "object"
       and (.endpoint | nullable_key("exists"; "boolean"))
       and (.endpoint.agent_state | type) == "string"
+      and (.endpoint.agent_state | endpoint_agent_state_valid)
       and (.endpoint.agent_alive | type) == "string"
+      and (.endpoint.agent_alive | endpoint_agent_alive_valid)
       and (.endpoint.probe | type) == "string"
+      and (.endpoint.probe | endpoint_probe_valid)
       and (.endpoint.codex_session | type) == "object"
       and (.endpoint.codex_session | nullable_key("resume_banner"; "boolean"))
       and (.paths | type) == "object"
@@ -631,13 +638,12 @@ EVALUATED=$(jq -n \
                     "pr-poll";1)
           else empty end),
       (($listeners.records // [])[]
-        | select(.owner == "missing" or .owner == "stale" or .owner == "orphaned"
-                 or .owner == "invalid")
+        | select(.owner == "missing" or .owner == "stale" or .owner == "orphaned")
         | finding("result-listener-missing";.id;"error";"high";
                   ("process-event source has no live result listener (owner=" + .owner + ")");
                   .owner;1)),
       (($listeners.records // [])[]
-        | select(.owner == "uncertain" or .owner == "unreadable")
+        | select(.owner == "uncertain" or .owner == "unreadable" or .owner == "invalid")
         | finding("result-listener-inconclusive";.id;"notice";"inconclusive";
                   "process-event listener liveness or registration could not be established";.owner;1)),
       (if $supervision.needed == true and $supervision.available == true

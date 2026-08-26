@@ -252,11 +252,17 @@ test_snapshot_task_evidence_requires_keys_and_known_states() {
   home=$(make_home malformed-task-evidence)
   fixture=$(make_health_fixture_root malformed-task-evidence)
   snapshot='{"schema":"fm-fleet-snapshot.v1","generated":"2026-01-01T00:00:00Z","fm_home":"/tmp/home","roots":{"fm_root":"/tmp/root","state":"/tmp/state","data":"/tmp/data","config":"/tmp/config","projects":"/tmp/projects"},"backlog":{"path":"/tmp/backlog.md","present":false,"records":[]},"tasks":[{"id":"task","kind":"ship","remote":null,"current_state":{"state":"working"},"endpoint":{"agent_state":"alive","agent_alive":"alive","probe":"local","codex_session":{"resume_banner":null}},"paths":{"status_log":{"last_event":{"state":"working","handoff_required":false,"mtime_epoch":null}}},"pr":{"url":null,"source":"absent"}}],"scout_reports":[],"collection":{"state":{"present":true,"available":true,"invalid_metadata_count":0,"invalid_metadata":[]}},"main_inventory":{"valid":true,"reason":null},"secondmate_current":{"records":[],"truncated":0,"registry":{"available":true,"complete":true,"input_truncated":false,"records_truncated":false}},"secondmate_landed":{"records":[],"truncated":[],"unreadable":[],"partial":[]},"secondmate_guidance":{"note":"fixture"}}'
-  for mutation in omit-endpoint-exists invalid-state; do
+  for mutation in omit-endpoint-exists invalid-state invalid-agent-state invalid-agent-alive invalid-probe; do
     if [ "$mutation" = omit-endpoint-exists ]; then
       snapshot=$(printf '%s' "$snapshot" | jq 'del(.tasks[0].endpoint.exists)')
-    else
+    elif [ "$mutation" = invalid-state ]; then
       snapshot=$(printf '%s' "$snapshot" | jq '.tasks[0].current_state.state = "not-a-state"')
+    elif [ "$mutation" = invalid-agent-state ]; then
+      snapshot=$(printf '%s' "$snapshot" | jq '.tasks[0].endpoint.agent_state = "not-a-state"')
+    elif [ "$mutation" = invalid-agent-alive ]; then
+      snapshot=$(printf '%s' "$snapshot" | jq '.tasks[0].endpoint.agent_alive = "not-a-state"')
+    else
+      snapshot=$(printf '%s' "$snapshot" | jq '.tasks[0].endpoint.probe = "not-a-probe"')
     fi
     rc=0
     out=$(FM_HOME="$home" FM_TEST_SNAPSHOT="$snapshot" FM_FLEET_HEALTH_TIMED_WORKER=1 \
@@ -265,7 +271,7 @@ test_snapshot_task_evidence_requires_keys_and_known_states() {
     printf '%s' "$out" | jq -e '.status == "incomplete" and .reason == "fleet snapshot was malformed"' \
       >/dev/null || fail "snapshot with $mutation was accepted: $out"
   done
-  pass "snapshot task evidence requires nullable keys and known states"
+  pass "snapshot task evidence requires nullable keys and known enums"
 }
 
 test_remote_snapshot_probe_disabled_skips_remote_state() {
@@ -692,6 +698,12 @@ at=2026-08-26T12:00:00Z
 --
 unageable record
 EOF
+  cat > "$home/state/broken.inbox/003.msg" <<'EOF'
+schema=fm-task-inbox.v1
+at=xxxx-xx-xxTxx:xx:xxZ
+--
+malformed timestamp
+EOF
   fresh_autoarm_supervision "$home"
   fakebin=$(make_fakebin "$home")
   real_stat=$(command -v stat)
@@ -709,7 +721,7 @@ SH
   printf '%s' "$out" | jq -e '
     .status == "inconclusive"
       and any(.findings[]; .kind == "steering-inbox-inconclusive"
-              and .count == 2 and (.evidence | contains("are invalid")))
+              and .count == 3 and (.evidence | contains("are invalid")))
       and any(.findings[]; .kind == "steering-inbox-inconclusive"
               and .count == 1 and (.evidence | contains("could not be aged")))
       and (any(.findings[]; .kind == "steering-inbox-aged") | not)
@@ -1016,6 +1028,10 @@ test_invalid_pending_reply_is_inconclusive() {
   sed 's/^delivered_epoch=.*/delivered_epoch=not-a-number/' \
     "$home/state/pending-replies/0123012301230123" > "$home/state/pending-replies/invalid.tmp"
   mv "$home/state/pending-replies/invalid.tmp" "$home/state/pending-replies/0123012301230123"
+  write_pending "$home" 4567456745674567 owner-gap awaiting_report
+  sed 's/^parent_home=.*/parent_home=not-an-absolute-path/' \
+    "$home/state/pending-replies/4567456745674567" > "$home/state/pending-replies/owner.tmp"
+  mv "$home/state/pending-replies/owner.tmp" "$home/state/pending-replies/4567456745674567"
   fresh_autoarm_supervision "$home"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
@@ -1023,7 +1039,7 @@ test_invalid_pending_reply_is_inconclusive() {
   printf '%s' "$out" | jq -e '
     .status == "inconclusive"
       and any(.findings[]; .kind == "pending-reply-inconclusive"
-              and .subject == "pending-replies" and .count == 2)
+              and .subject == "pending-replies" and .count == 3)
       and (any(.findings[]; .kind == "pending-reply-broken") | not)
   ' >/dev/null || fail "invalid pending-reply record was hidden: $out"
   pass "invalid pending-reply records make health inconclusive"
@@ -1081,21 +1097,21 @@ EOF
   pass "inconsistent inventory and missing listeners are actionable"
 }
 
-test_invalid_procevent_registration_is_reported() {
+test_invalid_procevent_registration_is_inconclusive() {
   local home fakebin out rc=0
   home=$(make_home invalid-procevent-registration)
   mkdir -p "$home/state/procevent/broken.source"
   fresh_autoarm_supervision "$home"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
-  expect_code 1 "$rc" "structurally invalid process-event registration should be actionable"
+  expect_code 3 "$rc" "structurally invalid process-event registration should be inconclusive"
   printf '%s' "$out" | jq -e '
-    .status == "actionable"
-      and any(.findings[]; .kind == "result-listener-missing"
-              and .subject == "broken"
-              and (.evidence | contains("owner=invalid")))
-  ' >/dev/null || fail "invalid process-event registration was hidden: $out"
-  pass "invalid process-event registrations remain visible"
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "result-listener-inconclusive"
+              and .subject == "broken")
+      and (any(.findings[]; .kind == "result-listener-missing" and .subject == "broken") | not)
+  ' >/dev/null || fail "invalid process-event registration became actionable: $out"
+  pass "invalid process-event registrations remain inconclusive"
 }
 
 test_dangling_procevent_claim_root_is_inconclusive() {
@@ -1299,6 +1315,35 @@ test_malformed_supervision_pid_is_inconclusive() {
   pass "malformed watcher-lock PID remains unavailable"
 }
 
+test_incomplete_supervision_lock_is_inconclusive() {
+  local home fakebin out rc=0 watcher_pid identity
+  home=$(make_home incomplete-supervision-lock)
+  write_live_ship "$home" supervised-worker
+  fresh_autoarm_supervision "$home"
+  mkdir -p "$home/state/.watch.lock"
+  sleep 30 &
+  watcher_pid=$!
+  identity=$(fm_pid_identity "$watcher_pid") || {
+    kill "$watcher_pid" 2>/dev/null || true
+    fail "could not identify the supervision fixture process"
+  }
+  printf '%s\n' "$watcher_pid" > "$home/state/.watch.lock/pid"
+  printf '%s\n' "$ROOT/bin/fm-watch.sh" > "$home/state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$home/state/.watch.lock/pid-identity"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=persistent \
+    "$HEALTH" --json) || rc=$?
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  expect_code 3 "$rc" "incomplete watcher-lock metadata should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "supervision-inconclusive")
+      and (any(.findings[]; .kind == "supervision-unhealthy") | not)
+  ' >/dev/null || fail "incomplete supervision metadata became actionable: $out"
+  pass "incomplete watcher-lock metadata remains unavailable"
+}
+
 test_internal_worker_failure_returns_json() {
   local home fakebin out rc=0
   home=$(make_home internal-worker-failure)
@@ -1392,7 +1437,7 @@ test_pending_reply_uses_recorded_grace
 test_invalid_pending_reply_is_inconclusive
 test_dangling_pending_reply_directory_is_inconclusive
 test_inventory_and_missing_listener
-test_invalid_procevent_registration_is_reported
+test_invalid_procevent_registration_is_inconclusive
 test_dangling_procevent_claim_root_is_inconclusive
 test_dangling_procevent_registry_is_inconclusive
 test_paused_ship_still_requires_pr_listener
@@ -1402,6 +1447,7 @@ test_matching_retired_pr_listener_is_not_missing
 test_inconclusive_dominates_actionable_status
 test_unreadable_supervision_lock_is_inconclusive
 test_malformed_supervision_pid_is_inconclusive
+test_incomplete_supervision_lock_is_inconclusive
 test_internal_worker_failure_returns_json
 test_complete_timeout_covers_fingerprinting
 test_human_view_and_incomplete_exit

@@ -200,8 +200,10 @@ fm_pending_reply_record_valid() {  # <record-path>
   esac
   task=$(fm_pending_reply_get "$rec" task_id)
   case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
-  [ -n "$(fm_pending_reply_get "$rec" parent_home)" ] || return 1
-  [ -n "$(fm_pending_reply_get "$rec" parent_status)" ] || return 1
+  value=$(fm_pending_reply_get "$rec" parent_home)
+  case "$value" in /*) ;; *) return 1 ;; esac
+  value=$(fm_pending_reply_get "$rec" parent_status)
+  case "$value" in /*) ;; *) return 1 ;; esac
   phase=$(fm_pending_reply_get "$rec" phase)
   case "$phase" in
     awaiting_report|delivery_unknown|recovery_sending|recovery_sent|recovery_failed|recovery_unknown|escalated|resolved) ;;
@@ -1491,26 +1493,43 @@ fm_pending_reply_task_has_open() {  # <state-dir> <task_id>
 # Does not tick, recover, escalate, or otherwise mutate records.
 fm_pending_reply_open_json() {  # <state-dir>
   local state=$1 dir rec corr phase task_id created delivered completed recovery_completed grace
-  local now age recovery_verdict row records='[]' invalid_count=0
+  local now age recovery_verdict row records='[]' invalid_count=0 unreadable_count=0
+  local record_readable record_valid classification available=true
   dir=$(fm_pending_reply_dir "$state")
   now=$(fm_pending_reply_now)
   if [ -L "$dir" ] && [ ! -e "$dir" ]; then
-    jq -n --argjson now "$now" '{available:false,now_epoch:$now,invalid_count:0,records:[]}'
+    classification=$(fm_evidence_classify false false)
+    jq -n --argjson now "$now" --argjson available "$( [ "$classification" = available ] && printf true || printf false )" \
+      '{available:$available,now_epoch:$now,invalid_count:0,unreadable_count:0,records:[]}'
     return 0
   fi
   if [ ! -e "$dir" ]; then
-    jq -n --argjson now "$now" '{available:true,now_epoch:$now,invalid_count:0,records:[]}'
+    classification=$(fm_evidence_classify true true)
+    jq -n --argjson now "$now" --argjson available "$( [ "$classification" = available ] && printf true || printf false )" \
+      '{available:$available,now_epoch:$now,invalid_count:0,unreadable_count:0,records:[]}'
     return 0
   fi
   if [ ! -d "$dir" ] || [ ! -r "$dir" ] || [ ! -x "$dir" ]; then
-    jq -n --argjson now "$now" '{available:false,now_epoch:$now,invalid_count:0,records:[]}'
+    classification=$(fm_evidence_classify false false)
+    jq -n --argjson now "$now" --argjson available "$( [ "$classification" = available ] && printf true || printf false )" \
+      '{available:$available,now_epoch:$now,invalid_count:0,unreadable_count:0,records:[]}'
     return 0
   fi
   for rec in "$dir"/*; do
       [ -e "$rec" ] || [ -L "$rec" ] || continue
       case "$(basename "$rec")" in .*) continue ;; esac
-      if ! fm_pending_reply_record_valid "$rec"; then
-        invalid_count=$((invalid_count + 1))
+      record_readable=false
+      [ -f "$rec" ] && [ ! -L "$rec" ] && [ -r "$rec" ] && record_readable=true
+      record_valid=false
+      [ "$record_readable" = true ] && fm_pending_reply_record_valid "$rec" && record_valid=true
+      classification=$(fm_evidence_classify "$record_readable" "$record_valid")
+      if [ "$classification" != available ]; then
+        available=false
+        if [ "$record_readable" = true ]; then
+          invalid_count=$((invalid_count + 1))
+        else
+          unreadable_count=$((unreadable_count + 1))
+        fi
         continue
       fi
       corr=$(fm_pending_reply_get "$rec" corr_id)
@@ -1554,6 +1573,9 @@ fm_pending_reply_open_json() {  # <state-dir>
         }') || return 1
       records=$(jq -n --argjson records "$records" --argjson row "$row" '$records + [$row]') || return 1
   done
-  jq -n --argjson now "$now" --argjson invalid "$invalid_count" --argjson records "$records" \
-    '{available:true,now_epoch:$now,invalid_count:$invalid,records:$records}'
+  classification=$(fm_evidence_classify "$available" true)
+  jq -n --argjson now "$now" \
+    --argjson available "$( [ "$classification" = available ] && printf true || printf false )" \
+    --argjson invalid "$invalid_count" --argjson unreadable "$unreadable_count" --argjson records "$records" \
+    '{available:$available,now_epoch:$now,invalid_count:$invalid,unreadable_count:$unreadable,records:$records}'
 }

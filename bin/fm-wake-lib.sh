@@ -9,6 +9,10 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
+_FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_WAKE_LIB_DIR="."
+# shellcheck source=bin/fm-classify-lib.sh
+# shellcheck disable=SC1091
+. "$_FM_WAKE_LIB_DIR/fm-classify-lib.sh"
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
@@ -128,22 +132,56 @@ fm_watcher_healthy() {
 }
 
 fm_watcher_lock_evidence_unreadable() {  # <state> <watch-path> [home]
-  local state=$1 watch_path=$2 home=${3:-$FM_HOME} lockdir file pid
+  local state=$1 watch_path=$2 home=${3:-$FM_HOME} lockdir file pid value classification
   lockdir="$state/.watch.lock"
   [ -e "$lockdir" ] || [ -L "$lockdir" ] || return 1
-  [ -d "$lockdir" ] && [ -r "$lockdir" ] && [ -x "$lockdir" ] || return 0
+  if ! [ -d "$lockdir" ] || ! [ -r "$lockdir" ] || ! [ -x "$lockdir" ]; then
+    classification=$(fm_evidence_classify false false)
+    [ "$classification" = inconclusive ] && return 0
+  fi
   [ -e "$lockdir/pid" ] || [ -L "$lockdir/pid" ] || return 1
-  [ -f "$lockdir/pid" ] && [ ! -L "$lockdir/pid" ] && [ -r "$lockdir/pid" ] || return 0
-  pid=$(cat "$lockdir/pid" 2>/dev/null) || return 0
-  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  if ! [ -f "$lockdir/pid" ] || [ -L "$lockdir/pid" ] || ! [ -r "$lockdir/pid" ]; then
+    classification=$(fm_evidence_classify false false)
+    [ "$classification" = inconclusive ] && return 0
+  fi
+  if ! pid=$(cat "$lockdir/pid" 2>/dev/null); then
+    classification=$(fm_evidence_classify false false)
+    [ "$classification" = inconclusive ] && return 0
+  fi
+  case "$pid" in
+    ''|*[!0-9]*)
+      classification=$(fm_evidence_classify false false)
+      [ "$classification" = inconclusive ] && return 0
+      ;;
+  esac
   fm_pid_alive "$pid" || return 1
   for file in fm-home watcher-path pid-identity; do
-    if [ -e "$lockdir/$file" ] || [ -L "$lockdir/$file" ]; then
-      [ -f "$lockdir/$file" ] && [ ! -L "$lockdir/$file" ] && [ -r "$lockdir/$file" ] || return 0
+    if [ ! -e "$lockdir/$file" ] && [ ! -L "$lockdir/$file" ]; then
+      classification=$(fm_evidence_classify false false)
+      [ "$classification" = inconclusive ] && return 0
     fi
+    if ! [ -f "$lockdir/$file" ] || [ -L "$lockdir/$file" ] || ! [ -r "$lockdir/$file" ]; then
+      classification=$(fm_evidence_classify false false)
+      [ "$classification" = inconclusive ] && return 0
+    fi
+    if ! value=$(cat "$lockdir/$file" 2>/dev/null); then
+      classification=$(fm_evidence_classify false false)
+      [ "$classification" = inconclusive ] && return 0
+    fi
+    case "$value" in
+      ''|*$'\n'*)
+        classification=$(fm_evidence_classify false false)
+        [ "$classification" = inconclusive ] && return 0
+        ;;
+    esac
   done
+  classification=$(fm_evidence_classify true true)
+  [ "$classification" = available ] || return 0
   fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" && return 1
-  fm_pid_identity "$pid" >/dev/null 2>&1 || { fm_pid_alive "$pid" && return 0; }
+  if ! fm_pid_identity "$pid" >/dev/null 2>&1; then
+    classification=$(fm_evidence_classify false false)
+    [ "$classification" = inconclusive ] && { fm_pid_alive "$pid" && return 0; }
+  fi
   return 1
 }
 
