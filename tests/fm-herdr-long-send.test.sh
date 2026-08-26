@@ -33,6 +33,8 @@ run() {
 out=$(run "$long")
 [ "$out" = empty ] || { echo "long send was not confirmed: $out" >&2; exit 1; }
 grep -F 'agent prompt w1:p2' "$FM_FAKE_HERDR_LOG" >/dev/null
+grep -F '[fm-from-firstmate]' "$FM_FAKE_HERDR_LOG" >/dev/null
+grep -F $'\u2063' "$FM_FAKE_HERDR_LOG" >/dev/null
 grep -F 'TAIL' "$FM_FAKE_HERDR_LOG" >/dev/null
 ! grep -F 'pane send-text' "$FM_FAKE_HERDR_LOG" >/dev/null
 

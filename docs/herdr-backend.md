@@ -207,9 +207,10 @@ Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the envir
 An environment variable alone is not reliable when another Herdr server is running.
 
 Literal text and Enter are separate operations on `fm-send.sh`'s typed plane; ordinary local text steers instead use the durable steering inbox and send only its best-effort constant doorbell through this adapter.
-Typed Herdr messages larger than 800 bytes use the atomic `agent prompt` operation on protocol 19 or newer, which submits the complete text and Enter together.
+Typed Herdr messages larger than 200 bytes use the atomic `agent prompt` operation on protocol 19 or newer, which submits the complete text and Enter together.
 On older or unreadable Herdr releases, a long typed message fails closed before any text is inserted rather than risking silent prefix loss.
 The adapter submit function is the authoritative transport boundary for both secondmate and ordinary explicit-target typed sends, while durable inbox sends remain lossless and unchanged.
+The unsubmitted literal-send primitive used by spawn-time commands, such as the crewmate and secondmate launch line, fails closed over the same byte threshold instead of risking the same silent prefix loss, since it has no atomic unsubmitted equivalent to fall back to.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
 Enter, Escape, and Ctrl-C are supported.
 Typed-plane slash input, and dollar-prefixed skill input for Codex, uses the shared harness-aware settle before the first Enter so a completion popup cannot consume it.

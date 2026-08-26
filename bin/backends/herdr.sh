@@ -121,7 +121,13 @@ FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION=0.8.0
 # terminal composer can lose the head of a large literal PTY paste, while the
 # agent-prompt API submits the text as one bracketed-paste operation.
 FM_BACKEND_HERDR_MIN_AGENT_PROMPT_PROTOCOL=19
-FM_BACKEND_HERDR_LONG_TEXT_BYTES=800
+# Live verification only reproduced the legacy path as safe for a short
+# (~43-byte) marker-bearing message and confirmed the atomic route for
+# 2,000+ bytes; the true onset of head/marker loss between those points is
+# unproven. Kept deliberately far below the smallest untested point so the
+# legacy literal route is only ever used for messages close in size to what
+# was actually verified safe.
+FM_BACKEND_HERDR_LONG_TEXT_BYTES=200
 # One-warning-per-release dedupe marker prefix, under the state dir. The
 # projection decision is remade on every spawn, so an undeduplicated
 # below-floor warning would repeat on every crewmate; the key is the detected
@@ -2548,8 +2554,20 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
 # caller sends Enter separately. Mirrors tmux's `send-keys -t T -l text`.
 # Verified: `pane send-text` does NOT auto-submit (contrary to the addendum's
 # original guess); it behaves exactly like tmux's `-l` literal send.
+#
+# Long text fails closed here rather than falling back to the atomic
+# agent-prompt route: that route submits as part of the call, which would
+# break this function's unsubmitted contract, and it targets a running
+# agent's composer - not available for pre-launch shell sends (e.g. the
+# spawn LAUNCH command), which is this primitive's only long-text caller.
 fm_backend_herdr_send_literal() {  # <target> <text>
+  local text_bytes
   fm_backend_herdr_target_ready "$1" || return 1
+  text_bytes=$(LC_ALL=C printf '%s' "$2" | wc -c | tr -d '[:space:]')
+  if [ "$text_bytes" -gt "$FM_BACKEND_HERDR_LONG_TEXT_BYTES" ]; then
+    echo "error: refusing unsafe Herdr literal send (${text_bytes} bytes); Herdr's PTY paste can silently drop the head of long input and no atomic unsubmitted primitive exists" >&2
+    return 1
+  fi
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
 }
 
@@ -2816,6 +2834,11 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   local text_bytes agent_prompt_capable
   local raw_status footer_baseline='' allow_rendered=0 enter_sent=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  # fm_backend_herdr_send_literal below auto-starts the server via
+  # fm_backend_herdr_target_ready; the atomic agent-prompt branch calls
+  # fm_backend_herdr_cli directly instead, which has no bootstrap logic of
+  # its own, so ensure the server here for both branches alike.
+  fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" || { printf 'send-failed'; return 0; }
 
   # Herdr's literal PTY route is unsafe for large composer pastes: a Claude
   # terminal can accept the tail while dropping the marker and leading text.
