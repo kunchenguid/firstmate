@@ -392,6 +392,33 @@ The locked bootstrap inheritance pass uses the same placement-specific behavior;
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 
+## Scheduled review sweep supervisor
+
+[`bin/fm-review-sweep-supervisor.sh`](../bin/fm-review-sweep-supervisor.sh) installs an Aqua-scoped macOS LaunchAgent for a privately configured `/nt-review-sweep` skill.
+It runs review cycles in an isolated Firstmate home, so an attended captain session and the scheduled job never contend for the same home lock, backlog, task metadata, or project clones.
+The installer synchronizes captain context and declared inherited configuration from the selected source home, provisions independent registered-project clones, persists an exact host-job write-authorization contract, and retains cycle results outside the source checkout.
+
+Install the job from the source Firstmate home:
+
+```sh
+bin/fm-review-sweep-supervisor.sh install --source-home "$PWD"
+```
+
+The installed default is 07:00 through 17:00 America/Chicago at 30-minute boundaries, with 17:00 as the final daily slot and at most ten concurrent independent reviews.
+The LaunchAgent wakes once per minute, while a durable slot ledger ensures that the review cycle itself runs only once per due half-hour slot.
+A wake after sleep or reboot runs only the newest missed slot from the current Chicago calendar day, so it catches up without replaying a queue of stale sweeps.
+A single owner lock excludes overlap between launchd and manual runs, failed cycles wait five minutes before retry, and an abandoned running slot resumes under the same slot identity.
+
+Each cycle starts a fresh non-interactive Codex process in the isolated home and invokes the installed skill.
+The skill remains the owner of live Jira pagination, GitHub discovery, watermark checks, review content, comment publication, own-comment minimization, and the exact Slack author notification.
+The supervisor accepts success only when no task metadata remains and the cycle writes a valid receipt binding every reviewed PR to its exact head, direct GitHub comment URL, and either a direct Slack message URL or a unique-match skip reason.
+The runtime is bounded to three hours by default, after which the slot is failed and becomes eligible for its normal retry.
+
+Use `bin/fm-review-sweep-supervisor.sh status` to verify the loaded LaunchAgent, schedule, current owner, last successful slot, and isolated-home task count.
+Use `bin/fm-review-sweep-supervisor.sh run-now` for an immediate cycle through the same lock and receipt gates.
+Use `bin/fm-review-sweep-supervisor.sh uninstall` to boot out the LaunchAgent and remove its property list while retaining private configuration, reports, receipts, logs, and the isolated home for recovery.
+The script header and `--help` output own exact private paths, commands, configuration keys, state transitions, and test overrides.
+
 ## Watched tool updates (config/watched-tools.json)
 
 `config/watched-tools.json` is an optional local, gitignored list of the tools this home depends on.
