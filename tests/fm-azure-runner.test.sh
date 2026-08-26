@@ -434,7 +434,7 @@ path,ancestor,head=sys.argv[1:]
 with open(path,"w",encoding="utf-8") as handle:
     json.dump({"repository":{"source_mode":"private-exact-bundle","commit":head,"source_ancestors":[ancestor]}},handle)
 PY
-  for mode in private-parent-bundle private-exact-bundle; do
+  for mode in private-parent-bundle private-exact-bundle private-direct-bundle; do
     python3 - "$request" "$mode" <<'PY'
 import json,sys
 path,mode=sys.argv[1:]
@@ -457,7 +457,7 @@ PY
   if python3 "$EXECUTOR" --verify-private-source-ancestors "$request" "$clone" >/dev/null 2>&1; then
     fail "private snapshot ancestor verification accepted a descendant"
   fi
-  pass "private bundle modes verify ancestors locally without contacting origin"
+  pass "all private bundle modes verify ancestors locally without contacting origin"
 }
 
 agent_fleet_offline_install_contract() {

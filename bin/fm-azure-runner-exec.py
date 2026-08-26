@@ -20,7 +20,7 @@ import time
 
 
 RESULT_SCHEMA = "fm.azure-command-result/v1"
-PRIVATE_SOURCE_MODES = ("private-parent-bundle", "private-exact-bundle")
+PRIVATE_SOURCE_MODES = ("private-parent-bundle", "private-exact-bundle", "private-direct-bundle")
 
 
 def fail(message):
