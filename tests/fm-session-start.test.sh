@@ -743,6 +743,63 @@ EOF
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
 }
 
+# --- context digest: brain-axi recall layer (adoption change 2) -------------
+# brain-axi is an OPTIONAL recall layer over the curated files. When it is
+# available its output is ADDED beneath the curated bodies, never replacing them
+# (brain-axi v1 context_pack carries titles + facts, not page bodies, so a
+# replacement would silently drop the captain-preference prose). When it errors
+# or is absent the digest falls back to the curated bodies alone and session
+# start never breaks - the load-bearing invariant.
+test_context_digest_brain_recall_layer() {
+  local rec root home fakebin store out
+  rec=$(new_world context-brain)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  printf 'Captain prefers proposal-first Vietnamese discussion.\n' > "$home/data/captain.md"
+  store="$home/brainstore"; mkdir -p "$store"
+
+  # A brain-axi that answers the two read verbs with recognizable output.
+  cat > "$fakebin/brain-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  context_pack) echo 'PACK: ## Captain preferences (captain)' ;;
+  delta)        echo 'DELTA: {"first_wake":true}' ;;
+  *) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/brain-axi"
+
+  out=$(BRAIN_STORE="$store" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  # The curated captain body is never lost.
+  assert_contains "$out" "Captain prefers proposal-first Vietnamese discussion." \
+    "brain recall must not replace the curated captain.md body"
+  # The recall layer appears with both verbs' output.
+  assert_contains "$out" "Memory recall (brain-axi)" "brain recall subsection missing when brain-axi is available"
+  assert_contains "$out" "PACK: ## Captain preferences (captain)" "context_pack output missing from recall layer"
+  assert_contains "$out" "DELTA:" "delta output missing from recall layer"
+
+  # Fail-open: a brain-axi that errors on both verbs yields NO recall subsection,
+  # yet the curated body still prints and session start still completes.
+  cat > "$fakebin/brain-axi" <<'SH'
+#!/usr/bin/env bash
+echo '{"error":"boom"}'; exit 1
+SH
+  chmod +x "$fakebin/brain-axi"
+  out=$(BRAIN_STORE="$store" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "Captain prefers proposal-first Vietnamese discussion." \
+    "a failing brain-axi must not drop the curated captain.md body"
+  assert_not_contains "$out" "Memory recall (brain-axi)" \
+    "a failing brain-axi must not emit an empty recall subsection"
+
+  pass "brain-axi recall layer augments the curated files and fails open in the digest"
+}
+
 # --- lock refusal: read-only path --------------------------------------------
 
 test_lock_refusal_read_only_path() {
@@ -2517,6 +2574,7 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_context_digest_brain_recall_layer
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock

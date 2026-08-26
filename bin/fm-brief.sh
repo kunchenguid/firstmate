@@ -97,6 +97,8 @@ esac
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-brain-lib.sh
+. "$SCRIPT_DIR/fm-brain-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 
 resolve_directory_input() {
@@ -244,6 +246,19 @@ When a terminal message says an instruction is waiting there - and at any natura
 The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
 EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
+
+# Fleet-memory section (brain-axi). Seed this home's store path into every
+# generated crewmate brief so a crewmate uses the exact same store any external
+# session uses, not a private path (design change 4). fm_brain_store resolves the
+# path with no dependency on brain-axi being installed; the crewmate checks
+# availability itself, so the section is safe to emit even where brain-axi is
+# absent. A secondmate charter does not carry it (it is not a delivery brief).
+BRAIN_STORE_PATH=$(fm_brain_store)
+BRAIN_SECTION="# Fleet memory (brain-axi)
+This home shares a brain-axi knowledge store. Use the SAME store any external session uses - do not invent a private path:
+   export BRAIN_STORE=$(shell_quote "$BRAIN_STORE_PATH")
+Recall with \`brain-axi recall --query \"...\"\`, and record a durable decision or learning with \`brain-axi remember \"<fact>\" --provenance \"<source>\"\`.
+brain-axi is an OPTIONAL layer: if it is not on PATH, skip it - nothing in your task depends on it."
 
 # emit_soft_playbook: print the worker SOFT playbook that splices into a brief
 # (story fmops-07 §2; architecture.md §7). The HARD skeleton names no skill;
@@ -460,6 +475,8 @@ Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-li
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 
+$BRAIN_SECTION
+
 $SOFT_PLAYBOOK
 EOF
 echo "scaffolded: $BRIEF (scout; replace {TASK})"
@@ -631,6 +648,8 @@ Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+
+$BRAIN_SECTION
 
 $DOD
 

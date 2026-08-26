@@ -435,6 +435,38 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# Adoption change 4: every generated crewmate brief (ship + scout) seeds this
+# home's brain-axi store path so a crewmate uses the same store an external
+# session uses. A secondmate charter is not a delivery brief and must NOT carry
+# it.
+test_brain_store_is_seeded_into_crewmate_briefs() {
+  local home ship scout secondmate
+  home="$TMP_ROOT/brain-seed-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" BRAIN_STORE="/custom/fleet/store" \
+    "$ROOT/bin/fm-brief.sh" brain-ship some-proj --mode local-only >/dev/null 2>&1
+  ship="$home/data/brain-ship/brief.md"
+  assert_grep "# Fleet memory (brain-axi)" "$ship" "ship brief lost the fleet-memory section"
+  assert_grep "export BRAIN_STORE='/custom/fleet/store'" "$ship" \
+    "ship brief did not seed the resolved store path"
+  assert_grep "brain-axi is an OPTIONAL layer" "$ship" \
+    "ship brief lost the optional-dependency note"
+
+  FM_HOME="$home" BRAIN_STORE="/custom/fleet/store" \
+    "$ROOT/bin/fm-brief.sh" brain-scout some-proj --scout >/dev/null 2>&1
+  scout="$home/data/brain-scout/brief.md"
+  assert_grep "# Fleet memory (brain-axi)" "$scout" "scout brief lost the fleet-memory section"
+  assert_grep "export BRAIN_STORE='/custom/fleet/store'" "$scout" \
+    "scout brief did not seed the resolved store path"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='run the payments domain' \
+    "$ROOT/bin/fm-brief.sh" brain-sm --secondmate proj1 >/dev/null 2>&1
+  secondmate="$home/data/brain-sm/brief.md"
+  assert_no_grep "Fleet memory (brain-axi)" "$secondmate" \
+    "secondmate charter must not carry the crewmate fleet-memory section"
+  pass "fm-brief.sh: brain-axi store seeded into ship+scout briefs, absent from secondmate charter"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -827,6 +859,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_brain_store_is_seeded_into_crewmate_briefs
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

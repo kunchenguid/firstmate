@@ -390,6 +390,47 @@ print_file_or_absent() {
   fi
 }
 
+# print_home_memory: emit this home's curated memory for the context digest.
+# The three curated files (captain.md, captain-shared.md, learnings.md) are the
+# brain-axi store's SOURCES and are read IN PLACE, so their full bodies always
+# print - the startup-memory budget contract, the ABSENT-file semantics, and the
+# captain-preference prose are preserved exactly. When brain-axi is available it
+# ADDS a recall layer on top: context_pack --pinned (the always-loaded
+# facts/commitments recalled over the pages marked `pinned: true`) and delta
+# (what memory changed since the previous session start, keyed by a stable
+# per-home cursor). brain-axi absent, its store missing, or any brain-axi error
+# simply omits the recall layer - session start never breaks.
+# The bodies are ADDED to, never REPLACED by, context_pack for a concrete
+# reason: in brain-axi v1 context_pack returns page titles + remembered facts,
+# NOT page bodies, so replacing the raw load would silently drop the
+# captain-preference prose the whole digest exists to carry.
+print_home_memory() {
+  print_file_or_absent "$DATA/captain.md" "data/captain.md"
+  print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
+  print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+
+  # shellcheck source=bin/fm-brain-lib.sh
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/fm-brain-lib.sh"
+  fm_brain_available || return 0
+
+  local store budget pack delta
+  store=$(fm_brain_store)
+  budget=$(FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-startup-memory-budget.sh" read 2>/dev/null) || budget=7500
+  case "$budget" in ''|*[!0-9]*) budget=7500 ;; esac
+
+  pack=$(brain-axi context_pack --pinned --budget-tokens "$budget" --store "$store" 2>/dev/null) || pack=
+  delta=$(brain-axi delta --agent firstmate --session "$(basename "$FM_HOME")" --store "$store" 2>/dev/null) || delta=
+
+  [ -n "$pack$delta" ] || return 0
+  subsection "Memory recall (brain-axi)"
+  printf 'Recall over the pinned always-loaded pages plus what changed since the last session start.\n'
+  printf 'The curated files above remain the source of truth; this is the accumulated fact/commitment layer.\n'
+  [ -z "$pack" ] || { printf '\ncontext_pack --pinned (--budget-tokens %s):\n%s\n' "$budget" "$pack"; }
+  [ -z "$delta" ] || { printf '\ndelta (since last session start):\n%s\n' "$delta"; }
+}
+
 # print_firstmate_playbook: emit the firstmate SOFT dispatch grammar
 # (story fmops-07 §2, §7b; architecture.md §11). Source is swappable: a
 # per-home config/firstmate-playbook.md override wins wholesale, else the fleet
@@ -949,9 +990,7 @@ stage context
 section "CONTEXT"
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
-print_file_or_absent "$DATA/captain.md" "data/captain.md"
-print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
-print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+print_home_memory
 print_firstmate_playbook
 
 # --- 9. closing reminder -----------------------------------------------

@@ -2,14 +2,18 @@
 # tests/fm-remember.test.sh - guard behavior of bin/fm-remember.sh, the
 # best-effort fleet-memory push wired into decision-hold and /stow (memval-04).
 #
-# fm-remember.sh is a side-effect that must NEVER block or fail its caller. The
-# cases here drive the REAL script over a fake per-home memory CLI and assert:
-#   - absent CLI (home has no memory wiring) -> no call, no output, exit 0;
-#   - present CLI -> the decision text reaches the CLI verbatim;
-#   - a slow/hung CLI is bounded by FM_REMEMBER_TIMEOUT and still exits 0;
-#   - empty text -> no call, exit 0;
-#   - node missing -> no call, exit 0.
-# The write path itself (memhub-remember.mjs) is memval-03's and is not retested.
+# fm-remember.sh is a side-effect that must NEVER block or fail its caller. Its
+# write path is now `brain-axi remember`. The cases here drive the REAL script
+# over a fake brain-axi and assert the load-bearing fail-open invariant in both
+# directions:
+#   - brain-axi absent (memory not wired for this home) -> no call, no output, exit 0;
+#   - brain-axi present -> the decision text reaches the binary verbatim, with
+#     mandatory provenance;
+#   - a brain-axi that ERRORS (exit 1) is swallowed -> exit 0;
+#   - a slow/hung brain-axi is bounded by FM_REMEMBER_TIMEOUT and still exits 0;
+#   - empty text -> no call, exit 0.
+# The write path itself (brain-axi) is brain-axi's own test surface and is not
+# retested here.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -17,91 +21,108 @@ set -u
 
 REMEMBER="$ROOT/bin/fm-remember.sh"
 TMP_ROOT=$(fm_test_tmproot fm-remember-tests)
+BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 
-# Build a fake home whose memory CLI records each decision text (one per line)
-# to <home>/config/memory/recorded, so a test can assert what reached the CLI.
-# <mode> shapes the stub: "record" writes and exits 0; "hang" never returns.
-make_home() {  # <name> <mode>
-  local name=$1 mode=$2 home mjs
-  home="$TMP_ROOT/$name"
-  mjs="$home/config/memory/memhub-remember.mjs"
-  mkdir -p "$home/config/memory"
+# Build a fakebin whose `brain-axi` records the remembered fact (one per line) to
+# <dir>/recorded, so a test can assert what reached the binary. <mode> shapes the
+# stub: "record" writes and exits 0; "fail" prints an error JSON and exits 1;
+# "hang" never returns.
+make_fake_brain() {  # <dir> <mode>
+  local dir=$1 mode=$2 fakebin
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
   case "$mode" in
     record)
-      cat > "$mjs" <<'JS'
-import { appendFileSync } from "node:fs";
-appendFileSync(new URL("./recorded", import.meta.url), process.argv[2] + "\n");
-JS
+      cat > "$fakebin/brain-axi" <<SH
+#!/usr/bin/env bash
+# args: remember <fact> --provenance <p> --store <s>
+[ "\${1:-}" = remember ] || exit 0
+printf '%s\n' "\${2:-}" >> "$dir/recorded"
+exit 0
+SH
+      ;;
+    fail)
+      cat > "$fakebin/brain-axi" <<'SH'
+#!/usr/bin/env bash
+echo '{"protocol_version":1,"error":"internal","message":"boom","suggestion":"x"}'
+exit 1
+SH
       ;;
     hang)
-      cat > "$mjs" <<'JS'
-setInterval(() => {}, 1000); // never exits on its own
-JS
+      cat > "$fakebin/brain-axi" <<'SH'
+#!/usr/bin/env bash
+sleep 3600
+SH
       ;;
   esac
-  printf '%s\n' "$home"
+  chmod +x "$fakebin/brain-axi"
+  printf '%s\n' "$fakebin"
 }
 
-test_absent_cli_does_nothing() {
-  local home="$TMP_ROOT/no-memory" out rc
-  mkdir -p "$home"                        # a home with NO config/memory/
-  out=$(FM_HOME="$home" "$REMEMBER" "chose X over Y because Z" 2>&1); rc=$?
-  expect_code 0 "$rc" "absent CLI must exit 0"
-  [ -z "$out" ] || fail "absent CLI must emit nothing, got: $out"
-  pass "absent memory CLI: no call, no output, exit 0"
+test_absent_binary_does_nothing() {
+  local out rc
+  # A PATH with coreutils but NO brain-axi: the wrapper returns before it sources
+  # anything, so it must be a pure exit-0 no-op.
+  out=$(PATH="$BASE_PATH" BRAIN_STORE="$TMP_ROOT/store" "$REMEMBER" "chose X over Y because Z" 2>&1); rc=$?
+  expect_code 0 "$rc" "absent brain-axi must exit 0"
+  [ -z "$out" ] || fail "absent brain-axi must emit nothing, got: $out"
+  pass "absent brain-axi: no call, no output, exit 0"
 }
 
-test_present_cli_receives_text() {
-  local home out rc recorded
-  home=$(make_home wired record)
-  out=$(FM_HOME="$home" "$REMEMBER" "chose SQLite over Postgres for the seed" 2>&1); rc=$?
-  expect_code 0 "$rc" "present CLI call must exit 0"
-  [ -z "$out" ] || fail "present CLI must not print to the caller, got: $out"
-  recorded="$home/config/memory/recorded"
-  assert_present "$recorded" "wired CLI should have recorded the decision"
-  assert_grep "chose SQLite over Postgres for the seed" "$recorded" \
-    "the decision text must reach the CLI verbatim"
-  pass "wired memory CLI receives the decision text verbatim"
+test_present_binary_receives_text() {
+  local dir fakebin out rc
+  dir="$TMP_ROOT/wired"; mkdir -p "$dir"
+  fakebin=$(make_fake_brain "$dir" record)
+  out=$(PATH="$fakebin:$BASE_PATH" BRAIN_STORE="$dir/store" "$REMEMBER" \
+    "chose SQLite over Postgres for the seed" 2>&1); rc=$?
+  expect_code 0 "$rc" "present brain-axi call must exit 0"
+  [ -z "$out" ] || fail "present brain-axi must not print to the caller, got: $out"
+  assert_present "$dir/recorded" "wired brain-axi should have recorded the decision"
+  assert_grep "chose SQLite over Postgres for the seed" "$dir/recorded" \
+    "the decision text must reach brain-axi verbatim"
+  pass "wired brain-axi receives the decision text verbatim"
 }
 
-test_slow_cli_is_bounded() {
-  local home rc start end elapsed
-  home=$(make_home slow hang)
+test_failing_binary_is_swallowed() {
+  local dir fakebin out rc
+  dir="$TMP_ROOT/failing"; mkdir -p "$dir"
+  fakebin=$(make_fake_brain "$dir" fail)
+  out=$(PATH="$fakebin:$BASE_PATH" BRAIN_STORE="$dir/store" "$REMEMBER" \
+    "a decision brain-axi rejects" 2>&1); rc=$?
+  expect_code 0 "$rc" "a brain-axi that exits 1 must still exit 0 (fail open)"
+  [ -z "$out" ] || fail "a failing brain-axi must not leak output, got: $out"
+  pass "failing brain-axi (exit 1) is swallowed and still exits 0"
+}
+
+test_slow_binary_is_bounded() {
+  local dir fakebin rc start end elapsed
+  dir="$TMP_ROOT/slow"; mkdir -p "$dir"
+  fakebin=$(make_fake_brain "$dir" hang)
   start=$(date +%s)
-  FM_HOME="$home" FM_REMEMBER_TIMEOUT=1 "$REMEMBER" "a decision the hub cannot ack" >/dev/null 2>&1
+  PATH="$fakebin:$BASE_PATH" BRAIN_STORE="$dir/store" FM_REMEMBER_TIMEOUT=1 \
+    "$REMEMBER" "a decision the store cannot ack" >/dev/null 2>&1
   rc=$?
   end=$(date +%s)
   elapsed=$((end - start))
-  expect_code 0 "$rc" "a hung CLI must still exit 0 (fail open)"
+  expect_code 0 "$rc" "a hung brain-axi must still exit 0 (fail open)"
   [ "$elapsed" -lt 8 ] \
-    || fail "a hung CLI must be bounded by the timeout, took ${elapsed}s"
-  pass "slow/hung CLI is bounded and still exits 0"
+    || fail "a hung brain-axi must be bounded by the timeout, took ${elapsed}s"
+  pass "slow/hung brain-axi is bounded and still exits 0"
 }
 
 test_empty_text_is_a_noop() {
-  local home out rc
-  home=$(make_home empty record)
-  out=$(FM_HOME="$home" "$REMEMBER" "" 2>&1); rc=$?
+  local dir fakebin out rc
+  dir="$TMP_ROOT/empty"; mkdir -p "$dir"
+  fakebin=$(make_fake_brain "$dir" record)
+  out=$(PATH="$fakebin:$BASE_PATH" BRAIN_STORE="$dir/store" "$REMEMBER" "" 2>&1); rc=$?
   expect_code 0 "$rc" "empty text must exit 0"
   [ -z "$out" ] || fail "empty text must emit nothing, got: $out"
-  assert_absent "$home/config/memory/recorded" "empty text must not invoke the CLI"
+  assert_absent "$dir/recorded" "empty text must not invoke brain-axi"
   pass "empty decision text: no call, exit 0"
 }
 
-test_node_missing_does_nothing() {
-  local home out rc
-  home=$(make_home nonode record)
-  # A PATH without node (nvm's node is not under /usr/bin or /bin) still has the
-  # coreutils fm-remember.sh needs before its node check.
-  out=$(PATH=/usr/bin:/bin FM_HOME="$home" "$REMEMBER" "a decision with no node" 2>&1); rc=$?
-  expect_code 0 "$rc" "missing node must exit 0"
-  [ -z "$out" ] || fail "missing node must emit nothing, got: $out"
-  assert_absent "$home/config/memory/recorded" "missing node must not invoke the CLI"
-  pass "node missing: no call, exit 0"
-}
-
-test_absent_cli_does_nothing
-test_present_cli_receives_text
-test_slow_cli_is_bounded
+test_absent_binary_does_nothing
+test_present_binary_receives_text
+test_failing_binary_is_swallowed
+test_slow_binary_is_bounded
 test_empty_text_is_a_noop
-test_node_missing_does_nothing
