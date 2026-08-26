@@ -227,11 +227,149 @@ test_unresolved_remote_default_refuses_pool() {
   pass "an unresolved remote default branch refuses the pooled worktree"
 }
 
+# A slot left on a stale submodule pin is the field failure this diagnosis exists
+# for: the previous refresh moved the superproject and left the submodule behind,
+# so the refusal fires a spawn later, on a slot whose own `git status` looks clean
+# to the operator. Nothing here is converged - the gate only has to say why.
+make_submodule_case() {  # <name> <id>
+  local name=$1 id=$2 case_dir home project origin pool publisher fakebin sub subpin1 subpin2 advanced
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  origin="$case_dir/origin.git"
+  pool="$case_dir/pool"
+  publisher="$case_dir/publisher"
+  sub="$case_dir/sub-origin"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b main "$sub"
+  printf 'pin one\n' > "$sub/lib.txt"
+  git -C "$sub" add lib.txt
+  git -C "$sub" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm sub-one
+  subpin1=$(git -C "$sub" rev-parse HEAD)
+  printf 'pin two\n' > "$sub/lib.txt"
+  git -C "$sub" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qam sub-two
+  subpin2=$(git -C "$sub" rev-parse HEAD)
+  git -C "$sub" checkout --quiet "$subpin1"
+
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c protocol.file.allow=always -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    submodule --quiet add "file://$sub" ui
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  git clone --quiet --bare "$project" "$origin"
+  git -C "$project" remote add origin "file://$origin"
+  git -C "$project" worktree add --quiet --detach "$pool" HEAD
+  git -C "$pool" -c protocol.file.allow=always submodule --quiet update --init
+
+  # Advance origin and move the submodule pin, exactly as the field incident did.
+  git clone --quiet "file://$origin" "$publisher"
+  git -C "$publisher" -c protocol.file.allow=always submodule --quiet update --init
+  git -C "$publisher/ui" checkout --quiet "$subpin2"
+  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qam advance-pin
+  git -C "$publisher" push --quiet origin main
+  advanced=$(git -C "$publisher" rev-parse HEAD)
+
+  # Reproduce the residue a previous spawn left: superproject moved, submodule not.
+  git -C "$pool" fetch --quiet origin
+  git -C "$pool" reset --hard --quiet "$advanced" >/dev/null
+
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$subpin1|$subpin2"
+}
+
+read_submodule_case() {
+  IFS='|' read -r CASE_DIR HOME_DIR PROJECT_DIR POOL_DIR FAKEBIN_DIR SUBPIN1 SUBPIN2 <<EOF
+$1
+EOF
+}
+
+test_stale_submodule_pin_explains_itself() {
+  local rec id out status before before_sub
+  id='pool-stale-pin-r7'
+  rec=$(make_submodule_case stale-pin "$id")
+  read_submodule_case "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  before_sub=$(git -C "$POOL_DIR/ui" rev-parse HEAD)
+  [ "$before_sub" = "$SUBPIN1" ] || fail "fixture did not leave the submodule on the old pin"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched from a slot carrying a stale submodule pin"
+  assert_contains "$out" "stale submodule checkout" \
+    "refusal did not name the cause as a stale submodule checkout"
+  assert_contains "$out" "submodule 'ui'" "refusal did not name the submodule"
+  assert_contains "$out" "$SUBPIN1" "refusal did not report the pin the slot actually has"
+  assert_contains "$out" "$SUBPIN2" "refusal did not report the pin the base records"
+  assert_contains "$out" "submodule update --checkout" "refusal did not print the command that clears it"
+  assert_not_contains "$out" "refusing to discard uncommitted work" \
+    "a stale pin was misreported as uncommitted work"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD while refusing a stale submodule pin"
+  [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$before_sub" ] \
+    || fail "spawn converged the submodule; this gate must never touch the slot"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed stale-pin refusal: %s\n' "$(printf '%s\n' "$out" | grep 'submodule' | head -n 1)"
+  fi
+  pass "a stale submodule pin is refused with the submodule, both pins, and the remedy named"
+}
+
+test_work_inside_submodule_is_still_uncommitted_work() {
+  local rec id out status
+  id='pool-sub-work-r8'
+  rec=$(make_submodule_case sub-work "$id")
+  read_submodule_case "$rec"
+  # Put the submodule back on the pin the base records, so the ONLY deviation is
+  # real work inside it. This must never be softened into a stale-pin diagnosis.
+  git -C "$POOL_DIR/ui" checkout --quiet "$SUBPIN2"
+  printf 'work that must survive\n' > "$POOL_DIR/ui/keep-me.txt"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched from a slot holding work inside a submodule"
+  assert_contains "$out" "refusing to discard uncommitted work" \
+    "work inside a submodule was not refused as uncommitted work"
+  assert_not_contains "$out" "stale submodule checkout" \
+    "real work inside a submodule was misreported as a stale pin"
+  assert_grep 'work that must survive' "$POOL_DIR/ui/keep-me.txt" \
+    "spawn discarded work inside the submodule while refusing the pool"
+  pass "work inside a submodule is still refused as uncommitted work, not called stale"
+}
+
+test_stale_pin_carrying_real_work_is_not_called_stale() {
+  local rec id out status
+  id='pool-sub-both-r9'
+  rec=$(make_submodule_case sub-both "$id")
+  read_submodule_case "$rec"
+  # Stale pin AND real work inside it: the remedy command would be wrong here, so
+  # the refusal must stay the conservative one.
+  printf 'work that must survive\n' > "$POOL_DIR/ui/keep-me.txt"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched from a slot with a stale pin and work inside it"
+  assert_contains "$out" "refusing to discard uncommitted work" \
+    "a stale pin carrying real work was not refused as uncommitted work"
+  assert_not_contains "$out" "stale submodule checkout" \
+    "a submodule holding real work was reported as merely stale"
+  assert_grep 'work that must survive' "$POOL_DIR/ui/keep-me.txt" \
+    "spawn discarded work inside the submodule while refusing the pool"
+  pass "a stale pin carrying real work is refused conservatively, never called stale"
+}
+
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
+test_stale_submodule_pin_explains_itself
+test_work_inside_submodule_is_still_uncommitted_work
+test_stale_pin_carrying_real_work_is_not_called_stale
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
