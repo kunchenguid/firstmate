@@ -2384,12 +2384,20 @@ def apply_action_result(env, state, action, result):
             expected_task_command_id = (
                 ((action.get("resources") or {}).get("task-command") or {}).get("id")
             )
+            provisioning_state = str(execution.get("provisioning_state", "")).lower()
+            execution_state = str(execution.get("execution_state", "")).lower()
+            provisioning_terminal = provisioning_state in ("failed", "canceled")
+            execution_terminal = (
+                provisioning_state == "succeeded"
+                and execution_state in ("failed", "canceled")
+                and isinstance(execution.get("exit_code"), int)
+                and not isinstance(execution.get("exit_code"), bool)
+            )
             if (
                 execution.get("request_digest") != action.get("request_digest")
                 or execution.get("idempotency_key") != action.get("idempotency_key")
                 or execution.get("disposition") != "provider-terminal"
-                or str(execution.get("provisioning_state", "")).lower()
-                not in ("failed", "canceled")
+                or not (provisioning_terminal or execution_terminal)
                 or not isinstance(execution.get("task_command_id"), str)
                 or not execution["task_command_id"]
             ):
@@ -2398,9 +2406,10 @@ def apply_action_result(env, state, action, result):
                 raise ProviderResultIdentityRefused(
                     "provider terminal execution task-command identity differs from the claimed action"
                 )
+            terminal_state = execution_state if execution_terminal else provisioning_state
             raise LifecycleError(
                 "provider-terminal {}: exact execution is {} and cannot be applied".format(
-                    execution["request_digest"], execution["provisioning_state"]
+                    execution["request_digest"], terminal_state
                 )
             )
         if not isinstance(execution, dict) or execution.get("schema") != EXECUTION_RESULT_SCHEMA:
@@ -4523,16 +4532,53 @@ def command_service_complete(env, args):
             require_id("task generation", args.task_generation),
         )
         item = state["queue"].get(key)
-        worker = state["workers"].get(str((item or {}).get("slot")))
-        if item is None or item.get("status") != "assigned" or worker is None:
-            raise LifecycleError("service completion requires one exact assigned worker")
-        if item.get("role") != "no-mistakes" or worker.get("role") != "no-mistakes":
+        if item is None or item.get("role") != "no-mistakes":
             raise LifecycleError("service completion is owned by no-mistakes workers only")
-        if worker.get("assignment_generation") != args.assignment_generation:
-            raise LifecycleError("service completion assignment generation is not exact")
         execution = state["executions"].get(request_digest)
         if not isinstance(execution, dict):
             raise LifecycleError("service completion has no exact recorded execution")
+        receipt = item.get("service_completion_receipt")
+        if receipt is not None:
+            if item.get("status") not in ("releasing", "complete"):
+                raise LifecycleError("service completion receipt exists in an invalid queue state")
+            if not isinstance(receipt, dict):
+                raise LifecycleError("service completion receipt is malformed")
+            unsigned_receipt = dict(receipt)
+            receipt_digest = unsigned_receipt.pop("proof_digest", None)
+            if (
+                receipt.get("schema") != "fm.worker-service-release/v1"
+                or receipt.get("task") != args.task
+                or receipt.get("task_generation") != args.task_generation
+                or receipt.get("assignment_generation") != args.assignment_generation
+                or receipt.get("request_digest") != request_digest
+                or receipt.get("result_digest") != execution.get("result_digest")
+                or execution.get("request_digest") != request_digest
+                or execution.get("assignment_generation") != args.assignment_generation
+                or receipt.get("verdict") != "proved"
+                or receipt_digest != digest_value(unsigned_receipt)
+            ):
+                raise LifecycleError("service completion receipt identity differs")
+            worker = state["workers"].get(str(item.get("slot")))
+            worker_owns_item = (
+                worker is not None and worker.get("queue_key") == key
+            )
+            if item.get("status") == "releasing" and not worker_owns_item:
+                raise LifecycleError("releasing service completion lost its exact worker")
+            if worker_owns_item and (
+                worker.get("role") != "no-mistakes"
+                or worker.get("assignment_generation") != args.assignment_generation
+                or worker.get("release_proof") != receipt
+            ):
+                raise LifecycleError("service completion worker receipt identity differs")
+            print("service release proof already recorded with exact identity")
+            return
+        worker = state["workers"].get(str(item.get("slot")))
+        if item.get("status") != "assigned" or worker is None:
+            raise LifecycleError("service completion requires one exact assigned worker")
+        if worker.get("role") != "no-mistakes":
+            raise LifecycleError("service completion is owned by no-mistakes workers only")
+        if worker.get("assignment_generation") != args.assignment_generation:
+            raise LifecycleError("service completion assignment generation is not exact")
         if (
             execution.get("request_digest") != request_digest
             or execution.get("result_digest") != worker.get("last_execution_digest")
@@ -4556,9 +4602,10 @@ def command_service_complete(env, args):
                 raise LifecycleError("worker already has a different service release proof")
             print("service release proof already recorded with exact identity")
             return
-        worker["release_proof"] = proof
+        worker["release_proof"] = copy.deepcopy(proof)
         worker["released_at"] = iso_utc()
         worker["phase"] = "release-proved"
+        item["service_completion_receipt"] = copy.deepcopy(proof)
         item["status"] = "releasing"
         save_state(env, state)
     print("service execution proved; exact idle capacity is eligible for cleanup")

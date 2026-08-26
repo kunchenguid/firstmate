@@ -35,6 +35,7 @@
 #   fm-worker-lifecycle.sh capacity-release <exact fence and cleanup receipt>
 #   fm-worker-lifecycle.sh execute <exact assignment flags> [--existing-task-disk --return-kind <ship|scout> --outcome-dir <dir>] -- <argv...>
 #   fm-worker-lifecycle.sh authority-receipt <exact assignment flags> --output <json>
+#   fm-worker-lifecycle.sh service-complete <exact no-mistakes execution binding>
 #   fm-worker-lifecycle.sh proof-template --task <id> --task-generation <id>
 #   fm-worker-lifecycle.sh release --task <id> --task-generation <id> --proof-file <json>
 #   fm-worker-lifecycle.sh withdraw --task <id> --task-generation <id> --confirm-withdraw --confirm-subscription <uuid>
@@ -138,7 +139,7 @@ fm_worker_receipt_credential_remains() {  # <task home file> <task id> <controll
 }
 
 case "${1:-}" in
-  request|release|resume|steer|execute|authority-receipt|capacity-reserve|capacity-reserve-shape|capacity-release|capacity-retire-fence|abandon-claim|message-put|message-collect|compartment-chain-tip)
+  request|release|resume|steer|execute|authority-receipt|service-complete|capacity-reserve|capacity-reserve-shape|capacity-release|capacity-retire-fence|abandon-claim|message-put|message-collect|compartment-chain-tip)
     fm_refuse_if_gate_agent
     exec python3 "$SCRIPT_DIR/fm-worker-lifecycle.py" "$@"
     ;;
