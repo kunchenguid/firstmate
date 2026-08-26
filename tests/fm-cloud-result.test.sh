@@ -5,7 +5,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-make_return_case() {  # <name> <id> <kind> <report yes|no> <scratch yes|no> <commit yes|no>
+make_return_case() {  # <name> <id> <kind> <report yes|no|empty> <scratch yes|no> <commit yes|no>
   local name=$1 id=$2 kind=$3 report=$4 scratch=$5 commit=$6
   local root home repo worker state
   root=$(fm_test_tmproot "fm-cloud-result-$name")
@@ -46,17 +46,21 @@ report_path = return_root / "data" / task / report_name
 status_path = return_root / "state" / (task + ".status")
 status_path.parent.mkdir(parents=True, exist_ok=True)
 status_path.write_text("working: remote task ran\n", encoding="utf-8")
-if with_report == "yes":
+if with_report in ("yes", "empty"):
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(
+    report = (
         "## Summary\n\nReturned task outcome.\n\n"
         "## What changed\n\nThe requested work ran.\n\n"
         "## Verification\n\nThe fixture exercised the return path.\n\n"
         "## Visual evidence\n\nNone.\n\n"
         "## Artifacts\n\nThe return bundle is retained.\n\n"
-        "## Follow-ups\n\nNone.\n",
-        encoding="utf-8",
+        "## Follow-ups\n\nNone.\n"
     )
+    if with_report == "empty":
+        report = "\n".join("## " + heading for heading in (
+            "Summary", "What changed", "Verification", "Visual evidence", "Artifacts", "Follow-ups",
+        )) + "\n"
+    report_path.write_text(report, encoding="utf-8")
 request = {
     "schema": "fm.worker-execution/v1",
     "home_binding": "a" * 64,
@@ -211,6 +215,37 @@ EOF
   assert_grep 'requested outcome is not complete' "$home/data/$id/report.md" \
     "absent report did not produce a truthful completion-stack artifact"
   pass "an absent required scout report yields a substantive failure report before terminal status"
+}
+
+test_ship_requires_valid_authored_report() {
+  local record root home repo id out
+  id=cloud-return-ship-no-report
+  record=$(make_return_case ship-absent-report "$id" ship no no yes)
+  IFS='|' read -r root home repo <<EOF
+$record
+EOF
+  out=$(run_collect "$home" "$id" 2>&1) || fail "reportless ship return should be retained as a failure: $out"
+  assert_contains "$out" "failed:" "reportless ship return was reported done"
+  assert_grep 'required worker report was absent or invalid' "$home/state/$id.status" \
+    "reportless ship failure did not name the missing deliverable"
+  assert_present "$repo/cloud-change.txt" "reportless ship commit was not retained in local custody"
+  pass "a ship commit remains in custody but cannot succeed without its authored report"
+}
+
+test_heading_only_report_is_truthful_failure() {
+  local record root home repo id out
+  id=cloud-return-empty-report
+  record=$(make_return_case empty-report "$id" scout empty no no)
+  IFS='|' read -r root home repo <<EOF
+$record
+EOF
+  out=$(run_collect "$home" "$id" 2>&1) || fail "heading-only report should be retained as a failure: $out"
+  assert_contains "$out" "failed:" "heading-only report was reported done"
+  assert_present "$home/data/$id/cloud-return-report.invalid.md" \
+    "heading-only authored report was not retained for diagnosis"
+  assert_grep 'required worker report was absent or invalid' "$home/state/$id.status" \
+    "heading-only report failure did not name the invalid deliverable"
+  pass "required headings without substantive bodies cannot authorize success"
 }
 
 test_local_divergence_retains_custody() {
@@ -462,6 +497,8 @@ SH
 test_ship_success_and_replay
 test_scout_success_with_uncommitted_scratch
 test_absent_report_is_truthful_failure
+test_ship_requires_valid_authored_report
+test_heading_only_report_is_truthful_failure
 test_local_divergence_retains_custody
 test_corrupt_bundle_refuses_before_artifacts
 test_cloud_custody_authority_reads_localized_return

@@ -250,7 +250,7 @@ def substantive_report(body):
     missing = [name for name in REQUIRED_SECTIONS if name not in seen]
     empty = []
     for name, lines in sections.items():
-        if lines and not any(
+        if not any(
             any(character.isalnum() or unicodedata.category(character).startswith("S") for character in line)
             for line in lines
         ):
@@ -499,7 +499,7 @@ def collect(args):
         and not result.get("outcome_error")
         and (kind == "scout" or not result.get("outcome_uncommitted_changes"))
         and (kind != "ship" or int(result.get("outcome_commits", 0)) > 0)
-        and (kind != "scout" or report_valid)
+        and report_valid
     )
     if succeeded:
         terminal = "done: cloud outcome returned to local custody"
