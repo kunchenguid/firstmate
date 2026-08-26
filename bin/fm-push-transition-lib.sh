@@ -92,24 +92,26 @@ watch_delivery_progress_watermark_locked() {
 }
 
 watch_delivery_progress_publish_locked() {
-  local state=$1 watermark=$2 transition previous previous_state previous_transition previous_watermark previous_pid extra tab tmp status=0 pid
+  local state=$1 watermark=$2 token=$3 owner_pid=$4 transition previous previous_state previous_transition previous_watermark previous_writer_pid previous_owner_pid previous_token extra tab tmp status=0 writer_pid
   case "$state" in inflight|committed) ;; *) return 1 ;; esac
   case "$watermark" in ''|*[!0-9]*) return 1 ;; esac
+  case "$token" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   transition=$(date +%s 2>/dev/null) || return 1
   case "$transition" in ''|*[!0-9]*) return 1 ;; esac
-  pid=${BASHPID:-$$}
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$owner_pid" in ''|*[!0-9]*) return 1 ;; esac
+  writer_pid=${BASHPID:-$$}
+  case "$writer_pid" in ''|*[!0-9]*) return 1 ;; esac
   previous=$(awk -F '\t' '
-    NR == 1 && NF == 4 && ($1 == "inflight" || $1 == "committed") && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ { value = $0 }
+    NR == 1 && NF == 6 && ($1 == "inflight" || $1 == "committed") && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+$/ && $6 ~ /^[A-Za-z0-9._-]+$/ { value = $0 }
     END { if (NR == 1) print value }
   ' "$WATCH_DELIVERY_PROGRESS" 2>/dev/null || true)
   tab=$(printf '\t')
-  IFS="$tab" read -r previous_state previous_transition previous_watermark previous_pid extra <<EOF
+  IFS="$tab" read -r previous_state previous_transition previous_watermark previous_writer_pid previous_owner_pid previous_token extra <<EOF
 $previous
 EOF
   if [ -z "$extra" ] && { [ "$previous_state" = inflight ] || [ "$previous_state" = committed ]; }; then
-    case "$previous_transition:$previous_watermark:$previous_pid" in
-      *[!0-9:]*) ;;
+    case "$previous_transition:$previous_watermark:$previous_writer_pid:$previous_owner_pid:$previous_token" in
+      *[!A-Za-z0-9._:-]*) ;;
       *)
         if [ "$previous_transition" -gt "$transition" ]; then
           transition=$previous_transition
@@ -119,12 +121,41 @@ EOF
   fi
   tmp=$(umask 077; mktemp "$STATE/.watch-delivery-progress.XXXXXX" 2>/dev/null) || status=1
   if [ "$status" -eq 0 ]; then
-    printf '%s\t%s\t%s\t%s\n' "$state" "$transition" "$watermark" "$pid" > "$tmp" || status=1
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$state" "$transition" "$watermark" "$writer_pid" "$owner_pid" "$token" > "$tmp" || status=1
   fi
   if [ "$status" -eq 0 ]; then
     mv -f -- "$tmp" "$WATCH_DELIVERY_PROGRESS" 2>/dev/null || status=1
   fi
   [ "$status" -eq 0 ] || rm -f -- "${tmp:-}" 2>/dev/null || true
+  return "$status"
+}
+
+watch_delivery_progress_confirm() {
+  local token=${1:-} expected_pid=${2:-} record state transition watermark writer_pid owner_pid record_token extra tab tmp status=1
+  case "$token" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$expected_pid" in ''|*[!0-9]*) expected_pid= ;; esac
+  [ -n "$token$expected_pid" ] || return 1
+  watch_delivery_lock_acquire_bounded "$WATCH_DELIVERY_PROGRESS_LOCK" || return 1
+  record=$(awk -F '\t' '
+    NR == 1 && NF == 6 && $1 == "inflight" && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+$/ && $6 ~ /^[A-Za-z0-9._-]+$/ { value = $0 }
+    END { if (NR == 1) print value }
+  ' "$WATCH_DELIVERY_PROGRESS" 2>/dev/null || true)
+  tab=$(printf '\t')
+  IFS="$tab" read -r state transition watermark writer_pid owner_pid record_token extra <<EOF
+$record
+EOF
+  if [ -z "$extra" ] && [ "$state" = inflight ] \
+    && { { [ -n "$token" ] && [ "$record_token" = "$token" ]; } \
+      || { [ -n "$expected_pid" ] && [ "$writer_pid" = "$expected_pid" ]; }; }; then
+    tmp=$(umask 077; mktemp "$STATE/.watch-delivery-progress.XXXXXX" 2>/dev/null) || tmp=
+    if [ -n "$tmp" ]; then
+      printf 'committed\t%s\t%s\t%s\t%s\t%s\n' "$transition" "$watermark" "$writer_pid" "$owner_pid" "$record_token" > "$tmp" \
+        && mv -f -- "$tmp" "$WATCH_DELIVERY_PROGRESS" 2>/dev/null \
+        && status=0
+      [ "$status" -eq 0 ] || rm -f -- "$tmp" 2>/dev/null || true
+    fi
+  fi
+  fm_lock_release "$WATCH_DELIVERY_PROGRESS_LOCK"
   return "$status"
 }
 
@@ -174,7 +205,7 @@ triage_log() {
 
 # Exit after reporting one actionable wake. Tests override this callback.
 wake() {
-  local output_status=0 progress_watermark=0 serialized=0 inflight=0
+  local output_status=0 progress_watermark=0 serialized=0 inflight=0 confirm_token=${FM_WATCH_DELIVERY_CONFIRM_TOKEN:-direct} progress_owner_pid=${FM_WATCH_DELIVERY_CONFIRM_PID:-${BASHPID:-$$}}
   case "$1" in
     heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
     *) echo 0 > "$STATE/.heartbeat-streak" ;;
@@ -182,7 +213,7 @@ wake() {
   if watch_delivery_serialization_acquire; then
     serialized=1
     progress_watermark=$(watch_delivery_progress_watermark_locked)
-    if watch_delivery_progress_publish_locked inflight "$progress_watermark"; then
+    if watch_delivery_progress_publish_locked inflight "$progress_watermark" "$confirm_token" "$progress_owner_pid"; then
       inflight=1
     else
       printf 'fm-watch: could not publish in-flight actionable wake progress.\n' >&2
@@ -196,7 +227,8 @@ wake() {
     output_status=0
     # shellcheck disable=SC2034 # Read by bin/fm-watch.sh's EXIT cleanup.
     FM_WATCH_DELIVERED_REASON=$1
-    if [ "$inflight" -eq 1 ] && ! watch_delivery_progress_publish_locked committed "$progress_watermark"; then
+    if [ "$inflight" -eq 1 ] && [ "$confirm_token" = direct ] \
+      && ! watch_delivery_progress_publish_locked committed "$progress_watermark" "$confirm_token" "$progress_owner_pid"; then
       printf 'fm-watch: could not commit actionable wake progress.\n' >&2
     fi
   else

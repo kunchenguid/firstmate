@@ -50,6 +50,15 @@ ERR=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.err.XXXXXX") || {
   exit 1
 }
 trap 'rm -f "$OUT" "$ERR"' EXIT
+WATCH_CONFIRM_TOKEN="${BASHPID:-$$}.$(date +%s).${RANDOM:-0}"
+export FM_WATCH_DELIVERY_CONFIRM_TOKEN=$WATCH_CONFIRM_TOKEN
+export FM_WATCH_DELIVERY_CONFIRM_PID=${BASHPID:-$$}
+
+confirm_watch_delivery() {
+  FM_STATE_OVERRIDE="${FM_STATE_OVERRIDE:-}" FM_HOME="${FM_HOME:-}" FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-}" \
+    bash -c '. "$1"; watch_delivery_progress_confirm "$2"' \
+    _ "$SCRIPT_DIR/fm-push-transition-lib.sh" "$WATCH_CONFIRM_TOKEN"
+}
 
 run_with_perl_timeout() {
   perl -e '
@@ -88,6 +97,7 @@ set -e
 
 if grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$OUT" >/dev/null 2>&1; then
   cat "$OUT"
+  confirm_watch_delivery >/dev/null 2>&1 || true
   [ ! -s "$ERR" ] || cat "$ERR" >&2
   exit 0
 fi
