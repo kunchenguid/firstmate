@@ -406,21 +406,31 @@ bin/fm-review-sweep-supervisor.sh install --source-home "$PWD"
 
 Installation validates the supplied source home before it persists any private configuration, so a mistyped `--source-home` leaves nothing behind and the installer stays reusable.
 It also pins the source repository's default branch and records it as `source_branch`; the automation home tracks that branch afterwards, so switching working branches in the captain's live checkout never disables the scheduled job.
+Rerunning install against a private configuration written before that key existed backfills the pinned branch in place, so no hand edit under the private application-support directory is ever required.
 `jq` is required and is checked whenever configuration loads, rather than being discovered as a receipt failure later.
+
+The automation home is a clone this script owns, and it is kept exactly on the pinned branch.
+If the pinned history in the source home is rewritten, the clone can no longer fast-forward, so the supervisor realigns it to the exact source head - but only after re-proving the configured source home's identity, the pinned branch, the resolved source head, and a clean tracked worktree in the clone.
+The realignment never writes to the source home or to a project worktree, never runs when the clone carries tracked changes, and never deletes untracked private context.
 
 The installed default is 07:00 through 17:00 America/Chicago at 30-minute boundaries, with 17:00 as the final daily slot and at most ten concurrent independent reviews.
 The LaunchAgent wakes once per minute, while a durable slot ledger ensures that the review cycle itself runs only once per due half-hour slot.
-A duplicate minute tick reads slot state and retry eligibility under the owner lock and returns before any git fetch, context copy, or project validation, so the once-a-minute wake stays cheap and a transient synchronization problem is reported once per slot rather than once per minute.
+A duplicate minute tick reads slot state and retry eligibility under the owner lock and returns before any git fetch, context copy, or project validation, so the once-a-minute wake stays cheap.
+A failure to synchronize the automation home is itself recorded against the slot with the same retry deadline as a failed cycle, so a persistent synchronization problem costs one attempt per throttle window rather than one per minute.
 A wake after sleep or reboot runs only the newest missed slot from the current Chicago calendar day, and the final 17:00 slot stays claimable only through 17:29, so no unattended cycle begins an authorized external write later in the evening.
 A single owner lock excludes overlap between launchd and manual runs, and an abandoned running slot resumes under the same slot identity.
 A failed cycle waits five minutes measured from when that cycle actually finished, so a long cycle still throttles before its next attempt.
 A lock directory left behind by a crash between its creation and its owner record is respected briefly and then reclaimed, so the job self-heals instead of wedging invisibly.
+The lock also records the cycle's process group, and that record is honored only while the group is still live, still runs the configured codex binary, and is younger than any cycle could legitimately be; a record that fails those checks - a group id reused after a reboot, for instance - is retired rather than trusted forever, and `status` reports it as reclaimable rather than as a running cycle.
 
 Each cycle starts a fresh non-interactive Codex process in the isolated home and invokes the installed skill.
 The cycle runs in its own verified process group, and a timeout or a supervisor signal terminates that exact group; the owner lock is released only once the whole group is confirmed gone, so no reviewer still holding GitHub and Slack write authorization can outlive the exclusion that stops a second cycle for the same slot.
 The skill remains the owner of live Jira pagination, GitHub discovery, watermark checks, review content, comment publication, own-comment minimization, and the exact Slack author notification.
 The supervisor accepts success only when no task metadata remains and the cycle writes a valid receipt binding every reviewed PR to its exact head, direct GitHub comment URL, and either a direct Slack message URL or a unique-match skip reason.
-A missing receipt, a receipt that is not readable JSON, a receipt that violates the publication contract, and a receipt gate that could not be evaluated are distinct failures with distinct exit codes (74, 76, 75, and 77), so a tooling problem is never reported as a publication problem.
+A missing receipt (74), a receipt that is not readable JSON (76), a receipt that violates the publication contract (75), and a receipt gate that `jq` itself could not run (77) are distinct failures, so a tooling problem is never reported as a publication problem.
+A receipt whose field types make the contract unevaluable counts as a contract violation, not as a tooling failure.
+The receipt is read and recorded on every cycle, whatever else went wrong, and the verdict is kept in the slot ledger and reported by `status`.
+Because that verdict is durable evidence of what was published, a slot whose receipt verified is never re-run: if a stray reviewer process survives termination the supervisor reports the incomplete teardown and retains the owner lock, but it does not schedule a second publication of the same reviews.
 The runtime is bounded to three hours by default, after which the slot is failed and becomes eligible for its normal retry.
 
 Artifacts are bounded. A verified cycle keeps its prompt, compact final result, and receipt, and discards the raw Codex event stream; only the most recent failure retains a bounded diagnostic tail of that stream.

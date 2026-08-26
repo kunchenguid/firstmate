@@ -34,10 +34,17 @@ CASE_CODEX_BAD_JSON="$TMP_ROOT/codex.bad-json"
 CASE_CODEX_BAD_RECEIPT="$TMP_ROOT/codex.bad-receipt"
 CASE_CODEX_LINGER="$TMP_ROOT/codex.linger"
 CASE_CODEX_LINGER_PID="$TMP_ROOT/codex.linger-pid"
+CASE_CODEX_MALFORMED_SLACK="$TMP_ROOT/codex.malformed-slack"
+CASE_CODEX_SLOW="$TMP_ROOT/codex.slow"
 CASE_CLOCK_FILE="$TMP_ROOT/clock.fields"
+CASE_ALT_LAUNCH_AGENT_DIR="$CASE_HOME/Library/LaunchAgentsAlt"
+CASE_ALT_LAUNCH_STATE="$TMP_ROOT/launch-state-alt"
 SUBJECT="$ROOT/bin/fm-review-sweep-supervisor.sh"
 SUBJECT_APP_ROOT="$CASE_APP"
-mkdir -p "$CASE_HOME" "$CASE_BIN" "$CASE_LAUNCH_STATE"
+SUBJECT_LAUNCH_AGENT_DIR="$CASE_LAUNCH_AGENT_DIR"
+SUBJECT_LAUNCH_STATE="$CASE_LAUNCH_STATE"
+REAL_JQ=$(command -v jq) || fail 'jq is required by this test'
+mkdir -p "$CASE_HOME" "$CASE_BIN" "$CASE_LAUNCH_STATE" "$CASE_ALT_LAUNCH_STATE"
 : > "$CASE_CODEX_LOG"
 printf '0\n' > "$CASE_CODEX_COUNT"
 
@@ -110,6 +117,13 @@ if [ -f "$FM_FAKE_CODEX_BAD_JSON" ]; then
   printf 'unparseable receipt for %s\n' "$slot" > "$out"
   exit 0
 fi
+if [ -f "$FM_FAKE_CODEX_MALFORMED_SLACK" ]; then
+  cat > "$receipts/$slot.json" <<EOF
+{"version":1,"slot":"$slot","coverage":"complete","discovered":1,"reviewed":1,"skipped":0,"failed":0,"comments_published":1,"slack_messages_sent":1,"tasks_left_in_flight":0,"reviews":[{"pr":"https://github.com/acme/widget/pull/7","head":"0123456789abcdef0123456789abcdef01234567","comment_url":"https://github.com/acme/widget/pull/7#issuecomment-42","slack":"sent"}]}
+EOF
+  printf 'receipt with a malformed slack field for %s\n' "$slot" > "$out"
+  exit 0
+fi
 if [ -f "$FM_FAKE_CODEX_BAD_RECEIPT" ]; then
   cat > "$receipts/$slot.json" <<EOF
 {"version":1,"slot":"$slot","coverage":"partial","discovered":3,"reviewed":1,"skipped":0,"failed":0,"comments_published":1,"slack_messages_sent":0,"tasks_left_in_flight":0,"reviews":[]}
@@ -121,6 +135,8 @@ cat > "$receipts/$slot.json" <<EOF
 {"version":1,"slot":"$slot","coverage":"complete","discovered":0,"reviewed":0,"skipped":0,"failed":0,"comments_published":0,"slack_messages_sent":0,"tasks_left_in_flight":0,"reviews":[]}
 EOF
 printf 'verified no-op for %s\n' "$slot" > "$out"
+# Publish first, then outlive the configured runtime bound.
+if [ -f "$FM_FAKE_CODEX_SLOW" ]; then /bin/sleep 20; fi
 SH
 
 chmod +x "$CASE_BIN/launchctl" "$CASE_BIN/codex"
@@ -146,11 +162,11 @@ run_subject() {
   HOME="$CASE_HOME" \
   PATH="$CASE_BIN:$PATH" \
   FM_REVIEW_SWEEP_APP_ROOT="$SUBJECT_APP_ROOT" \
-  FM_REVIEW_SWEEP_LAUNCH_AGENT_DIR="$CASE_LAUNCH_AGENT_DIR" \
+  FM_REVIEW_SWEEP_LAUNCH_AGENT_DIR="$SUBJECT_LAUNCH_AGENT_DIR" \
   FM_REVIEW_SWEEP_LOG_DIR="$CASE_LOG_DIR" \
   FM_REVIEW_SWEEP_LAUNCHCTL="$CASE_BIN/launchctl" \
-  FM_FAKE_LAUNCH_STATE="$CASE_LAUNCH_STATE" \
-  FM_FAKE_RUNTIME_SCRIPT="$CASE_APP/runtime/fm-review-sweep-supervisor.sh" \
+  FM_FAKE_LAUNCH_STATE="$SUBJECT_LAUNCH_STATE" \
+  FM_FAKE_RUNTIME_SCRIPT="$SUBJECT_APP_ROOT/runtime/fm-review-sweep-supervisor.sh" \
   FM_FAKE_CODEX_LOG="$CASE_CODEX_LOG" \
   FM_FAKE_CODEX_COUNT="$CASE_CODEX_COUNT" \
   FM_FAKE_CODEX_FAIL="$CASE_CODEX_FAIL" \
@@ -159,6 +175,8 @@ run_subject() {
   FM_FAKE_CODEX_BAD_RECEIPT="$CASE_CODEX_BAD_RECEIPT" \
   FM_FAKE_CODEX_LINGER="$CASE_CODEX_LINGER" \
   FM_FAKE_CODEX_LINGER_PID="$CASE_CODEX_LINGER_PID" \
+  FM_FAKE_CODEX_MALFORMED_SLACK="$CASE_CODEX_MALFORMED_SLACK" \
+  FM_FAKE_CODEX_SLOW="$CASE_CODEX_SLOW" \
   "$SUBJECT" "$@"
 }
 
@@ -186,6 +204,8 @@ assert_grep 'max_concurrent_reviews=10' "$CASE_APP/home/config/review-sweep-host
 pass 'install persists the isolated home, authorization, ten-review cap, pinned branch, and Aqua LaunchAgent'
 
 SUBJECT_APP_ROOT="$CASE_ALT_APP"
+SUBJECT_LAUNCH_AGENT_DIR="$CASE_ALT_LAUNCH_AGENT_DIR"
+SUBJECT_LAUNCH_STATE="$CASE_ALT_LAUNCH_STATE"
 set +e
 BAD_INSTALL_OUT=$(run_subject install --source-home "$TMP_ROOT/missing-home" 2>&1)
 BAD_INSTALL_RC=$?
@@ -200,8 +220,27 @@ set -e
 assert_eq 1 "$BAD_INSTALL_AGAIN_RC" 'install with a non-root source home should fail'
 assert_not_contains "$BAD_INSTALL_AGAIN" 'existing config belongs to' 'a refused install left the installer unusable'
 assert_absent "$CASE_ALT_APP/config/supervisor.conf" 'a refused install persisted private configuration'
-SUBJECT_APP_ROOT="$CASE_APP"
 pass 'install validates the source home before persisting anything and stays recoverable'
+
+ALT_INSTALL_OUT=$(run_subject install --source-home "$CASE_SOURCE") || fail "alt install failed: $ALT_INSTALL_OUT"
+assert_grep 'source_branch=main' "$CASE_ALT_APP/config/supervisor.conf" 'alt install did not pin the source branch'
+grep -v '^source_branch=' "$CASE_ALT_APP/config/supervisor.conf" > "$TMP_ROOT/legacy.conf"
+cp "$TMP_ROOT/legacy.conf" "$CASE_ALT_APP/config/supervisor.conf"
+set +e
+LEGACY_STATUS_OUT=$(run_subject status 2>&1)
+LEGACY_STATUS_RC=$?
+set -e
+assert_eq 1 "$LEGACY_STATUS_RC" 'a config without a pinned branch should fail loudly'
+assert_contains "$LEGACY_STATUS_OUT" 'rerun install' 'a config without a pinned branch named no repair path'
+BACKFILL_OUT=$(run_subject install --source-home "$CASE_SOURCE") || fail "backfill install failed: $BACKFILL_OUT"
+assert_contains "$BACKFILL_OUT" 'backfilled: source_branch=main' 'install did not backfill the pinned branch'
+assert_grep 'source_branch=main' "$CASE_ALT_APP/config/supervisor.conf" 'backfill did not persist the pinned branch'
+assert_grep 'retention_days=90' "$CASE_ALT_APP/config/supervisor.conf" 'backfill discarded other configuration'
+assert_eq 1 "$(grep -c '^source_branch=' "$CASE_ALT_APP/config/supervisor.conf")" 'backfill duplicated the pinned branch key'
+SUBJECT_APP_ROOT="$CASE_APP"
+SUBJECT_LAUNCH_AGENT_DIR="$CASE_LAUNCH_AGENT_DIR"
+SUBJECT_LAUNCH_STATE="$CASE_LAUNCH_STATE"
+pass 'install backfills a pinned branch into a private config written before that key existed'
 
 set +e
 BEFORE_OUT=$(run_subject slot-at 20260826 06 59 2>&1)
@@ -259,6 +298,7 @@ assert_present "$CASE_APP/results/20260826-0730/result.txt" 'a verified cycle di
 assert_present "$CASE_APP/results/20260826-0730/prompt.txt" 'a verified cycle discarded its audited prompt'
 assert_absent "$CASE_APP/results/20260826-0730/events.jsonl" 'a verified cycle retained its full event stream'
 assert_absent "$CASE_APP/results/20260826-0730/events.tail.jsonl" 'a verified cycle retained a failure tail'
+assert_eq 0 "$(sed -n '1p' "$CASE_APP/state/slots/20260826-0730/receipt-status")" 'a verified cycle did not record its receipt verdict'
 pass 'a successful cycle keeps its compact records and discards unbounded telemetry'
 
 mkdir -p "$CASE_APP/state/run.lock"
@@ -339,6 +379,7 @@ assert_contains "$BAD_JSON_OUT" 'not a readable JSON object' 'unparseable receip
 assert_eq 8 "$(codex_runs)" 'unparseable-receipt case did not run exactly once'
 assert_present "$CASE_APP/results/20260828-0700/events.tail.jsonl" 'a failed cycle kept no diagnostic tail'
 assert_absent "$CASE_APP/results/20260828-0700/events.jsonl" 'a failed cycle retained its full event stream'
+assert_eq 76 "$(sed -n '1p' "$CASE_APP/state/slots/20260828-0700/receipt-status")" 'a failed cycle did not record its receipt verdict'
 touch "$CASE_CODEX_BAD_RECEIPT"
 set +e
 BAD_RECEIPT_OUT=$(run_tick '20260828 07 30 8100 -0500' 2>&1)
@@ -407,16 +448,117 @@ PREPARE_RC=$?
 set -e
 assert_eq 1 "$PREPARE_RC" 'a runnable slot ignored an unsafe automation home'
 assert_contains "$PREPARE_OUT" 'automation_home has tracked local changes' 'preparation no longer guards a runnable slot'
+assert_contains "$PREPARE_OUT" 'slot=20260828-1000 status=failed exit=1 retry-after=300 reason=preparation' 'a preparation failure was not recorded against the slot'
 assert_eq 12 "$(codex_runs)" 'a guarded slot still started a cycle'
+THROTTLED_OUT=$(run_tick '20260828 10 05 12300 -0500') || fail "throttled tick failed: $THROTTLED_OUT"
+assert_contains "$THROTTLED_OUT" 'deferred: slot 20260828-1000 retry is due at epoch 12500' 'a preparation failure was retried on the next minute tick'
+assert_not_contains "$THROTTLED_OUT" 'automation_home has tracked local changes' 'a throttled tick still synchronized the automation home'
+assert_eq 12 "$(codex_runs)" 'a throttled slot started a cycle'
 git -C "$CASE_APP/home" checkout -- AGENTS.md
-pass 'a duplicate minute tick decides under the lock without synchronizing the automation home'
+pass 'a duplicate minute tick and a failed preparation both stay cheap under the retry throttle'
 
 git -C "$CASE_SOURCE" checkout -q -b captain-working-branch
-BRANCH_OUT=$(run_tick '20260828 10 00 12300 -0500') || fail "pinned-branch tick failed: $BRANCH_OUT"
+BRANCH_OUT=$(run_tick '20260828 10 15 12600 -0500') || fail "pinned-branch tick failed: $BRANCH_OUT"
 assert_contains "$BRANCH_OUT" 'slot=20260828-1000 status=succeeded' 'a source working-branch switch disabled the scheduled job'
 assert_eq 13 "$(codex_runs)" 'the pinned-branch slot did not invoke Codex once'
 assert_eq main "$(git -C "$CASE_APP/home" symbolic-ref --short HEAD)" 'the automation home left its pinned default branch'
 pass 'the automation home tracks the pinned default branch through source working-branch changes'
+
+SOURCE_HEAD_BEFORE=$(git -C "$CASE_SOURCE" rev-parse refs/heads/main)
+git -C "$CASE_SOURCE" checkout -q main
+printf 'rewritten source line\n' >> "$CASE_SOURCE/AGENTS.md"
+git -C "$CASE_SOURCE" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+  commit -aq --amend -m 'rewritten history'
+git -C "$CASE_SOURCE" checkout -q captain-working-branch
+SOURCE_HEAD_AFTER=$(git -C "$CASE_SOURCE" rev-parse refs/heads/main)
+[ "$SOURCE_HEAD_BEFORE" != "$SOURCE_HEAD_AFTER" ] || fail 'the source history rewrite fixture did not change the head'
+REWRITE_OUT=$(run_tick '20260828 10 30 12700 -0500') || fail "history rewrite tick failed: $REWRITE_OUT"
+assert_contains "$REWRITE_OUT" "realigned: automation home reset to pinned main at $SOURCE_HEAD_AFTER" 'a rewritten source history did not self-heal'
+assert_contains "$REWRITE_OUT" 'slot=20260828-1030 status=succeeded' 'the realigned slot did not run'
+assert_eq 14 "$(codex_runs)" 'the realigned slot did not invoke Codex once'
+assert_eq "$SOURCE_HEAD_AFTER" "$(git -C "$CASE_APP/home" rev-parse HEAD)" 'the automation home did not settle on the pinned source head'
+assert_eq "$SOURCE_HEAD_AFTER" "$(git -C "$CASE_SOURCE" rev-parse refs/heads/main)" 'realignment rewrote the source home'
+assert_eq captain-working-branch "$(git -C "$CASE_SOURCE" symbolic-ref --short HEAD)" 'realignment moved the source working branch'
+assert_present "$CASE_APP/home/data/captain.md" 'realignment deleted untracked private context'
+assert_present "$CASE_APP/home/data/backlog.md" 'realignment deleted the automation backlog'
+pass 'a rewritten pinned history realigns the supervisor-owned clone without touching the source home'
+
+STRAY_OWNER_PID=$(bash -c 'echo $$')
+set -m
+bash -c 'exec -a "$0" /bin/sleep 300' "$CASE_BIN/codex" >/dev/null 2>&1 </dev/null &
+CODEX_LIKE_PGID=$!
+/bin/sleep 300 >/dev/null 2>&1 </dev/null &
+STRAY_PGID=$!
+set +m
+disown -a 2>/dev/null || true
+# These fixtures must never hold this script's output open, or a failing
+# assertion would leave the suite's reader blocked until they expire.
+trap 'kill -KILL "-$CODEX_LIKE_PGID" "-$STRAY_PGID" 2>/dev/null || true; fm_test_cleanup' EXIT
+mkdir -p "$CASE_APP/state/run.lock"
+printf '%s\n' "$STRAY_OWNER_PID" > "$CASE_APP/state/run.lock/owner"
+printf '%s\n%s\n' "$CODEX_LIKE_PGID" "$(date +%s)" > "$CASE_APP/state/run.lock/cycle-pgid"
+LIVE_PGID_OUT=$(run_tick '20260828 11 30 12900 -0500') || fail "live cycle group tick failed: $LIVE_PGID_OUT"
+assert_contains "$LIVE_PGID_OUT" "busy: review-sweep cycle process group $CODEX_LIKE_PGID outlived its supervisor" 'a live cycle group no longer excludes a second cycle'
+assert_eq 14 "$(codex_runs)" 'a live cycle group did not exclude a second cycle'
+printf '%s\n%s\n' "$STRAY_PGID" "$(date +%s)" > "$CASE_APP/state/run.lock/cycle-pgid"
+STALE_PGID_OUT=$(run_tick '20260828 11 30 12901 -0500') || fail "stale cycle group tick failed: $STALE_PGID_OUT"
+assert_contains "$STALE_PGID_OUT" "reclaim: retiring an unverifiable review-sweep cycle process group record ($STRAY_PGID)" 'a reused cycle process group id wedged the supervisor'
+assert_contains "$STALE_PGID_OUT" 'slot=20260828-1130 status=succeeded' 'the reclaimed slot did not run'
+assert_eq 15 "$(codex_runs)" 'the reclaimed slot did not invoke Codex once'
+kill -KILL "-$CODEX_LIKE_PGID" 2>/dev/null || true
+kill -KILL "-$STRAY_PGID" 2>/dev/null || true
+trap fm_test_cleanup EXIT
+pass 'a cycle process group record is honored only while it verifies, and retired otherwise'
+
+sed 's/^max_runtime_seconds=.*/max_runtime_seconds=1/' "$CASE_APP/config/supervisor.conf" > "$TMP_ROOT/bounded.conf"
+cp "$TMP_ROOT/bounded.conf" "$CASE_APP/config/supervisor.conf"
+touch "$CASE_CODEX_SLOW"
+set +e
+BOUNDED_OUT=$(run_tick '20260828 12 00 13000 -0500' 2>&1)
+BOUNDED_RC=$?
+set -e
+rm -f -- "$CASE_CODEX_SLOW"
+sed 's/^max_runtime_seconds=.*/max_runtime_seconds=10800/' "$CASE_APP/config/supervisor.conf" > "$TMP_ROOT/bounded.conf"
+cp "$TMP_ROOT/bounded.conf" "$CASE_APP/config/supervisor.conf"
+assert_eq 124 "$BOUNDED_RC" 'a cycle past its runtime bound did not report the timeout'
+assert_contains "$BOUNDED_OUT" 'exceeded 1 seconds' 'the runtime bound was not enforced'
+assert_contains "$BOUNDED_OUT" 'slot=20260828-1200 status=succeeded exit=124 publication=verified' 'a verified publication was discarded with the failed cycle'
+assert_eq 0 "$(sed -n '1p' "$CASE_APP/state/slots/20260828-1200/receipt-status")" 'the receipt verdict was not recorded for a failed cycle'
+assert_eq 16 "$(codex_runs)" 'the bounded cycle did not run exactly once'
+REPUBLISH_OUT=$(run_tick '20260828 12 05 13010 -0500') || fail "post-timeout tick failed: $REPUBLISH_OUT"
+assert_contains "$REPUBLISH_OUT" 'noop: slot 20260828-1200 already succeeded' 'a verified publication was scheduled again'
+assert_eq 16 "$(codex_runs)" 'a verified publication was published twice'
+pass 'a cycle that verified its publication is never re-run, even when it ended badly'
+
+touch "$CASE_CODEX_MALFORMED_SLACK"
+set +e
+MALFORMED_OUT=$(run_tick '20260828 12 30 13100 -0500' 2>&1)
+MALFORMED_RC=$?
+set -e
+rm -f -- "$CASE_CODEX_MALFORMED_SLACK"
+assert_eq 75 "$MALFORMED_RC" 'a receipt field of the wrong type was not a contract violation'
+assert_contains "$MALFORMED_OUT" 'invalid or incomplete cycle receipt' 'a malformed receipt field was reported as a tooling failure'
+assert_not_contains "$MALFORMED_OUT" 'could not be run by jq' 'a malformed receipt field was reported as a tooling failure'
+cat > "$CASE_BIN/jq" <<SH
+#!/usr/bin/env bash
+# Pass the parse probe through to real jq, then refuse to run the gate program.
+for arg in "\$@"; do
+  case \$arg in
+    'type == "object"') exec "$REAL_JQ" "\$@" ;;
+  esac
+done
+exit 3
+SH
+chmod +x "$CASE_BIN/jq"
+set +e
+JQ_BROKEN_OUT=$(run_tick '20260828 13 00 13200 -0500' 2>&1)
+JQ_BROKEN_RC=$?
+set -e
+rm -f -- "$CASE_BIN/jq"
+assert_eq 77 "$JQ_BROKEN_RC" 'an unrunnable receipt gate was not reported as a tooling failure'
+assert_contains "$JQ_BROKEN_OUT" 'receipt gate could not be run by jq' 'an unrunnable receipt gate was not named'
+assert_eq 18 "$(codex_runs)" 'the receipt classification cases did not run once each'
+pass 'a malformed receipt field is a contract violation and only an unrunnable gate is a tooling failure'
 
 mkdir -p "$CASE_APP/state/slots/20200101-0700" "$CASE_APP/results/20200101-0700" "$TMP_ROOT/linked-slot"
 printf 'succeeded\n' > "$CASE_APP/state/slots/20200101-0700/status"
@@ -430,9 +572,9 @@ touch -t 202001010000 "$CASE_APP/state/slots/20200101-0700" "$CASE_APP/results/2
   "$CASE_APP/home/state/review-sweep-cycle-receipts/notes.txt" \
   "$CASE_APP/state/slots/20200101-0800"
 touch -h -t 202001010000 "$CASE_APP/results/20200101-0900"
-RETAIN_OUT=$(run_tick '20260828 10 30 12400 -0500') || fail "retention tick failed: $RETAIN_OUT"
-assert_contains "$RETAIN_OUT" 'slot=20260828-1030 status=succeeded' 'the retention cycle did not complete'
-assert_eq 14 "$(codex_runs)" 'the retention cycle did not invoke Codex once'
+RETAIN_OUT=$(run_tick '20260828 13 30 13300 -0500') || fail "retention tick failed: $RETAIN_OUT"
+assert_contains "$RETAIN_OUT" 'slot=20260828-1330 status=succeeded' 'the retention cycle did not complete'
+assert_eq 19 "$(codex_runs)" 'the retention cycle did not invoke Codex once'
 assert_absent "$CASE_APP/state/slots/20200101-0700" 'an expired slot record was retained'
 assert_absent "$CASE_APP/results/20200101-0700" 'an expired result directory was retained'
 assert_absent "$CASE_APP/home/state/review-sweep-cycle-receipts/20200101-0700.json" 'an expired receipt was retained'
@@ -440,8 +582,8 @@ assert_present "$CASE_APP/home/state/review-sweep-cycle-receipts/notes.txt" 'ret
 assert_present "$CASE_APP/state/slots/20200101-0800" 'retention removed an unexpectedly shaped entry'
 assert_present "$CASE_APP/results/20200101-0900" 'retention followed a symlinked result path'
 assert_present "$TMP_ROOT/linked-slot" 'retention deleted through a symlinked result path'
-assert_present "$CASE_APP/state/slots/20260828-1030" 'retention removed a current slot record'
-assert_present "$CASE_APP/home/state/review-sweep-cycle-receipts/20260828-1030.json" 'retention removed a current receipt'
+assert_present "$CASE_APP/state/slots/20260828-1330" 'retention removed a current slot record'
+assert_present "$CASE_APP/home/state/review-sweep-cycle-receipts/20260828-1330.json" 'retention removed a current receipt'
 pass 'retention prunes only expired supervisor-owned artifacts and refuses unexpected shapes'
 
 STATUS_OUT=$(run_subject status) || fail "status failed: $STATUS_OUT"
@@ -450,6 +592,7 @@ assert_contains "$STATUS_OUT" 'max-concurrent-reviews: 10' 'status did not repor
 assert_contains "$STATUS_OUT" 'source-branch: main' 'status did not report the pinned branch'
 assert_contains "$STATUS_OUT" 'retention-days: 90' 'status did not report artifact retention'
 assert_contains "$STATUS_OUT" 'cycle: idle' 'status did not report an idle cycle'
+assert_contains "$STATUS_OUT" 'last-slot-receipt-status: 0' 'status did not report the last verified receipt'
 assert_contains "$STATUS_OUT" 'automation-inflight: 0' 'status did not verify terminal task metadata'
 pass 'status reports the loaded job, schedule cap, pinned branch, retention, and terminal metadata'
 

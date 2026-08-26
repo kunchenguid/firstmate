@@ -13,7 +13,8 @@
 #       branch; later working-branch changes in the source home never disturb
 #       the scheduled job. Existing private configuration is preserved;
 #       rerunning install refreshes code, context, projects, and the launchd
-#       contract idempotently.
+#       contract idempotently, and backfills a pinned branch into a private
+#       configuration written before that key existed.
 #   fm-review-sweep-supervisor.sh tick
 #       Claim and run the newest due slot for the current Chicago day. A single
 #       process owns the slot through completion. A wake after sleep catches up
@@ -48,10 +49,22 @@
 #     signal terminates that exact group, and the owner lock is released only
 #     after the group is confirmed gone, so no authorized external writer
 #     outlives the exclusion that stops a second cycle for the same slot.
+#   * The recorded cycle process group is trusted only while it is still live,
+#     still runs the configured codex binary, and is younger than any cycle
+#     could legitimately be. A record that fails those checks - a reused group
+#     id after a reboot, for example - is retired instead of wedging the job.
 #   * A lock directory left behind by a crash between its creation and its owner
 #     record is reclaimed after a short grace, so the job self-heals.
-#   * A failed slot's retry deadline is measured from when the cycle actually
-#     finished, never from when the tick started.
+#   * A failed slot's retry deadline is measured from when the attempt actually
+#     finished, never from when the tick started, and a failure to synchronize
+#     the automation home is recorded against the slot under the same throttle.
+#   * The cycle receipt is read and recorded whatever else went wrong. A slot
+#     whose publication verified is never re-run, so a stray surviving process
+#     is reported and the lock retained without duplicating comments or DMs.
+#   * The automation home is a clone this script owns. When the pinned source
+#     history is rewritten it is realigned to the exact source head, but only
+#     after its identity, pinned branch, and clean tracked worktree re-verify.
+#     Nothing here ever writes to source_home or a project worktree.
 #   * A successful cycle keeps its prompt, final result, and receipt. Full Codex
 #     event streams are not retained; only the most recent failure keeps a
 #     bounded diagnostic tail. Supervisor-owned slot, result, and receipt
@@ -181,13 +194,15 @@ RUN_CHILD_PID=
 RUN_CHILD_PGID=
 SLOT_DIR=
 SLOT_ADMISSION_MESSAGE=
+CYCLE_PUBLICATION_VERIFIED=0
 
 config_value_seen() {
   case " ${CONFIG_KEYS_SEEN:-} " in *" $1 "*) return 0 ;; *) return 1 ;; esac
 }
 
-load_config() {
-  local key value line_no=0
+load_config() { # [--allow-missing-source-branch]
+  local key value line_no=0 allow_legacy=0
+  case ${1:-} in --allow-missing-source-branch) allow_legacy=1 ;; esac
   [ -f "$CONFIG_PATH" ] && [ ! -L "$CONFIG_PATH" ] || die "missing private supervisor config: $CONFIG_PATH"
   CONFIG_KEYS_SEEN=
   while IFS='=' read -r key value || [ -n "${key:-}${value:-}" ]; do
@@ -220,7 +235,12 @@ load_config() {
   done < <(awk 'BEGIN { FS="=" } { key=$1; sub(/^[[:space:]]+/, "", key); sub(/[[:space:]]+$/, "", key); value=substr($0, index($0, "=")+1); if (index($0, "=")==0) { print $0 "=" } else { print key "=" value } }' "$CONFIG_PATH")
 
   safe_absolute_path "$SOURCE_HOME" || die 'source_home must be an absolute non-root path'
-  safe_branch_name "$SOURCE_BRANCH" || die 'source_branch must name the pinned default branch of source_home'
+  if [ "$allow_legacy" = 1 ] && ! config_value_seen source_branch; then
+    SOURCE_BRANCH=
+  else
+    safe_branch_name "$SOURCE_BRANCH" \
+      || die "source_branch must name the pinned default branch of source_home; rerun install --source-home $SOURCE_HOME to repair it"
+  fi
   safe_absolute_path "$AUTOMATION_HOME" || die 'automation_home must be an absolute non-root path'
   safe_absolute_path "$CODEX_BIN" || die 'codex_bin must be absolute'
   [ -x "$CODEX_BIN" ] || die "codex executable is unavailable: $CODEX_BIN"
@@ -343,17 +363,49 @@ ensure_automation_home() {
     git clone --quiet --no-hardlinks --branch "$SOURCE_BRANCH" "$SOURCE_HOME" "$AUTOMATION_HOME" \
       || die 'failed to clone the isolated automation home'
   fi
-  [ -d "$AUTOMATION_HOME" ] && [ ! -L "$AUTOMATION_HOME" ] || die 'automation_home is unsafe'
-  [ "$(git -C "$AUTOMATION_HOME" rev-parse --show-toplevel 2>/dev/null || true)" = "$AUTOMATION_HOME" ] \
-    || die 'automation_home is not an isolated git worktree root'
-  [ "$AUTOMATION_HOME" != "$SOURCE_HOME" ] || die 'automation_home must differ from source_home'
-  case "$AUTOMATION_HOME/" in "$SOURCE_HOME/"*) die 'automation_home cannot be inside source_home' ;; esac
+  assert_supervisor_owned_automation_home
   mkdir -p "$AUTOMATION_HOME/data" "$AUTOMATION_HOME/state" "$AUTOMATION_HOME/config" "$AUTOMATION_HOME/projects"
   write_empty_backlog "$AUTOMATION_HOME/data/backlog.md" || die 'failed to initialize the automation backlog'
 }
 
+assert_supervisor_owned_automation_home() {
+  local top
+  safe_absolute_path "$AUTOMATION_HOME" || die 'automation_home must be an absolute non-root path'
+  [ -d "$AUTOMATION_HOME" ] && [ ! -L "$AUTOMATION_HOME" ] || die 'automation_home is unsafe'
+  [ "$AUTOMATION_HOME" != "$SOURCE_HOME" ] || die 'automation_home must differ from source_home'
+  case "$AUTOMATION_HOME/" in "$SOURCE_HOME/"*) die 'automation_home cannot be inside source_home' ;; esac
+  case "$SOURCE_HOME/" in "$AUTOMATION_HOME/"*) die 'source_home cannot be inside automation_home' ;; esac
+  top=$(git -C "$AUTOMATION_HOME" rev-parse --show-toplevel 2>/dev/null || true)
+  [ "$top" = "$AUTOMATION_HOME" ] || die 'automation_home is not an isolated git worktree root'
+}
+
+realign_automation_home() { # <source-head>
+  # The automation home is a disposable clone this script owns, so a rewritten
+  # pinned history is recoverable. Every identity, ref, and cleanliness fact is
+  # re-proven immediately before the reset, and the reset never reaches the
+  # source home, a project worktree, or any untracked private context.
+  local source_head=$1 auto_branch dirty after
+  assert_supervisor_owned_automation_home
+  validate_source_home "$SOURCE_HOME"
+  case $source_head in *[!0-9a-f]*|'') die 'refusing to realign to an unresolved source head' ;; esac
+  [ "$(git -C "$SOURCE_HOME" rev-parse --verify --quiet "refs/heads/$SOURCE_BRANCH^{commit}" 2>/dev/null || true)" \
+    = "$source_head" ] || die 'source head changed while realigning the automation home'
+  auto_branch=$(git -C "$AUTOMATION_HOME" symbolic-ref --short HEAD 2>/dev/null || true)
+  [ "$auto_branch" = "$SOURCE_BRANCH" ] || die 'refusing to realign an automation home off its pinned branch'
+  dirty=$(git -C "$AUTOMATION_HOME" status --porcelain --untracked-files=no 2>/dev/null || true)
+  [ -z "$dirty" ] || die 'automation_home has tracked local changes; refusing to overwrite them'
+  git -C "$AUTOMATION_HOME" rev-parse --verify --quiet "$source_head^{commit}" >/dev/null 2>&1 \
+    || die 'automation_home did not receive the pinned source head'
+  git -C "$AUTOMATION_HOME" reset --hard --quiet "$source_head" \
+    || die 'failed to realign the automation home to the pinned source head'
+  after=$(git -C "$AUTOMATION_HOME" rev-parse HEAD 2>/dev/null || true)
+  [ "$after" = "$source_head" ] || die 'automation home did not settle on the pinned source head'
+  printf 'realigned: automation home reset to pinned %s at %s\n' "$SOURCE_BRANCH" "$source_head"
+}
+
 sync_automation_code() {
   local source_head auto_branch dirty
+  assert_supervisor_owned_automation_home
   auto_branch=$(git -C "$AUTOMATION_HOME" symbolic-ref --short HEAD 2>/dev/null || true)
   [ "$auto_branch" = "$SOURCE_BRANCH" ] \
     || die "automation_home is on '${auto_branch:-a detached head}', expected the pinned branch '$SOURCE_BRANCH'"
@@ -363,7 +415,10 @@ sync_automation_code() {
     || die "cannot resolve the pinned branch '$SOURCE_BRANCH' in source_home"
   git -C "$AUTOMATION_HOME" fetch --quiet "$SOURCE_HOME" "$SOURCE_BRANCH" \
     || die 'failed to refresh automation code from source_home'
-  git -C "$AUTOMATION_HOME" merge --quiet --ff-only "$source_head" || die 'automation code cannot fast-forward to source_home'
+  if git -C "$AUTOMATION_HOME" merge --quiet --ff-only "$source_head" 2>/dev/null; then
+    return 0
+  fi
+  realign_automation_home "$source_head"
 }
 
 sync_private_context() {
@@ -466,6 +521,14 @@ retry_seconds=$DEFAULT_RETRY_SECONDS
 max_runtime_seconds=$DEFAULT_MAX_RUNTIME_SECONDS
 retention_days=$DEFAULT_RETENTION_DAYS
 enabled=1" || die 'failed to write private supervisor config'
+}
+
+backfill_source_branch() { # <branch>
+  local branch=$1 existing
+  safe_branch_name "$branch" || die 'resolved source branch is unsafe'
+  existing=$(cat "$CONFIG_PATH") || die 'cannot read the private supervisor config'
+  atomic_write "$CONFIG_PATH" 0600 "$existing
+source_branch=$branch" || die 'failed to backfill source_branch into the private config'
 }
 
 install_runtime_script() {
@@ -669,17 +732,37 @@ lock_dir_age_seconds() {
   printf '%s\n' "$((now - mtime))"
 }
 
-lock_cycle_group_is_live() {
-  local pgid=
-  if [ -f "$LOCK_CYCLE_PGID_FILE" ] && [ ! -L "$LOCK_CYCLE_PGID_FILE" ]; then
-    pgid=$(sed -n '1p' "$LOCK_CYCLE_PGID_FILE" 2>/dev/null || true)
-  fi
+lock_cycle_record_field() { # <line-number>
+  [ -f "$LOCK_CYCLE_PGID_FILE" ] && [ ! -L "$LOCK_CYCLE_PGID_FILE" ] || return 1
+  sed -n "$1p" "$LOCK_CYCLE_PGID_FILE" 2>/dev/null || return 1
+}
+
+process_group_runs_codex() { # <pgid>
+  safe_positive_integer "$1" || return 1
+  [ -n "$CODEX_BIN" ] || return 1
+  ps -A -o pgid=,command= 2>/dev/null | awk -v g="$1" '$1 == g { print }' | grep -Fq -- "$CODEX_BIN"
+}
+
+# Prints the recorded cycle process group id and reports:
+#   0  a verified cycle group from this record is still live
+#   1  there is no usable record, or its group is already gone
+#   2  the record is live but unverifiable, so it is safe to retire
+lock_cycle_group_status() {
+  local pgid epoch now age bound
+  pgid=$(lock_cycle_record_field 1) || return 1
   safe_positive_integer "${pgid:-}" || return 1
-  if kill -0 "-$pgid" 2>/dev/null; then
-    printf '%s\n' "$pgid"
-    return 0
-  fi
-  return 1
+  printf '%s\n' "$pgid"
+  kill -0 "-$pgid" 2>/dev/null || return 1
+  epoch=$(lock_cycle_record_field 2) || epoch=
+  safe_nonnegative_integer "${epoch:-}" || return 2
+  now=$(date +%s)
+  safe_nonnegative_integer "$now" || return 2
+  [ "$now" -ge "$epoch" ] || return 2
+  age=$((now - epoch))
+  bound=$((MAX_RUNTIME_SECONDS + LOCK_ORPHAN_GRACE_SECONDS))
+  [ "$age" -le "$bound" ] || return 2
+  process_group_runs_codex "$pgid" || return 2
+  return 0
 }
 
 retire_lock_directory() {
@@ -692,7 +775,7 @@ retire_lock_directory() {
 }
 
 acquire_run_lock() {
-  local owner pgid age
+  local owner pgid age cycle_rc
   mkdir -p "$STATE_ROOT"
   [ -d "$STATE_ROOT" ] && [ ! -L "$STATE_ROOT" ] || die 'state root is unsafe'
   while ! mkdir "$LOCK_DIR" 2>/dev/null; do
@@ -707,10 +790,19 @@ acquire_run_lock() {
         return 1
       fi
       # A dead supervisor whose cycle process group outlived it still holds the
-      # external write authorization, so the lock must not be reclaimed yet.
-      if pgid=$(lock_cycle_group_is_live); then
+      # external write authorization, so the lock must not be reclaimed yet. A
+      # record that cannot be verified as that group - a reused id after a
+      # reboot, or one older than any cycle could legitimately run - is retired
+      # instead of trusted forever.
+      cycle_rc=0
+      pgid=$(lock_cycle_group_status) || cycle_rc=$?
+      if [ "$cycle_rc" -eq 0 ]; then
         printf 'busy: review-sweep cycle process group %s outlived its supervisor\n' "$pgid"
         return 1
+      fi
+      if [ "$cycle_rc" -eq 2 ]; then
+        printf 'reclaim: retiring an unverifiable review-sweep cycle process group record (%s)\n' \
+          "${pgid:-unknown}"
       fi
     else
       # A crash between the lock directory and its owner record leaves an
@@ -926,9 +1018,11 @@ $receipt.tasks_left_in_flight == 0 and
 ($receipt.reviews | type) == "array" and
 ($receipt.reviews | length) == $receipt.reviewed and
 all($receipt.reviews[];
+  (type == "object") and
   (.pr | type == "string" and test("^https://github[.]com/[^/]+/[^/]+/pull/[0-9]+$")) and
   (.head | type == "string" and test("^[0-9a-f]{40}([0-9a-f]{24})?$")) and
   (.comment_url | type == "string" and test("^https://github[.]com/[^/]+/[^/]+/pull/[0-9]+#issuecomment-[0-9]+$")) and
+  ((.slack | type) == "object") and
   (.slack.status == "sent" or .slack.status == "skipped") and
   (if .slack.status == "sent" then
      (.slack.message_url | type == "string" and test("^https://[^/]*slack[.]com/archives/"))
@@ -942,9 +1036,10 @@ JQ
 # Receipt outcomes are distinct so a missing tool, unreadable JSON, and a
 # semantically invalid receipt are never reported as the same failure:
 #   74  the cycle published no receipt
-#   75  the receipt is valid JSON but does not satisfy the publication contract
+#   75  the receipt is valid JSON but does not satisfy the publication contract,
+#       including a field whose type makes the contract unevaluable
 #   76  the receipt is not parseable as a JSON object
-#   77  jq could not evaluate the receipt gate at all
+#   77  jq itself could not run the receipt gate
 verify_cycle_receipt() { # <slot> <receipt-path>
   local slot=$1 receipt=$2 status=0
   if [ ! -f "$receipt" ] || [ -L "$receipt" ]; then
@@ -961,12 +1056,12 @@ verify_cycle_receipt() { # <slot> <receipt-path>
   "$JQ_BIN" -e --arg slot "$slot" "$(receipt_gate_program)" "$receipt" >/dev/null 2>&1 || status=$?
   case $status in
     0) return 0 ;;
-    1|4)
+    1|4|5)
       printf 'error: slot %s published an invalid or incomplete cycle receipt\n' "$slot" >&2
       return 75
       ;;
     *)
-      printf 'error: slot %s receipt could not be evaluated by jq (exit %s)\n' "$slot" "$status" >&2
+      printf 'error: slot %s receipt gate could not be run by jq (exit %s)\n' "$slot" "$status" >&2
       return 77
       ;;
   esac
@@ -974,7 +1069,7 @@ verify_cycle_receipt() { # <slot> <receipt-path>
 
 run_codex_cycle() { # <slot> <result-dir>
   local slot=$1 result_dir=$2 prompt prompt_file result_file event_log receipt
-  local pid pgid self_pgid job_control=0 start_epoch now_epoch deadline rc=0 inflight
+  local pid pgid self_pgid job_control=0 start_epoch now_epoch deadline rc=0 inflight receipt_rc
   mkdir -p "$result_dir"
   [ -d "$result_dir" ] && [ ! -L "$result_dir" ] || die 'result directory is unsafe'
   prompt_file="$result_dir/prompt.txt"
@@ -1017,7 +1112,8 @@ run_codex_cycle() { # <slot> <result-dir>
   fi
   if [ -n "$RUN_CHILD_PGID" ]; then
     if [ "${RUN_LOCK_HELD:-0}" = 1 ]; then
-      atomic_write "$LOCK_CYCLE_PGID_FILE" 0600 "$RUN_CHILD_PGID" || true
+      atomic_write "$LOCK_CYCLE_PGID_FILE" 0600 "$RUN_CHILD_PGID
+$(date +%s)" || true
     fi
   else
     printf 'warning: slot %s did not obtain an owned cycle process group; only its direct child can be stopped\n' \
@@ -1051,9 +1147,18 @@ run_codex_cycle() { # <slot> <result-dir>
     printf 'error: slot %s ended with %s task metadata record(s) still in flight\n' "$slot" "$inflight" >&2
     [ "$rc" -ne 0 ] || rc=73
   fi
-  if [ "$rc" -eq 0 ]; then
-    verify_cycle_receipt "$slot" "$receipt" || rc=$?
+  # The receipt is the only durable evidence of what this cycle published, so it
+  # is read and recorded whatever else went wrong. Nothing may re-run a slot
+  # whose publication verified, or duplicate comments and author DMs follow.
+  receipt_rc=0
+  verify_cycle_receipt "$slot" "$receipt" || receipt_rc=$?
+  atomic_write "$result_dir/receipt-status" 0600 "$receipt_rc" || true
+  if [ "$receipt_rc" -eq 0 ] && [ "$inflight" -eq 0 ]; then
+    CYCLE_PUBLICATION_VERIFIED=1
+  else
+    CYCLE_PUBLICATION_VERIFIED=0
   fi
+  if [ "$rc" -eq 0 ] && [ "$receipt_rc" -ne 0 ]; then rc=$receipt_rc; fi
   bound_cycle_telemetry "$result_dir" "$event_log" "$rc"
   return "$rc"
 }
@@ -1095,9 +1200,22 @@ slot_admission() { # <slot> <now-epoch>
   return 0
 }
 
-run_slot() { # <slot> <now-epoch>
-  local slot=$1 now_epoch=$2 result_dir attempt rc=0 completed
-  result_dir="$RESULTS_ROOT/$slot"
+record_slot_failure() { # <slot> <exit-code> <reason>
+  local slot=$1 rc=$2 reason=$3 completed
+  # The retry deadline is measured from when the attempt actually finished, so a
+  # cycle longer than retry_seconds still waits a full throttle before attempt N+1,
+  # and a repeatedly failing preparation costs one attempt per slot, not per tick.
+  completed=$(current_epoch)
+  slot_set "$SLOT_DIR" completed-at "$completed"
+  slot_set "$SLOT_DIR" exit-code "$rc"
+  slot_set "$SLOT_DIR" retry-at "$((completed + RETRY_SECONDS))"
+  slot_set "$SLOT_DIR" status failed
+  printf 'complete: slot=%s status=failed exit=%s retry-after=%s reason=%s\n' \
+    "$slot" "$rc" "$RETRY_SECONDS" "$reason" >&2
+}
+
+claim_slot_attempt() { # <slot> <now-epoch>
+  local slot=$1 now_epoch=$2 attempt
   attempt=$(slot_file_value "$SLOT_DIR" attempt 2>/dev/null || printf '0')
   safe_nonnegative_integer "$attempt" || attempt=0
   attempt=$((attempt + 1))
@@ -1105,24 +1223,41 @@ run_slot() { # <slot> <now-epoch>
   slot_set "$SLOT_DIR" started-at "$now_epoch"
   slot_set "$SLOT_DIR" owner-pid "$$"
   slot_set "$SLOT_DIR" status running
+  printf '%s\n' "$attempt"
+}
+
+run_slot() { # <slot> <now-epoch> <attempt>
+  local slot=$1 now_epoch=$2 attempt=$3 result_dir rc=0 completed
+  result_dir="$RESULTS_ROOT/$slot"
+  CYCLE_PUBLICATION_VERIFIED=0
   printf 'start: slot=%s attempt=%s max-concurrent-reviews=%s\n' "$slot" "$attempt" "$MAX_CONCURRENT_REVIEWS"
   run_codex_cycle "$slot" "$result_dir" || rc=$?
-  # The retry deadline is measured from when this cycle actually finished, so a
-  # cycle longer than retry_seconds still waits a full throttle before attempt N+1.
-  completed=$(current_epoch)
-  slot_set "$SLOT_DIR" completed-at "$completed"
+  slot_set "$SLOT_DIR" receipt-status "$(slot_receipt_status "$result_dir")"
   if [ "$rc" -eq 0 ]; then
+    completed=$(current_epoch)
+    slot_set "$SLOT_DIR" completed-at "$completed"
     slot_set "$SLOT_DIR" status succeeded
     atomic_write "$STATE_ROOT/last-succeeded-slot" 0600 "$slot" || true
     printf 'complete: slot=%s status=succeeded\n' "$slot"
-  else
+  elif [ "${CYCLE_PUBLICATION_VERIFIED:-0}" = 1 ]; then
+    completed=$(current_epoch)
+    slot_set "$SLOT_DIR" completed-at "$completed"
     slot_set "$SLOT_DIR" exit-code "$rc"
-    slot_set "$SLOT_DIR" retry-at "$((completed + RETRY_SECONDS))"
-    slot_set "$SLOT_DIR" status failed
-    printf 'complete: slot=%s status=failed exit=%s retry-after=%s\n' "$slot" "$rc" "$RETRY_SECONDS" >&2
+    slot_set "$SLOT_DIR" status succeeded
+    atomic_write "$STATE_ROOT/last-succeeded-slot" 0600 "$slot" || true
+    printf 'complete: slot=%s status=succeeded exit=%s publication=verified\n' "$slot" "$rc" >&2
+  else
+    record_slot_failure "$slot" "$rc" cycle
   fi
   prune_expired_artifacts
   return "$rc"
+}
+
+slot_receipt_status() { # <result-dir>
+  local value
+  value=$(slot_file_value "$1" receipt-status 2>/dev/null || true)
+  safe_nonnegative_integer "${value:-}" || value=unknown
+  printf '%s\n' "$value"
 }
 
 prepare_cycle_home() {
@@ -1134,7 +1269,7 @@ prepare_cycle_home() {
 }
 
 run_supervised_cycle() { # <slot> <now-epoch>
-  local slot=$1 now_epoch=$2 rc=0
+  local slot=$1 now_epoch=$2 rc=0 attempt prepare_rc=0
   acquire_run_lock || return 0
   trap release_run_lock EXIT
   trap 'handle_cycle_signal HUP' HUP
@@ -1143,8 +1278,16 @@ run_supervised_cycle() { # <slot> <now-epoch>
   # Slot admission is decided under the lock and before any synchronization, so
   # a duplicate minute tick costs one state read instead of a full home sync.
   if slot_admission "$slot" "$now_epoch"; then
-    prepare_cycle_home
-    run_slot "$slot" "$now_epoch" || rc=$?
+    attempt=$(claim_slot_attempt "$slot" "$now_epoch")
+    # Preparation runs in a subshell so a synchronization failure is recorded
+    # against the slot and throttled, instead of being retried every minute.
+    ( prepare_cycle_home ) || prepare_rc=$?
+    if [ "$prepare_rc" -eq 0 ]; then
+      run_slot "$slot" "$now_epoch" "$attempt" || rc=$?
+    else
+      rc=$prepare_rc
+      record_slot_failure "$slot" "$rc" preparation
+    fi
   else
     printf '%s\n' "$SLOT_ADMISSION_MESSAGE"
   fi
@@ -1190,9 +1333,19 @@ install_supervisor() {
   done
   [ -n "$source" ] || usage
   if [ -f "$CONFIG_PATH" ] && [ ! -L "$CONFIG_PATH" ]; then
-    load_config
+    load_config --allow-missing-source-branch
     [ "$SOURCE_HOME" = "$source" ] \
       || die "existing config belongs to source_home $SOURCE_HOME; remove $CONFIG_PATH to install a different source home"
+    if [ -z "$SOURCE_BRANCH" ]; then
+      # A config written before the branch pin is repaired in place rather than
+      # requiring a hand edit under the private application-support directory.
+      validate_source_home "$SOURCE_HOME"
+      branch=$(source_default_branch "$SOURCE_HOME") \
+        || die 'cannot resolve the default branch of source_home'
+      backfill_source_branch "$branch"
+      load_config
+      printf 'backfilled: source_branch=%s\n' "$SOURCE_BRANCH"
+    fi
   else
     # Nothing is persisted until the supplied home proves it is a Firstmate
     # worktree root, so a mistyped path leaves the installer reusable.
@@ -1221,7 +1374,7 @@ install_supervisor() {
 }
 
 status_supervisor() {
-  local loaded=no lock=idle owner= pgid latest=none slot_status=unknown
+  local loaded=no lock=idle owner= pgid cycle_rc latest=none slot_status=unknown slot_receipt=unknown
   if [ -f "$CONFIG_PATH" ] && [ ! -L "$CONFIG_PATH" ]; then
     load_config
   else
@@ -1232,10 +1385,14 @@ status_supervisor() {
   if [ -d "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ]; then
     if [ -f "$LOCK_OWNER_FILE" ] && [ ! -L "$LOCK_OWNER_FILE" ]; then
       owner=$(sed -n '1p' "$LOCK_OWNER_FILE" 2>/dev/null || true)
+      cycle_rc=0
+      pgid=$(lock_cycle_group_status) || cycle_rc=$?
       if process_is_live_owner "$owner"; then
         lock="running pid=$owner"
-      elif pgid=$(lock_cycle_group_is_live); then
+      elif [ "$cycle_rc" -eq 0 ]; then
         lock="orphaned cycle process group=$pgid"
+      elif [ "$cycle_rc" -eq 2 ]; then
+        lock="reclaimable stale cycle process group record=${pgid:-unknown}"
       else
         lock="stale pid=${owner:-unknown}"
       fi
@@ -1246,6 +1403,7 @@ status_supervisor() {
   if [ -f "$STATE_ROOT/last-succeeded-slot" ] && [ ! -L "$STATE_ROOT/last-succeeded-slot" ]; then
     latest=$(sed -n '1p' "$STATE_ROOT/last-succeeded-slot")
     slot_status=$(slot_file_value "$SLOTS_ROOT/$latest" status 2>/dev/null || printf unknown)
+    slot_receipt=$(slot_file_value "$SLOTS_ROOT/$latest" receipt-status 2>/dev/null || printf unknown)
   fi
   printf 'installed: yes\n'
   printf 'enabled: %s\n' "$ENABLED"
@@ -1258,6 +1416,7 @@ status_supervisor() {
   printf 'cycle: %s\n' "$lock"
   printf 'last-succeeded-slot: %s\n' "$latest"
   printf 'last-slot-status: %s\n' "$slot_status"
+  printf 'last-slot-receipt-status: %s\n' "$slot_receipt"
   printf 'automation-inflight: %s\n' "$(automation_inflight_count)"
   [ "$loaded" = yes ]
 }
