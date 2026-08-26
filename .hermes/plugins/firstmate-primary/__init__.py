@@ -97,11 +97,51 @@ def _marker_digest() -> str:
     return "sha256:" + hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
+def _process_identity_digest() -> str | None:
+    identity_lib = _ROOT / "bin" / "fm-wake-lib.sh"
+    if not identity_lib.is_file():
+        return None
+    env = os.environ.copy()
+    env["FM_ROOT_OVERRIDE"] = str(_ROOT)
+    env.setdefault("FM_HOME", str(_ROOT))
+    try:
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                '. "$1"; fm_pid_identity "$2"',
+                "firstmate-hermes-identity",
+                str(identity_lib),
+                str(os.getpid()),
+            ],
+            cwd=str(_ROOT),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    identity = result.stdout.rstrip("\n")
+    if result.returncode != 0 or not identity:
+        return None
+    return "identity-sha256:" + hashlib.sha256(identity.encode()).hexdigest()
+
+
 def _write_loaded_marker() -> None:
     marker = _state_dir() / _MARKER_NAME
     tmp = marker.with_name(f"{marker.name}.{os.getpid()}.tmp")
+    identity = _process_identity_digest()
+    if identity is None:
+        return
     try:
-        tmp.write_text(f"{_marker_digest()}\n{os.getpid()}\n", encoding="utf-8")
+        tmp.write_text(
+            f"{_marker_digest()}\n{os.getpid()}\n{identity}\n",
+            encoding="utf-8",
+        )
         os.replace(tmp, marker)
     except OSError:
         try:
@@ -154,17 +194,35 @@ def register(ctx: Any) -> None:
         command = args.get("command")
         if not isinstance(command, str) or not command:
             return None
-        if "fm-watch-arm.sh" in command and (
-            args.get("background") is not True
-            or args.get("notify_on_complete") is not True
-        ):
-            return {
-                "action": "block",
-                "message": (
-                    "Hermes watcher supervision requires terminal(background=true, "
-                    "notify_on_complete=true); use the managed terminal registry."
-                ),
-            }
+        if "fm-watch-arm.sh" in command:
+            workdir = args.get("workdir")
+            try:
+                effective_workdir = (
+                    Path.cwd()
+                    if workdir is None
+                    else Path(workdir).expanduser()
+                    if isinstance(workdir, str) and workdir
+                    else None
+                )
+                workdir_matches = (
+                    effective_workdir is not None
+                    and effective_workdir.resolve() == _ROOT
+                )
+            except (OSError, RuntimeError):
+                workdir_matches = False
+            if (
+                args.get("background") is not True
+                or args.get("notify_on_complete") is not True
+                or not workdir_matches
+            ):
+                return {
+                    "action": "block",
+                    "message": (
+                        "Hermes watcher supervision requires terminal(background=true, "
+                        "notify_on_complete=true, workdir=the Firstmate root); use the "
+                        "managed terminal registry."
+                    ),
+                }
         result = _run_checker(
             _ROOT / "bin" / "fm-arm-pretool-check.sh",
             "--command",

@@ -27,16 +27,11 @@ fm_process_is_hermes() {
 
 # Return 0 only for the persistent classic-CLI shape emitted by the supported
 # wrapper. ps exposes flattened argv, so this predicate deliberately checks
-# stable structural flags rather than trying to reconstruct quoted arguments.
+# required structural flags without interpreting text inside argument values.
 fm_process_is_hermes_primary() {
   local args=" $1 "
   fm_process_is_hermes "$1" || return 1
   case "$args" in *' --cli '*) ;; *) return 1 ;; esac
   case "$args" in *' --no-restore-cwd '*) ;; *) return 1 ;; esac
-  case "$args" in
-    *' -z '*|*' --oneshot '*|*' --oneshot='*|*' --tui '*|*' --safe-mode '*|\
-    *' --ignore-user-config '*|*' --ignore-rules '*|*' --worktree '*|*' -w '*|\
-    *' --in '*|*' --in='*|*' --profile '*|*' --profile='*|*' -p '*) return 1 ;;
-  esac
   return 0
 }

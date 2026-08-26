@@ -84,9 +84,9 @@ test_hermes_process_shapes() {
   [ "$out" = primary ] || fail "the wrapper-shaped CLI did not satisfy the primary predicate"
 
   out=$(PATH="$fakebin:$BASE_PATH" bash -c \
-    '. "$0/bin/fm-harness-process-lib.sh"; if fm_process_is_hermes_primary "$1"; then printf primary; fi' \
-    "$ROOT" 'hermes --cli --no-restore-cwd --ignore-rules' 2>/dev/null) || true
-  [ "$out" != primary ] || fail "a rule-skipping Hermes process satisfied the primary predicate"
+    '. "$0/bin/fm-harness-process-lib.sh"; fm_process_is_hermes_primary "$1"; printf primary' \
+    "$ROOT" 'hermes --cli --no-restore-cwd --continue "Project --ignore-rules Alpha"')
+  [ "$out" = primary ] || fail "an option-like word in a session title changed primary detection"
 
   out=$(PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$0/bin/fm-harness-process-lib.sh"; if fm_process_is_hermes_primary "$1"; then printf primary; fi' \

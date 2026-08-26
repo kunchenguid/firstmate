@@ -115,6 +115,7 @@ test_plugin_scope_guard_and_recovery() {
 import importlib.util
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 source = Path(os.environ["FM_PLUGIN_SOURCE"])
@@ -168,6 +169,22 @@ marker = primary / "state" / ".hermes-primary-plugin-loaded"
 lines = marker.read_text().splitlines()
 assert lines[0].startswith("sha256:")
 assert lines[1] == str(os.getpid())
+assert lines[2].startswith("identity-sha256:")
+(primary / "state" / ".lock").write_text(f"{os.getpid()}\n")
+marker_check = [
+    "bash",
+    "-c",
+    '. "$1"; fm_adapter_loaded_marker_matches "$2" "$3" "$4"',
+    "hermes-marker-check",
+    str(primary / "bin" / "fm-wake-lib.sh"),
+    str(marker),
+    lines[0],
+    str(primary / "state" / ".lock"),
+]
+assert subprocess.run(marker_check, check=False).returncode == 0
+marker.write_text(f"{lines[0]}\n{lines[1]}\nidentity-sha256:stale\n")
+assert subprocess.run(marker_check, check=False).returncode != 0
+marker.write_text("\n".join(lines) + "\n")
 
 pre = ctx.hooks["pre_tool_call"]
 assert pre("read_file", {}) is None
@@ -180,8 +197,23 @@ blocked = pre("terminal", {"command": "bin/fm-watch-arm.sh", "background": True}
 assert blocked and blocked["action"] == "block"
 assert pre(
     "terminal",
-    {"command": "bin/fm-watch-arm.sh", "background": True, "notify_on_complete": True},
+    {
+        "command": "bin/fm-watch-arm.sh",
+        "background": True,
+        "notify_on_complete": True,
+        "workdir": str(primary),
+    },
 ) is None
+blocked = pre(
+    "terminal",
+    {
+        "command": "bin/fm-watch-arm.sh",
+        "background": True,
+        "notify_on_complete": True,
+        "workdir": str(child),
+    },
+)
+assert blocked and blocked["action"] == "block"
 
 end = ctx.hooks["on_session_end"]
 end(session_id="s1", platform="cli")
@@ -201,6 +233,15 @@ assert len(ctx.injected) == 2
 
 os.chdir(primary.parent)
 blocked = pre("delegate_task", {})
+assert blocked and blocked["action"] == "block"
+blocked = pre(
+    "terminal",
+    {
+        "command": "bin/fm-watch-arm.sh",
+        "background": True,
+        "notify_on_complete": True,
+    },
+)
 assert blocked and blocked["action"] == "block"
 end(session_id="s2", platform="cli", completed=False, interrupted=True)
 assert len(ctx.injected) == 3

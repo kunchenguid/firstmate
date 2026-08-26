@@ -189,17 +189,34 @@ fm_adapter_file_version() {
   fi
 }
 
+fm_adapter_process_identity_version() {
+  local pid=$1 identity
+  identity=$(fm_pid_identity "$pid") || return 1
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$identity" | shasum -a 256 | awk '{print "identity-sha256:" $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$identity" | sha256sum | awk '{print "identity-sha256:" $1}'
+  else
+    return 1
+  fi
+}
+
 # fm_adapter_loaded_marker_matches <marker> <expected-version> <session-lock>
 # True when <marker> records <expected-version> and names the session process in
-# <session-lock>, i.e. the session holding this home loaded exactly this build.
+# <session-lock>. Markers that record process-incarnation identity must also
+# match the current incarnation of that process.
 fm_adapter_loaded_marker_matches() {
-  local marker=$1 expected_version=$2 lock=$3 marker_version marker_pid lock_pid
+  local marker=$1 expected_version=$2 lock=$3 marker_version marker_pid lock_pid marker_identity current_identity
   [ -f "$marker" ] && [ -f "$lock" ] && [ -n "$expected_version" ] || return 1
   marker_version=$(sed -n '1p' "$marker")
   marker_pid=$(sed -n '2p' "$marker")
+  marker_identity=$(sed -n '3p' "$marker")
   lock_pid=$(sed -n '1p' "$lock")
   [ -n "$marker_pid" ] || return 1
-  [ "$marker_version" = "$expected_version" ] && [ "$marker_pid" = "$lock_pid" ]
+  [ "$marker_version" = "$expected_version" ] && [ "$marker_pid" = "$lock_pid" ] || return 1
+  [ -z "$marker_identity" ] && return 0
+  current_identity=$(fm_adapter_process_identity_version "$marker_pid") || return 1
+  [ "$marker_identity" = "$current_identity" ]
 }
 
 # Pi compatibility names retained for the extension-specific callers below.
