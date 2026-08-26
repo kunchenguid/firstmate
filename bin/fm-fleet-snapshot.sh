@@ -231,7 +231,9 @@ path_present_json() {  # <path>
 
 state_collection_json() {
   local meta id reason invalid='[]'
-  if [ ! -e "$STATE" ]; then
+  if [ -L "$STATE" ] && [ ! -e "$STATE" ]; then
+    jq -n '{present:true,available:false,reason:"state path is a dangling symlink",invalid_metadata_count:0,invalid_metadata:[]}'
+  elif [ ! -e "$STATE" ]; then
     jq -n '{present:false,available:true,reason:null,invalid_metadata_count:0,invalid_metadata:[]}'
   elif [ ! -d "$STATE" ] || [ ! -r "$STATE" ] || [ ! -x "$STATE" ]; then
     jq -n '{present:true,available:false,reason:"state directory is not readable and searchable",invalid_metadata_count:0,invalid_metadata:[]}'

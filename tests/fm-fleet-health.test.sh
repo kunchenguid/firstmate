@@ -155,6 +155,9 @@ test_usage_exit() {
   local rc=0
   "$HEALTH" --nope >/dev/null 2>&1 || rc=$?
   expect_code 2 "$rc" "unknown flag must be a usage error"
+  rc=0
+  "$HEALTH" --json extra >/dev/null 2>&1 || rc=$?
+  expect_code 2 "$rc" "extra arguments must be a usage error"
   pass "usage errors exit 2"
 }
 
@@ -183,6 +186,22 @@ test_missing_state_home_remains_unmodified() {
   printf '%s' "$out" | jq -e '.status == "healthy"' >/dev/null \
     || fail "missing-state home did not report healthy: $out"
   pass "health check does not create a missing state directory"
+}
+
+test_dangling_state_path_is_inconclusive() {
+  local home fakebin out rc=0
+  home=$TMP_ROOT/dangling-state
+  mkdir -p "$home"
+  ln -s "$home/missing-state-target" "$home/state"
+  fakebin=$(make_fakebin "$home")
+  out=$(run_health "$home" "$fakebin") || rc=$?
+  expect_code 3 "$rc" "dangling state path should make health inconclusive"
+  [ -L "$home/state" ] || fail "read-only health changed dangling state path"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "fleet-inventory-inconclusive" and .subject == "state")
+  ' >/dev/null || fail "dangling state path was treated as healthy: $out"
+  pass "dangling state path remains unavailable and inconclusive"
 }
 
 test_unsearchable_state_is_inconclusive() {
@@ -415,6 +434,23 @@ SH
       and (any(.findings[]; .kind == "steering-inbox-aged") | not)
   ' >/dev/null || fail "malformed inbox evidence was hidden: $out"
   pass "invalid and unageable inbox records remain inconclusive"
+}
+
+test_invalid_inbox_containers_are_inconclusive() {
+  local home fakebin out rc=0
+  home=$(make_home invalid-inbox-containers)
+  printf 'not a directory\n' > "$home/state/file.inbox"
+  ln -s "$home/state/missing.inbox-target" "$home/state/dangling.inbox"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "invalid inbox containers should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "steering-inbox-inconclusive"
+              and .count == 2 and (.evidence | contains("are invalid")))
+  ' >/dev/null || fail "invalid inbox containers were hidden: $out"
+  pass "invalid inbox containers remain visible and inconclusive"
 }
 
 test_remote_liveness_is_inconclusive() {
@@ -679,6 +715,10 @@ test_invalid_pending_reply_is_inconclusive() {
   home=$(make_home invalid-pending-reply)
   mkdir -p "$home/state/pending-replies"
   printf 'schema=fm-pending-reply.v1\ncorr_id=bad\n' > "$home/state/pending-replies/truncated"
+  write_pending "$home" 0123012301230123 malformed-pending awaiting_report
+  sed 's/^delivered_epoch=.*/delivered_epoch=not-a-number/' \
+    "$home/state/pending-replies/0123012301230123" > "$home/state/pending-replies/invalid.tmp"
+  mv "$home/state/pending-replies/invalid.tmp" "$home/state/pending-replies/0123012301230123"
   fresh_autoarm_supervision "$home"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
@@ -686,10 +726,24 @@ test_invalid_pending_reply_is_inconclusive() {
   printf '%s' "$out" | jq -e '
     .status == "inconclusive"
       and any(.findings[]; .kind == "pending-reply-inconclusive"
-              and .subject == "pending-replies" and .count == 1)
+              and .subject == "pending-replies" and .count == 2)
       and (any(.findings[]; .kind == "pending-reply-broken") | not)
   ' >/dev/null || fail "invalid pending-reply record was hidden: $out"
   pass "invalid pending-reply records make health inconclusive"
+}
+
+test_dangling_pending_reply_directory_is_inconclusive() {
+  local home fakebin out rc=0
+  home=$(make_home dangling-pending-dir)
+  ln -s "$home/state/missing-pending-target" "$home/state/pending-replies"
+  fakebin=$(make_fakebin "$home")
+  out=$(run_health "$home" "$fakebin") || rc=$?
+  expect_code 3 "$rc" "dangling pending-replies directory should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "pending-reply-inconclusive" and .subject == "pending-replies")
+  ' >/dev/null || fail "dangling pending-replies directory was treated as healthy: $out"
+  pass "dangling pending-replies directory remains unavailable"
 }
 
 test_inventory_and_missing_listener() {
@@ -747,6 +801,25 @@ test_invalid_procevent_registration_is_reported() {
               and (.evidence | contains("owner=invalid")))
   ' >/dev/null || fail "invalid process-event registration was hidden: $out"
   pass "invalid process-event registrations remain visible"
+}
+
+test_dangling_procevent_claim_root_is_inconclusive() {
+  local home fakebin claim_root out rc=0
+  home=$(make_home dangling-procevent-root)
+  mkdir -p "$home/state/procevent"
+  printf 'adapter=lavish\nargc=1\nargv:\npoll\n' > "$home/state/procevent/source-one.source"
+  claim_root="$home/missing-claims"
+  ln -s "$home/missing-claims-target" "$claim_root"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm \
+    FM_PROCEVENT_CLAIM_ROOT="$claim_root" "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "dangling process-event claim root should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "result-listener-inconclusive" and .subject == "procevent")
+      and (any(.findings[]; .kind == "result-listener-missing" and .subject == "source-one") | not)
+  ' >/dev/null || fail "dangling process-event claim root was classified as missing: $out"
+  pass "dangling process-event claim root remains inconclusive"
 }
 
 test_paused_ship_still_requires_pr_listener() {
@@ -899,6 +972,7 @@ test_human_view_and_incomplete_exit() {
 test_usage_exit
 test_healthy_empty_fleet
 test_missing_state_home_remains_unmodified
+test_dangling_state_path_is_inconclusive
 test_unsearchable_state_is_inconclusive
 test_dangling_metadata_is_inconclusive
 test_unsearchable_nested_inventories_are_inconclusive
@@ -909,6 +983,7 @@ test_terminal_unreadable_endpoint_is_inconclusive
 test_historical_status_pr_does_not_require_listener
 test_grouped_inbox_and_stable_fingerprints
 test_invalid_inbox_records_are_inconclusive
+test_invalid_inbox_containers_are_inconclusive
 test_remote_liveness_is_inconclusive
 test_unknown_worker_state_is_inconclusive
 test_registry_only_remote_evidence_is_inconclusive
@@ -920,8 +995,10 @@ test_truncated_secondmate_inventory_is_inconclusive
 test_incomplete_registry_does_not_break_secondmate_summary
 test_pending_reply_uses_recorded_grace
 test_invalid_pending_reply_is_inconclusive
+test_dangling_pending_reply_directory_is_inconclusive
 test_inventory_and_missing_listener
 test_invalid_procevent_registration_is_reported
+test_dangling_procevent_claim_root_is_inconclusive
 test_paused_ship_still_requires_pr_listener
 test_matching_retired_pr_listener_is_not_missing
 test_inconclusive_dominates_actionable_status

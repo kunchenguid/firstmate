@@ -81,6 +81,7 @@ case "${1:-}" in
   "") ;;
   *) usage >&2; exit 2 ;;
 esac
+[ "$#" -le 1 ] || { usage >&2; exit 2; }
 
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-health: jq not found" >&2; exit 3; }
 
@@ -95,7 +96,7 @@ esac
 if [ "${FM_FLEET_HEALTH_TIMED_WORKER:-0}" != 1 ]; then
   WRAPPED_RC=0
   WRAPPED_OUTPUT=$(FM_FLEET_HEALTH_TIMED_WORKER=1 \
-    fm_run_timed "$FM_FLEET_HEALTH_TIMEOUT" "$0" "${1:-}") || WRAPPED_RC=$?
+    fm_run_timed "$FM_FLEET_HEALTH_TIMEOUT" "$0" "$@") || WRAPPED_RC=$?
   if [ "$WRAPPED_RC" -eq 124 ]; then
     NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     if [ "$OUTPUT_MODE" = json ]; then

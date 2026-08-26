@@ -440,8 +440,12 @@ fm_task_inbox_unhandled_json() {  # <state-dir>
       ;;
   esac
   for dir in "$state"/*.inbox; do
-    [ -d "$dir" ] || continue
-    [ -r "$dir" ] && [ -x "$dir" ] || available=false
+    [ -e "$dir" ] || [ -L "$dir" ] || continue
+    if [ ! -d "$dir" ] || { [ -L "$dir" ] && [ ! -e "$dir" ]; }; then
+      invalid_count=$((invalid_count + 1))
+    elif [ ! -r "$dir" ] || [ ! -x "$dir" ]; then
+      available=false
+    fi
   done
   for dir in "$state"/*.inbox; do
     [ -d "$dir" ] && [ -r "$dir" ] && [ -x "$dir" ] || continue

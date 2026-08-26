@@ -116,7 +116,7 @@ fm_procevent_listeners_json() {  # <state>
     return 0
   fi
   root=$(fm_procevent_claim_root)
-  if [ -e "$root" ] && { [ ! -d "$root" ] || [ ! -r "$root" ] || [ ! -x "$root" ]; }; then
+  if { [ -L "$root" ] && [ ! -e "$root" ]; } || { [ -e "$root" ] && { [ ! -d "$root" ] || [ ! -r "$root" ] || [ ! -x "$root" ]; }; }; then
     jq -n '{available:false,records:[]}'
     return 0
   fi
