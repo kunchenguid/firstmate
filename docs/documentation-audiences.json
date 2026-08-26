@@ -173,6 +173,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/read-only-pr-review/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/secondmate-provisioning/SKILL.md",
       "audience": "agent-runtime"
     },
