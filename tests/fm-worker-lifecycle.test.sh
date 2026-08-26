@@ -8323,6 +8323,162 @@ LIVE = {
     "fm-secondmate-session.py": 45142,
     "fm-secondmate-spawn.pi-ext.ts": 3867,
 }
+
+import copy
+import hashlib
+import importlib.util
+import sys
+
+provider_spec = importlib.util.spec_from_file_location(
+    "fm_provider_abandon", str(Path(sys.argv[1]).with_name("fm-azure-worker-provider.py")))
+provider = importlib.util.module_from_spec(provider_spec)
+provider_spec.loader.exec_module(provider)
+lifecycle_spec = importlib.util.spec_from_file_location("fm_lifecycle_abandon", sys.argv[1])
+lifecycle = importlib.util.module_from_spec(lifecycle_spec)
+lifecycle_spec.loader.exec_module(lifecycle)
+
+controller = {
+    "subscription": "00000000-0000-4000-8000-000000000000",
+    "resource_group": "rg-test", "prefix": "fmtest", "owner": "owner",
+    "deployment_generation": "dep-one", "home_binding": "a" * 64,
+}
+bindings = {
+    "home_binding": "a" * 64, "task": "never-started",
+    "task_generation": "spawn:never-started", "assignment_generation": "asg-00000038",
+    "account_binding": "b" * 64, "worktree_binding": "c" * 64,
+    "repository_binding": "d" * 64, "repository_generation": "e" * 40,
+}
+action = {
+    "type": "execute", "slot": 6, "role": "author",
+    "sku": "Standard_D4s_v6", "sku_family": "StandardDsv6Family",
+    "deployment_generation": "dep-one", "owner": "owner", "cloud_generation": 1,
+    "cloud_instance_id": "vm-instance", "bindings": bindings,
+    "request_digest": "5" * 64, "reservation_usd": 2.5,
+}
+action["request"] = dict(bindings, **{
+    "schema": "fm.worker-execution/v1", "cloud_instance_id": "vm-instance",
+    "argv": ["/usr/bin/true"], "wall_seconds": 60,
+    "request_digest": action["request_digest"],
+})
+tags = provider.action_tags(controller, action)
+resources = {}
+for kind in provider.REQUIRED_RESOURCE_KINDS:
+    resources[kind] = {
+        "id": "/resource/" + kind, "immutable_id": "/resource/" + kind,
+        "tags": dict(tags),
+    }
+resources["vm"]["power_state"] = "VM deallocated"
+resources["vm"]["immutable_id"] = action["cloud_instance_id"]
+for kind in ("monitor-extension", "bootstrap-command", "task-command", "ttl-schedule"):
+    resources[kind]["attached_to"] = resources["vm"]["id"]
+for kind in ("monitor-extension", "bootstrap-command", "task-command"):
+    resources[kind]["provisioning_state"] = "Succeeded"
+resources["ttl-schedule"].update({"status": "Enabled", "deadline": "2359"})
+for kind, payload in provider.initial_execute_staging_pair(action).items():
+    body = provider.canonical_bytes(payload) + b"\n"
+    resources[kind].update({"digest": hashlib.sha256(body).hexdigest(), "length": len(body)})
+reservation_body = b"{}\n"
+resources["global-reservation"].update({
+    "digest": hashlib.sha256(reservation_body).hexdigest(), "length": len(reservation_body),
+})
+action["resources"] = {
+    kind: {"id": value["id"], "immutable_id": value["immutable_id"]}
+    for kind, value in resources.items()
+}
+action["idempotency_key"] = hashlib.sha256(provider.canonical_bytes(action)).hexdigest()
+tags = provider.action_tags(controller, action)
+for resource in resources.values():
+    resource["tags"] = dict(tags)
+worker = {"slot": 6, "resources": resources}
+original_worker = copy.deepcopy(worker)
+state = {"worker": worker, "views": 0, "marks": 0, "deletes": 0}
+
+provider.inventory = lambda *_args, **_kwargs: {
+    "workers": [copy.deepcopy(state["worker"])], "conflicts": [], "metrics": {},
+}
+provider.show_full = lambda *_args, **_kwargs: {
+    "id": action["resources"]["task-command"]["id"],
+    "properties": {"source": None, "provisioningState": "Succeeded"},
+    "tags": dict(tags),
+}
+def pending_view(*_args, **_kwargs):
+    state["views"] += 1
+    return {
+        "executionState": "Pending", "exitCode": 0, "startTime": None,
+        "endTime": None, "output": "", "error": "", "executionMessage": None,
+    }
+provider.run_command_instance_view = pending_view
+def mark(_controller, _action, key, value):
+    assert key == provider.EXECUTE_ABANDON_MARKER
+    assert value == action["idempotency_key"]
+    state["marks"] += 1
+    state["worker"]["resources"]["state-container"]["tags"][key] = value
+provider.mark_cleanup_container = mark
+def delete(_controller, kind, resource):
+    assert kind == "task-command"
+    assert resource["id"] == action["resources"]["task-command"]["id"]
+    state["deletes"] += 1
+    state["worker"]["resources"].pop("task-command")
+provider.conditional_delete = delete
+provider.wait_absent = lambda _controller, resource_id: (
+    resource_id == action["resources"]["task-command"]["id"]
+) or (_ for _ in ()).throw(AssertionError("wrong task-command absence proof"))
+
+result = provider.abandon_execute(controller, action)
+assert state == {"worker": state["worker"], "views": 2, "marks": 1, "deletes": 1}, state
+assert result["action"] == "abandon-execute"
+assert result["execution"]["disposition"] == "provider-never-started-retired"
+assert "task-command" not in result["worker"]["resources"]
+lifecycle.validate_abandon_execute_result(action, result)
+for label, mutate in (
+    ("VM resource ID", lambda value: value["worker"]["resources"]["vm"].update(
+        {"id": "/foreign/vm"})),
+    ("VM immutable identity", lambda value: value["worker"]["resources"]["vm"].update(
+        {"immutable_id": "foreign-vm"})),
+    ("state container ID", lambda value: value["worker"]["resources"]["state-container"].update(
+        {"id": "/foreign/container"})),
+    ("assignment tag", lambda value: value["worker"]["resources"]["vm"]["tags"].update(
+        {"task-binding": "foreign-task"})),
+):
+    foreign = copy.deepcopy(result)
+    mutate(foreign)
+    try:
+        lifecycle.validate_abandon_execute_result(action, foreign)
+    except lifecycle.LifecycleError:
+        pass
+    else:
+        raise AssertionError("retirement accepted a foreign {}".format(label))
+
+# Crash replay after marker + child deletion is terminal and performs no new mutation.
+replayed = provider.abandon_execute(controller, action)
+assert replayed["execution"] == result["execution"]
+assert state["views"] == 2 and state["marks"] == 1 and state["deletes"] == 1, state
+
+# Any evidence of execution keeps custody and does not mark or delete.
+state["worker"] = copy.deepcopy(original_worker)
+state["views"] = state["marks"] = state["deletes"] = 0
+provider.run_command_instance_view = lambda *_args, **_kwargs: {
+    "executionState": "Running", "exitCode": 0, "output": "", "error": "",
+}
+try:
+    provider.abandon_execute(controller, action)
+except provider.ProviderError as exc:
+    assert "never-started" in str(exc), exc
+else:
+    raise AssertionError("a Running execute was retired")
+assert state["marks"] == 0 and state["deletes"] == 0, state
+
+# Ordinary cleanup may accept the missing child only with the exact marker and
+# controller-carried retired key; absence alone remains fail closed.
+state["worker"]["resources"].pop("task-command")
+delete_action = dict(action, type="delete-compute", retired_execute_key=None)
+delete_action["idempotency_key"] = "9" * 64
+try:
+    provider.mutate_delete_compute(controller, delete_action)
+except provider.ProviderError as exc:
+    assert "custody proof" in str(exc), exc
+else:
+    raise AssertionError("compute cleanup accepted an unexplained missing task-command")
 ORDINARY = {"brief.md": 4384, "repo.bundle": 10042238}
 
 # A compartment payload is admitted, and the manifest carries all four entries
