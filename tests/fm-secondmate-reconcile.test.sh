@@ -108,8 +108,11 @@ test_an_inventory_mismatch_asks_the_mate_once_per_window() {
     "the first ask did not report what it sent: $out"
   [ "$(inbox_records "$home/state" mate)" -eq 1 ] \
     || fail "the ask did not land as exactly one durable steering record"
-  assert_contains "$(inbox_text "$home/state" mate)" "stale-scout" \
-    "the instruction did not name the rows that disagree"
+  assert_contains "$(inbox_text "$home/state" mate)" "check your current books" \
+    "the instruction did not ask the mate to inspect its current state"
+  if printf '%s' "$(inbox_text "$home/state" mate)" | grep -Fq 'stale-scout'; then
+    fail "the instruction prescribed a repair from sampled details that can become stale"
+  fi
 
   # Every later recap sees the same mismatch; none of them may nag.
   out=$(run_notify "$home" "$fakebin" once "$snap") || fail "the repeat run failed: $out"
@@ -346,6 +349,33 @@ test_concurrent_recaps_send_one_instruction() {
   pass "simultaneous recaps still ask the mate only once"
 }
 
+test_a_delayed_snapshot_never_prescribes_a_stale_repair() {
+  local home mate fakebin old_snap new_snap out text
+  { read -r home; read -r mate; read -r fakebin; } < <(make_main_home delayed mate)
+  old_snap="$home/old-snapshot.json"
+  new_snap="$home/new-snapshot.json"
+  write_snapshot "$old_snap" mate '{"kind":"orphan_in_flight","ids":["already-repaired"]}'
+  write_snapshot "$new_snap" mate '{"kind":"unowned_current","ids":["current-row"]}'
+
+  out=$(run_notify "$home" "$fakebin" delayed "$old_snap") \
+    || fail "the delayed reconcile ask failed: $out"
+  assert_contains "$out" "sent: mate orphan_in_flight" \
+    "the delayed snapshot did not produce the cooldown-limited check: $out"
+  out=$(run_notify "$home" "$fakebin" delayed "$new_snap") \
+    || fail "the current snapshot reconcile failed: $out"
+  assert_contains "$out" "cooldown: mate" \
+    "the per-home cooldown did not deduplicate the newer observation: $out"
+  [ "$(inbox_records "$home/state" mate)" -eq 1 ] \
+    || fail "the old and new snapshots produced more than one ask inside the cooldown"
+  text=$(inbox_text "$home/state" mate)
+  assert_contains "$text" "check your current books" \
+    "the delayed ask did not direct the mate to current state"
+  if printf '%s' "$text" | grep -Eq 'already-repaired|current-row'; then
+    fail "the delayed ask embedded sampled row details and could prescribe a stale repair: $text"
+  fi
+  pass "a delayed snapshot asks for a current check instead of prescribing a stale repair"
+}
+
 test_a_stale_snapshot_never_targets_a_replacement_mate() {
   local home mate fakebin snap out
   { read -r home; read -r mate; read -r fakebin; } < <(make_main_home stale mate)
@@ -434,5 +464,6 @@ test_the_parent_never_changes_the_mates_own_files
 test_a_failed_send_is_retried_on_the_next_run
 test_busy_lifecycle_locks_never_hold_up_the_digest
 test_concurrent_recaps_send_one_instruction
+test_a_delayed_snapshot_never_prescribes_a_stale_repair
 test_a_stale_snapshot_never_targets_a_replacement_mate
 test_teardown_cannot_leave_its_replacement_in_cooldown

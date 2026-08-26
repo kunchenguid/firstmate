@@ -131,23 +131,14 @@ delivery_id() {
   printf '%s' "$digest" | cut -c1-16
 }
 
-# The instruction is deliberately plain: it names what disagrees and leaves the
-# repair entirely to the mate, which is the only home allowed to change it.
-reconcile_text() {  # <kind> <ids-csv>
-  local kind=$1 ids=$2 what
-  case "$kind" in
-    orphan_in_flight)
-      what="these in-flight backlog items have no task metadata in your home, so no worker is running them: $ids" ;;
-    unowned_current)
-      what="these live task records in your home have no in-flight backlog item: $ids" ;;
-    terminal_in_flight)
-      what="these in-flight backlog items already have a finished worker: $ids" ;;
-    *) what="your backlog and task metadata disagree about: $ids" ;;
-  esac
-  cat <<EOF
-Your home's backlog and its task metadata disagree, and only you can settle it: $what
+# The instruction is deliberately independent of the sampled mismatch details.
+# A delayed snapshot can therefore ask only for a check of the mate's current
+# books, never prescribe a repair for rows that may already have changed.
+reconcile_text() {
+  cat <<'EOF'
+A fleet snapshot found that your home's backlog and task metadata disagreed.
 
-Please reconcile your own books: move each row to the section that matches reality, or clean up the leftover record. Nothing outside your home has been changed, and no reply is expected.
+Please check your current books and, if they still disagree, reconcile them to match reality. Nothing outside your home has been changed, and no reply is expected.
 EOF
 }
 
@@ -189,11 +180,11 @@ cmd_notify() {
     | select((.spawn_gen | type) == "string" and (.spawn_gen | test("^[A-Za-z0-9._-]+$")))
     | .kind as $kind
     | select(["orphan_in_flight","unowned_current","terminal_in_flight"] | index($kind))
-    | [.id, .spawn_gen, $kind, (.ids | map(select(type == "string")) | sort | join(", "))]
+    | [.id, .spawn_gen, $kind]
     | @tsv')
 
-  local id sampled_spawn_gen kind ids path last age now delivered_at reconcile_lock control_lock meta meta_lock current_spawn_gen did send_rc
-  while IFS=$'\t' read -r id sampled_spawn_gen kind ids; do
+  local id sampled_spawn_gen kind path last age now delivered_at reconcile_lock control_lock meta meta_lock current_spawn_gen did send_rc
+  while IFS=$'\t' read -r id sampled_spawn_gen kind; do
     [ -n "${id:-}" ] || continue
     path=$(nudge_path "$id")
     reconcile_lock="$STATE/.$id.reconcile.lock"
@@ -259,7 +250,7 @@ cmd_notify() {
     send_rc=0
     FM_TASK_INBOX_LOCK_WAIT_SECS=0 FM_SEND_EXPECTED_SPAWN_GEN="$sampled_spawn_gen" \
       "$SCRIPT_DIR/fm-send.sh" "$id" --fire-and-forget "$did" \
-      "$(reconcile_text "$kind" "$ids")" >/dev/null 2>&1 || send_rc=$?
+      "$(reconcile_text)" >/dev/null 2>&1 || send_rc=$?
     # exit 3 is "typed but unconfirmed": the mate may already hold the ask, so
     # record the nudge rather than risk asking twice.
     if [ "$send_rc" -ne 0 ] && [ "$send_rc" -ne 3 ]; then
