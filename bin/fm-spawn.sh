@@ -2701,7 +2701,12 @@ preserve_relaunch_meta() {
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
-} > "$SPAWN_META_PATH"
+} > "$SPAWN_META_PATH" || {
+  # Bash 3.2 does not abort on a failed grouped redirect even with set -e, so a
+  # directory or other unwritable metadata path would otherwise launch anyway.
+  echo "error: could not write task metadata for $ID" >&2
+  exit 1
+}
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
