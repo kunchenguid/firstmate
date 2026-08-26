@@ -2523,6 +2523,37 @@ fm_backend_herdr_target_ready() {  # <target>
   fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" || return 1
 }
 
+# Native Windows Herdr keeps PowerShell as the foreground group leader while
+# interactive `treehouse get` opens a nested cmd.exe in the task copy. Herdr
+# cannot report that descendant's cwd, so spawn acquires a durable lease itself
+# on this one platform and moves the owning PowerShell to the known path.
+fm_backend_herdr_treehouse_acquisition_mode() {  # [uname]
+  local os=${1:-}
+  [ -n "$os" ] || os=$(uname -s 2>/dev/null || true)
+  case "$os" in
+    MSYS*|MINGW*|CYGWIN*) printf '%s\n' lease ;;
+    *) printf '%s\n' interactive ;;
+  esac
+}
+
+fm_backend_herdr_windows_enter_worktree_command() {  # <native-windows-path>
+  local path=$1
+  path=$(printf '%s' "$path" | sed "s/'/''/g")
+  printf "Set-Location -LiteralPath '%s'\n" "$path"
+}
+
+fm_backend_herdr_acquire_treehouse_lease() {  # <project> <lease-holder>
+  (
+    cd "$1" || exit 1
+    treehouse get --lease --lease-holder "$2"
+  )
+}
+
+fm_backend_herdr_return_unpublished_treehouse_lease() {  # <target> <worktree>
+  fm_backend_herdr_kill "$1" 2>/dev/null || true
+  treehouse return --force "$2"
+}
+
 # fm_backend_herdr_current_path: the live FOREGROUND process's cwd, or empty on
 # any error. Mirrors tmux's pane_current_path poll used for worktree-path
 # discovery after `treehouse get`.
@@ -2535,7 +2566,8 @@ fm_backend_herdr_target_ready() {  # <target>
 # `.result.pane.foreground_cwd` tracks the ACTUALLY RUNNING foreground
 # process's cwd instead, which is what changes when `treehouse get` enters its
 # worktree subshell. Native Windows Herdr omits that field, so process-info's
-# exact foreground group leader supplies the only safe cwd fallback.
+# exact foreground group leader supplies the only safe cwd fallback after
+# spawn moves that PowerShell process into its pre-acquired task copy.
 fm_backend_herdr_current_path() {  # <target>
   local out path
   fm_backend_herdr_target_ready "$1" || return 0
