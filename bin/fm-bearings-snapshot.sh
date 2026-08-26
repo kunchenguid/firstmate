@@ -299,10 +299,15 @@ EOF
       npr=$((npr + cnt))
       rows_file=$(jq_blob_file pr_rows "$rows") || exit 1
       repo_rows_file=$(jq_blob_file pr_repo_rows "$repo_rows") || exit 1
+      # A failed accumulation loses every row gathered so far, so it cannot join the
+      # loop's soft per-repo degrade: continuing would keep counting rows that no
+      # longer exist. Announce it here instead of leaving the next iteration to
+      # report the emptied accumulator as an empty jq input.
       rows=$(jq -n --slurpfile a_blob "$rows_file" --slurpfile b_blob "$repo_rows_file" '
         ($a_blob[0]) as $a
         | ($b_blob[0]) as $b
-        | $a + $b')
+        | $a + $b') \
+        || { echo "fm-bearings-snapshot: pull request row accumulation failed" >&2; exit 1; }
     done
     PR_REPOS_SHOWN=$nrepos
     PR_ROWS_CAPPED=$ncapped
