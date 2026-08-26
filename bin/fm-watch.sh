@@ -1401,6 +1401,18 @@ EOF
               date +%s > "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+            elif crew_is_terminal_done "$task" \
+              && fm_pr_poll_artifacts_valid "$STATE" "$task" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+              # Nothing left for this crew to do: the run-step itself reports
+              # done and the merge poll is armed and waiting to notice the
+              # landing (teardown's own gate, not a possible wedge). Absorb
+              # with no wedge timer - unlike the provably-working override
+              # above, this idle wait is expected to last until the captain
+              # merges, so it must never tick toward a possible-wedge escalation.
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf"
+              clear_write_tracking "$key"
+              triage_log "absorbed stale (terminal done, merge poll armed): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               printf '%s' "$h" > "$sf"
