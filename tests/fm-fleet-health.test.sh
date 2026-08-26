@@ -168,6 +168,19 @@ test_healthy_empty_fleet() {
   pass "empty fleet is healthy with no findings"
 }
 
+test_missing_state_home_remains_unmodified() {
+  local home fakebin out rc=0
+  home=$TMP_ROOT/missing-state
+  mkdir -p "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(run_health "$home" "$fakebin") || rc=$?
+  expect_code 0 "$rc" "home without state should remain a healthy empty fleet"
+  [ ! -e "$home/state" ] || fail "read-only health check created the missing state directory"
+  printf '%s' "$out" | jq -e '.status == "healthy"' >/dev/null \
+    || fail "missing-state home did not report healthy: $out"
+  pass "health check does not create a missing state directory"
+}
+
 test_actionable_dead_direct_report() {
   local home fakebin out rc=0
   home=$(make_home dead-agent)
@@ -438,6 +451,24 @@ test_pending_reply_uses_recorded_grace() {
   pass "pending-reply health uses each record's authoritative grace"
 }
 
+test_invalid_pending_reply_is_inconclusive() {
+  local home fakebin out rc=0
+  home=$(make_home invalid-pending-reply)
+  mkdir -p "$home/state/pending-replies"
+  printf 'schema=fm-pending-reply.v1\ncorr_id=bad\n' > "$home/state/pending-replies/truncated"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "invalid pending-reply state should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "pending-reply-inconclusive"
+              and .subject == "pending-replies" and .count == 1)
+      and (any(.findings[]; .kind == "pending-reply-broken") | not)
+  ' >/dev/null || fail "invalid pending-reply record was hidden: $out"
+  pass "invalid pending-reply records make health inconclusive"
+}
+
 test_inventory_and_missing_listener() {
   local home fakebin out
   home=$(make_home inventory)
@@ -512,6 +543,7 @@ test_human_view_and_incomplete_exit() {
 
 test_usage_exit
 test_healthy_empty_fleet
+test_missing_state_home_remains_unmodified
 test_actionable_dead_direct_report
 test_dead_agent_with_live_endpoint
 test_unreadable_local_endpoint_is_inconclusive
@@ -523,6 +555,7 @@ test_invalid_secondmate_summary_uses_normalized_kind
 test_truncated_secondmate_inventory_is_inconclusive
 test_incomplete_registry_does_not_break_secondmate_summary
 test_pending_reply_uses_recorded_grace
+test_invalid_pending_reply_is_inconclusive
 test_inventory_and_missing_listener
 test_complete_timeout_covers_fingerprinting
 test_human_view_and_incomplete_exit

@@ -206,7 +206,7 @@ if ! printf '%s' "$SNAPSHOT" | jq -e '.schema == "fm-fleet-snapshot.v1"' >/dev/n
 fi
 
 PENDING_JSON=$(fm_pending_reply_open_json "$STATE") \
-  || PENDING_JSON='{"available":false,"now_epoch":null,"records":[]}'
+  || PENDING_JSON='{"available":false,"now_epoch":null,"invalid_count":0,"records":[]}'
 INBOX_JSON=$(fm_task_inbox_unhandled_json "$STATE") \
   || INBOX_JSON='{"available":false,"records":[]}'
 LISTENERS_JSON=$(fm_procevent_listeners_json "$STATE") \
@@ -249,6 +249,11 @@ EVALUATED=$(jq -n \
       (if $pending.available == false then
         finding("pending-reply-inconclusive";"pending-replies";"notice";"inconclusive";
                 "pending-reply records could not be read";"unreadable";1)
+      else empty end),
+      (if ($pending.invalid_count // 0) > 0 then
+        finding("pending-reply-inconclusive";"pending-replies";"notice";"inconclusive";
+                (($pending.invalid_count | tostring) + " pending-reply record(s) are invalid");
+                "invalid";$pending.invalid_count)
       else empty end),
       (if $inbox.available == false then
         finding("steering-inbox-inconclusive";"steering-inbox";"notice";"inconclusive";

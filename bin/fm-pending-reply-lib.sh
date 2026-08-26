@@ -177,6 +177,39 @@ fm_pending_reply_get() {  # <record-path> <key>
   grep "^${key}=" "$rec" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+fm_pending_reply_record_valid() {  # <record-path>
+  local rec=$1 base schema corr task phase key count value
+  [ -f "$rec" ] && [ ! -L "$rec" ] || return 1
+  for key in schema corr_id task_id created_epoch phase request_turn_completed_epoch recovery_turn_completed_epoch grace_secs; do
+    count=$(grep -c "^${key}=" "$rec" 2>/dev/null || true)
+    [ "$count" -eq 1 ] || return 1
+  done
+  schema=$(fm_pending_reply_get "$rec" schema)
+  [ "$schema" = "$FM_PENDING_REPLY_SCHEMA" ] || return 1
+  corr=$(fm_pending_reply_get "$rec" corr_id)
+  base=$(basename "$rec")
+  [ "$corr" = "$base" ] || return 1
+  case "$corr" in
+    [a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9]) ;;
+    *) return 1 ;;
+  esac
+  task=$(fm_pending_reply_get "$rec" task_id)
+  case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  phase=$(fm_pending_reply_get "$rec" phase)
+  case "$phase" in
+    awaiting_report|delivery_unknown|recovery_sending|recovery_sent|recovery_failed|recovery_unknown|escalated|resolved) ;;
+    *) return 1 ;;
+  esac
+  for key in created_epoch grace_secs; do
+    value=$(fm_pending_reply_get "$rec" "$key")
+    case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  done
+  for key in request_turn_completed_epoch recovery_turn_completed_epoch; do
+    value=$(fm_pending_reply_get "$rec" "$key")
+    case "$value" in *[!0-9]*) return 1 ;; esac
+  done
+}
+
 fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
   local state=$1 corr=$2 task_id=$3 rec phase delivered
   printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
@@ -1412,23 +1445,25 @@ fm_pending_reply_task_has_open() {  # <state-dir> <task_id>
 # Does not tick, recover, escalate, or otherwise mutate records.
 fm_pending_reply_open_json() {  # <state-dir>
   local state=$1 dir rec corr phase task_id created delivered completed recovery_completed grace
-  local now age
+  local now age row records='[]' invalid_count=0
   dir=$(fm_pending_reply_dir "$state")
   now=$(fm_pending_reply_now)
   if [ ! -e "$dir" ]; then
-    jq -n --argjson now "$now" '{available:true,now_epoch:$now,records:[]}'
+    jq -n --argjson now "$now" '{available:true,now_epoch:$now,invalid_count:0,records:[]}'
     return 0
   fi
   if [ ! -d "$dir" ] || [ ! -r "$dir" ]; then
-    jq -n --argjson now "$now" '{available:false,now_epoch:$now,records:[]}'
+    jq -n --argjson now "$now" '{available:false,now_epoch:$now,invalid_count:0,records:[]}'
     return 0
   fi
-  {
-    for rec in "$dir"/*; do
-      [ -f "$rec" ] || continue
+  for rec in "$dir"/*; do
+      [ -e "$rec" ] || [ -L "$rec" ] || continue
       case "$(basename "$rec")" in .*) continue ;; esac
+      if ! fm_pending_reply_record_valid "$rec"; then
+        invalid_count=$((invalid_count + 1))
+        continue
+      fi
       corr=$(fm_pending_reply_get "$rec" corr_id)
-      [ -n "$corr" ] || corr=$(basename "$rec")
       phase=$(fm_pending_reply_get "$rec" phase)
       [ "$phase" != resolved ] || continue
       task_id=$(fm_pending_reply_get "$rec" task_id)
@@ -1443,7 +1478,7 @@ fm_pending_reply_open_json() {  # <state-dir>
         ''|*[!0-9]*) ;;
         *) age=$((now - created)); [ "$age" -lt 0 ] && age=0 ;;
       esac
-      jq -n \
+      row=$(jq -n \
         --arg corr "$corr" \
         --arg task "$task_id" \
         --arg phase "$phase" \
@@ -1463,7 +1498,9 @@ fm_pending_reply_open_json() {  # <state-dir>
           recovery_turn_completed_epoch:(if $recovery_completed == "" then null else (try ($recovery_completed | tonumber) catch null) end),
           grace_secs:($grace | tonumber),
           age_seconds:$age
-        }'
-    done
-  } | jq -s --argjson now "$now" '{available:true,now_epoch:$now,records:.}'
+        }') || return 1
+      records=$(jq -n --argjson records "$records" --argjson row "$row" '$records + [$row]') || return 1
+  done
+  jq -n --argjson now "$now" --argjson invalid "$invalid_count" --argjson records "$records" \
+    '{available:true,now_epoch:$now,invalid_count:$invalid,records:$records}'
 }
