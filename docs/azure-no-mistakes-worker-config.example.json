@@ -18,7 +18,9 @@
     "FM_AZURE_DEPLOYMENT_GENERATION": "replace-with-deployment-generation",
     "FM_AZURE_OWNER_TAG": "replace-with-owner-tag",
     "FM_AZURE_NAMING_PREFIX": "replace-with-naming-prefix",
-    "FM_AZURE_STORAGE_NAME": "replace-with-storage-account"
+    "FM_AZURE_STORAGE_NAME": "replace-with-storage-account",
+    "FM_AZURE_OPERATOR_DATA_PLANE_IP": "replace-with-one-exact-operator-egress-ipv4",
+    "FM_AZURE_WORKER_IMAGE_ID": "replace-with-exact-compute-gallery-image-version-resource-id"
   },
   "assignment_timeout_seconds": 1800,
   "cleanup_timeout_seconds": 1800,

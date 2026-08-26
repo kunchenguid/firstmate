@@ -1887,7 +1887,11 @@ SH
     . "$1"
     run_bounded 1 "$2"
   ' _ "$WATCH" "$stubborn" || rc=$?
-  [ "$rc" -eq 124 ] || fail "watcher timeout wrapper returned $rc instead of 124"
+  # GNU timeout may return 137 after its --kill-after escalation sends KILL;
+  # both values prove the bounded timeout path, and process absence below is
+  # the independent cleanup proof.
+  [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] \
+    || fail "watcher timeout wrapper returned $rc instead of 124 or 137"
   [ -s "$pid_file" ] || fail "watcher timeout fixture did not start"
   ! kill -0 "$(cat "$pid_file")" 2>/dev/null \
     || fail "watcher timeout wrapper left the TERM-resistant process alive"

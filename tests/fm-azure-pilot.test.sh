@@ -593,6 +593,7 @@ run_bounded_mutation_deadline_checks() {
   state_dir=$(mktemp -d)
   write_sourceable_script "$sourceable"
   set +e
+  # shellcheck disable=SC2030,SC2031
   output=$(
     (
       set -- help "$state_dir"
@@ -614,7 +615,7 @@ run_bounded_mutation_deadline_checks() {
   status=$?
   set -e
   [ "$status" -ne 0 ] || fail "bounded Azure mutation accepted a hung CLI"
-  # shellcheck disable=SC2031
+  # shellcheck disable=SC2030,SC2031
   [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["phase"])' "$state_dir/apply.json")" = retained ] || fail "timed-out mutation did not retain exact operation state"
   python3 - "$SCRIPT" <<'PY' || fail "foundation mutating Azure calls bypass bounded state owner"
 from pathlib import Path
@@ -662,7 +663,7 @@ run_capacity_contract_checks() {
   write_sourceable_script "$sourceable"
   set +e
   # These exports intentionally reset names assigned in earlier isolated runtime-test subshells.
-  # shellcheck disable=SC2031
+  # shellcheck disable=SC2030,SC2031
   output=$(
     (
       set --
@@ -750,6 +751,8 @@ run_worker_create_replay_quota_checks() {
   sourceable=$(mktemp)
   write_sourceable_script "$sourceable"
   set +e
+  # These exports intentionally reset names assigned in earlier isolated runtime-test subshells.
+  # shellcheck disable=SC2030,SC2031
   output=$(
     (
       set --

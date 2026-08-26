@@ -37,6 +37,11 @@ import subprocess
 import sys
 
 root = Path(__file__).parent
+expected_image = "/subscriptions/11111111-1111-4111-8111-111111111111/resourceGroups/fixture/providers/Microsoft.Compute/galleries/fixture/images/worker/versions/1.0.0"
+if os.environ.get("FM_AZURE_WORKER_IMAGE_ID") != expected_image:
+    raise SystemExit("exact worker image identity was not forwarded to lifecycle")
+if os.environ.get("FM_AZURE_OPERATOR_DATA_PLANE_IP") != "203.0.113.10":
+    raise SystemExit("exact operator data-plane IP was not forwarded to lifecycle")
 state_path = root / "fake-state.json"
 complete = root / "complete"
 log = root / "calls.log"
@@ -286,7 +291,7 @@ pass "guest supervisor re-verifies the sealed runtime inventory and executable"
 
 RUNTIME_SHA=$(shasum -a 256 "$TMP_ROOT/runtime.tar.gz" | awk '{print $1}')
 cat > "$TMP_ROOT/config.json" <<JSON
-{"schema":"fm.no-mistakes-worker-wrapper-config/v1","fm_home":"$HOME_DIR","account_pool_home":"$HOME_DIR/accounts","runtime_bundle":"$TMP_ROOT/runtime.tar.gz","runtime_bundle_sha256":"$RUNTIME_SHA","lifecycle_path":"$FAKE","lifecycle_source_commit":"$LIFECYCLE_COMMIT","lifecycle_env":{"FM_AZURE_TENANT_ID":"22222222-2222-4222-8222-222222222222","FM_AZURE_SUBSCRIPTION_ID":"11111111-1111-4111-8111-111111111111","FM_AZURE_ADMIN_EMAIL":"fixture@example.invalid","FM_AZURE_ADMIN_USERNAME":"fixtureadmin","FM_AZURE_ADMIN_SSH_PUBLIC_KEY":"ssh-ed25519 AAAATEST fixture","FM_AZURE_RUNNER_OPERATOR_OBJECT_ID":"33333333-3333-4333-8333-333333333333","FM_AZURE_KEY_VAULT_NAME":"fixture-vault","FM_AZURE_BUDGET_START_DATE":"2026-08-01","FM_AZURE_DEPLOYMENT_GENERATION":"dep-fixture","FM_AZURE_OWNER_TAG":"owner","FM_AZURE_NAMING_PREFIX":"fixture","FM_AZURE_STORAGE_NAME":"fixturestorage"},"assignment_timeout_seconds":30,"cleanup_timeout_seconds":30,"poll_seconds":1,"wall_seconds":60}
+{"schema":"fm.no-mistakes-worker-wrapper-config/v1","fm_home":"$HOME_DIR","account_pool_home":"$HOME_DIR/accounts","runtime_bundle":"$TMP_ROOT/runtime.tar.gz","runtime_bundle_sha256":"$RUNTIME_SHA","lifecycle_path":"$FAKE","lifecycle_source_commit":"$LIFECYCLE_COMMIT","lifecycle_env":{"FM_AZURE_TENANT_ID":"22222222-2222-4222-8222-222222222222","FM_AZURE_SUBSCRIPTION_ID":"11111111-1111-4111-8111-111111111111","FM_AZURE_ADMIN_EMAIL":"fixture@example.invalid","FM_AZURE_ADMIN_USERNAME":"fixtureadmin","FM_AZURE_ADMIN_SSH_PUBLIC_KEY":"ssh-ed25519 AAAATEST fixture","FM_AZURE_RUNNER_OPERATOR_OBJECT_ID":"33333333-3333-4333-8333-333333333333","FM_AZURE_KEY_VAULT_NAME":"fixture-vault","FM_AZURE_BUDGET_START_DATE":"2026-08-01","FM_AZURE_DEPLOYMENT_GENERATION":"dep-fixture","FM_AZURE_OWNER_TAG":"owner","FM_AZURE_NAMING_PREFIX":"fixture","FM_AZURE_STORAGE_NAME":"fixturestorage","FM_AZURE_OPERATOR_DATA_PLANE_IP":"203.0.113.10","FM_AZURE_WORKER_IMAGE_ID":"/subscriptions/11111111-1111-4111-8111-111111111111/resourceGroups/fixture/providers/Microsoft.Compute/galleries/fixture/images/worker/versions/1.0.0"},"assignment_timeout_seconds":30,"cleanup_timeout_seconds":30,"poll_seconds":1,"wall_seconds":60}
 JSON
 chmod 600 "$TMP_ROOT/config.json"
 
@@ -343,7 +348,31 @@ PY
   [ ! -e "$TMP_ROOT/calls.log" ] \
     || fail "missing Azure foundation field reached lifecycle before config validation"
 done
-pass "wrapper requires the complete Azure foundation identity before lifecycle dispatch"
+
+python3 - "$TMP_ROOT/config.json" "$TMP_ROOT/config-broad-route.json" <<'PY'
+import json, pathlib, sys
+source, target = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+value = json.loads(source.read_text())
+value["lifecycle_env"]["FM_AZURE_OPERATOR_DATA_PLANE_IP"] = "0.0.0.0/0"
+target.write_text(json.dumps(value, separators=(",", ":")))
+PY
+chmod 600 "$TMP_ROOT/config-broad-route.json"
+write_request "$TMP_ROOT/request-broad-route.json" job-broad-route
+"$WRAPPER" --config "$TMP_ROOT/config-broad-route.json" execute \
+  --request "$TMP_ROOT/request-broad-route.json" --payload "$PAYLOAD" \
+  --result "$TMP_ROOT/result-broad-route.json" --outcome "$TMP_ROOT/outcome-broad-route.bundle" \
+  --step-outcome "$TMP_ROOT/step-outcome-broad-route.json"
+python3 - "$TMP_ROOT/result-broad-route.json" <<'PY' \
+  || fail "broad operator data-plane route did not return a closed config failure"
+import json, pathlib, sys
+result = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert result["outcome"] == "failed"
+assert result["error_category"] == "config_invalid"
+assert result["retryable"] is False
+PY
+[ ! -e "$TMP_ROOT/calls.log" ] \
+  || fail "broad operator data-plane route reached lifecycle before config validation"
+pass "wrapper requires exact Azure foundation identity and a single IPv4 operator route before dispatch"
 
 printf 'ok\n' > "$TMP_ROOT/mode"
 write_request "$TMP_ROOT/request.json" job-success
