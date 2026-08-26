@@ -778,6 +778,19 @@ test_dormant_checks_replace_the_check_shaped_finish_line() {
     "dormant brief re-gated the finish line on the pipeline run going inactive"
   assert_grep "whether or not the run is still sitting on its CI step" "$brief" \
     "dormant brief did not free the done report from the run's own state"
+
+  # The forbidden park verb is the configured declared-external-wait verb, not a
+  # hardcoded "paused": a home that renames it would otherwise be told to avoid a
+  # verb it does not use while the one it does use stays open as an idle trap.
+  FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting "$ROOT/bin/fm-brief.sh" \
+    brief-dormant-verb some-proj --mode no-mistakes --checks-dormant 'runner minutes exhausted' >/dev/null 2>&1 \
+    || fail "dormant brief should scaffold under a renamed pause verb"
+  brief="$home/data/brief-dormant-verb/brief.md"
+  assert_grep "never park on it with \`awaiting:\`" "$brief" \
+    "dormant brief did not forbid parking with the configured pause verb"
+  # shellcheck disable=SC2016 # the default verb must not survive the override
+  assert_no_grep 'park on it with `paused:`' "$brief" \
+    "dormant brief hardcoded the default pause verb"
   pass "fm-brief.sh: a dormant-checks declaration replaces the check-shaped finish line"
 }
 
