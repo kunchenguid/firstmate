@@ -19,8 +19,7 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-harness-process-lib.sh"
 
 FM_HERMES_ROOT=${FM_ROOT_OVERRIDE:-${FM_ROOT:-$(cd "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}}
-FM_HERMES_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_HERMES_ROOT}}
-FM_HERMES_STATE=${FM_STATE_OVERRIDE:-$FM_HERMES_HOME/state}
+FM_HERMES_STATE=$FM_HERMES_ROOT/state
 
 # Known harness command names; extend when a new adapter is verified.
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'

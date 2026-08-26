@@ -4,19 +4,27 @@
 # This file is sourced by fm-harness.sh and fm-session-lock-lib.sh and has no
 # side effects.
 
+_FM_HARNESS_PROCESS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-process-identity-lib.sh
+. "$_FM_HARNESS_PROCESS_LIB_DIR/fm-process-identity-lib.sh"
+# shellcheck source=bin/fm-adapter-marker-lib.sh
+. "$_FM_HARNESS_PROCESS_LIB_DIR/fm-adapter-marker-lib.sh"
+
 fm_hermes_marker_pid() {  # <state> <root>
-  local state=$1 root=$2 marker version digest pid marker_root extra
+  local state=$1 root=$2 marker version expected pid marker_root identity current extra
   marker="$state/.hermes-primary-plugin-loaded"
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   version=$(sed -n '1p' "$marker" 2>/dev/null) || return 1
   pid=$(sed -n '2p' "$marker" 2>/dev/null) || return 1
   marker_root=$(sed -n '3p' "$marker" 2>/dev/null) || return 1
-  extra=$(sed -n '4p' "$marker" 2>/dev/null) || return 1
-  case "$version" in sha256:*) digest=${version#sha256:} ;; *) return 1 ;; esac
-  [ "${#digest}" -eq 64 ] || return 1
-  case "$digest" in *[!0-9a-fA-F]*) return 1 ;; esac
+  identity=$(sed -n '4p' "$marker" 2>/dev/null) || return 1
+  extra=$(sed -n '5p' "$marker" 2>/dev/null) || return 1
+  expected=$(fm_adapter_file_version "$root/.hermes/plugins/firstmate-primary/__init__.py") || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$marker_root" = "$root" ] && [ -z "$extra" ] || return 1
+  [ "$version" = "$expected" ] && [ "$marker_root" = "$root" ] \
+    && [ -n "$identity" ] && [ -z "$extra" ] || return 1
+  current=$(fm_pid_identity "$pid") || return 1
+  [ "$identity" = "$current" ] || return 1
   printf '%s\n' "$pid"
 }
 
@@ -24,7 +32,6 @@ fm_process_is_hermes_primary_pid() {  # <pid> <state> <root>
   local pid=$1 state=$2 root=$3 marker_pid comm base
   marker_pid=$(fm_hermes_marker_pid "$state" "$root") || return 1
   [ "$pid" = "$marker_pid" ] || return 1
-  kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   base=$(basename -- "$comm")
   case "$base" in

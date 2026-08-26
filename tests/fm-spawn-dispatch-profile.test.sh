@@ -837,7 +837,14 @@ test_hermes_is_not_a_crewmate_or_secondmate_runtime() {
   [ "$status" -ne 0 ] || fail "fm-spawn must refuse Hermes as a worker runtime"
   assert_contains "$out" "unknown harness 'hermes'" "fm-spawn did not refuse Hermes before launch"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused Hermes worker must not write task metadata"
-  pass "Hermes remains primary-only and any visible crewmate dispatch stays on fm-spawn"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'hermes --cli --no-restore-cwd')
+  status=$?
+  [ "$status" -ne 0 ] || fail "fm-spawn must refuse Hermes through the raw worker escape hatch"
+  assert_contains "$out" "Hermes is primary-only" "raw Hermes worker refusal was not actionable"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused raw Hermes worker wrote task metadata"
+  pass "Hermes remains primary-only across verified and raw worker launches"
 }
 
 test_hermes_primary_policy_rejects_worker_overrides() {

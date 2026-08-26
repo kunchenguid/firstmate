@@ -46,8 +46,13 @@ if [ "\${1:-}" = plugins ] && [ "\${2:-}" = enable ]; then
 fi
 exit 0
 SH
-  chmod +x "$fakebin/hermes"
-  mkdir -p "$dir/firstmate-config" "$dir/state"
+  cat > "$fakebin/ssh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$dir/ssh-calls'
+exit "\${FM_FAKE_SSH_STATUS:-0}"
+SH
+  chmod +x "$fakebin/hermes" "$fakebin/ssh"
+  mkdir -p "$dir/firstmate-config" "$dir/state" "$dir/data"
   printf '%s\n' pi > "$dir/firstmate-config/crew-harness"
   printf '%s\n' pi > "$dir/firstmate-config/secondmate-harness"
   printf '%s\n' herdr > "$dir/firstmate-config/backend"
@@ -58,11 +63,12 @@ run_primary_launcher() {
   local fakebin=$1 case_dir=$2
   shift 2
   PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$case_dir/firstmate-config" \
-    FM_STATE_OVERRIDE="$case_dir/state" "$ROOT/bin/fm-hermes-primary.sh" "$@"
+    FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+    "$ROOT/bin/fm-hermes-primary.sh" "$@"
 }
 
 test_launcher_scope_and_fail_closed() {
-  local fakebin out rc=0 calls
+  local fakebin out rc=0 calls child
   fakebin=$(make_fake_hermes "$TMP_ROOT/launcher-enabled" enabled)
   out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" --provider openai-codex --model gpt-5) || rc=$?
   [ "$rc" -eq 0 ] || fail "enabled launcher failed: $out"
@@ -92,6 +98,30 @@ test_launcher_scope_and_fail_closed() {
   [ "$rc" -eq 1 ] || fail "launcher must reject an active non-Herdr task"
   assert_contains "$out" 'active task old with backend=tmux' "active backend mismatch was not actionable"
   rm -f "$TMP_ROOT/launcher-enabled/state/old.meta"
+
+  child="$TMP_ROOT/launcher-enabled/child-home"
+  mkdir -p "$child/state"
+  printf 'window=child\nharness=codex\nbackend=tmux\n' > "$child/state/worker.meta"
+  printf 'window=sm\nharness=pi\nbackend=herdr\nkind=secondmate\nhome=%s\n' "$child" \
+    > "$TMP_ROOT/launcher-enabled/state/sm.meta"
+  rc=0
+  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "launcher must reject a non-Pi descendant worker"
+  assert_contains "$out" 'active task worker with harness=codex' "descendant harness mismatch was not actionable"
+  rm -f "$TMP_ROOT/launcher-enabled/state/sm.meta"
+
+  printf '%s\n' '- rsm - remote domain (host: remote-mac; root: /remote/root; home: /remote/home; scope: remote; projects: alpha; added 2026-08-02)' \
+    > "$TMP_ROOT/launcher-enabled/data/secondmates.md"
+  printf 'window=remote:rsm\nharness=pi\nkind=secondmate\nremote_host=remote-mac\nremote_backend=herdr\n' \
+    > "$TMP_ROOT/launcher-enabled/state/rsm.meta"
+  rc=0
+  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled") || rc=$?
+  [ "$rc" -eq 0 ] || fail "launcher rejected a valid remote Pi/Herdr secondmate: $out"
+  [ -s "$TMP_ROOT/launcher-enabled/ssh-calls" ] || fail "launcher did not inspect the remote secondmate descendants"
+  rc=0
+  out=$(FM_FAKE_SSH_STATUS=1 run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "launcher must fail closed when remote descendants cannot be inspected"
+  rm -f "$TMP_ROOT/launcher-enabled/state/rsm.meta"
 
   rc=0
   out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" --safe-mode 2>&1) || rc=$?
@@ -212,6 +242,9 @@ ctx = activate(child)
 assert ctx.hooks == {}
 assert not (child / "state" / ".hermes-primary-plugin-loaded").exists()
 
+for path in (primary / "state").glob("*"):
+    path.unlink()
+(primary / "state").rmdir()
 module._ROOT = primary
 os.environ["FM_HOME"] = str(primary)
 os.environ["FM_STATE_OVERRIDE"] = str(primary / "state")
@@ -228,6 +261,8 @@ lines = marker.read_text().splitlines()
 assert lines[0].startswith("sha256:")
 assert lines[1] == str(os.getpid())
 assert lines[2] == str(primary.resolve())
+assert lines[3]
+assert (primary / "state").is_dir()
 
 pre = ctx.hooks["pre_tool_call"]
 assert pre("read_file", {}) is None

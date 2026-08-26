@@ -24,6 +24,7 @@ bin/fm-hermes-primary.sh --check
 Setup links the tracked plugin into the active Hermes home and enables its exact plugin key.
 It refuses to replace an existing non-matching plugin path.
 Normal launches only check that enablement and do not rewrite Hermes configuration.
+Setup and launch create the checkout state directory when absent and refuse a symlinked or non-directory state path.
 
 Configure the required Pi workers and Herdr backend before launching Hermes:
 
@@ -35,8 +36,8 @@ printf '%s\n' herdr > config/backend
 ```
 
 These operator choices remain local and gitignored by design.
-The launcher refuses missing or different values and any active task record not already on Pi plus Herdr.
-The loaded-plugin marker and session-lock ancestry activate the same enforcement in `fm-spawn.sh`, while a durable policy in each launched secondmate home preserves it across remote and nested launches even if a child clears inherited environment variables.
+The launcher refuses missing or different values and recursively checks local and remote active descendants for Pi plus Herdr before launch.
+The checkout-owned loaded-plugin marker activates the same enforcement in `fm-spawn.sh` regardless of per-command home or state overrides, while a durable policy in each launched secondmate home preserves it across remote and nested launches.
 Configure the Hermes model or provider separately with `hermes setup` or `hermes model`; Firstmate does not copy, modify, or own provider credentials.
 
 ## Launch
@@ -56,7 +57,7 @@ The plugin then:
 - validates watcher-arm terminal calls through Firstmate's shared command policy;
 - requires `terminal(background=true, notify_on_complete=true)` for the one managed watcher process;
 - runs the shared turn-end predicate after successful, failed, and interrupted turns and injects one bounded recovery turn when active work lacks healthy supervision;
-- publishes a versioned, checkout-bound process marker for the lifetime of the CLI process so detection and session start can prove the current lock-owning Hermes process loaded the current plugin build across `/new` and reset boundaries.
+- publishes an exact-build, checkout-bound process marker with process-incarnation identity for the lifetime of the CLI process so detection and session start can reject stale PID reuse across `/new` and reset boundaries.
 
 ## Verification and upgrades
 

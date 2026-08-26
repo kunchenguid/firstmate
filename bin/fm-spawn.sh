@@ -209,7 +209,8 @@ case "${1:-}" in
   -h|--help) usage; exit 0 ;;
 esac
 
-FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+SCRIPT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$SCRIPT_ROOT}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 resolve_directory_input() {
@@ -399,16 +400,13 @@ else
 fi
 
 hermes_primary_policy_session_active() {
-  local version
-  fm_hermes_primary_session_matches "$STATE" "$FM_ROOT" || return 1
-  version=$(fm_adapter_file_version "$FM_ROOT/.hermes/plugins/firstmate-primary/__init__.py") \
-    || return 1
-  fm_adapter_loaded_marker_matches \
-    "$STATE/.hermes-primary-plugin-loaded" "$version" "$STATE/.lock"
+  fm_hermes_primary_ancestry_pid "$FM_ROOT/state" "$FM_ROOT" >/dev/null
 }
 
 HERMES_PRIMARY_POLICY_ACTIVE=0
-if hermes_primary_policy_session_active || fm_hermes_worker_policy_enabled "$FM_HOME"; then
+if hermes_primary_policy_session_active \
+  || fm_hermes_worker_policy_enabled "$SCRIPT_ROOT" \
+  || fm_hermes_worker_policy_enabled "$FM_HOME"; then
   HERMES_PRIMARY_POLICY_ACTIVE=1
 fi
 
@@ -1264,6 +1262,12 @@ case "$ARG3" in
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
     done
+    case "$(printf '%s' "$LAUNCH" | tr '[:upper:]' '[:lower:]')" in
+      *hermes*)
+        echo "error: Hermes is primary-only and cannot appear in a raw worker launch command" >&2
+        exit 1
+        ;;
+    esac
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the

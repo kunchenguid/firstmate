@@ -1003,7 +1003,8 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;
-    bin/fm-harness-process-lib.sh|bin/fm-session-lock-lib.sh)
+    bin/fm-harness-process-lib.sh|bin/fm-session-lock-lib.sh|\
+    bin/fm-process-identity-lib.sh|bin/fm-adapter-marker-lib.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
       printf '%s\n' session-bootstrap
@@ -1031,7 +1032,8 @@ families_for_changed_path() {
       # lane's contract coverage re-runs.
       printf '%s\n' real-herdr-gated
       ;;
-    .hermes/plugins/firstmate-primary/*|bin/fm-hermes-primary.sh)
+    .hermes/plugins/firstmate-primary/*|bin/fm-hermes-primary.sh|\
+    bin/fm-hermes-worker-policy-lib.sh|bin/fm-remote-secondmate-control.sh)
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;

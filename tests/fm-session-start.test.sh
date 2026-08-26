@@ -35,6 +35,10 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
+# shellcheck source=bin/fm-process-identity-lib.sh
+. "$ROOT/bin/fm-process-identity-lib.sh"
+# shellcheck source=bin/fm-adapter-marker-lib.sh
+. "$ROOT/bin/fm-adapter-marker-lib.sh"
 
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
@@ -2338,15 +2342,20 @@ EOF
 }
 
 test_supervision_block_hermes_and_plugin_diagnostic() {
-  local rec root home fakebin out
+  local rec root home fakebin out version identity
   rec=$(new_world hermes-supervision-block)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_harness "$fakebin" hermes
-  printf 'sha256:%064d\n%s\n%s\n' 0 "$SESSION_START_TEST_HARNESS_PID" "$root" \
-    > "$home/state/.hermes-primary-plugin-loaded"
+  mkdir -p "$root/.hermes/plugins/firstmate-primary" "$root/state"
+  cp "$ROOT/.hermes/plugins/firstmate-primary/__init__.py" \
+    "$root/.hermes/plugins/firstmate-primary/__init__.py"
+  version=$(fm_adapter_file_version "$root/.hermes/plugins/firstmate-primary/__init__.py")
+  identity=$(fm_pid_identity "$SESSION_START_TEST_HARNESS_PID")
+  printf '%s\n%s\n%s\n%s\n' "$version" "$SESSION_START_TEST_HARNESS_PID" "$root" "$identity" \
+    > "$root/state/.hermes-primary-plugin-loaded"
 
   out=$(run_named_harness_session_start hermes "$home" "$root" "$fakebin:$BASE_PATH")
 

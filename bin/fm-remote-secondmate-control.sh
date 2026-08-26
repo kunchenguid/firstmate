@@ -11,6 +11,7 @@
 #   fm-remote-secondmate-control.sh observe <id>
 #   fm-remote-secondmate-control.sh sync <id>
 #   fm-remote-secondmate-control.sh update <id>
+#   fm-remote-secondmate-control.sh policy-check <id>
 #   fm-remote-secondmate-control.sh retire <id> [--force]
 #
 # Remote placement ends here, but the second-mate agent always runs on the
@@ -48,6 +49,8 @@ REMOTE_HERDR_SESSION=fm-remote
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# shellcheck source=bin/fm-hermes-worker-policy-lib.sh
+. "$SCRIPT_DIR/fm-hermes-worker-policy-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -301,6 +304,19 @@ cmd_sync() {
   printf 'synced: %s\n' "$head"
 }
 
+remote_policy_check() {
+  local id=$1
+  FM_HOME="$TARGET_HOME" "$SCRIPT_DIR/fm-on.sh" \
+    "$id" fm-remote-secondmate-control.sh policy-check "$id"
+}
+
+cmd_policy_check() {
+  local id=$1
+  validate_id "$id"
+  validate_home "$id"
+  fm_hermes_policy_check_home "$TARGET_HOME" "$TARGET_HOME/state" remote_policy_check
+}
+
 cmd_update() {
   local id=$1 update_out root_status
   validate_id "$id"
@@ -356,6 +372,7 @@ case "${1:-}" in
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
   sync) shift; [ "$#" -eq 1 ] || usage; cmd_sync "$@" ;;
   update) shift; [ "$#" -eq 1 ] || usage; cmd_update "$@" ;;
+  policy-check) shift; [ "$#" -eq 1 ] || usage; cmd_policy_check "$@" ;;
   retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;

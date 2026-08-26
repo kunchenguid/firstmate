@@ -82,7 +82,7 @@ See [Hermes primary setup](docs/hermes-primary.md) for the one-time plugin and l
 
 ```sh
 gh auth login
-git clone https://github.com/kunchenguid/firstmate
+git clone https://github.com/netixc/firstmate
 cd firstmate
 ```
 

@@ -22,9 +22,20 @@ _retry_lock = threading.Lock()
 def _state_dir() -> Path:
     override = os.environ.get("FM_STATE_OVERRIDE", "").strip()
     if override:
-        return Path(override).expanduser().resolve()
+        return Path(os.path.abspath(os.path.expanduser(override)))
     home = os.environ.get("FM_HOME", "").strip()
-    return (Path(home).expanduser().resolve() if home else _ROOT) / "state"
+    base = Path(os.path.abspath(os.path.expanduser(home))) if home else _ROOT
+    return base / "state"
+
+
+def _ensure_state_dir(state: Path) -> bool:
+    try:
+        if state.is_symlink():
+            return False
+        state.mkdir(parents=True, exist_ok=True)
+        return state.is_dir() and not state.is_symlink()
+    except OSError:
+        return False
 
 
 def _persistent_cli_launch() -> bool:
@@ -45,8 +56,13 @@ def _primary_scope_matches() -> bool:
     except OSError:
         return False
     state = _state_dir()
+    canonical_state = _ROOT / "state"
     scope_lib = _ROOT / "bin" / "fm-primary-scope-lib.sh"
-    if not scope_lib.is_file() or not state.is_dir():
+    if (
+        not scope_lib.is_file()
+        or not _ensure_state_dir(state)
+        or not _ensure_state_dir(canonical_state)
+    ):
         return False
     try:
         result = subprocess.run(
@@ -75,19 +91,50 @@ def _marker_digest() -> str:
     return "sha256:" + hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
-def _write_loaded_marker() -> None:
-    marker = _state_dir() / _MARKER_NAME
-    tmp = marker.with_name(f"{marker.name}.{os.getpid()}.tmp")
+def _process_identity() -> str | None:
+    identity_lib = _ROOT / "bin" / "fm-process-identity-lib.sh"
     try:
-        tmp.write_text(
-            f"{_marker_digest()}\n{os.getpid()}\n{_ROOT}\n", encoding="utf-8"
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                '. "$1"; fm_pid_identity "$2"',
+                "firstmate-hermes-identity",
+                str(identity_lib),
+                str(os.getpid()),
+            ],
+            cwd=str(_ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+            check=False,
         )
-        os.replace(tmp, marker)
-    except OSError:
+    except (OSError, subprocess.SubprocessError):
+        return None
+    identity = result.stdout.rstrip("\n")
+    if result.returncode != 0 or not identity or "\n" in identity:
+        return None
+    return identity
+
+
+def _write_loaded_marker() -> None:
+    identity = _process_identity()
+    if identity is None:
+        return
+    payload = f"{_marker_digest()}\n{os.getpid()}\n{_ROOT}\n{identity}\n"
+    for state in {_state_dir(), _ROOT / "state"}:
+        marker = state / _MARKER_NAME
+        tmp = marker.with_name(f"{marker.name}.{os.getpid()}.tmp")
         try:
-            tmp.unlink()
+            tmp.write_text(payload, encoding="utf-8")
+            os.replace(tmp, marker)
         except OSError:
-            pass
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 def _run_checker(path: Path, *args: str, payload: str | None = None) -> subprocess.CompletedProcess[str] | None:

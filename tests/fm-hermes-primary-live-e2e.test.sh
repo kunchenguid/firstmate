@@ -23,6 +23,10 @@ launcher_pid=
 hermes_pid=
 
 cleanup() {
+  canonical_marker="$ROOT/state/.hermes-primary-plugin-loaded"
+  if [ -n "$hermes_pid" ] && [ "$(sed -n '2p' "$canonical_marker" 2>/dev/null || true)" = "$hermes_pid" ]; then
+    rm -f "$canonical_marker"
+  fi
   if [ -n "$hermes_pid" ]; then
     kill -TERM "$hermes_pid" 2>/dev/null || true
     sleep 1
@@ -67,6 +71,7 @@ done
 version=$(sed -n '1p' "$marker")
 hermes_pid=$(sed -n '2p' "$marker")
 marker_root=$(sed -n '3p' "$marker")
+marker_identity=$(sed -n '4p' "$marker")
 expected=$(fm_adapter_file_version "$ROOT/.hermes/plugins/firstmate-primary/__init__.py")
 [ "$version" = "$expected" ] || fail "Hermes loaded a different primary plugin build"
 case "$hermes_pid" in
@@ -74,6 +79,7 @@ case "$hermes_pid" in
 esac
 kill -0 "$hermes_pid" 2>/dev/null || fail "Hermes primary marker names a dead process"
 [ "$marker_root" = "$ROOT" ] || fail "Hermes primary marker names the wrong checkout root"
+[ -n "$marker_identity" ] || fail "Hermes primary marker omitted process-incarnation identity"
 
 # shellcheck source=bin/fm-harness-process-lib.sh
 . "$ROOT/bin/fm-harness-process-lib.sh"
