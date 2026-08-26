@@ -44,6 +44,8 @@ if os.environ.get("FM_AZURE_OPERATOR_DATA_PLANE_IP") != "203.0.113.10":
     raise SystemExit("exact operator data-plane IP was not forwarded to lifecycle")
 state_path = root / "fake-state.json"
 complete = root / "complete"
+assigned = root / "assigned"
+release_pending = root / "release-pending"
 log = root / "calls.log"
 with log.open("a") as handle:
     handle.write(" ".join(sys.argv[1:]) + "\n")
@@ -62,14 +64,29 @@ if command == "request":
     state = {"task": value("--task"), "generation": value("--task-generation")}
     state_path.write_text(json.dumps(state))
     complete.unlink(missing_ok=True)
+    assigned.unlink(missing_ok=True)
+    release_pending.unlink(missing_ok=True)
     print("queued")
 elif command == "reconcile":
+    failures = root / "reconcile-failures"
+    if failures.exists():
+        remaining = int(failures.read_text().strip())
+        if remaining > 0:
+            failures.write_text(str(remaining - 1))
+            print("fixture transient reconcile refusal", file=sys.stderr)
+            raise SystemExit(75)
+    if release_pending.exists():
+        release_pending.unlink()
+        complete.touch()
+    else:
+        assigned.touch()
     print("converged")
 elif command == "status":
     state = json.loads(state_path.read_text())
     placements = [] if complete.exists() else [{
         "task": state["task"], "task_generation": state["generation"],
-        "status": "assigned", "assignment_generation": "asg-00000001",
+        "status": "assigned" if assigned.exists() else "assigning",
+        "assignment_generation": "asg-00000001",
         "account_home": str(root / "account"),
     }]
     print(json.dumps({"account_placements": placements}, separators=(",", ":")))
@@ -169,7 +186,11 @@ elif command == "execute":
     }
     print(json.dumps(result, separators=(",", ":")))
 elif command == "service-complete":
-    complete.touch()
+    release_pending.touch()
+    cleanup_failures = root / "cleanup-reconcile-failures"
+    if cleanup_failures.exists():
+        (root / "reconcile-failures").write_text(cleanup_failures.read_text())
+        cleanup_failures.unlink()
     print("released")
 else:
     raise SystemExit("unsupported fake lifecycle command " + command)
@@ -398,6 +419,52 @@ assert_contains "$(cat "$TMP_ROOT/calls.log")" "request --task" "wrapper bypasse
 assert_contains "$(cat "$TMP_ROOT/calls.log")" "--role no-mistakes" "wrapper did not request the service role"
 assert_contains "$(cat "$TMP_ROOT/calls.log")" "service-complete" "wrapper did not release from execution evidence"
 pass "wrapper allocates, executes, returns semantic evidence, and cleans through lifecycle"
+
+printf 'ok\n' > "$TMP_ROOT/mode"
+printf '2\n' > "$TMP_ROOT/reconcile-failures"
+: > "$TMP_ROOT/calls.log"
+write_request "$TMP_ROOT/request-transient-reconcile.json" job-transient-reconcile
+"$WRAPPER" --config "$TMP_ROOT/config.json" execute \
+  --request "$TMP_ROOT/request-transient-reconcile.json" --payload "$PAYLOAD" \
+  --result "$TMP_ROOT/result-transient-reconcile.json" \
+  --outcome "$TMP_ROOT/outcome-transient-reconcile.bundle" \
+  --step-outcome "$TMP_ROOT/step-outcome-transient-reconcile.json" \
+  || fail "transient lifecycle refusals escaped the durable worker invocation"
+python3 - "$TMP_ROOT/result-transient-reconcile.json" "$TMP_ROOT/calls.log" <<'PY' \
+  || fail "transient lifecycle retries duplicated or lost the exact Azure job"
+import json, pathlib, sys
+result = json.loads(pathlib.Path(sys.argv[1]).read_text())
+calls = pathlib.Path(sys.argv[2]).read_text().splitlines()
+requests = [line for line in calls if line.startswith("request ")]
+reconciles = [line for line in calls if line.startswith("reconcile ")]
+assert result["outcome"] == "succeeded", result
+assert len(requests) == 1, requests
+assert len(reconciles) >= 3, reconciles
+PY
+pass "wrapper resumes transient reconciliation under one durable Azure task identity"
+
+printf 'ok\n' > "$TMP_ROOT/mode"
+printf '2\n' > "$TMP_ROOT/cleanup-reconcile-failures"
+: > "$TMP_ROOT/calls.log"
+write_request "$TMP_ROOT/request-transient-cleanup.json" job-transient-cleanup
+"$WRAPPER" --config "$TMP_ROOT/config.json" execute \
+  --request "$TMP_ROOT/request-transient-cleanup.json" --payload "$PAYLOAD" \
+  --result "$TMP_ROOT/result-transient-cleanup.json" \
+  --outcome "$TMP_ROOT/outcome-transient-cleanup.bundle" \
+  --step-outcome "$TMP_ROOT/step-outcome-transient-cleanup.json" \
+  || fail "transient cleanup refusals escaped the durable worker invocation"
+python3 - "$TMP_ROOT/result-transient-cleanup.json" "$TMP_ROOT/calls.log" <<'PY' \
+  || fail "transient cleanup retries duplicated or lost the finished Azure job"
+import json, pathlib, sys
+result = json.loads(pathlib.Path(sys.argv[1]).read_text())
+calls = pathlib.Path(sys.argv[2]).read_text().splitlines()
+requests = [line for line in calls if line.startswith("request ")]
+reconciles = [line for line in calls if line.startswith("reconcile ")]
+assert result["outcome"] == "succeeded", result
+assert len(requests) == 1, requests
+assert len(reconciles) >= 4, reconciles
+PY
+pass "wrapper resumes transient cleanup under the finished Azure task identity"
 
 printf 'test-repair\n' > "$TMP_ROOT/mode"
 write_request "$TMP_ROOT/request-test-repair.json" job-test-repair test repair
