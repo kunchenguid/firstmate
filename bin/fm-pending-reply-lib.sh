@@ -238,23 +238,18 @@ fm_pending_reply_embed_corr() {  # <message> <corr_id> <result-var>
 
 # Create a durable pending-reply expectation. Prints corr_id on success.
 # Does not deliver anything. Fails if parent paths cannot be prepared.
-fm_pending_reply_create() {  # <parent-home> <state-dir> <task_id> <request-text> [corr-id]
-  local parent_home=$1 state=$2 task_id=$3 request_text=$4 requested_corr=${5:-}
+fm_pending_reply_create() {  # <parent-home> <state-dir> <task_id> <request-text>
+  local parent_home=$1 state=$2 task_id=$3 request_text=$4
   local dir rec corr now summary status_path tmp
   [ -n "$parent_home" ] && [ -n "$state" ] && [ -n "$task_id" ] || return 2
   dir=$(fm_pending_reply_dir "$state")
   mkdir -p "$dir" || return 1
   chmod 700 "$dir" 2>/dev/null || true
-  if [ -n "$requested_corr" ]; then
-    printf '%s' "$requested_corr" | grep -Eq '^[a-f0-9]{16}$' || return 1
-    corr=$requested_corr
-  else
-    corr=$(fm_pending_reply_new_id)
-    [ "${#corr}" -eq 16 ] || return 1
-  fi
+  corr=$(fm_pending_reply_new_id)
+  [ "${#corr}" -eq 16 ] || return 1
   rec=$(fm_pending_reply_path "$state" "$corr")
+  # Extremely unlikely collision; regenerate once.
   if [ -e "$rec" ]; then
-    [ -z "$requested_corr" ] || return 1
     corr=$(fm_pending_reply_new_id)
     rec=$(fm_pending_reply_path "$state" "$corr")
     [ ! -e "$rec" ] || return 1

@@ -86,6 +86,16 @@ inbox_text() {  # <state-dir> <task-id>
   done
 }
 
+hold_lock_until_released() {  # <lock> <ready> <release>
+  bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2"
+    : > "$3"
+    while [ ! -f "$4" ]; do sleep 0.01; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$2" "$3" &
+}
+
 
 test_an_inventory_mismatch_asks_the_mate_once_per_window() {
   local home mate fakebin snap out
@@ -286,6 +296,43 @@ test_a_failed_send_is_retried_on_the_next_run() {
   pass "a failed ask starts no cooldown, so the next run retries it"
 }
 
+test_busy_lifecycle_locks_never_hold_up_the_digest() {
+  local label home mate fakebin snap lock ready release holder notify out
+  for label in reconcile control meta; do
+    { read -r home; read -r mate; read -r fakebin; } < <(make_main_home "busy-$label" mate)
+    snap="$home/snapshot.json"
+    write_snapshot "$snap" mate '{"kind":"orphan_in_flight","ids":["ghost"]}'
+    case "$label" in
+      reconcile) lock="$home/state/.mate.reconcile.lock" ;;
+      control) lock="$home/state/.control-mate.lock" ;;
+      meta) lock="$home/state/.meta-mate.lock" ;;
+    esac
+    ready="$home/lock-ready"
+    release="$home/lock-release"
+    hold_lock_until_released "$lock" "$ready" "$release"
+    holder=$!
+    while [ ! -f "$ready" ]; do sleep 0.01; done
+    run_notify "$home" "$fakebin" "busy-$label" "$snap" > "$home/notify.out" 2>&1 &
+    notify=$!
+    sleep 0.2
+    if kill -0 "$notify" 2>/dev/null; then
+      : > "$release"
+      wait "$notify" 2>/dev/null || true
+      wait "$holder" 2>/dev/null || true
+      fail "a busy $label lock blocked the reconcile path"
+    fi
+    wait "$notify" || fail "a busy $label lock made notify fail"
+    : > "$release"
+    wait "$holder" || fail "the $label lock holder failed"
+    out=$(cat "$home/notify.out")
+    assert_contains "$out" "skipped: mate lock" \
+      "a busy $label lock was not reported as a skipped nudge: $out"
+    assert_absent "$home/state/mate.reconcile-nudged" \
+      "a skipped $label-lock nudge started the cooldown"
+  done
+  pass "busy reconcile lifecycle locks never block the digest or start cooldown"
+}
+
 test_concurrent_recaps_send_one_instruction() {
   local home mate fakebin snap
   { read -r home; read -r mate; read -r fakebin; } < <(make_main_home concurrent mate)
@@ -367,7 +414,7 @@ META
 
   sleep 0.1
   : > "$release"
-  wait "$notify_pid" || fail "the reconcile ask failed during the lifecycle race"
+  wait "$notify_pid" 2>/dev/null || true
   wait "$lifecycle_pid" || fail "the simulated teardown and reseed failed"
   [ -f "$lifecycle_done" ] || fail "the simulated lifecycle transition did not finish"
   assert_absent "$home/state/mate.reconcile-nudged" \
@@ -384,6 +431,7 @@ test_the_ask_never_arms_a_reply_expectation_or_a_re_ring
 test_a_readable_home_without_a_mismatch_is_never_asked
 test_the_parent_never_changes_the_mates_own_files
 test_a_failed_send_is_retried_on_the_next_run
+test_busy_lifecycle_locks_never_hold_up_the_digest
 test_concurrent_recaps_send_one_instruction
 test_a_stale_snapshot_never_targets_a_replacement_mate
 test_teardown_cannot_leave_its_replacement_in_cooldown

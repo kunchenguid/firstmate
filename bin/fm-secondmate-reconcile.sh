@@ -107,21 +107,17 @@ cmd_nudged() {
 }
 
 delivery_id() {
-  local raw digest
-  if command -v openssl >/dev/null 2>&1; then
-    raw=$(openssl rand -hex 8 2>/dev/null || true)
+  local seed=$1 digest
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$seed" | shasum -a 256 | awk '{print $1}') || return 1
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$seed" | sha256sum | awk '{print $1}') || return 1
+  elif command -v openssl >/dev/null 2>&1; then
+    digest=$(printf '%s' "$seed" | openssl dgst -sha256 2>/dev/null | awk '{print $NF}') || return 1
+  else
+    return 1
   fi
-  if [ -z "${raw:-}" ]; then
-    if command -v shasum >/dev/null 2>&1; then
-      digest=$(printf '%s' "$$:$(date +%s):$RANDOM:$RANDOM" | shasum -a 256 | awk '{print $1}') || return 1
-    elif command -v sha256sum >/dev/null 2>&1; then
-      digest=$(printf '%s' "$$:$(date +%s):$RANDOM:$RANDOM" | sha256sum | awk '{print $1}') || return 1
-    else
-      return 1
-    fi
-    raw=$(printf '%s' "$digest" | cut -c1-16)
-  fi
-  printf '%s' "$raw"
+  printf '%s' "$digest" | cut -c1-16
 }
 
 # The instruction is deliberately plain: it names what disagrees and leaves the
@@ -190,7 +186,10 @@ cmd_notify() {
     [ -n "${id:-}" ] || continue
     path=$(nudge_path "$id")
     reconcile_lock="$STATE/.$id.reconcile.lock"
-    fm_lock_acquire_wait "$reconcile_lock" || { printf 'failed: %s lock\n' "$id"; rc=1; continue; }
+    if ! fm_lock_try_acquire "$reconcile_lock"; then
+      printf 'skipped: %s lock\n' "$id"
+      continue
+    fi
     ACTIVE_RECONCILE_LOCK=$reconcile_lock
     now=$(date +%s)
     last=
@@ -206,12 +205,11 @@ cmd_notify() {
       fi
     fi
     control_lock="$STATE/.control-$id.lock"
-    fm_lock_acquire_wait "$control_lock" || {
-      printf 'failed: %s lock\n' "$id"
-      rc=1
+    if ! fm_lock_try_acquire "$control_lock"; then
+      printf 'skipped: %s lock\n' "$id"
       release_active_locks
       continue
-    }
+    fi
     ACTIVE_CONTROL_LOCK=$control_lock
     meta="$STATE/$id.meta"
     meta_lock=$(fm_meta_lock_path "$meta") || {
@@ -219,11 +217,11 @@ cmd_notify() {
       release_active_locks
       continue
     }
-    fm_lock_acquire_wait "$meta_lock" || {
-      printf 'stale: %s %s\n' "$id" "$kind"
+    if ! fm_lock_try_acquire "$meta_lock"; then
+      printf 'skipped: %s lock\n' "$id"
       release_active_locks
       continue
-    }
+    fi
     ACTIVE_META_LOCK=$meta_lock
     current_spawn_gen=
     if [ -f "$meta" ] && [ ! -L "$meta" ]; then
@@ -240,37 +238,53 @@ cmd_notify() {
       release_active_locks
       continue
     fi
-    fm_lock_release "$ACTIVE_META_LOCK"
-    ACTIVE_META_LOCK=
-    did=$(delivery_id) || {
+    did=$(delivery_id "$id:$sampled_spawn_gen:${last:-none}") || {
       printf 'failed: %s %s\n' "$id" "$kind"
       rc=1
       release_active_locks
       continue
     }
+    release_active_locks
     send_rc=0
-    "$SCRIPT_DIR/fm-send.sh" "$id" --fire-and-forget "$did" \
+    FM_TASK_INBOX_LOCK_WAIT_SECS=0 FM_SEND_EXPECTED_SPAWN_GEN="$sampled_spawn_gen" \
+      "$SCRIPT_DIR/fm-send.sh" "$id" --fire-and-forget "$did" \
       "$(reconcile_text "$kind" "$ids")" >/dev/null 2>&1 || send_rc=$?
     # exit 3 is "typed but unconfirmed": the mate may already hold the ask, so
     # record the nudge rather than risk asking twice.
     if [ "$send_rc" -ne 0 ] && [ "$send_rc" -ne 3 ]; then
       printf 'failed: %s %s\n' "$id" "$kind"
       rc=1
-      release_active_locks
       continue
     fi
     delivered_at=$(date +%s)
-    fm_lock_acquire_wait "$meta_lock" || {
+    if ! fm_lock_try_acquire "$reconcile_lock"; then
+      printf 'sent-unrecorded: %s %s\n' "$id" "$kind"
+      rc=1
+      continue
+    fi
+    ACTIVE_RECONCILE_LOCK=$reconcile_lock
+    if ! fm_lock_try_acquire "$control_lock"; then
       printf 'sent-unrecorded: %s %s\n' "$id" "$kind"
       rc=1
       release_active_locks
       continue
-    }
+    fi
+    ACTIVE_CONTROL_LOCK=$control_lock
+    if ! fm_lock_try_acquire "$meta_lock"; then
+      printf 'sent-unrecorded: %s %s\n' "$id" "$kind"
+      rc=1
+      release_active_locks
+      continue
+    fi
     ACTIVE_META_LOCK=$meta_lock
     current_spawn_gen=
     if [ -f "$meta" ] && [ ! -L "$meta" ]; then
       current_spawn_gen=$(meta_spawn_gen "$meta")
     fi
+    last=
+    if [ -f "$path" ] && [ ! -L "$path" ]; then last=$(cat "$path" 2>/dev/null || true); fi
+    case "$last" in ''|*[!0-9]*) last= ;; esac
+    if [ -n "$last" ] && [ "$last" -gt "$delivered_at" ]; then delivered_at=$last; fi
     if [ "$current_spawn_gen" = "$sampled_spawn_gen" ] \
       && (umask 077; printf '%s\n' "$delivered_at" > "$path.tmp") \
       && mv -f -- "$path.tmp" "$path"; then

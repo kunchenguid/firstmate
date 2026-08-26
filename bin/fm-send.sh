@@ -675,9 +675,7 @@ else
       existing_corr=$(fm_pending_reply_extract_corr "$MESSAGE")
     fi
     if [ -n "$existing_corr" ] \
-      && { fm_pending_reply_corr_reusable "$STATE" "$existing_corr" "$TARGET_TASK_ID" \
-        || { [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ] \
-          && [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$STATE" "$existing_corr")" task_id)" = "$TARGET_TASK_ID" ]; }; }; then
+      && fm_pending_reply_corr_reusable "$STATE" "$existing_corr" "$TARGET_TASK_ID"; then
       PENDING_REPLY_CORR=$existing_corr
     else
       if [ "$existing_corr_explicit" = 1 ]; then
@@ -688,7 +686,7 @@ else
         echo "error: cannot create pending-reply expectation without a resolvable secondmate task id" >&2
         exit 1
       fi
-      PENDING_REPLY_CORR=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$TARGET_TASK_ID" "$MESSAGE" "${FM_PENDING_REPLY_CORR_ID:-}") \
+      PENDING_REPLY_CORR=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$TARGET_TASK_ID" "$MESSAGE") \
         || { echo "error: failed to create parent pending-reply expectation for $TARGET_TASK_ID" >&2; exit 1; }
       PENDING_REPLY_CREATED=1
     fi
@@ -700,7 +698,7 @@ else
           echo "error: pending-reply delivery for $TARGET_TASK_ID could not be reset for an idempotent remote resend of correlation $PENDING_REPLY_CORR" >&2
           exit 1
         fi
-      elif [ "${FM_SEND_IDEMPOTENT:-0}" != 1 ]; then
+      else
         echo "error: pending-reply delivery for $TARGET_TASK_ID is unresolved; refusing to resend correlation $PENDING_REPLY_CORR" >&2
         exit 1
       fi
@@ -755,11 +753,15 @@ else
     fi
     CURRENT_REMOTE_ID=
     CURRENT_REMOTE_HOST=
+    CURRENT_REMOTE_SPAWN_GEN=
     if [ -f "$TARGET_META" ]; then
       CURRENT_REMOTE_ID=$(fm_send_id_from_meta "$TARGET_META")
       CURRENT_REMOTE_HOST=$(fm_meta_get "$TARGET_META" remote_host)
+      CURRENT_REMOTE_SPAWN_GEN=$(fm_meta_get "$TARGET_META" spawn_gen)
     fi
     if [ "$CURRENT_REMOTE_ID" != "$TARGET_REMOTE_ID" ] \
+      || { [ -n "${FM_SEND_EXPECTED_SPAWN_GEN:-}" ] \
+        && [ "$CURRENT_REMOTE_SPAWN_GEN" != "$FM_SEND_EXPECTED_SPAWN_GEN" ]; } \
       || [ -z "$CURRENT_REMOTE_HOST" ] \
       || [ "$CURRENT_REMOTE_HOST" != "$TARGET_REMOTE_HOST" ]; then
       fm_lock_release "$REMOTE_META_LOCK"
@@ -845,12 +847,16 @@ else
     fi
     CURRENT_INBOX_TARGET=
     CURRENT_INBOX_BACKEND=
+    CURRENT_INBOX_SPAWN_GEN=
     if [ -f "$TARGET_META" ]; then
       CURRENT_INBOX_TARGET=$(fm_backend_target_of_meta "$TARGET_META")
       CURRENT_INBOX_BACKEND=$(fm_backend_of_meta "$TARGET_META")
+      CURRENT_INBOX_SPAWN_GEN=$(fm_meta_get "$TARGET_META" spawn_gen)
     fi
     if [ "$CURRENT_INBOX_TARGET" != "$T" ] \
       || [ "$CURRENT_INBOX_BACKEND" != "$TARGET_BACKEND" ] \
+      || { [ -n "${FM_SEND_EXPECTED_SPAWN_GEN:-}" ] \
+        && [ "$CURRENT_INBOX_SPAWN_GEN" != "$FM_SEND_EXPECTED_SPAWN_GEN" ]; } \
       || [ -n "$(fm_meta_get "$TARGET_META" remote_host)" ]; then
       fm_lock_release "$INBOX_META_LOCK"
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
