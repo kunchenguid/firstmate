@@ -1043,6 +1043,90 @@ test_stale_terminal_done_transition_without_armed_poll_still_escalates() {
   pass "a done task with no armed merge poll still wedge-escalates on the repeat branch exactly as before"
 }
 
+# --- an exemption that LAPSES on a still-unchanged pane hash must re-escalate ---
+# Regression for a real gap a repo reviewer (Greptile) caught on the round-1 fix
+# above: granting the exemption cleared $ssf (the wedge timer) as its "no timer
+# needed" signal, but the repeat branch's ONLY reevaluation trigger was
+# `[ -e "$ssf" ]` - so once granted, that same clear made the repeat branch stop
+# reevaluating anything, forever, on a pane whose text never changes again. A
+# task that is exempted once and then genuinely stops qualifying (its merge poll
+# retires, or a fresh run starts) would go silently unwatched even if it were
+# truly wedged afterward - exactly the real-wedge-detection weakening the intent
+# explicitly forbids. The fix adds a dedicated $maf marker that keeps the repeat
+# branch reevaluating every poll for as long as it is set, and clears it (and
+# restarts a fresh wedge timer via wedge_timer_check's own missing-timer
+# self-heal) the moment the exemption stops applying.
+test_stale_terminal_done_exemption_lapse_reescalates_on_unchanged_hash() {
+  local dir state fakebin out capture_file window id key pane_hash pid
+  dir=$(make_case terminal-done-exemption-lapse); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-exemption-lapse"
+  id=exemption-lapse
+  printf 'idle shell, nothing to do' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/$id.meta"
+  printf 'done: PR https://github.com/example/repo/pull/13 checks green\n' > "$state/$id.status"
+  prime_status_seen "$state" "$state/$id.status" || fail "could not prime the fixture status baseline"
+  FM_STATE_OVERRIDE="$state" "$PR_CHECK" "$id" "https://github.com/example/repo/pull/13" >/dev/null \
+    || fail "could not arm a real merge poll for the fixture task"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle shell, nothing to do")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · run passed: PR merged/closed'
+
+  # Phase A: first sighting grants the exemption - absorbed, no wedge timer,
+  # and the dedicated exemption marker is the one thing now recording it.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited while granting the initial exemption: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "granting the exemption printed a wake reason: $(cat "$out")"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "granting the exemption must not start a wedge timer"; }
+  [ -e "$state/.merge-await-$key" ] || { reap "$pid"; fail "the exemption marker was not recorded"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A watcher stop"
+
+  # Phase B: the exemption's own condition lapses - the merge poll retires,
+  # exactly as it would once the PR actually lands - while the pane hash stays
+  # completely unchanged (the same idle shell). Only the repeat branch's own
+  # reevaluation, gated on the exemption marker rather than the (already
+  # absent) wedge timer, can ever notice this.
+  rm -f "$state/$id.check.sh" "$state/$id.pr-poll" "$state/$id.pr-poll-registration"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited while the lapsed exemption restarted its wedge timer: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "the lapsed exemption printed a wake reason before its threshold: $(cat "$out")"; }
+  [ ! -e "$state/.merge-await-$key" ] || { reap "$pid"; fail "the exemption marker must be cleared once its condition lapses"; }
+  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "a fresh wedge timer must start the moment the exemption lapses"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-B watcher stop"
+
+  # Phase C: with that freshly-restarted timer backdated past the threshold and
+  # the pane hash STILL unchanged throughout, the alarm must come back exactly
+  # like any other genuinely wedged pane - this is the actual regression proof:
+  # the pre-fix code never reached here at all, because nothing ever cleared or
+  # restarted a timer once the first exemption had cleared it for good.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "the alarm did not return after the exemption lapsed on an unchanged pane"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the returned alarm did not print a stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "the returned alarm did not flag a possible wedge"
+  unset FM_FAKE_CREW_STATE
+  pass "an exemption that lapses on a still-unchanged pane hash resumes wedge escalation instead of staying silent forever"
+}
+
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
 # A provably-working crew (an actively-running pipeline) legitimately sits on a
 # static pane (e.g. waiting on CI), so a non-terminal stale is absorbed and only
@@ -2853,6 +2937,7 @@ test_stale_terminal_done_with_armed_merge_poll_absorbed
 test_stale_terminal_done_without_armed_merge_poll_still_surfaces
 test_stale_terminal_done_transition_absorbs_existing_wedge_timer
 test_stale_terminal_done_transition_without_armed_poll_still_escalates
+test_stale_terminal_done_exemption_lapse_reescalates_on_unchanged_hash
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active

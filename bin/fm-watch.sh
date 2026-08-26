@@ -1355,6 +1355,7 @@ EOF
     ssf="$STATE/.stale-since-$key"
     ewf="$STATE/.wedge-escalations-$key"
     pf="$STATE/.paused-$key"   # flag: this key's stale is using the bounded pause cadence
+    maf="$STATE/.merge-await-$key"   # flag: this key's stale hash is under the terminal-done+armed-poll exemption
     prev=$(cat "$hf" 2>/dev/null || true)
     # Busy match: a backend's native semantic state when available (herdr), else
     # the last 6 non-blank lines only (the TUI footer area, where every verified
@@ -1399,6 +1400,7 @@ EOF
             if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
+              rm -f "$maf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             elif crew_is_terminal_done "$task" \
@@ -1409,19 +1411,25 @@ EOF
               # with no wedge timer - unlike the provably-working override
               # above, this idle wait is expected to last until the captain
               # merges, so it must never tick toward a possible-wedge escalation.
+              # $maf marks the exemption itself (not just its absence of a
+              # timer) so the unchanged-hash repeat path below can keep
+              # re-verifying it every poll instead of falling silent forever
+              # once the exemption later stops applying on a pane whose text
+              # never changes again.
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
+              : > "$maf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (terminal done, merge poll armed): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               printf '%s' "$h" > "$sf"
-              rm -f "$ssf"
+              rm -f "$ssf" "$maf"
               clear_write_tracking "$key"
               mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
               wake "stale: $w"
             fi
-          elif [ -e "$ssf" ]; then
+          elif [ -e "$ssf" ] || [ -e "$maf" ]; then
             # This exact hash was already overridden as provably-working (a
             # wedge timer is running for it) - keep treating it that way
             # without re-reading the crew state every poll, and without
@@ -1432,12 +1440,21 @@ EOF
             # re-check that exemption here too, and drop the wedge timer the
             # moment it now qualifies instead of letting it keep ticking
             # toward a possible-wedge escalation for a task that is done.
+            # $maf alone (no $ssf) means a prior poll already found the
+            # exemption applied: re-verify it on THIS poll too, every time,
+            # because clearing $ssf as part of granting the exemption would
+            # otherwise leave nothing here to notice the moment it stops
+            # applying (the merge poll retires, or the crew starts a fresh
+            # run) on a pane whose text never changes again - exactly the
+            # silent-after-one-grant gap a real wedge must never fall into.
             if crew_is_terminal_done "$task" \
               && fm_pr_poll_artifacts_valid "$STATE" "$task" "$SCRIPT_DIR/fm-pr-poll.sh"; then
               rm -f "$ssf"
+              : > "$maf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (terminal done, merge poll armed): $w"
             else
+              rm -f "$maf"
               wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task"
             fi
           fi
