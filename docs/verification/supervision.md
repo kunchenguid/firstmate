@@ -207,7 +207,7 @@ tests/fm-crew-state.test.sh
 
 ## Turn-end guard
 
-The blocking and bounded-follow-up mechanisms were validated across seven harnesses on 2026-07-08 through 2026-08-25, with Claude's replacement Stop-owned path revalidated on 2026-07-24, Cursor's stop-hook park validated on 2026-08-13, and Hermes's primary plugin validated on 2026-08-25.
+The blocking and bounded-follow-up mechanisms were validated across seven harnesses on 2026-07-08 through 2026-08-26, with Claude's replacement Stop-owned path revalidated on 2026-07-24, Cursor's stop-hook park validated on 2026-08-13, and Hermes's primary plugin validated on 2026-08-26.
 
 | Harness | Version verified | Mechanism | Observed result |
 | --- | --- | --- | --- |
@@ -217,13 +217,14 @@ The blocking and bounded-follow-up mechanisms were validated across seven harnes
 | Pi | 0.80.5 | Passive `agent_settled` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns. |
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
 | Cursor | 2026.08.11-e8db854 | Awaited `stop` hook park returning one `followup_message` | Exit 2 ended the turn normally, proving it cannot block; a returned follow-up ran a genuine second turn; a sleeping hook held the boundary open and the wake landed after it; `loop_limit` stopped the hook being invoked at its ceiling. |
-| Hermes | 0.20.5 | Project plugin `pre_tool_call` policy plus passive `on_session_end` recovery | A real persistent CLI loaded and registered the exact tracked plugin build; deterministic callback coverage blocked delegation and unsafe watcher arms and bounded canonically marked recovery to one injected turn per blind boundary, including failed and interrupted callback shapes. |
+| Hermes | 0.20.5 | Project plugin `pre_tool_call` policy plus passive `on_session_end` recovery | Real persistent CLIs loaded the exact tracked plugin, blocked native delegation, and delivered canonically marked recovery after successful, failed, and interrupted turn outcomes through an isolated local protocol fixture. |
 
-### Hermes primary plugin, 2026-08-25
+### Hermes primary plugin, 2026-08-26
 
-The installed Linux Hermes Agent 0.20.5 process was launched through `bin/fm-hermes-primary.sh` under a real PTY with no model turn and no provider credential.
+The installed Linux Hermes Agent 0.20.5 processes were launched through `bin/fm-hermes-primary.sh` under real PTYs against an isolated local OpenAI-compatible protocol fixture with no external provider credential.
 The plugin publishes its marker only after all three native hooks register, so the observed exact-digest marker proves registration completed inside the real persistent process.
-The same guard verified that the process argv satisfied the primary-only identity predicate and that the marker process agreed with a Firstmate session lock.
+The guard verified that the process argv satisfied the primary-only identity predicate, that the marker process agreed with a Firstmate session lock, and that native `pre_tool_call` blocked `delegate_task`.
+Separate real CLI turns proved `on_session_end` recovery after successful, failed, and interrupted outcomes.
 
 ```sh
 FM_HERMES_PRIMARY_LIVE_E2E=1 \
@@ -231,13 +232,13 @@ FM_HERMES_PRIMARY_LIVE_E2E=1 \
 ```
 
 ```text
-ok - live Hermes primary loaded the tracked plugin and matched session identity (Hermes Agent v0.20.5 (2026.8.19) · upstream 95668f5e)
-FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
+ok - live Hermes native hooks covered tool, success, failure, and interruption paths (Hermes Agent v0.20.5 (2026.8.19) · upstream f751a8c5 · local 95668f5e (+1 carried commit))
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=25785
 ```
 
 `tests/fm-hermes-primary.test.sh` invokes the registered callbacks deterministically in a primary checkout and a child worktree.
 It proves the plugin stays inert outside primary scope, blocks `delegate_task`, refuses unmanaged watcher-arm shapes, passes ordinary tools, injects one recovery turn after the shared guard blocks, suppresses that recovery turn's own boundary, and becomes eligible again for a later independent blind boundary.
-The live check deliberately sends no model turn, so provider behavior and token use are outside this evidence; hook registration, executable identity, and callback policy are the active guarantees.
+The live fixture exercises Hermes's model protocol but runs no real model and uses no operator credential, so external provider behavior, inference, and token use remain outside this evidence.
 
 ### Cursor primary park, 2026-08-13
 

@@ -21,5 +21,5 @@ When this session owns supervision and away mode is not active:
 
 The tracked `.hermes/plugins/firstmate-primary` plugin uses Hermes `on_session_end` plus `ctx.inject_message()` as the final turn-end backstop for successful, failed, and interrupted turns.
 When the shared predicate reports a blind turn end, it injects one bounded Hermes turn-end recovery retry and suppresses recursion for that injected retry.
-The plugin is loaded only through `bin/fm-hermes-primary.sh`, which forces the verified classic persistent CLI and enables project-plugin discovery without changing provider credentials.
+The supported plugin path is `bin/fm-hermes-primary.sh`, which forces the verified classic persistent CLI and enables project-plugin discovery without changing provider credentials.
 See [`watcher-continuity.md`](../watcher-continuity.md) for the arm-layer successor and clean-close failure contract.

@@ -232,17 +232,10 @@ Native supervision paths were also validated in the same scratch project:
 
 Every native-path automatic marker was present and every deny sentinel remained absent.
 
-## Hermes live integration record, 2026-08-25
+## Hermes verification
 
-Hermes Agent 0.20.5 loaded the tracked `firstmate-primary` plugin in a real persistent classic CLI process under a PTY.
-The live guard verified the exact plugin digest and process identity without sending a model turn or requiring provider credentials.
-The portable plugin test separately invokes the registered native `pre_tool_call` callback and proves unrelated commands pass, `delegate_task` is blocked, unsafe arm shapes are blocked, and only `terminal(background=true, notify_on_complete=true)` admits the watcher arm.
-Refresh the installed-host evidence with:
-
-```sh
-FM_HERMES_PRIMARY_LIVE_E2E=1 \
-  bin/fm-test-run.sh tests/fm-hermes-primary-live-e2e.test.sh
-```
+[`verification/supervision.md`](verification/supervision.md#hermes-primary-plugin-2026-08-26) owns the installed Hermes evidence and refresh command, including native `pre_tool_call` delivery through the credentialless local protocol fixture.
+The portable plugin test separately proves unrelated commands pass, `delegate_task` is blocked, unsafe arm shapes are blocked, and only `terminal(background=true, notify_on_complete=true)` admits the watcher arm.
 
 ## Automated validation
 

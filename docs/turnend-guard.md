@@ -163,7 +163,7 @@ It also covers true-reason banner wording and reason-keyed episode dedup survivi
 `tests/fm-cursor-primary.test.sh` covers the Cursor park end to end over real processes with no harness installed: each tracked Claude-shaped entrypoint standing down on a Cursor payload, both follow-up sources, the bounded repair nag and its reset, the nested loop bounds, supersession, away-mode and lock-ownership inertness, child-worktree exclusion, and that the adapter never exits 2.
 `FM_CURSOR_PRIMARY_LIVE_E2E=1 tests/fm-cursor-primary-live-e2e.test.sh` is the opt-in guard that proves the same behavior against the installed cursor-agent and fails naming the harness and version.
 `tests/fm-hermes-primary.test.sh` covers Hermes plugin scope, unsafe launch refusal, managed watcher command enforcement, built-in delegation denial, and bounded recovery.
-`FM_HERMES_PRIMARY_LIVE_E2E=1 tests/fm-hermes-primary-live-e2e.test.sh` proves plugin loading, process identity, and marker-to-lock agreement against the installed Hermes version without sending a model turn.
+`FM_HERMES_PRIMARY_LIVE_E2E=1 tests/fm-hermes-primary-live-e2e.test.sh` proves plugin loading, process identity, marker-to-lock agreement, native delegation blocking, and success, failure, and interruption turn-end recovery against the installed Hermes version through an isolated credentialless protocol fixture.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.

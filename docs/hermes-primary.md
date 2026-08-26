@@ -9,8 +9,8 @@ This integration is primary-only: Hermes never runs crewmates, scouts, or second
 - A separate verified worker harness in `config/crew-harness`.
 - The normal Firstmate backend requirements for that worker harness.
 
-The integration was live-verified with Hermes Agent 0.20.5 on 2026-08-25.
-Run the live drift guard after every Hermes upgrade before trusting the refreshed installation.
+The live drift guard targets Hermes Agent 0.20.5.
+Run it after every Hermes upgrade before trusting the refreshed installation; [`verification/supervision.md`](verification/supervision.md#hermes-primary-plugin-2026-08-26) owns the current evidence.
 
 ## One-time setup
 
@@ -73,9 +73,10 @@ FM_HERMES_PRIMARY_LIVE_E2E=1 \
   bin/fm-test-run.sh tests/fm-hermes-primary-live-e2e.test.sh
 ```
 
-The live check opens a real persistent Hermes process in a PTY without sending a model turn.
-It verifies plugin loading, the exact loaded-plugin digest, structural process identity, and agreement between the plugin marker and Firstmate session-lock identity; provider-backed model-turn behavior remains operator verification because Firstmate does not own Hermes credentials.
-It reports an absent Hermes installation or disabled plugin rather than silently passing.
+The live check opens real persistent Hermes processes in PTYs against an isolated local protocol fixture without external provider credentials.
+It verifies plugin loading, the exact loaded-plugin digest, structural process identity, agreement between the plugin marker and Firstmate session-lock identity, native `pre_tool_call` delegation blocking, and native `on_session_end` recovery after successful, failed, and interrupted turn outcomes.
+Real provider and model behavior remains operator verification because Firstmate does not own Hermes credentials.
+The check reports an absent Hermes installation or disabled plugin rather than silently passing.
 
 After `hermes update`, rerun the live check before starting the next Firstmate primary session.
 If the check fails, use `hermes plugins show firstmate-primary` and `bin/fm-hermes-primary.sh --check` to distinguish discovery and enablement failures.

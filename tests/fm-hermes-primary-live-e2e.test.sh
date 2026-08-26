@@ -72,6 +72,7 @@ cleanup() {
     kill -TERM "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
   fi
+  fm_test_cleanup
 }
 trap cleanup EXIT INT TERM
 
