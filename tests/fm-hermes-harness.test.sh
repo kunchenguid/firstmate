@@ -4,23 +4,9 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=bin/fm-process-identity-lib.sh
-. "$ROOT/bin/fm-process-identity-lib.sh"
-# shellcheck source=bin/fm-adapter-marker-lib.sh
-. "$ROOT/bin/fm-adapter-marker-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-hermes-harness)
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
-HOLDER_PIDS=()
-
-cleanup() {
-  local pid
-  for pid in "${HOLDER_PIDS[@]}"; do
-    kill "$pid" 2>/dev/null || true
-  done
-  fm_test_cleanup
-}
-trap cleanup EXIT INT TERM
 
 make_fake_ps() {
   local dir=$1 fakebin
@@ -39,110 +25,109 @@ SH
   printf '%s\n' "$fakebin"
 }
 
-make_identity_root() {
-  local root=$1
-  mkdir -p "$root/.hermes/plugins/firstmate-primary" "$root/state"
-  cp "$ROOT/.hermes/plugins/firstmate-primary/__init__.py" \
-    "$root/.hermes/plugins/firstmate-primary/__init__.py"
-}
-
-start_holder() {
-  sleep 300 &
-  HOLDER_PID=$!
-  HOLDER_PIDS+=("$HOLDER_PID")
-}
-
-write_marker() {
-  local root=$1 pid=$2 identity version
-  identity=$(fm_pid_identity "$pid") || fail "could not read holder process identity"
-  version=$(fm_adapter_file_version "$root/.hermes/plugins/firstmate-primary/__init__.py") \
-    || fail "could not hash fixture plugin"
-  printf '%s\n%s\n%s\n%s\n' "$version" "$pid" "$root" "$identity" \
-    > "$root/state/.hermes-primary-plugin-loaded"
-}
-
 run_detect() {
-  local fakebin=$1 root=$2
-  shift 2
+  local fakebin=$1
+  shift
   env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u HERMES_HOME \
-    FM_ROOT_OVERRIDE="$root" FM_STATE_OVERRIDE="$TMP_ROOT/ignored-state" \
     PATH="$fakebin:$BASE_PATH" "$@" "$ROOT/bin/fm-harness.sh"
 }
 
-test_hermes_identity_requires_loaded_plugin_marker() {
-  local fakebin fixture out
+test_hermes_identity_requires_the_executable() {
+  local fakebin out
   fakebin=$(make_fake_ps "$TMP_ROOT/identity")
-  fixture="$TMP_ROOT/identity/root"
-  make_identity_root "$fixture"
 
-  out=$(run_detect "$fakebin" "$fixture" env HERMES_HOME="$TMP_ROOT/hermes-home")
+  out=$(run_detect "$fakebin" env HERMES_HOME="$TMP_ROOT/hermes-home")
   [ "$out" = unknown ] || fail "HERMES_HOME alone must not impersonate Hermes, got '$out'"
 
-  out=$(run_detect "$fakebin" "$fixture" env FM_TEST_PS_COMM=hermes \
-    FM_TEST_PS_ARGS='hermes --cli --no-restore-cwd' FM_TEST_PS_PPID=1)
-  [ "$out" = unknown ] || fail "persistent argv without a loaded plugin marker must stay unknown, got '$out'"
+  out=$(run_detect "$fakebin" env FM_TEST_PS_COMM=python3 \
+    FM_TEST_PS_ARGS="python3 worker.py 'write about hermes'" FM_TEST_PS_PPID=1)
+  [ "$out" = unknown ] || fail "an unrelated Python prompt mentioning Hermes must stay unknown, got '$out'"
 
-  start_holder
-  write_marker "$fixture" "$HOLDER_PID"
-  out=$(run_detect "$fakebin" "$fixture" env FM_TEST_PS_COMM=python3 \
-    FM_TEST_PS_ARGS='python3 worker.py "hermes --cli"' FM_TEST_PS_PPID="$HOLDER_PID")
-  [ "$out" = hermes ] || fail "loaded Hermes marker and process ancestry were not detected, got '$out'"
-  pass "Hermes detection requires the exact loaded plugin marker and process incarnation"
+  out=$(run_detect "$fakebin" env FM_TEST_PS_COMM=python3 \
+    FM_TEST_PS_ARGS="python3 worker.py /opt/hermes" FM_TEST_PS_PPID=1)
+  [ "$out" = unknown ] || fail "a prompt path ending in /hermes must stay unknown, got '$out'"
+  pass "Hermes detection rejects home markers and unrelated Python prompt text"
 }
 
-test_hermes_identity_rejects_stale_incarnation_and_build() {
-  local fakebin fixture marker out version
-  fakebin=$(make_fake_ps "$TMP_ROOT/stale")
-  fixture="$TMP_ROOT/stale/root"
-  make_identity_root "$fixture"
-  start_holder
-  write_marker "$fixture" "$HOLDER_PID"
-  marker="$fixture/state/.hermes-primary-plugin-loaded"
+test_hermes_process_shapes() {
+  local fakebin out
+  fakebin=$(make_fake_ps "$TMP_ROOT/shapes")
 
-  awk 'NR == 4 {$0 = "linux-starttime=1 cmdline-hex=00"} {print}' "$marker" > "$marker.tmp"
-  mv "$marker.tmp" "$marker"
-  out=$(run_detect "$fakebin" "$fixture" env FM_TEST_PS_COMM=hermes FM_TEST_PS_PPID="$HOLDER_PID")
-  [ "$out" = unknown ] || fail "stale process-incarnation identity retained Hermes trust"
+  out=$(run_detect "$fakebin" env FM_TEST_PS_COMM=hermes \
+    FM_TEST_PS_ARGS='hermes --cli')
+  [ "$out" = unknown ] || fail "a direct CLI outside the wrapper shape must stay unknown, got '$out'"
 
-  write_marker "$fixture" "$HOLDER_PID"
-  version=$(sed -n '1p' "$marker")
-  printf '%s-x\n' "$version" > "$marker.tmp"
-  sed -n '2,$p' "$marker" >> "$marker.tmp"
-  mv "$marker.tmp" "$marker"
-  out=$(run_detect "$fakebin" "$fixture" env FM_TEST_PS_COMM=hermes FM_TEST_PS_PPID="$HOLDER_PID")
-  [ "$out" = unknown ] || fail "a marker for a different plugin build retained Hermes trust"
-  pass "Hermes identity rejects stale process incarnations and plugin builds"
+  out=$(run_detect "$fakebin" env FM_TEST_PS_COMM=hermes \
+    FM_TEST_PS_ARGS='hermes -p firstmate --tui')
+  [ "$out" = unknown ] || fail "the unsupported Hermes profile TUI must stay unknown, got '$out'"
+
+  out=$(run_detect "$fakebin" env FM_TEST_PS_COMM=python3 \
+    FM_TEST_PS_ARGS='/opt/hermes-agent/venv/bin/python3 /opt/hermes-agent/venv/bin/hermes -p firstmate --tui')
+  [ "$out" = unknown ] || fail "an interpreter-backed profile TUI must stay unknown, got '$out'"
+
+  out=$(run_detect "$fakebin" env FM_TEST_PS_COMM=python \
+    FM_TEST_PS_ARGS='/usr/local/lib/hermes-agent/venv/bin/python /usr/local/lib/hermes-agent/hermes --cli --no-restore-cwd')
+  [ "$out" = hermes ] || fail "the official Hermes 0.20 launcher shape was not detected, got '$out'"
+
+  out=$(run_detect "$fakebin" env FM_TEST_PS_COMM=hermes \
+    FM_TEST_PS_ARGS='hermes -z prompt')
+  [ "$out" = unknown ] || fail "one-shot Hermes workers must stay out of primary detection, got '$out'"
+
+  out=$(PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-harness-process-lib.sh"; if fm_process_is_hermes_primary "$1"; then printf primary; fi' \
+    "$ROOT" 'hermes -z prompt' 2>/dev/null) || true
+  [ "$out" != primary ] || fail "one-shot Hermes must not satisfy the primary predicate"
+
+  out=$(PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-harness-process-lib.sh"; fm_process_is_hermes_primary "$1"; printf primary' \
+    "$ROOT" 'hermes --cli --no-restore-cwd --continue "Project Alpha"')
+  [ "$out" = primary ] || fail "the wrapper-shaped CLI did not satisfy the primary predicate"
+
+  out=$(PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-harness-process-lib.sh"; if fm_process_is_hermes_primary "$1"; then printf primary; fi' \
+    "$ROOT" 'hermes --cli --no-restore-cwd --ignore-rules' 2>/dev/null) || true
+  [ "$out" != primary ] || fail "a rule-skipping Hermes process satisfied the primary predicate"
+
+  out=$(PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-harness-process-lib.sh"; if fm_process_is_hermes_primary "$1"; then printf primary; fi' \
+    "$ROOT" 'hermes -p unrelated --tui' 2>/dev/null) || true
+  [ "$out" != primary ] || fail "an unrelated Hermes profile must not satisfy the primary predicate"
+  pass "Hermes detection distinguishes persistent CLI and one-shot worker argv"
 }
 
-test_lock_accepts_only_marker_bound_primary() {
-  local fakebin fixture home out rc holder
+test_lock_accepts_primary_and_rejects_worker_or_prompt() {
+  local fakebin home out rc=0
   fakebin=$(make_fake_ps "$TMP_ROOT/lock")
-  fixture="$TMP_ROOT/lock/root"
-  home="$TMP_ROOT/lock/home"
-  make_identity_root "$fixture"
+  home="$TMP_ROOT/lock-home"
   mkdir -p "$home/state"
-  start_holder
-  holder=$HOLDER_PID
-  write_marker "$fixture" "$holder"
 
-  rc=0
-  out=$(FM_ROOT_OVERRIDE="$fixture" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
-    FM_TEST_PS_COMM=hermes FM_TEST_PS_PPID="$holder" PATH="$fakebin:$BASE_PATH" \
+  out=$(FM_HOME="$home" FM_TEST_PS_COMM=hermes \
+    FM_TEST_PS_ARGS='hermes --cli --no-restore-cwd' PATH="$fakebin:$BASE_PATH" \
     "$ROOT/bin/fm-lock.sh") || rc=$?
-  [ "$rc" -eq 0 ] || fail "fm-lock rejected a marker-bound Hermes primary: $out"
-  assert_contains "$out" "lock acquired: harness pid $holder" "Hermes primary acquired the wrong lock identity"
+  [ "$rc" -eq 0 ] || fail "fm-lock rejected a persistent Hermes primary: $out"
+  assert_contains "$out" "lock acquired: harness pid" "Hermes primary did not acquire the lock"
 
-  rm -f "$fixture/state/.hermes-primary-plugin-loaded" "$home/state/.lock"
+  rm -f "$home/state/.lock"
   rc=0
-  out=$(FM_ROOT_OVERRIDE="$fixture" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
-    FM_TEST_PS_COMM=hermes FM_TEST_PS_PPID="$holder" PATH="$fakebin:$BASE_PATH" \
+  out=$(FM_HOME="$home" FM_TEST_PS_COMM=hermes \
+    FM_TEST_PS_ARGS='hermes -p firstmate --tui' PATH="$fakebin:$BASE_PATH" \
     "$ROOT/bin/fm-lock.sh" 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "fm-lock accepted Hermes argv without the loaded plugin marker"
-  pass "primary lock ownership requires a current marker-bound Hermes process"
+  [ "$rc" -ne 0 ] || fail "fm-lock accepted the unsupported Hermes profile TUI: $out"
+
+  printf '%s\n' "$$" > "$home/state/.lock"
+  out=$(FM_HOME="$home" FM_TEST_PS_COMM=hermes FM_TEST_PS_ARGS='hermes -z prompt' \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: stale" "one-shot Hermes must not own the primary lock"
+
+  out=$(FM_HOME="$home" FM_TEST_PS_COMM=python3 \
+    FM_TEST_PS_ARGS="python3 worker.py 'hermes --cli'" PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: stale" "unrelated Python prompt text must not own the lock"
+  pass "primary lock ownership accepts only persistent Hermes"
 }
 
-test_hermes_identity_requires_loaded_plugin_marker
-test_hermes_identity_rejects_stale_incarnation_and_build
-test_lock_accepts_only_marker_bound_primary
+test_hermes_identity_requires_the_executable
+test_hermes_process_shapes
+test_lock_accepts_primary_and_rejects_worker_or_prompt
 
 echo "# all fm-hermes-harness tests passed"

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -23,23 +22,13 @@ _retry_lock = threading.Lock()
 def _state_dir() -> Path:
     override = os.environ.get("FM_STATE_OVERRIDE", "").strip()
     if override:
-        return Path(os.path.abspath(os.path.expanduser(override)))
+        return Path(override).expanduser().resolve()
     home = os.environ.get("FM_HOME", "").strip()
-    base = Path(os.path.abspath(os.path.expanduser(home))) if home else _ROOT
-    return base / "state"
-
-
-def _ensure_state_dir(state: Path) -> bool:
-    try:
-        if state.is_symlink():
-            return False
-        state.mkdir(parents=True, exist_ok=True)
-        return state.is_dir() and not state.is_symlink()
-    except OSError:
-        return False
+    return (Path(home).expanduser().resolve() if home else _ROOT) / "state"
 
 
 def _persistent_cli_launch() -> bool:
+    """Accept only the classic-session argv emitted by the wrapper."""
     args = sys.argv[1:]
     cli = False
     rooted = False
@@ -66,12 +55,7 @@ def _persistent_cli_launch() -> bool:
         elif arg not in {"--accept-hooks", "--yolo", "--pass-session-id"}:
             return False
         index += 1
-    return (
-        cli
-        and rooted
-        and os.environ.get("FM_HERMES_PRIMARY_POLICY") == "pi-herdr-v1"
-        and os.environ.get("FM_HERMES_PRIMARY_PID") == str(os.getpid())
-    )
+    return cli and rooted
 
 
 def _primary_scope_matches() -> bool:
@@ -83,13 +67,8 @@ def _primary_scope_matches() -> bool:
     except OSError:
         return False
     state = _state_dir()
-    canonical_state = _ROOT / "state"
     scope_lib = _ROOT / "bin" / "fm-primary-scope-lib.sh"
-    if (
-        not scope_lib.is_file()
-        or not _ensure_state_dir(state)
-        or not _ensure_state_dir(canonical_state)
-    ):
+    if not scope_lib.is_file() or not state.is_dir() or state.is_symlink():
         return False
     try:
         result = subprocess.run(
@@ -118,94 +97,17 @@ def _marker_digest() -> str:
     return "sha256:" + hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
-def _process_identity() -> str | None:
-    identity_lib = _ROOT / "bin" / "fm-process-identity-lib.sh"
-    try:
-        result = subprocess.run(
-            [
-                "bash",
-                "-c",
-                '. "$1"; fm_pid_identity "$2"',
-                "firstmate-hermes-identity",
-                str(identity_lib),
-                str(os.getpid()),
-            ],
-            cwd=str(_ROOT),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    identity = result.stdout.rstrip("\n")
-    if result.returncode != 0 or not identity or "\n" in identity:
-        return None
-    return identity
-
-
-def _live_marker_owner(state: Path) -> int | None:
-    process_lib = _ROOT / "bin" / "fm-harness-process-lib.sh"
-    try:
-        result = subprocess.run(
-            [
-                "bash",
-                "-c",
-                '. "$1"; pid=$(fm_hermes_marker_pid "$2" "$3") && '
-                'fm_process_is_hermes_primary_pid "$pid" "$2" "$3" && printf "%s" "$pid"',
-                "firstmate-hermes-marker-owner",
-                str(process_lib),
-                str(state),
-                str(_ROOT),
-            ],
-            cwd=str(_ROOT),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    try:
-        return int(result.stdout) if result.returncode == 0 else None
-    except ValueError:
-        return None
-
-
 def _write_loaded_marker() -> None:
-    identity = _process_identity()
-    if identity is None:
-        return
-    payload = f"{_marker_digest()}\n{os.getpid()}\n{_ROOT}\n{identity}\n"
-    canonical_state = _ROOT / "state"
-    lock_path = canonical_state / ".hermes-primary-marker.lock"
-    flags = os.O_CREAT | os.O_RDWR
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+    marker = _state_dir() / _MARKER_NAME
+    tmp = marker.with_name(f"{marker.name}.{os.getpid()}.tmp")
     try:
-        lock_fd = os.open(lock_path, flags, 0o600)
+        tmp.write_text(f"{_marker_digest()}\n{os.getpid()}\n", encoding="utf-8")
+        os.replace(tmp, marker)
     except OSError:
-        return
-    with os.fdopen(lock_fd, "r+") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        owner = _live_marker_owner(canonical_state)
-        if owner is not None and owner != os.getpid():
-            return
-        for state in {_state_dir(), canonical_state}:
-            marker = state / _MARKER_NAME
-            tmp = marker.with_name(f"{marker.name}.{os.getpid()}.tmp")
-            try:
-                tmp.write_text(payload, encoding="utf-8")
-                os.replace(tmp, marker)
-            except OSError:
-                try:
-                    tmp.unlink()
-                except OSError:
-                    pass
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 def _run_checker(path: Path, *args: str, payload: str | None = None) -> subprocess.CompletedProcess[str] | None:
@@ -237,8 +139,8 @@ def register(ctx: Any) -> None:
 
     def pre_tool_call(tool_name: str, args: dict[str, Any], **kwargs: Any) -> dict[str, str] | None:
         del kwargs
-        if not _primary_scope_matches():
-            return None
+        # Registration already proved the trusted primary scope. Keep these
+        # guards active if Hermes changes cwd later in the same CLI process.
         if tool_name in _DELEGATION_TOOLS:
             return {
                 "action": "block",
@@ -281,7 +183,7 @@ def register(ctx: Any) -> None:
         **kwargs: Any,
     ) -> None:
         del kwargs
-        if not _primary_scope_matches() or platform != "cli":
+        if platform != "cli":
             return
 
         sid = str(session_id or "")

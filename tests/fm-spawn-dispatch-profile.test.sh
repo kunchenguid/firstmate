@@ -60,7 +60,6 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse
-  fm_fake_exit0 "$fakebin" custom-agent
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
 shift
@@ -838,44 +837,7 @@ test_hermes_is_not_a_crewmate_or_secondmate_runtime() {
   [ "$status" -ne 0 ] || fail "fm-spawn must refuse Hermes as a worker runtime"
   assert_contains "$out" "unknown harness 'hermes'" "fm-spawn did not refuse Hermes before launch"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused Hermes worker must not write task metadata"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" 'hermes --cli --no-restore-cwd')
-  status=$?
-  [ "$status" -ne 0 ] || fail "fm-spawn must refuse Hermes through the raw worker escape hatch"
-  assert_contains "$out" "not an eligible direct worker runtime" "raw Hermes worker refusal was not actionable"
-  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused raw Hermes worker wrote task metadata"
-
-  out=$(H=/usr/local/bin/hermes run_ship_spawn \
-    "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" '$H --cli --no-restore-cwd')
-  status=$?
-  [ "$status" -ne 0 ] || fail "fm-spawn must refuse a dynamically resolved Hermes worker"
-  assert_contains "$out" "without dynamic shell syntax" "dynamic Hermes worker refusal was not actionable"
-  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused dynamic Hermes worker wrote task metadata"
-  pass "Hermes remains primary-only across verified, raw, and dynamic worker launches"
-}
-
-test_hermes_primary_policy_rejects_worker_overrides() {
-  local rec id out status
-  id=profile-hermes-policy-z21
-  rec=$(make_spawn_case profile-hermes-policy pi "$id")
-  read_case_record "$rec"
-  printf '%s\n' pi-herdr-v1 > "$HOME_DIR/state/.hermes-primary-worker-policy"
-
-  out=$(FM_HERMES_PRIMARY_POLICY= FM_BACKEND=herdr \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex)
-  status=$?
-  [ "$status" -ne 0 ] || fail "durable Hermes primary policy must refuse a non-Pi worker"
-  assert_contains "$out" "requires harness=pi" "Hermes worker-harness refusal was not actionable"
-  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused Hermes policy override wrote task metadata"
-
-  out=$(FM_HERMES_PRIMARY_POLICY= FM_BACKEND=herdr \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness pi --backend tmux)
-  status=$?
-  [ "$status" -ne 0 ] || fail "durable Hermes primary policy must refuse a non-Herdr backend"
-  assert_contains "$out" "requires backend=herdr" "Hermes backend refusal was not actionable"
-  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused Hermes backend override wrote task metadata"
-  pass "Hermes worker policy remains Pi and Herdr after environment clearing"
+  pass "Hermes remains primary-only and any visible crewmate dispatch stays on fm-spawn"
 }
 
 test_no_profile_keeps_claude_profile_defaults
@@ -910,6 +872,5 @@ test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
 test_hermes_is_not_a_crewmate_or_secondmate_runtime
-test_hermes_primary_policy_rejects_worker_overrides
 
 echo "# all fm-spawn-dispatch-profile tests passed"

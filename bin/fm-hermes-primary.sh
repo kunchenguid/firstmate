@@ -19,14 +19,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PLUGIN=firstmate-primary
 HOME_ROOT=${FM_HOME:-$ROOT}
-CONFIG=${FM_CONFIG_OVERRIDE:-$HOME_ROOT/config}
 STATE=${FM_STATE_OVERRIDE:-$HOME_ROOT/state}
-DATA=${FM_DATA_OVERRIDE:-$HOME_ROOT/data}
-# shellcheck source=bin/fm-hermes-worker-policy-lib.sh
-. "$SCRIPT_DIR/fm-hermes-worker-policy-lib.sh"
 
 usage() {
-  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 require_root() {
@@ -42,54 +38,21 @@ require_root() {
 plugin_status() {
   hermes config get plugins.enabled 2>/dev/null | grep -Fx -- "- $PLUGIN" >/dev/null \
     || return 1
-  if hermes config get plugins.disabled 2>/dev/null | grep -Fx -- "- $PLUGIN" >/dev/null; then
-    return 1
-  fi
+  ! hermes config get plugins.disabled 2>/dev/null | grep -Fx -- "- $PLUGIN" >/dev/null
 }
 
 require_state_dir() {
-  local state=$1
-  if [ -e "$state" ] || [ -L "$state" ]; then
-    [ -d "$state" ] && [ ! -L "$state" ] || {
-      echo "error: Hermes primary requires a safe state directory: $state" >&2
+  if [ -e "$STATE" ] || [ -L "$STATE" ]; then
+    [ -d "$STATE" ] && [ ! -L "$STATE" ] || {
+      echo "error: Hermes primary requires a safe state directory: $STATE" >&2
       exit 1
     }
-    return 0
+  else
+    mkdir -p "$STATE" || {
+      echo "error: Hermes primary could not create state directory: $STATE" >&2
+      exit 1
+    }
   fi
-  mkdir -p "$state" || {
-    echo "error: Hermes primary could not create state directory: $state" >&2
-    exit 1
-  }
-}
-
-hermes_remote_policy_check() {
-  local id=$1
-  FM_HOME="$HOME_ROOT" FM_DATA_OVERRIDE="$DATA" \
-    "$ROOT/bin/fm-on.sh" "$id" fm-remote-secondmate-control.sh policy-check "$id"
-}
-
-require_local_policy() {
-  local path value
-  for path in crew-harness secondmate-harness; do
-    value=$(tr -d '[:space:]' < "$CONFIG/$path" 2>/dev/null || true)
-    [ "$value" = pi ] || {
-      echo "error: Hermes primary requires $CONFIG/$path to contain 'pi'" >&2
-      exit 1
-    }
-  done
-  value=$(tr -d '[:space:]' < "$CONFIG/backend" 2>/dev/null || true)
-  [ "$value" = herdr ] || {
-    echo "error: Hermes primary requires $CONFIG/backend to contain 'herdr'" >&2
-    exit 1
-  }
-  case "${FM_BACKEND:-herdr}" in
-    herdr) ;;
-    *)
-      echo "error: Hermes primary requires FM_BACKEND=herdr when FM_BACKEND is set" >&2
-      exit 1
-      ;;
-  esac
-  fm_hermes_policy_check_home "$HOME_ROOT" "$STATE" hermes_remote_policy_check || exit 1
 }
 
 validate_launch_args() {
@@ -176,8 +139,7 @@ case "${1:-}" in
     exit 1
     ;;
   --setup)
-    require_state_dir "$STATE"
-    require_state_dir "$ROOT/state"
+    require_state_dir
     enable_plugin
     plugin_status || {
       echo "error: Hermes did not report $PLUGIN enabled after setup" >&2
@@ -188,8 +150,7 @@ case "${1:-}" in
     ;;
 esac
 
-require_state_dir "$STATE"
-require_state_dir "$ROOT/state"
+require_state_dir
 
 plugin_status || {
   echo "error: Hermes Firstmate primary plugin is not enabled." >&2
@@ -198,12 +159,8 @@ plugin_status || {
 }
 
 validate_launch_args "$@"
-require_local_policy
 
 export HERMES_ENABLE_PROJECT_PLUGINS=1
-export FM_BACKEND=herdr
-export FM_HERMES_PRIMARY_POLICY=pi-herdr-v1
-export FM_HERMES_PRIMARY_PID=$$
 exec env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS \
   -u GROK_AGENT -u GROK_HOOK_EVENT -u GROK_HOOK_NAME -u GROK_SESSION_ID \
   -u GROK_WORKSPACE_ROOT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \

@@ -33,10 +33,6 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-harness-process-lib.sh"
 
 detect_own() {
-  if fm_hermes_primary_ancestry_pid "$FM_ROOT/state" "$FM_ROOT" >/dev/null; then
-    echo hermes
-    return
-  fi
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
   # Claude, Pi, Grok, and Cursor set verified markers of their own; codex,
@@ -88,6 +84,10 @@ detect_own() {
       return
     fi
     args=$(ps -o args= -p "$pid" 2>/dev/null)
+    if fm_process_is_hermes_primary "$args"; then
+      echo hermes
+      return
+    fi
     case "$(basename -- "$comm")" in
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;

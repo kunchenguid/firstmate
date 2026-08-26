@@ -6,8 +6,8 @@ This integration is primary-only: Hermes never runs crewmates, scouts, or second
 ## Requirements
 
 - Hermes Agent with native project-plugin support.
-- Pi in both `config/crew-harness` and `config/secondmate-harness`.
-- Herdr in `config/backend`, with the normal Herdr backend requirements.
+- A separate verified worker harness in `config/crew-harness`.
+- The normal Firstmate backend requirements for that worker harness.
 
 The integration was live-verified with Hermes Agent 0.20.5 on 2026-08-25.
 Run the live drift guard after every Hermes upgrade before trusting the refreshed installation.
@@ -23,10 +23,10 @@ bin/fm-hermes-primary.sh --check
 
 Setup links the tracked plugin into the active Hermes home and enables its exact plugin key.
 It refuses to replace an existing non-matching plugin path.
-Normal launches require the plugin in `plugins.enabled` and absent from the higher-precedence `plugins.disabled` list without rewriting Hermes configuration.
-Setup and launch create the checkout state directory when absent and refuse a symlinked or non-directory state path.
+Normal launches only check that enablement and do not rewrite Hermes configuration.
 
-Configure the required Pi workers and Herdr backend before launching Hermes:
+Configure the workers independently because an absent or `default` worker setting would mirror the Hermes primary and `fm-spawn.sh` deliberately refuses that primary-only runtime.
+For Pi workers on Herdr:
 
 ```sh
 mkdir -p config
@@ -36,8 +36,6 @@ printf '%s\n' herdr > config/backend
 ```
 
 These operator choices remain local and gitignored by design.
-The launcher refuses missing or different values and recursively checks local and remote active descendants for Pi plus Herdr before launch.
-The checkout-owned loaded-plugin marker activates the same enforcement in `fm-spawn.sh` regardless of per-command home or state overrides, while a durable policy in each launched secondmate home preserves it across remote and nested launches.
 Configure the Hermes model or provider separately with `hermes setup` or `hermes model`; Firstmate does not copy, modify, or own provider credentials.
 
 ## Launch
@@ -48,8 +46,7 @@ Always launch the primary from the checkout root:
 bin/fm-hermes-primary.sh
 ```
 
-The launcher forces the persistent classic CLI and keeps resumed sessions in the checkout root.
-The project plugin independently enforces the same bounded classic-session argument contract before it publishes trusted identity.
+The launcher forces the persistent classic CLI, keeps resumed sessions in the checkout root, clears inherited markers from other primary harnesses, and accepts only a bounded set of classic-session options.
 Profiles, subcommands, one-shot mode, the TUI, safe mode, ignored rules or user configuration, Hermes-managed worktrees, and alternate starting directories are refused because those shapes would disable or escape the Firstmate integration.
 
 The plugin then:
@@ -57,8 +54,8 @@ The plugin then:
 - blocks Hermes's built-in `delegate_task` so work stays in visible Firstmate-managed sessions;
 - validates watcher-arm terminal calls through Firstmate's shared command policy;
 - requires `terminal(background=true, notify_on_complete=true)` for the one managed watcher process;
-- runs the shared turn-end predicate after successful, failed, and interrupted turns and injects one bounded recovery turn when active work lacks healthy supervision;
-- publishes an exact-build, checkout-bound process marker with process-incarnation identity for the lifetime of the CLI process, preserving any other live checkout owner so concurrent startup cannot invalidate session-lock ownership.
+- runs the shared turn-end predicate after successful, failed, and interrupted turns and injects one canonically marked, bounded recovery turn when active work lacks healthy supervision;
+- publishes a versioned process marker for the CLI lifetime so session start can prove the current lock-owning Hermes process loaded the current plugin build across `/new` and reset boundaries.
 
 ## Verification and upgrades
 
@@ -77,7 +74,7 @@ FM_HERMES_PRIMARY_LIVE_E2E=1 \
 ```
 
 The live check opens a real persistent Hermes process in a PTY without sending a model turn.
-It verifies plugin loading, the exact loaded-plugin digest and checkout, marker-bound process identity, and agreement between the plugin marker and Firstmate session-lock identity.
+It verifies plugin loading, the exact loaded-plugin digest, structural process identity, and agreement between the plugin marker and Firstmate session-lock identity; provider-backed model-turn behavior remains operator verification because Firstmate does not own Hermes credentials.
 It reports an absent Hermes installation or disabled plugin rather than silently passing.
 
 After `hermes update`, rerun the live check before starting the next Firstmate primary session.
@@ -88,5 +85,8 @@ If the check fails, use `hermes plugins show firstmate-primary` and `bin/fm-herm
 
 - The classic interactive CLI is the only verified primary surface.
 - Hermes gateway, desktop, web, TUI, one-shot, ACP, and outer-wrapper modes are outside this integration.
-- The plugin intentionally disables built-in Hermes delegation in Firstmate scope.
-- Worker busy state, steering, interruption, cleanup, and backend behavior remain properties of Pi and Herdr, not Hermes.
+- The plugin intentionally disables built-in Hermes delegation for the lifetime of the loaded primary CLI, including after a cwd change.
+- Hermes is excluded from Firstmate's verified worker-harness selection. Firstmate's pre-existing raw-command escape hatch remains explicitly operator-owned and outside adapter guarantees.
+- Worker and backend selection use the normal gitignored Firstmate configuration; this integration does not add a second policy layer around those settings.
+- Like the rest of Firstmate's local shell tooling, the wrapper is an operational safety boundary for a trusted local operator, not a security boundary against an operator deliberately recreating or modifying its environment.
+- Worker busy state, steering, interruption, cleanup, and backend behavior remain properties of the selected worker harness, not Hermes.

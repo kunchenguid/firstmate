@@ -2,7 +2,7 @@
 # Host-local lifecycle control for the remote secondmate home selected by fm-on.
 #
 # Usage:
-#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent|-] [pi-herdr-v1]
+#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent]
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
 #   fm-remote-secondmate-control.sh send <id> <message>
@@ -11,7 +11,6 @@
 #   fm-remote-secondmate-control.sh observe <id>
 #   fm-remote-secondmate-control.sh sync <id>
 #   fm-remote-secondmate-control.sh update <id>
-#   fm-remote-secondmate-control.sh policy-check <id>
 #   fm-remote-secondmate-control.sh retire <id> [--force]
 #
 # Remote placement ends here, but the second-mate agent always runs on the
@@ -49,8 +48,6 @@ REMOTE_HERDR_SESSION=fm-remote
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
-# shellcheck source=bin/fm-hermes-worker-policy-lib.sh
-. "$SCRIPT_DIR/fm-hermes-worker-policy-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -68,23 +65,6 @@ validate_home() { # <id> [allow-absent]
 }
 
 meta_path() { printf '%s/%s.meta\n' "$CONTROL_STATE" "$1"; }
-
-publish_hermes_worker_policy() {
-  local path="$TARGET_HOME/state/.hermes-primary-worker-policy" tmp
-  mkdir -p "$TARGET_HOME/state"
-  if [ -e "$path" ] || [ -L "$path" ]; then
-    [ -f "$path" ] && [ ! -L "$path" ] \
-      && [ "$(cat "$path" 2>/dev/null || true)" = pi-herdr-v1 ] \
-      || die "unsafe or conflicting Hermes worker policy at $path"
-    return 0
-  fi
-  tmp=$(mktemp "$TARGET_HOME/state/.hermes-primary-worker-policy.XXXXXX") \
-    || die "could not create Hermes worker policy"
-  if ! printf '%s\n' pi-herdr-v1 > "$tmp" || ! mv -f "$tmp" "$path"; then
-    rm -f "$tmp" 2>/dev/null || true
-    die "could not publish Hermes worker policy"
-  fi
-}
 
 remote_endpoint_load() {
   local id=$1 herdr_session
@@ -155,7 +135,7 @@ cmd_route() {
 }
 
 cmd_launch() {
-  local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-} policy=${7:-}
+  local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-}
   local current meta out herdr_session
 
   validate_id "$id"
@@ -165,16 +145,10 @@ cmd_launch() {
     *) die "unverified remote secondmate harness: $harness" ;;
   esac
   case "$effort" in -|low|medium|high|xhigh|max) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
-  case "$policy" in ''|pi-herdr-v1) ;; *) die "invalid remote secondmate worker policy: $policy" ;; esac
-  if [ "$policy" = pi-herdr-v1 ]; then
-    [ "$harness" = pi ] || die "the Hermes primary policy requires harness=pi, not '$harness'"
-  fi
-  [ "$traceparent" != - ] || traceparent=
   # Herdr is required on this host, not merely preferred: its server belongs to
   # the GUI login session, so the endpoint survives every SSH disconnection that
   # a remote route depends on. bin/fm-remote-doctor.sh is the readiness owner.
   case "$selected_backend" in herdr) ;; *) die "a remote secondmate runs only on the herdr backend, not '$selected_backend'" ;; esac
-  [ "$policy" != pi-herdr-v1 ] || publish_hermes_worker_policy
   mkdir -p "$CONTROL_STATE" "$CONTROL_DATA"
   meta=$(meta_path "$id")
   if [ -f "$meta" ]; then
@@ -304,19 +278,6 @@ cmd_sync() {
   printf 'synced: %s\n' "$head"
 }
 
-remote_policy_check() {
-  local id=$1
-  FM_HOME="$TARGET_HOME" "$SCRIPT_DIR/fm-on.sh" \
-    "$id" fm-remote-secondmate-control.sh policy-check "$id"
-}
-
-cmd_policy_check() {
-  local id=$1
-  validate_id "$id"
-  validate_home "$id"
-  fm_hermes_policy_check_home "$TARGET_HOME" "$TARGET_HOME/state" remote_policy_check
-}
-
 cmd_update() {
   local id=$1 update_out root_status
   validate_id "$id"
@@ -363,7 +324,7 @@ cmd_retire() {
 }
 
 case "${1:-}" in
-  launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 7 ] || usage; cmd_launch "$@" ;;
+  launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 6 ] || usage; cmd_launch "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
   send) shift; [ "$#" -eq 2 ] || usage; cmd_send "$@" ;;
@@ -372,7 +333,6 @@ case "${1:-}" in
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
   sync) shift; [ "$#" -eq 1 ] || usage; cmd_sync "$@" ;;
   update) shift; [ "$#" -eq 1 ] || usage; cmd_update "$@" ;;
-  policy-check) shift; [ "$#" -eq 1 ] || usage; cmd_policy_check "$@" ;;
   retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;

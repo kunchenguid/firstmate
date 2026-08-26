@@ -18,7 +18,7 @@ Optional dispatch profiles in `config/crew-dispatch.json` can override that stat
 When a matched rule or default is a profile array, load `quota-array-dispatch` for the completion-aware candidate choice after this skill establishes harness and model/provider facts.
 The captain may override that file at session start or later; a per-task instruction such as "run this one on codex" overrides it for that dispatch only.
 `default` means mirror firstmate's own harness.
-A Hermes primary is the exception whose trusted launcher and inherited spawn policy require Pi for every worker and Herdr for every endpoint because Hermes is primary-only.
+A Hermes primary is the exception that requires an explicit verified worker value because Hermes is primary-only and `fm-spawn.sh` deliberately refuses it.
 
 Secondmates have their own harness knob, so a secondmate can run on a different adapter than crewmates.
 `config/secondmate-harness` is the harness the primary uses to launch SECONDMATE agents, resolved through the fallback chain `config/secondmate-harness` -> `config/crew-harness` -> firstmate's own.
@@ -47,7 +47,7 @@ If the captain asks for a new harness, propose verifying it first: spawn a trivi
 ## Detection
 
 `bin/fm-harness.sh` prints firstmate's own harness, using verified env markers first and then process ancestry.
-Hermes has no trusted detection environment marker in this integration, so it is recognized only when the exact current project-plugin build marker binds the checkout and current process incarnation in the ancestry.
+Hermes has no trusted environment marker in this integration, so it is recognized only from the official executable argv in a persistent primary launch.
 Within the Pi family, only the exact launch-boundary marker `FM_PI_HARNESS=pi-signed` alongside `PI_CODING_AGENT=true` selects the signed identity; unmarked shared launcher ancestry remains `pi`.
 `bin/fm-harness.sh crew` resolves the effective crewmate harness from `config/crew-harness` (absent or `default` -> own).
 `bin/fm-harness.sh secondmate` resolves the secondmate-launch harness through the chain `config/secondmate-harness` -> `config/crew-harness` -> own, so an unset `config/secondmate-harness` matches the crew harness.
@@ -367,13 +367,13 @@ Grok's primary watcher protocol remains background-notify around `bin/fm-watch-a
 ## hermes (VERIFIED PRIMARY ONLY 2026-08-25, Hermes Agent 0.20.5)
 
 Hermes runs only the captain-facing primary Firstmate session.
-Launch it from the trusted checkout with `bin/fm-hermes-primary.sh`, after the one-time `bin/fm-hermes-primary.sh --setup` effectively enables the tracked project plugin; the plugin independently refuses any argv outside the launcher's classic-session allowlist before publishing identity.
+Launch it from the trusted checkout with `bin/fm-hermes-primary.sh`, after the one-time `bin/fm-hermes-primary.sh --setup` enables the tracked project plugin.
 The launcher forces the persistent classic CLI, preserves the checkout root on resume, and refuses one-shot, safe-mode, rule-skipping, user-config-skipping, worktree, alternate-directory, and TUI options that would disable or escape the integration.
-Detection and session-lock ownership require the current project-plugin marker to bind the checkout root, exact plugin digest, and live Hermes ancestor incarnation; publication preserves another live checkout owner, while `HERMES_HOME`, caller-selected roots or state paths, flattened process arguments, prompt text, profiles, subcommands, unsafe direct CLI launches, and one-shot `-z` processes are not identity.
+Detection and session-lock ownership require the structural Hermes executable argv plus the wrapper's persistent `--cli --no-restore-cwd` shape; `HERMES_HOME`, prompt text, profiles, and one-shot `-z` processes are not identity.
 The project plugin blocks `delegate_task`, so all implementation work continues through visible Firstmate workers.
 It also routes watcher-arm commands through the shared pre-tool checker and requires Hermes's managed background terminal with completion notification.
-`on_session_end` runs the shared turn-end predicate and injects at most one recovery turn per blind boundary, including provider failures and interruptions.
-Hermes is never a crewmate, scout, or secondmate runtime in this integration; its launcher requires `pi` in both worker-harness files and `herdr` in `config/backend`, recursively rejects conflicting local or remote descendant records, and propagates a durable secondmate policy that refuses per-task overrides of those axes.
+`on_session_end` runs the shared turn-end predicate and injects at most one operationally marked recovery turn per blind boundary.
+Hermes is never selected as a verified crewmate, scout, or secondmate runtime in this integration, so configure a concrete verified worker such as `pi` in both `config/crew-harness` and `config/secondmate-harness`; the pre-existing raw-command escape hatch remains operator-owned.
 The live drift guard is `FM_HERMES_PRIMARY_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-hermes-primary-live-e2e.test.sh`.
 
 ## cursor (VERIFIED CREWMATE/SCOUT 2026-08-11 on tmux and 2026-08-12 on Herdr, and SECONDMATE/PRIMARY 2026-08-13, Cursor Agent CLI 2026.08.11-e8db854)

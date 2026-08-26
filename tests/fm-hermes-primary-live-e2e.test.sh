@@ -23,22 +23,12 @@ launcher_pid=
 hermes_pid=
 
 cleanup() {
-  canonical_marker="$ROOT/state/.hermes-primary-plugin-loaded"
-  if [ -n "$hermes_pid" ] && [ "$(sed -n '2p' "$canonical_marker" 2>/dev/null || true)" = "$hermes_pid" ]; then
-    rm -f "$canonical_marker"
-  fi
   if [ -n "$hermes_pid" ]; then
     kill -TERM "$hermes_pid" 2>/dev/null || true
     sleep 1
     kill -KILL "$hermes_pid" 2>/dev/null || true
   fi
   if [ -n "$launcher_pid" ]; then
-    child_pids=$(ps -eo pid=,ppid= 2>/dev/null | awk -v parent="$launcher_pid" '$2 == parent { print $1 }')
-    while IFS= read -r child_pid; do
-      [ -z "$child_pid" ] || kill -TERM "$child_pid" 2>/dev/null || true
-    done <<EOF
-$child_pids
-EOF
     kill -TERM "$launcher_pid" 2>/dev/null || true
     wait "$launcher_pid" 2>/dev/null || true
   fi
@@ -70,21 +60,17 @@ done
 
 version=$(sed -n '1p' "$marker")
 hermes_pid=$(sed -n '2p' "$marker")
-marker_root=$(sed -n '3p' "$marker")
-marker_identity=$(sed -n '4p' "$marker")
 expected=$(fm_adapter_file_version "$ROOT/.hermes/plugins/firstmate-primary/__init__.py")
 [ "$version" = "$expected" ] || fail "Hermes loaded a different primary plugin build"
 case "$hermes_pid" in
   ''|*[!0-9]*) fail "Hermes primary marker has an invalid process id" ;;
 esac
 kill -0 "$hermes_pid" 2>/dev/null || fail "Hermes primary marker names a dead process"
-[ "$marker_root" = "$ROOT" ] || fail "Hermes primary marker names the wrong checkout root"
-[ -n "$marker_identity" ] || fail "Hermes primary marker omitted process-incarnation identity"
 
+args=$(ps -o args= -p "$hermes_pid" 2>/dev/null || true)
 # shellcheck source=bin/fm-harness-process-lib.sh
 . "$ROOT/bin/fm-harness-process-lib.sh"
-fm_process_is_hermes_primary_pid "$hermes_pid" "$STATE" "$ROOT" \
-  || fail "the live Hermes process does not match the marker-bound primary identity contract"
+fm_process_is_hermes_primary "$args" || fail "the live Hermes process does not match the primary identity contract"
 
 printf '%s\n' "$hermes_pid" > "$STATE/.lock"
 fm_adapter_loaded_marker_matches "$marker" "$expected" "$STATE/.lock" ||

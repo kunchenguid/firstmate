@@ -19,7 +19,7 @@ When this session owns supervision and away mode is not active:
 11. Recovery only: if a forced restart is genuinely needed, use the same managed terminal mechanism with `command="bin/fm-watch-arm.sh --restart"`.
 12. Do not send idle progress while the tracked process is parked.
 
-The tracked `.hermes/plugins/firstmate-primary` plugin uses Hermes's every-turn `on_session_end` plus `ctx.inject_message()` as the final turn-end backstop, including failed and interrupted turns.
+The tracked `.hermes/plugins/firstmate-primary` plugin uses Hermes `on_session_end` plus `ctx.inject_message()` as the final turn-end backstop for successful, failed, and interrupted turns.
 When the shared predicate reports a blind turn end, it injects one bounded Hermes turn-end recovery retry and suppresses recursion for that injected retry.
 The plugin is loaded only through `bin/fm-hermes-primary.sh`, which forces the verified classic persistent CLI and enables project-plugin discovery without changing provider credentials.
 See [`watcher-continuity.md`](../watcher-continuity.md) for the arm-layer successor and clean-close failure contract.

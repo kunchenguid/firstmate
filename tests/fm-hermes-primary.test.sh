@@ -32,11 +32,11 @@ make_fake_hermes() {
   cat > "$fakebin/hermes" <<SH
 #!/usr/bin/env bash
 set -u
-printf '%s\n' "HERMES_ENABLE_PROJECT_PLUGINS=\${HERMES_ENABLE_PROJECT_PLUGINS:-} FM_BACKEND=\${FM_BACKEND:-} FM_HERMES_PRIMARY_POLICY=\${FM_HERMES_PRIMARY_POLICY:-} CLAUDECODE=\${CLAUDECODE:-} PI_CODING_AGENT=\${PI_CODING_AGENT:-} FM_PI_HARNESS=\${FM_PI_HARNESS:-} GROK_AGENT=\${GROK_AGENT:-} CURSOR_AGENT=\${CURSOR_AGENT:-} CURSOR_INVOKED_AS=\${CURSOR_INVOKED_AS:-} ARGS=\$*" >> '$dir/calls'
+printf '%s\n' "HERMES_ENABLE_PROJECT_PLUGINS=\${HERMES_ENABLE_PROJECT_PLUGINS:-} CLAUDECODE=\${CLAUDECODE:-} PI_CODING_AGENT=\${PI_CODING_AGENT:-} ARGS=\$*" >> '$dir/calls'
 if [ "\${1:-}" = config ] && [ "\${2:-}" = get ]; then
   case "\${3:-}:$status" in
     plugins.enabled:enabled|plugins.enabled:both) printf '%s\n' '- firstmate-primary' ;;
-    plugins.disabled:disabled|plugins.disabled:both) printf '%s\n' '- firstmate-primary' ;;
+    plugins.disabled:both) printf '%s\n' '- firstmate-primary' ;;
   esac
   exit 0
 fi
@@ -49,151 +49,52 @@ if [ "\${1:-}" = plugins ] && [ "\${2:-}" = enable ]; then
 fi
 exit 0
 SH
-  cat > "$fakebin/ssh" <<SH
-#!/usr/bin/env bash
-printf '%s\n' "\$*" >> '$dir/ssh-calls'
-exit "\${FM_FAKE_SSH_STATUS:-0}"
-SH
-  chmod +x "$fakebin/hermes" "$fakebin/ssh"
-  mkdir -p "$dir/firstmate-config" "$dir/state" "$dir/data"
-  printf '%s\n' pi > "$dir/firstmate-config/crew-harness"
-  printf '%s\n' pi > "$dir/firstmate-config/secondmate-harness"
-  printf '%s\n' herdr > "$dir/firstmate-config/backend"
+  chmod +x "$fakebin/hermes"
   printf '%s\n' "$fakebin"
 }
 
-run_primary_launcher() {
-  local fakebin=$1 case_dir=$2
-  shift 2
-  PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$case_dir/firstmate-config" \
-    FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
-    "$ROOT/bin/fm-hermes-primary.sh" "$@"
-}
-
 test_launcher_scope_and_fail_closed() {
-  local fakebin out rc=0 calls child
+  local fakebin out rc=0 calls
   fakebin=$(make_fake_hermes "$TMP_ROOT/launcher-enabled" enabled)
-  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" --provider openai-codex --model gpt-5) || rc=$?
+  out=$(CLAUDECODE=1 PI_CODING_AGENT=true PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-hermes-primary.sh" --provider openai-codex --model gpt-5) || rc=$?
   [ "$rc" -eq 0 ] || fail "enabled launcher failed: $out"
   calls=$(cat "$TMP_ROOT/launcher-enabled/calls")
-  assert_contains "$calls" 'ARGS=config get plugins.enabled' "launcher did not check allow-list"
-  assert_contains "$calls" 'HERMES_ENABLE_PROJECT_PLUGINS=1 FM_BACKEND=herdr FM_HERMES_PRIMARY_POLICY=pi-herdr-v1' "launcher did not scope project discovery and worker policy"
-  assert_contains "$calls" 'ARGS=--cli --no-restore-cwd --provider openai-codex --model gpt-5' "launcher did not force persistent CLI mode"
+  assert_contains "$calls" 'ARGS=config get plugins.enabled' "launcher did not check the enable list"
+  assert_contains "$calls" 'ARGS=config get plugins.disabled' "launcher did not check the disable list"
+  assert_contains "$calls" 'HERMES_ENABLE_PROJECT_PLUGINS=1 CLAUDECODE= PI_CODING_AGENT= ARGS=--cli --no-restore-cwd --provider openai-codex --model gpt-5' "launcher did not clear foreign markers or force persistent CLI mode"
 
-  : > "$TMP_ROOT/launcher-enabled/calls"
-  rc=0
-  out=$(CLAUDECODE=1 PI_CODING_AGENT=true FM_PI_HARNESS=pi GROK_AGENT=1 \
-    CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent \
-    run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled") || rc=$?
-  [ "$rc" -eq 0 ] || fail "launcher failed while clearing inherited harness markers: $out"
-  calls=$(cat "$TMP_ROOT/launcher-enabled/calls")
-  assert_contains "$calls" 'CLAUDECODE= PI_CODING_AGENT= FM_PI_HARNESS= GROK_AGENT= CURSOR_AGENT= CURSOR_INVOKED_AS=' \
-    "Hermes launch inherited a foreign harness identity marker"
-
-  printf 'window=old\nharness=codex\nbackend=herdr\n' > "$TMP_ROOT/launcher-enabled/state/old.meta"
-  rc=0
-  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" 2>&1) || rc=$?
-  [ "$rc" -eq 1 ] || fail "launcher must reject an active non-Pi task"
-  assert_contains "$out" 'active task old with harness=codex' "active harness mismatch was not actionable"
-  printf 'window=old\nharness=pi\n' > "$TMP_ROOT/launcher-enabled/state/old.meta"
-  rc=0
-  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" 2>&1) || rc=$?
-  [ "$rc" -eq 1 ] || fail "launcher must reject an active non-Herdr task"
-  assert_contains "$out" 'active task old with backend=tmux' "active backend mismatch was not actionable"
-  rm -f "$TMP_ROOT/launcher-enabled/state/old.meta"
-
-  child="$TMP_ROOT/launcher-enabled/child-home"
-  mkdir -p "$child/state"
-  printf 'window=child\nharness=codex\nbackend=tmux\n' > "$child/state/worker.meta"
-  printf 'window=sm\nharness=pi\nbackend=herdr\nkind=secondmate\nhome=%s\n' "$child" \
-    > "$TMP_ROOT/launcher-enabled/state/sm.meta"
-  rc=0
-  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" 2>&1) || rc=$?
-  [ "$rc" -eq 1 ] || fail "launcher must reject a non-Pi descendant worker"
-  assert_contains "$out" 'active task worker with harness=codex' "descendant harness mismatch was not actionable"
-  rm -f "$TMP_ROOT/launcher-enabled/state/sm.meta"
-
-  printf '%s\n' '- rsm - remote domain (host: remote-mac; root: /remote/root; home: /remote/home; scope: remote; projects: alpha; added 2026-08-02)' \
-    > "$TMP_ROOT/launcher-enabled/data/secondmates.md"
-  printf 'window=remote:rsm\nharness=pi\nkind=secondmate\nremote_host=remote-mac\nremote_backend=herdr\n' \
-    > "$TMP_ROOT/launcher-enabled/state/rsm.meta"
-  rc=0
-  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled") || rc=$?
-  [ "$rc" -eq 0 ] || fail "launcher rejected a valid remote Pi/Herdr secondmate: $out"
-  [ -s "$TMP_ROOT/launcher-enabled/ssh-calls" ] || fail "launcher did not inspect the remote secondmate descendants"
-  rc=0
-  out=$(FM_FAKE_SSH_STATUS=1 run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" 2>&1) || rc=$?
-  [ "$rc" -eq 1 ] || fail "launcher must fail closed when remote descendants cannot be inspected"
-  rm -f "$TMP_ROOT/launcher-enabled/state/rsm.meta"
-
-  rc=0
-  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" --safe-mode 2>&1) || rc=$?
-  [ "$rc" -eq 1 ] || fail "launcher must refuse options that disable the primary plugin"
-  assert_contains "$out" "incompatible with the persistent Hermes Firstmate primary" \
-    "unsafe Hermes launch option omitted its refusal"
-
-  rc=0
-  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" -z prompt 2>&1) || rc=$?
-  [ "$rc" -eq 1 ] || fail "launcher must refuse one-shot Hermes mode"
-
-  for escaped in '--profile=other' gateway acp; do
+  for escaped in --safe-mode -z --profile=other gateway acp; do
     rc=0
-    out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" "$escaped" 2>&1) || rc=$?
-    [ "$rc" -eq 1 ] || fail "launcher must refuse Hermes surface escape '$escaped'"
+    out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-hermes-primary.sh" "$escaped" 2>&1) || rc=$?
+    [ "$rc" -eq 1 ] || fail "launcher accepted incompatible option or command: $escaped"
     assert_contains "$out" "incompatible with the persistent Hermes Firstmate primary" \
-      "surface escape '$escaped' omitted its refusal"
+      "unsafe Hermes launch shape omitted its refusal"
   done
-
-  printf '%s\n' codex > "$TMP_ROOT/launcher-enabled/firstmate-config/crew-harness"
-  rc=0
-  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" 2>&1) || rc=$?
-  [ "$rc" -eq 1 ] || fail "launcher must require Pi crewmates"
-  assert_contains "$out" "crew-harness to contain 'pi'" "Pi worker-policy refusal was not actionable"
-
-  printf '%s\n' pi > "$TMP_ROOT/launcher-enabled/firstmate-config/crew-harness"
-  printf '%s\n' codex > "$TMP_ROOT/launcher-enabled/firstmate-config/secondmate-harness"
-  rc=0
-  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" 2>&1) || rc=$?
-  [ "$rc" -eq 1 ] || fail "launcher must require Pi secondmates"
-  assert_contains "$out" "secondmate-harness to contain 'pi'" "Pi secondmate-policy refusal was not actionable"
-
-  printf '%s\n' pi > "$TMP_ROOT/launcher-enabled/firstmate-config/secondmate-harness"
-  printf '%s\n' tmux > "$TMP_ROOT/launcher-enabled/firstmate-config/backend"
-  rc=0
-  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" 2>&1) || rc=$?
-  [ "$rc" -eq 1 ] || fail "launcher must require the Herdr backend"
-  assert_contains "$out" "backend to contain 'herdr'" "Herdr policy refusal was not actionable"
-
-  printf '%s\n' herdr > "$TMP_ROOT/launcher-enabled/firstmate-config/backend"
-  rc=0
-  out=$(FM_BACKEND=tmux run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" 2>&1) || rc=$?
-  [ "$rc" -eq 1 ] || fail "launcher must reject an ambient non-Herdr backend override"
-  assert_contains "$out" "FM_BACKEND=herdr" "ambient backend refusal was not actionable"
 
   fakebin=$(make_fake_hermes "$TMP_ROOT/launcher-disabled" disabled)
   rc=0
-  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-disabled" 2>&1) || rc=$?
+  out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-hermes-primary.sh" 2>&1) || rc=$?
   [ "$rc" -eq 1 ] || fail "disabled plugin must fail closed, got $rc"
   assert_contains "$out" '--setup' "disabled launcher omitted setup guidance"
 
-  fakebin=$(make_fake_hermes "$TMP_ROOT/launcher-both" both)
+  fakebin=$(make_fake_hermes "$TMP_ROOT/launcher-denied" both)
   rc=0
-  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-both" --check 2>&1) || rc=$?
-  [ "$rc" -eq 1 ] || fail "a plugin in both enabled and disabled lists must be reported disabled"
-  assert_contains "$out" 'not enabled' "effective disabled-list precedence was not reported"
-  pass "Hermes launcher is explicit, effectively enabled, scoped, and fail-closed"
+  out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-hermes-primary.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "plugins.disabled must override plugins.enabled"
+  pass "Hermes launcher is explicit, scoped, and fail-closed"
 }
 
 test_setup_keeps_normal_wrapper_plugin_discoverable() {
   local fakebin out link target rc=0
   fakebin=$(make_fake_hermes "$TMP_ROOT/launcher-setup" enabled)
-  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-setup" --setup) || rc=$?
+  out=$(FM_HOME="$TMP_ROOT/launcher-setup/home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-hermes-primary.sh" --setup) || rc=$?
   [ "$rc" -eq 0 ] || fail "Hermes setup failed: $out"
   link="$TMP_ROOT/launcher-setup/plugins/firstmate-primary"
   [ -L "$link" ] || fail "Hermes setup did not retain the user-plugin link for the normal wrapper"
   target=$(readlink "$link")
   [ "$target" = "$ROOT/.hermes/plugins/firstmate-primary" ] ||
     fail "Hermes setup linked the wrong tracked plugin: $target"
+  [ -d "$TMP_ROOT/launcher-setup/home/state" ] || fail "Hermes setup did not create clean-clone state"
   pass "Hermes setup makes the tracked plugin discoverable by the normal profile wrapper"
 }
 
@@ -202,10 +103,7 @@ test_plugin_scope_guard_and_recovery() {
   mkdir -p "$fixture"
   cp -R "$ROOT/bin" "$fixture/bin"
   cp "$ROOT/AGENTS.md" "$fixture/AGENTS.md"
-  mkdir -p "$fixture/state" "$fixture/config" "$fixture/docs" \
-    "$fixture/.hermes/plugins/firstmate-primary"
-  cp "$ROOT/.hermes/plugins/firstmate-primary/__init__.py" \
-    "$fixture/.hermes/plugins/firstmate-primary/__init__.py"
+  mkdir -p "$fixture/state" "$fixture/config" "$fixture/docs"
   git -C "$fixture" init -q
   git -C "$fixture" add AGENTS.md
   git -C "$fixture" -c user.name=fixture -c user.email=fixture@example.invalid commit -qm fixture
@@ -217,7 +115,6 @@ test_plugin_scope_guard_and_recovery() {
 import importlib.util
 import os
 from pathlib import Path
-import subprocess
 import sys
 
 source = Path(os.environ["FM_PLUGIN_SOURCE"])
@@ -245,8 +142,6 @@ def activate(root, argv=None):
     os.environ["FM_STATE_OVERRIDE"] = str(root / "state")
     os.chdir(root)
     sys.argv = argv or ["hermes", "--cli", "--no-restore-cwd"]
-    os.environ["FM_HERMES_PRIMARY_POLICY"] = "pi-herdr-v1"
-    os.environ["FM_HERMES_PRIMARY_PID"] = str(os.getpid())
     ctx = Context()
     module.register(ctx)
     return ctx
@@ -255,9 +150,6 @@ ctx = activate(child)
 assert ctx.hooks == {}
 assert not (child / "state" / ".hermes-primary-plugin-loaded").exists()
 
-for path in (primary / "state").glob("*"):
-    path.unlink()
-(primary / "state").rmdir()
 module._ROOT = primary
 os.environ["FM_HOME"] = str(primary)
 os.environ["FM_STATE_OVERRIDE"] = str(primary / "state")
@@ -267,46 +159,15 @@ ctx = Context()
 module.register(ctx)
 assert ctx.hooks == {}
 
-ctx = activate(
-    primary,
-    ["hermes", "--cli", "--no-restore-cwd", "--ignore-rules"],
-)
+ctx = activate(primary, ["hermes", "--cli", "--no-restore-cwd", "--ignore-rules"])
 assert ctx.hooks == {}
-assert not (primary / "state").exists()
-
-(primary / "state").mkdir()
-holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
-try:
-    identity = subprocess.check_output(
-        [
-            "bash",
-            "-c",
-            '. "$1"; fm_pid_identity "$2"',
-            "holder-identity",
-            str(primary / "bin" / "fm-process-identity-lib.sh"),
-            str(holder.pid),
-        ],
-        text=True,
-    ).strip()
-    marker = primary / "state" / ".hermes-primary-plugin-loaded"
-    marker.write_text(
-        f"{module._marker_digest()}\n{holder.pid}\n{primary}\n{identity}\n"
-    )
-    ctx = activate(primary)
-    assert set(ctx.hooks) == {"pre_tool_call", "on_session_end", "on_session_finalize"}
-    assert marker.read_text().splitlines()[1] == str(holder.pid)
-finally:
-    holder.terminate()
-    holder.wait()
 
 ctx = activate(primary)
 assert set(ctx.hooks) == {"pre_tool_call", "on_session_end", "on_session_finalize"}
+marker = primary / "state" / ".hermes-primary-plugin-loaded"
 lines = marker.read_text().splitlines()
 assert lines[0].startswith("sha256:")
 assert lines[1] == str(os.getpid())
-assert lines[2] == str(primary.resolve())
-assert lines[3]
-assert (primary / "state").is_dir()
 
 pre = ctx.hooks["pre_tool_call"]
 assert pre("read_file", {}) is None
@@ -323,29 +184,28 @@ assert pre(
 ) is None
 
 end = ctx.hooks["on_session_end"]
-end(session_id="s1", platform="cli", completed=True)
+end(session_id="s1", platform="cli")
 assert ctx.injected == []
-end(session_id="s1", platform="telegram", completed=True)
+end(session_id="s1", platform="telegram")
 assert ctx.injected == []
 (primary / "state" / "worker.meta").write_text("project=fixture\n")
 end(session_id="s1", platform="cli", completed=False, failed=True)
 assert len(ctx.injected) == 1
 repair = ctx.injected[0][0]
-assert repair.startswith("\u2063FIRSTMATE_OP: v1 turn-end-guard: ")
+assert repair.startswith("\u2063FIRSTMATE_OP: v1 turn-end-guard:")
 assert "terminal(background=true, notify_on_complete=true)" in repair
 end(session_id="s1", platform="cli", completed=False, interrupted=True)
 assert len(ctx.injected) == 1
-end(session_id="s2", platform="cli", completed=False, interrupted=True)
+end(session_id="s1", platform="cli")
 assert len(ctx.injected) == 2
-ctx.hooks["on_session_finalize"](session_id="s1")
-assert marker.exists()
-end(session_id="s1", platform="cli", completed=True)
-assert len(ctx.injected) == 3
 
 os.chdir(primary.parent)
-pre("delegate_task", {}) is None
-end(session_id="s3", platform="cli", completed=False, failed=True)
+blocked = pre("delegate_task", {})
+assert blocked and blocked["action"] == "block"
+end(session_id="s2", platform="cli", completed=False, interrupted=True)
 assert len(ctx.injected) == 3
+ctx.hooks["on_session_finalize"](session_id="s2")
+assert marker.exists()
 PY
   pass "Hermes plugin is scoped, blocks delegation, preserves ordinary tools, and has bounded recovery"
 }

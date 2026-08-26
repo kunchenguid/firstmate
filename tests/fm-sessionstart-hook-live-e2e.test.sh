@@ -120,8 +120,6 @@ make_lab() {  # <harness> -> echoes lab dir
   ln -sf "$ROOT/bin/fm-startup-network.sh" "$lab/bin/fm-startup-network.sh"
   ln -sf "$ROOT/bin/fm-timeout-lib.sh" "$lab/bin/fm-timeout-lib.sh"
   ln -sf "$ROOT/bin/fm-wake-lib.sh" "$lab/bin/fm-wake-lib.sh"
-  ln -sf "$ROOT/bin/fm-process-identity-lib.sh" "$lab/bin/fm-process-identity-lib.sh"
-  ln -sf "$ROOT/bin/fm-adapter-marker-lib.sh" "$lab/bin/fm-adapter-marker-lib.sh"
   ln -sf "$ROOT/bin/fm-session-lock-lib.sh" "$lab/bin/fm-session-lock-lib.sh"
   ln -sf "$ROOT/bin/fm-harness-process-lib.sh" "$lab/bin/fm-harness-process-lib.sh"
   cat > "$lab/bin/fm-bootstrap.sh" <<'SH'
