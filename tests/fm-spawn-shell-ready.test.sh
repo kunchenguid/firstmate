@@ -20,12 +20,23 @@
 # The stub can also refuse a send outright, which is a DIFFERENT failure: a pane
 # that cannot be reached at all is not a shell that is slow to start, and the
 # spawn must attribute it that way instead of waiting out the whole readiness
-# budget and then blaming shell-init latency. And it can leave a line TYPED but
-# neither submitted nor cleared - what zellij and cmux report as status 2, since
-# they compose a text line from a literal send plus Enter - which is the opposite
-# failure again: the endpoint answered, the text is sitting in its input line
-# where it would prefix whatever is typed there next, and the spawn must name
-# that instead of claiming the line was never typed.
+# budget and then blaming shell-init latency. And a line can be left TYPED but
+# neither submitted nor cleared, which is the opposite failure again: the
+# endpoint answered, the text is sitting in its input line where it would prefix
+# whatever is typed there next, and the spawn must name that instead of claiming
+# the line was never typed. That third outcome only EXISTS on a backend that
+# composes a text line from a literal send plus Enter and then tries to clear
+# what it typed when the Enter fails, so the two cases for it drive a second
+# stub over the same shell state - `cmux`, which really does compose it that way
+# - rather than asking tmux for a status its single `send-keys ... Enter` cannot
+# produce.
+#
+# The gate covers what is typed AFTER it, not the moment after that, so the stub
+# also models the residue: a literal the backend delivered which the shell's next
+# pre-prompt cycle flushed out of its input queue before reading it. That is
+# indistinguishable from a delivered line in the pane's own text, so the launch
+# needs a proof of its own on the far side - the endpoint's agent-state read -
+# rather than the backend's delivery receipt.
 #
 # And a marker only proves anything while nothing else can write it. /tmp is
 # world-writable and a task id is an ordinary slug, so the task temp root is a
@@ -80,14 +91,142 @@ use_task_tmp() {  # <id>
   FM_TEST_CLEANUP_DIRS+=("$TASK_TMP_PATH")
 }
 
-# make_shell_fakebin <dir> builds the fake backend trio. The tmux stub keeps a
-# one-line input buffer so it can distinguish tmux's three real send shapes -
-# `send-keys -t T <text> Enter`, `send-keys -t T -l <text>`, and `send-keys -t T
-# Enter` - and submits exactly like a terminal does. A submitted line is either
-# swallowed (the shell is not reading yet) or evaluated. `treehouse get` and the
-# harness binary are the observable effects of a line that really ran.
+# make_shell_cmux_fake <fakebin>: a `cmux` stub over the same shell state the
+# tmux stub drives, so one line discipline serves both send shapes firstmate
+# has. It exists because a text line is NOT one input event on every backend:
+# cmux (like zellij) composes it from `send` plus `send-key enter`, and when the
+# enter fails it tries `send-key ctrl-c` to clear what it just typed. When that
+# clear fails too, the line is left sitting in the surface's input buffer and the
+# adapter says so with its own status 2 - the only shape in which a send can be
+# typed-but-uncleared at all. tmux submits in a single `send-keys ... Enter`, so
+# it has no such state and never reports one; a case that needs the stranded
+# outcome has to drive a backend that really composes the line, which is this
+# one. Modelled faithfully: a stranded `send-key` leaves the buffer intact.
+make_shell_cmux_fake() {  # <fakebin>
+  local fakebin=$1
+  cat > "$fakebin/cmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+S="${FM_FAKE_SHELL_STATE:?FM_FAKE_SHELL_STATE unset}"
+WS=ws-fake
+SF=sf-fake
+
+submit_line() {
+  local text=$1 budget=0
+  [ -f "$S/swallow" ] && budget=$(cat "$S/swallow")
+  if [ "$budget" -gt 0 ]; then
+    printf '%s\n' "$((budget - 1))" > "$S/swallow"
+    printf 'swallowed\t%s\n' "$text" >> "$S/lines.log"
+    return 0
+  fi
+  printf 'ran\t%s\n' "$text" >> "$S/lines.log"
+  (
+    cd "$(cat "$S/cwd")" 2>/dev/null || true
+    eval "$text"
+  ) >> "$S/exec.out" 2>&1 || true
+}
+
+stranded_holds() {  # <buffered-text>
+  local want
+  [ -f "$S/stranded" ] || return 1
+  want=$(cat "$S/stranded")
+  [ -n "$want" ] || return 1
+  case "$1" in *"$want"*) return 0 ;; esac
+  return 1
+}
+
+case "${1:-}" in
+  version) printf 'cmux 0.64.17 (97) [abcdef1]\n'; exit 0 ;;
+  ping) printf 'PONG\n'; exit 0 ;;
+  workspace)
+    if [ -f "$S/workspace-title" ]; then
+      printf '{"workspaces":[{"id":"%s","title":"%s"}]}\n' "$WS" "$(cat "$S/workspace-title")"
+    else
+      printf '{"workspaces":[]}\n'
+    fi
+    exit 0
+    ;;
+  new-workspace)
+    title=
+    while [ $# -gt 0 ]; do
+      case "$1" in --name) title=${2:-}; shift ;; esac
+      shift
+    done
+    printf '%s' "$title" > "$S/workspace-title"
+    exit 0
+    ;;
+  list-panes)
+    printf '{"panes":[{"selected_surface_id":"%s","surface_ids":["%s"]}]}\n' "$SF" "$SF"
+    exit 0
+    ;;
+  read-screen)
+    jq -Rs '{text: .}' < "$S/exec.out" 2>/dev/null || printf '{"text":""}\n'
+    exit 0
+    ;;
+  send)
+    # A surface that cannot be reached at all: nothing is typed, and every
+    # attempt is recorded so a retry storm is visible to the test.
+    if [ -f "$S/send-fails" ]; then
+      printf 'attempt\n' >> "$S/send-attempts"
+      printf 'cmux: no such surface: %s\n' "$SF" >&2
+      exit 1
+    fi
+    text=
+    while [ $# -gt 0 ]; do
+      case "$1" in --) text=${2:-}; break ;; esac
+      shift
+    done
+    printf '%s' "$text" >> "$S/buffer"
+    exit 0
+    ;;
+  send-key)
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in --workspace|--surface) shift 2 ;; *) break ;; esac
+    done
+    key=${1:-}
+    buffered=$(cat "$S/buffer" 2>/dev/null || true)
+    case "$key" in
+      enter)
+        if stranded_holds "$buffered"; then
+          printf 'stranded\t%s\n' "$buffered" >> "$S/lines.log"
+          printf 'cmux: send-key enter failed\n' >&2
+          exit 1
+        fi
+        : > "$S/buffer"
+        submit_line "$buffered"
+        exit 0
+        ;;
+      ctrl-c)
+        # The clear of a line this stub could not submit fails too, which is
+        # exactly what leaves the text sitting in the input buffer.
+        if stranded_holds "$buffered"; then
+          printf 'cmux: send-key ctrl-c failed\n' >&2
+          exit 1
+        fi
+        : > "$S/buffer"
+        exit 0
+        ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/cmux"
+}
+
+# make_shell_fakebin <dir> [backend] builds the fake backend trio. The tmux stub
+# keeps a one-line input buffer so it can distinguish tmux's three real send
+# shapes - `send-keys -t T <text> Enter`, `send-keys -t T -l <text>`, and
+# `send-keys -t T Enter` - and submits exactly like a terminal does. A submitted
+# line is either swallowed (the shell is not reading yet) or evaluated.
+# `treehouse get` and the harness binary are the observable effects of a line
+# that really ran. Passing `cmux` as the backend adds a cmux stub over the SAME
+# shell state, so a case can drive the identical line discipline through the one
+# other send shape firstmate supports (see make_shell_cmux_fake).
 make_shell_fakebin() {
-  local dir=$1 fakebin
+  local dir=$1 backend=${2:-tmux} fakebin
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -111,9 +250,33 @@ submit_line() {
 
 case "$*" in
   *"#{pane_current_path}"*) cat "$S/cwd"; exit 0 ;;
+  # The pane's foreground command, which is what tells an agent-free pane from
+  # one running a harness. It is the fake shell until a launch line really ran:
+  # the harness binary records itself here when it starts, exactly as a real
+  # exec would put itself in the pane's foreground.
+  *"#{pane_current_command}"*)
+    if [ -f "$S/pane-command" ]; then cat "$S/pane-command"; else printf 'zsh\n'; fi
+    exit 0
+    ;;
+  # A tty no ps can read, so the foreground-process-group half of the liveness
+  # probe stays empty and the verdict rests on the command above alone.
+  *"#{pane_tty}"*) printf '/dev/fm-fake-tty\n'; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
+  # The window inventory only carries a window once it has been created, so the
+  # spawn's own duplicate-name check still sees an empty session first.
+  list-windows) [ -f "$S/windows" ] && cat "$S/windows"; exit 0 ;;
+  new-window)
+    wname=
+    while [ $# -gt 0 ]; do
+      case "$1" in -n) wname=${2:-}; shift ;; esac
+      shift
+    done
+    [ -z "$wname" ] || printf '%s\n' "$wname" >> "$S/windows"
+    printf '@1\n'
+    exit 0
+    ;;
   send-keys)
     # A pane that is gone: the backend itself refuses to deliver, loudly, and
     # every attempt is recorded so a retry storm is visible to the test.
@@ -130,6 +293,23 @@ case "${1:-}" in
         printf "can't find pane: %s\n" "${3:-}" >&2
         exit 1
       fi
+      # A pre-prompt typeahead FLUSH, the residue the readiness gate cannot
+      # cover: the send succeeds, the pty echoes the text, and then the shell's
+      # next precmd discards its input queue before the line editor reads it, so
+      # the Enter that follows submits an empty line. Nothing distinguishes this
+      # from a delivered line in the pane's own scrollback, which is the whole
+      # reason the launch needs its own proof afterwards.
+      if [ -f "$S/flush-literal" ]; then
+        flush=$(cat "$S/flush-literal")
+        if [ -n "$flush" ]; then
+          case "${5:-}" in
+            *"$flush"*)
+              printf 'flushed\t%s\n' "${5:-}" >> "$S/lines.log"
+              exit 0
+              ;;
+          esac
+        fi
+      fi
       printf '%s' "${5:-}" >> "$S/buffer"
       exit 0
     fi
@@ -140,21 +320,10 @@ case "${1:-}" in
       exit 0
     fi
     if [ "${5:-}" = Enter ]; then
-      # A line the endpoint TYPED but could neither submit nor clear. The
-      # backends that compose a text line from a literal send plus Enter
-      # (zellij, cmux) report that as status 2, and the text stays in the
-      # shell's input line, where it prefixes whatever is typed there next.
-      stranded=""
-      [ -f "$S/stranded" ] && stranded=$(cat "$S/stranded")
-      if [ -n "$stranded" ]; then
-        case "${4:-}" in
-          *"$stranded"*)
-            printf '%s' "${4:-}" >> "$S/buffer"
-            printf 'stranded\t%s\n' "${4:-}" >> "$S/lines.log"
-            exit 2
-            ;;
-        esac
-      fi
+      # tmux types and submits in this ONE call, so it has no state in which a
+      # line was typed and then left unsubmitted and uncleared, and no status
+      # for one. The stub models no such outcome here for that reason; the cmux
+      # stub above owns it, because cmux really does compose the line.
       : > "$S/buffer"
       submit_line "${4:-}"
       exit 0
@@ -165,6 +334,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  [ "$backend" != cmux ] || make_shell_cmux_fake "$fakebin"
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -182,23 +352,30 @@ SH
 set -u
 S="${FM_FAKE_SHELL_STATE:?FM_FAKE_SHELL_STATE unset}"
 printf 'launched\n' >> "$S/launched.log"
+# A launched harness is the pane's foreground command from here on, which is
+# what makes it visible to the endpoint's own agent-state read.
+printf 'codex\n' > "$S/pane-command"
 exit 0
 SH
   chmod +x "$fakebin/codex"
   printf '%s\n' "$fakebin"
 }
 
-# make_shell_case <name> <id> <outer-swallow> <inner-swallow>: a home, a project
-# with a real worktree, and the fake backend's shell state seeded with the
-# project as the starting cwd and the outer shell's swallow budget.
+# make_shell_case <name> <id> <outer-swallow> <inner-swallow> [backend]: a home,
+# a project with a real worktree, and the fake backend's shell state seeded with
+# the project as the starting cwd and the outer shell's swallow budget. The
+# backend defaults to tmux and is carried in the record, because it decides which
+# send shape the case drives - and the spawn is always told explicitly rather
+# than left to detection, so one case's choice cannot leak into another's.
 make_shell_case() {
-  local name=$1 id=$2 outer=$3 inner=$4 case_dir home proj wt fakebin state
+  local name=$1 id=$2 outer=$3 inner=$4 backend=${5:-tmux}
+  local case_dir home proj wt fakebin state
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
   state="$case_dir/shell-state"
-  fakebin=$(make_shell_fakebin "$case_dir/fake")
+  fakebin=$(make_shell_fakebin "$case_dir/fake" "$backend")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config" "$state"
   printf 'codex\n' > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
@@ -208,11 +385,11 @@ make_shell_case() {
   printf '%s\n' "$proj" > "$state/cwd"
   printf '%s\n' "$outer" > "$state/swallow"
   : > "$state/buffer"
-  printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$state|$inner"
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$state|$inner|$backend"
 }
 
 read_shell_record() {
-  IFS='|' read -r _ HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR STATE_DIR INNER_SWALLOW <<REC
+  IFS='|' read -r _ HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR STATE_DIR INNER_SWALLOW CASE_BACKEND <<REC
 $1
 REC
 }
@@ -228,7 +405,8 @@ run_shell_spawn() {
     FM_FAKE_SHELL_STATE="$STATE_DIR" FM_FAKE_WT="$WT_DIR" \
     FM_FAKE_INNER_SWALLOW="$INNER_SWALLOW" \
     PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off \
+    --backend "${CASE_BACKEND:-tmux}" 2>&1
 }
 
 # The reported defect: the pane's shell swallows the first sends, so a
@@ -354,6 +532,46 @@ test_lost_launch_send_after_meta_is_recorded_as_the_tasks_last_state() {
   pass "a launch send lost after meta publication is recorded as the task's last state"
 }
 
+# The residue the gate itself cannot cover, and the reason the launch needs a
+# proof of its own rather than a delivery receipt. The gate proves the shell was
+# reading input immediately BEFORE the launch line was typed; one pre-prompt
+# cycle later - exactly where a project loading direnv or devenv spends its
+# seconds - that shell can flush its input queue, so the line the backend
+# delivered successfully never reaches the line editor and the Enter after it
+# submits nothing. The pty already echoed the text, so the pane looks identical
+# either way. The worktree half has the settle loop as its backstop; the launch
+# half had none for any harness but kimi, and a spawn that printed `spawned` for
+# a task with a live window, a real worktree and no agent is the reported symptom
+# with a narrower window rather than a closed one.
+test_flushed_launch_line_refuses_instead_of_reporting_a_spawn() {
+  local rec id out status
+  id=shell-ready-flushed-launch-zd-$RUN_TAG
+  use_task_tmp "$id"
+  rec=$(make_shell_case shell-ready-flushed-launch "$id" 0 0)
+  read_shell_record "$rec"
+  printf '%s\n' '--dangerously-bypass-approvals-and-sandbox' > "$STATE_DIR/flush-literal"
+
+  out=$(run_shell_spawn "$id" \
+    FM_SPAWN_SHELL_READY_INTERVAL=0.05 \
+    FM_SPAWN_LAUNCH_CONFIRM_POLLS=4 FM_SPAWN_LAUNCH_CONFIRM_INTERVAL=0.25)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should refuse when its launch line was flushed away unrun"
+  assert_grep flushed "$STATE_DIR/lines.log" \
+    "the case did not actually exercise a launch line the shell flushed away"
+  assert_not_contains "$out" "spawned $id" \
+    "a spawn whose launch line never ran reported a started worker"
+  assert_contains "$out" "reads positively agent-free" \
+    "the refusal did not name the agent-free endpoint it read"
+  assert_present "$HOME_DIR/state/$id.meta" \
+    "a refused launch dropped the meta, leaving its live window unreapable by id"
+  assert_grep "failed: the agent launch command was typed into" \
+    "$HOME_DIR/state/$id.status" \
+    "the unconfirmed launch was not recorded as the task's last state"
+  assert_absent "$STATE_DIR/launched.log" \
+    "the harness ran even though its launch line was flushed away"
+  pass "a launch line flushed away after the gate refuses instead of reporting a spawn"
+}
+
 # An endpoint that cannot be reached at all is a different failure from a shell
 # that is slow to start, and it must be reported as itself. The regression this
 # guards: a swallowed send status turned a dead pane into a full readiness
@@ -395,7 +613,7 @@ test_stranded_probe_refuses_as_uncleared_input() {
   local rec id out status probes
   id=shell-ready-stranded-z9-$RUN_TAG
   use_task_tmp "$id"
-  rec=$(make_shell_case shell-ready-stranded "$id" 0 0)
+  rec=$(make_shell_case shell-ready-stranded "$id" 0 0 cmux)
   read_shell_record "$rec"
   printf 'worktree-entry\n' > "$STATE_DIR/stranded"
 
@@ -430,7 +648,7 @@ test_stranded_export_is_recorded_as_uncleared_input() {
   local rec id out status
   id=shell-ready-stranded-export-zc-$RUN_TAG
   use_task_tmp "$id"
-  rec=$(make_shell_case shell-ready-stranded-export "$id" 0 0)
+  rec=$(make_shell_case shell-ready-stranded-export "$id" 0 0 cmux)
   read_shell_record "$rec"
   printf 'export GOTMPDIR=\n' > "$STATE_DIR/stranded"
 
@@ -583,6 +801,7 @@ test_swallowed_launch_still_starts_the_agent
 test_shell_that_never_reads_refuses_loudly
 test_launch_gate_refusal_is_recorded_as_the_tasks_last_state
 test_lost_launch_send_after_meta_is_recorded_as_the_tasks_last_state
+test_flushed_launch_line_refuses_instead_of_reporting_a_spawn
 test_unreachable_endpoint_refuses_with_the_backend_error
 test_stranded_probe_refuses_as_uncleared_input
 test_stranded_export_is_recorded_as_uncleared_input

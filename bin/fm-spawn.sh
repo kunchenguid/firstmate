@@ -157,7 +157,21 @@
 #   A probe that cannot be DELIVERED is a different failure from one that was
 #   delivered and never answered: the send is not retried past its own error,
 #   and the refusal names the unreachable endpoint rather than blaming
-#   shell-init latency.
+#   shell-init latency. A THIRD class sits between those two - a line the
+#   endpoint typed but could neither submit nor clear, which is now sitting in
+#   that shell's input line where it would prefix whatever is typed there next.
+#   That one is reported as the uncleared input it is (spawn_send_stranded and
+#   spawn_send_stranded_detail below) and is never re-sent onto the front of
+#   itself. It has a status of its own reserved across every backend, which an
+#   adapter may answer only when it really holds that state - an adapter that
+#   types and submits in one call never can, so it owes every failure the plain
+#   undelivered status however its own internals number them.
+#   Once the launch line is submitted, the endpoint is asked whether an agent
+#   actually came up, on the same recovery-grade classifier the control plane
+#   uses. A positively agent-free endpoint refuses instead of reporting a spawn,
+#   so a launch line the shell discarded after the gate cannot be reported as a
+#   started worker; a backend or launch command that cannot be classified is
+#   left alone rather than guessed at.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -1255,9 +1269,16 @@ launch_template() {
   esac
 }
 
+# Whether the launch line came from a verified adapter's own template. The
+# post-launch agent confirmation below reads it: the backends' agent-state
+# classifiers recognise exactly the verified harness process names, so a raw
+# escape-hatch command is the one launch whose absence from that vocabulary
+# proves nothing about whether it started.
+SPAWN_LAUNCH_TEMPLATED=1
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
+    SPAWN_LAUNCH_TEMPLATED=0
     HARNESS=""
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
@@ -2220,6 +2241,17 @@ fi
 # WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
 # worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
 : "${WT_TARGET:=$T}"
+# spawn_send_text_line: one line typed and submitted. Status 2 is RESERVED, for
+# every backend, for the one outcome the other two do not name - a line that was
+# typed and could then be neither submitted nor cleared (see spawn_send_stranded
+# below). An adapter may only answer 2 when it genuinely holds that state, which
+# in practice means the ones composing the line from a literal send plus Enter
+# and then trying to clear what they typed; an adapter that submits in one call
+# has no such state and must collapse every failure to 1, however its own
+# internals number them. bin/backends/orca.sh's send is the worked example: its
+# JSON envelope check exits 2 when Orca answered `ok:false` and NOTHING was
+# typed, so it collapses that itself rather than reporting the opposite of what
+# happened through a status whose meaning is fixed here.
 spawn_send_text_line() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
@@ -2257,14 +2289,16 @@ spawn_send_key() {  # <target> <key>
 }
 
 # spawn_send_text_line answers with THREE outcomes, not two, and the third names
-# a repair the other two do not: 0 is typed and submitted, status 2 (zellij and
-# cmux, which compose the line from a literal send plus Enter) is a line that WAS
-# typed but could neither be submitted nor cleared - it is sitting in that
-# shell's input line, where it prefixes whatever is typed there next - and any
-# other nonzero status left nothing behind because the endpoint never answered.
-# Every caller reporting a failed send composes its message through here, so a
-# stranded line is never reported as one that was never typed and the operator is
-# never sent to the wrong repair.
+# a repair the other two do not: 0 is typed and submitted, status 2 is a line
+# that WAS typed but could neither be submitted nor cleared - it is sitting in
+# that shell's input line, where it prefixes whatever is typed there next - and
+# any other nonzero status left nothing behind because the endpoint never
+# answered. Who may answer 2 at all - and why an adapter's own internal 2 is not
+# automatically this one - is spawn_send_text_line's own contract above, so by
+# the time a status reaches here it already carries that meaning. Every caller
+# reporting a failed send composes its message through here, so a stranded line
+# is never reported as one that was never typed and the operator is never sent to
+# the wrong repair.
 spawn_send_stranded() {  # <status>
   [ "$1" -eq 2 ]
 }
@@ -2546,6 +2580,61 @@ spawn_wait_shell_ready() {  # <target> <label> <what-would-be-typed>
   rm -f "$marker"
   SPAWN_READY_REFUSAL="error: task $ID's endpoint shell never confirmed it was reading input within ${SPAWN_READY_BUDGET}s, so $what would have been typed into a shell that is not listening and silently lost; inspect window $T"
   return 1
+}
+
+# The launch line's own backstop, and the missing half of the pair above. The
+# gate proves the shell was reading input immediately BEFORE the launch line was
+# typed; it cannot promise the shell was still reading one pre-prompt cycle
+# later, which is exactly where a project loading direnv or devenv spends its
+# seconds and where a typeahead flush can still swallow what was typed. The
+# worktree half already has a backstop for that residue - the settle loop
+# refuses when `treehouse get` never took effect - and without this the launch
+# half had none for any harness but kimi, so a discarded launch line printed
+# `spawned` for a task with a live window, a real worktree and no agent.
+#
+# The question is asked through fm_backend_agent_state (bin/fm-backend.sh), the
+# same recovery-grade classifier fm-control's relaunch transaction and the
+# liveness paths use, rather than a per-harness reading of pane text. `dead` is
+# the one verdict that positively proves an agent-free endpoint, so it is the
+# only one that refuses, and it is polled rather than sampled once because a
+# launch line spends its first moments in shell work (a command substitution
+# building the brief, an `env` exec) that reads agent-free while being perfectly
+# on its way. `alive` confirms and stops waiting. Every other verdict -
+# `ambiguous`, `unreadable`, `missing`, and the `unverified` that every backend
+# without a classifier returns - cannot settle the question in either direction,
+# so the spawn proceeds rather than inventing a verdict: refusing there would
+# turn an unreadable endpoint into a failed spawn for a worker that is running.
+# A raw escape-hatch launch command is skipped for that same reason - the
+# classifiers know the verified harness names and nothing else, so its absence
+# from that vocabulary proves nothing.
+#
+# The budget is deliberately far longer than any harness needs to reach its own
+# exec, because it is only ever spent when the launch has ALREADY failed: a
+# working launch answers `alive` on the first poll and pays one. It is also kept
+# at or under what the control plane already tolerates for the same transition
+# after a relaunch (FM_CONTROL_LAUNCH_WAIT, bin/fm-control.sh), so a relaunch
+# cannot be refused here for a delay that verb was written to wait out.
+#
+# Tuning knobs (test and pathological-host use, defaults are the contract):
+# FM_SPAWN_LAUNCH_CONFIRM_POLLS (0 disables the confirmation entirely),
+# FM_SPAWN_LAUNCH_CONFIRM_INTERVAL (seconds per poll).
+SPAWN_LAUNCH_CONFIRM_POLLS=${FM_SPAWN_LAUNCH_CONFIRM_POLLS:-120}
+SPAWN_LAUNCH_CONFIRM_INTERVAL=${FM_SPAWN_LAUNCH_CONFIRM_INTERVAL:-0.25}
+SPAWN_LAUNCH_CONFIRM_BUDGET=$(awk -v p="$SPAWN_LAUNCH_CONFIRM_POLLS" \
+  -v i="$SPAWN_LAUNCH_CONFIRM_INTERVAL" 'BEGIN { printf "%.0f", p * i }')
+
+spawn_confirm_launched_agent() {
+  local i=0 state
+  [ "$SPAWN_LAUNCH_TEMPLATED" -eq 1 ] || return 0
+  [ "$SPAWN_LAUNCH_CONFIRM_POLLS" -gt 0 ] || return 0
+  while :; do
+    state=$(fm_backend_agent_state "$BACKEND" "$T" 2>/dev/null) || state=unreadable
+    [ "$state" = dead ] || return 0
+    i=$((i + 1))
+    [ "$i" -lt "$SPAWN_LAUNCH_CONFIRM_POLLS" ] || break
+    sleep "$SPAWN_LAUNCH_CONFIRM_INTERVAL"
+  done
+  spawn_fail_after_meta "the agent launch command was typed into $W and submitted, but that endpoint still reads positively agent-free ${SPAWN_LAUNCH_CONFIRM_BUDGET}s later, so its shell discarded the line after proving it was reading input and no $HARNESS agent is running"
 }
 
 if [ "$RELAUNCH" -eq 1 ]; then
@@ -3216,6 +3305,7 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
 fi
 spawn_send_key "$T" Enter \
   || spawn_fail_after_meta "the agent launch command was typed into $W but its submitting Enter could not be delivered, so the command is sitting unsubmitted and no agent started"
+spawn_confirm_launched_agent
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     spawn_fail_after_meta "kimi did not show a verified ready signal before brief delivery"

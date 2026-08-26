@@ -23,6 +23,21 @@ next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
   for a in "$@"; do printf '\x1f%s' "$a"; done
   printf '\n'
 } >> "$LOG"
+# A send Orca REJECTED: its ordinary error envelope, returned at process exit
+# 0, which is how every Orca failure arrives (the CLI reserves its own exit
+# codes for not running at all). Nothing was typed, so the line below is not
+# run either. Keyed on the send text so a case can reject one specific send and
+# leave the rest of the sequence untouched.
+if [ "${1:-}" = terminal ] && [ "${2:-}" = send ] && [ -n "${FM_ORCA_SEND_REJECT_TEXT:-}" ]; then
+  for a in "$@"; do
+    case "$a" in
+      *"$FM_ORCA_SEND_REJECT_TEXT"*)
+        printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"terminal handle stale"}}\n'
+        exit 0
+        ;;
+    esac
+  done
+fi
 # Run a submitted text line the way the terminal's own shell would, so
 # fm-spawn's shell-readiness probe is answered. A literal send and the bare
 # Enter key (an empty --text with --enter) are input events, not submitted
@@ -545,6 +560,58 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
     "spawn did not send the selected harness launch command through Orca"
   rm -rf "/tmp/fm-$id"
   pass "fm-spawn.sh --backend orca: reuses implicit terminal, records metadata, launches harness"
+}
+
+# Orca submits a text line in ONE call (`terminal send --enter`), so it has no
+# state in which a line was typed and then left neither submitted nor cleared -
+# and no status meaning that. Its send nevertheless exits 2, straight out of the
+# JSON envelope check, whenever Orca answers `ok:false`: the terminal REFUSED the
+# send and nothing was typed at all. fm-spawn's readiness gate must therefore
+# report an unreachable endpoint here, not input sitting uncleared in a shell's
+# input line - a repair for a pane state that does not exist, and one that
+# becomes the task's durable last state because this gate runs after the meta is
+# published. The regression is the inversion: every non-fatal Orca send failure
+# arrives as 2, so a backend-agnostic reading of that status makes the
+# unreachable-endpoint refusal unreachable on this backend entirely.
+test_spawn_reports_rejected_orca_send_as_undelivered_not_stranded() {
+  local proj wt data state config id out status recorded
+  id="orcarejectz1"
+  proj="$TMP_ROOT/reject-project"
+  wt="$TMP_ROOT/reject-wt"
+  data="$TMP_ROOT/reject-data"
+  state="$TMP_ROOT/reject-state"
+  config="$TMP_ROOT/reject-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  orca_case reject-send
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-reject"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-reject","path":"%s"},"terminal":{"handle":"term-reject"}}}\n' "$wt" > "$RESP/3.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ORCA_SEND_REJECT_TEXT='shell-ready.' \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-reject-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "fm-spawn.sh --backend orca should refuse when Orca rejects the readiness probe"$'\n'"$out"
+  assert_contains "$out" "endpoint could not be reached" \
+    "the refusal did not name the endpoint that rejected the send"$'\n'"$out"
+  assert_contains "$out" "was never typed" \
+    "the refusal did not say the probe was never typed"$'\n'"$out"
+  assert_not_contains "$out" "could not be cleared" \
+    "a send Orca rejected was reported as input sitting uncleared in a shell's input line"$'\n'"$out"
+  recorded=$(cat "$state/$id.status" 2>/dev/null || true)
+  assert_contains "$recorded" "endpoint could not be reached" \
+    "the task's durable last state did not name the unreachable endpoint"
+  assert_not_contains "$recorded" "could not be cleared" \
+    "the task's durable last state told the uncleared-input story instead"
+  assert_not_contains "$out" "spawned $id" "a refused spawn reported success"
+  assert_not_contains "$(cat "$LOG")" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+    "the launch command was sent into a terminal that had rejected the probe"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh --backend orca: a rejected send is undelivered, never uncleared input"
 }
 
 test_spawn_refuses_orca_secondmate_before_home_mutation() {
@@ -1352,6 +1419,7 @@ test_worktree_and_terminal_helpers_parse_json
 test_worktree_create_removes_worktree_when_path_missing
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
 test_spawn_writes_orca_metadata_and_launches_harness
+test_spawn_reports_rejected_orca_send_as_undelivered_not_stranded
 test_spawn_refuses_orca_secondmate_before_home_mutation
 test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree

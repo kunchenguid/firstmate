@@ -165,10 +165,24 @@ fm_backend_orca_terminal_create() {  # <worktree-id> <title>
   printf '%s' "$terminal"
 }
 
+# fm_backend_orca_send_text_line: one line typed and submitted. Orca does both
+# in a SINGLE call, so this adapter has no state in which a line was typed and
+# then left neither submitted nor cleared - which is the meaning firstmate
+# reserves status 2 for across every backend that composes a text line from a
+# literal send plus Enter (bin/fm-spawn.sh's spawn_send_text_line owns that
+# contract). fm_backend_orca_run_json's own 2 says the opposite thing: Orca
+# answered `ok:false`, or unparseably, and nothing was typed at all. Passing it
+# straight out would report an endpoint that REFUSED the send as an input line
+# sitting uncleared in a shell, sending the operator to a pane state that does
+# not exist - and, at the post-meta launch gate, recording that story as the
+# task's durable last state. Every failure here is therefore one status: the
+# send did not land. fm_backend_orca_worktree_create deliberately keeps its own
+# 2, which distinguishes an Orca-side refusal that may still have left a
+# worktree behind and does need its own cleanup.
 fm_backend_orca_send_text_line() {  # <terminal-id> <text>
   local terminal=$1 text=$2
   fm_backend_orca_tool_check || return 1
-  fm_backend_orca_run_json orca terminal send --terminal "$terminal" --text "$text" --enter --json
+  fm_backend_orca_run_json orca terminal send --terminal "$terminal" --text "$text" --enter --json || return 1
 }
 
 fm_backend_orca_send_literal() {  # <terminal-id> <text>
