@@ -1890,6 +1890,41 @@ SH
   pass "watcher timeouts force-kill TERM-resistant subprocesses"
 }
 
+test_watcher_shutdown_joins_report_prune() {
+  local dir state fake_root prune_pid watcher_pid i
+  dir=$(make_case watcher-report-prune-shutdown); state="$dir/state"
+  fake_root="$dir/root"
+  mkdir -p "$fake_root/bin"
+  rm -f "$state/.last-report-retention"
+  cat > "$fake_root/bin/fm-report-stack.mjs" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_FAKE_PRUNE_PID_FILE"
+trap 'exit 0' TERM INT HUP
+while :; do sleep 1; done
+SH
+  chmod +x "$fake_root/bin/fm-report-stack.mjs"
+
+  FM_ROOT_OVERRIDE="$fake_root" FM_STATE_OVERRIDE="$state" \
+    FM_CONFIG_OVERRIDE="$dir/config" FM_FAKE_PRUNE_PID_FILE="$dir/prune.pid" \
+    FM_REPORT_STACK_ROOT="$dir/report-stack" \
+    FM_REPORT_RETENTION_TIMEOUT=30 "$WATCH" >/dev/null 2>&1 &
+  watcher_pid=$!
+  wait_numeric_file "$dir/prune.pid" 50 \
+    || { kill "$watcher_pid" 2>/dev/null || true; wait "$watcher_pid" 2>/dev/null || true; fail "report prune did not start"; }
+  prune_pid=$(cat "$dir/prune.pid")
+
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  i=0
+  while kill -0 "$prune_pid" 2>/dev/null && [ "$i" -lt 30 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! kill -0 "$prune_pid" 2>/dev/null \
+    || { kill "$prune_pid" 2>/dev/null || true; fail "watcher shutdown orphaned its report prune"; }
+  pass "watcher shutdown terminates and joins its report prune"
+}
+
 if [ "${FM_TEST_FOCUSED:-}" = review-round-10 ]; then
   test_watcher_markers_refuse_symlinks
   exit 0
@@ -1902,6 +1937,11 @@ fi
 
 if [ "${FM_TEST_FOCUSED:-}" = review-round-23 ]; then
   test_account_session_sync_is_bounded_and_cadenced
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = report-prune-lifecycle ]; then
+  test_watcher_shutdown_joins_report_prune
   exit 0
 fi
 
@@ -1996,3 +2036,4 @@ test_afk_paused_changed_pane_hands_off_plain_stale
 test_account_session_sync_is_bounded_and_cadenced
 test_watcher_markers_refuse_symlinks
 test_watcher_timeout_wrapper_uses_hard_kill_fallback
+test_watcher_shutdown_joins_report_prune
