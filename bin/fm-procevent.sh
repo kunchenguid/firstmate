@@ -351,7 +351,7 @@ cmd_start_public() {
 }
 
 cmd_start() {
-  local id=${1-} adapter out rc claimed bound_rc published_capture=0 self_announcing=0
+  local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   require_runner_group
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
@@ -470,6 +470,8 @@ cmd_start() {
   else
     if publish_result "$durable"; then
       published_capture=1
+    elif fm_procevent_is_handled "$STATE" "$id" "$(fm_procevent_result_sequence "$durable")"; then
+      handled_capture=1
     fi
     publish_pending "$durable" >/dev/null
   fi
@@ -502,6 +504,8 @@ cmd_start() {
       published_capture=1
     fi
     publish_pending "$durable" >/dev/null
+  elif [ "$handled_capture" -eq 1 ]; then
+    :
   elif [ "$published_capture" -eq 1 ] && adapter_autohandle "$adapter" "$id" "$durable"; then
     printf 'autohandled: %s\n' "$id"
   else

@@ -617,7 +617,9 @@ quiet_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$QUIET_ART")
 PE_TRACKED+=("$HEMPTY|$quiet_id")
 PATH="$EMPTY_BIN:$PATH" FM_HOME="$HEMPTY" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$QUIET_ART" >/dev/null
-PATH="$EMPTY_BIN:$PATH" pe "$HEMPTY" reconcile >/dev/null
+quiet_out=$(PATH="$EMPTY_BIN:$PATH" pe "$HEMPTY" start "$quiet_id" 2>&1)
+assert_not_contains "$quiet_out" "not-autohandled" \
+  "a durably silenced result was reported as still unacknowledged"
 # The handled marker is written at exactly the point the wake would otherwise
 # have been appended, so waiting on it - rather than on a fixed sleep - is what
 # makes "no wake" a real observation instead of a race the test won by being
