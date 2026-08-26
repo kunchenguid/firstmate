@@ -1553,7 +1553,8 @@ function normalizedInboundParts(raw, messageType, options) {
     error.unsupportedType = unsupportedType;
     throw error;
   }
-  if (parts.length === 0 || attachmentCount === 0 || (messageType === "image" && (parts.length !== 1 || attachmentCount !== 1))) throw new Error("malformed-content");
+  const meaningful = parts.some((part) => part.type === "image" || part.text.trim().length > 0);
+  if (!meaningful || (messageType === "image" && (parts.length !== 1 || attachmentCount !== 1))) throw new Error("malformed-content");
   return parts;
 }
 
