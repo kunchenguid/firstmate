@@ -34,14 +34,36 @@
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
 #      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
-#      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
-#      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
-#      the active step is ci, `axi status` alone cannot tell "still waiting on
-#      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
-#      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating.
+#      diverged from it, invalidates attribution. Only the branch's NEWEST run
+#      is ever a candidate: a newer run supersedes every older one on that
+#      branch, so a head mismatch on the newest run attributes NOTHING rather
+#      than falling back to an older row (see nm_runs_status_for_branch). The
+#      guarantee that buys is bounded and worth stating exactly: the run-step
+#      path never reports a superseded run's verdict as current. It is NOT a
+#      guarantee that no stale terminal verdict can surface at all. With no
+#      attributable run this drops to step 4, and there an earlier run's
+#      `failed:`/`done:` status-log line still becomes `state: failed|done -
+#      source: status-log` whenever the pane reads idle - which it does while
+#      the pipeline daemon, not the crew, owns the fix round. KNOWN LIMITATION,
+#      deferred: a live (pending/running) newest row is positive proof the crew
+#      is not terminal, so that case could suppress the terminal log fallback
+#      instead; today the lookup reports only "attributable or not" and cannot
+#      tell step 4 the difference.
+#      The run-step is AUTHORITATIVE: pending/running/fixing -> working,
+#      ci -> working, awaiting_approval/fix_review -> parked (with gate
+#      findings), terminal passed/checks-passed -> done, failed/cancelled ->
+#      failed. EXCEPT: while the active step is ci, `axi status` alone cannot
+#      tell "still waiting on checks" from "checks green, waiting on merge"
+#      (see nm_ci_checks_state) - a ci-step log-tail check overrides
+#      working -> done once checks read green, so a green PR is never silently
+#      read as still-validating. A `checks green` status-log line can settle a
+#      working run to done the same way, but that is a FULL-PATH-ONLY
+#      guarantee: on the `axi status` path the run must have reached its own ci
+#      step, so a younger run still short of ci never inherits an earlier run's
+#      green line. The coarse runs-list path has no step table to test that
+#      against and knowingly cannot enforce it - a coarse `running` row IS
+#      reported done off an earlier run's green line; only `pending` is
+#      suppressed there, on the status word alone. KNOWN LIMITATION, deferred.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -380,9 +402,24 @@ nm_ci_checks_state() {
 # "<status> <branch> <short-sha> <date> [<pr-url>]" separated by runs of
 # spaces (verified: no quoting, so splitting on the first two whitespace runs
 # is exact) - but branch + coarse status is exactly what this predicate needs:
-# is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# is a run for THIS branch active right now. Echoes the branch's NEWEST row's
+# status word (pending/running/completed/cancelled/failed), or empty when that
+# row is not bound to this worktree's code, or when the branch has no row
+# within FM_CREW_STATE_RUNS_LIMIT rows.
+#
+# Only the branch's newest row is attributable, and a head mismatch on it ends
+# the scan instead of continuing to older rows. A newer run on a branch
+# supersedes every older run on that branch by definition, so an older row is
+# never the current one - and scanning past the newest row is what made a
+# healthy crew report `failed`: after a relaunch the branch carried an
+# in-flight run whose pipeline-rebased head had diverged from the worktree tip,
+# the newest row was skipped for that mismatch, and an older terminal row whose
+# head still equalled the unadvanced worktree tip was reported as the current
+# verdict. What this function guarantees is exactly that no superseded run-step
+# verdict is attributed - not that the caller then reports something fresh. With
+# no attributable row the caller drops to the pane/status-log fallback, and an
+# idle pane plus an earlier run's terminal `failed:`/`done:` line still reports
+# that line as current (source: status-log); see the step-4 note in the header.
 nm_runs_status_for_branch() {  # <branch>
   local branch=$1 out row st rest br sha
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
@@ -398,11 +435,10 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
-      fi
+      # Same code-identity rule as axi status: a newest row whose short-sha does
+      # not match this worktree (rewritten, rebased, or advanced tip) attributes
+      # nothing, and no older row is consulted in its place.
+      nm_coarse_head_matches_worktree "$sha" || return 0
       printf '%s' "$st"
       return 0
     fi
@@ -478,8 +514,12 @@ if [ "$HAVE_RUN" = 1 ]; then
     # needs-decision/blocked status-log append (a captain-relevant VERB) is
     # surfaced through signal_reason_is_actionable regardless of this
     # coarse-vs-full distinction, so a real gate is never silently missed.
+    # `pending` is a live run that has not started its first step, and is as
+    # much a validation in progress as `running`.
+    RUN_STATUS=$COARSE_STATUS
     case "$COARSE_STATUS" in
       running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
+      pending)   RUN_STATE=working; RUN_DETAIL="validating (pending)" ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
       failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
       cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
@@ -545,17 +585,25 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
-  if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
+  # A `checks green` status-log line is written by the run that was monitoring
+  # the PR, so it is only THIS run's own line when this run has reached its own
+  # ci step. A run that has not (a `pending` run that has not started a step at
+  # all, or a `running` run still at an earlier step after the captain asked for
+  # a change) is necessarily younger than the run that wrote the line, and the
+  # PR it points at is no longer green - so the line must not shortcut it to
+  # done. On the full path that precondition is read off the step table
+  # (an empty effective ci-step status means ci was never reached); the coarse
+  # lookup has no step table, so there the run's own status word is the only
+  # available discriminator.
+  if [ "$RUN_STATE" = working ] && [ "$RUN_STATUS" != pending ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
     [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
-    if [ "$RUN_STATUS" = fixing ]; then
+    if [ "$RUN_STATUS" = fixing ] || [ "$CI_STEP_STATUS" = fixing ] || [ -z "$CI_STEP_STATUS" ]; then
       CI_LOG_STATE=not-ready
     elif [ "$CI_STEP_STATUS" = running ] && [ -z "$CI_LOG_STATE" ]; then
       CI_LOG_STATE=$(nm_ci_checks_state)
-    elif [ "$CI_STEP_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
     fi
     if [ "$CI_LOG_STATE" != not-ready ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"

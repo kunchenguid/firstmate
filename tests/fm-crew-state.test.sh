@@ -191,6 +191,21 @@ run:
 EOF
 }
 
+run_pending() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: pending
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+  steps[2]{step,status,findings,duration_ms}:
+    intent,pending,0,0
+    review,pending,0,0
+EOF
+}
+
 run_fixing() {  # <branch>
   cat <<EOF
 run:
@@ -1389,6 +1404,158 @@ test_local_advanced_past_run_head_invalidates() {
   pass "local work advanced past run head invalidates attribution"
 }
 
+# Stale-record incident (three occurrences, latest 2026-08-25): after a
+# relaunch the same branch carries an in-flight run whose pipeline-rebased head
+# has diverged from the worktree tip, plus an older failed run whose head still
+# equals that tip. Attributing the older row reported a healthy validating crew
+# as `failed`. The branch's newest row is the only attributable one, so the
+# superseded failure can never become the verdict.
+test_superseded_failed_row_is_not_attributed() {
+  reset_fakes
+  local d local_short diverged_short out
+  d=$(new_case superseded-failed-row)
+  make_repo_on_branch "$d/wt" fm/feat-relaunch
+  local_short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  # A real commit that is neither the worktree tip nor on its history, exactly
+  # as a pipeline rebase leaves the in-flight run's head.
+  git -C "$d/wt" checkout -q --orphan tmp-diverged
+  git -C "$d/wt" commit -q --allow-empty -m 'rebased pipeline head'
+  diverged_short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  git -C "$d/wt" checkout -q fm/feat-relaunch
+  [ "$local_short" != "$diverged_short" ] || fail "diverged head is the worktree tip"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/relaunch.meta" "window=fm:fm-relaunch" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-25 22:10
+  running    fm/feat-relaunch ${diverged_short}  2026-08-25 15:08
+  failed     fm/feat-relaunch ${local_short}  2026-08-22 16:18
+EOF
+)"
+  FM_FAKE_BUSY=1
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" relaunch)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" relaunch busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  out=$(run_crew_state "$d" relaunch)
+  assert_not_contains "$out" "state: failed" "superseded failed row must not become the verdict"
+  assert_not_contains "$out" "run failed" "superseded failed row must not supply the detail"
+  assert_not_contains "$out" "source: run-step" "an unattributable newest row attributes no run"
+  assert_contains "$out" "state: working" "falls through to the live busy pane"
+  pass "a failed row superseded by a newer run is not attributed"
+}
+
+# The safety counterpart: a genuine failure is the branch's newest row and still
+# reaches the captain.
+test_newest_failed_row_still_reports_failed() {
+  reset_fakes
+  local d short out
+  d=$(new_case newest-failed-row)
+  make_repo_on_branch "$d/wt" fm/feat-genuine-fail
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/genuinefail.meta" "window=fm:fm-genuinefail" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-25 22:10
+  failed     fm/feat-genuine-fail ${short}  2026-08-25 21:00
+  completed  fm/feat-genuine-fail ${short}  2026-08-24 09:00
+EOF
+)"
+  FM_FAKE_BUSY=1
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" genuinefail)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" genuinefail busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  out=$(run_crew_state "$d" genuinefail)
+  assert_contains "$out" "state: failed" "the branch's newest row is a genuine failure"
+  assert_contains "$out" "source: run-step" "genuine failure is run-step sourced"
+  assert_contains "$out" "run failed" "genuine failure keeps its detail"
+  pass "a genuine newest failed row still reports failed"
+}
+
+# A run that has not started its first step is `pending` in the runs list and is
+# just as live as `running`.
+test_coarse_pending_row_is_working() {
+  reset_fakes
+  local d short out
+  d=$(new_case coarse-pending)
+  make_repo_on_branch "$d/wt" fm/feat-pending
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/pendingrun.meta" "window=fm:fm-pendingrun" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-25 22:10
+  pending    fm/feat-pending ${short}  2026-08-25 22:09
+EOF
+)"
+  out=$(run_crew_state "$d" pendingrun)
+  assert_contains "$out" "state: working" "a pending run is a validation in progress"
+  assert_contains "$out" "source: run-step" "pending row is run-step sourced"
+  assert_not_contains "$out" "state: unknown" "pending must not read as an unknown status word"
+  pass "a coarse pending row reports working"
+}
+
+# A `checks green` status-log line cannot belong to a run that has not started a
+# step, so it must not shortcut a pending run to done.
+test_coarse_pending_row_does_not_take_ci_ready_log() {
+  reset_fakes
+  local d short out
+  d=$(new_case coarse-pending-ready-log)
+  make_repo_on_branch "$d/wt" fm/feat-pending-ready
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/pendingready.meta" "window=fm:fm-pendingready" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/9 checks green\n' > "$d/state/pendingready.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-25 22:10
+  pending    fm/feat-pending-ready ${short}  2026-08-25 22:09
+EOF
+)"
+  out=$(run_crew_state "$d" pendingready)
+  assert_contains "$out" "state: working" "an earlier run's green line must not settle a pending run"
+  assert_not_contains "$out" "state: done" "pending run must not be shortcut to done"
+  pass "a coarse pending row does not take an earlier run's ci-ready log line"
+}
+
+# The same rule on the full `axi status` path: `axi status` can answer with this
+# branch's own freshly created run before it has started a step, and an earlier
+# run's `checks green` line must not settle that one either.
+test_pending_run_does_not_take_ci_ready_log() {
+  reset_fakes
+  local d out
+  d=$(new_case pending-full-ready-log)
+  make_repo_on_branch "$d/wt" fm/feat-pending-full
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/pendingfull.meta" "window=fm:fm-pendingfull" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/11 checks green\n' > "$d/state/pendingfull.status"
+  FM_FAKE_AXI_STATUS="$(run_pending fm/feat-pending-full)"
+  out=$(run_crew_state "$d" pendingfull)
+  assert_contains "$out" "state: working" "a pending run found via axi status is still validating"
+  assert_not_contains "$out" "state: done" "an earlier run's green line must not settle a pending run"
+  pass "a full-status pending run does not take an earlier run's ci-ready log line"
+}
+
+# The same rule one step further along: a relaunched run that IS running but has
+# not yet reached its own ci step (the captain asked for a change, the crew
+# pushed fix commits and the new run is back at review) must not inherit the
+# previous run's `checks green` line either - that PR is no longer green.
+test_prereq_step_run_does_not_take_ci_ready_log() {
+  reset_fakes
+  local d out
+  d=$(new_case prereq-step-ready-log)
+  make_repo_on_branch "$d/wt" fm/feat-prereq-ready
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/prereqready.meta" "window=fm:fm-prereqready" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/12 checks green\n' > "$d/state/prereqready.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-prereq-ready)"
+  out=$(run_crew_state "$d" prereqready)
+  assert_contains "$out" "state: working" "a run that has not reached ci is still validating"
+  assert_contains "$out" "source: run-step" "pre-ci run stays run-step sourced"
+  assert_not_contains "$out" "state: done" "an earlier run's green line must not settle a pre-ci run"
+  pass "a run that has not reached ci does not take an earlier run's ci-ready log line"
+}
+
 test_missing_run_head_falls_back_to_current_state() {
   reset_fakes
   local d out
@@ -1461,5 +1628,11 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_superseded_failed_row_is_not_attributed
+test_newest_failed_row_still_reports_failed
+test_coarse_pending_row_is_working
+test_coarse_pending_row_does_not_take_ci_ready_log
+test_pending_run_does_not_take_ci_ready_log
+test_prereq_step_run_does_not_take_ci_ready_log
 
 echo "all fm-crew-state tests passed"
