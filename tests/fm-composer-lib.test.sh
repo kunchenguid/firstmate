@@ -625,6 +625,32 @@ test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence
 test_bare_wrap_region_classifies
 test_contiguous_transcript_reanchors_on_live_prompt
+# An exited agent leaves a login-shell prompt whose glyph is NOT leading: the
+# real macOS zsh default is "<user>@<host> <dir> %". Every glyph rule here is
+# leading-anchored, so that row carries no container proof at all and must read
+# `unknown`. This case exists because the classifier is the FIRST place someone
+# will reach for after a steer lands in a dead shell, and reclassifying this row
+# as `empty` to "identify the shell" would hand the away-mode injector a live
+# injection target. The shell-ness of the endpoint is a process fact, owned by
+# fm_backend_agent_state (bin/fm-backend.sh); the screen alone must never claim
+# it. The composer shapes a live agent draws are pinned beside it, because a
+# refusal built on this verdict would be as harmful as the swallow it prevents.
+test_exited_agent_shell_prompt_row_is_unknown() {
+  local prompt idle ghost busy
+  prompt=$'transcript from the finished turn\n\nkhyle@host scratchpad % '
+  assert_screen "macOS zsh prompt after /exit on herdr" unknown "$CAPS_STYLED" "$prompt"
+  assert_screen "macOS zsh prompt after /exit on zellij" unknown "$CAPS_STYLED_NOID" "$prompt"
+  assert_screen "macOS zsh prompt after /exit on cmux/orca" unknown "$CAPS_PLAIN" "$prompt"
+
+  idle=$'transcript\n╭────────╮\n│        │\n╰────────╯'
+  assert_screen "idle bordered composer stays empty" empty "$CAPS_STYLED" "$idle"
+  ghost=$'transcript\n\n  ❯ \033[2mTry "fix the bug"\033[0m'
+  assert_screen "ghost-text composer stays empty" empty "$CAPS_STYLED" "$(printf '%b' "$ghost")"
+  busy=$'transcript\n╭────────╮\n│ hello  │\n╰────────╯'
+  assert_screen "composer holding real text stays pending" pending "$CAPS_STYLED" "$busy"
+  pass "fm_composer_classify_screen: an exited agent's shell prompt row reads unknown while live composer shapes keep their verdicts"
+}
+test_exited_agent_shell_prompt_row_is_unknown
 test_lower_dead_shell_invalidates_cursorless_candidate
 test_cursorless_bare_wrap_region_classifies
 test_cursorless_container_rejects_contiguous_lower_activity
