@@ -275,6 +275,61 @@ test_concurrent_recaps_send_one_instruction() {
   pass "simultaneous recaps still ask the mate only once"
 }
 
+test_teardown_cannot_leave_its_replacement_in_cooldown() {
+  local home mate fakebin snap signal release lifecycle_done notify_pid lifecycle_pid
+  { read -r home; read -r mate; read -r fakebin; } < <(make_main_home lifecycle mate)
+  snap="$home/snapshot.json"
+  signal="$home/send-ringing"
+  release="$home/release-ring"
+  lifecycle_done="$home/lifecycle-done"
+  write_snapshot "$snap" mate '{"kind":"orphan_in_flight","ids":["ghost"]}'
+  mv "$fakebin/tmux" "$fakebin/tmux-real"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = send-keys ]; then
+  : > "$FM_FAKE_TMUX_SEND_SIGNAL"
+  while [ ! -f "$FM_FAKE_TMUX_SEND_RELEASE" ]; do sleep 0.01; done
+fi
+exec "$(dirname "$0")/tmux-real" "$@"
+SH
+  chmod +x "$fakebin/tmux"
+
+  FM_FAKE_TMUX_SEND_SIGNAL="$signal" FM_FAKE_TMUX_SEND_RELEASE="$release" \
+    run_notify "$home" "$fakebin" lifecycle "$snap" >/dev/null 2>&1 &
+  notify_pid=$!
+  while [ ! -f "$signal" ]; do sleep 0.01; done
+
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$home/state/.control-mate.lock"
+    fm_lock_acquire_wait "$home/state/.meta-mate.lock"
+    rm -rf "$home/state/mate.inbox"
+    rm -f "$home/state/mate.meta" "$home/state/mate.reconcile-nudged"
+    cat > "$home/state/mate.meta" <<META
+window=firstmate:fm-mate
+kind=secondmate
+harness=claude
+backend=tmux
+home=$mate
+worktree=$mate
+META
+    fm_lock_release "$home/state/.meta-mate.lock"
+    fm_lock_release "$home/state/.control-mate.lock"
+    : > "$lifecycle_done"
+  ) &
+  lifecycle_pid=$!
+
+  sleep 0.1
+  : > "$release"
+  wait "$notify_pid" || fail "the reconcile ask failed during the lifecycle race"
+  wait "$lifecycle_pid" || fail "the simulated teardown and reseed failed"
+  [ -f "$lifecycle_done" ] || fail "the simulated lifecycle transition did not finish"
+  assert_absent "$home/state/mate.reconcile-nudged" \
+    "a retired mate's cooldown was recreated after its replacement was seeded"
+  pass "teardown retires the cooldown before a replacement can inherit it"
+}
+
 test_an_inventory_mismatch_asks_the_mate_once_per_window
 test_a_mismatch_still_there_after_the_window_earns_one_more_nudge
 test_the_window_is_four_hours
@@ -284,3 +339,4 @@ test_a_readable_home_without_a_mismatch_is_never_asked
 test_the_parent_never_changes_the_mates_own_files
 test_a_failed_send_is_retried_on_the_next_run
 test_concurrent_recaps_send_one_instruction
+test_teardown_cannot_leave_its_replacement_in_cooldown

@@ -59,13 +59,19 @@ case "$FM_RECONCILE_COOLDOWN_SECONDS" in
   ''|*[!0-9]*) echo "fm-secondmate-reconcile: FM_RECONCILE_COOLDOWN_SECONDS must be a whole number of seconds" >&2; exit 2 ;;
 esac
 
-ACTIVE_LOCK=
-release_active_lock() {
-  [ -z "$ACTIVE_LOCK" ] || fm_lock_release "$ACTIVE_LOCK"
-  ACTIVE_LOCK=
+ACTIVE_RECONCILE_LOCK=
+ACTIVE_CONTROL_LOCK=
+ACTIVE_META_LOCK=
+release_active_locks() {
+  [ -z "$ACTIVE_META_LOCK" ] || fm_lock_release "$ACTIVE_META_LOCK"
+  ACTIVE_META_LOCK=
+  [ -z "$ACTIVE_CONTROL_LOCK" ] || fm_lock_release "$ACTIVE_CONTROL_LOCK"
+  ACTIVE_CONTROL_LOCK=
+  [ -z "$ACTIVE_RECONCILE_LOCK" ] || fm_lock_release "$ACTIVE_RECONCILE_LOCK"
+  ACTIVE_RECONCILE_LOCK=
 }
-trap release_active_lock EXIT
-trap 'release_active_lock; exit 130' INT TERM
+trap release_active_locks EXIT
+trap 'release_active_locks; exit 130' INT TERM
 
 usage() {
   cat <<'EOF'
@@ -175,13 +181,13 @@ cmd_notify() {
     | @tsv')
 
   now=$(date +%s)
-  local id kind ids path last age lock did send_rc
+  local id kind ids path last age reconcile_lock control_lock meta meta_lock did send_rc
   while IFS=$'\t' read -r id kind ids; do
     [ -n "${id:-}" ] || continue
     path=$(nudge_path "$id")
-    lock="$STATE/.$id.reconcile.lock"
-    fm_lock_acquire_wait "$lock" || { printf 'failed: %s lock\n' "$id"; rc=1; continue; }
-    ACTIVE_LOCK=$lock
+    reconcile_lock="$STATE/.$id.reconcile.lock"
+    fm_lock_acquire_wait "$reconcile_lock" || { printf 'failed: %s lock\n' "$id"; rc=1; continue; }
+    ACTIVE_RECONCILE_LOCK=$reconcile_lock
     last=
     if [ -f "$path" ] && [ ! -L "$path" ]; then last=$(cat "$path" 2>/dev/null || true); fi
     case "$last" in ''|*[!0-9]*) last= ;; esac
@@ -190,14 +196,22 @@ cmd_notify() {
       # A clock that moved backwards must not silence the home forever.
       if [ "$age" -ge 0 ] && [ "$age" -lt "$FM_RECONCILE_COOLDOWN_SECONDS" ]; then
         printf 'cooldown: %s %s\n' "$id" "$age"
-        release_active_lock
+        release_active_locks
         continue
       fi
     fi
+    control_lock="$STATE/.control-$id.lock"
+    fm_lock_acquire_wait "$control_lock" || {
+      printf 'failed: %s lock\n' "$id"
+      rc=1
+      release_active_locks
+      continue
+    }
+    ACTIVE_CONTROL_LOCK=$control_lock
     did=$(delivery_id) || {
       printf 'failed: %s %s\n' "$id" "$kind"
       rc=1
-      release_active_lock
+      release_active_locks
       continue
     }
     send_rc=0
@@ -208,10 +222,26 @@ cmd_notify() {
     if [ "$send_rc" -ne 0 ] && [ "$send_rc" -ne 3 ]; then
       printf 'failed: %s %s\n' "$id" "$kind"
       rc=1
-      release_active_lock
+      release_active_locks
       continue
     fi
-    if (umask 077; printf '%s\n' "$now" > "$path.tmp") && mv -f -- "$path.tmp" "$path"; then
+    meta="$STATE/$id.meta"
+    meta_lock=$(fm_meta_lock_path "$meta") || {
+      printf 'sent-unrecorded: %s %s\n' "$id" "$kind"
+      rc=1
+      release_active_locks
+      continue
+    }
+    fm_lock_acquire_wait "$meta_lock" || {
+      printf 'sent-unrecorded: %s %s\n' "$id" "$kind"
+      rc=1
+      release_active_locks
+      continue
+    }
+    ACTIVE_META_LOCK=$meta_lock
+    if [ -f "$meta" ] && [ ! -L "$meta" ] \
+      && (umask 077; printf '%s\n' "$now" > "$path.tmp") \
+      && mv -f -- "$path.tmp" "$path"; then
       printf 'sent: %s %s\n' "$id" "$kind"
     else
       rm -f -- "$path.tmp"
@@ -220,7 +250,7 @@ cmd_notify() {
       printf 'sent-unrecorded: %s %s\n' "$id" "$kind"
       rc=1
     fi
-    release_active_lock
+    release_active_locks
   done <<EOF
 $rows
 EOF
