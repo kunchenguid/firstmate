@@ -1515,6 +1515,72 @@ EOF
   pass "Pi watcher arm distinguishes all session lock ownership states"
 }
 
+test_pi_descendant_process_cannot_claim_primary_lock() {
+  local repo home plugin log marker out status
+  repo="$TMP_ROOT/pi-descendant-lock-root"
+  home="$TMP_ROOT/pi-descendant-lock-home"
+  log="$TMP_ROOT/pi-descendant-lock.log"
+  marker="$home/state/.pi-watch-extension-loaded"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+
+const lock = `${process.env.FM_HOME}/state/.lock`;
+const marker = `${process.env.FM_HOME}/state/.pi-watch-extension-loaded`;
+writeFileSync(lock, `${process.pid}\n`);
+writeFileSync(marker, "primary-marker\nprimary-owner\n");
+
+const childSource = String.raw`
+  import { pathToFileURL } from "node:url";
+  const handlers = new Map();
+  let tool = null;
+  const pi = {
+    on(event, handler) { handlers.set(event, handler); },
+    registerCommand() {},
+    registerTool(candidate) {
+      if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+    },
+    sendUserMessage: async () => {},
+    events: { on() {} },
+  };
+  const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+  mod.default(pi);
+  await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+  const result = await tool.execute("nested-pi", {}, undefined, undefined, {});
+  if (result.details?.ok !== false || !result.details?.message.includes("session lock is held by another firstmate session")) {
+    throw new Error("nested Pi process claimed the primary lock: " + JSON.stringify(result.details));
+  }
+  await new Promise((resolve) => setTimeout(resolve, 100));
+`;
+const child = spawnSync(process.execPath, ["--input-type=module", "-e", childSource], {
+  encoding: "utf8",
+  env: process.env,
+});
+if (child.status !== 0) {
+  throw new Error(`nested Pi process failed (${child.status}): ${child.stdout}${child.stderr}`);
+}
+if (readFileSync(marker, "utf8") !== "primary-marker\nprimary-owner\n") {
+  throw new Error(`nested Pi process replaced the primary marker: ${readFileSync(marker, "utf8")}`);
+}
+if (existsSync(process.env.FM_ARM_LOG)) {
+  throw new Error("nested Pi process started the primary watcher arm");
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi descendant processes must not claim their live primary ancestor's session lock"
+  [ -z "$out" ] || fail "Pi descendant-lock test printed output: $out"
+  pass "Pi descendant process preserves primary watcher ownership"
+}
+
 test_pi_session_transition_generation_owner() {
   local repo home plugin child_pid_file child_marker_file marker_root arm_log out status
   repo="$TMP_ROOT/pi-session-transition-root"
@@ -2823,6 +2889,7 @@ test_pi_empty_close_retries_instead_of_disappearing
 test_pi_established_empty_close_honors_retry_limit
 test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
+test_pi_descendant_process_cannot_claim_primary_lock
 test_pi_session_transition_generation_owner
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child

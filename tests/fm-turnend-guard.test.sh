@@ -1084,6 +1084,54 @@ EOF
   pass ".pi primary extension: delivery failure resets the logical-run latch"
 }
 
+test_pi_extension_descendant_preserves_primary_marker() {
+  local repo home ext marker out status
+  repo="$TMP_ROOT/pi-descendant-marker-root"
+  home="$TMP_ROOT/pi-descendant-marker-home"
+  ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  marker="$home/state/.pi-turnend-extension-loaded"
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  out=$(PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
+import { readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+
+const lock = `${process.env.FM_HOME}/state/.lock`;
+const marker = `${process.env.FM_HOME}/state/.pi-turnend-extension-loaded`;
+writeFileSync(lock, `${process.pid}\n`);
+writeFileSync(marker, "primary-marker\nprimary-owner\n");
+
+const childSource = String.raw`
+  import { pathToFileURL } from "node:url";
+  const handlers = new Map();
+  const pi = {
+    on(event, handler) { handlers.set(event, handler); },
+    sendMessage() {},
+  };
+  const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+  mod.default(pi);
+  await handlers.get("session_start")?.({ type: "session_start", reason: "reload" }, {});
+`;
+const child = spawnSync(process.execPath, ["--input-type=module", "-e", childSource], {
+  encoding: "utf8",
+  env: process.env,
+});
+if (child.status !== 0) {
+  throw new Error(`nested Pi process failed (${child.status}): ${child.stdout}${child.stderr}`);
+}
+if (readFileSync(marker, "utf8") !== "primary-marker\nprimary-owner\n") {
+  throw new Error(`nested Pi process replaced the primary marker: ${readFileSync(marker, "utf8")}`);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi descendant processes must preserve the primary turn-end marker"
+  [ -z "$out" ] || fail "Pi turn-end descendant-marker test printed output: $out"
+  pass ".pi primary extension: a descendant Pi process preserves the primary session marker"
+}
+
 # --- --claude cooperative mode -----------------------------------------------
 # In --claude mode the guard ignores stop_hook_active (Claude marks every stop
 # after ANY stop-hook continuation true, including asyncRewake rewake turns) and
@@ -1724,6 +1772,7 @@ test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
+test_pi_extension_descendant_preserves_primary_marker
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive

@@ -263,9 +263,20 @@ cp "$ROOT/bin/fm-operational-input.sh" "$PROJECT/bin/fm-operational-input.sh"
 cp "$ROOT/bin/fm-supervision-instructions.sh" "$PROJECT/bin/fm-supervision-instructions.sh"
 chmod +x "$PROJECT/bin/fm-operational-input.sh"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/config"
+cat > "$PROJECT/bin/fm-pi-live-e2e-session.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$$" > "${FM_HOME:?}/state/.lock"
+exec pi --approve --no-session --no-context-files --no-extensions \
+  -e .pi/extensions/fm-calm.ts \
+  -e .pi/extensions/fm-primary-turnend-guard.ts \
+  -e .pi/extensions/fm-primary-pi-watch.ts \
+  --model openai-codex/gpt-5.6-sol --thinking low
+SH
+chmod +x "$PROJECT/bin/fm-pi-live-e2e-session.sh"
 
 "$TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -c "$PROJECT" \
-  "env FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 bash -lc 'printf \"%s\\n\" \"\$\$\" > \"\$FM_HOME/state/.lock\"; pi --approve --no-session --no-context-files --no-extensions -e .pi/extensions/fm-calm.ts -e .pi/extensions/fm-primary-turnend-guard.ts -e .pi/extensions/fm-primary-pi-watch.ts --model openai-codex/gpt-5.6-sol --thinking low; rc=\$?; printf \"PI_EXIT=%s\\n\" \"\$rc\"; sleep 300'"
+  "env FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 bash -lc 'bin/fm-pi-live-e2e-session.sh; rc=\$?; printf \"PI_EXIT=%s\\n\" \"\$rc\"; sleep 300'"
 
 i=0
 while [ "$i" -lt 120 ]; do
@@ -275,6 +286,13 @@ while [ "$i" -lt 120 ]; do
 done
 [ -f "$HOME_DIR/state/.pi-turnend-extension-loaded" ] || fail "Pi turn-end extension did not load"
 [ -f "$HOME_DIR/state/.pi-watch-extension-loaded" ] || fail "Pi watcher extension did not load"
+primary_pid=$(sed -n '1p' "$HOME_DIR/state/.lock")
+turnend_marker_pid=$(sed -n '2p' "$HOME_DIR/state/.pi-turnend-extension-loaded")
+watch_marker_pid=$(sed -n '2p' "$HOME_DIR/state/.pi-watch-extension-loaded")
+[ "$primary_pid" = "$turnend_marker_pid" ] \
+  || fail "Pi turn-end extension marker was not owned by the primary Pi process"
+[ "$primary_pid" = "$watch_marker_pid" ] \
+  || fail "Pi watcher extension marker was not owned by the primary Pi process"
 wait_for_text "(openai-codex)" 120 || fail "Pi did not reach its ready composer"
 sleep 1
 
