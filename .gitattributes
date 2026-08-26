@@ -1,0 +1,8 @@
+# Shell scripts are the repository's executable surface and its lint surface
+# (bin/*.sh, bin/backends/*.sh, tests/*.sh - the canonical set bin/fm-lint.sh
+# owns). Checking them out with CRLF on Windows breaks both: POSIX shells read
+# the carriage return as part of every token, and ShellCheck reports SC1017
+# "Literal carriage return" on every line, so the lint gate fails on the file
+# endings instead of on the code. Pin them to LF so a Windows checkout under
+# core.autocrlf=true still produces the exact bytes CI lints.
+*.sh text eol=lf

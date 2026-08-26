@@ -28,13 +28,24 @@ document:
 # `.github/workflows/ci.yml` invokes it directly, with parity asserted by
 # `tests/fm-lint.test.sh`.
 #
+# The `bash ` prefix is load-bearing, not cosmetic. no-mistakes hands this
+# string to a platform shell, and on Windows that shell is cmd.exe, which
+# cannot exec a POSIX script path: a bare `bin/fm-lint.sh` fails every run at
+# Lint with "'bin' is not recognized as an internal or external command".
+# Naming the interpreter keeps ONE portable string instead of a per-platform
+# fork - `bash` resolves through PATH exactly as the script's
+# `#!/usr/bin/env bash` shebang does on macOS/Linux - so the lint command,
+# file set, config, and pinned ShellCheck version stay identical everywhere.
+# `.gitattributes` pins *.sh to LF for the same reason: a CRLF Windows
+# checkout makes ShellCheck report SC1017 on every line.
+#
 # Do not set commands.test to a complete tests/*.test.sh walk. Local no-mistakes
 # Test is intent-targeted validation of whether the change meets its brief;
 # .github/workflows/ci.yml owns broad regression (behavior suite, platform,
 # security, Herdr, tmux, and lifecycle coverage). A full-suite override here
 # would duplicate CI and defeat the targeted Test contract.
 commands:
-  lint: 'bin/fm-lint.sh'
+  lint: 'bash bin/fm-lint.sh'
 
 # Store test evidence in this repo so it is committed alongside the change instead of kept in a temp dir.
 test:
