@@ -3109,10 +3109,29 @@ def execute_terminal_disposition(controller, action, resources):
         )
     names = expected_names(controller, action["slot"])
     view = view or run_command_instance_view(controller, names["vm"], names["task-command"])
-    if view.get("executionState") != "Succeeded":
+    execution_state = view.get("executionState")
+    if str(execution_state).lower() in ("failed", "canceled"):
+        exit_code = view.get("exitCode")
+        if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+            raise ProviderError(
+                "exact terminal worker execution has no integer exit code: state={}".format(
+                    execution_state
+                )
+            )
+        return EXECUTE_DISPOSITION_TERMINAL, {
+            "schema": EXECUTION_TERMINAL_SCHEMA,
+            "request_digest": request_digest,
+            "idempotency_key": action.get("idempotency_key"),
+            "disposition": "provider-terminal",
+            "provisioning_state": provisioning_state,
+            "execution_state": execution_state,
+            "exit_code": exit_code,
+            "task_command_id": task_command_resource["id"],
+        }
+    if execution_state != "Succeeded":
         raise ProviderError(
             "exact worker execution has no recoverable terminal result: state={}".format(
-                view.get("executionState")
+                execution_state
             )
         )
     execution = exact_execution_marker(view)

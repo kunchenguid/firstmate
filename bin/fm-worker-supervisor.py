@@ -29,6 +29,7 @@ MAX_REQUEST_BYTES = 1024 * 1024
 MAX_RESULT_BYTES = 8 * 1024 * 1024
 MAX_WALL_SECONDS = 6 * 60 * 60
 MAX_OUTPUT_BYTES = 4 * 1024 * 1024
+MAX_NO_MISTAKES_RUNTIME_FILES = 20000
 
 
 class SupervisorError(RuntimeError):
@@ -386,7 +387,7 @@ def stage_no_mistakes_runtime(source, target, enforce_linux=True):
     try:
         with tarfile.open(source, mode="r:gz") as archive:
             members = archive.getmembers()
-            if not members or len(members) > 4096:
+            if not members or len(members) > MAX_NO_MISTAKES_RUNTIME_FILES:
                 raise SupervisorError("no-mistakes runtime member inventory is unbounded")
             for member in members:
                 parts = Path(member.name).parts

@@ -16,6 +16,153 @@ AUTHORITY="$ROOT/bin/fm-worker-authority.py"
 DOC="$ROOT/docs/azure-workers.md"
 SUB=11111111-1111-4111-8111-111111111111
 
+service_complete_front_door() {
+  local tmp help
+  fm_test_tmproot_into tmp fm-worker-service-complete-front-door
+  mkdir -p "$tmp/home"
+  help=$(FM_HOME="$tmp/home" "$WRAPPER" service-complete --help) \
+    || fail "supported lifecycle wrapper rejected service-complete"
+  case "$help" in
+    *--request-digest*--confirm-subscription*) ;;
+    *) fail "service-complete help lost its exact execution binding" ;;
+  esac
+  pass "supported lifecycle wrapper exposes service-complete"
+}
+
+service_complete_replay_contract() {
+  python3 - "$CONTROLLER" <<'PY' || fail "service completion replay contract failed"
+import contextlib
+import copy
+import importlib.util
+from types import SimpleNamespace
+import sys
+
+spec = importlib.util.spec_from_file_location("lifecycle", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+bindings = {
+    "home_binding": "1" * 64,
+    "task": "service-task",
+    "task_generation": "service-generation",
+    "assignment_generation": "asg-00000001",
+    "account_binding": "2" * 64,
+    "worktree_binding": "3" * 64,
+    "repository_binding": "4" * 64,
+    "repository_generation": "repository-generation",
+}
+request_digest = "5" * 64
+result_digest = "6" * 64
+item = {
+    **bindings,
+    "role": "no-mistakes",
+    "status": "assigned",
+    "slot": 1,
+}
+worker = {
+    "role": "no-mistakes",
+    "queue_key": "service-task@service-generation",
+    "assignment_generation": bindings["assignment_generation"],
+    "bindings": bindings,
+    "cloud_instance_id": "worker-instance",
+    "resources": {"vm": {"id": "/exact/vm"}},
+    "last_execution_digest": result_digest,
+    "release_proof": None,
+}
+execution = {
+    "request_digest": request_digest,
+    "result_digest": result_digest,
+    "assignment_generation": bindings["assignment_generation"],
+}
+state = {
+    "queue": {"service-task@service-generation": item},
+    "workers": {"1": worker},
+    "executions": {request_digest: execution},
+}
+module.controller_lock = lambda _env: contextlib.nullcontext()
+module.load_state = lambda _env: state
+module.save_state = lambda _env, _state: None
+args = SimpleNamespace(
+    task="service-task",
+    task_generation="service-generation",
+    assignment_generation=bindings["assignment_generation"],
+    request_digest=request_digest,
+    confirm_subscription="subscription",
+)
+env = {"subscription": "subscription"}
+
+# Crash window one: the first call durably moved the item to releasing, but
+# the caller died before observing success. The exact retry is idempotent.
+module.command_service_complete(env, args)
+assert item["status"] == "releasing", item
+assert item["service_completion_receipt"] == worker["release_proof"], item
+module.command_service_complete(env, args)
+
+# Crash window two: reconcile completed the reset and removed the worker, but
+# the caller died before publishing the cached result. The queue-owned exact
+# receipt survives reset and admits only the same bound completion request.
+item["status"] = "complete"
+# The released slot may already belong to a later task. Its presence cannot
+# invalidate the old queue item's exact, self-digested completion receipt.
+replacement_worker = {
+    "queue_key": "later-task@later-generation",
+    "role": "author",
+    "assignment_generation": "asg-00000002",
+    "release_proof": None,
+}
+state["workers"] = {"1": replacement_worker}
+replacement_before = copy.deepcopy(replacement_worker)
+module.command_service_complete(env, args)
+assert replacement_worker == replacement_before, replacement_worker
+wrong = SimpleNamespace(**vars(args))
+wrong.assignment_generation = "asg-99999999"
+try:
+    module.command_service_complete(env, wrong)
+except module.LifecycleError as exc:
+    assert "identity differs" in str(exc), exc
+else:
+    raise AssertionError("completed service receipt admitted a foreign assignment")
+
+# The provider-side regression below emits this exact terminal shape. Prove
+# the lifecycle consumer recognizes it as terminal (rather than malformed),
+# fails closed, and leaves the durable execute claim available for explicit
+# abandonment/recovery.
+terminal_action = {
+    "type": "execute",
+    "slot": 1,
+    "request_digest": "7" * 64,
+    "idempotency_key": "8" * 64,
+    "resources": {"task-command": {"id": "/exact/task-command"}},
+}
+terminal_state = {
+    "queue": {"terminal-task@terminal-generation": {"status": "assigned"}},
+    "workers": {"1": {"queue_key": "terminal-task@terminal-generation"}},
+    "executions": {},
+    "pending_actions": {"1": terminal_action},
+    "completed_worker_seconds": 0.0,
+}
+state = terminal_state
+terminal_result = {"execution": {
+    "schema": "fm.worker-execution-terminal/v1",
+    "request_digest": terminal_action["request_digest"],
+    "idempotency_key": terminal_action["idempotency_key"],
+    "disposition": "provider-terminal",
+    "provisioning_state": "Succeeded",
+    "execution_state": "Failed",
+    "exit_code": 2,
+    "task_command_id": "/exact/task-command",
+}}
+try:
+    module.apply_pending(env, terminal_action, terminal_result)
+except module.LifecycleError as exc:
+    assert "provider-terminal" in str(exc) and "failed" in str(exc), exc
+else:
+    raise AssertionError("failed guest execution was applied as a successful result")
+assert terminal_state["pending_actions"]["1"] == terminal_action, terminal_state
+PY
+  pass "service completion replays across releasing and completed crash windows"
+}
+
 static_contract() {
   python3 - "$CONTROLLER" "$AZURE" "$SUPERVISOR" "$AUTHORITY" "$DOC" <<'PY' || fail "elastic worker static contract failed"
 from pathlib import Path
@@ -859,6 +1006,23 @@ recovered_kind, recovered_execution = module.execute_terminal_disposition(
 )
 assert recovered_kind == module.EXECUTE_DISPOSITION_RECOVERED, recovered_kind
 assert recovered_execution == execution, recovered_execution
+module.run_command_instance_view = lambda *_args, **_kwargs: {
+    "executionState": "Failed", "exitCode": 2, "output": "", "error": "guest failed",
+}
+failed_kind, failed_execution = module.execute_terminal_disposition(
+    controller, execute_action, worker["resources"]
+)
+assert failed_kind == module.EXECUTE_DISPOSITION_TERMINAL, failed_kind
+assert failed_execution == {
+    "schema": "fm.worker-execution-terminal/v1",
+    "request_digest": execute_action["request_digest"],
+    "idempotency_key": execute_action["idempotency_key"],
+    "disposition": "provider-terminal",
+    "provisioning_state": "Succeeded",
+    "execution_state": "Failed",
+    "exit_code": 2,
+    "task_command_id": task_command["id"],
+}, failed_execution
 
 # Once the exact request owns the Run Command, a replay may only recover its
 # terminal disposition or exact result. Updating/Running and a Succeeded
@@ -8692,6 +8856,8 @@ PY
 }
 
 static_contract
+service_complete_front_door
+service_complete_replay_contract
 compartment_payload_contract
 classification_and_admission_matrix
 azure_provider_refusal_matrix

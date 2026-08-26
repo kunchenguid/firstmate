@@ -74,6 +74,8 @@ def load(name, path):
 
 builder = load("runtime_builder", root / "bin/fm-no-mistakes-runtime.py")
 supervisor = load("worker_supervisor", root / "bin/fm-worker-supervisor.py")
+assert supervisor.MAX_NO_MISTAKES_RUNTIME_FILES == builder.MAX_FILES, (
+    supervisor.MAX_NO_MISTAKES_RUNTIME_FILES, builder.MAX_FILES)
 bundle = temporary / "runtime.tar.gz"
 args = argparse.Namespace(
     no_mistakes=str(temporary / "no-mistakes"), node=str(temporary / "node"),
