@@ -23,6 +23,27 @@ next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
   for a in "$@"; do printf '\x1f%s' "$a"; done
   printf '\n'
 } >> "$LOG"
+# Run a submitted text line the way the terminal's own shell would, so
+# fm-spawn's shell-readiness probe is answered. A literal send and the bare
+# Enter key (an empty --text with --enter) are input events, not submitted
+# lines, so leaving them unrun keeps this stub from launching a harness.
+# The parse runs in a subshell so the response sequencing below still sees
+# the original argv.
+(
+  if [ "${1:-}" = terminal ] && [ "${2:-}" = send ]; then
+    text=; enter=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --text) text=${2:-}; shift ;;
+        --enter) enter=1 ;;
+      esac
+      shift
+    done
+    if [ "$enter" = 1 ] && [ -n "$text" ]; then
+      ( eval "$text" ) >/dev/null 2>&1 || true
+    fi
+  fi
+)
 if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ]; then
   printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'
   exit 0

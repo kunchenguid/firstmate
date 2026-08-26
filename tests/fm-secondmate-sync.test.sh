@@ -632,10 +632,18 @@ case "\$cmd \$sub" in
       printf '{"error":{"code":"agent_not_found","message":"gone"}}\n' >&2
     fi
     ;;
-  "pane send-text"|"pane run"|"pane send-keys")
+  "pane send-text"|"pane send-keys")
     if [ "\$arg" = "${stale#*:}" ]; then
       exit 1
     fi
+    exit 0
+    ;;
+  "pane run")
+    if [ "\$arg" = "${stale#*:}" ]; then
+      exit 1
+    fi
+    # A pane run types AND submits one line, so the pane's shell runs it.
+    ( eval "\${4:-}" ) >/dev/null 2>&1 || true
     exit 0
     ;;
 esac

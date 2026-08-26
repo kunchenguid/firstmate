@@ -781,11 +781,18 @@ case "\${1:-}" in
     for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
   list-windows) exit 0 ;;
+  send-keys)
+    # Run the typed line as the pane's shell would, so fm-spawn's
+    # shell-readiness probe is answered; this stub's pane path is scripted
+    # above, not driven by anything that runs here.
+    fm-fake-shell-exec "\$@"
+    exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fb/tmux"
   fm_fake_exit0 "$fb" treehouse
+  fm_fake_shell_exec "$fb"
   printf '%s\n' "$fb"
 }
 
@@ -851,11 +858,18 @@ case "\${1:-}" in
     ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
   list-windows) exit 0 ;;
+  send-keys)
+    # Run the typed line as the pane's shell would, so fm-spawn's
+    # shell-readiness probe is answered; this stub's pane path is scripted
+    # above, not driven by anything that runs here.
+    fm-fake-shell-exec "\$@"
+    exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fb/tmux"
   fm_fake_exit0 "$fb" treehouse
+  fm_fake_shell_exec "$fb"
   printf '%s\n' "$fb"
 }
 

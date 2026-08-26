@@ -67,6 +67,10 @@ case "${1:-}" in
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
+    # Run a submitted text line as the pane's shell would, so fm-spawn's
+    # shell-readiness probe is answered; the literal launch and pointer sends
+    # below stay under this fake's own control.
+    fm-fake-shell-exec "$@"
     prev=
     literal=
     for arg in "$@"; do
@@ -131,6 +135,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_fake_shell_exec "$fakebin"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
   fm_fake_exit0 "$fakebin" kimi
   ln -s "$JQ_BIN" "$fakebin/jq"

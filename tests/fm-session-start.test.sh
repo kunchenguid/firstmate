@@ -397,11 +397,13 @@ case "${1:-}" in
     printf '%%1\n'
     exit 0
     ;;
-  set-window-option|send-keys) exit 0 ;;
+  set-window-option) exit 0 ;;
+  send-keys) fm-fake-shell-exec "$@"; exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_fake_shell_exec "$fakebin"
 }
 
 make_fake_herdr_secondmate_recovery() {
@@ -472,7 +474,13 @@ case "${1:-} ${2:-}" in
   "pane close")
     [ "${3:-}" = p-old ] && : > "$killed"
     ;;
-  "pane run"|"pane send-text"|"pane send-keys"|"tab close")
+  "pane run")
+    # A pane run types AND submits one line, so the pane's shell runs it. The
+    # spawn this recovery drives proves the endpoint's shell is reading input
+    # by a side effect the shell must produce before it types the launch.
+    ( eval "${4:-}" ) >/dev/null 2>&1 || true
+    ;;
+  "pane send-text"|"pane send-keys"|"tab close")
     ;;
   *)
     exit 1
