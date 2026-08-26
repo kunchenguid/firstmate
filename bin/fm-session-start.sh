@@ -44,9 +44,10 @@
 #   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#                       every state/*.meta, provider-aware current task state,
+#                       a bounded state/*.status tail, state/.afk, and a cheap
+#                       endpoint-liveness read for local tasks: read-only,
+#                       always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -744,16 +745,28 @@ X_MODE_PRESENT=0
 if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
   PI_EXT="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
   PI_TURNEND_EXT="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
+  PI_FEISHU_EXT="$FM_ROOT/.pi/extensions/fm-primary-feishu-bridge.ts"
   PI_WATCH_MARKER="$STATE/.pi-watch-extension-loaded"
   PI_TURNEND_MARKER="$STATE/.pi-turnend-extension-loaded"
+  PI_FEISHU_MARKER="$STATE/.pi-feishu-extension-loaded"
   PI_LOCK="$STATE/.lock"
   PI_RESTART_COMMAND=$PRIMARY_HARNESS
   [ "$PRIMARY_HARNESS" != pi ] || PI_RESTART_COMMAND='plain pi'
   PI_WATCH_VERSION=$(fm_pi_extension_version "$PI_EXT" || printf '')
   PI_TURNEND_VERSION=$(fm_pi_extension_version "$PI_TURNEND_EXT" || printf '')
+  PI_FEISHU_VERSION=$(fm_pi_extension_version "$PI_FEISHU_EXT" || printf '')
   if ! fm_pi_extension_loaded "$PI_WATCH_MARKER" "$PI_WATCH_VERSION" "$PI_LOCK" \
     || ! fm_pi_extension_loaded "$PI_TURNEND_MARKER" "$PI_TURNEND_VERSION" "$PI_LOCK"; then
     printf 'PI_WATCH_EXTENSION: not loaded - approve Pi project trust once per clone, then restart %s so %s and %s auto-load for turn-end guard and background wake coverage; use -e %s -e %s only if project hooks are not trusted\n' "$PI_RESTART_COMMAND" "$PI_TURNEND_EXT" "$PI_EXT" "$PI_TURNEND_EXT" "$PI_EXT"
+  fi
+  PI_FEISHU_ACTIVE=''
+  if [ -e "$CONFIG/feishu.env" ] || [ -L "$CONFIG/feishu.env" ]; then
+    PI_FEISHU_ACTIVE=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+      "$SCRIPT_DIR/fm-feishu-transport.sh" config-check 2>/dev/null || printf '')
+  fi
+  if [ "$PI_FEISHU_ACTIVE" = '{"status":"enabled"}' ] \
+    && ! fm_pi_extension_loaded "$PI_FEISHU_MARKER" "$PI_FEISHU_VERSION" "$PI_LOCK"; then
+    printf 'FEISHU: Pi bridge not loaded - restart %s after approving project trust so %s can converge the configured exact current-session binding\n' "$PI_RESTART_COMMAND" "$PI_FEISHU_EXT"
   fi
 fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \
@@ -809,17 +822,28 @@ for meta in "$STATE"/*.meta; do
   printf '\n--- %s ---\n' "$id"
   cat "$meta"
 
-  window=$(fm_meta_get "$meta" window)
-  target=$(fm_backend_target_of_meta "$meta")
-  if [ -n "$window" ]; then
-    backend=$(fm_backend_of_meta "$meta")
-    if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
-      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
-    else
-      printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
-    fi
+  executor=$(fm_meta_get "$meta" executor)
+  [ -n "$executor" ] || executor=local-agent
+  if [ "$executor" = cloud-worker ] || [ "$executor" = remote-agent ]; then
+    provider=$(fm_meta_get "$meta" provider)
+    printf 'endpoint: not applicable (executor=%s provider=%s)\n' "$executor" "${provider:-unknown}"
+    FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-task-state.sh" "$id" 2>/dev/null \
+      || printf 'state: unknown · source: cloud-readback · provider-aware state read failed\n'
   else
-    printf 'endpoint: unknown (no window recorded)\n'
+    window=$(fm_meta_get "$meta" window)
+    target=$(fm_backend_target_of_meta "$meta")
+    if [ -n "$window" ]; then
+      backend=$(fm_backend_of_meta "$meta")
+      if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
+        printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
+      else
+        printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
+      fi
+    else
+      printf 'endpoint: unknown (no window recorded)\n'
+    fi
   fi
 
   status="$STATE/$id.status"

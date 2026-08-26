@@ -132,7 +132,7 @@ now_ms() {
 # unclassified so new tests are still runnable and visible in summaries.
 family_for_basename() {
   case "$1" in
-    fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
+    fm-aime-cloud-worker.test.sh|fm-remote-agent.test.sh|fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
     fm-bearings-board.test.sh|\
     fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
@@ -140,7 +140,7 @@ family_for_basename() {
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
-    fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
+    fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-traex-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-lint-workflows.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
@@ -151,7 +151,7 @@ family_for_basename() {
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
-    fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
+    fm-daemon.test.sh|fm-feishu-channel.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
     fm-session-lock-ancestry.test.sh|fm-cursor-primary.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
     fm-wake-drain-unread-status.test.sh|\
@@ -191,7 +191,7 @@ family_for_basename() {
     fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
     fm-cursor-primary-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-harness-liveness-drift-live-e2e.test.sh|\
-    fm-muse-signals-live-e2e.test.sh|\
+    fm-muse-signals-live-e2e.test.sh|fm-traex-harness-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|\
@@ -415,13 +415,14 @@ tests/fm-control.test.sh 36712
 tests/fm-cursor-harness.test.sh 30071
 tests/fm-cursor-primary-live-e2e.test.sh 20
 tests/fm-cursor-primary.test.sh 52324
-tests/fm-daemon.test.sh 25834
-tests/fm-documentation-audiences.test.sh 642
-tests/fm-fleet-snapshot-view.test.sh 6995
-tests/fm-fleet-sync.test.sh 20194
-tests/fm-gate-refuse.test.sh 4071
-tests/fm-gitignore-config.test.sh 63
-tests/fm-gotmp.test.sh 762
+tests/fm-daemon.test.sh 15140
+tests/fm-documentation-audiences.test.sh 572
+tests/fm-feishu-channel.test.sh 3500
+tests/fm-fleet-snapshot-view.test.sh 5902
+tests/fm-fleet-sync.test.sh 16417
+tests/fm-gate-refuse.test.sh 2839
+tests/fm-gitignore-config.test.sh 28
+tests/fm-gotmp.test.sh 308
 tests/fm-grok-continuity-live-e2e.test.sh 19
 tests/fm-grok-stop-live-e2e.test.sh 21
 tests/fm-guard-stale-banner.test.sh 11280
@@ -649,8 +650,8 @@ run_coverage_guard() {
     return 1
   fi
   cat "$tmp/s1" "$tmp/s2" | LC_ALL=C sort -u >"$tmp/shards_union"
-  missing=$(comm -23 "$tmp/proven" "$tmp/shards_union" || true)
-  extra=$(comm -13 "$tmp/proven" "$tmp/shards_union" || true)
+  missing=$(LC_ALL=C comm -23 "$tmp/proven" "$tmp/shards_union" || true)
+  extra=$(LC_ALL=C comm -13 "$tmp/proven" "$tmp/shards_union" || true)
   if [ -n "$missing" ] || [ -n "$extra" ]; then
     log "coverage guard: portable shards must equal the proven-isolated set"
     [ -z "$missing" ] || { log "missing from shards:"; printf '%s\n' "$missing" >&2; }
@@ -694,8 +695,8 @@ run_coverage_guard() {
     return 1
   fi
   LC_ALL=C sort -u "$tmp/serial_shards_raw" >"$tmp/serial_shards"
-  missing=$(comm -23 "$tmp/serial" "$tmp/serial_shards" || true)
-  extra=$(comm -13 "$tmp/serial" "$tmp/serial_shards" || true)
+  missing=$(LC_ALL=C comm -23 "$tmp/serial" "$tmp/serial_shards" || true)
+  extra=$(LC_ALL=C comm -13 "$tmp/serial" "$tmp/serial_shards" || true)
   if [ -n "$missing" ] || [ -n "$extra" ]; then
     log "coverage guard: portable serial shards must equal the portable serial lane"
     [ -z "$missing" ] || { log "missing from serial shards:"; printf '%s\n' "$missing" >&2; }
@@ -707,7 +708,7 @@ run_coverage_guard() {
   for pair in "shards_union:serial" "shards_union:herdr" "serial:herdr"; do
     a=${pair%%:*}
     b=${pair#*:}
-    comm -12 "$tmp/$a" "$tmp/$b" >"$tmp/overlap"
+    LC_ALL=C comm -12 "$tmp/$a" "$tmp/$b" >"$tmp/overlap"
     if [ -s "$tmp/overlap" ]; then
       log "coverage guard: overlap between $a and $b:"
       cat "$tmp/overlap" >&2
@@ -725,8 +726,8 @@ run_coverage_guard() {
     return 1
   fi
   LC_ALL=C sort -u "$tmp/union_raw" >"$tmp/union"
-  missing=$(comm -23 "$tmp/all" "$tmp/union" || true)
-  extra=$(comm -13 "$tmp/all" "$tmp/union" || true)
+  missing=$(LC_ALL=C comm -23 "$tmp/all" "$tmp/union" || true)
+  extra=$(LC_ALL=C comm -13 "$tmp/all" "$tmp/union" || true)
   if [ -n "$missing" ] || [ -n "$extra" ]; then
     log "coverage guard: union of portable shards + portable serial + Herdr must equal tests/*.test.sh"
     [ -z "$missing" ] || { log "missing from union:"; printf '%s\n' "$missing" >&2; }
@@ -739,7 +740,7 @@ run_coverage_guard() {
     "$ROOT/bin/fm-test-isolation-proof.sh" --list | LC_ALL=C sort -u >"$tmp/proof_list"
     if ! cmp -s "$tmp/proven" "$tmp/proof_list"; then
       log "coverage guard: embedded proven-isolated set diverges from bin/fm-test-isolation-proof.sh --list"
-      comm -3 "$tmp/proven" "$tmp/proof_list" >&2 || true
+      LC_ALL=C comm -3 "$tmp/proven" "$tmp/proof_list" >&2 || true
       rm -rf "$tmp"
       return 1
     fi
@@ -937,8 +938,13 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' real-herdr-gated
       ;;
+    bin/fm-classify-lib.sh)
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' "__script__:fm-aime-cloud-worker.test.sh"
+      printf '%s\n' "__script__:fm-remote-agent.test.sh"
+      ;;
     bin/fm-watch*|bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
-    bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
+    bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
       printf '%s\n' watcher-wake-lock
       ;;
     bin/fm-afk*)
@@ -955,16 +961,33 @@ families_for_changed_path() {
       printf '%s\n' secondmate
       printf '%s\n' session-bootstrap
       ;;
+    bin/fm-remote-agent-lib.sh|bin/fm-remote-agent-aime.sh|bin/fm-remote-agent-ida.sh|\
+    bin/fm-ida-remote-lib.sh|bin/fm-bytedcli-mcp-call.sh|bin/fm-procevent-ida.sh|\
+    bin/fm-task-dispatch.sh|bin/fm-task-state.sh|bin/fm-task-retire.sh)
+      printf '%s\n' "__script__:fm-aime-cloud-worker.test.sh"
+      printf '%s\n' "__script__:fm-remote-agent.test.sh"
+      ;;
     bin/fm-secondmate*|bin/fm-remote*|bin/fm-on.sh|bin/fm-home-seed.sh|\
     bin/fm-backlog-handoff.sh|bin/fm-backlog-receive.sh|bin/fm-procevent-remote-reply.sh|\
     bin/fm-config-inherit-lib.sh|bin/fm-config-push.sh|bin/fm-shared*|\
     bin/fm-stow-cascade.sh)
       printf '%s\n' secondmate
       ;;
-    bin/fm-session-start.sh|bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
+    bin/fm-session-start.sh)
+      printf '%s\n' session-bootstrap
+      printf '%s\n' "__script__:fm-aime-cloud-worker.test.sh"
+      printf '%s\n' "__script__:fm-remote-agent.test.sh"
+      ;;
+    bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
     bin/fm-sessionstart-nudge.sh|bin/fm-startup-network.sh|bin/fm-tangle*|bin/fm-update.sh|\
     bin/fm-gate-refuse*|bin/fm-lock*|bin/fm-quota-axi-lib.sh)
       printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-feishu-*|.pi/extensions/fm-primary-feishu-bridge.ts|\
+    .pi/extensions/lib/fm-feishu-native-channel.ts|.pi/extensions/lib/fm-primary-ingress.ts|\
+    package.json|package-lock.json)
+      printf '%s\n' "__script__:fm-feishu-channel.test.sh"
+      printf '%s\n' "__script__:fm-pi-primary-types.test.sh"
       ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
     .pi/extensions/fm-primary-turnend-guard.ts)
@@ -972,6 +995,10 @@ families_for_changed_path() {
       # context-reset stdout injection) only show up against a real harness.
       printf '%s\n' session-bootstrap
       printf '%s\n' live-harness-optin
+      ;;
+    bin/fm-aime-cloud-lib.sh|bin/fm-cloud-research-aime.sh|bin/fm-procevent-aime.sh)
+      printf '%s\n' "__script__:fm-aime-cloud-worker.test.sh"
+      printf '%s\n' "__script__:fm-remote-agent.test.sh"
       ;;
     bin/fm-timeout-lib.sh)
       # The shared hard bound: session start's runtime bound, the fleet/bearings
@@ -1015,7 +1042,12 @@ families_for_changed_path() {
       printf '%s\n' watcher-wake-lock
       printf '%s\n' live-harness-optin
       ;;
-    bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh)
+    bin/fm-fleet-snapshot.sh)
+      printf '%s\n' snapshot-bearings
+      printf '%s\n' "__script__:fm-aime-cloud-worker.test.sh"
+      printf '%s\n' "__script__:fm-remote-agent.test.sh"
+      ;;
+    bin/fm-bearings-snapshot.sh|bin/fm-fleet-view.sh)
       printf '%s\n' snapshot-bearings
       ;;
     bin/fm-install-herdr.sh|bin/fm-install-treehouse.sh|bin/fm-herdr-ci-cleanup.sh)
@@ -1037,6 +1069,9 @@ families_for_changed_path() {
     .agents/skills/quota-array-dispatch/SKILL.md)
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
+      ;;
+    .agents/skills/magibook-pyspark/templates/*.py)
+      printf '%s\n' "__script__:fm-magibook-pyspark.test.sh"
       ;;
     .agents/skills/*/SKILL.md)
       printf '%s\n' pure-contract-unit

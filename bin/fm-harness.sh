@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|traex|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -33,6 +33,10 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
+  # Firstmate sets FM_TRAEX_HARNESS only on its exact TraeX worker launch.
+  # It outranks inherited foreign markers and deliberately has no ancestry fallback,
+  # so unrelated TraeX processes cannot be misidentified as workers or primaries.
+  [ "${FM_TRAEX_HARNESS:-}" = traex ] && { echo traex; return; }
   # Claude, Pi, Grok, and Cursor set verified markers of their own; codex,
   # opencode, Kimi, and Muse are markerless, so a foreign marker retained in a terminal
   # multiplexer's stored environment can silently misidentify one of them before

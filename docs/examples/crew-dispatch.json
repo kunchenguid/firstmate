@@ -13,10 +13,11 @@
     {
       "when": "The task is a big or ambiguous multi-file feature, a risky refactor, or work that requires holding many moving parts in mind.",
       "use": [
+        { "harness": "traex", "model": "gpt-5.6-sol", "effort": "high", "preferWhileLoadBelowPercent": 90 },
         { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },
         { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
       ],
-      "why": "Use a strong coding profile for big, ambiguous work; resolve the alternatives through quota-array-dispatch."
+      "why": "Use a strong coding profile for big, ambiguous work; the TraeX load threshold is an example local value, not shared policy."
     }
   ],
   "default": [

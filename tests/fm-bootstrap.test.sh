@@ -894,7 +894,7 @@ test_network_phase_partitions_the_run() {
   fakebin=$(make_fake_toolchain "$case_dir")
   # Break the two diagnostics that stand for the two halves: a local tool floor
   # and the network GitHub-auth probe.
-  rm -f "$fakebin/node"
+  rm -f "$fakebin/chrome-devtools-axi"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 1
@@ -903,18 +903,18 @@ SH
 
   all_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$all_out" "MISSING: node (install:" "the unsplit run lost its local diagnostic"
+  assert_contains "$all_out" "MISSING: chrome-devtools-axi (install:" "the unsplit run lost its local diagnostic"
   assert_contains "$all_out" "NEEDS_GH_AUTH" "the unsplit run lost its network diagnostic"
 
   skip_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$skip_out" "MISSING: node (install:" "the local half lost its own diagnostic"
+  assert_contains "$skip_out" "MISSING: chrome-devtools-axi (install:" "the local half lost its own diagnostic"
   assert_not_contains "$skip_out" "NEEDS_GH_AUTH" "the local half still made a network call"
 
   only_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$only_out" "NEEDS_GH_AUTH" "the network half lost its own diagnostic"
-  assert_not_contains "$only_out" "MISSING: node" "the network half repeated the local half's work"
+  assert_not_contains "$only_out" "MISSING: chrome-devtools-axi" "the network half repeated the local half's work"
 
   combined=$(printf '%s\n%s\n' "$skip_out" "$only_out" | LC_ALL=C sort)
   [ "$combined" = "$(printf '%s\n' "$all_out" | LC_ALL=C sort)" ] \
@@ -1077,7 +1077,7 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   case_dir="$TMP_ROOT/dispatch-active"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-  printf '%s\n' '{"rules":[{"when":"fresh news","use":{"harness":"grok"},"why":"current context"},{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]},{"when":"legacy feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"quota-balanced"}],"default":[{"harness":"pi","model":"anthropic/claude-sonnet-5","effort":"high"},{"harness":"grok","model":"grok-4.5","effort":"high"}]}' > "$case_dir/home/config/crew-dispatch.json"
+  printf '%s\n' '{"rules":[{"when":"fresh news","use":{"harness":"grok"},"why":"current context"},{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]},{"when":"traex-eligible feature","use":[{"harness":"traex","model":"gpt-5.6-sol","effort":"high","preferWhileLoadBelowPercent":110},{"harness":"codex","model":"gpt-5.6-sol","effort":"high"}]},{"when":"legacy feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"quota-balanced"}],"default":[{"harness":"pi","model":"anthropic/claude-sonnet-5","effort":"high"},{"harness":"grok","model":"grok-4.5","effort":"high"}]}' > "$case_dir/home/config/crew-dispatch.json"
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
 
@@ -1088,7 +1088,7 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_BOOTSTRAP_VERBOSE_FACTS=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
 
-  expect=$'BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json\nBOOTSTRAP_INFO: crew dispatch rule: fresh news -> grok\nBOOTSTRAP_INFO: crew dispatch rule: big feature -> quota-balanced[claude/claude-sonnet-5/high, codex/gpt-5.5/high]\nBOOTSTRAP_INFO: crew dispatch rule: legacy feature -> quota-balanced[claude, codex]\nBOOTSTRAP_INFO: crew dispatch default: quota-balanced[pi/anthropic/claude-sonnet-5/high, grok/grok-4.5/high]'
+  expect=$'BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json\nBOOTSTRAP_INFO: crew dispatch rule: fresh news -> grok\nBOOTSTRAP_INFO: crew dispatch rule: big feature -> quota-balanced[claude/claude-sonnet-5/high, codex/gpt-5.5/high]\nBOOTSTRAP_INFO: crew dispatch rule: traex-eligible feature -> quota-balanced[traex/gpt-5.6-sol/high/prefer-load<110, codex/gpt-5.6-sol/high]\nBOOTSTRAP_INFO: crew dispatch rule: legacy feature -> quota-balanced[claude, codex]\nBOOTSTRAP_INFO: crew dispatch default: quota-balanced[pi/anthropic/claude-sonnet-5/high, grok/grok-4.5/high]'
   [ "$out" = "$expect" ] || fail "active dispatch verbose info block mismatch"$'\n'"expected: $expect"$'\n'"actual:   $out"
   pass "bootstrap surfaces active crew-dispatch rules only as verbose BOOTSTRAP_INFO"
 }
@@ -1124,6 +1124,8 @@ unsupported grok xhigh effort is flagged^{"rules":[{"when":"deep current work","
 pi max effort is accepted^{"rules":[{"when":"deep coding","use":{"harness":"pi","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
 pi-signed max effort is accepted^{"rules":[{"when":"signed coding","use":{"harness":"pi-signed","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
 muse shared efforts are accepted^{"rules":[{"when":"muse low","use":{"harness":"muse","effort":"low"}},{"when":"muse medium","use":{"harness":"muse","effort":"medium"}},{"when":"muse high","use":{"harness":"muse","effort":"high"}},{"when":"muse xhigh","use":{"harness":"muse","effort":"xhigh"}},{"when":"muse max","use":{"harness":"muse","effort":"max"}}]}^empty^
+traex xhigh effort is accepted^{"rules":[{"when":"traex coding","use":{"harness":"traex","effort":"xhigh"}}]}^empty^
+traex max effort is flagged^{"rules":[{"when":"traex max","use":{"harness":"traex","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: traex:max
 unsupported muse ultra effort is flagged^{"rules":[{"when":"muse ultra","use":{"harness":"muse","effort":"ultra"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: muse:ultra
 unsupported opencode effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:high
 kimi model profile is accepted^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3"}}]}^empty^
@@ -1132,8 +1134,10 @@ cursor model profile is accepted^{"rules":[{"when":"cursor work","use":{"harness
 unsupported cursor effort is flagged^{"rules":[{"when":"cursor work","use":{"harness":"cursor","model":"cursor-grok-4.5-high","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: cursor:high
 array use with quota-balanced is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}]}^empty^
 array use without select is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}]}]}^empty^
+traex array load preference is accepted^{"rules":[{"when":"traex feature","use":[{"harness":"traex","model":"gpt-5.6-sol","preferWhileLoadBelowPercent":110},{"harness":"codex","model":"gpt-5.6-sol"}]}]}^empty^
 one-element array use is accepted^{"rules":[{"when":"focused feature","use":[{"harness":"claude"}]}]}^empty^
 default array is accepted^{"default":[{"harness":"pi","model":"anthropic/claude-sonnet-5"},{"harness":"grok"}]}^empty^
+traex default array load preference is accepted^{"default":[{"harness":"traex","model":"gpt-5.6-sol","preferWhileLoadBelowPercent":85},{"harness":"codex","model":"gpt-5.6-sol"}]}^empty^
 one-element default array is accepted^{"default":[{"harness":"codex"}]}^empty^
 empty array use is flagged^{"rules":[{"when":"big feature","use":[]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each rule needs at least one use profile
 array profile without harness is flagged^{"rules":[{"when":"big feature","use":[{"model":"gpt-5.5"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each use profile needs harness
@@ -1144,6 +1148,11 @@ empty default array is flagged^{"default":[]}^exact^CREW_DISPATCH: invalid confi
 non-object default array entry is flagged^{"default":["codex"]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each default profile must be an object
 default array profile without harness is flagged^{"default":[{"model":"gpt-5.5"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each default profile needs harness
 default array malformed effort is flagged^{"default":[{"harness":"codex","effort":3}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile model and effort must be non-empty strings when present
+zero traex load preference is flagged^{"rules":[{"when":"traex feature","use":[{"harness":"traex","model":"gpt-5.6-sol","preferWhileLoadBelowPercent":0},{"harness":"codex"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - preferWhileLoadBelowPercent must be a positive number
+string traex load preference is flagged^{"rules":[{"when":"traex feature","use":[{"harness":"traex","model":"gpt-5.6-sol","preferWhileLoadBelowPercent":"110"},{"harness":"codex"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - preferWhileLoadBelowPercent must be a positive number
+single profile load preference is flagged^{"rules":[{"when":"traex feature","use":{"harness":"traex","model":"gpt-5.6-sol","preferWhileLoadBelowPercent":110}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - preferWhileLoadBelowPercent is valid only in profile arrays
+non-traex load preference is flagged^{"rules":[{"when":"codex feature","use":[{"harness":"codex","model":"gpt-5.6-sol","preferWhileLoadBelowPercent":110},{"harness":"traex","model":"gpt-5.6-sol"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - preferWhileLoadBelowPercent is valid only for traex profiles
+modelless traex load preference is flagged^{"rules":[{"when":"traex feature","use":[{"harness":"traex","preferWhileLoadBelowPercent":110},{"harness":"codex"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - preferWhileLoadBelowPercent requires an explicit traex model
 ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }

@@ -33,6 +33,16 @@ The required CI lane uses the pinned installers in `bin/fm-install-herdr.sh` and
 Those script headers own release assets, checksums, download bounds, and post-install gates.
 Real harness credential tests remain opt-in rather than part of default CI.
 
+## TraeX worker adapter
+
+TraeX is verified on Herdr 0.8.0 for ordinary isolated workers and scouts only.
+`fm-spawn.sh` refuses secondmate and non-Herdr TraeX launches before endpoint creation.
+The [`harness-adapters`](../.agents/skills/harness-adapters/SKILL.md#traex-verified-2026-08-11-traecli-020019-internal-edition-herdr-080) reference owns its exact launch, profile, marker, trust, interrupt, exit, and resume facts.
+
+After launch, TraeX uses the generic Herdr agent, pane, process, input, busy-state, kill, supervision, and stale-recovery paths used by ordinary harnesses.
+It has no TraeX-specific readiness state machine, transition journal, completion transaction, watcher scan, or exactly-once guarantee.
+The opt-in smoke test is `FM_TRAEX_HERDR_LIVE=1 bin/fm-test-run.sh tests/fm-traex-harness-live-e2e.test.sh`.
+
 ## Watching and task containers
 
 The ordinary topology puts one task tab per endpoint in the exact workspace of the Firstmate or secondmate that launches it.

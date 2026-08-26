@@ -51,7 +51,15 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-remote-home-seed.sh` | Register and provision a whole secondmate home on an SSH-reachable host              |
 | `fm-remote-readiness-lib.sh` | Shared remote second-mate readiness gate: check and, when needed, repair then re-check through `fm-remote-doctor.sh` |
 | [`fm-project-origin-lib.sh`](../bin/fm-project-origin-lib.sh) | Accepted origin-form owner shared by both remote provisioning boundaries |
+| `fm-task-dispatch.sh`     | Dispatch an ordinary task through the local-agent or an explicit AIME/iDA remote-agent executor |
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
+| `fm-remote-agent-lib.sh` | Own native remote-agent metadata, normalized task state, private artifacts, and report safety |
+| `fm-remote-agent-aime.sh` | Select AIME's established lifecycle while publishing new `executor=remote-agent` records |
+| `fm-remote-agent-ida.sh` | Probe, dispatch, adopt, reconcile, cancel, abandon, and retire an SG iDA remote-agent task |
+| `fm-ida-remote-lib.sh`   | Own iDA configuration, normalized observations, and provider-state validation |
+| `fm-bytedcli-mcp-call.sh` | Verify the iDA MCP command capability or pass the approved private SG create command through stdin and emit normalized JSON |
+| `fm-cloud-research-aime.sh` | Probe, dispatch, adopt, reconcile, interrupt, retire, or explicitly sandbox-verify an AIME research task |
+| `fm-aime-cloud-lib.sh`   | Shared AIME configuration, legacy-compatible task state, metadata, artifact, and error-classification primitives |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer shapes, capability-aware screen classification, and verdicts |
@@ -70,6 +78,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-secondmate-report.sh` | Optional helper to append a correlated parent status or document-pointer report       |
 | `fm-procevent-remote-reply.sh` | Relay the remote-secondmate status stream through non-destructive process-event deltas |
 | `fm-procevent-when.sh`   | Fire a trust-bound deterministic action at most once when its registered condition holds, then wake with the outcome |
+| `fm-procevent-aime.sh`   | Adapt AIME event replay and result readback to the generic process-event transport    |
+| `fm-procevent-ida.sh`    | Reconcile iDA identity, submit once, normalize readback, capture reports, and re-arm through process-event transport |
 | `fm-gate-refuse-lib.sh`  | Shared no-mistakes gate-context refusal for fleet lifecycle entrypoints               |
 | `fm-watch-arm.sh`        | Verified home-scoped watcher arm wrapper with loud cycle endings and bounded lifecycle ledger |
 | `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision            |
@@ -80,6 +90,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-afk-return.sh`       | Own deterministic return shutdown, catch-up evidence, and the firstmate-actionable blocker gate |
 | `fm-supervisor-target-lib.sh` | Resolve the shared supervisor target and backend for the daemon and launcher       |
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, guard injection by the detected primary harness, escalate batched digests, alert on failed delivery |
+| `fm-task-state.sh`       | Print provider-aware current task state while preserving local crew-state semantics  |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crew                                |
 | `fm-nm-run-lib.sh`       | Shared branch-and-code-identity attribution for no-mistakes runs                    |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
@@ -116,6 +127,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub or GitLab URL          |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode |
+| `fm-task-retire.sh`      | Retire a local or AIME/iDA remote task through its executor-specific safety path     |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |

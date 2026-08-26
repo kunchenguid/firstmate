@@ -947,7 +947,9 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   # Force a MISSING diagnostic line so the bootstrap section is non-trivial.
-  rm -f "$fakebin/node"
+  # Use a tool absent from the default test base path so host system packages
+  # cannot mask it.
+  rm -f "$fakebin/chrome-devtools-axi"
 
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
   printf 'Captain memory that may be truncated away safely.\n' > "$home/data/captain.md"
@@ -986,7 +988,7 @@ EOF
   assert_contains "$out" "Captain memory that may be truncated away safely." \
     "the ordering fixture did not actually print a memory file"
 
-  missing_line=$(printf '%s\n' "$out" | grep -n 'MISSING: node' | head -1 | cut -d: -f1)
+  missing_line=$(printf '%s\n' "$out" | grep -n 'MISSING: chrome-devtools-axi' | head -1 | cut -d: -f1)
   [ -n "$missing_line" ] || fail "MISSING diagnostic did not appear at all"
   [ "$missing_line" -lt "$fleet_line" ] || fail "actionable MISSING diagnostic was buried after the bulk fleet-state digest"
 
@@ -1341,6 +1343,37 @@ EOF
   pass "herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone one"
 }
 
+test_remote_agent_startup_recovery() {
+  local rec root home fakebin out id=remote-ida state_dir
+  rec=$(new_world remote-agent-startup)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  state_dir="$home/state/remote-tasks/$id"
+  mkdir -p "$state_dir"
+  cat >"$home/state/$id.meta" <<EOF
+kind=scout
+executor=remote-agent
+provider=ida
+task_type=research
+remote_state=$state_dir
+EOF
+  chmod 0600 "$home/state/$id.meta"
+  cat >"$state_dir/state.json" <<EOF
+{"schema":"fm-remote-agent-task-state.v1","task_id":"$id","executor":"remote-agent","provider":"ida","task_type":"research","revision":1,"phase":"terminal-success","instruction_file":"$home/data/$id/instructions.txt","instruction_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytedcli_version":"0.128.0","outcome":"succeeded","error_class":null,"provider_checkpoint":"result-verified","waiter":"terminal","result_availability":"zero","result_path":null,"report_path":null,"provider_state":{"region":"sg","identity":"user","session_marker":"firstmate:$id:aaaaaaaaaaaaaaaa","session_id":"70001","task_id":"80001","agent_id":"9001","agent_name":"iDA Test","model":"ida-test","provider_status":"completed"},"created_at":"2026-08-19T00:00:00Z","updated_at":"2026-08-19T00:00:00Z"}
+EOF
+  chmod 0600 "$state_dir/state.json"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "endpoint: not applicable (executor=remote-agent provider=ida)" \
+    "session start pretended a remote agent had a local endpoint"
+  assert_contains "$out" "state: done · source: remote-state · provider=ida phase=terminal-success outcome=succeeded" \
+    "session start did not recover native remote-agent current state"
+  pass "session start recovers native remote-agent state without a local endpoint"
+}
+
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
@@ -1351,7 +1384,7 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  rm -f "$fakebin/node"
+  rm -f "$fakebin/chrome-devtools-axi"
 
   printf 'needs-decision: pick a library\n' > "$home/state/task-z.status"
   append_wake "$home/state" signal task-z.status "needs-decision: pick a library"
@@ -1361,7 +1394,7 @@ EOF
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"
   # fm-bootstrap.sh's own exact MISSING-tool line format.
-  assert_contains "$out" "MISSING: node (install:" "fm-bootstrap.sh's real detect line did not appear verbatim"
+  assert_contains "$out" "MISSING: chrome-devtools-axi (install:" "fm-bootstrap.sh's real detect line did not appear verbatim"
   # fm-wake-drain.sh's real drained record (raw tab-separated queue line).
   assert_contains "$out" "$(printf 'signal\ttask-z.status\tneeds-decision: pick a library')" "fm-wake-drain.sh's real drained record did not appear"
   assert_contains "$out" "wake annotation: latest wake-EVENT observed at drain, not current state: task-z.status: needs-decision: pick a library" "fm-session-start.sh did not preserve the drain's separate annotation line"
@@ -2479,6 +2512,7 @@ test_status_tail_line_cap
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
+test_remote_agent_startup_recovery
 test_composition_invokes_real_scripts
 test_branch_outcome_replay_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched

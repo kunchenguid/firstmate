@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Structural regression tests for the tracked documentation audience inventory.
+# Structural regressions for documentation audiences and agent-runtime skill registration.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -135,7 +135,86 @@ MD
   pass "local links resolve while dates, versions, commands, and incident prose remain semantically reviewed"
 }
 
+test_technical_design_skill_registration() {
+  python3 - "$ROOT" <<'PY' || fail "technical-design-docs metadata, discovery, or trigger registration is invalid"
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+skill_path = root / ".agents/skills/technical-design-docs/SKILL.md"
+lines = skill_path.read_text(encoding="utf-8").splitlines()
+assert lines[0] == "---"
+end = lines.index("---", 1)
+frontmatter: dict[str, object] = {}
+index = 1
+while index < end:
+    line = lines[index]
+    if not line.strip():
+        index += 1
+        continue
+    assert not line.startswith((" ", "\t")) and ":" in line
+    key, raw = line.split(":", 1)
+    raw = raw.strip()
+    if raw in {">", ">-", "|", "|-"}:
+        index += 1
+        value = []
+        while index < end and (not lines[index].strip() or lines[index].startswith("  ")):
+            if lines[index].strip():
+                value.append(lines[index].strip())
+            index += 1
+        frontmatter[key] = " ".join(value)
+        continue
+    if raw == "":
+        index += 1
+        nested: dict[str, object] = {}
+        while index < end and (not lines[index].strip() or lines[index].startswith("  ")):
+            if lines[index].strip():
+                nested_key, nested_raw = lines[index].strip().split(":", 1)
+                nested[nested_key] = nested_raw.strip() == "true"
+            index += 1
+        frontmatter[key] = nested
+        continue
+    if raw in {"true", "false"}:
+        frontmatter[key] = raw == "true"
+    elif raw.startswith('"'):
+        frontmatter[key] = json.loads(raw)
+    else:
+        frontmatter[key] = raw
+    index += 1
+
+name = frontmatter["name"]
+description = frontmatter["description"]
+assert name == skill_path.parent.name == "technical-design-docs"
+assert isinstance(description, str) and 0 < len(description) <= 1024
+assert re.search(r"\buse before\b", description, re.IGNORECASE)
+assert frontmatter["user-invocable"] is False
+assert frontmatter["metadata"] == {"internal": True}
+
+discovered = [path for path in (root / ".agents/skills").glob("*/SKILL.md") if path.parent.name == name]
+assert discovered == [skill_path]
+
+agents = (root / "AGENTS.md").read_text(encoding="utf-8").splitlines()
+start = agents.index("## 13. Agent-only reference skills") + 1
+triggers: dict[str, str] = {}
+for line in agents[start:]:
+    if line.startswith("## "):
+        break
+    match = re.fullmatch(r"- `([a-z0-9-]+)` - (.+)", line)
+    if match:
+        assert match.group(1) not in triggers
+        triggers[match.group(1)] = match.group(2)
+assert name in triggers
+assert triggers[name].lower().startswith("load before ")
+PY
+  pass "technical-design-docs is discoverable as an internal agent-only skill with a precise load trigger"
+}
+
 test_repository_inventory_passes
 test_duplicate_and_setup_classification_fail
 test_required_pointer_fails
 test_local_links_and_no_keyword_heuristic
+test_technical_design_skill_registration

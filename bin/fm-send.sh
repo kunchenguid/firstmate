@@ -225,7 +225,7 @@ fm_send_id_from_meta() {  # <meta-file>
   printf '%s' "${base%.meta}"
 }
 
-# fm_send_clear_after_interrupt: muse RESTORES the interrupted prompt back into
+# fm_send_clear_after_interrupt: muse and TraeX RESTORE the interrupted prompt back into
 # the composer when Escape cancels a turn, as real bright text (verified: fg
 # 38;2;204;211;219, luminance ~210, muse 0.1.0-R708.1), not de-emphasised ghost
 # text. Classifying that as pending input is correct - the text really is

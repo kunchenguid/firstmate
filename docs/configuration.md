@@ -10,13 +10,14 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
-`data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
-`state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, away-mode state, generated Relay artifacts, private secondmate config-reread generations with their retry and quarantine state, per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`), and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+`data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, scout reports, and opt-in Feishu pairing and binding generations under `data/feishu/`.
+`state/` holds volatile runtime records such as executor-discriminated task metadata, append-only status events, local endpoint signals, inactive terminal-outcome receipts under `state/terminal-outcomes/`, legacy AIME execution state under `state/cloud-tasks/`, native remote-agent state under `state/remote-tasks/`, watcher and wake-queue coordination, away-mode state, generated Relay artifacts, opt-in private Feishu delivery state under `state/feishu/`, private secondmate config-reread generations with their retry and quarantine state, per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`), and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 Untracked files and directories whose names begin with `scratchpad` are also gitignored, so temporary scratch does not make porcelain-based secondmate sync guards treat a home as dirty.
 
-`bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
-The producing PR and Relay helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
+`bin/fm-spawn.sh` owns local-agent task metadata, `bin/fm-remote-agent-lib.sh` owns the native remote-agent metadata shape and normalized iDA task state, and `bin/fm-aime-cloud-lib.sh` preserves AIME's proven task-state schema plus the legacy cloud-worker metadata path.
+The runtime-backend section below owns local backend-specific fields and selector interpretation.
+The producing PR and Relay helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-task-state.sh` owns provider-aware current-state reconciliation while delegating local tasks unchanged to `bin/fm-crew-state.sh`.
 Wake, watcher, away-mode, and Relay-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
 
 `bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and the digest's startup mechanism.
@@ -24,6 +25,159 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `docs/sessionstart-nudge.md` owns the native session-open adapter tiers that run or nudge the digest command, and the source routing between them.
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
+
+## Feishu current-Pi channel
+
+The optional `config/feishu.env` file is local, gitignored, and parsed strictly as data by [`bin/fm-feishu-config.mjs`](../bin/fm-feishu-config.mjs).
+It is absent by default.
+The only accepted fields are `FM_FEISHU_ENABLED`, `FM_FEISHU_APP_ID`, `FM_FEISHU_APP_SECRET`, `FM_FEISHU_CAPTAIN_OPEN_ID`, and `FM_FEISHU_P2P_CHAT_ID`.
+Each non-comment line is one unquoted `KEY=value` with no whitespace, duplicate key, expansion, command, continuation, or unsupported field.
+Comments start with `#` in column one, and blank lines are accepted.
+`FM_FEISHU_ENABLED` is exactly `true` or `false`.
+When enabled, all four identity and credential fields are required.
+When disabled, those four fields are optional but any present value is still validated.
+The App ID must be a `cli_` identifier, the captain identity must be an `ou_` open ID, and the chat identity must be an `oc_` chat ID.
+The file must be one current-user-owned, single-linked regular file with exact mode `0600` beneath a current-user-owned, non-symlinked config directory that is not writable by group or others.
+Missing or disabled configuration starts no transport and creates no Feishu state in a fresh home.
+An explicit disable converges any previously active local channel to stopped and disabled state.
+Malformed content, unsafe ownership, unsafe permissions, another file type, a symlink, a hardlink, an unsupported field, or a missing required value refuses activation before credential use or binding mutation.
+
+[`docs/feishu-channel.md`](feishu-channel.md) is the single operator owner for app setup, activation, local controls, supported limits, transport operation, safety, health, and recovery.
+[`bin/fm-feishu-state.mjs`](../bin/fm-feishu-state.mjs) owns the exact private child schemas and mutation mechanics.
+
+## Remote research agents
+
+Firstmate supports exactly two native remote research providers: AIME and iDA.
+New work must select `remote-agent/aime` or `remote-agent/ida` explicitly through `bin/fm-task-dispatch.sh`; no config, capability probe, or heuristic silently chooses one.
+Both providers are optional, disabled by default, and operate above local harness and runtime-backend semantics.
+They create no local worker endpoint or worktree and retain the ordinary task, backlog, report, decision, supervision, and notification lifecycle.
+
+New native metadata records `kind=scout`, `executor=remote-agent`, `provider=aime|ida`, and `task_type=research|document` without local endpoint fields.
+iDA records `remote_state=...`; `bin/fm-remote-agent-lib.sh` owns that metadata/state shape and the `fm-remote-agent-task-state.v1` normalized phases.
+New AIME records retain `cloud_state=...` and the proven `fm-aime-task-state.v1` lifecycle while recording `executor=remote-agent`.
+Provider adapters own provider commands and normalized observations.
+Existing AIME records with `executor=cloud-worker`, `provider=aime`, `cloud_state=...`, and `fm-aime-task-state.v1` are a permanent read-compatibility path.
+They are not migrated or rewritten and remain readable, adoptable, cancellable, reportable, and retireable through their original lifecycle.
+The [`cloud-research-worker` skill](../.agents/skills/cloud-research-worker/SKILL.md) owns the conditional operator procedure for both providers.
+
+<a id="aime-cloud-research-worker-configaime-cloud-worker"></a>
+
+### AIME (config/aime-cloud-worker)
+
+The AIME cloud research executor is optional and disabled by default.
+An absent, malformed, unsafe, version-mismatched, or explicitly disabled `config/aime-cloud-worker` leaves ordinary local task routing unchanged and refuses new AIME dispatch before any cloud write.
+It is a native remote task executor, not a harness or backend.
+
+`bin/fm-cloud-research-aime.sh sandbox-verify` is the only supported config writer.
+Its `--help` output owns the exact authorization flag, site and space arguments, config fields, and current schema.
+The command is intentionally mutating and must be run only after an operator explicitly authorizes one disposable AIME session.
+It performs the read-only site and space checks first, creates one disposable empty session, reads that same session back, and records the exact installed `bytedcli` version with `enabled=false`.
+Ordinary tests, lint, documentation checks, no-mistakes validation, and CI must never run this mutating verification.
+
+Enabling is a separate local operator action after the disposable-session verification succeeds.
+Change only the generated `enabled=false` line to `enabled=true`, retain mode `0600`, and do not edit the verified site, space, identity, version, timestamp, or verification fields by hand.
+The dispatch path repeats read-only authentication and capability checks and refuses if the current `bytedcli` version differs from the sandbox-verified version.
+The config contains no token or credential.
+Authentication remains in bytedcli-managed user identity state for the explicit configured site, and Firstmate never reads or prints its value.
+
+Before dispatch, create the ordinary private task directory and `brief.md`, then place the exact instruction in a non-symlinked `0600` or `0400` file beneath `data/<id>/`.
+The instruction file is passed through `bytedcli --content-file`; prompt bytes never enter argv, task metadata, status events, tracked files, or reports.
+The maximum instruction size defaults to 262144 bytes and is controlled by `FM_AIME_MAX_INSTRUCTION_BYTES`.
+The [`cloud-research-worker` skill](../.agents/skills/cloud-research-worker/SKILL.md) owns the intake, document-result, wake, adoption, cancellation, and retirement procedure.
+
+A new AIME task records the native discriminator in `state/<id>.meta`: `kind=scout`, `executor=remote-agent`, `provider=aime`, the research or document task type, and the private AIME state directory.
+The legacy `cloud-worker/aime` selector remains available only for read-compatible operation and fixtures that require the old discriminator.
+It never fakes `window`, `worktree`, `harness`, `backend`, or local endpoint fields.
+Private AIME state and provider artifacts live beneath mode-restricted `state/cloud-tasks/<id>/`.
+`bin/fm-aime-cloud-lib.sh` owns their exact schemas, phases, atomic transition rules, file modes, and allowed error classifications.
+`bin/fm-procevent-aime.sh` owns authoritative event replay, session and output readback, durable cursor advancement, duplicate handling, report generation, and re-arming through the existing process-event runner.
+Replay, session, and output readback failures remain adoptable and re-armed unless one identity-bound observation proves provider status `stopped`, authoritative terminal replay, and unavailable bounded output readback.
+That exact combination becomes the explicit `provider-stopped-output-unavailable` terminal failure without claiming recovered output, successful research, a computed result, or provider cancellation.
+The adapter establishes or preserves the private failure report, stops the canonical source, then uses a bounded task/source generation scan to quarantine each selected captured result before exact acknowledgement and queued-wake removal.
+Identity, adapter, file-safety, size, contradictory-result, and scan-bound mismatches refuse that seal.
+
+Restart adoption uses the recorded session identity and never creates or sends again after submission.
+Create or send acceptance that cannot be proven remains an explicit blocker and is never retried automatically.
+Disabling or removing the config blocks new dispatch but does not erase an already-recorded cloud task.
+Existing submitted work remains adoptable and readable from its durable state even while new dispatch is disabled.
+
+Rollback is therefore two steps.
+First set `enabled=false`, or remove `config/aime-cloud-worker`, to stop new cloud dispatch immediately while leaving local routing unchanged.
+Then reconcile every existing cloud task to a terminal report, or interrupt only its local waiter while recording that the AIME session may still continue.
+Do not delete a nonterminal cloud record, claim cancellation, or create a replacement session.
+Terminal tasks retire through `bin/fm-task-retire.sh` only after task state binds a private single-link report and the ordinary decision-hold completion gate passes.
+A previously recorded `result-unavailable` task can cross that boundary only through the adapter's idempotent stopped terminal-unavailable preparation using its preserved authoritative observation or one bounded fresh readback and an already existing safe report.
+Retirement preserves the report and private quarantined capture evidence while removing volatile cloud state.
+
+Document mode does not activate the local Feishu document integration.
+AIME creates the requested document and returns its canonical URL, identity, and revision.
+Firstmate validates and records that artifact but performs no local create, copy, rewrite, permission, or sharing operation.
+
+Current active evidence, including the pinned CLI version and the non-mutating verification commands, is in [`verification/aime-cloud-worker.md`](verification/aime-cloud-worker.md).
+
+### iDA (config/ida-remote-agent)
+
+iDA uses the official SG-capable iDA Deep Research and session lifecycle exposed by installed `bytedcli`.
+An absent, malformed, or explicitly disabled config refuses new iDA dispatch before any provider write and leaves local-agent and AIME routing unchanged.
+The config is a current-user-owned, single-link regular file at mode `0600` with this schema:
+
+```text
+schema=fm-ida-remote-agent-config.v1
+enabled=false
+region=sg
+identity=user
+agent_id=default
+```
+
+Use `default` to let iDA select its established Deep Research agent.
+An existing config may retain one legacy `model=default|<name>` field, but that field is validated only for compatibility and never selects the model for a new dispatch.
+Select a model only for one new iDA task with `bin/fm-task-dispatch.sh remote-agent/ida <id> --instructions <private-file> --model <name>`, where `<name>` exactly matches the current SG `bytedcli --json --as user ida --region sg model list` output.
+For example, `bin/fm-task-dispatch.sh remote-agent/ida market-review --instructions data/market-review/instructions.txt --model usecase-frontend-deepseek-v4-pro` keeps the private instruction body out of argv while selecting that model for this task only.
+Omitting `--model` performs no model-catalog lookup, adds no model to the official create request, and leaves selection to the current iDA provider default.
+Empty, malformed, duplicate, unsupported-position, unavailable-catalog, unsupported, or provider-incompatible model selections fail before task-state publication or provider creation, and the option is rejected on AIME selectors.
+The private normalized iDA task record retains the explicit selection across submission, adoption, recovery, inspection, and result readback; legacy records with no model field remain readable.
+The adapter preserves the recorded agent and explicit model identity when the official response provides no stronger identity.
+An existing config may retain one legacy `bytedcli_version` field, but it is informational only: absence, staleness, or mismatch never blocks probe, dispatch, adoption, reconciliation, process-event handling, cancellation, or retirement.
+New setup must omit it and does not pin or refresh a bytedcli version.
+The config contains no credential, token, OECID, or prompt; authentication remains in bytedcli-managed `user` identity state.
+Set `enabled=true` only after a read-only `bin/fm-remote-agent-ida.sh probe` succeeds against the config.
+The probe verifies the executable, SG Deep Research agent and raw-session-list reads with `identity=user`, and the domain-restricted MCP command listing for the required create, model-selection, raw-list, get, and close commands and options; it creates no session.
+
+Before dispatch, create the ordinary private task directory and `brief.md`, then put the instruction in a non-symlinked `0600` or `0400` file below `data/<id>/`.
+The default instruction bound is 262144 bytes (`FM_REMOTE_MAX_INSTRUCTION_BYTES`).
+Submission uses the official domain-restricted `bytedcli --as user mcp --allow-domains ida` server and its `run_command` tool to invoke `ida --region sg deep-research create`.
+`bin/fm-bytedcli-mcp-call.sh` constructs that command inside a mode-`0600` stdin request so prompt bytes do not enter operating-system argv.
+Raw session list, session get, and cancellation use official `bytedcli --json --as user ida --region sg ...` commands.
+Every iDA-owned bytedcli child unsets conventional upper- and lower-case proxy variables because ambient proxies can divert the SG identity endpoint through an incompatible route; this sanitation is child-local and preserves all unrelated operator environment.
+Firstmate stores only normalized bounded observations, not the MCP exchange, raw messages, SSE/event bodies, credentials, or private request payload.
+
+Before the sole allowed create, the adapter records a unique marker derived from the Firstmate task id and instruction digest.
+It places that marker in the private first message because SG may automatically rename a session despite the create command's `--name`, then exact-matches either the legacy session name or that bounded first-message marker through raw session list plus session get.
+It repeats that reconciliation after a timeout or ambiguous submission before deciding state.
+A unique match is adopted; multiple matches, a truncated listing, provider unavailability, or unresolved identity becomes a preserved unavailable or ambiguous state and never authorizes a silent duplicate create.
+Restart adoption and startup recovery use the durable marker and session id and re-arm the existing process-event source without pretending a local endpoint exists.
+
+`bin/fm-procevent-ida.sh` owns first submission, session readback, normalized state transitions, report creation, acknowledgement, and re-arming.
+Provider-running or idle-but-processing state is healthy.
+After the first nonterminal transient read failure is durably captured, published, and applied, the iDA source keeps only semantically identical retries inside the same waiter and polls with bounded exponential backoff.
+The comparison binds task and provider identity, normalized local phase and provider status, result availability, and error class to the state-linked prior observation; a successful or materially changed observation leaves the retry loop immediately and resets the next source to its initial delay.
+Terminal results, available answers, cancellation, ambiguous identity, submission uncertainty, authorization or unsupported-operation failures, materially different errors, state transitions, and the first actionable failure are never coalesced.
+Suppressed attempts create no new captured generation, task artifact, notification, or event log, while every generation captured before the suppression boundary and every already queued notification remains intact and generation-keyed.
+Terminal success, failure, and provider-confirmed cancellation produce a mode-`0600` `data/<id>/report.md` bound by task state.
+The report preserves `available`, exact `zero`, `unavailable`, and `error` distinctions and includes normalized session, remote-task, agent, model, outcome, result kind, and error-class fields when available.
+Legacy visible type-8 text remains a `text` result, while a supported non-empty `deep_research_content.finalAnswer` artifact becomes an `artifact` result whose private mode-`0600` boundary retains only a safe session-readback reference with artifact and supported-part counts.
+Malformed or unsupported structured results remain explicit errors, and artifact identifiers, names, file URIs, inline data, provider messages, and raw session JSON never enter the normalized result, report, status, log, or metadata boundary.
+If an existing durable iDA task contains `bytedcli_version`, a report may label it as legacy informational metadata; the value never participates in state validity or a lifecycle decision.
+It never embeds the prompt, credentials, raw provider streams, or private payloads.
+iDA document mode does not imply AIME's Feishu creation contract; the durable return remains the self-contained report or its authoritative provider identity.
+
+`interrupt-wait` stops only local waiting and may leave the provider session running.
+Provider cancellation uses official `chat completion close`, requires current destructive-action authority plus `--authorize-provider-cancel`, and does not become terminal until session readback confirms a cancelled/closed state.
+After that confirmation, the command retires only the older local waiter before routing a fresh normalized terminal observation through durable capture, publication, and automatic application.
+An ambiguous or submission-unknown task whose marker yields an authoritative complete non-truncated zero-match session list can leave its permanent blocked state only through the explicit `abandon` command with `--authorize-abandon`; abandonment fail-terminals the durable record, performs no provider write, never retries or recreates, and any future execution requires a separate explicit dispatch.
+Retirement requires normalized terminal state, a safe bound report, retired process-event supervision, and the ordinary decision-hold completion gate.
+Disabling the config blocks new submission but does not erase, cancel, or make an existing record unreadable.
+Current behavioral evidence is in [`verification/remote-agents.md`](verification/remote-agents.md).
 
 ## Pi Calm preference (config/calm)
 
@@ -237,6 +391,7 @@ A cursor secondmate or primary runs the tracked project-scope `.cursor/hooks.jso
 Cursor typed-submit confirmation is verified on tmux and Herdr only.
 On Zellij, cmux, and Orca a typed-plane Cursor send (a harness-native invocation or an explicit backend target; ordinary text steers ride the durable inbox and exit 0 at enqueue) lands, but `fm-send` reports delivery unconfirmed and exits non-zero because their shared submit core does not consult the busy footer; [runtime backend verification](verification/runtime-backends.md#cursor-agent-cli) owns the evidence and transcript-state boundary.
 muse is verified for crewmate and scout launches ONLY, and `fm-spawn.sh` refuses it for a secondmate, because muse ships no usable hook surface for a primary session's turn-end supervision; [`docs/verification/muse.md`](verification/muse.md) owns that evidence.
+TraeX is likewise limited to crewmates and scouts, but only on Herdr; it uses Herdr's ordinary pane, process, input, state, and cleanup contract rather than a harness-specific lifecycle subsystem.
 muse also needs a worker-reachable credential before spawning, and the portable fleet path is the `<config>/muse/auth.json` credential stored by `muse login`, because a caller-only `META_API_KEY` does not cross a long-lived backend daemon.
 New harnesses get verified through a supervised trial task before joining the set.
 The verified adapter evidence - each harness's busy-state source, interrupt and exit behavior, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
@@ -287,7 +442,7 @@ This section is the single owner of the canonical schema and its per-field seman
     {
       "when": "<natural-language condition describing a kind of task>",
       "use": [
-        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>" }
+        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>", "preferWhileLoadBelowPercent": "<optional positive number, TraeX arrays only>" }
       ],
       "why": "<optional rationale that helps firstmate choose>"
     }
@@ -303,13 +458,17 @@ Both `use` and the optional top-level `default` accept either one profile object
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
 Profile `model` and `effort` fields and rule `why` are optional.
 An omitted model or effort means the selected harness uses its own default for that axis.
+The optional numeric `preferWhileLoadBelowPercent` field is valid only on a TraeX profile with an explicit model inside a profile array.
+A fresh normalized TraeX model load strictly below that local value makes the otherwise viable candidate preferred, while a known value at or above it blocks the candidate.
+Missing, invalid, or stale load remains uncertainty, and load is never converted into quota remaining.
+The threshold has no shared default; each home records its own value, so local operating preferences do not become product policy.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
-Malformed JSON, an empty or malformed rule/default array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
+Malformed JSON, an empty or malformed rule/default array, an unverified harness, an effort value unsupported by that harness, or a malformed or misplaced TraeX load preference is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
@@ -541,6 +700,8 @@ The `when` adapter (`bin/fm-procevent-when.sh`) turns this channel into a condit
 The (condition, action) spec is stored privately under `state/when/` and hash-bound by a trust record the same way `bin/fm-check-register.sh` binds a custom check, while the spec separately binds the resolved action executable's bytes; a mutated or unregistered spec or a changed action executable is refused before the action runs.
 Every failure path - a mutated spec or action executable, a condition error past its budget, an expired deadline, a failed action, or an earlier fire whose outcome was never captured - produces a terminal captured outcome that wakes firstmate rather than a silent retry, and a durable single-fire marker claimed before the action makes restarts and re-polls unable to fire it twice.
 The adapter automates only the exact deterministic subset: anything needing judgment, and anything destructive, irreversible, or security-sensitive, keeps the ordinary check-fires-then-firstmate-decides flow, and the adapter's header and `--help` own its commands, flags, and outcome document.
+`bin/fm-procevent.sh` owns the generic contract.
+Current applying adapters include the remote-secondmate reply relay plus AIME and iDA remote research readback, while `bin/fm-procevent-lavish.sh` wraps only the currently published `lavish-axi poll` interface.
 
 This section is the single owner of the runner's operating contract.
 Registration writes one private record under `state/procevent/`, and a completed result plus its immutable adapter identity are captured under `state/procevent-inbox/` before any announcement or event can reference it.
@@ -574,6 +735,10 @@ A binding can select one decision origin or the script's cross-origin mode; the 
 The adapter reports only what the captain chose; the intake owns every rule about what happens next, so the runner names no adapter, parses no result, and carries no decision rule, and a future source needs nothing here beyond an `answers` command and a binding.
 Feeding is independent of handling: it never acknowledges a result and never suppresses a wake, because recording the answer is transcription while acting on it is firstmate's judgement.
 An unbound source, an adapter with no `answers` command, and a failure on either side all leave the capture untouched and still announced.
+Failed publication skips the call, and exit 0 means the adapter fully applied and acknowledged the result; failed publication, a missing command, an error, or any other exit is not a capture failure but leaves the result unacknowledged and therefore still eligible for re-announcement, so a handler receives it exactly as before and an adapter with no such command needs no change.
+The remote-secondmate reply adapter implements it, so a captured reply reaches its local status mirror and settles its correlated pending-reply expectation without any handler step; the published wake still reaches firstmate, and handling that wake through the adapter again is idempotent.
+The AIME adapter also implements it, so each captured observation advances or preserves the provider-aware task state, writes a verified terminal report or re-arms readback, then acknowledges the exact generation; handling the wake through the adapter again is idempotent.
+The iDA adapter implements the same applying boundary for normalized observations: it advances the shared remote state, records a safe report or explicit blocker, re-arms only when provider state permits, and acknowledges the exact generation idempotently.
 
 Ownership is machine-wide per canonical source, because separate homes can share one underlying source store.
 Claims live under `$XDG_STATE_HOME/firstmate/procevent-claims` (override with `FM_PROCEVENT_CLAIM_ROOT`).
@@ -670,11 +835,26 @@ FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sw
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
+FM_AIME_MAX_INSTRUCTION_BYTES=262144   # maximum private AIME instruction-file size
+FM_AIME_PROBE_TIMEOUT=20               # seconds allowed for each read-only bytedcli version/space probe
+FM_AIME_WRITE_TIMEOUT=30               # seconds allowed for create or send before acceptance becomes unknown
+FM_AIME_STATE_TIMEOUT=15               # seconds allowed for provider readback in fm-task-state
+FM_AIME_REPLAY_TIMEOUT_MS=5000         # per-stream AIME event replay hard limit
+FM_AIME_REPLAY_MAX_STREAMS=200         # maximum replay streams before the adapter returns unavailable
+FM_AIME_READBACK_TIMEOUT=20            # seconds allowed for each AIME replay/session/output CLI call
+FM_AIME_RETIRE_MAX_GENERATIONS=256       # maximum queued AIME generations scanned and sealed for stopped terminal-unavailable retirement
+FM_AIME_RETIRE_MAX_CAPTURE_BYTES=1048576 # maximum bytes of one quarantined captured AIME generation during that retirement seal
+FM_REMOTE_MAX_INSTRUCTION_BYTES=262144    # maximum private instruction-file size for native remote-agent providers
+FM_REMOTE_RESULT_MAX_CHARS=131072         # maximum redacted iDA final-answer characters captured into normalized state/report artifacts
+FM_IDA_SESSION_PAGE_SIZE=100             # bounded SG raw session list used for exact marker reconciliation
+FM_IDA_DEEP_RESEARCH_TIMEOUT_MS=900000   # official iDA Deep Research MCP timeout passed to the provider tool
+FM_IDA_TRANSIENT_BACKOFF_INITIAL_MS=5000 # initial retry delay for an identical nonterminal transient iDA observation
+FM_IDA_TRANSIENT_BACKOFF_MAX_MS=60000    # maximum retry delay after bounded exponential increase
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code
-FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
+FM_CREW_STATE_BIN=bin/fm-task-state.sh   # test override for the provider-aware current-state reader used by working/paused watcher triage
 FMX_PAIRING_TOKEN=      # Relay pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env

@@ -25,6 +25,7 @@
   ],
   "readmeSetupTargets": [
     "docs/configuration.md",
+    "docs/feishu-channel.md",
     "docs/wedge-alarm.md",
     "docs/tmux-backend.md",
     "docs/herdr-backend.md",
@@ -125,11 +126,19 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/bits-development/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/bootstrap-diagnostics/SKILL.md",
       "audience": "agent-runtime"
     },
     {
       "path": ".agents/skills/captain-hold-lifecycle/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/cloud-research-worker/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -153,11 +162,19 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/feishu-channel/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/fmx-respond/SKILL.md",
       "audience": "agent-runtime"
     },
     {
       "path": ".agents/skills/harness-adapters/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/magibook-pyspark/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -182,6 +199,10 @@
     },
     {
       "path": ".agents/skills/stuck-crewmate-recovery/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/technical-design-docs/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -269,8 +290,16 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/examples/feishu.env",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/wedge-alarm",
       "audience": "operator-example"
+    },
+    {
+      "path": "docs/feishu-channel.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/fm-test-isolation-proof.md",
@@ -357,11 +386,23 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/aime-cloud-worker.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/feishu-channel.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/muse.md",
       "audience": "maintainer-verification"
     },
     {
       "path": "docs/verification/process-event-sources.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/remote-agents.md",
       "audience": "maintainer-verification"
     },
     {

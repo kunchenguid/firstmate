@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Backend-neutral Firstmate task executor dispatch.
+#
+# Usage:
+#   fm-task-dispatch.sh local-agent <task-id> [fm-spawn arguments...]
+#   fm-task-dispatch.sh remote-agent/aime <task-id> --instructions <private-file> [--document]
+#   fm-task-dispatch.sh remote-agent/ida <task-id> --instructions <private-file> [--model <name>] [--document]
+#   fm-task-dispatch.sh cloud-worker/aime <task-id> --instructions <private-file> [--document]
+#
+# This is the narrow executor seam above local harness/runtime semantics.
+# `local-agent` delegates byte-for-byte argument ownership to fm-spawn.sh, which
+# retains its existing isolated-worktree guarantee and all harness/backend
+# validation.
+# Both remote selectors are explicit; no heuristic chooses a provider.
+# `remote-agent/aime` delegates to AIME's established fm-aime-task-state.v1
+# lifecycle but records executor=remote-agent; `cloud-worker/aime` remains the
+# permanent read-compatible legacy selector. `remote-agent/ida` uses the shared
+# fm-remote-agent-task-state.v1 record. Neither native provider creates a
+# worktree, terminal endpoint, harness, or runtime-backend record.
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+  sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+  exit 2
+}
+
+reject_remote_model() {
+  local executor=$1 argument
+  shift
+  for argument in "$@"; do
+    case "$argument" in
+      --model|--model=*)
+        printf 'error: --model is supported only by remote-agent/ida; omit it for %s\n' "$executor" >&2
+        exit 2
+        ;;
+    esac
+  done
+}
+
+executor=${1-}
+id=${2-}
+[ -n "$executor" ] && [ -n "$id" ] || usage
+shift 2
+
+case "$executor" in
+  local-agent)
+    exec "$SCRIPT_DIR/fm-spawn.sh" "$id" "$@"
+    ;;
+  remote-agent/aime)
+    reject_remote_model "$executor" "$@"
+    exec "$SCRIPT_DIR/fm-remote-agent-aime.sh" dispatch "$id" "$@"
+    ;;
+  cloud-worker/aime)
+    reject_remote_model "$executor" "$@"
+    exec "$SCRIPT_DIR/fm-cloud-research-aime.sh" dispatch "$id" "$@"
+    ;;
+  remote-agent/ida)
+    exec "$SCRIPT_DIR/fm-remote-agent-ida.sh" dispatch "$id" "$@"
+    ;;
+  *)
+    printf 'error: unsupported task executor: %s\n' "$executor" >&2
+    exit 1
+    ;;
+esac

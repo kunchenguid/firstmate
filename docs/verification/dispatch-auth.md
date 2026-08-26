@@ -12,9 +12,12 @@ Credential paths below are shown with the home directory replaced by `<home>`.
 
 ## Quota granularity the judgment depends on
 
-Verified 2026-07-30 against quota-axi 0.1.16 for the provider and model-scope relationships below.
-That release's captured default output included `quotaSemantics.description`; the current default TOON and JSON fallback field placement are verified against 0.1.29 in the next section.
-Current dispatch reads the TOON scope and `limitedBy` fields; the JSON fallback's corresponding `scope` and `boundedBy` fields preserve the same provider/model applicability without relying on the `--full`-only description.
+Verified 2026-07-30 against quota-axi 0.1.16; re-verified 2026-08-19 against quota-axi 0.1.29.
+
+`quota-axi --json` reports availability at whatever granularity the vendor supplies.
+The default `--json` output carries no `quotaSemantics.description` for any provider; the bounding-rule prose appears only in a `--full` snapshot, so the structured `effectiveAvailability` scopes are the bounding evidence `--json` itself supplies.
+The example below shows the full-snapshot form.
+Current dispatch reads the default TOON's scope and `limitedBy` fields first; the permitted JSON fallback's corresponding `scope` and `boundedBy` fields preserve the same provider/model applicability without relying on the `--full`-only description.
 
 ```json
 {
@@ -199,6 +202,5 @@ Re-run the two commands above and update this section and the pinned version tog
 It asserts that the script accepts no harness, model, or provider input, never calls `quota-axi`, exits alike for every probe result because it renders no verdict, invokes only the two fixed non-destructive argv forms with stdin closed, holds a real bound even when the configured bound is zero or malformed, and never echoes raw vendor output.
 `tests/fm-spawn-dispatch-profile.test.sh` owns spawn's deterministic profile and harness refusals.
 `tests/fm-bootstrap.test.sh` owns the quota-axi version-floor diagnostic.
-`tests/fm-quota-array-dispatch-live-e2e.test.sh` drives the public Pi skill-loading interface against one fake schema-5 snapshot per case, served as quota-axi's default TOON.
-It covers TOON-first `spendPriority` ranking among candidates that pass eligibility, reasoning-class, and runway-feasibility gates, explicit accounting for unmeasurable runway, the strongest-reasoning constraint, and the runway feasibility floor over a higher `spendPriority`.
-The skill's primary path is that default TOON; `--json` is the documented defensive fallback, and this section records the producer `--json` shape that fallback consumes.
+`tests/fm-quota-array-dispatch-live-e2e.test.sh` drives the public Pi skill-loading interface against one fake schema-5 snapshot per case, serving default TOON and the permitted JSON fallback while recording the exact call sequence.
+It covers TOON-first `spendPriority` ranking among candidates that pass eligibility, reasoning-class, and runway-feasibility gates, explicit accounting for unmeasurable runway, the strongest-reasoning constraint, the runway feasibility floor over a higher `spendPriority`, and the schema-5 TraeX load-threshold, quota-depletion, runway-horizon, quota-scope, unsupported-model, tie-order, and all-tight cases.

@@ -104,7 +104,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|traex)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -1061,7 +1061,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|traex)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1191,14 +1191,30 @@ launch_template() {
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # TraeX is an ordinary worker/scout adapter only. The private marker is
+    # launch-scoped because TraeX has no verified child-process identity marker.
+    # Herdr owns pane/process/input/lifecycle behavior; the harness contributes
+    # only its autonomous CLI shape and the trust-dialog fact checked below.
+    traex) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS FM_TRAEX_HARNESS=traex traex -y __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
 
+RAW_LAUNCH=0
+RAW_TRAEX=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
+    # This bounded lexical check covers direct and ordinary shell-wrapped TraeX
+    # commands. Deliberately constructed interpreter code is outside the
+    # supported detection guarantee; preserving general raw execution is the
+    # captain-approved boundary.
+    canonical=${LAUNCH//\'/}
+    canonical=${canonical//\"/}
+    canonical=${canonical//\\/}
+    [[ "$canonical" =~ (^|[^[:alnum:]_.-])traex([^[:alnum:]_.-]|$) ]] && RAW_TRAEX=1
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
     done
@@ -1272,6 +1288,44 @@ case "$HARNESS" in
     fi
     ;;
 esac
+# TraeX intentionally follows the ordinary harness contract rather than owning
+# a backend lifecycle subsystem. Refuse its narrow unsupported surfaces before
+# any endpoint is created; Herdr then supplies the same generic pane, process,
+# input, liveness, busy-state, and cleanup operations used by Codex.
+if [ "$RAW_TRAEX" -eq 1 ]; then
+  echo "error: TraeX must use Firstmate's verified launch template; raw TraeX launch commands remain unverified" >&2
+  exit 1
+fi
+if [ "$HARNESS" = traex ]; then
+  if [ "$RAW_LAUNCH" -eq 1 ]; then
+    echo "error: TraeX must use Firstmate's verified launch template; raw TraeX launch commands remain unverified" >&2
+    exit 1
+  fi
+  if [ "$KIND" = secondmate ]; then
+    echo "error: traex is a verified crewmate/scout adapter only and cannot run a secondmate or primary supervision role" >&2
+    exit 1
+  fi
+  if [ "$BACKEND" != herdr ]; then
+    echo "error: traex workers are verified only on backend=herdr; backend=$BACKEND is unsupported" >&2
+    exit 1
+  fi
+  if [ "$EFFORT" = max ]; then
+    echo "error: traex supports --effort low, medium, high, or xhigh; max is not verified and is refused" >&2
+    exit 1
+  fi
+  if ! command -v traex >/dev/null 2>&1; then
+    echo "error: traex executable not found on PATH; install TraeX or select a different verified harness" >&2
+    exit 1
+  fi
+fi
+
+# pi-signed is an explicitly selected executable identity, not an alias that may
+# silently fall back to pi. Resolve it from PATH before creating an endpoint and
+# retain the literal name in the launch command and task metadata.
+if [ "$HARNESS" = pi-signed ] && ! command -v pi-signed >/dev/null 2>&1; then
+  echo "error: pi-signed executable not found on PATH; install the signed Pi wrapper or select a different verified harness" >&2
+  exit 1
+fi
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
@@ -1376,7 +1430,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|traex)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1391,10 +1445,10 @@ effort_flag_for_harness() {
         low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
-    codex)
-      # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
+    codex|traex)
+      # Both installed CLIs expose model_reasoning_effort through -c and have
+      # verified low|medium|high|xhigh values. TraeX max is refused before the
+      # endpoint exists; Codex continues to omit its unsupported max value.
       case "$effort" in
         low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
       esac
@@ -2828,6 +2882,15 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$HARNESS" = traex ]; then
+  # Sending Enter proves transport only. A fresh isolated copy may show TraeX's
+  # native trust chooser; the harness adapter verifies that exact dialog and
+  # accepts it once, while Herdr remains the sole lifecycle/backend owner.
+  if ! fm_backend_herdr_traex_wait_started "$T" "$WT" "$PROJ_ABS"; then
+    echo "error: TraeX task instructions did not begin through the verified Herdr launch path; inspect window $T" >&2
+    exit 1
+  fi
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

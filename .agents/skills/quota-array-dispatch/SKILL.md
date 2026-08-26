@@ -3,7 +3,7 @@ name: quota-array-dispatch
 description: >-
   Agent-only decision procedure for resolving a matched crew-dispatch profile
   array from quota-axi's default TOON, ranking by spendPriority after three
-  orthogonal gates.
+  orthogonal gates and any configured TraeX telemetry preference.
   Load when a dispatch rule or default resolves to more than one profile candidate.
 user-invocable: false
 metadata:
@@ -18,6 +18,8 @@ This skill is the single owner of the completion-aware profile-array selection p
 `quota-axi` remains data-only: it publishes `spendPriority` as a comparable scalar and never recommends, selects, ranks, or infers a route.
 Do not add a daemon, opaque composite score, routing wrapper, hard-coded model-specific policy, or producer-side route recommendation.
 Deterministic shell owns only schema, configuration, and version validation plus concrete spawn safeguards; every model-to-provider, provider-to-credential, and quota-applicability relation is yours to establish transparently and to show your evidence for.
+The optional per-candidate `preferWhileLoadBelowPercent` field is a local profile-array policy input, not provider data or shared product policy.
+It is valid only for a TraeX candidate with an explicit model and a positive numeric threshold.
 
 ## Read the default TOON
 
@@ -36,6 +38,17 @@ Below-floor is rare: bootstrap enforces `FM_QUOTA_AXI_MIN` and normally reports 
 `--json` is a defensive belt, not a habit; never reach for it because it feels more complete.
 Read `quota-axi auth --json` only when a candidate's credential surface is in question.
 
+When the JSON fallback is needed, preserve these facts for each candidate:
+
+- task/profile fit and required reasoning class
+- applicable effective headroom (`effectivePercentRemaining`) from the established provider/model scope
+- usable runway status, `usableRunwaySeconds`, `projectedExhaustedAt`, `limitingWindowId`, `projectionConfidence`, and any `unmeasurableWindowIds`; every projection is cycle-average, so the current contract has no `projectionBasis` field
+- the task-completion horizon and the evidence and confidence used to estimate it
+- effective pace, signed reserve per window, and worst reserve (`worstReservePercentPoints` or minimum signed reserve) for later diagnostic tie-breaking
+- for TraeX, the exact normalized `models[]` record joined by `catalogId`, including `load.status`, `load.percent`, `load.stale`, `quota.status`, `quota.scope`, `quota.windowIds`, `quota.relationship`, and `quota.sharing`
+- the configured `preferWhileLoadBelowPercent` value, when present
+- schema notes when runway, pace, or model telemetry fields are absent
+
 For each candidate, preserve explicit `harness`, `model`, and `provider`; `harness-adapters` owns identity, and model/provider never infer harness.
 
 ## Three gates, then spendPriority
@@ -49,12 +62,35 @@ It cannot override a hard-gate failure, and it is never hidden inside a new comp
 Deterministic shell must never map a model to a provider, a provider to a credential store, or a name prefix to a family.
 You establish those relations yourself, in the open, from the candidate's own authoritative catalog (`harness-adapters` owns the per-harness discovery surface) plus the one intake snapshot.
 
-Confirm the catalog lists the candidate's model and record the provider family it reports.
-A model the catalog does not list is concrete contradictory evidence: block that candidate and quote the catalog result.
-Apply quota at the granularity the vendor actually supplies.
-A provider-level or `all_models`/`all_products` scope bounds every model you established in that family, including one with no window of its own.
-A named-model or named-product scope is an additional bound for that model alone.
-Match the candidate to its `quota[]` row by that established provider and scope; a stale, auth-required, or unmeasurable scope is named in `attention[]` instead of a fabricated number.
+Name the evidence for each relation you assert so the conclusion is inspectable.
+
+1. Confirm the catalog lists the candidate's model and record the provider family it reports.
+   A model the authoritative catalog does not list is concrete contradictory evidence: block that candidate and quote the catalog result.
+2. Apply quota at the granularity the vendor actually supplies.
+   A provider-level or `all_models`/`all_products` scope bounds every model you established in that family, including one with no window of its own.
+   A named-model or named-product scope is an additional bound for that model alone and is irrelevant to every other model in the family.
+   Treat `quotaSemantics.effectiveAvailability` as the structured declaration of applicable scopes and bounds.
+   When a full snapshot includes `quotaSemantics.description`, use it as explanatory evidence; default `--json` legitimately omits it, so never require a second snapshot just to obtain prose.
+3. Record what remains unknown instead of converting it into a verdict.
+
+### TraeX model joins
+
+For TraeX, the permitted `quota-axi --json` fallback normalizes the harness's read-only model catalog into `providers[].models[]`; a configured TraeX model or load preference whose eligibility cannot be established from TOON is genuine ambiguity that requires that fallback.
+Join the configured model to exactly one `models[].catalogId`; do not match by display label, backend name, array position, or the captain-approved display-name mapping.
+A fresh TraeX provider record whose normalized catalog does not contain that exact `catalogId` is concrete unsupported-model evidence.
+An unavailable, errored, rate-limited, auth-required, or stale provider record does not prove catalog absence and remains explicit uncertainty unless its selected credential is separately proven unusable.
+Do not run another catalog command for this array decision: the one quota snapshot already contains the normalized TraeX catalog, load, and quota joins.
+
+TraeX `load.percent` is provider-reported model load, can exceed 100, and is never quota usage, quota used, or quota remaining.
+Only a fresh record with `load.status: "known"`, `load.stale: false`, and a numeric `load.percent` can satisfy or violate `preferWhileLoadBelowPercent`.
+A value strictly below the configured threshold makes that otherwise viable TraeX candidate the explicit local preference after the three gates and before `spendPriority`; a value at or above the threshold blocks it at eligibility.
+Missing, invalid, or stale load neither satisfies the preference nor blocks the candidate; disclose the uncertainty and continue with quota, runway, pace, fit, and reasoning evidence.
+
+Join `quota.status: "authoritative"` through its exact `quota.scope` to `quotaSemantics.effectiveAvailability[].scope`, and use `quota.windowIds` only as exact joins to `windows[]`.
+`not_reported`, `not_applicable`, or `invalid` quota is not zero headroom.
+Structurally equal TraeX windows remain distinct model-scoped evidence when `sharing` is `unknown`; never infer a shared family or account pool from equal values.
+
+## Authentication is scoped to the selected surface
 
 A candidate authenticates through its own tuple's surface; another harness's CLI can never gate it, and `harness=pi` with `model=xai/grok-*` is Pi using xAI rather than the standalone Grok CLI.
 `quota-axi auth --json` lists each provider's credential sources independently, so read the one source the candidate actually uses rather than collapsing a provider to a single status.
@@ -92,9 +128,10 @@ A high `spendPriority` on a nearly empty window that will exhaust soon must not 
 Unknown or unmeasurable runway stays eligible with disclosed uncertainty and is never assumed to pass.
 Do not invent a generic percentage floor, and honor an explicit captain floor for a candidate when one exists.
 
-## Rank by spendPriority
+## Apply a configured TraeX preference, then rank by spendPriority
 
-Among candidates that pass all three gates, pick the highest known `spendPriority`.
+Among candidates that pass all three gates, first honor a fresh satisfied `preferWhileLoadBelowPercent` preference as defined above.
+If no candidate has that explicit local preference, pick the highest known `spendPriority`.
 A higher known scalar is better: positive means paid allowance is on track to reach reset unused, `0` is exact utilization, and negative means overdrawn against the reset clock.
 Rank only from comparable known scalars.
 Never treat absent, `unknown`, or unmeasurable `spendPriority` as zero or as healthy; `0` means exact utilization, a different claim from unknown.
@@ -112,6 +149,6 @@ Genuine ties: stop and report every tied candidate for captain choice.
 Do not select by array order, harness name, or another arbitrary identity ordering.
 Report duplicate concrete profiles as a configuration error.
 
-Account for every candidate visibly before selecting or escalating, naming its catalog evidence, provider relation, applicable quota and authentication facts, remaining uncertainty, fit and reasoning class, `spendPriority`, and runway-versus-horizon result.
+Account for every candidate visibly before selecting or escalating, naming its catalog evidence, provider relation, applicable quota and authentication facts, remaining uncertainty, fit and reasoning class, configured load preference and fresh telemetry when applicable, `spendPriority`, and runway-versus-horizon result.
 A blocked credential report must name `harness`, `model`, authentication surface, and concrete failure evidence; never emit a bare `Grok unauthenticated` statement.
 Never conclude with an unexplained "best quota" label.

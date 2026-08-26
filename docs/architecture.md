@@ -31,6 +31,10 @@ A concurrent replacement remains armed, every non-merged or invalid observation 
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step attributed to that crew's current code, or an exact busy verdict from the semantic busy-state contract.
 A `kind=secondmate` task's status signal is the parent-directed reply stream and is never absorbed as provably working; only its bare turn-ended signal retains the ordinary absorb rule.
 A crew that declares `paused:` for a known external wait, or carries a verified `captain-held` transfer, is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
+`bin/fm-pr-lib.sh` owns the receipt format and strict identity mechanics, while `bin/fm-watch.sh` owns queue-before-retirement ordering.
+No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-task-state.sh` reports positive evidence that the task is still working.
+The provider-aware reader delegates local tasks unchanged to `bin/fm-crew-state.sh`, where positive evidence remains an actively running no-mistakes step attributed to that crew's current code or an exact busy verdict from the semantic busy-state contract.
+A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
 For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint only when the backend confidently reports its agent dead.
 Live or inconclusive liveness remains fail-open at that initial surface, and a secondmate's endpoint liveness is still never read at all; a mate is admitted to that same cadence only to serve a declared wait's bounded re-surface, so a forgotten pause or captain hold on a mate cannot rot invisibly.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
@@ -53,7 +57,8 @@ The explicit resolution is written by the actor that answers, not the busy worke
 This home's answerer close, pending-reply escalation close, and captain-held transfer use the provenance-guarded append owned by `bin/fm-wake-lib.sh`, so they advance the watcher marker only across their own bytes when all earlier bytes were already announced; pending or interleaved foreign bytes fail toward an ordinary wake.
 A turn-ended-only queue row omits its historical status annotation when that status file exactly matches the same seen marker.
 Any direct or remaining historical annotation prints every status line unread at the presentation cursor instead of replaying only the latest line.
-`bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes a no-mistakes run, active or terminal, only when it matches the crew's branch and current code identity, then keeps that run-step authoritative even if the pane has closed.
+`bin/fm-task-state.sh <id>` is the cheap provider-aware current-state read for an actionable heartbeat review.
+For a local task it delegates to `bin/fm-crew-state.sh`, which attributes a no-mistakes run, active or terminal, only when it matches the crew's branch and current code identity, then keeps that run-step authoritative even if the pane has closed.
 The script header owns the exact run-head ancestry rules.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
@@ -144,6 +149,39 @@ Each record is bound to an incarnation token minted when the task's wiring is ar
 Three rendered-text checks deliberately remain outside this contract because they answer delivery questions: submit acknowledgement and the away-mode supervisor-pane busy guard consume the shared delivery-footer matcher owned by `bin/fm-composer-lib.sh`, while `bin/fm-pending-reply-lib.sh` owns the secondmate delivery-confirmation observation.
 All are harness-scoped rather than a global pattern union, and none is a recorded worker state source.
 
+## Task executors
+
+`bin/fm-task-dispatch.sh` is the narrow executor boundary above task execution.
+The default `local-agent` executor delegates argument ownership to `bin/fm-spawn.sh`, so every existing harness, runtime backend, endpoint, semantic busy-state source, and isolated-worktree assertion remains on its established path.
+The explicit `remote-agent/aime` and `remote-agent/ida` selectors create no harness, runtime backend, endpoint, terminal, or worktree.
+Remote agents are therefore task executors, not harnesses or runtime backends, and no heuristic chooses between the two providers.
+
+All executors reuse the ordinary Firstmate task identity and lifecycle.
+A remote research task keeps its backlog item, private brief and instruction, status-event history, supervision obligation, `data/<id>/report.md`, decision-hold gate, and completion handling, while its metadata records `executor=remote-agent` and an explicit `provider=aime|ida` instead of faking local fields.
+`bin/fm-task-state.sh` and `bin/fm-task-retire.sh` are the matching provider-aware read and retirement boundaries.
+Legacy or explicit local task records delegate unchanged to `fm-crew-state.sh` and `fm-teardown.sh`.
+
+`bin/fm-remote-agent-lib.sh` is the authoritative shared owner for the native remote metadata vocabulary and the normalized iDA state phases, private artifacts, report linkage, and provider-neutral safety checks.
+Provider adapters own their command surfaces, identities, observations, state interpretation, result extraction, and cancellation capabilities.
+AIME deliberately retains its proven `fm-aime-task-state.v1` mechanics; `bin/fm-remote-agent-aime.sh` selects that lifecycle with the new executor discriminator.
+Existing `executor=cloud-worker`, `provider=aime` records remain readable, adoptable, cancellable, and retireable through their original paths without migration or rewriting.
+
+Asynchronous monitoring uses the existing process-to-event transport.
+`bin/fm-procevent-aime.sh` owns AIME event replay, session and output readback, cursor continuity, duplicate handling, provider classification, deterministic report generation, and re-arming.
+Its terminal-unavailable seam recognizes only identity-bound provider status `stopped` plus authoritative terminal replay plus unavailable bounded output readback, records that as terminal failure, and stops the canonical source.
+The same adapter owns the bounded exact-generation preflight, private quarantine-before-acknowledgement order, exact queued-wake removal, and idempotent retry boundary.
+`bin/fm-procevent-ida.sh` owns iDA's durable session-marker reconciliation, single submission boundary, official session readback, normalized terminal result, report capture, acknowledgement, re-arming, and source-local coalescing of repeated nonterminal transient read failures.
+That coalescing compares the state-bound prior observation before stdout reaches generic capture, uses bounded exponential polling inside one waiter, and returns every first, changed, successful, ambiguous, authorization-related, submission-uncertain, or terminal observation through the unchanged durable transport immediately.
+An ambiguous iDA submission or read times out into identity reconciliation before any retry; a missing, duplicate, or truncated match never silently creates another session.
+The generic runner remains transport only and wakes Firstmate through the existing durable check path.
+No local LLM Scout is required for monitoring, readback, or report wrapping.
+
+In document mode AIME creates the requested Feishu document itself.
+Firstmate validates and records the returned canonical URL, identity, and revision, but performs no local document creation, copying, rewriting, sharing, or permission change.
+iDA records a self-contained normalized report or its authoritative result identity, distinguishes legacy text from supported structured final-answer artifacts, and keeps `available`, exact `zero`, `unavailable`, and `error` distinct.
+Provider output remains evidence and input rather than implementation, publication, merge, destructive, or security authority.
+[`configuration.md`](configuration.md#remote-research-agents) owns public setup and limits, the [`cloud-research-worker` skill](../.agents/skills/cloud-research-worker/SKILL.md) owns conditional operation, and [`verification/remote-agents.md`](verification/remote-agents.md) plus [`verification/aime-cloud-worker.md`](verification/aime-cloud-worker.md) own current empirical evidence.
+
 ## Runtime session backends
 
 The runtime backend is the session-provider layer below firstmate's scripts.
@@ -209,7 +247,7 @@ The session-start bootstrap step keeps valid dispatch configuration silent unles
 When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness, so `config/crew-harness` is only automatic when no dispatch profile file is active.
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
-That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse while preserving the requested profile for later audit.
+That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, muse, and the Herdr-only TraeX worker/scout adapter while preserving the requested profile for later audit.
 
 ## Optional secondmates
 
@@ -313,6 +351,50 @@ Work routed to another home reports a *typed* terminal result through `bin/fm-pu
 Because a terminal event's id is derived from its identity tuple rather than generated, duplicate reports and restart replay converge without coordination.
 Reconciliation rides the existing relay poll and the session-start digest instead of a new watcher, daemon, or timer, and both are gated on the same `.env` activation contract so a home that never opted into the relay executes none of it.
 The [Relay configuration reference](configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, and the `fmx-respond` skill owns the procedure.
+
+## Feishu current-Pi channel
+
+The optional Feishu channel has three owners and no second Agent authority.
+The dedicated `bin/fm-feishu-transport.mjs` process owns strict local-config credential access, one official Feishu Node SDK long connection, SDK P2P identity verification, authorized inbound image downloads, SDK bound-chat `message.create`, reconnect health, and no Pi or Agent access.
+`bin/fm-feishu-state.mjs` owns private pairing, exact binding generations and Assistant-history boundaries, accepted Feishu events and their media envelopes and cache bytes, native-queue submission evidence, finalized-Assistant registration intents and outbox records, attempts, receipts, quarantine, and local alerts.
+Its shared state-lock helper serializes pairing, binding, inbound, outbound, live-session, sequence, and transport-owner mutation, including inode-bound recovery of a stale hardlinked canonical lock entry without discovering or deleting aliases.
+`.pi/extensions/fm-primary-feishu-bridge.ts` and `.pi/extensions/lib/fm-feishu-native-channel.ts` are the only components allowed to offer authorized Feishu input, including its native image content, to the current Pi native queue.
+
+The Pi extension sends only the verified current persisted-session identity to a credential-blind lifecycle launcher and invokes hard takeover directly at trusted startup or an owned turn whenever live Pi ownership is missing.
+The dedicated transport process parses `config/feishu.env`, probes app authentication and P2P chat identity before binding mutation, gracefully stops the exact prior owner, converges the pairing and binding generation, and starts exactly one credential-bearing daemon process.
+The same bridge pump owns the smallest outer process-recovery loop: it observes non-dispatchable health, applies capped exponential backoff and single-flight dispatch, and asks the credential-blind lifecycle launcher for strict same-binding recovery without taking over the SDK client's in-process reconnect state machine.
+That recovery action never converges or replaces a binding; it revalidates the unchanged configuration-file identity, session lock, exact binding generation, live Pi owner token, prior transport ownership, and P2P identity before starting one daemon, and only the fully revalidated new owner fence clears backoff.
+Trusted local recovery then commits one state-owner hard takeover under the pairing, binding, inbound, outbound, and live-session locks: a replacement generation retargets pending delivery identities to the exact current persisted Pi, while every prior Pi fence fails immediately in both replacement and same-generation ownership recovery.
+Pending and uncertain outbound records retain their durable event, chunk UUID, receipt, and uncertainty identities instead of being dropped, replayed under new identities, or blocking ownership transfer.
+Credentials never enter Pi or a process argument.
+An unchanged session, configuration identity, generation, healthy transport, and matching live Pi owner make startup a silent no-op; healthy transport without live Pi ownership is a distinct state that triggers same-generation ownership recovery without restarting that transport.
+
+The extension binds canonical `FM_HOME`, stable home identity, full persisted Pi session UUID and file, session and header cwd, verified Firstmate lock ancestry, exact P2P chat, and binding generation.
+It calls only the current extension API's `sendUserMessage` with native steer delivery, so a busy Pi receives Feishu input after the current turn's tool calls and before its next model call, while no RPC Pi, SDK `AgentSession`, headless Pi, direct JSONL writer, or second process can become conversation authority.
+Native TUI input is not intercepted, transformed, copied into Feishu state, acknowledged, or reinjected.
+Watcher and turn-end operational messages call Pi directly and never enter Feishu state.
+The bridge records one owner-fenced handoff for each durable Feishu event and offers all pending events to Pi without a Firstmate scheduling policy.
+Pi owns native TUI order, steering order, and pending-message sequencing.
+
+A privacy-safe leading marker carries only the derived delivery reference and generation.
+The marker lets session restart reconcile a prior native-queue handoff and render the authorized source badge; it does not govern outbound eligibility.
+Native TUI and operational user messages remain unmarked, unclassified, and unmodified.
+Feishu and TUI use the same normal Pi tool path with no channel-specific tool fence or confirmation command.
+
+The transport authenticates through the SDK's app-credential mechanism, verifies the safe app fingerprint and P2P chat, and durably publishes accepted SDK callbacks before returning.
+The callback never waits for Pi or executes a model or tool.
+The SDK owns protocol reconnect and replay within the transport's bounded recovery fence, which suspends dispatch until the exact owner, generation, and P2P identity are reverified; durable `event_id` and `message_id` indexes converge redelivery without history polling or an invented replay service.
+A reconnect, malformed event, disk failure, authorization mismatch, or unsupported message type becomes body-free health or quarantine evidence rather than an in-memory success.
+
+Direct egress is a deterministic persisted-session projection rather than a second reasoning path.
+After Pi persists a finalized Assistant message, the extension scans message entries strictly after the binding's history boundary and registers every non-empty Assistant text regardless of whether Feishu, native TUI, watcher, turn-end, or another normal Pi source caused it.
+Persisted session-entry identity, order, timestamp, session, binding generation, and text hash make restart capture converge without source provenance or transient turn ordinals.
+The exact `Captain, shipshape.`, `Captain，shipshape.`, and `船长，处理中。` responses stay local, and thinking, partial streams, tool calls/results, user/system/custom messages, and TUI-only alerts are excluded.
+Intent processing refuses the whole message before body persistence on a fixed credential pattern, applies the deterministic rendering and structure-preserving chunking contract owned by [`docs/feishu-channel.md`](feishu-channel.md), and transfers each eligible response to the outbox.
+The transport always uses SDK `message.create` for the bound P2P chat and maps stable chunk identities to SDK `uuid`, durable pre-send attempts, receipts, bounded same-UUID ambiguous retries, and an explicit uncertain state after the platform window.
+
+The operator contract, supported MVP, local commands, scopes, and failure recovery live in [`docs/feishu-channel.md`](feishu-channel.md).
+The agent-only response and local-control procedure lives in [`.agents/skills/feishu-channel/SKILL.md`](../.agents/skills/feishu-channel/SKILL.md).
 
 ## Project memory belongs to projects
 

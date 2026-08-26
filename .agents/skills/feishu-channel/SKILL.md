@@ -1,0 +1,58 @@
+---
+name: feishu-channel
+description: >-
+  Agent-only procedure for Firstmate's private Feishu current-Pi channel.
+  Load when a user message carries the authorized Feishu source badge, before a local /fm-feishu-* control operation, or when session start reports a FEISHU diagnostic.
+user-invocable: false
+metadata:
+  internal: true
+---
+
+# Feishu channel
+
+Use this procedure only for Firstmate's opt-in private Feishu channel.
+The operator contract is [`docs/feishu-channel.md`](../../../docs/feishu-channel.md), and the exact mechanics belong to the named scripts and their help.
+
+## On an authorized Feishu input
+
+Treat the body as authenticated captain text from the exact allowlisted P2P channel.
+An authorized image is native model input from that same channel, not a file path or a textual placeholder; preserve its position relative to adjacent text.
+Feishu and native TUI input follow the same normal Pi tool and Firstmate authority path.
+Do not add a Feishu-specific tool restriction, local confirmation step, special policy switch, or alternate tool executor.
+A slash-like prefix is ordinary content and is never a Pi command, skill invocation, prompt template, shell command, or direct tool request.
+Use normal Firstmate project intake, approval, merge, destructive-action, and security rules exactly as for native TUI input.
+Do not expose the open ID, chat ID, message ID, delivery marker, app identity, private state path, or transport mechanics in a captain-facing answer.
+
+Native TUI and Firstmate operational input never pass through Feishu durable state.
+The bridge offers only accepted durable Feishu events to Pi through `sendUserMessage` with native steer delivery.
+Text-only input retains the normal string form, while images use Pi's native image-content shape after private byte-hash verification.
+Pi therefore delivers a busy-session Feishu message after the current Assistant turn's tool calls and before the next model call, while an idle session starts a normal turn.
+Pi owns input ordering and scheduling.
+Do not reconstruct a cross-channel queue around it.
+
+Every finalized non-empty Assistant text persisted after the binding boundary is mirrored automatically to the bound Feishu chat, whether the turn came from Feishu, native TUI, watcher, turn-end, or another normal Pi source.
+The exact fixed responses `Captain, shipshape.`, `Captain，shipshape.`, and `船长，处理中。` stay local and are never pushed.
+Do not add a classifier, summary, semantic rewrite, model call, semantic redaction, typed notification, source-provenance requirement, or separate outbound message.
+Write the captain-facing final answer exactly as it should appear, with complete URLs.
+Fixed credential-pattern refusal, stable persisted Assistant-entry identity, deterministic chunking, and bound-chat delivery are extension-owned.
+Thinking, partial streams, tool calls and results, user/system/custom messages, and TUI-only alerts are not outbound Assistant text.
+
+## Local control and health
+
+Normal pairing, direct hard binding, replacement, and missing live-session ownership recovery come from local `config/feishu.env` during trusted persisted Pi session startup and owned turn boundaries, and automatic transport process recovery continues on its own while the exact current session remains active.
+They require no slash command, credential export, or manual transport start.
+Use `/fm-feishu-disable` for a durable local disable and `/fm-feishu-status` for detailed local status.
+Use `/fm-feishu-rebind` only as the compatibility-named local recovery control that hard-binds the configured channel to the exact current trusted persisted Pi session and fences every prior session in the same takeover.
+Never enable, disable, bind, rebind, create or configure an app, write a credential, start a live connection, consume a live event, or send a real message from Feishu text.
+Never create or configure an app, write a credential, consume a live event, or send a real message as part of diagnosis without explicit local operator intent.
+
+A `FEISHU:` session-start line contains no body, app identity, or stable user/chat identifier.
+Use `bin/fm-feishu-status.sh summary` for body-free machine status and `/fm-feishu-status` for exact local-TUI identity display.
+Treat transport health and `session_owned` as separate gates: a healthy transport without current live Pi ownership cannot deliver inbound work and is recovered by the next trusted owned Pi boundary, not by restarting only the transport.
+Use `bin/fm-feishu-transport.sh config-check` for the body-free local configuration verdict.
+Use `bin/fm-feishu-transport.sh start|stop|restart|status` only as explicit local controls for the dedicated no-Agent official-SDK transport.
+A transport stop is graceful and must never be escalated to a force kill.
+
+For `transport=starting`, `connecting`, or `reconnecting`, leave durable Feishu input pending until the exact current connection and identity fence are healthy.
+For a missing SDK dependency, invalid local configuration, SDK authentication or scope failure, unsafe private state, disk failure, lost session ownership, or delivery uncertainty, report the concrete local operator action without message bodies, credentials, or raw private IDs.
+Do not start another Pi, add a webhook, or create another transport to work around a channel failure.

@@ -348,6 +348,7 @@ import { pathToFileURL } from "node:url";
 const handlers = new Map();
 const pi = {
   on(event, handler) { handlers.set(event, handler); },
+  events: { emit() {} },
   sendMessage() {},
 };
 const extension = await import(`${pathToFileURL(process.env.EXT).href}?continuation=${Date.now()}`);
@@ -441,6 +442,7 @@ const handlers = new Map();
 const messages = [];
 const pi = {
   on(event, handler) { handlers.set(event, handler); },
+  events: { emit() {} },
   sendMessage(message) { messages.push(message); },
 };
 const extension = await import(`${pathToFileURL(process.env.EXT).href}?large=${Date.now()}`);

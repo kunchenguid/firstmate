@@ -1,0 +1,185 @@
+// Opt-in Firstmate Feishu bridge for the current live Pi AgentSession.
+//
+// This extension never creates an AgentSession and never starts Pi.  It binds
+// only a trusted local TUI whose persisted session identity and Firstmate lock
+// exactly match the active private binding.  Network transport remains in the
+// dedicated no-Agent fm-feishu-transport process.
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { Box, Text } from "@earendil-works/pi-tui";
+import {
+  disablePairing,
+  statusSummary,
+} from "../../bin/fm-feishu-state.mjs";
+import {
+  firstmateSessionLockOwnership,
+  registerFeishuNativeChannel,
+} from "./lib/fm-feishu-native-channel.ts";
+import { FIRSTMATE_SESSION_START_SETTLED_EVENT } from "./lib/fm-operational-input.ts";
+
+const extensionDir = dirname(fileURLToPath(import.meta.url));
+const root = resolve(extensionDir, "../..");
+const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
+const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
+const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
+const marker = `${state}/.pi-feishu-extension-loaded`;
+const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(fileURLToPath(import.meta.url))).digest("hex")}`;
+const transportScript = process.env.FM_FEISHU_TRANSPORT_SCRIPT || `${fmRoot}/bin/fm-feishu-transport.sh`;
+
+function requireLocalTui(ctx: ExtensionCommandContext): void {
+  if (ctx.mode !== "tui" || !ctx.hasUI) throw new Error("Feishu channel controls are available only in the local Pi TUI");
+  if (!ctx.isProjectTrusted()) throw new Error("the current Firstmate project is not trusted");
+  if (firstmateSessionLockOwnership() !== "owned") throw new Error("this Pi does not own the verified Firstmate session lock");
+}
+
+function configPathPresent(): boolean {
+  try {
+    lstatSync(`${fmHome}/config/feishu.env`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function transportAction(action: "stop" | "disable-config"): Promise<void> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(transportScript, [action], {
+      cwd: fmRoot,
+      env: { ...process.env, FM_HOME: fmHome, FM_ROOT_OVERRIDE: fmRoot },
+      stdio: "ignore",
+    });
+    child.once("error", rejectPromise);
+    child.once("close", (code) => {
+      if (code === 0) resolvePromise();
+      else rejectPromise(new Error(`Feishu transport ${action} exited ${code ?? "without status"}`));
+    });
+  });
+}
+
+function fullStatus(): string {
+  const value = statusSummary(fmHome) as {
+    paired?: boolean;
+    disabled?: boolean;
+    binding_status?: string;
+    binding_generation?: number | null;
+    home_realpath?: string | null;
+    session_id?: string | null;
+    session_file?: string | null;
+    session_cwd?: string | null;
+    chat_id?: string | null;
+    allowed_user?: string | null;
+    transport_phase?: string;
+    transport_healthy?: boolean;
+    live_session_owned?: boolean;
+    inbound?: { pending?: number; queued?: number; delivered?: number };
+    outbound_pending?: number;
+    outbound_uncertain?: number;
+  };
+  return [
+    `paired=${value.paired === true ? "yes" : "no"}`,
+    `disabled=${value.disabled === true ? "yes" : "no"}`,
+    `binding=${value.binding_status ?? "absent"}`,
+    `generation=${value.binding_generation ?? "none"}`,
+    `home=${value.home_realpath ?? "none"}`,
+    `session_id=${value.session_id ?? "none"}`,
+    `session_file=${value.session_file ?? "none"}`,
+    `session_cwd=${value.session_cwd ?? "none"}`,
+    `chat_id=${value.chat_id ?? "none"}`,
+    `allowed_user=${value.allowed_user ?? "none"}`,
+    `transport=${value.transport_phase ?? "stopped"}`,
+    `transport_healthy=${value.transport_healthy === true ? "yes" : "no"}`,
+    `live_session_owned=${value.live_session_owned === true ? "yes" : "no"}`,
+    `inbox_pending=${value.inbound?.pending ?? 0}`,
+    `inbox_queued=${value.inbound?.queued ?? 0}`,
+    `inbox_delivered=${value.inbound?.delivered ?? 0}`,
+    `outbox_pending=${value.outbound_pending ?? 0}`,
+    `outbox_uncertain=${value.outbound_uncertain ?? 0}`,
+  ].join("\n");
+}
+
+function markLoaded(): void {
+  if (firstmateSessionLockOwnership() !== "owned") return;
+  mkdirSync(state, { recursive: true });
+  writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`, { mode: 0o600 });
+}
+
+export default function (pi: ExtensionAPI) {
+  const nativeChannel = registerFeishuNativeChannel(pi);
+  let stopListeningForSessionStart: (() => void) | undefined;
+  const listenForSessionStart = () => {
+    if (stopListeningForSessionStart) return;
+    stopListeningForSessionStart = pi.events.on(FIRSTMATE_SESSION_START_SETTLED_EVENT, markLoaded);
+  };
+  listenForSessionStart();
+
+  pi.registerEntryRenderer<{ kind?: string; message?: string }>("fm-feishu-local-alert", (entry, _options, theme) => {
+    const box = new Box(1, 0, (text) => theme.bg("toolErrorBg", text));
+    box.addChild(new Text(theme.fg("error", theme.bold("Feishu channel alert")), 0, 0));
+    box.addChild(new Text(theme.fg("warning", entry.data?.message ?? "A private Feishu channel action needs local attention."), 0, 0));
+    return box;
+  });
+
+  pi.registerCommand("fm-feishu-disable", {
+    description: "Disable the local Feishu pairing and stop its no-Agent transport.",
+    handler: async (_args, ctx) => {
+      try {
+        requireLocalTui(ctx);
+        const configured = configPathPresent();
+        await transportAction(configured ? "disable-config" : "stop");
+        const result = configured ? { changed: true } : disablePairing(fmHome);
+        ctx.ui.setStatus("fm-feishu", undefined);
+        ctx.ui.notify(result.changed ? "Feishu pairing disabled and transport stop requested." : "Feishu pairing was already absent or disabled.", "info");
+      } catch (error) {
+        ctx.ui.notify(`Feishu disable refused: ${String(error)}`, "error");
+      }
+    },
+  });
+
+  pi.registerCommand("fm-feishu-status", {
+    description: "Show the exact local Feishu pairing, Pi session binding, queue, and transport status.",
+    handler: async (_args, ctx) => {
+      try {
+        requireLocalTui(ctx);
+        ctx.ui.notify(fullStatus(), "info");
+      } catch (error) {
+        ctx.ui.notify(`Feishu status unavailable: ${String(error)}`, "error");
+      }
+    },
+  });
+
+  pi.registerCommand("fm-feishu-rebind", {
+    description: "Hard-bind the configured private Feishu channel to this exact local Pi session.",
+    handler: async (_args, ctx) => {
+      try {
+        requireLocalTui(ctx);
+        const result = await nativeChannel.hardBind(ctx);
+        ctx.ui.notify(
+          result === "already-current"
+            ? "Feishu channel is already bound to this Pi session and healthy."
+            : "Feishu channel hard-bound to this Pi session and is healthy.",
+          "info",
+        );
+      } catch {
+        ctx.ui.notify(
+          "Feishu hard bind refused. Run /fm-feishu-status and bin/fm-feishu-transport.sh config-check locally, verify the protected configuration and current Firstmate session lock, then retry /fm-feishu-rebind.",
+          "error",
+        );
+      }
+    },
+  });
+
+  pi.on("session_start", () => {
+    listenForSessionStart();
+    markLoaded();
+  });
+  pi.on("agent_start", () => markLoaded());
+  pi.on("session_shutdown", () => {
+    stopListeningForSessionStart?.();
+    stopListeningForSessionStart = undefined;
+  });
+  markLoaded();
+}
