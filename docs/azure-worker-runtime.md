@@ -13,10 +13,9 @@ data-disk preparation (/mnt/account lun0, /mnt/task lun1), bounded execute
 with digest-bound fm.worker-execution-result/v1, TTL, Herdr tracking endpoint
 with queued-spawn convergence (PR 227).
 
-Items 1 to 5 below were the original gap list. They are now BUILT (1 to 4 by
-D1-D3, 5 by D5) and docs/azure-workers.md owns their behavior; they are kept
-here only so the decisions that follow read against the problem they solved.
-Item 6 is the one still open.
+Items 1 to 6 below were the original gap list.
+They are now BUILT (1 to 4 by D1-D3, 5 by D5, and 6 by D6), and docs/azure-workers.md owns their behavior.
+They are kept here only so the decisions that follow read against the problem they solved.
 
 1. BUILT. Runtime: pi and node did not exist on the worker. Workers booted the
    raw Canonical Ubuntu 24.04 base; bootstrap installed only the supervisor.
