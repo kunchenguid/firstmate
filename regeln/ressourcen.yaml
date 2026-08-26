@@ -1,0 +1,125 @@
+# regeln/ressourcen.yaml - contextual rules for everything the fleet shares or
+# spends: claimed resources, the boundary between own and foreign, the cost of
+# a paid run, and the survival of work in progress (mechanism families M12 and
+# M15, plan section "Gesamtlehren-Verdichtung").
+# Delivered by retrieval (bin/fm-prompt-regeln.sh, bin/fm-brief.sh).
+# Caps: regeln/VERFASSUNG.yaml.
+#
+# Deliberately ABSENT (class (c), the gate is the rule): the seat ledger
+# config/konten.tsv read by bin/fm-spawn.sh, the salvage snapshot in
+# bin/fm-git-guard.sh, and the PID check in bin/fm-kill-pretool-check.sh.
+# RES-EIGENTUM-001 is kept even though the kill case has a gate: the gate ends
+# at PIDs, the failures did not (a worktree deploy script reached production, a
+# password reached a foreign transcript stream).
+
+rules:
+  - id: RES-BELEGUNG-001
+    geltung: flotte
+    verbindlichkeit: kontext
+    severity: 3
+    anker: [L38, L82, L87]
+    quelle: grundsatz:8
+    leser: tor:bin/fm-reservierung-lib.sh
+    verfall: null
+    trigger: >
+      A shared or live resource is about to be used: rolling out or deploying
+      to a live server, taking a port, a database, a test device, or spawning
+      onto an account.
+    statement: >
+      Shared means claimed before use, never assumed free. The claim is written
+      where the others look (state/reservierungen/), names who, what, and until
+      when, and it expires - an expired claim is no claim. Whoever meets a
+      foreign claim waits or asks its owner; whoever is done releases. "Nobody
+      seemed to be using it" is not a check, and free capacity is not a
+      permission.
+    violation: 'rolling out to a target whose reservation ran out yesterday; spawning onto an account because it "had room"'
+    correct: 'claim, act, release - and on a foreign claim, ask the owner named in it'
+    tags: reservierung, belegung, geteilt, live, ausrollen, konto
+
+  - id: RES-EIGENTUM-001
+    geltung: flotte
+    verbindlichkeit: kontext
+    severity: 3
+    anker: [L86, L73]
+    quelle: grundsatz:9
+    leser: tor:bin/fm-kill-pretool-check.sh
+    verfall: null
+    trigger: >
+      A command reaches a process, a file, or a host this task did not create -
+      killing a PID, deleting foreign files - or a real password, token, or key
+      is about to be written into a message, a brief, a log, or code.
+    statement: >
+      The boundary is not the repository; it is every target your commands and
+      your text can reach. Act only on what is registered as yours
+      (bin/fm-owned.sh): no kill on a PID you did not register, no write to a
+      host you were not given, no deletion of a file you did not make.
+      Isolation that holds only inside the repo is no isolation. A password, a
+      token, or a key never travels in a message, a brief, or a log - it goes
+      through bin/fm-secret.sh, and a masking rule covering one channel covers
+      nothing.
+    violation: 'killing a PID grepped out of the whole ss output; a worktree deploy script writing the live file; a real password pasted into a lane that answers'
+    correct: 'register the PID as owned, then act on it; put the secret in fm-secret and pass the handle'
+    tags: eigentum, grenze, fremd, kill, pid, prozess, kennwort, token, geheimnis, isolation
+
+  - id: RES-ABBRUCH-001
+    geltung: flotte
+    verbindlichkeit: kontext
+    severity: 2
+    anker: [L94]
+    quelle: grundsatz:10
+    leser: retrieval
+    verfall: null
+    trigger: >
+      A run that costs money, tokens, or hours is started or repeated - a
+      campaign, a search, another attempt at the same thing.
+    statement: >
+      A paid run starts with its stop written down: what it may cost, which
+      result ends it, and what counts as failure. At the limit it stops and
+      reports what the money bought; it is never extended in silence. Effort is
+      proportional to the risk - the small path is the rule, full sharpness
+      only at the hard gates.
+    violation: 'a third round of the same failing attempt with no budget named; an overnight run with nothing to show'
+    correct: '"budget: forty minutes or two failed rounds, then I stop and report" - and stopping there'
+    tags: kosten, abbruch, budget, bezahlt, proportional
+
+  - id: RES-SICHERUNG-001
+    geltung: worker
+    verbindlichkeit: kontext
+    severity: 2
+    anker: [L95, L68]
+    quelle: grundsatz:8
+    leser: tor:bin/fm-git-guard.sh
+    verfall: null
+    trigger: >
+      Work runs over a long stretch, across a restart, or in a lane that can be
+      killed or replaced.
+    statement: >
+      An agent's life is not durable storage: work that exists only inside a
+      running session is not saved. Commit intermediate state as you go, on
+      your own branch, before every expensive step and before any handover -
+      small and often beats the one clean commit that never happens. A backup
+      nobody has restored from is a claim, not a backup.
+    violation: 'two hours of work gone with the lane; "I will commit once it is finished"'
+    correct: 'a WIP commit per finished step, pushed to the lane branch'
+    tags: sicherung, zwischenstand, commit, verlust, neustart
+
+  - id: RES-KLASSE-001
+    geltung: flotte
+    verbindlichkeit: kontext
+    severity: 2
+    anker: [L72, L90]
+    quelle: grundsatz:1
+    leser: retrieval
+    verfall: null
+    trigger: >
+      The same kind of defect turns up a second time, or a fix is about to be
+      applied to one instance of something that plainly has siblings.
+    statement: >
+      From the second find on, the order is the class, not the case: search the
+      whole class first, list what it holds, then fix in one pass. Drip-fixing
+      multiplies rounds and leaves the rest of the class standing. Known damage
+      that is not being fixed now gets a named item and an owner, never a queue
+      position.
+    violation: 'the same missing check patched in four consecutive rounds; "there may be more of these" as the closing line'
+    correct: '"eleven of these exist, here is the list, all eleven fixed in this branch"'
+    tags: klasse, erschoepfend, runden, wiederholung, bekannt

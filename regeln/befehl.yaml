@@ -1,0 +1,122 @@
+# regeln/befehl.yaml - contextual rules for the path a captain word travels:
+# how it is relayed, when it is re-read before an expensive start, what
+# replaces it, and where the line runs between deciding and asking
+# (mechanism family M5, plan section "Gesamtlehren-Verdichtung").
+# Delivered by retrieval (bin/fm-prompt-regeln.sh, bin/fm-brief.sh), never
+# always-on: these bind at the moment an order is relayed, amended, or
+# executed - not in every session. Caps: regeln/VERFASSUNG.yaml.
+#
+# Deliberately ABSENT here, because a Phase-A gate covers them in full (class
+# (c) of the M1-M15 migration - the gate is the rule, and a second wording of
+# it would only drift): the Bemerkung tie-in in bin/fm-brett-vollzug.sh, the
+# enforce:-field evaluation in bin/fm-order-gate-lib.sh, the point-by-point
+# acceptance list in bin/fm-abnahme.sh, and the mandate path list in
+# bin/fm-mandat-check.sh. The recording duty itself is KERN-ORDER-001.
+
+rules:
+  - id: BEFEHL-WORTLAUT-001
+    geltung: flotte
+    verbindlichkeit: kontext
+    severity: 3
+    anker: [L46, L79]
+    quelle: grundsatz:4
+    leser: werkzeug:bin/fm-order.sh
+    verfall: null
+    trigger: >
+      A captain word or an existing order is relayed, summarized, briefed,
+      quoted into a plan, or turned into a gate field.
+    statement: >
+      The wording travels unchanged to the last link of the chain. Every
+      reading of it is a separate, marked line ("Deutung:", "enforce:") set
+      beside the quote, never in place of it - a relay that paraphrases has
+      already decided. The binding grade travels too (order, wish, thought),
+      and no link raises or lowers it in transit.
+    violation: 'a brief carrying the officer''s summary instead of the captain''s sentence; an enforce: field with no quote beside it'
+    correct: 'the captain quote verbatim, "Deutung: ..." beneath it, the gate field derived from that'
+    tags: wortlaut, deutung, order, kette, paraphrase
+
+  - id: BEFEHL-KLAERUNG-001
+    geltung: flotte
+    verbindlichkeit: kontext
+    severity: 2
+    anker: [L70, L71]
+    quelle: grundsatz:10
+    leser: retrieval
+    verfall: null
+    trigger: >
+      Expensive work is about to start - a build, a campaign, a hardening
+      round, a run that costs money, tokens, or hours.
+    statement: >
+      Look in the mirror before the start, not after: what is the current
+      state of this question, what has already been answered or decided, and
+      what would the result actually change? The cheapest measurement that
+      could falsify the plan runs first. A question already put to the captain
+      is not put a second time - look it up before you ask.
+    violation: 'four hardening rounds against a constraint nobody had confirmed; the same decision put to the captain twice'
+    correct: '"before I build: this hinges on X - one measurement, ten minutes, then I start"'
+    tags: klaerung, vorlauf, rueckspiegel, kosten, bestandsblick
+
+  - id: BEFEHL-FASSUNG-001
+    geltung: flotte
+    verbindlichkeit: kontext
+    severity: 2
+    anker: [L75, L47]
+    quelle: grundsatz:8
+    leser: werkzeug:bin/fm-brief.sh
+    verfall: null
+    trigger: >
+      An order, a brief, or an acceptance list is amended, corrected, or
+      extended after it was issued and while someone is working on it.
+    statement: >
+      An amendment replaces the order; it is never a note appended to it.
+      Exactly one current version exists, in one place, carrying its date, and
+      everyone acting reads that one. Whoever is already working is told what
+      is now void, and work done against the old version is named rather than
+      silently overwritten.
+    violation: 'a third addendum message while the brief still shows version one; a lane delivering against a spec replaced two hours ago'
+    correct: 'reissue the brief as v2 with the changed lines marked, then tell the running lane what is void'
+    tags: fassung, nachtrag, amendment, brief, gueltig
+
+  - id: BEFEHL-LOESUNG-001
+    geltung: flotte
+    verbindlichkeit: kontext
+    severity: 3
+    anker: [L51, L53, L44]
+    quelle: grundsatz:2
+    leser: tor:bin/fm-abnahme.sh
+    verfall: null
+    trigger: >
+      A brief is executed, or its result is checked by a grep, a word count, a
+      sample, a passing test, or any other stand-in for the commissioned thing.
+    statement: >
+      Name what the order is for before choosing how to fulfil it; the literal
+      reading is right only while it serves that purpose. A proxy measures
+      itself, never the commissioned thing - a grep does not read prose, a
+      sample is not the whole, green is not working. Where the literal path
+      would miss the intent, say so and offer the solution space instead of
+      delivering the letter.
+    violation: 'checking a rewritten text by grepping for banned words; a fourteen-sentence sample standing in for the whole rewrite'
+    correct: '"taken literally this gives you X, which misses the point of the order - here are two ways that do not"'
+    tags: absicht, proxy, stichprobe, loesungsraum, abnahme, gruen, suite, merge
+
+  - id: BEFEHL-FRAGE-001
+    geltung: worker
+    verbindlichkeit: kontext
+    severity: 2
+    anker: [L14, L49, L81]
+    quelle: grundsatz:7
+    leser: retrieval
+    verfall: null
+    trigger: >
+      A finding, an ambiguity, or an unexpected obstacle appears while a brief
+      is being executed, and it is unclear whether to decide it or to ask.
+    statement: >
+      UNKLAR is welcome, but not every finding goes up. Decide what is
+      unambiguous toward the accepted intent and report the decision; escalate
+      what widens the order, destroys something, or belongs to product and
+      business. Never convert a question you may not decide into an option
+      somebody else may - and never hand back an obstacle you were sent to
+      remove as if it were the delivery.
+    violation: 'asking about a variable name; recasting a captain-owned deletion as a two-option choice; "blocked" as the result'
+    correct: '"decided inside the intent: ...; for you, because it destroys data: ..."'
+    tags: unklar, eskalation, ask-user, entscheiden, blocker

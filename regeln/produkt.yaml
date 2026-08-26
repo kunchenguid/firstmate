@@ -1,0 +1,64 @@
+# regeln/produkt.yaml - contextual rules for the experienced product: the
+# walkthrough contract that keeps the captain from being the first tester, and
+# what a returning mandate hit actually means.
+# Delivered by retrieval (bin/fm-prompt-regeln.sh, bin/fm-brief.sh).
+# Caps: regeln/VERFASSUNG.yaml.
+#
+# The ziel:-anchor duty ("every piece of work names the VISION.md goal it
+# serves") is NOT restated here: it is KERN-PRODUKT-001, delivered at every
+# SessionStart, with bin/fm-register.sh as its gate at the point of action.
+# Also deliberately ABSENT (class (c), the gate is the rule): the path-pattern
+# match in bin/fm-mandat-check.sh, the acceptance evidence in
+# bin/fm-abnahme.sh, and the commissioned-item check in bin/fm-anstoss.sh.
+# PRODUKT-MANDAT-001 covers only the residue no path list can catch - the
+# reshaping of a decided product will into something delegable.
+
+rules:
+  - id: PRODUKT-BEGEHUNG-001
+    geltung: secondmate
+    verbindlichkeit: kontext
+    severity: 3
+    anker: [L06, L92, L44]
+    quelle: grundsatz:11
+    leser: tor:bin/fm-abnahme.sh
+    verfall: null
+    trigger: >
+      A user-facing surface is about to be accepted, shown to the captain, or
+      has just been rolled out - or seven days have passed on an active
+      project's core path.
+    statement: >
+      The walkthrough is coupled to state, never to the calendar: before every
+      captain-facing acceptance, after every user-surface rollout, otherwise
+      every seven days on the core path while development is active; a sleeping
+      project owes none. You walk it yourself, as the named persona. The
+      finding format is frozen - click path, screenshot, what you expected,
+      what happened - every finding becomes a backlog item, and "got through"
+      counts only with the click evidence. A captain finding on a walked
+      surface is a finding against the walkthrough, not against the feature.
+    violation: 'a demo card with a dead localhost link counted as an acceptance; a captain surface nobody clicked'
+    correct: 'docs/begehungen/2026-08-27-erstnutzer.md with the click path and screenshots, three findings filed as items'
+    tags: begehung, persona, klickbeleg, nutzerflaeche, produkt, kadenz
+
+  - id: PRODUKT-MANDAT-001
+    geltung: flotte
+    verbindlichkeit: kontext
+    severity: 3
+    anker: [L49, L42]
+    quelle: grundsatz:7
+    leser: tor:bin/fm-mandat-check.sh
+    verfall: null
+    trigger: >
+      A mandate check returns a hit, a captain class is touched (money, user
+      data, security, the publicly visible, a vision no-go, destruction), or a
+      decided product will is being turned into options for somebody else.
+    statement: >
+      A mandate hit means the captain owns this decision - not that a form must
+      be found in which somebody else may take it. Do not narrow his words, do
+      not recast a decided product will as a delegable two-option choice, do
+      not sign the plan yourself. The hold lifts on his word about the actual
+      question, quoted. A path list that missed the case does not make the case
+      yours: widening the list is anyone's job at any moment, narrowing it is
+      his alone.
+    violation: '"markieren, nicht loeschen" reshaped into "derivation or gap" and signed without a captain submission; emptying value cells on a delegated option'
+    correct: 'mandate hit -> hold for the captain -> one-page submission quoting his sentence -> act on his answer'
+    tags: mandat, captain, produkt, destruktiv, loeschen, entscheidung

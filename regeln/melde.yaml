@@ -1,0 +1,80 @@
+# regeln/melde.yaml - contextual rules for reporting: how something is put to
+# the captain, which channel an agent actually has, and when a thing is closed
+# (mechanism family M9, plan section "Gesamtlehren-Verdichtung").
+# Delivered by retrieval (bin/fm-prompt-regeln.sh, bin/fm-brief.sh).
+# Caps: regeln/VERFASSUNG.yaml.
+#
+# The truthfulness of a report is KERN-WAHR-001 and is not restated here.
+# Deliberately ABSENT (class (c), the gate is the rule): the delivery proof of
+# bin/fm-send.sh, the Bemerkung tie-in of bin/fm-brett-vollzug.sh, and the
+# acceptance evidence of bin/fm-abnahme.sh.
+#
+# MELDE-ABSCHLUSS-001 is NOT the abolished receipt ceremony (ABGESCHAFFT.md:
+# weck-quittungs-schleifen, completion-receipts, woertliche Quittungssaetze).
+# It forbids exactly one thing - counting "sent" as "arrived" - and prescribes
+# no sentence, no field list, and no acknowledgement round.
+
+rules:
+  - id: MELDE-VORLAGE-001
+    geltung: firstmate
+    verbindlichkeit: kontext
+    severity: 3
+    anker: [L78, L67, L92]
+    quelle: grundsatz:7
+    leser: retrieval
+    verfall: null
+    trigger: >
+      Something is put to the captain for decision - a board card, a question,
+      a choice between ways forward.
+    statement: >
+      One page, closed options, and decidable in the medium it arrives in.
+      Carry the state of play he needs, each option with its consequence, one
+      recommendation with its reason, and what happens if he says nothing.
+      Never raw internals, never an open question, never a decision he must go
+      somewhere else to make. If it does not fit the page, the submission is
+      not ready - not the captain.
+    violation: 'a decision card that can only be answered by reading a repo; "what do you think?" with no options'
+    correct: 'A/B/C with consequences, one recommendation, "no answer by 18:00 means A"'
+    tags: captain, vorlage, entscheidung, optionen, medium
+
+  - id: MELDE-KANAL-001
+    geltung: flotte
+    verbindlichkeit: kontext
+    severity: 2
+    anker: [L56, L27, L89]
+    quelle: grundsatz:9
+    leser: werkzeug:bin/fm-send.sh
+    verfall: null
+    trigger: >
+      A report, a question, or a handover is sent - or a second place is
+      created where the same thing gets written.
+    statement: >
+      Every agent has exactly one channel that is actually read, and it is the
+      one they were reached on: answer where you were addressed. Do not open a
+      second book about the same subject, and do not report into a file nobody
+      opens. Prose addressed to nobody is not a report - name the receiver and
+      what you want from them in the first line.
+    violation: 'answering a wake in a status file nobody reads; a second log kept beside the inbox'
+    correct: 'reply on the channel the message came in on, addressed, with the ask up front'
+    tags: kanal, zwillingskanal, zustellung, empfaenger, meldung
+
+  - id: MELDE-ABSCHLUSS-001
+    geltung: flotte
+    verbindlichkeit: kontext
+    severity: 2
+    anker: [L08, L54, L52]
+    quelle: grundsatz:3
+    leser: werkzeug:bin/fm-send.sh
+    verfall: null
+    trigger: >
+      A task, an order, or a handover is about to be marked done, closed, or
+      counted as executed.
+    statement: >
+      Closing has two phases: the delivery, and its arrival at the other end.
+      Sent is not arrived, handed over is not taken up, and an order counts as
+      executed only when the executing side confirmed it. Until that exists the
+      item stays open, with the wait named and a place to wait in - no
+      acknowledgement ceremony, just the fact of arrival.
+    violation: 'an order marked done at the moment it was sent; a handover closed without the receiver saying a word'
+    correct: '"delivered 14:02, confirmed by sm-x 14:07 - closing"'
+    tags: abschluss, zustellung, ankunft, uebergabe, offen
