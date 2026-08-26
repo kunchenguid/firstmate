@@ -404,8 +404,49 @@ test_charted_kind_is_optional_and_accepts_both_values() {
   pass "charted kind is optional and accepts queued and warning"
 }
 
+test_open_prs_are_optional_and_validated() {
+  local home data board rc out
+  home=$(make_home openprs)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+
+  # Absent prs is the ordinary case and must keep building.
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null || fail "a payload without prs was refused"
+  extract_payload "$board" | jq -e 'has("prs") | not' >/dev/null     || fail "the built board invented a prs field"
+
+  write_valid_payload "$data"
+  jq '.prs = [
+        {"repo":"sample","number":12,"url":"https://github.com/example/sample/pull/12","title":"A change"},
+        {"repo":"other","number":7,"url":"https://github.com/example/other/pull/7"}
+      ]' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null || fail "a valid prs payload was refused"
+  extract_payload "$board" | jq -e '
+    ([.prs[] | .repo + "#" + (.number | tostring)]) == ["sample#12", "other#7"]
+      and .prs[0].title == "A change"
+      and (.prs[1] | has("title") | not)
+  ' >/dev/null || fail "the built board did not carry the open pull requests it was given"
+
+  write_valid_payload "$data"
+  jq '.prs = [{"repo":"sample","number":0,"url":"https://github.com/example/sample/pull/0"}]'     "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a non-positive PR number was accepted: $out"
+
+  write_valid_payload "$data"
+  jq '.prs = [{"repo":"sample","number":3,"url":"javascript:alert(1)"}]'     "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a non-HTTPS PR URL was accepted: $out"
+
+  write_valid_payload "$data"
+  jq '.prs = [{"number":3,"url":"https://github.com/example/sample/pull/3"}]'     "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a PR entry without a repo was accepted: $out"
+  pass "prs is optional, round-trips into the board, and refuses malformed entries"
+}
+
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
+test_open_prs_are_optional_and_validated
 test_charted_kind_is_optional_and_accepts_both_values
 test_build_injects_binds_then_arms
 test_registration_cannot_consume_before_any_origin_binding

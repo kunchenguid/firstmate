@@ -33,8 +33,11 @@
 # Captain's Call item explicitly carries `repo`; the composer fills it from the
 # snapshot and task records wherever known, and uses null or an empty string
 # only as the deliberate genuinely-no-repo marker. In that exceptional case
-# the template may display the routing id. Anything else refuses before the
-# existing board is touched.
+# the template may display the routing id. The optional top-level `prs` array
+# is the captain's open pull requests; each item carries `repo` (non-empty
+# string), `number` (positive integer), `url` (https), and an optional `title`
+# string. Omitting `prs` entirely is valid and renders nothing. Anything else
+# refuses before the existing board is touched.
 #
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation rebuilds the same file in place, which keeps the same Lavish
@@ -110,6 +113,12 @@ validate_payload() {  # <data.json>
       type == "object" and repo_marker and (.id | nonempty_string)
       and (.what | nonempty_string) and (.owner | nonempty_string)
       and optional_https_url("pr_url");
+    def pr_item:
+      type == "object"
+      and (.repo | nonempty_string)
+      and (.number | type == "number" and . > 0 and floor == .)
+      and (has("url") and optional_https_url("url"))
+      and optional_string("title");
     def charted_item:
       type == "object" and repo_marker and (.id | slug(128))
       and (.title | nonempty_string) and (.reason | type == "string")
@@ -129,6 +138,8 @@ validate_payload() {  # <data.json>
       or ((.charted_more | type == "number") and (.charted_more >= 0) and (.charted_more | floor == .)))
     and ((has("charted_warning_more") | not)
       or ((.charted_warning_more | type == "number") and (.charted_warning_more >= 0) and (.charted_warning_more | floor == .)))
+    and ((has("prs") | not)
+      or ((.prs | type == "array") and ([.prs[] | pr_item] | all)))
     and ([.captains_call[] | call_item] | all)
     and ([.underway[] | underway_item] | all)
     and ([.landed[] | landed_item] | all)
