@@ -422,7 +422,7 @@ done
 [ "$provider" = "${FM_TEST_PI_EXPECT_PROVIDER:-openai-codex}" ] || exit 65
 [ "$model" = "${FM_TEST_PI_EXPECT_MODEL:-gpt-5.6-sol}" ] || exit 66
 [ "$thinking" = xhigh ] || [ "$thinking" = low ] || exit 67
-[ "$tools" = repo_search,repo_read,submit_evidence_file,report_finding,report_suspicion,update_finding,request_lookup,finish_review ] || exit 68
+[ "$tools" = repo_search,repo_read,report_finding,report_suspicion,update_finding,request_lookup,finish_review ] || exit 68
 [ -f "$extension" ] && [ -f "${FM_CROSSCHECK_REVIEW_SCHEMA:-}" ] \
   && [ -n "$system_prompt" ] || exit 97
 [ "$context_isolated" = yes ] || {
@@ -2266,7 +2266,7 @@ test_pi_reviewer_executes_bound_policy_profile() {
     || fail "Pi reviewer did not complete"
   assert_contains "$output" 'crosscheck clear' \
     "Pi reviewer did not earn a clear result"
-  assert_grep '--mode json --offline --provider openai-codex --model gpt-5.6-sol --thinking xhigh --tools repo_search,repo_read,submit_evidence_file,report_finding,report_suspicion,update_finding,request_lookup,finish_review --extension' \
+  assert_grep '--mode json --offline --provider openai-codex --model gpt-5.6-sol --thinking xhigh --tools repo_search,repo_read,report_finding,report_suspicion,update_finding,request_lookup,finish_review --extension' \
     "$case_dir/pi.log" \
     "Pi reviewer was not invoked with its pinned provider, model, effort, and tools"
   assert_grep '--no-context-files' "$case_dir/pi.log" \
@@ -2484,8 +2484,8 @@ test_clear_review_uses_policy_contract() {
     "Codex reviewer loaded untrusted repository instructions"
   assert_grep 'BEGIN UNTRUSTED PR CLAIMS DATA' "$case_dir/prompt.log" \
     "PR claims were not delimited as untrusted data"
-  assert_grep 'Do not spend this bounded independent-review run repeating the full suite' "$case_dir/prompt.log" \
-    "reviewer was not directed toward focused evidence"
+  assert_grep 'Inspect the full diff and use bounded repository reads for focused context' "$case_dir/prompt.log" \
+    "reviewer was not directed toward a focused semantic review"
   assert_no_grep 'SAME-MODEL REVIEW' "$case_dir/prompt.log" \
     "an ordinary cross-model review received the reduced-independence prompt"
   pass "clear review uses the observed policy-grade Codex invocation"
@@ -2574,7 +2574,7 @@ PY
       || fail "$model reviewer did not complete"
     assert_contains "$output" 'crosscheck clear' \
       "$model reviewer did not earn a clear result"
-    assert_grep "--mode json --offline --provider $slot --model $model --thinking xhigh --tools repo_search,repo_read,submit_evidence_file,report_finding,report_suspicion,update_finding,request_lookup,finish_review --extension" \
+    assert_grep "--mode json --offline --provider $slot --model $model --thinking xhigh --tools repo_search,repo_read,report_finding,report_suspicion,update_finding,request_lookup,finish_review --extension" \
       "$case_dir/pi.log" \
       "$model reviewer was not invoked on the $slot provider with its pinned model, effort, and tools"
     assert_no_grep 'CROSSCHECK DEGRADED' "$case_dir/err" \
@@ -5653,7 +5653,7 @@ value = json.load(open(sys.argv[1]))
 run = value["runs"][-1]
 assert run["state"] == "clear", run["state"]
 durations = run["durations_ms"]
-for name in ("snapshot", "reviewer", "proofs", "ledger", "total"):
+for name in ("snapshot", "reviewer", "decision", "ledger", "total"):
     assert name in durations, f"{name} was not recorded: {sorted(durations)}"
 for name, measured in durations.items():
     assert isinstance(measured, int) and not isinstance(measured, bool), (name, measured)
@@ -5694,17 +5694,17 @@ value = json.load(open(sys.argv[1]))
 run = value["runs"][-1]
 assert run["state"] == "tool-failure", run["state"]
 durations = run["durations_ms"]
-# Absent, never zero: this run never reached the reviewer or the proof gate,
+# Absent, never zero: this run never reached the reviewer or decision step,
 # and a zero would read as "they ran and cost nothing".
 assert "reviewer" not in durations, durations
-assert "proofs" not in durations, durations
+assert "decision" not in durations, durations
 for name in ("snapshot", "ledger", "total"):
     assert name in durations, (name, durations)
 named = sum(value for name, value in durations.items() if name != "total")
 assert durations["total"] >= named, (durations, named)
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "a failure before the reviewer fabricated a reviewer duration"
-  pass "a run that failed before the reviewer records no reviewer or proofs phase"
+  pass "a run that failed before the reviewer records no reviewer or decision phase"
 }
 
 test_local_lane_run_records_no_compartment_phases() {
@@ -5844,9 +5844,7 @@ assert (
     "Timing: total 30.0s (reviewer 20.0s, snapshot 1.5s)." in timed_report
 ), timed_report
 
-# Current identity-only Azure reviews intentionally have no tool/verifier VM.
-# Rendering that admitted result must not turn the successful review into a
-# post-admission tool failure.
+# Current Azure reviews render the shared host without legacy proof VMs.
 identity_only = run_record(
     state="clear",
     citations=[{"path": "docs/marker.md", "line": 1}],
@@ -5864,8 +5862,10 @@ identity_only = run_record(
     },
 )
 identity_report = module.render_report(ledger_with(identity_only), identity_only)
-assert "Tool compartment: `none`" in identity_report, identity_report
-assert "Verifier compartment: `none`" in identity_report, identity_report
+assert "Execution mode: **AZURE SHARED REVIEWER HOST**" in identity_report, identity_report
+assert "Reviewer host: `model-1`" in identity_report, identity_report
+assert "Tool compartment" not in identity_report, identity_report
+assert "Verifier compartment" not in identity_report, identity_report
 
 # Every way a recorded measurement can be dishonest is refused.
 for durations, expected in (
@@ -6146,7 +6146,7 @@ outer = azure.azure_pi_review_schema(
 assert_strict_subset(local, "local")
 assert_strict_subset(outer, "azure")
 update = local["properties"]["finding_updates"]["items"]
-for name in ("reproduction", "mutation_proof", "equivalent_to"):
+for name in ("equivalent_to",):
     assert name not in update["required"], update
 normalized = core.normalize_pi_review(
     {
@@ -6160,8 +6160,7 @@ normalized = core.normalize_pi_review(
 assert normalized["executing_account_home"] == "/host/bound-account"
 assert normalized["execution_home"] == "/host/bound-home"
 assert normalized["finding_updates"][0] == {
-    "id": "cc-test", "reproduction": None,
-    "mutation_proof": None, "equivalent_to": None,
+    "id": "cc-test", "equivalent_to": None,
 }
 (destination / "local-schema.json").write_text(json.dumps(local), encoding="utf-8")
 (destination / "azure-schema.json").write_text(json.dumps(outer), encoding="utf-8")
@@ -6174,7 +6173,7 @@ PY
   mkdir -p "$probe_dir/repository"
   printf 'review line\n' > "$probe_dir/repository/review.txt"
   : > "$probe_dir/tool-events.jsonl"
-  pi_tool_names=repo_search,repo_read,submit_evidence_file,report_finding,report_suspicion,update_finding,request_lookup,finish_review
+  pi_tool_names=repo_search,repo_read,report_finding,report_suspicion,update_finding,request_lookup,finish_review
   if ! FM_CROSSCHECK_REVIEW_SCHEMA="$probe_dir/local-schema.json" \
     FM_CROSSCHECK_REPOSITORY="$probe_dir/repository" \
     FM_CROSSCHECK_TOOL_EVENT_LOG="$probe_dir/tool-events.jsonl" \
@@ -6236,7 +6235,7 @@ const tools = [];
 const extension = await import(pathToFileURL(process.argv[2]));
 extension.default({ registerTool(value) { tools.push(value); } });
 const expected = [
-  "repo_search", "repo_read", "submit_evidence_file", "report_finding",
+  "repo_search", "repo_read", "report_finding",
   "report_suspicion", "update_finding", "request_lookup", "finish_review",
 ];
 if (JSON.stringify(tools.map((tool) => tool.name)) !== JSON.stringify(expected)) throw new Error("tool names drifted");
@@ -6848,56 +6847,6 @@ test_existing_task_metadata_identity_collision_fails_closed
 test_review_fetches_exact_pr_head_when_author_worktree_is_behind
 test_missing_pr_head_ref_fails_closed
 test_codex_reviewer_requires_bound_auth_and_clears_ambient_credentials
-test_new_finding_requires_executed_reproduction
-test_failed_new_finding_reproduction_becomes_a_suspicion
-test_silence_never_closes_prior_finding
-test_verified_fix_executes_mutation_proof
-test_typescript_jest_mutation_proof_can_clear
-test_preexisting_jest_runner_stays_blocking
-test_local_fake_jest_package_stays_blocking
-test_local_transitive_jest_package_stays_blocking
-test_jest_runs_under_declared_node_major
-test_inadequate_typescript_jest_coverage_stays_blocking
-test_typescript_without_usable_route_stays_blocking
-test_python_mutation_proof_is_byte_exact
-test_node_id_selector_clears_a_passing_named_test
-test_absent_runner_is_never_a_test_outcome
-test_unclassified_runner_cannot_clear_a_finding
-test_positional_argument_cannot_supply_a_second_target
-test_flag_argument_cannot_rewrite_the_non_execution_signal
-test_unmatched_selector_is_never_a_failing_test
-test_mutated_non_execution_cannot_clear_a_finding
-test_ambient_addopts_cannot_rewrite_the_non_execution_signal
-test_ancestor_runner_config_cannot_rewrite_the_non_execution_signal
-test_incomplete_proof_environment_fails_loudly
-test_symlinked_directory_named_test_is_rejected
-test_symlinked_home_ancestor_still_clears
-test_reviewer_env_dependent_evidence_names_the_difference
-test_unfound_evidence_command_is_a_non_execution
-test_bulky_reviewer_evidence_still_completes
-test_tampered_review_checkout_is_still_detected
-test_bulky_unauthorized_scratch_is_named_not_truncated
-test_evidence_capture_runs_on_older_interpreters
-test_forged_git_diff_mutation_command_is_rejected
-test_stateful_test_cannot_fabricate_mutation_causality
-test_baseline_readable_state_is_destroyed_before_mutation
-test_mutation_is_bound_to_cited_non_test_implementation
-test_invalid_closure_stays_blocking_and_preserves_siblings
-test_final_wait_and_residual_processes_are_bounded
-test_installed_sandbox_denies_shared_private_tmp
-test_symlinked_named_test_cannot_hide_test_mutation
-test_evidence_batch_item_limit_precedes_execution
-test_evidence_batch_has_aggregate_deadline
-test_remote_receipt_does_not_impersonate_model_environment
-test_artifacts_cannot_escape_designated_subtrees
-test_reviewer_output_uses_separate_capture_limit
-test_reviewer_capture_override_is_validated
-test_ordinary_output_paths_remain_bounded
-test_prompt_uses_only_bounded_ledger_projection
-test_nonexistent_mutation_proof_stays_blocking
-test_mutation_proof_does_not_float_to_a_new_head
-test_recorded_argument_proof_loads_but_no_longer_clears
-test_equivalent_finding_reopens_when_direct_proof_regresses
 test_null_ledger_fails_without_normalization
 test_claims_lookup_error_never_reaches_reviewer
 test_reviewer_configuration_failures_are_tool_failures

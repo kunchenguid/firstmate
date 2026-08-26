@@ -16,7 +16,6 @@ VERDICT_REPAIR_EFFORT = "low"
 TOOL_NAMES = (
     "repo_search",
     "repo_read",
-    "submit_evidence_file",
     "report_finding",
     "report_suspicion",
     "update_finding",
@@ -30,18 +29,9 @@ MAX_SEARCH_BYTES = 16 * 1024
 MAX_SEARCH_SCAN_BYTES = 512 * 1024 * 1024
 MAX_READ_LINES = 500
 MAX_READ_BYTES = 48 * 1024
-MAX_EVIDENCE_FILE_BYTES = 12 * 1024
-MAX_EVIDENCE_TOTAL_BYTES = 24 * 1024
 MAX_REVIEW_ITEMS = 32
 SEVERITIES = {"blocking", "high", "medium", "low"}
 LIFECYCLES = {"open", "claimed-fixed", "verified-fixed", "closed-equivalent"}
-TEST_RUNNERS = {
-    "bash", "bun", "direct", "jest", "node", "php", "pytest", "python",
-    "python3", "rspec", "ruby", "sh", "vitest", "zsh",
-}
-EVIDENCE_PATH = re.compile(
-    r"^\.crosscheck/(?:reproductions|mutations)/[A-Za-z0-9._/+@:-]{1,180}$"
-)
 
 
 class ReviewError(RuntimeError):
@@ -192,8 +182,6 @@ def replay_tool_log(
         manifest,
         trust_repository_manifest=trust_repository_manifest,
     )
-    evidence: dict[str, str] = {}
-    evidence_bytes = 0
     findings: list[dict[str, Any]] = []
     suspicions: list[dict[str, Any]] = []
     updates: list[dict[str, Any]] = []
@@ -263,57 +251,6 @@ def replay_tool_log(
                     raise ReviewError("model guest: citation line is outside its file")
             validated.append({"path": relative, "line": line})
         return validated
-
-    def validate_reproduction(value: Any, label: str) -> dict[str, Any]:
-        value = exact_object(
-            value, {"test_path", "command", "expected_exit", "output_contains"}
-        )
-        test_path = safe_relative(value["test_path"])
-        if test_path not in evidence or not test_path.startswith(
-            ".crosscheck/reproductions/"
-        ):
-            raise ReviewError(f"model guest: {label}.test_path was not submitted")
-        command = nonempty(value["command"], f"{label}.command", 4096)
-        if base_sha is None:
-            raise ReviewError("model guest: reproduction base identity is unavailable")
-        expected_command = (
-            f"bash --noprofile --norc {test_path} {base_sha} {head_sha}"
-        )
-        if command != expected_command:
-            raise ReviewError(
-                f"model guest: {label}.command is not the exact bridge command"
-            )
-        return {
-            "test_path": test_path,
-            "command": command,
-            "expected_exit": integer(value["expected_exit"], f"{label}.expected_exit", 0, 255),
-            "output_contains": nonempty(value["output_contains"], f"{label}.output_contains", 1024),
-        }
-
-    def validate_mutation(value: Any, label: str) -> dict[str, Any]:
-        value = exact_object(
-            value, {"test_path", "test_invocation", "mutation_patch_path"}
-        )
-        invocation = exact_object(value["test_invocation"], {"runner", "arguments"})
-        if not isinstance(invocation["arguments"], list) or invocation["arguments"]:
-            raise ReviewError(
-                f"model guest: {label}.test_invocation.arguments must be empty"
-            )
-        if invocation.get("runner") not in TEST_RUNNERS:
-            raise ReviewError(f"model guest: {label}.runner is not approved")
-        patch_path = safe_relative(value["mutation_patch_path"])
-        if patch_path not in evidence or not patch_path.startswith(
-            ".crosscheck/mutations/"
-        ):
-            raise ReviewError(f"model guest: {label}.mutation_patch_path was not submitted")
-        return {
-            "test_path": nonempty(value["test_path"], f"{label}.test_path", 512),
-            "test_invocation": {
-                "runner": nonempty(invocation["runner"], f"{label}.runner", 64),
-                "arguments": [],
-            },
-            "mutation_patch_path": patch_path,
-        }
 
     def repo_search(arguments: dict[str, Any]) -> dict[str, Any]:
         nonlocal search_scanned_bytes
@@ -409,33 +346,10 @@ def replay_tool_log(
             result = repo_search(arguments)
         elif name == "repo_read":
             result = repo_read(arguments)
-        elif name == "submit_evidence_file":
-            exact_object(arguments, {"path", "content"})
-            relative = safe_relative(arguments["path"])
-            content = arguments["content"]
-            if (
-                EVIDENCE_PATH.fullmatch(relative) is None
-                or "//" in relative
-                or not isinstance(content, str)
-            ):
-                raise ReviewError("model guest: evidence file is malformed")
-            size = len(content.encode("utf-8"))
-            if (
-                not 1 <= size <= MAX_EVIDENCE_FILE_BYTES
-                or "\x00" in content
-                or relative in evidence
-                or len(evidence) >= 64
-            ):
-                raise ReviewError("model guest: evidence file is duplicate or oversized")
-            if evidence_bytes + size > MAX_EVIDENCE_TOTAL_BYTES:
-                raise ReviewError("model guest: evidence files exceed 24 KB")
-            evidence[relative] = content
-            evidence_bytes += size
-            result = {"path": relative, "bytes": size, "digest": value_digest(content)}
         elif name == "report_finding":
             exact_object(
                 arguments,
-                {"severity", "title", "citations", "explanation", "reproduction"},
+                {"severity", "title", "citations", "explanation"},
             )
             if len(findings) >= MAX_REVIEW_ITEMS:
                 raise ReviewError("model guest: too many reported findings")
@@ -447,7 +361,6 @@ def replay_tool_log(
                     "severity": nonempty(arguments["severity"], "finding.severity", 64),
                     "description": nonempty(arguments["explanation"], "finding.explanation"),
                     "citations": validate_citations(arguments["citations"]),
-                    "reproduction": validate_reproduction(arguments["reproduction"], "finding.reproduction"),
                 }
             )
             result = {"admitted": True}
@@ -466,7 +379,7 @@ def replay_tool_log(
             exact_object(
                 arguments,
                 {"id", "requested_status", "explanation"},
-                {"reproduction", "mutation", "equivalent_to"},
+                {"equivalent_to"},
             )
             if len(updates) >= MAX_REVIEW_ITEMS:
                 raise ReviewError("model guest: too many finding updates")
@@ -479,18 +392,12 @@ def replay_tool_log(
                 raise ReviewError("model guest: finding update id is unknown or duplicated")
             if status not in LIFECYCLES:
                 raise ReviewError("model guest: finding update status is invalid")
-            has_reproduction = "reproduction" in arguments
-            has_mutation = "mutation" in arguments
             has_equivalent = "equivalent_to" in arguments
-            if status == "verified-fixed" and (not has_mutation or has_equivalent):
-                raise ReviewError("model guest: verified-fixed update needs only mutation proof")
-            if status == "closed-equivalent" and (
-                has_reproduction or has_mutation or not has_equivalent
-            ):
+            if status == "verified-fixed" and has_equivalent:
+                raise ReviewError("model guest: verified-fixed update carries equivalent_to")
+            if status == "closed-equivalent" and not has_equivalent:
                 raise ReviewError("model guest: closed-equivalent update shape is invalid")
-            if status in {"open", "claimed-fixed"} and (
-                has_mutation or has_equivalent
-            ):
+            if status in {"open", "claimed-fixed"} and has_equivalent:
                 raise ReviewError("model guest: active update carries closure-only fields")
             if has_equivalent and (
                 arguments["equivalent_to"] == target
@@ -505,16 +412,6 @@ def replay_tool_log(
                     "id": target,
                     "status": status,
                     "note": nonempty(arguments["explanation"], "update.explanation"),
-                    "reproduction": (
-                        validate_reproduction(arguments["reproduction"], "update.reproduction")
-                        if has_reproduction
-                        else None
-                    ),
-                    "mutation_proof": (
-                        validate_mutation(arguments["mutation"], "update.mutation")
-                        if has_mutation
-                        else None
-                    ),
                     "equivalent_to": (
                         nonempty(arguments["equivalent_to"], "update.equivalent_to", 256)
                         if has_equivalent
@@ -559,25 +456,6 @@ def replay_tool_log(
         return {"lookup_request": lookup_request}
     if finish is None or records[-1].get("name") != "finish_review":
         raise ReviewError("model guest: Pi review did not finish exactly once")
-    evidence_items = len(findings) + sum(
-        int(update["reproduction"] is not None)
-        + int(update["mutation_proof"] is not None)
-        for update in updates
-    )
-    if evidence_items > MAX_REVIEW_ITEMS:
-        raise ReviewError("model guest: review requests too many evidence executions")
-    referenced = {
-        finding["reproduction"]["test_path"] for finding in findings
-    }
-    for update in updates:
-        if update["reproduction"] is not None:
-            referenced.add(update["reproduction"]["test_path"])
-        if update["mutation_proof"] is not None:
-            referenced.add(update["mutation_proof"]["mutation_patch_path"])
-    if referenced != set(evidence):
-        raise ReviewError(
-            "model guest: submitted evidence paths do not exactly match review items"
-        )
     updated_ids = {update["id"] for update in updates}
     untouched_active = set(active_finding_ids or set()) - updated_ids
     blocking_events = bool(findings or suspicions or untouched_active) or any(
@@ -599,9 +477,6 @@ def replay_tool_log(
             "new_findings": findings,
             "suspicions": suspicions,
         },
-        "evidence_files": [
-            {"path": path, "content": evidence[path]} for path in sorted(evidence)
-        ],
     }
 
 

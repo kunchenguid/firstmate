@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # Trusted root-side Azure Crosscheck model-compartment payload.
 #
-# This compartment receives exactly one reviewer credential and no repository.
-# The model receives one bounded static exact-head review packet and has no
-# repository or command tools. Reviewer-supplied evidence is returned as data;
-# the host controller executes and replays it later in fresh credentialless
-# `crosscheck-tool` Azure runner invocations.
+# This compartment receives exactly one reviewer credential and one read-only
+# exact-head snapshot. The reviewer has bounded read/search and verdict tools,
+# but no generic command or cloud interface.
 set -euo pipefail
 umask 077
 
@@ -26,7 +24,7 @@ unset input_url credential_url snapshot_url output_url
   && [ -n "$GUEST_DIGEST" ] && [ -n "$INPUT_URL" ] && [ -n "$CREDENTIAL_URL" ] \
   && [ -n "$SNAPSHOT_URL" ] && [ -n "$OUTPUT_URL" ] || { echo "model guest: expected eight bound parameters" >&2; exit 125; }
 
-case "$REVIEW_GENERATION" in [0-9a-f][0-9a-f]*) ;; *) echo "model guest: malformed review generation" >&2; exit 125 ;; esac
+[[ "$REVIEW_GENERATION" =~ ^[0-9a-f]{24}$ ]] || { echo "model guest: malformed review generation" >&2; exit 125; }
 case "$GUEST_DIGEST" in sha256:[0-9a-f][0-9a-f]*) ;; *) echo "model guest: malformed guest digest" >&2; exit 125 ;; esac
 [ -n "$VM_RESOURCE_ID" ] && [ -n "$VM_INSTANCE_ID" ] || { echo "model guest: missing VM identity" >&2; exit 125; }
 case "$INPUT_URL" in https://*) ;; *) echo "model guest: input capability is not HTTPS" >&2; exit 125 ;; esac
@@ -34,9 +32,12 @@ case "$CREDENTIAL_URL" in https://*) ;; *) echo "model guest: credential capabil
 case "$SNAPSHOT_URL" in https://*) ;; *) echo "model guest: snapshot capability is not HTTPS" >&2; exit 125 ;; esac
 case "$OUTPUT_URL" in https://*) ;; *) echo "model guest: output capability is not HTTPS" >&2; exit 125 ;; esac
 
-BASE=/var/lib/fm-crosscheck-model
-rm -rf "$BASE"
+ROOT=/var/lib/fm-crosscheck-model
+BASE=$ROOT/$REVIEW_GENERATION
+install -d -m 0700 -o root -g root "$ROOT"
+[ ! -e "$BASE" ] || { echo "model guest: review generation already exists" >&2; exit 125; }
 install -d -m 0700 -o root -g root "$BASE"
+trap 'rm -rf "$BASE"' EXIT
 INPUT=$BASE/request.json
 CREDENTIAL=$BASE/credential.tar.gz
 SNAPSHOT=$BASE/repository-snapshot.tar.gz
@@ -82,7 +83,7 @@ if value.get("tool_protocol", {}).get("network_bytes") != 0:
     raise SystemExit("model guest: repository tool contract is not networkless")
 expected_tools = (
     [
-        "repo_search", "repo_read", "submit_evidence_file",
+        "repo_search", "repo_read",
         "report_finding", "report_suspicion", "update_finding",
         "request_lookup", "finish_review",
     ]
@@ -527,17 +528,13 @@ lookup = review.get("lookup_request")
 if lookup is not None:
     if harness != "pi" or not isinstance(lookup, list) or not lookup:
         raise SystemExit("model guest: lookup request is malformed")
-    if "verdict" in review or "evidence_files" in review:
+    if "verdict" in review:
         raise SystemExit("model guest: provisional lookup carried authority")
     output["lookup_request"] = lookup
 else:
-    expected_evidence_type = list if harness == "pi" else dict
     if not isinstance(review.get("verdict"), dict):
         raise SystemExit("model guest: reviewer omitted its verdict")
-    if not isinstance(review.get("evidence_files"), expected_evidence_type):
-        raise SystemExit("model guest: reviewer omitted its evidence manifest")
     output["verdict"] = review["verdict"]
-    output["evidence_files"] = review["evidence_files"]
 path = pathlib.Path(sys.argv[3])
 path.write_text(json.dumps(output, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
 PY

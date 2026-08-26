@@ -5,7 +5,6 @@ import { posix as path } from "node:path";
 const TOOL_NAMES = [
 	"repo_search",
 	"repo_read",
-	"submit_evidence_file",
 	"report_finding",
 	"report_suspicion",
 	"update_finding",
@@ -19,9 +18,6 @@ const MAX_SEARCH_BYTES = 16 * 1024;
 const MAX_SEARCH_SCAN_BYTES = 512 * 1024 * 1024;
 const MAX_READ_LINES = 500;
 const MAX_READ_BYTES = 48 * 1024;
-const MAX_EVIDENCE_FILE_BYTES = 12 * 1024;
-const MAX_EVIDENCE_TOTAL_BYTES = 24 * 1024;
-const EVIDENCE_PATH = /^\.crosscheck\/(?:reproductions|mutations)\/[A-Za-z0-9._/+@:-]{1,180}$/;
 
 class FatalToolError extends Error {}
 let guardCall = () => {};
@@ -150,8 +146,6 @@ export default function registerCrosscheckTools(pi) {
 		};
 		walk(repository);
 	}
-	const evidence = new Map();
-	let evidenceBytes = 0;
 	let callCount = 0;
 	let attemptedCalls = 0;
 	let logBytes = 0;
@@ -159,7 +153,6 @@ export default function registerCrosscheckTools(pi) {
 	let findingCount = 0;
 	let suspicionCount = 0;
 	let updateCount = 0;
-	let evidenceItemCount = 0;
 	let blockingUpdateCount = 0;
 	const updatedFindingIds = new Set();
 	const repositoryTextCache = new Map();
@@ -232,30 +225,6 @@ export default function registerCrosscheckTools(pi) {
 		});
 	}
 
-	function reproduction(value, label) {
-		if (!exactObject(value, ["test_path", "command", "expected_exit", "output_contains"])) throw new Error(`${label} is malformed`);
-		const testPath = safeRelative(value.test_path);
-		if (!evidence.has(testPath) || !testPath.startsWith(".crosscheck/reproductions/")) throw new Error(`${label}.test_path must name a submitted reproduction file`);
-		nonempty(value.command, `${label}.command`, 4096);
-		const exactCommand = `bash --noprofile --norc ${testPath} ${baseSha} ${headSha}`;
-		if (value.command !== exactCommand) throw new Error(`${label}.command must equal ${exactCommand}`);
-		integer(value.expected_exit, `${label}.expected_exit`, 0, 255);
-		nonempty(value.output_contains, `${label}.output_contains`, 1024);
-		return value;
-	}
-
-	function mutation(value, label) {
-		if (!exactObject(value, ["test_path", "test_invocation", "mutation_patch_path"])) throw new Error(`${label} is malformed`);
-		nonempty(value.test_path, `${label}.test_path`, 512);
-		if (!exactObject(value.test_invocation, ["runner", "arguments"]) || !Array.isArray(value.test_invocation.arguments)) throw new Error(`${label}.test_invocation is malformed`);
-		if (value.test_invocation.arguments.length !== 0) throw new Error(`${label}.test_invocation.arguments must be empty`);
-		const runners = new Set(["bash", "bun", "direct", "jest", "node", "php", "pytest", "python", "python3", "rspec", "ruby", "sh", "vitest", "zsh"]);
-		if (!runners.has(value.test_invocation.runner)) throw new Error(`${label}.test_invocation.runner is not approved`);
-		const patchPath = safeRelative(value.mutation_patch_path);
-		if (!evidence.has(patchPath) || !patchPath.startsWith(".crosscheck/mutations/")) throw new Error(`${label}.mutation_patch_path must name a submitted mutation file`);
-		return value;
-	}
-
 	register(pi, "repo_search", "Search literal text in the read-only exact-head snapshot.", {
 		type: "object", additionalProperties: false, required: ["query"], properties: {
 			query: { type: "string", minLength: 1, maxLength: 200 },
@@ -314,41 +283,18 @@ export default function registerCrosscheckTools(pi) {
 		return accepted("repo_read", args, result);
 	});
 
-	register(pi, "submit_evidence_file", "Submit one bounded reproduction or mutation file as data for controller execution.", {
-		type: "object", additionalProperties: false, required: ["path", "content"], properties: {
-			path: { type: "string", pattern: "^\\.crosscheck/(?:reproductions|mutations)/[A-Za-z0-9._/+@:-]{1,180}$" },
-			content: { type: "string", minLength: 1, maxLength: MAX_EVIDENCE_FILE_BYTES },
-		},
-	}, (args) => {
-		if (!exactObject(args, ["path", "content"])) throw new Error("submit_evidence_file arguments are malformed");
-		const relative = safeRelative(args.path);
-		if (!EVIDENCE_PATH.test(relative) || relative.includes("//")) throw new Error("evidence path is outside the bridge allowlist");
-		const size = textBytes(args.content);
-		if (size < 1 || size > MAX_EVIDENCE_FILE_BYTES || args.content.includes("\0")) throw new Error("evidence file violates its 12 KB byte contract");
-		if (evidence.has(relative)) throw new Error("evidence path is duplicated");
-		if (evidence.size >= 64) throw new Error("evidence manifest exceeds 64 files");
-		if (evidenceBytes + size > MAX_EVIDENCE_TOTAL_BYTES) throw new Error("evidence files exceed their 24 KB aggregate bound");
-		const result = { path: relative, bytes: size, digest: digest(args.content) };
-		const response = accepted("submit_evidence_file", args, result);
-		evidence.set(relative, args.content);
-		evidenceBytes += size;
-		return response;
-	});
-
-	register(pi, "report_finding", "Report one reproduced new finding after submitting its evidence file.", {
-		type: "object", additionalProperties: false, required: ["severity", "title", "citations", "explanation", "reproduction"], properties: {
+	register(pi, "report_finding", "Report one actionable finding with exact-head citations.", {
+		type: "object", additionalProperties: false, required: ["severity", "title", "citations", "explanation"], properties: {
 			severity: finding.properties.severity, title: finding.properties.title, citations: finding.properties.citations,
-			explanation: finding.properties.description, reproduction: finding.properties.reproduction,
+			explanation: finding.properties.description,
 		},
 	}, (args) => {
-		if (!exactObject(args, ["severity", "title", "citations", "explanation", "reproduction"])) throw new Error("report_finding arguments are malformed");
+		if (!exactObject(args, ["severity", "title", "citations", "explanation"])) throw new Error("report_finding arguments are malformed");
 		if (findingCount >= 32) throw new Error("new finding limit reached");
-		if (evidenceItemCount >= 32) throw new Error("evidence execution item limit reached");
 		if (!["blocking", "high", "medium", "low"].includes(args.severity)) throw new Error("severity is invalid");
-		nonempty(args.title, "title", 1024); nonempty(args.explanation, "explanation", 8192); citations(args.citations); reproduction(args.reproduction, "reproduction");
+		nonempty(args.title, "title", 1024); nonempty(args.explanation, "explanation", 8192); citations(args.citations);
 		const response = accepted("report_finding", args, { admitted: true });
 		findingCount += 1;
-		evidenceItemCount += 1;
 		return response;
 	});
 
@@ -363,32 +309,25 @@ export default function registerCrosscheckTools(pi) {
 		return response;
 	});
 
-	register(pi, "update_finding", "Update one durable finding with optional reproduction or mutation proof data.", {
+	register(pi, "update_finding", "Update one durable finding after inspecting the exact head.", {
 		type: "object", additionalProperties: false, required: ["id", "requested_status", "explanation"], properties: {
 			id: update.properties.id, requested_status: update.properties.status, explanation: update.properties.note,
-			reproduction: update.properties.reproduction, mutation: update.properties.mutation_proof, equivalent_to: update.properties.equivalent_to,
+			equivalent_to: update.properties.equivalent_to,
 		},
 	}, (args) => {
-		if (!exactObject(args, ["id", "requested_status", "explanation"], ["reproduction", "mutation", "equivalent_to"])) throw new Error("update_finding arguments are malformed");
+		if (!exactObject(args, ["id", "requested_status", "explanation"], ["equivalent_to"])) throw new Error("update_finding arguments are malformed");
 		if (updateCount >= 32) throw new Error("finding update limit reached");
 		nonempty(args.id, "id", 256); nonempty(args.explanation, "explanation", 8192);
 		if (!knownFindingIds.has(args.id) || updatedFindingIds.has(args.id)) throw new Error("finding update id is unknown or duplicated");
 		if (!["open", "claimed-fixed", "verified-fixed", "closed-equivalent"].includes(args.requested_status)) throw new Error("requested_status is invalid");
-		const hasReproduction = args.reproduction !== undefined;
-		const hasMutation = args.mutation !== undefined;
 		const hasEquivalent = args.equivalent_to !== undefined;
-		const addedEvidenceItems = Number(hasReproduction) + Number(hasMutation);
-		if (evidenceItemCount + addedEvidenceItems > 32) throw new Error("evidence execution item limit reached");
-		if (args.requested_status === "verified-fixed" && (!hasMutation || hasEquivalent)) throw new Error("verified-fixed requires mutation and forbids equivalent_to");
-		if (args.requested_status === "closed-equivalent" && (hasReproduction || hasMutation || !hasEquivalent)) throw new Error("closed-equivalent update shape is invalid");
-		if (["open", "claimed-fixed"].includes(args.requested_status) && (hasMutation || hasEquivalent)) throw new Error("active update carries closure-only fields");
+		if (args.requested_status === "verified-fixed" && hasEquivalent) throw new Error("verified-fixed forbids equivalent_to");
+		if (args.requested_status === "closed-equivalent" && !hasEquivalent) throw new Error("closed-equivalent requires equivalent_to");
+		if (["open", "claimed-fixed"].includes(args.requested_status) && hasEquivalent) throw new Error("active update carries equivalent_to");
 		if (hasEquivalent && (args.equivalent_to === args.id || !eligibleEquivalentIds.has(args.equivalent_to))) throw new Error("equivalent_to is not verified-fixed on this head");
-		if (args.reproduction !== undefined) reproduction(args.reproduction, "reproduction");
-		if (args.mutation !== undefined) mutation(args.mutation, "mutation");
 		if (args.equivalent_to !== undefined) nonempty(args.equivalent_to, "equivalent_to", 256);
 		const response = accepted("update_finding", args, { admitted: true });
 		updateCount += 1;
-		evidenceItemCount += addedEvidenceItems;
 		if (["open", "claimed-fixed"].includes(args.requested_status)) blockingUpdateCount += 1;
 		updatedFindingIds.add(args.id);
 		return response;
@@ -431,5 +370,5 @@ export default function registerCrosscheckTools(pi) {
 		return accepted("finish_review", args, { finalized: true }, true);
 	});
 
-	if (TOOL_NAMES.length !== 8 || statSync(repository).isDirectory() !== true) throw new Error("Crosscheck tool registration invariant failed");
+	if (TOOL_NAMES.length !== 7 || statSync(repository).isDirectory() !== true) throw new Error("Crosscheck tool registration invariant failed");
 }

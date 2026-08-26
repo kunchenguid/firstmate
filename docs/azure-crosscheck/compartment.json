@@ -49,6 +49,10 @@
       "minLength": 20,
       "maxLength": 20
     },
+    "persistent": {
+      "type": "bool",
+      "defaultValue": false
+    },
     "tags": {
       "type": "object"
     },
@@ -154,6 +158,7 @@
       }
     },
     {
+      "condition": "[not(parameters('persistent'))]",
       "type": "Microsoft.Compute/virtualMachines/runCommands",
       "apiVersion": "2024-03-01",
       "name": "[format('{0}/safety-shutdown', parameters('vmName'))]",

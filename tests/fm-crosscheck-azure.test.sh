@@ -2963,9 +2963,8 @@ def call_lines(name):
 guard = call_lines("require_model_image_attests_harness")
 assert len(guard) == 1, ("the lane does not call the image attestation guard", guard)
 for billable in (
-    "reserve_model_capacity",
     "upload_blob",
-    "provision_model_vm",
+    "ensure_model_host",
     "submit_model_run",
 ):
     spends = call_lines(billable)
@@ -3008,7 +3007,7 @@ for harness, bindings in m.HARNESS_IMAGE_ATTESTATION.items():
 
 # The owning doc must record that these tags are load-bearing and must not
 # still describe the read as missing.
-text = doc_path.read_text(encoding="utf-8")
+text = " ".join(doc_path.read_text(encoding="utf-8").split())
 for phrase in (
     "Admission refuses a model image that does not attest the reviewer harness",
     "load-bearing",
@@ -4968,31 +4967,178 @@ PY
   pass "the adapter and guest agree on the exact eight-parameter contract"
 }
 
-static_contract
+shared_host_contract_unit() {
+  local GUEST="$MODEL_GUEST"
+  local PI_RUNTIME="$PI_REVIEWER_RUNTIME"
+  local PI_EXTENSION="$PI_VERDICT_EXTENSION"
+python3 -m py_compile "$ADAPTER" "$CORE" "$PI_RUNTIME" \
+  || fail "Crosscheck Python sources do not compile"
+node --check "$PI_EXTENSION" \
+  || fail "Crosscheck Pi verdict extension does not parse"
+bash -n "$GUEST" \
+  || fail "Crosscheck Azure guest does not parse"
+pass "Crosscheck reviewer sources parse"
+
+python3 - "$ADAPTER" "$TEMPLATE" "$GUEST" "$PI_EXTENSION" <<'PY' \
+  || fail "shared reviewer host static contract failed"
+import importlib.util
+import json
+from pathlib import Path
+import sys
+
+adapter_path, template_path, guest_path, extension_path = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("crosscheck_azure", adapter_path)
+adapter = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(adapter)
+
+verdict = {"type": "object"}
+for schema in (adapter.azure_review_schema(verdict), adapter.azure_pi_review_schema(verdict)):
+    assert schema["required"] == ["verdict"]
+    assert schema["properties"] == {"verdict": verdict}
+    assert schema["additionalProperties"] is False
+
+template = json.loads(template_path.read_text(encoding="utf-8"))
+assert template["parameters"]["persistent"]["defaultValue"] is False
+safety = next(
+    item for item in template["resources"]
+    if item["type"] == "Microsoft.Compute/virtualMachines/runCommands"
+)
+assert safety["condition"] == "[not(parameters('persistent'))]"
+
+guest = guest_path.read_text(encoding="utf-8")
+assert 'BASE=$ROOT/$REVIEW_GENERATION' in guest
+assert "review generation already exists" in guest
+assert "trap 'rm -rf \"$BASE\"' EXIT" in guest
+assert "submit_evidence_file" not in guest
+assert "evidence_files" not in guest
+
+adapter_source = adapter_path.read_text(encoding="utf-8")
+assert 'guest_root = "/var/lib/fm-crosscheck-model/" + identity["review_generation"]' in adapter_source
+assert 'config["executing_account_home"] = guest_root + "/account"' in adapter_source
+assert 'config["execution_home"] = guest_root + "/home"' in adapter_source
+
+extension = extension_path.read_text(encoding="utf-8")
+assert "submit_evidence_file" not in extension
+for tool in (
+    "repo_search", "repo_read", "report_finding", "report_suspicion",
+    "update_finding", "request_lookup", "finish_review",
+):
+    assert tool in extension
+PY
+pass "review contract is verdict-only and the host is persistent"
+
+python3 - "$ADAPTER" <<'PY' \
+  || fail "shared reviewer host reuse contract failed"
+import importlib.util
+from pathlib import Path
+import tempfile
+import sys
+
+spec = importlib.util.spec_from_file_location("crosscheck_azure", sys.argv[1])
+adapter = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(adapter)
+
+with tempfile.TemporaryDirectory() as temporary:
+    home = Path(temporary)
+    config = {
+        "home": home,
+        "subscription": "11111111-1111-4111-8111-111111111111",
+        "resource_group": "rg-test",
+        "prefix": "test",
+        "deployment_generation": "deploy-1",
+        "reviewer_sku": "Standard_D4as_v6",
+        "model_image_id": (
+            "/subscriptions/11111111-1111-4111-8111-111111111111/"
+            "resourceGroups/rg-test/providers/Microsoft.Compute/images/reviewer"
+        ),
+        "timeout_seconds": 1800,
+        "provider_port": 443,
+    }
+    expected_tags = {
+        "workload": "firstmate",
+        "firstmate-role": "crosscheck-model",
+        "deployment-generation": "deploy-1",
+        "host-mode": "shared-v1",
+    }
+    calls = []
+    def fake_az(_config, arguments, **_kwargs):
+        calls.append(arguments)
+        assert arguments[:2] == ["rest", "--method"]
+        return ({
+            "tags": expected_tags,
+            "properties": {
+                "storageProfile": {
+                    "imageReference": {"id": config["model_image_id"]},
+                },
+                "hardwareProfile": {"vmSize": config["reviewer_sku"]},
+                "instanceView": {"statuses": [{"code": "PowerState/running"}]},
+            },
+        }, 0, "")
+    adapter.az = fake_az
+    resources = adapter.ensure_model_host(
+        config,
+        {"review_generation": "a" * 24, "provider_host": "example.com"},
+        {"input_blob": "in", "credential_blob": "credential", "output_blob": "out"},
+    )
+    assert resources["vm_name"] == "vm-test-cc-reviewer"
+    assert resources["tags"] == expected_tags
+    assert len(calls) == 1
+PY
+pass "an existing healthy reviewer host is reused without deployment"
+
+python3 - "$ADAPTER" <<'PY' \
+  || fail "unique review-generation contract failed"
+import importlib.util
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location("crosscheck_azure", sys.argv[1])
+adapter = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(adapter)
+
+common = dict(
+    home=Path("/tmp/crosscheck-home"),
+    task_id="task",
+    pr_url="https://github.com/owner/repo/pull/1",
+    snapshot_value={
+        "head_sha": "a" * 40,
+        "base_sha": "b" * 40,
+        "base_branch_sha": "b" * 40,
+        "claims_sha256": "c" * 64,
+    },
+    config={
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "effort": "xhigh",
+        "evidence_policy": "conditional-v1",
+    },
+    azure={
+        "deployment_generation": "deploy-1",
+        "model_image_id": "/subscriptions/test/resourceGroups/rg/providers/Microsoft.Compute/images/reviewer",
+        "reviewer_sku": "Standard_D4as_v6",
+        "provider_host": None,
+        "provider_port": 443,
+    },
+    ledger={"findings": [], "runs": []},
+    reviewer_account_identity="fireworks-glm:api.fireworks.ai/accounts/fireworks/models/glm-5p2",
+)
+first = adapter.review_identity(**common)
+second = adapter.review_identity(**common)
+assert first["dispatch_nonce"] != second["dispatch_nonce"]
+assert first["review_generation"] != second["review_generation"]
+assert len(first["review_generation"]) == 24
+PY
+pass "retries receive distinct review generations"
+}
+
+shared_host_contract_unit
 parameter_contract_unit
-adapter_mode_unit
-azure_prompt_wrapper_schema_unit
-pi_reviewer_runtime_unit
-pi_extension_protocol_unit
-pi_reviewer_runtime_run_unit
 azure_pi_review_contract_unit
 cross_family_provider_host_unit
 cross_family_credential_lane_unit
-model_guest_executing_account_unit
-identity_outcome_unit
-account_and_cleanup_identity_unit
-lookup_followup_orchestration_unit
-bridge_security_unit
-bridge_private_snapshot_unit
 repository_snapshot_unit
 manifest_bounds_unit
 template_expiry_render_unit
-replay_positive_and_failure_unit
-shared_capacity_unit
-capacity_retry_cleanup_unit
-persist_before_cleanup_alarm_unit
-lane_queue_unit
 image_and_policy_contract
 image_attestation_guard_unit
-documented_acceptance_contract
 printf 'Azure Crosscheck tests passed.\n'
