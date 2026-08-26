@@ -138,6 +138,11 @@
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
 #   refuses the spawn rather than risking a PR based on stale history.
+#   A project with no origin remote configured has no remote to be stale against,
+#   so that spawn warns once and refreshes the worktree from the local default
+#   branch instead; the clean-worktree requirement is unchanged. That skip is
+#   decided from the configured remote list alone, never from a failed fetch, so
+#   a configured-but-unreachable origin still refuses.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1743,23 +1748,45 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 }
 
 freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
-  if ! git -C "$worktree" fetch --quiet origin; then
-    echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+  local worktree=$1 remotes default target expected actual status
+  # The staleness this guard exists to prevent is staleness relative to origin,
+  # so a repo with no origin configured has nothing to be stale against. Decide
+  # that from the configured remote list, never from a failed fetch: a network
+  # error and a missing remote must not collapse into one branch, because only
+  # the second is safe to skip. Everything after the origin-only steps - the
+  # clean-worktree requirement, the reset, and the verified result - still runs.
+  remotes=$(git -C "$worktree" remote) || {
+    echo "error: could not inspect the remotes of pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
-  target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
-    echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
+  if printf '%s\n' "$remotes" | grep -qx origin; then
+    if ! git -C "$worktree" fetch --quiet origin; then
+      echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
+      echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    target="origin/$default"
+    if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
+      echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+  else
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine the local default branch of pooled worktree '$worktree', which has no origin remote; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    target="refs/heads/$default"
+    # Warn rather than skip silently: the launch still gets a clean, current
+    # local base, but the stronger remote-freshness guarantee did not apply, and
+    # a silent skip is exactly what makes a weakened guard hard to notice later.
+    echo "warning: pooled worktree '$worktree' has no origin remote; refreshing its base from the local '$default' instead of a fetched remote tip" >&2
   fi
   expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
