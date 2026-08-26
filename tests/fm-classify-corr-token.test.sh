@@ -467,7 +467,7 @@ test_a_cursor_written_before_this_change_is_rebuilt() {
   # byte for byte what the previous reading would have persisted here.
   cursor="$state/.task-stale.open-decisions-cursor"
   {
-    printf 'version=3\n'
+    printf 'version=4\n'
     printf 'offset=%s\n' "$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')"
     printf 'ident=%s\n' "$(bash -c '. "$1"; _fm_open_decisions_file_ident "$2"' _ \
       "$ROOT/bin/fm-classify-lib.sh" "$status")"
