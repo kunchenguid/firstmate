@@ -456,6 +456,82 @@ CALLSITES
 
 run_outcome_call_sites
 
+run_resume_after_exact_compute_removal() {
+  python3 - "$PROVIDER" <<'PY' || fail "retained-disk resume rejected absent deleted compute children"
+import copy
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("fm_provider", sys.argv[1])
+provider = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(provider)
+controller = {
+    "subscription": "00000000-0000-0000-0000-000000000000",
+    "resource_group": "rg-test", "prefix": "fmtest", "owner": "owner",
+    "deployment_generation": "dep-one", "home_binding": "a" * 64,
+}
+action = {
+    "type": "resume", "slot": 1, "reuse_retained": True,
+    "sku": "Standard_D4as_v6", "sku_family": "standardDav6Family",
+    "cloud_generation": 2, "previous_cloud_generation": 1,
+    "deployment_generation": "dep-one", "owner": "owner",
+    "cloud_instance_id": "replacement-vm",
+    "bindings": {
+        "home_binding": "a" * 64, "task": "retained-task",
+        "task_generation": "spawn:retained", "assignment_generation": "asg-00000033",
+        "account_binding": "b" * 64, "worktree_binding": "c" * 64,
+        "repository_binding": "d" * 64, "repository_generation": "e" * 40,
+    },
+}
+prior_action = dict(action, cloud_generation=1)
+tags = provider.action_tags(controller, prior_action)
+resources = {}
+for kind in provider.REQUIRED_RESOURCE_KINDS:
+    resources[kind] = {
+        "id": "/resource/" + kind, "immutable_id": "immutable-" + kind,
+        "tags": dict(tags),
+    }
+for kind in ("global-reservation", "staging-request", "staging-result"):
+    resources[kind].update({"digest": "f" * 64, "length": 1})
+action["resources"] = {
+    kind: {"id": value["id"], "immutable_id": value["immutable_id"]}
+    for kind, value in resources.items()
+}
+removed_compute = {
+    "vm", "nic", "os-disk", "monitor-extension", "bootstrap-command",
+    "task-command", "ttl-schedule",
+}
+retained = {
+    kind: copy.deepcopy(value) for kind, value in resources.items()
+    if kind not in removed_compute
+}
+worker = {"slot": 1, "resources": retained}
+provider.inventory = lambda *_args, **_kwargs: {
+    "workers": [worker], "conflicts": [], "metrics": {},
+}
+calls = []
+provider.run_pilot_create = lambda *_args: calls.append("pilot")
+provider.create_lifecycle_children = lambda *_args: calls.append("children")
+provider.converge_create_tags = lambda *_args: "resumed"
+assert provider.create_or_resume(controller, action) == "resumed"
+assert calls == ["pilot", "children"], calls
+foreign = copy.deepcopy(worker)
+foreign["resources"]["task-disk"]["id"] = "/foreign/task-disk"
+provider.inventory = lambda *_args, **_kwargs: {
+    "workers": [foreign], "conflicts": [], "metrics": {},
+}
+try:
+    provider.create_or_resume(controller, action)
+except provider.ProviderIdentityRefusal as exc:
+    assert "task-disk resource ID differs" in str(exc), exc
+else:
+    raise AssertionError("resume accepted a replaced retained task disk")
+PY
+  pass "resume accepts exact retained disks after all old compute children are absent and refuses replaced disks"
+}
+
+run_resume_after_exact_compute_removal
+
 run_outcome_bound_agreement() {
   # The guest enforces its ceiling before uploading and the controller enforces
   # it on the claim. They are separate literals in separate files, so drift
