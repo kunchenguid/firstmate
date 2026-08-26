@@ -43,8 +43,8 @@ Verified 2026-08-25 against live systems.
 | Gates today | 11, in `GATE_ORDER` in `src/gates.ts` |
 | Risk signals today | 6, including `newFindings` reading Cycode check verdicts |
 | Declared check lists | `rules.signalChecks` (Spec C) — when the risk grade is *final* |
-| Org custom properties | **Only** `is_poc` and `is_soc2_compliant` (required). No sensitivity property exists. |
-| Demo repo properties | `is_poc=true`, `is_soc2_compliant=false` |
+| Org custom properties | `is_poc`, `is_soc2_compliant` (required), and `resiliency_tier` — the last added 2026-08-25 for this work |
+| Demo repo properties | `is_poc=true`, `is_soc2_compliant=false`, `resiliency_tier=Paper` |
 | Demo repo coverage | 62.99% (`codecov/project`) |
 
 ### The check names, confirmed
@@ -94,9 +94,44 @@ guessed.
 parsing each repo's Terraform, which is fragile and version-dependent. So it becomes a repo custom
 property, following the `is_soc2_compliant` precedent.
 
-**Its current values are known to be wrong.** The standard says so directly — most teams did not
-weight the tag carefully, and re-evaluation is one of its success criteria. This has a direct
-consequence for thresholds; see below.
+**Its Terraform values are known to be wrong.** The standard says so directly — most teams did not
+weight the tag carefully, and re-evaluation is one of its success criteria. The custom property is
+therefore the source of truth for this service, not the Terraform tag it is named after.
+
+### The property exists, and is set
+
+Created on the `bankrate` org and set on the demo repo on 2026-08-25. Verified live:
+
+```json
+{
+  "property_name": "resiliency_tier",
+  "value_type": "single_select",
+  "allowed_values": ["Platinum", "Gold", "Silver", "Bronze", "Paper"],
+  "required": false,
+  "require_explicit_values": false,
+  "values_editable_by": "org_and_repo_actors",
+  "description": "Define the Production Resiliency Tier for Auto-Merge capabilities - <ResiliencyTier standard doc>"
+}
+```
+
+`bankrate/platform-cicd-v2-demo` → `resiliency_tier = Paper`, alongside `is_poc = true` and
+`is_soc2_compliant = false`.
+
+**Values are Title Case** — `Platinum`, not `platinum`. The rules file and the tier ranking must
+match, and the gate compares case-insensitively so a lowercase value in a hand-edited rules file
+cannot silently rank as unrecognised.
+
+**The property is optional and repo-editable, which bounds what this gate is worth.**
+`required: false` means a repo can simply not have it — handled by failing closed. More
+significantly, `values_editable_by: org_and_repo_actors` means **a repository admin can set their own
+tier**. A team wanting more automation on a production service could set it to `Paper` and get it.
+
+That makes gate 13 a *self-attestation* check, not an enforced control. It is still worth having —
+it makes the claim explicit, reviewable and auditable in the decision ledger, and it stops accidental
+automation on an untagged repo — but it is not a defence against someone deliberately
+misdeclaring. Narrowing `values_editable_by` to `org_actors` would close that, and is the right
+follow-up if this gate ever becomes load-bearing beyond shadow mode. Recorded here so nobody later
+mistakes it for enforcement.
 
 ## Four new gates, 11 → 15
 
@@ -165,44 +200,47 @@ rules:
     - "Terraform plan (speculative)"
 
   changeClasses:
+    # maxResiliencyTier is the MOST critical tier a class may touch, using the
+    # standard's own Title Case values. Ranking: Paper < Bronze < Silver < Gold
+    # < Platinum, so a higher tier is more critical and therefore stricter.
+    lockfile-only:
+      minCoveragePct: 0
+      maxResiliencyTier: Platinum    # generated content only; safe anywhere
+      soc2Eligible: false
     dep-patch:
       minCoveragePct: 60
-      maxResiliencyTier: gold
+      maxResiliencyTier: Gold        # everything but the 99.99% tier
       soc2Eligible: false
     dep-minor:
       minCoveragePct: 60
-      maxResiliencyTier: gold
+      maxResiliencyTier: Silver
       soc2Eligible: false
     dep-major:
       minCoveragePct: 60
-      maxResiliencyTier: silver
-      soc2Eligible: false
-    lockfile-only:
-      minCoveragePct: 0
-      maxResiliencyTier: platinum
+      maxResiliencyTier: Bronze
       soc2Eligible: false
 ```
 
 Per-repo `blockingChecks` override on the enrollment record, exactly as `signalChecks` works — same
 inherit-or-replace semantics, never merged.
 
-### Why the tier thresholds start loose
+### The thresholds are real, not placeholders
 
-`dep-patch` and `dep-minor` both permit up to `gold`, which admits every repo inspected — all of
-them self-report `gold` in production.
+An earlier draft of this spec proposed deliberately loose thresholds, on the reasoning that every
+platform repo's Terraform self-reports `gold` in production from boilerplate and a tight ceiling
+would encode a tagging error rather than a policy.
 
-This is deliberate and temporary. The demo repo reports `gold` because it inherited the standard
-provider block, not because a demo application needs 99.95% availability. That is precisely the
-inaccuracy the ResiliencyTier standard names as its motivation. A tighter threshold today would not
-express real policy; it would encode a tagging error, and it would flip PR #27 — the only pull
-request currently exercising the full happy path — from candidate to non-candidate, so the shadow
-dataset would stop showing what a pass looks like.
+**That reasoning is obsolete.** The custom property is set independently of the Terraform tag, and
+the demo repo is declared `Paper` — which is accurate: a demonstration application genuinely has no
+availability requirement. So the thresholds above express real policy, and the demo repo passes all
+of them on merit rather than on a loosened ceiling.
 
-Tightening is a one-line rules pull request once the org-wide re-evaluation the standard calls for
-has happened. The spec records the reason so nobody later reads `gold` as a considered ceiling.
+The resulting ladder is the intended one: lockfile churn is safe on anything, patch bumps stop short
+of the 99.99% tier, minor bumps stop at Silver, and major bumps are confined to Bronze and below.
 
-`dep-major` is capped at `silver` for symmetry and future-proofing; it remains ineligible everywhere
-regardless, because its `classifications` list is empty (Spec A).
+`dep-major` remains ineligible everywhere regardless of its tier ceiling, because its
+`classifications` list is empty (Spec A). Its `maxResiliencyTier` matters only if that list is ever
+populated.
 
 ## Where the existing risk signal stands
 
@@ -214,20 +252,20 @@ PLAT-1191's six-signal criterion stays intact.
 The redundancy is real and accepted. Collapsing them would mean either losing the hard stop or losing
 the gradient, and both are worth keeping.
 
-## Prerequisites this spec cannot perform
+## Prerequisites — both now satisfied
 
-Two org-level actions, both needing sign-off, neither in the implementation plan:
+Two org-level actions were needed before this gate could pass anywhere. Both are done:
 
-1. **Create the `resiliency_tier` org custom property.**
-   `PUT /orgs/bankrate/properties/schema/resiliency_tier`, `single_select`, allowed values
-   `platinum`, `gold`, `silver`, `bronze`, `paper`. Needs org-admin rights. Its description should
-   state that it means the **production** tier, since the underlying tag varies by environment.
-2. **Set it on every enrolled repository.** Until it is set, gate 13 fails and no pull request on
-   that repo is a candidate — correct fail-closed behaviour, and worth knowing before the first
-   validation run reads as a regression.
+1. ~~**Create the `resiliency_tier` org custom property.**~~ **Done 2026-08-25.** `single_select`,
+   values `Platinum`/`Gold`/`Silver`/`Bronze`/`Paper`, described as the production tier and linked to
+   the standard. See "The property exists, and is set" above for the verified schema.
+2. ~~**Set it on the demo repository.**~~ **Done 2026-08-25** — `Paper`.
 
-Until both are done the gate reports a clear reason rather than a mystery: *"resiliency_tier is not
-set on this repository"*.
+Remaining, for **every future enrolled repository**: set `resiliency_tier` before enrolling it. The
+property is optional org-wide, so an unset repo fails gate 13 and none of its pull requests is a
+candidate. That is correct fail-closed behaviour, and the gate reports a clear reason rather than a
+mystery: *"resiliency_tier is not set on this repository"* — but it will read as a regression to
+anyone who enrols a repo and forgets this step.
 
 ## Error handling
 
@@ -251,9 +289,10 @@ Gates 11–14 read the class's thresholds, so they follow the existing rule: whe
   checks are ignored (a failing `Commit lint` is not a security finding).
 - **`coverageFloor`** — 62.99% against a floor of 60 passes; against 70 fails; absent fails; an
   unparseable title fails; a floor of 0 passes with any reported value.
-- **`resiliencyTierPermits`** — `gold` against a `gold` ceiling passes; `platinum` against `gold`
-  fails; `paper` against `gold` passes; unset fails; an unrecognised tier value fails rather than
-  ranking as 0.
+- **`resiliencyTierPermits`** — `Gold` against a `Gold` ceiling passes; `Platinum` against `Gold`
+  fails; `Paper` against `Gold` passes; the demo repo's real `Paper` passes every configured ceiling;
+  lowercase `paper` is accepted case-insensitively; unset fails; an unrecognised tier value fails
+  rather than ranking lowest.
 - **`soc2Permits`** — a non-SOC2 repo passes regardless of `soc2Eligible`; a SOC2 repo passes only
   when `soc2Eligible` is true; unset fails.
 - **Property fetch** — parses the live response shape; an unset property is absent, not null; a
@@ -268,9 +307,9 @@ Gates 11–14 read the class's thresholds, so they follow the existing rule: whe
 ### Live validation
 
 PR #27 stays a candidate, now passing 15 of 15 gates, with the four new rows visible in the table.
-A deliberate negative: temporarily set the demo repo's `resiliency_tier` to `platinum` and confirm
+A deliberate negative: temporarily set the demo repo's `resiliency_tier` to `Platinum` and confirm
 the pull request becomes a non-candidate with `resiliencyTierPermits` named as the failure, then set
-it back.
+it back to `Paper`.
 
 ## Out of scope
 
@@ -281,12 +320,16 @@ it back.
   service.
 - **Per-environment tiers.** One property, meaning production.
 - **Re-tagging repos** to accurate resiliency tiers — the org-wide effort the standard calls for.
+- **Restricting `values_editable_by` to `org_actors`.** Today a repo admin can set their own tier,
+  which makes gate 13 self-attested rather than enforced. Worth doing before this gate is load-bearing
+  outside shadow mode.
 - **Acting on any verdict.** Shadow mode is unchanged.
 
 ## Definition of done
 
-- [ ] `resiliency_tier` org custom property created, `single_select`, five tiers, documented as production
-- [ ] Set on `bankrate/platform-cicd-v2-demo`
+- [x] `resiliency_tier` org custom property created, `single_select`, five tiers, documented as production — **done 2026-08-25**
+- [x] Set on `bankrate/platform-cicd-v2-demo` to `Paper` — **done 2026-08-25**
+- [ ] Tier comparison is case-insensitive; an unrecognised tier value fails rather than ranking lowest
 - [ ] `rules.blockingChecks` declared, validated at build time, overridable per repo
 - [ ] `minCoveragePct`, `maxResiliencyTier` and `soc2Eligible` on every change class, all validated
 - [ ] Gates 11–14 implemented in `GATE_ORDER`, with `freezeOff` still last
@@ -296,6 +339,6 @@ it back.
 - [ ] `newFindings` risk signal unchanged; still six signals
 - [ ] Each new gate has a passing and a failing test, plus its absent-data case
 - [ ] The check-run table shows 15 rows
-- [ ] PR #27 is still a candidate at 15 of 15; setting the demo repo to `platinum` makes it a
+- [ ] PR #27 is still a candidate at 15 of 15; setting the demo repo to `Platinum` makes it a
       non-candidate naming `resiliencyTierPermits`, and reverting restores it
 - [ ] Both checks remain `neutral` and on no required-checks configuration
