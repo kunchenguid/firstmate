@@ -1963,7 +1963,7 @@ fm_backend_herdr_recovery_ownership_state() {  # <recorded-session> <task-id> <w
   local tabs tab_id tab_label workspace_id panes pane_id pane_info pane_code
   local pane_tab_id pane_workspace_id foreground candidate agent_info agent_code
   local agent_status recorded_seen=0
-  local tab_row pane_row
+  local tab_row
   [ -n "$recorded_session" ] && [ -n "$task_id" ] && [ -n "$worktree" ] || {
     printf 'unreadable'
     return 0
@@ -2191,7 +2191,10 @@ EOF
     echo "error: could not parse tab/pane id from herdr tab create output" >&2
     return 1
   fi
+  # The callback reads these dynamically to persist allocation evidence.
+  # shellcheck disable=SC2034
   FM_BACKEND_HERDR_CREATED_TAB_ID=$tab_id
+  # shellcheck disable=SC2034
   FM_BACKEND_HERDR_CREATED_PANE_ID=$pane_id
   [ -z "$created_callback" ] || "$created_callback" || return 1
   [ -z "$seeded_tab_id" ] || fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded_tab_id"
