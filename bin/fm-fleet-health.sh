@@ -277,11 +277,19 @@ EVALUATED=$(jq -n \
         finding("supervision-inconclusive";"supervision";"notice";"inconclusive";
                 "supervision continuity could not be established";"unreadable";1)
       else empty end),
-      ($snapshot.tasks[]?
-        | select(remote(.) and (probe(.) == "skipped" or agent_state(.) == "not_collected" or agent_state(.) == "unreadable"))
-        | finding("remote-liveness-inconclusive";.id;"notice";"inconclusive";
-                  "remote liveness was not collected; a local placeholder is not remote evidence";
-                  "not_collected";1)),
+      (([
+          ($snapshot.tasks[]?
+            | select(remote(.) and (probe(.) == "skipped" or agent_state(.) == "not_collected" or agent_state(.) == "unreadable"))
+            | {id:.id}),
+          ($snapshot.secondmate_current.records[]?
+            | select(.current.state == "unknown")
+            | select((.current.failure_kind // "unknown") == "not_collected")
+            | {id:.id})
+        ]
+        | group_by(.id)[]) as $g
+        | finding("remote-liveness-inconclusive";$g[0].id;"notice";"inconclusive";
+                  "remote liveness or summary was not collected; a local placeholder is not remote evidence";
+                  "not_collected";($g | length))),
       ($snapshot.tasks[]?
         | select(remote(.) | not)
         | select(.kind != "secondmate")
@@ -298,6 +306,13 @@ EVALUATED=$(jq -n \
                  or agent_state(.) == "unverified" or agent_state(.) == "not_checked")
         | finding("endpoint-inconclusive";.id;"notice";"inconclusive";
                   "agent or endpoint liveness could not be established";agent_state(.);1)),
+      ($snapshot.tasks[]?
+        | select(remote(.) | not)
+        | select(.kind != "secondmate")
+        | select(agent_state(.) == "alive")
+        | select(.current_state.state == "unknown")
+        | finding("current-state-inconclusive";.id;"notice";"inconclusive";
+                  "worker lifecycle state could not be established";"unknown";1)),
       ($snapshot.tasks[]?
         | select(.kind == "secondmate")
         | select(remote(.) | not)

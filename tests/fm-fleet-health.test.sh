@@ -136,7 +136,7 @@ write_live_ship() {  # <home> <id>
     "window=firstmate:fm-${id}" \
     "worktree=$home/projects/${id}-wt" \
     "project=alpha" \
-    "harness=codex" \
+    "harness=grok" \
     "kind=ship" \
     "mode=ship" \
     "yolo=off"
@@ -433,6 +433,46 @@ EOF
   pass "remote local placeholder is inconclusive, not healthy or dead"
 }
 
+test_unknown_worker_state_is_inconclusive() {
+  local home fakebin out rc=0
+  home=$(make_home unknown-worker-state)
+  mkdir -p "$home/projects/paused-unknown-wt"
+  fm_write_meta "$home/state/paused-unknown.meta" \
+    "window=firstmate:fm-paused-unknown" \
+    "worktree=$home/projects/paused-unknown-wt" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship" \
+    "yolo=off"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "unknown worker lifecycle state should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "current-state-inconclusive"
+              and .subject == "paused-unknown" and .confidence == "inconclusive")
+  ' >/dev/null || fail "unknown worker lifecycle state was hidden: $out"
+  pass "unknown worker lifecycle state remains inconclusive"
+}
+
+test_registry_only_remote_evidence_is_inconclusive() {
+  local home fakebin out rc=0
+  home=$(make_home registry-only-remote)
+  cat > "$home/data/secondmates.md" <<'EOF'
+- registry-only (host: example.invalid; root: /remote/firstmate; home: /remote/registry-only; scope: remote work; projects: alpha; added 2026-08-01)
+EOF
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "registry-only remote evidence should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and ([.findings[] | select(.kind == "remote-liveness-inconclusive"
+                                 and .subject == "registry-only")] | length) == 1
+  ' >/dev/null || fail "registry-only remote evidence was hidden or duplicated: $out"
+  pass "registry-only remote evidence remains grouped and inconclusive"
+}
+
 test_pending_reply_broken_and_historical_noise_omitted() {
   local home fakebin out
   home=$(make_home reply-and-noise)
@@ -652,7 +692,7 @@ EOF
     "window=firstmate:fm-pr-ship" \
     "worktree=$home/projects/pr-ship-wt" \
     "project=alpha" \
-    "harness=codex" \
+    "harness=grok" \
     "kind=ship" \
     "mode=ship" \
     "yolo=off" \
@@ -823,6 +863,8 @@ test_historical_status_pr_does_not_require_listener
 test_grouped_inbox_and_stable_fingerprints
 test_invalid_inbox_records_are_inconclusive
 test_remote_liveness_is_inconclusive
+test_unknown_worker_state_is_inconclusive
+test_registry_only_remote_evidence_is_inconclusive
 test_pending_reply_broken_and_historical_noise_omitted
 test_recovery_sending_owner_verdicts
 test_inconclusive_secondmate_summary_not_broken
