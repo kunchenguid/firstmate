@@ -2278,6 +2278,27 @@ with tempfile.TemporaryDirectory() as temporary:
     assert (output / "plain.txt").stat().st_mode & 0o222 == 0
     assert output.stat().st_mode & 0o222 == 0
 
+    # Generated snapshot metadata owns this namespace. A tracked path there
+    # would otherwise collide with controller-authenticated manifest state.
+    (repo / ".crosscheck-snapshot").mkdir()
+    (repo / ".crosscheck-snapshot/manifest.json").write_text(
+        "attacker-controlled\n", encoding="utf-8"
+    )
+    git(repo, "add", ".crosscheck-snapshot/manifest.json")
+    git(repo, "commit", "-qm", "reserved snapshot namespace")
+    reserved_head = git(repo, "rev-parse", "HEAD")
+    try:
+        module.build_repository_snapshot(
+            repo, base_sha=base, head_sha=reserved_head,
+            destination=root / "reserved.tar.gz",
+        )
+    except module.AzureCrosscheckError as exc:
+        assert "unsafe tracked path" in str(exc)
+        assert ".crosscheck-snapshot" in str(exc)
+    else:
+        raise AssertionError("tracked snapshot metadata shadowed the generated manifest")
+    git(repo, "checkout", "-q", head)
+
     # Host build refuses hard-link and symlink escape shapes before staging.
     (repo / "plain.txt").unlink()
     os.link(repo / "changed.txt", repo / "plain.txt")
