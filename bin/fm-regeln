@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# fm-regeln - bootstraps and delegates to the vendored writ-light rule-retrieval
+# tool (tools/writ-fm), so every home gets the same CLI without a hand-run
+# `uv pip install` step or a machine-specific interpreter path.
+#
+# Usage:
+#   fm-regeln <writ-light subcommand and args...>
+#   fm-regeln session-start ...   ingest ...   query ...   doctor ...   etc.
+#     (subcommands are the vendored tool's own; this script does not parse
+#     them, it only bootstraps the venv and delegates argv - unchanged except
+#     that `ingest` gets --strikt-v2 appended, see the delegation line below)
+#
+# Bootstrap (idempotent, silent when already done): on first call, or whenever
+# $FM_HOME/state/writ-fm/venv/bin/writ-light is missing, creates that venv via
+# `uv venv --python 3.12` and installs tools/writ-fm into it editable
+# (`uv pip install -e`). A later call finds the binary and skips straight to
+# delegation - no re-install, no network, no output about it.
+#
+# Env vars this script owns the defaulting of (all individually overridable;
+# tools/writ-fm/src/writ_light/paths.py reads the same three names):
+#   WRIT_DATA_DIR   default $FM_HOME/state/writ-fm      (rules.db, vectors.hnsw)
+#   WRIT_MODEL_DIR  default ~/.local/share/writ-fm/model (the ONNX embed model)
+#   WRIT_RULES_DIR  default $FM_HOME/regeln              (source YAML rules)
+# FM_HOME defaults to this repo's root, found via this script's own path -
+# same convention as every other bin/fm-*.sh entry point.
+#
+# Fails loudly (L33: unknown/missing state never falls back silently) with
+# `WRIT_FM: MISSING <what>` on stderr and exit 1 when `uv` is unavailable to
+# bootstrap the venv, or when WRIT_MODEL_DIR has no model in it - a delegated
+# call without an embedding model would just fail deeper and less legibly.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-$FM_ROOT}"
+
+WRIT_DATA_DIR="${WRIT_DATA_DIR:-$FM_HOME/state/writ-fm}"
+WRIT_MODEL_DIR="${WRIT_MODEL_DIR:-$HOME/.local/share/writ-fm/model}"
+WRIT_RULES_DIR="${WRIT_RULES_DIR:-$FM_HOME/regeln}"
+export WRIT_DATA_DIR WRIT_MODEL_DIR WRIT_RULES_DIR
+
+WRIT_FM_SRC="$FM_ROOT/tools/writ-fm"
+VENV_DIR="$WRIT_DATA_DIR/venv"
+WRIT_BIN="$VENV_DIR/bin/writ-light"
+
+usage() { sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  usage
+  exit 0
+fi
+
+if [ ! -x "$WRIT_BIN" ]; then
+  if ! command -v uv >/dev/null 2>&1; then
+    echo "WRIT_FM: MISSING uv (needed to bootstrap $VENV_DIR - install uv, or run outside this home with uv on PATH)" >&2
+    exit 1
+  fi
+  mkdir -p "$WRIT_DATA_DIR"
+  uv venv --python 3.12 "$VENV_DIR" >&2
+  uv pip install --python "$VENV_DIR" -e "$WRIT_FM_SRC" >&2
+fi
+
+if [ ! -d "$WRIT_MODEL_DIR" ] || [ -z "$(ls -A "$WRIT_MODEL_DIR" 2>/dev/null)" ]; then
+  echo "WRIT_FM: MISSING model ($WRIT_MODEL_DIR is absent or empty - place the ONNX embed model there, or point WRIT_MODEL_DIR at it)" >&2
+  exit 1
+fi
+
+# regeln/ is the fleet rule source and is always schema v2 - never let an ingest from here fall back into the v1 legacy mode.
+if [ "${1:-}" = "ingest" ]; then set -- "$@" --strikt-v2; fi
+
+exec "$WRIT_BIN" "$@"

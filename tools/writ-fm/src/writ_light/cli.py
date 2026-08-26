@@ -9,28 +9,41 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import paths
+from . import paths, schema
 
 
 def _cmd_ingest(args) -> int:
-    from . import ingest
+    from . import fmpfade, ingest
 
-    quelle = Path(args.quelle).expanduser() if args.quelle else paths.rules_dir()
-    stat = ingest.run(source=quelle)
+    quelle = Path(args.quelle).expanduser() if args.quelle else fmpfade.regeln_dir()
+    stat = ingest.run(source=quelle, mit_index=not args.ohne_index,
+                      strikt_v2=args.strikt_v2)
     print(f"Quelle:       {quelle}")
-    print(f"Regeln:       {stat['regeln']}  (davon mandatory: {stat['mandatory']})")
+    print(f"Regeln:       {stat['regeln']}  "
+          f"(kern: {stat['kern']}, kontext: {stat['kontext']}, "
+          f"abgelaufen: {stat['abgelaufen']})")
+    # Nur wenn es sie gibt: eine Dauerzeile "Legacy: 0" liest nach kurzer Zeit
+    # niemand mehr, und dann faellt auch die erste 1 nicht auf.
+    if stat["legacy"]:
+        print(f"Schema v1:    {stat['legacy']}  "
+              f"(Legacy-Modus, Vorgaben statt Aussagen — `--strikt-v2` weist sie ab)")
     print(f"Beziehungen:  {stat['beziehungen']}")
     print(f"Projekte:     {stat['projekte']}")
     print(f"Vektoren:     {stat['indexiert']}")
     print(f"Datenbank:    {stat['db']}")
     print(f"Index:        {stat['index']}")
+    # Warnungen auf stderr: die Ausgabe oben wird von Wrappern gelesen, die
+    # Warnung gehoert dem Menschen. Ein Warnungstext in der Zaehlspalte hat
+    # schon einmal einen Wrapper zum Schweigen gebracht.
+    for zeile in stat["warnungen"]:
+        print(zeile, file=sys.stderr)
     return 0
 
 
 def _cmd_session_start(args) -> int:
     from . import hooks
 
-    text = hooks.session_start()
+    text = hooks.session_start(geltung=args.geltung, projekt=args.projekt)
     print(hooks.als_json(text) if args.json else text)
     return 0
 
@@ -42,7 +55,8 @@ def _cmd_prompt_regeln(args) -> int:
     prompt, cwd = hooks.eingabe_lesen(sys.stdin.read())
     if not prompt.strip():
         return 0
-    text = hooks.prompt_regeln(prompt, cwd=cwd, budget=args.budget)
+    text = hooks.prompt_regeln(prompt, cwd=cwd, budget=args.budget,
+                               geltung=args.geltung, projekt=args.projekt)
     print(hooks.als_json(text, "UserPromptSubmit") if args.json else text)
     return 0
 
@@ -56,11 +70,40 @@ def _cmd_query(args) -> int:
         projekt=args.projekt,
         mit_claw=args.rolle == "claw",
         limit=args.limit,
+        geltung=args.geltung,
+        auch_hinweise=args.auch_hinweise,
     )
     if args.erklaeren:
         print(render.erklaerung(ergebnis))
     else:
         print(render.block(ergebnis))
+    return 0
+
+
+def _cmd_brief(args) -> int:
+    from . import brief
+
+    text = brief.kontext_lesen(Path(args.kontext_datei))
+    ergebnis = brief.bauen(text, geltung=args.geltung, projekt=args.projekt)
+    print(ergebnis.text)
+    for zeile in ergebnis.warnungen:
+        print(zeile, file=sys.stderr)
+    return 0
+
+
+def _cmd_streich(args) -> int:
+    from . import streich
+
+    stat = streich.streiche(args.id, grund=args.grund, nach=args.nach,
+                            mit_index=not args.ohne_index)
+    print(f"Gestrichen:   {stat['id']}  -> {stat['nach']}")
+    print(f"Regeldatei:   {stat['datei']}")
+    print(f"Register:     {stat['register']}")
+    print(f"Eintrag:      {stat['eintrag']}")
+    print(f"Bestand jetzt: {stat['ingest']['kern']} kern, "
+          f"{stat['ingest']['kontext']} kontext")
+    for zeile in stat["ingest"]["warnungen"]:
+        print(zeile, file=sys.stderr)
     return 0
 
 
@@ -557,6 +600,15 @@ def _git_hooks_pfad() -> Path | None:
     return Path(pfad).expanduser() if pfad else None
 
 
+def _geltung_argumente(p: argparse.ArgumentParser, pflicht: bool = False) -> None:
+    """`--geltung` und `--projekt` — der Filter jeder Zustellung."""
+    p.add_argument("--geltung", choices=list(schema.ROLLEN),
+                   required=pflicht, default=None if pflicht else "flotte",
+                   help="wessen Regeln zugestellt werden (Standard: flotte)")
+    p.add_argument("--projekt",
+                   help="Projektbindung: erlaubt zusaetzlich geltung projekt:<name>")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="writ-light",
@@ -565,28 +617,55 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="befehl", required=True)
 
     pi = sub.add_parser("ingest", help="YAML-Regeln in SQLite + Vektorindex ueberfuehren")
-    pi.add_argument("quelle", nargs="?", help="Verzeichnis oder Datei (Standard: rules/)")
+    pi.add_argument("quelle", nargs="?", help="Verzeichnis oder Datei (Standard: regeln/)")
+    pi.add_argument("--ohne-index", action="store_true", dest="ohne_index",
+                    help="nur Datenbank, keinen Vektorindex bauen (Pruefung des Regelwerks)")
+    pi.add_argument("--strikt-v2", action="store_true", dest="strikt_v2",
+                    help="jede Regel muss im Schema v2 stehen; eine v1-Regel bricht ab "
+                         "(kein Legacy-Modus)")
     pi.set_defaults(func=_cmd_ingest)
 
-    ps = sub.add_parser("session-start", help="Verbindliche Regeln fuer den Session-Start")
+    ps = sub.add_parser("session-start", help="Kernregeln fuer den Session-Start")
     ps.add_argument("--json", action="store_true", help="als Hook-Umschlag ausgeben")
+    _geltung_argumente(ps)
     ps.set_defaults(func=_cmd_session_start)
 
     pp = sub.add_parser("prompt-regeln",
                         help="UserPromptSubmit: Hook-JSON von stdin, Regelblock auf stdout")
     pp.add_argument("--budget", type=int, default=2000)
     pp.add_argument("--json", action="store_true", help="als Hook-Umschlag ausgeben")
+    _geltung_argumente(pp)
     pp.set_defaults(func=_cmd_prompt_regeln)
 
-    pq = sub.add_parser("query", help="Gerankte Regeln zu einem Prompt")
+    pq = sub.add_parser("query", help="Gerankte Kontextregeln zu einem Prompt")
     pq.add_argument("prompt")
     pq.add_argument("--budget", type=int, default=2000, help="Token-Budget (Standard 2000)")
-    pq.add_argument("--projekt", help="Projektbindung erzwingen (sonst aus dem cwd)")
     pq.add_argument("--rolle", choices=["session", "claw"], default="session",
                     help="claw = Regeln der Domain claw-rolle mit ausgeben")
-    pq.add_argument("--limit", type=int, help="hoechstens n gerankte Regeln")
+    pq.add_argument("--limit", type=int,
+                    help="hoechstens n gerankte Regeln (Standard: topk aus VERFASSUNG.yaml)")
+    pq.add_argument("--auch-hinweise", action="store_true", dest="auch_hinweise",
+                    help="abgestufte Regeln mitliefern — der einzige Weg, sie zu sehen")
     pq.add_argument("--erklaeren", action="store_true", help="Ranking-Diagnose statt Regelblock")
+    _geltung_argumente(pq)
     pq.set_defaults(func=_cmd_query)
+
+    pb = sub.add_parser("brief",
+                        help="Regelblock fuer einen Brief: Kern voll + top-k Kontext, gedeckelt")
+    pb.add_argument("--kontext-datei", dest="kontext_datei", required=True,
+                    help="Datei mit dem Brieftext, zu dem die Kontextregeln passen sollen")
+    _geltung_argumente(pb, pflicht=True)
+    pb.set_defaults(func=_cmd_brief)
+
+    pst = sub.add_parser("streich",
+                         help="Regel abstufen oder entfernen — mit Register-Eintrag und Ingest")
+    pst.add_argument("id", help="Regel-ID")
+    pst.add_argument("--nach", choices=list(schema.STREICH_ZIELE), default="hinweis",
+                     help="hinweis = abstufen (Standard), geloescht = aus dem YAML entfernen")
+    pst.add_argument("--grund", required=True, help="warum die Regel weg soll (Pflicht)")
+    pst.add_argument("--ohne-index", action="store_true", dest="ohne_index",
+                     help="abschliessenden Ingest ohne Vektorindex laufen lassen")
+    pst.set_defaults(func=_cmd_streich)
 
     pmem = sub.add_parser("memory",
                           help="Session-uebergreifendes Memory (kuratierte Fakten/Entscheidungen)")

@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from . import paths
+from . import paths, schema
 
 # Die gelieferte Gold-Datei wird nicht zurueckgeschrieben: sie traegt
 # Abschnittskommentare ZWISCHEN den Regeln, die kein Emitter reproduziert,
@@ -41,25 +41,53 @@ def skalar(wert) -> str:
     return s
 
 
+# Anker kommen als Liste (Ingest) oder als Zeile (Datenbank) an. Die Lesart
+# gehoert zur Spalte und steht deshalb in `schema`; hier nur der gewohnte Name.
+anker_liste = schema.anker_liste
+
+
 def regel_block(r: dict, mit_herkunft: bool = False) -> str:
     """YAML-Block einer Regel.
 
-    `mit_herkunft` schreibt `project` und `quelle` mit in die Regel. Beim
-    Rueckschreiben in die Herkunftsdatei sind beide implizit — `project` steht
-    im Dateikopf, `quelle` IST die Datei. In einer Sammeldatei (Export) ist
-    nichts davon implizit: ohne die Felder verliert ein Rundlauf saemtliche
-    Projektbindungen und die Herkunft, und zwar lautlos.
+    `mit_herkunft` schreibt `project` und `herkunftsdatei` mit in die Regel.
+    Beim Rueckschreiben in die Herkunftsdatei sind beide implizit — `project`
+    steht im Dateikopf, die Herkunftsdatei IST die Datei. In einer Sammeldatei
+    (Export) ist nichts davon implizit: ohne die Felder verliert ein Rundlauf
+    saemtliche Projektbindungen und die Herkunft, und zwar lautlos.
+
+    `mandatory` wird fuer v2-Regeln nicht mehr geschrieben: dort ist es die
+    abgeleitete Schreibweise fuer `verbindlichkeit: kern`, und der Ingest weist
+    einen widersprechenden Wert zurueck. Zwei Schreibweisen desselben Fakts in
+    derselben Datei waeren die naechste Gelegenheit zum Auseinanderlaufen.
+
+    Eine v1-Regel wird als v1 zurueckgeschrieben (`mandatory`, keine v2-Zeilen).
+    Ihre v2-Spalten sind Vorgaben des Legacy-Modus, keine Aussagen; als YAML
+    hingeschrieben waeren sie beides zugleich falsch — sie behaupteten eine
+    Geltung, die niemand entschieden hat, und die Datei fiele beim naechsten
+    Ingest durch die v2-Pruefung (Anker weder gesetzt noch belegt).
     """
     zeilen = [f"  - id: {r['id']}",
               f"    domain: {r.get('domain') or 'allgemein'}",
               f"    severity: {int(r.get('severity') or 2)}"]
-    if r.get("mandatory"):
-        zeilen.append("    mandatory: true")
+    if schema.ist_v1_profil(r):
+        if r.get("mandatory"):
+            zeilen.append("    mandatory: true")
+    else:
+        zeilen += [f"    geltung: {skalar(r.get('geltung'))}",
+                   f"    verbindlichkeit: {skalar(r.get('verbindlichkeit'))}",
+                   f"    leser: {skalar(r.get('leser'))}",
+                   f"    status: {skalar(r.get('status') or 'aktiv')}",
+                   f"    anker: [{', '.join(anker_liste(r.get('anker')))}]"]
+        if r.get("nachweis"):
+            zeilen.append(f"    quelle: {skalar(r['nachweis'])}")
+        zeilen.append(f"    verfall: {r['verfall'] if r.get('verfall') else 'null'}")
+        if r.get("leiter"):
+            zeilen.append(f"    leiter: {skalar(r['leiter'])}")
     if mit_herkunft:
         if r.get("project"):
             zeilen.append(f"    project: {r['project']}")
         if r.get("quelle"):
-            zeilen.append(f"    quelle: {r['quelle']}")
+            zeilen.append(f"    herkunftsdatei: {r['quelle']}")
     zeilen.append(f"    trigger: {skalar(r.get('trigger'))}")
     zeilen.append(f"    statement: {skalar(r.get('statement'))}")
     for feld in ("violation", "correct", "tags"):
@@ -87,15 +115,28 @@ def _kopf(pfad: Path, projekt: str | None) -> str:
     return kopf + "\n"
 
 
+def datei_inhalt(pfad: Path, regeln: list[dict], projekt: str | None = None) -> str:
+    """Vollstaendiger Dateiinhalt — getrennt vom Schreiben, damit `streich` den
+    Text durch seine Transaktion schicken kann statt an ihr vorbei."""
+    kopf = _kopf(pfad, projekt)
+    if not regeln:
+        # Eine Datei mit Kopf, aber ohne `rules:` liesse den naechsten Ingest
+        # LAUT ueber sie stolpern ("Schluessel 'rules' fehlt").
+        return kopf + "rules: []\n"
+    return kopf + "rules:\n\n" + "\n\n".join(regel_block(r) for r in regeln) + "\n"
+
+
 def schreibe_datei(pfad: Path, regeln: list[dict], projekt: str | None = None) -> None:
-    inhalt = _kopf(pfad, projekt) + "rules:\n\n"
-    inhalt += "\n\n".join(regel_block(r) for r in regeln) + "\n"
     pfad.parent.mkdir(parents=True, exist_ok=True)
-    pfad.write_text(inhalt, encoding="utf-8")
+    pfad.write_text(datei_inhalt(pfad, regeln, projekt), encoding="utf-8")
 
 
 TEXTFELDER = ("id", "domain", "trigger", "statement", "violation",
-              "correct", "tags", "project")
+              "correct", "tags", "project",
+              # Schema v2 — ohne diese Felder haelte der Vergleich zwei Regeln
+              # fuer gleich, die verschieden zugestellt werden.
+              "geltung", "verbindlichkeit", "nachweis", "leser", "verfall",
+              "leiter", "status")
 
 
 def _signatur(regeln: list[dict]) -> list[tuple]:
@@ -109,6 +150,7 @@ def _signatur(regeln: list[dict]) -> list[tuple]:
     return [
         tuple((f, str(r.get(f) or "")) for f in TEXTFELDER)
         + (int(r.get("severity") or 2), bool(r.get("mandatory")))
+        + (tuple(anker_liste(r.get("anker"))),)
         + (tuple(sorted((x["kind"], x["dst"]) for x in (r.get("relations") or []))),)
         for r in regeln
     ]

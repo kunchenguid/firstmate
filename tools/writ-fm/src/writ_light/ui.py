@@ -64,7 +64,7 @@ def _normieren(roh: list) -> list[dict]:
             if x.get("kind") not in ingest.VALID_KINDS:
                 raise ValueError(f"{r['id']}: unbekannte Beziehungsart {x.get('kind')!r}")
             rel.append({"kind": x["kind"], "dst": x["dst"]})
-        regeln.append({
+        eintrag = {
             "id": str(r["id"]).strip(),
             "domain": (r.get("domain") or "allgemein").strip(),
             "severity": int(r.get("severity") or 2),
@@ -79,7 +79,17 @@ def _normieren(roh: list) -> list[dict]:
             "project": r.get("project") or None,
             "quelle": r.get("quelle") or yamlio.UI_DATEI,
             "relations": rel,
-        })
+        }
+        # Schema v2 nur durchreichen, wo wirklich etwas steht. Zwei Gruende:
+        # ein leeres Feld wuerde eine v1-Regel faelschlich zur v2-Regel machen
+        # (und sie an der Anker-Pflicht scheitern lassen), und ein Verwerfen
+        # wuerde umgekehrt jede v2-Regel beim ersten Speichern aus der
+        # Oberflaeche lautlos auf die Legacy-Vorgaben zurueckstufen.
+        for feld in ("geltung", "verbindlichkeit", "anker", "nachweis", "leser",
+                     "verfall", "leiter", "status"):
+            if r.get(feld) not in (None, "", []):
+                eintrag[feld] = r[feld]
+        regeln.append(eintrag)
     return regeln
 
 

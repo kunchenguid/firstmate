@@ -116,9 +116,17 @@ def _projektzeile(ergebnis) -> str:
             f"Projekts sind enthalten, die anderer Projekte bewusst nicht.\n")
 
 
-def session_start(cwd=None, db=None) -> str:
-    """Verbindliche Regeln plus Rahmen — ersetzt das fruehere ONBOARDING.md."""
-    ergebnis = retrieve.nur_mandatory(cwd=cwd, db=db)
+def session_start(cwd=None, db=None, geltung: str | None = "flotte",
+                  projekt: str | None = None) -> str:
+    """Kernregeln plus Rahmen — ersetzt das fruehere ONBOARDING.md.
+
+    `geltung` ist standardmaessig `flotte` und nicht None: wer seine Rolle
+    nicht nennt, bekommt genau die Regeln, die fuer alle gelten. Der stille
+    Gegenentwurf — ohne Rolle alles ausliefern — waere die falsche Richtung:
+    ein Worker saehe dann die Firstmate-Regeln und haette Pflichten, die ihn
+    nichts angehen.
+    """
+    ergebnis = retrieve.nur_kern(cwd=cwd, db=db, geltung=geltung, projekt=projekt)
     gesamt = _bestand(db)
     kopf = RAHMEN.format(
         anzahl=len(ergebnis.mandatory),
@@ -195,7 +203,8 @@ def _bestand(db=None) -> int:
         conn.close()
 
 
-def prompt_regeln(prompt: str, cwd=None, budget: int = 2000, db=None) -> str:
+def prompt_regeln(prompt: str, cwd=None, budget: int = 2000, db=None,
+                  geltung: str | None = "flotte", projekt: str | None = None) -> str:
     """Gerankte Regeln zu einer Nutzereingabe (UserPromptSubmit).
 
     Die verbindlichen Regeln kommen hier nur noch als ID-Zeile. Das ist genau
@@ -206,7 +215,8 @@ def prompt_regeln(prompt: str, cwd=None, budget: int = 2000, db=None) -> str:
     Streichung nicht zu verantworten gewesen; taete der Hook es nicht,
     arbeiteten alle Turns nach dem ersten /compact ohne Regelwerk.
     """
-    ergebnis = retrieve.query(prompt, budget_tokens=budget, cwd=cwd, db=db)
+    ergebnis = retrieve.query(prompt, budget_tokens=budget, cwd=cwd, db=db,
+                              geltung=geltung, projekt=projekt)
     return (render.block(ergebnis, mandatory_als_ids=True)
             + _memory_prompt_block(prompt, cwd=cwd, db=db))
 

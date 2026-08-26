@@ -1,4 +1,4 @@
-"""SQLite-Schema nach regel-retrieval-light.md.
+"""SQLite-Schema nach regel-retrieval-light.md — plus Regel-Schema v2.
 
 Abweichungen von der Spezifikation (im Report begruendet):
   * rules.project — NULL = global, sonst Projekt-ID. Ohne diese Spalte wuerde
@@ -8,10 +8,34 @@ Abweichungen von der Spezifikation (im Report begruendet):
     aus der Weboberflaeche wieder ueberschreiben.
   * Tabelle projects — cwd -> Projekt-ID, beim Ingest aus den Dossier-
     Kopfzeilen geparst statt hartkodiert.
+
+Regel-Schema v2 (Flottenordnung) haengt acht Spalten an. Dieses Modul ist ihr
+EINZIGER Eigner: die erlaubten Werte stehen hier, nicht verstreut in Ingest,
+Retrieval und Werkzeugen — sonst driften drei Listen auseinander und eine
+Regel gilt je nach Leser unterschiedlich.
+
+  geltung         wen die Regel bindet (flotte|firstmate|secondmate|worker|
+                  projekt:<name>)
+  verbindlichkeit kern = immer zugestellt, kontext = gerankt, hinweis = nur auf
+                  ausdrueckliche Nachfrage
+  anker           Lnn/HRn — der belegte Fehlerfall, den die Regel verhindert
+  nachweis        Herkunft des Wortlauts (grundsatz:<n>|order:O-xxxx|
+                  captain-wort:<datum>). Traegt im YAML den Schluessel
+                  `quelle`; die SPALTE heisst anders, weil `rules.quelle` seit
+                  jeher die Herkunftsdatei haelt und beide Fakten getrennt
+                  bleiben muessen (ein Eigner je Fakt). Die Herkunftsdatei
+                  laesst sich im YAML mit `herkunftsdatei:` ueberschreiben.
+  leser           wer sie liest (hook:<pfad>|tor:<pfad>|werkzeug:<pfad>|
+                  retrieval) — eine Regel ohne Leser wirkt nirgends
+  verfall         ISO-Datum oder NULL
+  leiter          Stufe-4-Begruendung (Pflicht erst fuer Neuaufnahmen nach dem
+                  Cutover, deshalb hier optional)
+  status          aktiv|abgelaufen|hinweis-abgestuft
 """
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 
@@ -46,7 +70,16 @@ CREATE TABLE IF NOT EXISTS rules (
   tags       TEXT,
   confidence REAL DEFAULT 1.0,
   project    TEXT,
-  quelle     TEXT
+  quelle     TEXT,
+  -- Regel-Schema v2
+  geltung         TEXT,
+  verbindlichkeit TEXT,
+  anker           TEXT,
+  nachweis        TEXT,
+  leser           TEXT,
+  verfall         TEXT,
+  leiter          TEXT,
+  status          TEXT DEFAULT 'aktiv'
 );
 
 -- Bewusst KEIN content=rules: die Tabelle haelt eine schreibweisen-normalisierte
@@ -63,6 +96,11 @@ CREATE TABLE IF NOT EXISTS relations (
 );
 CREATE INDEX IF NOT EXISTS idx_rel_src ON relations(src);
 CREATE INDEX IF NOT EXISTS idx_rules_project ON rules(project);
+-- Jede Zustellung filtert ueber genau diese drei Spalten (Kern-Block,
+-- Geltungsfilter, Verfall). Ohne Index laeuft der Session-Start-Hook bei jedem
+-- Start einen Full Scan.
+CREATE INDEX IF NOT EXISTS idx_rules_zustellung
+  ON rules(status, verbindlichkeit, geltung);
 
 CREATE TABLE IF NOT EXISTS projects (
   id        TEXT PRIMARY KEY,
@@ -79,7 +117,101 @@ CREATE TABLE IF NOT EXISTS meta (
 FIELDS = (
     "id", "domain", "severity", "mandatory", "trigger", "statement",
     "violation", "correct", "tags", "confidence", "project", "quelle",
+    "geltung", "verbindlichkeit", "anker", "nachweis", "leser", "verfall",
+    "leiter", "status",
 )
+
+# ── Erlaubte Werte des Regel-Schemas v2 ───────────────────────────────────
+#
+# Feste Rollen und freie Projektbindung stehen getrennt: `projekt:<name>` ist
+# offen (jedes registrierte Projekt), die vier Rollen sind es nicht. Ein
+# Tippfehler in der Rolle (`workr`) muss auffallen und darf nicht als neue
+# Geltung durchgehen — sonst bindet die Regel niemanden und niemand merkt es.
+ROLLEN = ("flotte", "firstmate", "secondmate", "worker")
+PROJEKT_GELTUNG = re.compile(r"^projekt:[A-Za-z0-9._-]+$")
+
+VERBINDLICHKEITEN = ("kern", "kontext", "hinweis")
+STATUS_WERTE = ("aktiv", "abgelaufen", "hinweis-abgestuft")
+
+# Wohin eine Streichung fuehren kann. Steht hier und nicht in `streich.py`,
+# damit die Kommandozeile die Auswahl anbieten kann, ohne den halben Ingest zu
+# laden — und damit es die Liste genau einmal gibt.
+STREICH_ZIELE = ("hinweis", "geloescht")
+
+# `retrieval` ist der einzige Leser ohne Pfad: dort liest kein benanntes
+# Skript, sondern die Zustellung selbst.
+LESER_MIT_PFAD = ("hook", "tor", "werkzeug")
+LESER_OHNE_PFAD = ("retrieval",)
+
+ANKER = re.compile(r"^(L\d{2}|HR\d+)$")
+NACHWEIS = re.compile(r"^(grundsatz:\d+|order:O-[A-Za-z0-9-]+|captain-wort:\d{4}-\d{2}-\d{2})$")
+
+# ── Schema-Versionierung je Regel ─────────────────────────────────────────
+#
+# Der Bestand ist zweisprachig und bleibt es: v1-Regeln (id/trigger/statement/
+# mandatory/tags/relations) und v2-Regeln (zusaetzlich geltung/verbindlichkeit/
+# anker/quelle/leser/verfall/leiter). Welche Fassung gilt, entscheidet die
+# einzelne REGEL, nicht ein globaler Schalter — sonst muesste jeder Bestand an
+# einem einzigen Tag komplett umziehen, und bis dahin liefe gar nichts.
+#
+# v2 ist eine Regel, sobald sie EINES dieser Felder traegt, oder sobald ihre
+# Datei `schema: v2` auf oberster Ebene deklariert. `status` steht bewusst
+# NICHT in der Liste: es hat einen Vorgabewert und wuerde sonst jede Regel
+# markieren, die nur ihren Zustand nennt.
+V2_MARKER = ("geltung", "verbindlichkeit", "anker", "quelle", "leser",
+             "verfall", "leiter")
+
+# Was eine v1-Regel beim Ingest bekommt (Vorgaben des Legacy-Modus, Vertrag
+# im Kopf von ingest.py).
+V1_GELTUNG = "flotte"
+V1_LESER = "retrieval"
+V1_STATUS = "aktiv"
+
+
+def anker_liste(wert) -> list[str]:
+    """Anker kommen als Liste (Ingest) oder als Zeile (Datenbank) an.
+
+    Steht hier und nicht in `yamlio`, weil die Kommaschreibweise eine
+    Eigenschaft der SPALTE ist — und damit Ingest, Rueckschreibung und
+    Schema-Erkennung dieselbe Lesart benutzen.
+    """
+    if wert is None:
+        return []
+    if isinstance(wert, str):
+        return [t.strip() for t in wert.split(",") if t.strip()]
+    return [str(t).strip() for t in wert if str(t).strip()]
+
+
+def ist_v1_profil(regel) -> bool:
+    """Traegt diese Regelzeile GENAU die Vorgaben des Legacy-Modus?
+
+    Der Rueckweg braucht das: aus der Datenbank kommt keine Regel mit ihrem
+    YAML zurueck, nur mit ihren Spalten — die Weboberflaeche und der Export
+    sehen also keinen Schluessel mehr, an dem die Fassung haenge. Das Profil
+    reicht trotzdem eindeutig, denn eine v2-Regel KANN es nicht tragen: v2
+    verlangt Anker oder Nachweis, und beides ist hier leer.
+    """
+    return (
+        (regel.get("geltung") or V1_GELTUNG) == V1_GELTUNG
+        and (regel.get("verbindlichkeit") or "kontext") in ("kern", "kontext")
+        and (regel.get("leser") or V1_LESER) == V1_LESER
+        and (regel.get("status") or V1_STATUS) == V1_STATUS
+        and not anker_liste(regel.get("anker"))
+        and not regel.get("nachweis")
+        and not regel.get("verfall")
+        and not regel.get("leiter")
+    )
+
+
+def geltung_gueltig(wert: str) -> bool:
+    return wert in ROLLEN or bool(PROJEKT_GELTUNG.match(wert or ""))
+
+
+def leser_gueltig(wert: str) -> bool:
+    if wert in LESER_OHNE_PFAD:
+        return True
+    art, _, pfad = (wert or "").partition(":")
+    return art in LESER_MIT_PFAD and bool(pfad.strip())
 
 
 def connect(path: Path) -> sqlite3.Connection:

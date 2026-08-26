@@ -1,0 +1,213 @@
+# Quelle: claw-bridge/kontext/projekte/rag-digital.md
+# NICHT modelliert: die Wellen-Chronik mit Commit-Hashes und Messzahlen
+# (Bundle-Größen, Lighthouse-Werte, Trefferquoten), die Tarif- und ENV-Liste
+# (Nachschlagewerk, steht in STATUS.md/OPS.md) sowie die Sackgassen-Doku zur
+# Verbandsliste. Übernommen sind die Design-Beschlüsse und die Fallen, die
+# sich auf künftige Arbeit übertragen.
+
+project: rag-digital
+repo: ~/projects/rag-digital
+
+rules:
+
+  - id: RAG-FREIGABE-001
+    domain: rag-digital
+    severity: 3
+    trigger: Eine Funktion in rag-digital erzeugt Außenwirkung — Mail, Rechnung, Nachricht.
+    statement: >
+      Oberstes Prinzip (Wave 3, GOD-PROMPT): KEIN Auto-Versand. Jede externe
+      Wirkung endet in der Freigabe-Queue (`approvalQueue`) und braucht einen
+      Owner-Klick. mailto ist Standard, SMTP nur ausdrücklich. Gründe sind
+      rechtlich: § 7 UWG und GoBD.
+    violation: Rechnungsmail direkt nach Generierung verschicken
+    correct: In approvalQueue schreiben, Owner klickt frei
+    tags: freigabe-queue, uwg, gobd, auto-versand
+
+  - id: RAG-EU-001
+    domain: rag-digital
+    severity: 3
+    trigger: Ein Hosting-, Speicher- oder Modellanbieter wird ausgewählt.
+    statement: >
+      EU-Hosting only (Hetzner), DSGVO, AVV, Art. 50 EU AI Act. Keine
+      US-Cloud. Der Bürger-Assistent bleibt self-hosted.
+    violation: Einen US-Anbieter für Embeddings einbinden
+    correct: EU-Anbieter oder self-hosted; Subunternehmer in der AVV dokumentieren
+    tags: dsgvo, eu-hosting, ai-act, avv
+
+  - id: RAG-CONSENT-001
+    domain: rag-digital
+    severity: 3
+    trigger: Eine Demo oder ein Outbound-Kontakt für einen Lead wird erzeugt.
+    statement: >
+      Demo-Erzeugung nur mit dokumentiertem Einverständnis (`consentGiven`).
+      Inbound — also eine eigeninitiative Anfrage — setzt es automatisch,
+      Outbound bleibt manuell.
+    violation: Outbound-Demo ohne consentGiven anlegen
+    correct: Bei Outbound erst Einverständnis dokumentieren
+    tags: consent, dsgvo, outbound, lead
+    relations:
+      - {kind: DEPENDS_ON, dst: RAG-FREIGABE-001}
+
+  - id: RAG-LLM-001
+    domain: rag-digital
+    severity: 2
+    trigger: Ein LLM-Aufruf in rag-digital wird gebaut oder umkonfiguriert.
+    statement: >
+      Die LLM-Abstraktion liegt zentral in `api/lib/llm.ts`, konfiguriert wird
+      ausschließlich per ENV. Der Mail-Generator nutzt ein getrenntes
+      `MAIL_LLM_MODEL` und darf stärker sein; die Onboarding-Kette hat eigene
+      Variablen OHNE Fallback auf `LLM_*`.
+    violation: Ein zweites Modell direkt im Feature-Code verdrahten
+    correct: Über api/lib/llm.ts gehen, Modell per ENV setzen
+    tags: llm, abstraktion, env, modelltrennung
+
+  - id: RAG-FAKTEN-001
+    domain: rag-digital
+    severity: 3
+    trigger: Ein LLM erzeugt Text, der an Bürger oder Kunden geht.
+    statement: >
+      Kein Fakten-Erfinden. Nur Rohdaten und feste Bausteine (KfW 65 %,
+      Tarife 200/500/Amt, EU-Hosting). Fehlen Daten, wird der Text generisch —
+      nicht ausgeschmückt.
+    violation: Fehlende Förderquote plausibel erfinden lassen
+    correct: Baustein weglassen, generisch formulieren
+    tags: halluzination, bausteine, rohdaten
+
+  - id: RAG-MOCK-001
+    domain: rag-digital
+    severity: 3
+    trigger: Ein Test bildet eine externe Quelle nach.
+    statement: >
+      Mocks für Fremdquellen müssen deren ECHTES Antwortformat nachbilden,
+      nicht das erwartete. Im Projekt dreimal belegt: der DWD liefert trotz
+      `.json`-Endung JSONP, Open-Meteo nutzt `/air-quality` mit Bindestrich.
+      Test-Mocks bildeten den CODE nach statt die QUELLE und haben die Defekte
+      dauerhaft verdeckt. Gegenmittel im Repo: `api/lib/externe-pfade.test.ts`
+      nagelt gebaute URLs auf live verifizierte Pfade fest.
+    violation: 'Mock liefert sauberes JSON, die echte Quelle liefert JSONP'
+    correct: Echte Antwort einmal abrufen, Mock danach bauen
+    tags: mock, fremdquelle, antwortformat, jsonp
+    relations:
+      - {kind: SUPPLEMENTS, dst: LEK-ROHOUTPUT-001}
+
+  - id: RAG-TESTNETZ-001
+    domain: rag-digital
+    severity: 3
+    trigger: Ein Test könnte eine externe Adresse aufrufen.
+    statement: >
+      Externe APIs in Tests immer über Mock-Server plus ENV-URL-Pinning;
+      `LLM_API_URL` zeigt in Tests auf tote oder Mock-Server (Kosten-Disziplin).
+      ENV-basierte Base-URLs LAZY lesen — beim Modul-Load ist die Umgebung noch
+      nicht gesetzt (fuel.ts-Bug). Eine neue Stufe hat die Schutzregel schon
+      einmal umgangen und drei Suites live ins Netz telefonieren lassen: bei
+      jeder neuen Kettenstufe die Pfad-Variablen mitziehen.
+    violation: Neue Discovery-Stufe ohne eigene PATH-Variable einhängen
+    correct: 'GEMEINDE_INDEX_PATH und ENTSORGER_PLATFORMEN_PATH in Tests pinnen'
+    tags: tests, mock-server, env-pinning, lazy, kosten
+    relations:
+      - {kind: DEPENDS_ON, dst: RAG-MOCK-001}
+
+  - id: RAG-WAECHTER-001
+    domain: rag-digital
+    severity: 2
+    trigger: Ein Wächter, Monitor oder Plausibilitäts-Check wird gebaut oder scharf geschaltet.
+    statement: >
+      Ein Wächter mit Fehlalarmen ist so wertlos wie gar keiner. Erster
+      scharfer Lauf meldete 13 von 18 Bereichen — reines Rauschen. Vor dem
+      Scharfschalten kalibrieren: strukturell unmögliche Fälle als
+      "leer_ok mit Grund" ausweisen, Schwellen an der Produktionsrealität
+      messen. Und den Prüfer selbst prüfen: jede Prüfung muss gegen eine
+      tote Quelle rot werden, sonst ist sie blind
+      (`npm run quellen:selbsttest`).
+    violation: Wächter scharf schalten und die Fehlalarme "später" filtern
+    correct: Kalibrieren, Selbsttest grün, dann scharf schalten
+    tags: wächter, fehlalarm, kalibrierung, selbsttest
+
+  - id: RAG-STILL-001
+    domain: rag-digital
+    severity: 3
+    trigger: Eine Schicht fängt einen Fehler ab oder liefert ein leeres Ergebnis.
+    statement: >
+      Kernursache der fünf monatelang unbemerkten Datenfehler war keiner der
+      Fehler selbst, sondern: "leer" und "kaputt" sind von außen nicht
+      unterscheidbar. Jede Schicht degradiert still (`catch -> []`,
+      `available:false`, `gap:*`). Fehlerzustand muss unterscheidbar bleiben —
+      Parse-Fehler und Netzfehler getrennt behandeln.
+    violation: 'catch (e) { return [] } über Netz- UND Parse-Fehler'
+    correct: Netzfehler durchreichen oder markieren, nur Parse-Fehler leer liefern
+    tags: stille-degradation, fehlerbehandlung, datenqualität
+
+  - id: RAG-MELDUNG-001
+    domain: rag-digital
+    severity: 1
+    trigger: Ein Überwachungslauf in rag-digital will melden.
+    statement: >
+      Meldeweg ist `claw-notify`, aber NUR bei Zustandswechsel — inklusive
+      Entwarnung. Das Gedächtnis liegt in `data/*-zustand.json` (gitignored).
+      Owner-Entscheid.
+    violation: Bei jedem Lauf melden, auch wenn sich nichts geändert hat
+    correct: Zustand vergleichen, nur bei Wechsel melden
+    tags: claw-notify, zustandswechsel, entwarnung
+    relations:
+      - {kind: SUPPLEMENTS, dst: COMM-NOTIFY-001}
+
+  - id: RAG-CHUNK-001
+    domain: rag-digital
+    severity: 2
+    trigger: Das Vite-Bundle wird aufgeteilt oder `manualChunks` angefasst.
+    statement: >
+      Nur Vendor gruppieren (`react-vendor`, `ui-vendor`) — die Routen
+      schneidet Rollups Standard-Algorithmus korrekt. Routen zu Gruppen
+      zusammenzufassen zieht deren GETEILTE Abhängigkeiten mit in den Chunk:
+      "admin" schluckte `@tanstack/react-query` und `@trpc`, die schon der
+      Einstieg braucht — der Admin-Chunk wurde damit statische
+      Eintritts-Abhängigkeit samt `modulepreload`, also das Gegenteil des
+      Ziels. Diagnose läuft über die `sources`-Liste der Chunk-Sourcemaps,
+      nicht über Raten.
+    violation: 'manualChunks nach Routen-Gruppen (admin/superadmin/website)'
+    correct: Nur Vendor gruppieren, Routen dem Bundler überlassen
+    tags: vite, manualchunks, bundle, sourcemap
+
+  - id: RAG-MESSUNG-001
+    domain: rag-digital
+    severity: 1
+    trigger: Eine Performance-Messung soll die Wirkung einer Änderung belegen.
+    statement: >
+      Mit gzip ausliefern, sonst fällt der Vergleich künstlich zugunsten des
+      kleineren Bundles aus. `vite preview` meldet programmatisch eine URL,
+      nimmt aber teils auf keiner Adresse Verbindungen an — für Messungen
+      eigener Mini-Server mit Dual-Stack-Binding auf `::`. Fremde Kennzahlen
+      nicht als Bezugspunkt übernehmen, ohne sie selbst reproduziert zu haben —
+      die in `STATUS.md` dokumentierte "Performance 79" ließ sich mit dem
+      Standard-Preset nicht nachstellen (geprüft 2026-07-31).
+    violation: Vorher/Nachher ohne gzip messen und den Gewinn melden
+    correct: Beide Läufe mit gzip, eigener Server, Zahlen aus derselben Messreihe
+    tags: lighthouse, gzip, messung, vite-preview
+    relations:
+      - {kind: SUPPLEMENTS, dst: REPORT-HONEST-001}
+
+  - id: RAG-K3-001
+    domain: rag-digital
+    severity: 2
+    trigger: Ein Aufruf gegen Kimi K3 (Moonshot) wird gebaut.
+    statement: >
+      Bekannte Fallen, nicht wiederholen: `temperature` darf NICHT gesendet
+      werden (nur 1 erlaubt, sonst HTTP 400 — im Code `temperature: null` =
+      weglassen). Das `$web_search`-Echo ist auf k3 kaputt ("tokenization
+      failed"), deshalb läuft die Suche auf
+      `ONBOARDING_LLM_SEARCH_MODEL=kimi-k2.6`. Key nur lazy aus ENV, exakter
+      Bearer-Header.
+    violation: 'temperature: 0.2 mitsenden und den 400er als Netzfehler deuten'
+    correct: temperature weglassen, Suche auf k2.6
+    tags: kimi-k3, moonshot, temperature, web_search
+
+  - id: RAG-DB-001
+    domain: rag-digital
+    severity: 1
+    trigger: Eine Datenbank-Migration in rag-digital steht an.
+    statement: >
+      `npm run db:push`; bei Typ-Änderungen kommen interaktive Prompts —
+      dann direkt per SQL-ALTER arbeiten. varchar-Unique-Indizes fassen
+      höchstens 767 Zeichen (utf8mb4, 3072 Byte). Vitest läuft sequentiell
+      (`fileParallelism: false`), weil sich die Suites die Docker-MySQL teilen.
+    tags: migration, drizzle, mysql, vitest

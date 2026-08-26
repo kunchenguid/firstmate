@@ -34,7 +34,7 @@ case "${WRIT_RULES:-}" in
   aus|off|0|nein) exit 0 ;;
 esac
 
-WRIT=/home/fridjof/projects/Rules/.venv/bin/writ-light
+WRIT="${WRIT_BIN:-/home/fridjof/projects/Rules/.venv/bin/writ-light}"
 [ -x "$WRIT" ] || exit 0
 
 "$WRIT" prompt-regeln --json 2>/dev/null || exit 0

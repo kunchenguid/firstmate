@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-ECHTES_MODELL = Path.home() / ".local/share/writ-light/model"
+ECHTES_MODELL = Path.home() / ".local/share/writ-fm/model"
 
 
 class TempDatenTest(unittest.TestCase):

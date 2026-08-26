@@ -1,0 +1,148 @@
+# Quelle: claw-bridge/kontext/projekte/trooper_ai.md
+# NICHT modelliert: Vertrags- und Hardware-Kennzahlen (serverId, Ports, Preise,
+# Guthaben — altern und stehen in docs/API.md) sowie der Stand nach dem Rückbau.
+# Der Termin 2026-09-02 ist als Regel drin, weil daran eine Handlung hängt.
+
+project: trooper_ai
+repo: ~/projects/trooper_ai
+
+rules:
+
+  - id: TRP-ZWECK-001
+    domain: trooper_ai
+    severity: 3
+    trigger: Eine neue Nutzung für den Trooper-Server wird vorgeschlagen.
+    statement: >
+      Vorgesehener Zweck ist ausschließlich: Android-Emulatoren. Der Aufbau
+      für Bildgenerierung (ComfyUI) und LLM-Serving (Ollama/OpenWebUI) wurde
+      installiert und am selben Tag wieder entfernt, die VRAM-Arbitrierung ist
+      aus dem Repo raus. Grund: erst der Testmonat, dann die Entscheidung über
+      den Anbieter. Kein Wiederaufbau ohne Owner-Beschluss.
+    violation: ComfyUI erneut installieren, "die GPU steht ja ohnehin"
+    correct: Beim Emulator-Zweck bleiben, Vorschlag dem Owner vorlegen
+    tags: zweck, android-emulator, rückbau, design-beschluss
+
+  - id: TRP-IOS-001
+    domain: trooper_ai
+    severity: 2
+    trigger: iOS-Tests auf dem Server werden erwogen.
+    statement: >
+      iOS-Emulatoren sind unmöglich — der Simulator ist Teil von Xcode,
+      macOS-only, und die Apple-Lizenz verbietet macOS auf Fremd-Hardware.
+      Für iOS bleiben das iPad mit Expo Go oder ein gehosteter Mac-Runner.
+      Android dagegen ist belegt möglich: `/dev/kvm` vorhanden, `kvm_intel`
+      geladen, nested virtualization aktiv.
+    violation: Zeit in einen iOS-Simulator auf dem Linux-Server investieren
+    correct: iOS über das iPad testen, Android auf dem Server
+    tags: ios, xcode, kvm, lizenz
+
+  - id: TRP-STOPP-001
+    domain: trooper_ai
+    severity: 2
+    trigger: Der Server soll zum Kostensparen gestoppt oder eingefroren werden.
+    statement: >
+      Knappe Ressource ist VRAM, nicht Geld. Monatsverträge bekommen laut
+      Trooper-Doku weder den 35-%-Stopp-Tarif noch Einfrieren — Stoppen spart
+      NULL Euro. Der Server läuft durch.
+    violation: Server nach dem Test herunterfahren, "um Kosten zu sparen"
+    correct: Laufen lassen; die Kostenfrage stellt sich erst bei der Verlängerung
+    tags: kosten, monatsvertrag, stoppen
+
+  - id: TRP-MIGRATION-001
+    domain: trooper_ai
+    severity: 3
+    trigger: Ein Server-Upgrade oder eine Migration steht an.
+    statement: >
+      Migration NUR über das Dashboard, nie per API — der Support kann eine
+      per API verpfuschte Migration nicht wiederherstellen. Das offene Upgrade
+      auf `sparbox.l1` (6 Cores) läuft ebenfalls nur über das Dashboard.
+    violation: Migration per API-Aufruf auslösen
+    correct: Owner macht es im Dashboard
+    tags: migration, dashboard, api, datenverlust
+    relations:
+      - {kind: DEPENDS_ON, dst: ENF-BLOCKER-001}
+
+  - id: TRP-UA-001
+    domain: trooper_ai
+    severity: 2
+    trigger: Ein HTTP-Aufruf gegen die Trooper-API wird gebaut.
+    statement: >
+      Cloudflare sperrt den Default-User-Agent von urllib — ohne eigenen
+      User-Agent kommt auf JEDEN Request ein 403 (Error 1010), auch mit
+      gültigem Key. Der 403 ist kein Authentifizierungsproblem.
+    violation: Den 403 als abgelaufenen API-Key deuten
+    correct: Eigenen User-Agent setzen
+    tags: cloudflare, user-agent, 403, urllib
+
+  - id: TRP-CASE-001
+    domain: trooper_ai
+    severity: 1
+    trigger: Ein Template-Endpunkt der Trooper-API wird aufgerufen.
+    statement: >
+      Die Doku lügt bei der Schreibweise: `template-install-add` verlangt
+      `orderId` (camelCase), obwohl die Doku `order_id` nennt — bei
+      gleichzeitig `template_id` in snake_case. `template-install-delete`
+      verlangt ebenso `installId`. Verifikationsstand steht in `docs/API.md`,
+      Unverifiziertes ist dort markiert.
+    violation: Der Doku folgen und den 400er als Serverfehler melden
+    correct: camelCase verwenden, Abweichung in docs/API.md nachtragen
+    tags: api, camelcase, doku-fehler
+
+  - id: TRP-DF-001
+    domain: trooper_ai
+    severity: 2
+    trigger: Ein größerer Download oder eine Installation auf dem Server steht an.
+    statement: >
+      Der Plattenwert der API ist veraltet: `stats_disc_root_free_gb` wird nur
+      periodisch erhoben (im Test 40+ Minuten alt) und zeigte 150 GB, während
+      `df` real 130 GB meldete. Vor Downloads immer per SSH mit `df`
+      gegenprüfen. `trooper status` weist das Alter aus.
+    violation: Auf den API-Wert vertrauen und die Platte volllaufen lassen
+    correct: 'ssh + df prüfen, dann herunterladen'
+    tags: platte, df, veraltet, api
+    relations:
+      - {kind: SUPPLEMENTS, dst: LEK-BEFUND-001}
+
+  - id: TRP-SECRET-001
+    domain: trooper_ai
+    severity: 3
+    trigger: Eine API-Antwort oder eine SSH-Ausgabe wird geloggt oder ausgegeben.
+    statement: >
+      Zweimal an einem Tag sind Tokens im Klartext gelandet: (1) der Redaktor
+      filterte nur FELDNAMEN und griff nicht in URLs (`?token=…`), (2) er
+      greift nur bei API-Antworten, nicht bei SSH-Ausgaben — `ps aux` zeigte
+      den Jupyter-Token. Vor jeder Ausgabe redigieren, auch bei SSH, auch in
+      URLs. Passwörter aus `POST /api/credentials` nur über die Umgebung,
+      nie auf Platte, nie in Ausgaben.
+    violation: SSH-Ausgabe ungefiltert ins Log schreiben
+    correct: Redaktor auch auf SSH-Ausgaben und URL-Parameter anwenden
+    tags: secrets, redaktor, ssh, url, token
+    relations:
+      - {kind: SUPPLEMENTS, dst: ENF-SECRET-001}
+
+  - id: TRP-STDLIB-001
+    domain: trooper_ai
+    severity: 2
+    trigger: Eine Abhängigkeit soll dem trooper_ai-Repo hinzugefügt werden.
+    statement: >
+      Stack ist Python 3.14, stdlib-only (urllib, unittest) — bewusst ohne
+      venv und ohne Abhängigkeiten, damit `trooper` aus jedem
+      Projektverzeichnis läuft. Eine neue Abhängigkeit bricht genau das.
+    violation: 'requests einführen, "ist bequemer"'
+    correct: Bei urllib bleiben
+    tags: stdlib, keine-abhängigkeiten, python
+
+  - id: TRP-VERTRAG-001
+    domain: trooper_ai
+    severity: 2
+    trigger: Der Vertragstermin 2026-09-02 rückt näher oder Guthaben wird geprüft.
+    statement: >
+      Autorenew ist aktiv. Reicht das Guthaben zum Buchungstermin nicht,
+      kaskadiert Trooper binnen 4–12 Stunden bis zur Terminierung — MIT
+      DATENVERLUST. Gewarnt wird ausschließlich per `claw-notify`
+      (`bin/verlaengerung-warnung`), keine Warnmaschinerie im Werkzeug.
+    violation: Unterdeckung feststellen und nicht melden
+    correct: 'claw-notify an den Owner, rechtzeitig vor dem Termin'
+    tags: vertrag, autorenew, datenverlust, warnung
+    relations:
+      - {kind: DEPENDS_ON, dst: COMM-NOTIFY-001}

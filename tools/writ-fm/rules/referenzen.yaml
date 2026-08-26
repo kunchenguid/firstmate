@@ -1,0 +1,230 @@
+# Quellen: WERKZEUGE.md, PROJEKT-KARTE.md, INFRASTRUKTUR.md, HIGGSFIELD.md
+# (Referenzdateien nach ONBOARDING §2 — laut Auftrag nur soweit sie echte Regeln
+#  enthalten; reine Nachschlage-Inhalte als niedrig priorisierte Kontext-Regeln
+#  nach Muster CTX-PATH-001.)
+#
+# NICHT modelliert:
+#  * WERKZEUGE.md — die Versionstabelle selbst (Nachschlagewerk, altert; Zeiger CTX-WERKZEUGE-001)
+#  * PROJEKT-KARTE.md — Stack-/Startbefehl-Beschreibungen je Repo (Nachschlagewerk;
+#    Zeiger CTX-PROJEKTKARTE-001). Die verbindliche Testreihenfolge daraus steht
+#    projektgebunden in projekte/testlab.yaml.
+#  * INFRASTRUKTUR.md — Bot-Liste, Router-Interna, Profil-Refresh (Maschinerie ohne
+#    Handlungsregel; Zeiger CTX-INFRA-001)
+#  * HIGGSFIELD.md — §5 Modell-Benchmark (eine Messung, kein Ranking), §7/§7b
+#    (zur Hälfte unverifiziert), §8 Ehrlichkeits-Sektion
+
+rules:
+
+  # ─── WERKZEUGE & UMGEBUNG ─────────────────────────────────────────
+
+  - id: REF-TMUX-001
+    domain: werkzeuge
+    severity: 2
+    trigger: Ein langlebiger Dienst oder eine Worker-Session soll gestartet werden.
+    statement: >
+      tmux läuft auf dem geteilten Socket `/tmp/work.sock`, NICHT auf dem
+      Default-Socket. Laufende Sessions: `tmux -S /tmp/work.sock ls`.
+      Langlebige Dienste gehören ausschließlich dorthin, nie in eine
+      Agent-Shell — sonst sterben sie mit ihr.
+    violation: '`tmux new -s backend` ohne -S — die Session ist für alle anderen unsichtbar'
+    correct: '`tmux -S /tmp/work.sock new -s backend`'
+    tags: tmux, socket, dienste, work.sock
+    relations:
+      - {kind: SUPPLEMENTS, dst: COMM-WORKER-001}
+
+  - id: REF-NODE-001
+    domain: werkzeuge
+    severity: 2
+    trigger: Node oder npm fehlt, oder Node soll installiert werden.
+    statement: >
+      Node kommt über nvm, NIE über `apt install npm`. Fehlt es in einer
+      frischen Shell: `source ~/.bashrc`.
+    violation: 'sudo apt install npm'
+    correct: 'source ~/.bashrc && node --version'
+    tags: node, nvm, apt
+    relations:
+      - {kind: SUPPLEMENTS, dst: LEK-UMGEBUNG-001}
+
+  - id: REF-CONNECT-001
+    domain: werkzeuge
+    severity: 2
+    trigger: Ein Server soll per SSH erreicht werden, oder von connect_serv, connect_gex oder gex44 ist die Rede.
+    statement: >
+      Zwei Server-Aliase in `~/.local/bin/`: `connect_serv` (kleiner Server,
+      2.28.5.107, root) und `connect_gex` (Hetzner-Dedicated gex44,
+      144.76.224.182, root, IdentityFile `~/.ssh/id_ed25519_gex44fs`, Hostname
+      gex, Ubuntu 24.04 mit GNOME). GUI-Fernzugriff auf gex44 läuft über
+      RustDesk mit SELBST GEHOSTETEM Relay (hbbs/hbbr auf gex44 selbst,
+      systemd-Units rustdesk-hbbs/rustdesk-hbbr, Ports 21115-21119) — der
+      öffentliche RustDesk-Relay verlangt Login und ist tabu. RustDesk-ID und
+      Passwörter (RustDesk + User fridjof) liegen in
+      `~/gex44-rustdesk.txt` (chmod 600), niemals im Chat ausgeben.
+    violation: Öffentlichen RustDesk-Relay nutzen oder Zugangsdaten im Chat zeigen
+    correct: '`connect_gex` für SSH, RustDesk-Client mit ID aus `~/gex44-rustdesk.txt`'
+    tags: ssh, server, gex44, connect_gex, connect_serv, rustdesk, hetzner
+    relations:
+      - {kind: SUPPLEMENTS, dst: ENF-SECRET-001}
+
+  - id: REF-ADB-001
+    domain: werkzeuge
+    severity: 2
+    trigger: '`adb`, `emulator` oder `avdmanager` wird gebraucht.'
+    statement: >
+      Die Android-Werkzeuge liegen NICHT im PATH. Erst
+      `source ~/projects/testlab/env.sh` — das setzt `ANDROID_HOME` und den
+      PATH. Ohne diesen Schritt scheitert jeder adb-Aufruf.
+    violation: '`adb devices` direkt aufrufen und "adb: command not found" als Defekt melden'
+    correct: 'source ~/projects/testlab/env.sh && adb devices'
+    tags: adb, emulator, android-sdk, pfad
+
+  - id: CTX-WERKZEUGE-001
+    domain: werkzeuge
+    severity: 1
+    trigger: Eine Werkzeug-Version, ein Installationspfad oder ein AVD-Name wird gebraucht.
+    statement: >
+      Inventur steht in `~/projects/WERKZEUGE.md` (Node, npm, python3, java,
+      git, tmux, adb, emulator, avdmanager, Maestro, v4l2loopback, die
+      claw-Werkzeuge, tailscale, ttyd, connect_serv). Bei Bedarf
+      lesen, nicht pro Session — und Versionen dort nachschlagen statt raten.
+    tags: werkzeuge, versionen, pfade, nachschlagewerk
+
+  - id: CTX-PROJEKTKARTE-001
+    domain: werkzeuge
+    severity: 1
+    trigger: Stack, Startbefehl oder Testkommando eines fremden Repos wird gebraucht.
+    statement: >
+      Überblick in `~/projects/PROJEKT-KARTE.md`. Verbindliches
+      Projektwissen steht aber in den Dossiers unter
+      `~/projects/claw-bridge/kontext/projekte/<projekt>.md` — im Zweifel
+      gilt das Dossier und das Repo selbst.
+    tags: projekt-karte, stack, nachschlagewerk
+    relations:
+      - {kind: SUPPLEMENTS, dst: CTX-PATH-001}
+
+  # ─── INFRASTRUKTUR: KOMMUNIKATION ─────────────────────────────────
+
+  - id: COMM-ROUTING-001
+    domain: kommunikation
+    severity: 2
+    trigger: Eine Meldung soll gezielt an einen bestimmten Kanal gehen.
+    statement: >
+      `claw-notify` wählt den Bot in dieser Rangfolge: (1) `--projekt <name>`,
+      (2) Text-Präfix `"<projekt>: "`, (3) Pfad-Anker (Git-Wurzel des
+      Arbeitsverzeichnisses, sonst dessen Name), (4) `default` = Hauptbot.
+      Bewusst an die Zentrale melden: `--projekt default`. Vorher prüfen
+      lässt sich das mit `--dry-run`. Vorgeschrieben ist ausschließlich
+      Rang 1: die Ränge 2 bis 4 sind Rückfallebene des Werkzeugs, keine
+      Arbeitsweise — das Raten hat mehrfach den falschen Bot getroffen.
+    violation: Meldung ohne Projekt-Flag aus einem fremden Verzeichnis — sie trifft den falschen Bot
+    correct: 'claw-notify --projekt lensclash "Suite grün"'
+    tags: claw-notify, routing, bots.conf, dry-run
+    relations:
+      - {kind: SUPPLEMENTS, dst: COMM-NOTIFY-001}
+
+  - id: COMM-BUTTON-001
+    domain: kommunikation
+    severity: 1
+    trigger: Eine Meldung soll dem Owner Auswahlmöglichkeiten anbieten.
+    statement: >
+      `claw-notify "<text>" --buttons "Label=aktion;Label2=aktion2"` sendet
+      Inline-Schaltflächen; ein Klick kommt als normale Texteingabe in der
+      Session an. Semantik ist "genau eine Antwort": nach dem ersten Klick
+      entfernt der Router alle Buttons und zeigt die Wahl fett im Text.
+    tags: buttons, claw-notify, auswahl
+
+  - id: CTX-INFRA-001
+    domain: kommunikation
+    severity: 1
+    trigger: Ein Dienst, ein Bot oder der Ort einer Env-Datei wird gesucht.
+    statement: >
+      Nachschlagen in `~/projects/INFRASTRUKTUR.md`: Dienste
+      (fortschritt-dashboard, ttyd, claw-router, claw-quota), Telegram-Bots und
+      ihre Zuordnung (`~/.config/claw-notify/bots.conf`, Owner-Chat-ID in
+      `~/.config/claw/owner.json`), Env-Dateien nur als ORTE
+      (`~/.config/claw/env`, `~/.config/claw-notify/env`, je Repo `.env`).
+      Variablennamen ja, Werte nein.
+    tags: infrastruktur, dienste, bots, env-orte, nachschlagewerk
+    relations:
+      - {kind: DEPENDS_ON, dst: ENF-SECRET-001}
+
+  # ─── BILDGENERIERUNG (HIGGSFIELD.md §1, §3, §4) ───────────────────
+
+  - id: HF-COST-001
+    domain: bildgenerierung
+    severity: 3
+    trigger: Eine Bild-, Video-, Audio- oder 3D-Generierung soll ausgelöst werden.
+    statement: >
+      Vor JEDER Generierung `get_cost: true` setzen. Das liefert die Kosten
+      exakt und reicht keinen Job ein. Es gibt keinen Grund, Kosten zu
+      schätzen. Die Annahme "1 Credit = 1 Bild" ist widerlegt — gemessen
+      reicht die Spanne von 0,12 bis 3,0 Credits pro Bild.
+    violation: Vier Modelle "zum Vergleich" generieren und die Kosten hinterher schätzen
+    correct: 'get_cost: true, Preis lesen, dann entscheiden'
+    tags: higgsfield, get_cost, credits, kosten
+
+  - id: HF-BUDGET-001
+    domain: bildgenerierung
+    severity: 3
+    trigger: Während einer Generierungs-Serie nähert sich der Credit-Verbrauch dem Budget.
+    statement: >
+      Budget sind 50 Bild-Credits für MCP-Generierungen (Owner-Freigabe
+      2026-08-01). Beim Erreichen: STOPP und Rückfrage, nicht still
+      weitergenerieren. Der Verbrauch ist serverseitig belegbar (`balance`,
+      `transactions`) — kein manuelles Log nötig, aber auch keine Ausrede.
+    violation: Über das Budget hinaus generieren und es im Report erwähnen
+    correct: Bei Budgetende stoppen und per claw-ask fragen
+    tags: higgsfield, budget, credits, stopp
+    relations:
+      - {kind: DEPENDS_ON, dst: ENF-BLOCKER-001}
+      - {kind: DEPENDS_ON, dst: HF-COST-001}
+
+  - id: HF-VIDEO-001
+    domain: bildgenerierung
+    severity: 3
+    trigger: Eine Videogenerierung (Sora, Veo, Kling, Hailuo) wird erwogen.
+    statement: >
+      Video nur nach ausdrücklicher Owner-Freigabe PRO EINSATZ. Videokosten
+      liegen um Größenordnungen über Bildkosten.
+    violation: Ein Testvideo generieren, "um die Qualität zu sehen"
+    correct: Vorher fragen, mit get_cost-Zahl in der Frage
+    tags: higgsfield, video, freigabe
+    relations:
+      - {kind: DEPENDS_ON, dst: ENF-BLOCKER-001}
+
+  - id: HF-FINGERWEG-001
+    domain: bildgenerierung
+    severity: 3
+    trigger: Ein Higgsfield-Werkzeug zu Abrechnung oder Abo soll aufgerufen werden.
+    statement: >
+      `confirm_billing_purchase` und `confirm_trial_cancel` NIE aufrufen —
+      sie belasten das hinterlegte Zahlungsmittel und sind laut eigener
+      Beschreibung nur über Widget-Klicks vorgesehen.
+    violation: confirm_billing_purchase aufrufen, um den Kontostand aufzufüllen
+    correct: Kontostand melden, Entscheidung dem Owner überlassen
+    tags: higgsfield, abrechnung, verbot
+
+  - id: HF-WEG-001
+    domain: bildgenerierung
+    severity: 2
+    trigger: Bilder sollen erzeugt werden — einzeln oder als Serie.
+    statement: >
+      Einzelbild, Nachschärfen, Ausprobieren, Modellwahl -> MCP
+      (`higgsfield`, in jeder Session verfügbar). Serienproduktion aus einem
+      Skript (Cover, Spot-Stills, Brand-Assets) -> REST-API im jeweiligen Repo.
+      MCP-Werkzeuge sind ausschließlich aus einer Session aufrufbar; aus einem
+      Skript heraus gibt es keinen MCP-Aufruf.
+    violation: Eine Batch-Pipeline auf MCP umstellen wollen
+    correct: Batch bleibt auf der REST-API, Einzelbilder laufen über MCP
+    tags: higgsfield, mcp, rest-api, batch
+
+  - id: CTX-HIGGSFIELD-001
+    domain: bildgenerierung
+    severity: 1
+    trigger: Ein Prompt für eine Bildgenerierung wird geschrieben.
+    statement: >
+      Prompt- und Modellwissen steht in
+      `lensclash/docs/design/HIGGSFIELD.md` — Master-Prompt-Struktur, die
+      Rahmen-Falle, "keine Versalien", "nie empty/bare/unlit". Vor eigener
+      Prompt-Arbeit dort nachlesen; es ist mit Credits bezahlt worden.
+      Zugangs- und Credit-Regeln: `~/projects/HIGGSFIELD.md`.
+    tags: higgsfield, prompt, nachschlagewerk

@@ -1,0 +1,47 @@
+# Memory: session-übergreifende, kuratierte Fakten (Feature 2026-08-05).
+#
+# Quelle: Owner-Auftrag 2026-08-05 — zwei TencentDB-Agent-Memory-Features
+# (session-übergreifendes Gedächtnis, Token-Reduktion) als Eigenbau im
+# writ-light-Stack statt Übernahme des Fremdsystems.
+#
+# Gegenstück zum Regelwerk: Regeln kommen aus versioniertem YAML, Memory
+# entsteht zur Laufzeit per `writ-light memory add`. Bewusst kuratiert —
+# kein automatisches Mitschreiben der Konversation.
+#
+# NICHT modelliert: Löschen/Korrigieren von Einträgen (append-only; ein
+# Irrtum wird durch einen neuen, richtigstellenden Eintrag beantwortet).
+
+rules:
+
+  - id: MEM-SAVE-001
+    domain: workflow
+    severity: 2
+    trigger: >
+      Eine Session endet oder ein Meilenstein ist erreicht, und die Arbeit
+      brachte Fakten, Entscheidungen oder Konventionen hervor, die eine
+      spätere Session wieder braucht.
+    statement: >
+      Solche Fakten per `writ-light memory add "<fakt>"` sichern — knapp,
+      ein Fakt pro Eintrag. Memory ist kuratiert: nicht die Konversation
+      mitschreiben, sondern nur das, was eine neue Session sonst erneut
+      erfragen oder erarbeiten müsste.
+    violation: >
+      Session endet ohne Sicherung; die nächste Session fragt denselben
+      Kontext erneut ab oder baut ihn mühsam neu.
+    correct: 'writ-light memory add "Deploy von projekt-x läuft per docker compose auf hetzner"'
+    tags: memory, session, writ-light, kontext
+
+  - id: MEM-SEC-001
+    domain: sicherheit
+    severity: 3
+    trigger: Ein Memory-Eintrag wird geschrieben.
+    statement: >
+      Ins Memory gehören keine Secrets, keine Zugangsdaten und keine
+      flüchtigen Zustände (aktuelle Fehlermeldungen, Tageszahlen,
+      Zwischenstände). Gespeichert wird nur Dauerhaftes; Variablen-NAMEN
+      ja, Werte nein.
+    violation: 'writ-light memory add "Der API-Key lautet sk-..."'
+    correct: 'writ-light memory add "Provider X nutzt $PROVIDER_X_API_KEY aus der Projekt-.env"'
+    tags: memory, secrets, writ-light
+    relations:
+      - {kind: DEPENDS_ON, dst: ENF-SECRET-001}

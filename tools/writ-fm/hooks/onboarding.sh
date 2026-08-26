@@ -23,7 +23,7 @@
 # tests/test_hooks_shell.py::TestSondertexteStehenZweimalGleich abgesichert.
 set -uo pipefail
 
-WRIT=/home/fridjof/projects/Rules/.venv/bin/writ-light
+WRIT="${WRIT_BIN:-/home/fridjof/projects/Rules/.venv/bin/writ-light}"
 
 # Protokoll, welches Ereignis diesen Hook ausloest. Grund: die verbindlichen
 # Regeln sollen aus dem UserPromptSubmit-Block verschwinden — sie kosten dort

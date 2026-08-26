@@ -1,0 +1,94 @@
+# Quellen: claw-bridge/kontext/projekte/testlab.md + die verbindliche Testreihenfolge
+# aus PROJEKT-KARTE.md (dort projektgebunden, deshalb hier statt in referenzen.yaml).
+# NICHT modelliert: die Fixture-Liste mit Ground Truth und die AVD-Kennzahlen
+# (Nachschlagewerk, steht in fixtures/labels.yaml bzw. SCHNITTSTELLE.md).
+
+project: testlab
+repo: ~/projects/testlab
+
+rules:
+
+  - id: TL-FREMD-001
+    domain: testlab
+    severity: 3
+    trigger: Ein Test deckt einen Fehler im Repo eines anderen Projekts auf.
+    statement: >
+      Niemals Repos fremder Projekte ändern. testlab liefert ausschließlich
+      Infrastruktur und Beweise (`shots/`) — der Fix gehört ins Projekt-Repo
+      und in dessen Session.
+    violation: Den gefundenen Fehler "schnell" im lensclash-Repo patchen
+    correct: Befund plus Screenshot melden, testlab-Repo nicht verlassen
+    tags: repo-grenzen, infrastruktur, beweise
+    relations:
+      - {kind: SUPPLEMENTS, dst: WF-SCOPE-001}
+
+  - id: TL-ENV-001
+    domain: testlab
+    severity: 2
+    trigger: In testlab wird gearbeitet oder ein Emulator gestartet.
+    statement: >
+      Erst `source env.sh` — das setzt `ANDROID_HOME=~/android-sdk` und den
+      PATH. Ohne diesen Schritt sind adb, emulator und avdmanager nicht
+      auffindbar.
+    violation: '`./emu-up.sh phone` ohne vorheriges source'
+    correct: 'source ~/projects/testlab/env.sh && ./emu-up.sh phone'
+    tags: env.sh, android-home, pfad
+    relations:
+      - {kind: DEPENDS_ON, dst: REF-ADB-001}
+
+  - id: TL-REIHENFOLGE-001
+    domain: testlab
+    severity: 3
+    trigger: Ein nativer LensClash-Test soll gefahren werden.
+    statement: >
+      Verbindliche Reihenfolge: (1) `cd ~/projects/lensclash && scripts/dev-up.sh`
+      — startet Backend und Metro, gibt am Ende die `exp://`-URL aus.
+      (2) `source ~/projects/testlab/env.sh && cd ~/projects/testlab && ./emu-up.sh phone`.
+      (3) optional `./cam-feed.sh <fixture>` für Kamera-Flows.
+      (4) `maestro test -e EXP_URL="exp://<url>" flows/<name>.yaml`.
+      Exit-Code 0 = grün. Artefakte unter `~/.maestro/tests/`,
+      Beweis-Screenshots zusätzlich nach `shots/`.
+    violation: Maestro starten, bevor dev-up.sh die exp://-URL ausgegeben hat
+    correct: Reihenfolge einhalten, URL aus dev-up übernehmen
+    tags: maestro, emulator, reihenfolge, exp-url
+
+  - id: TL-NETZ-001
+    domain: testlab
+    severity: 2
+    trigger: Eine App im Emulator soll das Backend auf dem Laptop erreichen.
+    statement: >
+      Aus Emulator-Sicht ist der Host `10.0.2.2`, nicht `localhost` und nicht
+      die LAN-IP. Für den Emulator-Betrieb `EXPO_PUBLIC_BACKEND_URL` in
+      `frontend/.env` auf `http://10.0.2.2:3000` setzen (NETZ-FALLE in
+      testlab/README.md).
+    violation: 'EXPO_PUBLIC_BACKEND_URL=http://localhost:3000 im Emulator'
+    correct: 'EXPO_PUBLIC_BACKEND_URL=http://10.0.2.2:3000'
+    tags: emulator, netzwerk, backend-url, 10.0.2.2
+
+  - id: TL-AKZEPTANZ-001
+    domain: testlab
+    severity: 2
+    trigger: Die UI-Akzeptanz eines anderen Projekts soll belegt werden.
+    statement: >
+      UI-Akzeptanz anderer Projekte = Maestro-Flow plus Emulator-Screenshots
+      BEIDER Profile (phone_s26 und tablet_ipadish). Web-Playwright belegt nur
+      Logik und State.
+    violation: Ein Screenshot vom Telefon-Profil als vollständiger UI-Beleg
+    correct: Beide Profile screenen, beide in den Report
+    tags: akzeptanz, maestro, profile, screenshots
+    relations:
+      - {kind: SUPPLEMENTS, dst: TEST-ACCEPT-001}
+      - {kind: DEPENDS_ON, dst: LEK-GERAETE-001}
+
+  - id: TL-FLAKE-001
+    domain: testlab
+    severity: 1
+    trigger: Ein Maestro-Flow schlägt sporadisch fehl.
+    statement: >
+      Der Emulator läuft unter RAM-Druck (je AVD 4 GB) — Flakes sind bekannt.
+      Der Kamera-Mock liefert 5 fps über v4l2loopback und bildet KEIN echtes
+      Sensor-Verhalten ab. Vor einer Fehlermeldung erst wiederholen und den
+      RAM-Stand prüfen.
+    violation: Einen einzelnen Flake als Regression melden
+    correct: Wiederholen, RAM prüfen, erst dann melden
+    tags: flake, ram, kamera-mock, v4l2loopback

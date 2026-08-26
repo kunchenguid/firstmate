@@ -124,4 +124,46 @@ case "$SOURCE" in
     "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" || true
     ;;
 esac
+
+# --- Kernregeln (WRIT-FM) ------------------------------------------------
+# AGENTS.md "Rule database and drift brake": "SessionStart injects the core
+# set (bin/fm-sessionstart-run.sh -> fm-regeln session-start)" - this block
+# is that reader. It appends bin/fm-regeln's core VERFASSUNG rule set right
+# after the digest above. Never reached on the resume|reload|fork branch
+# above, which execs into the nudge wrapper instead of taking the helm - the
+# core set belongs to a helm-taking open, not a bare nudge.
+#
+# FM_REGELN_BIN resolution repeats bin/fm-prompt-regeln.sh's own order
+# exactly (that file owns the canonical description of it): an override
+# first (a test double stands in via PATH-independent injection), then
+# colocated "$SCRIPT_DIR/fm-regeln", then PATH.
+#
+# Fail-open, same philosophy as fm-prompt-regeln.sh: empty stdout on a clean
+# exit is a valid "no core rules configured" answer and stays silent; any
+# non-zero exit (missing binary, missing/unbuilt DB, a genuine fm-regeln
+# failure) or a hang past the 20s bound below is reported as exactly one
+# diagnostic line instead - this must never block or slow session start.
+FM_REGELN="${FM_REGELN_BIN:-}"
+if [ -z "$FM_REGELN" ]; then
+  if [ -x "$SCRIPT_DIR/fm-regeln" ]; then
+    FM_REGELN="$SCRIPT_DIR/fm-regeln"
+  elif command -v fm-regeln >/dev/null 2>&1; then
+    FM_REGELN="$(command -v fm-regeln)"
+  fi
+fi
+[ -n "$FM_REGELN" ] && [ ! -x "$FM_REGELN" ] && FM_REGELN=""
+
+if [ -n "$FM_REGELN" ]; then
+  KERNREGELN="$(timeout 20 "$FM_REGELN" session-start --geltung firstmate 2>/dev/null)"
+  KERNREGELN_RC=$?
+else
+  KERNREGELN_RC=127
+fi
+
+if [ "$KERNREGELN_RC" -eq 0 ]; then
+  [ -n "${KERNREGELN:-}" ] && printf '%s\n' "$KERNREGELN"
+else
+  echo 'WRIT_FM: MISSING - Kernregeln nicht geladen (bin/fm-regeln ingest)'
+fi
+
 exit 0
