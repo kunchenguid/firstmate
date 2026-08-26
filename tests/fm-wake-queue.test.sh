@@ -17,6 +17,22 @@ GRANT="$ROOT/bin/fm-wake-grant.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
+
+test_missing_state_drain_initializes_writer_boundary() {
+  local dir state rc=0
+  dir="$TMP_ROOT/missing-state-drain"
+  state="$dir/state"
+  mkdir -p "$dir"
+  fm_run_timed 3 env FM_STATE_OVERRIDE="$state" "$DRAIN" \
+    > "$dir/drain.out" 2> "$dir/drain.err" || rc=$?
+  [ "$rc" -ne 124 ] || fail "wake drain hung while acquiring a lock below a missing state directory"
+  [ "$rc" -eq 0 ] || fail "wake drain failed to initialize missing state: $(cat "$dir/drain.err")"
+  [ -d "$state" ] || fail "wake drain did not create state at its mutating entrypoint"
+  pass "wake drain initializes missing state before locking"
+}
+
 
 test_concurrent_append_and_drain() {
   local dir state out1 out2 pids i pid count unique malformed sequence generation
@@ -1199,6 +1215,7 @@ test_historical_annotation_skips_announced_status() {
 }
 
 test_self_held_lock_reclaims_instead_of_deadlocking
+test_missing_state_drain_initializes_writer_boundary
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash

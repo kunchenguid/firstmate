@@ -285,6 +285,53 @@ test_unreadable_local_endpoint_is_inconclusive() {
   pass "unreadable local endpoint evidence remains inconclusive"
 }
 
+test_terminal_unreadable_endpoint_is_inconclusive() {
+  local home fakebin out rc=0
+  home=$(make_home terminal-unreadable-endpoint)
+  mkdir -p "$home/projects/terminal-unreadable-wt"
+  fm_write_meta "$home/state/terminal-unreadable.meta" \
+    "backend=herdr" \
+    "window=malformed-herdr-target" \
+    "worktree=$home/projects/terminal-unreadable-wt" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship"
+  printf 'done: worker completed\n' > "$home/state/terminal-unreadable.status"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "terminal worker with unreadable endpoint evidence should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "endpoint-inconclusive"
+              and .subject == "terminal-unreadable")
+      and (any(.findings[]; .kind == "terminal-needs-cleanup"
+               and .subject == "terminal-unreadable") | not)
+  ' >/dev/null || fail "terminal unreadable endpoint evidence disappeared: $out"
+  pass "terminal endpoint uncertainty remains inconclusive"
+}
+
+test_historical_status_pr_does_not_require_listener() {
+  local home fakebin out rc=0
+  home=$(make_home historical-status-pr)
+  write_live_ship "$home" historical-pr
+  cat > "$home/state/historical-pr.status" <<'EOF'
+update: old delivery was https://github.com/example/alpha/pull/7
+working: implementing the current delivery
+EOF
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
+  expect_code 0 "$rc" "historical status PR should not require a current listener"
+  printf '%s' "$out" | jq -e '
+    .status == "healthy"
+      and (any(.findings[]; .kind == "result-listener-missing"
+               and .subject == "historical-pr") | not)
+  ' >/dev/null || fail "historical status PR created a listener requirement: $out"
+  pass "historical status PR events do not require current listeners"
+}
+
 test_grouped_inbox_and_stable_fingerprints() {
   local home fakebin out1 out2 rc=0 fp1 fp2 count
   home=$(make_home grouped-inbox)
@@ -558,6 +605,23 @@ EOF
   pass "inconsistent inventory and missing listeners are actionable"
 }
 
+test_invalid_procevent_registration_is_reported() {
+  local home fakebin out rc=0
+  home=$(make_home invalid-procevent-registration)
+  mkdir -p "$home/state/procevent/broken.source"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
+  expect_code 1 "$rc" "structurally invalid process-event registration should be actionable"
+  printf '%s' "$out" | jq -e '
+    .status == "actionable"
+      and any(.findings[]; .kind == "result-listener-missing"
+              and .subject == "broken"
+              and (.evidence | contains("owner=invalid")))
+  ' >/dev/null || fail "invalid process-event registration was hidden: $out"
+  pass "invalid process-event registrations remain visible"
+}
+
 test_paused_ship_still_requires_pr_listener() {
   local home fakebin out rc=0
   home=$(make_home paused-pr-listener)
@@ -642,6 +706,8 @@ test_unsearchable_nested_inventories_are_inconclusive
 test_actionable_dead_direct_report
 test_dead_agent_with_live_endpoint
 test_unreadable_local_endpoint_is_inconclusive
+test_terminal_unreadable_endpoint_is_inconclusive
+test_historical_status_pr_does_not_require_listener
 test_grouped_inbox_and_stable_fingerprints
 test_remote_liveness_is_inconclusive
 test_pending_reply_broken_and_historical_noise_omitted
@@ -652,6 +718,7 @@ test_incomplete_registry_does_not_break_secondmate_summary
 test_pending_reply_uses_recorded_grace
 test_invalid_pending_reply_is_inconclusive
 test_inventory_and_missing_listener
+test_invalid_procevent_registration_is_reported
 test_paused_ship_still_requires_pr_listener
 test_inconclusive_dominates_actionable_status
 test_complete_timeout_covers_fingerprinting

@@ -55,6 +55,40 @@ fm_procevent_adapter_valid() {
   [ "${#a}" -le 32 ]
 }
 
+fm_procevent_registration_parse() {  # <registration> <source-id>
+  local file=$1 id=$2 line adapter argc i=0 extra
+  local -a argv=()
+  FM_PROCEVENT_REG_ADAPTER=
+  FM_PROCEVENT_REG_ARGV=()
+  FM_PROCEVENT_REG_FAILURE=invalid
+  fm_procevent_source_id_valid "$id" || return 1
+  case "$file" in */"$id.source") ;; *) return 1 ;; esac
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  if [ ! -r "$file" ]; then
+    FM_PROCEVENT_REG_FAILURE=unreadable
+    return 1
+  fi
+  {
+    IFS= read -r line || return 1
+    case "$line" in adapter=*) adapter=${line#adapter=} ;; *) return 1 ;; esac
+    fm_procevent_adapter_valid "$adapter" || return 1
+    IFS= read -r line || return 1
+    case "$line" in argc=*) argc=${line#argc=} ;; *) return 1 ;; esac
+    case "$argc" in ''|*[!0-9]*|0) return 1 ;; esac
+    IFS= read -r line || return 1
+    [ "$line" = "argv:" ] || return 1
+    while [ "$i" -lt "$argc" ]; do
+      IFS= read -r line || return 1
+      argv+=("$line")
+      i=$((i + 1))
+    done
+    ! IFS= read -r extra || return 1
+  } < "$file"
+  FM_PROCEVENT_REG_ADAPTER=$adapter
+  FM_PROCEVENT_REG_ARGV=("${argv[@]}")
+  FM_PROCEVENT_REG_FAILURE=
+}
+
 # fm_procevent_any_registered <state>
 fm_procevent_any_registered() {
   local reg rec
@@ -87,19 +121,27 @@ fm_procevent_listeners_json() {  # <state>
     return 0
   fi
   for rec in "$reg"/*.source; do
-    [ -f "$rec" ] || continue
+    [ -e "$rec" ] || [ -L "$rec" ] || continue
     id=${rec##*/}; id=${id%.source}
-    adapter=$(awk -F= '$1 == "adapter" { print $2; exit }' "$rec" 2>/dev/null || printf '')
-    fm_procevent_claim_state_locked "$id"
-    status=$?
-    case "$status" in
-      0) owner=live ;;
-      1) owner=missing ;;
-      2) owner=uncertain ;;
-      3) owner=orphaned ;;
-      4) owner=terminal ;;
-      *) owner=uncertain ;;
-    esac
+    if fm_procevent_registration_parse "$rec" "$id"; then
+      adapter=$FM_PROCEVENT_REG_ADAPTER
+      fm_procevent_claim_state_locked "$id"
+      status=$?
+      case "$status" in
+        0) owner=live ;;
+        1) owner=missing ;;
+        2) owner=uncertain ;;
+        3) owner=orphaned ;;
+        4) owner=terminal ;;
+        *) owner=uncertain ;;
+      esac
+    else
+      adapter=
+      case "$FM_PROCEVENT_REG_FAILURE" in
+        unreadable) owner=unreadable ;;
+        *) owner=invalid ;;
+      esac
+    fi
     records=$(jq -n \
       --argjson records "$records" \
       --arg id "$id" \

@@ -270,7 +270,6 @@ EVALUATED=$(jq -n \
         | select(.kind != "secondmate")
         | select(agent_state(.) == "ambiguous" or agent_state(.) == "unreadable"
                  or agent_state(.) == "unverified" or agent_state(.) == "not_checked")
-        | select(terminal_state(.current_state.state) | not)
         | finding("endpoint-inconclusive";.id;"notice";"inconclusive";
                   "agent or endpoint liveness could not be established";agent_state(.);1)),
       ($snapshot.tasks[]?
@@ -376,6 +375,7 @@ EVALUATED=$(jq -n \
       ($snapshot.tasks[]?
         | select(.kind == "ship")
         | select((.pr.url // null) != null)
+        | select(.pr.source == "meta")
         | select(terminal_state(.current_state.state) | not)
         | select($prs.available == true)
         | .id as $id
@@ -384,14 +384,15 @@ EVALUATED=$(jq -n \
                   "in-flight ship with a recorded PR has no armed merge-poll listener";
                   "pr-poll";1)),
       (($listeners.records // [])[]
-        | select(.owner == "missing" or .owner == "stale" or .owner == "orphaned")
+        | select(.owner == "missing" or .owner == "stale" or .owner == "orphaned"
+                 or .owner == "invalid")
         | finding("result-listener-missing";.id;"error";"high";
                   ("process-event source has no live result listener (owner=" + .owner + ")");
                   .owner;1)),
       (($listeners.records // [])[]
-        | select(.owner == "uncertain")
+        | select(.owner == "uncertain" or .owner == "unreadable")
         | finding("result-listener-inconclusive";.id;"notice";"inconclusive";
-                  "process-event listener liveness could not be established";"uncertain";1)),
+                  "process-event listener liveness or registration could not be established";.owner;1)),
       (if $supervision.needed == true and $supervision.ok == false then
         finding("supervision-unhealthy";"supervision";"error";"high";
                 ("supervision is required but unhealthy (" + ($supervision.reason // "unknown") + ")");
