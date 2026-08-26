@@ -487,11 +487,12 @@ For example, `bin/fm-runner-health-check.sh arm connectwithclayton/toolroll tool
 Arming writes `state/runner-health.check.sh` and binds its bytes through `bin/fm-check-register.sh`.
 The existing watcher polls that private check on its ordinary cadence and turns a report into a `check:` wake.
 It does not add work to session start, start a watcher by itself, or introduce another scheduler.
+The command refuses an existing symlinked or otherwise invalid state path before creating, reading, writing, or cleaning up runner-health artifacts, and does not normalize or repair unsafe paths.
 
 The check prints `runner health: <owner/repo> runner label <runner-label> is offline` when a matching registration exists but none is online.
 It prints `runner health: <owner/repo> has no registered runner with label <runner-label>` when no registration carries the label.
 An online runner is healthy whether idle or busy, so healthy polls print nothing.
-Network errors, authentication errors, timeouts, and malformed API responses also print nothing and leave the last known report state unchanged.
+Network errors, authentication errors, timeouts, and malformed API envelopes or runner/label payloads also print nothing and leave the last known report state unchanged.
 
 `state/.runner-health` records the target and last reported finding.
 The same outage therefore reports once, recovery clears the finding silently, and a later outage reports again.
@@ -502,7 +503,8 @@ Changing between offline and missing is a changed finding and reports once in it
 The probe is cut further when necessary to leave three seconds inside `FM_CHECK_TIMEOUT` for process cleanup and local record handling.
 
 The installed launchd service was inspected without rebooting or logging out: `~/actions-runner-toolroll/.service` points to `~/Library/LaunchAgents/actions.runner.connectwithclayton-toolroll.toolroll-mac.plist`; the plist `Label` is `actions.runner.connectwithclayton-toolroll.toolroll-mac`, `RunAtLoad` is true, and `KeepAlive` is absent.
-This configuration does come back after a reboot once the captain logs in because it is a per-user `LaunchAgent`, not a system daemon. It starts at login rather than boot, so a machine sitting at the login screen has no runner.
+This configuration does come back after a reboot once the captain logs in because it is a per-user `LaunchAgent`, not a system daemon.
+It starts at login rather than boot, so a machine sitting at the login screen has no runner.
 Because `KeepAlive` is absent, a later runner exit is not automatically relaunched within that same login session.
 
 ## Relay (.env)
