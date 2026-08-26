@@ -7,6 +7,16 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-hermes-harness)
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+HOLDER_PIDS=()
+
+cleanup() {
+  local pid
+  for pid in "${HOLDER_PIDS[@]}"; do
+    kill "$pid" 2>/dev/null || true
+  done
+  fm_test_cleanup
+}
+trap cleanup EXIT INT TERM
 
 make_fake_ps() {
   local dir=$1 fakebin
@@ -25,107 +35,99 @@ SH
   printf '%s\n' "$fakebin"
 }
 
-run_detect() {
-  local fakebin=$1
-  shift
-  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u HERMES_HOME \
-    PATH="$fakebin:$BASE_PATH" "$@" "$ROOT/bin/fm-harness.sh"
+start_holder() {
+  sleep 300 &
+  HOLDER_PID=$!
+  HOLDER_PIDS+=("$HOLDER_PID")
 }
 
-test_hermes_identity_requires_the_executable() {
-  local fakebin out
-  fakebin=$(make_fake_ps "$TMP_ROOT/identity")
+write_marker() {
+  local state=$1 pid=$2
+  mkdir -p "$state"
+  printf 'sha256:%064d\n%s\n%s\n' 0 "$pid" "$ROOT" > "$state/.hermes-primary-plugin-loaded"
+}
 
-  out=$(run_detect "$fakebin" env HERMES_HOME="$TMP_ROOT/hermes-home")
+run_detect() {
+  local fakebin=$1 state=$2
+  shift 2
+  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u HERMES_HOME \
+    FM_STATE_OVERRIDE="$state" PATH="$fakebin:$BASE_PATH" "$@" "$ROOT/bin/fm-harness.sh"
+}
+
+test_hermes_identity_requires_loaded_plugin_marker() {
+  local fakebin state out
+  fakebin=$(make_fake_ps "$TMP_ROOT/identity")
+  state="$TMP_ROOT/identity/state"
+  mkdir -p "$state"
+
+  out=$(run_detect "$fakebin" "$state" env HERMES_HOME="$TMP_ROOT/hermes-home")
   [ "$out" = unknown ] || fail "HERMES_HOME alone must not impersonate Hermes, got '$out'"
 
-  out=$(run_detect "$fakebin" env FM_TEST_PS_COMM=python3 \
-    FM_TEST_PS_ARGS="python3 worker.py 'write about hermes'" FM_TEST_PS_PPID=1)
-  [ "$out" = unknown ] || fail "an unrelated Python prompt mentioning Hermes must stay unknown, got '$out'"
+  out=$(run_detect "$fakebin" "$state" env FM_TEST_PS_COMM=hermes \
+    FM_TEST_PS_ARGS='hermes --cli --no-restore-cwd' FM_TEST_PS_PPID=1)
+  [ "$out" = unknown ] || fail "persistent argv without a loaded plugin marker must stay unknown, got '$out'"
 
-  out=$(run_detect "$fakebin" env FM_TEST_PS_COMM=python3 \
-    FM_TEST_PS_ARGS="python3 worker.py /opt/hermes" FM_TEST_PS_PPID=1)
-  [ "$out" = unknown ] || fail "a prompt path ending in /hermes must stay unknown, got '$out'"
-  pass "Hermes detection rejects home markers and unrelated Python prompt text"
+  start_holder
+  write_marker "$state" "$HOLDER_PID"
+  out=$(run_detect "$fakebin" "$state" env FM_TEST_PS_COMM=python3 \
+    FM_TEST_PS_ARGS='python3 worker.py "hermes --cli"' FM_TEST_PS_PPID="$HOLDER_PID")
+  [ "$out" = hermes ] || fail "loaded Hermes marker and process ancestry were not detected, got '$out'"
+  pass "Hermes detection requires the loaded plugin marker and its process ancestry"
 }
 
-test_hermes_process_shapes() {
-  local fakebin out
-  fakebin=$(make_fake_ps "$TMP_ROOT/shapes")
+test_hermes_identity_preserves_quoted_classic_arguments() {
+  local fakebin state out
+  fakebin=$(make_fake_ps "$TMP_ROOT/quoted")
+  state="$TMP_ROOT/quoted/state"
+  start_holder
+  write_marker "$state" "$HOLDER_PID"
 
-  out=$(run_detect "$fakebin" env FM_TEST_PS_COMM=hermes \
-    FM_TEST_PS_ARGS='hermes --cli --no-restore-cwd')
-  [ "$out" = hermes ] || fail "trusted persistent Hermes CLI was not detected, got '$out'"
+  out=$(run_detect "$fakebin" "$state" env FM_TEST_PS_COMM=hermes \
+    FM_TEST_PS_ARGS='hermes --cli --no-restore-cwd --continue "Project Alpha"' \
+    FM_TEST_PS_PPID="$HOLDER_PID")
+  [ "$out" = hermes ] || fail "quoted classic-session arguments broke trusted Hermes detection, got '$out'"
 
-  out=$(run_detect "$fakebin" env FM_TEST_PS_COMM=hermes \
-    FM_TEST_PS_ARGS='hermes --cli')
-  [ "$out" = unknown ] || fail "a direct CLI outside the trusted launcher must stay unknown, got '$out'"
-
-  out=$(run_detect "$fakebin" env FM_TEST_PS_COMM=hermes \
-    FM_TEST_PS_ARGS='hermes -p firstmate --tui')
-  [ "$out" = unknown ] || fail "the Hermes profile TUI must stay outside primary detection, got '$out'"
-
-  out=$(run_detect "$fakebin" env FM_TEST_PS_COMM=python3 \
-    FM_TEST_PS_ARGS='/opt/hermes-agent/venv/bin/python3 /opt/hermes-agent/venv/bin/hermes gateway')
-  [ "$out" = unknown ] || fail "a Hermes subcommand must stay outside primary detection, got '$out'"
-
-  out=$(run_detect "$fakebin" env FM_TEST_PS_COMM=python \
-    FM_TEST_PS_ARGS='/usr/local/lib/hermes-agent/venv/bin/python /usr/local/lib/hermes-agent/hermes --cli --no-restore-cwd')
-  [ "$out" = hermes ] || fail "the official Hermes 0.20 launcher shape was not detected, got '$out'"
-
-  out=$(run_detect "$fakebin" env FM_TEST_PS_COMM=hermes \
-    FM_TEST_PS_ARGS='hermes -z prompt')
-  [ "$out" = unknown ] || fail "one-shot Hermes workers must stay out of primary detection, got '$out'"
-
-  out=$(PATH="$fakebin:$BASE_PATH" bash -c \
-    '. "$0/bin/fm-harness-process-lib.sh"; if fm_process_is_hermes_primary "$1"; then printf primary; fi' \
-    "$ROOT" 'hermes -z prompt' 2>/dev/null) || true
-  [ "$out" != primary ] || fail "one-shot Hermes must not satisfy the primary predicate"
-
-  out=$(PATH="$fakebin:$BASE_PATH" bash -c \
-    '. "$0/bin/fm-harness-process-lib.sh"; fm_process_is_hermes_primary "$1"; printf primary' \
-    "$ROOT" 'hermes --cli --no-restore-cwd')
-  [ "$out" = primary ] || fail "trusted persistent Hermes CLI did not satisfy the primary predicate"
-
-  out=$(PATH="$fakebin:$BASE_PATH" bash -c \
-    '. "$0/bin/fm-harness-process-lib.sh"; if fm_process_is_hermes_primary "$1"; then printf primary; fi' \
-    "$ROOT" 'hermes --cli gateway --no-restore-cwd' 2>/dev/null) || true
-  [ "$out" != primary ] || fail "a Hermes subcommand must not satisfy the primary predicate"
-  pass "Hermes detection distinguishes persistent CLI and one-shot worker argv"
+  rm -f "$state/.hermes-primary-plugin-loaded"
+  out=$(run_detect "$fakebin" "$state" env FM_TEST_PS_COMM=hermes \
+    FM_TEST_PS_ARGS='hermes --cli --no-restore-cwd --continue "Project Alpha"' \
+    FM_TEST_PS_PPID="$HOLDER_PID")
+  [ "$out" = unknown ] || fail "quoted argv was trusted after its plugin marker was removed, got '$out'"
+  pass "Hermes identity does not reconstruct quoted argv from ps output"
 }
 
-test_lock_accepts_primary_and_rejects_worker_or_prompt() {
-  local fakebin home out rc=0
+test_lock_accepts_only_marker_bound_primary() {
+  local fakebin home out rc holder
   fakebin=$(make_fake_ps "$TMP_ROOT/lock")
   home="$TMP_ROOT/lock-home"
   mkdir -p "$home/state"
+  start_holder
+  holder=$HOLDER_PID
+  write_marker "$home/state" "$holder"
 
-  out=$(FM_HOME="$home" FM_TEST_PS_COMM=hermes \
-    FM_TEST_PS_ARGS='hermes --cli --no-restore-cwd' PATH="$fakebin:$BASE_PATH" \
-    "$ROOT/bin/fm-lock.sh") || rc=$?
-  [ "$rc" -eq 0 ] || fail "fm-lock rejected a persistent Hermes primary: $out"
-  assert_contains "$out" "lock acquired: harness pid" "Hermes primary did not acquire the lock"
+  rc=0
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_TEST_PS_COMM=hermes \
+    FM_TEST_PS_ARGS='hermes --cli --no-restore-cwd' FM_TEST_PS_PPID="$holder" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh") || rc=$?
+  [ "$rc" -eq 0 ] || fail "fm-lock rejected a marker-bound Hermes primary: $out"
+  assert_contains "$out" "lock acquired: harness pid $holder" "Hermes primary acquired the wrong lock identity"
 
-  rm -f "$home/state/.lock"
-  out=$(FM_HOME="$home" FM_TEST_PS_COMM=hermes \
-    FM_TEST_PS_ARGS='hermes -p firstmate --tui' PATH="$fakebin:$BASE_PATH" \
-    "$ROOT/bin/fm-lock.sh") || rc=$?
-  [ "$rc" -ne 0 ] || fail "fm-lock accepted the unsupported Hermes profile TUI"
+  rm -f "$home/state/.hermes-primary-plugin-loaded" "$home/state/.lock"
+  rc=0
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_TEST_PS_COMM=hermes \
+    FM_TEST_PS_ARGS='hermes --cli --no-restore-cwd' FM_TEST_PS_PPID="$holder" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-lock accepted Hermes argv without the loaded plugin marker"
 
-  printf '%s\n' "$$" > "$home/state/.lock"
-  out=$(FM_HOME="$home" FM_TEST_PS_COMM=hermes FM_TEST_PS_ARGS='hermes -z prompt' \
+  printf '%s\n' "$holder" > "$home/state/.lock"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_TEST_PS_COMM=hermes \
+    FM_TEST_PS_ARGS='hermes --cli --no-restore-cwd' FM_TEST_PS_PPID="$holder" \
     PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" status)
-  assert_contains "$out" "lock: stale" "one-shot Hermes must not own the primary lock"
-
-  out=$(FM_HOME="$home" FM_TEST_PS_COMM=python3 \
-    FM_TEST_PS_ARGS="python3 worker.py 'hermes --cli'" PATH="$fakebin:$BASE_PATH" \
-    "$ROOT/bin/fm-lock.sh" status)
-  assert_contains "$out" "lock: stale" "unrelated Python prompt text must not own the lock"
-  pass "primary lock ownership accepts only persistent Hermes"
+  assert_contains "$out" "lock: stale" "markerless Hermes pid must not retain the primary lock"
+  pass "primary lock ownership requires a marker-bound Hermes process"
 }
 
-test_hermes_identity_requires_the_executable
-test_hermes_process_shapes
-test_lock_accepts_primary_and_rejects_worker_or_prompt
+test_hermes_identity_requires_loaded_plugin_marker
+test_hermes_identity_preserves_quoted_classic_arguments
+test_lock_accepts_only_marker_bound_primary
 
 echo "# all fm-hermes-harness tests passed"

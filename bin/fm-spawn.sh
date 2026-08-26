@@ -240,6 +240,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-harness-process-lib.sh
+. "$SCRIPT_DIR/fm-harness-process-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
@@ -396,18 +398,51 @@ else
   fi
 fi
 
+hermes_primary_policy_session_active() {
+  local version
+  fm_hermes_primary_session_matches "$STATE" "$FM_ROOT" || return 1
+  version=$(fm_adapter_file_version "$FM_ROOT/.hermes/plugins/firstmate-primary/__init__.py") \
+    || return 1
+  fm_adapter_loaded_marker_matches \
+    "$STATE/.hermes-primary-plugin-loaded" "$version" "$STATE/.lock"
+}
+
+HERMES_PRIMARY_POLICY_ACTIVE=0
+if hermes_primary_policy_session_active || fm_hermes_worker_policy_enabled "$FM_HOME"; then
+  HERMES_PRIMARY_POLICY_ACTIVE=1
+fi
+
 hermes_primary_policy_backend() {
-  [ "${FM_HERMES_PRIMARY_POLICY:-}" != pi-herdr-v1 ] || [ "$1" = herdr ] || {
+  [ "$HERMES_PRIMARY_POLICY_ACTIVE" -eq 0 ] || [ "$1" = herdr ] || {
     echo "error: the Hermes primary policy requires backend=herdr, not '$1'" >&2
     return 1
   }
 }
 
 hermes_primary_policy_harness() {
-  [ "${FM_HERMES_PRIMARY_POLICY:-}" != pi-herdr-v1 ] || [ "$1" = pi ] || {
+  [ "$HERMES_PRIMARY_POLICY_ACTIVE" -eq 0 ] || [ "$1" = pi ] || {
     echo "error: the Hermes primary policy requires harness=pi, not '$1'" >&2
     return 1
   }
+}
+
+publish_hermes_worker_policy() {  # <secondmate-home>
+  local home=$1 path tmp
+  [ "$HERMES_PRIMARY_POLICY_ACTIVE" -eq 1 ] || return 0
+  path="$home/state/.hermes-primary-worker-policy"
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    fm_hermes_worker_policy_enabled "$home" || {
+      echo "error: refusing unsafe or conflicting Hermes worker policy at $path" >&2
+      return 1
+    }
+    return 0
+  fi
+  tmp=$(mktemp "$home/state/.hermes-primary-worker-policy.XXXXXX") || return 1
+  if printf '%s\n' pi-herdr-v1 > "$tmp" && mv -f "$tmp" "$path"; then
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  return 1
 }
 
 spawn_remote_secondmate() {
@@ -576,7 +611,7 @@ spawn_remote_secondmate() {
   fi
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
   [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
-  if [ "${FM_HERMES_PRIMARY_POLICY:-}" = pi-herdr-v1 ]; then
+  if [ "$HERMES_PRIMARY_POLICY_ACTIVE" -eq 1 ]; then
     [ -n "$remote_traceparent" ] || launch_args+=(-)
     launch_args+=(pi-herdr-v1)
   fi
@@ -1258,13 +1293,13 @@ case "$ARG3" in
     ;;
 esac
 
-if [ "${FM_HERMES_PRIMARY_POLICY:-}" = pi-herdr-v1 ] && [ "$RAW_LAUNCH" -eq 1 ]; then
+if [ "$HERMES_PRIMARY_POLICY_ACTIVE" -eq 1 ] && [ "$RAW_LAUNCH" -eq 1 ]; then
   echo "error: the Hermes primary policy requires the verified Pi launch template, not a raw launch command" >&2
   exit 1
 fi
 hermes_primary_policy_harness "$HARNESS" || exit 1
-if [ "${FM_HERMES_PRIMARY_POLICY:-}" = pi-herdr-v1 ]; then
-  LAUNCH="FM_HERMES_PRIMARY_POLICY=pi-herdr-v1 FM_BACKEND=herdr $LAUNCH"
+if [ "$HERMES_PRIMARY_POLICY_ACTIVE" -eq 1 ]; then
+  LAUNCH="FM_BACKEND=herdr $LAUNCH"
 fi
 
 # muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
@@ -1666,6 +1701,7 @@ if [ "$KIND" = secondmate ]; then
     echo "error: could not create secondmate state directory for $PROJ_ABS" >&2
     exit 1
   }
+  publish_hermes_worker_policy "$PROJ_ABS" || exit 1
   if [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
     CONFIG_INHERIT_LOCK=$(fm_config_inherit_lock_path "$PROJ_ABS") || {
       echo "error: could not resolve secondmate inheritance lock for $PROJ_ABS" >&2

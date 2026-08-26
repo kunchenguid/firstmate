@@ -66,17 +66,19 @@ done
 
 version=$(sed -n '1p' "$marker")
 hermes_pid=$(sed -n '2p' "$marker")
+marker_root=$(sed -n '3p' "$marker")
 expected=$(fm_adapter_file_version "$ROOT/.hermes/plugins/firstmate-primary/__init__.py")
 [ "$version" = "$expected" ] || fail "Hermes loaded a different primary plugin build"
 case "$hermes_pid" in
   ''|*[!0-9]*) fail "Hermes primary marker has an invalid process id" ;;
 esac
 kill -0 "$hermes_pid" 2>/dev/null || fail "Hermes primary marker names a dead process"
+[ "$marker_root" = "$ROOT" ] || fail "Hermes primary marker names the wrong checkout root"
 
-args=$(ps -o args= -p "$hermes_pid" 2>/dev/null || true)
 # shellcheck source=bin/fm-harness-process-lib.sh
 . "$ROOT/bin/fm-harness-process-lib.sh"
-fm_process_is_hermes_primary "$args" || fail "the live Hermes process does not match the primary identity contract"
+fm_process_is_hermes_primary_pid "$hermes_pid" "$STATE" "$ROOT" \
+  || fail "the live Hermes process does not match the marker-bound primary identity contract"
 
 printf '%s\n' "$hermes_pid" > "$STATE/.lock"
 fm_adapter_loaded_marker_matches "$marker" "$expected" "$STATE/.lock" ||

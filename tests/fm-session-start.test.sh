@@ -2345,8 +2345,10 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_harness "$fakebin" hermes
+  printf 'sha256:%064d\n%s\n%s\n' 0 "$SESSION_START_TEST_HARNESS_PID" "$root" \
+    > "$home/state/.hermes-primary-plugin-loaded"
 
-  out=$(FM_FAKE_HARNESS=hermes run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(run_named_harness_session_start hermes "$home" "$root" "$fakebin:$BASE_PATH")
 
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: hermes" \
     "Hermes supervision block missing from session start"

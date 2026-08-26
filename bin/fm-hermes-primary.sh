@@ -20,6 +20,7 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PLUGIN=firstmate-primary
 HOME_ROOT=${FM_HOME:-$ROOT}
 CONFIG=${FM_CONFIG_OVERRIDE:-$HOME_ROOT/config}
+STATE=${FM_STATE_OVERRIDE:-$HOME_ROOT/state}
 
 usage() {
   sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
@@ -39,8 +40,19 @@ plugin_status() {
   hermes config get plugins.enabled 2>/dev/null | grep -Fx -- "- $PLUGIN" >/dev/null
 }
 
+meta_value() {  # <meta> <key>
+  awk -v key="$2" '
+    index($0, key "=") == 1 { count++; value=substr($0, length(key) + 2) }
+    END {
+      if (count == 1) print value
+      else if (count > 1) exit 2
+      else exit 1
+    }
+  ' "$1"
+}
+
 require_local_policy() {
-  local path value
+  local path value meta harness backend rc
   for path in crew-harness secondmate-harness; do
     value=$(tr -d '[:space:]' < "$CONFIG/$path" 2>/dev/null || true)
     [ "$value" = pi ] || {
@@ -60,6 +72,35 @@ require_local_policy() {
       exit 1
       ;;
   esac
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
+    [ -f "$meta" ] && [ ! -L "$meta" ] || {
+      echo "error: Hermes primary refuses unsafe active task record: $meta" >&2
+      exit 1
+    }
+    harness=$(meta_value "$meta" harness 2>/dev/null) || {
+      echo "error: Hermes primary requires every active task record to name harness=pi: $meta" >&2
+      exit 1
+    }
+    [ "$harness" = pi ] || {
+      echo "error: Hermes primary refuses active task $(basename "$meta" .meta) with harness=$harness; stop or migrate it to Pi first" >&2
+      exit 1
+    }
+    rc=0
+    backend=$(meta_value "$meta" backend 2>/dev/null) || rc=$?
+    case "$rc" in
+      0) ;;
+      1) backend=tmux ;;
+      *)
+        echo "error: Hermes primary requires one unambiguous backend in active task record: $meta" >&2
+        exit 1
+        ;;
+    esac
+    [ "$backend" = herdr ] || {
+      echo "error: Hermes primary refuses active task $(basename "$meta" .meta) with backend=$backend; stop or migrate it to Herdr first" >&2
+      exit 1
+    }
+  done
 }
 
 validate_launch_args() {
@@ -169,4 +210,7 @@ export HERMES_ENABLE_PROJECT_PLUGINS=1
 export FM_BACKEND=herdr
 export FM_HERMES_PRIMARY_POLICY=pi-herdr-v1
 export FM_HERMES_PRIMARY_PID=$$
-exec hermes --cli --no-restore-cwd "$@"
+exec env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS \
+  -u GROK_AGENT -u GROK_HOOK_EVENT -u GROK_HOOK_NAME -u GROK_SESSION_ID \
+  -u GROK_WORKSPACE_ROOT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+  hermes --cli --no-restore-cwd "$@"

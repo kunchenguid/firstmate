@@ -18,6 +18,10 @@
 # shellcheck source=bin/fm-harness-process-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-harness-process-lib.sh"
 
+FM_HERMES_ROOT=${FM_ROOT_OVERRIDE:-${FM_ROOT:-$(cd "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}}
+FM_HERMES_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_HERMES_ROOT}}
+FM_HERMES_STATE=${FM_STATE_OVERRIDE:-$FM_HERMES_HOME/state}
+
 # Known harness command names; extend when a new adapter is verified.
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
 
@@ -51,25 +55,23 @@ fm_harness_path_name() {  # <path>
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
 # Evidence, in order:
-#   1. the basename of the reported command name, against FM_HARNESS_RE.
-#   2. an exact harness component in that command path or in argv[0]. Both are
+#   1. a Hermes PID bound to the loaded project-plugin marker for this checkout.
+#   2. the basename of the reported command name, against FM_HARNESS_RE.
+#   3. an exact harness component in that command path or in argv[0]. Both are
 #      needed because the two platforms report different things: macOS reports
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
-#   3. a bare interpreter (node, python) running a harness script path.
-#   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
+#   4. a bare interpreter (node, python) running a harness script path.
+#   5. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
-fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name
+fm_harness_process_matches() {  # <comm> <args> [pid]
+  local comm=$1 args=$2 pid=${3:-} base argv0 name
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
-  # Hermes is primary-only and its official launcher execs a generic Python
-  # process. Match its structural argv and require a persistent launch instead
-  # of widening the generic harness-name regex.
-  if fm_process_is_hermes "$args"; then
-    fm_process_is_hermes_primary "$args"
-    return
+  if [ -n "$pid" ] && fm_process_is_hermes_primary_pid \
+    "$pid" "$FM_HERMES_STATE" "$FM_HERMES_ROOT"; then
+    return 0
   fi
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
@@ -120,7 +122,7 @@ fm_harness_ancestry_pids() {
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if fm_harness_process_matches "$comm" "$args"; then
+    if fm_harness_process_matches "$comm" "$args" "$pid"; then
       printf '%s\n' "$pid"
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
@@ -158,7 +160,7 @@ fm_harness_pid_alive() {
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
-  fm_harness_process_matches "$comm" "$args"
+  fm_harness_process_matches "$comm" "$args" "$pid"
 }
 
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor

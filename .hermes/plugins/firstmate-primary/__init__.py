@@ -13,7 +13,6 @@ from typing import Any
 
 
 _ROOT = Path(__file__).resolve().parents[3]
-_RETRY_PREFIX = "[firstmate-supervision-repair-v1]"
 _MARKER_NAME = ".hermes-primary-plugin-loaded"
 _DELEGATION_TOOLS = {"delegate_task"}
 _pending_retries: set[str] = set()
@@ -80,7 +79,9 @@ def _write_loaded_marker() -> None:
     marker = _state_dir() / _MARKER_NAME
     tmp = marker.with_name(f"{marker.name}.{os.getpid()}.tmp")
     try:
-        tmp.write_text(f"{_marker_digest()}\n{os.getpid()}\n", encoding="utf-8")
+        tmp.write_text(
+            f"{_marker_digest()}\n{os.getpid()}\n{_ROOT}\n", encoding="utf-8"
+        )
         os.replace(tmp, marker)
     except OSError:
         try:
@@ -179,17 +180,24 @@ def register(ctx: Any) -> None:
             return
 
         reason = (result.stderr or "").strip()
-        recovery = (
-            f"{_RETRY_PREFIX}\n"
+        body = (
             "This is the one bounded Hermes turn-end recovery retry. "
             "Drain queued wakes first, then restore watcher supervision through "
             "Hermes terminal(background=true, notify_on_complete=true) exactly "
             "as the session-start Hermes protocol directs. Do not use shell &.\n\n"
             f"{reason[:3500]}"
         )
+        encoded = _run_checker(
+            _ROOT / "bin" / "fm-operational-input.sh",
+            "encode",
+            "turn-end-guard",
+            payload=body,
+        )
+        if encoded is None or encoded.returncode != 0 or not encoded.stdout:
+            return
         with _retry_lock:
             _pending_retries.add(sid)
-        if not ctx.inject_message(recovery, role="user"):
+        if not ctx.inject_message(encoded.stdout, role="user"):
             with _retry_lock:
                 _pending_retries.discard(sid)
 

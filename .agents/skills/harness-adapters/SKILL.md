@@ -47,7 +47,7 @@ If the captain asks for a new harness, propose verifying it first: spawn a trivi
 ## Detection
 
 `bin/fm-harness.sh` prints firstmate's own harness, using verified env markers first and then process ancestry.
-Hermes has no trusted detection environment marker in this integration, so it is recognized only from the official executable argv carrying the trusted launcher's persistent `--cli --no-restore-cwd` shape.
+Hermes has no trusted detection environment marker in this integration, so it is recognized only when the loaded project-plugin marker names the exact Hermes process in the current ancestry and checkout.
 Within the Pi family, only the exact launch-boundary marker `FM_PI_HARNESS=pi-signed` alongside `PI_CODING_AGENT=true` selects the signed identity; unmarked shared launcher ancestry remains `pi`.
 `bin/fm-harness.sh crew` resolves the effective crewmate harness from `config/crew-harness` (absent or `default` -> own).
 `bin/fm-harness.sh secondmate` resolves the secondmate-launch harness through the chain `config/secondmate-harness` -> `config/crew-harness` -> own, so an unset `config/secondmate-harness` matches the crew harness.
@@ -369,11 +369,11 @@ Grok's primary watcher protocol remains background-notify around `bin/fm-watch-a
 Hermes runs only the captain-facing primary Firstmate session.
 Launch it from the trusted checkout with `bin/fm-hermes-primary.sh`, after the one-time `bin/fm-hermes-primary.sh --setup` enables the tracked project plugin.
 The launcher forces the persistent classic CLI, preserves the checkout root on resume, and refuses one-shot, safe-mode, rule-skipping, user-config-skipping, worktree, alternate-directory, and TUI options that would disable or escape the integration.
-Detection and session-lock ownership require the structural Hermes executable argv plus the trusted launcher's persistent `--cli --no-restore-cwd` shape; `HERMES_HOME`, prompt text, profiles, subcommands, direct CLI launches, and one-shot `-z` processes are not identity.
+Detection and session-lock ownership require the current project-plugin marker to bind the checkout root and exact live Hermes ancestor PID; `HERMES_HOME`, flattened process arguments, prompt text, profiles, subcommands, direct CLI launches, and one-shot `-z` processes are not identity.
 The project plugin blocks `delegate_task`, so all implementation work continues through visible Firstmate workers.
 It also routes watcher-arm commands through the shared pre-tool checker and requires Hermes's managed background terminal with completion notification.
 `on_session_end` runs the shared turn-end predicate and injects at most one recovery turn per blind boundary, including provider failures and interruptions.
-Hermes is never a crewmate, scout, or secondmate runtime in this integration; its launcher requires `pi` in both worker-harness files and `herdr` in `config/backend`, then propagates a spawn policy that refuses per-task overrides of those axes.
+Hermes is never a crewmate, scout, or secondmate runtime in this integration; its launcher requires `pi` in both worker-harness files and `herdr` in `config/backend`, rejects conflicting active task records, and propagates a durable secondmate policy that refuses per-task overrides of those axes.
 The live drift guard is `FM_HERMES_PRIMARY_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-hermes-primary-live-e2e.test.sh`.
 
 ## cursor (VERIFIED CREWMATE/SCOUT 2026-08-11 on tmux and 2026-08-12 on Herdr, and SECONDMATE/PRIMARY 2026-08-13, Cursor Agent CLI 2026.08.11-e8db854)

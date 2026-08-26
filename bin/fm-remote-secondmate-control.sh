@@ -66,6 +66,23 @@ validate_home() { # <id> [allow-absent]
 
 meta_path() { printf '%s/%s.meta\n' "$CONTROL_STATE" "$1"; }
 
+publish_hermes_worker_policy() {
+  local path="$TARGET_HOME/state/.hermes-primary-worker-policy" tmp
+  mkdir -p "$TARGET_HOME/state"
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -f "$path" ] && [ ! -L "$path" ] \
+      && [ "$(cat "$path" 2>/dev/null || true)" = pi-herdr-v1 ] \
+      || die "unsafe or conflicting Hermes worker policy at $path"
+    return 0
+  fi
+  tmp=$(mktemp "$TARGET_HOME/state/.hermes-primary-worker-policy.XXXXXX") \
+    || die "could not create Hermes worker policy"
+  if ! printf '%s\n' pi-herdr-v1 > "$tmp" || ! mv -f "$tmp" "$path"; then
+    rm -f "$tmp" 2>/dev/null || true
+    die "could not publish Hermes worker policy"
+  fi
+}
+
 remote_endpoint_load() {
   local id=$1 herdr_session
   REMOTE_ENDPOINT_ERROR=
@@ -146,11 +163,15 @@ cmd_launch() {
   esac
   case "$effort" in -|low|medium|high|xhigh|max) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
   case "$policy" in ''|pi-herdr-v1) ;; *) die "invalid remote secondmate worker policy: $policy" ;; esac
+  if [ "$policy" = pi-herdr-v1 ]; then
+    [ "$harness" = pi ] || die "the Hermes primary policy requires harness=pi, not '$harness'"
+  fi
   [ "$traceparent" != - ] || traceparent=
   # Herdr is required on this host, not merely preferred: its server belongs to
   # the GUI login session, so the endpoint survives every SSH disconnection that
   # a remote route depends on. bin/fm-remote-doctor.sh is the readiness owner.
   case "$selected_backend" in herdr) ;; *) die "a remote secondmate runs only on the herdr backend, not '$selected_backend'" ;; esac
+  [ "$policy" != pi-herdr-v1 ] || publish_hermes_worker_policy
   mkdir -p "$CONTROL_STATE" "$CONTROL_DATA"
   meta=$(meta_path "$id")
   if [ -f "$meta" ]; then
@@ -176,7 +197,6 @@ cmd_launch() {
   if ! out=$(HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \
-    FM_HERMES_PRIMARY_POLICY="$policy" \
     "$SCRIPT_DIR/fm-spawn.sh" "${ARGS[@]}" 2>&1); then
     [ -z "$out" ] || printf '%s\n' "$out" >&2
     die "remote host-local secondmate launch failed"

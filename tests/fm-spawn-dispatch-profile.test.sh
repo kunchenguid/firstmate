@@ -845,21 +845,22 @@ test_hermes_primary_policy_rejects_worker_overrides() {
   id=profile-hermes-policy-z21
   rec=$(make_spawn_case profile-hermes-policy pi "$id")
   read_case_record "$rec"
+  printf '%s\n' pi-herdr-v1 > "$HOME_DIR/state/.hermes-primary-worker-policy"
 
-  out=$(FM_HERMES_PRIMARY_POLICY=pi-herdr-v1 FM_BACKEND=herdr \
+  out=$(FM_HERMES_PRIMARY_POLICY= FM_BACKEND=herdr \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex)
   status=$?
-  [ "$status" -ne 0 ] || fail "Hermes primary policy must refuse a non-Pi worker"
+  [ "$status" -ne 0 ] || fail "durable Hermes primary policy must refuse a non-Pi worker"
   assert_contains "$out" "requires harness=pi" "Hermes worker-harness refusal was not actionable"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused Hermes policy override wrote task metadata"
 
-  out=$(FM_HERMES_PRIMARY_POLICY=pi-herdr-v1 FM_BACKEND=herdr \
+  out=$(FM_HERMES_PRIMARY_POLICY= FM_BACKEND=herdr \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness pi --backend tmux)
   status=$?
-  [ "$status" -ne 0 ] || fail "Hermes primary policy must refuse a non-Herdr backend"
+  [ "$status" -ne 0 ] || fail "durable Hermes primary policy must refuse a non-Herdr backend"
   assert_contains "$out" "requires backend=herdr" "Hermes backend refusal was not actionable"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused Hermes backend override wrote task metadata"
-  pass "Hermes primary policy fixes Pi workers to Herdr"
+  pass "Hermes worker policy remains Pi and Herdr after environment clearing"
 }
 
 test_no_profile_keeps_claude_profile_defaults

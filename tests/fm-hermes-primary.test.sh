@@ -32,7 +32,7 @@ make_fake_hermes() {
   cat > "$fakebin/hermes" <<SH
 #!/usr/bin/env bash
 set -u
-printf '%s\n' "HERMES_ENABLE_PROJECT_PLUGINS=\${HERMES_ENABLE_PROJECT_PLUGINS:-} FM_BACKEND=\${FM_BACKEND:-} FM_HERMES_PRIMARY_POLICY=\${FM_HERMES_PRIMARY_POLICY:-} ARGS=\$*" >> '$dir/calls'
+printf '%s\n' "HERMES_ENABLE_PROJECT_PLUGINS=\${HERMES_ENABLE_PROJECT_PLUGINS:-} FM_BACKEND=\${FM_BACKEND:-} FM_HERMES_PRIMARY_POLICY=\${FM_HERMES_PRIMARY_POLICY:-} CLAUDECODE=\${CLAUDECODE:-} PI_CODING_AGENT=\${PI_CODING_AGENT:-} FM_PI_HARNESS=\${FM_PI_HARNESS:-} GROK_AGENT=\${GROK_AGENT:-} CURSOR_AGENT=\${CURSOR_AGENT:-} CURSOR_INVOKED_AS=\${CURSOR_INVOKED_AS:-} ARGS=\$*" >> '$dir/calls'
 if [ "\${1:-}" = config ] && [ "\${2:-}" = get ]; then
   [ '$status' = enabled ] && printf '%s\n' '- firstmate-primary'
   exit 0
@@ -47,7 +47,7 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/hermes"
-  mkdir -p "$dir/firstmate-config"
+  mkdir -p "$dir/firstmate-config" "$dir/state"
   printf '%s\n' pi > "$dir/firstmate-config/crew-harness"
   printf '%s\n' pi > "$dir/firstmate-config/secondmate-harness"
   printf '%s\n' herdr > "$dir/firstmate-config/backend"
@@ -58,7 +58,7 @@ run_primary_launcher() {
   local fakebin=$1 case_dir=$2
   shift 2
   PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$case_dir/firstmate-config" \
-    "$ROOT/bin/fm-hermes-primary.sh" "$@"
+    FM_STATE_OVERRIDE="$case_dir/state" "$ROOT/bin/fm-hermes-primary.sh" "$@"
 }
 
 test_launcher_scope_and_fail_closed() {
@@ -68,7 +68,30 @@ test_launcher_scope_and_fail_closed() {
   [ "$rc" -eq 0 ] || fail "enabled launcher failed: $out"
   calls=$(cat "$TMP_ROOT/launcher-enabled/calls")
   assert_contains "$calls" 'ARGS=config get plugins.enabled' "launcher did not check allow-list"
-  assert_contains "$calls" 'HERMES_ENABLE_PROJECT_PLUGINS=1 FM_BACKEND=herdr FM_HERMES_PRIMARY_POLICY=pi-herdr-v1 ARGS=--cli --no-restore-cwd --provider openai-codex --model gpt-5' "launcher did not scope project discovery, worker policy, and persistent CLI mode"
+  assert_contains "$calls" 'HERMES_ENABLE_PROJECT_PLUGINS=1 FM_BACKEND=herdr FM_HERMES_PRIMARY_POLICY=pi-herdr-v1' "launcher did not scope project discovery and worker policy"
+  assert_contains "$calls" 'ARGS=--cli --no-restore-cwd --provider openai-codex --model gpt-5' "launcher did not force persistent CLI mode"
+
+  : > "$TMP_ROOT/launcher-enabled/calls"
+  rc=0
+  out=$(CLAUDECODE=1 PI_CODING_AGENT=true FM_PI_HARNESS=pi GROK_AGENT=1 \
+    CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent \
+    run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled") || rc=$?
+  [ "$rc" -eq 0 ] || fail "launcher failed while clearing inherited harness markers: $out"
+  calls=$(cat "$TMP_ROOT/launcher-enabled/calls")
+  assert_contains "$calls" 'CLAUDECODE= PI_CODING_AGENT= FM_PI_HARNESS= GROK_AGENT= CURSOR_AGENT= CURSOR_INVOKED_AS=' \
+    "Hermes launch inherited a foreign harness identity marker"
+
+  printf 'window=old\nharness=codex\nbackend=herdr\n' > "$TMP_ROOT/launcher-enabled/state/old.meta"
+  rc=0
+  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "launcher must reject an active non-Pi task"
+  assert_contains "$out" 'active task old with harness=codex' "active harness mismatch was not actionable"
+  printf 'window=old\nharness=pi\n' > "$TMP_ROOT/launcher-enabled/state/old.meta"
+  rc=0
+  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "launcher must reject an active non-Herdr task"
+  assert_contains "$out" 'active task old with backend=tmux' "active backend mismatch was not actionable"
+  rm -f "$TMP_ROOT/launcher-enabled/state/old.meta"
 
   rc=0
   out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" --safe-mode 2>&1) || rc=$?
@@ -204,6 +227,7 @@ marker = primary / "state" / ".hermes-primary-plugin-loaded"
 lines = marker.read_text().splitlines()
 assert lines[0].startswith("sha256:")
 assert lines[1] == str(os.getpid())
+assert lines[2] == str(primary.resolve())
 
 pre = ctx.hooks["pre_tool_call"]
 assert pre("read_file", {}) is None
@@ -228,7 +252,7 @@ assert ctx.injected == []
 end(session_id="s1", platform="cli", completed=False, failed=True)
 assert len(ctx.injected) == 1
 repair = ctx.injected[0][0]
-assert repair.startswith("[firstmate-supervision-repair-v1]")
+assert repair.startswith("\u2063FIRSTMATE_OP: v1 turn-end-guard: ")
 assert "terminal(background=true, notify_on_complete=true)" in repair
 end(session_id="s1", platform="cli", completed=False, interrupted=True)
 assert len(ctx.injected) == 1

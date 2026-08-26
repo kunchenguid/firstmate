@@ -35,7 +35,8 @@ printf '%s\n' herdr > config/backend
 ```
 
 These operator choices remain local and gitignored by design.
-The launcher refuses missing or different values, exports Herdr as the effective backend, and propagates a policy that makes `fm-spawn.sh` reject raw launch commands or per-task harness and backend overrides.
+The launcher refuses missing or different values and any active task record not already on Pi plus Herdr.
+The loaded-plugin marker and session-lock ancestry activate the same enforcement in `fm-spawn.sh`, while a durable policy in each launched secondmate home preserves it across remote and nested launches even if a child clears inherited environment variables.
 Configure the Hermes model or provider separately with `hermes setup` or `hermes model`; Firstmate does not copy, modify, or own provider credentials.
 
 ## Launch
@@ -55,7 +56,7 @@ The plugin then:
 - validates watcher-arm terminal calls through Firstmate's shared command policy;
 - requires `terminal(background=true, notify_on_complete=true)` for the one managed watcher process;
 - runs the shared turn-end predicate after successful, failed, and interrupted turns and injects one bounded recovery turn when active work lacks healthy supervision;
-- publishes a versioned process marker for the lifetime of the CLI process so session start can prove the current lock-owning Hermes process loaded the current plugin build across `/new` and reset boundaries.
+- publishes a versioned, checkout-bound process marker for the lifetime of the CLI process so detection and session start can prove the current lock-owning Hermes process loaded the current plugin build across `/new` and reset boundaries.
 
 ## Verification and upgrades
 
@@ -74,7 +75,7 @@ FM_HERMES_PRIMARY_LIVE_E2E=1 \
 ```
 
 The live check opens a real persistent Hermes process in a PTY without sending a model turn.
-It verifies plugin loading, the exact loaded-plugin digest, structural process identity, and agreement between the plugin marker and Firstmate session-lock identity.
+It verifies plugin loading, the exact loaded-plugin digest and checkout, marker-bound process identity, and agreement between the plugin marker and Firstmate session-lock identity.
 It reports an absent Hermes installation or disabled plugin rather than silently passing.
 
 After `hermes update`, rerun the live check before starting the next Firstmate primary session.
