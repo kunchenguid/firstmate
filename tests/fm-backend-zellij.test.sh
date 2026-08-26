@@ -629,7 +629,12 @@ test_send_text_line_clears_partial_input_when_enter_fails() {
     FM_ZELLIJ_SESSION_LIST="firstmate" bash -c \
     '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_text_line "firstmate:7" "export TRACEPARENT=carrier"' "$ROOT"
   status=$?
-  [ "$status" -ne 0 ] || fail "send_text_line should report a failed Enter"
+  # 3, not 1: the pane answered the paste AND the clear, so nothing is left in
+  # its input line and it is demonstrably reachable. fm-spawn refuses on that
+  # status with a message saying exactly that (bin/fm-spawn.sh's
+  # spawn_send_cleared), which it cannot do if this collapses into the
+  # never-delivered status.
+  expect_code 3 "$status" "send_text_line should distinguish input it typed and then cleared"
   log=$(cat "$dir/log")
   assert_contains "$log" $'\x1f''paste'$'\x1f''--pane-id'$'\x1f''7'$'\x1f''--'$'\x1f''export TRACEPARENT=carrier' \
     "send_text_line did not paste the trace export before the simulated Enter failure"

@@ -504,11 +504,21 @@ fm_backend_cmux_send_key() {  # <target> <key> [expected-label]
   fm_backend_cmux_cli send-key --workspace "$FM_BACKEND_CMUX_WORKSPACE" --surface "$FM_BACKEND_CMUX_SURFACE" "$key" >/dev/null 2>&1
 }
 
-# fm_backend_cmux_send_text_line: send one line of TEXT then submit.
+# fm_backend_cmux_send_text_line: send one line of TEXT then submit. This
+# composes the line from a literal send plus Enter, so its three failures are
+# three different surface states and each gets the status firstmate reserves for
+# it (bin/fm-spawn.sh's spawn_send_text_line owns those meanings): 1 when the
+# literal never landed and nothing was typed at all, 3 when the text WAS typed,
+# the Enter failed on its own, and the C-c that followed cleared it again, and 2
+# when that clear failed too and the text is still sitting in the surface's
+# input buffer. 3 is not 1: the surface answered both the send and the clear, so
+# reporting it as an undelivered send would tell fm-spawn a live endpoint is
+# unreachable and - at the post-meta launch gate - record that as the task's
+# durable last state.
 fm_backend_cmux_send_text_line() {  # <target> <text> [expected-label]
   fm_backend_cmux_send_literal "$1" "$2" "${3:-}" || return 1
   fm_backend_cmux_send_key "$1" Enter "${3:-}" && return 0
-  fm_backend_cmux_send_key "$1" C-c "${3:-}" >/dev/null 2>&1 && return 1
+  fm_backend_cmux_send_key "$1" C-c "${3:-}" >/dev/null 2>&1 && return 3
   return 2
 }
 

@@ -649,7 +649,12 @@ test_send_text_line_clears_partial_input_when_enter_fails() {
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_send_text_line "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "export TRACEPARENT=carrier"' "$ROOT"
   status=$?
-  [ "$status" -ne 0 ] || fail "send_text_line should report a failed Enter"
+  # 3, not 1: the surface answered the send AND the clear, so nothing is left in
+  # its input buffer and it is demonstrably reachable. fm-spawn refuses on that
+  # status with a message saying exactly that (bin/fm-spawn.sh's
+  # spawn_send_cleared), which it cannot do if this collapses into the
+  # never-delivered status.
+  expect_code 3 "$status" "send_text_line should distinguish input it typed and then cleared"
   log=$(cat "$dir/log")
   assert_contains "$log" $'\x1f''send'$'\x1f''--workspace'$'\x1f''aaaaaaaa-0000-0000-0000-000000000000'$'\x1f''--surface'$'\x1f''bbbbbbbb-1111-1111-1111-111111111111'$'\x1f''--'$'\x1f''export TRACEPARENT=carrier' \
     "send_text_line did not send the trace export before the simulated Enter failure"

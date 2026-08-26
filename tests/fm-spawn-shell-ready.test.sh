@@ -20,23 +20,25 @@
 # The stub can also refuse a send outright, which is a DIFFERENT failure: a pane
 # that cannot be reached at all is not a shell that is slow to start, and the
 # spawn must attribute it that way instead of waiting out the whole readiness
-# budget and then blaming shell-init latency. And a line can be left TYPED but
-# neither submitted nor cleared, which is the opposite failure again: the
-# endpoint answered, the text is sitting in its input line where it would prefix
-# whatever is typed there next, and the spawn must name that instead of claiming
-# the line was never typed. That third outcome only EXISTS on a backend that
-# composes a text line from a literal send plus Enter and then tries to clear
-# what it typed when the Enter fails, so the two cases for it drive a second
-# stub over the same shell state - `cmux`, which really does compose it that way
-# - rather than asking tmux for a status its single `send-keys ... Enter` cannot
-# produce.
+# budget and then blaming shell-init latency. And a composed line can fail in
+# two further ways, each its own endpoint state: left TYPED but neither
+# submitted nor cleared, so the text is sitting in the input line where it would
+# prefix whatever is typed there next; or typed, unsubmitted, and then CLEARED
+# again, so the endpoint answered twice and holds nothing. Neither may be told
+# as an unreachable endpoint, and neither may be told as the other. Both only
+# EXIST on a backend that composes a text line from a literal send plus Enter
+# and then tries to clear what it typed when the Enter fails, so their cases
+# drive a second stub over the same shell state - `cmux`, which really does
+# compose it that way - rather than asking tmux for a status its single
+# `send-keys ... Enter` cannot produce.
 #
-# The gate covers what is typed AFTER it, not the moment after that, so the stub
-# also models the residue: a literal the backend delivered which the shell's next
-# pre-prompt cycle flushed out of its input queue before reading it. That is
-# indistinguishable from a delivered line in the pane's own text, so the launch
-# needs a proof of its own on the far side - the endpoint's agent-state read -
-# rather than the backend's delivery receipt.
+# What is NOT covered here, deliberately: the gate proves the shell was reading
+# input immediately before a line is typed, not that the line then ran, and the
+# launch line has no proof of its own on the far side (kimi's ready signal
+# aside). A literal the backend delivered which the shell's next pre-prompt cycle
+# flushes out of its input queue is indistinguishable from a delivered line in
+# the pane's own text, so a spawn is still reported for it. That residual window
+# is a named gap in fm-spawn.sh's own contract, not a behaviour with a case here.
 #
 # And a marker only proves anything while nothing else can write it. /tmp is
 # world-writable and a task id is an ordinary slug, so the task temp root is a
@@ -126,12 +128,17 @@ submit_line() {
   ) >> "$S/exec.out" 2>&1 || true
 }
 
-stranded_holds() {  # <buffered-text>
+# Which composed-send failure this run models, keyed on the buffered text so a
+# case can fail one specific line and leave the rest of the sequence alone.
+# `stranded`: the Enter fails and the ctrl-c that follows fails too, so the text
+# stays in the buffer. `cleared`: only the Enter fails, and the ctrl-c really
+# does clear the buffer - the surface answered twice and nothing is left behind.
+holds() {  # <state-file> <buffered-text>
   local want
-  [ -f "$S/stranded" ] || return 1
-  want=$(cat "$S/stranded")
+  [ -f "$S/$1" ] || return 1
+  want=$(cat "$S/$1")
   [ -n "$want" ] || return 1
-  case "$1" in *"$want"*) return 0 ;; esac
+  case "$2" in *"$want"*) return 0 ;; esac
   return 1
 }
 
@@ -188,8 +195,8 @@ case "${1:-}" in
     buffered=$(cat "$S/buffer" 2>/dev/null || true)
     case "$key" in
       enter)
-        if stranded_holds "$buffered"; then
-          printf 'stranded\t%s\n' "$buffered" >> "$S/lines.log"
+        if holds stranded "$buffered" || holds cleared "$buffered"; then
+          printf 'unsubmitted\t%s\n' "$buffered" >> "$S/lines.log"
           printf 'cmux: send-key enter failed\n' >&2
           exit 1
         fi
@@ -198,9 +205,11 @@ case "${1:-}" in
         exit 0
         ;;
       ctrl-c)
-        # The clear of a line this stub could not submit fails too, which is
-        # exactly what leaves the text sitting in the input buffer.
-        if stranded_holds "$buffered"; then
+        # In the stranded case the clear of a line this stub could not submit
+        # fails too, which is exactly what leaves the text sitting in the input
+        # buffer. In the cleared case it succeeds and empties the buffer below,
+        # so the surface has answered twice and holds nothing.
+        if holds stranded "$buffered"; then
           printf 'cmux: send-key ctrl-c failed\n' >&2
           exit 1
         fi
@@ -251,9 +260,8 @@ submit_line() {
 case "$*" in
   *"#{pane_current_path}"*) cat "$S/cwd"; exit 0 ;;
   # The pane's foreground command, which is what tells an agent-free pane from
-  # one running a harness. It is the fake shell until a launch line really ran:
-  # the harness binary records itself here when it starts, exactly as a real
-  # exec would put itself in the pane's foreground.
+  # one running a harness. It is the fake shell until a launch line really ran,
+  # because the harness binary records itself here when it starts.
   *"#{pane_current_command}"*)
     if [ -f "$S/pane-command" ]; then cat "$S/pane-command"; else printf 'zsh\n'; fi
     exit 0
@@ -292,23 +300,6 @@ case "${1:-}" in
       if [ -f "$S/literal-fails" ]; then
         printf "can't find pane: %s\n" "${3:-}" >&2
         exit 1
-      fi
-      # A pre-prompt typeahead FLUSH, the residue the readiness gate cannot
-      # cover: the send succeeds, the pty echoes the text, and then the shell's
-      # next precmd discards its input queue before the line editor reads it, so
-      # the Enter that follows submits an empty line. Nothing distinguishes this
-      # from a delivered line in the pane's own scrollback, which is the whole
-      # reason the launch needs its own proof afterwards.
-      if [ -f "$S/flush-literal" ]; then
-        flush=$(cat "$S/flush-literal")
-        if [ -n "$flush" ]; then
-          case "${5:-}" in
-            *"$flush"*)
-              printf 'flushed\t%s\n' "${5:-}" >> "$S/lines.log"
-              exit 0
-              ;;
-          esac
-        fi
       fi
       printf '%s' "${5:-}" >> "$S/buffer"
       exit 0
@@ -352,8 +343,8 @@ SH
 set -u
 S="${FM_FAKE_SHELL_STATE:?FM_FAKE_SHELL_STATE unset}"
 printf 'launched\n' >> "$S/launched.log"
-# A launched harness is the pane's foreground command from here on, which is
-# what makes it visible to the endpoint's own agent-state read.
+# A launched harness is the pane's foreground command from here on, the way a
+# real exec would leave the pane looking.
 printf 'codex\n' > "$S/pane-command"
 exit 0
 SH
@@ -601,6 +592,47 @@ test_stranded_probe_refuses_as_uncleared_input() {
   pass "a probe that could not be submitted or cleared refuses as uncleared input"
 }
 
+# The third failure of a composed send, and the one a two-way reading gets
+# backwards: the literal landed, only the Enter failed, and the ctrl-c that
+# followed really did clear the line. The endpoint answered twice and its input
+# line is clean - so calling it unreachable sends the operator to a dead-pane or
+# dropped-server repair for a pane that is alive, and calling it uncleared input
+# sends them looking for text that is not there. The whole cost lands on the
+# operator: this gate also runs after the meta is published, where its refusal
+# becomes the task's durable last state that the fleet reads back.
+test_cleared_probe_refuses_as_neither_unreachable_nor_uncleared() {
+  local rec id out status probes
+  id=shell-ready-cleared-zd-$RUN_TAG
+  use_task_tmp "$id"
+  rec=$(make_shell_case shell-ready-cleared "$id" 0 0 cmux)
+  read_shell_record "$rec"
+  printf 'worktree-entry\n' > "$STATE_DIR/cleared"
+
+  out=$(run_shell_spawn "$id" \
+    FM_SPAWN_SHELL_READY_POLLS=4 FM_SPAWN_SHELL_READY_INTERVAL=0.05 \
+    FM_SPAWN_SHELL_READY_RESEND=2)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should refuse when its probe was typed and then cleared"
+  assert_contains "$out" "typed into" \
+    "the refusal did not say the probe reached the endpoint at all"$'\n'"$out"
+  assert_contains "$out" "cleared again" \
+    "the refusal did not say the probe was cleared, so nothing names the state the endpoint is in"$'\n'"$out"
+  assert_not_contains "$out" "could not be reached" \
+    "an endpoint that answered both the send and the clear was reported as unreachable"$'\n'"$out"
+  assert_not_contains "$out" "input could not be cleared" \
+    "a probe the endpoint DID clear was reported as input still sitting in its input line"$'\n'"$out"
+  assert_not_contains "$out" "never confirmed it was reading input" \
+    "a cleared probe was misreported as a slow shell"$'\n'"$out"
+  assert_no_grep "$(printf 'ran\ttreehouse get')" "$STATE_DIR/lines.log" \
+    "a worktree was acquired through a shell whose probe never ran"
+  assert_absent "$STATE_DIR/launched.log" \
+    "an agent was launched after a probe that never ran"
+  probes=$(grep -c 'touch ' "$STATE_DIR/lines.log" | tr -d ' ')
+  [ "$probes" = 1 ] \
+    || fail "the probe was sent $probes times, so a send that failed on its own error was retried anyway"
+  pass "a probe that was typed and then cleared refuses as neither unreachable nor uncleared"
+}
+
 # The same rule on the far side of meta publication, where the spawn's callers
 # read <id>.status rather than stderr: the export is sitting uncleared in the
 # worktree shell's input line, so the launch command must not be appended to it
@@ -695,12 +727,11 @@ test_planted_temp_root_keeps_its_mode_and_the_marker_stays_private() {
 # so it must refuse loudly BEFORE typing a command it cannot afford to lose -
 # rather than fall back to a shared path or push on unproven.
 #
-# Deliberately narrow: the root here already HOLDS gotmp and only then stopped
+# Narrow on purpose: the root here already HOLDS gotmp and only then stopped
 # being privately writable, which is why the spawn's own `mkdir -p <root>/gotmp`
-# still returns 0 and the refusal under test is the one that fires. A genuinely
-# foreign-planted root has no gotmp; there that mkdir fails first, `set -e` ends
-# the spawn on a bare permission error, and none of this explanation reaches the
-# operator. That wider case is NOT covered here and is tracked separately.
+# still returns 0 and the refusal under test is the one that fires. The wider
+# case - a root with no gotmp at all, where that mkdir is what fails first - is
+# the sibling case below.
 test_temp_root_that_cannot_hold_a_private_marker_refuses_the_spawn() {
   local rec id out status
   id=shell-ready-unwritable-z7-$RUN_TAG
@@ -721,6 +752,39 @@ test_temp_root_that_cannot_hold_a_private_marker_refuses_the_spawn() {
   assert_absent "$STATE_DIR/lines.log" \
     "the spawn typed into the pane before it could hold a private readiness marker"
   pass "a temp root that cannot hold a private marker refuses the spawn"
+}
+
+# The wider half of the same threat model: a temp root this account cannot write
+# INTO at all, so the spawn's own `mkdir -p <root>/gotmp` is what fails, before
+# any marker directory is attempted. /tmp is world-writable and a task id is an
+# ordinary predictable slug, so this is the shape a foreign-planted root really
+# has. The window already exists by then, so the failure that must not happen is
+# the silent one: `set -e` ending the spawn on a bare `mkdir: .../gotmp:
+# Permission denied`, which leaves the operator an orphan pane and a path with
+# no stated connection to a spawn - while the marker refusal one line later
+# explains itself in full.
+test_temp_root_the_spawn_cannot_write_into_refuses_by_name() {
+  local rec id out status
+  id=shell-ready-unwritable-root-ze-$RUN_TAG
+  rec=$(make_shell_case shell-ready-unwritable-root "$id" 0 0)
+  read_shell_record "$rec"
+  use_task_tmp "$id"
+  mkdir -p "$TASK_TMP_PATH"
+  chmod 500 "$TASK_TMP_PATH"
+
+  out=$(run_shell_spawn "$id")
+  status=$?
+  chmod 755 "$TASK_TMP_PATH"
+  [ "$status" -ne 0 ] || fail "spawn should refuse when it cannot write its own per-task temp root"
+  assert_contains "$out" "could not create the per-task temp root $TASK_TMP_PATH" \
+    "the refusal did not name the temp root it could not create, so the operator gets a bare mkdir error"$'\n'"$out"
+  assert_contains "$out" "refusing to spawn" \
+    "the refusal did not say the spawn was refused"$'\n'"$out"
+  assert_absent "$STATE_DIR/lines.log" \
+    "the spawn typed into the pane before it had a temp root to hold its readiness marker"
+  assert_absent "$STATE_DIR/launched.log" \
+    "an agent was launched without a per-task temp root"
+  pass "a temp root the spawn cannot write into refuses by name instead of a bare mkdir error"
 }
 
 # No behaviour change for a pane whose shell is already reading: every spawn
@@ -764,10 +828,12 @@ test_launch_gate_refusal_is_recorded_as_the_tasks_last_state
 test_lost_launch_send_after_meta_is_recorded_as_the_tasks_last_state
 test_unreachable_endpoint_refuses_with_the_backend_error
 test_stranded_probe_refuses_as_uncleared_input
+test_cleared_probe_refuses_as_neither_unreachable_nor_uncleared
 test_stranded_export_is_recorded_as_uncleared_input
 test_unconfirmed_probe_backs_off_instead_of_flooding_the_pane
 test_planted_temp_root_keeps_its_mode_and_the_marker_stays_private
 test_temp_root_that_cannot_hold_a_private_marker_refuses_the_spawn
+test_temp_root_the_spawn_cannot_write_into_refuses_by_name
 test_ready_shell_pays_at_most_one_poll_per_gate
 
 echo "# all fm-spawn-shell-ready tests passed"

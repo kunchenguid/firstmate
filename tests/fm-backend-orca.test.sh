@@ -7,6 +7,12 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-orca-tests)
+# A task id names the per-task temp root under the shared real /tmp, which this
+# file's spawn cases reap on their way out. Several worktrees of this repo run
+# their gate on one host at the same time, so any id whose root is reaped needs a
+# token unique to this run or two runs would delete each other's roots mid-spawn;
+# the mktemp suffix on this run's own temp root is already that token.
+RUN_TAG=${TMP_ROOT##*.}
 
 make_orca_fakebin() {  # <dir> -> echoes fakebin dir
   local fb="$1/fakebin"
@@ -525,7 +531,7 @@ test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
 
 test_spawn_writes_orca_metadata_and_launches_harness() {
   local proj wt data state config id out log
-  id="orcaspawnz1"
+  id="orcaspawnz1-$RUN_TAG"
   proj="$TMP_ROOT/spawn-project"
   wt="$TMP_ROOT/spawn-wt"
   data="$TMP_ROOT/spawn-data"
@@ -554,7 +560,7 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   assert_grep "worktree=$wt" "$state/$id.meta" "meta missing Orca worktree path"
   assert_not_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''create' \
     "spawn should reuse the implicit terminal returned by Orca worktree creation"
-  assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f''export GOTMPDIR=/tmp/fm-orcaspawnz1/gotmp'$'\x1f''--enter'$'\x1f''--json' \
+  assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f'"export GOTMPDIR=/tmp/fm-$id/gotmp"$'\x1f''--enter'$'\x1f''--json' \
     "spawn did not export GOTMPDIR through the Orca terminal"
   assert_contains "$(cat "$log")" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions" \
     "spawn did not send the selected harness launch command through Orca"
@@ -575,7 +581,7 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
 # unreachable-endpoint refusal unreachable on this backend entirely.
 test_spawn_reports_rejected_orca_send_as_undelivered_not_stranded() {
   local proj wt data state config id out status recorded
-  id="orcarejectz1"
+  id="orcarejectz1-$RUN_TAG"
   proj="$TMP_ROOT/reject-project"
   wt="$TMP_ROOT/reject-wt"
   data="$TMP_ROOT/reject-data"

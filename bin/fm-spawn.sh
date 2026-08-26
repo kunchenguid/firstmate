@@ -157,21 +157,29 @@
 #   A probe that cannot be DELIVERED is a different failure from one that was
 #   delivered and never answered: the send is not retried past its own error,
 #   and the refusal names the unreachable endpoint rather than blaming
-#   shell-init latency. A THIRD class sits between those two - a line the
-#   endpoint typed but could neither submit nor clear, which is now sitting in
-#   that shell's input line where it would prefix whatever is typed there next.
-#   That one is reported as the uncleared input it is (spawn_send_stranded and
-#   spawn_send_stranded_detail below) and is never re-sent onto the front of
-#   itself. It has a status of its own reserved across every backend, which an
-#   adapter may answer only when it really holds that state - an adapter that
-#   types and submits in one call never can, so it owes every failure the plain
-#   undelivered status however its own internals number them.
-#   Once the launch line is submitted, the endpoint is asked whether an agent
-#   actually came up, on the same recovery-grade classifier the control plane
-#   uses. A positively agent-free endpoint refuses instead of reporting a spawn,
-#   so a launch line the shell discarded after the gate cannot be reported as a
-#   started worker; a backend or launch command that cannot be classified is
-#   left alone rather than guessed at.
+#   shell-init latency. TWO more classes sit between those two, each naming a
+#   pane state and a repair neither of the first two does, and each with a
+#   status of its own reserved across every backend. A line the endpoint typed
+#   but could neither submit nor clear is now sitting in that shell's input line
+#   where it would prefix whatever is typed there next, so it is reported as the
+#   uncleared input it is (spawn_send_stranded and spawn_send_stranded_detail
+#   below) and is never re-sent onto the front of itself. A line the endpoint
+#   typed and then CLEARED again, because the submitting keystroke failed on its
+#   own, left an endpoint that is demonstrably alive and an input line that is
+#   demonstrably clean, so it is reported as neither unreachable nor uncleared
+#   (spawn_send_cleared and spawn_send_cleared_detail below). A reserved status
+#   is answerable only by an adapter that really holds that state - an adapter
+#   that types and submits in one call holds neither, so it owes every failure
+#   the plain undelivered status however its own internals number them.
+#   The gate proves the shell was reading input immediately BEFORE each line was
+#   typed, which is not the same as proving that line then ran. The worktree half
+#   has a backstop for the difference - the settle loop below waits for the
+#   pane's cwd to move and refuses when `treehouse get` never took effect. The
+#   launch half has none: the launch line is checked for backend delivery only
+#   (kimi alone waits for its own ready signal afterwards), so a launch line the
+#   shell's next pre-prompt cycle flushes right after the gate confirmed is
+#   still reported as a spawn. That residual window is named here rather than
+#   half-closed.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -2234,17 +2242,19 @@ fi
 # WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
 # worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
 : "${WT_TARGET:=$T}"
-# spawn_send_text_line: one line typed and submitted. Status 2 is RESERVED, for
-# every backend, for the one outcome the other two do not name - a line that was
-# typed and could then be neither submitted nor cleared (see spawn_send_stranded
-# below). An adapter may only answer 2 when it genuinely holds that state, which
-# in practice means the ones composing the line from a literal send plus Enter
-# and then trying to clear what they typed; an adapter that submits in one call
-# has no such state and must collapse every failure to 1, however its own
-# internals number them. bin/backends/orca.sh's send is the worked example: its
-# JSON envelope check exits 2 when Orca answered `ok:false` and NOTHING was
-# typed, so it collapses that itself rather than reporting the opposite of what
-# happened through a status whose meaning is fixed here.
+# spawn_send_text_line: one line typed and submitted. Statuses 2 and 3 are
+# RESERVED, for every backend, for the two outcomes a bare failure does not name
+# - a line that was typed and could then be neither submitted nor cleared (2,
+# see spawn_send_stranded below), and one that was typed and then cleared again
+# because only its submitting keystroke failed (3, see spawn_send_cleared). An
+# adapter may only answer either when it genuinely holds that state, which in
+# practice means the ones composing the line from a literal send plus Enter and
+# then trying to clear what they typed; an adapter that submits in one call has
+# neither state and must collapse every failure to 1, however its own internals
+# number them. bin/backends/orca.sh's send is the worked example: its JSON
+# envelope check exits 2 when Orca answered `ok:false` and NOTHING was typed, so
+# it collapses that itself rather than reporting the opposite of what happened
+# through a status whose meaning is fixed here.
 spawn_send_text_line() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
@@ -2281,22 +2291,39 @@ spawn_send_key() {  # <target> <key>
   esac
 }
 
-# spawn_send_text_line answers with THREE outcomes, not two, and the third names
-# a repair the other two do not: 0 is typed and submitted, status 2 is a line
-# that WAS typed but could neither be submitted nor cleared - it is sitting in
-# that shell's input line, where it prefixes whatever is typed there next - and
-# any other nonzero status left nothing behind because the endpoint never
-# answered. Who may answer 2 at all - and why an adapter's own internal 2 is not
+# spawn_send_text_line answers with FOUR outcomes, not two, because a failed
+# send leaves the endpoint in more than one state and each state has its own
+# repair: 0 is typed and submitted; status 2 is a line that WAS typed but could
+# neither be submitted nor cleared, so it is sitting in that shell's input line
+# where it prefixes whatever is typed there next; status 3 is a line that was
+# typed and then CLEARED again after only its submitting keystroke failed, so
+# the endpoint answered twice, its input line is clean, and nothing ran; and
+# status 1 is the send that never landed at all, which is the only one that says
+# anything about the endpoint being unreachable.
+#
+# Collapsing 3 into 1 is what this pair exists to prevent. The adapters that
+# compose the line (bin/backends/cmux.sh, bin/backends/zellij.sh) can reach it
+# on their own reasoning - the ladder's Enter and its C-c fail independently -
+# and reporting it as an undelivered send tells the operator a live endpoint is
+# dead, which at the post-meta launch gate becomes the task's durable last
+# state and points its repair at a dropped server instead of a re-spawn.
+#
+# Who may answer 2 or 3 at all - and why an adapter's own internal 2 is not
 # automatically this one - is spawn_send_text_line's own contract above, so by
 # the time a status reaches here it already carries that meaning. Every caller
-# reporting a failed send composes its message through here, so a stranded line
-# is never reported as one that was never typed and the operator is never sent to
-# the wrong repair.
+# reporting a failed send composes its message through here, so no state is ever
+# told as another one and the operator is never sent to the wrong repair.
 spawn_send_stranded() {  # <status>
   [ "$1" -eq 2 ]
 }
 spawn_send_stranded_detail() {  # <what-was-typed>
   printf '%s' "$1 input could not be cleared for $W: the $BACKEND backend typed it but could neither submit nor clear it, so it is sitting uncleared in that shell's input line where it would prefix whatever is typed there next"
+}
+spawn_send_cleared() {  # <status>
+  [ "$1" -eq 3 ]
+}
+spawn_send_cleared_detail() {  # <what-was-typed>
+  printf '%s' "$1 input was typed into $W and then cleared again: the $BACKEND backend could not submit it and cleared what it had typed, so that endpoint is reachable and its input line is clean, but the line never ran"
 }
 
 kimi_capture() {
@@ -2381,7 +2408,18 @@ spawn_fail_after_meta() {  # <detail>
 # below keeps its marker inside this same root and teardown already removes it.
 TASK_TMP="/tmp/fm-$ID"
 [ -d "$TASK_TMP" ] || SPAWN_TASK_TMP_CREATED=1
-mkdir -p "$TASK_TMP/gotmp"
+# Guarded, and not left to `set -e`, for the same reason the marker directory
+# below refuses out loud: /tmp is world-writable and a task id is an ordinary
+# predictable slug, so this whole root is a path another local account can
+# pre-create at a mode this one cannot write into. The window already exists by
+# now, so a bare `mkdir: .../gotmp: Permission denied` leaves the operator an
+# orphan pane and a path they have no reason to connect to a spawn - while the
+# adjacent failure of the marker directory inside this root explains itself in
+# full. Both are the same refusal and owe the same explanation.
+mkdir -p "$TASK_TMP/gotmp" || {
+  echo "error: could not create the per-task temp root $TASK_TMP for $ID (its own reason is above); a path under world-writable /tmp named after the task id may already belong to another local account, and the readiness marker that proves the endpoint shell ran what was typed into it lives there; refusing to spawn" >&2
+  exit 1
+}
 
 # The readiness marker below is a correctness boolean, so it lives in a
 # directory this spawn CREATED and never in one it adopted. /tmp is
@@ -2487,7 +2525,7 @@ fi
 # rather than the real command: re-sending `treehouse get` would acquire a
 # second worktree, and re-sending a launch would start a second agent.
 #
-# Four distinct refusals, never conflated, because each names a different
+# Five distinct refusals, never conflated, because each names a different
 # repair. A probe that the BACKEND COULD NOT DELIVER (a pane that died, a
 # dropped server) is not shell-init latency: the send is not retried past its
 # own nonzero status, so the spawn refuses at once with the unreachable endpoint
@@ -2497,9 +2535,12 @@ fi
 # status 2) is the opposite failure - the endpoint answered and the probe text is
 # now sitting in its input line - so it is reported as the stranded input it is,
 # through spawn_send_stranded_detail, and is not re-sent onto the front of that
-# text. A marker whose directory stopped being private is not proof at all and
-# refuses rather than being believed. Only a probe that was genuinely delivered
-# and never answered gets the readiness-timeout message.
+# text. A probe that was typed and then CLEARED again (status 3) says the
+# endpoint answered twice and left nothing behind, so it is reported as neither
+# of those two: an unreachable-endpoint message would send the operator to
+# repair a pane that is alive. A marker whose directory stopped being private is
+# not proof at all and refuses rather than being believed. Only a probe that was
+# genuinely delivered and never answered gets the readiness-timeout message.
 #
 # Re-sends BACK OFF instead of repeating at a flat cadence: after N polls, then
 # 2N, 4N and so on, capped so no more than ten times the first gap ever passes
@@ -2537,6 +2578,10 @@ spawn_wait_shell_ready() {  # <target> <label> <what-would-be-typed>
     SPAWN_READY_REFUSAL="error: task $ID's $(spawn_send_stranded_detail 'shell-readiness probe'); refusing to type $what into it; inspect window $T"
     return 1
   fi
+  if spawn_send_cleared "$send_status"; then
+    SPAWN_READY_REFUSAL="error: task $ID's $(spawn_send_cleared_detail 'shell-readiness probe'), so $what was never typed; inspect window $T"
+    return 1
+  fi
   if [ "$send_status" -ne 0 ]; then
     SPAWN_READY_REFUSAL="error: task $ID's endpoint could not be reached: the $BACKEND backend failed to deliver the shell-readiness probe (status $send_status; its own diagnostic, if any, is above), so $what was never typed; inspect window $T"
     return 1
@@ -2558,6 +2603,11 @@ spawn_wait_shell_ready() {  # <target> <label> <what-would-be-typed>
       if spawn_send_stranded "$send_status"; then
         rm -f "$marker"
         SPAWN_READY_REFUSAL="error: task $ID's $(spawn_send_stranded_detail 'shell-readiness probe re-send'); refusing to type $what into it; inspect window $T"
+        return 1
+      fi
+      if spawn_send_cleared "$send_status"; then
+        rm -f "$marker"
+        SPAWN_READY_REFUSAL="error: task $ID's $(spawn_send_cleared_detail 'shell-readiness probe re-send'), so $what was never typed; inspect window $T"
         return 1
       fi
       if [ "$send_status" -ne 0 ]; then
@@ -2602,6 +2652,10 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get' || WT_SEND_STATUS=$?
   if spawn_send_stranded "$WT_SEND_STATUS"; then
     echo "error: task $ID's $(spawn_send_stranded_detail "'treehouse get'"); no worktree was acquired; inspect window $T" >&2
+    exit 1
+  fi
+  if spawn_send_cleared "$WT_SEND_STATUS"; then
+    echo "error: task $ID's $(spawn_send_cleared_detail "'treehouse get'") although its shell had just been proven ready, so no worktree was acquired; inspect window $T" >&2
     exit 1
   fi
   if [ "$WT_SEND_STATUS" -ne 0 ]; then
@@ -3213,6 +3267,8 @@ GOTMP_SEND_STATUS=0
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp" || GOTMP_SEND_STATUS=$?
 if spawn_send_stranded "$GOTMP_SEND_STATUS"; then
   spawn_fail_after_meta "$(spawn_send_stranded_detail 'the Go temp export'); refusing to append the launch command, so the agent was not launched"
+elif spawn_send_cleared "$GOTMP_SEND_STATUS"; then
+  spawn_fail_after_meta "$(spawn_send_cleared_detail 'the Go temp export') although its shell had just been proven ready, so the agent was not launched"
 elif [ "$GOTMP_SEND_STATUS" -ne 0 ]; then
   spawn_fail_after_meta "the Go temp export could not be delivered to $W although its shell had just been proven ready, so the agent was not launched"
 fi
