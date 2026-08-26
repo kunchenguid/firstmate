@@ -1424,6 +1424,7 @@ def blob_identity_digest(value, volatile_fields=()):
 
 def upload_json_blob(
     controller, account, container, name, value, tags, overwrite=False, volatile_fields=(),
+    if_match=None,
 ):
     payload = canonical_bytes(value) + b"\n"
     digest = hashlib.sha256(payload).hexdigest()
@@ -1436,11 +1437,14 @@ def upload_json_blob(
         metadata = dict(tags_to_metadata(tags))
         metadata["content_digest"] = digest
         metadata["identity_digest"] = identity
-        _, rc, stderr = az(controller, [
+        upload_args = [
             "storage", "blob", "upload", "--auth-mode", "login", "--account-name", account,
             "--container-name", container, "--name", name, "--file", path,
             "--overwrite", "true" if overwrite else "false", "--metadata",
-        ] + ["{}={}".format(key, value) for key, value in sorted(metadata.items())], check=False)
+        ] + ["{}={}".format(key, value) for key, value in sorted(metadata.items())]
+        if if_match is not None:
+            upload_args += ["--if-match", if_match]
+        _, rc, stderr = az(controller, upload_args, check=False)
         if rc != 0:
             # A create-once blob that already carries exactly these bytes is
             # this same action replaying after a lost or timed-out response,
@@ -2877,6 +2881,7 @@ def mutate_execute(controller, action):
     upload_json_blob(
         controller, os.environ.get("FM_AZURE_STORAGE_NAME", ""), names["state-container"],
         names["staging-request"], request, tags, overwrite=True,
+        if_match=(action.get("resources") or {}).get("staging-request", {}).get("immutable_id"),
     )
     # Crewmate payload plane: the digest-bound request carries only manifests;
     # the archives ride private blobs and reach the guest over short-lived

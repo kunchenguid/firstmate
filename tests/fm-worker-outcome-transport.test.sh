@@ -483,6 +483,7 @@ action = {
     },
 }
 resources = {
+    "vm": {"id": "/vm/fresh", "power_state": "VM running"},
     "task-command": {"id": "/vm/fresh/task-command"},
     "staging-request": {
         "id": "/blob/request", "immutable_id": "assignment-request-etag",
@@ -501,6 +502,30 @@ provider.run_command_instance_view = lambda *_args, **_kwargs: {
 }
 disposition, recovered = provider.execute_terminal_disposition(controller, action, resources)
 assert disposition == provider.EXECUTE_DISPOSITION_SUBMIT and recovered is None
+
+provider.inventory = lambda *_args, **_kwargs: {"workers": []}
+provider.worker_by_slot = lambda *_args, **_kwargs: {"slot": 6}
+provider.recorded_exact = lambda *_args, **_kwargs: resources
+execute_terminal_disposition = provider.execute_terminal_disposition
+provider.execute_terminal_disposition = lambda *_args, **_kwargs: (
+    provider.EXECUTE_DISPOSITION_SUBMIT, None,
+)
+provider.action_tags = lambda *_args, **_kwargs: {}
+upload_calls = []
+def reject_changed_etag(_controller, args, **_kwargs):
+    upload_calls.append(args)
+    return None, 1, "ConditionNotMet"
+provider.az = reject_changed_etag
+try:
+    provider.mutate_execute(controller, action)
+except provider.ProviderError as exc:
+    assert "exact worker staging upload failed" in str(exc), exc
+else:
+    raise AssertionError("a concurrent staging overwrite was accepted")
+assert len(upload_calls) == 1, upload_calls
+assert upload_calls[0][-2:] == ["--if-match", "assignment-request-etag"], upload_calls[0]
+provider.execute_terminal_disposition = execute_terminal_disposition
+
 changed = copy.deepcopy(resources)
 changed["staging-request"]["immutable_id"] = "post-staging-etag"
 try:
