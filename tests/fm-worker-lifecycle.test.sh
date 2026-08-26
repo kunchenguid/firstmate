@@ -831,17 +831,15 @@ finally:
     module.ROOT = real_root
 
 # Azure's actual fresh managed Run Command omits source entirely and exposes
-# the async preflight stub as Failed/-202. The exact untouched staging pair is
-# the run-owned proof that this is the one initial submission. Any other exit
-# remains ambiguous. The accepted update atomically carries both execution
-# bindings in its tags, so a replay cannot pass through this initial gate.
+# the async preflight stub as Failed/-202. The exact assignment-captured blob
+# ETags prove this is the one initial submission even if the landed supervisor
+# changed after create. A staged request changes its ETag before a replay, so
+# the accepted update still cannot pass through this initial gate twice.
 fresh_resources = copy.deepcopy(worker["resources"])
-for kind, value in module.initial_execute_staging_pair(execute_action).items():
-    body = module.canonical_bytes(value) + b"\n"
-    fresh_resources[kind]["digest"] = hashlib.sha256(body).hexdigest()
-    fresh_resources[kind]["length"] = len(body)
+fresh_resources["staging-request"]["digest"] = "7" * 64
+fresh_resources["staging-result"]["digest"] = "8" * 64
 crashed_resources = copy.deepcopy(fresh_resources)
-crashed_resources["staging-request"]["digest"] = "0" * 64
+crashed_resources["staging-request"]["immutable_id"] = "post-staging-etag"
 active_resources["value"] = crashed_resources
 retained_execute(
     {"provisioningState": "Succeeded"},

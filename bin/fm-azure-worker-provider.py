@@ -2677,12 +2677,20 @@ def initial_execute_staging_pair(action):
 
 
 def initial_execute_staging_is_exact(action, resources):
-    for kind, value in initial_execute_staging_pair(action).items():
-        payload = canonical_bytes(value) + b"\n"
-        resource = resources.get(kind) or {}
+    # The controller captured each assignment blob's ETag before it minted the
+    # execute action. That identity survives a later source checkout update,
+    # while any request/result overwrite changes it before a replay can submit.
+    # Re-deriving the assignment body from today's supervisor bytes rejects a
+    # real untouched initial stub whenever code landed between create and run.
+    expected = action.get("resources") or {}
+    for kind in ("staging-request", "staging-result"):
+        current = resources.get(kind) or {}
+        prior = expected.get(kind) or {}
         if (
-            resource.get("digest") != hashlib.sha256(payload).hexdigest()
-            or resource.get("length") != len(payload)
+            not current.get("id")
+            or current.get("id") != prior.get("id")
+            or not current.get("immutable_id")
+            or current.get("immutable_id") != prior.get("immutable_id")
         ):
             return False
     return True

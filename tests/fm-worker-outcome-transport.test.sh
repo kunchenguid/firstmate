@@ -456,6 +456,65 @@ CALLSITES
 
 run_outcome_call_sites
 
+run_initial_stub_adoption_after_source_update() {
+  python3 - "$PROVIDER" <<'PY' || fail "fresh source-absent execute stub was not adopted exactly once"
+import copy
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("fm_provider", sys.argv[1])
+provider = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(provider)
+controller = {"prefix": "fmtest", "resource_group": "rg-test"}
+bindings = {
+    "home_binding": "a" * 64, "task": "fresh-task",
+    "task_generation": "spawn:fresh", "assignment_generation": "asg-00000038",
+    "account_binding": "b" * 64, "worktree_binding": "c" * 64,
+    "repository_binding": "d" * 64, "repository_generation": "e" * 40,
+}
+action = {
+    "type": "execute", "slot": 6, "bindings": bindings,
+    "cloud_instance_id": "fresh-vm", "request_digest": "1" * 64,
+    "idempotency_key": "2" * 64,
+    "request": {**bindings, "request_digest": "1" * 64},
+    "resources": {
+        "staging-request": {"id": "/blob/request", "immutable_id": "assignment-request-etag"},
+        "staging-result": {"id": "/blob/result", "immutable_id": "assignment-result-etag"},
+    },
+}
+resources = {
+    "task-command": {"id": "/vm/fresh/task-command"},
+    "staging-request": {
+        "id": "/blob/request", "immutable_id": "assignment-request-etag",
+        "digest": "7" * 64, "length": 901,
+    },
+    "staging-result": {
+        "id": "/blob/result", "immutable_id": "assignment-result-etag",
+        "digest": "8" * 64, "length": 117,
+    },
+}
+provider.show_full = lambda *_args, **_kwargs: {
+    "properties": {"source": None, "provisioningState": "Succeeded"},
+}
+provider.run_command_instance_view = lambda *_args, **_kwargs: {
+    "executionState": "Failed", "exitCode": -202, "output": "", "error": "",
+}
+disposition, recovered = provider.execute_terminal_disposition(controller, action, resources)
+assert disposition == provider.EXECUTE_DISPOSITION_SUBMIT and recovered is None
+changed = copy.deepcopy(resources)
+changed["staging-request"]["immutable_id"] = "post-staging-etag"
+try:
+    provider.execute_terminal_disposition(controller, action, changed)
+except provider.ProviderError as exc:
+    assert "outside the exact initial staging state" in str(exc), exc
+else:
+    raise AssertionError("a post-staging replay passed through the initial stub gate")
+PY
+  pass "source-absent -202 stub uses assignment-captured blob identity and rejects post-staging replay"
+}
+
+run_initial_stub_adoption_after_source_update
+
 run_resume_after_exact_compute_removal() {
   python3 - "$PROVIDER" <<'PY' || fail "retained-disk resume rejected absent deleted compute children"
 import copy
