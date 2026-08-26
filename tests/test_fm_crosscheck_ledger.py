@@ -1,6 +1,7 @@
 import importlib.util
 import copy
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -28,6 +29,108 @@ REVIEWER_SPEC.loader.exec_module(PI_REVIEWER)
 
 
 class CrosscheckLedgerValidationTests(unittest.TestCase):
+    def test_pre_contract_local_clear_run_remains_loadable(self) -> None:
+        task_id = "legacy-local-clear"
+        pull_request = "https://github.com/example/project/pull/8"
+        ledger = {
+            "schema": "firstmate.crosscheck-ledger.v2",
+            "task_id": task_id,
+            "pull_request": pull_request,
+            "findings": [],
+            "runs": [{
+                "active_blockers": [],
+                "at": "2026-08-06T01:22:58Z",
+                "base_sha": "b" * 40,
+                "citations": [{"path": "source.py", "line": 1}],
+                "claims_sha256": "c" * 64,
+                "head_sha": "a" * 40,
+                "new_findings": [],
+                "reviewer": {
+                    "account_home": "/legacy/reviewer",
+                    "effort": "xhigh",
+                    "harness": "codex",
+                    "model": "gpt-5.6-sol",
+                },
+                "state": "clear",
+                "summary": "Legacy semantic review completed.",
+                "suspicions": [],
+                "updated_findings": [],
+            }],
+        }
+        loaded = CROSSCHECK.validate_ledger(ledger, task_id, pull_request)
+        self.assertEqual(loaded["runs"][0]["state"], "clear")
+
+    def test_local_git_objects_accelerate_an_exact_remote_fetch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            home = root / "home"
+            repository = home / "projects" / "project"
+            repository.mkdir(parents=True)
+            subprocess.run(
+                ["git", "-C", str(repository), "init", "--quiet", "-b", "main"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "user.name", "fixture"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "user.email", "fixture@example.invalid"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repository), "remote", "add", "origin", "https://github.com/example/project.git"],
+                check=True,
+            )
+            (repository / "source.py").write_text("base = True\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repository), "add", "source.py"], check=True)
+            subprocess.run(["git", "-C", str(repository), "commit", "--quiet", "-m", "base"], check=True)
+            base = subprocess.check_output(
+                ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+            ).strip()
+            subprocess.run(["git", "-C", str(repository), "switch", "--quiet", "-c", "feature"], check=True)
+            (repository / "source.py").write_text("base = False\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repository), "commit", "--quiet", "-am", "feature"], check=True)
+            head = subprocess.check_output(
+                ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+            ).strip()
+            subprocess.run(
+                ["git", "-C", str(repository), "update-ref", "refs/pull/8/head", head],
+                check=True,
+            )
+            snapshot = {
+                "base_repo": "example/project",
+                "base_ref": "main",
+                "number": 8,
+                "head_sha": head,
+            }
+            reference = CROSSCHECK.local_fetch_reference(home, snapshot)
+            self.assertEqual(reference, repository.resolve())
+            destination = root / "review"
+            old_remote = os.environ.get("FM_CROSSCHECK_FETCH_REMOTE")
+            os.environ["FM_CROSSCHECK_FETCH_REMOTE"] = str(repository)
+            try:
+                resolved_base = CROSSCHECK.prepare_review_checkout(
+                    destination, snapshot, reference=reference
+                )
+            finally:
+                if old_remote is None:
+                    os.environ.pop("FM_CROSSCHECK_FETCH_REMOTE", None)
+                else:
+                    os.environ["FM_CROSSCHECK_FETCH_REMOTE"] = old_remote
+            self.assertEqual(resolved_base, base)
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "-C", str(destination), "rev-parse", "HEAD"], text=True
+                ).strip(),
+                head,
+            )
+            alternate = destination / ".git" / "objects" / "info" / "alternates"
+            self.assertEqual(
+                Path(alternate.read_text(encoding="utf-8").strip()),
+                (repository / ".git" / "objects").resolve(),
+            )
+
     def test_semantic_tool_events_reach_durable_finding_and_verified_fix(self) -> None:
         task_id = "semantic-ledger-reachability"
         pull_request = "https://github.com/example/project/pull/8"

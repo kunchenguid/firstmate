@@ -13,10 +13,16 @@ It does not rerun CI, manufacture proof scripts, or launch verifier VMs.
 Use a unique task ID and the full public GitHub PR URL:
 
 ```sh
+set -a
+. ~/.fm-azure/fleet.env
+set +a
 FM_HOME=/Users/dongkeun/firstmate-home \
   bin/fm-crosscheck.sh run <unique-task-id> \
   https://github.com/OWNER/REPO/pull/NUMBER
 ```
+
+The fleet environment is operator-private Azure configuration. Load it into the
+process environment; never paste its values into a prompt or command.
 
 A new task ID needs no pre-created metadata file. Existing state must match the
 same task and PR identity or the run fails closed.
@@ -57,6 +63,10 @@ The trusted controller fetches `refs/pull/<number>/head`, checks it against the
 live GitHub API head, resolves the merge base, and builds a bounded read-only
 snapshot. The reviewer can search and read that snapshot but has no generic
 shell, edit, GitHub, cloud, credential, MCP, or arbitrary network tool.
+
+When the current directory or `$FM_HOME/projects/<repo>` is a matching GitHub
+checkout, Crosscheck reuses its content-addressed Git objects. It still fetches
+and verifies the live public PR ref; the local checkout is only a transfer cache.
 
 The reviewer must:
 

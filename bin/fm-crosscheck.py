@@ -3657,6 +3657,10 @@ def validate_ledger(value: Any, task_id: str, url: str) -> dict[str, Any]:
             isinstance(reviewer, dict)
             and reviewer.get("execution_mode") != "azure-compartment-v1"
             and run["state"] in {"clear", "blocking"}
+            and (
+                reviewer.get("review_contract_sha256") is not None
+                or reviewer.get("evidence_policy") is not None
+            )
         )
         if (
             isinstance(reviewer, dict)
@@ -4281,10 +4285,17 @@ def validate_reviewer_evidence_contract(
     if policy is None:
         require(mode is None, f"{label}.reviewer legacy evidence mode is mixed")
         if run["state"] in {"clear", "blocking"}:
-            require(
-                isinstance(reviewer.get("execution_proof"), dict),
-                f"{label}.reviewer legacy semantic run needs execution_proof",
-            )
+            if reviewer.get("execution_proof") is None:
+                require(
+                    set(reviewer) == {"harness", "model", "effort", "account_home"},
+                    f"{label}.reviewer legacy semantic run needs execution_proof "
+                    "unless it has the exact pre-proof identity shape",
+                )
+            else:
+                require(
+                    isinstance(reviewer.get("execution_proof"), dict),
+                    f"{label}.reviewer legacy semantic run needs execution_proof",
+                )
         return
     require(
         policy == EVIDENCE_POLICY_CONDITIONAL_V1,
@@ -6717,8 +6728,80 @@ def render_unloadable_ledger_report(
     )
 
 
+def github_slug_for_checkout(checkout: Path) -> str | None:
+    """Return owner/repo for a local checkout whose origin is GitHub."""
+
+    result = run_command(
+        ["git", "-C", str(checkout), "config", "--get", "remote.origin.url"],
+        timeout=10,
+        description="local fetch-reference inspection",
+    )
+    if result.returncode != 0:
+        return None
+    remote = result.stdout.strip()
+    match = re.fullmatch(
+        r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
+        r"([^/]+/[^/]+?)(?:\.git)?/?",
+        remote,
+        flags=re.IGNORECASE,
+    )
+    return match.group(1) if match is not None else None
+
+
+def local_fetch_reference(home: Path, snapshot_value: dict[str, Any]) -> Path | None:
+    """Find a matching local object store without trusting it for PR identity."""
+
+    explicit = os.environ.get("FM_CROSSCHECK_FETCH_REFERENCE")
+    repository_name = snapshot_value["base_repo"].split("/", 1)[1]
+    candidates: list[Path] = []
+    if explicit:
+        candidates.append(Path(explicit).expanduser())
+    candidates.extend((Path.cwd(), home / "projects" / repository_name))
+    seen: set[Path] = set()
+    for index, candidate in enumerate(candidates):
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            if explicit and index == 0:
+                fail(f"configured Crosscheck fetch reference is unavailable: {candidate}")
+            continue
+        if resolved in seen or not resolved.is_dir():
+            continue
+        seen.add(resolved)
+        slug = github_slug_for_checkout(resolved)
+        if slug is not None and slug.lower() == snapshot_value["base_repo"].lower():
+            return resolved
+        if explicit and index == 0:
+            fail(
+                "configured Crosscheck fetch reference does not match "
+                f"{snapshot_value['base_repo']}"
+            )
+    return None
+
+
+def install_git_alternate(destination: Path, reference: Path) -> None:
+    """Let a disposable checkout reuse content-addressed local Git objects."""
+
+    common_raw = git(reference, "rev-parse", "--git-common-dir")
+    common = Path(common_raw)
+    if not common.is_absolute():
+        common = reference / common
+    objects = (common / "objects").resolve(strict=True)
+    require(objects.is_dir(), "local Crosscheck fetch reference has no object store")
+    require("\n" not in str(objects), "local Crosscheck fetch reference path is malformed")
+    info = destination / ".git" / "objects" / "info"
+    info.mkdir(mode=0o700, parents=True, exist_ok=True)
+    alternate = info / "alternates"
+    descriptor = os.open(alternate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(str(objects) + "\n")
+
+
 def prepare_review_checkout(
-    destination: Path, snapshot_value: dict[str, Any], source: Path | None = None
+    destination: Path,
+    snapshot_value: dict[str, Any],
+    source: Path | None = None,
+    reference: Path | None = None,
 ) -> str:
     """Build one disposable exact-head checkout and return its reviewed base.
 
@@ -6751,6 +6834,8 @@ def prepare_review_checkout(
         "review checkout initialization failed at "
         f"{destination}: {(initialized.stderr or initialized.stdout).strip()[:500]}",
     )
+    if source is None and reference is not None:
+        install_git_alternate(destination, reference)
     fetched = run_command(
         [
             "git",
@@ -6970,6 +7055,7 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
             run = None
             reviewed_base = ""
             fetched_source: Path | None = None
+            fetch_reference = local_fetch_reference(home, snapshot_value)
             for position, candidate in enumerate(candidates):
                 config = candidate
                 if (
@@ -7003,7 +7089,10 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
                         # ledger, and verify -- so one stable value is used
                         # end to end.
                         resolved_base = prepare_review_checkout(
-                            review_dir, snapshot_value, fetched_source
+                            review_dir,
+                            snapshot_value,
+                            fetched_source,
+                            fetch_reference if fetched_source is None else None,
                         )
                         fetched_source = review_dir
                         if reviewed_base:
