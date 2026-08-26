@@ -139,11 +139,14 @@
 #   An unreachable origin, unresolved default branch, or non-clean worktree
 #   refuses the spawn rather than risking a PR based on stale history.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
-#   same clean check, but is reported as a stale checkout naming each submodule,
-#   both pins, and the command that clears it; nothing is converged or removed.
+#   same clean check, but is reported as a stale checkout naming each submodule
+#   and both pins; nothing is converged or removed, and no remedy is suggested.
 #   That report is only reached when each submodule's checked-out commit is
 #   already contained in one of its remotes, so a submodule carrying an unpushed
-#   commit keeps the conservative uncommitted-work refusal instead.
+#   commit keeps the conservative uncommitted-work refusal instead. That
+#   containment test reads local refs only and never fetches, so this gate stays
+#   usable offline; a stale remote-tracking ref can therefore make an unpushed
+#   commit look contained, which is exactly why no remedy command is printed.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1753,13 +1756,22 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 # the pin the previous base recorded. The refusal still stands and this gate
 # never touches the slot; it only names the cause, because "is not clean" while
 # the operator's own `git status` reads clean gives neither a cause nor a remedy.
-# A pin is only stale when the commit the slot holds is already contained in one
-# of the submodule's remotes, so the `submodule update --checkout` this refusal
-# prints can never orphan unlanded work. Anything that cannot be proven contained
-# - an unpushed commit, a submodule with no remote, a git error - falls through to
-# the conservative uncommitted-work refusal, as does any entry that is not exactly
-# a clean submodule sitting on a different pin. The diagnosis is buffered and only
-# emitted once every entry qualifies, so it can never contradict the verdict.
+# A pin is only reported as stale when the commit the slot holds is already
+# contained in one of the submodule's remotes. Anything that cannot be proven
+# contained - an unpushed commit, a submodule with no remote, a git error - falls
+# through to the conservative uncommitted-work refusal, as does any entry that is
+# not exactly a clean submodule sitting on a different pin. The diagnosis is
+# buffered and only emitted once every entry qualifies, so it can never
+# contradict the verdict.
+#
+# No remedy command is printed, deliberately. That containment check reads local
+# refs only and never fetches, because this gate has to stay usable offline. A
+# remote-tracking ref that has gone stale - its upstream branch deleted or
+# force-pushed, and never pruned - therefore still reads as containment, so a
+# commit that is really unpushed can look contained. Naming the submodule and both
+# pins is what the operator actually needs; printing a checkout command on a
+# judgement that can be fooled could cost them that commit, so the remedy is left
+# to the operator, who can see the whole picture.
 describe_stale_submodule_pins() {  # <worktree> <status>
   local worktree=$1 status=$2 line path want have unpushed lines=
   while IFS= read -r line; do
@@ -1810,7 +1822,6 @@ freshen_spawn_worktree_base() {  # <worktree>
   if [ -n "$status" ]; then
     if describe_stale_submodule_pins "$worktree" "$status"; then
       echo "error: pooled worktree '$worktree' has a stale submodule checkout, not uncommitted work; refusing to launch and leaving it untouched" >&2
-      echo "error: clear it with: git -C '$worktree' submodule update --checkout" >&2
     else
       echo "error: pooled worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
     fi

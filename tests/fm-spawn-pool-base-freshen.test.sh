@@ -322,7 +322,11 @@ test_stale_submodule_pin_explains_itself() {
   assert_contains "$out" "submodule 'ui'" "refusal did not name the submodule"
   assert_contains "$out" "$SUBPIN1" "refusal did not report the pin the slot actually has"
   assert_contains "$out" "$SUBPIN2" "refusal did not report the pin the base records"
-  assert_contains "$out" "submodule update --checkout" "refusal did not print the command that clears it"
+  # No remedy is printed on purpose: the containment check reads local refs only,
+  # so a stale remote-tracking ref can make an unpushed commit look contained, and
+  # a checkout command on that judgement could cost the operator a commit.
+  assert_not_contains "$out" "submodule update --checkout" \
+    "refusal printed a remedy command the containment check cannot stand behind"
   assert_not_contains "$out" "refusing to discard uncommitted work" \
     "a stale pin was misreported as uncommitted work"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
@@ -332,7 +336,7 @@ test_stale_submodule_pin_explains_itself() {
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf '# observed stale-pin refusal: %s\n' "$(printf '%s\n' "$out" | grep 'submodule' | head -n 1)"
   fi
-  pass "two consecutive spawns across a moved submodule pin end in a refusal naming both pins and the remedy"
+  pass "two consecutive spawns across a moved submodule pin end in a refusal naming both pins and no remedy"
 }
 
 test_unpushed_submodule_commit_is_still_uncommitted_work() {
@@ -342,9 +346,9 @@ test_unpushed_submodule_commit_is_still_uncommitted_work() {
   read_submodule_case "$rec"
   strand_submodule_pin_via_spawn 'pool-sub-unpushed-seed-r10'
   # A commit made inside the submodule and never pushed leaves the submodule work
-  # tree clean and the pins different - the same two facts a stale pin shows. The
-  # printed `submodule update --checkout` would move HEAD off this commit and
-  # orphan it, so this case must keep the conservative refusal.
+  # tree clean and the pins different - the same two facts a stale pin shows. Any
+  # checkout of the recorded pin would move HEAD off this commit and leave it
+  # unreferenced, so this case must keep the conservative refusal.
   printf 'unlanded submodule work\n' > "$POOL_DIR/ui/unlanded.txt"
   git -C "$POOL_DIR/ui" add unlanded.txt
   git -C "$POOL_DIR/ui" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
@@ -406,7 +410,7 @@ test_stale_pin_carrying_real_work_is_not_called_stale() {
   rec=$(make_submodule_case sub-both "$id")
   read_submodule_case "$rec"
   strand_submodule_pin_via_spawn 'pool-sub-both-seed-r9'
-  # Stale pin AND real work inside it: the remedy command would be wrong here, so
+  # Stale pin AND real work inside it: calling this merely stale would be wrong, so
   # the refusal must stay the conservative one.
   printf 'work that must survive\n' > "$POOL_DIR/ui/keep-me.txt"
 
