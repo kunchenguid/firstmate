@@ -157,6 +157,15 @@ test_prose_and_malformed_tokens_never_become_transitions() {
   # Every one of these must stay a non-transition. If any became a verb, free
   # text would be able to open decisions nobody raised - or silently close one
   # the captain is owed, which is the takeover this strictness exists to stop.
+  #
+  # All of these are UNBRACKETED, which is the shape this parser owns. A
+  # BRACKETED tag is deliberately NOT listed: verb parsing ends at the first
+  # "[", so "resolved [corr=deadbeef] [key=victim]:" reads as the bare verb
+  # "resolved" and does close the decision. That is the tag rule's own
+  # contract, not a gap in this one, and tightening it here would silently
+  # narrow a separately reviewed rule. The strictness below is what keeps an
+  # unbracketed token honest, and a bracketed impostor still has to get a
+  # well-formed key past _fm_decision_key_transition_allowed.
   local -a impostors=(
     'resolved the corr= issue yesterday [key=victim]'
     'resolved corr= [key=victim]'
@@ -164,7 +173,6 @@ test_prose_and_malformed_tokens_never_become_transitions() {
     'resolved corr=abcdef0123456789ab [key=victim]'
     'resolved corr=ZZZZbeefdeadbeef [key=victim]'
     'resolved xcorr=c44897ee2db4326b [key=victim]'
-    'resolved [corr=deadbeef] [key=victim]'
     'resolved corr=c44897ee2db4326 [key=victim]'
     'resolved anything=whatever [key=victim]'
     'resolved and then corr=c44897ee2db4326b happened [key=victim]'
@@ -315,6 +323,41 @@ test_consumer_verdicts_read_through_the_token() {
     && fail "a correlated blocked mentioning paused false-matched"
 
   pass "captain-relevance, terminal-verb, pause and captain-held all read through the token"
+}
+
+test_daemon_and_crew_state_case_arms_read_through_the_token() {
+  # Two consumers switch on the verb STRING rather than on a helper, so they
+  # cannot be proven through status_is_*: bin/fm-supervise-daemon.sh matches
+  # working|resolved|captain-held to take the transient-stale path instead of
+  # the terminal one, and bin/fm-crew-state.sh's map_log_state maps each verb to
+  # a run state, falling through to "unknown" on anything else.
+  #
+  # Before this fix a correlated line matched no arm of either: a correlated
+  # working line was escalated as terminally stale, and every correlated line
+  # read as run state "unknown". Pin the exact strings those arms compare
+  # against, for both the tokened and untokened spellings.
+  local verb
+  for verb in working resolved captain-held; do
+    [ "$(status_line_verb "$verb corr=$CORR [key=k]: note")" = "$verb" ] \
+      || fail "the daemon transient-stale arm no longer matches a correlated $verb"
+    [ "$(status_line_verb "$verb [key=k]: note")" = "$verb" ] \
+      || fail "the daemon transient-stale arm regressed for an untokened $verb"
+  done
+  for verb in working needs-decision blocked 'done' failed; do
+    [ "$(status_line_verb "$verb corr=$CORR: note")" = "$verb" ] \
+      || fail "map_log_state would still read a correlated $verb as unknown"
+    [ "$(status_line_verb "$verb: note")" = "$verb" ] \
+      || fail "map_log_state regressed for an untokened $verb"
+  done
+
+  # The same arms must stay closed to prose and to a malformed token, or a
+  # stuck worker could dodge a stale escalation by writing one.
+  [ "$(status_line_verb "working the corr= thing [key=k]: prose")" = working ] \
+    && fail "prose reduced to a bare working verb"
+  [ "$(status_line_verb "working corr=deadbeef [key=k]: malformed")" = working ] \
+    && fail "a malformed token reduced to a bare working verb"
+
+  pass "the daemon and crew-state verb case arms read through the token"
 }
 
 test_pending_reply_escalation_matching_is_unaffected() {
@@ -493,6 +536,7 @@ test_prose_and_malformed_tokens_never_become_transitions
 test_token_first_word_never_impersonates_a_transition
 test_captain_relevance_and_pause_are_unchanged_without_a_token
 test_consumer_verdicts_read_through_the_token
+test_daemon_and_crew_state_case_arms_read_through_the_token
 test_pending_reply_escalation_matching_is_unaffected
 test_incremental_and_whole_file_folds_agree_over_correlated_lines
 test_a_cursor_written_before_this_change_is_rebuilt
