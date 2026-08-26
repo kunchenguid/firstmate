@@ -131,12 +131,13 @@ read -r _FAKE_TAB_ID FAKE_CREW_PANE_ID <<EOF
 $FAKE_CREW_IDS
 EOF
 
-# --- deterministic bordered-composer loop, drawn in the scratch pane ---------
-# Mirrors tests/fm-afk-inject-e2e.test.sh's supervisor-loop.sh, but draws a
-# "│ > <buf> │" border so the bordered branch of
-# fm_backend_herdr_composer_state recognizes it, exactly like a bordered-TUI
-# harness composer. ALSO registers itself as a real herdr agent via `herdr
-# pane report-agent` and reports idle/working transitions around each
+# --- deterministic bare-composer loop, drawn in the scratch pane -------------
+# Mirrors tests/fm-afk-inject-e2e.test.sh's supervisor-loop.sh, but draws the
+# shared classifier's positively identified bare-agent shape (`❯ <buf>`). This
+# remains readable under the strict blank-row posture without pretending that
+# one side-bordered row is a complete composer box. ALSO registers itself as a
+# real herdr agent via `herdr pane report-agent` and reports idle/working
+# transitions around each
 # submission: fm_backend_herdr_send_text_submit's confirmation is now native
 # agent-state (agent get), not composer content (docs/herdr-backend.md
 # "Native agent-state submit confirmation"), so a synthetic pane that only
@@ -189,7 +190,7 @@ redraw() {
   else
     shown="$_buf"
   fi
-  printf '\r\033[K│ > %s │' "$shown"
+  printf '\r\033[K❯ %s' "$shown"
 }
 submit_line() {
   local _line=$_buf _c _hex

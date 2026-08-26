@@ -22,13 +22,16 @@
 # loop and the Linux restart supervisor stop instead of polling forever
 # reparented to init. FM_REMOTE_JOB_ORPHAN_GRACE_SECONDS is how long the root
 # must stay missing before that counts, so an ordinary transient never stops a
-# healthy worker. The supervisor additionally refuses to restart a child that
-# keeps failing immediately: it backs off up to
+# healthy worker. The supervisor additionally bounds how many times it restarts
+# a failing child, whether or not the failures are immediate: it backs off
+# between immediate failures up to
 # FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS and gives up after
-# FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS consecutive failures, since a restart
-# loop that never stays up only burns CPU and grows its log without bound. A
-# child that stays up for FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS clears that
-# count. fm-on's ensure path restarts a worker that gave up.
+# FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS failed children in total, since a
+# restart loop only burns CPU and grows its log without bound. A child that
+# stays up for FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS clears the
+# consecutive-failure backoff, but not that total restart guard, so a child
+# that dies just past the healthy threshold cannot restart without bound
+# either. fm-on's ensure path restarts a worker that gave up.
 set -u
 
 # A non-numeric override falls back to the default rather than crashing the
@@ -291,8 +294,17 @@ worker_stop_active_execution() {
   WORKER_ACTIVE_JOB=
 }
 
+# Ignore, rather than restore the default disposition for, the signals this
+# handler answers. A replacement stops a Linux worker by signalling its whole
+# isolated group, and the supervisor in that group forwards a second stop signal
+# to this same serving child, so a repeat is the normal case and not an
+# exception. Restoring the default let that second signal kill the shutdown part
+# way through, which left the ownership lock behind holding a half-written temp
+# file that no later worker could clear, so every replacement then failed to
+# report ready. A shutdown that hangs is still stopped: the caller escalates to
+# KILL, which no disposition can block.
 worker_shutdown() {
-  trap - HUP INT TERM
+  trap '' HUP INT TERM
   worker_publish_quarantine || {
     worker_error "cannot guard worker ownership for shutdown"
     trap worker_shutdown HUP INT TERM
@@ -485,7 +497,7 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
   WORKER_ACTIVE_JOB=
   [ "$timed_out" -eq 0 ] || return 124
   [ "$heartbeat_failed" -eq 0 ] || return 125
-  [ "$WORKER_PREEMPTED" -eq 0 ] || return 75
+  [ "$WORKER_PREEMPTED" -eq 0 ] || return "$FM_REMOTE_JOB_PREEMPTED_EXIT"
   return "$rc"
 }
 
@@ -734,7 +746,7 @@ worker_supervisor_shutdown() {
 }
 
 worker_supervise_linux() {
-  local account_home child_status started failures=0 backoff
+  local account_home child_status started failures=0 restarts=0 backoff
   account_home=$(worker_account_home) || { worker_error "cannot resolve account home"; return 1; }
   FM_ROOT=$(fm_remote_job_canonical_existing_dir "$FM_ROOT") || { worker_error "configured FM_ROOT is unsafe"; return 1; }
   [ -f "$FM_ROOT/AGENTS.md" ] && [ ! -L "$FM_ROOT/AGENTS.md" ] || { worker_error "FM_ROOT is not a Firstmate checkout"; return 1; }
@@ -760,16 +772,17 @@ worker_supervise_linux() {
     fi
     worker_supervisor_cleanup_dead_child "$account_home" "$WORKER_SUPERVISED_PID" || true
     WORKER_SUPERVISED_PID=
+    restarts=$((restarts + 1))
+    if [ "$restarts" -ge "$FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS" ]; then
+      worker_error "remote job worker exited $restarts times; stopping the supervisor"
+      return 1
+    fi
     if [ $((SECONDS - started)) -ge "$FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS" ]; then
       failures=0
       sleep 0.1
       continue
     fi
     failures=$((failures + 1))
-    if [ "$failures" -ge "$FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS" ]; then
-      worker_error "remote job worker failed $failures times without staying up; stopping the supervisor"
-      return 1
-    fi
     backoff=$failures
     [ "$backoff" -le "$FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS" ] ||
       backoff=$FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS

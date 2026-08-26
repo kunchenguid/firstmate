@@ -25,11 +25,11 @@
 # check only exists in a home that opted into the relay, and it is an O(1)
 # directory presence test plus a signature compare, with no tasks-axi call and no
 # backlog scan. A home with no pending terminal results pays nothing for it.
-# The full object is stashed verbatim, so any conversation context the relay
-# includes (in_reply_to: {author_handle, text}, null for a fresh mention) is
-# preserved for fmx-respond to handle follow-ups with continuity. The durable
-# context record lets a delayed follow-up recover the ORIGINAL platform/budget
-# even after this inbox file is drained.
+# The full object is stashed verbatim, so every conversation-context field the
+# relay includes is preserved for fmx-respond to handle with continuity; the
+# Relay section of docs/configuration.md owns that payload's wire contract. The
+# durable context record lets a delayed follow-up recover the ORIGINAL
+# platform/budget even after this inbox file is drained.
 #
 # Config (home .env, FMX_ENV_FILE, or env): FMX_PAIRING_TOKEN (required),
 # FMX_RELAY_URL (default https://myfirstmate.io). Auth: Authorization: Bearer

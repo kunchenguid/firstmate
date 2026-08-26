@@ -594,11 +594,15 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 # boundaries keep runtime dispatch from importing all five adapter ASTs into
 # every dispatcher consumer while preserving the runtime source operations.
 fm_backend_source() {  # <name>
+  # Each adapter is checked for readability before it is sourced: under set -e,
+  # Bash 3.2 (stock macOS) treats a failed `.` as fatal even inside `||`, so
+  # without the check this loader could never refuse a missing adapter.
   local name=$1
   fm_backend_validate "$name" || return 1
   case "$name" in
     tmux)
       if [ -z "${_FM_BACKEND_TMUX_SOURCED:-}" ]; then
+        [ -r "$FM_BACKEND_LIB_DIR/backends/tmux.sh" ] || return 1
         # shellcheck source=/dev/null
         . "$FM_BACKEND_LIB_DIR/backends/tmux.sh" || return 1
         _FM_BACKEND_TMUX_SOURCED=1
@@ -606,6 +610,7 @@ fm_backend_source() {  # <name>
       ;;
     herdr)
       if [ -z "${_FM_BACKEND_HERDR_SOURCED:-}" ]; then
+        [ -r "$FM_BACKEND_LIB_DIR/backends/herdr.sh" ] || return 1
         # shellcheck source=/dev/null
         . "$FM_BACKEND_LIB_DIR/backends/herdr.sh" || return 1
         _FM_BACKEND_HERDR_SOURCED=1
@@ -613,6 +618,7 @@ fm_backend_source() {  # <name>
       ;;
     zellij)
       if [ -z "${_FM_BACKEND_ZELLIJ_SOURCED:-}" ]; then
+        [ -r "$FM_BACKEND_LIB_DIR/backends/zellij.sh" ] || return 1
         # shellcheck source=/dev/null
         . "$FM_BACKEND_LIB_DIR/backends/zellij.sh" || return 1
         _FM_BACKEND_ZELLIJ_SOURCED=1
@@ -620,6 +626,7 @@ fm_backend_source() {  # <name>
       ;;
     orca)
       if [ -z "${_FM_BACKEND_ORCA_SOURCED:-}" ]; then
+        [ -r "$FM_BACKEND_LIB_DIR/backends/orca.sh" ] || return 1
         # shellcheck source=/dev/null
         . "$FM_BACKEND_LIB_DIR/backends/orca.sh" || return 1
         _FM_BACKEND_ORCA_SOURCED=1
@@ -627,6 +634,7 @@ fm_backend_source() {  # <name>
       ;;
     cmux)
       if [ -z "${_FM_BACKEND_CMUX_SOURCED:-}" ]; then
+        [ -r "$FM_BACKEND_LIB_DIR/backends/cmux.sh" ] || return 1
         # shellcheck source=/dev/null
         . "$FM_BACKEND_LIB_DIR/backends/cmux.sh" || return 1
         _FM_BACKEND_CMUX_SOURCED=1
@@ -808,19 +816,19 @@ fm_backend_busy_state() {  # <backend> <target>
   esac
 }
 
-# fm_backend_composer_state: classify the composer/input row of <target> as
+# fm_backend_composer_state: classify the composer/input area of <target> as
 # empty|pending|pending-unproven|unknown for callers that need a pre-submit
-# input guard or an adapter's conservative submit fallback. It is exposed so a
-# caller other than the send path (the away-mode daemon's supervisor-pane
-# pending-input guard, bin/fm-supervise-daemon.sh) can ask the same question
-# without duplicating per-backend composer-reading logic. tmux and herdr both
-# expose a named classifier already (fm_tmux_composer_state,
-# fm_backend_herdr_composer_state), as do orca and cmux
-# (fm_backend_orca_composer_state, fm_backend_cmux_composer_state); zellij's
-# submit path uses an internal content-diff approach with no separately named
-# classifier, so it reports unknown here - callers fall back to their own
-# policy, exactly as an unknown fm_backend_busy_state already does.
-fm_backend_composer_state() {  # <backend> <target> -> empty|pending|pending-unproven|unknown
+# input guard, a submit acknowledgement, or a launch-readiness check. It is
+# exposed so a caller other than the send path (the away-mode daemon's
+# supervisor-pane pending-input guard in bin/fm-supervise-daemon.sh, and
+# fm-spawn.sh's kimi readiness/delivery checks) can ask the same question
+# without duplicating per-backend composer reading. Every adapter's named
+# classifier is a THIN wrapper - capture plus a capability descriptor fed to
+# the one shared shape owner (bin/fm-composer-lib.sh,
+# fm_composer_classify_screen) - so no backend can hold a private shape
+# assumption; zellij's classifier reads `dump-screen --ansi`, which replaced
+# its old no-classifier content-diff reporting.
+fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pending|pending-unproven|unknown
   local backend=$1
   shift
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
@@ -829,6 +837,7 @@ fm_backend_composer_state() {  # <backend> <target> -> empty|pending|pending-unp
     herdr) fm_backend_herdr_composer_state "$@" ;;
     orca) fm_backend_orca_composer_state "$@" ;;
     cmux) fm_backend_cmux_composer_state "$@" ;;
+    zellij) fm_backend_zellij_composer_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }

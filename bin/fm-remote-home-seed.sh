@@ -130,7 +130,7 @@ if [ ! -f "$BRIEF" ]; then
   if [ "$NO_PROJECTS" -eq 1 ]; then
     "$SCRIPT_DIR/fm-brief.sh" "$ID" --secondmate --no-projects >/dev/null
   else
-    "$SCRIPT_DIR/fm-brief.sh" "$ID" --secondmate "${PROJECT_NAMES[@]}" >/dev/null
+    "$SCRIPT_DIR/fm-brief.sh" "$ID" --secondmate ${PROJECT_NAMES[@]+"${PROJECT_NAMES[@]}"} >/dev/null
   fi
   BRIEF_CREATED=1
 fi
@@ -157,7 +157,7 @@ done < "$BRIEF" > "$TMP/charter.remote"
 PROJECTS_CSV=
 : > "$TMP/project.records"
 PROJECT_INDEX=0
-for project in "${PROJECT_NAMES[@]}"; do
+for project in ${PROJECT_NAMES[@]+"${PROJECT_NAMES[@]}"}; do
   ORIGIN=${PROJECT_ORIGINS[$PROJECT_INDEX]}
   PROJECT_INDEX=$((PROJECT_INDEX + 1))
   MODE_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$project")

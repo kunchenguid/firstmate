@@ -12,7 +12,11 @@
 # has. Supervision health is MODEL-AWARE (fm_watcher_supervision_verdict in
 # bin/fm-wake-lib.sh): under the Claude Stop auto-arm model the watcher runs only
 # between turns, so mid-turn a fresh beacon with no live watcher is healthy and
-# only a stale beacon (beyond FM_GUARD_GRACE) is a genuine lapse; under every
+# only a stale beacon (beyond FM_GUARD_GRACE) is a genuine lapse; under the Pi
+# extension model the extension tears the watcher down and respawns it on every
+# actionable wake, so a fresh beacon with a genuinely unheld lock is healthy
+# while that live Pi session provably owns continuity; any held but unhealthy
+# lock is down; under every
 # persistent-watcher harness a live identity-matched watcher with a fresh beacon
 # is required. The banner names the true failing condition (a missing live
 # watcher process vs a genuinely stale beacon). The full banner is emitted once
@@ -152,7 +156,7 @@ in_flight=$FM_SUP_IN_FLIGHT
 sources=$FM_SUP_SOURCES
 needed=$FM_SUP_NEEDED
 beacon_desc=$FM_SUP_BEACON_DESC
-fm_watcher_supervision_verdict "$STATE" "$WATCH" "$GRACE" "$FM_HOME"
+fm_watcher_supervision_verdict "$STATE" "$WATCH" "$GRACE" "$FM_HOME" "$FM_ROOT"
 watcher_healthy=$FM_WATCHER_VERDICT_OK
 watcher_down_reason=$FM_WATCHER_VERDICT_REASON
 if [ "$needed" = false ]; then
