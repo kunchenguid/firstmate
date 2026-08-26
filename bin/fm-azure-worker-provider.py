@@ -2309,7 +2309,12 @@ def create_or_resume(controller, action):
                     raise ProviderError("visible worker belongs to another task or generation")
         elif reuse:
             recorded_exact(
-                action, existing, allow_missing=("vm", "nic", "os-disk"),
+                action,
+                existing,
+                allow_missing=(
+                    "vm", "nic", "os-disk", "monitor-extension",
+                    "bootstrap-command", "task-command", "ttl-schedule",
+                ),
                 allow_previous_cloud_generation=True,
             )
         else:
