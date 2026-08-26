@@ -29,6 +29,12 @@
 #      relaunch landed in a bare shell (the measured failure after the seat
 #      move). That aborts the revival episode loudly - notifier plus exit 3 -
 #      instead of arming a kicker that would type into nothing.
+#   5. A resumed LARGE session instead stops at the harness's summary-vs-full
+#      resume chooser (wording owner: bin/fm-totmann-relaunch-lib.sh, half 2b;
+#      seen live 26.08.2026). That chooser is ANSWERED, not aborted: up to
+#      three Enters take the highlighted default "Resume from summary" - the
+#      re-anchoring comes from the files anyway, full history is never needed.
+#      A chooser that survives them aborts the episode like a failed start.
 #
 # Revival mode - boot versus day-hang (captain finding 24.08.2026, O-0063
 # night: a post-reboot `--continue` resumed stale pre-reboot context and the
@@ -105,7 +111,7 @@ relaunch_cmd() { # the command to type; loud refusal instead of a guessed accoun
 }
 
 ergebnis_pruefen() { # after the relaunch: did the seat really start? 0 yes, 1 no
-  local text grund ausweg
+  local text grund ausweg versuche=0
   [ "$ERGEBNIS_SECS" -gt 0 ] 2>/dev/null || return 0
   sleep "$ERGEBNIS_SECS"
   text="$(tmx capture-pane -p -t "$TARGET" 2>/dev/null || true)"
@@ -113,6 +119,26 @@ ergebnis_pruefen() { # after the relaunch: did the seat really start? 0 yes, 1 n
     echo "note: relaunch result unreadable (empty capture of $TARGET) - treating as started"
     return 0
   fi
+  # The summary-vs-full chooser has a safe default (lib half 2b): answer it
+  # with bounded Enters so a revival never waits on a human for this. A
+  # chooser that survives every attempt is a failed start like any other.
+  while fm_totmann_resume_dialog_pending "$text"; do
+    versuche=$((versuche + 1))
+    if [ "$versuche" -gt 3 ]; then
+      echo "FEHLSTART: der Resume-Dialog (Summary gegen voller Verlauf) blieb in $TARGET nach 3 Enter-Versuchen offen." >&2
+      echo "FEHLSTART: Der Sitz braucht von Hand einen Menschen; nichts wurde bewaffnet, kein Reset getippt." >&2
+      if [ -n "$NOTIFY" ] && command -v "$NOTIFY" >/dev/null 2>&1; then
+        "$NOTIFY" "Die Firstmate-Sitzung haengt im Resume-Dialog (Summary gegen voller Verlauf); 3 automatische Enter haben ihn nicht geschlossen. Bitte einmal von Hand nachsehen." \
+          --prio hoch --projekt default >/dev/null 2>&1 || true
+      fi
+      return 1
+    fi
+    echo "note: resume chooser open - answering with the default (Enter on 'Resume from summary')"
+    tmx send-keys -t "$TARGET" Enter
+    sleep "$ERGEBNIS_SECS"
+    text="$(tmx capture-pane -p -t "$TARGET" 2>/dev/null || true)"
+    [ -n "$text" ] || break
+  done
   grund="$(fm_totmann_fehlstart_grund "$text")" || return 0
   ausweg="$(fm_totmann_fehlstart_ausweg "$grund")"
   echo "FEHLSTART: die Wiederbelebung tippte '$RELAUNCH' in $TARGET, aber das Fenster zeigt: $grund" >&2
@@ -125,7 +151,7 @@ ergebnis_pruefen() { # after the relaunch: did the seat really start? 0 yes, 1 n
 }
 # ---------------------------------------------------------------------------
 
-usage() { sed -n '2,74p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,80p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 tmx() { tmux ${TMUX_EXTRA[@]+"${TMUX_EXTRA[@]}"} "$@"; }
 
 is_shell_comm() { # the stable system shells; anything else in a pane is a live program

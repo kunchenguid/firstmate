@@ -6,6 +6,8 @@
 #   fm_totmann_relaunch_default          print the relaunch command for the seat
 #   fm_totmann_fehlstart_grund <text>    name the failure a pane capture shows
 #   fm_totmann_fehlstart_ausweg <grund>  print the operator's way out of it
+#   fm_totmann_resume_dialog_pending <text>  0 when the summary-vs-full resume
+#                                        chooser is open on the pane
 #
 # Usage (executed, for tests and one-off shell checks):
 #   fm-totmann-relaunch-lib.sh <function> [args...]
@@ -111,6 +113,34 @@ fm_totmann_fehlstart_grund() {
   return 1
 }
 
+# --- half 2b: the summary-vs-full resume chooser -----------------------------
+# Measured rendering (bundle strings of the installed claude 2.1.246, extracted
+# 26.08.2026; seen live after a revival the same morning - journal entry in
+# data/umbau-2026-08/journal.md): a --continue onto a large session stops at a
+# chooser titled "This session is <age> old and <tokens> tokens." offering
+# "Resume from summary (recommended)", "Resume full session as-is" and
+# "Don't ask me again". Unlike the failure markers above this one has a safe
+# default: plain Enter selects the highlighted first option, the summary -
+# measured live with exactly that keypress - and re-anchoring comes from the
+# files anyway, so full history is never needed. The chooser is therefore
+# ANSWERED by the revival (bin/fm-totmann.sh, bounded Enters), never reported.
+#
+# Vocabulary: one extended regex, deliberately two independent verbatim
+# substrings of the measured rendering (question sentence and option label) so
+# a single vendor string is never load-bearing. Override seam for tests and
+# version drift; a changed rendering is fixed here and in the test fixture,
+# never guessed at call time.
+FM_TOTMANN_RESUME_DIALOG_REGEX="${FM_TOTMANN_RESUME_DIALOG_REGEX:-Resuming the full session will consume|Resume from summary}"
+
+# fm_totmann_resume_dialog_pending <capture-text>: status 0 when the capture
+# shows the summary-vs-full resume chooser, status 1 otherwise (an empty
+# capture included).
+fm_totmann_resume_dialog_pending() {
+  local text=${1-}
+  [ -n "$text" ] || return 1
+  printf '%s' "$text" | grep -Eq -- "$FM_TOTMANN_RESUME_DIALOG_REGEX"
+}
+
 # fm_totmann_fehlstart_ausweg <grund>: the operator's way out, named so the
 # notification carries a next step and not just an alarm.
 fm_totmann_fehlstart_ausweg() {
@@ -126,13 +156,13 @@ fm_totmann_fehlstart_ausweg() {
   esac
 }
 
-fm_totmann_relaunch_usage() { sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+fm_totmann_relaunch_usage() { sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   set -uo pipefail
   case "${1:-}" in
     ''|-h|--help) fm_totmann_relaunch_usage; exit 0 ;;
-    fm_totmann_relaunch_default|fm_totmann_fehlstart_grund|fm_totmann_fehlstart_ausweg)
+    fm_totmann_relaunch_default|fm_totmann_fehlstart_grund|fm_totmann_fehlstart_ausweg|fm_totmann_resume_dialog_pending)
       fn=$1
       shift
       "$fn" "$@"

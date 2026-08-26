@@ -15,6 +15,11 @@
 #      session whose pane answers `No conversation found` aborts the revival
 #      episode (exit 3, loud message naming config/konten.tsv) and arms NO
 #      kicker; the same run against a healthy pane revives and arms one.
+#   6. The summary-vs-full resume chooser is ANSWERED, never reported: the
+#      measured harness wording (claude 2.1.246 bundle; seen live 26.08.2026,
+#      journal data/umbau-2026-08/journal.md) is recognized, the default
+#      (summary) gets a bounded number of Enters, exhaustion aborts loudly
+#      without arming a kicker, and a healthy revival gets no stray Enter.
 #
 # Isolation: fixture ledger, fixture HOME and FM_HOME under mktemp, tmux and
 # the notifier replaced by PATH shims that only write log files. Nothing
@@ -201,6 +206,130 @@ FM_TOTMANN_RELAUNCH_CMD="eigener-start --jetzt" "$TOTMANN" check >/dev/null 2>&1
 grep -q 'keys:eigener-start --jetzt' "$TMP/e2e-ov.log" \
   && ok "FM_TOTMANN_RELAUNCH_CMD still overrides the ledger default" \
   || fail "the explicit override must win: $(cat "$TMP/e2e-ov.log")"
+
+# --- 6. the summary-vs-full resume chooser is answered, never reported ------
+# Fixture wording measured from the harness itself, not guessed: the question
+# sentence and the three option labels are verbatim bundle strings of the
+# installed claude 2.1.246 (strings extraction, 26.08.2026), and the 9h44m /
+# 540k title values are the variant observed live in the journal entry of the
+# same day. The numbered "N. label" row shape is the verified menu rendering
+# already documented in bin/fm-anstoss.sh dialog_choice_pending.
+CAP_DIALOG="$(cat <<'DIALOG'
+This session is 9h44m old and 540k tokens.
+Resuming the full session will consume a substantial portion of your usage limits. We recommend resuming from a summary.
+1. Resume from summary (recommended)
+2. Resume full session as-is
+3. Don't ask me again
+DIALOG
+)"
+
+"$LIB" fm_totmann_resume_dialog_pending "$CAP_DIALOG" \
+  && ok "the measured resume-chooser wording is recognized" \
+  || fail "the resume chooser fixture must be recognized as pending"
+
+if "$LIB" fm_totmann_resume_dialog_pending "$CAP_OK" >/dev/null 2>&1; then
+  fail "a healthy capture must not read as an open chooser"
+else
+  ok "a healthy capture is not an open chooser (no stray Enter)"
+fi
+
+if "$LIB" fm_totmann_resume_dialog_pending "$CAP_TRUST" >/dev/null 2>&1; then
+  fail "the trust dialog must not read as the resume chooser"
+else
+  ok "other open dialogs are not mistaken for the resume chooser"
+fi
+
+if "$LIB" fm_totmann_resume_dialog_pending "" >/dev/null 2>&1; then
+  fail "an empty capture must not read as an open chooser"
+else
+  ok "an empty capture is not an open chooser"
+fi
+
+OUT="$("$LIB" fm_totmann_resume_dialog_pending "$CAP_DIALOG" 2>&1)" && RC=0 || RC=$?
+[ "$RC" = 0 ] \
+  && ok "the execute-mode CLI exposes the chooser predicate" \
+  || fail "the lib CLI must whitelist fm_totmann_resume_dialog_pending (rc=$RC: $OUT)"
+
+# End to end: a second tmux mock whose FIRST capture serves the open chooser
+# and every later capture the healthy pane - the answer Enter visibly flips
+# the pane. claw-notify falls through to the existing shim on PATH.
+SHIM2="$TMP/shim-dialog"
+mkdir -p "$SHIM2"
+cat > "$SHIM2/tmux" <<'MOCK'
+#!/usr/bin/env bash
+# tmux mock (dialog variant): like the shim above, but the first capture-pane
+# serves $MOCK_CAPTURE.offen and moves it away, so a later capture reads clean.
+printf '%s\n' "$*" >> "${MOCK_LOG:?}"
+case "$1" in
+  display-message) [ -n "${MOCK_PANE_PID:-}" ] && printf '%s\n' "$MOCK_PANE_PID"; exit 0 ;;
+  has-session)     exit 0 ;;
+  capture-pane)
+    if [ -f "${MOCK_CAPTURE:?}.offen" ]; then
+      cat "${MOCK_CAPTURE}.offen"
+      mv "${MOCK_CAPTURE}.offen" "${MOCK_CAPTURE}.beantwortet"
+    else
+      cat "${MOCK_CAPTURE:?}"
+    fi ;;
+  send-keys)       shift 3; printf 'keys:%s\n' "$*" >> "$MOCK_LOG" ;;
+  *)               exit 0 ;;
+esac
+MOCK
+chmod +x "$SHIM2/tmux"
+
+e2e_dialog() { # e2e_dialog <capture-file> <log> <notify-log>
+  MOCK_LOG="$2" MOCK_NOTIFY="$3" MOCK_CAPTURE="$1" \
+  PATH="$SHIM2:$SHIM:$PATH" HOME="$H" FM_HOME="$FMH" \
+  FM_TOTMANN_TARGET="fmtest:0" FM_TOTMANN_DEBOUNCE=0 FM_TOTMANN_ERGEBNIS_SECS=1 \
+  FM_TOTMANN_PROC_STAT="$TMP/procstat" FM_TOTMANN_ANSTOSS="$KICK" \
+  FM_TOTMANN_NOTIFY="claw-notify" \
+  "$TOTMANN" check
+}
+
+enter_count() { grep -c '^keys:Enter$' "$1" 2>/dev/null || true; }
+
+# 6a. chooser opens right after the relaunch -> one default answer, revival completes
+printf '%s\n' "$CAP_DIALOG" > "$TMP/cap-dialog.offen"
+cp "$TMP/cap-ok" "$TMP/cap-dialog"
+: > "$TMP/e2e-dlg.log"; : > "$TMP/e2e-dlg.notify"
+OUT="$(e2e_dialog "$TMP/cap-dialog" "$TMP/e2e-dlg.log" "$TMP/e2e-dlg.notify" 2>&1)" && RC=0 || RC=$?
+[ "$RC" = 0 ] && ok "a revived session stopped at the chooser still completes (exit 0)" \
+  || fail "answering the chooser must complete the revival, got rc=$RC: $OUT"
+[ "$(enter_count "$TMP/e2e-dlg.log")" = 1 ] \
+  && ok "exactly one answer Enter goes to the chooser" \
+  || fail "the chooser must receive exactly one Enter, got $(enter_count "$TMP/e2e-dlg.log"): $(cat "$TMP/e2e-dlg.log")"
+grep -q '^keys:claude3 --continue Enter$' "$TMP/e2e-dlg.log" \
+  && ok "the relaunch is typed before the chooser answer" \
+  || fail "the relaunch must precede the chooser answer: $(cat "$TMP/e2e-dlg.log")"
+grep -q '^kicker:' "$TMP/e2e-dlg.log" \
+  && ok "the answered chooser still arms the kicker" \
+  || fail "a completed revival must arm the kicker: $(cat "$TMP/e2e-dlg.log")"
+
+# 6b. chooser stays open despite Enters -> bounded attempts, loud abort, no kicker
+printf '%s\n' "$CAP_DIALOG" > "$TMP/cap-stuck"
+: > "$TMP/e2e-stuck.log"; : > "$TMP/e2e-stuck.notify"
+OUT="$(e2e_dialog "$TMP/cap-stuck" "$TMP/e2e-stuck.log" "$TMP/e2e-stuck.notify" 2>&1)" && RC=0 || RC=$?
+[ "$RC" = 3 ] && ok "a chooser that survives every answer aborts with exit 3" \
+  || fail "an unanswerable chooser must abort (exit 3), got rc=$RC: $OUT"
+[ "$(enter_count "$TMP/e2e-stuck.log")" = 3 ] \
+  && ok "the answer retries stay bounded (3 Enters)" \
+  || fail "the retry budget must be 3, got $(enter_count "$TMP/e2e-stuck.log")"
+if grep -q 'FEHLSTART' "$TMP/e2e-stuck.log" || printf '%s\n' "$OUT" | grep -q 'FEHLSTART'; then
+  ok "the exhaustion is loud (FEHLSTART named)"
+else
+  fail "exhaustion must say FEHLSTART loudly: $OUT"
+fi
+grep -q '^kicker:' "$TMP/e2e-stuck.log" \
+  && fail "no kicker may be armed while the chooser is stuck open" \
+  || ok "an exhausted chooser arms no kicker"
+
+# 6c. a healthy revival gets no stray Enter at all
+: > "$TMP/e2e-clean.log"; : > "$TMP/e2e-clean.notify"
+OUT="$(e2e_dialog "$TMP/cap-ok" "$TMP/e2e-clean.log" "$TMP/e2e-clean.notify" 2>&1)" && RC=0 || RC=$?
+if [ "$RC" = 0 ] && [ "$(enter_count "$TMP/e2e-clean.log")" = 0 ]; then
+  ok "a healthy revival types no bare Enter"
+else
+  fail "a healthy revival must not send a bare Enter (rc=$RC, ent=$(enter_count "$TMP/e2e-clean.log"))"
+fi
 
 echo
 if [ "$FAILS" -eq 0 ]; then
