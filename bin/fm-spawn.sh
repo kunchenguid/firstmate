@@ -136,8 +136,17 @@
 #   git worktree root distinct from the primary project checkout.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
-#   An unreachable origin, unresolved default branch, or non-clean worktree
-#   refuses the spawn rather than risking a PR based on stale history.
+#   A repository with no origin remote configured (a supported local-only
+#   project shape) skips the fetch and instead resets the clean worktree to
+#   the tip of the local default branch (local main or master), which the
+#   shared object store keeps as the freshest base. That remoteless path is
+#   allowed only for scouts and MODE=local-only ships; a direct-PR or
+#   no-mistakes ship needs a pushable origin to deliver and refuses. A
+#   remoteless default branch other than main/master also refuses, because
+#   the guarded review and landing helpers resolve only those.
+#   An unreachable origin, an unresolved remote or local default branch, or a
+#   non-clean worktree refuses the spawn rather than risking a PR based on
+#   stale history.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1742,24 +1751,60 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+# Resolve the LOCAL default branch for a task worktree whose repository has no
+# origin remote: default_branch (fm-ff-lib.sh), the repo-wide local main/master
+# convention that fm-review-diff, fm-merge-local and fm-teardown also resolve,
+# so a primary stranded on a feature branch still bases the task on the real
+# trunk instead of propagating that branch. A remoteless default under any
+# other name returns 1 and refuses the spawn, because the guarded review and
+# landing helpers cannot resolve such a branch to land the work.
+# Echoes a branch name that has a local head, or returns 1.
+spawn_local_default_branch() {  # <worktree>
+  local worktree=$1 ref
+  ref=$(default_branch "$worktree" 2>/dev/null) || return 1
+  [ -n "$ref" ] || return 1
+  git -C "$worktree" show-ref --verify --quiet "refs/heads/$ref" || return 1
+  printf '%s\n' "$ref"
+}
+
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status
-  if ! git -C "$worktree" fetch --quiet origin; then
-    echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  }
-  target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
-    echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
+  if git -C "$worktree" remote get-url origin >/dev/null 2>&1; then
+    if ! git -C "$worktree" fetch --quiet origin; then
+      echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
+      echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    target="origin/$default"
+    if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
+      echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+  else
+    # No origin remote is a supported local-only project shape (fm-fleet-sync
+    # and fm-teardown handle it deliberately), but only for work that never
+    # needs to push: a scout, or a ship whose delivery mode is local-only.
+    # A direct-PR or no-mistakes ship cannot push or open its PR without an
+    # origin, so it refuses here instead of launching work that cannot ship.
+    if [ "$KIND" != scout ] && [ "$MODE" != local-only ]; then
+      echo "error: project has no origin remote; mode ${MODE:-unset} needs a pushable origin to deliver - only a scout or a local-only ship can run on a remoteless project; refusing to launch" >&2
+      return 1
+    fi
+    # The pooled worktree shares the primary checkout's object store, so the
+    # local default branch tip IS the freshest base; only "origin is absent"
+    # takes this path - a configured but unreachable origin still refuses above.
+    default=$(spawn_local_default_branch "$worktree") || {
+      echo "error: no origin remote and no resolvable local default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    target="refs/heads/$default"
   fi
   expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
