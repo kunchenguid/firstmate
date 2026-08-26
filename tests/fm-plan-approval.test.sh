@@ -5,14 +5,22 @@
 # implementation and starts only after the main firstmate's explicit approval,
 # while investigation stays free. bin/fm-plan-approval.sh makes that mechanical:
 # only the primary home holds the ed25519 private key, and a secondmate home
-# refuses to start a ship task without a signature over that exact task id and
-# the exact current brief bytes.
+# refuses to start a ship task without a signature naming that exact task id.
 #
-# The spawn cases here all stop before any endpoint exists: the gate runs ahead
-# of backend creation, and a fake `tmux` that exits non-zero backstops the cases
-# meant to get past it, so no window or worktree is ever created. A case that
-# clears the gate is recognized by the absence of the refusal, exactly as the
-# delivery-contract suite recognizes an agreeing mode.
+# This file owns the gate's END-TO-END behavior - the spawn and the promotion
+# that consult it. The v=2 payload itself (the 5-question Freigabenotiz, the
+# class, the captain's wording, the tripwire, batch-approve, the v1 legacy exit)
+# is pinned next door in tests/fm-plan-approval-v2.test.sh, so a refusal there
+# can be read without a backend anywhere near it.
+#
+# WHY SOME CASES HERE WERE REWRITTEN FOR v=2. The old contract signed a hash of
+# the WHOLE brief, so these cases used to assert that any edit to a brief - a
+# typo fix included - withdrew the approval. v=2 signs the firstmate's own
+# Freigabenotiz instead, and keeps exactly one byte binding: the brief's
+# "## Abnahme (maschinenlesbar)" block, the bar the work is measured against.
+# The tampering case below therefore now pins BOTH halves of that boundary
+# (prose free, bar bound), and the forgery case builds a v=2 payload, because a
+# v=1 one is answered as legacy rather than as the forgery it is meant to be.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -44,16 +52,25 @@ TMP_ROOT=$(fm_test_tmproot fm-plan-approval)
 # One primary home plus one seeded secondmate home, both shaped enough for the
 # real home validator, with a fake tmux that refuses so a spawn that clears the
 # gate still creates nothing. Echoes "<primary>|<officer>|<fakebin>|<project>".
+#
+# The fixture also brings its own account ledger and a store that has finished
+# onboarding for both paths a case spawns into. bin/fm-spawn-gate-lib.sh resolves
+# the seat from config/konten.tsv BEFORE the plan gate runs and refuses a seat
+# that would drop the agent into the setup wizard, so without this the cases
+# below would never reach the gate they are about (see FM_KONTEN_AKTE in
+# run_spawn).
 make_fleet() {  # <name> [<secondmate-id>]
-  local name=$1 sid=${2:-sm-alpha} base primary officer fakebin project
+  local name=$1 sid=${2:-sm-alpha} base primary officer fakebin project store
   base="$TMP_ROOT/$name"
   primary="$base/primary"
   officer="$base/officer"
   fakebin="$base/bin"
   project="$base/projects/proj"
+  store="$base/store"
   mkdir -p "$primary/data" "$primary/state" "$primary/config" "$primary/bin" \
     "$officer/data" "$officer/state" "$officer/config" "$officer/bin" \
-    "$fakebin" "$project"
+    "$fakebin" "$project" "$store"
+  project=$(cd "$project" && pwd -P)
   printf '# firstmate\n' > "$primary/AGENTS.md"
   printf '# firstmate\n' > "$officer/AGENTS.md"
   printf '%s\n' "$sid" > "$officer/.fm-secondmate-home"
@@ -61,19 +78,40 @@ make_fleet() {  # <name> [<secondmate-id>]
     > "$officer/.fm-secondmate-parent"
   printf -- '- %s - alpha domain (home: %s; scope: alpha work; projects: none; added 2026-08-20)\n' \
     "$sid" "$officer" > "$primary/data/secondmates.md"
-  printf '#!/bin/sh\nexit 1\n' > "$fakebin/tmux"
-  chmod +x "$fakebin/tmux"
+  printf '{"hasCompletedOnboarding":true,"projects":{"%s":{"hasTrustDialogAccepted":true},"%s":{"hasTrustDialogAccepted":true}}}\n' \
+    "$project" "$officer" > "$store/.claude.json"
+  printf '# speicher\tpfad\tanthropic_konto\trolle\tbemerkung\n' > "$base/konten.tsv"
+  printf 'basis\t%s\tfixture@example.invalid\toffiziere-worker\ttest fixture seat\n' \
+    "$store" >> "$base/konten.tsv"
   printf '%s\n' "$primary|$officer|$fakebin|$project"
 }
 
-write_brief() {  # <home> <id> [<extra-line>]
-  local home=$1 id=$2 extra=${3:-}
+# A brief with a real acceptance block, which is the one part v=2 binds
+# byte-exactly. The block is closed by the next "## " heading, exactly as
+# bin/fm-abnahme.sh reads it, so <extra> lands OUTSIDE the bar.
+write_brief() {  # <home> <id> [<extra-line>] [<abnahme-point>]
+  local home=$1 id=$2 extra=${3:-} abnahme=${4:-'- [A1] the suite is green :: beleg=testlauf'}
   mkdir -p "$home/data/$id"
   {
-    printf 'You are a crewmate.\n\n# Goal\nShip the thing.\n\n# Definition of done\n'
+    printf 'You are a crewmate.\n\n# Goal\nShip the thing.\n\n'
+    printf '## Abnahme (maschinenlesbar)\n%s\n\n' "$abnahme"
+    printf '## Definition of done\n'
     printf 'Delivery contract: mode=local-only\n'
     [ -z "$extra" ] || printf '%s\n' "$extra"
   } > "$home/data/$id/brief.md"
+}
+
+# The Freigabenotiz v=2 signs: five questions, one answer each. What the answers
+# SAY is firstmate's judgment and no tool grades it, so a fixture note is as
+# valid as a considered one - only the five markers are mechanical.
+write_notiz() {  # <file>
+  {
+    printf 'F1 Praemissen: the officer home is the one bound to this primary.\n'
+    printf 'F2 Abnahme: the brief acceptance block is the whole bar.\n'
+    printf 'F3 Vision: exercises the plan gate, not a product.\n'
+    printf 'F4 Budget: one fixture run.\n'
+    printf 'F5 Betroffene: nobody outside this temporary directory.\n'
+  } > "$1"
 }
 
 run_primary() {  # <primary> <args...>
@@ -92,18 +130,28 @@ run_officer() {  # <officer> <args...>
 }
 
 run_spawn() {  # <home> <fakebin> <spawn-args...>
-  local home=$1 fakebin=$2
+  local home=$1 fakebin=$2 base
   shift 2
+  # The ledger lives one level above both homes in the fixture, so an officer
+  # and its primary read the same seat.
+  base=$(dirname "$home")
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/projects-unused" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_KONTEN_AKTE="$base/konten.tsv" \
     FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
 
+# The v=2 approval every case here needs: routine class, one order, one complete
+# Freigabenotiz. The cases that are ABOUT the class, the order, or the note live
+# in tests/fm-plan-approval-v2.test.sh; here the approval is a precondition.
 approve() {  # <primary> <secondmate-id> <officer> <task-id>
   local primary=$1 sid=$2 officer=$3 task=$4 out
-  out=$(run_primary "$primary" approve "$sid" "$task" --plan-file "$officer/data/$task/brief.md") \
+  write_notiz "$primary/freigabenotiz-$task.md"
+  out=$(run_primary "$primary" approve "$sid" "$task" \
+    --plan-file "$officer/data/$task/brief.md" \
+    --klasse routine --order O-0042 --notiz "$primary/freigabenotiz-$task.md") \
     || fail "approve failed for $task: $out"
 }
 
@@ -162,9 +210,11 @@ EOF
   pass "a primary-signed approval clears the officer home's ship spawn"
 }
 
-# (c) The approval covers specific plan bytes, so editing the brief afterwards
-# withdraws it until the current plan is approved again.
-test_tampered_plan_invalidates_the_approval() {
+# (c) v=2 draws the line at the acceptance block rather than at the whole brief:
+# prose may be sharpened after approval, the bar the work is measured against may
+# not. This case pins both halves at the spawn, because "which edits burn an
+# approval" is exactly the question an officer asks at the point of starting.
+test_a_changed_acceptance_block_invalidates_the_approval() {
   local rec primary officer fakebin project out status
   rec=$(make_fleet tampered)
   IFS='|' read -r primary officer fakebin project <<EOF
@@ -172,21 +222,31 @@ $rec
 EOF
   write_brief "$officer" ship-tamper-c1
   approve "$primary" sm-alpha "$officer" ship-tamper-c1
-  printf 'and quietly also rewrite the release pipeline\n' >> "$officer/data/ship-tamper-c1/brief.md"
 
+  # Prose: free. Under v=1 this appended line alone withdrew the approval, which
+  # is the cost the captain's standing order was paying for a byte signature.
+  printf 'A clearer sentence about the same work, added after approval.\n' \
+    >> "$officer/data/ship-tamper-c1/brief.md"
+  out=$(run_spawn "$officer" "$fakebin" ship-tamper-c1 "$project" claude --mode local-only --yolo off)
+  assert_not_contains "$out" "$GATE_REFUSAL" "sharpening prose after approval withdrew the approval"
+  assert_not_contains "$out" "changed after it was approved" \
+    "an edit outside the acceptance block was treated as a change to the bar"
+
+  # The bar: bound. Moving what the work is measured against withdraws it.
+  write_brief "$officer" ship-tamper-c1 '' '- [A1] the suite is green, mostly :: beleg=testlauf'
   out=$(run_spawn "$officer" "$fakebin" ship-tamper-c1 "$project" claude --mode local-only --yolo off)
   status=$?
-  [ "$status" -ne 0 ] || fail "a ship spawn on an edited plan should exit non-zero"
+  [ "$status" -ne 0 ] || fail "a ship spawn on a moved acceptance block should exit non-zero"
   assert_contains "$out" "changed after it was approved" \
-    "the refusal did not explain that the approved plan no longer matches"
+    "the refusal did not explain that the approved acceptance block no longer matches"
   assert_absent "$officer/state/ship-tamper-c1.meta" "a refused spawn wrote task metadata"
 
-  # Re-approving the current bytes clears it again, so the gate withdraws
+  # Re-approving the current criteria clears it again, so the gate withdraws
   # authority rather than permanently burning the task.
   approve "$primary" sm-alpha "$officer" ship-tamper-c1
   out=$(run_spawn "$officer" "$fakebin" ship-tamper-c1 "$project" claude --mode local-only --yolo off)
-  assert_not_contains "$out" "$GATE_REFUSAL" "a re-approved plan was still refused"
-  pass "editing an approved plan withdraws the approval until it is re-approved"
+  assert_not_contains "$out" "$GATE_REFUSAL" "a re-approved acceptance block was still refused"
+  pass "prose stays free after approval; a changed acceptance block withdraws it until re-approved"
 }
 
 # (d) Investigation stays free and a launch is not an implementation, so scout
@@ -221,7 +281,7 @@ EOF
 # signed with a key the officer generated, and one that also replaces this
 # home's own copy of the trusted public key.
 test_a_forgery_built_in_the_officer_home_fails() {
-  local rec primary officer fakebin project record forge out status key_sha plan_sha plan_bytes
+  local rec primary officer fakebin project record forge out status key_sha abnahme_sha
   rec=$(make_fleet forged)
   IFS='|' read -r primary officer fakebin project <<EOF
 $rec
@@ -233,9 +293,11 @@ EOF
   mkdir -p "$forge"
 
   # Forgery 1: re-sign the genuine payload with a key minted inside this home.
+  # A v=2 record signs its first ELEVEN lines; taking any other count would
+  # test the parser instead of the signature.
   openssl genpkey -algorithm ed25519 -out "$forge/key" >/dev/null 2>&1 \
     || fail "could not mint a forgery key"
-  head -n 7 "$record" > "$forge/payload"
+  head -n 11 "$record" > "$forge/payload"
   openssl pkeyutl -sign -inkey "$forge/key" -rawin -in "$forge/payload" -out "$forge/sig" >/dev/null 2>&1 \
     || fail "could not sign the forged payload"
   chmod u+w "$record"
@@ -251,15 +313,17 @@ EOF
   # Forgery 2: also replace this home's own inherited public key and name that
   # key in the record, which is the strongest record an officer can build from
   # material it controls. The parent binding anchors the trusted key outside
-  # this home, so it still fails.
+  # this home, so it still fails. The forged payload is a well-formed v=2 one on
+  # purpose: a v=1 payload would be answered as legacy, which would prove
+  # nothing about the key binding this case is here for.
   openssl pkey -in "$forge/key" -pubout -out "$officer/config/plan-approval-key.pub" >/dev/null 2>&1 \
     || fail "could not publish the forged public key"
   key_sha=$(sha256_of "$officer/config/plan-approval-key.pub")
-  plan_sha=$(sha256_of "$officer/data/ship-forge-e1/brief.md")
-  plan_bytes=$(wc -c < "$officer/data/ship-forge-e1/brief.md" | tr -d ' ')
+  abnahme_sha=$(sed -n 's/^abnahme_sha256=//p' "$record")
   {
-    printf 'v=1\ntask=ship-forge-e1\nsecondmate=sm-alpha\n'
-    printf 'plan_sha256=%s\nplan_bytes=%s\n' "$plan_sha" "$plan_bytes"
+    printf 'v=2\ntask=ship-forge-e1\nsecondmate=sm-alpha\n'
+    printf 'klasse=routine\norder=O-0042\nvorlage=-\nbegruendung=-\n'
+    printf 'notiz_sha256=%064d\nabnahme_sha256=%s\n' 0 "$abnahme_sha"
     printf 'approved_at=2026-08-20T00:00:00Z\nkey_sha256=%s\n' "$key_sha"
   } > "$forge/payload2"
   openssl pkeyutl -sign -inkey "$forge/key" -rawin -in "$forge/payload2" -out "$forge/sig2" >/dev/null 2>&1 \
@@ -372,14 +436,18 @@ EOF
   [ "$status" -ne 0 ] || fail "a revoked approval should stop the spawn"
   assert_contains "$out" "$GATE_REFUSAL" "a revoked approval did not restore the refusal"
 
-  # A plan that is not the brief the worker would follow is refused at approval
-  # time rather than minted into an approval that could never be used.
-  printf 'a different plan entirely\n' > "$primary/other-plan.md"
-  out=$(run_primary "$primary" approve sm-alpha ship-life-h1 --plan-file "$primary/other-plan.md")
+  # A plan whose acceptance block is not the one the worker would be held to is
+  # refused at approval time rather than minted into an approval that could
+  # never be used. Under v=2 the bar is the binding, so this is the shape the
+  # refusal takes.
+  write_brief "$primary" ship-life-h1 '' '- [A1] something else entirely :: beleg=diff'
+  out=$(run_primary "$primary" approve sm-alpha ship-life-h1 \
+    --plan-file "$primary/data/ship-life-h1/brief.md" \
+    --klasse routine --order O-0042 --notiz "$primary/freigabenotiz-ship-life-h1.md")
   status=$?
   [ "$status" -ne 0 ] || fail "approving a plan that is not the worker's brief should exit non-zero"
-  assert_contains "$out" "the exact instructions the worker will follow" \
-    "the refusal did not explain the brief-binding requirement"
+  assert_contains "$out" "does not match" \
+    "the refusal did not explain the acceptance-block binding"
   assert_absent "$officer/state/ship-life-h1.plan-approval" "a refused approval still wrote a record"
   pass "the primary side creates its key lazily, revokes, lists, and refuses an unusable approval"
 }
@@ -436,7 +504,7 @@ EOF
 
 test_absent_approval_refuses_a_ship_spawn
 test_valid_approval_clears_the_gate
-test_tampered_plan_invalidates_the_approval
+test_a_changed_acceptance_block_invalidates_the_approval
 test_scout_secondmate_and_primary_spawns_are_ungated
 test_a_forgery_built_in_the_officer_home_fails
 test_an_approval_cannot_be_replayed_into_another_home
