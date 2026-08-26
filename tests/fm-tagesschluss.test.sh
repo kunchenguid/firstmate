@@ -69,6 +69,12 @@ grep -q '^abschluss=ok$' "$OUT/bericht.md" && ok "the day report closes with abs
 grep -q Tagesschluss "$TMP/notify.log" || fail "the three-liner must be German and name the day close"
 [ ! -f "$TMP/reboot.log" ] && ok "no reboot while FM_TAGESSCHLUSS_REBOOT is unset" \
   || fail "an unarmed run must never reboot"
+[ -f "$OUT/streichliste.md" ] && grep -q '^# Streichliste' "$OUT/streichliste.md" \
+  && ok "run writes the strike-candidate report via bin/fm-streichliste.sh" \
+  || fail "run must write $OUT/streichliste.md via bin/fm-streichliste.sh"
+grep -q '^streichliste: ' "$OUT/bericht.md" \
+  && ok "the day report names the streichliste step" \
+  || fail "bericht.md must note the streichliste step"
 
 # --- 2. green morning check lifts the day-close stop -----------------------
 run_ts morgenpruefung >/dev/null || fail "a green morning check must exit 0"

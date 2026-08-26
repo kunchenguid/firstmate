@@ -1,0 +1,127 @@
+# Quelle: Owner-Entscheid vom 2026-08-08 — Pläne werden immer subagent-driven
+# umgesetzt. Beleg ist die Runde LensClash R24,
+# /home/fridjof/projects/lensclash/docs/reports/R24_BERICHT.md.
+#
+# Eigene Datei nach der Konvention "eine Datei je Quelle" (seit
+# rules/retrieval.yaml, siehe auch den Kopf von rules/arbeitsweise.yaml): der
+# Entscheid ist eine eigene Quelle, kein Nachtrag zu ONBOARDING.md oder zum
+# Insights-Report. onboarding.yaml wird zusätzlich gegen ihr Archiv
+# `rules-onboarding.yaml` abgeglichen — eine Regel von hier hätte den Abgleich
+# stumpf gemacht.
+#
+# Herkunft der einzelnen Regeln im Bericht:
+#   ENF-PLAN-001     R24_BERICHT.md:11 ("Diese Runde lief subagenten-getrieben:
+#                    zwölf Umsetzer auf disjunkten Dateimengen, dazu eine
+#                    adversariale Gegenprüfung. Die Hauptsitzung hat keinen
+#                    Produktivcode geschrieben — ihre Aufgabe war Zuschnitt,
+#                    Gegenprüfung und Commit.") und R24_BERICHT.md:19 ("Vier von
+#                    fünf Diagnosen der Planungsphase waren falsch. Sie klangen
+#                    plausibel, und die Umsetzer haben sie mit Messungen
+#                    widerlegt, statt sie auszuführen."). Der zweite Satz dreht
+#                    die Prüfrichtung um: wichtiger als "der Ansprechpartner
+#                    misst den Umsetzer nach" ist "der Umsetzer widerlegt den
+#                    Plan". Deshalb steht das Messen vor dem Bauen im statement.
+#   WF-SUBAGENT-001  Zuschnitt und Zwischenfälle derselben Runde: disjunkte
+#                    Dateimengen aus Zeile 11, dazu die 47 roten Tests aus einem
+#                    fremden Halbstand, die drei übereinstimmenden Fehlurteile
+#                    über einen roten Test, und die kollidierenden fortlaufenden
+#                    Nummern.
+#   WF-MODELL-001    Owner-Entscheid vom 2026-08-08 (Modell je Auftrag wählen und
+#                    im Plan benennen), gegengeprüft am R24-Plan
+#                    ~/.claude/plans/ich-habe-hier-home-fridjof-projects-lens-fluffy-karp.md:
+#                    702 Zeilen ohne ein einziges Subagenten-Modell.
+#
+# Nur ENF-PLAN-001 ist verbindlich, die beiden anderen nicht. Verbindlich
+# gehört, was beim Planen schon feststehen muss und keine passende Lage
+# abwartet: DASS subagent-driven umgesetzt wird, ist die Weichenstellung — wird
+# sie verpasst, greift keine der beiden Handwerksregeln je. Zuschnitt
+# (WF-SUBAGENT-001) und Modellwahl (WF-MODELL-001) sind Handwerk innerhalb
+# dieser Weiche; sie sollen greifen, wenn die Lage passt, nicht immer. Der Preis
+# einer verbindlichen Regel ist seit 2026-08-07 nicht mehr die Verdrängung
+# gerankter Regeln (REG-BUDGET-001), sondern der Session-Start-Block plus eine
+# ID-Zeile je Eingabe — gering, aber nicht null, und drei verbindliche Regeln
+# aus einer Quelle wären drei ID-Zeilen für eine einzige Weichenstellung.
+#
+# NICHT modelliert aus R24_BERICHT.md:
+#   * die 24 Einzelbefunde des Owner-Durchlaufs und ihre Diagnosetabelle —
+#     Projektinhalt von LensClash, gehört ins Dossier, nicht ins globale
+#     Regelwerk
+#   * die Mess- und Laufzeitzahlen der Runde (Attributmigration, Skalierung):
+#     Messwerte, keine Handlungsregel
+#   * konkrete Modellnamen: sie veralten schneller als das Regelwerk und
+#     gehören in den Plan — so steht es in WF-MODELL-001 selbst
+#   * "zwölf Umsetzer" als Zahl — der Zuschnitt richtet sich nach disjunkten
+#     Dateimengen, nicht nach einer Zielgröße
+
+rules:
+
+  - id: ENF-PLAN-001
+    domain: workflow
+    severity: 3
+    mandatory: true
+    trigger: >
+      Ein Plan wird erstellt oder umgesetzt.
+    statement: >
+      Umgesetzt wird subagent-driven: der Ansprechpartner führt, prüft und
+      verantwortet — er schreibt selbst keinen Produktiv- und keinen Testcode.
+      Er wählt je Auftrag das Modell und benennt es im Plan. Subagenten messen,
+      bevor sie bauen, und widerlegen eine falsche Diagnose des Plans, statt sie
+      auszuführen. Vor der Fertigmeldung eine unabhängige Gegenprüfung.
+    violation: >
+      Parent schreibt den Fix selbst, weil es nur eine Zeile ist — oder
+      Umsetzer führen eine ungeprüfte Diagnose aus
+    correct: >
+      Auftrag mit Beleg, Messauftrag und benanntem Modell; Diff und rote
+      Gegenprobe selbst prüfen; dann Commit
+    tags: plan, subagent, umsetzer, umsetzung, ansprechpartner, gegenprüfung, messen, widerlegen, modell
+    relations:
+      - {kind: SUPPLEMENTS, dst: ENF-SUBAGENT-001}
+      - {kind: SUPPLEMENTS, dst: LEK-ROLLEN-001}
+      - {kind: SUPPLEMENTS, dst: LEK-VERIFY-001}
+      - {kind: SUPPLEMENTS, dst: LEK-HYPOTHESE-001}
+
+  - id: WF-SUBAGENT-001
+    domain: workflow
+    severity: 2
+    trigger: >
+      Subagenten-Aufträge werden geschnitten oder laufen bereits.
+    statement: >
+      Aufträge auf disjunkte Dateimengen schneiden, fremde Dateien im Auftrag
+      namentlich sperren. Während ein Umsetzer schreibt, fährt niemand die
+      Testsuite — 47 rote Tests waren ein fremder Halbstand. Übereinstimmung
+      mehrerer Agenten ist kein Beweis: drei stuften denselben roten Test als
+      vorbestehend ein, alle drei lagen falsch; Beweis war das
+      Baseline-Protokoll vom Sitzungsbeginn. Commits nach Befund schneiden,
+      nicht nach Umsetzer. Fortlaufende Nummern zentral am Ende vergeben —
+      Umsetzer raten sie gegen den eigenen Baum und kollidieren.
+    violation: >
+      Zwei Umsetzer schreiben noch, die Suite läuft rot, und alle Beteiligten
+      halten das für den Ausgangsstand
+    correct: >
+      Disjunkte Dateimengen, gesperrte Dateien namentlich im Auftrag, Suite erst
+      nach dem letzten Schreiber, Nummern zentral vergeben
+    tags: zuschnitt, disjunkt, dateimenge, parallel, gleichzeitig, halbstand, baseline, übereinstimmung, nummern, umsetzer
+    relations:
+      - {kind: SUPPLEMENTS, dst: ENF-PLAN-001}
+      - {kind: SUPPLEMENTS, dst: TEST-BASELINE-001}
+
+  - id: WF-MODELL-001
+    domain: workflow
+    severity: 2
+    trigger: >
+      Ein Subagenten-Auftrag wird vergeben und das Modell dafür ist offen.
+    statement: >
+      Modell je Auftrag bewusst wählen, im Plan benennen und begründen —
+      Kriterium ist die Schwere der Aufgabe, nicht der Preis. Die Gegenprüfung
+      läuft nie auf einem schwächeren Modell als die Umsetzung. Konkrete
+      Modellnamen gehören in den Plan, nicht in Regeltext: sie veralten
+      schneller als das Regelwerk. Belegt: der R24-Plan hat 702 Zeilen und nennt
+      kein einziges Subagenten-Modell — alle Umsetzer erbten stillschweigend das
+      Session-Modell.
+    violation: Auftrag ohne Modellangabe vergeben — der Umsetzer erbt still das Session-Modell
+    correct: >
+      Modell je Auftrag im Plan nennen und begründen; Gegenprüfung mindestens so
+      stark wie die Umsetzung
+    tags: modell, modellwahl, plan, auftrag, vergeben, gegenprüfung, schwere, subagent
+    relations:
+      - {kind: SUPPLEMENTS, dst: ENF-PLAN-001}

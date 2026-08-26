@@ -1,0 +1,200 @@
+# Quelle: SnackSuite-RAG-Session (drei Claude-Code-Transkripte, 28 Blöcke mit
+# RAG-Bezug; Commits 525b268, 6839c3a, 4090277). Aufgenommen auf Owner-Entscheid
+# 2026-08-03 nach Durchsicht der Vorschlagsliste (VORSCHLAG-RAG-REGELN.md).
+#
+# Präfix RET-, nicht RAG-: elf projektgebundene Regeln von rag-digital tragen
+# bereits RAG-, globale und projektgebundene Regeln wären sonst beim Lesen nicht
+# auseinanderzuhalten.
+#
+# Alle Beziehungen zeigen bewusst auf GLOBALE Regeln. Mehrere dieser Regeln haben
+# ihren nächsten inhaltlichen Verwandten in rag-digital (RAG-WAECHTER-001,
+# RAG-STILL-001, RAG-MOCK-001) — eine Beziehung dorthin wäre aber nur in diesem
+# einen Projekt sichtbar. Die Verwandtschaft steht deshalb im Text.
+#
+# NICHT modelliert: die konkreten Schwellenwerte aus SnackSuite (0.84/0.87/0.83 —
+# projektspezifisch, gehören ins Dossier), Einzelbefunde der Projektlogik, und der
+# 404-mit-HTTP-200-Fall (echte Falle, aber kein Retrieval).
+
+rules:
+
+  # ─── SCHWELLENWERT ──────────────────────────────────────────────
+
+  - id: RET-SCHWELLE-001
+    domain: retrieval
+    severity: 3
+    trigger: >
+      Ein Ähnlichkeits-Schwellenwert wird festgelegt oder geändert —
+      Retrieval-Gate, Relevanzfilter, Arbiter, MIN_SCORE.
+    statement: >
+      Erst die Verteilungen messen: die Werte legitimer Anfragen und die von
+      Fremdanfragen, je als Menge. Die Schwelle gehört in die LÜCKE zwischen
+      beiden. Liegt sie innerhalb der On-Topic-Verteilung, weist sie legitime
+      Anfragen ab, ohne dass es auffällt — der Nutzer sieht eine Absage, nicht
+      einen Fehler. Belegt: eine geerbte Schwelle lag mitten in der
+      On-Topic-Spanne; vier von 29 legitimen Themen bekamen Vollabsage, obwohl
+      Material vorhanden war.
+    violation: Schwelle aus einem Tutorial übernehmen oder nach Gefühl setzen
+    correct: Je 20+ On- und Off-Proben scoren, Verteilungen ausgeben, Schwelle in die Lücke legen
+    tags: schwelle, retrieval, arbiter, trennschärfe, min_score, verteilung, messen
+
+  - id: RET-BAENDER-001
+    domain: retrieval
+    severity: 2
+    trigger: Ein Retrieval-Gate entscheidet zwischen Weitermachen und Absage.
+    statement: >
+      Zwei Schwellen statt einer: sicher / unsicher / abgelehnt. Das Mittelband
+      gibt dem Nutzer die Wahl — nahe Treffer mit ihrer Fundstellenzahl — statt
+      einer Sackgasse. Es kostet keinen Modellaufruf, weil an dieser Stelle noch
+      nichts generiert wurde. Belegt: elf legitime Themen wurden vorher
+      abgewiesen, danach keines; zwei Fremdanfragen erreichten das Modell,
+      danach keine.
+    violation: >
+      Binäres Gate — knapp unter der Schwelle gibt es nur die Absage, oft mit
+      immer denselben Vorschlägen in Indexreihenfolge
+    correct: Mittelband mit drei nahen Treffern samt Fundstellenzahl, der Nutzer entscheidet
+    tags: schwelle, bänder, absage, nutzerwahl, sackgasse
+    relations:
+      - {kind: DEPENDS_ON, dst: RET-SCHWELLE-001}
+
+  - id: RET-PUFFER-001
+    domain: retrieval
+    severity: 2
+    trigger: Eine Retrieval-Schwelle ist gesetzt und soll bestehen bleiben.
+    statement: >
+      Den Abstand zur schlechtesten legitimen Anfrage bewachen statt behaupten.
+      Ein Halteset mit den heikelsten legitimen Proben mitführen — die Vektoren
+      in die Datei, damit die Prüfung ohne Modell läuft. Drei Tests: kein
+      Halteset-Fall unter der Schwelle, Puffer über einem Mindestmaß, keine
+      Off-Anfrage im sicheren Band. Und belegen, dass sie anschlagen: Schwelle
+      testweise anheben, bis sie umfallen. Der Puffer war im gemessenen Fall
+      weniger als halb so groß wie angenommen.
+    violation: '"Der Abstand ist komfortabel" — ohne Zahl und ohne Test'
+    correct: Halteset-Vektoren mitführen, drei modellfreie Tests, Anschlagen belegt
+    tags: puffer, halteset, wächter, schwelle, regressionstest
+    relations:
+      - {kind: DEPENDS_ON, dst: RET-SCHWELLE-001}
+      - {kind: SUPPLEMENTS, dst: LEK-VERIFY-001}
+
+  - id: RET-ZENTROID-001
+    domain: retrieval
+    severity: 2
+    trigger: >
+      Ein datengetriebener Arbiter soll eine kuratierte Themenliste ergänzen
+      oder ersetzen — etwa Dokument-Zentroide, die ohne Pflege mitwachsen.
+    statement: >
+      Vorher messen, und damit rechnen, dass es nicht trägt. Dokument-Zentroide
+      VERSCHLECHTERN die Trennung: Der Schwerpunkt eines gemischten Dokuments
+      liegt näher an "irgendwas Allgemeinem" als ein scharf formuliertes Thema —
+      und genau das zieht Fremdanfragen an. Gemessen an 104 Dokumenten und 47
+      Proben: die Lücke schrumpfte, und bei Betriebsschwelle kamen doppelt so
+      viele Fremdanfragen durch, bei null Gewinn auf der legitimen Seite.
+    violation: Zentroide einbauen, weil die Themenliste ohne Pflege mitwachsen soll
+    correct: Gegen den bestehenden Arbiter messen; bei schlechterer Lücke nicht bauen
+    tags: zentroid, arbiter, themenliste, automatisch, verworfen
+    relations:
+      - {kind: SUPPLEMENTS, dst: RET-SCHWELLE-001}
+
+  # ─── DIE KETTE ──────────────────────────────────────────────────
+
+  - id: RET-PROMPTREGEL-001
+    domain: retrieval
+    severity: 3
+    trigger: >
+      Der System-Prompt verlangt eine Eigenschaft vom Ergebnis — Deckung durch
+      die Quellen, Format, Sprache, Länge.
+    statement: >
+      Was der Prompt verlangt, muss am Ergebnis gemessen werden. Sonst hält sich
+      das Modell daran, wenn es gerade passt. Gesehen: "Das Unterthema jeder
+      Einheit muss vom Quellen-Kontext gedeckt sein" stand seit jeher im Prompt —
+      die Validierung bekam den Kontext gar nicht übergeben und prüfte nur Typen,
+      Längen und IDs. Wo es eine Reparatur-Runde gibt, den Verstoß dort
+      einhängen, und die Rüge das Problem beim Namen nennen lassen statt nur
+      "ungültig" zu sagen.
+    violation: Die Prompt-Regel verlangt Quellendeckung, der Validator sieht die Quellen nicht
+    correct: Jedes Ergebnis-Element gegen den Kontext messen, Verstoß in die Reparatur-Runde
+    tags: prompt, validierung, systemprompt, quellendeckung, reparatur
+    relations:
+      - {kind: SUPPLEMENTS, dst: LEK-VERIFY-001}
+
+  - id: RET-KORPUS-001
+    domain: retrieval
+    severity: 2
+    trigger: Ein Index wird gebaut oder erweitert.
+    statement: >
+      Nur hinein, was Quelle sein darf. Eigene Arbeitsdokumente — Dossiers,
+      Berichte, Aufgabenlisten, Planungen — verschmutzen die Fundlage und tauchen
+      als Quelle auf. Ein Filter allein reicht nicht: in Produktion gegenprüfen,
+      dass keine dieser Dateien als Quelle erscheint. Im gemessenen Fall fanden
+      realistische Anfragen null von sechs belegbaren Stellen, solange die
+      Verschmutzung drin war.
+    violation: Der Index enthält die eigenen Planungsdokumente, die Fundlage sieht gesund aus
+    correct: Filter setzen und live nachweisen, dass kein Arbeitsdokument als Quelle auftaucht
+    tags: korpus, index, hygiene, verschmutzung, quellen, filter
+    relations:
+      - {kind: SUPPLEMENTS, dst: LEK-BEFUND-001}
+
+  - id: RET-FUNDSTELLEN-001
+    domain: retrieval
+    severity: 2
+    trigger: Ein Ergebnis wird aus abgerufenen Quellen gebaut und dem Nutzer gezeigt.
+    statement: >
+      Nennen, woraus gebaut wurde und wie viele Fundstellen dahinterstehen. Das
+      macht die Passung überprüfbar statt behauptet, und dünne Belege erkennt der
+      Nutzer selbst. Fehlt die Angabe serverseitig, bleibt die Zeile weg —
+      nichts erfinden.
+    violation: '"Hier ist dein Ergebnis" ohne Angabe, worauf es beruht'
+    correct: '"Gebaut aus dem Bereich X — 37 Fundstellen"'
+    tags: fundstellen, herkunft, überprüfbar, transparenz, nutzersicht
+    relations:
+      - {kind: SUPPLEMENTS, dst: LEK-VERIFY-001}
+
+  # ─── MESSEN UND BETRIEB ─────────────────────────────────────────
+
+  - id: RET-BENCHMARK-001
+    domain: retrieval
+    severity: 2
+    trigger: Zwei oder mehr Modelle sollen für eine Aufgabe verglichen werden.
+    statement: >
+      Die echte Pipeline fahren, keine Nachbildung — echter Index, echte Prompts
+      aller Phasen, echte Validatoren, echter Fallback. Und die Aufgabe muss
+      TRENNEN: eine, die alle bestehen, misst nichts. Gesehen: eine erste
+      Prüfung bestanden alle sechs Modelle, in der zweiten fielen zwei komplett
+      durch. Kosten und Latenz mitmessen.
+    violation: Modelle an einem Prompt vergleichen, den alle bestehen
+    correct: Zweistufig prüfen; die trennende Aufgabe ist die aussagekräftige
+    tags: benchmark, modellvergleich, pipeline, nachbildung, latenz, kosten
+    relations:
+      - {kind: SUPPLEMENTS, dst: LEK-ROHOUTPUT-001}
+
+  - id: RET-HEALTH-001
+    domain: retrieval
+    severity: 1
+    trigger: Ein Health- oder Statusendpunkt meldet den Zustand eines Index.
+    statement: >
+      Die Zahl nicht als Befund nehmen — sie kann ein Cache-Stand sein. Vor einer
+      Aussage über den Index eine echte Abfrage auslösen und danach erneut lesen.
+      Gemessen: die gemeldete Chunk-Zahl war der alte Stand, der Hot-Reload griff
+      erst bei der nächsten echten Abfrage.
+    violation: Die Chunk-Zahl direkt aus /health zitieren und als aktuell ausgeben
+    correct: Echte Abfrage auslösen, dann /health erneut lesen
+    tags: health, endpunkt, cache, index, veraltet
+    relations:
+      - {kind: SUPPLEMENTS, dst: LEK-BEFUND-001}
+
+  - id: RET-CONFIG-001
+    domain: retrieval
+    severity: 2
+    trigger: >
+      Ein Dienst läuft im Container und liest Modell- oder Endpunkt-Konfiguration
+      aus der Umgebung.
+    statement: >
+      Im LAUFENDEN Container prüfen, was wirklich gesetzt ist. Die `.env` des
+      Servers ist nicht die Umgebung des Containers: wird eine Variable in
+      `docker-compose` nicht durchgereicht, greift stumm der Default. Gesehen:
+      die `.env` nannte den einen Anbieter, compose reichte nichts durch — also
+      wurde ein anderer Anbieter nach einem Modell gefragt, das er nicht kennt.
+    violation: Die `.env` lesen und daraus schließen, welches Modell läuft
+    correct: '`docker exec … env | grep LLM_` — im Container prüfen, nicht in der Datei'
+    tags: konfiguration, container, docker-compose, env, default, anbieter
+    relations:
+      - {kind: SUPPLEMENTS, dst: LEK-BEFUND-001}

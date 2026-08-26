@@ -1,0 +1,100 @@
+# Quelle: claw-bridge/kontext/projekte/lernplattform.md
+# Hinweis: Das Dossier ist als Entwurf vom 2026-07-31 markiert und lag dem Owner
+# zur Bestätigung vor. Übernommen sind nur die dort als final gekennzeichneten
+# Design-Beschlüsse und die belegten Stolpersteine.
+# NICHT modelliert: Meilenstein-Stand (M0/M1), Bot-Zuordnung, Referenzliste.
+
+project: lernplattform
+repo: ~/projects/Lernplattform
+
+rules:
+
+  - id: LERN-MANDANT-001
+    domain: lernplattform
+    severity: 3
+    trigger: Mandanten-Auflösung oder Zugriff auf Schul-/Klassendaten wird gebaut.
+    statement: >
+      Mandanten sind hierarchisch Schule -> Klasse (Stufe als Attribut);
+      Wissen vererbt sich Klasse -> Stufe -> Schule -> zentral kuratiert. Der
+      Mandant kommt aus der SESSION, nicht aus der Subdomain. Ein unbekannter
+      Code ergibt 404 — NIE ein Fallback auf irgendeinen Mandanten.
+    violation: Bei unbekanntem Klassencode auf den Default-Mandanten fallen
+    correct: 404 zurückgeben
+    tags: mandant, hierarchie, 404, fallback
+
+  - id: LERN-PII-001
+    domain: lernplattform
+    severity: 3
+    trigger: Schülerdaten werden erfasst oder gespeichert.
+    statement: >
+      Schüler melden sich über Klassencode plus Pseudonym plus
+      Wiederkehr-Code an — KEINE personenbezogenen Daten. Kein Klarname, keine
+      Mailadresse, kein Geburtsdatum.
+    violation: Vorname und Nachname im Anmeldeformular
+    correct: Pseudonym plus Wiederkehr-Code
+    tags: pii, datenschutz, schüler, pseudonym
+
+  - id: LERN-ROLLEN-001
+    domain: lernplattform
+    severity: 3
+    trigger: Ein LLM-Aufruf in der Lernplattform wird gebaut.
+    statement: >
+      Strikte Rollentrennung: TUTOR (nur self-hosted, verarbeitet Schülertext,
+      Allowlist über `TUTOR_ERLAUBTE_HOSTS`) und GENERATOR — OHNE
+      gegenseitigen Fallback. Fällt der eine aus, übernimmt der andere nicht.
+    violation: Bei Tutor-Ausfall auf den Generator umschalten
+    correct: Ausfall melden, Funktion deaktivieren
+    tags: llm, tutor, generator, self-hosted, allowlist
+
+  - id: LERN-BUDGET-001
+    domain: lernplattform
+    severity: 2
+    trigger: Ein LLM-Aufruf wird gegen ein Budget verrechnet.
+    statement: >
+      Budget-Kette global -> Schule -> Spielsitzung
+      (`LLM_TAGESLIMIT_GLOBAL`, `SCHULE_TAGESLIMIT_DEFAULT`,
+      `SITZUNG_LIMIT_DEFAULT`). Die Tabelle `llm_calls` führt schuleId und
+      purpose (`spiel:<id>`) mit, damit Kosten je Schule und Spielart
+      auswertbar bleiben. Cache-Treffer zählen NICHT gegen Budgets.
+    violation: Cache-Treffer mitzählen und Sitzungen vorzeitig abwürgen
+    correct: Nur echte Aufrufe verrechnen
+    tags: budget, llm_calls, cache, limits
+
+  - id: LERN-KOSTEN-001
+    domain: lernplattform
+    severity: 3
+    trigger: Ein Test in der Lernplattform berührt einen LLM-Pfad.
+    statement: >
+      Tests laufen ausschließlich gegen tote Endpunkte oder Fake-Server —
+      0 EUR API-Kosten. `MIN_SCORE` wird gemessen, nicht geraten.
+    violation: Einen Test gegen die echte Dev-API laufen lassen
+    correct: Fake-Server, URL per ENV gepinnt
+    tags: tests, kosten, fake-server
+    relations:
+      - {kind: SUPPLEMENTS, dst: RAG-TESTNETZ-001}
+
+  - id: LERN-PORT-001
+    domain: lernplattform
+    severity: 1
+    trigger: Der API-Server der Lernplattform wird gestartet.
+    statement: >
+      API-Port ist 3210. Port 3000 gehört auf diesem Laptop lensclash —
+      belegt über einen EADDRINUSE-Befund. Die Dev-Datenbank läuft über
+      `docker compose -f docker-compose.dev.yml up -d` (pgvector:pg16,
+      Port 5433, eigene Test-DB `lernplattform_test`).
+    violation: Auf 3000 starten und den Portkonflikt als Bug melden
+    correct: 3210 verwenden
+    tags: port, eaddrinuse, pgvector, docker
+
+  - id: LERN-SPIELE-001
+    domain: lernplattform
+    severity: 2
+    trigger: Ein Lernspiel wird aufgenommen oder freigeschaltet.
+    statement: >
+      Jedes Spiel im Fundus trägt ein RAG-Spektrum (`keins | batch |
+      laufzeit`). Vor der Freischaltung läuft eine
+      Material-Eignungsprüfung — ein Laufzeit-RAG-Spiel ohne geeignetes
+      Unterrichtsmaterial wird nicht freigegeben.
+    violation: Spiel freischalten, ohne das Material zu prüfen
+    correct: Eignungsprüfung fahren, dann freischalten
+    tags: spiele, rag-spektrum, eignungsprüfung

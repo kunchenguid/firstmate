@@ -7,13 +7,15 @@
 #   fm-order.sh record --type decision|directive|promise|prohibition \
 #       --subject <slug> (--quote <text> | --quote-file <path>) \
 #       [--translation <text>] [--scope <text>] [--due YYYY-MM-DD] \
-#       [--expires YYYY-MM-DD] [--task <task-id>] [--source <who>]
+#       [--expires YYYY-MM-DD] [--task <task-id>] [--source <who>] \
+#       [--enforce '<gate> [allow] <key>=<value>...']...
 #   fm-order.sh list [--all]         active orders (default) or every order
 #   fm-order.sh show <id>            print one order record
 #   fm-order.sh pin                  emit the uncompressible active-orders block
 #   fm-order.sh recite <id>...       verify the recited set equals the active set
 #   fm-order.sh close <id> --reason <text> [--captain-wording <text>]
 #   fm-order.sh check-subject <subject> [--new-fact <text>]
+#   fm-order.sh gate-check <gate> [--ctx <key>=<value>]...
 #   fm-order.sh --help
 #
 # Types (L45): decision (captain decision; closing needs his verbatim wording),
@@ -25,6 +27,10 @@
 #     header block, terminated by the first blank line, one "key: value" per line:
 #       id, type, subject, status (active|closed), scope, source, recorded,
 #       due, expires, task   ("-" for empty)
+#       enforce  OPTIONAL and REPEATABLE, last in the header block: the
+#                machine-readable half of the order, format and semantics owned
+#                by bin/fm-order-gate-lib.sh's header, validated here at write
+#                time so a malformed entry never reaches a gate (L64)
 #     "## wording (verbatim, original language)" then the quote, byte-exact
 #     "## translation (EN, marked)" then the marked translation or "(none)"
 #     closing appends "## closed" with closed/reason/captain-wording lines
@@ -37,14 +43,25 @@
 # without a named new fact (L71); `recite` fails loudly on any mismatch so a
 # restarted session must re-anchor before acting (hardening 1). An order past
 # its expires date stops binding: it leaves pin and recite but stays on disk.
+#
+# Enforcement: an order MAY carry `enforce:` lines so a tool can ask it
+# (`gate-check`, or bin/fm-order-gate-lib.sh from inside a gate). The wording
+# stays the source of truth; `show` and `pin` print every enforce line twice -
+# verbatim as recorded, and once more as an "[interpretation]" line clearly
+# marked as such, so no agent ever mistakes our reading for the captain's words
+# (L46, L50).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
+export FM_HOME
 ORDERS="$FM_HOME/data/entscheide"
 
-usage() { sed -n '2,37p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+# shellcheck source=bin/fm-order-gate-lib.sh
+. "$SCRIPT_DIR/fm-order-gate-lib.sh"
+
+usage() { sed -n '2,52p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 die() { echo "error: $*" >&2; exit 2; }
 utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 today() { date -u +%F; }
@@ -103,8 +120,10 @@ case "$cmd" in
     shift
     type="" subject="" quote="" quote_file="" translation="" scope="-"
     due="-" expires="-" task="-" source="captain"
+    enforce_entries=()
     while [ $# -gt 0 ]; do
       case "$1" in
+        --enforce) enforce_entries+=("${2:-}"); shift 2 ;;
         --type) type="${2:-}"; shift 2 ;;
         --subject) subject="${2:-}"; shift 2 ;;
         --quote) quote="${2:-}"; shift 2 ;;
@@ -142,6 +161,10 @@ case "$cmd" in
     if [ "$task" != "-" ]; then
       command -v tasks-axi >/dev/null 2>&1 || die "--task needs tasks-axi on PATH to hold the backlog item; nothing was recorded"
     fi
+    for entry in "${enforce_entries[@]+"${enforce_entries[@]}"}"; do
+      fm_order_gate_validate_entry "$entry" \
+        || die "--enforce '$entry' is not a valid enforce entry (see bin/fm-order-gate-lib.sh); nothing was recorded"
+    done
     id="$(next_id)"
     dir="$ORDERS/$(today)"
     mkdir -p "$dir"
@@ -158,6 +181,9 @@ case "$cmd" in
       printf 'due: %s\n' "$due"
       printf 'expires: %s\n' "$expires"
       printf 'task: %s\n' "$task"
+      for entry in "${enforce_entries[@]+"${enforce_entries[@]}"}"; do
+        printf 'enforce: %s\n' "$entry"
+      done
       printf '\n## wording (verbatim, original language)\n%s\n' "$quote"
       printf '\n## translation (EN, marked)\n%s\n' "${translation:-(none)}"
     } > "$tmp"
@@ -198,6 +224,17 @@ case "$cmd" in
     f="$(find_by_id "$1")"
     [ -n "$f" ] || die "no order '$1'"
     cat "$f"
+    enforce_lines="$(fm_order_gate_enforce_lines "$f")"
+    if [ -n "$enforce_lines" ]; then
+      echo
+      echo "## enforce (INTERPRETATION, marked - the wording above is the source)"
+      while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        printf '  enforce: %s\n' "$entry"
+        printf '    %s' "$(fm_order_gate_deutung "$entry")"
+        echo
+      done <<< "$enforce_lines"
+    fi
     ;;
   pin)
     body=""
@@ -207,6 +244,11 @@ case "$cmd" in
       ids="${ids:+$ids }$id"
       body+="$id $(field "$f" type) $(field "$f" subject) scope=$(field "$f" scope) due=$(field "$f" due) expires=$(field "$f" expires)"$'\n'
       body+="  > $(wording_first_line "$f")"$'\n'
+      while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        body+="  enforce: $entry"$'\n'
+        body+="    $(fm_order_gate_deutung "$entry")"$'\n'
+      done < <(fm_order_gate_enforce_lines "$f")
     done < <(active_rows)
     count="$(printf '%s' "$ids" | wc -w | tr -d ' ')"
     sha="$(printf '%s' "$body" | sha256sum | cut -c1-12)"
@@ -298,6 +340,28 @@ case "$cmd" in
     fi
     [ -n "$informational" ] && echo "note: subject '$subj' has related orders: $informational"
     echo "subject '$subj' is free for submission"
+    ;;
+  gate-check)
+    shift
+    [ -n "${1:-}" ] || die "gate-check requires a gate; known gates: $FM_ORDER_GATE_GATES"
+    gate="$1"; shift
+    gate_ctx=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --ctx) gate_ctx+=("${2:-}"); shift 2 ;;
+        *) die "unknown argument '$1' for gate-check (use --ctx key=value)" ;;
+      esac
+    done
+    set +e
+    gate_out="$(fm_order_gate_check "$gate" "${gate_ctx[@]+"${gate_ctx[@]}"}")"
+    gate_rc=$?
+    set -e
+    if [ -n "$gate_out" ]; then printf '%s\n' "$gate_out"; fi
+    case "$gate_rc" in
+      0) echo "gate '$gate' is free for this context (no active order enforces against it)" ;;
+      1) echo "gate '$gate' is BLOCKED by the order(s) above - quote the wording, name the exit, or have the captain close/amend the order" >&2 ;;
+    esac
+    exit "$gate_rc"
     ;;
   --help|-h|help)
     usage

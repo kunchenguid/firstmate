@@ -12,8 +12,10 @@
 #   3. write refuses a hand-kept register without the takeover flag; with
 #      --uebernehmen --archiv it archives first and then writes the render;
 #      re-write over its own render needs no flag.
-#   4. check is silent when fresh, reports after a backlog change or a hand
-#      edit, and never touches a hand-kept register.
+#   4. check raises no freshness line when fresh, reports after a backlog
+#      change or a hand edit, and never touches a hand-kept register. Its
+#      second half - the three register invariants it now also reports - is
+#      owned by tests/fm-register-invarianten-lib.test.sh.
 #   5. dead-edges reads ONLY the structured blocked-by field on open head
 #      lines: a prose citation with an empty field stays silent while real
 #      dead edges (missing or closed target) are still reported.
@@ -115,7 +117,14 @@ fi
 
 # --- 4. staleness check -----------------------------------------------------
 out=$(run check)
-[ -z "$out" ] && ok "check is silent while the render is fresh" || fail "fresh render must be silent (got: $out)"
+# check answers two questions now: is the derived view fresh, and are the
+# records it derives FROM sound (bin/fm-register-invarianten-lib.sh). The
+# invariant lines are a separate report with their own test file; this
+# assertion is about the FRESHNESS signal, so it strips them and stays exactly
+# as strict as before about everything else.
+frische=$(printf '%s\n' "$out" | grep -v '^REGISTER: \(ziel fehlt\|eigner fehlt\|planlos seit\)' || true)
+[ -z "$frische" ] && ok "check reports no staleness while the render is fresh" \
+  || fail "fresh render must produce no freshness line (got: $frische)"
 printf -- '- [ ] neu-1 - Neuer Posten (repo: lensclash) (since 2026-08-22)\n' >> "$HOME_A/data/backlog.md"
 out=$(run check)
 printf '%s' "$out" | grep -q 'stale or hand-edited' && ok "check reports a moved backlog" \

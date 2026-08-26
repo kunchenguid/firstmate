@@ -9,6 +9,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fm-konten-fixture-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-konten-fixture-lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
@@ -95,6 +97,10 @@ make_spawn_case() {
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
+  # A claude-family spawn resolves its account from the ledger and refuses loudly
+  # without one (bin/fm-spawn-gate-lib.sh), so every case carries a fixture ledger
+  # whose worker seat is startable for this case's project and worktree.
+  fm_test_konten_fixture "$home" "$case_dir/konten" "$proj" "$wt" "$home"
   touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
     mkdir -p "$home/data/$id"
@@ -130,6 +136,7 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
+    FM_KONTEN_AKTE="${FM_TEST_KONTEN_AKTE:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
@@ -157,10 +164,13 @@ assert_meta_profile() {
 }
 
 test_no_profile_keeps_claude_profile_defaults() {
-  local rec id out status expected launch
+  local rec id out status expected launch seat
   id=profile-off-z1
   rec=$(make_spawn_case profile-off claude "$id")
   read_case_record "$rec"
+  # The ledger's offiziere-worker seat is part of the canonical claude launch now
+  # that the account is resolved instead of inherited (bin/fm-spawn-gate-lib.sh).
+  seat=$(fm_test_konten_store_pfad "$CASE_DIR/konten" konto-1)
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
@@ -169,7 +179,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="CLAUDE_CONFIG_DIR='$seat' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -789,37 +799,56 @@ test_batch_forwards_shared_profile_flags() {
   pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
 }
 
-test_claude_forwards_firstmate_config_dir_when_set() {
-  local rec id out status launch
+# The account is a MANAGED state, never inherited (AGENTS.md "Accounts and day
+# close"). These two tests pin the contract that replaced inheritance: the seat
+# comes from config/konten.tsv, it is recorded in the task meta, and whatever
+# CLAUDE_CONFIG_DIR the invoking firstmate session carries is NOT passed on -
+# inheriting it is what launched a worker on the firstmate seat against a pinned
+# captain order.
+test_claude_takes_account_from_ledger_not_from_inherited_config_dir() {
+  local rec id out status launch seat
   id=profile-claude-cfgdir-z17
   rec=$(make_spawn_case profile-claude-cfgdir claude "$id")
   read_case_record "$rec"
+  seat=$(fm_test_konten_store_pfad "$CASE_DIR/konten" konto-1)
 
-  out=$(FM_TEST_CLAUDE_CONFIG_DIR="/opt/test/claude-work" \
+  # A firstmate session sitting on a DIFFERENT store than the worker seat: the
+  # launch must show the ledger's seat, and never this one.
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="/opt/test/claude-firstmate-seat" \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
+  expect_code 0 "$status" "claude spawn should succeed on the ledger's offiziere-worker seat"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
-    "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
-  pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$seat' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+    "claude launch did not carry the offiziere-worker seat from config/konten.tsv"
+  assert_not_contains "$launch" "/opt/test/claude-firstmate-seat" \
+    "claude launch inherited the invoking session's CLAUDE_CONFIG_DIR instead of the ledger's seat"
+  assert_grep "account=konto-1" "$HOME_DIR/state/$id.meta" \
+    "meta does not record the resolved account, so order gates on account= have nothing to judge"
+  pass "claude resolves its account from the ledger and records it, ignoring the inherited CLAUDE_CONFIG_DIR"
 }
 
-test_claude_omits_config_dir_prefix_when_unset() {
-  local rec id out status launch
+test_claude_refuses_when_account_ledger_is_missing() {
+  local rec id out status
   id=profile-claude-nocfgdir-z18
   rec=$(make_spawn_case profile-claude-nocfgdir claude "$id")
   read_case_record "$rec"
+  rm -f "$HOME_DIR/config/konten.tsv"
 
-  # run_spawn pins CLAUDE_CONFIG_DIR empty by default, exercising the single-store
-  # default path where fm-spawn adds no prefix.
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  # Pin the ledger path INTO the fixture before removing it. Without this the
+  # lookup falls back to the checkout's own config/konten.tsv and the test would
+  # quietly read the operator's real accounts instead of the absent fixture one.
+  # No ledger and an inherited store present: the old code would have launched on
+  # the inherited value. The seat is unresolvable now, so the spawn must stop.
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="/opt/test/claude-firstmate-seat" \
+    FM_TEST_KONTEN_AKTE="$HOME_DIR/config/konten.tsv" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  expect_code 0 "$status" "claude spawn without CLAUDE_CONFIG_DIR should succeed"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
-    "claude launch must not add a config-dir prefix when firstmate has no CLAUDE_CONFIG_DIR set"
-  pass "claude omits the config-dir prefix when firstmate runs with the single-store default"
+  expect_code 1 "$status" "claude spawn without an account ledger must refuse, not fall back to the inherited store"
+  assert_contains "$out" "konten.tsv" "refusal does not name the missing ledger"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "/opt/test/claude-firstmate-seat" \
+    "a spawn without a resolvable seat still launched on the inherited store"
+  pass "a missing account ledger is a loud refusal, never a silent fall back to the inherited store"
 }
 
 test_non_claude_harness_ignores_config_dir() {
@@ -884,8 +913,8 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
-test_claude_forwards_firstmate_config_dir_when_set
-test_claude_omits_config_dir_prefix_when_unset
+test_claude_takes_account_from_ledger_not_from_inherited_config_dir
+test_claude_refuses_when_account_ledger_is_missing
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
 

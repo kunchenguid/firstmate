@@ -3,7 +3,7 @@ name: secondmate-provisioning
 description: >-
   Agent-only reference for persistent secondmate setup and retirement.
   Use when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, approving a secondmate's implementation plan, or retiring a secondmate home, or when editing data/secondmates.md.
-  Covers local leases, whole-home remote routes, transactional seeding, record intake for an existing or inherited domain, project clone restrictions, secondmate harness pins, inherited local-material push, the plan-approval gate on secondmate implementations, idle charter, handoff helper, and teardown safety.
+  Covers the seeding checklist, local leases, whole-home remote routes, transactional seeding, the charter's product frame, rule ingest, record intake for an existing or inherited domain, project clone restrictions, secondmate harness pins, inherited local-material push, the plan-approval gate on secondmate implementations, handoff helper, and teardown safety.
 user-invocable: false
 metadata:
   internal: true
@@ -13,7 +13,31 @@ metadata:
 
 Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, approving an implementation plan for, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
 
-Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and secondmates are idle by default.
+Route by natural-language `scope:`; `local-only` projects stay with the main firstmate.
+A secondmate holds the product mandate inside its projects' `VISION.md` frame: it decides and prioritizes there, proposes work as written plans, and answers for the experienced product.
+The "you do not generate your own work" charter clause was abolished on 2026-08-26 (`regeln/ABGESCHAFFT.md`, `charter-eigeninitiative-verbot`), so an empty plan state on a live product is a reportable condition, not a resting state - but every proposal still goes plan -> review -> start, and nothing begins unplanned.
+
+## Seeding checklist
+
+Work this in order; each step has a later step that depends on it.
+
+1. **Classify the domain** - greenfield, or existing/inherited (see "Record intake" below). An inherited domain needs its reconciliation done before the new mate acts on any inherited plan.
+2. **Resolve the projects and their origins**, and confirm each is `no-mistakes` or `direct-PR`; `local-only` projects stay with the main firstmate.
+3. **Scaffold the charter** with `bin/fm-brief.sh <id> --secondmate {<project>...|--no-projects}`, then fill its `# Product` section (below) before seeding.
+4. **Seed the home** - `bin/fm-home-seed.sh` locally, `bin/fm-remote-home-seed.sh` for a whole remote home. Seeding is transactional; a failure rolls back briefs, homes, clones, and registry edits.
+5. **Ingest the rules in the new home**: `FM_HOME=<new-home> bin/fm-regeln ingest` (through `bin/fm-on.sh` for a remote route).
+   `regeln/` arrives with the tracked fast-forward, but the home's rule database and vector index are local build artifacts that no seed or sync regenerates - without this step the new mate's SessionStart hook has nothing to inject and it starts with no core rules at all.
+6. **Validate** with `bin/fm-home-seed.sh validate`, whose header owns the complete validation and refusal mechanics.
+7. **Launch** with `bin/fm-spawn.sh <id> --secondmate`.
+8. **Hand off its in-scope queued backlog items** (below), after record intake for an inherited domain.
+9. **Confirm the first session came up with rules**: a `WRIT_FM: MISSING` line in that home's session-start digest means step 5 did not take, and it is running blind (`bootstrap-diagnostics`).
+
+## The charter's product frame
+
+`bin/fm-brief.sh`'s charter template scaffolds a `# Product` section, and that section is the point of the charter: it is where the mate's product foundation reaches it.
+Fill it with pointers and quoted words, never a paraphrase - the `VISION.md` of each project it owns, the success measures quoted verbatim, and the mandate boundary that says which decisions are its own and which are the captain's.
+`bin/fm-brief.sh`'s header owns the placeholder names and the exact rendering; `FM_SECONDMATE_CHARTER` fills the charter text and `FM_SECONDMATE_SCOPE` the routing scope when it differs.
+A charter whose `# Product` section is still a placeholder is not seedable: `bin/fm-home-seed.sh` refuses a missing or placeholder charter, and a mate with no product frame is exactly the planless mate this rebuild exists to prevent.
 
 ## Routing table
 
@@ -97,7 +121,7 @@ When the file's tokens do apply, an explicit per-spawn `--model` or `--effort` f
 Because this resolves from the file on every spawn, the pin is durable across every respawn (recovery, `/updatefirstmate`, restart) exactly like the harness axis itself - e.g. `config/secondmate-harness` containing `claude opus` keeps a secondmate pinned to Opus even if the primary's own default model later changes.
 This is secondmate-only: crewmate/scout model resolution is untouched by this file.
 
-This section is the single owner of the secondmate sync and inherited-local-material propagation contract; `AGENTS.md` sections 3 and 4 point here.
+This section is the single owner of the secondmate sync and inherited-local-material propagation contract.
 Before a local launch, `fm-spawn.sh --secondmate` locally fast-forwards the home to the primary firstmate checkout's current default-branch commit when it is safe; dirty, diverged, or in-flight homes launch unchanged with a warning.
 The locked session-start deferred network stage runs the same bootstrap sweep for every live local secondmate home, discovered from `state/<id>.meta` records with `kind=secondmate` (`data/secondmates.md` only backfills `home=` for older records).
 That no-fetch path is a purely local fast-forward of tracked files, never an origin fetch, and it never touches the gitignored operational dirs, so a secondmate's backlog, projects, and in-flight work are never disturbed; a linked worktree advances immediately, while a standalone clone that lacks the target receives firstmate updates through `/updatefirstmate`'s origin refresh.
@@ -179,20 +203,31 @@ Treat an inherited queue that carries plans with no matching delivery record as 
 ## Plan approval before an implementation
 
 The captain's standing order is that an officer submits a plan - goal, which agreement it implements, steps, acceptance - before every implementation and starts only after the main firstmate's explicit approval, while investigation and analysis stay free.
-That order is enforced mechanically rather than by memory: in a home carrying the `.fm-secondmate-home` marker, a fresh ship spawn and a scout promotion both refuse unless [`bin/fm-plan-approval.sh`](../../../bin/fm-plan-approval.sh) verifies a signature only the primary home can produce, bound to that exact task id and to the exact current bytes of the brief the worker would follow.
-That script's header is the single owner of the record format, the key files, the verification steps, and the exact scope of the gate; do not restate its mechanics here or anywhere else.
+That order is enforced mechanically rather than by memory: in a home carrying the `.fm-secondmate-home` marker, a fresh ship spawn and a scout promotion both refuse unless [`bin/fm-plan-approval.sh`](../../../bin/fm-plan-approval.sh) verifies a signature only the primary home can produce.
 
-The operational shape for the main firstmate is short.
+**What is signed changed in v2.**
+Byte-exact plan signatures were abolished on 2026-08-26 (`regeln/ABGESCHAFFT.md`, `byte-plan-signaturen`) after 37 runs produced not one rejection while costing hours of standstill.
+The ed25519 record mechanic stays, because it is the one thing an officer's home cannot forge; what it now signs is the **5-question Freigabenotiz** plus the undertaking's class and its order, not the brief's bytes.
+So a v2 approval carries `--klasse <routine|destruktiv|produkt>`, either `--order <O-xxxx>` or `--no-order`, and `--notiz <path>` naming the Freigabenotiz that answers all five questions: are the premises evidenced, is acceptance point-by-point, which product goal does it serve, what is the budget and abort threshold, and who is affected or which mandate patterns it hits.
+`--klasse destruktiv` and `--klasse produkt` additionally REQUIRE `--captain-vorlage <O-xxxx>`: those classes may not rest on the fleet's own judgment.
+A `--klasse routine` on a brief carrying destructive markers trips a loud tripwire that only `--klasse-begruendung '<text>'` passes.
+The Freigabenotiz itself never travels - it is firstmate's own judgment, archived in the primary home - and only the acceptance block's bytes still invalidate an approval when they change.
+`bin/fm-plan-approval.sh`'s header is the single owner of the record format, the key files, the verification steps, and the exact scope of the gate; do not restate its mechanics here or anywhere else.
+
+**Measure the review, not the approvals.**
+A plan review that never rejects anything is itself the finding: track the rejection rate and report it at day close, because the abolished byte signature failed precisely by always passing.
+
+The operational shape is short.
 The officer writes the plan into the task's brief in its own home and routes that path back through its marked status channel.
-Read it, and when you approve, run `bin/fm-plan-approval.sh approve <secondmate-id> <task-id> --plan-file <path-to-that-brief>`; the first approval generates the primary keypair lazily.
+Read it substantively - minutes, not seconds - then approve with `bin/fm-plan-approval.sh approve <secondmate-id> <task-id> --klasse <...> --order <...> --notiz <path>`; the first approval generates the primary keypair lazily.
 When you do not approve, say so through the ordinary routed reply and leave the record unwritten, because an absent approval is already a refusal at the officer's spawn.
-Editing the brief after approval invalidates it by design, so a changed plan comes back for a fresh approval rather than starting on stale authority.
-Use `revoke` to withdraw an approval that has not been acted on yet, and `list` to see what a home is currently authorized to start.
+Use `revoke` to withdraw an approval not yet acted on, and `list` to see what a home is currently authorized to start.
 A remote route needs `--emit` because this home cannot write into it; place the printed bytes at the path the command names on that host.
+For task ids that predate the cutover, `batch-approve --heim <path> --order <O-xxxx>` writes one `klasse=routine` record per task after a cursory read-through, so the transition does not require re-planning work already underway.
 
 ## Backlog handoff
 
-Apply `AGENTS.md` section 10's work-items-only backlog contract before creation or handoff.
+A backlog holds work items only - never notes, reminders, or questions - so classify before creation or handoff.
 When a secondmate is created for a domain, existing main-backlog items that fall under its scope should become its work instead of staying stranded in the main backlog.
 Scope-matching is firstmate's judgment against the secondmate's natural-language scope, not a keyword rule.
 Read `data/backlog.md`, pick queued items that fit the new scope, and move them with:

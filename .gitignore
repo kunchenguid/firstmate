@@ -11,3 +11,10 @@ __pycache__/
 *.pyc
 .env
 config/
+
+# writ-fm / Python-Buildartefakte (Guard-Invariante: nichts Generiertes im getrackten Baum)
+.venv/
+__pycache__/
+*.pyc
+.venv-test/
+.pytest_cache/

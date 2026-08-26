@@ -41,6 +41,44 @@ pgid_of() { ps -p "$1" -o pgid= 2>/dev/null | tr -d '[:space:]'; }
 
 ppid_of() { ps -p "$1" -o ppid= 2>/dev/null | tr -d '[:space:]'; }
 
+pid_is_numeric() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+}
+
+# The pid this host actually reparents a freshly orphaned process to. That is
+# traditionally true init (1), but any process that armed
+# PR_SET_CHILD_SUBREAPER over its session claims orphans for itself instead -
+# notably a systemd --user instance, which is the normal case on a modern
+# systemd desktop, not a container-only quirk. Discovered once per run by
+# orphaning a throwaway process and reading who adopted it, rather than
+# hardcoding 1, so the fixture worker below is checked against this host's
+# real reparent target. Observed on this machine: a probe orphaned by its
+# launching subshell lands on ppid 2014 (systemd --user), never on ppid 1.
+discover_orphan_reaper_pid() {
+  local probe reaper deadline
+  # Job-control isolation (set -m + nohup, mirroring
+  # fm_remote_job_start_linux_worker) matters here too: a bare backgrounded
+  # process left in the launching subshell's own process group does not
+  # reliably survive to be reparented under this harness, the same way an
+  # unisolated worker would not survive its launching command's own teardown.
+  probe=$(
+    set -m
+    nohup sleep 5 >/dev/null 2>&1 &
+    printf '%s\n' "$!"
+  )
+  pid_is_numeric "$probe" || return 1
+  deadline=$(( $(date +%s) + 10 ))
+  reaper=
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    reaper=$(ppid_of "$probe")
+    pid_is_numeric "$reaper" && break
+    sleep 0.1
+  done
+  kill -KILL "$probe" 2>/dev/null || true
+  pid_is_numeric "$reaper" || return 1
+  printf '%s\n' "$reaper"
+}
+
 # Wait up to <seconds> for <pid> to exit; 0 when it did.
 wait_gone() { # <pid> <seconds>
   local pid=$1 deadline=$(( $(date +%s) + $2 ))
@@ -76,10 +114,6 @@ build_remote_root() {
   git -C "$root" config user.name Test
   git -C "$root" add AGENTS.md bin
   git -C "$root" commit -qm 'remote job fixture'
-}
-
-pid_is_numeric() {
-  case "$1" in ''|*[!0-9]*) return 1 ;; esac
 }
 
 # start_worker <remote-root> <account-home> <state-root>: start the worker
@@ -123,8 +157,10 @@ SERVE=$(pgrep -P "$WORKER" | head -n 1)
   fail "the serving child is outside the worker's process group"
 pass "the Linux start path puts the whole worker tree in its own process group"
 
-[ "$(ppid_of "$WORKER")" = 1 ] ||
-  fail "the fixture worker is not orphaned to init, so this case does not reproduce the leak"
+ORPHAN_REAPER_PID=$(discover_orphan_reaper_pid) ||
+  fail "could not determine this host's orphan reparent target"
+[ "$(ppid_of "$WORKER")" = "$ORPHAN_REAPER_PID" ] ||
+  fail "the fixture worker is not orphaned to this host's reparent target ($ORPHAN_REAPER_PID), so this case does not reproduce the leak"
 
 # The exact teardown shape that leaked in production: a fixture cleanup removes
 # the worker's state root and then stops only the single recorded worker pid -

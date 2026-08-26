@@ -5,6 +5,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fm-konten-fixture-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-konten-fixture-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-orca-tests)
 
@@ -461,6 +463,7 @@ test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
   config="$TMP_ROOT/pathless-cleanup-config"
   fm_git_init_commit "$proj"
   mkdir -p "$data/$id" "$state" "$config"
+  fm_test_konten_akte "$config/konten.tsv" "$config/konten-store" "$proj"
   printf 'brief\n' > "$data/$id/brief.md"
   touch "$state/.last-watcher-beat"
   orca_case pathless-cleanup-fail
@@ -470,7 +473,7 @@ test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
   printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/4.out"
   printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/5.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_KONTEN_AKTE="$config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
   status=$?
@@ -497,6 +500,7 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   config="$TMP_ROOT/spawn-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$config"
+  fm_test_konten_akte "$config/konten.tsv" "$config/konten-store" "$proj"
   printf 'brief\n' > "$data/$id/brief.md"
   touch "$state/.last-watcher-beat"
   orca_case spawn
@@ -505,7 +509,7 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   printf '{"ok":true,"result":{"repo":{"id":"repo-spawn"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-spawn","path":"%s"},"terminal":{"handle":"term-spawn"}}}\n' "$wt" > "$RESP/3.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_KONTEN_AKTE="$config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
   expect_code 0 $? "fm-spawn.sh --backend orca should succeed with fake Orca"$'\n'"$out"
@@ -535,12 +539,14 @@ test_spawn_refuses_orca_secondmate_before_home_mutation() {
   state="$home/state"
   config="$home/config"
   mkdir -p "$data" "$state" "$config" "$subhome/bin" "$subhome/data" "$subhome/state" "$subhome/projects"
+  # This case spawns into the secondmate home, not a project checkout.
+  fm_test_konten_akte "$config/konten.tsv" "$config/konten-store" "$subhome" "$home"
   printf '%s\n' "$id" > "$subhome/.fm-secondmate-home"
   printf 'firstmate\n' > "$subhome/AGENTS.md"
   printf 'claude\n' > "$config/crew-harness"
   touch "$state/.last-watcher-beat"
   set +e
-  out=$( FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+  out=$( FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_KONTEN_AKTE="$config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$subhome" claude --backend orca --secondmate 2>&1 )
   status=$?
@@ -562,12 +568,13 @@ test_spawn_refuses_orca_when_runtime_not_ready() {
   config="$TMP_ROOT/runtime-down-config"
   fm_git_init_commit "$proj"
   mkdir -p "$data/$id" "$state" "$config"
+  fm_test_konten_akte "$config/konten.tsv" "$config/konten-store" "$proj"
   printf 'brief\n' > "$data/$id/brief.md"
   touch "$state/.last-watcher-beat"
   orca_case runtime-down-spawn
   printf '{"ok":true,"result":{"runtime":{"reachable":false,"state":"starting"}}}\n' > "$RESP/1.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_ORCA_STATUS_RESPONSE=sequence \
-    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_KONTEN_AKTE="$config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
   status=$?
@@ -591,6 +598,7 @@ test_spawn_refuses_orca_nonisolated_worktree() {
   config="$TMP_ROOT/bad-spawn-config"
   fm_git_init_commit "$proj"
   mkdir -p "$data/$id" "$state" "$config"
+  fm_test_konten_akte "$config/konten.tsv" "$config/konten-store" "$proj"
   printf 'brief\n' > "$data/$id/brief.md"
   touch "$state/.last-watcher-beat"
   orca_case bad-spawn
@@ -598,7 +606,7 @@ test_spawn_refuses_orca_nonisolated_worktree() {
   printf '{"ok":true,"result":{"repo":{"id":"repo-bad"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-bad","path":"%s"},"terminal":{"handle":"term-bad"}}}\n' "$proj" > "$RESP/3.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_KONTEN_AKTE="$config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
   status=$?
@@ -625,6 +633,7 @@ test_spawn_removes_orca_worktree_when_terminal_create_fails() {
   config="$TMP_ROOT/terminal-fail-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$config"
+  fm_test_konten_akte "$config/konten.tsv" "$config/konten-store" "$proj"
   printf 'brief\n' > "$data/$id/brief.md"
   touch "$state/.last-watcher-beat"
   orca_case terminal-fail
@@ -633,7 +642,7 @@ test_spawn_removes_orca_worktree_when_terminal_create_fails() {
   printf '{"ok":true,"result":{"worktree":{"id":"wt-terminal-fail","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
   printf '1\n' > "$RESP/4.exit"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_KONTEN_AKTE="$config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
   status=$?
@@ -658,6 +667,7 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
   config="$TMP_ROOT/cleanup-fail-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$config"
+  fm_test_konten_akte "$config/konten.tsv" "$config/konten-store" "$proj"
   printf 'brief\n' > "$data/$id/brief.md"
   touch "$state/.last-watcher-beat"
   orca_case cleanup-fail
@@ -667,7 +677,7 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
   printf '1\n' > "$RESP/4.exit"
   printf '1\n' > "$RESP/5.exit"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_KONTEN_AKTE="$config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
   status=$?
@@ -692,6 +702,7 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   config="$TMP_ROOT/meta-fail-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state/$id.meta" "$config"
+  fm_test_konten_akte "$config/konten.tsv" "$config/konten-store" "$proj"
   printf 'brief\n' > "$data/$id/brief.md"
   orca_case meta-fail
   printf '1\n' > "$RESP/1.exit"
@@ -699,7 +710,7 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   printf '{"ok":true,"result":{"worktree":{"id":"wt-meta-fail","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
   printf '{"ok":true,"result":{"terminal":{"handle":"term-meta-fail"}}}\n' > "$RESP/4.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_KONTEN_AKTE="$config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
   status=$?
@@ -806,6 +817,7 @@ test_scout_teardown_removes_orca_worktree_via_helper() {
   config="$TMP_ROOT/teardown-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$config"
+  fm_test_konten_akte "$config/konten.tsv" "$config/konten-store" "$proj"
   printf 'report\n' > "$data/$id/report.md"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
@@ -818,7 +830,7 @@ test_scout_teardown_removes_orca_worktree_via_helper() {
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_KONTEN_AKTE="$config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
   rc=$?
   set -e
@@ -843,6 +855,7 @@ test_scout_teardown_refuses_orca_id_path_mismatch() {
   fm_git_worktree "$proj" "$wt" "fm/$id"
   git -C "$proj" worktree add --quiet -b "fm/$id-other" "$other_wt"
   mkdir -p "$data/$id" "$state" "$config"
+  fm_test_konten_akte "$config/konten.tsv" "$config/konten-store" "$proj"
   printf 'report\n' > "$data/$id/report.md"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
@@ -855,7 +868,7 @@ test_scout_teardown_refuses_orca_id_path_mismatch() {
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_KONTEN_AKTE="$config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
   rc=$?
   set -e
@@ -879,6 +892,7 @@ test_teardown_removes_orca_worktree_when_path_missing() {
   state="$TMP_ROOT/missing-path-state"
   config="$TMP_ROOT/missing-path-config"
   mkdir -p "$data/$id" "$state" "$config"
+  fm_test_konten_akte "$config/konten.tsv" "$config/konten-store" "$proj"
   printf 'report\n' > "$data/$id/report.md"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
@@ -890,7 +904,7 @@ test_teardown_removes_orca_worktree_when_path_missing() {
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_KONTEN_AKTE="$config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
   rc=$?
   set -e
@@ -912,6 +926,7 @@ test_teardown_preserves_metadata_when_orca_remove_error_json() {
   state="$TMP_ROOT/remove-error-state"
   config="$TMP_ROOT/remove-error-config"
   mkdir -p "$data/$id" "$state" "$config"
+  fm_test_konten_akte "$config/konten.tsv" "$config/konten-store" "$proj"
   printf 'report\n' > "$data/$id/report.md"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
@@ -925,7 +940,7 @@ test_teardown_preserves_metadata_when_orca_remove_error_json() {
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_KONTEN_AKTE="$config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
   rc=$?
   set -e
@@ -944,6 +959,7 @@ test_scout_teardown_refuses_orca_missing_report_when_path_missing() {
   state="$TMP_ROOT/missing-report-state"
   config="$TMP_ROOT/missing-report-config"
   mkdir -p "$data/$id" "$state" "$config"
+  fm_test_konten_akte "$config/konten.tsv" "$config/konten-store" "$proj"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-missing-report" "worktree=$wt" "project=$proj" \
@@ -953,7 +969,7 @@ test_scout_teardown_refuses_orca_missing_report_when_path_missing() {
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_KONTEN_AKTE="$config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
   rc=$?
   set -e
@@ -974,6 +990,7 @@ test_ship_teardown_refuses_orca_missing_worktree_path() {
   config="$TMP_ROOT/missing-ship-config"
   fm_git_init_commit "$proj"
   mkdir -p "$data/$id" "$state" "$config"
+  fm_test_konten_akte "$config/konten.tsv" "$config/konten-store" "$proj"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-missing-ship" "worktree=$wt" "project=$proj" \
@@ -983,7 +1000,7 @@ test_ship_teardown_refuses_orca_missing_worktree_path() {
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_KONTEN_AKTE="$config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
   rc=$?
   set -e
@@ -1005,6 +1022,7 @@ test_ship_teardown_removes_orca_worktree_when_id_path_matches() {
   config="$TMP_ROOT/ship-match-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$config"
+  fm_test_konten_akte "$config/konten.tsv" "$config/konten-store" "$proj"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-ship-match" "worktree=$wt" "project=$proj" \
@@ -1015,7 +1033,7 @@ test_ship_teardown_removes_orca_worktree_when_id_path_matches() {
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_KONTEN_AKTE="$config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
   rc=$?
   set -e
@@ -1040,6 +1058,7 @@ test_ship_teardown_refuses_orca_unresolvable_worktree_id() {
   config="$TMP_ROOT/ship-unresolved-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$config"
+  fm_test_konten_akte "$config/konten.tsv" "$config/konten-store" "$proj"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-ship-unresolved" "worktree=$wt" "project=$proj" \
@@ -1050,7 +1069,7 @@ test_ship_teardown_refuses_orca_unresolvable_worktree_id() {
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_KONTEN_AKTE="$config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
   rc=$?
   set -e
@@ -1079,6 +1098,7 @@ test_ship_teardown_refuses_orca_id_path_mismatch() {
   fm_git_worktree "$proj" "$wt" "fm/$id"
   git -C "$proj" worktree add --quiet -b "fm/$id-other" "$other_wt"
   mkdir -p "$data/$id" "$state" "$config"
+  fm_test_konten_akte "$config/konten.tsv" "$config/konten-store" "$proj"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-ship-mismatch" "worktree=$wt" "project=$proj" \
@@ -1089,7 +1109,7 @@ test_ship_teardown_refuses_orca_id_path_mismatch() {
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_KONTEN_AKTE="$config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
   rc=$?
   set -e
@@ -1116,6 +1136,7 @@ test_teardown_refuses_orca_missing_worktree_id() {
   config="$TMP_ROOT/missing-id-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$config"
+  fm_test_konten_akte "$config/konten.tsv" "$config/konten-store" "$proj"
   printf 'report\n' > "$data/$id/report.md"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
@@ -1126,7 +1147,7 @@ test_teardown_refuses_orca_missing_worktree_id() {
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_KONTEN_AKTE="$config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
   rc=$?
   set -e
@@ -1147,6 +1168,7 @@ test_teardown_refuses_orca_worktree_without_terminal_handle() {
   config="$TMP_ROOT/no-terminal-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$config"
+  fm_test_konten_akte "$config/konten.tsv" "$config/konten-store" "$proj"
   printf 'report\n' > "$data/$id/report.md"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
@@ -1158,7 +1180,7 @@ test_teardown_refuses_orca_worktree_without_terminal_handle() {
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_KONTEN_AKTE="$config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
   rc=$?
   set -e

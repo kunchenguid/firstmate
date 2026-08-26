@@ -51,7 +51,7 @@ The absence of a routed work item is not a divergence and the guard never requir
 2. Inventory only genuine unresolved choices that require the captain, and find the task each one gates.
 3. Hold one captain-held task per genuine question - bundle only questions truly decidable only together - each with a concise reason carrying the question and closed options.
 4. Run `complete` with the full captain-held inventory for that review pass.
-5. Relay the choices to the captain as decisions from Bearings' Captain's Call section under `AGENTS.md` section 9; do not use the word hold in captain chat.
+5. Relay the choices to the captain as decisions from Bearings' Captain's Call section, in his terms and in outcomes; do not use the word hold in captain chat.
 6. Close each call only through `answer` (or a channel that feeds `answers`), through `--until` when the captain defers it, or confirm a channel already closed it.
 7. Confirm Bearings reflects the outcome: answered calls leave Captain's Call, released work resumes, and deferred calls sit in Charted Next with their date.
 

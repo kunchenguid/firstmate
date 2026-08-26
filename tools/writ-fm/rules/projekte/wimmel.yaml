@@ -1,0 +1,112 @@
+# Quelle: claw-bridge/kontext/projekte/wimmel.md
+# NICHT modelliert: Deploy-Stand und Verifikationszahlen vom 2026-07-29 (Momentaufnahme),
+# die Hotspot-Koordinaten und die Referenzliste am Ende.
+
+project: wimmel
+repo: ~/projects/wimmel
+
+rules:
+
+  - id: WIM-MARKER-001
+    domain: wimmel
+    severity: 3
+    trigger: Etwas soll im Wimmelbild sichtbar hervorgehoben werden.
+    statement: >
+      GAR KEINE Marker im Bild (Owner, wörtlich, Runde 3). Personen wie
+      Attraktionen werden direkt in der Illustration angetippt — der nächste
+      Kandidat im Radius gewinnt. Der Zeig-mir-Blitz ist nur ein kurzer Ring,
+      kein bleibender Marker. Auch Overlays sind abgelehnt: Hinweise,
+      Steckbriefe und Abschluss stehen in einer festen Karte unter der Bühne.
+    violation: Kleine Punkte über die anklickbaren Personen legen
+    correct: Bild markerfrei lassen, Treffer nur über Radius und Rückmeldung
+    tags: marker, overlay, design-beschluss
+
+  - id: WIM-PUNKTE-001
+    domain: wimmel
+    severity: 3
+    trigger: Eine Spielmechanik für wimmel wird vorgeschlagen.
+    statement: >
+      Kein Spielcharakter — nur klicken, hören, sehen. KEINE Punkte, kein
+      Score, kein Zeitdruck. Die Aufgabe lautet "finde die drei Attraktionen".
+    violation: Punktezähler oder Bestenliste einbauen
+    correct: Fortschritt ohne Wertung anzeigen
+    tags: punkte, spielcharakter, design-beschluss
+
+  - id: WIM-VOLLBILD-001
+    domain: wimmel
+    severity: 2
+    trigger: Die Bühnen-Darstellung oder die Bedienleiste wird geändert.
+    statement: >
+      Der Vollbild-Button ist Pflichtfeature (Auftrag). Zoom wurde nach dem
+      Gerätetest ENTFERNT — Cover-Fit plus Pan per Drag bleibt.
+    violation: Zoom wieder einbauen, "weil man Details schlecht sieht"
+    correct: Vollbild anbieten, Zoom draußen lassen
+    tags: vollbild, zoom, pan, design-beschluss
+
+  - id: WIM-VORRANG-001
+    domain: wimmel
+    severity: 2
+    trigger: Trefferradien oder die Auswahl im Umkreis werden angefasst.
+    statement: >
+      Attraktionen haben VORRANG im Umkreis — sonst frisst eine danebensitzende
+      Person den Tipp auf. Radien: 5 % für Personen, 3,5 % für Attraktionen.
+      Drag-Schwelle 10 px (6 px fraßen Finger-Tipps auf: "manchmal treffe ich
+      nicht"). Cursor: Fadenkreuz über Attraktionen, Hand über Personen.
+    violation: Nächsten Kandidaten rein nach Abstand wählen
+    correct: Attraktionen zuerst prüfen, dann Personen
+    tags: trefferradius, vorrang, drag-schwelle, cursor
+
+  - id: WIM-HINWEIS-001
+    domain: wimmel
+    severity: 2
+    trigger: Ein Spruch oder Hinweistext für eine Person wird getextet.
+    statement: >
+      Hinweise müssen inhaltlich aus den drei HOT-Steckbriefen kommen (Fakten
+      und Zitate) und zur jeweiligen Person passen. "Zeig mir!" schwenkt nur
+      zu Personen, NIE zur Attraktion. Das Bezüge-Netz wird vor der
+      Entwicklung vorgelegt.
+    violation: Hinweise frei erfinden, weil sie besser klingen
+    correct: Aus den Steckbriefen texten, Netz vorlegen
+    tags: hinweise, steckbriefe, zeig-mir
+    relations:
+      - {kind: SUPPLEMENTS, dst: RAG-FAKTEN-001}
+
+  - id: WIM-ESCAPE-001
+    domain: wimmel
+    severity: 2
+    trigger: Ein Caddy-Site-Block mit Basic-Auth-Platzhaltern wird erzeugt.
+    statement: >
+      Escaping-Falle: Platzhalter per `printf` über zwei Shell-Ebenen zu
+      schieben schreibt einen Backslash in die Caddyfile (`{\$TESTER_USER}`),
+      der Reload endet mit 400. Lösung ist ein gequotetes Heredoc (siehe
+      `deploy.sh`). Dieselbe Falle droht bei jedem neuen Site-Block nach
+      SnackSuite-Muster.
+    violation: 'printf mit verschachtelten Anführungszeichen für die Caddyfile'
+    correct: 'Gequotetes Heredoc (<<''EOF'')'
+    tags: caddy, escaping, heredoc, basic-auth
+
+  - id: WIM-READ-001
+    domain: wimmel
+    severity: 2
+    trigger: Eine Dateiliste wird in einer Shell-Schleife abgearbeitet.
+    statement: >
+      `while read` überliest die letzte Zeile, wenn die Datei nicht mit einem
+      Zeilenumbruch endet — das hat hier einen kompletten
+      TTS-Regenerations-Auftrag verschluckt, unbemerkt.
+    violation: 'while read zeile; do … done < liste.txt ohne abschließende Newline'
+    correct: 'while read -r zeile || [[ -n "$zeile" ]]; do … done'
+    tags: shell, while-read, newline, stille-lücke
+    relations:
+      - {kind: SUPPLEMENTS, dst: RAG-STILL-001}
+
+  - id: WIM-PORT-001
+    domain: wimmel
+    severity: 1
+    trigger: Eine lokale Vorschau für die Akzeptanz wird gestartet.
+    statement: >
+      Die Preview-Ports 4173 und 4174 sind oft von anderen Projekt-Previews
+      belegt. Verifikation mit eigenem Port fahren (etwa 4180) und `BASIS=…`
+      entsprechend setzen.
+    violation: Auf 4173 starten und die fremde App screenen
+    correct: Eigenen Port wählen, BASIS mitgeben
+    tags: port, vite-preview, verifikation

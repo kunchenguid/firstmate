@@ -15,10 +15,20 @@
 #      shell: a dead session leaves a bare shell with no children.
 #      pane_current_command is deliberately not read - version-named harness
 #      binaries broke that check and produced duplicate sessions (W3).
-#   3. Neither holds -> dead: after the debounce the revival types
-#      $FM_TOTMANN_RELAUNCH_CMD (default `claude4 --continue`) into the target
-#      window, creating session and window when missing, and notifies the
-#      captain best-effort via the notifier.
+#   3. Neither holds -> dead: after the debounce the revival types the relaunch
+#      command into the target window, creating session and window when
+#      missing, and notifies the captain best-effort via the notifier. The
+#      command is DERIVED, not literal: the account ledger config/konten.tsv
+#      names the storage holding role `firstmate`, and its wrapper plus
+#      `--continue` is what gets typed (owner: bin/fm-totmann-relaunch-lib.sh
+#      via bin/fm-konten-lib.sh). FM_TOTMANN_RELAUNCH_CMD overrides it; an
+#      unreadable ledger is a loud refusal, never a guessed wrapper.
+#   4. The revival then reads its own RESULT back: after a short settle the
+#      target pane is captured, and a capture showing `No conversation found`,
+#      the onboarding wizard, the login chooser or the trust dialog means the
+#      relaunch landed in a bare shell (the measured failure after the seat
+#      move). That aborts the revival episode loudly - notifier plus exit 3 -
+#      instead of arming a kicker that would type into nothing.
 #
 # Revival mode - boot versus day-hang (captain finding 24.08.2026, O-0063
 # night: a post-reboot `--continue` resumed stale pre-reboot context and the
@@ -47,8 +57,11 @@
 #
 # Environment:
 #   FM_TOTMANN_TARGET        tmux target pane (default firstmate:0)
-#   FM_TOTMANN_RELAUNCH_CMD  command typed to revive (default: claude4 --continue;
-#                            follows the firstmate seat - account 4 since O-0006, 23.08.2026)
+#   FM_TOTMANN_RELAUNCH_CMD  command typed to revive (default: derived from the
+#                            account ledger config/konten.tsv - the wrapper of the
+#                            storage holding role `firstmate`, plus --continue)
+#   FM_TOTMANN_ERGEBNIS_SECS seconds to settle before reading the relaunch result
+#                            back from the pane (default 20; 0 disables the check)
 #   FM_TOTMANN_TMUX          extra tmux args, e.g. "-L testsock" (tests)
 #   FM_TOTMANN_DEBOUNCE      seconds between revivals (default 1800)
 #   FM_TOTMANN_NOTIFY        notifier executable (default claw-notify; "" disables)
@@ -68,15 +81,51 @@ STATE="$FM_HOME/state"
 MARKER="$STATE/.startup-network.timings"
 TARGET="${FM_TOTMANN_TARGET:-firstmate:0}"
 SESSION="${TARGET%%:*}"
-RELAUNCH="${FM_TOTMANN_RELAUNCH_CMD:-claude4 --continue}"
+RELAUNCH="${FM_TOTMANN_RELAUNCH_CMD:-}"
 DEBOUNCE="${FM_TOTMANN_DEBOUNCE:-1800}"
 NOTIFY="${FM_TOTMANN_NOTIFY-claw-notify}"
 ANSTOSS="${FM_TOTMANN_ANSTOSS-$HOME/.local/bin/fm-anstoss}"
 READY_SECS="${FM_TOTMANN_READY_SECS:-240}"
+ERGEBNIS_SECS="${FM_TOTMANN_ERGEBNIS_SECS:-20}"
 PROC_STAT="${FM_TOTMANN_PROC_STAT:-/proc/stat}"
 read -r -a TMUX_EXTRA <<< "${FM_TOTMANN_TMUX:-}"
 
-usage() { sed -n '2,61p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+# --- account hook (owner: bin/fm-totmann-relaunch-lib.sh) -------------------
+# The relaunch command and the result check both live in that library; kept to
+# this block so the ledger can move without touching the revival mechanics.
+# shellcheck source=bin/fm-totmann-relaunch-lib.sh
+. "$SCRIPT_DIR/fm-totmann-relaunch-lib.sh"
+
+relaunch_cmd() { # the command to type; loud refusal instead of a guessed account
+  [ -z "$RELAUNCH" ] || { printf '%s\n' "$RELAUNCH"; return 0; }
+  fm_totmann_relaunch_default && return 0
+  echo "fm-totmann: no relaunch command - the account ledger config/konten.tsv named no firstmate seat." >&2
+  echo "fm-totmann: move the seat with bin/fm-sitzwechsel.sh or set FM_TOTMANN_RELAUNCH_CMD; refusing to guess an account." >&2
+  return 2
+}
+
+ergebnis_pruefen() { # after the relaunch: did the seat really start? 0 yes, 1 no
+  local text grund ausweg
+  [ "$ERGEBNIS_SECS" -gt 0 ] 2>/dev/null || return 0
+  sleep "$ERGEBNIS_SECS"
+  text="$(tmx capture-pane -p -t "$TARGET" 2>/dev/null || true)"
+  if [ -z "$text" ]; then
+    echo "note: relaunch result unreadable (empty capture of $TARGET) - treating as started"
+    return 0
+  fi
+  grund="$(fm_totmann_fehlstart_grund "$text")" || return 0
+  ausweg="$(fm_totmann_fehlstart_ausweg "$grund")"
+  echo "FEHLSTART: die Wiederbelebung tippte '$RELAUNCH' in $TARGET, aber das Fenster zeigt: $grund" >&2
+  echo "FEHLSTART: Quelle des Sitzes ist config/konten.tsv (Leser bin/fm-konten-lib.sh). Ausweg: $ausweg" >&2
+  if [ -n "$NOTIFY" ] && command -v "$NOTIFY" >/dev/null 2>&1; then
+    "$NOTIFY" "Die Firstmate-Sitzung liess sich NICHT wiederbeleben: $grund. Der Sitz kommt aus config/konten.tsv, gestartet wurde '$RELAUNCH'. Ausweg: $ausweg" \
+      --prio hoch --projekt default >/dev/null 2>&1 || true
+  fi
+  return 1
+}
+# ---------------------------------------------------------------------------
+
+usage() { sed -n '2,74p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 tmx() { tmux ${TMUX_EXTRA[@]+"${TMUX_EXTRA[@]}"} "$@"; }
 
 is_shell_comm() { # the stable system shells; anything else in a pane is a live program
@@ -188,6 +237,7 @@ case "$cmd" in
       echo "dead, but debounced: last revival $((now - last))s ago (< ${DEBOUNCE}s)"
       exit 0
     fi
+    RELAUNCH="$(relaunch_cmd)" || exit 2
     mode="day-hang"
     boot_now="$(boot_epoch || true)"
     if [ -n "$boot_now" ]; then
@@ -201,6 +251,13 @@ case "$cmd" in
       tmx new-session -d -s "$SESSION" -c "$FM_HOME"
     fi
     tmx send-keys -t "$TARGET" "$RELAUNCH" Enter
+    # Read the result back before anything is armed: a relaunch that answered
+    # "No conversation found" or stopped at onboarding/trust left a bare shell,
+    # and a kicker aimed at a bare shell types into nothing.
+    if ! ergebnis_pruefen; then
+      echo "aborted: revival episode stopped after a failed start in $TARGET (nothing armed, no reset typed)" >&2
+      exit 3
+    fi
     # The kicker's stamp predates the boot-path /clear, so only a digest
     # printed AFTER the reset counts (fm-neustart contract).
     stamp="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/fm-totmann-stempel.XXXXXX")"

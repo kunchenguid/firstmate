@@ -1,0 +1,181 @@
+# Quelle: claw-bridge/kontext/projekte/cli_dashboard.md
+# NICHT modelliert: Stand-Angaben (Meilensteine, Testzahlen, Commit-Zähler — altern
+# täglich), die Channel-Befehlsliste und die Referenzliste am Ende.
+# Übernommen sind die Design-Beschlüsse und die gemessenen Fallen.
+
+project: cli_dashboard
+repo: ~/projects/CLI_Dashboard
+
+rules:
+
+  - id: CLID-BOT-001
+    domain: cli_dashboard
+    severity: 3
+    trigger: Der Telegram-Bot des CLI-Dashboards oder die Reserve wird angefasst.
+    statement: >
+      Der Bot gehört dem Dashboard, NICHT dem Router. `cli_dashboard` steht
+      bewusst nicht in `bots.conf` (dort nur ein erklärender Kommentar):
+      `claw-router` liest die Datei in jedem Zyklus neu und würde denselben
+      Bot mitpollen — `getUpdates` hat aber nur eine Warteschlange, wer den
+      Offset zuerst bestätigt, dem gehört die Nachricht. `telegram.py`
+      bedient beide Richtungen selbst. TG_POOL_10 ist NICHT frei — kein
+      `claw-bot-request --refill` darauf.
+    violation: cli_dashboard in bots.conf eintragen, "damit claw-notify funktioniert"
+    correct: Eintrag weglassen; ausgehend fällt telegram.py auf claw-notify zurück
+    tags: telegram, bots.conf, getupdates, tg_pool_10
+    relations:
+      - {kind: CONFLICTS_WITH, dst: COMM-BOT-001}
+      - {kind: DEPENDS_ON, dst: LEK-TG-001}
+
+  - id: CLID-YOLO-001
+    domain: cli_dashboard
+    severity: 3
+    trigger: Eine Session wird mit `bypassPermissions` gestartet.
+    statement: >
+      Beim ersten Start erscheint eine Warnung, deren VORAUSWAHL "No, exit"
+      ist — ein blindes Enter beendet den Slot sofort. Richtige Antwort ist
+      `2`.
+    violation: Enter senden, um die Warnung wegzuklicken
+    correct: '`2` senden'
+    tags: bypasspermissions, yolo, warnung, start
+
+  - id: CLID-ENTER-001
+    domain: cli_dashboard
+    severity: 2
+    trigger: Einer frisch gestarteten Session wird zum ersten Mal Text zugestellt.
+    statement: >
+      Eine frisch gestartete Session schluckt das ERSTE Enter; der Text bleibt
+      im Eingabefeld stehen. Zustellung bestätigen und dann nur das Enter
+      wiederholen — NIE den Text.
+    violation: Text erneut senden, weil er noch im Feld steht — er steht dann doppelt drin
+    correct: Nur Enter nachschicken
+    tags: enter, zustellung, erststart
+    relations:
+      - {kind: DEPENDS_ON, dst: LEK-TMUX-001}
+
+  - id: CLID-PROMPT-001
+    domain: cli_dashboard
+    severity: 2
+    trigger: Anhand des Terminalbilds soll entschieden werden, ob eine Nachricht angekommen ist.
+    statement: >
+      Claude Code wiederholt abgeschickte Nachrichten im Verlauf mit
+      DEMSELBEN `>`-Zeichen wie die Eingabezeile. Wer irgendeine solche Zeile
+      prüft, hält jede zugestellte Nachricht für hängengeblieben.
+      Maßgeblich ist ausschließlich die LETZTE.
+    violation: Die erste Prompt-Zeile im Puffer als Eingabezeile lesen
+    correct: Nur die letzte Zeile auswerten
+    tags: terminal, prompt-zeile, zustellprüfung
+
+  - id: CLID-GENEHMIGUNG-001
+    domain: cli_dashboard
+    severity: 3
+    trigger: Es ist zu entscheiden, ob eine Session fertig ist oder angestupst werden darf.
+    statement: >
+      Der Genehmigungsdialog ist strukturiert erkennbar: `status == "waiting"`
+      plus `waitingFor == "permission prompt"` in
+      `~/.claude/sessions/<pid>.json`. Solche Sessions gelten NICHT als fertig
+      und dürfen nie angestupst werden — sonst landet der Text im Dialogfeld.
+    violation: Wartende Session als fertig werten und einen Folgeauftrag senden
+    correct: waitingFor prüfen, Genehmigung melden statt anzustupsen
+    tags: genehmigung, waiting, anstupsen, sessions
+
+  - id: CLID-KOSTEN-001
+    domain: cli_dashboard
+    severity: 3
+    trigger: Ein Judge- oder Bewertungsaufruf per `claude -p` wird gebaut.
+    statement: >
+      Immer mit `--setting-sources "" --tools "" --system-prompt "…"` aufrufen.
+      Gemessen 0,033 $ je Aufruf; naiv ohne diese Flags 0,78 $ — Faktor 24,
+      weil der SessionStart-Hook sonst das komplette Regelwerk in jeden Call
+      schiebt. Zusätzlich `--max-budget-usd` je Aufruf und ein hartes
+      Nacht-Budget in der Config.
+    violation: 'claude -p --model fable ohne --setting-sources ""'
+    correct: 'Flags setzen, Budget je Aufruf begrenzen'
+    tags: kosten, judge, setting-sources, budget
+    relations:
+      - {kind: SUPPLEMENTS, dst: LEK-RATELIMIT-001}
+
+  - id: CLID-GELD-001
+    domain: cli_dashboard
+    severity: 2
+    trigger: Ein Geldbetrag aus der Oberfläche wird berichtet.
+    statement: >
+      Die Sessions laufen über das Claude-Max-Abo, NICHT über einen
+      API-Key (belegt: das `init`-Ereignis meldet `apiKeySource: "none"`).
+      Jeder Betrag in der Oberfläche ist ein Gegenwert zu Listenpreisen,
+      keine Rechnung — brauchbar als Verbrauchsmaß, nicht als Kostenaussage.
+    violation: '"Die Nacht hat 4,20 $ gekostet" als Rechnungsbetrag melden'
+    correct: '"Verbrauch entspricht 4,20 $ zu Listenpreisen (Abo, keine Rechnung)"'
+    tags: kosten, abo, listenpreise, schätzung
+    relations:
+      - {kind: SUPPLEMENTS, dst: REPORT-HONEST-001}
+
+  - id: CLID-PFAD-001
+    domain: cli_dashboard
+    severity: 2
+    trigger: Der Transkript-Pfad einer Session wird aus dem Arbeitsverzeichnis gebildet.
+    statement: >
+      In der Pfadregel werden `/` UND `_` je zu `-`.
+      `/home/fridjof/projects/CLI_Dashboard` wird zu
+      `-home-fridjof-projects-CLI-Dashboard`. Der Unterstrich ist die nicht
+      offensichtliche Hälfte.
+    violation: Nur Schrägstriche ersetzen — der Pfad zeigt ins Leere
+    correct: Beide Zeichen ersetzen
+    tags: transkript, pfadregel, unterstrich
+
+  - id: CLID-SCHILD-001
+    domain: cli_dashboard
+    severity: 2
+    trigger: Der Zustand des Dashboards soll am Telegram-Bot sichtbar gemacht werden.
+    statement: >
+      `setMyName` ist hart begrenzt, `setMyProfilePhoto` nicht — im selben
+      Moment gemessen: `setMyName -> 429 retry after 48006` (gut 13 h),
+      `setMyProfilePhoto -> ok`. Deshalb trägt das PROFILBILD den Zustand,
+      der Name läuft nur nebenher. Beides wird als Wunsch vorgemerkt und im
+      Fernsteuerungs-Takt nachgereicht, mit GETRENNTEN Sperren je Eigenschaft
+      — sonst hielte der begrenzte Name das Bild mit auf. Maßgeblich bleibt
+      ohnehin die Channel-Meldung bei jedem Umschalten.
+    violation: Zustand nur über setMyName anzeigen
+    correct: Bild als Zustandsträger, Name best effort, Channel-Meldung als Wahrheit
+    tags: telegram, setmyname, ratelimit, profilbild
+
+  - id: CLID-NACHT-001
+    domain: cli_dashboard
+    severity: 2
+    trigger: Der Nachtmodus wird eingeschaltet.
+    statement: >
+      Nachtmodus an heißt nicht Nachtmodus tut etwas: geprüft wird nur, was
+      `nacht = true` UND ein Ziel hat. Ohne Ziel läuft der Wächter die Nacht
+      durch und tut nichts. Der Nachtmodus startet ausschließlich manuell —
+      es gibt keine Uhrzeit-Logik.
+    violation: Nachtmodus einschalten, ohne für die Slots ein Ziel zu hinterlegen
+    correct: Ziel je Slot setzen, dann einschalten
+    tags: nachtmodus, ziel, wächter
+    relations:
+      - {kind: SUPPLEMENTS, dst: RAG-WAECHTER-001}
+
+  - id: CLID-TRUST-001
+    domain: cli_dashboard
+    severity: 2
+    trigger: Eine Session wird in einem Verzeichnis gestartet, das noch nie benutzt wurde.
+    statement: >
+      Neue Verzeichnisse fragen beim ersten Start nach Vertrauen. Ohne ein
+      bestätigendes Enter startet der Slot scheinbar, arbeitet aber nie.
+    violation: Slot als gestartet werten, weil das Fenster offen ist
+    correct: Trust-Dialog bestätigen, dann Arbeitsbeginn prüfen
+    tags: trust-dialog, erststart, verzeichnis
+
+  - id: CLID-SPEICHER-001
+    domain: cli_dashboard
+    severity: 1
+    trigger: Mehrere Sessions sollen parallel gestartet werden.
+    statement: >
+      Vor dem Start `free -h` prüfen — nicht auf einen erinnerten Wert
+      verlassen. Jede Session belegt (Stand 2026-08-01) 386–460 MB, vier neue
+      also rund 1,8 GB; der Swap war zu dem Zeitpunkt bereits weitgehend
+      belegt. Ob das heute noch stimmt, sagt nur die Messung.
+      Transkripte werden pro Content-Block geschrieben und werden groß —
+      deshalb rückwärts lesen mit frühem Abbruch statt Vollparse.
+    violation: Vier Slots starten, weil "letztes Mal ging es auch"
+    correct: 'free -h prüfen, dann Slots dosieren'
+    tags: speicher, swap, transkript, performance

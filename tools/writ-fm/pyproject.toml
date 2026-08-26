@@ -1,0 +1,22 @@
+[project]
+name = "writ-light"
+version = "0.1.0"
+description = "Regel-Retrieval ohne Docker, Neo4j oder Daemon — SQLite/FTS5 + hnswlib + ONNX"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "hnswlib>=0.8.0",
+    "onnxruntime>=1.18",
+    "tokenizers>=0.19",
+    "numpy>=1.26",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+writ-light = "writ_light.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/writ_light"]

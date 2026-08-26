@@ -113,10 +113,6 @@
       "audience": "agent-runtime"
     },
     {
-      "path": ".agents/skills/ahoy/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
       "path": ".agents/skills/ask-user-authority/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -133,23 +129,11 @@
       "audience": "agent-runtime"
     },
     {
-      "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
       "path": ".agents/skills/diagnostic-reasoning/SKILL.md",
       "audience": "agent-runtime"
     },
     {
-      "path": ".agents/skills/firstmate-codexapp/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
       "path": ".agents/skills/firstmate-coding-guidelines/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
-      "path": ".agents/skills/firstmate-orca/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -166,10 +150,6 @@
     },
     {
       "path": ".agents/skills/project-management/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
-      "path": ".agents/skills/quota-array-dispatch/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -397,6 +377,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/totmann-revival.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/trace-context.md",
       "audience": "maintainer-architecture"
     },
@@ -406,6 +390,10 @@
     },
     {
       "path": "docs/verification/dispatch-auth.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/harness-adapters.md",
       "audience": "maintainer-verification"
     },
     {
@@ -453,8 +441,36 @@
       "audience": "operator-current"
     },
     {
+      "path": "ops/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "ops/messprotokoll-2026-08-23.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "regeln/ABGESCHAFFT.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
+    },
+    {
+      "path": "tools/writ-fm/hooks/git/README.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "tools/writ-fm/regel-retrieval-light.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "tools/writ-fm/skills/context-offloading/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "tools/writ-fm/skills/ship/SKILL.md",
+      "audience": "agent-runtime"
     }
   ]
 }

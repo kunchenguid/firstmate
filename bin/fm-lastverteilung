@@ -1,0 +1,379 @@
+#!/usr/bin/env bash
+# fm-lastverteilung - haelt die Claude-Konten im Gleichgewicht.
+#
+# HERKUNFT: lag bis 25.08.2026 nur unter ~/.local/bin und kannte die Sitzordnung
+# als Literal ("Konto 2"). Es lebt jetzt im Repo; ~/.local/bin/fm-lastverteilung
+# ist ein Zwei-Zeilen-Weiterreicher, damit die systemd-Unit unveraendert bleibt.
+#
+# QUELLE DER SITZORDNUNG: config/konten.tsv, gelesen ueber bin/fm-konten-lib.sh.
+# Weder Speicherpfade noch Wrapper-Namen noch der Firstmate-Sitz stehen hier
+# noch einmal - ein Sitzwechsel (bin/fm-sitzwechsel.sh) wirkt sofort.
+#
+# WARUM ES DAS GIBT (16.08.2026): Die Zuordnung war implizit. Firstmate und die
+# Worker lagen auf einem Konto, aber die no-mistakes-Pipeline-Agenten erbten still das
+# Env ihres Hintergrunddienstes und liefen damit auf dem Hauptkonto - obwohl sie der
+# groesste Verbraucher sind. Um 08:12 war dessen 5h-Fenster leer und BEIDE laufenden
+# Pruefungen starben mitten im Lauf, waehrend ein anderes Konto bei 93 % frei danebenlag.
+# Captain-Auftrag: "das load balancing muss sitzen".
+#
+# DIE REGEL (Captain 16.08.):
+#   Ein Konto OHNE Wochenfenster hat nur das 5h-Fenster als Grenze.
+#   Was dort nicht verbraucht wird, verfaellt ersatzlos - es ist geschenkte Kapazitaet
+#   und wird IMMER bis ans 5h-Limit gefahren. Konten MIT Wochenfenster bezahlen jeden
+#   5h-Verbrauch zusaetzlich aus dem Wochenbudget; sie sind die Reserve, nicht der
+#   erste Griff.
+#
+# WER BEKOMMT ARBEIT (Rolle aus der Akte, nicht aus einer Nummer):
+#   firstmate            NIE - die Lehre vom 17.08. (Pipeline/Worker nie auf den
+#                        Firstmate-Sitz; Captain: "Das bitte nicht erneut verursachen")
+#   captain-handbetrieb  NIE - "nie Flotte" laut Akte
+#   offiziere-worker     normale Verteilung
+#   restverbrauch        normale Verteilung, aber OHNE die harte Wochen-Startsperre
+#                        (O-0085: diese Konten sind zum Leerfahren da)
+#
+# WAS DAS SKRIPT TUT
+#   1. Liest ALLE Speicher der Akte (quota-axi je Speicher, inkl. basis).
+#   2. Bestimmt daraus das Zielkonto fuer die Pipeline-Agenten und fuer neue Worker.
+#   3. Zieht die Pipeline automatisch nach, indem es den Wrapper-Eintrag in
+#      ~/.no-mistakes/config.yaml auf den passenden Konto-Wrapper setzt - aber NUR,
+#      wenn gerade kein Pruefagent laeuft.
+#   4. Schlaegt Alarm, wenn ein Konto leerlaeuft, waehrend ein anderes viel frei hat.
+#
+# Nutzung:
+#   fm-lastverteilung            # pruefen, ggf. umstellen, Bericht auf stdout
+#   fm-lastverteilung --pruefen  # nur berichten, nie umstellen (Vorschau)
+#   fm-lastverteilung --worker   # NUR das empfohlene Konto fuer einen neuen Worker,
+#                                # als CLAUDE_CONFIG_DIR-Pfad, fuer Firstmate vor jedem Spawn
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-konten-lib.sh
+. "$SCRIPT_DIR/fm-konten-lib.sh"
+
+MODUS="${1:-}"
+NM_CONFIG="${FM_LB_NM_CONFIG:-$HOME/.no-mistakes/config.yaml}"
+WRAPPER_DIR="${FM_LB_WRAPPER_DIR:-$HOME/.local/bin}"
+# Ab wann ein 5h-Fenster als erschoepft gilt und die Pipeline umziehen muss.
+SCHWELLE_LEER="${FM_LB_SCHWELLE_LEER:-25}"
+# Ab wann ein Konto wieder als Ziel taugt (Hysterese, damit es nicht hin- und herspringt).
+SCHWELLE_VOLL="${FM_LB_SCHWELLE_VOLL:-25}"
+# Ab wann NEUE Last nicht mehr auf das Konto ohne Wochenfenster gelegt wird.
+# Befund 16.08. 13:30: die Regel "Konto ohne Wochenfenster zuerst" hatte ZEHN Prozesse
+# auf einem Konto gestapelt, waehrend zwei andere mit vollen Fenstern danebenlagen - und
+# umgeschaltet haette sie erst unter 12 %. Zu spaet: mit zehn Arbeitern faellt ein Fenster
+# schneller, als die naechste Pruefung kommt.
+SCHWELLE_OHNE_WOCHE="${FM_LB_SCHWELLE_OHNE_WOCHE:-40}"
+# Ein Wochenfenster unter diesem Wert macht ein Konto zur Notreserve.
+SCHWELLE_WOCHE="${FM_LB_SCHWELLE_WOCHE:-15}"
+# Harte Schranke: unter diesem Wochenrest bekommt ein Konto in KEINEM Rang neue Arbeit -
+# ausser es traegt die Rolle `restverbrauch` (siehe verteilbar_hart unten).
+SCHWELLE_WOCHE_HART="${FM_LB_SCHWELLE_WOCHE_HART:-5}"
+
+# ── Die Akte lesen ──────────────────────────────────────────────────────────────
+mapfile -t SPEICHER < <(fm_konten_speicher) || true
+if [ "${#SPEICHER[@]}" -eq 0 ]; then
+  echo "fm-lastverteilung: die Kontenakte $(fm_konten_akte) nennt keinen Speicher - nichts zu verteilen." >&2
+  echo "fm-lastverteilung: Ausweg: config/konten.tsv pruefen (Leser bin/fm-konten-lib.sh)." >&2
+  exit 1
+fi
+declare -A PFAD ROLLE WRAPPER
+for s in "${SPEICHER[@]}"; do
+  PFAD[$s]="$(fm_konto_pfad "$s")" || exit 1
+  ROLLE[$s]="$(fm_konto_rolle "$s")" || exit 1
+  WRAPPER[$s]="$WRAPPER_DIR/$(fm_konto_wrapper "$s")" || exit 1
+done
+
+# Der Sitz kommt aus der Akte; FM_LB_FIRSTMATE_KONTO bleibt als Notueberschreibung.
+FIRSTMATE_KONTO="${FM_LB_FIRSTMATE_KONTO:-$(fm_firstmate_sitz)}"
+if [ -z "$FIRSTMATE_KONTO" ]; then
+  echo "fm-lastverteilung: kein Firstmate-Sitz in $(fm_konten_akte) - ohne Sitz laesst sich nicht ausschliessen," >&2
+  echo "fm-lastverteilung: wessen Konto geschont werden muss. Ausweg: bin/fm-sitzwechsel.sh oder FM_LB_FIRSTMATE_KONTO." >&2
+  exit 1
+fi
+
+# verteilbar <speicher>: darf dieser Speicher ueberhaupt neue Last bekommen?
+verteilbar() {
+  [ "$1" != "$FIRSTMATE_KONTO" ] || return 1
+  case "${ROLLE[$1]:-}" in
+    offiziere-worker|restverbrauch) return 0 ;;
+    *) return 1 ;;   # firstmate und captain-handbetrieb sind nie Ziel
+  esac
+}
+
+# verteilbar_hart <speicher> <woche>: gilt die harte Wochen-Startsperre?
+# O-0085: fuer `restverbrauch`-Konten NICHT - sie existieren, um ihren Rest zu
+# verbrennen, und ein Wochenrest unter SCHWELLE_WOCHE_HART ist dort kein Grund
+# zu warten, sondern genau der Zustand, fuer den sie da sind.
+verteilbar_hart() {
+  [ "$2" != "-1" ] || return 0
+  [ "$2" -lt "$SCHWELLE_WOCHE_HART" ] || return 0
+  [ "${ROLLE[$1]:-}" = restverbrauch ]
+}
+
+# ── Konten lesen ────────────────────────────────────────────────────────────────
+# Ausgabe je Speicher: "<speicher> <session%> <woche% oder -1> - <configdir>"
+# Ein Konto kann per Marker fuer die Verteilung gesperrt werden, ohne es abzumelden:
+#   <configdir>/.fm-gesperrt
+# GRUND (16.08.): quota-axi liest den gespeicherten OAuth-Token und meldet ein
+# gesundes Fenster, waehrend die Claude-CLI im selben Konfig-Verzeichnis trotzdem
+# eine interaktive Anmeldung verlangt. Ein Worker landet dann in einer
+# OAuth-Schleife statt zu arbeiten - lesbares Kontingent ist also KEIN Beleg fuer
+# Startfaehigkeit. Der Marker haelt so ein Konto aus der Verteilung, bis der
+# Captain sich dort angemeldet hat.
+konto_lesen() {
+  local key=$1 dir=$2; shift 2
+  [ -f "$dir/.credentials.json" ] || { echo "$key - - - $dir"; return; }
+  [ -f "$dir/.fm-gesperrt" ] && { echo "$key - - - $dir"; return; }
+  # Startfaehigkeits-Pruefung (16.08.): ein Konfig-Verzeichnis, das den einmaligen
+  # interaktiven Einrichtungsassistenten nie abgeschlossen hat, laesst zwar
+  # nicht-interaktive Aufrufe zu, faehrt einen interaktiven Worker aber in den
+  # Assistenten samt Anmeldeschritt - obwohl gueltige Zugangsdaten vorliegen.
+  # Genau so verlor am 16.08. ein Worker eine Viertelstunde. Das Merkmal steht in
+  # <dir>/.claude.json als hasCompletedOnboarding.
+  if [ -f "$dir/.claude.json" ]; then
+    FM_LB_CLAUDE_JSON="$dir/.claude.json" python3 -c "
+import json,os,sys
+try: d=json.load(open(os.environ['FM_LB_CLAUDE_JSON']))
+except Exception: sys.exit(0)
+sys.exit(0 if d.get('hasCompletedOnboarding') is True else 1)
+" 2>/dev/null || { echo "$key - - - $dir"; return; }
+  fi
+  local json
+  json=$(env CLAUDE_CONFIG_DIR="$dir" "$@" quota-axi --provider claude --json 2>/dev/null) || {
+    echo "$key ? ? - $dir"; return; }
+  FM_LB_JSON="$json" python3 - "$key" "$dir" <<'PY'
+import json,os,sys
+key,dirp=sys.argv[1],sys.argv[2]
+def unlesbar():
+    # BEFUND 23.08. (Auftrag fm-lastverteilung-blindempfehlung): eine unlesbare
+    # oder unvollstaendige Lesung darf NIE als Zahl durchrutschen. Sie faellt
+    # als "? ?" an und wird damit in JEDEM Rang von ziel_bestimmen ueber-
+    # gangen; bleibt keines uebrig, verweigert die --worker-Weiche laut
+    # (stderr + Exit 1), statt still irgendein Konto zu raten.
+    print(f"{key} ? ? - {dirp}"); raise SystemExit
+try: d=json.loads(os.environ.get("FM_LB_JSON",""))
+except Exception: unlesbar()
+claude=[p for p in d.get("providers",[]) if p.get("provider")=="claude"]
+if len(claude)!=1: unlesbar()   # keine oder mehrfache claude-Antwort = keine Lesung
+p=claude[0]
+st=p.get("state") or {}
+# FRISCHE-PFLICHT (23.08.): quota-axi kann bei gescheitertem Abruf den Zwi-
+# schenstand aus seinem Cache liefern - mit Zahlen, aber markiert
+# (state.stale bzw. state.status != fresh). Genau solche Zahlen hat das
+# Werkzeug bisher wie frische behandelt und dadurch ein Konto empfohlen,
+# dessen echte Lesung '?' war und dessen Wochenrest real gegen 0 lief.
+# Ein nicht EINDEUTIG frischer Zustand ist daher unlesbar; ein unbekannter
+# Status gilt nie als frisch (unbekannter Wert = Abbruch, kein Still-Fallback).
+if st.get("stale") is True: unlesbar()
+if str(st.get("status","")).lower() not in ("fresh","ok"): unlesbar()
+ganz=lambda v: v if isinstance(v,int) and not isinstance(v,bool) and 0<=v<=100 else None
+sess,woche="?", -1
+for w in p.get("windows",[]):
+    if w.get("id")=="five_hour":
+        v=ganz(w.get("percentRemaining"))
+        if v is None: unlesbar()
+        sess=v
+    # Das allgemeine Wochenfenster, NICHT die modellgebundenen (model:fable o.ae.).
+    elif w.get("kind")=="subscription" or w.get("id")in("seven_day","weekly","week"):
+        v=ganz(w.get("percentRemaining"))
+        if v is None: unlesbar()
+        woche=v
+# 18.08. 16:4x: die Flottenkonten haben ein Wochenfenster. Fehlt es in der Antwort
+# (Teilantwort, Cache), ist das UNBEKANNT und kein "Konto ohne Wochenfenster" -
+# sonst landet ein wochenleeres Konto in Rang 1 (Befund sm-snacksuite 18.08.:
+# zwei Arbeiter auf einem Konto mit 0 % Wochenrest gestartet).
+if woche == -1: sess="?"
+print(f"{key} {sess} {woche} - {dirp}")
+PY
+}
+
+# ALLE Speicher der Akte, inklusive basis: der Bericht soll den vollen Stand
+# zeigen. Ob ein Speicher Arbeit bekommen darf, entscheidet allein `verteilbar`.
+mapfile -t KONTEN < <(
+  for s in "${SPEICHER[@]}"; do konto_lesen "$s" "${PFAD[$s]}"; done
+)
+
+wrapper_fuer() { printf '%s\n' "${WRAPPER[$1]:-}"; }
+
+# ── Zielkonto bestimmen ─────────────────────────────────────────────────────────
+# Rang 1: Konto ohne Wochenfenster (woche = -1) mit brauchbarem 5h-Fenster - geschenkte
+#         Kapazitaet, die sonst verfaellt.
+# Rang 2: Konto mit Wochenfenster ueber der Wochenschwelle, groesstes 5h-Fenster zuerst.
+# Rang 3: Konto ohne Wochenfenster, auch unter SCHWELLE_OHNE_WOCHE.
+# Rang 4 (Notlauf): was uebrig bleibt - aber NIE unter der harten Wochenschranke,
+#         ausser bei Rolle `restverbrauch` (O-0085).
+ziel_bestimmen() {
+  local schwelle=$1 best="" best_sess=-1 nr sess woche rest zeile
+  for zeile in "${KONTEN[@]}"; do
+    read -r nr sess woche rest <<<"$zeile"
+    verteilbar "$nr" || continue
+    [ "$sess" = "-" ] || [ "$sess" = "?" ] && continue
+    [ "$woche" != "-1" ] && continue
+    [ "$sess" -ge "$schwelle" ] || continue
+    [ "$sess" -ge "$SCHWELLE_OHNE_WOCHE" ] || continue
+    if [ "$sess" -gt "$best_sess" ]; then best=$nr; best_sess=$sess; fi
+  done
+  [ -n "$best" ] && { echo "$best"; return; }
+  for zeile in "${KONTEN[@]}"; do
+    read -r nr sess woche rest <<<"$zeile"
+    verteilbar "$nr" || continue
+    [ "$sess" = "-" ] || [ "$sess" = "?" ] && continue
+    [ "$woche" = "-1" ] && continue
+    [ "$woche" -ge "$SCHWELLE_WOCHE" ] || continue
+    [ "$sess" -ge "$schwelle" ] || continue
+    if [ "$sess" -gt "$best_sess" ]; then best=$nr; best_sess=$sess; fi
+  done
+  [ -n "$best" ] && { echo "$best"; return; }
+  # Vorrang hat das Konto ohne Wochenfenster, auch unterhalb von
+  # SCHWELLE_OHNE_WOCHE - lieber wenig Fenster als Wochenrest verbrennen.
+  for zeile in "${KONTEN[@]}"; do
+    read -r nr sess woche rest <<<"$zeile"
+    verteilbar "$nr" || continue
+    [ "$sess" = "-" ] || [ "$sess" = "?" ] && continue
+    [ "$woche" = "-1" ] || continue
+    if [ "$sess" -gt "$best_sess" ]; then best=$nr; best_sess=$sess; fi
+  done
+  [ -n "$best" ] && { echo "$best"; return; }
+  # Notlauf: NIE ein Konto, dessen Wochenfenster unter der harten Schranke liegt -
+  # Befund 17.08. 15:05: ein Konto stand bei 80 % 5h-Fenster und 1 % Woche und
+  # wurde hier trotzdem gewaehlt, weil nur das 5h-Fenster zaehlte. Die Wochenschranke
+  # ist eine harte Grenze, kein zweites Kriterium. AUSNAHME O-0085: `restverbrauch`-
+  # Konten sind zum Leerfahren da, fuer sie gilt die Startsperre nicht.
+  for zeile in "${KONTEN[@]}"; do
+    read -r nr sess woche rest <<<"$zeile"
+    verteilbar "$nr" || continue
+    [ "$sess" = "-" ] || [ "$sess" = "?" ] && continue
+    verteilbar_hart "$nr" "$woche" || continue
+    if [ "$sess" -gt "$best_sess" ]; then best=$nr; best_sess=$sess; fi
+  done
+  echo "$best"
+}
+
+# ── Nur die Worker-Empfehlung? ──────────────────────────────────────────────────
+if [ "$MODUS" = "--worker" ]; then
+  z=$(ziel_bestimmen "$SCHWELLE_VOLL"); [ -z "$z" ] && z=$(ziel_bestimmen 1)
+  # BEFUND 20.08. (Auftrag fm-lastverteilung-wochenschranke): diese Weiche kannte
+  # ein neues Konto nicht und fiel fuer JEDEN unbekannten Wert - auch fuer "kein
+  # Konto startfaehig" - stumm auf ein Konto zurueck. So wurde dreimal ein Konto
+  # mit 0 % Wochenrest vergeben. Die Weiche kommt jetzt aus der Akte und kann
+  # kein Konto mehr uebersehen; ohne Ziel verweigert sie LAUT.
+  if [ -n "$z" ] && [ -n "${PFAD[$z]:-}" ]; then
+    printf '%s\n' "${PFAD[$z]}"
+    exit 0
+  fi
+  echo "fm-lastverteilung: kein startfaehiges Worker-Konto (alle gesperrt, unlesbar oder Wochenrest unter ${SCHWELLE_WOCHE_HART}%) - warten oder Captain fragen" >&2
+  exit 1
+fi
+
+echo "== Kontostand (Akte: $(fm_konten_akte))"
+for zeile in "${KONTEN[@]}"; do
+  read -r nr sess woche rest <<<"$zeile"
+  rolle="${ROLLE[$nr]:-?}"
+  if [ "$sess" = "-" ]; then echo "  $nr [$rolle]: nicht angemeldet"; continue; fi
+  # 23.08.: unlesbare Lesungen werden AUSGEWIESEN, nicht als '?'-Zahl deklariert.
+  if [ "$sess" = "?" ]; then
+    if [ "$woche" = "?" ]; then
+      echo "  $nr [$rolle]: UNLESBAR (Lesung fehlgeschlagen, Zwischenstand oder Anmeldung noetig)"
+    else
+      echo "  $nr [$rolle]: UNLESBAR (Antwort ohne auswertbares Wochenfenster)"
+    fi
+    continue
+  fi
+  if [ "$woche" = "-1" ]; then w="kein Wochenfenster"; else w="Woche ${woche}%"; fi
+  echo "  $nr [$rolle]: 5h-Fenster ${sess}% frei, $w"
+done
+
+# ── Wo laeuft die Pipeline gerade? ──────────────────────────────────────────────
+IST_WRAPPER=$(awk '/^[[:space:]]*claude:[[:space:]]*[^[:space:]]/ {print $2; exit}' "$NM_CONFIG" 2>/dev/null)
+IST_NR=""
+for s in "${SPEICHER[@]}"; do
+  [ "$IST_WRAPPER" = "${WRAPPER[$s]}" ] && { IST_NR=$s; break; }
+done
+if [ -z "$IST_NR" ]; then
+  # Unbekannter oder fehlender Eintrag: der erste verteilbare Speicher der Akte
+  # ist die Annahme - sie wird unten ohnehin gegen die Rangfolge geprueft.
+  for s in "${SPEICHER[@]}"; do verteilbar "$s" && { IST_NR=$s; break; }; done
+fi
+
+# O-0008 (23.08.2026): Die komplette Pruefkette laeuft auf Ox Alpha, solange es
+# kostenlos ist. Steht der Eintrag auf dem Ox-Wrapper, wird NICHT auf Konten
+# umgestellt; endet die Kostenlosigkeit, setzt Firstmate den Eintrag zurueck und
+# diese Weiche uebernimmt wieder.
+if [ "$IST_WRAPPER" = "$WRAPPER_DIR/claude-ox" ]; then
+  echo "== Pruefpipeline"
+  echo "  laeuft auf Ox Alpha (claude-ox, O-0008) - Konto-Umstellung ausgesetzt"
+  exit 0
+fi
+
+# Hysterese - aber NICHT gegen den Rang-1-Vorzug.
+#
+# Ein Konto OHNE Wochenfenster ist geschenkte Kapazitaet: sein 5h-Fenster fuellt
+# sich alle fuenf Stunden von selbst wieder auf und verfaellt ungenutzt. Ein Konto
+# MIT Wochenfenster zehrt dagegen an einem knappen Wochenvorrat. Solange also ein
+# Konto ohne Wochenfenster brauchbar dasteht, gehoert die Last dorthin - auch wenn
+# das aktuelle Konto noch bequem gefuellt ist.
+#
+# Bis 16.08. hielt die Hysterese genau das auf: sie liess das laufende Konto
+# stehen, solange es ueber SCHWELLE_LEER lag, und fragte die Rangfolge nie -
+# der Captain hat das zu Recht als Verschwendung gemeldet.
+#
+# Hysterese greift jetzt nur noch INNERHALB derselben Klasse: ein laufendes
+# Konto ohne Wochenfenster bleibt stehen, solange es nicht leer ist. Ein
+# laufendes Konto mit Wochenfenster wird verdraengt, sobald die Rangfolge ein
+# Konto ohne Wochenfenster anbietet.
+IST_SESS=$(for z in "${KONTEN[@]}"; do read -r nr s w _ <<<"$z"; [ "$nr" = "$IST_NR" ] && echo "$s"; done)
+IST_WOCHE=$(for z in "${KONTEN[@]}"; do read -r nr s w _ <<<"$z"; [ "$nr" = "$IST_NR" ] && echo "$w"; done)
+ZIEL=$(ziel_bestimmen "$SCHWELLE_VOLL"); [ -z "$ZIEL" ] && ZIEL=$(ziel_bestimmen 1)
+# Auf einem nicht verteilbaren Speicher wird NIE gehalten (21.08.): sitzt die
+# Pipeline noch auf dem Firstmate-Sitz oder auf basis (Altbestand vor einem
+# Sitzwechsel), zieht sie ohne Hysterese auf das Regel-Ziel um.
+if verteilbar "${IST_NR:-}" && [ "${IST_SESS:-?}" != "?" ] && [ "${IST_SESS:--}" != "-" ] && [ "$IST_SESS" -ge "$SCHWELLE_LEER" ]; then
+  ZIEL_WOCHE=$(for z in "${KONTEN[@]}"; do read -r nr s w _ <<<"$z"; [ "$nr" = "${ZIEL:-}" ] && echo "$w"; done)
+  # Nur halten, wenn der Wechsel keinen Rang-1-Gewinn braechte.
+  if [ "${IST_WOCHE:-0}" = "-1" ] || [ "${ZIEL_WOCHE:-0}" != "-1" ]; then
+    ZIEL=$IST_NR
+  fi
+fi
+
+echo "== Pruefpipeline"
+echo "  laeuft auf ${IST_NR:-?}, Ziel nach Regel: ${ZIEL:-?}"
+
+# ── Umstellen, wenn noetig und gefahrlos ────────────────────────────────────────
+if [ -n "${ZIEL:-}" ] && [ "$ZIEL" != "${IST_NR:-}" ]; then
+  if [ "$MODUS" = "--pruefen" ]; then
+    echo "  -> Umstellung faellig auf $ZIEL (Vorschau, nichts geaendert)"
+  elif pgrep -f -- ' -p --verbose --output-format stream-json' >/dev/null 2>&1; then
+    # nur echte Pipeline-Agenten (no-mistakes startet claude -p ... stream-json); Worker-Briefs mit ' -p ' im Text zaehlen nicht (17.08.)
+    echo "  -> Umstellung faellig auf $ZIEL, aber ein Pruefagent laeuft gerade: verschoben"
+  else
+    NEU=$(wrapper_fuer "$ZIEL")
+    if [ -x "$NEU" ] && awk '/^[[:space:]]*claude:[[:space:]]*[^[:space:]]/ {found=1} END {exit !found}' "$NM_CONFIG" 2>/dev/null; then
+      sed -i -E "s|^(\s*)claude:\s*\S+|\1claude: $NEU|" "$NM_CONFIG"
+      # kein Daemon-Neustart: der Pfad wirkt fuer neu gestartete Agenten, ein
+      # Neustart zerreisst laufende Pruefungen (learnings.md).
+      echo "  -> umgestellt auf $ZIEL ($NEU), gilt fuer neue Pruefagenten"
+      command -v claw-notify >/dev/null 2>&1 && \
+        claw-notify "Lastverteilung: Pruefpipeline laeuft jetzt auf $ZIEL (${IST_NR:-?} war bei ${IST_SESS:-?}%)." >/dev/null 2>&1
+    else
+      echo "  -> FEHLER: Wrapper $NEU fehlt oder der claude-Eintrag steht nicht in $NM_CONFIG"
+    fi
+  fi
+fi
+
+# ── Ungleichgewicht melden ──────────────────────────────────────────────────────
+MAX=-1; MAXNR=""
+for z in "${KONTEN[@]}"; do
+  read -r nr s w _ <<<"$z"
+  [ "$s" = "-" ] || [ "$s" = "?" ] && continue
+  [ "$s" -gt "$MAX" ] && { MAX=$s; MAXNR=$nr; }
+done
+# Gemeldet wird nur der Fall, der wirklich weh tut: die Pipeline sitzt auf einem
+# leeren Konto UND daneben liegt freie Kapazitaet. Ein leeres Konto, von dem gerade
+# niemand abhaengt, ist kein Alarm - es faellt einfach in sein naechstes Fenster.
+if [ "$MAX" -ge 70 ] && [ "${IST_SESS:-100}" != "?" ] && [ "${IST_SESS:-100}" != "-" ] \
+   && [ "${IST_SESS:-100}" -le "$SCHWELLE_LEER" ] && [ "$ZIEL" = "${IST_NR:-}" ]; then
+  MELDUNG="Lastverteilung klemmt: die Pruefpipeline haengt auf ${IST_NR} (${IST_SESS}%), $MAXNR liegt mit ${MAX}% frei daneben - automatische Umstellung war nicht moeglich."
+  echo "== WARNUNG"; echo "  $MELDUNG"
+  [ "$MODUS" != "--pruefen" ] && command -v claw-notify >/dev/null 2>&1 && \
+    claw-notify "$MELDUNG" >/dev/null 2>&1
+fi

@@ -20,7 +20,8 @@
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
-#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
+#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD] \
+#     [--vorfuehrung [--begehung <docs/begehungen/...>]]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
 #   fm-captain-hold.sh bind <source-id> [<legacy-origin> | --any-origin]
@@ -38,6 +39,46 @@
 # idempotent; a task already closed is refused rather than reopened. `--until`
 # records the captain's own deferral date through `tasks-axi hold --until`, so
 # a "revisit later" answer is stored as a date instead of a live card.
+#
+# THE VORFUEHRUNGSWEG AND ITS BEGEHUNG.
+# A card that puts a product SURFACE in front of the captain - a Vorfuehrung -
+# is the one card kind that must not be created out of a reading of the code.
+# The captain's standing complaint is that surfaces were shown to him that
+# nobody had walked, so his own click became the first walk (plan
+# crispy-launching-cookie Z.89: "Vorfuehrungsweg verweigert ohne
+# `begehung:`-Feld"; "Captain-Fund auf begangener Flaeche = Pruefbefund GEGEN
+# die Begehung").
+#
+# Cards carry NO type today - the board's contract is the filename-is-task-id
+# rule and nothing else (bin/fm-brett-karten-vollstaendigkeit.sh), and no
+# existing field distinguishes a Vorfuehrung from any other captain call. So
+# the kind is declared, not guessed: the optional flag `--vorfuehrung` on
+# `hold` marks the card being created as a Vorfuehrungs-Karte. Without the
+# flag nothing here changes for any existing caller.
+#
+#   --vorfuehrung             this captain call shows the captain a surface.
+#   --begehung <pfad>         the walk that was actually done, as the artifact
+#                             path RELATIVE TO THE PRODUCT REPO, under
+#                             docs/begehungen/ (the plan's artifact location:
+#                             docs/begehungen/<datum>-<persona>.md). It is
+#                             recorded verbatim in the card body as a
+#                             "Begehung:" line beneath "Vorfuehrung: ja", so
+#                             the card itself carries the walk it rests on and
+#                             a later captain finding can be measured against
+#                             it. Repeating the same hold is idempotent: an
+#                             already recorded path is not written twice.
+#   Passing --begehung without --vorfuehrung is refused - a walk with no
+#   demonstration is a mislabelled call, not a silently ignored flag.
+#
+# ARMING: state/.tor-begehung-scharf. Armed, `--vorfuehrung` WITHOUT
+# `--begehung` is refused loudly and nothing is created or held; the refusal
+# names its exit (walk the core path, file the artifact in the product repo,
+# repeat the same command with --begehung - the call is never lost, only
+# deferred). Unarmed, the same call passes with one warning on stderr, because
+# docs/begehungen/ does not exist in a single product repo yet and a gate that
+# blocks on day one would be routed around instead of obeyed. Both outcomes -
+# green, warned, refused - are written as one line via fm_tor_log to
+# state/tor-log/begehung.jsonl, so "did the gate look?" stays answerable.
 #
 # `answer` records the captain's exact words and closes the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes,
@@ -164,6 +205,14 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-wake-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-tor-log-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-tor-log-lib.sh"
+
+# The Begehung gate; see "THE VORFUEHRUNGSWEG AND ITS BEGEHUNG" above.
+BEGEHUNG_FLAG="$STATE/.tor-begehung-scharf"
+BEGEHUNG_TOR="begehung"
+BEGEHUNG_ORT="docs/begehungen/"
 
 CAPTAIN_META_LOCK=
 CAPTAIN_META_LOCK_HELD=0
@@ -440,8 +489,81 @@ record_hold_in_inventory() {  # <origin-id> <task-id>
   CAPTAIN_META_LOCK_HELD=0
 }
 
+# The walk artifact lives in the PRODUCT repo, so this validates the shape of
+# a repo-relative path, never the presence of a file in this home.
+validate_begehung_path() {  # <path>
+  local path=$1
+  validate_one_line --begehung "$path"
+  case "$path" in
+    /*) fail "--begehung must be relative to the product repo, not absolute: $path" ;;
+    *'..'*) fail "--begehung must not walk out of the product repo: $path" ;;
+    "$BEGEHUNG_ORT"*) : ;;
+    *) fail "--begehung must name an artifact under $BEGEHUNG_ORT (plan: ${BEGEHUNG_ORT}<datum>-<persona>.md): $path" ;;
+  esac
+  [ "$path" != "$BEGEHUNG_ORT" ] \
+    || fail "--begehung must name the walk artifact itself, not just $BEGEHUNG_ORT"
+  case "$path" in
+    */) fail "--begehung must name a file, not a directory: $path" ;;
+  esac
+}
+
+# The gate itself. Runs BEFORE anything is created or held, so a refusal leaves
+# no half-made card behind.
+gate_begehung() {  # <task-id> <vorfuehrung-0-or-1> <begehung>
+  local id=$1 vorfuehrung=$2 begehung=$3
+  if [ "$vorfuehrung" != 1 ]; then
+    [ -z "$begehung" ] \
+      || fail "--begehung belongs to a Vorfuehrungs-Karte; pass --vorfuehrung with it or drop it"
+    return 0
+  fi
+  if [ -n "$begehung" ]; then
+    fm_tor_log "$BEGEHUNG_TOR" - gruen - "hold $id vorfuehrung begehung=$begehung"
+    return 0
+  fi
+  if [ -f "$BEGEHUNG_FLAG" ]; then
+    fm_tor_log "$BEGEHUNG_TOR" - rot begehung-nachreichen \
+      "hold $id vorfuehrung ohne begehung; nichts angelegt"
+    fail "$(printf '%s\n%s\n%s' \
+      "REFUSED: the Vorfuehrungs-Karte $id would show the captain a surface nobody walked - no card was created." \
+      "Walk the core path yourself as the named persona and file the artifact in the PRODUCT repo under ${BEGEHUNG_ORT}<datum>-<persona>.md." \
+      "Then repeat this exact command with --begehung ${BEGEHUNG_ORT}<datum>-<persona>.md; the call is deferred, never lost.")"
+  fi
+  fm_tor_log "$BEGEHUNG_TOR" - warn tor-nicht-scharf \
+    "hold $id vorfuehrung ohne begehung; Tor nicht scharf"
+  printf 'fm-captain-hold: WARNING: %s is a Vorfuehrungs-Karte without a --begehung. The gate (%s) is not armed yet, so it passes - file the walk under %s and record it.\n' \
+    "$id" "$BEGEHUNG_FLAG" "$BEGEHUNG_ORT" >&2
+  return 0
+}
+
+# Write the declared kind and its walk into the card body, above whatever the
+# body already carried. Idempotent: an already recorded path is left alone.
+record_vorfuehrung() {  # <task-id> <begehung>
+  local id=$1 begehung=$2 show body new_body tmp
+  show=$(task_show "$id") || fail "task $id disappeared while recording its Begehung"
+  body=$(show_field_value "$show" body)
+  if printf '%s\n' "$body" | grep -Fxq "Begehung: $begehung"; then
+    return 0
+  fi
+  new_body=$(printf 'Vorfuehrung: ja\nBegehung: %s' "$begehung")
+  if [ -n "$body" ]; then
+    new_body=$(printf '%s\n\n%s' "$new_body" "$body")
+  fi
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-vorfuehrung.XXXXXX") \
+    || fail "cannot stage the Begehung record"
+  if ! printf '%s\n' "$new_body" > "$tmp"; then
+    rm -f -- "$tmp"
+    fail "cannot stage the Begehung record for $id"
+  fi
+  if ! tasks_axi update "$id" --body-file "$tmp" >/dev/null; then
+    rm -f -- "$tmp"
+    fail "could not record the Begehung on $id"
+  fi
+  rm -f -- "$tmp"
+}
+
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind
+  local vorfuehrung=0 begehung=''
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -451,6 +573,8 @@ command_hold() {
       --repo) shift; repo=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
       --until) shift; until=${1:-} ;;
+      --vorfuehrung) vorfuehrung=1 ;;
+      --begehung) shift; begehung=${1:-} ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -467,6 +591,8 @@ command_hold() {
       *) fail "--until must be a YYYY-MM-DD date: $until" ;;
     esac
   fi
+  [ -z "$begehung" ] || validate_begehung_path "$begehung"
+  gate_begehung "$id" "$vorfuehrung" "$begehung"
   require_tasks_axi
   if show=$(task_show "$id"); then
     state=$(show_field "$show" state)
@@ -511,6 +637,7 @@ command_hold() {
   show=$(task_show "$id") || fail "task $id disappeared while holding it"
   hold_kind=$(show_field_value "$show" hold_kind)
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
+  [ -z "$begehung" ] || record_vorfuehrung "$id" "$begehung"
   [ -z "$origin" ] || record_hold_in_inventory "$origin" "$id"
   printf '%s\n' "$id"
 }

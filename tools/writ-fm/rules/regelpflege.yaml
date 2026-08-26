@@ -1,0 +1,95 @@
+# Quelle: Regel-Kandidaten aus REPORT-AUFTRAG-B.md, aufgenommen auf Owner-Entscheid
+# 2026-08-02. Erste Anwendung der Lernschleife, die REPORT-REGEL-001 vorschreibt.
+#
+# Eigene Domain, weil diese Regeln nicht das Handwerk der Projektarbeit betreffen,
+# sondern die Pflege des Regelwerks selbst — wer eine Regel schreibt, nicht wer
+# Code schreibt.
+#
+# NICHT modelliert: nichts — die Datei enthielt genau die drei aufgenommenen Kandidaten.
+#
+# Nachgetragen 2026-08-07: REG-SKILL-001. Quelle ist nicht REPORT-AUFTRAG-B.md,
+# sondern der Insights-Report vom 2026-08-07 — die Regel steht hier und nicht in
+# rules/arbeitsweise.yaml, weil sie die Pflege des Regelwerks betrifft und nicht
+# das Handwerk der Projektarbeit. Genau die Trennung, für die diese Datei da ist.
+
+rules:
+
+  - id: REG-SUCHBAR-001
+    domain: regelpflege
+    severity: 2
+    trigger: >
+      Eine Regel wird geschrieben oder überarbeitet, und ein Stichwort soll sie
+      auffindbar machen.
+    statement: >
+      Das Stichwort gehört in `trigger`, `statement` oder `tags` — NUR diese drei
+      Felder landen im Volltextindex. `violation` und `correct` werden nicht
+      indexiert: Wer ein Wort allein ins Beispiel schreibt, macht die Regel darüber
+      unauffindbar. Nach dem Schreiben mit `writ-light query` gegenprüfen, ob die
+      Regel bei der erwarteten Frage auch kommt.
+    violation: >
+      "Falle" steht nur im Negativbeispiel — die Frage "ich habe eine Falle
+      gelernt" findet die Regel nicht
+    correct: Stichwort in die tags aufnehmen, dann mit einer echten Frage gegenprüfen
+    tags: suchbarkeit, index, tags, trigger, statement, violation, gegenprobe
+    relations:
+      - {kind: SUPPLEMENTS, dst: LEK-PROMPT-001}
+
+  - id: REG-TOKEN-001
+    domain: regelpflege
+    severity: 1
+    trigger: >
+      Ein zusammengesetzter Begriff soll zwei Regeln voneinander abgrenzen, die
+      dasselbe Wort verwenden.
+    statement: >
+      Ein Bindestrich-Präfix reicht dafür nicht. Die Volltextsuche trennt am
+      Bindestrich: "Prozess-Tutor" erzeugt die Suchwörter `prozess` UND `tutor`,
+      die Regel bleibt über `tutor` voll auffindbar. Wer eine Namenskollision im
+      Ranking wirklich auflösen will, muss das kollidierende Wort ersetzen, nicht
+      qualifizieren.
+    violation: '"Tutor" zu "Prozess-Tutor" machen und annehmen, die Kollision sei weg'
+    correct: Die Rolle "Prozess-Aufsicht" nennen — das Wort verschwindet ganz
+    tags: bindestrich, tokenisierung, namenskollision, abgrenzung
+    relations:
+      - {kind: SUPPLEMENTS, dst: REG-SUCHBAR-001}
+
+  - id: REG-BUDGET-001
+    domain: regelpflege
+    severity: 2
+    trigger: 'Eine Regel soll verbindlich gesetzt werden (`mandatory: true`).'
+    statement: >
+      Vorher den Anteil des verbindlichen Blocks am Token-Budget messen — das
+      gilt weiter. Was der Preis IST, hat sich geändert: seit 2026-08-07 zählt
+      das Budget nur noch die gerankten Regeln (`budget_anwenden` startet mit
+      `verbraucht = 0`), und zu jeder Eingabe kommen verbindliche Regeln nur
+      als ID-Zeile. Eine weitere verbindliche Regel kostet damit den Platz im
+      Session-Start-Block plus eine ID-Zeile je Eingabe — sie verdrängt keine
+      gerankte Regel mehr. Davor galt das Gegenteil, gemessen 2026-08-02:
+      8 verbindliche Regeln belegten 1054 von 2000 Tokens, eine
+      Beispielausgabe lieferte dadurch 7 statt 21 gerankte Regeln. Der Preis
+      der Weichenstellung ENF-PLAN-001 ist so gemessen 2026-08-08
+      (belege/e2-mandatory-plan-regel.md).
+    violation: Eine Regel verbindlich setzen, weil sie wichtig wirkt
+    correct: Blockanteil messen, Regel straffen, oder es beim Ranking belassen
+    tags: mandatory, budget, token, verbindlich, verdrängung, id-zeile, session-start
+    relations:
+      - {kind: SUPPLEMENTS, dst: LEK-STAND-001}
+
+  - id: REG-SKILL-001
+    domain: regelpflege
+    severity: 2
+    trigger: >
+      Ein Skill wird geschrieben oder überarbeitet und würde eine Regel
+      erwähnen — Ablauf, Checkliste, Slash-Kommando.
+    statement: >
+      Ein Skill erzählt keinen Regelinhalt nach. Er ordnet Schritte an und
+      nennt je Schritt die zuständige Regel-ID; den Wortlaut holt die Session
+      über `writ-light query`. Grund: ein Skill hat keine Tests, die ihn beim
+      Driften erwischen — Regeltexte haben welche. Belegt am Onboarding-Skill,
+      der bis 2026-08-07 einen Override-Weg, einen Nachreich-Zustand und eine
+      Blocker-Reaktion nacherzählte; alle drei Aussagen waren zuletzt falsch,
+      und niemandem ist es aufgefallen.
+    violation: Der Skill schreibt "niemals git add -A" aus, statt WF-CWD-001 zu nennen
+    correct: '"Gezielt stagen (WF-CWD-001)" plus writ-light query bei Bedarf'
+    tags: skill, nacherzählen, drift, regel-id, slash-kommando, doppelte-wahrheit
+    relations:
+      - {kind: SUPPLEMENTS, dst: REG-SUCHBAR-001}

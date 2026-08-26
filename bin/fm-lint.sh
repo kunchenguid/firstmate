@@ -13,6 +13,12 @@
 # The default (no explicit-path) path also runs bin/fm-lint-workflows.sh so a
 # malformed GitHub workflow, including a self-broken ci.yml, fails locally
 # before merge instead of only failing to run as CI.
+# The default (no explicit-path) path also runs bin/fm-regel-eval.sh check
+# last, after ShellCheck and the workflow check, so every change to AGENTS.md
+# and regeln/ meets the same one owner CI and the no-mistakes pre-push gate
+# both invoke. Its output is passed through as-is; a nonzero exit is fatal for
+# this lint run. A checkout missing bin/fm-regel-eval.sh (a bare environment)
+# prints one loud skip line instead of failing.
 #
 # With no explicit paths, the file set depends on context:
 #   - In CI (GITHUB_ACTIONS=true or CI=true), on the main branch, or when no
@@ -120,6 +126,23 @@ fm_lint_usage() {
 fm_lint_run_workflows() {
   [ "$EXPLICIT_PATHS" -eq 0 ] || return 0
   "$SELF_DIR/fm-lint-workflows.sh"
+}
+
+# Runs last, after ShellCheck and the workflow check, so every home, CI, and
+# the no-mistakes pre-push gate meet the same rule-database gate through this
+# one owner. Explicit paths bypass it like the workflow check above. A missing
+# or non-executable bin/fm-regel-eval.sh (a bare environment) is not a lint
+# failure: it prints one loud skip line and returns clean.
+fm_lint_run_regel_eval() {
+  [ "$EXPLICIT_PATHS" -eq 0 ] || return 0
+  local regel_eval="$SELF_DIR/fm-regel-eval.sh" out rc=0
+  if [ ! -x "$regel_eval" ]; then
+    printf 'fm-lint.sh: bin/fm-regel-eval.sh missing or not executable - regel-eval gate SKIPPED (bare environment; Ausweg: restore bin/fm-regel-eval.sh)\n' >&2
+    return 0
+  fi
+  out=$("$regel_eval" check 2>&1) || rc=$?
+  printf '%s\n' "$out"
+  return "$rc"
 }
 
 JOBS=${FM_LINT_JOBS:-2}
@@ -281,6 +304,11 @@ if [ "$CHANGED_MODE" -eq 1 ] && [ "$ROOT_COUNT" -eq 0 ]; then
   printf 'fm-lint.sh: no changed lint targets\n'
   overall_rc=0
   fm_lint_run_workflows || overall_rc=$?
+  if [ "$overall_rc" -eq 0 ]; then
+    fm_lint_run_regel_eval || overall_rc=$?
+  else
+    fm_lint_run_regel_eval || true
+  fi
   exit "$overall_rc"
 fi
 
@@ -586,6 +614,12 @@ if [ "$overall_rc" -eq 0 ]; then
   fm_lint_run_workflows || overall_rc=$?
 else
   fm_lint_run_workflows || true
+fi
+
+if [ "$overall_rc" -eq 0 ]; then
+  fm_lint_run_regel_eval || overall_rc=$?
+else
+  fm_lint_run_regel_eval || true
 fi
 
 exit "$overall_rc"

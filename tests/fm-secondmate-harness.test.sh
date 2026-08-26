@@ -45,6 +45,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fm-konten-fixture-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-konten-fixture-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-ff-lib.sh"
 # shellcheck source=/dev/null
@@ -445,9 +447,22 @@ make_seeded_home() {
 # resolves), the primary config dir is <world>/home/config, and CLAUDECODE pins
 # detect_own. stderr is discarded (the local-HEAD ff sync harmlessly skips a
 # non-worktree home). Inspect <world>/home/state/<id>.meta and <home>/config after.
+# konten_for <primary-home> <trusted-path...>: the account ledger a claude spawn
+# from that home needs (bin/fm-spawn-gate-lib.sh). Without it the lookup falls
+# back to the checkout's real config/konten.tsv.
+konten_for() {
+  local primary=$1
+  shift
+  fm_test_konten_fixture "$primary" "$primary/../konten-store" "$@" "$primary"
+}
+
 spawn_secondmate() {
   local world=$1 id=$2 home=$3 harness=${4:-} fakebin
   mkdir -p "$world/home/state" "$world/home/data"
+  # A claude secondmate resolves its account from the PRIMARY home's ledger
+  # (bin/fm-spawn-gate-lib.sh). konten.tsv is not on the inheritable allowlist,
+  # so this never reaches the secondmate home the side-effect assertions watch.
+  konten_for "$world/home" "$home"
   fakebin=$(make_noop_tmux "$world/tmux-$id")
   # An empty harness must contribute zero args, not an empty positional; build the
   # arg list explicitly so the optional harness is omitted cleanly.
@@ -458,6 +473,7 @@ spawn_secondmate() {
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
+    FM_KONTEN_AKTE="$world/home/config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "${spawn_args[@]}" >/dev/null 2>&1 || true
 }
@@ -564,6 +580,7 @@ test_spawn_unverified_secondmate_harness_refused() {
   mkdir -p "$w/home/config" "$w/home/state"
   printf 'bogus\n' > "$w/home/config/secondmate-harness"
   make_seeded_home "$sm" sm
+  konten_for "$w/home" "$sm"
   fakebin=$(make_noop_tmux "$w/tmux")
   err="$w/spawn.err"
   rc=0
@@ -591,6 +608,7 @@ test_spawn_cursor_secondmate_launches_with_its_primary_contract() {
   mkdir -p "$w/home/config" "$w/home/state" "$w/home/data" "$w/home/projects"
   printf 'cursor\n' > "$w/home/config/secondmate-harness"
   make_seeded_home "$sm" sm
+  konten_for "$w/home" "$sm"
   fakebin=$(make_launch_capturing_tmux "$w/tmux")
   : > "$launchlog"
   rc=0
@@ -649,6 +667,11 @@ case "${1:-}" in
       prev=
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
+          # The tmux backend always sends `send-keys -t T -l -- <text>`, so the
+          # bare `--` guarding dash-leading text is skipped WITHOUT advancing
+          # prev - otherwise the terminator is captured and the payload after it
+          # never is (bin/backends/tmux.sh).
+          [ "$a" = "--" ] && continue
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
         fi
         prev=$a
@@ -671,6 +694,7 @@ spawn_secondmate_capture() {
   local world=$1 id=$2 home=$3 launchlog=$4 fakebin
   shift 4
   mkdir -p "$world/home/state" "$world/home/data"
+  konten_for "$world/home" "$home"
   fakebin=$(make_launch_capturing_tmux "$world/tmux-$id")
   : > "$launchlog"
   PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
@@ -959,6 +983,7 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   fakebin=$(make_launch_capturing_tmux "$w/tmux-crew")
   fm_git_worktree "$proj" "$wt" "wt-crew"
   mkdir -p "$home/data/$id" "$home/projects" "$home/state"
+  konten_for "$home" "$proj" "$wt"
   printf 'brief\n' > "$home/data/$id/brief.md"
   : > "$launchlog"
   PATH="$fakebin:$BASE_PATH" TMUX="fake,1,0" CLAUDECODE=1 \
@@ -2511,6 +2536,7 @@ exec "$real_rm" "\$@"
 SH
   chmod +x "$fakebin/rm"
   launchlog="$w/spawn-quarantine.launch.log"
+  konten_for "$w/home" "$sm"
   out=$(PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
     FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \

@@ -11,6 +11,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fm-konten-fixture-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-konten-fixture-lib.sh"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
@@ -49,6 +51,10 @@ make_spawn_case() {  # <name> <harness> <id>
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
+  # A claude-family spawn resolves its account from the ledger and refuses
+  # without one (bin/fm-spawn-gate-lib.sh); a fixture with no ledger would fall
+  # back to the checkout's real config/konten.tsv.
+  fm_test_konten_fixture "$home" "$case_dir/konten" "$proj" "$wt" "$home"
   touch "$home/state/.last-watcher-beat"
   mkdir -p "$home/data/$id"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
@@ -65,6 +71,7 @@ run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_KONTEN_AKTE="$home/config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1

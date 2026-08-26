@@ -15,11 +15,14 @@ GitHub Actions and Dependabot are exempt so their automation keeps working, but 
 
 ## Workflow
 
-1. Fork the repo, then clone the parent repo or set your local `origin` back to the parent (`git@github.com:kunchenguid/firstmate.git`).
+This checkout's `origin` is a fork (`git@github.com:swippipp/firstmate.git`) and is the authority here: the gate pushes to it and PRs land against it, not against the original project.
+`upstream` (`https://github.com/kunchenguid/firstmate`) is configured fetch-only and is never a push or PR target from this repo - see "Upstream adoptions" below for how changes travel the other direction.
+
+1. Fork this repo (`origin`, not the original `kunchenguid/firstmate`), then clone your fork or set your local `origin` to it.
 2. Create a branch and make your changes.
-3. Initialize the gate with your fork as the push target: `no-mistakes init --fork-url git@github.com:<you>/firstmate.git` (firstmate expects **no-mistakes v1.31.2+**; without a fork, plain `no-mistakes init` still works for maintainers with push access).
+3. Initialize the gate with your fork as the push target: `no-mistakes init --fork-url git@github.com:<you>/firstmate.git` (firstmate expects **no-mistakes v1.31.2+**; without a fork of your own, plain `no-mistakes init` still works for maintainers with push access to `origin`).
 4. Commit your changes.
-5. Push through the gate instead of pushing to `origin`:
+5. Push through the gate instead of pushing to `origin` directly:
 
    ```sh
    git push no-mistakes
@@ -27,9 +30,14 @@ GitHub Actions and Dependabot are exempt so their automation keeps working, but 
 
 6. Run `no-mistakes` to attach to the pipeline, watch findings, authorize auto-fixes, and review ask-user findings as needed.
    Follow the installed no-mistakes version's SKILL.md and live `axi` help for gate mechanics.
-7. Once the pipeline passes, it pushes the branch to your fork and opens the PR against the parent repo for you.
+7. Once the pipeline passes, it pushes the branch to your fork and opens the PR against `origin`'s default branch for you.
 
 See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
+
+### Upstream adoptions only as a reviewed cherry-pick through the Update-Guard
+
+`upstream` stays fetch-only on purpose: a change from the original project never merges or fast-forwards straight in.
+It reaches this fork only as an explicit, reviewed cherry-pick that the update-guard TOR (`bin/fm-update-guard-lib.sh`, driven by `/updatefirstmate`) verifies before any home advances onto it, so an upstream commit cannot silently regress an invariant this fork depends on.
 
 ## Repo conventions
 

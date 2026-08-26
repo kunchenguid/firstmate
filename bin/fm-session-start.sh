@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fm-session-start.sh - one command for the whole session start.
 #
-# Collapses AGENTS.md sections 3 (bootstrap) and 5 (recovery) into ONE script
+# Collapses firstmate's bootstrap and recovery procedures into ONE script
 # producing ONE ordered digest, so a session starts in one or two turns
 # instead of the six-plus separate reads the old docs required: run
 # fm-bootstrap.sh, then separately read data/projects.md, data/secondmates.md,
@@ -156,8 +156,8 @@
 # STATUS TAILS: FM_SESSION_START_STATUS_TAIL bounds how many lines each task's
 # tail prints, and bin/fm-line-cap-lib.sh bounds how long each of those lines
 # may be. Both bounds are safe because the section prints every task's full
-# status log path, and AGENTS.md section 8 treats a status line as a wake EVENT
-# rather than current state - bin/fm-crew-state.sh owns current state.
+# status log path, and a status line is a wake EVENT rather than current state
+# (docs/architecture.md) - bin/fm-crew-state.sh owns current state.
 #
 # RUNTIME BOUND: the digest is now executed on a session-open hook (see
 # bin/fm-sessionstart-run.sh), which blocks session initialization while it
@@ -360,9 +360,9 @@ subsection() { printf '\n%s\n%s\n' "$1" "$SUBRULE"; }
 # print_file_or_absent <path> <label>: full contents under a labeled
 # subsection, or an explicit ABSENT marker. Absence is semantically
 # meaningful for every one of these files (captain.md absent = firstmate
-# repo built-in defaults, projects.md absent = rebuild from clones, etc. -
-# AGENTS.md section 3) and must never be confused with an empty-but-present
-# file, so the two cases print differently.
+# repo built-in defaults, projects.md absent = rebuild from clones, etc.)
+# and must never be confused with an empty-but-present file, so the two
+# cases print differently.
 #
 # Diff cursor (plan v3 U1.8): a file whose sha is unchanged since the last
 # LOCKED session start prints one compact line naming its sha and path instead
@@ -715,7 +715,7 @@ fi
 # wake, without adding a daemon or external-network call.
 # Presented records are this turn's first work queue; the drain consumes them
 # at presentation, and a still-open decision re-appears in its OPEN DECISIONS
-# section on every drain until answered (AGENTS.md sections 3 and 8).
+# section on every drain until answered (the captain-hold-lifecycle skill).
 # The drain also runs fm-guard.sh internally on the locked path, so the
 # tangle/watcher-liveness alarms land right here too, ahead of the bulk digest
 # below. The read-only path never touches the queue because it lacks mutation

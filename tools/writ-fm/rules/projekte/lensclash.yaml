@@ -1,0 +1,152 @@
+# Quelle: claw-bridge/kontext/projekte/lensclash.md
+# NICHT modelliert: "Aktuelle Lage" (Runde 3, offene Punkte — altert bei jeder Runde)
+# und die Referenzliste am Ende (Zeiger auf Repo-Dateien, keine Handlungsregel).
+
+project: lensclash
+repo: ~/projects/lensclash
+
+rules:
+
+  - id: LC-QUARTETT-001
+    domain: lensclash
+    severity: 3
+    trigger: Kampf-, Deck- oder Kategorielogik in LensClash wird geändert.
+    statement: >
+      Quartett-Prinzip, finaler Design-Beschluss (nicht hinterfragen): Kämpfe
+      laufen NUR innerhalb einer Kategorie — PvP, Bot, PvE und Tutorial gleich.
+      Verglichen wird der Rohwert mit `higher_wins`-Flag. PvE-Nodes haben eine
+      Pflicht-Kategorie; ohne passendes Deck ist der Button disabled. Der
+      Sammeldruck ist gewollt, kein Bug.
+    violation: Kategorieübergreifende Kämpfe erlauben, "damit der Button nicht disabled ist"
+    correct: Button disabled lassen, Kategorie-Filter strikt halten
+    tags: quartett, kampf, kategorie, design-beschluss
+
+  - id: LC-DECK-001
+    domain: lensclash
+    severity: 2
+    trigger: Starter-Decks oder der Deck-Builder werden angefasst.
+    statement: >
+      Vier Kategorien a zehn Karten, Stat-Jitter pro Vergabe (Bot separat),
+      höchstens Bronze. Im Deck-Builder gilt ein strikter Kategorie-Filter.
+    tags: deck, starter, jitter, bronze
+    relations:
+      - {kind: DEPENDS_ON, dst: LC-QUARTETT-001}
+
+  - id: LC-TRANSFORM-001
+    domain: lensclash
+    severity: 3
+    trigger: Die Karten-Bildgenerierung oder die Motiv-Transformation wird geändert.
+    statement: >
+      Die Per-Karten-Transformation ist DAS Feature: Foto -> Analyse ->
+      generiertes Artwork nach `docs/runde2/regelwerk-motiv-transformation.md`
+      (Pure Artwork, Archetyp, Hero-Shot, Identität, Clean Slate mit OCR-QA,
+      Cinematic Polish). Zielstil zeigen die Beispiele in `docs/runde2/beispiele/`.
+    violation: Das Originalfoto beschneiden und als Kartenmotiv verwenden
+    correct: Regelwerk lesen, Transformation anwenden, gegen die Beispiele prüfen
+    tags: artwork, transformation, regelwerk, clean-slate
+
+  - id: LC-MINTING-001
+    domain: lensclash
+    severity: 2
+    trigger: Die Minting-Sequenz wird angefasst.
+    statement: >
+      Die Minting-Show ist heilig: kein Placeholder-Frame, 3-Akt-Choreografie,
+      Hearthstone als Referenz.
+    violation: Platzhalter-Rahmen einblenden, bis das Artwork geladen ist
+    correct: Ladezustand innerhalb der Choreografie lösen, ohne Placeholder-Frame
+    tags: minting, animation, design-beschluss
+
+  - id: LC-I18N-001
+    domain: lensclash
+    severity: 2
+    trigger: Ein Text erscheint in der LensClash-Oberfläche.
+    statement: >
+      de und en, keine hartkodierten Strings, Denylist-Guard aktiv. i18n-Lecks
+      sind ein Dauerbrenner — bekannte Lücke: Battle-Animation.
+    violation: 'Ein deutscher String direkt im JSX'
+    correct: 'Schlüssel in beiden Sprachdateien anlegen, über t() ziehen'
+    tags: i18n, strings, denylist
+
+  - id: LC-BILD-001
+    domain: lensclash
+    severity: 3
+    trigger: In LensClash wird ein Bild generiert.
+    statement: >
+      Standard-Modell `google/gemini-3.1-flash-lite-image` (gewichteter
+      Benchmark-Sieger aus Identität, Latenz, Kosten), Premium-Profil
+      `gemini-3-pro-image` für Spezial-Karten. IMMER über die
+      OpenRouter-API, NIEMALS direkt über die Google-/Gemini-API.
+      Konfiguration: `~/.config/lensbutler/image-modell.yaml`.
+    violation: Direkt gegen die Gemini-API generieren, weil der Key vorhanden ist
+    correct: Über OpenRouter mit dem konfigurierten Modell generieren
+    tags: bildgenerierung, openrouter, gemini, design-beschluss
+
+  - id: LC-MOCK-001
+    domain: lensclash
+    severity: 2
+    trigger: Eine API-Anbindung in LensClash wird gebaut oder getestet.
+    statement: >
+      Mock- und Fixture-First für ALLE APIs. Kosten laufen in
+      `qa/apicost.log` mit harten Caps — 9 EUR Gesamtbudget.
+    violation: Testlauf gegen die echte Vision-API, "nur einmal"
+    correct: Fixture aufnehmen, danach gegen die Fixture testen
+    tags: mock, fixture, apicost, cap
+    relations:
+      - {kind: SUPPLEMENTS, dst: LEK-RATELIMIT-001}
+
+  - id: LC-KEY-001
+    domain: lensclash
+    severity: 2
+    trigger: Ein API-Key in LensClash wird eingesetzt.
+    statement: >
+      `KIMI_API_KEY` (in `~/projects/lensclash/.env`) macht Vision-Analyse,
+      aber KEINE Bildgenerierung — der Versuch endet mit 403. `GEMINI_API_KEY`
+      lief zuletzt im Free Tier mit einem Tages-Cap (Stand 2026-07-21: 40);
+      bei 429 greifen lokaler Fallback und Retry-Queue. Tarif und Cap vor
+      jeder Nutzung neu verifizieren statt den Wert von hier zu übernehmen —
+      die API-Landschaft ändert sich.
+    violation: Bildgenerierung über KIMI_API_KEY versuchen und den 403 als Bug melden
+    correct: Vision über KIMI_API_KEY, Bilder über den konfigurierten Weg
+    tags: api-key, 403, 429, tages-cap
+    relations:
+      - {kind: DEPENDS_ON, dst: LC-BILD-001}
+
+  - id: LC-QA-001
+    domain: lensclash
+    severity: 3
+    trigger: Eine LensClash-Änderung soll als abgenommen gelten.
+    statement: >
+      Expo web plus Playwright und Shims beweisen State und Layout — NICHT die
+      native Runtime (Worklets). Der Gerätetest durch den Owner ist
+      Pflicht-Gate. Testbar sind nur iPad und Samsung S26.
+    violation: '"Auf Web grün, also fertig" für eine Reanimated-Änderung'
+    correct: Web-Beleg plus Testbitte an den Owner mit Geräte-Checkliste
+    tags: qa, playwright, native, gate
+    relations:
+      - {kind: SUPPLEMENTS, dst: TEST-ACCEPT-001}
+      - {kind: DEPENDS_ON, dst: LEK-VERIFY-001}
+
+  - id: LC-SDK-001
+    domain: lensclash
+    severity: 2
+    trigger: Eine Expo- oder React-Native-Abhängigkeit soll aktualisiert werden.
+    statement: >
+      Expo SDK 54 ist gepinnt. Das Testgerät iPad fährt Expo Go SDK 54, das
+      Emulator-APK ebenso — ein SDK-Sprung macht die gesamte Testkette
+      unbrauchbar.
+    violation: 'expo upgrade auf SDK 55'
+    correct: Auf SDK 54 bleiben; ein Sprung ist eine Owner-Entscheidung
+    tags: expo, sdk-54, pinning
+
+  - id: LC-DAUERBRENNER-001
+    domain: lensclash
+    severity: 1
+    trigger: Ein Fehler in LensClash wirkt bekannt.
+    statement: >
+      Bekannte Dauerbrenner zuerst prüfen: Tutorial-Overlay-State (drei
+      Runden lang aufgetreten), i18n-Lecks, Truncation auf kleinen Karten.
+      `docs/KNOWN_ISSUES.md` ist das Dedup-Register und wird nach jeder Runde
+      gepflegt.
+    violation: Einen Overlay-Bug als neu melden, ohne KNOWN_ISSUES zu lesen
+    correct: KNOWN_ISSUES lesen, als bekannt markieren oder ergänzen
+    tags: known-issues, dauerbrenner, dedup

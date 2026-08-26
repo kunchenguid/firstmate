@@ -4,7 +4,7 @@ description: >-
   Agent-only procedure for Firstmate project management.
   Use before adding, creating, removing, or initializing a project.
   Cloning or registering a project is add intake and uses the same trigger.
-  Owns project add, create, clone, remove, initialization, registry, delivery-mode, autonomy, and outward-consent decisions.
+  Owns project add, create, clone, remove, initialization, registry, delivery-mode, the aktiv/schlafend status field, the product-foundation gate on a new project, and outward-consent decisions.
 user-invocable: false
 metadata:
   internal: true
@@ -25,17 +25,46 @@ Keep each registry description useful for identifying the project, but keep deli
 Do not turn the registry into project documentation.
 
 Before adding, cloning, creating, or registering any project in the main home, inspect the authoritative `data/secondmates.md` routing table and judge every existing natural-language `scope:` against the proposed project or domain.
-Apply `AGENTS.md` section 7's authoritative secondmate routing rules; if an existing scope owns that domain, route the new-project operation or work there instead of creating or registering a duplicate main-home clone.
+Routing is by natural-language `scope:`, and `secondmate-provisioning` owns that table; if an existing scope owns the domain, route the new-project operation or work there instead of creating or registering a duplicate main-home clone.
 Absence from the main `data/projects.md` registry is never evidence that no second mate owns the domain.
 If the owning second mate cannot accept the route, report that concrete blocker or obtain an explicit captain redirection rather than silently duplicating the project in the main home.
 
-Resolve the project name, destination, delivery posture, and autonomy posture before changing local or remote state.
+Resolve the project name, destination, delivery posture, and status before changing local or remote state.
 Keep a newly added clone and its registry entry consistent, and roll back only artifacts created by the incomplete operation when a later initialization step fails and that rollback is safe.
 Do not overwrite or repurpose an existing path.
 
+## Status: aktiv or schlafend
+
+Every registry entry carries a status.
+`aktiv` is the working default and means the project owes a product foundation and can carry backlog items.
+`(status: schlafend)` means the project is deliberately parked: it carries no obligations at all - no product foundation, no walkthrough cadence, no register duties - and it is a legitimate answer, not a failure.
+
+Two rules make the field load-bearing rather than decorative:
+
+- A project with no product foundation and no `schlafend` marker cannot carry a new backlog item.
+  Fix that by giving it a foundation or by marking it `schlafend`; never by filing the item anyway.
+- A new backlog item for a `schlafend` project is a wake question for the captain, not a silent status flip.
+  Ask whether to wake the project, and only then change the marker.
+
+## The product foundation gate on a new project
+
+Every project's product foundation is its `VISION.md`, and it is never rewritten - gaps are filled by appendix, each with the captain's approval.
+So `project add` for a repo that has no `VISION.md` does not simply register and move on:
+
+1. Register the project, then decide with the captain which of three classes it is.
+2. **Full vision** - the project is or will be a real product.
+   Start the proven vision process, whose four completed runs live under `data/vision-*/` as the pattern to copy: evidence -> cards -> board -> drafts -> answers -> `VISION.md`.
+   Prepare it as a brief; the resulting `VISION.md` is a captain-class change and lands only on his word.
+3. **Feeder** - the repo serves other projects and has no users of its own (a test harness, an automation host).
+   A ten-line `ZWECK.md` naming what it feeds and what "working" means for it is the whole foundation.
+4. **Parked** - nothing is planned here.
+   Mark it `(status: schlafend)` in the registry and stop; that is the complete and correct outcome.
+
+Never draft or edit a `VISION.md` directly in a project clone: prepare the draft under `data/` and route it for the captain's approval, because the product foundation is his.
+
 ## Delivery posture
 
-The registry records the project's standing posture, which is the captain's default for the work rather than any task's answer; `AGENTS.md` section 7 owns how each task's concrete mode and yolo are resolved at intake and passed explicitly to the brief, the spawn, and any promotion.
+The registry records the project's standing posture, which is the captain's default for the work rather than any task's answer; each task's concrete mode is resolved at intake and passed explicitly to the brief, the spawn, and any promotion.
 Choose that posture when adding or creating the project:
 
 - `no-mistakes` runs the full validation pipeline before a PR.
@@ -48,13 +77,15 @@ State that resolved default while confirming the source, local name, and posture
 Existing registry entries keep the meaning they already have and are never migrated or reinterpreted, so a legacy entry with no bracket stays `no-mistakes`.
 Registering a conditional policy is a one-time choice and never requires classifying any change; the per-task surface classification happens at each task's intake, and internal-only is never inferred from file location or project name.
 
-The optional `+yolo` posture changes merge authority only and does not change the delivery mode.
-Default it off for every project and every posture, and enable it only on the captain's explicit instruction.
-`AGENTS.md` section 7 owns the merge-authority contract.
+The `+yolo` posture is retired.
+The blanket per-project merge exception was abolished on 2026-08-26 (`regeln/ABGESCHAFFT.md`, `projekt-yolo`) because it was pauschal frei rather than precisely free.
+What replaced it is per-repo: landing authority now comes from the repo's `MANDAT.md` path patterns read by `bin/fm-mandat-check.sh`, plus the acceptance gate `bin/fm-abnahme.sh`.
+Never add `+yolo` to a new entry; a legacy `+yolo` on an existing line is inert and should be dropped when that line is next touched.
+A newly registered project starts under the conservative default mandate for its repo, which is sharpened afterwards by the captain rather than guessed at registration time.
 
 ## Add or clone an existing project
 
-Confirm the source URL, local project name, delivery posture, and autonomy posture, stating the resolved default for each rather than asking the captain to invent one.
+Confirm the source URL, local project name, delivery posture, and status, stating the resolved default for each rather than asking the captain to invent one, and run the product-foundation gate above before the entry is treated as complete.
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
@@ -88,5 +119,5 @@ Project removal is destructive.
 First obtain the captain's explicit removal decision, then inspect the current digest and authoritative repositories for in-flight or queued work, registered secondmate clones, linked worktrees, dirty files, unpushed commits, and any other unlanded work.
 If any dependency or unlanded work exists, stop and report it before changing anything.
 Never issue a raw removal command from Firstmate.
-Once that preflight confirms none of the above and the captain's approval is concrete, AGENTS.md hard rule 1's captain-approved project operation exception authorizes firstmate to remove the clone directly and update its registry entry to match.
+Once that preflight confirms none of the above and the captain's approval is concrete, that explicit word is what authorizes firstmate to remove the clone directly and update its registry entry to match - the one narrow case where HR1's never-write-into-projects rule yields, and only because the captain named this exact removal.
 When a clone has already been removed through an approved removal, or the registry is provably stale because no clone exists, remove its registry line so navigation matches reality.

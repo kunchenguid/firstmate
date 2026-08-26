@@ -6,6 +6,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fm-konten-fixture-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-konten-fixture-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
 
@@ -95,6 +97,10 @@ make_spawn_case() {
   printf '%s\n' "$$" > "$home/state/.lock"
   printf '%s off\n' "$$" > "$home/state/.trace-context-effective"
   fm_git_worktree "$proj" "$wt" "wt-$name"
+  # A claude spawn resolves its account from the ledger and refuses without one
+  # (bin/fm-spawn-gate-lib.sh); a fixture with no ledger would fall back to the
+  # checkout's real config/konten.tsv.
+  fm_test_konten_fixture "$home" "$case_dir/konten" "$proj" "$wt" "$home"
   touch "$home/state/.last-watcher-beat"
   id=$name-z1
   mkdir -p "$home/data/$id"
@@ -113,6 +119,7 @@ run_spawn() {
     FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_KONTEN_AKTE="$home/config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_TRACEPARENT_SEND_FAIL="${FM_FAKE_TRACEPARENT_SEND_FAIL:-0}" \
     FM_FAKE_TRACEPARENT_SEND_UNSAFE="${FM_FAKE_TRACEPARENT_SEND_UNSAFE:-0}" \
@@ -131,6 +138,7 @@ run_spawn_tc() {
     FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_KONTEN_AKTE="$home/config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" --mode no-mistakes --yolo off 2>&1
@@ -178,6 +186,11 @@ run_two_level() {
   sm="$base/sm"
   mkdir -p "$prim/config" "$prim/data" "$prim/state" "$prim/projects"
   printf 'claude\n' > "$prim/config/crew-harness"
+  # Both homes spawn claude and resolve their account from their own ledger
+  # (bin/fm-spawn-gate-lib.sh); the trust list names every path either home will
+  # spawn into, including the ones created further down.
+  fm_test_konten_fixture "$prim" "$base/konten" "$sm" "$base/wproj" "$base/wwt" "$prim"
+  fm_test_konten_fixture "$sm" "$base/konten" "$sm" "$base/wproj" "$base/wwt" "$prim"
   [ "$pfile" = present ] && : > "$prim/config/trace-context"
   touch "$prim/state/.last-watcher-beat"
   # The nested spawn below is a ship spawn inside a secondmate home, which the
@@ -228,11 +241,22 @@ run_two_level() {
   printf 'worker brief\n' > "$sm/data/$worker_id/brief.md"
   touch "$sm/state/.last-watcher-beat"
   # Approve that exact brief so the nested ship spawn clears the plan gate.
+  # v2 additionally requires a Freigabenotiz answering all five questions, plus
+  # an explicit class and order/no-order (bin/fm-plan-approval.sh header).
+  local notiz_file="$base/notiz-$worker_id.md"
+  {
+    printf 'F1 Praemissen: fixture\n'
+    printf 'F2 Abnahme: fixture\n'
+    printf 'F3 Vision: fixture\n'
+    printf 'F4 Budget: fixture\n'
+    printf 'F5 Betroffene: fixture\n'
+  } > "$notiz_file"
   env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" \
     FM_STATE_OVERRIDE="$prim/state" FM_DATA_OVERRIDE="$prim/data" \
     FM_CONFIG_OVERRIDE="$prim/config" \
     "$ROOT/bin/fm-plan-approval.sh" approve "$sm_id" "$worker_id" \
-    --plan-file "$sm/data/$worker_id/brief.md" >/dev/null 2>&1 \
+    --plan-file "$sm/data/$worker_id/brief.md" \
+    --klasse routine --no-order --notiz "$notiz_file" >/dev/null 2>&1 \
     || fail "the two-level fixture could not approve the nested worker's plan"
   start_trace_session "$sm" "$TL_ENV_TC"
   wlog="$base/worker-launch.log"
@@ -368,6 +392,7 @@ test_duplicate_secondmate_spawn_does_not_converge_trace_context() {
   id=sm-duplicate
   log="$base/launch.log"
   mkdir -p "$prim/config" "$prim/data/$id" "$prim/state" "$prim/projects"
+  fm_test_konten_fixture "$prim" "$base/konten" "$sm" "$prim"
   : > "$prim/config/trace-context"
   printf 'charter brief\n' > "$prim/data/$id/brief.md"
   touch "$prim/state/.last-watcher-beat"
@@ -498,6 +523,8 @@ test_two_routed_tasks_through_one_secondmate_root_distinct_traces() {
   sm="$base/sm-home"
   mkdir -p "$sm/data" "$sm/projects" "$sm/state" "$sm/config"
   printf 'claude\n' > "$sm/config/crew-harness"
+  fm_test_konten_fixture "$sm" "$base/konten" \
+    "$base/proj-a" "$base/proj-b" "$base/wt-a" "$base/wt-b" "$sm"
   : > "$sm/config/trace-context"
   printf '%s\n' "$$" > "$sm/state/.lock"
   touch "$sm/state/.last-watcher-beat"

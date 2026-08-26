@@ -1,0 +1,22 @@
+# regeln/VERFASSUNG.yaml - the fleet's rule-budget constitution.
+# SINGLE OWNER of every cap number in the rule system. Captain class: changing
+# any value here is a `vision` MANDAT hit on the firstmate repo itself and
+# requires the captain's word (drift lesson: 10 rules became 80+ because
+# nothing made growth cost anything).
+# Read by: writ-fm ingest (caps), bin/fm-prompt-regeln.sh (topk),
+# bin/fm-regeln brief (brief_token_max), bin/fm-regel-eval.sh (all).
+# Anchor: L17-Abgrenzung - these caps bound BINDINGNESS, never knowledge.
+# `hinweis` rules, the Lehren-Ledger, ABGESCHAFFT.md and Begehungsberichte
+# are deliberately uncapped; hinweis is never injected anywhere.
+
+kern_max: 8               # always-on rules delivered at SessionStart
+kern_token_max: 1200      # estimated token budget of the SessionStart block
+kontext_max_je_geltung: 12
+kontext_max_gesamt: 40
+topk: 3                   # UserPromptSubmit retrieval depth - fixed, never raised without captain word
+brief_token_max: 600      # rule block embedded into a worker brief
+nogo_zeilen_max_je_brief: 5
+
+# Over-cap additions require a demotion (kontext -> hinweis or -> tool gate)
+# in the same commit, recorded in ABGESCHAFFT.md: one in, one out, by demotion,
+# never by deletion of knowledge.

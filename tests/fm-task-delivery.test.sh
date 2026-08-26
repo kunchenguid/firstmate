@@ -16,6 +16,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fm-konten-fixture-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-konten-fixture-lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
@@ -32,6 +34,10 @@ make_home() {  # <name> [<registry-line>...]
   projects="$TMP_ROOT/$name/projects"
   fakebin="$TMP_ROOT/$name/bin"
   mkdir -p "$home/data" "$home/state" "$home/config" "$projects/proj" "$fakebin"
+  # A claude spawn resolves its account from this home's ledger and refuses
+  # without one (bin/fm-spawn-gate-lib.sh); without a fixture ledger the lookup
+  # would fall back to the checkout's real config/konten.tsv.
+  fm_test_konten_fixture "$home" "$TMP_ROOT/$name/konten" "$projects/proj" "$home"
   printf '#!/bin/sh\nexit 1\n' > "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
   if [ "$#" -gt 0 ]; then
@@ -55,6 +61,7 @@ run_spawn() {  # <home> <fakebin> <spawn-args...>
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/projects-unused" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_KONTEN_AKTE="$home/config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }

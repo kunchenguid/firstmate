@@ -31,6 +31,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fm-konten-fixture-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-konten-fixture-lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 # shellcheck source=/dev/null
@@ -793,9 +795,13 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
   local bin=$1 fb=$2 log=$3 state=$4 data=$5 config=$6 proj=$7; shift 7
   [ "${1:-}" = -- ] && shift
   : > "$log"
+  # This case runs against the real checkout as FM_ROOT_OVERRIDE and sets no
+  # FM_HOME, so the account ledger would otherwise resolve to the checkout's own
+  # config/konten.tsv - the operator's real accounts. Pin it into the fixture.
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$bin" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" \
+    FM_KONTEN_AKTE="$config/konten.tsv" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_TMUX_LOG="$log" \
     "$bin/bin/fm-spawn.sh" "$@"
 }
@@ -885,6 +891,10 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
   printf 'test brief content\n' > "$data/$id/brief.md"
   state="$TMP_ROOT/symlink-state-$label"; config="$TMP_ROOT/symlink-config-$label"
   mkdir -p "$state" "$config"
+  # The project is reachable by two names here; trust both, so the account gate
+  # cannot be what fails a test that is about symlink resolution.
+  fm_test_konten_akte "$config/konten.tsv" "$TMP_ROOT/symlink-konten-$label" \
+    "$proj" "$proj_phys" "$wt"
   log="$TMP_ROOT/symlink-spawn-$label.log"
 
   out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
@@ -1005,7 +1015,10 @@ test_spawn_refuses_unknown_backend_flag() {
   local out status
   # bogus names a backend with no adapter at all; zellij and orca both
   # graduated to real adapters and have their own spawn tests.
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+  # An empty fixture state keeps a live fleet stop (state/.fleet-stop in the
+  # real checkout) from firing before the backend validation under test.
+  local state_fixture; state_fixture=$(mktemp -d)
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE="$state_fixture" FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" nope-backend-z1 projects/none claude --mode no-mistakes --yolo off --backend bogus 2>&1)
   status=$?
@@ -1016,7 +1029,10 @@ test_spawn_refuses_unknown_backend_flag() {
 
 test_spawn_refuses_codex_app_backend_flag() {
   local out status
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+  # An empty fixture state keeps a live fleet stop (state/.fleet-stop in the
+  # real checkout) from firing before the backend validation under test.
+  local state_fixture; state_fixture=$(mktemp -d)
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE="$state_fixture" FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" nope-codex-app-z1 projects/none claude --mode no-mistakes --yolo off --backend codex-app 2>&1)
   status=$?
@@ -1027,7 +1043,8 @@ test_spawn_refuses_codex_app_backend_flag() {
 
 test_spawn_refuses_unknown_fm_backend_env() {
   local out status
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+  local state_fixture; state_fixture=$(mktemp -d)
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE="$state_fixture" FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 FM_BACKEND=bogus \
     "$ROOT/bin/fm-spawn.sh" nope-backend-z2 projects/none claude --mode no-mistakes --yolo off 2>&1)
   status=$?
@@ -1046,8 +1063,12 @@ test_spawn_default_backend_writes_no_meta_field() {
   mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
   state="$TMP_ROOT/nobackend-state"; config="$TMP_ROOT/nobackend-config"
   mkdir -p "$state" "$config"
+  # Account preflight (fm-spawn-gate-lib): a fixture ledger plus a startable
+  # store, so the spawn never reads the operator's real accounts.
+  fm_test_konten_akte "$config/konten.tsv" "$TMP_ROOT/nobackend-stores" "$proj"
 
   out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_KONTEN_AKTE="$config/konten.tsv" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_TMUX_LOG="$TMP_ROOT/nobackend.log" \
@@ -1068,10 +1089,14 @@ test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
   mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
   state="$TMP_ROOT/explicit-backend-state"; config="$TMP_ROOT/explicit-backend-config"
   mkdir -p "$state" "$config"
+  # Account preflight (fm-spawn-gate-lib): a fixture ledger plus a startable
+  # store, so the spawn never reads the operator's real accounts.
+  fm_test_konten_akte "$config/konten.tsv" "$TMP_ROOT/explicit-backend-stores" "$proj"
 
   # HERDR_ENV=1 is present (as if firstmate itself were running under herdr),
   # but an explicit --backend tmux flag must still win outright.
   out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_KONTEN_AKTE="$config/konten.tsv" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" HERDR_ENV=1 \
     FM_TMUX_LOG="$TMP_ROOT/explicit-backend.log" \
@@ -1092,6 +1117,9 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
   state="$TMP_ROOT/nest-state"; config="$TMP_ROOT/nest-config"
   mkdir -p "$state" "$config"
+  # Account preflight (fm-spawn-gate-lib): a fixture ledger plus a startable
+  # store, so the spawn never reads the operator's real accounts.
+  fm_test_konten_akte "$config/konten.tsv" "$TMP_ROOT/nest-stores" "$proj"
 
   # No --backend, no FM_BACKEND, no config/backend: nothing is explicitly
   # configured, so auto-detect runs. $TMUX and HERDR_ENV=1 are both present
@@ -1099,6 +1127,7 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   # fm_backend_name, must resolve this to tmux and stay completely silent about
   # it (today's default path, byte-identical).
   out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_KONTEN_AKTE="$config/konten.tsv" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" HERDR_ENV=1 \
     FM_TMUX_LOG="$TMP_ROOT/nest.log" \

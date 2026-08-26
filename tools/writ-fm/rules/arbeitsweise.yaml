@@ -1,0 +1,105 @@
+# Quelle: Claude-Code-Insights-Report vom 2026-08-07
+# (~/.claude/usage-data/report-2026-08-07-180149.html, sechs Tage Sessions).
+# Aufgenommen auf Owner-Entscheid am selben Tag.
+#
+# Eigene Datei statt Einsortierung in onboarding.yaml oder kern.yaml: beide
+# spiegeln je eine gelieferte Quelle (ONBOARDING.md bzw. KERN-KONTEXT.md), und
+# onboarding.yaml wird gegen ihr Archiv `rules-onboarding.yaml` abgeglichen —
+# eine Regel aus einem Report hätte dort den Abgleich stumpf gemacht. Die
+# Konvention "eine Datei je Quelle" gilt seit rules/retrieval.yaml.
+#
+# Alle vier Regeln beschreiben Handwerk, nicht Sicherheit: sie sind bewusst
+# NICHT mandatory — sie sollen greifen, wenn die Lage passt, nicht immer.
+# Die Begründung von 2026-08-07 lautete anders und ist überholt: damals kostete
+# der verbindliche Block 918 von 2000 Tokens je Eingabe
+# (belege/e1-budget-messung.md), und jede weitere mandatory-Regel ging direkt
+# von den gerankten ab. Seit 2026-08-07 zählt das Budget nur noch die gerankten
+# Regeln, und verbindliche Regeln kommen je Eingabe nur als ID-Zeile mit — der
+# Preis ist heute der Session-Start-Block plus diese Zeile, keine Verdrängung
+# (REG-BUDGET-001).
+#
+# NICHT modelliert aus dem Report:
+#   * Kosten- und Token-Statistiken (Messwerte, keine Handlungsregel)
+#   * Werkzeug-Nutzungsverteilung (beschreibt, was war, nicht was gelten soll)
+#   * die Hook- und Konfigurationsbefunde — sie sind Mechanik geworden
+#     (hooks/, `writ-light doctor`), nicht Regeltext. Wo eine Mechanik greift,
+#     ist eine Regel die schwächere Antwort.
+
+rules:
+
+  - id: WF-CWD-001
+    domain: workflow
+    severity: 2
+    trigger: >
+      Tests, Builds oder Git-Befehle stehen an, oder Änderungen sollen mit
+      `git add` gestaged werden — besonders bei mehreren Worktrees,
+      parallelen Sessions oder langlebigen Diensten.
+    statement: >
+      Erst das Arbeitsverzeichnis belegen, dann arbeiten: `pwd` und
+      `git rev-parse --show-toplevel` ausgeben und gegen die Aufgabe prüfen.
+      In den Commit kommen ausschließlich die Dateien, die man selbst
+      geändert hat, einzeln mit Pfad hinzugefügt — `git add -A`, `--all` und
+      `.` ziehen Dateien fremder Sessions mit hinein. Belegt: eine Testsuite
+      lief im falschen Verzeichnis, weil ein `cd` fehlte, und ein
+      `git add -A` stagte den Stand einer Parallel-Session.
+    violation: Im Home-Verzeichnis `npm test` aufrufen und das Ergebnis für das Projekt halten
+    correct: 'pwd && git rev-parse --show-toplevel, dann git add src/datei.ts tests/datei.test.ts'
+    tags: arbeitsverzeichnis, worktree, cwd, git-add, stage, stagen, gestaged, parallele-sessions
+    relations:
+      - {kind: SUPPLEMENTS, dst: WF-SCOPE-001}
+
+  - id: LEK-SELBSTPRUEFUNG-001
+    domain: qualität
+    severity: 2
+    trigger: >
+      Eine Änderung über mehrere Dateien ist umgesetzt und soll als fertig
+      gelten.
+    statement: >
+      Vor der Fertigmeldung ein eigener Durchgang gegen AUSLASSUNGEN — nicht
+      gegen Logikfehler. Gesucht wird, was fehlt: nicht registrierte
+      Event-Listener, unvollständige Key- und Enum-Listen, Labels, die noch
+      den alten Zustand nennen, Reste aus Zwischenständen, kaputte
+      Markdown-Listen. Jede berührte Datei einmal ganz lesen, Befunde als
+      Liste vor der Korrektur. Belegt: 21 Vorfälle mit fehlerhaftem Code in
+      sechs Tagen, fast alle still — sie fielen erst dem Owner auf.
+    violation: Nach der letzten Datei "fertig" melden, weil die Tests grün sind
+    correct: Jede berührte Datei ganz lesen, Auslassungen als Liste sammeln, dann korrigieren
+    tags: selbstprüfung, auslassung, diff, listener, enum, reste, mehrdatei
+    relations:
+      - {kind: SUPPLEMENTS, dst: LEK-VERIFY-001}
+
+  - id: LEK-HYPOTHESE-001
+    domain: qualität
+    severity: 2
+    trigger: >
+      Eine Ursache ist noch nicht belegt, und die erste Code-Änderung zur
+      Behebung steht an.
+    statement: >
+      Vor der ersten Änderung zwei Hypothesen benennen und die billigste
+      Prüfung fahren, die die erste WIDERLEGEN würde. Ergebnis lesen, dann
+      entscheiden. Belegt: drei Fehldiagnosen in sechs Tagen — ein
+      Scroll-Sprung wurde dem iframe statt einem `focus()` angelastet,
+      Kartendaten auf dem falschen Server gesucht, eine Zeigerdrift durch den
+      falschen Kernel-Pfad verfolgt. Alle drei wurden selbst korrigiert, aber
+      erst nachdem ein Fix schon gebaut war.
+    violation: Die erste plausible Ursache annehmen und sofort den Fix schreiben
+    correct: Zwei Hypothesen nennen, einen Befehl fahren, der die erste widerlegt, dann bauen
+    tags: hypothese, diagnose, widerlegen, fehlersuche, erste-änderung, ursache
+    relations:
+      - {kind: SUPPLEMENTS, dst: LEK-BEFUND-001}
+
+  - id: WF-PROZESS-001
+    domain: workflow
+    severity: 2
+    trigger: >
+      Ein Hintergrundprozess wird gestartet — Dev-Server, Emulator, Tunnel,
+      Warteschleife — oder eine Session geht zu Ende.
+    statement: >
+      PID und Befehl beim Start notieren, am Ende NUR diese PIDs beenden. Nie
+      ein pauschales `pkill -f node` oder `pkill -f vite`: es trifft fremde
+      Sessions und die eigene Shell. Belegt: ein solcher Aufruf beendete die
+      eigene Shell (Exit 144), und 19 verwaiste Vite-Prozesse plus fünf
+      Warteschleifen mussten zweimal angemahnt werden.
+    violation: 'pkill -f node am Session-Ende'
+    correct: PID beim Start notieren, am Ende gezielt kill <pid>, Rest melden
+    tags: prozesse, pid, hintergrund, pkill, aufräumen, session-ende, verwaist

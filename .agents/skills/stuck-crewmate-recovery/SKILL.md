@@ -51,4 +51,4 @@ Escalate in order:
    Genuine wedging means looping, unresponsive, repeating the same obstacle, or truly dead.
    A low context reading is not wedging; modern harnesses auto-compact and keep going.
    The worktree and commits persist, so relaunch is cheap.
-5. If a second relaunch fails too, write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `AGENTS.md` section 9; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.
+5. If a second relaunch fails too, write `failed` to the backlog and tell the captain the plain failure, the preserved work, and the consequence in his terms; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.

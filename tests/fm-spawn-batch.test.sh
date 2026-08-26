@@ -16,14 +16,27 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-batch)
 export FM_BACKEND=tmux
 
+# These cases deliberately clear FM_HOME so argument routing runs against the
+# real checkout - which also makes STATE and CONFIG the live state/ and config/
+# of whoever runs the suite. Both directories are operational, untracked (config/
+# is gitignored outright), and both are read by gates that fail closed *before*
+# argument routing: a captain state/.fleet-stop refuses every launch, and an
+# active config/crew-dispatch.json demands an explicit harness. Either one turns
+# every case here red for a reason that has nothing to do with batch dispatch.
+# Empty fixtures keep the live fleet out of the test - the same isolation
+# tests/fm-backend.test.sh uses for its backend-validation cases.
+STATE_FIXTURE="$TMP_ROOT/state"
+CONFIG_FIXTURE="$TMP_ROOT/config"
+mkdir -p "$STATE_FIXTURE" "$CONFIG_FIXTURE"
+
 # Clear ambient firstmate overrides so the behavior test owns its environment.
 run_spawn() {
   FM_ROOT_OVERRIDE='' \
     FM_HOME='' \
-    FM_STATE_OVERRIDE='' \
+    FM_STATE_OVERRIDE="$STATE_FIXTURE" \
     FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' \
-    FM_CONFIG_OVERRIDE='' \
+    FM_CONFIG_OVERRIDE="$CONFIG_FIXTURE" \
     FM_SPAWN_NO_GUARD=1 \
     "$SPAWN" "$@" 2>&1
 }

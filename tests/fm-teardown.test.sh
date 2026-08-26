@@ -69,14 +69,24 @@ export REAL_LSOF_FOR_TEST
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
 #   $CASE/fakebin/      - mocks for treehouse, tmux (PATH-prepended by caller)
 #   $CASE/origin.git/   - bare upstream repo (so the project clone has origin)
+#   $CASE/data/         - firstmate data dir (empty secondmate registry etc.)
 #   $CASE/project/      - clone of origin; acts as the firstmate project dir
 #   $CASE/wt/           - a worktree of the project (the task worktree)
+#
+# The case dir must cover state, config AND data. FM_ROOT_OVERRIDE points at the
+# real repo (that is how the script under test finds bin/), so any operational
+# dir left un-overridden resolves inside the developer's live firstmate home.
+# data/ carries the secondmate registry (data/secondmates.md), which teardown
+# both READS (the removal-target binding check refuses on a registry that has no
+# binding for the task id) and REWRITES on secondmate teardown. Without
+# FM_DATA_OVERRIDE the suite's verdicts depend on whether the host happens to
+# run secondmates, and the run edits the host's real registry file.
 # Echoes the case dir.
 make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -545,6 +555,7 @@ run_teardown() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -1635,6 +1646,7 @@ SH
   esac
   rc=0
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    FM_DATA_OVERRIDE="$case_dir/data" \
     FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
     FM_FAKE_HERDR_SESSION_LIST_GARBAGE="$([ "$mode" = unresolvable-lock ] && printf 1 || printf 0)" \
     PATH="$case_dir/fakebin:$PATH" \

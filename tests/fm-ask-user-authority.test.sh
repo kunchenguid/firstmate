@@ -13,8 +13,14 @@ test_primary_and_secondmate_instruction_generation() {
   home="$TMP_ROOT/home"
   mkdir -p "$home/data"
 
+  # v2: fm-brief now requires an order reference and a product goal for
+  # every ship brief (radikalumbau, see AGENTS.md); the pre-umbau v1 call
+  # had neither and now exits 1 before brief.md is ever written.
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$BRIEF" authority-worker sample --mode no-mistakes >/dev/null 2>&1
+    "$BRIEF" authority-worker sample --mode no-mistakes \
+    --order O-0083 \
+    --ziel 'Scans reach a card without a detour|lensclash/scan-zu-karte' \
+    >/dev/null 2>&1
   ship="$home/data/authority-worker/brief.md"
   assert_grep 'ask-user findings are never yours to answer' "$ship" \
     "generated implementation brief lets the worker own an ask-user decision"
