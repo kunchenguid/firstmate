@@ -368,6 +368,7 @@ For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports
 Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
 Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine merge authority.
+A forge's merged-by field never identifies who decided, because firstmate, every crewmate, and the captain act through one shared forge identity; when a merge's authorization is in doubt, `bin/fm-merge-attribution.sh <id>` reports whether it went through the recorded merge path, and a merge with no matching record reads as unattributed, never as firstmate's own.
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
 
 Tear down a ship task only after landing is confirmed.

@@ -24,6 +24,8 @@
 #   (o) glab or jq absent refuses before any state is recorded
 #   (p) --sha in extra GitLab args fails fast, and still forwards on GitHub
 #   (q) a GitLab refusal still leaves pr= recorded and the merge poll armed
+#   (r) --match-head-commit in extra GitHub args fails fast, because the head
+#       binding is firstmate's to determine there too
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -65,7 +67,12 @@ make_case() {
 }
 
 # gh-axi mock recording every invocation to a log file, and gh mock answering
-# headRefOid for fm-pr-check.sh's pr_head lookup. Args: case_dir head_sha
+# headRefOid for fm-pr-check.sh's pr_head lookup, plus a "pr merge" case that
+# logs to the same file and succeeds: fm-pr-merge.sh routes the real merge
+# call to gh, not gh-axi, whenever a valid head is available to bind to (which
+# a nonempty head param here always provides), because gh-axi does not
+# support --match-head-commit and would silently drop it. Args: case_dir
+# head_sha
 add_gh_mocks() {
   local case_dir=$1 head=$2
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
@@ -79,7 +86,12 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *) printf 'MERGED\n' ; exit 0 ;;
     esac
+    ;;
+  "pr merge")
+    printf '%s\n' "\$*" >> "\$FM_TEST_GH_AXI_LOG"
+    exit 0
     ;;
 esac
 exit 0
@@ -247,8 +259,9 @@ test_records_pr_and_head_before_merging() {
     "records-before-merge: pr= was not recorded"
   assert_grep 'pr_head=deadbeefcafefeed0000000000000000deadbeef' "$case_dir/state/task-x1.meta" \
     "records-before-merge: pr_head= was not recorded"
-  grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
-    || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
+  grep -qxF 'pr merge 9 --repo example/repo --squash --match-head-commit deadbeefcafefeed0000000000000000deadbeef' \
+    "$case_dir/gh-axi.log" \
+    || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, default --squash, and the bound head"
   pass "fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge"
 }
 
@@ -281,7 +294,8 @@ test_extra_merge_args_forwarded() {
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/15 -- --squash --delete-branch \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "extra-args: fm-pr-merge failed"
 
-  grep -qxF 'pr merge 15 --repo example/repo --squash --delete-branch' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 15 --repo example/repo --match-head-commit 2222222222222222222222222222222222222222 --squash --delete-branch' \
+    "$case_dir/gh-axi.log" \
     || fail "extra-args: extra gh-axi pr merge flags were not forwarded"
   pass "fm-pr-merge forwards extra flags to gh-axi pr merge after the -- separator"
 }
@@ -445,7 +459,8 @@ test_bundled_repo_override_args_refuse_before_recording() {
     > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "bundled-non-repo-cluster: fm-pr-merge refused a short flag that overrides nothing"
 
-  grep -qxF 'pr merge 8 --repo example/repo --squash -d' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 8 --repo example/repo --squash --match-head-commit bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc -d' \
+    "$case_dir/gh-axi.log" \
     || fail "bundled-non-repo-cluster: a short flag carrying no repository override was not forwarded"
   pass "fm-pr-merge refuses a bundled short-option repo override and forwards other short flags"
 }
@@ -460,7 +475,8 @@ test_explicit_merge_method_not_overridden() {
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/22 -- --merge \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "explicit-merge-method: fm-pr-merge failed"
 
-  grep -qxF 'pr merge 22 --repo example/repo --merge' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 22 --repo example/repo --match-head-commit 5555555555555555555555555555555555555555 --merge' \
+    "$case_dir/gh-axi.log" \
     || fail "explicit-merge-method: caller --merge was not forwarded without an extra default --squash"
   pass "fm-pr-merge does not add default --squash when the caller passes an explicit merge method"
 }
@@ -475,7 +491,8 @@ test_method_equals_merge_method_not_overridden() {
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/23 -- --method=merge \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "method-equals-merge-method: fm-pr-merge failed"
 
-  grep -qxF 'pr merge 23 --repo example/repo --method=merge' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 23 --repo example/repo --match-head-commit 7777777777777777777777777777777777777777 --method=merge' \
+    "$case_dir/gh-axi.log" \
     || fail "method-equals-merge-method: caller --method=merge was not forwarded without an extra default --squash"
   pass "fm-pr-merge respects --method=<value> as an explicit merge method"
 }
@@ -490,8 +507,9 @@ test_parses_pr_url_for_gh_axi() {
   run_pr_merge "$case_dir" task-x1 https://github.com/my-org/my-repo/pull/126 \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "url-parsing: fm-pr-merge failed"
 
-  grep -qxF 'pr merge 126 --repo my-org/my-repo --squash' "$case_dir/gh-axi.log" \
-    || fail "url-parsing: gh-axi pr merge was not invoked as number + --repo + default --squash"
+  grep -qxF 'pr merge 126 --repo my-org/my-repo --squash --match-head-commit 6666666666666666666666666666666666666666' \
+    "$case_dir/gh-axi.log" \
+    || fail "url-parsing: gh-axi pr merge was not invoked as number + --repo + default --squash + bound head"
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
@@ -805,9 +823,32 @@ test_github_still_forwards_sha_arg() {
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/44 -- --sha abc123 \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "github-sha-arg: fm-pr-merge failed"
 
-  grep -qxF 'pr merge 44 --repo example/repo --squash --sha abc123' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 44 --repo example/repo --squash --match-head-commit dddddddddddddddddddddddddddddddddddddddd --sha abc123' \
+    "$case_dir/gh-axi.log" \
     || fail "github-sha-arg: the GitHub path stopped forwarding a caller --sha"
   pass "fm-pr-merge leaves GitHub extra-arg handling unchanged, including --sha"
+}
+
+test_github_head_override_args_refuse_before_recording() {
+  local case_dir rc
+  case_dir=$(make_case github-head-override)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 8888888888888888888888888888888888888888
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/50 -- --match-head-commit deadbeef \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-head-override: fm-pr-merge should refuse a caller head override"
+  assert_grep 'extra merge arguments must not override the head commit' "$case_dir/stderr" \
+    "github-head-override: refusal did not explain the head override"
+  assert_no_grep 'pr=https://github.com/example/repo/pull/50' "$case_dir/state/task-x1.meta" \
+    "github-head-override: the URL was recorded before rejecting the head override"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "github-head-override: gh-axi was invoked despite the head override"
+  pass "fm-pr-merge refuses a GitHub head override before recording state"
 }
 
 test_records_pr_and_head_before_merging
@@ -822,6 +863,7 @@ test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
 test_github_still_forwards_sha_arg
+test_github_head_override_args_refuse_before_recording
 test_gitlab_url_resolves_and_merges
 test_gitlab_host_comes_from_the_url
 test_gitlab_imposes_no_merge_method
