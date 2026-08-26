@@ -388,6 +388,10 @@ print_backlog_pointer() {
 # string "language"/"response_tone" fields) also gates what reaches the
 # standing session context - a file that /helm would refuse, empty or
 # otherwise, is never surfaced as if it were an active preference.
+# `fm-helm.sh show` exits 3 specifically when jq itself is missing (a tool
+# problem, not a content problem); that case must not be reported as an
+# invalid file - a valid captain-style.json would then be silently discarded
+# - so it is surfaced as its own loud, dependency-named diagnostic instead.
 print_captain_style() {
   local path=$1 label=$2
   subsection "$label"
@@ -395,9 +399,13 @@ print_captain_style() {
     printf 'ABSENT\n'
     return
   fi
-  local out
-  if out=$(FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-helm.sh" show 2>&1); then
+  local out status
+  out=$(FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-helm.sh" show 2>&1) && status=0 || status=$?
+  if [ "$status" -eq 0 ]; then
     printf '%s\n' "$out"
+  elif [ "$status" -eq 3 ]; then
+    printf 'MISSING: jq - cannot validate %s (install jq to enable captain-style preferences); firstmate defaults apply until jq is installed\n' \
+      "$label"
   else
     printf 'INVALID: %s failed /helm'"'"'s schema validation - ignored, firstmate defaults apply (%s)\n' \
       "$label" "$out"

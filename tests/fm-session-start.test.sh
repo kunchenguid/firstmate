@@ -737,6 +737,62 @@ EOF
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
 }
 
+# mirror_path_without <dir> <tool> [<bindir> ...]: the whole search path
+# re-exposed by symlink except one tool, because a real copy anywhere on PATH
+# would prove nothing. The named bindirs are mirrored ahead of the search
+# path, so a case's own fakes answer for every tool that is not the omitted
+# one and the refusal names that tool alone whatever the host has installed.
+# Mirrors tests/fm-pr-merge.test.sh's helper of the same name.
+mirror_path_without() {
+  local dir=$1 omit=$2 search bindir entry name
+  shift 2
+  mkdir -p "$dir"
+  search=$(printf '%s\n' "$@"; printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=${entry##*/}
+      [ "$name" = "$omit" ] && continue
+      [ -e "$dir/$name" ] || ln -s "$entry" "$dir/$name" 2>/dev/null
+    done
+  done <<EOF
+$search
+EOF
+  ! PATH="$dir" command -v "$omit" >/dev/null 2>&1 \
+    || fail "the $omit-free search path still resolved $omit"
+}
+
+test_context_digest_valid_captain_style_survives_missing_jq() {
+  local rec root home fakebin noqjq out cap_section
+  rec=$(new_world context-digest-no-jq)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  mkdir -p "$home/config"
+  FM_HOME="$home" "$ROOT/bin/fm-helm.sh" set --language vi --response-tone 'blunt and playful' \
+    >/dev/null || fail "fixture setup: fm-helm.sh set exited non-zero"
+
+  noqjq="$home/no-jq-path"
+  mirror_path_without "$noqjq" jq "$fakebin"
+
+  out=$(run_session_start "$home" "$root" "$noqjq")
+
+  cap_section=$(printf '%s\n' "$out" | awk '/^config\/captain-style\.json \(/{flag=1;next}flag&&/^-{10,}$/{next}flag&&/^$/{exit}flag')
+  case "$cap_section" in
+    *INVALID*)
+      fail "a valid captain-style.json with jq absent from PATH was reported as schema-invalid instead of a missing dependency: $cap_section"
+      ;;
+  esac
+  assert_contains "$cap_section" "MISSING: jq" \
+    "a valid captain-style.json with jq absent from PATH must name the missing dependency loudly, not silently default: $cap_section"
+
+  pass "context digest reports a missing jq by name rather than discarding a valid captain-style.json as schema-invalid"
+}
+
 test_context_digest_empty_captain_style_is_invalid_not_blank() {
   local rec root home fakebin out cap_section
   rec=$(new_world context-digest-empty-captain-style)
@@ -2483,6 +2539,7 @@ EOF
 
 test_context_digest_absent_empty_present
 test_context_digest_empty_captain_style_is_invalid_not_blank
+test_context_digest_valid_captain_style_survives_missing_jq
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock

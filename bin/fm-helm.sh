@@ -40,10 +40,15 @@ print_error() {
   printf 'fm-helm: %s\n' "$1" >&2
 }
 
+# require_jq: exits 3 when jq is absent, a status distinct from both a usage
+# error (2) and a content/schema failure (1) so callers - notably
+# fm-session-start.sh's captain-style reader - can tell "jq is missing" apart
+# from "the file is actually invalid" instead of conflating both into one
+# generic failure.
 require_jq() {
   command -v jq >/dev/null 2>&1 || {
     print_error "jq is required and was not found on PATH"
-    return 1
+    return 3
   }
 }
 

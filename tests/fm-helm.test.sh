@@ -129,6 +129,51 @@ test_non_string_field_is_refused() {
   pass "a structured (non-string) field value is refused by both show and set"
 }
 
+# no_jq_path: a minimal PATH containing only what fm-helm.sh needs to launch
+# and run its non-jq logic (bash for the shebang, dirname for SCRIPT_DIR) -
+# with no directory that provides jq. Used to prove a missing jq is reported
+# as its own distinct, loudly-named failure rather than being conflated with
+# a schema-invalid file.
+no_jq_path() {
+  local dir tool
+  dir=$(fm_test_tmproot fm-helm-no-jq)/bin
+  mkdir -p "$dir"
+  for tool in bash dirname; do
+    ln -s "$(command -v "$tool")" "$dir/$tool"
+  done
+  printf '%s' "$dir"
+}
+
+test_show_missing_jq_is_distinct_from_schema_invalid() {
+  local home noqjs out status
+  home=$(new_home)
+  FM_HOME="$home" "$HELM" set --language vi --response-tone 'blunt and playful' \
+    || fail "initial set with both fields exited non-zero"
+
+  noqjs=$(no_jq_path)
+  status=0
+  out=$(PATH="$noqjs" FM_HOME="$home" "$HELM" show 2>&1) || status=$?
+  [ "$status" -eq 3 ] \
+    || fail "show without jq on PATH must exit 3 (distinct from schema-invalid's 1), got $status: $out"
+  printf '%s' "$out" | grep -q 'jq' || fail "missing-jq failure did not name the missing dependency: $out"
+  pass "show without jq on PATH fails with a distinct status naming the missing dependency, not a schema error"
+}
+
+test_set_missing_jq_is_distinct_from_schema_invalid() {
+  local home noqjs out status
+  home=$(new_home)
+
+  noqjs=$(no_jq_path)
+  status=0
+  out=$(PATH="$noqjs" FM_HOME="$home" "$HELM" set --language vi 2>&1) || status=$?
+  [ "$status" -eq 3 ] \
+    || fail "set without jq on PATH must exit 3 (distinct from schema-invalid's 1), got $status: $out"
+  printf '%s' "$out" | grep -q 'jq' || fail "missing-jq failure did not name the missing dependency: $out"
+  [ ! -f "$home/config/captain-style.json" ] \
+    || fail "set without jq on PATH must not write a file"
+  pass "set without jq on PATH fails with a distinct status naming the missing dependency, not a schema error"
+}
+
 test_help_prints_full_text_not_truncated() {
   local out
   out=$("$HELM" --help) || fail "--help exited non-zero"
@@ -147,3 +192,5 @@ test_set_one_field_preserves_other
 test_set_requires_a_field
 test_set_rejects_empty_value
 test_write_is_atomic_no_stray_tmp
+test_show_missing_jq_is_distinct_from_schema_invalid
+test_set_missing_jq_is_distinct_from_schema_invalid
