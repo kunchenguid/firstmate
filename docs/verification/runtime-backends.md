@@ -666,7 +666,8 @@ The real lifecycle smoke proved spawn, metadata, nested-subshell worktree discov
 
 ## Orca
 
-Real readiness was verified against `/usr/local/bin/orca` with `/Applications/Orca.app` bundle version 1.4.116.
+Real runtime smoke was verified on 2026-08-26 against `/opt/homebrew/bin/orca` with `/Applications/Orca.app` reporting `result.runtime.appVersion=1.4.188`.
+This supersedes the earlier metadata-only-fixture coverage: envelope, status shape, tail shape, plain-text (no ANSI), interrupt delivery, and worktree/terminal selector round-trip are now confirmed against the live CLI.
 
 ```sh
 orca status --json
@@ -679,9 +680,15 @@ result.runtime.reachable=true
 result.runtime.state=ready
 ```
 
+Success envelope shape is `{ id, ok:true, result, _meta }`; firstmate reads `result.runtime.reachable`/`result.runtime.state` and ignores the harmless top-level `id` and `_meta.runtimeId`.
+The error envelope is `{ id, ok:false, error:{ code, message }, _meta }` with a non-zero exit; a stale terminal handle returns `error.code=terminal_handle_stale`.
+
 `orca terminal create --json` returned `result.terminal.handle`.
-`orca worktree create` returned `result.worktree.id` and `result.worktree.path`.
+`orca worktree create` returned `result.worktree.id` (the composite `<repoId>::<path>` selector, which round-trips as `--worktree id:<id>`) and `result.worktree.path`.
 Speculative bare ids and nested terminal fields were deliberately rejected.
+
+`orca terminal read --json` returned `result.terminal.tail` as a plain-text string array with zero ANSI escape bytes, confirming the adapter's `styled=0` capability.
+`orca terminal send --terminal <h> --interrupt --json` reported `bytesWritten=1` (a single 0x03 Ctrl-C byte) and killed a running foreground process, confirming `docs/orca-backend.md` "Enter and Ctrl-C are supported".
 
 ```sh
 tests/fm-backend-orca.test.sh

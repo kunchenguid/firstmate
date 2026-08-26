@@ -233,10 +233,10 @@ fm_backend_orca_composer_capture() {  # <terminal-id> [expected-label]
 }
 
 # fm_backend_orca_composer_caps: static capability facts, not logic (see the
-# capability model in bin/fm-composer-lib.sh). Orca's `terminal read` returns
-# plain text; whether it can emit ANSI is unverified (orca is not installed
-# on the verification machine), so styled stays 0 - the conservative
-# degradation - until a live capture proves otherwise.
+# capability model in bin/fm-composer-lib.sh). Real smoke against Orca v1.4.188
+# (2026-08-26) proved `orca terminal read --json` returns a plain-text tail with
+# no ANSI escapes, so styled=0 reflects Orca's actual behavior, not a
+# conservative fallback (see docs/verification/runtime-backends.md "Orca").
 fm_backend_orca_composer_caps() {
   printf 'styled=0\ncursor=0\nidentity=0\nrows=%s\n' "$FM_COMPOSER_CAPTURE_LINES"
 }
