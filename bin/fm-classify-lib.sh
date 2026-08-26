@@ -1309,6 +1309,25 @@ crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }
 
+# 0 (with one short evidence token on stdout) when crew <id>'s OWN no-mistakes
+# run shows positive progress since <anchor-file> - a last_activity stamp newer
+# than the anchor, an active step that STARTED after the anchor, or a live agent
+# pid: the probe mode of fm-crew-state.sh answers this, so run attribution, the
+# active_steps parse, and the evidence rules stay with their one owner. Every
+# no-evidence outcome returns 1 silently - no run attributable to this crew at
+# full fidelity, a parked or terminal run, or an active step that has been
+# running since before the anchor whose activity is stale or unparseable and
+# whose agent is dead or absent - so the caller's escalation schedule is
+# untouched unless the progress evidence is real. NOT a
+# pure status-file read (see the header): one bounded no-mistakes call inside
+# fm-crew-state.sh, which callers must reach only when they are otherwise about
+# to escalate, never on every poll.
+crew_pipeline_progressing_since() {  # <id> <anchor-file>
+  local id=$1 anchor=$2
+  { [ -n "$id" ] && [ -f "$anchor" ]; } || return 1
+  "$FM_CREW_STATE_BIN" "$id" --run-progress-since "$anchor" 2>/dev/null
+}
+
 # Directories excluded from the worktree write probe below, and the depth it walks.
 # The excluded set is everything a supervisor read or a package manager can write
 # without the crew doing any work - .git first, so firstmate's own read-only git
@@ -1349,7 +1368,8 @@ FM_WORKTREE_WRITE_TIMEOUT=${FM_WORKTREE_WRITE_TIMEOUT:-10}
 # 1 for every other outcome, including an id with no recorded worktree, a worktree
 # that is gone, a missing anchor, and a walk that fails or finds nothing. Absence of
 # evidence therefore always leaves the caller's existing escalation schedule
-# untouched, so a crew that writes nothing still escalates exactly as before.
+# untouched - this probe never suppresses an escalation on its own; the caller's
+# other liveness inputs decide.
 #
 # A kind=secondmate task records a provisioned firstmate home, not a code tree, and
 # such a home runs its OWN supervision inside it: its state/ directory churns a
@@ -1357,8 +1377,8 @@ FM_WORKTREE_WRITE_TIMEOUT=${FM_WORKTREE_WRITE_TIMEOUT:-10}
 # anything, so a walk there would report liveness for a mate that has done nothing.
 # Those homes are excluded outright rather than by pruning "state", which would also
 # hide a legitimate source directory of that name in an ordinary worktree. The
-# exclusion is a negative outcome like any other, so an unproductive mate keeps
-# escalating on the caller's unchanged schedule.
+# exclusion is a negative outcome like any other, so this probe never suppresses an
+# escalation for an unproductive mate on its own.
 #
 # The anchor is the caller's own idle-window timer file, whose mtime already marks
 # when the quiet window opened, so `-newer` needs no clock arithmetic, no temp

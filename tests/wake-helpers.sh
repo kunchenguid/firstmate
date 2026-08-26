@@ -94,12 +94,25 @@ SH
 # A per-id override FM_FAKE_CREW_STATE_<sanitized-id> wins; otherwise the shared
 # FM_FAKE_CREW_STATE; otherwise an unknown verdict (NOT provably working), the
 # safe default so a test that forgets to set one surfaces rather than absorbs.
+# The real helper also serves the wedge detector's run-progress probe as
+# `$0 <id> --run-progress-since <anchor-file>`; the fake answers that mode from
+# FM_FAKE_RUN_PROGRESS (0 = progressing, printing FM_FAKE_RUN_PROGRESS_DETAIL as
+# the evidence token; anything else, including unset, = no evidence, exit 1),
+# defaulting to no evidence so an unprimed test keeps the unchanged escalation
+# schedule.
 make_fake_crew_state() {  # <fakebin>
   local fakebin=$1
   cat > "$fakebin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
 id=${1:-}
+if [ "${2:-}" = --run-progress-since ]; then
+  if [ "${FM_FAKE_RUN_PROGRESS:-1}" = 0 ]; then
+    printf '%s\n' "${FM_FAKE_RUN_PROGRESS_DETAIL:-pipeline test active: last activity 30s ago}"
+    exit 0
+  fi
+  exit 1
+fi
 key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_')
 var="FM_FAKE_CREW_STATE_$key"
 val=${!var:-${FM_FAKE_CREW_STATE:-}}
