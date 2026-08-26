@@ -408,9 +408,9 @@ EOF
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+This task ships **no-mistakes**: you validate and raise the PR yourself, in one continuous pass.
+When the implementation is committed on your branch, append \`working: implemented, starting validation\` to the status file and invoke /no-mistakes right away - do not stop and do not wait to be told to start it.
+The terminal report below is the only \`done:\` line this task ever gets.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
