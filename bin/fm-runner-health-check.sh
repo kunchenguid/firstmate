@@ -160,7 +160,7 @@ api_state() {
   fi
 
   command -v gh-axi >/dev/null 2>&1 || return 1
-  query="if (type != \"object\") or ((.runners | type) != \"array\") then \"invalid\" elif any(.runners[]; if (type != \"object\") then true elif ((.labels | type) != \"array\") then true else any(.labels[]; (type != \"object\") or ((.name | type) != \"string\")) end) then \"invalid\" else [.runners[] | select(any(.labels[]; .name == \"$label\"))] as \$matching | if (\$matching | length) == 0 then \"missing\" elif any(\$matching[]; (.status | type) != \"string\" or (.status != \"online\" and .status != \"offline\")) then \"invalid\" elif any(\$matching[]; .status == \"online\") then \"online\" else \"offline\" end end"
+  query="if (type != \"object\") or ((.runners | type) != \"array\") then \"invalid\" elif any(.runners[]; if (type != \"object\") then true elif ((.status | type) != \"string\") or (.status != \"online\" and .status != \"offline\") then true elif ((.labels | type) != \"array\") then true else any(.labels[]; (type != \"object\") or ((.name | type) != \"string\")) end) then \"invalid\" else [.runners[] | select(any(.labels[]; .name == \"$label\"))] as \$matching | if (\$matching | length) == 0 then \"missing\" elif any(\$matching[]; .status == \"online\") then \"online\" else \"offline\" end end"
   output=$(fm_run_timed "$max_probe" gh-axi api "/repos/$repository/actions/runners" --paginate --jq "$query" --full 2>/dev/null)
   status=$?
   [ "$status" -eq 0 ] || return 1
@@ -383,6 +383,11 @@ action_arm() {
     printf 'fm-runner-health-check: gh-axi is required\n' >&2
     return 1
   }
+  if [ -L "$STATE" ]; then
+    state_unavailable_diagnostic
+    printf 'fm-runner-health-check: state directory is unavailable\n' >&2
+    return 1
+  fi
   mkdir -p "$STATE" || return 1
   state_private_valid || {
     state_unavailable_diagnostic

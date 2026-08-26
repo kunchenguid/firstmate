@@ -110,6 +110,13 @@ write_runner_with_invalid_label() {
 JSON
 }
 
+write_unmatched_runner_without_status() {
+  local file=$1
+  cat > "$file" <<'JSON'
+{"runners":[{"name":"another-runner","busy":false,"labels":[{"name":"another-label"}]}]}
+JSON
+}
+
 run_check() {
   local home=$1 fakebin=$2 response=$3 out=$4
   shift 4
@@ -231,6 +238,11 @@ test_malformed_matching_runner_status_is_silent() {
   write_runner_with_invalid_label "$response"
   run_check "$home" "$fakebin" "$response" "$out"
   [ ! -s "$out" ] || fail "a matching runner with a non-string label produced a report: $(cat "$out")"
+  expect_reported "$home" ''
+
+  write_unmatched_runner_without_status "$response"
+  run_check "$home" "$fakebin" "$response" "$out"
+  [ ! -s "$out" ] || fail "an unmatched runner with no status produced a report: $(cat "$out")"
   expect_reported "$home" ''
   pass "a matching runner with an unreadable status is a silent missed poll"
 }
@@ -461,6 +473,31 @@ test_arm_and_disarm_refuse_a_symlinked_state_directory() {
   pass "arm and disarm refuse a symlinked state directory without cleanup"
 }
 
+test_arm_rejects_a_dangling_state_symlink_before_mkdir() {
+  local home fakebin target status real_mkdir
+  home=$(make_home dangling-state)
+  fakebin=$(make_fake_gh_axi dangling-state)
+  target="$home/not-created"
+  real_mkdir=$(command -v mkdir)
+  cat > "$fakebin/mkdir" <<SH
+#!/usr/bin/env bash
+"$real_mkdir" -p "\${FAKE_MKDIR_TARGET:?}"
+SH
+  chmod 0755 "$fakebin/mkdir"
+  mv "$home/state" "$home/state-real"
+  ln -s "$target" "$home/state"
+
+  status=0
+  env FM_HOME="$home" PATH="$fakebin:$PATH" FAKE_MKDIR_TARGET="$target" \
+    "$CHECK" arm "$REPOSITORY" "$LABEL" > "$home/out.txt" 2> "$home/err.txt" || status=$?
+  expect_code 1 "$status" "arm with dangling state symlink exit"
+  [ -L "$home/state" ] || fail "arm replaced the dangling state symlink"
+  assert_absent "$target" "arm created a dangling state symlink target"
+  assert_contains "$(cat "$home/err.txt")" "$home/state" "the dangling state diagnostic omitted the path"
+  assert_contains "$(cat "$home/err.txt")" 'a symlink' "the dangling state diagnostic omitted the condition"
+  pass "arm rejects a dangling state symlink before directory creation"
+}
+
 test_armed_check_reaches_the_existing_watcher() {
   local home fakebin response out err status
   home=$(make_home watcher)
@@ -501,4 +538,5 @@ test_target_validation_refuses_unsafe_or_ambiguous_values
 test_arm_registers_a_targeted_shim_and_disarm_removes_it
 test_arm_refuses_a_symlink_at_the_shim_path
 test_arm_and_disarm_refuse_a_symlinked_state_directory
+test_arm_rejects_a_dangling_state_symlink_before_mkdir
 test_armed_check_reaches_the_existing_watcher
