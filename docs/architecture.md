@@ -270,6 +270,8 @@ The helper requires a full canonical URL and rejects malformed URLs or repo over
 A `https://github.com/<owner>/<repo>/pull/<n>` URL invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, and preserves explicit merge-method flags.
 A `https://<host>/<path>/-/merge_requests/<n>` URL (see [docs/gitlab-merge-watch.md](gitlab-merge-watch.md)) invokes `glab mr merge <n> -R https://<host>/<path>`, so the instance comes from the URL, and adds no merge-method flag because the project's own merge method applies.
 That path merges only after one live read of the merge request confirms it is open, mergeable, conflict-free, with blocking discussions resolved and a successful pipeline at the current head, and it binds the merge to that verified head; recorded metadata is never the authority for those conditions because a rebase leaves it stale.
+A `https://<host>/<owner>/<repo>/pulls/<n>` URL (see [docs/gitea-merge-watch.md](gitea-merge-watch.md)) invokes `tea pulls merge <n> --login <login> --repo <owner>/<repo>`, defaults to `--style squash`, and preserves an explicit style; `<login>` is resolved from `tea`'s own login table by matching the URL's host, since `tea` addresses a server by login name rather than by URL.
+That path needs no live pre-merge read: Gitea's own `mergeable` field already reflects conflicts and branch protection server-side, so it trusts `tea pulls merge`'s exit code the same way the GitHub path trusts `gh-axi`'s.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
 

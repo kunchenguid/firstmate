@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # Shared validation and atomic artifact helpers for merge polling on the
-# supported forges. Callers must validate task IDs and raw PR/MR URLs before
-# constructing task paths or performing any side effect.
+# supported forges: GitHub, GitLab, and Gitea. Callers must validate task IDs
+# and raw PR/MR URLs before constructing task paths or performing any side
+# effect.
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
-# "path" is the full project path, which is owner/repository on GitHub and an
-# arbitrarily nested group/subgroup/project namespace on GitLab. A GitLab
+# "path" is the full project path: owner/repository on GitHub and Gitea, and
+# an arbitrarily nested group/subgroup/project namespace on GitLab. A GitLab
 # project can sit at any depth, so no owner/repository pair can address one and
-# the sidecar carries the whole path instead. GitLab also runs on self-hosted
-# instances, so the host is part of that identity rather than a constant. Every
-# consumer re-derives the identity from the stored URL and refuses any record
-# whose parts do not reconstruct that exact URL.
+# the sidecar carries the whole path instead. GitLab and Gitea both also run
+# on self-hosted instances, so the host is part of that identity rather than a
+# constant. Every consumer re-derives the identity from the stored URL and
+# refuses any record whose parts do not reconstruct that exact URL.
 #
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
@@ -134,6 +135,30 @@ fm_pr_gitlab_host_valid() {
   done
 }
 
+# Gitea also serves self-hosted instances, so the host is part of the
+# identity rather than a constant, mirroring GitLab. github.com and gitlab.com
+# are refused here even though the URL shape cannot collide with either
+# forge's own pattern (see fm_pr_url_parse): refusing them is a second,
+# independent guard against a doctored or spoofed URL naming a well-known host
+# that is never actually a Gitea instance.
+fm_pr_gitea_host_valid() {
+  local host=${1-} label
+  local LC_ALL=C
+  local -a labels
+  [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || return 1
+  [ "$host" != github.com ] && [ "$host" != gitlab.com ] || return 1
+  case "$host" in
+    .*|*.|*..*|*[!a-z0-9.-]*) return 1 ;;
+  esac
+  IFS=. read -ra labels <<< "$host"
+  for label in "${labels[@]}"; do
+    [ "${#label}" -ge 1 ] && [ "${#label}" -le 63 ] || return 1
+    case "$label" in
+      -*|*-) return 1 ;;
+    esac
+  done
+}
+
 # A GitLab project path is group[/subgroup...]/project, so at least two
 # segments and no fixed depth. GitLab reserves "-" as its route separator and
 # forbids a leading hyphen, ".git", and ".atom", so none of those can name a
@@ -158,12 +183,13 @@ fm_pr_gitlab_path_valid() {
 
 # Parse a canonical PR or MR URL into the provider-tagged identity. Validation
 # is strict and per provider: the GitHub username and repository rules are
-# unchanged, and GitLab gets its own host and namespace rules rather than a
-# loosened GitHub rule.
+# unchanged, and GitLab and Gitea each get their own host and namespace rules
+# rather than a loosened GitHub rule.
 #
-# FM_PR_OWNER and FM_PR_REPO are additionally set for github because
-# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab URL leaves
-# them empty, and that path addresses the project by FM_PR_HOST and FM_PR_PATH
+# FM_PR_OWNER and FM_PR_REPO are additionally set for github and gitea because
+# both address a repository as a fixed owner/repository pair (bin/fm-pr-merge.sh
+# passes that pair straight through to gh and tea). A gitlab URL leaves them
+# empty, and that path addresses the project by FM_PR_HOST and FM_PR_PATH
 # instead, so a merge request on any instance resolves without a hardcoded host.
 fm_pr_url_parse() {
   local raw=${1-} pattern host path
@@ -195,16 +221,65 @@ fm_pr_url_parse() {
   # "/-/merge_requests/". Any earlier separator therefore lands inside the
   # captured path, where the reserved "-" segment is refused.
   pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._/-]+)/-/merge_requests/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    host=${BASH_REMATCH[1]}
+    path=${BASH_REMATCH[2]}
+    fm_pr_gitlab_host_valid "$host" || return 1
+    fm_pr_gitlab_path_valid "$path" || return 1
+    FM_PR_PROVIDER=gitlab
+    FM_PR_URL=$raw
+    FM_PR_HOST=$host
+    FM_PR_PATH=$path
+    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
+  # A Gitea repository sits at a fixed owner/repository depth, unlike a
+  # GitLab project's arbitrary subgroup nesting, so the path is two fixed
+  # segments rather than the "+" class GitLab's pattern needs. The distinct
+  # "pulls" (plural, no "-" route segment) keeps this pattern from ever
+  # matching a GitHub or GitLab URL shape, so trying it last cannot steal a
+  # match the earlier two providers own.
+  pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9._-]{0,38}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pulls/([1-9][0-9]*)$'
   [[ "$raw" =~ $pattern ]] || return 1
   host=${BASH_REMATCH[1]}
-  path=${BASH_REMATCH[2]}
-  fm_pr_gitlab_host_valid "$host" || return 1
-  fm_pr_gitlab_path_valid "$path" || return 1
-  FM_PR_PROVIDER=gitlab
+  [ "${BASH_REMATCH[3]}" != . ] && [ "${BASH_REMATCH[3]}" != .. ] || return 1
+  case "${BASH_REMATCH[3]}" in
+    *.git) return 1 ;;
+  esac
+  fm_pr_gitea_host_valid "$host" || return 1
+  FM_PR_PROVIDER=gitea
   FM_PR_URL=$raw
   FM_PR_HOST=$host
-  FM_PR_PATH=$path
-  FM_PR_NUMBER=${BASH_REMATCH[3]}
+  FM_PR_PATH="${BASH_REMATCH[2]}/${BASH_REMATCH[3]}"
+  # Consumed by bin/fm-pr-merge.sh, which addresses a Gitea repository by
+  # owner/repository through tea's --repo flag.
+  # shellcheck disable=SC2034
+  FM_PR_OWNER=${BASH_REMATCH[2]}
+  # shellcheck disable=SC2034
+  FM_PR_REPO=${BASH_REMATCH[3]}
+  FM_PR_NUMBER=${BASH_REMATCH[4]}
+}
+
+# tea addresses a login by name, not by URL, so the login bound to a given
+# Gitea host is resolved from tea's own login table rather than an env var the
+# way GITLAB_HOST selects a glab credential. Requires jq, which every gitea
+# caller in this file already requires on PATH before reaching here. Sets
+# FM_PR_GITEA_LOGIN on exactly one match and refuses an absent or ambiguous
+# host rather than guessing which login to use.
+FM_PR_GITEA_LOGIN=
+fm_pr_gitea_resolve_login() {
+  local host=${1-} want name url count=0 found=
+  want="https://$host"
+  FM_PR_GITEA_LOGIN=
+  while IFS=$'\t' read -r name url; do
+    [ "$url" = "$want" ] || continue
+    count=$((count + 1))
+    found=$name
+  done < <(tea logins list --output json 2>/dev/null | jq -r '.[] | [.name, .url] | @tsv')
+  [ "$count" -eq 1 ] && [ -n "$found" ] || return 1
+  # Consumed by bin/fm-pr-check.sh and bin/fm-pr-merge.sh after this call.
+  # shellcheck disable=SC2034
+  FM_PR_GITEA_LOGIN=$found
 }
 
 fm_pr_head_valid() {

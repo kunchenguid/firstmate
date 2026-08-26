@@ -3,8 +3,9 @@
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
-# A GitHub pull request URL and a GitLab merge request URL are both accepted,
-# including a merge request on a self-hosted GitLab instance.
+# A GitHub pull request URL, a GitLab merge request URL, and a Gitea pull
+# request URL are all accepted, including on a self-hosted GitLab or Gitea
+# instance.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -49,13 +50,27 @@ fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || 
   exit 1
 }
 
-# Refuse to arm a GitLab watch with no glab on PATH. The poll is silent on
-# every error by design, so a missing CLI would be indistinguishable from a
-# merge request that is never merged. Arming is the one point where that can be
-# reported, so the absent tool stops the watch here instead of watching nothing.
+# Refuse to arm a GitLab or Gitea watch with no glab/tea (and, for Gitea, jq)
+# on PATH. The poll is silent on every error by design, so a missing CLI
+# would be indistinguishable from a merge/pull request that is never merged.
+# Arming is the one point where that can be reported, so the absent tool
+# stops the watch here instead of watching nothing. The Gitea poll reads a
+# single pull request's JSON view with jq (bin/fm-pr-poll.sh), unlike the
+# plain-text GitLab poll, so jq is required there too.
 if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   echo "error: watching a GitLab merge request requires glab on PATH" >&2
   exit 1
+fi
+if [ "$PROVIDER" = gitea ]; then
+  GITEA_ARM_MISSING=
+  command -v tea >/dev/null 2>&1 || GITEA_ARM_MISSING="tea"
+  if ! command -v jq >/dev/null 2>&1; then
+    GITEA_ARM_MISSING="${GITEA_ARM_MISSING:+$GITEA_ARM_MISSING and }jq"
+  fi
+  if [ -n "$GITEA_ARM_MISSING" ]; then
+    echo "error: watching a Gitea pull request requires $GITEA_ARM_MISSING on PATH" >&2
+    exit 1
+  fi
 fi
 
 # Neutralize any pre-fix poll before recording or arming this task. The
@@ -67,7 +82,10 @@ fi
 # pr_head is recorded only when the forge's CLI can supply it. gh exposes the
 # head commit as a selectable field; plain glab exposes it only inside its JSON
 # output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head. Both consumers already treat it as optional:
+# GitLab task records no pr_head. tea also exposes it only inside its JSON
+# view, but bin/fm-pr-merge.sh already requires jq for Gitea's login
+# resolution (fm_pr_gitea_resolve_login), so recording it costs no new
+# dependency there. All three consumers already treat it as optional:
 # bin/fm-teardown.sh reads the head from the forge at teardown rather than from
 # metadata and falls back to its provider-agnostic content check, and
 # bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
@@ -77,6 +95,14 @@ WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
+    && fm_pr_head_valid "$REMOTE_HEAD"; then
+    PR_HEAD=$REMOTE_HEAD
+  fi
+fi
+if [ "$PROVIDER" = gitea ] && command -v tea >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  if fm_pr_gitea_resolve_login "$HOST" \
+    && REMOTE_HEAD=$(tea pulls "$NUMBER" --login "$FM_PR_GITEA_LOGIN" --repo "$PROJECT_PATH" --output json 2>/dev/null \
+      | jq -r '.headSha // empty') \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi

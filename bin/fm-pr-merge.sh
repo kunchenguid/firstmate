@@ -4,13 +4,17 @@
 # The full canonical URL is parsed by bin/fm-pr-lib.sh. A GitHub pull request is
 # addressed through gh-axi by the derived owner and repository; a GitLab merge
 # request is addressed through glab by the project URL rebuilt from the parsed
-# host and path, so any instance works and no host is hardcoded.
+# host and path; a Gitea pull request is addressed through tea by the derived
+# owner and repository plus a login resolved from tea's own login table (tea
+# addresses a server by login name, not URL). Any instance works for GitLab or
+# Gitea and no host is hardcoded.
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
-# GitLab adds no method flag at all: its merge method is the project's own
-# setting, which the merge API applies, and imposing squash there would override
-# that convention rather than mirror the GitHub default.
+# Gitea defaults to --style squash the same way when the caller passes none of
+# --style or -s. GitLab adds no method flag at all: its merge method is the
+# project's own setting, which the merge API applies, and imposing squash there
+# would override that convention rather than mirror the GitHub default.
 #
 # A GitLab merge is refused unless every pre-merge condition holds, each read
 # live at merge time rather than taken from recorded metadata: the merge request
@@ -24,7 +28,15 @@
 # recorded value stale. Reading that state needs glab and jq, and either one
 # absent stops the merge before any state is recorded.
 #
-# Extra args must not include --repo or -R in any form, including a bundled
+# Gitea needs no equivalent pre-merge read: tea exposes no head-pinning flag to
+# guard against a race the way glab's --sha does, so a Gitea merge calls
+# `tea pulls merge` directly and trusts its own server-side mergeable check,
+# mirroring how the GitHub case trusts gh's own server-side check rather than
+# pre-verifying. Reading the login table needs tea and jq, and either one
+# absent, or the host resolving to zero or more than one configured login,
+# stops the merge before any state is recorded.
+#
+# Extra args must not include --repo/-r/-R in any form, including a bundled
 # short-option cluster such as -yR, because the repository comes only from the
 # URL, nor --sha on GitLab because the head comes only from the live read.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra forge merge args>]
@@ -75,7 +87,25 @@ caller_has_merge_method() {
   return 1
 }
 
+caller_has_merge_style() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --style|--style=*) return 0 ;;
+      --*) ;;
+      # A single-dash argument is a short-option cluster, which tea expands one
+      # character at a time, so -sX carries --style exactly as a bare -s does.
+      -*s*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 reject_repo_overrides() {
+  local provider=$1
+  shift
+  local repo_letter=R
+  [ "$provider" != gitea ] || repo_letter=r
   local arg
   for arg in "$@"; do
     case "$arg" in
@@ -84,9 +114,12 @@ reject_repo_overrides() {
         return 1
         ;;
       --*) ;;
-      # A single-dash argument is a short-option cluster, which both CLIs expand
-      # one character at a time, so -yR carries --repo exactly as a bare -R does.
-      -*R*)
+      # A single-dash argument is a short-option cluster, which every supported
+      # CLI expands one character at a time, so -yR carries --repo exactly as a
+      # bare -R does for gh/glab, and -yr carries --repo exactly as a bare -r
+      # does for tea. gh/glab use -r for --rebase, so only tea's provider scope
+      # checks the lowercase letter.
+      -*"$repo_letter"*)
         echo "error: extra merge arguments must not override the repository" >&2
         return 1
         ;;
@@ -106,7 +139,7 @@ reject_head_overrides() {
   done
 }
 
-reject_repo_overrides "$@" || exit 1
+reject_repo_overrides "$PROVIDER" "$@" || exit 1
 [ "$PROVIDER" != gitlab ] || reject_head_overrides "$@" || exit 1
 
 # Task-derived paths are constructed only after the canonical ID validation.
@@ -129,6 +162,25 @@ if [ "$PROVIDER" = gitlab ]; then
     echo "error: merging a GitLab merge request requires $GITLAB_MISSING on PATH" >&2
     exit 1
   fi
+fi
+
+# Resolving the tea login for this host needs both tools, for the same reason.
+GITEA_MISSING=
+GITEA_LOGIN=
+if [ "$PROVIDER" = gitea ]; then
+  command -v tea >/dev/null 2>&1 || GITEA_MISSING="tea"
+  if ! command -v jq >/dev/null 2>&1; then
+    GITEA_MISSING="${GITEA_MISSING:+$GITEA_MISSING and }jq"
+  fi
+  if [ -n "$GITEA_MISSING" ]; then
+    echo "error: merging a Gitea pull request requires $GITEA_MISSING on PATH" >&2
+    exit 1
+  fi
+  if ! fm_pr_gitea_resolve_login "$FM_PR_HOST"; then
+    echo "error: no single tea login is configured for host $FM_PR_HOST" >&2
+    exit 1
+  fi
+  GITEA_LOGIN=$FM_PR_GITEA_LOGIN
 fi
 
 # The recorded head is read before bin/fm-pr-check.sh rewrites the metadata,
@@ -261,6 +313,14 @@ case "$PROVIDER" in
     # the conditions above are what authorize the merge.
     GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
       --sha "$FM_PR_MERGE_HEAD" --yes "$@"
+    ;;
+  gitea)
+    merge_args=()
+    if ! caller_has_merge_style "$@"; then
+      merge_args=(--style squash)
+    fi
+    tea pulls merge "$PR_NUMBER" --login "$GITEA_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
+      "${merge_args[@]+"${merge_args[@]}"}" "$@"
     ;;
   *)
     echo "error: invalid PR merge request" >&2
