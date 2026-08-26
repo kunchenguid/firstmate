@@ -983,6 +983,8 @@ do_recover_missing() {
     "attempt=$RECOVERY_ATTEMPT" "${CHECKPOINT_LINES[@]}" "$note_line"
 
   spawn_args=("$ID" --recover-missing --harness "$TARGET_HARNESS")
+  [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
+  [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
   if FM_CONTROL_RECOVER_MISSING_TX="$RECOVERY_TX" \
       FM_CONTROL_RECOVER_MISSING_ATTEMPT="$RECOVERY_ATTEMPT" \
       FM_CONTROL_RECOVER_MISSING_LAUNCH_WAIT="$LAUNCH_WAIT" \

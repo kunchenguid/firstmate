@@ -206,7 +206,10 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
   [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] || return 1
   case "$harness" in
     claude) printf '%s\n' "$wt/.claude/settings.local.json" ;;
-    opencode) printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js" ;;
+    opencode)
+      printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js"
+      printf '%s\n' "$wt/.opencode/plugins/fm-busy-state-$id.js"
+      ;;
     pi|pi-signed) printf '%s\n' "$state/$id.pi-ext.ts" ;;
     grok)
       printf '%s\n' "$wt/.fm-grok-turnend"

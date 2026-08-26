@@ -1480,6 +1480,9 @@ test_missing_herdr_recovery_reuses_dirty_copy_and_publishes_a_fresh_endpoint() {
   branch_before=$(git -C "$wt" branch --show-current)
   head_before=$(git -C "$wt" rev-parse HEAD)
   printf 'uncommitted audit fix\n' > "$wt/audit-fix.txt"
+  sed 's/^model=default$/model=opus/; s/^effort=default$/effort=high/' \
+    "$dir/home/state/mr1.meta" > "$dir/home/state/mr1.meta.tmp"
+  mv "$dir/home/state/mr1.meta.tmp" "$dir/home/state/mr1.meta"
   before=$(cat "$dir/home/state/mr1.meta")
   out=$(run_herdr_control "$dir" mr1 recover-missing --captain-authorized --note 'resume validation from the existing copy'); rc=$?
   expect_code 0 "$rc" "authorized missing-endpoint recovery should succeed"$'\n'"$out"
@@ -1497,10 +1500,54 @@ test_missing_herdr_recovery_reuses_dirty_copy_and_publishes_a_fresh_endpoint() {
   [ "$(git -C "$wt" rev-parse HEAD)" = "$head_before" ] \
     || fail "recovery must preserve the existing committed head"
   [ "$(meta_field "$dir" mr1 control_recover_missing_tx)" != "" ] || fail "published metadata must carry the recovery transaction binding"
+  [ "$(meta_field "$dir" mr1 model)" = opus ] || fail "recovery must preserve the recorded model"
+  [ "$(meta_field "$dir" mr1 effort)" = high ] || fail "recovery must preserve the recorded effort"
+  assert_grep "--model 'opus' --effort 'high'" "$dir/fake/herdr.log" \
+    "recovery must launch with the recorded non-default profile"
   [ "$(grep -h '^phase=published$' "$dir/home/state/mr1.recover-missing."*.attempt)" = phase=published ] || fail "the attempt evidence must record publication"
   assert_grep "resume validation" "$dir/home/data/mr1/brief.md" "the replacement note must reach the existing brief"
   [ "$(cat "$dir/home/state/mr1.meta")" != "$before" ] || fail "successful recovery must publish a replacement record"
   pass "missing Herdr recovery: dirty existing copy is preserved and a fresh endpoint is published atomically"
+}
+
+test_missing_herdr_recovery_preserves_claude_worktree_settings() {
+  local dir out rc settings
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case preserve-settings mr12)
+  settings="$dir/wt/.claude/settings.local.json"
+  mkdir -p "${settings%/*}"
+  printf '%s\n' '{"permissions":{"allow":["Read"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch user-stop"}]}]}}' > "$settings"
+
+  out=$(run_herdr_control "$dir" mr12 recover-missing --captain-authorized --note 'preserve local Claude configuration'); rc=$?
+  expect_code 0 "$rc" "recovery with project Claude settings should succeed"$'\n'"$out"
+  jq -e '.permissions.allow == ["Read"]' "$settings" >/dev/null \
+    || fail "recovery must preserve project-owned Claude settings"
+  jq -e '[.hooks.Stop[].hooks[].command] | any(. == "touch user-stop")' "$settings" >/dev/null \
+    || fail "recovery must preserve project-owned Claude hooks"
+  jq -e '[.hooks.Stop[].hooks[].command] | any(contains("fm-busy-event.sh"))' "$settings" >/dev/null \
+    || fail "recovery must add replacement lifecycle wiring without overwriting project hooks"
+  pass "missing Herdr recovery: Claude worktree settings are merged, not overwritten"
+}
+
+test_missing_herdr_recovery_preserves_opencode_worktree_plugin() {
+  local dir out rc plugin before
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case preserve-opencode mr13)
+  sed 's/^harness=claude$/harness=opencode/' \
+    "$dir/home/state/mr13.meta" > "$dir/home/state/mr13.meta.tmp"
+  mv "$dir/home/state/mr13.meta.tmp" "$dir/home/state/mr13.meta"
+  plugin="$dir/wt/.opencode/plugins/fm-busy-state.js"
+  mkdir -p "${plugin%/*}"
+  printf '%s\n' 'export const ProjectPlugin = async () => ({ event: async () => {} });' > "$plugin"
+  before=$(cat "$plugin")
+
+  out=$(run_herdr_control "$dir" mr13 recover-missing --captain-authorized --note 'preserve local OpenCode configuration'); rc=$?
+  expect_code 0 "$rc" "recovery with a project OpenCode plugin should succeed"$'\n'"$out"
+  [ "$(cat "$plugin")" = "$before" ] \
+    || fail "recovery must preserve the project-owned OpenCode plugin byte-for-byte"
+  assert_grep 'export const FmBusyState' "$dir/wt/.opencode/plugins/fm-busy-state-mr13.js" \
+    "recovery must isolate replacement lifecycle wiring from the project plugin"
+  pass "missing Herdr recovery: OpenCode project plugins are preserved"
 }
 
 test_missing_herdr_recovery_refuses_unrelated_live_copy_ownership() {
@@ -1559,17 +1606,23 @@ test_missing_herdr_recovery_refuses_ambiguous_state() {
 }
 
 test_missing_herdr_recovery_rolls_back_after_launch_failure() {
-  local dir out rc before brief_before attempt
+  local dir out rc before brief_before attempt settings settings_before
   unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
   dir=$(new_herdr_case rollback mr4)
   before=$(cat "$dir/home/state/mr4.meta")
   brief_before=$(cat "$dir/home/data/mr4/brief.md")
+  settings="$dir/wt/.claude/settings.local.json"
+  mkdir -p "${settings%/*}"
+  printf '%s\n' '{"permissions":{"allow":["Read"]}}' > "$settings"
+  settings_before=$(cat "$settings")
   FM_FAKE_LAUNCH_FAIL=1 out=$(run_herdr_control "$dir" mr4 recover-missing --captain-authorized --note 'retain this recovery evidence'); rc=$?
   expect_code 1 "$rc" "a failed replacement launch must fail closed"$'\n'"$out"
   assert_contains "$out" "could not be launched" "the launch failure should be reported without claiming recovery"
   [ "$(cat "$dir/home/state/mr4.meta")" = "$before" ] || fail "launch failure must retain the prior durable record"
   [ "$(cat "$dir/home/data/mr4/brief.md")" = "$brief_before" ] \
     || fail "launch failure must restore the saved brief after retiring replacement wiring"
+  [ "$(cat "$settings")" = "$settings_before" ] \
+    || fail "launch failure must restore the preserved Claude settings"
   attempt=$(find "$dir/home/state" -maxdepth 1 -type f -name 'mr4.recover-missing.*.attempt' -print -quit)
   [ -n "$attempt" ] || fail "launch failure must retain exact replacement evidence"
   assert_grep "phase=cleanup-complete" "$attempt" "the exact fresh endpoint should be cleaned after an unambiguous launch failure"
@@ -1696,6 +1749,8 @@ test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_missing_herdr_recovery_requires_captain_authorization
 test_missing_herdr_recovery_reuses_dirty_copy_and_publishes_a_fresh_endpoint
+test_missing_herdr_recovery_preserves_claude_worktree_settings
+test_missing_herdr_recovery_preserves_opencode_worktree_plugin
 test_missing_herdr_recovery_refuses_unrelated_live_copy_ownership
 test_missing_herdr_recovery_retains_evidence_when_endpoint_allocation_fails
 test_missing_herdr_recovery_refuses_live_process_ownership

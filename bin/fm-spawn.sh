@@ -708,6 +708,8 @@ RECOVERY_REPLACEMENT_TAB=
 RECOVERY_REPLACEMENT_PANE=
 RECOVERY_ATTEMPT_FILE=${FM_CONTROL_RECOVER_MISSING_ATTEMPT:-}
 RECOVERY_ATTEMPT_TX=${FM_CONTROL_RECOVER_MISSING_TX:-}
+RECOVERY_WIRING_BACKUP_DIR=
+RECOVERY_WIRING_PENDING=0
 RECOVERY_OLD_TARGET=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
@@ -815,6 +817,10 @@ spawn_abort_cleanup() {
         echo "warning: could not retire replacement busy generation after aborted relaunch of $ID" >&2
       fi
     fi
+  fi
+  if [ "$RECOVERY_WIRING_PENDING" = 1 ]; then
+    recovery_restore_worktree_wiring || \
+      echo "warning: could not restore worktree wiring after aborted recovery of $ID" >&2
   fi
   if [ "$RECOVERY_REPLACEMENT_PENDING" = 1 ]; then
     recovery_cleanup_exact
@@ -935,6 +941,63 @@ clear_relaunch_harness_wiring() {
   done <<EOF
 $(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
 EOF
+}
+
+recovery_preserve_worktree_wiring() {
+  local harness source marker
+  harness=$(fm_control_harness_family "$RELAUNCH_PRIOR_HARNESS") || harness=
+  RECOVERY_WIRING_BACKUP_DIR="$RECOVERY_ATTEMPT_FILE.wiring"
+  mkdir -p "$RECOVERY_WIRING_BACKUP_DIR" || return 1
+  case "$harness" in
+    claude) source="$WT/.claude/settings.local.json" ;;
+    opencode) source="$WT/.opencode/plugins/fm-busy-state.js" ;;
+    *)
+      rmdir "$RECOVERY_WIRING_BACKUP_DIR" 2>/dev/null || true
+      RECOVERY_WIRING_BACKUP_DIR=
+      return 0
+      ;;
+  esac
+  marker="$RECOVERY_WIRING_BACKUP_DIR/original"
+  if [ -e "$source" ] || [ -L "$source" ]; then
+    [ -f "$source" ] && [ ! -L "$source" ] || return 1
+    cp -p "$source" "$marker" || return 1
+  else
+    : > "$RECOVERY_WIRING_BACKUP_DIR/absent" || return 1
+  fi
+  RECOVERY_WIRING_PENDING=1
+}
+
+recovery_restore_worktree_wiring() {
+  local harness target alternate
+  [ "$RECOVERY_WIRING_PENDING" = 1 ] || return 0
+  harness=$(fm_control_harness_family "$RELAUNCH_PRIOR_HARNESS") || harness=
+  case "$harness" in
+    claude)
+      target="$WT/.claude/settings.local.json"
+      ;;
+    opencode)
+      target="$WT/.opencode/plugins/fm-busy-state.js"
+      alternate="$WT/.opencode/plugins/fm-busy-state-$ID.js"
+      rm -f -- "$alternate" || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  if [ -f "$RECOVERY_WIRING_BACKUP_DIR/original" ]; then
+    mkdir -p "$(dirname "$target")" || return 1
+    cp -p "$RECOVERY_WIRING_BACKUP_DIR/original" "$target" || return 1
+  else
+    rm -f -- "$target" || return 1
+  fi
+  rm -rf -- "$RECOVERY_WIRING_BACKUP_DIR" || return 1
+  RECOVERY_WIRING_PENDING=0
+  RECOVERY_WIRING_BACKUP_DIR=
+}
+
+recovery_commit_worktree_wiring() {
+  [ "$RECOVERY_WIRING_PENDING" = 1 ] || return 0
+  rm -rf -- "$RECOVERY_WIRING_BACKUP_DIR" || return 1
+  RECOVERY_WIRING_PENDING=0
+  RECOVERY_WIRING_BACKUP_DIR=
 }
 
 spawn_herdr_presentation_order_lock_release() {
@@ -2554,6 +2617,12 @@ if [ "$RELAUNCH" -eq 1 ] || [ "$RECOVER_MISSING" -eq 1 ]; then
   # new one. Missing-endpoint recovery has no live old agent, but its old hook
   # or busy artifacts are still stale and must not outlive the replacement
   # transaction (bin/fm-control-lib.sh owns where those artifacts live).
+  if [ "$RECOVER_MISSING" -eq 1 ]; then
+    recovery_preserve_worktree_wiring || {
+      echo "error: could not preserve $RELAUNCH_PRIOR_HARNESS worktree wiring for task $ID; refusing to arm the replacement" >&2
+      exit 1
+    }
+  fi
   clear_relaunch_harness_wiring "$RELAUNCH_PRIOR_HARNESS" "$WT" "$STATE_REAL" "$ID" || {
     echo "error: could not retire $RELAUNCH_PRIOR_HARNESS wiring for task $ID; refusing to arm the replacement" >&2
     exit 1
@@ -2622,14 +2691,55 @@ if [ "$KIND" != secondmate ]; then
       j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
       j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
       j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
-      cat > "$WT/.claude/settings.local.json" <<EOF
+      claude_settings="$WT/.claude/settings.local.json"
+      claude_generated="$STATE_REAL/.$ID.claude-settings.${BASHPID:-$$}"
+      cat > "$claude_generated" <<EOF
 {"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
+      if [ "$RECOVER_MISSING" -eq 1 ] \
+         && [ -f "$RECOVERY_WIRING_BACKUP_DIR/original" ]; then
+        claude_merged="$STATE_REAL/.$ID.claude-settings-merged.${BASHPID:-$$}"
+        if ! jq -s --arg needle "$FM_ROOT/bin/fm-busy-event.sh" \
+            --arg state "$STATE_REAL" --arg id "$ID" '
+          def firstmate_hook:
+            any(.hooks[]?.command?;
+              type == "string"
+              and contains($needle)
+              and contains($state)
+              and contains($id));
+          .[0] as $base
+          | .[1] as $generated
+          | if (($base.hooks // {}) | type) != "object" then
+              error("hooks must be an object")
+            else
+              reduce ($generated.hooks | keys[]) as $event ($base;
+                .hooks[$event] =
+                  (((.hooks[$event] // []) | map(select(firstmate_hook | not)))
+                   + $generated.hooks[$event]))
+            end
+        ' "$RECOVERY_WIRING_BACKUP_DIR/original" "$claude_generated" \
+            > "$claude_merged"; then
+          rm -f "$claude_generated" "$claude_merged" 2>/dev/null || true
+          echo "error: could not merge Firstmate hooks into the preserved Claude settings for task $ID" >&2
+          exit 1
+        fi
+        cp -p "$RECOVERY_WIRING_BACKUP_DIR/original" "$claude_settings" || exit 1
+        cat "$claude_merged" > "$claude_settings" || exit 1
+        rm -f "$claude_generated" "$claude_merged" || exit 1
+      else
+        mv -f "$claude_generated" "$claude_settings" || exit 1
+      fi
       exclude_path '.claude/settings.local.json'
       ;;
     opencode*)
       mkdir -p "$WT/.opencode/plugins"
-      cat > "$WT/.opencode/plugins/fm-busy-state.js" <<EOF
+      opencode_plugin="$WT/.opencode/plugins/fm-busy-state.js"
+      if [ "$RECOVER_MISSING" -eq 1 ] \
+         && [ -f "$RECOVERY_WIRING_BACKUP_DIR/original" ]; then
+        cp -p "$RECOVERY_WIRING_BACKUP_DIR/original" "$opencode_plugin" || exit 1
+        opencode_plugin="$WT/.opencode/plugins/fm-busy-state-$ID.js"
+      fi
+      cat > "$opencode_plugin" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
 // Semantic state comes from OpenCode's session.status events: busy and retry
@@ -2678,7 +2788,7 @@ export const FmBusyState = async () => {
   };
 };
 EOF
-      exclude_path '.opencode/plugins/fm-busy-state.js'
+      exclude_path "${opencode_plugin#"$WT/"}"
       ;;
     pi|pi-signed)
       # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
@@ -3167,6 +3277,10 @@ if [ "$RECOVER_MISSING" -eq 1 ]; then
   SPAWN_META_TMP=
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
+  recovery_commit_worktree_wiring || {
+    echo "error: replacement metadata for $ID is published, but preserved wiring evidence could not be retired" >&2
+    exit 1
+  }
   recovery_attempt_write published || {
     echo "error: replacement metadata for $ID is published and the agent is alive, but final recovery evidence could not be written" >&2
     exit 1
