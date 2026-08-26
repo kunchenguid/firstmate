@@ -360,14 +360,27 @@ test_watcher_hook_and_idle_secondmate_exemption() {
 
 # A stalled authoritative state read consumes only the aggregate scan budget.
 # The durable scan position lets the next invocation reach the following child.
+# The budget is a hard wall-clock bound over the whole scan process (script
+# startup, lock waits, and the following child's probe included), so a fixed
+# 1s budget flakes on loaded or fork-slow hosts: the scan gets killed before
+# it can reach the following child at all. Measure this host's full no-stall
+# scan overhead first and derive the budget and the stall from it, keeping the
+# contract "the budget, not the stall, decides when the scan ends" intact.
 test_stalled_state_read_is_bounded_and_scan_progresses() {
-  local started elapsed
+  local started overhead budget stall elapsed
   make_world bounded
   write_child "$MAIN" a 'working: state read will stall'
-  cat > "$WORLD/fakebin/fm-crew-state.sh" <<'SH'
+  started=$(date +%s)
+  FM_INACTIVE_RECONCILE_BUDGET_SECS=30 FM_FAKE_CREW_STATE='working' run_reconcile "$MAIN" --startup
+  overhead=$(( $(date +%s) - started ))
+  budget=$(( overhead * 2 + 5 ))
+  [ "$budget" -le 30 ] || budget=30
+  stall=$(( budget + overhead + 30 ))
+
+  cat > "$WORLD/fakebin/fm-crew-state.sh" <<SH
 #!/usr/bin/env bash
-if [ "$1" = a ]; then
-  sleep 30
+if [ "\$1" = a ]; then
+  sleep $stall
 else
   printf 'state: done · source: fake\n'
 fi
@@ -375,12 +388,15 @@ SH
   chmod +x "$WORLD/fakebin/fm-crew-state.sh"
 
   started=$(date +%s)
-  FM_INACTIVE_RECONCILE_BUDGET_SECS=1 run_reconcile "$MAIN" --startup
+  FM_INACTIVE_RECONCILE_BUDGET_SECS=$budget run_reconcile "$MAIN" --startup
   elapsed=$(( $(date +%s) - started ))
-  [ "$elapsed" -le 3 ] || fail "stalled state read exceeded aggregate scan budget (${elapsed}s)"
+  [ "$elapsed" -le $(( budget + overhead + 5 )) ] \
+    || fail "stalled state read exceeded aggregate scan budget (${elapsed}s, budget ${budget}s)"
+  grep -Fxq 'cursor=a' "$MAIN/state/.inactive-outcome-reconcile" \
+    || fail "stalled scan did not durably record its resume position"
 
   write_child "$MAIN" b 'done: green'
-  FM_INACTIVE_RECONCILE_BUDGET_SECS=1 run_reconcile "$MAIN" --startup
+  FM_INACTIVE_RECONCILE_BUDGET_SECS=$budget run_reconcile "$MAIN" --startup
   grep -Fq 'child=b state=done' "$MAIN/state/.wake-queue" \
     || fail "next bounded scan did not resume with the following child"
   pass "stalled state reads are bounded without starving later children"

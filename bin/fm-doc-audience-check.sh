@@ -11,7 +11,38 @@ set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
-exec python3 - "$@" <<'PY'
+
+# Resolve a Python 3 interpreter. `python3` is the portable spelling and stays
+# first, so hosts that have it behave exactly as before; minimal and conda-style
+# installs (notably on Windows) ship only `python`, so fall back to that name and
+# prove it really is Python 3 rather than trusting the spelling.
+PYTHON_BIN=""
+for candidate in python3 python; do
+  command -v "$candidate" >/dev/null 2>&1 || continue
+  version=$("$candidate" -c 'import sys; sys.stdout.write("%d.%d" % sys.version_info[:2])' 2>/dev/null) || version=""
+  major=${version%%.*}
+  case "$major" in
+    "" | *[!0-9]*)
+      printf 'fm-doc-audience-check: ignoring "%s": it did not report a usable Python version.\n' \
+        "$candidate" >&2
+      ;;
+    *)
+      if [ "$major" -ge 3 ]; then
+        PYTHON_BIN=$candidate
+        break
+      fi
+      printf 'fm-doc-audience-check: refusing "%s": it is Python %s, and this check requires Python 3.\n' \
+        "$candidate" "$version" >&2
+      ;;
+  esac
+done
+if [ -z "$PYTHON_BIN" ]; then
+  printf 'fm-doc-audience-check: no Python 3 interpreter on PATH; tried "python3" then "python".\n' >&2
+  printf 'fm-doc-audience-check: install Python 3 and expose it under either name, then re-run.\n' >&2
+  exit 1
+fi
+
+exec "$PYTHON_BIN" - "$@" <<'PY'
 from __future__ import annotations
 
 import argparse
