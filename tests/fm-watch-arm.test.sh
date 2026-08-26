@@ -241,6 +241,37 @@ test_attached_arm_still_fails_on_a_wake_it_did_not_deliver() {
   pass "watch-arm: a cycle that delivered no wake of its own still fails loudly"
 }
 
+test_restart_arm_survives_quiet_tracked_background_startup() {
+  local dir home state fakebin armout status watcher_pid
+  dir=$(make_case restart-arm-survival)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$armout"
+  watcher_pid=$(sed -n 's/^watcher: started pid=\([0-9][0-9]*\).*$/\1/p' "$armout")
+  [ -n "$watcher_pid" ] \
+    || fail "tracked restart arm did not report its watcher pid: $(cat "$armout" 2>/dev/null || true)"
+
+  sleep 1.2
+  is_live_non_zombie "$ARM_PID" \
+    || fail "tracked restart arm completed immediately after startup: $(cat "$armout" 2>/dev/null || true)"
+  is_live_non_zombie "$watcher_pid" \
+    || fail "watcher child died while its tracked arm was still expected to own it"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$watcher_pid" ] \
+    || fail "quiet restart arm lost its watcher lock before any wake"
+
+  printf 'done: tracked arm shutdown\n' > "$state/shutdown.status"
+  wait_for_exit "$ARM_PID" 80
+  status=$?
+  expect_code 0 "$status" "tracked restart arm must close on a real wake"
+  grep -F 'signal:' "$armout" >/dev/null \
+    || fail "tracked restart arm did not report its shutdown wake: $(cat "$armout")"
+  pass "watch-arm: tracked restart arm survives quiet startup until a real wake"
+}
+
 test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   local dir home state fakebin result armout drainout status watcher_pid sequence generation decision_recovery_arm decision_successor
   dir=$(make_case rearm-resurface)
@@ -287,16 +318,15 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   append_wake "$state" check startup-network 'check: startup-network'
 
   start_rearm_arm "$home" "$state" "$fakebin" "$armout"
-  sleep 0.25
-  if is_live_non_zombie "$ARM_PID"; then
+  wait_for_exit "$ARM_PID" 80
+  status=$?
+  if [ "$status" -eq 124 ]; then
     # End the fixture through an ordinary actionable status transition so this
     # failing pre-fix path leaves no child behind.
     printf 'done: fixture cleanup\n' > "$state/cleanup.status"
     wait_for_exit "$ARM_PID" 80 || true
-    fail "re-arm stayed live instead of surfacing durable wakes and the still-open remote decision"
+    fail "re-arm stayed live instead of surfacing durable wakes and the still-open remote decision; arm=$(tr '\n' '|' < "$armout" 2>/dev/null || true) marker=$(tr '\n' '|' < "$state/.watcher-down" 2>/dev/null || true) queue=$(tr '\n' '|' < "$state/.wake-queue" 2>/dev/null || true)"
   fi
-  wait "$ARM_PID"
-  status=$?
   expect_code 0 "$status" "re-arm re-surface wake must close successfully"
   grep -F 'check: rearm-resurface' "$armout" >/dev/null \
     || fail "re-arm did not report the durable recovery wake: $(cat "$armout")"
@@ -807,6 +837,7 @@ test_downtime_marker_does_not_follow_symlink() {
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
+test_restart_arm_survives_quiet_tracked_background_startup
 test_rearm_resurfaces_durable_queue_and_remote_open_decision
 test_marker_publish_failure_retains_recovery_evidence
 test_delivery_gap_wake_is_recovered_once

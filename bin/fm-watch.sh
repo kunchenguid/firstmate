@@ -1090,12 +1090,23 @@ trap 'exit 1' HUP INT TERM
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
 WATCHER_PID=${BASHPID:-$$}
-printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
-printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
+if ! printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" \
+  || ! printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path"; then
+  echo "watcher: could not publish watcher lock ownership metadata" >&2
+  exit 1
+fi
 # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
 FM_WATCH_DELIVERY_PID=$WATCHER_PID
-FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
-printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+if ! FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity_retry "$WATCHER_PID"); then
+  echo "watcher: could not record pid identity for $WATCHER_PID; refusing to publish an invisible watcher lock" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null \
+  || [ "$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)" != "$FM_WATCH_DELIVERY_IDENTITY" ]; then
+  rm -f "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+  echo "watcher: could not verify watcher lock pid identity publication" >&2
+  exit 1
+fi
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 

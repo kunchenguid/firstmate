@@ -19,6 +19,28 @@ fm_current_pid() {
   printf '%s\n' "${BASHPID:-$$}"
 }
 
+FM_LOCK_CURRENT_PID=
+FM_LOCK_CURRENT_TOKEN=
+fm_lock_current_owner_set() {
+  FM_LOCK_CURRENT_PID=${BASHPID:-$$}
+  FM_LOCK_CURRENT_TOKEN="$FM_LOCK_CURRENT_PID:${BASH_SUBSHELL:-0}"
+}
+
+fm_lock_owner_matches_current() {
+  local ownerdir=$1 pid token
+  fm_lock_current_owner_set
+  pid=$(cat "$ownerdir/pid" 2>/dev/null || true)
+  [ "$pid" = "$FM_LOCK_CURRENT_PID" ] || return 1
+  token=$(cat "$ownerdir/owner-token" 2>/dev/null || true)
+  if [ -n "$token" ]; then
+    [ "$token" = "$FM_LOCK_CURRENT_TOKEN" ]
+    return
+  fi
+  # Legacy locks recorded only $$ on Bash 3. In a subshell $$ still names the
+  # parent shell, so a child must not reclaim or release a parent-owned old lock.
+  [ -n "${BASHPID+x}" ] || [ "${BASH_SUBSHELL:-0}" = 0 ]
+}
+
 fm_pid_alive() {
   local pid=$1
   case "$pid" in
@@ -64,6 +86,34 @@ fm_pid_identity() {
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
 }
 
+fm_pid_identity_retry() {  # <pid> [attempts] [delay-seconds]
+  local pid=$1 attempts=${2:-5} delay=${3:-0.05} identity i=0
+  while [ "$i" -lt "$attempts" ]; do
+    identity=$(fm_pid_identity "$pid" 2>/dev/null) && [ -n "$identity" ] && {
+      printf '%s\n' "$identity"
+      return 0
+    }
+    i=$((i + 1))
+    [ "$i" -lt "$attempts" ] || break
+    sleep "$delay" 2>/dev/null || sleep 1
+  done
+  return 1
+}
+
+fm_pid_identity_mentions_path() {  # <identity> <path>
+  local identity=$1 path=$2 path_hex
+  [ -n "$identity" ] && [ -n "$path" ] || return 1
+  case "$identity" in
+    *"$path"*) return 0 ;;
+  esac
+  path_hex=$(printf '%s' "$path" | od -An -v -tx1 2>/dev/null | tr -d '[:space:]') || return 1
+  [ -n "$path_hex" ] || return 1
+  case "$identity" in
+    *"cmdline-hex="*"$path_hex"*) return 0 ;;
+  esac
+  return 1
+}
+
 fm_path_mtime() {
   if [ "$_FM_UNAME" = Darwin ]; then
     stat -f %m "$1" 2>/dev/null
@@ -92,6 +142,53 @@ fm_watcher_lock_unheld() {
 }
 
 FM_WATCHER_MATCHED_IDENTITY=
+fm_watcher_lock_repair_blank_identity() {
+  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME}
+  local lockdir repair_lock lock_pid lock_home lock_path lock_identity identity tmp back
+  lockdir="$state/.watch.lock"
+  repair_lock="$state/.watch.lock.identity-repair"
+  fm_lock_try_acquire "$repair_lock" || return 1
+  lock_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
+  lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
+  lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  if [ "$lock_pid" != "$pid" ] || [ "$lock_home" != "$home" ] \
+    || [ "$lock_path" != "$watch_path" ] || [ -n "$lock_identity" ] \
+    || [ ! -f "$lockdir/pid-identity" ]; then
+    fm_lock_release "$repair_lock"
+    return 1
+  fi
+  identity=$(fm_pid_identity_retry "$pid") || {
+    fm_lock_release "$repair_lock"
+    return 1
+  }
+  if ! fm_pid_identity_mentions_path "$identity" "$watch_path"; then
+    fm_lock_release "$repair_lock"
+    return 1
+  fi
+  lock_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
+  lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
+  lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  if [ "$lock_pid" != "$pid" ] || [ "$lock_home" != "$home" ] \
+    || [ "$lock_path" != "$watch_path" ] || [ -n "$lock_identity" ]; then
+    fm_lock_release "$repair_lock"
+    return 1
+  fi
+  tmp="$state/.watch.pid-identity.$$"
+  if ! printf '%s\n' "$identity" > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$lockdir/pid-identity" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    fm_lock_release "$repair_lock"
+    return 1
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  back=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  fm_lock_release "$repair_lock"
+  [ "$back" = "$identity" ] || return 1
+  printf '%s\n' "$identity"
+}
+
 fm_watcher_lock_matches_pid() {
   local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
   FM_WATCHER_MATCHED_IDENTITY=
@@ -101,8 +198,10 @@ fm_watcher_lock_matches_pid() {
   lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
   [ "$lock_home" = "$home" ] || return 1
   [ "$lock_path" = "$watch_path" ] || return 1
-  [ -n "$lock_identity" ] || return 1
-  current_identity=$(fm_pid_identity "$pid") || return 1
+  if [ -z "$lock_identity" ]; then
+    lock_identity=$(fm_watcher_lock_repair_blank_identity "$state" "$watch_path" "$pid" "$home") || return 1
+  fi
+  current_identity=$(fm_pid_identity_retry "$pid") || return 1
   [ "$current_identity" = "$lock_identity" ] || return 1
   FM_WATCHER_MATCHED_IDENTITY=$lock_identity
 }
@@ -129,14 +228,17 @@ fm_watcher_healthy() {
 }
 
 # fm_watcher_healthy above is the PID-STRICT primitive: true only when a live,
-# identity-matched watcher PROCESS holds this home's lock with a fresh beacon. The
-# arm layer (bin/fm-watch-arm.sh, bin/fm-claude-stop-autoarm.sh) needs exactly
-# that - it decides whether to start, attach to, or replace a real watcher
-# process, so a leftover beacon must never satisfy it. bin/fm-turnend-guard.sh
-# also keeps this strict check because it fires at the turn boundary where the
-# auto-arm brings a fresh watcher up. The pull warning (bin/fm-guard.sh) fires
-# mid-turn, where the auto-arm model runs no watcher at all, so it wants a
-# different, model-aware question:
+# identity-matched watcher PROCESS holds this home's lock with a fresh beacon.
+# A blank pid-identity record is repaired only by capturing a real identity
+# whose command line names this watcher path, then writing and re-reading that
+# identity for the same live pid, fm-home, and watcher-path before the match is
+# accepted. The arm layer (bin/fm-watch-arm.sh,
+# bin/fm-claude-stop-autoarm.sh) needs exactly that - it decides whether to
+# start, attach to, or replace a real watcher process, so a leftover beacon must
+# never satisfy it. bin/fm-turnend-guard.sh also keeps this strict check because
+# it fires at the turn boundary where the auto-arm brings a fresh watcher up. The
+# pull warning (bin/fm-guard.sh) fires mid-turn, where the auto-arm model runs no
+# watcher at all, so it wants a different, model-aware question:
 
 # fm_supervision_model
 # Print the supervision model of this home's PRIMARY harness:
@@ -290,6 +392,7 @@ fm_lock_clean_known_files() {
   rm -f \
     "$lockdir/pid" \
     "$lockdir/fm-home" \
+    "$lockdir/owner-token" \
     "$lockdir/pid-identity" \
     "$lockdir/role" \
     "$lockdir/watcher-path" \
@@ -297,14 +400,12 @@ fm_lock_clean_known_files() {
 }
 
 fm_lock_set_role() {
-  local lockdir=$1 role=$2 current pid back
+  local lockdir=$1 role=$2 back
   case "$role" in
     autoarm|terminal-check) : ;;
     *) return 1 ;;
   esac
-  current=${BASHPID:-$$}
-  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  [ "$pid" = "$current" ] || return 1
+  fm_lock_owner_matches_current "$lockdir" || return 1
   printf '%s\n' "$role" > "$lockdir/role" 2>/dev/null || return 1
   back=$(cat "$lockdir/role" 2>/dev/null || true)
   [ "$back" = "$role" ]
@@ -322,6 +423,30 @@ fm_lock_abs_path() {
   printf '%s/%s\n' "$dir" "$base"
 }
 
+fm_lock_normalize_owner_path() {
+  local ownerdir=$1 owner_parent owner_base
+  [ -n "$ownerdir" ] || return 1
+  owner_parent=$(dirname "$ownerdir")
+  owner_base=$(basename "$ownerdir")
+  owner_parent=$(cd "$owner_parent" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s\n' "$owner_parent" "$owner_base"
+}
+
+fm_lock_owner_dir_belongs_to_lock() {
+  local lockdir=$1 ownerdir=$2 lock_abs owner_abs
+  [ -n "$ownerdir" ] || return 1
+  lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
+  case "$ownerdir" in
+    /*) owner_abs=$ownerdir ;;
+    *) owner_abs="$(dirname "$lockdir")/$ownerdir" ;;
+  esac
+  owner_abs=$(fm_lock_normalize_owner_path "$owner_abs") || return 1
+  case "$owner_abs" in
+    "$lock_abs".owner.*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_lock_owner_dir() {
   local lockdir=$1 lock_abs
   lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
@@ -329,11 +454,15 @@ fm_lock_owner_dir() {
 }
 
 fm_lock_prepare_owner() {
-  local ownerdir=$1 mypid back
-  mypid=${BASHPID:-$$}
+  local ownerdir=$1 mypid token back back_token
+  fm_lock_current_owner_set
+  mypid=$FM_LOCK_CURRENT_PID
+  token=$FM_LOCK_CURRENT_TOKEN
   printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
+  printf '%s\n' "$token" > "$ownerdir/owner-token" 2>/dev/null || return 1
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
-  [ "$back" = "$mypid" ]
+  back_token=$(cat "$ownerdir/owner-token" 2>/dev/null || true)
+  [ "$back" = "$mypid" ] && [ "$back_token" = "$token" ]
 }
 
 fm_lock_link_owner() {
@@ -346,6 +475,20 @@ fm_lock_link_owner() {
   esac
 }
 
+fm_lock_owner_dir_referenced() {
+  local lockdir=$1 ownerdir=$2 lock_abs parent path target owner_norm
+  lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
+  owner_norm=$(fm_lock_normalize_owner_path "$ownerdir") || return 1
+  parent=$(dirname "$lock_abs")
+  for path in "$parent"/* "$parent"/.[!.]* "$parent"/..?*; do
+    [ -L "$path" ] || continue
+    target=$(fm_lock_link_owner "$path" 2>/dev/null || true)
+    target=$(fm_lock_normalize_owner_path "$target" 2>/dev/null) || continue
+    [ "$target" = "$owner_norm" ] && return 0
+  done
+  return 1
+}
+
 fm_lock_points_to_owner() {
   local lockdir=$1 ownerdir=$2 actual
   actual=$(readlink "$lockdir" 2>/dev/null) || return 1
@@ -353,10 +496,44 @@ fm_lock_points_to_owner() {
 }
 
 fm_lock_discard_owner() {
-  local ownerdir=$1
+  local ownerdir=$1 stray
   [ -n "$ownerdir" ] || return 0
+  for stray in "$ownerdir"/*.owner.* "$ownerdir"/.*.owner.*; do
+    [ -L "$stray" ] || continue
+    rm -f "$stray" 2>/dev/null || true
+  done
   fm_lock_clean_known_files "$ownerdir"
   rmdir "$ownerdir" 2>/dev/null || true
+}
+
+fm_lock_cleanup_orphan_owner_dirs() {
+  local lockdir=$1 lock_abs parent base current_owner current_owner_norm candidate stale_after age owner_pid
+  lock_abs=$(fm_lock_abs_path "$lockdir") || return 0
+  parent=$(dirname "$lock_abs")
+  base=$(basename "$lock_abs")
+  current_owner=
+  current_owner_norm=
+  if [ -L "$lockdir" ]; then
+    current_owner=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
+    current_owner_norm=$(fm_lock_normalize_owner_path "$current_owner" 2>/dev/null || true)
+  fi
+  stale_after=${FM_LOCK_STALE_AFTER:-2}
+  case "$stale_after" in
+    ''|*[!0-9]*) stale_after=2 ;;
+  esac
+  [ "$stale_after" -lt 2 ] && stale_after=2
+  for candidate in "$parent/$base".owner.*; do
+    [ -d "$candidate" ] && [ ! -L "$candidate" ] || continue
+    fm_lock_owner_dir_belongs_to_lock "$lockdir" "$candidate" || continue
+    [ -z "$current_owner_norm" ] || [ "$(fm_lock_normalize_owner_path "$candidate" 2>/dev/null || true)" != "$current_owner_norm" ] || continue
+    fm_lock_owner_dir_referenced "$lockdir" "$candidate" && continue
+    owner_pid=$(cat "$candidate/pid" 2>/dev/null || true)
+    ! fm_pid_alive "$owner_pid" || continue
+    age=$(fm_path_age "$candidate")
+    [ "$age" -ge "$stale_after" ] || continue
+    fm_lock_discard_owner "$candidate"
+  done
+  return 0
 }
 
 fm_lock_remove_stray_owner_link() {
@@ -378,14 +555,21 @@ fm_lock_claim_blocked_by_steal() {
 }
 
 fm_lock_claim() {
-  local lockdir=$1 ownerdir=$2 allowed_steal_owner=${3:-} mypid back
-  mypid=${BASHPID:-$$}
+  local lockdir=$1 ownerdir=$2 allowed_steal_owner=${3:-} mypid token back back_token
+  fm_lock_current_owner_set
+  mypid=$FM_LOCK_CURRENT_PID
+  token=$FM_LOCK_CURRENT_TOKEN
   if ! { printf '%s\n' "$mypid" > "$ownerdir/pid"; } 2>/dev/null; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
+  if ! { printf '%s\n' "$token" > "$ownerdir/owner-token"; } 2>/dev/null; then
+    fm_lock_discard_owner "$ownerdir"
+    return 1
+  fi
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
-  if [ "$back" != "$mypid" ]; then
+  back_token=$(cat "$ownerdir/owner-token" 2>/dev/null || true)
+  if [ "$back" != "$mypid" ] || [ "$back_token" != "$token" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
@@ -431,15 +615,20 @@ fm_lock_try_create() {
 }
 
 fm_lock_remove_path() {
-  local lockdir=$1 ownerdir
+  local lockdir=$1 ownerdir rc
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     rm -f "$lockdir" 2>/dev/null || return 1
-    [ -n "$ownerdir" ] && fm_lock_discard_owner "$ownerdir"
+    [ -n "$ownerdir" ] && fm_lock_owner_dir_belongs_to_lock "$lockdir" "$ownerdir" \
+      && fm_lock_discard_owner "$ownerdir"
+    fm_lock_cleanup_orphan_owner_dirs "$lockdir" || true
     return 0
   fi
   fm_lock_clean_known_files "$lockdir"
   rmdir "$lockdir" 2>/dev/null
+  rc=$?
+  fm_lock_cleanup_orphan_owner_dirs "$lockdir" || true
+  return "$rc"
 }
 
 fm_lock_mid_acquire_is_fresh() {
@@ -792,10 +981,12 @@ fm_lock_try_acquire() {
     return 0
   fi
 
-  # Compare against ${BASHPID:-$$} inline, never via a command substitution:
-  # $() forks a subshell whose BASHPID is not this frame's pid.
+  # Compare against this shell frame, not a command substitution. On Bash 3, $$
+  # still names the parent shell inside a subshell, so the owner-token keeps a
+  # child from reclaiming its parent's live lock while preserving same-frame
+  # trap recovery.
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if [ -n "$pid" ] && [ "$pid" = "${BASHPID:-$$}" ]; then
+  if [ -n "$pid" ] && fm_lock_owner_matches_current "$lockdir"; then
     # The recorded holder is THIS very process. Single-threaded bash can only
     # observe that when an interrupting trap abandoned the frame that held the
     # lock mid-critical-section (e.g. TERM inside a recovery-marker section,
@@ -891,22 +1082,28 @@ fm_lock_acquire_wait() {
 }
 
 fm_lock_release() {
-  local lockdir=$1 pid current ownerdir
-  current=${BASHPID:-$$}
+  local lockdir=$1 ownerdir
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     [ -n "$ownerdir" ] || return 0
-    pid=$(cat "$ownerdir/pid" 2>/dev/null || true)
-    [ "$pid" = "$current" ] || return 0
+    if [ ! -e "$ownerdir" ]; then
+      fm_lock_owner_dir_belongs_to_lock "$lockdir" "$ownerdir" \
+        && rm -f "$lockdir" 2>/dev/null || true
+      fm_lock_cleanup_orphan_owner_dirs "$lockdir" || true
+      return 0
+    fi
+    fm_lock_owner_matches_current "$ownerdir" || return 0
     fm_lock_points_to_owner "$lockdir" "$ownerdir" || return 0
     rm -f "$lockdir" 2>/dev/null || return 0
-    fm_lock_discard_owner "$ownerdir"
+    fm_lock_owner_dir_belongs_to_lock "$lockdir" "$ownerdir" \
+      && fm_lock_discard_owner "$ownerdir"
+    fm_lock_cleanup_orphan_owner_dirs "$lockdir" || true
     return 0
   fi
-  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  [ "$pid" = "$current" ] || return 0
+  fm_lock_owner_matches_current "$lockdir" || return 0
   fm_lock_clean_known_files "$lockdir"
   rmdir "$lockdir" 2>/dev/null || true
+  fm_lock_cleanup_orphan_owner_dirs "$lockdir" || true
 }
 
 fm_meta_lock_path() {
@@ -954,9 +1151,7 @@ fm_failure_episode_reset() {
       acquired=1
       ;;
     held)
-      current=${BASHPID:-$$}
-      pid=$(cat "$lock/pid" 2>/dev/null || true)
-      [ "$pid" = "$current" ] || return 1
+      fm_lock_owner_matches_current "$lock" || return 1
       ;;
     *) return 1 ;;
   esac
@@ -1046,18 +1241,18 @@ _fm_autoarm_epoch_field() {  # <epoch-file> <field>
 # identity file behind, so a partial write can never read as a mismatch against
 # its own live owner. Call it before publishing the auto-arm role.
 fm_autoarm_claim_record_identity() {  # <state-dir>
-  local state=$1 lock pid held identity back
+  local state=$1 lock pid identity back
   lock="$state/.claude-autoarm.lock"
-  # Resolve the pid into a variable FIRST: expanding ${BASHPID:-$$} inside the
-  # command substitution below would resolve it in that subshell, recording the
-  # identity of a process that exits immediately and leaving every later reader
-  # with a permanent mismatch against the real owner.
-  pid=${BASHPID:-$$}
+  # Resolve the pid into a variable FIRST in this shell frame: expanding a pid
+  # expression inside the command substitution below would resolve it in that
+  # subshell, recording the identity of a process that exits immediately and
+  # leaving every later reader with a permanent mismatch against the real owner.
+  fm_lock_current_owner_set
+  pid=$FM_LOCK_CURRENT_PID
   # The identity must describe the pid the lock publishes, so record it only for a
   # lock this process actually holds (the same ownership test as fm_lock_set_role).
-  held=$(cat "$lock/pid" 2>/dev/null || true)
-  [ "$held" = "$pid" ] || return 1
-  identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  fm_lock_owner_matches_current "$lock" || return 1
+  identity=$(fm_pid_identity_retry "$pid") || return 1
   [ -n "$identity" ] || return 1
   if ! printf '%s\n' "$identity" > "$lock/pid-identity" 2>/dev/null; then
     rm -f "$lock/pid-identity" 2>/dev/null || true

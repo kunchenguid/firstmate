@@ -160,6 +160,11 @@ budget_reset() {
   fm_lock_release "$BUDGET_LOCK"
 }
 
+reset_retry_banner() {
+  [ "$CLAUDE_MODE" -eq 1 ] || return 0
+  printf '%s\n' 'firstmate watcher recovery retry - a live watcher was verified, but stale failure markers could not be cleared yet.' >&2
+}
+
 fm_supervision_status "$STATE" "$GRACE"
 if [ "$FM_SUP_NEEDED" = false ]; then
   [ -e "$FAILURE_NOTICE" ] || budget_reset
@@ -168,6 +173,7 @@ fi
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
   [ "$CLAUDE_MODE" -eq 1 ] || exit 0
   fm_failure_episode_reset "$STATE" && exit 0
+  reset_retry_banner
   exit 2
 fi
 
@@ -377,7 +383,7 @@ i=0
 while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
   if autoarm_owns_recovery; then
     if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-      fm_failure_episode_reset "$STATE" || exit 2
+      fm_failure_episode_reset "$STATE" || { reset_retry_banner; exit 2; }
     fi
     exit 0
   fi
@@ -386,7 +392,7 @@ while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
 done
 if autoarm_owns_recovery; then
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-    fm_failure_episode_reset "$STATE" || exit 2
+    fm_failure_episode_reset "$STATE" || { reset_retry_banner; exit 2; }
   fi
   exit 0
 fi

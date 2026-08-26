@@ -37,10 +37,10 @@
 #     benign when a live identity-matched watcher still has a fresh beacon.
 #   - Failure handling: a typed failure is rechecked against the same live,
 #     fresh watcher predicate and retried a bounded number of times in this
-#     hook. Only an exhausted failure with no verified watcher emits one
-#     last-resort notice per failure episode; later consecutive failures still
-#     exit 2 to guarantee the next Stop-owned retry without repeating notice,
-#     until the synchronous guard has consumed its attended fail-open.
+#     hook. Only an exhausted failure with no verified watcher emits the full
+#     last-resort notice once per failure episode; later consecutive failures
+#     still exit 2 with a compact retry banner, until the synchronous guard has
+#     consumed its attended fail-open.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim and
 # outcome so the synchronous Stop guard (bin/fm-turnend-guard.sh --claude) can
@@ -51,7 +51,8 @@
 # suppresses any later automatic continuation in that unresolved episode.
 #
 # This hook never blocks the Stop decision itself and never prints to stdout:
-# exit 0 is always silent, and exit 2 carries the rewake banner on stderr.
+# exit 0 is always silent, and exit 2 always carries a rewake or retry banner on
+# stderr.
 # On any uncertainty such as unresolvable ancestry, malformed lock state, or
 # lock contention, it exits 0 and leaves continuity to the synchronous guard and
 # the model.
@@ -178,6 +179,14 @@ write_epoch() {  # <outcome>
 
 write_epoch arming
 
+retry_banner() {  # <summary> [captured-arm-output]
+  local summary=$1 out=${2:-}
+  {
+    printf 'firstmate watcher auto-arm retry - %s\n' "$summary"
+    [ -n "$out" ] && grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$out" 2>/dev/null | head -8
+  } >&2
+}
+
 # X mode cadence: source the generated config so an X instance polls at its
 # 30s cadence (fm-bootstrap.sh x_mode_setup contract).
 # shellcheck source=/dev/null
@@ -245,6 +254,7 @@ if [ "$HEALTHY" -eq 1 ]; then
   write_epoch failed-suppressed
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   [ -e "$FAILURE_ALARM" ] && exit 0
+  retry_banner "a live watcher was verified, but stale failure markers could not be cleared yet."
   exit 2
 fi
 
@@ -282,5 +292,6 @@ if [ ! -e "$FAILURE_NOTICE" ]; then
   exit 2
 fi
 write_epoch failed-suppressed
+[ -e "$FAILURE_NOTICE" ] && retry_banner "the prior automatic supervision failure episode remains unresolved after $attempt bounded attempts." "$OUT"
 [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
 exit 2
