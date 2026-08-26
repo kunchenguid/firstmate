@@ -59,8 +59,11 @@
 #     appear in decisions_open; blocked captain holds remain queued with metadata.
 #   secondmate_landed: {records[],truncated[],unreadable[],partial[]} - the
 #     compatibility landed-work roll-up derived from secondmate_current. Readable
-#     structured homes with an unknown current classification are partial, not
-#     unreadable, and retain independently trustworthy structured surfaces.
+#     structured homes are partial, not unreadable, when an unavailable child state
+#     or a backlog-vs-metadata inventory mismatch makes their summary incomplete;
+#     they retain independently trustworthy structured surfaces. An inventory
+#     mismatch also keeps the home's own current classification, which only an
+#     unavailable child state or an untrustworthy backlog collapses to unknown.
 #   secondmate_guidance: return-channel action note for renderers and bearings.
 #
 # Compatibility: JSON is the primary machine-readable surface.
@@ -760,7 +763,11 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     | (if ($strict_invalidities | length) > 0 then $strict_invalidities[0] | del(.reason)
        elif ($unknown_children | length) > 0 then {kind:"child_current_unavailable",ids:($unknown_children | map(.id))}
        else {kind:null,ids:[]} end) as $invalidity
-    | (if $valid | not then "unknown"
+    | (if ($valid | not)
+          and (($unknown_children | length) > 0
+               or (["orphan_in_flight","unowned_current","terminal_in_flight"]
+                   | index($invalidity.kind) | not))
+       then "unknown"
        elif any($decisions_all[]; .verb == "needs-decision" or .verb == "captain-hold") then "captain_decision"
        elif ($active_all | length) > 0 then "active_child_work"
        elif ($holds_all | length) > 0 then "externally_held"
@@ -1258,9 +1265,10 @@ secondmate_current_json() {  # <parent-tasks-json>
           if [ "$summary_valid" != true ]; then
             summary_reason=$(printf '%s' "$summary" | jq -r '.reason // "unknown reason"')
             summary_invalidity=$(printf '%s' "$summary" | jq -r '.invalidity.kind // "unknown"')
-            if [ "$summary_invalidity" != child_current_unavailable ]; then
-              reason="structured home state invalid: $summary_reason"
-            fi
+            case "$summary_invalidity" in
+              child_current_unavailable|orphan_in_flight|unowned_current|terminal_in_flight) : ;;
+              *) reason="structured home state invalid: $summary_reason" ;;
+            esac
           fi
         fi
       fi
@@ -1353,7 +1361,7 @@ secondmate_landed_from_current_json() {  # <secondmate-current-json>
        | select(.current.state == "unknown" and .provenance.selected != "structured-home")
        | .home // ("<" + .id + ": unavailable>")],
      partial:[ $current.records[]
-       | select(.current.state == "unknown" and .provenance.selected == "structured-home")
+       | select(.provenance.selected == "structured-home" and .provenance.trust == "partial-structured")
        | .home // ("<" + .id + ": partial>")]}
     | .records |= sort_by([(.completion.date // ""), .id]) | .records |= reverse'
 }
