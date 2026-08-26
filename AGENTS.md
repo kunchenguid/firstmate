@@ -358,7 +358,8 @@ Require the matching `resolved` event, forbid `--yes`, and require the worker to
 Resume fleet supervision immediately after the decision lands.
 
 Judge validation by the current-code-matched run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event.
-Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed or checks-passed is done; failed or cancelled is failed.
+Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed is done; failed or cancelled is failed.
+A checks-passed outcome, and a worker's own `checks green` line, are only claims: they read done solely when `bin/fm-crew-state.sh` has independently confirmed from the task's own recorded GitHub PR that its head still matches and every one of a non-zero set of checks succeeded, and they otherwise stay not ready (`unknown`, or the still-working run state when a run is attributed) with the unverified verdict named, which is the intended answer rather than a fault.
 A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership outside the supersession sequence above; steer it back to the gate response flow.
 The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
 
@@ -366,6 +367,7 @@ The worker reports the PR when CI first becomes green rather than waiting for me
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
 Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
+Recording that `pr=` is also what lets the checks verification above run at all, and that verification reads GitHub only, so a GitLab merge request task reports `forge-unsupported` and its readiness stays a captain judgement.
 Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine merge authority.
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.

@@ -37,11 +37,14 @@
 #      diverged from it, invalidates attribution.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
+#      passed -> done, failed/cancelled -> failed. A checks-passed outcome is
+#      captain-ready only after the task-bound PR resolver independently proves
+#      a head this task owns still has a non-zero, all-successful check set;
+#      anything else reads unknown rather than done. EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
-#      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating.
+#      a ci-step log-tail marker triggers that same resolver; log prose alone
+#      never overrides working -> done.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -73,6 +76,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -228,6 +233,24 @@ nm_run() {  # <args...>
   fm_nm_run "$WT" "$NM_TIMEOUT" "$@"
 }
 
+# Bounded, read-only GitHub PR lookup. Unlike nm_run, callers need the exit status
+# so an unavailable forge remains unknown instead of becoming a friendly empty
+# answer. `gh pr view` is the only forge operation used here.
+forge_pr_view() {  # <pr-url-or-number>
+  local have_timeout=none
+  command -v gh >/dev/null 2>&1 || return 127
+  if command -v timeout >/dev/null 2>&1; then have_timeout=timeout
+  elif command -v gtimeout >/dev/null 2>&1; then have_timeout=gtimeout
+  elif command -v perl >/dev/null 2>&1; then have_timeout=perl
+  fi
+  case "$have_timeout" in
+    timeout)  ( cd "$WT" && timeout "$NM_TIMEOUT" gh pr view "$1" --json headRefOid,statusCheckRollup ) 2>/dev/null ;;
+    gtimeout) ( cd "$WT" && gtimeout "$NM_TIMEOUT" gh pr view "$1" --json headRefOid,statusCheckRollup ) 2>/dev/null ;;
+    perl)     ( cd "$WT" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$NM_TIMEOUT" gh pr view "$1" --json headRefOid,statusCheckRollup ) 2>/dev/null ;;
+    *)        return 127 ;;
+  esac
+}
+
 # Scalar value of a TOON key in the captured run output ($RUN_OUT).
 RUN_OUT=""
 nm_field() {  # <key>
@@ -298,6 +321,94 @@ log_reports_ci_ready() {
   esac
 }
 
+# Resolve readiness from the exact task-bound PR, never from worker or pipeline
+# prose. The task's canonical pr= wins; a full attributed run may supply the PR
+# only when metadata has not recorded one yet, and the URL is accepted only
+# through the one canonical parser (bin/fm-pr-lib.sh), so an unparseable or
+# flag-shaped value never reaches the forge command.
+#
+# Head identity must match a head this task provably owns: EITHER the recorded
+# pr_head= OR the attributed full run's current head. pr_head= is a snapshot
+# taken when bin/fm-pr-check.sh recorded the PR and is never re-recorded, so
+# treating it as the only truth would pin a genuinely green PR to not-ready
+# forever once a pipeline fix round or captain-requested change pushed a newer
+# commit; the attributed run's head is bound to this worktree's own code
+# identity (nm_run_head_matches_worktree), so it is an equally exact record.
+#
+# Verification reads GitHub only - the check-set semantics below are GitHub's -
+# so a merge request on any other forge resolves to forge-unsupported rather
+# than to a guessed answer. Output is exactly one of green, no-checks,
+# not-ready, forge-unsupported, or unknown; only green is captain-ready.
+resolve_pr_checks_state() {
+  local meta_pr run_pr pr candidate candidate_full expected_heads forge_json forge_head verdict matched
+  meta_pr=$(meta_value pr)
+  run_pr=""
+  if [ "${HAVE_RUN:-0}" = 1 ] && [ "${RUN_SOURCE:-full}" = full ]; then
+    run_pr=$(strip_quotes "$(nm_field pr)")
+  fi
+  if [ -n "$meta_pr" ] && [ -n "$run_pr" ] && [ "$meta_pr" != "$run_pr" ]; then
+    printf 'unknown'
+    return
+  fi
+  pr=${meta_pr:-$run_pr}
+  [ -n "$pr" ] || { printf 'unknown'; return; }
+  fm_pr_url_parse "$pr" || { printf 'unknown'; return; }
+  [ "$FM_PR_PROVIDER" = github ] || { printf 'forge-unsupported'; return; }
+  pr=$FM_PR_URL
+
+  expected_heads=""
+  candidate=$(meta_value pr_head)
+  if [ -n "$candidate" ] \
+    && candidate_full=$(git -C "$WT" rev-parse --verify "${candidate}^{commit}" 2>/dev/null); then
+    expected_heads=$candidate_full
+  fi
+  if [ "${HAVE_RUN:-0}" = 1 ] && [ "${RUN_SOURCE:-full}" = full ]; then
+    candidate=$(strip_quotes "$(nm_field head)")
+    if [ -n "$candidate" ] \
+      && candidate_full=$(git -C "$WT" rev-parse --verify "${candidate}^{commit}" 2>/dev/null); then
+      case " $expected_heads " in
+        *" $candidate_full "*) ;;
+        *) expected_heads="${expected_heads:+$expected_heads }$candidate_full" ;;
+      esac
+    fi
+  fi
+  [ -n "$expected_heads" ] || { printf 'unknown'; return; }
+
+  forge_json=$(forge_pr_view "$pr") || { printf 'unknown'; return; }
+  command -v jq >/dev/null 2>&1 || { printf 'unknown'; return; }
+  forge_head=$(printf '%s\n' "$forge_json" | jq -er '.headRefOid | select(type == "string" and length > 0)' 2>/dev/null) \
+    || { printf 'unknown'; return; }
+  matched=0
+  for candidate in $expected_heads; do
+    [ "$forge_head" = "$candidate" ] && matched=1
+  done
+  [ "$matched" = 1 ] || { printf 'not-ready'; return; }
+
+  verdict=$(printf '%s\n' "$forge_json" | jq -er '
+    if (.statusCheckRollup | type) != "array" then
+      error("missing statusCheckRollup")
+    elif (.statusCheckRollup | length) == 0 then
+      "no-checks"
+    elif any(.statusCheckRollup[]; (has("conclusion") or has("state")) | not) then
+      "unknown"
+    elif all(.statusCheckRollup[];
+      if has("conclusion") then
+        .status == "COMPLETED" and .conclusion == "SUCCESS"
+      else
+        .state == "SUCCESS"
+      end)
+    then
+      "green"
+    else
+      "not-ready"
+    end
+  ' 2>/dev/null) || { printf 'unknown'; return; }
+  case "$verdict" in
+    green|no-checks|not-ready|unknown) printf '%s' "$verdict" ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 nm_ci_step_status() {
   local row rest
   row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' | head -1)
@@ -337,7 +448,8 @@ nm_effective_ci_step_status() {
 # actual PR #252 run). Reads the ci step's log tail via `axi logs` and scans it
 # for the MOST RECENT recognized marker (the log is append-only/chronological,
 # so the last match is current): green with nothing red after it means CI is
-# green right now, still only waiting on merge/close.
+# a resolver candidate, no-checks, not-ready, or unknown. Only the separate
+# task-bound forge resolver above can turn the green candidate into readiness.
 nm_ci_checks_state() {
   local run_id log_tail marker
   run_id=$(strip_quotes "$(nm_field id)")
@@ -348,7 +460,8 @@ nm_ci_checks_state() {
     | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
     | tail -1)
   case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
+    *"checks passed"*) printf 'green' ;;
+    *"no CI checks reported - still monitoring"*) printf 'no-checks' ;;
     *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
   esac
@@ -469,6 +582,7 @@ if [ "$HAVE_RUN" = 1 ]; then
   RUN_DETAIL=""
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
+  CI_VERDICT=""
   RUN_STATUS=""
   if [ "$RUN_SOURCE" = coarse ]; then
     # No step/gate detail is available from the plain runs list - only ever
@@ -497,7 +611,16 @@ if [ "$HAVE_RUN" = 1 ]; then
     if [ -n "$outcome" ]; then
       case "$outcome" in
         passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
-        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
+        checks-passed)
+          CI_VERDICT=$(resolve_pr_checks_state)
+          if [ "$CI_VERDICT" = green ]; then
+            RUN_STATE="done"
+            RUN_DETAIL="checks green: PR ready for review (verified from forge)"
+          else
+            RUN_STATE=unknown
+            RUN_DETAIL="checks $CI_VERDICT: checks-passed outcome not captain-ready"
+          fi
+          ;;
         failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
         cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
@@ -529,36 +652,44 @@ if [ "$HAVE_RUN" = 1 ]; then
       esac
       if [ "$RUN_STATE" = working ]; then
         CI_STEP_STATUS=$(nm_effective_ci_step_status)
-        case "$CI_STEP_STATUS" in
-          running)
-            CI_LOG_STATE=$(nm_ci_checks_state)
-            if [ "$CI_LOG_STATE" = green ]; then
-              RUN_STATE="done"
-              RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
-            fi
-            ;;
-          fixing)
-            CI_LOG_STATE=not-ready
-            ;;
-        esac
+        if [ "$CI_STEP_STATUS" = running ]; then
+          CI_LOG_STATE=$(nm_ci_checks_state)
+          case "$CI_LOG_STATE" in
+            green)
+              CI_VERDICT=$(resolve_pr_checks_state)
+              if [ "$CI_VERDICT" = green ]; then
+                RUN_STATE="done"
+                RUN_DETAIL="checks green: PR ready for review (verified from forge; still monitoring for merge/close)"
+              else
+                RUN_DETAIL="ci running (checks $CI_VERDICT)"
+              fi
+              ;;
+            no-checks) RUN_DETAIL="ci running (checks no-checks)" ;;
+          esac
+        fi
       fi
     fi
   fi
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
-    if [ "$RUN_SOURCE" = coarse ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+    # A run in a fix round cannot be ready, but only a FULL attributed run may
+    # say so: in coarse mode $RUN_OUT is another branch's `axi status` (coarse
+    # attribution is entered precisely because this branch's run was not the one
+    # reported), so its step rows describe a foreign run and must never veto this
+    # task. Coarse attribution falls straight through to the task-bound resolver,
+    # which is itself guarded the same way.
+    if [ "$RUN_SOURCE" = full ]; then
+      [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
+      if [ "$RUN_STATUS" = fixing ] || [ "$CI_STEP_STATUS" = fixing ]; then
+        CI_VERDICT=not-ready
+      fi
     fi
-    [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
-    if [ "$RUN_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
-    elif [ "$CI_STEP_STATUS" = running ] && [ -z "$CI_LOG_STATE" ]; then
-      CI_LOG_STATE=$(nm_ci_checks_state)
-    elif [ "$CI_STEP_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
-    fi
-    if [ "$CI_LOG_STATE" != not-ready ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+    [ -n "$CI_VERDICT" ] || CI_VERDICT=$(resolve_pr_checks_state)
+    if [ "$CI_VERDICT" = green ]; then
+      RUN_STATE="done"
+      RUN_DETAIL="checks green: PR ready for review (verified from forge; worker status signaled claim)"
+    else
+      RUN_DETAIL="$RUN_DETAIL${SEP}worker checks-green claim unverified ($CI_VERDICT)"
     fi
   fi
 
@@ -600,6 +731,17 @@ if [ "$KIND" != secondmate ]; then
     idle) ;;
     *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
   esac
+fi
+
+# A worker checks-green line remains a wake signal, but it is not a readiness
+# source. With no attributed run, only the same exact task/PR resolver may
+# promote it; every other verdict stays explicitly non-ready.
+if log_reports_ci_ready; then
+  CI_VERDICT=$(resolve_pr_checks_state)
+  if [ "$CI_VERDICT" = green ]; then
+    emit "done" status-log "checks green: PR ready for review (verified from forge)"
+  fi
+  emit unknown status-log "worker checks-green claim unverified ($CI_VERDICT)"
 fi
 
 # Fall back to the status log's last line, but ONLY when its verb maps to a real
