@@ -330,8 +330,9 @@ cmd_terminal() {
 # published response frames content as a top-level `prompts[N]{...}:` or
 # `feedback[N]{...}:` header whose rows are INDENTED, so this anchors on column
 # zero: an indented payload line is captain-supplied text and must never be able
-# to forge - or, here, to hide behind - a content header. N is read, so a
-# declared-empty block counts as no content.
+# to forge - or, here, to hide behind - a content header. Any recognized block
+# is content regardless of its declared count, while a malformed top-level
+# prompts or feedback header makes the result indeterminate.
 #
 # 0 = content present, 1 = provably no content, anything else = the check did
 # not complete. The caller must distinguish those three, because "the check
@@ -339,12 +340,18 @@ cmd_terminal() {
 result_has_queued_content() {  # <result-file>
   awk '
     /^(prompts|feedback)\[[0-9]+\]\{[^}]*\}:[[:space:]]*$/ {
-      count = $0
-      sub(/^[a-z]+\[/, "", count)
-      sub(/\].*$/, "", count)
-      if (count + 0 > 0) { found = 1; exit }
+      verdict = "present"
+      exit
     }
-    END { exit found ? 0 : 1 }
+    /^(prompts|feedback)/ {
+      verdict = "indeterminate"
+      exit
+    }
+    END {
+      if (verdict == "present") exit 0
+      if (verdict == "indeterminate") exit 2
+      exit 1
+    }
   ' "$1"
 }
 
