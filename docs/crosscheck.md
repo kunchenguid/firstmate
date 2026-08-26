@@ -50,7 +50,7 @@ The declared regular-lane rates are 1.40 dollars per million input tokens, 0.14 
 The declaration tracks Fireworks serverless pricing at https://docs.fireworks.ai/serverless/pricing.
 Fireworks publishes no separate cache-write price, so emitted cache-write tokens are charged at the uncached input rate of 1.40 dollars per million rather than silently treated as free.
 A truncated reviewer turn is a failed review, never a verdict.
-The strict verdict tool is the primary submission path, and the terminal assistant turn must stop with `toolUse` after exactly one call.
+The accepted sequential tool log is the submission authority and must end with exactly one `finish_review` call. Pi may emit one final prose turn after a mixed tool batch; that turn cannot change the accepted log.
 Pi's provider-generation schema makes nullable structured finding-update fields optional and non-null so Pi can prepare its supported strict subset.
 The host restores omitted nullable fields to explicit null before applying the unchanged full review validation.
 The host still validates the complete outer review schema and every evidence contract after constrained sampling.
@@ -70,30 +70,30 @@ It is not compared with task metadata and does not establish an author-account i
 Missing or failed Pi author-account capture therefore has no effect on reviewer selection, review admissibility, the durable verdict, or merge verification.
 The former `config/crosscheck-legacy-author-admissions.json` path existed only to work around the removed author-identity refusal and is no longer read.
 
-Crosscheck then binds the provider's executing credential selector to that exact reviewer path and requires the verdict plus a local reviewer's Bash-created receipt to report the selector and actual private `HOME`.
-For Azure reviews, the controller binds the model compartment identity independently, while the later credentialless tool and verifier receipts bind only their distinctive marker and the exact base and head SHAs.
+Crosscheck binds the provider's executing credential selector and private `HOME` through the controller-owned reviewer identity.
+Current `conditional-v1` records do not ask the model to prove that controller identity with a verdict-level helper. Legacy records without an evidence policy retain their receipt and execution-proof requirements.
 For Pi, the terminal event must also report the exact provider slot and model selector that the roster requested.
 A run that reports the historical Fast selector, another provider, or no model identity is a tool failure rather than a regular-lane verdict.
 That proves which dedicated reviewer home executed the review without comparing it to an author account.
 Every reviewer disables reviewed-repository instruction discovery at launch: Codex sets `project_doc_max_bytes=0`, and Pi uses `--no-context-files`.
-Pi is launched through the resolved installed executable at `xhigh` with JSON event output, offline startup, an ephemeral session, and only the read and Bash-capable review tools plus the explicit verdict tool.
+Pi is launched through the resolved installed executable at `xhigh` with JSON event output, offline startup, an ephemeral session, and exactly eight explicit sequential tools: bounded repository search/read, evidence-file submission, finding/suspicion/update reporting, one optional public lookup request, and finalization.
 The prompt is passed by `@file` so repository and claim size cannot exceed the process argument limit.
 Extension discovery remains disabled while the tracked verdict extension is loaded explicitly.
-That extension registers a strict JSON-schema-constrained `submit_crosscheck_verdict` tool whose successful execution terminates that attempt without another model turn.
-The local regular GLM lane runs a fixed two-pass full-diff protocol: an isolated advisory challenge followed by an authoritative synthesis that independently inspects the same exact-base/exact-head diff and receives only a bounded projection of the challenge's untrusted hypotheses.
-Only the synthesis supplies the ledger verdict, and it must reproduce any challenge concern it carries forward rather than treating the challenge as execution proof.
-The two passes never wait or sleep to affect timing, and Crosscheck aggregates their token, cost, turn, and reviewer-latency telemetry without inventing unavailable values.
-The regular-lane reviewer record binds `review_depth_passes: "2"`, `review_depth_mode: two-pass-independent-synthesis-v1`, and the terminal provider/model readback to the registered regular cross-family lane.
+The extension validates each call immediately, returns correctable errors in-session, and appends only accepted calls to a 512-call, 2 MiB digest-bound log. It exposes no shell, edit, Git, GitHub, cloud, credential, MCP, or general network tool. Evidence helpers are data until the trusted controller validates and executes them after finalization.
+The local regular GLM lane runs one substantive full-diff pass with an in-session skeptical re-challenge before finalization. The reviewer record binds `review_depth_passes: "1"`, `review_depth_mode: single-pass-skeptical-rechallenge-v1`, and exact terminal provider/model readback to the registered regular cross-family lane.
+Ledger validation checks that pair against a frozen historical registry rather than today's active depth constants, so a later review protocol cannot make old records unreadable.
 Successful current-contract `clear` and `blocking` records, including reusable records, fail validation when any of those fields is missing or contradictory.
 Failed `tool-failure`, `unreviewed`, and `cannot-certify` attempts may omit terminal and depth evidence they never earned, so their ledgers remain reloadable for a later retry; they are never reusable.
-Crosscheck accepts exactly one verdict tool call from each successful pass and preserves usage across Pi auto-retries.
+Crosscheck accepts exactly one finalization in the successful attempt and preserves usage across Pi auto-retries.
 If an attempt reaches the model but ends without exactly one well-formed verdict call, including an output-limit or provider terminal error, one fresh ephemeral low-reasoning attempt receives a fixed repair instruction plus the identical exact-head review packet.
 The repair is attempted once per pass, its usage is included in the run economics, and a second protocol miss fails closed instead of selecting a convenient call or rotating to another reviewer.
 Provider terminal-error diagnostics have credential-shaped values redacted, are whitespace-normalized and stripped of non-printable characters, and are limited to 512 characters before they reach operator-visible failure output.
 The model decides the provider slot through an explicit mapping derived from the lane registry that maps each registered model to its own slot, maps `gpt-5.6-sol` to `openai-codex`, and refuses an unmapped model rather than guessing.
 For the installed npm entrypoint, Crosscheck also resolves Pi's sibling Node runtime before launch instead of allowing the reviewer environment's `PATH` to substitute another interpreter.
 That pin recognizes every `env`-based Node shebang, including `#!/usr/bin/env -S node --flag`, and preserves the flags; an `env` shebang naming no interpreter fails closed rather than silently falling back to `PATH`.
-Its event stream must contain at least one completed turn, end with a successful `toolUse` assistant turn, and complete the agent before Crosscheck accepts the single submitted verdict.
+Its event stream must contain at least one completed turn and a completed agent with the expected provider/model. The controller independently replays every accepted tool event against the exact snapshot and requires the final accepted event to be `finish_review`, except that the first pass may end with one accepted `request_lookup` and no authoritative review items.
+
+The optional lookup runs only on the trusted controller through the fixed `/opt/homebrew/bin/ketch` binary. It accepts at most two mechanically screened public code or web queries, uses only the fixed grep.app or DuckDuckGo JSON argv with a five-result cap, a temporary HOME/config, a sanitized environment, a 20-second deadline, and an 8 KiB result bound. URLs, controls, long queries, commit-like hex, private repository names, secret-like terms, and 24-character private diff or snapshot fragments are refused before launch. Refusal or Ketch failure becomes bounded untrusted context rather than a review failure. A fresh final pass receives the digest-bound result, must call `finish_review`, and cannot request lookup again. The provisional pass has no finding or verdict authority; both passes retain their own one-shot protocol repair, and their tokens, costs, latency, and repair counts are combined in the one durable run.
 Pi credential provisioning is a captain-owned prerequisite, and its shape depends on the lane: a codex-family fallback home must contain a usable `openai-codex` OAuth entry in `auth.json`, while a cross-family lane home must instead contain an api-key `models.json` declaring exactly that lane's provider slot and no `auth.json` is required. Firstmate does not create or copy either credential.
 Because reviewer launches disable extension discovery, a Pi reviewer home holds exactly one account and exactly one provider; a multi-provider Pi home is refused for a cross-family lane and reviews as its default slot for the codex fallback, not as whichever slot has capacity.
 
@@ -142,13 +142,14 @@ Existing durable Crosscheck state plus missing metadata fails closed before revi
 When metadata exists, its author harness/model identity remains authoritative: unreadable, malformed, duplicate, blank, or model-colliding metadata still fails closed.
 
 The run writes `data/<task-id>/crosscheck-ledger.json` and the readable `data/<task-id>/crosscheck.md` report.
-The run exits zero only when the exact head has a complete review, the reviewer supplied a successfully gate-reexecuted exact-base/exact-head reproduction, the durable ledger has no active blocker, and the reviewer returned no unreproduced suspicion.
+The run exits zero only when the exact head has a complete identity-bound review, the durable ledger has no active blocker, and the reviewer returned no unresolved suspicion.
+When the reviewer proposes item evidence, each admitted reproduction or mutation proof is still reexecuted by the gate; a plain CLEAR review needs no invented command.
 It fetches `refs/pull/<number>/head` from the base repository into a disposable Git checkout and requires that ref to resolve to the exact live API head SHA before reviewer launch.
 
 New run records carry additive telemetry for input, output, cache-read, and cache-write tokens when Pi reports them.
 The record keeps provider-reported cost, Pi-calculated cost, and cost recomputed from the pinned declared rates as separate fields with explicit provenance.
 Pi events do not currently expose a provider-reported billing value, so that field remains null instead of relabeling Pi's calculated value.
-The same record carries completed turns, reviewer latency, outcome, normalized failure category, finding disposition, and optional reuse provenance; regular-lane totals aggregate both full-diff passes.
+The same record carries completed turns, reviewer latency, outcome, normalized failure category, finding disposition, and optional reuse provenance.
 Use `bin/fm-crosscheck.sh economics <task-id>` for a read-only per-run table and totals.
 
 Crosscheck can reuse an already accepted original review without another provider request only when the exact head SHA, reviewed base, stable claims digest, reviewer credential identity, and byte-derived review-contract digest are unchanged.
@@ -157,7 +158,7 @@ The new run remains in state `clear` and records the exact SHA-256 digest of its
 Merge verification resolves that exact earlier source and revalidates its execution proof, reviewer identity, contract digest, and Azure compartment identity when applicable.
 Missing, changed, ambiguous, or chained source provenance fails closed.
 
-The reviewed base is the merge base of that head and the live base branch, resolved in the review checkout, and it is the base every downstream consumer uses: the reviewer prompt, the verdict-level execution proof, the ledger run, and verification.
+The reviewed base is the merge base of that head and the live base branch, resolved in the review checkout, and it is the base every downstream consumer uses: the reviewer prompt, the ledger run, and verification.
 It is deliberately not GitHub's `base.sha`.
 GitHub reports `base.sha` as the base branch tip observed when the snapshot was taken, so on an active default branch it is usually not an ancestor of the PR head and it changes whenever anything else merges.
 Treating it as the reviewed base made two failures routine: an un-rebased PR was refused before launch because the live base was not the checkout's merge base, and a ledger written minutes earlier stopped matching at the merge gate because the branch had moved for reasons unrelated to the PR.
@@ -250,8 +251,8 @@ The readable report renders that distinction before its summary.
 - `tool-failure` means environment, task metadata, reviewer configuration, exact-head fetch, reviewer credential binding, or required command-execution proof prevented a trustworthy verdict.
 - `cannot-certify` means a reviewer completed but the changed implementation's own test system had no trustworthy mutation-certification route the gate could execute.
 - `unreviewed` means a reviewer ran but no valid exact-head verdict artifact exists.
-- `blocking` means a completed reviewer with successful command-execution evidence declined clearance through a suspicion, admitted finding, or a named test that stayed green under its implementation mutation.
-- `clear` means a completed reviewer with successful command-execution evidence earned clearance and no durable blocker remains.
+- `blocking` means a completed exact-head reviewer declined clearance through a suspicion, admitted finding, or a named test that stayed green under its implementation mutation.
+- `clear` means a completed exact-head reviewer earned clearance and no durable blocker remains.
 
 CLI banners preserve the same distinction as `CROSSCHECK TOOL-FAILURE`, `CROSSCHECK UNREVIEWED`, and `CROSSCHECK BLOCKING`.
 Only `blocking` is a review verdict about code.
@@ -259,14 +260,12 @@ Only `blocking` is a review verdict about code.
 New findings must supply a helper under `.crosscheck/reproductions/`, a command naming that helper, an expected exit code, and a distinctive output marker.
 Crosscheck executes the command itself and stores its actual exit and bounded output in the ledger.
 If that reproduction or its citations are inadmissible, the candidate does not enter durable findings; it becomes a run-scoped suspicion carrying every valid citation and a note for each dropped citation, so the completed review remains `blocking`.
-Every verdict artifact must also carry one verdict-level reproduction whose command names the exact base and head SHAs.
-The local reviewer must create and run that helper with its own command tool, and the helper must leave a receipt naming both SHAs, `HOME`, and the provider account selector.
-In Azure static-packet mode, the model proposes the helper and the controller runs it in separate credentialless tool and verifier VMs, so that remote receipt proves its marker and both exact SHAs without pretending to observe the model compartment's private paths.
-Crosscheck inspects that receipt before independently re-executing the helper, then stores the receipt digest and bounded content with the verdict.
-A missing or failed verdict-level reproduction is a `tool-failure`, so a reading-only concern from a reviewer with a dead command tool can never become a blocking code verdict.
-The gate's re-execution is deliberately independent: it re-runs the helper itself in the review checkout with no network and none of the reviewer's provider credentials or account environment.
-Reviewer helpers must therefore be self-contained and must not require reviewer-only variables to be set, even when a local receipt records `HOME` and the provider account selector.
-That asymmetry is the trap this contract exists to name: a helper that reads those variables unguarded under `set -u` succeeds for the reviewer and fails for the gate.
+Current records carry `evidence_policy: conditional-v1` and a controller-derived evidence mode.
+`identity-only-v1` means no reproduction or mutation proof was admitted. Plain CLEAR, suspicion-only blocking, closed-equivalent-only, and all-proofs-degraded reviews use this mode.
+`isolated-proof-v1` means at least one reproduction or mutation proof was admitted.
+The mode is part of the reviewer identity digest and validators recompute it from durable admitted proof state.
+Azure launches no tool or verifier VMs for an identity-only review with no proposed evidence.
+Failed Azure proof pairs are retained separately as `failed_evidence_attempts`; their compartment identity, networkless boundary, and cleanup must validate, but they never certify a finding or change evidence mode.
 Every evidence-execution refusal carries the command's own bounded output, because a bare unexpected exit reads as a substantive verdict about the code when it is often a failure to execute at all.
 The post-review integrity check reads `git status --porcelain --untracked-files=normal`, not `--untracked-files=all`.
 `normal` collapses the wholly untracked `.crosscheck/` tree into one status entry, so the check costs a fixed amount however much evidence the reviewer wrote.
@@ -354,7 +353,7 @@ The Pi path pins the roster model on its mapped provider (each registered cross-
 The globally installed Pi Fast Mode toggle is not used by this lane.
 Crosscheck loads only its explicit verdict extension, and `pi-openai-fast-mode` targets OpenAI providers rather than the `fireworks-glm` custom provider.
 New reviews deliberately use the regular GLM 5.2 selector rather than the historical Fast serving path.
-An unavailable reviewer binary, sandbox, reviewer credential binding, verdict-level execution proof, or exact remote PR head records a `tool-failure` attempt when the live head is already known, and otherwise emits the same tool-failure class without fabricating a ledger run.
+An unavailable reviewer binary, sandbox, reviewer credential binding, or exact remote PR head records a `tool-failure` attempt when the live head is already known, and otherwise emits the same tool-failure class without fabricating a ledger run.
 A ledger that cannot be read is the one stop that cannot record itself: appending a run to a file that failed to parse would risk destroying the durable findings it still holds, so the ledger is left exactly as it is and only the readable `crosscheck.md` report is rewritten, naming the parse failure so the cause is on disk rather than only in the exit status of a run nobody kept.
 A reviewer that never reached its provider is also a `tool-failure` rather than an `unreviewed` attempt, and is the case that fails over.
 The two are distinguished by evidence of model work: a Codex exit that wrote no result artifact or a Pi launch that never completed a turn means the account never spoke and the gate learned nothing about the code.

@@ -256,14 +256,14 @@ prompt = module.azure_review_prompt(
 )
 expected = module.canonical_bytes(schema).decode("utf-8")
 trusted_header = "AZURE REVIEW OUTPUT FORMAT (TRUSTED FINAL INSTRUCTION):"
-packet_close = "</AZURE_EXACT_HEAD_REVIEW_PACKET_UNTRUSTED>"
+packet_close = "</AZURE_EXACT_HEAD_REVIEW_PACKET_UNTRUSTED_"
 
 
 def assert_pi_bound(candidate):
     assert candidate.startswith(host_prompt)
     assert candidate.rfind(trusted_header) > candidate.rfind(packet_close)
     assert expected not in candidate
-    assert "Use `submit_crosscheck_verdict` exactly once" in candidate
+    assert "call `finish_review` exactly once" in candidate
     assert "supplied Crosscheck verdict schema" not in candidate
     trusted_tail = candidate[candidate.rfind(trusted_header):]
     assert "supplied" not in trusted_tail.lower()
@@ -275,6 +275,7 @@ assert set(schema["properties"]) == {"verdict", "evidence_files"}, schema
 assert schema["additionalProperties"] is False
 assert schema["properties"]["verdict"] == verdict_schema
 assert schema["properties"]["evidence_files"]["type"] == "array"
+assert schema["properties"]["evidence_files"]["minItems"] == 0
 evidence_item = schema["properties"]["evidence_files"]["items"]
 assert evidence_item["required"] == ["path", "content"]
 assert evidence_item["additionalProperties"] is False
@@ -285,6 +286,7 @@ manifest = [
 assert module.normalize_pi_evidence_files(manifest) == {
     item["path"]: item["content"] for item in manifest
 }
+assert module.normalize_pi_evidence_files([]) == {}
 for malformed in (
     [manifest[0], manifest[0]],
     [{**manifest[0], "extra": True}],
@@ -297,8 +299,8 @@ for malformed in (
     else:
         raise AssertionError(f"Pi evidence normalization admitted {malformed!r}")
 assert "Your final response must satisfy the supplied JSON schema" in host_prompt
-assert "The constrained verdict submitter is the only enabled tool." in prompt
-assert "credentialless tool VM's HOME and account selector are not model-identity evidence" in prompt
+assert "For Pi, only the bounded snapshot read/search" in prompt
+assert "emit only surviving reports and updates" in prompt
 assert "record the schema's fixed model execution-home" not in prompt
 assert commands[0][0] == [
     "git", "-C", "/unused-review-checkout", "diff", "--no-ext-diff",
@@ -319,7 +321,10 @@ with tempfile.TemporaryDirectory() as temporary:
     request = json.loads(request_path.read_text(encoding="utf-8"))
 assert request["prompt"] == prompt
 assert request["review_schema"] == schema
-assert request["tool_protocol"]["model_tools"] == ["submit_crosscheck_verdict"]
+assert request["tool_protocol"]["model_tools"] == [
+    "repo_search", "repo_read", "submit_evidence_file", "report_finding",
+    "report_suspicion", "update_finding", "request_lookup", "finish_review",
+]
 assert request["verdict_extension"]["sha256"] == module.digest_bytes(
     request["verdict_extension"]["source"].encode("utf-8")
 )
@@ -1063,6 +1068,7 @@ PY
 cross_family_provider_host_unit() {
   python3 - "$ADAPTER" "$CORE" <<'PY' || fail "model-aware provider host derivation failed"
 import importlib.util
+import copy
 import sys
 
 spec = importlib.util.spec_from_file_location("azure_crosscheck", sys.argv[1])
@@ -1525,13 +1531,18 @@ PY
 }
 
 identity_outcome_unit() {
-  python3 - "$ADAPTER" <<'PY' || fail "Azure ledger identity contract failed"
+  python3 - "$ADAPTER" "$CORE" <<'PY' || fail "Azure ledger identity contract failed"
 import importlib.util
+import copy
 import sys
 
 spec = importlib.util.spec_from_file_location("azure_crosscheck", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+core_spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[2])
+core = importlib.util.module_from_spec(core_spec)
+sys.modules["fm_crosscheck"] = core
+core_spec.loader.exec_module(core)
 identity = {
     "home_binding": "sha256:" + "1" * 64,
     "task_id": "task-one",
@@ -1603,8 +1614,215 @@ base = {
 }
 run = {"head_sha": "a" * 40, "base_sha": "b" * 40, "claims_sha256": "c" * 64}
 module.validate_azure_reviewer_record(base, run, "run")
+
+# The conditional contract admits a zero-proof identity-only record without
+# inventing tool/verifier VMs, while the successful-attempt mode remains exact.
+generation_fields = (
+    "home_binding", "task_id", "pull_request", "head_sha", "base_sha",
+    "base_branch_sha", "claims_sha256", "deployment_generation",
+    "model_image_id", "reviewer_sku", "provider_host", "provider_port",
+    "reviewer_harness", "reviewer_model", "reviewer_effort",
+    "reviewer_account_digest", "ledger_digest", "evidence_policy",
+)
+conditional = copy.deepcopy(base)
+conditional["evidence_policy"] = "conditional-v1"
+conditional["evidence_mode"] = "isolated-proof-v1"
+conditional_identity = conditional["azure_identity"]
+conditional_identity["evidence_policy"] = "conditional-v1"
+conditional_identity["review_generation"] = module.digest_bytes(
+    module.canonical_bytes(
+        {field: conditional_identity[field] for field in generation_fields}
+    )
+).split(":", 1)[1][:24]
+for child_label in ("tool", "verifier"):
+    conditional_identity[child_label]["review_generation"] = conditional_identity[
+        "review_generation"
+    ]
+    conditional_identity["evidence_attempts"][0][child_label][
+        "review_generation"
+    ] = conditional_identity["review_generation"]
+conditional_identity["evidence_attempts_digest"] = module.digest_bytes(
+    module.canonical_bytes(conditional_identity["evidence_attempts"])
+)
+conditional_identity["failed_evidence_attempts"] = []
+conditional_identity["failed_evidence_attempts_digest"] = module.digest_bytes(
+    module.canonical_bytes([])
+)
+module.validate_azure_reviewer_record(conditional, run, "conditional")
+
+discarded_clean = copy.deepcopy(conditional)
+discarded_clean["evidence_mode"] = "identity-only-v1"
+module.validate_azure_reviewer_record(
+    discarded_clean, run, "semantically-discarded-clean-attempt"
+)
+
+identity_only = copy.deepcopy(conditional)
+identity_only["evidence_mode"] = "identity-only-v1"
+identity_only_identity = identity_only["azure_identity"]
+identity_only_identity["tool"] = None
+identity_only_identity["verifier"] = None
+identity_only_identity["evidence_attempts"] = []
+identity_only_identity["evidence_attempts_digest"] = module.digest_bytes(
+    module.canonical_bytes([])
+)
+module.validate_azure_reviewer_record(identity_only, run, "identity-only")
+
+snapshot_bound = copy.deepcopy(identity_only)
+snapshot_identity = snapshot_bound["azure_identity"]
+snapshot_identity.update({
+    "repository_snapshot_digest": "sha256:" + "a" * 64,
+    "repository_snapshot_manifest_digest": "sha256:" + "b" * 64,
+    "repository_snapshot_head_sha": "a" * 40,
+    "repository_snapshot_base_sha": "b" * 40,
+    "repository_snapshot_compressed_bytes": "1024",
+    "repository_snapshot_uncompressed_bytes": "4096",
+    "repository_snapshot_file_count": "3",
+    "repository_snapshot_excluded_count": "1",
+    "review_guidance": "review exact behavior",
+    "review_guidance_digest": module.digest_bytes(b"review exact behavior"),
+    "review_guidance_source": "b" * 40 + ":AGENTS.md",
+})
+snapshot_generation_fields = generation_fields + (
+    "repository_snapshot_digest",
+    "repository_snapshot_manifest_digest",
+    "repository_snapshot_head_sha",
+    "repository_snapshot_base_sha",
+    "repository_snapshot_compressed_bytes",
+    "repository_snapshot_uncompressed_bytes",
+    "repository_snapshot_file_count",
+    "repository_snapshot_excluded_count",
+    "review_guidance",
+    "review_guidance_digest",
+    "review_guidance_source",
+)
+snapshot_identity["review_generation"] = module.digest_bytes(
+    module.canonical_bytes(
+        {field: snapshot_identity[field] for field in snapshot_generation_fields}
+    )
+).split(":", 1)[1][:24]
+module.validate_azure_reviewer_record(snapshot_bound, run, "snapshot-bound")
+lookup_bound = copy.deepcopy(snapshot_bound)
+lookup_identity = lookup_bound["azure_identity"]
+lookup_identity.update({
+    "lookup_follow_up_pass": "1",
+    "lookup_results_digest": "sha256:" + "d" * 64,
+    "lookup_initial_request_digest": "sha256:" + "e" * 64,
+    "lookup_initial_result_digest": "sha256:" + "f" * 64,
+    "lookup_initial_model": {
+        **copy.deepcopy(lookup_identity["model"]),
+        "resource_id": "/initial-model",
+        "vm_instance_id": "initial-model",
+        "boot_id": "boot-initial-model",
+        "request_digest": "sha256:" + "e" * 64,
+        "result_digest": "sha256:" + "f" * 64,
+        "cleanup_phase": "complete",
+    },
+})
+lookup_generation_fields = snapshot_generation_fields + (
+    "lookup_follow_up_pass",
+    "lookup_results_digest",
+    "lookup_initial_request_digest",
+    "lookup_initial_result_digest",
+)
+lookup_identity["review_generation"] = module.digest_bytes(
+    module.canonical_bytes(
+        {field: lookup_identity[field] for field in lookup_generation_fields}
+    )
+).split(":", 1)[1][:24]
+module.validate_azure_reviewer_record(lookup_bound, run, "lookup-bound")
+for field in ("resource_id", "vm_instance_id", "boot_id"):
+    reused_lookup_identity = copy.deepcopy(lookup_bound)
+    reused_lookup_identity["azure_identity"]["lookup_initial_model"][field] = (
+        reused_lookup_identity["azure_identity"]["model"][field]
+    )
+    try:
+        module.validate_azure_reviewer_record(
+            reused_lookup_identity, run, "reused-lookup-" + field
+        )
+    except RuntimeError as exc:
+        assert "provisional lookup model identity" in str(exc), str(exc)
+    else:
+        raise AssertionError(
+            "lookup follow-up reused its provisional model " + field
+        )
+tampered_base = copy.deepcopy(snapshot_bound)
+tampered_base["azure_identity"]["repository_snapshot_base_sha"] = "9" * 40
+try:
+    module.validate_azure_reviewer_record(tampered_base, run, "tampered-base")
+except RuntimeError as exc:
+    assert "snapshot or guidance identity" in str(exc), str(exc)
+else:
+    raise AssertionError("snapshot base drift validated")
+tampered_guidance = copy.deepcopy(snapshot_bound)
+tampered_guidance["azure_identity"]["review_guidance"] += " changed"
+try:
+    module.validate_azure_reviewer_record(
+        tampered_guidance, run, "tampered-guidance"
+    )
+except RuntimeError as exc:
+    assert "guidance identity" in str(exc), str(exc)
+else:
+    raise AssertionError("tampered merge-base guidance validated")
+
+contradictory = copy.deepcopy(identity_only)
+contradictory["evidence_mode"] = "isolated-proof-v1"
+try:
+    module.validate_azure_reviewer_record(contradictory, run, "contradictory")
+except RuntimeError as exc:
+    assert "has no successful attempt" in str(exc), str(exc)
+else:
+    raise AssertionError("isolated mode with zero successful attempts validated")
+
+failed = copy.deepcopy(identity_only)
+failed_identity = failed["azure_identity"]
+failed_tool = child("failed-tool")
+failed_verifier = child("failed-verifier")
+for candidate in (failed_tool, failed_verifier):
+    candidate["review_generation"] = failed_identity["review_generation"]
+failed_result = {**result, "exit_code": 1}
+failed_identity["failed_evidence_attempts"] = [{
+    "tool": failed_tool,
+    "tool_result": failed_result,
+    "verifier": failed_verifier,
+    "verifier_result": failed_result,
+    "failure": "evidence command did not pass cleanly",
+}]
+failed_identity["failed_evidence_attempts_digest"] = module.digest_bytes(
+    module.canonical_bytes(failed_identity["failed_evidence_attempts"])
+)
+module.validate_azure_reviewer_record(failed, run, "failed-attempt")
+
+# A paid failed pair remains loadable through the complete core ledger path.
+failed_config = copy.deepcopy(failed)
+failed_config.update({
+    "credential_source": "fixture-source",
+    "credential_identifier": "fixture-id",
+    "review_family_mode": core.REVIEW_FAMILY_CODEX_FALLBACK,
+    "model_independence": None,
+})
+core.refresh_reviewer_identity(failed_config)
+failed_ledger = core.new_ledger(
+    "task-one", "https://github.com/example/repo/pull/1"
+)
+core.append_failed_run(
+    failed_ledger,
+    {
+        "head_sha": "a" * 40,
+        "base_sha": "b" * 40,
+        "base_branch_sha": "d" * 40,
+        "claims_sha256": "c" * 64,
+    },
+    "fixture paid evidence failure",
+    failed_config,
+    "tool-failure",
+)
+reloaded = core.validate_ledger(
+    failed_ledger, "task-one", "https://github.com/example/repo/pull/1"
+)
+recorded = reloaded["runs"][-1]["reviewer"]["azure_identity"]
+assert recorded["evidence_attempts"] == []
+assert len(recorded["failed_evidence_attempts"]) == 1
 for cleanup_phase in ("pending", "ambiguous"):
-    import copy
     candidate = copy.deepcopy(base)
     candidate["azure_identity"]["model"]["cleanup_phase"] = cleanup_phase
     candidate["azure_identity"]["staging_cleanup_phase"] = cleanup_phase
@@ -1742,6 +1960,162 @@ PY
   pass "review generation binds the executing account and ambiguous cleanup never becomes absence"
 }
 
+lookup_followup_orchestration_unit() {
+  python3 - "$ADAPTER" "$CORE" <<'PY' \
+    || fail "Azure lookup follow-up orchestration contract failed"
+import importlib.util
+from pathlib import Path
+import sys
+import tempfile
+
+spec = importlib.util.spec_from_file_location("azure_lookup_orchestration", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+core_spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[2])
+core = importlib.util.module_from_spec(core_spec)
+sys.modules["fm_crosscheck"] = core
+core_spec.loader.exec_module(core)
+
+module.preflight_reviewer_credential = lambda *_args, **_kwargs: None
+module.runtime_config = lambda _home: {"lanes": 3, "queue_wait_seconds": 1}
+module.acquire_review_lane = lambda *_args, **_kwargs: (2, "lane-handle")
+released = []
+module.release_review_lane = released.append
+module.static_review_packet = lambda *_args, **_kwargs: "bounded diff"
+lookup_calls = []
+def lookup(requests, **kwargs):
+    lookup_calls.append((requests, kwargs))
+    return {
+        "schema": "firstmate.crosscheck-lookup.v1",
+        "queries": [{
+            "type": "search", "query": "public parser behavior",
+            "status": "complete", "result": "{}", "cache_hit": False,
+            "cache_key": "sha256:" + "1" * 64,
+        }],
+        "digest": "sha256:" + "2" * 64,
+    }
+core.perform_ketch_lookups = lookup
+
+telemetry = core.unavailable_run_telemetry()
+initial_model = {
+    "resource_id": "/initial", "vm_instance_id": "initial-vm",
+    "boot_id": "initial-boot", "request_digest": "sha256:" + "3" * 64,
+    "result_digest": "sha256:" + "4" * 64, "cleanup_phase": "complete",
+}
+calls = []
+def two_pass(**kwargs):
+    calls.append(kwargs)
+    if len(calls) == 1:
+        assert kwargs["lookup_context"] is None
+        raise module.LookupPassRequested(
+            [{"type": "search", "query": "public parser behavior"}],
+            telemetry,
+            initial_model,
+        )
+    assert kwargs["lookup_context"]["digest"] == "sha256:" + "2" * 64
+    assert kwargs["provisional_lookup_pass"]["model"] is initial_model
+    assert kwargs["provisional_lookup_pass"]["model"]["cleanup_phase"] == "complete"
+    return {"verdict": "CLEAR"}, {"execution_mode": module.EXECUTION_MODE}
+module._run_azure_review_in_lane = two_pass
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    outcome = module._run_azure_review_after_snapshot(
+        core=core, root=root, home=root, task_id="lookup-task",
+        pr_url="https://github.com/example/repo/pull/1",
+        review_dir=root, proof_root=root,
+        snapshot_value={
+            "head_sha": "a" * 40, "base_sha": "b" * 40,
+            "base_repo": "example/repo", "head_repo": "example/repo",
+        },
+        ledger={"findings": [], "runs": []},
+        config={"harness": "pi"}, author_account_identity="author",
+        phase_timer=None, persist_result=None,
+        repository_snapshot={"manifest": {}}, guidance={},
+    )
+assert outcome[0]["verdict"] == "CLEAR"
+assert len(calls) == 2 and len(lookup_calls) == 1
+assert released == ["lane-handle"]
+
+calls.clear()
+lookup_calls.clear()
+released.clear()
+failure_config = {"harness": "pi"}
+def failed_followup(**kwargs):
+    calls.append(kwargs)
+    if len(calls) == 1:
+        raise module.LookupPassRequested(
+            [{"type": "search", "query": "public parser behavior"}],
+            telemetry,
+            initial_model,
+        )
+    raise core.CrosscheckToolError("fresh follow-up launch failed")
+module._run_azure_review_in_lane = failed_followup
+try:
+    module._run_azure_review_after_snapshot(
+        core=core, root=Path("."), home=Path("."), task_id="lookup-failure",
+        pr_url="https://github.com/example/repo/pull/1",
+        review_dir=Path("."), proof_root=Path("."),
+        snapshot_value={
+            "head_sha": "a" * 40, "base_sha": "b" * 40,
+            "base_repo": "example/repo", "head_repo": "example/repo",
+        },
+        ledger={"findings": [], "runs": []}, config=failure_config,
+        author_account_identity="author", phase_timer=None,
+        persist_result=None, repository_snapshot={"manifest": {}}, guidance={},
+    )
+except core.CrosscheckToolError as exc:
+    assert "follow-up launch failed" in str(exc), str(exc)
+else:
+    raise AssertionError("failed Azure lookup follow-up produced a review")
+failed_telemetry = failure_config["_run_telemetry"]
+assert failed_telemetry["lookup"] == {
+    "requested": True,
+    "completed": 1,
+    "failed": 0,
+    "follow_up_pass": True,
+    "digest": "sha256:" + "2" * 64,
+}
+assert failed_telemetry["tokens"] == telemetry["tokens"]
+assert len(calls) == 2 and len(lookup_calls) == 1
+assert released == ["lane-handle"]
+
+calls.clear()
+lookup_calls.clear()
+released.clear()
+def second_lookup(**kwargs):
+    calls.append(kwargs)
+    model = dict(initial_model)
+    model["vm_instance_id"] = f"vm-{len(calls)}"
+    raise module.LookupPassRequested(
+        [{"type": "search", "query": "public parser behavior"}],
+        telemetry,
+        model,
+    )
+module._run_azure_review_in_lane = second_lookup
+try:
+    module._run_azure_review_after_snapshot(
+        core=core, root=Path("."), home=Path("."), task_id="lookup-twice",
+        pr_url="https://github.com/example/repo/pull/1",
+        review_dir=Path("."), proof_root=Path("."),
+        snapshot_value={
+            "head_sha": "a" * 40, "base_sha": "b" * 40,
+            "base_repo": "example/repo", "head_repo": "example/repo",
+        },
+        ledger={"findings": [], "runs": []}, config={"harness": "pi"},
+        author_account_identity="author", phase_timer=None,
+        persist_result=None, repository_snapshot={"manifest": {}}, guidance={},
+    )
+except core.CrosscheckToolError as exc:
+    assert "second lookup" in str(exc), str(exc)
+else:
+    raise AssertionError("Azure follow-up admitted a second lookup request")
+assert len(calls) == 2 and len(lookup_calls) == 1
+assert released == ["lane-handle"]
+PY
+  pass "Azure holds one lane, uses a cleaned fresh follow-up, and refuses a second lookup"
+}
+
 bridge_security_unit() {
   python3 - "$BRIDGE" <<'PY' || fail "Azure host bridge security contract failed"
 import importlib.util
@@ -1801,12 +2175,10 @@ executor = module.RemoteEvidenceExecutor(
 )
 executor.validate_declared_paths(
     {".crosscheck/reproductions/proof.sh", ".crosscheck/mutations/proof.patch"},
-    receipt_path=".crosscheck/reproductions/receipt.txt",
 )
 try:
     executor.validate_declared_paths(
         {".crosscheck/reproductions/proof.sh"},
-        receipt_path=".crosscheck/reproductions/receipt.txt",
     )
 except module.BridgeError as exc:
     assert "exactly match" in str(exc)
@@ -1848,6 +2220,35 @@ except module.BridgeError as exc:
     assert "reused" in str(exc)
 else:
     raise AssertionError("stale tool endpoint reuse became accepted evidence")
+
+# A completed nonclean pair is durable failed evidence, never certification.
+def dispatch_failed(runner, request, suffix, command, wall_seconds):
+    identity, result = dispatch(
+        runner, request, suffix, command, wall_seconds
+    )
+    result["exit_code"] = 1
+    return identity, result
+module.dispatch_once = dispatch_failed
+failed = module.RemoteEvidenceExecutor(
+    repository_root=Path("."), remote="https://github.com/example/repo.git",
+    source_ref="refs/pull/7/head", head_sha="a" * 40, base_sha="b" * 40,
+    review_generation="e" * 24, evidence_files=files,
+)
+try:
+    failed(
+        {"test_path":".crosscheck/reproductions/proof.sh","command":"bash --noprofile --norc .crosscheck/reproductions/proof.sh " + "b"*40 + " " + "a"*40,"expected_exit":0,"output_contains":"marker"},
+        Path("."), "failed", time.monotonic() + 300,
+    )
+except module.BridgeError as exc:
+    assert "failed closed" in str(exc)
+else:
+    raise AssertionError("a nonclean evidence pair became certifying")
+assert failed.attempts == []
+assert len(failed.failed_attempts) == 1
+record = failed.failed_attempts[0]
+assert record["tool_result"]["exit_code"] == 1
+assert record["verifier_result"]["exit_code"] == 1
+assert record["failure"] == "evidence command did not pass cleanly"
 PY
   pass "host bridge rejects hostile evidence and requires distinct cleaned exact-head tool/verifier attempts"
 }
@@ -1927,6 +2328,305 @@ with tempfile.TemporaryDirectory() as temporary:
     assert not observed["bundle"].exists()
 PY
   pass "Azure evidence bridge privately bundles an exact detached PR checkout without GitHub credentials"
+}
+
+repository_snapshot_unit() {
+  python3 - "$ADAPTER" "$MODEL_GUEST" <<'PY' \
+    || fail "Azure repository snapshot and guidance contract failed"
+import gzip
+import hashlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+spec = importlib.util.spec_from_file_location("adapter", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+guest = Path(sys.argv[2]).read_text(encoding="utf-8")
+marker = 'python3 - "$SNAPSHOT" "$REPOSITORY" "$INPUT" <<\'PY\'\n'
+start = guest.index(marker) + len(marker)
+end = guest.index('\nPY\nrm -f "$SNAPSHOT"', start)
+extractor = guest[start:end]
+
+def run(*argv, cwd):
+    return subprocess.run(
+        list(argv), cwd=cwd, check=True, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+def git(repo, *argv):
+    return run("git", "-C", str(repo), *argv, cwd=repo).stdout.decode().strip()
+
+def extract(archive, output, built):
+    request = {
+        "repository_snapshot": {
+            "schema": module.SNAPSHOT_SCHEMA,
+            "digest": built["digest"],
+            "manifest_digest": built["manifest_digest"],
+            "head_sha": built["head_sha"],
+            "base_sha": built["base_sha"],
+            "compressed_bytes": built["compressed_bytes"],
+            "uncompressed_bytes": built["uncompressed_bytes"],
+            "file_count": built["file_count"],
+            "excluded_count": built["excluded_count"],
+        },
+        "identity": {
+            "repository_snapshot_digest": built["digest"],
+            "repository_snapshot_manifest_digest": built["manifest_digest"],
+        },
+    }
+    request_path = archive.parent / (output.name + "-request.json")
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    script = archive.parent / (output.name + "-extract.py")
+    script.write_text(extractor, encoding="utf-8")
+    return subprocess.run(
+        [sys.executable, str(script), str(archive), str(output), str(request_path)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    repo = root / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    git(repo, "config", "user.name", "snapshot fixture")
+    git(repo, "config", "user.email", "snapshot@example.invalid")
+    (repo / "AGENTS.md").write_text(
+        "outside\n<!-- crosscheck-review:start -->\ncheck exact behavior\n"
+        "<!-- crosscheck-review:end -->\noutside\n",
+        encoding="utf-8",
+    )
+    (repo / "plain.txt").write_text("plain\n", encoding="utf-8")
+    (repo / "changed.txt").write_text("small\n", encoding="utf-8")
+    (repo / "binary.dat").write_bytes(b"binary\0payload")
+    (repo / "ordinary-big.txt").write_bytes(b"o" * (2 * 1024 * 1024 + 1))
+    os.symlink("plain.txt", repo / "safe-link")
+    git(repo, "add", "AGENTS.md", "plain.txt", "changed.txt", "binary.dat", "ordinary-big.txt", "safe-link")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    (repo / "changed.txt").write_bytes(b"c" * (3 * 1024 * 1024))
+    git(repo, "add", "changed.txt")
+    git(repo, "commit", "-qm", "head")
+    head = git(repo, "rev-parse", "HEAD")
+    oversized_blob = git(repo, "rev-parse", "HEAD:ordinary-big.txt")
+    first = root / "first.tar.gz"
+    second = root / "second.tar.gz"
+    original_git_bytes = module._git_bytes
+    def bounded_git_bytes(repository, *arguments, **kwargs):
+        if arguments[:2] == ("cat-file", "blob") and arguments[2] == oversized_blob:
+            raise AssertionError("oversized blob was materialized before exclusion")
+        return original_git_bytes(repository, *arguments, **kwargs)
+    module._git_bytes = bounded_git_bytes
+    built = module.build_repository_snapshot(
+        repo, base_sha=base, head_sha=head, destination=first
+    )
+    repeated = module.build_repository_snapshot(
+        repo, base_sha=base, head_sha=head, destination=second
+    )
+    assert built["digest"] == repeated["digest"]
+    assert built["manifest_digest"] == repeated["manifest_digest"]
+    module._git_bytes = original_git_bytes
+    exclusions = {item["path"]: item for item in built["manifest"]["exclusions"]}
+    assert exclusions["binary.dat"]["reason"] == "binary"
+    assert exclusions["ordinary-big.txt"]["reason"] == "oversized"
+    included = {item["path"]: item for item in built["manifest"]["included"]}
+    assert included["changed.txt"]["changed"] is True
+    assert included["changed.txt"]["size"] == 3 * 1024 * 1024
+    assert included["safe-link"]["kind"] == "symlink"
+    manifest_bytes = module.canonical_bytes(built["manifest"]) + b"\n"
+    assert built["uncompressed_bytes"] == (
+        sum(item["size"] for item in built["manifest"]["included"])
+        + len(manifest_bytes)
+    )
+    assert module.review_guidance(repo, base) == {
+        "content": "check exact behavior",
+        "digest": module.digest_bytes(b"check exact behavior"),
+        "source": base + ":AGENTS.md",
+    }
+    (repo / "AGENTS.md").write_text(
+        "<!-- crosscheck-review:end -->\nreversed\n"
+        "<!-- crosscheck-review:start -->\n",
+        encoding="utf-8",
+    )
+    git(repo, "add", "AGENTS.md")
+    git(repo, "commit", "-qm", "reversed guidance")
+    reversed_guidance = git(repo, "rev-parse", "HEAD")
+    try:
+        module.review_guidance(repo, reversed_guidance)
+    except module.AzureCrosscheckError as exc:
+        assert "reversed" in str(exc)
+    else:
+        raise AssertionError("reversed guidance markers raw-raised or validated")
+    git(repo, "checkout", "-q", head)
+    with tarfile.open(first, "r:gz") as archive:
+        names = archive.getnames()
+        assert all(".git" not in Path(name).parts for name in names)
+        assert "repository/.crosscheck-snapshot/manifest.json" in names
+        manifest = archive.extractfile(
+            "repository/.crosscheck-snapshot/manifest.json"
+        ).read()
+        assert module.digest_bytes(manifest) == built["manifest_digest"]
+    output = root / "extracted"
+    result = extract(first, output, built)
+    assert result.returncode == 0, result.stderr
+    assert (output / "plain.txt").read_text() == "plain\n"
+    assert (output / "changed.txt").stat().st_size == 3 * 1024 * 1024
+    assert os.readlink(output / "safe-link") == "plain.txt"
+    assert (output / ".crosscheck-snapshot/manifest.json").is_file()
+    assert (output / "plain.txt").stat().st_mode & 0o222 == 0
+    assert output.stat().st_mode & 0o222 == 0
+
+    # Generated snapshot metadata owns this namespace. A tracked path there
+    # would otherwise collide with controller-authenticated manifest state.
+    (repo / ".crosscheck-snapshot").mkdir()
+    (repo / ".crosscheck-snapshot/manifest.json").write_text(
+        "attacker-controlled\n", encoding="utf-8"
+    )
+    git(repo, "add", ".crosscheck-snapshot/manifest.json")
+    git(repo, "commit", "-qm", "reserved snapshot namespace")
+    reserved_head = git(repo, "rev-parse", "HEAD")
+    try:
+        module.build_repository_snapshot(
+            repo, base_sha=base, head_sha=reserved_head,
+            destination=root / "reserved.tar.gz",
+        )
+    except module.AzureCrosscheckError as exc:
+        assert "unsafe tracked path" in str(exc)
+        assert ".crosscheck-snapshot" in str(exc)
+    else:
+        raise AssertionError("tracked snapshot metadata shadowed the generated manifest")
+    git(repo, "checkout", "-q", head)
+
+    # Host build refuses hard-link and symlink escape shapes before staging.
+    (repo / "plain.txt").unlink()
+    os.link(repo / "changed.txt", repo / "plain.txt")
+    try:
+        module.build_repository_snapshot(
+            repo, base_sha=base, head_sha=head, destination=root / "hard.tar.gz"
+        )
+    except module.AzureCrosscheckError as exc:
+        assert "hard link" in str(exc)
+    else:
+        raise AssertionError("hard-linked tracked file entered the snapshot")
+    (repo / "plain.txt").unlink()
+    (repo / "plain.txt").write_text("plain\n", encoding="utf-8")
+    os.symlink("../../escape", repo / "unsafe-link")
+    git(repo, "add", "unsafe-link")
+    git(repo, "commit", "-qm", "unsafe link")
+    unsafe_head = git(repo, "rev-parse", "HEAD")
+    try:
+        module.build_repository_snapshot(
+            repo, base_sha=base, head_sha=unsafe_head,
+            destination=root / "unsafe.tar.gz",
+        )
+    except module.AzureCrosscheckError as exc:
+        assert "symlink escapes" in str(exc)
+    else:
+        raise AssertionError("escaping symlink entered the snapshot")
+
+    # Guest extraction independently rejects hard links and traversal.
+    for label, member_name, member_type in (
+        ("hardlink", "repository/evil", tarfile.LNKTYPE),
+        ("traversal", "repository/../evil", tarfile.REGTYPE),
+    ):
+        hostile = root / (label + ".tar.gz")
+        with hostile.open("wb") as raw:
+            with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as compressed:
+                with tarfile.open(fileobj=compressed, mode="w") as archive:
+                    info = tarfile.TarInfo(member_name)
+                    info.type = member_type
+                    info.linkname = "repository/plain.txt"
+                    info.size = 0
+                    archive.addfile(info, io.BytesIO(b"") if member_type == tarfile.REGTYPE else None)
+                    manifest_bytes = module.canonical_bytes(built["manifest"]) + b"\n"
+                    info = tarfile.TarInfo("repository/.crosscheck-snapshot/manifest.json")
+                    info.size = len(manifest_bytes)
+                    archive.addfile(info, io.BytesIO(manifest_bytes))
+        hostile_built = dict(built)
+        hostile_built["digest"] = module.digest_file(hostile)
+        hostile_built["compressed_bytes"] = hostile.stat().st_size
+        refused = extract(hostile, root / (label + "-out"), hostile_built)
+        assert refused.returncode != 0
+        assert "unsafe repository snapshot" in refused.stderr
+
+    original_bound = module.MAX_SNAPSHOT_UNCOMPRESSED_BYTES
+    module.MAX_SNAPSHOT_UNCOMPRESSED_BYTES = 10
+    git(repo, "checkout", "-q", head)
+    try:
+        module.build_repository_snapshot(
+            repo, base_sha=base, head_sha=head, destination=root / "over.tar.gz"
+        )
+    except module.AzureCrosscheckError as exc:
+        assert "measured" in str(exc) and "above" in str(exc)
+    else:
+        raise AssertionError("oversized aggregate snapshot passed preflight")
+    finally:
+        module.MAX_SNAPSHOT_UNCOMPRESSED_BYTES = original_bound
+
+    original_manifest_bound = module.MAX_SNAPSHOT_MANIFEST_BYTES
+    module.MAX_SNAPSHOT_MANIFEST_BYTES = 100
+    try:
+        module.build_repository_snapshot(
+            repo, base_sha=base, head_sha=head,
+            destination=root / "manifest-over.tar.gz",
+        )
+    except module.AzureCrosscheckError as exc:
+        assert "manifest bytes" in str(exc) and "above" in str(exc)
+    else:
+        raise AssertionError("over-limit manifest reached the guest")
+    finally:
+        module.MAX_SNAPSHOT_MANIFEST_BYTES = original_manifest_bound
+
+    # Every expected pre-spend refusal is normalized into the core's durable
+    # tool-failure path, and non-UTF8 changed paths are classified there too.
+    class Core:
+        class CrosscheckToolError(RuntimeError):
+            pass
+    original_builder = module.build_repository_snapshot
+    module.build_repository_snapshot = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        module.AzureCrosscheckError("fixture preflight refusal")
+    )
+    try:
+        module.run_azure_review(
+            core=Core, root=repo, home=root, task_id="task-one",
+            pr_url="https://github.com/example/repo/pull/1",
+            review_dir=repo, proof_root=root,
+            snapshot_value={"base_sha": base, "head_sha": head},
+            ledger={}, config={}, author_account_identity="",
+        )
+    except Core.CrosscheckToolError as exc:
+        assert "repository snapshot preflight failed" in str(exc)
+    else:
+        raise AssertionError("snapshot preflight escaped the durable tool-failure path")
+    finally:
+        module.build_repository_snapshot = original_builder
+
+    def invalid_changed_path(repository, *arguments, **kwargs):
+        if arguments[0] == "rev-parse":
+            return (head + "\n").encode()
+        if arguments[0] == "diff":
+            return b"\xff\0"
+        return original_git_bytes(repository, *arguments, **kwargs)
+    module._git_bytes = invalid_changed_path
+    try:
+        module.build_repository_snapshot(
+            repo, base_sha=base, head_sha=head,
+            destination=root / "non-utf8.tar.gz",
+        )
+    except module.AzureCrosscheckError as exc:
+        assert "changed path is not UTF-8" in str(exc)
+    else:
+        raise AssertionError("non-UTF8 changed path escaped classification")
+    finally:
+        module._git_bytes = original_git_bytes
+PY
+  pass "exact-head snapshots are deterministic, bounded, read-only, and safe on both sides"
 }
 
 replay_positive_and_failure_unit() {
@@ -2543,7 +3243,7 @@ try:
         review_dir=review,
         proof_root=proof,
         snapshot_value=dict(snapshot),
-        ledger={"runs":[]},
+        ledger={"findings":[],"runs":[]},
         config=dict(config),
         author_account_identity="",
         lane=0,
@@ -2597,7 +3297,7 @@ try:
         core=core,root=root,home=home,task_id="task-expired",
         pr_url="https://github.com/ruby-dlee/firstmate/pull/302",
         review_dir=review,proof_root=proof,snapshot_value=dict(snapshot),
-        ledger={"runs":[]},config=dict(config),author_account_identity="",lane=0,
+        ledger={"findings":[],"runs":[]},config=dict(config),author_account_identity="",lane=0,
     )
 except core.CrosscheckToolError as exc:
     assert "expired while capacity waited" in str(exc)
@@ -2701,14 +3401,27 @@ adapter.parse_result = lambda *_args: {
 }
 
 attempts = [{
-    "tool": {"vm_instance_id": "tool-vm"},
-    "verifier": {"vm_instance_id": "verifier-vm"},
+    "tool": {
+        "vm_instance_id": "tool-vm", "boot_id": "tool-boot",
+        "resource_id": "/tool",
+    },
+    "verifier": {
+        "vm_instance_id": "verifier-vm", "boot_id": "verifier-boot",
+        "resource_id": "/verifier",
+    },
 }]
 class BridgeError(RuntimeError):
     pass
 class EvidenceExecutor:
+    instances = []
     def __init__(self, **_kwargs):
         self.attempts = attempts
+        self.failed_attempts = []
+        self.calls = 0
+        self.__class__.instances.append(self)
+    def __call__(self, *_args, **_kwargs):
+        self.calls += 1
+        raise AssertionError("identity-only review launched a proof executor")
 
 bridge = SimpleNamespace(
     BridgeError=BridgeError,
@@ -2717,13 +3430,36 @@ bridge = SimpleNamespace(
 )
 adapter.load_tool_bridge = lambda: bridge
 adapter.normalize_pi_evidence_files = lambda _value: {}
+adapter.replay_pi_result = lambda *_args, **_kwargs: {}
 adapter.remote_mutation_executor = lambda *_args: None
 core.pi_review_output_schema = lambda *_args: {}
 core.unavailable_run_telemetry = lambda: {}
 core.normalize_pi_review = lambda *_args: {}
 core.assert_review_checkout_intact = lambda *_args: None
 core.validate_review_shape = lambda *_args, **_kwargs: {}
-def apply_review(ledger, *_args, **_kwargs):
+def apply_review(
+    ledger,
+    _review,
+    _review_dir,
+    _proof_root,
+    _snapshot,
+    review_config,
+    *,
+    evidence_executor,
+    **_kwargs,
+):
+    if review_config.get("_fixture_apply_failure"):
+        evidence_executor.executor.failed_attempts.append({
+            "tool": {
+                "vm_instance_id": "failed-tool-vm", "boot_id": "failed-tool-boot",
+                "resource_id": "/failed-tool",
+            },
+            "verifier": {
+                "vm_instance_id": "failed-verifier-vm",
+                "boot_id": "failed-verifier-boot", "resource_id": "/failed-verifier",
+            },
+        })
+        raise core.CrosscheckError("fixture paid evidence failure")
     working = {**ledger, "runs": list(ledger.get("runs", []))}
     run = {"reviewer": {}, "state": "blocking"}
     working["runs"].append(run)
@@ -2752,7 +3488,7 @@ try:
         review_dir=review,
         proof_root=proof,
         snapshot_value=snapshot,
-        ledger={"runs": []},
+        ledger={"findings": [], "runs": []},
         config=config,
         author_account_identity="",
         lane=0,
@@ -2767,10 +3503,78 @@ persisted_run = events[1]
 assert persisted_run["reviewer"]["azure_identity"]["model"]["cleanup_phase"] == "ambiguous"
 assert persisted_run["reviewer"]["azure_identity"]["staging_cleanup_phase"] == "ambiguous"
 
+# With no admitted evidence, the adapter persists the model identity without
+# dispatching either proof compartment.
+events.clear()
+attempts.clear()
+adapter.cleanup_model_vm = lambda *_args: events.append("cleanup")
+identity_config = {
+    **config,
+    "evidence_policy": "conditional-v1",
+    "evidence_mode": "identity-only-v1",
+}
+working, identity_run = adapter._run_azure_review_in_lane(
+    core=core,
+    root=root,
+    home=home,
+    task_id="identity-only-no-proof-vms",
+    pr_url="https://github.com/ruby-dlee/firstmate/pull/327",
+    review_dir=review,
+    proof_root=proof,
+    snapshot_value=snapshot,
+    ledger={"findings": [], "runs": []},
+    config=identity_config,
+    author_account_identity="",
+    lane=0,
+    persist_result=persist_result,
+)
+assert working["runs"][-1] is identity_run
+identity_record = identity_run["reviewer"]["azure_identity"]
+assert identity_record["tool"] is None
+assert identity_record["verifier"] is None
+assert identity_record["evidence_attempts"] == []
+assert identity_record["failed_evidence_attempts"] == []
+assert identity_record["model"]["cleanup_phase"] == "complete"
+assert identity_record["staging_cleanup_phase"] == "complete"
+assert EvidenceExecutor.instances[-1].calls == 0
+
+# Proof-application failure still returns the paid attempt identity to the
+# core config that appends the failed run after this adapter unwinds.
+failed_config = {
+    **identity_config,
+    "_fixture_apply_failure": True,
+}
+try:
+    adapter._run_azure_review_in_lane(
+        core=core,
+        root=root,
+        home=home,
+        task_id="failed-proof-attempt-durable",
+        pr_url="https://github.com/ruby-dlee/firstmate/pull/327",
+        review_dir=review,
+        proof_root=proof,
+        snapshot_value=snapshot,
+        ledger={"findings": [], "runs": []},
+        config=failed_config,
+        author_account_identity="",
+        lane=0,
+        persist_result=persist_result,
+    )
+except core.CrosscheckError as exc:
+    assert "paid evidence failure" in str(exc), str(exc)
+else:
+    raise AssertionError("fixture proof failure unexpectedly produced a run")
+failed_identity = failed_config["azure_identity"]
+assert failed_identity["evidence_attempts"] == []
+assert len(failed_identity["failed_evidence_attempts"]) == 1
+assert failed_identity["model"]["cleanup_phase"] == "complete"
+assert failed_identity["staging_cleanup_phase"] == "complete"
+
 # A bridge failure must enter the core's item-scoped CrosscheckError family so
 # apply_review can degrade one proof without discarding the semantic review.
 class FailingExecutor:
     attempts = []
+    failed_attempts = []
     batch_deadline = 1.0
     def __call__(self, *_args, **_kwargs):
         raise BridgeError("fixture evidence refusal")
@@ -2784,7 +3588,7 @@ normalized = adapter.NormalizedRemoteEvidenceExecutor(
 )
 for operation in (
     lambda: normalized(None),
-    lambda: normalized.validate_declared_paths(set(), receipt_path="fixture"),
+    lambda: normalized.validate_declared_paths(set()),
     lambda: normalized.execute_mutation(None),
 ):
     try:
@@ -2815,7 +3619,7 @@ try:
         review_dir=review,
         proof_root=proof,
         snapshot_value=snapshot,
-        ledger={"runs": []},
+        ledger={"findings": [], "runs": []},
         config=dict(config),
         author_account_identity="",
         lane=0,
@@ -3019,7 +3823,7 @@ for handle in (handle_c,handle_d):
     m.release_review_lane(handle)
 # The review entrypoint queues before any Azure mutation and pins the lane
 # SKU unless config fixed one; reviewers copy auth in and never sync back.
-source=inspect.getsource(m.run_azure_review)
+source=inspect.getsource(m._run_azure_review_after_snapshot)
 assert source.index("acquire_review_lane")<source.index("_run_azure_review_in_lane")
 assert "finally:" in source and "release_review_lane" in source
 in_lane=inspect.getsource(m._run_azure_review_in_lane)
@@ -3138,7 +3942,7 @@ PY
   pass "the safety-shutdown expiry script renders real newlines with the exact unit text"
 }
 
-pi_reviewer_runtime_unit() {
+pi_reviewer_runtime_legacy_unused() {
   python3 - "$PI_REVIEWER_RUNTIME" "$PI_VERDICT_EXTENSION" <<'PY' \
     || fail "digest-bound Pi reviewer runtime contract failed"
 import hashlib
@@ -3424,6 +4228,669 @@ PY
   pass "the digest-bound Pi runtime bounds verdict repair and remains fail closed"
 }
 
+pi_reviewer_runtime_unit() {
+  python3 - "$PI_REVIEWER_RUNTIME" <<'PY' \
+    || fail "incremental Pi replay contract failed"
+import copy
+import importlib.util
+import json
+from pathlib import Path
+import tempfile
+import sys
+
+spec = importlib.util.spec_from_file_location("pi_replay", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+with tempfile.TemporaryDirectory() as temporary:
+    repository = Path(temporary) / "repository"
+    repository.mkdir()
+    (repository / "review.py").write_text("first\nneedle\n", encoding="utf-8")
+    head = "a" * 40
+    base = "b" * 40
+    read_args = {"path": "review.py", "start_line": 1, "end_line": 2}
+    read_result = {
+        "path": "review.py",
+        "start_line": 1,
+        "end_line": 2,
+        "lines": [
+            {"line": 1, "text": "first"},
+            {"line": 2, "text": "needle"},
+        ],
+    }
+    finish_args = {
+        "verdict": "CLEAR",
+        "summary": "No release blocker survived the skeptical re-check.",
+        "citations": [{"path": "review.py", "line": 2}],
+    }
+    records = [
+        {
+            "seq": 1,
+            "name": "repo_read",
+            "arguments": read_args,
+            "result_sha256": module.value_digest(read_result),
+        },
+        {
+            "seq": 2,
+            "name": "finish_review",
+            "arguments": finish_args,
+            "result_sha256": module.value_digest({"finalized": True}),
+        },
+    ]
+    replayed = module.replay_tool_log(
+        records,
+        repository=repository,
+        head_sha=head,
+        base_sha=base,
+        executing_account_home="/account",
+        execution_home="/home",
+        known_finding_ids=set(),
+        eligible_equivalent_ids=set(),
+    )
+    assert replayed["verdict"]["schema"] == "firstmate.crosscheck-review.v2"
+    assert replayed["verdict"]["head_sha"] == head
+    assert replayed["evidence_files"] == []
+
+    large_manifest = {
+        "exclusions": [
+            {
+                "path": f"excluded/{index:04d}-{'x' * 80}.txt",
+                "reason": "oversized",
+                "size": 2 * 1024 * 1024 + index,
+            }
+            for index in range(700)
+        ],
+        "included": [{"path": "review.py", "kind": "file"}],
+    }
+    assert len(module.canonical_bytes(large_manifest)) > module.MAX_READ_BYTES
+    manifest_text = json.dumps(
+        large_manifest, sort_keys=True, ensure_ascii=False, indent=2
+    ) + "\n"
+    manifest_lines = manifest_text.splitlines()
+    manifest_read_args = {
+        "path": ".crosscheck-snapshot/manifest.json",
+        "start_line": 1,
+        "end_line": 20,
+    }
+    manifest_read_result = {
+        "path": ".crosscheck-snapshot/manifest.json",
+        "start_line": 1,
+        "end_line": 20,
+        "lines": [
+            {"line": number, "text": manifest_lines[number - 1]}
+            for number in range(1, 21)
+        ],
+    }
+    manifest_records = [
+        {
+            "seq": 1,
+            "name": "repo_read",
+            "arguments": manifest_read_args,
+            "result_sha256": module.value_digest(manifest_read_result),
+        },
+        {
+            "seq": 2,
+            "name": "finish_review",
+            "arguments": finish_args,
+            "result_sha256": module.value_digest({"finalized": True}),
+        },
+    ]
+    manifest_replay = module.replay_tool_log(
+        manifest_records,
+        repository=repository,
+        manifest=large_manifest,
+        head_sha=head,
+        base_sha=base,
+        executing_account_home="/account",
+        execution_home="/home",
+    )
+    assert manifest_replay["verdict"]["summary"] == finish_args["summary"]
+
+    search_args = {"query": "absent", "paths": ["review.py"]}
+    empty_search = {"matches": [], "truncated": False}
+    search_records = [
+        {
+            "seq": index,
+            "name": "repo_search",
+            "arguments": search_args,
+            "result_sha256": module.value_digest(empty_search),
+        }
+        for index in (1, 2)
+    ] + [{
+        "seq": 3,
+        "name": "finish_review",
+        "arguments": finish_args,
+        "result_sha256": module.value_digest({"finalized": True}),
+    }]
+    original_scan_budget = module.MAX_SEARCH_SCAN_BYTES
+    module.MAX_SEARCH_SCAN_BYTES = 20
+    try:
+        module.replay_tool_log(
+            search_records,
+            repository=repository,
+            head_sha=head,
+            base_sha=base,
+            executing_account_home="/account",
+            execution_home="/home",
+        )
+    except module.ReviewError as exc:
+        assert "aggregate scan budget" in str(exc)
+    else:
+        raise AssertionError("repeated full-repository searches escaped the scan budget")
+    finally:
+        module.MAX_SEARCH_SCAN_BYTES = original_scan_budget
+
+    blocking = copy.deepcopy(records)
+    blocking[-1]["arguments"] = {
+        **finish_args,
+        "verdict": "BLOCKING",
+    }
+    blocking[-1]["result_sha256"] = module.value_digest({"finalized": True})
+    replayed = module.replay_tool_log(
+        blocking,
+        repository=repository,
+        head_sha=head,
+        base_sha=base,
+        executing_account_home="/account",
+        execution_home="/home",
+        known_finding_ids={"cc-active"},
+        active_finding_ids={"cc-active"},
+    )
+    assert replayed["verdict"]["summary"] == finish_args["summary"]
+
+    try:
+        module.replay_tool_log(
+            records,
+            repository=repository,
+            head_sha=head,
+            base_sha=base,
+            executing_account_home="/account",
+            execution_home="/home",
+            known_finding_ids={"cc-active"},
+            active_finding_ids={"cc-active"},
+        )
+    except module.ReviewError as exc:
+        assert "contradicts" in str(exc)
+    else:
+        raise AssertionError("CLEAR ignored an untouched active finding")
+
+    too_many_citations = copy.deepcopy(records)
+    too_many_citations[-1]["arguments"]["citations"] = [
+        {"path": "review.py", "line": 1} for _ in range(33)
+    ]
+    try:
+        module.replay_tool_log(
+            too_many_citations,
+            repository=repository,
+            head_sha=head,
+            base_sha=base,
+            executing_account_home="/account",
+            execution_home="/home",
+        )
+    except module.ReviewError:
+        pass
+    else:
+        raise AssertionError("33 citations escaped the immediate bound")
+
+    (repository / "target.py").write_text("target\n", encoding="utf-8")
+    (repository / "link.py").symlink_to("target.py")
+    manifest = {
+        "included": [
+            {"path": "review.py", "kind": "file"},
+            {"path": "link.py", "kind": "symlink"},
+        ],
+        "exclusions": [],
+    }
+    symlink_citation = copy.deepcopy(records)
+    symlink_citation[-1]["arguments"]["citations"] = [
+        {"path": "link.py", "line": 1}
+    ]
+    try:
+        module.replay_tool_log(
+            symlink_citation,
+            repository=repository,
+            manifest=manifest,
+            head_sha=head,
+            base_sha=base,
+            executing_account_home="/account",
+            execution_home="/home",
+        )
+    except module.ReviewError:
+        pass
+    else:
+        raise AssertionError("a snapshot symlink citation was accepted")
+
+    event_path = repository / "mixed-events.jsonl"
+    event_path.write_text("\n".join(json.dumps(event) for event in [
+        {
+            "type": "turn_end",
+            "message": {
+                "role": "assistant",
+                "provider": "fireworks-glm",
+                "model": "model",
+                "stopReason": "toolUse",
+                "content": [
+                    {"type": "toolCall", "id": "read", "name": "repo_read", "arguments": read_args},
+                    {"type": "toolCall", "id": "finish", "name": "finish_review", "arguments": finish_args},
+                ],
+                "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0.0}},
+            },
+        },
+        {
+            "type": "turn_end",
+            "message": {
+                "role": "assistant",
+                "provider": "fireworks-glm",
+                "model": "model",
+                "stopReason": "stop",
+                "content": [{"type": "text", "text": "done"}],
+                "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0.0}},
+            },
+        },
+        {"type": "agent_end", "messages": []},
+    ]) + "\n", encoding="utf-8")
+    completion = module.parse_events(event_path, "fireworks-glm", "model")
+    assert finish_args in completion["finishes"]
+
+    malformed = copy.deepcopy(records)
+    malformed[0]["seq"] = 2
+    try:
+        module.replay_tool_log(
+            malformed,
+            repository=repository,
+            head_sha=head,
+            base_sha=base,
+            executing_account_home="/account",
+            execution_home="/home",
+        )
+    except module.ReviewError:
+        pass
+    else:
+        raise AssertionError("malformed event ordering was accepted")
+
+    after_finish = copy.deepcopy(records) + [copy.deepcopy(records[0])]
+    after_finish[-1]["seq"] = 3
+    try:
+        module.replay_tool_log(
+            after_finish,
+            repository=repository,
+            head_sha=head,
+            base_sha=base,
+            executing_account_home="/account",
+            execution_home="/home",
+        )
+    except module.ReviewError:
+        pass
+    else:
+        raise AssertionError("a tool after finish_review was accepted")
+PY
+  pass "incremental Pi events replay into one schema-v2 review and fail closed"
+}
+
+pi_extension_protocol_unit() {
+  node --input-type=module - "$PI_VERDICT_EXTENSION" <<'JS' \
+    || fail "Pi extension immediate-validation contract failed"
+import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
+
+const root = mkdtempSync(`${tmpdir()}/crosscheck-extension-`);
+mkdirSync(`${root}/.crosscheck-snapshot`);
+writeFileSync(`${root}/review.py`, "first\nsecond\n");
+writeFileSync(`${root}/target.py`, "target\n");
+symlinkSync("target.py", `${root}/link.py`);
+const largeManifest = {
+  exclusions: Array.from({ length: 700 }, (_, index) => ({
+    path: `excluded/${String(index).padStart(4, "0")}-${"x".repeat(80)}.txt`,
+    reason: "oversized",
+    size: 2 * 1024 * 1024 + index,
+  })),
+  included: [
+    { path: "review.py", kind: "file" },
+    { path: "link.py", kind: "symlink" },
+  ],
+};
+const rawManifest = JSON.stringify(largeManifest);
+assert(Buffer.byteLength(rawManifest, "utf8") > 48 * 1024);
+writeFileSync(`${root}/.crosscheck-snapshot/manifest.json`, rawManifest);
+const schema = `${root}/schema.json`;
+const citation = { type: "array", items: { type: "object" } };
+const review = {
+  properties: {
+    summary: { type: "string" },
+    citations: citation,
+    new_findings: { items: { properties: {
+      severity: {}, title: {}, citations: citation, description: {}, reproduction: {},
+    } } },
+    suspicions: { items: { properties: { description: {}, citations: citation } } },
+    finding_updates: { items: { properties: {
+      id: {}, status: {}, note: {}, reproduction: {}, mutation_proof: {}, equivalent_to: {},
+    } } },
+  },
+};
+writeFileSync(schema, JSON.stringify(review));
+const log = `${root}/events.jsonl`;
+Object.assign(process.env, {
+  FM_CROSSCHECK_REVIEW_SCHEMA: schema,
+  FM_CROSSCHECK_REPOSITORY: root,
+  FM_CROSSCHECK_TOOL_EVENT_LOG: log,
+  FM_CROSSCHECK_BASE_SHA: "b".repeat(40),
+  FM_CROSSCHECK_HEAD_SHA: "a".repeat(40),
+  FM_CROSSCHECK_FINDING_IDS: '["cc-active"]',
+  FM_CROSSCHECK_ACTIVE_FINDING_IDS: '["cc-active"]',
+  FM_CROSSCHECK_ELIGIBLE_EQUIVALENT_IDS: "[]",
+  FM_CROSSCHECK_TRUST_SNAPSHOT_MANIFEST: "1",
+  FM_CROSSCHECK_LOOKUP_ALLOWED: "1",
+});
+const tools = [];
+const extension = await import(pathToFileURL(process.argv[2]).href + `?test=${Date.now()}`);
+extension.default({ registerTool(tool) { tools.push(tool); } });
+assert.deepEqual(tools.map((tool) => tool.name), [
+  "repo_search", "repo_read", "submit_evidence_file", "report_finding",
+  "report_suspicion", "update_finding", "request_lookup", "finish_review",
+]);
+assert(tools.every((tool) => tool.executionMode === "sequential"));
+const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
+const manifestPage = await byName.repo_read.execute("manifest", {
+  path: ".crosscheck-snapshot/manifest.json", start_line: 1, end_line: 20,
+});
+assert.deepEqual(manifestPage.details, { accepted: true });
+const manifestPayload = JSON.parse(manifestPage.content[0].text);
+assert.equal(manifestPayload.lines.length, 20);
+assert.equal(manifestPayload.lines[0].text, "{");
+const citations = Array.from({ length: 33 }, () => ({ path: "review.py", line: 1 }));
+const oversized = await byName.finish_review.execute("oversized", {
+  verdict: "BLOCKING", summary: "blocked", citations,
+});
+assert.deepEqual(oversized.details, { accepted: false, correctable: true });
+assert.equal(oversized.terminate, undefined);
+const trailingSlash = await byName.submit_evidence_file.execute("trailing", {
+  path: ".crosscheck/reproductions/proof/", content: "true\n",
+});
+assert.deepEqual(trailingSlash.details, { accepted: false, correctable: true });
+const symlink = await byName.finish_review.execute("symlink", {
+  verdict: "BLOCKING", summary: "blocked", citations: [{ path: "link.py", line: 1 }],
+});
+assert.deepEqual(symlink.details, { accepted: false, correctable: true });
+const lookup = await byName.request_lookup.execute("lookup", {
+  queries: [{ type: "search", query: "upstream behavior" }],
+});
+assert.deepEqual(lookup.details, { accepted: true });
+assert.equal(lookup.terminate, true);
+assert.match(lookup.content[0].text, /"requested":true/);
+const postLookup = await byName.finish_review.execute("after-lookup", {
+  verdict: "BLOCKING", summary: "Existing blocker remains active.",
+  citations: [{ path: "review.py", line: 2 }],
+});
+assert.equal(postLookup.terminate, true);
+assert.deepEqual(postLookup.details, { accepted: false, correctable: false });
+const events = readFileSync(log, "utf8").trim().split("\n").map(JSON.parse);
+assert.deepEqual(events.map((event) => event.name), ["repo_read", "request_lookup"]);
+
+const finalLog = `${root}/final-events.jsonl`;
+process.env.FM_CROSSCHECK_TOOL_EVENT_LOG = finalLog;
+process.env.FM_CROSSCHECK_LOOKUP_ALLOWED = "0";
+const finalTools = [];
+extension.default({ registerTool(tool) { finalTools.push(tool); } });
+const finalByName = Object.fromEntries(finalTools.map((tool) => [tool.name, tool]));
+const refusedLookup = await finalByName.request_lookup.execute("second-lookup", {
+  queries: [{ type: "search", query: "upstream behavior" }],
+});
+assert.deepEqual(refusedLookup.details, { accepted: false, correctable: true });
+const finish = await finalByName.finish_review.execute("finish", {
+  verdict: "BLOCKING", summary: "Existing blocker remains active.",
+  citations: [{ path: "review.py", line: 2 }],
+});
+assert.equal(finish.terminate, true);
+assert.deepEqual(finish.details, { accepted: true });
+const postFinish = await finalByName.repo_read.execute("after", { path: "review.py" });
+assert.equal(postFinish.terminate, true);
+assert.deepEqual(postFinish.details, { accepted: false, correctable: false });
+const finalEvents = readFileSync(finalLog, "utf8").trim().split("\n").map(JSON.parse);
+assert.deepEqual(finalEvents.map((event) => event.name), ["finish_review"]);
+JS
+  pass "Pi extension exposes exactly eight sequential tools with immediate bounded correction"
+}
+
+pi_reviewer_runtime_run_unit() {
+  python3 - "$PI_REVIEWER_RUNTIME" "$PI_VERDICT_EXTENSION" <<'PY' \
+    || fail "executable Pi runtime repair contract failed"
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+runtime = Path(sys.argv[1])
+extension = Path(sys.argv[2])
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    repository = root / "repository"
+    repository.mkdir()
+    (repository / "review.py").write_text("review\n", encoding="utf-8")
+    prompt = root / "prompt.md"
+    prompt.write_text("review the packet", encoding="utf-8")
+    schema = root / "schema.json"
+    schema.write_text("{}\n", encoding="utf-8")
+    account = root / "account"
+    account.mkdir()
+    fake = root / "pi"
+    fake.write_text(r'''#!/usr/bin/env python3
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+def digest(value):
+    return "sha256:" + hashlib.sha256(canonical(value).encode()).hexdigest()
+
+capture = Path(os.environ["CAPTURE"])
+launches = json.loads(capture.read_text()) if capture.is_file() else []
+launches.append(sys.argv[1:])
+capture.write_text(json.dumps(launches))
+attempt = len(launches)
+scenario = os.environ["SCENARIO"]
+provider = sys.argv[sys.argv.index("--provider") + 1]
+model = sys.argv[sys.argv.index("--model") + 1]
+finish = {
+    "verdict": "CLEAR",
+    "summary": "review complete",
+    "citations": [{"path": "review.py", "line": 1}],
+}
+blocking_finish = {**finish, "verdict": "BLOCKING"}
+suspicion = {
+    "description": "public contract remains unresolved",
+    "citations": [{"path": "review.py", "line": 1}],
+}
+lookup = {
+    "queries": [{"type": "search", "query": "upstream parser behavior"}],
+}
+valid = scenario in {
+    "valid", "mixed", "rejected-lookup-then-finish",
+    "rejected-identical-finish",
+} or (scenario == "repair" and attempt == 2)
+if scenario in {"malformed-log", "contradiction"}:
+    valid = True
+lookup_scenario = scenario.startswith("lookup")
+if valid or lookup_scenario:
+    log = Path(os.environ["FM_CROSSCHECK_TOOL_EVENT_LOG"])
+    if scenario == "malformed-log":
+        log.write_text("not-json\n")
+    elif scenario == "rejected-identical-finish":
+        log.write_text("\n".join(canonical(record) for record in [
+            {"seq": 1, "name": "report_suspicion", "arguments": suspicion,
+             "result_sha256": digest({"admitted": True})},
+            {"seq": 2, "name": "finish_review", "arguments": blocking_finish,
+             "result_sha256": digest({"finalized": True})},
+        ]) + "\n")
+    else:
+        terminal_name = "request_lookup" if lookup_scenario else "finish_review"
+        terminal_args = lookup if lookup_scenario else finish
+        terminal_result = {"requested": True} if lookup_scenario else {"finalized": True}
+        log.write_text(canonical({
+            "seq": 1,
+            "name": terminal_name,
+            "arguments": terminal_args,
+            "result_sha256": digest(terminal_result),
+        }) + "\n")
+content = (
+    [{"type": "toolCall", "id": "terminal",
+      "name": "request_lookup" if lookup_scenario else "finish_review",
+      "arguments": lookup if lookup_scenario else finish}]
+    if valid or lookup_scenario else [{"type": "text", "text": "done without finalization"}]
+)
+if scenario == "rejected-lookup-then-finish":
+    content = [{
+        "type": "toolCall", "id": "refused-lookup", "name": "request_lookup",
+        "arguments": lookup,
+    }]
+elif scenario == "rejected-identical-finish":
+    content = [{
+        "type": "toolCall", "id": "refused-finish", "name": "finish_review",
+        "arguments": blocking_finish,
+    }]
+print(json.dumps({
+    "type": "turn_end",
+    "message": {
+        "role": "assistant", "provider": provider, "model": model,
+            "stopReason": "toolUse" if valid or lookup_scenario else "stop", "content": content,
+        "usage": {"input": 10, "output": 2, "cacheRead": 4, "cacheWrite": 0,
+                  "cost": {"total": 0.00002336}},
+    },
+}))
+if scenario == "rejected-lookup-then-finish":
+    print(json.dumps({
+        "type": "turn_end",
+        "message": {
+            "role": "assistant", "provider": provider, "model": model,
+            "stopReason": "toolUse",
+            "content": [{"type": "toolCall", "id": "accepted-finish",
+                         "name": "finish_review", "arguments": finish}],
+            "usage": {"input": 10, "output": 2, "cacheRead": 4,
+                      "cacheWrite": 0, "cost": {"total": 0.00002336}},
+        },
+    }))
+if scenario == "rejected-identical-finish":
+    for call_id, name, arguments in (
+        ("accepted-suspicion", "report_suspicion", suspicion),
+        ("accepted-finish", "finish_review", blocking_finish),
+    ):
+        print(json.dumps({
+            "type": "turn_end",
+            "message": {
+                "role": "assistant", "provider": provider, "model": model,
+                "stopReason": "toolUse",
+                "content": [{"type": "toolCall", "id": call_id,
+                             "name": name, "arguments": arguments}],
+                "usage": {"input": 10, "output": 2, "cacheRead": 4,
+                          "cacheWrite": 0, "cost": {"total": 0.00002336}},
+            },
+        }))
+if scenario == "mixed":
+    print(json.dumps({
+        "type": "turn_end",
+        "message": {
+            "role": "assistant", "provider": provider, "model": model,
+            "stopReason": "stop", "content": [{"type": "text", "text": "done"}],
+            "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0,
+                      "cost": {"total": 0.0}},
+        },
+    }))
+print(json.dumps({"type": "agent_end", "messages": []}))
+''', encoding="utf-8")
+    fake.chmod(0o700)
+
+    def execute(scenario, *, active=False, lookup_allowed=False):
+        result = root / f"{scenario}-result.json"
+        capture = root / f"{scenario}-launches.json"
+        environment = os.environ.copy()
+        environment.update({
+            "CAPTURE": str(capture),
+            "SCENARIO": scenario,
+            "FM_CROSSCHECK_PI_COMMAND_JSON": json.dumps([str(fake)]),
+            "FM_CROSSCHECK_REPOSITORY": str(repository),
+            "FM_CROSSCHECK_HEAD_SHA": "a" * 40,
+            "FM_CROSSCHECK_BASE_SHA": "b" * 40,
+            "FM_CROSSCHECK_EXECUTING_ACCOUNT_HOME": str(account),
+            "FM_CROSSCHECK_EXECUTION_HOME": str(root / "home"),
+            "FM_CROSSCHECK_FINDING_IDS": '["cc-active"]' if active else "[]",
+            "FM_CROSSCHECK_ACTIVE_FINDING_IDS": '["cc-active"]' if active else "[]",
+            "FM_CROSSCHECK_ELIGIBLE_EQUIVALENT_IDS": "[]",
+            "FM_CROSSCHECK_LOOKUP_ALLOWED": "1" if lookup_allowed else "0",
+        })
+        completed = subprocess.run(
+            [sys.executable, str(runtime), str(account), "model", "xhigh",
+             "fireworks-glm", str(extension), str(prompt), str(schema), str(result)],
+            env=environment, capture_output=True, text=True,
+        )
+        launches = json.loads(capture.read_text())
+        value = json.loads(result.read_text()) if result.is_file() else None
+        return completed, launches, value
+
+    completed, launches, value = execute("valid")
+    assert completed.returncode == 0 and value["verdict"]["summary"] == "review complete"
+    assert len(launches) == 1 and launches[0][launches[0].index("--thinking") + 1] == "xhigh"
+    assert launches[0][launches[0].index("--tools") + 1].split(",") == [
+        "repo_search", "repo_read", "submit_evidence_file", "report_finding",
+        "report_suspicion", "update_finding", "request_lookup", "finish_review",
+    ]
+
+    completed, launches, value = execute("repair")
+    assert completed.returncode == 0 and value is not None
+    assert len(launches) == 2
+    assert launches[1][launches[1].index("--thinking") + 1] == "low"
+    assert value["telemetry"]["turns"] == 2
+
+    completed, launches, value = execute("mixed")
+    assert completed.returncode == 0 and value is not None and len(launches) == 1
+
+    completed, launches, value = execute("rejected-lookup-then-finish")
+    assert completed.returncode == 0 and value is not None, completed.stderr
+    assert len(launches) == 1, launches
+    assert value["telemetry"]["turns"] == 2, value["telemetry"]
+    assert value["telemetry"]["finish_repairs"] == 0, value["telemetry"]
+    assert [event["name"] for event in value["tool_events"]] == ["finish_review"]
+
+    completed, launches, value = execute("rejected-identical-finish")
+    assert completed.returncode == 0 and value is not None, completed.stderr
+    assert len(launches) == 1, launches
+    assert value["verdict"]["suspicions"] == [{
+        "description": "public contract remains unresolved",
+        "citations": [{"path": "review.py", "line": 1}],
+    }], value
+    assert value["telemetry"]["turns"] == 3, value["telemetry"]
+    assert value["telemetry"]["finish_repairs"] == 0, value["telemetry"]
+    assert [event["name"] for event in value["tool_events"]] == [
+        "report_suspicion", "finish_review",
+    ]
+
+    completed, launches, value = execute("lookup", lookup_allowed=True)
+    assert completed.returncode == 0 and value["lookup_request"] == [
+        {"type": "search", "query": "upstream parser behavior"}
+    ], (completed.returncode, completed.stderr, value)
+    assert value.get("verdict") is None and len(launches) == 1
+
+    completed, launches, value = execute("lookup-refused")
+    assert completed.returncode == 125 and value is None
+    assert len(launches) == 2
+    assert "one bounded verdict repair was exhausted" in completed.stderr
+
+    for scenario, active in (("missing", False), ("malformed-log", False), ("contradiction", True)):
+        completed, launches, value = execute(scenario, active=active)
+        assert completed.returncode == 125 and value is None, (scenario, completed.stderr)
+        assert len(launches) == 2, scenario
+        assert "one bounded verdict repair was exhausted" in completed.stderr, completed.stderr
+PY
+  pass "the executable Pi runtime repairs once and never persists failed finalization"
+}
+
 azure_pi_review_contract_unit() {
   python3 - "$CORE" "$PI_REVIEWER_RUNTIME" <<'PY' \
     || fail "Azure Pi review contract digest did not bind the reviewer runtime"
@@ -3445,16 +4912,16 @@ with tempfile.TemporaryDirectory() as raw_tmp:
     local_before = module.review_contract_sha256(False, "pi")
     candidate.write_bytes(candidate.read_bytes() + b"\n")
     assert module.review_contract_sha256(True, "pi") != azure_before
-    assert module.review_contract_sha256(False, "pi") == local_before
+    assert module.review_contract_sha256(False, "pi") != local_before
 PY
-  pass "Azure Pi review reuse is bound to the executable reviewer runtime"
+  pass "local and Azure Pi review reuse bind the executable reviewer runtime"
 }
 
 parameter_contract_unit() {
   # The model run-command parameter contract is env-vars-only and split
   # across two files: the adapter SUBMITS named (protected) parameters and
   # the guest CONSUMES them as lowercase environment variables, refusing
-  # everything else with exit 125. This pins both halves to the same seven
+  # everything else with exit 125. This pins both halves to the same eight
   # names so a rename on either side fails here instead of as an opaque
   # live provisioning failure.
   python3 - "$ADAPTER" "$MODEL_GUEST" <<'PY' || fail "run-command parameter contract diverged"
@@ -3468,7 +4935,7 @@ guest = Path(sys.argv[2]).read_text(encoding="utf-8")
 produced = set(re.findall(r'\{"name": "([a-z_]+)", "value"', adapter))
 expected = {
     "review_generation", "vm_resource_id", "vm_instance_id", "guest_digest",
-    "input_url", "credential_url", "output_url",
+    "input_url", "credential_url", "snapshot_url", "output_url",
 }
 assert produced == expected, ("adapter submits", sorted(produced))
 
@@ -3490,7 +4957,7 @@ scrubbed = set()
 for line in re.findall(r"^unset ([a-z_ ]+)$", code, re.M):
     scrubbed.update(line.split())
 assert scrubbed == expected, ("guest scrubs", sorted(scrubbed))
-assert "expected seven bound parameters" in code
+assert "expected eight bound parameters" in code
 # The refusal itself, not the word: this must match the guard construct and
 # its bounded exit.
 positional_guard = re.search(
@@ -3498,7 +4965,7 @@ positional_guard = re.search(
 )
 assert positional_guard, "the guest no longer refuses positional parameters"
 PY
-  pass "the adapter and guest agree on the exact seven-parameter contract"
+  pass "the adapter and guest agree on the exact eight-parameter contract"
 }
 
 static_contract
@@ -3506,14 +4973,18 @@ parameter_contract_unit
 adapter_mode_unit
 azure_prompt_wrapper_schema_unit
 pi_reviewer_runtime_unit
+pi_extension_protocol_unit
+pi_reviewer_runtime_run_unit
 azure_pi_review_contract_unit
 cross_family_provider_host_unit
 cross_family_credential_lane_unit
 model_guest_executing_account_unit
 identity_outcome_unit
 account_and_cleanup_identity_unit
+lookup_followup_orchestration_unit
 bridge_security_unit
 bridge_private_snapshot_unit
+repository_snapshot_unit
 manifest_bounds_unit
 template_expiry_render_unit
 replay_positive_and_failure_unit
