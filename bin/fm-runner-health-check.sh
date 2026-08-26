@@ -152,7 +152,7 @@ api_state() {
   fi
 
   command -v gh-axi >/dev/null 2>&1 || return 1
-  query="[.runners[] | select(any(.labels[]; .name == \"$label\"))] as \$matching | if (\$matching | length) == 0 then \"missing\" elif ([\$matching[] | select(.status == \"online\")] | length) > 0 then \"online\" else \"offline\" end"
+  query="[.runners[] | select(any(.labels[]; .name == \"$label\"))] as \$matching | if (\$matching | length) == 0 then \"missing\" elif any(\$matching[]; (.status | type) != \"string\" or (.status != \"online\" and .status != \"offline\")) then \"invalid\" elif any(\$matching[]; .status == \"online\") then \"online\" else \"offline\" end"
   output=$(fm_run_timed "$max_probe" gh-axi api "/repos/$repository/actions/runners" --paginate --jq "$query" --full 2>/dev/null)
   status=$?
   [ "$status" -eq 0 ] || return 1
@@ -224,6 +224,11 @@ action_check() {
   local repository=$1 label=$2 target state finding=
   target="$repository@$label"
 
+  state_private_valid || {
+    state_unavailable_diagnostic
+    return 1
+  }
+
   state=$(api_state "$repository" "$label") || return 0
   case "$state" in
     online) finding= ;;
@@ -237,13 +242,14 @@ action_check() {
     RECORD_REPORTED=
   fi
 
+  record_write "$target" "$finding" || return 0
+
   if [ -n "$finding" ] && [ "$finding" != "$RECORD_REPORTED" ]; then
     case "$finding" in
       offline) printf 'runner health: %s runner label %s is offline\n' "$repository" "$label" ;;
       missing) printf 'runner health: %s has no registered runner with label %s\n' "$repository" "$label" ;;
     esac
   fi
-  record_write "$target" "$finding" || true
   return 0
 }
 
@@ -264,6 +270,18 @@ state_private_valid() {
   local device
   device=$(fm_pr_file_device "$STATE") || return 1
   [ -n "$device" ]
+}
+
+state_unavailable_diagnostic() {
+  local condition
+  if [ -L "$STATE" ]; then
+    condition='a symlink'
+  elif [ ! -d "$STATE" ]; then
+    condition='not a directory'
+  else
+    condition='unavailable'
+  fi
+  printf 'fm-runner-health-check: refusing state path %s: %s; a real private directory is required\n' "$STATE" "$condition" >&2
 }
 
 safe_remove_state_file() {
@@ -359,6 +377,7 @@ action_arm() {
   }
   mkdir -p "$STATE" || return 1
   state_private_valid || {
+    state_unavailable_diagnostic
     printf 'fm-runner-health-check: state directory is unavailable\n' >&2
     return 1
   }
@@ -401,6 +420,7 @@ action_arm() {
 action_disarm() {
   local device path
   state_private_valid || {
+    state_unavailable_diagnostic
     printf 'fm-runner-health-check: state directory is unavailable\n' >&2
     return 1
   }

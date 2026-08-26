@@ -95,6 +95,13 @@ write_no_matching_runner() {
 JSON
 }
 
+write_runner_without_status() {
+  local file=$1
+  cat > "$file" <<'JSON'
+{"runners":[{"name":"toolroll-mac","busy":false,"labels":[{"name":"self-hosted"},{"name":"toolroll-mac"}]}]}
+JSON
+}
+
 run_check() {
   local home=$1 fakebin=$2 response=$3 out=$4
   shift 4
@@ -195,6 +202,72 @@ test_api_failures_are_silent_and_do_not_clear_an_outage() {
   run_check "$home" "$fakebin" "$response" "$out"
   [ ! -s "$out" ] || fail "an unavailable poll made the same outage look new: $(cat "$out")"
   pass "network, authentication, and malformed responses stay silent without changing known health"
+}
+
+test_malformed_matching_runner_status_is_silent() {
+  local home fakebin response out
+  home=$(make_home malformed-status)
+  fakebin=$(make_fake_gh_axi malformed-status)
+  response="$home/runners.json"
+  out="$home/out.txt"
+
+  write_runners "$response" online false
+  run_check "$home" "$fakebin" "$response" "$out"
+  expect_reported "$home" ''
+
+  write_runner_without_status "$response"
+  run_check "$home" "$fakebin" "$response" "$out"
+  [ ! -s "$out" ] || fail "a matching runner with no status produced a report: $(cat "$out")"
+  expect_reported "$home" ''
+  pass "a matching runner with an unreadable status is a silent missed poll"
+}
+
+test_failed_report_persistence_is_silent() {
+  local home fakebin response out status
+  home=$(make_home persistence-failure)
+  fakebin=$(make_fake_gh_axi persistence-failure)
+  response="$home/runners.json"
+  out="$home/out.txt"
+  write_runners "$response" offline false
+  cat > "$fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod 0755 "$fakebin/mktemp"
+
+  status=0
+  env FM_HOME="$home" PATH="$fakebin:$PATH" \
+    FAKE_GH_AXI_REPOSITORY="$REPOSITORY" FAKE_GH_AXI_RESPONSE="$response" \
+    "$CHECK" check "$REPOSITORY" "$LABEL" > "$out" 2>&1 || status=$?
+  expect_code 0 "$status" "read-only state check exit"
+  [ ! -s "$out" ] || fail "an outage was printed without durable report state: $(cat "$out")"
+  assert_absent "$home/state/.runner-health" "a failed report write created a health record"
+  pass "an outage is silent when its durable report cannot be written"
+}
+
+test_check_refuses_a_symlinked_state_directory() {
+  local home fakebin target out err status
+  home=$(make_home check-symlinked-state)
+  fakebin=$(make_fake_gh_axi check-symlinked-state)
+  target="$home/state-target"
+  out="$home/out.txt"
+  err="$home/err.txt"
+  mkdir -p "$target"
+  printf 'do not modify me\n' > "$target/sentinel"
+  mv "$home/state" "$home/state-real"
+  ln -s "$target" "$home/state"
+
+  status=0
+  env FM_HOME="$home" PATH="$fakebin:$PATH" \
+    FAKE_GH_AXI_REPOSITORY="$REPOSITORY" FAKE_GH_AXI_RESPONSE="$home/runners.json" \
+    "$CHECK" check "$REPOSITORY" "$LABEL" > "$out" 2> "$err" || status=$?
+  expect_code 1 "$status" "check with symlinked state exit"
+  [ ! -s "$out" ] || fail "a symlinked state check produced a health wake: $(cat "$out")"
+  assert_contains "$(cat "$err")" "$home/state" "the symlinked state diagnostic omitted the path"
+  assert_contains "$(cat "$err")" 'a symlink' "the symlinked state diagnostic omitted the condition"
+  [ "$(cat "$target/sentinel")" = 'do not modify me' ] || fail "check modified the symlink target"
+  assert_absent "$target/.runner-health" "check wrote a report through the symlinked state directory"
+  pass "check refuses a symlinked state directory before record access"
 }
 
 test_paginated_api_results_are_aggregated_before_verdict() {
@@ -365,6 +438,9 @@ test_online_runner_is_silent_even_when_busy
 test_offline_runner_reports_once_and_reports_again_after_recovery
 test_missing_label_is_a_distinct_once_only_finding
 test_api_failures_are_silent_and_do_not_clear_an_outage
+test_malformed_matching_runner_status_is_silent
+test_failed_report_persistence_is_silent
+test_check_refuses_a_symlinked_state_directory
 test_paginated_api_results_are_aggregated_before_verdict
 test_malformed_envelope_with_trailing_diagnostics_is_silent
 test_api_timeout_finishes_inside_the_watcher_bound
