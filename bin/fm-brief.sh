@@ -57,6 +57,14 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# The commit-producing scaffolds (ship and scout) carry a rule forbidding agent
+# attribution in a commit message - no `Co-Authored-By:` agent trailer and no
+# agent session line such as `Claude-Session:` - stated to override whatever the
+# worker's own harness or tooling would add by default, because a crewmate works
+# in a project checkout and never reads firstmate's AGENTS.md.
+# The secondmate charter deliberately omits that rule: a secondmate operates under
+# its own home's AGENTS.md, which already owns it, and its project commits are made
+# by crewmates that receive this same scaffold.
 # Refuses to overwrite an existing brief.
 set -eu
 
