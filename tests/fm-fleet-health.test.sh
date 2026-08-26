@@ -1166,6 +1166,28 @@ test_paused_ship_still_requires_pr_listener() {
   pass "declared waits retain their required PR listeners"
 }
 
+test_invalid_current_pr_metadata_is_inconclusive() {
+  local home fakebin out rc=0
+  home=$(make_home invalid-current-pr)
+  write_live_ship "$home" invalid-current-pr
+  printf 'pr=not-a-url\n' >> "$home/state/invalid-current-pr.meta"
+  printf 'paused: waiting for CI\n' > "$home/state/invalid-current-pr.status"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm \
+    "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "invalid current PR metadata should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "result-listener-inconclusive"
+              and .subject == "pr-polls"
+              and (.evidence | contains("current PR metadata")))
+      and (any(.findings[]; .kind == "result-listener-missing"
+               and .subject == "invalid-current-pr") | not)
+  ' >/dev/null || fail "invalid current PR metadata became actionable: $out"
+  pass "invalid current PR metadata remains inconclusive"
+}
+
 test_unknown_worker_state_does_not_create_missing_pr_listener() {
   local home fakebin out rc=0
   home=$(make_home unknown-pr-listener)
@@ -1441,6 +1463,7 @@ test_invalid_procevent_registration_is_inconclusive
 test_dangling_procevent_claim_root_is_inconclusive
 test_dangling_procevent_registry_is_inconclusive
 test_paused_ship_still_requires_pr_listener
+test_invalid_current_pr_metadata_is_inconclusive
 test_unknown_worker_state_does_not_create_missing_pr_listener
 test_invalid_pr_listener_evidence_is_inconclusive
 test_matching_retired_pr_listener_is_not_missing

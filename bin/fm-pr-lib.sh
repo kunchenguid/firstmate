@@ -39,6 +39,7 @@ FM_PR_META_URL=
 FM_PR_META_HOST=
 FM_PR_META_PATH=
 FM_PR_META_NUMBER=
+FM_PR_META_DECLARED=false
 FM_PR_REG_ID=
 FM_PR_REG_PROVIDER=
 FM_PR_REG_URL=
@@ -297,6 +298,7 @@ fm_pr_metadata_identity_parse() {
   FM_PR_META_HOST=
   FM_PR_META_PATH=
   FM_PR_META_NUMBER=
+  FM_PR_META_DECLARED=false
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
@@ -313,6 +315,7 @@ fm_pr_metadata_identity_parse() {
           FM_PR_META_NUMBER=$FM_PR_NUMBER
         fi
         seen_pr=1
+        FM_PR_META_DECLARED=true
         ;;
       pr_head=*)
         if [ "$seen_pr" -eq 1 ]; then
@@ -625,20 +628,41 @@ fm_pr_poll_artifacts_valid() {
 
 fm_pr_poll_listeners_json() {
   local state=$1 template=$2 f id meta records='[]' invalid='[]' unreadable='[]'
-  local artifact_readable artifact_valid notification_matches classification
+  local metadata_invalid='[]' artifact_readable artifact_valid metadata_valid
+  local notification_matches classification
   if [ ! -d "$state" ] && [ ! -L "$state" ]; then
     classification=$(fm_evidence_classify true true)
     jq -n --argjson available "$( [ "$classification" = available ] && printf true || printf false )" \
-      '{available:$available,records:[],invalid_count:0,invalid:[],unreadable_count:0,unreadable:[]}'
+      '{available:$available,records:[],invalid_count:0,invalid:[],unreadable_count:0,unreadable:[],metadata_invalid_count:0,metadata_invalid:[]}'
     return 0
   fi
   if { [ -L "$state" ] && [ ! -e "$state" ]; } \
     || { [ -e "$state" ] && { [ ! -d "$state" ] || [ ! -r "$state" ] || [ ! -x "$state" ]; }; }; then
     classification=$(fm_evidence_classify false false)
     jq -n --arg path "$state" --argjson available "$( [ "$classification" = available ] && printf true || printf false )" \
-      '{available:$available,records:[],invalid_count:0,invalid:[],unreadable_count:1,unreadable:[{path:$path}]}'
+      '{available:$available,records:[],invalid_count:0,invalid:[],unreadable_count:1,unreadable:[{path:$path}],metadata_invalid_count:0,metadata_invalid:[]}'
     return 0
   fi
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    artifact_readable=false
+    if [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ]; then
+      artifact_readable=true
+    fi
+    metadata_valid=false
+    FM_PR_META_DECLARED=false
+    if [ "$artifact_readable" = true ] \
+      && fm_pr_metadata_identity_parse "$meta"; then
+      metadata_valid=true
+    fi
+    classification=$(fm_evidence_classify "$artifact_readable" "$metadata_valid")
+    if [ "$FM_PR_META_DECLARED" = true ] \
+      && [ "$classification" != available ]; then
+      metadata_invalid=$(jq -n --argjson invalid "$metadata_invalid" --arg id "$id" --arg path "$meta" \
+        '$invalid + [{id:$id,path:$path}]')
+    fi
+  done
   for f in "$state"/*.check.sh; do
     [ -e "$f" ] || [ -L "$f" ] || continue
     id=$(basename "$f" .check.sh)
@@ -701,7 +725,8 @@ fm_pr_poll_listeners_json() {
     fi
   done
   if [ "$(printf '%s' "$invalid" | jq 'length')" -eq 0 ] \
-    && [ "$(printf '%s' "$unreadable" | jq 'length')" -eq 0 ]; then
+    && [ "$(printf '%s' "$unreadable" | jq 'length')" -eq 0 ] \
+    && [ "$(printf '%s' "$metadata_invalid" | jq 'length')" -eq 0 ]; then
     classification=$(fm_evidence_classify true true)
   else
     classification=$(fm_evidence_classify false false)
@@ -709,7 +734,8 @@ fm_pr_poll_listeners_json() {
   jq -n \
     --argjson available "$( [ "$classification" = available ] && printf true || printf false )" \
     --argjson records "$records" --argjson invalid "$invalid" --argjson unreadable "$unreadable" \
-    '{available:$available,records:$records,invalid_count:($invalid|length),invalid:$invalid,unreadable_count:($unreadable|length),unreadable:$unreadable}'
+    --argjson metadata_invalid "$metadata_invalid" \
+    '{available:$available,records:$records,invalid_count:($invalid|length),invalid:$invalid,unreadable_count:($unreadable|length),unreadable:$unreadable,metadata_invalid_count:($metadata_invalid|length),metadata_invalid:$metadata_invalid}'
 }
 
 fm_pr_poll_snapshot_capture() {

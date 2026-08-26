@@ -418,8 +418,14 @@ EVALUATED=$(jq -n \
                     + ($prs.unreadable_count | tostring) + " unreadable PR-listener artifact(s)"
                   else ""
                   end)
+                 + (if ($prs.metadata_invalid_count // 0) > 0 then
+                    (if (($prs.invalid_count // 0) + ($prs.unreadable_count // 0)) > 0 then "; " else "" end)
+                    + ($prs.metadata_invalid_count | tostring) + " current PR metadata record(s) are invalid"
+                  else ""
+                  end)
                  | if . == "" then "PR-listener registrations could not be read" else . end);
-                "unreadable";(($prs.invalid_count // 0) + ($prs.unreadable_count // 0)))
+                (if ($prs.metadata_invalid_count // 0) > 0 then "invalid-pr-metadata" else "unreadable" end);
+                (($prs.invalid_count // 0) + ($prs.unreadable_count // 0) + ($prs.metadata_invalid_count // 0)))
       else empty end),
       (if $snapshot.collection.state.available == false then
         finding("fleet-inventory-inconclusive";"state";"notice";"inconclusive";
