@@ -42,7 +42,11 @@ jobs:
         run: |
           set -euo pipefail
           body=''
-          for attempt in $(seq 1 30); do
+          # The PR can spend more than one minute moving from the opening body
+          # to the signed attestation while no-mistakes records its pipeline.
+          # Keep the required check bounded, but leave enough room for that
+          # normal asynchronous update before judging the body stale.
+          for attempt in $(seq 1 150); do
             body=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq .body)
             if [[ "$body" == *'<!-- no-mistakes-pipeline-attestation:v1 '* \
               && "$body" == *"\"head_sha\":\"$PR_HEAD_SHA\""* ]]; then
