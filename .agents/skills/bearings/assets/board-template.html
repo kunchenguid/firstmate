@@ -134,6 +134,9 @@ a { color: inherit; text-decoration: none; }
 .bb-brand__disc svg { width: 60%; height: 60%; }
 .bb-brand__wm { font-family: var(--font-display); font-size: 23px; color: var(--text-strong); line-height: 1; }
 .bb-meta-mono { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-faint); white-space: nowrap; }
+.bb-supervisor { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; min-width: 0; text-align: right; }
+.bb-supervisor__line { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-muted); line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bb-supervisor__line:first-child { color: var(--text-strong); font-weight: 700; }
 
 .bb-main {
   max-width: var(--container-app); margin: 0 auto;
@@ -258,6 +261,50 @@ a { color: inherit; text-decoration: none; }
 }
 .bb-empty { padding: 18px; font-size: var(--fs-sm); color: var(--text-muted); }
 
+/* ---- Provisions ---- */
+.bb-provisions { display: flex; flex-direction: column; gap: 0; }
+.bb-provision { display: grid; grid-template-columns: minmax(120px, 0.7fr) minmax(0, 2fr) auto; gap: 18px; align-items: center; padding: 12px 18px; border-top: 1px solid var(--border-soft); min-width: 0; }
+.bb-provision:first-child { border-top: none; }
+.bb-provision__name { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.bb-provision__dot { width: 8px; height: 8px; margin-top: 4px; border-radius: 50%; background: var(--ocean-500); flex: none; }
+.bb-provision__provider { font-family: var(--font-mono); font-size: var(--fs-sm); font-weight: 800; color: var(--text-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bb-provision__plan { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); margin-top: 2px; }
+.bb-provision__middle { min-width: 0; }
+.bb-provision__bar { height: 6px; border-radius: 99px; background: var(--ink-100); overflow: hidden; }
+.bb-provision__fill { height: 100%; border-radius: inherit; background: var(--sea-500); }
+.bb-provision__meta { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-muted); margin-top: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bb-provision__badge { justify-self: end; }
+.bb-provision__attention { grid-column: 2 / 4; font-size: var(--fs-xs); color: var(--text-muted); }
+.bb-provision--unavailable, .bb-provision--empty { display: block; }
+.bb-provision--unavailable .bb-provision__attention, .bb-provision--empty .bb-provision__attention { color: var(--text-muted); }
+
+/* ---- Herdr-style Underway rows and read-only detail ---- */
+.bb-underway-row { display: block; padding: 0; }
+.bb-underway-row__button { width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px 18px; text-align: left; color: inherit; background: transparent; border: 0; border-top: 1px solid var(--border-soft); cursor: pointer; }
+.bb-underway-row:first-child .bb-underway-row__button { border-top: none; }
+.bb-underway-row__button:hover { background: var(--paper-100); }
+.bb-underway-row__button:focus-visible { outline: none; box-shadow: inset var(--focus-ring); }
+.bb-underway-row__state { min-width: 82px; font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-muted); }
+.bb-underway-row__state::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: var(--sea-500); }
+.bb-underway-row__state--unknown::before { background: var(--gold-500); }
+.bb-underway-row__title { min-width: 0; font-size: var(--fs-sm); font-weight: 800; color: var(--text-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bb-underway-row__crew { min-width: 0; margin-top: 3px; font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bb-underway-row__caret { width: 16px; height: 16px; color: var(--text-faint); transition: transform 120ms; }
+.bb-underway-row__button[aria-expanded="true"] .bb-underway-row__caret { transform: rotate(180deg); }
+.bb-underway-detail { margin: 0 12px 12px; padding: 12px 14px; background: var(--surface-card-warm); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); }
+.bb-underway-detail[hidden] { display: none; }
+.bb-underway-detail .bb-ctx__v { overflow-wrap: anywhere; }
+.bb-underway-detail .bb-ctx__v--next { color: var(--text-strong); font-weight: 800; }
+.bb-underway-detail__links { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+
+@media (max-width: 700px) {
+  .bb-supervisor__line { max-width: 56vw; }
+  .bb-provision { grid-template-columns: minmax(100px, 1fr) minmax(0, 1.6fr); gap: 10px; }
+  .bb-provision__badge { grid-column: 2; justify-self: start; }
+  .bb-provision__attention { grid-column: 1 / -1; }
+  .bb-underway-row__state { min-width: 0; }
+}
+
 /* ---- Charted Next dispatch picker ---- */
 /* margin:0 kills the UA default checkbox margin so picker rows and spacer rows
    share one text left edge */
@@ -289,12 +336,21 @@ a { color: inherit; text-decoration: none; }
       </span>
       <span class="bb-brand__wm">bearings</span>
     </span>
+    <div class="bb-supervisor" id="bb-supervisor" aria-label="Supervisor"></div>
   </div>
 </header>
 
 <main class="bb-main">
 
   <div class="bb-stats" id="bb-stats"></div>
+
+  <section class="bb-section">
+    <div class="bb-section__head">
+      <span class="fm-sign fm-sign--eyebrow">Provisions</span>
+      <span class="fm-sign fm-sign--muted" id="bb-provisions-read"></span>
+    </div>
+    <div class="fm-card fm-card--warm bb-provisions" id="bb-provisions"></div>
+  </section>
 
   <div class="bb-cols">
   <section class="bb-section">
@@ -372,7 +428,7 @@ a { color: inherit; text-decoration: none; }
 </main>
 
 <!-- ONE SLOT. bin/fm-bearings-board.sh build injects the fresh
-     fm-bearings-board.v1 payload in place of the placeholder below; everything
+     fm-bearings-board.v2 payload in place of the placeholder below; everything
      above and below is the shipped template and is never regenerated per run. -->
 <script id="bearings-data" type="application/json">
 __FM_BEARINGS_BOARD_DATA__
@@ -410,7 +466,7 @@ __FM_BEARINGS_BOARD_DATA__
     renderBoardError("The board data is not valid JSON");
     return;
   }
-  if (!data || data.schema !== "fm-bearings-board.v1") {
+  if (!data || data.schema !== "fm-bearings-board.v2") {
     renderBoardError("Unsupported board data schema: " + (data && data.schema ? data.schema : "(none)"));
     return;
   }
@@ -422,7 +478,24 @@ __FM_BEARINGS_BOARD_DATA__
       typeof item.title === "string" && item.title.length > 0 &&
       Array.isArray(item.options);
   });
-  if (!fleetLists.every(Array.isArray) || !callItemsValid) {
+  var usageValid = data.usage && typeof data.usage.available === "boolean" &&
+    typeof data.usage.read_at === "string" &&
+    (!data.usage.available ? typeof data.usage.reason === "string" && data.usage.reason.length > 0 : Array.isArray(data.usage.providers));
+  var supervisorValid = data.supervisor && data.supervisor.identity === "firstmate" &&
+    Number.isInteger(data.supervisor.crew_count) && data.supervisor.crew_count >= 0;
+  function isSafeReportPath(value) {
+    return typeof value === "string" && value.length === 0 ||
+      typeof value === "string" && value === value.trim() &&
+      !/[\u0000-\u001f\u007f]/.test(value) && value.indexOf("\\") === -1 &&
+      !/^\/\//.test(value) && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value);
+  }
+  var underwayItemsValid = Array.isArray(data.underway) && data.underway.every(function (item) {
+    return item && typeof item.owner === "string" && item.owner.length > 0 &&
+      typeof item.state_detail === "string" && item.state_detail.length > 0 &&
+      typeof item.next === "string" && item.next.length > 0 &&
+      (item.report_path === undefined || isSafeReportPath(item.report_path));
+  });
+  if (!fleetLists.every(Array.isArray) || !callItemsValid || !usageValid || !supervisorValid || !underwayItemsValid) {
     renderBoardError("The board data does not have the required structure");
     return;
   }
@@ -438,7 +511,7 @@ __FM_BEARINGS_BOARD_DATA__
   function utf8ByteLength(text) { return new TextEncoder().encode(text).length; }
   var CHECK_SVG = '<svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
 
-  document.getElementById("bb-provenance").textContent = data.schema + " · " + data.generated;
+  document.getElementById("bb-provenance").textContent = data.schema + " · fleet: " + data.provenance.fleet_read_at + " · usage: " + data.provenance.usage_read_at;
 
   /* stat strip */
   var callTotal = data.captains_call.length;
@@ -446,7 +519,8 @@ __FM_BEARINGS_BOARD_DATA__
     { n: callTotal, l: "need you", call: true },
     { n: data.underway.length, l: "underway" },
     { n: data.landed.length, l: "landed recently" },
-    { n: data.charted.length + (data.charted_more || 0), l: "charted next" }
+    { n: data.charted.length + (data.charted_more || 0), l: "charted next" },
+    { n: data.usage.available ? data.usage.providers.filter(function (p) { return p.runway === "tight" || p.runway === "exhausted"; }).length : 0, l: "providers tight" }
   ];
   var strip = document.getElementById("bb-stats");
   stats.forEach(function (s) {
@@ -457,6 +531,73 @@ __FM_BEARINGS_BOARD_DATA__
   });
   document.getElementById("bb-call-sub").textContent =
     callTotal ? callTotal + " item" + (callTotal === 1 ? "" : "s") + " wait on you, captain" : "nothing needs you, captain";
+
+  /* Supervisor strip */
+  var supervisor = document.getElementById("bb-supervisor");
+  var supervisorModel = data.supervisor.model ? " · " + data.supervisor.model : "";
+  var supervisorEffort = data.supervisor.effort ? " " + data.supervisor.effort : "";
+  supervisor.appendChild(el("div", "bb-supervisor__line", "firstmate · supervising " + data.supervisor.crew_count + " crew" + supervisorModel + supervisorEffort));
+  if (data.supervisor.startup_memory) {
+    var mem = data.supervisor.startup_memory;
+    supervisor.appendChild(el("div", "bb-supervisor__line", "startup memory " + mem.used_tokens + " / " + mem.budget_tokens + " tokens · " + mem.status));
+  }
+
+  /* Provisions */
+  var provisions = document.getElementById("bb-provisions");
+  document.getElementById("bb-provisions-read").textContent = data.usage.source + " · " + data.usage.read_at;
+  function provisionAttention(text) {
+    provisions.appendChild(el("div", "bb-provision__attention", text));
+  }
+  function provisionBadge(runway) {
+    if (runway === "exhausted") return badge("danger", "exhausted");
+    if (runway === "tight") return badge("warn", "tight pace");
+    if (runway === "clear") return badge("online", "clear");
+    return badge("neutral", "unknown");
+  }
+  if (!data.usage.available) {
+    var unavailable = el("div", "bb-provision bb-provision--unavailable");
+    unavailable.appendChild(el("div", "bb-provision__attention", "usage unavailable: " + data.usage.reason));
+    provisions.appendChild(unavailable);
+    (data.usage.attention || []).forEach(function (a) { provisionAttention(a.text); });
+  } else if (!data.usage.providers.length) {
+    var emptyProviders = el("div", "bb-provision bb-provision--empty");
+    emptyProviders.appendChild(el("div", "bb-provision__attention", "No providers reported."));
+    provisions.appendChild(emptyProviders);
+    (data.usage.attention || []).forEach(function (a) { provisionAttention(a.text); });
+  } else {
+    data.usage.providers.forEach(function (p) {
+      var row = el("div", "bb-provision");
+      var name = el("div", "bb-provision__name");
+      name.appendChild(el("span", "bb-provision__dot"));
+      var nameText = el("div", "");
+      nameText.appendChild(el("div", "bb-provision__provider", p.provider));
+      nameText.appendChild(el("div", "bb-provision__plan", p.plan));
+      name.appendChild(nameText);
+      row.appendChild(name);
+      var middle = el("div", "bb-provision__middle");
+      if (typeof p.percent_remaining === "number") {
+        var bar = el("div", "bb-provision__bar");
+        var fill = el("div", "bb-provision__fill");
+        fill.style.width = p.percent_remaining + "%";
+        bar.appendChild(fill);
+        middle.appendChild(bar);
+        var meta = p.percent_remaining + "% left";
+      } else {
+        var meta = "headroom unknown";
+      }
+      if (p.reset_at) meta += " · resets " + p.reset_at;
+      if (p.pace) meta += " · " + p.pace;
+      if (p.model_note) meta += " · " + p.model_note;
+      middle.appendChild(el("div", "bb-provision__meta", meta));
+      row.appendChild(middle);
+      var badgeWrap = el("div", "bb-provision__badge");
+      badgeWrap.appendChild(provisionBadge(p.runway));
+      row.appendChild(badgeWrap);
+      provisions.appendChild(row);
+      (p.attention || []).forEach(function (a) { provisionAttention(a.text); });
+    });
+    (data.usage.attention || []).forEach(function (a) { provisionAttention(a.text); });
+  }
 
   /* Captain's Call deck: every item renders as the same full card */
   var deck = document.getElementById("bb-call");
@@ -603,15 +744,60 @@ __FM_BEARINGS_BOARD_DATA__
   /* Underway */
   var uw = document.getElementById("bb-underway");
   if (!data.underway.length) uw.appendChild(el("div", "bb-empty", "Nothing is underway."));
-  data.underway.forEach(function (t) {
-    var row = el("div", "bb-row");
-    row.appendChild(badge(t.state === "working" ? "online" : "info", t.state));
-    var main = el("div", "bb-row__main");
-    main.appendChild(el("div", "bb-row__title", t.doing));
-    /* captain-facing rows name the repo; the internal task id shows only when
-       no repo is known */
-    main.appendChild(el("div", "bb-row__sub", t.kind + " · " + (t.repo || t.id)));
-    row.appendChild(main);
+  data.underway.forEach(function (t, index) {
+    var runtimeParts = [t.harness, t.model, t.effort].filter(function (part) { return typeof part === "string" && part.length > 0; });
+    var crewParts = [t.kind, t.harness, t.model, t.effort, t.repo || t.id].filter(function (part) { return typeof part === "string" && part.length > 0; });
+    var row = el("div", "bb-underway-row");
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "bb-underway-row__button";
+    button.setAttribute("aria-expanded", "false");
+    var detailId = "bb-underway-detail-" + index;
+    button.setAttribute("aria-controls", detailId);
+    var state = el("span", "bb-underway-row__state" + (t.state === "unknown" ? " bb-underway-row__state--unknown" : ""), t.state_detail);
+    button.appendChild(state);
+    var main = el("span", "bb-row__main");
+    main.appendChild(el("span", "bb-underway-row__title", t.doing));
+    main.appendChild(el("span", "bb-underway-row__crew", crewParts.join(" · ")));
+    button.appendChild(main);
+    var caret = document.createElement("span");
+    caret.className = "bb-underway-row__caret";
+    caret.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';
+    button.appendChild(caret);
+    var detail = el("div", "bb-underway-detail");
+    detail.id = detailId;
+    detail.setAttribute("role", "region");
+    detail.setAttribute("aria-label", t.doing + " details");
+    detail.hidden = true;
+    var detailCtx = el("div", "bb-ctx");
+    detailCtx.appendChild(ctxRow("custody", t.owner + " owns · firstmate supervises"));
+    detailCtx.appendChild(ctxRow("state", t.state + " · " + t.state_detail));
+    detailCtx.appendChild(ctxRow("where", (t.repo || t.id) + (t.worktree_tail ? " · " + t.worktree_tail : "")));
+    detailCtx.appendChild(ctxRow("context", "model window: not measured"));
+    if (t.latest) detailCtx.appendChild(ctxRow("latest", t.latest));
+    if (t.blockers && t.blockers.length) detailCtx.appendChild(ctxRow("blockers", t.blockers.join(" · ")));
+    detailCtx.appendChild(ctxRow("runtime", runtimeParts.length ? runtimeParts.join(" · ") : "-"));
+    detailCtx.appendChild(ctxRow("next", t.next, true));
+    detail.appendChild(detailCtx);
+    var links = el("div", "bb-underway-detail__links");
+    if (t.pr_url) {
+      var pr = el("a", "bb-decision__link", "PR " + t.pr_url);
+      pr.href = t.pr_url; pr.target = "_blank"; pr.rel = "noopener";
+      links.appendChild(pr);
+    }
+    if (t.report_path) {
+      var report = el("a", "bb-decision__link", "report " + t.report_path);
+      report.href = t.report_path; report.target = "_blank"; report.rel = "noopener";
+      links.appendChild(report);
+    }
+    if (links.children.length) detail.appendChild(links);
+    button.addEventListener("click", function () {
+      var expanded = button.getAttribute("aria-expanded") === "true";
+      button.setAttribute("aria-expanded", expanded ? "false" : "true");
+      detail.hidden = expanded;
+    });
+    row.appendChild(button);
+    row.appendChild(detail);
     uw.appendChild(row);
   });
 

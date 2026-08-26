@@ -15,7 +15,7 @@ metadata:
 Generate a complete current snapshot from the fleet's current state, so the captain can resume in one read after a break, a night, or a context reset.
 Plain `/bearings` returns only the concise four-section chat digest.
 Only `/bearings file` writes the dated markdown report artifact and then returns the concise four-section chat digest linked to that report.
-Only `/bearings lavish` builds the interactive fleet board beside that digest, through `bin/fm-bearings-board.sh` (its header owns every board mechanic and the fm-bearings-board.v1 payload contract).
+Only `/bearings lavish` builds the interactive fleet board beside that digest, through `bin/fm-bearings-board.sh` (its header owns every board mechanic and the fm-bearings-board.v2 payload contract).
 A digest/build invocation is operationally read-only apart from those explicit per-mode artifacts: the dated report in file mode, and in lavish mode the board file plus the answer binding and source registration that `bin/fm-bearings-board.sh build` records through their own owners.
 During that invocation it never tears down a task, merges a PR, dispatches new work, steers a worker, answers a decision, cleans up work, or mutates backlog or task state.
 Board answers are acted on later under the normal authority rules; this skill's board-wake section explicitly owns the guarded routing at that time.
@@ -72,7 +72,7 @@ Board answers are acted on later under the normal authority rules; this skill's 
 ## Lavish board mode
 
 `/bearings lavish` adds one deliverable beside the unchanged chat digest: the interactive fleet board, a myfirstmate-styled Lavish page where the captain answers Captain's Call items directly instead of replying in chat.
-`bin/fm-bearings-board.sh` owns every board mechanic - the stable board path, fm-bearings-board.v1 payload validation, template injection, Lavish session establishment, the any-origin answer binding, and arm-if-absent registration - so the per-invocation work is composing the payload and running its `build`.
+`bin/fm-bearings-board.sh` owns every board mechanic - the stable board path, fm-bearings-board.v2 payload validation, template injection, Lavish session establishment, the any-origin answer binding, and arm-if-absent registration - so the per-invocation work is composing the payload and running its `build`.
 
 Compose the payload from the same snapshot with the same ranking judgment as the chat digest, plus these board rules:
 
@@ -82,6 +82,12 @@ Compose the payload from the same snapshot with the same ranking judgment as the
 - Card `type` (decision, merge, credential) is your composing judgment from the row's content; no backlog field types a card for you.
 - When the card's task is a captain-gated WORK item (the answer should free it to proceed rather than complete it), set the card's `close: "release"` so the answer lifts the hold instead of closing the task; question-shaped items omit it.
 - Every Captain's Call item and every Underway, Recently Landed, and Charted Next row carries an explicit `repo` field. Fill it from the snapshot and task records wherever known; use null or an empty string only as the deliberate genuinely-no-repo marker, in which case the template may show the internal id. Ids otherwise stay in the payload only as the routing channel, and composed reasons name blockers in plain words.
+- Add `provenance.fleet_read_at` from the fresh fleet snapshot and `provenance.usage_read_at` from the same compose-time usage read.
+- Read current usage from `quota-axi --json` at every build. Set `usage.available=false` with a bounded `reason` when that read fails, preserve zero providers as an explicit empty state, and never invent provider data.
+- For available providers, carry provider and plan, numeric weekly headroom or null with `headroom unknown`, reset time, pace, runway state, model sub-window note, attention rows, and the usage source read time. Render tight, exhausted, and unknown states explicitly.
+- Preserve usage attention rows when usage is unavailable or when zero providers report.
+- Add `supervisor` with identity `firstmate`, the supervised direct-crew count, model and effort only when known, and bounded startup-memory status when available. Firstmate supervises; crewmates and scouts own project tasks.
+- Add every Underway row's owner, reconciled state detail, required next action, optional task metadata, links, blockers, and bounded latest status. Render `report_path` as a link, accept only HTTPS PR URLs, render `model window: not measured` for every task, and do not add per-harness context readers.
 
 Run `build` once after composing the payload.
 Its serve-first sequence publishes the board, establishes or resumes its Lavish session with `lavish-axi`, and only then binds and arms the polling source; use the session URL it prints in the chat digest.

@@ -3,7 +3,7 @@
 #
 # The board is the captain-facing interactive surface of /bearings lavish: the
 # shipped template (.agents/skills/bearings/assets/board-template.html) plus one
-# injected fm-bearings-board.v1 JSON payload. This script owns the mechanics so
+# injected fm-bearings-board.v2 JSON payload. This script owns the mechanics so
 # the invoking agent's per-run work stays "compose the JSON, run build" - the
 # agent never authors board UI at invocation time.
 #
@@ -28,8 +28,8 @@
 # path       Print the stable board path for this home.
 #
 # Validation is fail-closed: the payload must be valid JSON with
-# schema=fm-bearings-board.v1 and every renderer-consumed field must satisfy
-# the fm-bearings-board.v1 types and item invariants below. Every fleet row and
+# schema=fm-bearings-board.v2 and every renderer-consumed field must satisfy
+# the fm-bearings-board.v2 types and item invariants below. Every fleet row and
 # Captain's Call item explicitly carries `repo`; the composer fills it from the
 # snapshot and task records wherever known, and uses null or an empty string
 # only as the deliberate genuinely-no-repo marker. In that exceptional case
@@ -51,7 +51,7 @@ FM_HOME="${FM_HOME:-$FM_ROOT}"
 
 TEMPLATE="${FM_BEARINGS_BOARD_TEMPLATE:-$SCRIPT_DIR/../.agents/skills/bearings/assets/board-template.html}"
 PLACEHOLDER='__FM_BEARINGS_BOARD_DATA__'
-BOARD_SCHEMA=fm-bearings-board.v1
+BOARD_SCHEMA=fm-bearings-board.v2
 
 usage() {
   awk '
@@ -71,6 +71,7 @@ board_path() { printf '%s/.lavish/bearings-board.html\n' "$FM_HOME"; }
 validate_payload() {  # <data.json>
   jq -e --arg schema "$BOARD_SCHEMA" '
     def nonempty_string: type == "string" and length > 0;
+    def bounded_string($max): type == "string" and length > 0 and length <= $max;
     def slug($max): type == "string" and test("^[A-Za-z0-9._-]{1," + ($max | tostring) + "}$");
     def repo_marker: has("repo") and (.repo == null or (.repo | type == "string"));
     def optional_string($name): (has($name) | not) or (.[$name] | type == "string");
@@ -79,6 +80,53 @@ validate_payload() {  # <data.json>
       or (.[$name]
         | type == "string"
           and test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$"));
+    def optional_report_path:
+      (has("report_path") | not)
+      or (.report_path
+        | type == "string"
+          and (length == 0 or (
+            . == (gsub("^\\s+|\\s+$"; ""))
+            and (test("[[:cntrl:]]") | not)
+            and (index("\\") == null)
+            and (test("^//") | not)
+            and (test("^[A-Za-z][A-Za-z0-9+.-]*:") | not)
+          )));
+    def provider_item:
+      type == "object"
+      and (.provider | nonempty_string)
+      and (.plan | nonempty_string)
+      and has("percent_remaining")
+      and (.percent_remaining | ((type == "number" and . >= 0 and . <= 100) or . == null))
+      and (.runway | (. == "clear" or . == "tight" or . == "exhausted" or . == "unknown"))
+      and optional_string("reset_at")
+      and optional_string("pace")
+      and optional_string("model_note")
+      and ((has("attention") | not) or (.attention | type == "array"
+        and all(.[]; type == "object" and (.text | bounded_string(240)))));
+    def usage_item:
+      type == "object"
+      and (.available | type == "boolean")
+      and (.read_at | nonempty_string)
+      and (.source | nonempty_string)
+      and ((has("attention") | not) or (.attention | type == "array"
+        and all(.[]; type == "object" and (.text | bounded_string(240)))))
+      and (if .available then
+             (.providers | type == "array")
+             and ([.providers[] | provider_item] | all)
+           else
+             (.reason | bounded_string(240))
+           end);
+    def supervisor_item:
+      type == "object"
+      and (.identity == "firstmate")
+      and (.crew_count | type == "number" and floor == . and . >= 0)
+      and optional_string("model")
+      and optional_string("effort")
+      and ((has("startup_memory") | not) or
+        (.startup_memory | type == "object"
+          and (.status | bounded_string(160))
+          and (.used_tokens | type == "number" and floor == . and . >= 0)
+          and (.budget_tokens | type == "number" and floor == . and . > 0)));
     def call_item:
       type == "object"
       and (.key | slug(128))
@@ -105,7 +153,16 @@ validate_payload() {  # <data.json>
       and (if .type == "merge" then (.risk | nonempty_string) else true end);
     def underway_item:
       type == "object" and repo_marker and (.id | nonempty_string)
-      and (.state | nonempty_string) and (.doing | nonempty_string) and (.kind | nonempty_string);
+      and (.state | nonempty_string) and (.state_detail | nonempty_string)
+      and (.doing | nonempty_string) and (.kind | nonempty_string)
+      and (.owner | nonempty_string) and (.next | bounded_string(240))
+      and optional_string("harness") and optional_string("model")
+      and optional_string("effort") and optional_string("worktree_tail")
+      and ((has("latest") | not) or (.latest | bounded_string(240)))
+      and optional_report_path
+      and ((has("blockers") | not) or (.blockers | type == "array"
+        and all(.[]; bounded_string(240))))
+      and optional_https_url("pr_url");
     def landed_item:
       type == "object" and repo_marker and (.id | nonempty_string)
       and (.what | nonempty_string) and (.owner | nonempty_string)
@@ -119,6 +176,11 @@ validate_payload() {  # <data.json>
     and (.home | nonempty_string)
     and (.generated | nonempty_string)
     and (.prs_live | type == "boolean")
+    and (.provenance | type == "object"
+      and (.fleet_read_at | nonempty_string)
+      and (.usage_read_at | nonempty_string))
+    and (.usage | usage_item)
+    and (.supervisor | supervisor_item)
     and (.captains_call | type == "array")
     and (.underway | type == "array")
     and (.landed | type == "array")

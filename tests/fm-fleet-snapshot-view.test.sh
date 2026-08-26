@@ -92,6 +92,8 @@ EOF
     "worktree=$home/projects/alpha-worktree" \
     "project=alpha" \
     "harness=claude" \
+    "model=claude-fable-5-thinking-high" \
+    "effort=default" \
     "kind=ship" \
     "mode=ship" \
     "yolo=off" \
@@ -165,6 +167,8 @@ test_fixture_snapshot_json() {
     .tasks[] | select(.id == "ship-task")
     | .current_state.state == "working"
       and .current_state.source == "pane"
+      and .model == "claude-fable-5-thinking-high"
+      and .effort == "default"
       and .pr.url == "https://github.com/kunchenguid/firstmate/pull/9"
       and .backlog.body_excerpt == "Preserve this detail for bearings."
       and .hints.pending_decision == false
@@ -184,6 +188,8 @@ test_fixture_snapshot_json() {
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "cmux-task")
     | .backend == "cmux"
+      and .model == ""
+      and .effort == ""
       and .paths.worktree.present == false
       and .current_state.state == "unknown"
   ' >/dev/null || fail "cmux missing-file row missing"

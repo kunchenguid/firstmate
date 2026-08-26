@@ -126,6 +126,8 @@ EOF
     "worktree=$home/projects/ship-wt" \
     "project=firstmate" \
     "harness=claude" \
+    "model=claude-fable-5-thinking-high" \
+    "effort=default" \
     "kind=ship" \
     "mode=no-mistakes" \
     "pr=https://github.com/kunchenguid/firstmate/pull/9"
@@ -931,6 +933,25 @@ test_toon_json_parity() {
     fi
   done
   pass "TOON and JSON are parity representations of the same model"
+}
+
+test_in_flight_preserves_model_and_effort_in_json_and_toon() {
+  local home fakebin toon json row
+  home=$(make_home model-effort); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  toon=$(run "$home" "$fakebin")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .in_flight | any(.[];
+      .id == "ship-task"
+      and .harness == "claude"
+      and .model == "claude-fable-5-thinking-high"
+      and .effort == "default")
+  ' >/dev/null || fail "JSON in_flight row lost model or effort: $json"
+  row=$(printf '%s\n' "$toon" | grep 'ship-task' | head -1)
+  assert_contains "$row" 'claude-fable-5-thinking-high' "TOON in_flight row lost model: $row"
+  assert_contains "$row" 'default' "TOON in_flight row lost effort: $row"
+  pass "bounded in_flight rows preserve model and effort in JSON and TOON"
 }
 
 test_open_decision_surfaces_end_to_end() {
@@ -1955,6 +1976,7 @@ test_registry_unavailability_and_bounds_are_explicit
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
 test_toon_json_parity
+test_in_flight_preserves_model_and_effort_in_json_and_toon
 test_landed_includes_secondmate_home_merges
 test_landed_default_balances_dominant_and_sparse_homes
 test_landed_default_refills_capacity_after_sparse_homes_exhaust
