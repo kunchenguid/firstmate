@@ -15,10 +15,9 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-cloud)
 
-# The fixture Pi credential POOL. The cloud lane's account home is the pooled
-# pi agent home, and placement leases ONE profile out of it (R5), so the fixture
-# has to look like the real pool: several profiles, each a complete oauth
-# credential shape naming a distinct upstream account.
+# The fixture Pi credential pool.  The cloud lane's canonical account home is
+# pooled, and every placement snapshots one load-balanced profile into its own
+# writable home, so the fixture carries several complete OAuth profiles.
 fm_spawn_cloud_write_pi_pool() {  # <auth.json path> [account prefix]
   python3 - "$1" "${2:-fixture}" <<'PY'
 import json
@@ -490,16 +489,16 @@ test_cloud_spawn_places_worker_and_runs_the_entrypoint() {
   assert_grep '--fast' "$HOME_DIR/state/$id.cloud-entrypoint" "the cloud worker entrypoint did not force Fast Mode"
   assert_grep 'worktree_git_dir_identity=' "$meta" "the cloud spawn did not record the worktree Git-dir identity"
   assert_grep 'worktree_git_dir=' "$meta" "the cloud spawn did not record the worktree Git dir"
-  # R5: the controller leased ONE profile out of that pool, and the credential
+  # The controller selected ONE profile out of that pool, and the credential
   # this worker actually receives is that profile's alone. Staging the pool
   # would put four accounts on the guest and let pi pick the first slot, which
   # is a shared-account placement no matter what the queue records.
-  assert_grep 'worker_account_profile=' "$meta" "the cloud spawn did not record its leased provider-account profile"
+  assert_grep 'worker_account_profile=' "$meta" "the cloud spawn did not record its provider-account snapshot profile"
   assert_grep "worker_account_home=$HOME_DIR/state/azure-workers/accounts/" "$meta" \
     "the cloud spawn did not record the controller-projected account home it was placed on"
   python3 - "$meta" "$HOME_DIR/state/$id.cloud-account/auth.json" \
     "$HOME_DIR/state/azure-workers/controller.json" "$id" <<'PY' \
-    || fail "the staged provider credential is not the leased single profile"
+    || fail "the staged provider credential is not the selected single-profile snapshot"
 import json
 import sys
 
@@ -511,8 +510,8 @@ for line in open(meta_path, encoding="utf-8"):
         meta[key] = value
 staged = json.load(open(staged_path, encoding="utf-8"))
 assert list(staged) == ["openai-codex"], sorted(staged)
-leased = json.load(open(meta["worker_account_home"] + "/auth.json", encoding="utf-8"))
-assert staged == leased, "the staged credential is not the leased profile's"
+snapshot = json.load(open(meta["worker_account_home"] + "/auth.json", encoding="utf-8"))
+assert staged == snapshot, "the staged credential is not the assignment snapshot"
 state = json.load(open(controller_path, encoding="utf-8"))
 item = next(entry for entry in state["queue"].values() if entry["task"] == task)
 assert item["account_profile"] == meta["worker_account_profile"], (item, meta)
@@ -522,7 +521,7 @@ assert item["account_pool_home"] == meta["account_home"], (item, meta)
 # proves a SELECTION happened rather than there being nothing to choose.
 pool = json.load(open(meta["account_home"] + "/auth.json", encoding="utf-8"))
 assert len(pool) > 1, sorted(pool)
-assert leased["openai-codex"]["accountId"] == pool[item["account_profile"]]["accountId"], item
+assert snapshot["openai-codex"]["accountId"] == pool[item["account_profile"]]["accountId"], item
 PY
   # Herdr tracking endpoint: every cloud crewmate registers a real Herdr
   # endpoint running the cloud monitor, with ZERO tmux involvement anywhere
@@ -576,7 +575,7 @@ test_cloud_spawn_uses_the_dedicated_azure_account_pool() {
   assert_grep "account_home=$azure_home" "$meta" "the cloud spawn ignored config/azure-worker-account-home"
   python3 - "$meta" "$HOME_DIR/state/azure-workers/controller.json" \
     "$CASE_DIR/pi-agent-home/auth.json" "$azure_home/auth.json" "$id" <<'PY' \
-    || fail "the controller did not lease from the dedicated Azure pool"
+    || fail "the controller did not snapshot from the dedicated Azure pool"
 import json
 from pathlib import Path
 import sys
@@ -651,7 +650,8 @@ import time
 
 path = sys.argv[1]
 pool = json.load(open(path, encoding="utf-8"))
-pool["openai-codex"]["expires"] = int((time.time() + 3600) * 1000)
+for entry in pool.values():
+    entry["expires"] = int((time.time() + 3600) * 1000)
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(pool, handle, sort_keys=True, indent=2)
 PY
@@ -662,8 +662,10 @@ PY
     "the refusal did not explain the guest refresh boundary: $out"
   assert_absent "$HOME_DIR/state/$id.cloud-account/auth.json" \
     "a near-expiry credential was left staged after refusal"
-  assert_no_grep "\"task\":\"$id\"" "$HOME_DIR/state/azure-workers/controller.json" \
-    "the refused near-expiry credential kept its provider-account lease"
+  if [ -f "$HOME_DIR/state/azure-workers/controller.json" ]; then
+    assert_no_grep "\"task\":\"$id\"" "$HOME_DIR/state/azure-workers/controller.json" \
+      "the refused near-expiry pool kept an assignment projection"
+  fi
   pass "cloud staging prevents a guest from becoming a second OAuth refresh authority"
 }
 
@@ -784,10 +786,10 @@ test_the_pool_is_never_staged_in_the_request_to_narrow_window() {
   id=cloud-window-c15
   record=$(make_cloud_case narrow-window "$id")
   read_cloud_case "$record"
-  # THE WINDOW: the durable lease exists and the tracking monitor pane is
-  # already polling, but the spawn has not yet narrowed the account directory.
+  # THE WINDOW: the request-private snapshot exists and the tracking monitor
+  # pane is already polling, but spawn has not staged the task-private copy.
   # The spawn is killed exactly there. If the pooled auth.json were staged
-  # before the lease (as it used to be), every signed-in account would be
+  # before selection (as it used to be), every signed-in account would be
   # sitting in a directory the monitor is willing to dispatch as --account-dir.
   # Written to a FILE, never captured through a command substitution. The spawn
   # is SIGKILLed here, and a command substitution would keep blocking on the
@@ -810,9 +812,8 @@ controller, account_dir, task, pool_path = sys.argv[1:]
 state = json.load(open(controller, encoding="utf-8"))
 live = [item for item in state["queue"].values()
         if item.get("task") == task and item.get("status") != "complete"]
-# The lease really is durable at this point, so the window is real and not
-# something the test skipped past.
-assert live, "no durable lease existed, so this never entered the window"
+# The queue-owned projection is durable, so the window is real and not skipped.
+assert live, "no durable projection owner existed, so this never entered the window"
 pool = json.load(open(pool_path, encoding="utf-8"))
 assert len(pool) > 1, sorted(pool)
 staged = pathlib.Path(account_dir) / "auth.json"
@@ -820,30 +821,29 @@ if staged.exists():
     parsed = json.load(open(staged, encoding="utf-8"))
     assert isinstance(parsed, dict) and len(parsed) == 1, (
         "the pooled credential was staged inside the window", sorted(parsed))
-print("# window state: lease durable, staged slots = {}".format(
+print("# window state: projection durable, staged slots = {}".format(
     sorted(json.load(open(staged, encoding="utf-8"))) if staged.exists() else "no auth.json at all"))
 PY2
-  pass "the pooled credential is never staged in the window between the durable lease and the narrowing"
+  pass "the pooled credential is never staged between private projection and task staging"
 }
 
-test_a_spawn_that_cannot_bind_its_leased_account_hands_it_back() {
+test_a_spawn_that_cannot_stage_its_snapshot_removes_projection() {
   local record id out status
   id=cloud-bindfail-c14
   record=$(make_cloud_case bind-failure "$id")
   read_cloud_case "$record"
-  # The queue entry IS the provider-account lease. A spawn that gets past the
-  # request but cannot bind the account it was handed must give the lease back,
-  # or the pool loses one account every time this happens and eventually
-  # refuses every placement.
+  # A queued request owns one private profile projection.  If task staging
+  # fails, withdraw must remove that exact projection without affecting the
+  # reusable canonical profile or another assignment.
   out=$(FM_ACCOUNT_DIRECTORY_TEST_LAB=firstmate-account-directory-test-lab-v1 \
     FM_TEST_CLOUD_ACCOUNT_BIND_FAIL=1 \
     run_cloud_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
   status=$?
-  expect_code 1 "$status" "a spawn that cannot bind its leased account should fail: $out"
-  assert_contains "$out" "could not be bound to its leased provider account" \
-    "the failure did not name the account binding step: $out"
-  assert_contains "$out" "released the provider-account lease for $id" \
-    "the spawn did not hand the provider-account lease back: $out"
+  expect_code 1 "$status" "a spawn that cannot stage its snapshot should fail: $out"
+  assert_contains "$out" "could not stage its provider-account snapshot" \
+    "the failure did not name the snapshot staging step: $out"
+  assert_contains "$out" "removed the provider-account projection for $id" \
+    "the spawn did not remove its assignment-private projection: $out"
   python3 - "$HOME_DIR/state/azure-workers/controller.json" "$id" <<'PY' \
     || fail "the unbindable placement kept holding its provider account"
 import json
@@ -858,7 +858,7 @@ assert not [item for item in live if item.get("task") == sys.argv[2]], live
 # Nothing else holds an account either, so the whole pool is free again.
 assert not [item for item in live if item.get("account_profile")], live
 PY
-  pass "a spawn that cannot bind its leased provider account hands the lease back instead of orphaning it"
+  pass "a spawn staging failure removes only its assignment-private provider projection"
 }
 
 test_cloud_switch_refuses_non_pi_harness() {
@@ -1870,7 +1870,7 @@ test_monitor_stands_down_when_dispatch_already_claimed
 test_cloud_spawn_config_file_default_and_env_override
 test_cloud_spawn_refuses_unknown_switch_value
 test_cloud_spawn_fails_closed_when_the_lifecycle_refuses_the_request
-test_a_spawn_that_cannot_bind_its_leased_account_hands_it_back
+test_a_spawn_that_cannot_stage_its_snapshot_removes_projection
 test_the_pool_is_never_staged_in_the_request_to_narrow_window
 test_cloud_switch_refuses_non_pi_harness
 test_cloud_switch_refuses_explicit_backend
