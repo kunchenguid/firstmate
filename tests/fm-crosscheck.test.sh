@@ -5697,6 +5697,29 @@ assert (
     "Timing: total 30.0s (reviewer 20.0s, snapshot 1.5s)." in timed_report
 ), timed_report
 
+# Current identity-only Azure reviews intentionally have no tool/verifier VM.
+# Rendering that admitted result must not turn the successful review into a
+# post-admission tool failure.
+identity_only = run_record(
+    state="clear",
+    citations=[{"path": "docs/marker.md", "line": 1}],
+    reviewer={
+        "execution_mode": "azure-compartment-v1",
+        "azure_identity": {
+            "review_generation": "a" * 24,
+            "model": {"vm_instance_id": "model-1", "cleanup_phase": "complete"},
+            "tool": None,
+            "verifier": None,
+            "evidence_attempts": [],
+            "evidence_attempts_digest": "sha256:" + "d" * 64,
+            "staging_cleanup_phase": "complete",
+        },
+    },
+)
+identity_report = module.render_report(ledger_with(identity_only), identity_only)
+assert "Tool compartment: `none`" in identity_report, identity_report
+assert "Verifier compartment: `none`" in identity_report, identity_report
+
 # Every way a recorded measurement can be dishonest is refused.
 for durations, expected in (
     ({"snapshot": 1.5, "total": 30}, "non-negative integer millisecond count"),
