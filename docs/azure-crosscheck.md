@@ -181,6 +181,8 @@ They do not share a database or writable account disk.
 The durable v2 per-task lock and ledger remain home-local and keep one writer per task.
 
 Cleanup starts only after a complete digest-bound result and exact compartment identities are retained.
+The controller persists that admitted semantic run before cleanup begins.
+If cleanup is ambiguous, the admitted run remains durable and a separate nonzero tool-failure alarm is appended; retrying publication or cleanup never reruns the model.
 The controller re-reads tags and ETags before conditional deletion.
 It deletes only the attempt's review and safety Managed Run Commands, model VM, NIC, OS disk, exact staged request, exact staged credential, and exact staged result.
 Every conditional deletion is followed by an exact absence proof, and an authorization, transport, or inventory error remains ambiguity rather than being treated as absence.

@@ -1,0 +1,1552 @@
+{
+  "findings": [
+    {
+      "citations": [
+        {
+          "line": 22,
+          "path": ".no-mistakes.yaml"
+        },
+        {
+          "line": 12,
+          "path": "bin/fm-no-mistakes-test-command.sh"
+        },
+        {
+          "line": 19,
+          "path": "bin/fm-no-mistakes-test-command.sh"
+        },
+        {
+          "line": 63,
+          "path": "bin/fm-no-mistakes-test-command.sh"
+        }
+      ],
+      "description": "The ordinary local no-mistakes test command replaces run_full() with run_local_required(). The old run_full() called \"$ROOT/tests/run.sh\" with no arguments, admitting the complete behavior-test inventory through the sealed boundary. The new run_local_required() calls \"$ROOT/tests/run.sh\" \"${herdr_tests[@]}\", where herdr_tests is built by filtering tests/test-capabilities.tsv to only herdr-lab and herdr-mixed entries (line 63: 'herdr-lab|herdr-mixed) herdr_tests+=(...)'). Every hermetic-only behavior test file is omitted from local pre-push validation. The .no-mistakes.yaml comment at line 22 explicitly acknowledges this: 'It deliberately does not duplicate hermetic-only behavior files on the Mac.' The PR's own review flagged this as an error: 'Restore the complete local suite, or obtain explicit approval for this material weakening of the gate contract.' No explicit approval was obtained, and the intent stated 'instead of hiding the seven shallow-history failures behind new skips,' meaning the seven failures should have been fixed rather than the tests removed from local execution. The PR did fix the shallow-history root cause by changing --depth=1 fetches to full fetches in fm-azure-runner-guest.sh, but then removed the hermetic-only tests from local validation instead of verifying they now pass. This materially weakens the gate contract: a developer can push code that fails hermetic behavior tests without any local check catching it, relying solely on CI.",
+      "history": [
+        {
+          "at": "2026-08-25T14:19:37Z",
+          "head_sha": "1251070bfa5f7924ee88e5b2814de27fe505d556",
+          "note": "executed reproduction admitted the finding",
+          "proof": {
+            "actual_exit": 0,
+            "azure_replay": {
+              "result": {
+                "exit_code": 0,
+                "signal": null,
+                "stderr_bytes": 0,
+                "stderr_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "stderr_truncated": false,
+                "stdout_bytes": 19,
+                "stdout_digest": "sha256:181b254f9e450337ce1ccee442cb4456ddd02e23a4716fe95f59be83e31a3f9c",
+                "stdout_truncated": false,
+                "timed_out": false
+              },
+              "tool": {
+                "base_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+                "boot_id": "94c4bd20-65c1-422f-853c-8e3791bbd866",
+                "cleanup_phase": "complete",
+                "credential_present": false,
+                "deployment_generation": "gen-20260812-01",
+                "head_sha": "1251070bfa5f7924ee88e5b2814de27fe505d556",
+                "invocation": "azr-812ba36d6cc8",
+                "network_bytes": 0,
+                "request_digest": "sha256:c5e69c3b7c1b1f3c63b918d486afe4cda573312992694b18d6f86c033a37997a",
+                "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-run-812ba36d6cc8",
+                "result_digest": "sha256:885f85fc488f4e2d4edacf36081cc9b5bb774a8360066395cda9430673e716bb",
+                "review_generation": "97e86816f9e7280cc741ffd4",
+                "source_ref": "refs/pull/327/head",
+                "vm_instance_id": "2dd839a1-0f1d-456a-897a-81a180ad1e13"
+              },
+              "verifier": {
+                "base_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+                "boot_id": "4ae47cf7-c1e2-4c68-9f09-e43984916a89",
+                "cleanup_phase": "complete",
+                "credential_present": false,
+                "deployment_generation": "gen-20260812-01",
+                "head_sha": "1251070bfa5f7924ee88e5b2814de27fe505d556",
+                "invocation": "azr-36d62a253e0c",
+                "network_bytes": 0,
+                "request_digest": "sha256:c97fefe7d806d4788436a8edef5db0ed75d358463c54f147c15580a4af739535",
+                "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-run-36d62a253e0c",
+                "result_digest": "sha256:de7b00639ebde57dea7c2ec79ad68620ea5545c844a60cedf9f080b03acd2edc",
+                "review_generation": "97e86816f9e7280cc741ffd4",
+                "source_ref": "refs/pull/327/head",
+                "vm_instance_id": "e41fe660-ca8e-4727-be4a-5cc2a071a3bf"
+              }
+            },
+            "command": "bash --noprofile --norc .crosscheck/reproductions/finding-local-coverage.sh c56d24c8a55181b3f44e7f35a9de168b546ae01a 1251070bfa5f7924ee88e5b2814de27fe505d556",
+            "expected_exit": 0,
+            "output": "validated in fresh networkless Azure tool/verifier attempts; sha256:181b254f9e450337ce1ccee442cb4456ddd02e23a4716fe95f59be83e31a3f9c",
+            "output_contains": "FINDING_LOCAL_COVERAGE_WEAKENED",
+            "test_path": ".crosscheck/reproductions/finding-local-coverage.sh"
+          },
+          "status": "open"
+        },
+        {
+          "at": "2026-08-25T15:33:01Z",
+          "head_sha": "3c8c480efeceadfdf56e11e48f8c7d101b02ec2b",
+          "note": "The finding was opened at prior head 1251070b and remains open. The current diff does not contain an identifiable fix for this blocking finding, and no tracked test or mutation proof is available to close it. Without the original finding description, I cannot map it to a specific change in this diff. Keeping it open.",
+          "proof": null,
+          "status": "open"
+        }
+      ],
+      "id": "cc-8f48584d092b",
+      "lifecycle": "open",
+      "severity": "blocking",
+      "title": "Local pre-push test command removes all hermetic-only behavior tests without authorization"
+    }
+  ],
+  "pull_request": "https://github.com/ruby-dlee/firstmate/pull/327",
+  "runs": [
+    {
+      "active_blockers": [],
+      "at": "2026-08-25T06:21:19Z",
+      "base_branch_sha": "4597245d883a8f35d2a2267917d7cd9bb1faf9d6",
+      "base_sha": "4597245d883a8f35d2a2267917d7cd9bb1faf9d6",
+      "citations": [],
+      "claims_sha256": "3fb04dddc7e305ecca391fa5f2f7d5076a9d6dd52f64397b999e9f1b0bb7b1ef",
+      "head_sha": "b249c28934a482edbc54e3d4e444c2560aa0c0ee",
+      "new_findings": [],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/var/lib/fm-crosscheck-model/account",
+        "execution_home": "/var/lib/fm-crosscheck-model/home",
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "a3bbabcab1fd40a0e7ed07f351ea914424f5f59b62f4b5921c506c545d6f607d",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4"
+      },
+      "state": "tool-failure",
+      "summary": "Azure evidence wrapper failed closed",
+      "suspicions": [],
+      "telemetry": {
+        "costs_usd": {
+          "declared": 0.1647846,
+          "declared_source": "pinned-fireworks-regular-rates",
+          "pi_calculated": 0.1647846,
+          "pi_calculated_source": "pi-turn-end-message-usage-cost-total",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable-in-pi-events"
+        },
+        "failure_category": "evidence",
+        "finding_disposition": {
+          "active": 0,
+          "closed_equivalent": 0,
+          "new": 0,
+          "suspicions": 0,
+          "updated": 0,
+          "verified_fixed": 0
+        },
+        "outcome": "tool-failure",
+        "reuse": null,
+        "reviewer_latency_ms": 326389,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": 2120,
+          "cache_write": 0,
+          "input": 31465,
+          "output": 27372,
+          "source": "pi-turn-end-message-usage"
+        },
+        "turns": 1
+      },
+      "updated_findings": []
+    },
+    {
+      "active_blockers": [],
+      "at": "2026-08-25T06:31:12Z",
+      "base_branch_sha": "4597245d883a8f35d2a2267917d7cd9bb1faf9d6",
+      "base_sha": "4597245d883a8f35d2a2267917d7cd9bb1faf9d6",
+      "citations": [],
+      "claims_sha256": "3fb04dddc7e305ecca391fa5f2f7d5076a9d6dd52f64397b999e9f1b0bb7b1ef",
+      "head_sha": "b249c28934a482edbc54e3d4e444c2560aa0c0ee",
+      "new_findings": [],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/var/lib/fm-crosscheck-model/account",
+        "execution_home": "/var/lib/fm-crosscheck-model/home",
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "a3bbabcab1fd40a0e7ed07f351ea914424f5f59b62f4b5921c506c545d6f607d",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4"
+      },
+      "state": "tool-failure",
+      "summary": "shared allocator queued disposable-runner demand: exact selected-family observed-plus-reserved capacity is exhausted",
+      "suspicions": [],
+      "telemetry": {
+        "costs_usd": {
+          "declared": 0.05022996,
+          "declared_source": "pinned-fireworks-regular-rates",
+          "pi_calculated": 0.05022996,
+          "pi_calculated_source": "pi-turn-end-message-usage-cost-total",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable-in-pi-events"
+        },
+        "failure_category": "tooling",
+        "finding_disposition": {
+          "active": 0,
+          "closed_equivalent": 0,
+          "new": 0,
+          "suspicions": 0,
+          "updated": 0,
+          "verified_fixed": 0
+        },
+        "outcome": "tool-failure",
+        "reuse": null,
+        "reviewer_latency_ms": 180388,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": 33584,
+          "cache_write": 0,
+          "input": 1,
+          "output": 10347,
+          "source": "pi-turn-end-message-usage"
+        },
+        "turns": 1
+      },
+      "updated_findings": []
+    },
+    {
+      "active_blockers": [],
+      "at": "2026-08-25T14:09:51Z",
+      "base_branch_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+      "base_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+      "citations": [],
+      "claims_sha256": "3fb04dddc7e305ecca391fa5f2f7d5076a9d6dd52f64397b999e9f1b0bb7b1ef",
+      "head_sha": "1251070bfa5f7924ee88e5b2814de27fe505d556",
+      "new_findings": [],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/var/lib/fm-crosscheck-model/account",
+        "execution_home": "/var/lib/fm-crosscheck-model/home",
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "c3918b91f4c787b3927bf5b0fd055072103af60441a0b54baafbc90a7855c07e",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4"
+      },
+      "state": "tool-failure",
+      "summary": "model compartment ended as Failed: model guest: Pi must submit exactly one verdict tool call\n",
+      "suspicions": [],
+      "telemetry": {
+        "costs_usd": {
+          "declared": null,
+          "declared_source": "unavailable",
+          "pi_calculated": null,
+          "pi_calculated_source": "unavailable",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable"
+        },
+        "failure_category": "review-validation",
+        "finding_disposition": {
+          "active": 0,
+          "closed_equivalent": 0,
+          "new": 0,
+          "suspicions": 0,
+          "updated": 0,
+          "verified_fixed": 0
+        },
+        "outcome": "tool-failure",
+        "reuse": null,
+        "reviewer_latency_ms": null,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": null,
+          "cache_write": null,
+          "input": null,
+          "output": null,
+          "source": "unavailable"
+        },
+        "turns": null
+      },
+      "updated_findings": []
+    },
+    {
+      "active_blockers": [
+        "cc-8f48584d092b"
+      ],
+      "at": "2026-08-25T14:19:37Z",
+      "base_branch_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+      "base_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+      "citations": [
+        {
+          "line": 22,
+          "path": ".no-mistakes.yaml"
+        },
+        {
+          "line": 12,
+          "path": "bin/fm-no-mistakes-test-command.sh"
+        },
+        {
+          "line": 19,
+          "path": "bin/fm-no-mistakes-test-command.sh"
+        },
+        {
+          "line": 63,
+          "path": "bin/fm-no-mistakes-test-command.sh"
+        },
+        {
+          "line": 243,
+          "path": "tests/fm-nm-step-liveness.test.sh"
+        },
+        {
+          "line": 244,
+          "path": "tests/fm-nm-step-liveness.test.sh"
+        }
+      ],
+      "claims_sha256": "3fb04dddc7e305ecca391fa5f2f7d5076a9d6dd52f64397b999e9f1b0bb7b1ef",
+      "durations_ms": {
+        "boot": 3422,
+        "collect": 667,
+        "create": 143839,
+        "ledger": 0,
+        "proofs": 1529725,
+        "reviewer": 391410,
+        "snapshot": 3517,
+        "stage": 1064,
+        "total": 2134873
+      },
+      "head_sha": "1251070bfa5f7924ee88e5b2814de27fe505d556",
+      "new_findings": [
+        "cc-8f48584d092b"
+      ],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "azure_identity": {
+          "base_branch_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+          "base_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+          "claims_sha256": "3fb04dddc7e305ecca391fa5f2f7d5076a9d6dd52f64397b999e9f1b0bb7b1ef",
+          "credential_archive_digest": "sha256:c51d62364ebcc305a0213c2b1bbfd6167e06855b3d293139c680b2b9ce3b4137",
+          "credential_digest": "sha256:acac4288c5887fafb0e00e247565ae9dca52be39dccd15cb72d5edd0380f5e2d",
+          "deployment_generation": "gen-20260812-01",
+          "evidence_attempts": [
+            {
+              "result": {
+                "exit_code": 0,
+                "signal": null,
+                "stderr_bytes": 0,
+                "stderr_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "stderr_truncated": false,
+                "stdout_bytes": 197,
+                "stdout_digest": "sha256:24d596484e7635d5147c3d4c3f2db06a7e6a41c0173b77813055405ae3dc76f7",
+                "stdout_truncated": false,
+                "timed_out": false
+              },
+              "tool": {
+                "base_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+                "boot_id": "2849715d-fe23-4bb3-a56e-c6fe807390fb",
+                "cleanup_phase": "complete",
+                "credential_present": false,
+                "deployment_generation": "gen-20260812-01",
+                "head_sha": "1251070bfa5f7924ee88e5b2814de27fe505d556",
+                "invocation": "azr-22f207e4864e",
+                "network_bytes": 0,
+                "request_digest": "sha256:77a43b8eba2d229f7be78a0f4c98103ac0a5535308f97e2119aeedef20d69c26",
+                "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-run-22f207e4864e",
+                "result_digest": "sha256:4dc7a3aeedf774ee9e1a9f088f409fac6870b153f967402dd8f3b783e7dab639",
+                "review_generation": "97e86816f9e7280cc741ffd4",
+                "source_ref": "refs/pull/327/head",
+                "vm_instance_id": "d3fba191-b0a1-4030-8972-d12c7ff36b2d"
+              },
+              "verifier": {
+                "base_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+                "boot_id": "f3a90aeb-3b47-4a05-b815-d13ff4df73ff",
+                "cleanup_phase": "complete",
+                "credential_present": false,
+                "deployment_generation": "gen-20260812-01",
+                "head_sha": "1251070bfa5f7924ee88e5b2814de27fe505d556",
+                "invocation": "azr-7003635ea9db",
+                "network_bytes": 0,
+                "request_digest": "sha256:fec903f2358574611bb0186658a4d331a733297f6608f02d4166a36afbeb840f",
+                "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-run-7003635ea9db",
+                "result_digest": "sha256:68d443738dd828332fd1f31796c2b2ac567de79a7191afa4b142e46e49840024",
+                "review_generation": "97e86816f9e7280cc741ffd4",
+                "source_ref": "refs/pull/327/head",
+                "vm_instance_id": "52b822a2-1300-433f-99f9-f9594d951255"
+              }
+            },
+            {
+              "result": {
+                "exit_code": 0,
+                "signal": null,
+                "stderr_bytes": 0,
+                "stderr_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "stderr_truncated": false,
+                "stdout_bytes": 19,
+                "stdout_digest": "sha256:181b254f9e450337ce1ccee442cb4456ddd02e23a4716fe95f59be83e31a3f9c",
+                "stdout_truncated": false,
+                "timed_out": false
+              },
+              "tool": {
+                "base_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+                "boot_id": "94c4bd20-65c1-422f-853c-8e3791bbd866",
+                "cleanup_phase": "complete",
+                "credential_present": false,
+                "deployment_generation": "gen-20260812-01",
+                "head_sha": "1251070bfa5f7924ee88e5b2814de27fe505d556",
+                "invocation": "azr-812ba36d6cc8",
+                "network_bytes": 0,
+                "request_digest": "sha256:c5e69c3b7c1b1f3c63b918d486afe4cda573312992694b18d6f86c033a37997a",
+                "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-run-812ba36d6cc8",
+                "result_digest": "sha256:885f85fc488f4e2d4edacf36081cc9b5bb774a8360066395cda9430673e716bb",
+                "review_generation": "97e86816f9e7280cc741ffd4",
+                "source_ref": "refs/pull/327/head",
+                "vm_instance_id": "2dd839a1-0f1d-456a-897a-81a180ad1e13"
+              },
+              "verifier": {
+                "base_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+                "boot_id": "4ae47cf7-c1e2-4c68-9f09-e43984916a89",
+                "cleanup_phase": "complete",
+                "credential_present": false,
+                "deployment_generation": "gen-20260812-01",
+                "head_sha": "1251070bfa5f7924ee88e5b2814de27fe505d556",
+                "invocation": "azr-36d62a253e0c",
+                "network_bytes": 0,
+                "request_digest": "sha256:c97fefe7d806d4788436a8edef5db0ed75d358463c54f147c15580a4af739535",
+                "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-run-36d62a253e0c",
+                "result_digest": "sha256:de7b00639ebde57dea7c2ec79ad68620ea5545c844a60cedf9f080b03acd2edc",
+                "review_generation": "97e86816f9e7280cc741ffd4",
+                "source_ref": "refs/pull/327/head",
+                "vm_instance_id": "e41fe660-ca8e-4727-be4a-5cc2a071a3bf"
+              }
+            }
+          ],
+          "evidence_attempts_digest": "sha256:6745bf2896116a8dfef5b53e05d313b2a8bc1880b597f7f3d3b7a30d944ead57",
+          "head_sha": "1251070bfa5f7924ee88e5b2814de27fe505d556",
+          "home_binding": "sha256:3dbb511eeecdb2b76c1dc4e347ec27b530ca709bb476a6f89a795e19de63077f",
+          "ledger_digest": "sha256:c363197304c876871c58190506e67c38aeac069e9c0e58e75c0db86930ec6589",
+          "model": {
+            "boot_id": "202d4a58-96a3-44a6-aa86-acb6c4dca7a1",
+            "capacity_fence_digest": "sha256:806e78a529b7951412de6add0251683b707eadf5b7377ef45f9a64ae45409098",
+            "capacity_reservation": "ccm-97e86816f9e7",
+            "cleanup_phase": "complete",
+            "deployment_generation": "gen-20260812-01",
+            "image_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/galleries/fmcellgallery/images/fm-ccm/versions/1.0.1787092687",
+            "request_digest": "sha256:141f0b771dbd8572fb6b4f2fdc53ec4280eec8c02a8cd87a450ac0a99753840f",
+            "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-ccm-97e86816f9e7",
+            "result_digest": "sha256:c1414344d7bc070f57e48b81ed8e74cd342e808c1264d9f73818c3684d447867",
+            "vm_instance_id": "a687418e-db58-4149-bf55-b28a550642f1"
+          },
+          "model_image_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/galleries/fmcellgallery/images/fm-ccm/versions/1.0.1787092687",
+          "provider_host": "api.fireworks.ai",
+          "provider_port": "443",
+          "pull_request": "https://github.com/ruby-dlee/firstmate/pull/327",
+          "request_digest": "sha256:141f0b771dbd8572fb6b4f2fdc53ec4280eec8c02a8cd87a450ac0a99753840f",
+          "review_generation": "97e86816f9e7280cc741ffd4",
+          "reviewer_account_digest": "sha256:ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+          "reviewer_effort": "xhigh",
+          "reviewer_harness": "pi",
+          "reviewer_model": "accounts/fireworks/models/glm-5p2",
+          "reviewer_sku": "Standard_D4as_v6",
+          "staging_cleanup_phase": "complete",
+          "task_id": "azure-nm-offload-fix-k4",
+          "tool": {
+            "base_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+            "boot_id": "2849715d-fe23-4bb3-a56e-c6fe807390fb",
+            "cleanup_phase": "complete",
+            "credential_present": false,
+            "deployment_generation": "gen-20260812-01",
+            "head_sha": "1251070bfa5f7924ee88e5b2814de27fe505d556",
+            "invocation": "azr-22f207e4864e",
+            "network_bytes": 0,
+            "request_digest": "sha256:77a43b8eba2d229f7be78a0f4c98103ac0a5535308f97e2119aeedef20d69c26",
+            "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-run-22f207e4864e",
+            "result_digest": "sha256:4dc7a3aeedf774ee9e1a9f088f409fac6870b153f967402dd8f3b783e7dab639",
+            "review_generation": "97e86816f9e7280cc741ffd4",
+            "source_ref": "refs/pull/327/head",
+            "vm_instance_id": "d3fba191-b0a1-4030-8972-d12c7ff36b2d"
+          },
+          "verifier": {
+            "base_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+            "boot_id": "f3a90aeb-3b47-4a05-b815-d13ff4df73ff",
+            "cleanup_phase": "complete",
+            "credential_present": false,
+            "deployment_generation": "gen-20260812-01",
+            "head_sha": "1251070bfa5f7924ee88e5b2814de27fe505d556",
+            "invocation": "azr-7003635ea9db",
+            "network_bytes": 0,
+            "request_digest": "sha256:fec903f2358574611bb0186658a4d331a733297f6608f02d4166a36afbeb840f",
+            "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-run-7003635ea9db",
+            "result_digest": "sha256:68d443738dd828332fd1f31796c2b2ac567de79a7191afa4b142e46e49840024",
+            "review_generation": "97e86816f9e7280cc741ffd4",
+            "source_ref": "refs/pull/327/head",
+            "vm_instance_id": "52b822a2-1300-433f-99f9-f9594d951255"
+          }
+        },
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/var/lib/fm-crosscheck-model/account",
+        "execution_home": "/var/lib/fm-crosscheck-model/home",
+        "execution_mode": "azure-compartment-v1",
+        "execution_proof": {
+          "actual_exit": 0,
+          "azure_replay": {
+            "result": {
+              "exit_code": 0,
+              "signal": null,
+              "stderr_bytes": 0,
+              "stderr_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stderr_truncated": false,
+              "stdout_bytes": 197,
+              "stdout_digest": "sha256:24d596484e7635d5147c3d4c3f2db06a7e6a41c0173b77813055405ae3dc76f7",
+              "stdout_truncated": false,
+              "timed_out": false
+            },
+            "tool": {
+              "base_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+              "boot_id": "2849715d-fe23-4bb3-a56e-c6fe807390fb",
+              "cleanup_phase": "complete",
+              "credential_present": false,
+              "deployment_generation": "gen-20260812-01",
+              "head_sha": "1251070bfa5f7924ee88e5b2814de27fe505d556",
+              "invocation": "azr-22f207e4864e",
+              "network_bytes": 0,
+              "request_digest": "sha256:77a43b8eba2d229f7be78a0f4c98103ac0a5535308f97e2119aeedef20d69c26",
+              "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-run-22f207e4864e",
+              "result_digest": "sha256:4dc7a3aeedf774ee9e1a9f088f409fac6870b153f967402dd8f3b783e7dab639",
+              "review_generation": "97e86816f9e7280cc741ffd4",
+              "source_ref": "refs/pull/327/head",
+              "vm_instance_id": "d3fba191-b0a1-4030-8972-d12c7ff36b2d"
+            },
+            "verifier": {
+              "base_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+              "boot_id": "f3a90aeb-3b47-4a05-b815-d13ff4df73ff",
+              "cleanup_phase": "complete",
+              "credential_present": false,
+              "deployment_generation": "gen-20260812-01",
+              "head_sha": "1251070bfa5f7924ee88e5b2814de27fe505d556",
+              "invocation": "azr-7003635ea9db",
+              "network_bytes": 0,
+              "request_digest": "sha256:fec903f2358574611bb0186658a4d331a733297f6608f02d4166a36afbeb840f",
+              "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-run-7003635ea9db",
+              "result_digest": "sha256:68d443738dd828332fd1f31796c2b2ac567de79a7191afa4b142e46e49840024",
+              "review_generation": "97e86816f9e7280cc741ffd4",
+              "source_ref": "refs/pull/327/head",
+              "vm_instance_id": "52b822a2-1300-433f-99f9-f9594d951255"
+            }
+          },
+          "command": "bash --noprofile --norc .crosscheck/reproductions/repro.sh c56d24c8a55181b3f44e7f35a9de168b546ae01a 1251070bfa5f7924ee88e5b2814de27fe505d556",
+          "expected_exit": 0,
+          "output": "validated in fresh networkless Azure tool/verifier attempts; sha256:24d596484e7635d5147c3d4c3f2db06a7e6a41c0173b77813055405ae3dc76f7",
+          "output_contains": "CROSSCHECK_REPRO_SUCCESS",
+          "reviewer_receipt": {
+            "contains": "CROSSCHECK_REPRO_RECEIPT_OK",
+            "output": "private receipt content retained by digest",
+            "path": ".crosscheck/reproductions/receipt-verdict.txt",
+            "sha256": "24d596484e7635d5147c3d4c3f2db06a7e6a41c0173b77813055405ae3dc76f7"
+          },
+          "test_path": ".crosscheck/reproductions/repro.sh"
+        },
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "c3918b91f4c787b3927bf5b0fd055072103af60441a0b54baafbc90a7855c07e",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4"
+      },
+      "state": "blocking",
+      "summary": "Reviewed the full diff for PR 327 (fix: enable detached Azure gate execution). The PR adds a private-direct-bundle mode for detached HEAD Azure routing, an offline Agent Fleet installer, full-history git fetches replacing shallow fetches, watcher subprocess cleanup via fm_super_stop_watcher, and a liveness test barrier mechanism. The Azure runner changes (private-direct-bundle mode, create_private_snapshot_from_head, verify_self_contained_private_bundle, Agent Fleet installer, four-name host-capability declaration, guest.sh full-history fetches with shallow-repository check) are structurally sound and well-tested. The watcher cleanup function fm_super_stop_watcher correctly terminates children before the watcher to prevent orphaning. However, the PR introduces one blocking finding: bin/fm-no-mistakes-test-command.sh replaces run_full() with run_local_required(), which only passes herdr-lab and herdr-mixed files to tests/run.sh, omitting every hermetic-only behavior test from local pre-push validation. The PR's own review flagged this as an error requiring restoration of the complete suite or explicit approval, but neither was provided. The intent explicitly stated the seven shallow-history failures should be fixed 'instead of hiding them behind new skips,' yet the PR removed the tests from local execution entirely. While the PR did fix the root cause (changing --depth=1 to full fetches), it did not verify the hermetic-only tests now pass locally before removing them. One suspicion is also raised about the liveness test's new barrier mechanism using FM_NM_TEST_BARRIER_DIR and FM_NM_TEST_BARRIER_PHASE environment variables whose support in the probe code cannot be verified from the diff.",
+      "suspicions": [
+        {
+          "citations": [
+            {
+              "line": 243,
+              "path": "tests/fm-nm-step-liveness.test.sh"
+            },
+            {
+              "line": 244,
+              "path": "tests/fm-nm-step-liveness.test.sh"
+            }
+          ],
+          "description": "The liveness test (j1 case) now drives a post-baseline membership change through FM_NM_TEST_BARRIER_DIR and FM_NM_TEST_BARRIER_PHASE=before-progress-sample environment variables passed to the probe ($PROBE). The probe must support these barrier variables to block at the specified phase, release on a barrier file write, and then complete its sample. The probe implementation is not in the diff, so it cannot be verified from the packet alone that these variables are actually handled. If the probe does not support the barrier mechanism, the test would hang at wait_for_barrier and eventually fail, or the probe might ignore the variables and produce an incorrect verdict. The old approach relied on sleep 0.2 turnover timing which was flaky under load; the new barrier approach is more deterministic but depends on unverified probe support."
+        }
+      ],
+      "telemetry": {
+        "costs_usd": {
+          "declared": 0.13157108,
+          "declared_source": "pinned-fireworks-regular-rates",
+          "pi_calculated": 0.13157108,
+          "pi_calculated_source": "pi-turn-end-message-usage-cost-total",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable-in-pi-events"
+        },
+        "failure_category": null,
+        "finding_disposition": {
+          "active": 1,
+          "closed_equivalent": 0,
+          "new": 1,
+          "suspicions": 1,
+          "updated": 0,
+          "verified_fixed": 0
+        },
+        "outcome": "blocking",
+        "reuse": null,
+        "reviewer_latency_ms": 391410,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": 33572,
+          "cache_write": 0,
+          "input": 1,
+          "output": 28834,
+          "source": "pi-turn-end-message-usage"
+        },
+        "turns": 1
+      },
+      "updated_findings": []
+    },
+    {
+      "active_blockers": [
+        "cc-8f48584d092b"
+      ],
+      "at": "2026-08-25T15:33:01Z",
+      "base_branch_sha": "4165bf07952aa198c2b2959d1aa8f19940bf39bb",
+      "base_sha": "4165bf07952aa198c2b2959d1aa8f19940bf39bb",
+      "citations": [
+        {
+          "line": 96,
+          "path": "bin/fm-no-mistakes-test-command.sh"
+        },
+        {
+          "line": 236,
+          "path": "tests/fm-nm-step-liveness.test.sh"
+        },
+        {
+          "line": 237,
+          "path": "tests/fm-nm-step-liveness.test.sh"
+        },
+        {
+          "line": 101,
+          "path": "docs/configuration.md"
+        },
+        {
+          "line": 793,
+          "path": "bin/fm-azure-runner.py"
+        },
+        {
+          "line": 259,
+          "path": "bin/fm-azure-runner-guest.sh"
+        }
+      ],
+      "claims_sha256": "3fb04dddc7e305ecca391fa5f2f7d5076a9d6dd52f64397b999e9f1b0bb7b1ef",
+      "durations_ms": {
+        "boot": 2895,
+        "collect": 674,
+        "create": 80091,
+        "ledger": 2,
+        "proofs": 768793,
+        "reviewer": 242909,
+        "snapshot": 3382,
+        "stage": 1116,
+        "total": 1167835
+      },
+      "head_sha": "3c8c480efeceadfdf56e11e48f8c7d101b02ec2b",
+      "new_findings": [],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "azure_identity": {
+          "base_branch_sha": "4165bf07952aa198c2b2959d1aa8f19940bf39bb",
+          "base_sha": "4165bf07952aa198c2b2959d1aa8f19940bf39bb",
+          "claims_sha256": "3fb04dddc7e305ecca391fa5f2f7d5076a9d6dd52f64397b999e9f1b0bb7b1ef",
+          "credential_archive_digest": "sha256:a0d6253d05c43f96ff89dfde41b878f38d025f69d2f5ef1e2e500f641c96a66b",
+          "credential_digest": "sha256:acac4288c5887fafb0e00e247565ae9dca52be39dccd15cb72d5edd0380f5e2d",
+          "deployment_generation": "gen-20260812-01",
+          "evidence_attempts": [
+            {
+              "result": {
+                "exit_code": 0,
+                "signal": null,
+                "stderr_bytes": 0,
+                "stderr_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "stderr_truncated": false,
+                "stdout_bytes": 228,
+                "stdout_digest": "sha256:e65e6817c5fb2aa5473603231a751c6731b905b938ce5b48d0211a8c8f67b16a",
+                "stdout_truncated": false,
+                "timed_out": false
+              },
+              "tool": {
+                "base_sha": "4165bf07952aa198c2b2959d1aa8f19940bf39bb",
+                "boot_id": "b57b96f7-251f-465d-91c0-be106efb0679",
+                "cleanup_phase": "complete",
+                "credential_present": false,
+                "deployment_generation": "gen-20260812-01",
+                "head_sha": "3c8c480efeceadfdf56e11e48f8c7d101b02ec2b",
+                "invocation": "azr-f8fb1b7c3b99",
+                "network_bytes": 0,
+                "request_digest": "sha256:96aad0de5b008f1d0ccf7ce971eff0cc96773409478152bb38a3ce27dc80492f",
+                "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-run-f8fb1b7c3b99",
+                "result_digest": "sha256:85dee76afb5e29e4743dd8b8a4a3dc851d49dd935cfc711a5aa03074331b8c70",
+                "review_generation": "4f5a8113b9cac7268e55f413",
+                "source_ref": "refs/pull/327/head",
+                "vm_instance_id": "9f958eca-f3c6-47ee-bd7c-bb23c199836d"
+              },
+              "verifier": {
+                "base_sha": "4165bf07952aa198c2b2959d1aa8f19940bf39bb",
+                "boot_id": "c10470f3-bcc7-42d6-96f4-3905f44f3463",
+                "cleanup_phase": "complete",
+                "credential_present": false,
+                "deployment_generation": "gen-20260812-01",
+                "head_sha": "3c8c480efeceadfdf56e11e48f8c7d101b02ec2b",
+                "invocation": "azr-f58c2d258d4d",
+                "network_bytes": 0,
+                "request_digest": "sha256:1b19450331185b4f1f77a7d4ccd1a324bfe5a733871433d3350a027018d53206",
+                "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-run-f58c2d258d4d",
+                "result_digest": "sha256:cf91dbbfc8f3d6a20bcfb6bc3114d5a4522d336c9f8f52ecc52710b06cf13b3f",
+                "review_generation": "4f5a8113b9cac7268e55f413",
+                "source_ref": "refs/pull/327/head",
+                "vm_instance_id": "61b005c5-73d1-4a59-84cb-c69284bc432d"
+              }
+            }
+          ],
+          "evidence_attempts_digest": "sha256:b205bacbc1d936fc0cbb2865a6097206e6a5aa1fa1b5bc660280ab92db2b51b1",
+          "head_sha": "3c8c480efeceadfdf56e11e48f8c7d101b02ec2b",
+          "home_binding": "sha256:3dbb511eeecdb2b76c1dc4e347ec27b530ca709bb476a6f89a795e19de63077f",
+          "ledger_digest": "sha256:ac68fcaf099ed33ebc6a74ccf769bca77309d9cef50fe406500f77c08a365253",
+          "model": {
+            "boot_id": "9e0e91f7-197c-4cfc-87c0-7b43a433c785",
+            "capacity_fence_digest": "sha256:30fed6b37b45775a7cc4529f922b052156e74d48e4b6b9310a7b68a511d731f0",
+            "capacity_reservation": "ccm-4f5a8113b9ca",
+            "cleanup_phase": "complete",
+            "deployment_generation": "gen-20260812-01",
+            "image_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/galleries/fmcellgallery/images/fm-ccm/versions/1.0.1787092687",
+            "request_digest": "sha256:a346930626cc089666576e0e17a31596accaa324be4ca522f7cc260f7c239c4f",
+            "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-ccm-4f5a8113b9ca",
+            "result_digest": "sha256:f99e35f3b096cbd2e6c459ac3b91409dbdd66015d8c30ad4d6312f47af9650a6",
+            "vm_instance_id": "298abd0d-3118-438d-b0c8-8df1a66437e8"
+          },
+          "model_image_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/galleries/fmcellgallery/images/fm-ccm/versions/1.0.1787092687",
+          "provider_host": "api.fireworks.ai",
+          "provider_port": "443",
+          "pull_request": "https://github.com/ruby-dlee/firstmate/pull/327",
+          "request_digest": "sha256:a346930626cc089666576e0e17a31596accaa324be4ca522f7cc260f7c239c4f",
+          "review_generation": "4f5a8113b9cac7268e55f413",
+          "reviewer_account_digest": "sha256:ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+          "reviewer_effort": "xhigh",
+          "reviewer_harness": "pi",
+          "reviewer_model": "accounts/fireworks/models/glm-5p2",
+          "reviewer_sku": "Standard_D4s_v6",
+          "staging_cleanup_phase": "complete",
+          "task_id": "azure-nm-offload-fix-k4",
+          "tool": {
+            "base_sha": "4165bf07952aa198c2b2959d1aa8f19940bf39bb",
+            "boot_id": "b57b96f7-251f-465d-91c0-be106efb0679",
+            "cleanup_phase": "complete",
+            "credential_present": false,
+            "deployment_generation": "gen-20260812-01",
+            "head_sha": "3c8c480efeceadfdf56e11e48f8c7d101b02ec2b",
+            "invocation": "azr-f8fb1b7c3b99",
+            "network_bytes": 0,
+            "request_digest": "sha256:96aad0de5b008f1d0ccf7ce971eff0cc96773409478152bb38a3ce27dc80492f",
+            "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-run-f8fb1b7c3b99",
+            "result_digest": "sha256:85dee76afb5e29e4743dd8b8a4a3dc851d49dd935cfc711a5aa03074331b8c70",
+            "review_generation": "4f5a8113b9cac7268e55f413",
+            "source_ref": "refs/pull/327/head",
+            "vm_instance_id": "9f958eca-f3c6-47ee-bd7c-bb23c199836d"
+          },
+          "verifier": {
+            "base_sha": "4165bf07952aa198c2b2959d1aa8f19940bf39bb",
+            "boot_id": "c10470f3-bcc7-42d6-96f4-3905f44f3463",
+            "cleanup_phase": "complete",
+            "credential_present": false,
+            "deployment_generation": "gen-20260812-01",
+            "head_sha": "3c8c480efeceadfdf56e11e48f8c7d101b02ec2b",
+            "invocation": "azr-f58c2d258d4d",
+            "network_bytes": 0,
+            "request_digest": "sha256:1b19450331185b4f1f77a7d4ccd1a324bfe5a733871433d3350a027018d53206",
+            "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-run-f58c2d258d4d",
+            "result_digest": "sha256:cf91dbbfc8f3d6a20bcfb6bc3114d5a4522d336c9f8f52ecc52710b06cf13b3f",
+            "review_generation": "4f5a8113b9cac7268e55f413",
+            "source_ref": "refs/pull/327/head",
+            "vm_instance_id": "61b005c5-73d1-4a59-84cb-c69284bc432d"
+          }
+        },
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/var/lib/fm-crosscheck-model/account",
+        "execution_home": "/var/lib/fm-crosscheck-model/home",
+        "execution_mode": "azure-compartment-v1",
+        "execution_proof": {
+          "actual_exit": 0,
+          "azure_replay": {
+            "result": {
+              "exit_code": 0,
+              "signal": null,
+              "stderr_bytes": 0,
+              "stderr_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stderr_truncated": false,
+              "stdout_bytes": 228,
+              "stdout_digest": "sha256:e65e6817c5fb2aa5473603231a751c6731b905b938ce5b48d0211a8c8f67b16a",
+              "stdout_truncated": false,
+              "timed_out": false
+            },
+            "tool": {
+              "base_sha": "4165bf07952aa198c2b2959d1aa8f19940bf39bb",
+              "boot_id": "b57b96f7-251f-465d-91c0-be106efb0679",
+              "cleanup_phase": "complete",
+              "credential_present": false,
+              "deployment_generation": "gen-20260812-01",
+              "head_sha": "3c8c480efeceadfdf56e11e48f8c7d101b02ec2b",
+              "invocation": "azr-f8fb1b7c3b99",
+              "network_bytes": 0,
+              "request_digest": "sha256:96aad0de5b008f1d0ccf7ce971eff0cc96773409478152bb38a3ce27dc80492f",
+              "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-run-f8fb1b7c3b99",
+              "result_digest": "sha256:85dee76afb5e29e4743dd8b8a4a3dc851d49dd935cfc711a5aa03074331b8c70",
+              "review_generation": "4f5a8113b9cac7268e55f413",
+              "source_ref": "refs/pull/327/head",
+              "vm_instance_id": "9f958eca-f3c6-47ee-bd7c-bb23c199836d"
+            },
+            "verifier": {
+              "base_sha": "4165bf07952aa198c2b2959d1aa8f19940bf39bb",
+              "boot_id": "c10470f3-bcc7-42d6-96f4-3905f44f3463",
+              "cleanup_phase": "complete",
+              "credential_present": false,
+              "deployment_generation": "gen-20260812-01",
+              "head_sha": "3c8c480efeceadfdf56e11e48f8c7d101b02ec2b",
+              "invocation": "azr-f58c2d258d4d",
+              "network_bytes": 0,
+              "request_digest": "sha256:1b19450331185b4f1f77a7d4ccd1a324bfe5a733871433d3350a027018d53206",
+              "resource_id": "/subscriptions/5f0f9efb-723c-4bd8-a2e2-ba13625ea014/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Compute/virtualMachines/vm-fm7c799d-run-f58c2d258d4d",
+              "result_digest": "sha256:cf91dbbfc8f3d6a20bcfb6bc3114d5a4522d336c9f8f52ecc52710b06cf13b3f",
+              "review_generation": "4f5a8113b9cac7268e55f413",
+              "source_ref": "refs/pull/327/head",
+              "vm_instance_id": "61b005c5-73d1-4a59-84cb-c69284bc432d"
+            }
+          },
+          "command": "bash --noprofile --norc .crosscheck/reproductions/repro.sh 4165bf07952aa198c2b2959d1aa8f19940bf39bb 3c8c480efeceadfdf56e11e48f8c7d101b02ec2b",
+          "expected_exit": 0,
+          "output": "validated in fresh networkless Azure tool/verifier attempts; sha256:e65e6817c5fb2aa5473603231a751c6731b905b938ce5b48d0211a8c8f67b16a",
+          "output_contains": "CROSSCHECK_DIFF_VERIFIED",
+          "reviewer_receipt": {
+            "contains": "CROSSCHECK_DIFF_VERIFIED",
+            "output": "private receipt content retained by digest",
+            "path": ".crosscheck/reproductions/repro_receipt.txt",
+            "sha256": "e65e6817c5fb2aa5473603231a751c6731b905b938ce5b48d0211a8c8f67b16a"
+          },
+          "test_path": ".crosscheck/reproductions/repro.sh"
+        },
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "f096243352325f55c6e80a4f20c2c43e6e8a5c4d2da06be61beff5c9d2770029",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4"
+      },
+      "state": "blocking",
+      "summary": "Reviewed the full diff between base 4165bf07952aa198c2b2959d1aa8f19940bf39bb and head 3c8c480efeceadfdf56e11e48f8c7d101b02ec2b. This PR adds a direct private-bundle Azure route for detached no-mistakes gate HEADs, an offline Agent Fleet installer, non-shallow guest fetches, watcher subprocess cleanup, and liveness test barrier instrumentation. The Azure runner changes (private-direct-bundle mode, bundle creation/verification, retry handling, Agent Fleet installer) appear structurally sound with proper fail-closed checks. Two suspicions are raised: (1) the liveness test relies on FM_NM_TEST_BARRIER_DIR/FM_NM_TEST_BARRIER_PHASE hooks whose probe implementation is not visible in this diff, and (2) the PR's own review flagged potential weakening of local pre-push behavior coverage that remains unresolved. The existing blocking finding cc-8f48584d092b cannot be verified as fixed from this diff alone and remains open.",
+      "suspicions": [
+        {
+          "citations": [
+            {
+              "line": 236,
+              "path": "tests/fm-nm-step-liveness.test.sh"
+            },
+            {
+              "line": 237,
+              "path": "tests/fm-nm-step-liveness.test.sh"
+            }
+          ],
+          "description": "The rewritten one-shot liveness test (j1) passes FM_NM_TEST_BARRIER_DIR and FM_NM_TEST_BARRIER_PHASE environment variables to the probe ($PROBE), expecting it to pause at a 'before-progress-sample' barrier until a release file is written. However, no changes to the probe implementation (likely bin/fm-nm-step-liveness.sh or similar) appear in this diff. If the probe does not already support these barrier hooks, the test would complete immediately without waiting for the barrier, the successor process would not be present during the sample window, and the 'alive' verdict would not be produced \u2014 causing the test to fail. The PR claims this test passed, which implies the hooks pre-exist, but this cannot be confirmed from the diff alone. If the hooks are absent, the test is non-functional and the liveness positive signal is unverified."
+        },
+        {
+          "citations": [
+            {
+              "line": 96,
+              "path": "bin/fm-no-mistakes-test-command.sh"
+            },
+            {
+              "line": 101,
+              "path": "docs/configuration.md"
+            }
+          ],
+          "description": "The PR's own review step flagged that the ordinary/local no-mistakes path now passes only herdr-lab and herdr-mixed files to tests/run.sh, omitting every hermetic-only behavior test before push. The PR risk assessment rates this 'High' and acknowledges it lacks authorization in the stated intent. While docs/configuration.md describes the coverage contract as the union of local Herdr host set and CI executed-manifest, the review explicitly required either restoring the complete local suite or obtaining explicit approval for this material weakening of the gate contract. Neither resolution is visible in the final diff. The local test parallelization (run_local_required) does not change which files are run \u2014 the herdr_tests derivation appears unchanged \u2014 but the concern about the overall coverage posture remains unaddressed in this PR."
+        }
+      ],
+      "telemetry": {
+        "costs_usd": {
+          "declared": 0.11390114,
+          "declared_source": "pinned-fireworks-regular-rates",
+          "pi_calculated": 0.11390114,
+          "pi_calculated_source": "pi-turn-end-message-usage-cost-total",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable-in-pi-events"
+        },
+        "failure_category": null,
+        "finding_disposition": {
+          "active": 1,
+          "closed_equivalent": 0,
+          "new": 0,
+          "suspicions": 2,
+          "updated": 1,
+          "verified_fixed": 0
+        },
+        "outcome": "blocking",
+        "reuse": null,
+        "reviewer_latency_ms": 242909,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": 2121,
+          "cache_write": 0,
+          "input": 28041,
+          "output": 16897,
+          "source": "pi-turn-end-message-usage"
+        },
+        "turns": 1
+      },
+      "updated_findings": [
+        "cc-8f48584d092b"
+      ]
+    },
+    {
+      "active_blockers": [
+        "cc-8f48584d092b"
+      ],
+      "at": "2026-08-25T16:42:42Z",
+      "base_branch_sha": "5118dbe1e925cede71bbfc9a54e291c34a5b8903",
+      "base_sha": "5118dbe1e925cede71bbfc9a54e291c34a5b8903",
+      "citations": [],
+      "claims_sha256": "3f81682e5f6cb5f27f733632fa52bf97cb11448f32d213f24b59a424f05070ba",
+      "durations_ms": {
+        "ledger": 2,
+        "proofs": 728874,
+        "reviewer": 643527,
+        "snapshot": 3356,
+        "total": 1574064
+      },
+      "head_sha": "86e5eb809148b271cb0e01c4a66dd21453abd1ae",
+      "new_findings": [],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/var/lib/fm-crosscheck-model/account",
+        "execution_home": "/var/lib/fm-crosscheck-model/home",
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "f096243352325f55c6e80a4f20c2c43e6e8a5c4d2da06be61beff5c9d2770029",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4"
+      },
+      "state": "cannot-certify",
+      "summary": "finding_updates[0].mutation_proof CANNOT-CERTIFY: Azure mutation proof currently has a measured non-execution route only for pytest",
+      "suspicions": [],
+      "telemetry": {
+        "costs_usd": {
+          "declared": 0.37780722,
+          "declared_source": "pinned-fireworks-regular-rates",
+          "pi_calculated": 0.37780722,
+          "pi_calculated_source": "pi-turn-end-message-usage-cost-total",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable-in-pi-events"
+        },
+        "failure_category": "certification",
+        "finding_disposition": {
+          "active": 1,
+          "closed_equivalent": 0,
+          "new": 0,
+          "suspicions": 0,
+          "updated": 0,
+          "verified_fixed": 0
+        },
+        "outcome": "cannot-certify",
+        "reuse": null,
+        "reviewer_latency_ms": 643527,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": 30393,
+          "cache_write": 0,
+          "input": 88095,
+          "output": 56868,
+          "source": "pi-turn-end-message-usage"
+        },
+        "turns": 3
+      },
+      "updated_findings": []
+    },
+    {
+      "active_blockers": [
+        "cc-8f48584d092b"
+      ],
+      "at": "2026-08-25T18:03:23Z",
+      "base_branch_sha": "5118dbe1e925cede71bbfc9a54e291c34a5b8903",
+      "base_sha": "5118dbe1e925cede71bbfc9a54e291c34a5b8903",
+      "citations": [],
+      "claims_sha256": "c6d4ef1e57661d9026d68b54b83065e9d293ebbf85201c97fb8237a985e2b32b",
+      "durations_ms": {
+        "ledger": 2,
+        "proofs": 804642,
+        "reviewer": 400687,
+        "snapshot": 6720,
+        "total": 1429729
+      },
+      "head_sha": "85f89f82aa34432b75efc098dc32dd5641e9d6fc",
+      "new_findings": [],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/var/lib/fm-crosscheck-model/account",
+        "execution_home": "/var/lib/fm-crosscheck-model/home",
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "5d0d6ae81d0414f32a86a4074727dfe0e1effc3385d2ae6e302ce2dc8acc3df6",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4"
+      },
+      "state": "unreviewed",
+      "summary": "finding_updates[0].mutation_proof is allowed only for verified-fixed",
+      "suspicions": [
+        {
+          "citations": [],
+          "description": "finding_updates[0].mutation_proof is allowed only for verified-fixed"
+        }
+      ],
+      "telemetry": {
+        "costs_usd": {
+          "declared": 0.15391174,
+          "declared_source": "pinned-fireworks-regular-rates",
+          "pi_calculated": 0.15391174,
+          "pi_calculated_source": "pi-turn-end-message-usage-cost-total",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable-in-pi-events"
+        },
+        "failure_category": "review-validation",
+        "finding_disposition": {
+          "active": 1,
+          "closed_equivalent": 0,
+          "new": 0,
+          "suspicions": 1,
+          "updated": 0,
+          "verified_fixed": 0
+        },
+        "outcome": "unreviewed",
+        "reuse": null,
+        "reviewer_latency_ms": 400687,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": 2121,
+          "cache_write": 0,
+          "input": 28834,
+          "output": 25738,
+          "source": "pi-turn-end-message-usage"
+        },
+        "turns": 1
+      },
+      "updated_findings": []
+    },
+    {
+      "active_blockers": [
+        "cc-8f48584d092b"
+      ],
+      "at": "2026-08-25T18:15:21Z",
+      "base_branch_sha": "5118dbe1e925cede71bbfc9a54e291c34a5b8903",
+      "base_sha": "5118dbe1e925cede71bbfc9a54e291c34a5b8903",
+      "citations": [],
+      "claims_sha256": "893e4f6eba5b516636278974c030444ed0937fb8755a6c626815df287f0c912d",
+      "durations_ms": {
+        "ledger": 5,
+        "proofs": 458,
+        "reviewer": 320312,
+        "snapshot": 6879,
+        "total": 627237
+      },
+      "head_sha": "85f89f82aa34432b75efc098dc32dd5641e9d6fc",
+      "new_findings": [],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/var/lib/fm-crosscheck-model/account",
+        "execution_home": "/var/lib/fm-crosscheck-model/home",
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "5d0d6ae81d0414f32a86a4074727dfe0e1effc3385d2ae6e302ce2dc8acc3df6",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4"
+      },
+      "state": "tool-failure",
+      "summary": "Azure evidence manifest must exactly match every declared helper and mutation path",
+      "suspicions": [],
+      "telemetry": {
+        "costs_usd": {
+          "declared": 0.13774294,
+          "declared_source": "pinned-fireworks-regular-rates",
+          "pi_calculated": 0.13774294,
+          "pi_calculated_source": "pi-turn-end-message-usage-cost-total",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable-in-pi-events"
+        },
+        "failure_category": "evidence",
+        "finding_disposition": {
+          "active": 1,
+          "closed_equivalent": 0,
+          "new": 0,
+          "suspicions": 0,
+          "updated": 0,
+          "verified_fixed": 0
+        },
+        "outcome": "tool-failure",
+        "reuse": null,
+        "reviewer_latency_ms": 320312,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": 2121,
+          "cache_write": 0,
+          "input": 27012,
+          "output": 22643,
+          "source": "pi-turn-end-message-usage"
+        },
+        "turns": 1
+      },
+      "updated_findings": []
+    },
+    {
+      "active_blockers": [
+        "cc-8f48584d092b"
+      ],
+      "at": "2026-08-25T18:27:00Z",
+      "base_branch_sha": "5118dbe1e925cede71bbfc9a54e291c34a5b8903",
+      "base_sha": "5118dbe1e925cede71bbfc9a54e291c34a5b8903",
+      "citations": [],
+      "claims_sha256": "54ac18dba0543fcd2f2445b04fb06d5ac482db38eae1df27aa05a0be9c6dc6da",
+      "durations_ms": {
+        "ledger": 3,
+        "reviewer": 436843,
+        "snapshot": 6311,
+        "total": 642103
+      },
+      "head_sha": "85f89f82aa34432b75efc098dc32dd5641e9d6fc",
+      "new_findings": [],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/var/lib/fm-crosscheck-model/account",
+        "execution_home": "/var/lib/fm-crosscheck-model/home",
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "5d0d6ae81d0414f32a86a4074727dfe0e1effc3385d2ae6e302ce2dc8acc3df6",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4"
+      },
+      "state": "tool-failure",
+      "summary": "model compartment ended as Failed: model guest: Pi final stopReason was 'error', not 'toolUse'; one bounded verdict repair was exhausted\n",
+      "suspicions": [],
+      "telemetry": {
+        "costs_usd": {
+          "declared": null,
+          "declared_source": "unavailable",
+          "pi_calculated": null,
+          "pi_calculated_source": "unavailable",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable"
+        },
+        "failure_category": "review-validation",
+        "finding_disposition": {
+          "active": 1,
+          "closed_equivalent": 0,
+          "new": 0,
+          "suspicions": 0,
+          "updated": 0,
+          "verified_fixed": 0
+        },
+        "outcome": "tool-failure",
+        "reuse": null,
+        "reviewer_latency_ms": null,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": null,
+          "cache_write": null,
+          "input": null,
+          "output": null,
+          "source": "unavailable"
+        },
+        "turns": null
+      },
+      "updated_findings": []
+    },
+    {
+      "active_blockers": [
+        "cc-8f48584d092b"
+      ],
+      "at": "2026-08-25T18:45:07Z",
+      "base_branch_sha": "5118dbe1e925cede71bbfc9a54e291c34a5b8903",
+      "base_sha": "5118dbe1e925cede71bbfc9a54e291c34a5b8903",
+      "citations": [],
+      "claims_sha256": "54ac18dba0543fcd2f2445b04fb06d5ac482db38eae1df27aa05a0be9c6dc6da",
+      "durations_ms": {
+        "ledger": 3,
+        "reviewer": 437754,
+        "snapshot": 12160,
+        "total": 701485
+      },
+      "head_sha": "85f89f82aa34432b75efc098dc32dd5641e9d6fc",
+      "new_findings": [],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/var/lib/fm-crosscheck-model/account",
+        "execution_home": "/var/lib/fm-crosscheck-model/home",
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "f661361bb6be1e681594ad882201c1d8e29f016697c5330f8fc6d234fb2037f6",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4"
+      },
+      "state": "tool-failure",
+      "summary": "model compartment ended as Failed: model guest: Pi final stopReason was 'error', not 'toolUse': 400: {\"object\":\"error\",\"type\":\"invalid_request_error\",\"code\":\"invalid_request_error\",\"message\":\"3 request validation errors: Input should be 'low', 'medium', 'high', 'xhigh', 'max', 'none' or 'adaptive', field: 'reasoning_effort.literal['low','medium','high','xhigh','max','none','adaptive']', value: 'minimal'; Input should be a valid integer, unable to parse string as an integer, field: 'reasoning_effort.int', value: 'minimal'; Input should be a valid boolean, unable to interpret input, field: 'reasoning_ef; one bounded verdict repair was exhausted\n",
+      "suspicions": [],
+      "telemetry": {
+        "costs_usd": {
+          "declared": null,
+          "declared_source": "unavailable",
+          "pi_calculated": null,
+          "pi_calculated_source": "unavailable",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable"
+        },
+        "failure_category": "review-validation",
+        "finding_disposition": {
+          "active": 1,
+          "closed_equivalent": 0,
+          "new": 0,
+          "suspicions": 0,
+          "updated": 0,
+          "verified_fixed": 0
+        },
+        "outcome": "tool-failure",
+        "reuse": null,
+        "reviewer_latency_ms": null,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": null,
+          "cache_write": null,
+          "input": null,
+          "output": null,
+          "source": "unavailable"
+        },
+        "turns": null
+      },
+      "updated_findings": []
+    },
+    {
+      "active_blockers": [
+        "cc-8f48584d092b"
+      ],
+      "at": "2026-08-25T22:50:07Z",
+      "base_branch_sha": "5118dbe1e925cede71bbfc9a54e291c34a5b8903",
+      "base_sha": "5118dbe1e925cede71bbfc9a54e291c34a5b8903",
+      "citations": [],
+      "claims_sha256": "54ac18dba0543fcd2f2445b04fb06d5ac482db38eae1df27aa05a0be9c6dc6da",
+      "durations_ms": {
+        "ledger": 3,
+        "proofs": 822306,
+        "reviewer": 327906,
+        "snapshot": 3335,
+        "total": 1379284
+      },
+      "head_sha": "85f89f82aa34432b75efc098dc32dd5641e9d6fc",
+      "new_findings": [],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/var/lib/fm-crosscheck-model/account",
+        "execution_home": "/var/lib/fm-crosscheck-model/home",
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "ae137c535d0d3b175704d08a170f77387a9bc45ac93ff89e76bb37f5d5686882",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4"
+      },
+      "state": "unreviewed",
+      "summary": "finding_updates[0].mutation_proof is not a Git patch",
+      "suspicions": [
+        {
+          "citations": [],
+          "description": "finding_updates[0].mutation_proof is not a Git patch"
+        }
+      ],
+      "telemetry": {
+        "costs_usd": {
+          "declared": 0.151881,
+          "declared_source": "pinned-fireworks-regular-rates",
+          "pi_calculated": 0.151881,
+          "pi_calculated_source": "pi-turn-end-message-usage-cost-total",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable-in-pi-events"
+        },
+        "failure_category": "review-validation",
+        "finding_disposition": {
+          "active": 1,
+          "closed_equivalent": 0,
+          "new": 0,
+          "suspicions": 1,
+          "updated": 0,
+          "verified_fixed": 0
+        },
+        "outcome": "unreviewed",
+        "reuse": null,
+        "reviewer_latency_ms": 327906,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": 0,
+          "cache_write": 0,
+          "input": 29431,
+          "output": 25154,
+          "source": "pi-turn-end-message-usage"
+        },
+        "turns": 1
+      },
+      "updated_findings": []
+    },
+    {
+      "active_blockers": [
+        "cc-8f48584d092b"
+      ],
+      "at": "2026-08-25T23:15:53Z",
+      "base_branch_sha": "5118dbe1e925cede71bbfc9a54e291c34a5b8903",
+      "base_sha": "5118dbe1e925cede71bbfc9a54e291c34a5b8903",
+      "citations": [],
+      "claims_sha256": "707303491c6ad715b6fdab44a3583da5369c46499229723d3f733bd21827a8da",
+      "durations_ms": {
+        "ledger": 4,
+        "proofs": 781167,
+        "reviewer": 210975,
+        "snapshot": 3592,
+        "total": 1226082
+      },
+      "head_sha": "85f89f82aa34432b75efc098dc32dd5641e9d6fc",
+      "new_findings": [],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/var/lib/fm-crosscheck-model/account",
+        "execution_home": "/var/lib/fm-crosscheck-model/home",
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "f1bcc4325e4ff0071fde4082f78c906109cd9c66c8ec411929952f0da54957dd",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4"
+      },
+      "state": "unreviewed",
+      "summary": "finding_updates[0].mutation_proof mutation changes test or evidence support: bin/fm-no-mistakes-test-command.sh",
+      "suspicions": [
+        {
+          "citations": [],
+          "description": "finding_updates[0].mutation_proof mutation changes test or evidence support: bin/fm-no-mistakes-test-command.sh"
+        }
+      ],
+      "telemetry": {
+        "costs_usd": {
+          "declared": 0.111084,
+          "declared_source": "pinned-fireworks-regular-rates",
+          "pi_calculated": 0.111084,
+          "pi_calculated_source": "pi-turn-end-message-usage-cost-total",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable-in-pi-events"
+        },
+        "failure_category": "review-validation",
+        "finding_disposition": {
+          "active": 1,
+          "closed_equivalent": 0,
+          "new": 0,
+          "suspicions": 1,
+          "updated": 0,
+          "verified_fixed": 0
+        },
+        "outcome": "unreviewed",
+        "reuse": null,
+        "reviewer_latency_ms": 210975,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": 0,
+          "cache_write": 0,
+          "input": 29786,
+          "output": 15769,
+          "source": "pi-turn-end-message-usage"
+        },
+        "turns": 1
+      },
+      "updated_findings": []
+    },
+    {
+      "active_blockers": [
+        "cc-8f48584d092b"
+      ],
+      "at": "2026-08-26T00:12:27Z",
+      "base_branch_sha": "ba0b8984da1b42dd38a0a03c185dfd09bdea81ac",
+      "base_sha": "ba0b8984da1b42dd38a0a03c185dfd09bdea81ac",
+      "citations": [],
+      "claims_sha256": "f3ea649a18fdb32a9c4ef2ec0dc7a1f2b8cf4e71a7d1ae99cac8a9e9c1f9e81d",
+      "durations_ms": {
+        "ledger": 4,
+        "proofs": 199,
+        "reviewer": 399389,
+        "snapshot": 3453,
+        "total": 897273
+      },
+      "head_sha": "feb1b2f76d17d3cb0fc4061a25477aa68ba3453b",
+      "new_findings": [],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/var/lib/fm-crosscheck-model/account",
+        "execution_home": "/var/lib/fm-crosscheck-model/home",
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "a1f0308c971eea92261b4cf658947763803c9014d2b987a7bc1b9339a87be838",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4"
+      },
+      "state": "tool-failure",
+      "summary": "Azure model compartment cleanup is ambiguous: compute: Command '['/fixture/firstmate-home/.treehouse/firstmate-21f368/4/firstmate/data/azure-breaktest-live-v1/integration-project/bin/fm-worker-lifecycle.sh', 'capacity-release', '--reservation-id', 'ccm-982563263ce0', '--fence-binding', '66a81bb8d660b463291316b72f87461bee96f0c6bbe6749a09c19b8ab8b81178', '--cleanup-receipt', '98adbb23dca12ef289f79a4422ddf4f5c47a3e6c65949ad1ab39eb6aed714db3', '--confirm-subscription', '5f0f9efb-723c-4bd8-a2e2-ba13625ea014']' timed out after 300 seconds",
+      "suspicions": [],
+      "telemetry": {
+        "costs_usd": {
+          "declared": 0.1845406,
+          "declared_source": "pinned-fireworks-regular-rates",
+          "pi_calculated": 0.1845406,
+          "pi_calculated_source": "pi-turn-end-message-usage-cost-total",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable-in-pi-events"
+        },
+        "failure_category": "tooling",
+        "finding_disposition": {
+          "active": 1,
+          "closed_equivalent": 0,
+          "new": 0,
+          "suspicions": 0,
+          "updated": 0,
+          "verified_fixed": 0
+        },
+        "outcome": "tool-failure",
+        "reuse": null,
+        "reviewer_latency_ms": 399389,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": 0,
+          "cache_write": 0,
+          "input": 32425,
+          "output": 31624,
+          "source": "pi-turn-end-message-usage"
+        },
+        "turns": 1
+      },
+      "updated_findings": []
+    },
+    {
+      "active_blockers": [
+        "cc-8f48584d092b"
+      ],
+      "at": "2026-08-26T00:25:02Z",
+      "base_branch_sha": "ba0b8984da1b42dd38a0a03c185dfd09bdea81ac",
+      "base_sha": "ba0b8984da1b42dd38a0a03c185dfd09bdea81ac",
+      "citations": [],
+      "claims_sha256": "4dccad0274c2c9c82444d0a99d2eb1e26d8c012fe1e74d9293ee48c4605d4136",
+      "durations_ms": {
+        "ledger": 6,
+        "snapshot": 3472,
+        "total": 684910
+      },
+      "head_sha": "feb1b2f76d17d3cb0fc4061a25477aa68ba3453b",
+      "new_findings": [],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/var/lib/fm-crosscheck-model/account",
+        "execution_home": "/var/lib/fm-crosscheck-model/home",
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "a1f0308c971eea92261b4cf658947763803c9014d2b987a7bc1b9339a87be838",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4"
+      },
+      "state": "tool-failure",
+      "summary": "Command '['/fixture/firstmate/bin/fm-worker-lifecycle.sh', 'capacity-reserve', '--reservation-id', 'ccm-b4dd9ee4360f', '--fence-binding', '3e609892b413ba3aa19641ca0ba2e9cb0b2efae0b83847a39bd86b326ff2d477', '--role', 'crosscheck', '--sku', 'Standard_D4s_v6', '--sku-family', 'StandardDsv6Family', '--vcpus', '4', '--amount-usd', '12.272', '--confirm-subscription', '5f0f9efb-723c-4bd8-a2e2-ba13625ea014']' timed out after 300 seconds",
+      "suspicions": [],
+      "telemetry": {
+        "costs_usd": {
+          "declared": null,
+          "declared_source": "unavailable",
+          "pi_calculated": null,
+          "pi_calculated_source": "unavailable",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable"
+        },
+        "failure_category": "tooling",
+        "finding_disposition": {
+          "active": 1,
+          "closed_equivalent": 0,
+          "new": 0,
+          "suspicions": 0,
+          "updated": 0,
+          "verified_fixed": 0
+        },
+        "outcome": "tool-failure",
+        "reuse": null,
+        "reviewer_latency_ms": null,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": null,
+          "cache_write": null,
+          "input": null,
+          "output": null,
+          "source": "unavailable"
+        },
+        "turns": null
+      },
+      "updated_findings": []
+    }
+  ],
+  "schema": "firstmate.crosscheck-ledger.v2",
+  "task_id": "azure-nm-offload-fix-k4"
+}

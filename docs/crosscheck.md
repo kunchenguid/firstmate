@@ -240,6 +240,8 @@ Findings have exactly four lifecycle values.
 A later review that omits a finding leaves its lifecycle unchanged.
 Silence never closes, supersedes, or deletes a finding.
 A `verified-fixed` lifecycle remains durable, but its proof clears only the exact head on which the gate executed it; a new head requires a fresh mutation proof.
+If any closure-proof execution or admission check fails, Crosscheck records `claimed-fixed`, appends the gate failure to the finding history, and keeps the semantic run `blocking` instead of discarding the review.
+Other valid finding updates and new findings from that review continue to apply.
 
 Each run has one outcome class.
 A run that used the local same-model relaxation records `reviewer.model_independence` as `same-model`; older and ordinary cross-model runs omit that field.
@@ -256,6 +258,7 @@ Only `blocking` is a review verdict about code.
 
 New findings must supply a helper under `.crosscheck/reproductions/`, a command naming that helper, an expected exit code, and a distinctive output marker.
 Crosscheck executes the command itself and stores its actual exit and bounded output in the ledger.
+If that reproduction or its citations are inadmissible, the candidate does not enter durable findings; it becomes a run-scoped suspicion carrying every valid citation and a note for each dropped citation, so the completed review remains `blocking`.
 Every verdict artifact must also carry one verdict-level reproduction whose command names the exact base and head SHAs.
 The local reviewer must create and run that helper with its own command tool, and the helper must leave a receipt naming both SHAs, `HOME`, and the provider account selector.
 In Azure static-packet mode, the model proposes the helper and the controller runs it in separate credentialless tool and verifier VMs, so that remote receipt proves its marker and both exact SHAs without pretending to observe the model compartment's private paths.

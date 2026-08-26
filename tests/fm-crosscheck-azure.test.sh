@@ -2591,6 +2591,162 @@ PY
   pass "admitted capacity keeps exact identity and cleans up before credential or run failure"
 }
 
+persist_before_cleanup_alarm_unit() {
+  python3 - "$ADAPTER" "$CORE" <<'PY' || fail "admitted Azure verdict was not persisted before cleanup alarm"
+import importlib.util
+from pathlib import Path
+from types import SimpleNamespace
+import sys
+import tempfile
+
+adapter_spec = importlib.util.spec_from_file_location("azure_persist_order", sys.argv[1])
+adapter = importlib.util.module_from_spec(adapter_spec)
+adapter_spec.loader.exec_module(adapter)
+core_spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[2])
+core = importlib.util.module_from_spec(core_spec)
+sys.modules["fm_crosscheck"] = core
+core_spec.loader.exec_module(core)
+
+root = Path(tempfile.mkdtemp())
+home = root / "home"
+home.mkdir()
+review = root / "review"
+review.mkdir()
+proof = root / "proof"
+proof.mkdir()
+credential = root / "credential"
+credential.write_text("fixture", encoding="utf-8")
+events = []
+
+azure = {
+    "lanes": 1,
+    "reviewer_sku_fixed": True,
+    "reviewer_sku": "Standard_D4as_v6",
+    "deployment_generation": "deploy-1",
+    "model_image_id": "/subscriptions/test/resourceGroups/rg/providers/Microsoft.Compute/images/model",
+    "timeout_seconds": 30,
+}
+snapshot = {
+    "number": 327,
+    "base_repo": "ruby-dlee/firstmate",
+    "head_sha": "a" * 40,
+    "base_sha": "b" * 40,
+    "base_branch_sha": "b" * 40,
+    "claims_sha256": "c" * 64,
+}
+config = {
+    "harness": "pi",
+    "model": "accounts/fireworks/models/glm-5p2",
+    "effort": "xhigh",
+    "account_home": "/reviewer",
+}
+
+adapter.runtime_config = lambda _home: dict(azure)
+adapter.verify_scope_and_foundation = lambda _azure: object()
+adapter.active_review_vms = lambda _azure: 0
+adapter.require_model_image_attests_harness = lambda *_args: None
+adapter.inspect_reviewer_credential = lambda *_args: (
+    credential,
+    "fixture-source",
+    "fixture-id",
+    "provider-binding:fixture",
+)
+adapter.review_identity = lambda **_kwargs: {
+    "review_generation": "d" * 24,
+    "home_binding": "sha256:" + "1" * 64,
+}
+adapter.azure_pi_review_schema = lambda _schema: {}
+adapter.azure_review_prompt = lambda *_args, **_kwargs: "prompt"
+adapter.create_credential_archive = lambda *_args, **_kwargs: (
+    "sha256:" + "2" * 64,
+    "sha256:" + "3" * 64,
+)
+adapter.require_stable_reviewer_credential = lambda *_args: None
+adapter.make_input = lambda *_args, **_kwargs: "sha256:" + "4" * 64
+adapter.reserve_model_capacity = lambda *_args: {
+    "reservation_id": "reservation-1",
+    "fence": "fence-1",
+}
+adapter.preflight_reviewer_credential = lambda *_args: None
+adapter.upload_blob = lambda *_args: None
+adapter.provision_model_vm = lambda *_args: {"resource_id": "/model"}
+adapter.submit_model_run = lambda *_args: {
+    "resource_id": "/model",
+    "vm_instance_id": "model-vm",
+    "run_command_id": "run-1",
+    "etag": "etag-1",
+}
+adapter.poll_model_run = lambda *_args: ("sha256:" + "5" * 64, "model-boot")
+adapter.download_blob = lambda *_args: None
+adapter.parse_result = lambda *_args: {
+    "telemetry": {},
+    "evidence_files": [{"path": ".crosscheck/reproductions/proof.sh", "content": "true\n"}],
+    "verdict": {},
+}
+
+attempts = [{
+    "tool": {"vm_instance_id": "tool-vm"},
+    "verifier": {"vm_instance_id": "verifier-vm"},
+}]
+class EvidenceExecutor:
+    def __init__(self, **_kwargs):
+        self.attempts = attempts
+
+bridge = SimpleNamespace(
+    validate_evidence_files=lambda _value: {},
+    RemoteEvidenceExecutor=EvidenceExecutor,
+)
+adapter.load_tool_bridge = lambda: bridge
+adapter.normalize_pi_evidence_files = lambda _value: {}
+adapter.remote_mutation_executor = lambda *_args: None
+core.pi_review_output_schema = lambda *_args: {}
+core.unavailable_run_telemetry = lambda: {}
+core.normalize_pi_review = lambda *_args: {}
+core.assert_review_checkout_intact = lambda *_args: None
+core.validate_review_shape = lambda *_args, **_kwargs: {}
+def apply_review(ledger, *_args, **_kwargs):
+    working = {**ledger, "runs": list(ledger.get("runs", []))}
+    run = {"reviewer": {}, "state": "blocking"}
+    working["runs"].append(run)
+    return working, run
+core.apply_review = apply_review
+
+def persist_result(ledger, run):
+    assert ledger["runs"][-1] is run
+    events.append("persist")
+
+def cleanup(*_args):
+    events.append("cleanup")
+    raise adapter.AzureCrosscheckError("fixture cleanup ambiguity")
+adapter.cleanup_model_vm = cleanup
+adapter.release_model_capacity = lambda *_args: events.append("release")
+adapter.delete_exact_blob = lambda *_args: None
+
+try:
+    adapter._run_azure_review_in_lane(
+        core=core,
+        root=root,
+        home=home,
+        task_id="persist-before-cleanup",
+        pr_url="https://github.com/ruby-dlee/firstmate/pull/327",
+        review_dir=review,
+        proof_root=proof,
+        snapshot_value=snapshot,
+        ledger={"runs": []},
+        config=config,
+        author_account_identity="",
+        lane=0,
+        persist_result=persist_result,
+    )
+except core.CrosscheckToolError as exc:
+    assert "cleanup is ambiguous" in str(exc), str(exc)
+else:
+    raise AssertionError("ambiguous cleanup did not remain a tool-level failure")
+assert events == ["persist", "cleanup"], events
+PY
+  pass "admitted Azure run persists before an ambiguous cleanup alarm"
+}
+
 image_and_policy_contract() {
   local params
   python3 - "$ROOT/docs/azure-crosscheck/model-image.json" "$ROOT/docs/azure-crosscheck/network-policy.json" <<'PY' || fail "image/policy declarations are not exact"
@@ -3280,6 +3436,7 @@ template_expiry_render_unit
 replay_positive_and_failure_unit
 shared_capacity_unit
 capacity_retry_cleanup_unit
+persist_before_cleanup_alarm_unit
 lane_queue_unit
 image_and_policy_contract
 image_attestation_guard_unit

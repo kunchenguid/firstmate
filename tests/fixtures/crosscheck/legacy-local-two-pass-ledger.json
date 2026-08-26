@@ -1,0 +1,1064 @@
+{
+  "findings": [
+    {
+      "citations": [
+        {
+          "line": 3456,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 3467,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 3478,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 5065,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 5327,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 5768,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 6248,
+          "path": "bin/fm-crosscheck.py"
+        }
+      ],
+      "description": "The current_regular_contract check added in validate_ledger (line 3456) runs for ALL run records with a matching reviewer dict, not just clear runs with execution_proof. A failed regular GLM review (tool-failure, unreviewed, etc.) creates a reviewer record via append_failed_run (line 5768) that carries review_contract_sha256 (set at line 6248) and review_family_mode but never sets terminal_provider, terminal_model, review_depth_passes, or review_depth_mode. Those fields are only set on successful completion: terminal identity at lines 5327-5328, and depth fields at lines 5061-5062 (only when final_completed is True). On failure, the two-pass finally block at lines 5065-5066 explicitly pops review_depth_passes and review_depth_mode. When the ledger with this failed run is loaded on the next invocation, validate_ledger hits the require at line 3468 and rejects the entire ledger with 'current regular review contract is missing terminal or depth fields', making the ledger permanently unloadable and blocking all future crosscheck operations for that task. The fix is to gate the current_regular_contract check on execution_proof being present (or on the run state being clear), matching the pattern of the adjacent execution_proof-gated block at line 3478.",
+      "history": [
+        {
+          "at": "2026-08-25T09:48:24Z",
+          "head_sha": "fbdcfc97881dfb5b707c1675772e455449b47690",
+          "note": "executed reproduction admitted the finding",
+          "proof": {
+            "actual_exit": 1,
+            "command": "python3 .crosscheck/reproductions/repro_failed_run_validation.py bin/fm-crosscheck.py",
+            "expected_exit": 1,
+            "output": "REPRO_MARKER_FAILED_RUN_CORRUPTS_LEDGER\n",
+            "output_contains": "REPRO_MARKER_FAILED_RUN_CORRUPTS_LEDGER",
+            "test_path": ".crosscheck/reproductions/repro_failed_run_validation.py"
+          },
+          "status": "open"
+        },
+        {
+          "at": "2026-08-25T13:15:31Z",
+          "head_sha": "265e93fea33feeb8a56d25610c4a9e8c5de53020",
+          "note": "This blocking finding was opened at head fbdcfc97881dfb5b707c1675772e455449b47690, which is not present in this checkout's history (git cat-file confirms the SHA is absent). Without the finding description or the ability to inspect the code at that head, I cannot verify whether it has been fixed by this PR's changes. The finding remains open.",
+          "proof": null,
+          "status": "open"
+        },
+        {
+          "at": "2026-08-25T18:38:28Z",
+          "head_sha": "e50a9a44d0039115761f476f0beae38c5cc6c79e",
+          "note": "The state gate `if current_regular_contract and run[\"state\"] in {\"clear\", \"blocking\"}:` at line 3471 of bin/fm-crosscheck.py properly prevents failed records (tool-failure, unreviewed, cannot-certify) from being rejected for missing terminal_provider/terminal_model/review_depth_passes/review_depth_mode fields. The tracked pytest test tests/test_fm_crosscheck_ledger.py::test_failed_current_regular_reviews_remain_reloadable constructs real failed records for all three states and verifies each reloads via validate_ledger without those fields. The mutation patch at .crosscheck/mutations/failed-regular-state-gate.patch reverts the state gate to `if current_regular_contract:` (removing the state check), which causes the pytest test to fail with exit 1 for all three failed states with the error 'current regular review contract is missing terminal or depth fields'. Verified locally: clean code passes (exit 0), mutated code fails (exit 1).",
+          "proof": {
+            "baseline_exit": 0,
+            "baseline_output": "============================= test session starts ==============================\nplatform darwin -- Python 3.9.6, pytest-8.4.2, pluggy-1.6.0\nrootdir: /fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.j2cm3qgs\nconfigfile: pytest.ini\ncollected 1 item\n\ntests/test_fm_crosscheck_ledger.py .                                     [100%]\n\n=============================== warnings summary ===============================\n../../../../Library/Python/3.9/lib/python/site-packages/_pytest/cacheprovider.py:475\n  /fixture/Library/Python/3.9/lib/python/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning: could not create cache path /fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.j2cm3qgs/.pytest_cache/v/cache/nodeids: [Errno 1] Operation not permitted: '/fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.j2cm3qgs/pytest-cache-files-j2vxvd3a'\n    config.cache.set(\"cache/nodeids\", sorted(self.cached_nodeids))\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n========================= 1 passed, 1 warning in 0.05s =========================\n",
+            "mutated_exit": 1,
+            "mutated_files": [
+              "bin/fm-crosscheck.py"
+            ],
+            "mutated_output": "============================= test session starts ==============================\nplatform darwin -- Python 3.9.6, pytest-8.4.2, pluggy-1.6.0\nrootdir: /fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.j2cm3qgs\nconfigfile: pytest.ini\ncollected 1 item\n\ntests/test_fm_crosscheck_ledger.py F                                     [100%]\n\n=================================== FAILURES ===================================\n_ CrosscheckLedgerValidationTests.test_failed_current_regular_reviews_remain_reloadable _\n\nself = <test_fm_crosscheck_ledger.CrosscheckLedgerValidationTests testMethod=test_failed_current_regular_reviews_remain_reloadable>\n\n    def test_failed_current_regular_reviews_remain_reloadable(self) -> None:\n        task_id = \"failed-current-regular-contract\"\n        pull_request = \"https://github.com/example/project/pull/1\"\n        snapshot = {\n            \"head_sha\": \"a\" * 40,\n            \"base_sha\": \"b\" * 40,\n            \"base_branch_sha\": \"b\" * 40,\n            \"claims_sha256\": \"c\" * 64,\n        }\n        reviewer = {\n            \"harness\": \"pi\",\n            \"model\": CROSSCHECK.CROSS_FAMILY_LANES[\"fireworks-glm\"][\"model\"],\n            \"effort\": \"xhigh\",\n            \"account_home\": \"/reviewer-account\",\n            \"execution_mode\": \"local\",\n            \"review_family_mode\": CROSSCHECK.REVIEW_FAMILY_CROSS_FAMILY_PRIMARY,\n            \"review_contract_sha256\": CROSSCHECK.review_contract_sha256(\n                False, \"pi\"\n            ),\n        }\n    \n        for state in (\"tool-failure\", \"unreviewed\", \"cannot-certify\"):\n            with self.subTest(state=state):\n                ledger = CROSSCHECK.new_ledger(task_id, pull_request)\n                CROSSCHECK.append_failed_run(\n                    ledger,\n                    snapshot,\n                    f\"simulated {state}\",\n                    reviewer,\n                    state,\n                )\n>               loaded = CROSSCHECK.validate_ledger(\n                    ledger, task_id, pull_request\n                )\n\ntests/test_fm_crosscheck_ledger.py:48: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nbin/fm-crosscheck.py:3472: in validate_ledger\n    require(\nbin/fm-crosscheck.py:1233: in require\n    fail(message)\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nmessage = 'ledger.runs[0].reviewer current regular review contract is missing terminal or depth fields'\n\n    def fail(message: str) -> NoReturn:\n>       raise CrosscheckError(message)\nE       fm_crosscheck_ledger_tested.CrosscheckError: ledger.runs[0].reviewer current regular review contract is missing terminal or depth fields\n\nbin/fm-crosscheck.py:377: CrosscheckError\n=============================== warnings summary ===============================\n../../../../Library/Python/3.9/lib/python/site-packages/_pytest/cacheprovider.py:475\n  /fixture/Library/Python/3.9/lib/python/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning: could not create cache path /fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.j2cm3qgs/.pytest_cache/v/cache/nodeids: [Errno 1] Operation not permitted: '/fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.j2cm3qgs/pytest-cache-files-ad36wem0'\n    config.cache.set(\"cache/nodeids\", sorted(self.cached_nodeids))\n\n../../../../Library/Python/3.9/lib/python/site-packages/_pytest/cacheprovider.py:429\n  /fixture/Library/Python/3.9/lib/python/site-packages/_pytest/cacheprovider.py:429: PytestCacheWarning: could not create cache path /fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.j2cm3qgs/.pytest_cache/v/cache/lastfailed: [Errno 1] Operation not permitted: '/fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.j2cm3qgs/pytest-cache-files-c53l3jg9'\n    config.cache.set(\"cache/lastfailed\", self.lastfailed)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED tests/test_fm_crosscheck_ledger.py::CrosscheckLedgerValidationTests::test_failed_current_regular_reviews_remain_reloadable\n======================== 1 failed, 2 warnings in 0.16s =========================\n",
+            "mutation_patch_sha256": "d9fa687a2972942317801bc803df66142941b0d45887d42fe20e2096104d921c",
+            "test_invocation": {
+              "arguments": [],
+              "runner": "pytest"
+            },
+            "test_path": "tests/test_fm_crosscheck_ledger.py"
+          },
+          "status": "verified-fixed"
+        },
+        {
+          "at": "2026-08-25T19:01:22Z",
+          "head_sha": "01707a79442e8a678311c4b62bf06dd9c43988b1",
+          "note": "The fix at bin/fm-crosscheck.py:3471 gates the terminal/depth field requirements to only successful clear and blocking states via `if current_regular_contract and run[\"state\"] in {\"clear\", \"blocking\"}:`. Failed records (tool-failure, unreviewed, cannot-certify) that lack terminal_provider, terminal_model, review_depth_passes, and review_depth_mode now pass validation and remain reloadable for retry. The tracked pytest test tests/test_fm_crosscheck_ledger.py::test_failed_current_regular_reviews_remain_reloadable constructs real tool-failure, unreviewed, and cannot-certify records and reloads each. The mutation patch at .crosscheck/mutations/failed-regular-state-gate.patch reverts the state gate to `if current_regular_contract:`, which causes the pytest path to fail with exit code 1 and three subTest errors, confirming the gate is mutation-sensitive.",
+          "proof": {
+            "baseline_exit": 0,
+            "baseline_output": "============================= test session starts ==============================\nplatform darwin -- Python 3.9.6, pytest-8.4.2, pluggy-1.6.0\nrootdir: /fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.uyy8e0ew\nconfigfile: pytest.ini\ncollected 1 item\n\ntests/test_fm_crosscheck_ledger.py .                                     [100%]\n\n=============================== warnings summary ===============================\n../../../../Library/Python/3.9/lib/python/site-packages/_pytest/cacheprovider.py:475\n  /fixture/Library/Python/3.9/lib/python/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning: could not create cache path /fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.uyy8e0ew/.pytest_cache/v/cache/nodeids: [Errno 1] Operation not permitted: '/fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.uyy8e0ew/pytest-cache-files-flvmn1ae'\n    config.cache.set(\"cache/nodeids\", sorted(self.cached_nodeids))\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n========================= 1 passed, 1 warning in 0.05s =========================\n",
+            "mutated_exit": 1,
+            "mutated_files": [
+              "bin/fm-crosscheck.py"
+            ],
+            "mutated_output": "============================= test session starts ==============================\nplatform darwin -- Python 3.9.6, pytest-8.4.2, pluggy-1.6.0\nrootdir: /fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.uyy8e0ew\nconfigfile: pytest.ini\ncollected 1 item\n\ntests/test_fm_crosscheck_ledger.py F                                     [100%]\n\n=================================== FAILURES ===================================\n_ CrosscheckLedgerValidationTests.test_failed_current_regular_reviews_remain_reloadable _\n\nself = <test_fm_crosscheck_ledger.CrosscheckLedgerValidationTests testMethod=test_failed_current_regular_reviews_remain_reloadable>\n\n    def test_failed_current_regular_reviews_remain_reloadable(self) -> None:\n        task_id = \"failed-current-regular-contract\"\n        pull_request = \"https://github.com/example/project/pull/1\"\n        snapshot = {\n            \"head_sha\": \"a\" * 40,\n            \"base_sha\": \"b\" * 40,\n            \"base_branch_sha\": \"b\" * 40,\n            \"claims_sha256\": \"c\" * 64,\n        }\n        reviewer = {\n            \"harness\": \"pi\",\n            \"model\": CROSSCHECK.CROSS_FAMILY_LANES[\"fireworks-glm\"][\"model\"],\n            \"effort\": \"xhigh\",\n            \"account_home\": \"/reviewer-account\",\n            \"execution_mode\": \"local\",\n            \"review_family_mode\": CROSSCHECK.REVIEW_FAMILY_CROSS_FAMILY_PRIMARY,\n            \"review_contract_sha256\": CROSSCHECK.review_contract_sha256(\n                False, \"pi\"\n            ),\n        }\n    \n        for state in (\"tool-failure\", \"unreviewed\", \"cannot-certify\"):\n            with self.subTest(state=state):\n                ledger = CROSSCHECK.new_ledger(task_id, pull_request)\n                CROSSCHECK.append_failed_run(\n                    ledger,\n                    snapshot,\n                    f\"simulated {state}\",\n                    reviewer,\n                    state,\n                )\n>               loaded = CROSSCHECK.validate_ledger(\n                    ledger, task_id, pull_request\n                )\n\ntests/test_fm_crosscheck_ledger.py:48: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nbin/fm-crosscheck.py:3472: in validate_ledger\n    require(\nbin/fm-crosscheck.py:1233: in require\n    fail(message)\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nmessage = 'ledger.runs[0].reviewer current regular review contract is missing terminal or depth fields'\n\n    def fail(message: str) -> NoReturn:\n>       raise CrosscheckError(message)\nE       fm_crosscheck_ledger_tested.CrosscheckError: ledger.runs[0].reviewer current regular review contract is missing terminal or depth fields\n\nbin/fm-crosscheck.py:377: CrosscheckError\n=============================== warnings summary ===============================\n../../../../Library/Python/3.9/lib/python/site-packages/_pytest/cacheprovider.py:475\n  /fixture/Library/Python/3.9/lib/python/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning: could not create cache path /fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.uyy8e0ew/.pytest_cache/v/cache/nodeids: [Errno 1] Operation not permitted: '/fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.uyy8e0ew/pytest-cache-files-2eqp10kh'\n    config.cache.set(\"cache/nodeids\", sorted(self.cached_nodeids))\n\n../../../../Library/Python/3.9/lib/python/site-packages/_pytest/cacheprovider.py:429\n  /fixture/Library/Python/3.9/lib/python/site-packages/_pytest/cacheprovider.py:429: PytestCacheWarning: could not create cache path /fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.uyy8e0ew/.pytest_cache/v/cache/lastfailed: [Errno 1] Operation not permitted: '/fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.uyy8e0ew/pytest-cache-files-bgbtvufd'\n    config.cache.set(\"cache/lastfailed\", self.lastfailed)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED tests/test_fm_crosscheck_ledger.py::CrosscheckLedgerValidationTests::test_failed_current_regular_reviews_remain_reloadable\n======================== 1 failed, 2 warnings in 0.18s =========================\n",
+            "mutation_patch_sha256": "d9fa687a2972942317801bc803df66142941b0d45887d42fe20e2096104d921c",
+            "test_invocation": {
+              "arguments": [],
+              "runner": "pytest"
+            },
+            "test_path": "tests/test_fm_crosscheck_ledger.py"
+          },
+          "status": "verified-fixed"
+        }
+      ],
+      "id": "cc-6f8469a6098b",
+      "lifecycle": "verified-fixed",
+      "severity": "blocking",
+      "title": "Failed regular GLM review permanently corrupts the ledger via ungated current_regular_contract validation"
+    }
+  ],
+  "pull_request": "https://github.com/ruby-dlee/firstmate/pull/330",
+  "runs": [
+    {
+      "active_blockers": [
+        "cc-6f8469a6098b"
+      ],
+      "at": "2026-08-25T09:48:24Z",
+      "base_branch_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+      "base_sha": "4597245d883a8f35d2a2267917d7cd9bb1faf9d6",
+      "citations": [
+        {
+          "line": 3456,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 3467,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 3478,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 5065,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 5327,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 5768,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 6248,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 2512,
+          "path": "tests/fm-crosscheck.test.sh"
+        }
+      ],
+      "claims_sha256": "af120597145fc6d67a7a63375be8c047535bd6f167256c30762a92f2b35184f2",
+      "durations_ms": {
+        "ledger": 0,
+        "proofs": 1224,
+        "reviewer": 657392,
+        "snapshot": 3358,
+        "total": 662328
+      },
+      "head_sha": "fbdcfc97881dfb5b707c1675772e455449b47690",
+      "new_findings": [
+        "cc-6f8469a6098b"
+      ],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "execution_home": "/fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.trt9j8_c/review-0/.crosscheck/pi-home",
+        "execution_proof": {
+          "actual_exit": 0,
+          "command": "bash .crosscheck/reproductions/repro.sh 4597245d883a8f35d2a2267917d7cd9bb1faf9d6 fbdcfc97881dfb5b707c1675772e455449b47690",
+          "expected_exit": 0,
+          "output": "REPRO_SUCCESS_MARKER_DIFF_VERIFIED\n",
+          "output_contains": "REPRO_SUCCESS_MARKER_DIFF_VERIFIED",
+          "reviewer_receipt": {
+            "contains": "REPRO_RECEIPT_START",
+            "output": "REPRO_RECEIPT_START\nbase_sha=4597245d883a8f35d2a2267917d7cd9bb1faf9d6\nhead_sha=fbdcfc97881dfb5b707c1675772e455449b47690\nHOME=/fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.trt9j8_c/review-0/.crosscheck/pi-home\nPI_CODING_AGENT_DIR=/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm\nprovider_account_selector=/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm\nREPRO_RECEIPT_END\n",
+            "path": ".crosscheck/reproductions/repro-receipt.txt",
+            "sha256": "b42e03baffc7518c406d71ed2d1630e5b17abbcfa5de86b3b3aaa3965bbec7c5"
+          },
+          "test_path": ".crosscheck/reproductions/repro.sh"
+        },
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "53740be346e46f826ed13ec7cca9beaa443ad8da8274d82d123658ad64ac6263",
+        "review_depth_mode": "two-pass-independent-synthesis-v1",
+        "review_depth_passes": "2",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4",
+        "reviewer_turn_count": "120",
+        "terminal_model": "accounts/fireworks/models/glm-5p2",
+        "terminal_provider": "fireworks-glm"
+      },
+      "state": "blocking",
+      "summary": "Reviewed the full 4-file diff (516 insertions, 17 deletions) implementing a two-pass regular GLM review protocol. The PR adds an isolated challenge pass followed by an authoritative synthesis pass, with bounded untrusted hypothesis projection, aggregated telemetry, and fail-closed validation for current-contract records missing terminal or depth fields. I verified implementation correctness of combine_review_telemetry (aggregation, missing values, mixed sources, boolean rejection, empty parts), review_depth_projection (correct stripping of execution claims including executed_reproduction, reproduction, mutation_proof, and equivalent_to), and regular_review_depth_context (pass validation and prior-count enforcement). However, I found a blocking issue: the new current_regular_contract validation in validate_ledger is not gated on execution_proof or run state being clear, so it applies to ALL run records matching the current regular contract, including failed runs (tool-failure, unreviewed). A failed regular GLM review's reviewer record carries review_contract_sha256 and review_family_mode but never sets terminal_provider, terminal_model, review_depth_passes, or review_depth_mode (those are only set on successful completion at lines 5327-5328 and 5061-5062). When the ledger is loaded on the next invocation, validate_ledger rejects the failed run, making the ledger permanently unloadable and blocking all future crosscheck operations for that task.",
+      "suspicions": [],
+      "telemetry": {
+        "costs_usd": {
+          "declared": 1.05946164,
+          "declared_source": "pinned-fireworks-regular-rates",
+          "pi_calculated": 1.05946164,
+          "pi_calculated_source": "pi-turn-end-message-usage-cost-total",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable-in-pi-events"
+        },
+        "failure_category": null,
+        "finding_disposition": {
+          "active": 1,
+          "closed_equivalent": 0,
+          "new": 1,
+          "suspicions": 0,
+          "updated": 0,
+          "verified_fixed": 0
+        },
+        "outcome": "blocking",
+        "reuse": null,
+        "reviewer_latency_ms": 656409,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": 4194046,
+          "cache_write": 0,
+          "input": 203446,
+          "output": 42607,
+          "source": "pi-turn-end-message-usage"
+        },
+        "turns": 120
+      },
+      "updated_findings": []
+    },
+    {
+      "active_blockers": [
+        "cc-6f8469a6098b"
+      ],
+      "at": "2026-08-25T13:15:31Z",
+      "base_branch_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+      "base_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+      "citations": [
+        {
+          "line": 4966,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 3456,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 4207,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 4897,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 5327,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 146,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 5957,
+          "path": "tests/fm-crosscheck.test.sh"
+        },
+        {
+          "line": 6045,
+          "path": "tests/fm-crosscheck.test.sh"
+        },
+        {
+          "line": 83,
+          "path": "docs/crosscheck.md"
+        },
+        {
+          "line": 1067,
+          "path": "docs/azure-requirements.md"
+        }
+      ],
+      "claims_sha256": "df6914c459b4dc95422163d250edfe8f013c800eb5554ebd83a2ff4d9713bfd3",
+      "durations_ms": {
+        "ledger": 2,
+        "proofs": 780,
+        "reviewer": 1363862,
+        "snapshot": 3459,
+        "total": 1368513
+      },
+      "head_sha": "265e93fea33feeb8a56d25610c4a9e8c5de53020",
+      "new_findings": [],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "execution_home": "/fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.cu8bo3i1/review-0/.crosscheck/pi-home",
+        "execution_proof": {
+          "actual_exit": 0,
+          "command": "bash .crosscheck/reproductions/repro.sh c56d24c8a55181b3f44e7f35a9de168b546ae01a 265e93fea33feeb8a56d25610c4a9e8c5de53020",
+          "expected_exit": 0,
+          "output": "REPRO_SUCCESS_DIFF_BETWEEN_c56d24c8a55181b3f44e7f35a9de168b546ae01a_AND_265e93fea33feeb8a56d25610c4a9e8c5de53020\nREPRO_RECEIPT_WRITTEN_TO_/fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.cu8bo3i1/review-0/.crosscheck/reproductions/repro-receipt.txt\n",
+          "output_contains": "REPRO_SUCCESS_DIFF_BETWEEN_c56d24c8a55181b3f44e7f35a9de168b546ae01a_AND_265e93fea33feeb8a56d25610c4a9e8c5de53020",
+          "reviewer_receipt": {
+            "contains": "REPRO_RECEIPT_OK",
+            "output": "base_sha=c56d24c8a55181b3f44e7f35a9de168b546ae01a\nhead_sha=265e93fea33feeb8a56d25610c4a9e8c5de53020\nHOME=/fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.cu8bo3i1/review-0/.crosscheck/pi-home\nPI_CODING_AGENT_DIR=/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm\nreceipt_marker=REPRO_RECEIPT_OK\ndiff_stat_lines=6\n",
+            "path": ".crosscheck/reproductions/repro-receipt.txt",
+            "sha256": "6a564b940728f641d00f76126e88c36c83b400b68c1286db27d9bd8b91408c22"
+          },
+          "test_path": ".crosscheck/reproductions/repro.sh"
+        },
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "5ae83ff5a35cc105835ad5046ba5ca0f1e7b2faf409b4db61f68fcfce52623dd",
+        "review_depth_mode": "two-pass-independent-synthesis-v1",
+        "review_depth_passes": "2",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4",
+        "reviewer_turn_count": "133",
+        "terminal_model": "accounts/fireworks/models/glm-5p2",
+        "terminal_provider": "fireworks-glm"
+      },
+      "state": "blocking",
+      "summary": "Pass 2 (authoritative synthesis) review of PR #330 \u2014 fix(crosscheck): add two-pass regular review evidence. The diff spans 4 files (bin/fm-crosscheck.py, tests/fm-crosscheck.test.sh, docs/azure-requirements.md, docs/crosscheck.md) with 562 insertions and 17 deletions. I independently inspected the complete full diff and executed focused Python-level reproductions for every concrete concern.\n\nKey implementation areas verified:\n\n1. Two-pass protocol (run_reviewer, lines ~4966-5066): The challenge pass creates a fresh git checkout (challenge_dir), deep-copies config, sets _review_depth_pass=\"challenge\", and calls run_reviewer recursively. The recursive call skips the two-pass trigger (since _review_depth_pass is not None) and falls through to normal Pi review logic. After the challenge succeeds, its verdict is projected via review_depth_projection (bounded string clipping, max 8 findings/suspicions/updates, max 12 citations each). The synthesis pass runs in the original review_dir with _review_depth_pass=\"final\" and receives the projection as prior analysis. The finally block combines telemetry, sums turn counts, and sets depth fields only if the synthesis completed.\n\n2. Validation (validate_ledger, lines ~3456-3551): A \"current_regular_contract\" check identifies reviews matching the regular GLM lane, cross-family primary mode, non-Azure execution, and current review contract hash. For clear/blocking states, all four terminal/depth fields are required. Inside the execution_proof block, terminal fields are validated against the expected provider/model, and depth fields are validated against the fixed constants. The turn_count >= depth_passes check ensures every pass contributed at least one turn. I verified via direct Python tests that: (a) valid clear records with all fields pass, (b) clear records missing any of the 4 fields are rejected, (c) blocking records missing fields are rejected, (d) tool-failure, unreviewed, and cannot-certify records without depth fields remain reloadable, (e) wrong terminal_provider is rejected, (f) wrong review_depth_mode is rejected, (g) turn_count < depth_passes is rejected.\n\n3. Projection safety (review_depth_projection, lines ~4207-4296): I verified that the projection strips reproduction, mutation_proof, and equivalent_to fields from findings and finding_updates, preventing execution claims from leaking into the synthesis prompt. Only title, severity, description, citations (for findings), description, citations (for suspicions), and id, status, note (for updates) are projected.\n\n4. Telemetry combination (combine_review_telemetry, lines ~4897-4960): I verified that integer and float values are correctly summed across passes, None values propagate (sum becomes None), mismatched source strings yield \"mixed-or-unavailable-pass-sources\", and an empty parts list raises CrosscheckError.\n\n5. Terminal identity (pi_review_result, lines ~4885-4895; run_reviewer, lines ~5327-5328): The terminal_identity dict is populated only after pi_review_result validates provider/model match. Since expected_provider and expected_model are non-None strings and the function calls tool_fail if they don't match, both keys are guaranteed present when the function returns normally. The direct dict access at lines 5327-5328 is safe.\n\n6. Failed record lifecycle: Challenge pass failure propagates telemetry but not turn count or terminal/depth fields to config, so failed records remain correctly shaped. Synthesis pass failure pops depth fields in the finally block. Internal _review_depth_pass and _review_depth_prior keys are always cleaned from config before returning or raising.\n\n7. Tests: The PR adds test_current_regular_contract_requires_reuse_evidence (verifies removing any of 4 fields blocks reuse) and test_failed_current_regular_contract_remains_reloadable (verifies failed-then-successful retry works). The existing test_telemetry_economics_and_exact_head_reuse was updated to reflect doubled telemetry (2 passes). I could not run the full bash test suite due to sandbox admission restrictions, but I verified all implementation logic through direct Python imports and assertions.\n\nExisting finding cc-6f8469a6098b (blocking, opened at head fbdcfc97881dfb5b707c1675772e455449b47690) remains open: that head is not present in this repository's history, so I cannot inspect the code at that point or determine whether this PR's changes address it.",
+      "suspicions": [],
+      "telemetry": {
+        "costs_usd": {
+          "declared": 1.08940166,
+          "declared_source": "pinned-fireworks-regular-rates",
+          "pi_calculated": 1.08940166,
+          "pi_calculated_source": "pi-turn-end-message-usage-cost-total",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable-in-pi-events"
+        },
+        "failure_category": null,
+        "finding_disposition": {
+          "active": 1,
+          "closed_equivalent": 0,
+          "new": 0,
+          "suspicions": 0,
+          "updated": 1,
+          "verified_fixed": 0
+        },
+        "outcome": "blocking",
+        "reuse": null,
+        "reviewer_latency_ms": 1362817,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": 4761859,
+          "cache_write": 0,
+          "input": 115505,
+          "output": 59326,
+          "source": "pi-turn-end-message-usage"
+        },
+        "turns": 133
+      },
+      "updated_findings": [
+        "cc-6f8469a6098b"
+      ]
+    },
+    {
+      "active_blockers": [
+        "cc-6f8469a6098b"
+      ],
+      "at": "2026-08-25T13:43:57Z",
+      "base_branch_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+      "base_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+      "citations": [],
+      "claims_sha256": "25b041cbec57910f50648638df331ab2c075211e603ab713c167af93012617c9",
+      "durations_ms": {
+        "ledger": 1,
+        "reviewer": 1613167,
+        "snapshot": 3301,
+        "total": 1616657
+      },
+      "head_sha": "265e93fea33feeb8a56d25610c4a9e8c5de53020",
+      "new_findings": [],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "execution_home": "/fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.m1wmh4_z/review-0/.crosscheck/pi-home",
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "5ae83ff5a35cc105835ad5046ba5ca0f1e7b2faf409b4db61f68fcfce52623dd",
+        "review_depth_mode": "two-pass-independent-synthesis-v1",
+        "review_depth_passes": "2",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4",
+        "reviewer_turn_count": "165",
+        "terminal_model": "accounts/fireworks/models/glm-5p2",
+        "terminal_provider": "fireworks-glm"
+      },
+      "state": "unreviewed",
+      "summary": "reviewer or evidence command changed tracked or unauthorized path: ?? bin/fm-crosscheck.py.bak",
+      "suspicions": [
+        {
+          "citations": [],
+          "description": "reviewer or evidence command changed tracked or unauthorized path: ?? bin/fm-crosscheck.py.bak"
+        }
+      ],
+      "telemetry": {
+        "costs_usd": {
+          "declared": 1.55864606,
+          "declared_source": "pinned-fireworks-regular-rates",
+          "pi_calculated": 1.55864606,
+          "pi_calculated_source": "pi-turn-end-message-usage-cost-total",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable-in-pi-events"
+        },
+        "failure_category": "review-validation",
+        "finding_disposition": {
+          "active": 1,
+          "closed_equivalent": 0,
+          "new": 0,
+          "suspicions": 1,
+          "updated": 0,
+          "verified_fixed": 0
+        },
+        "outcome": "unreviewed",
+        "reuse": null,
+        "reviewer_latency_ms": 1611958,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": 6905019,
+          "cache_write": 0,
+          "input": 218663,
+          "output": 64958,
+          "source": "pi-turn-end-message-usage"
+        },
+        "turns": 165
+      },
+      "updated_findings": []
+    },
+    {
+      "active_blockers": [
+        "cc-6f8469a6098b"
+      ],
+      "at": "2026-08-25T14:09:38Z",
+      "base_branch_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+      "base_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+      "citations": [],
+      "claims_sha256": "7580a22e7bd62194f7b13a0d69461357a160d713d80d7eaf692f8922c0463e5e",
+      "durations_ms": {
+        "ledger": 1,
+        "proofs": 896,
+        "reviewer": 1515265,
+        "snapshot": 3451,
+        "total": 1519859
+      },
+      "head_sha": "265e93fea33feeb8a56d25610c4a9e8c5de53020",
+      "new_findings": [],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "execution_home": "/fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck._qvxr5d6/review-0/.crosscheck/pi-home",
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "5ae83ff5a35cc105835ad5046ba5ca0f1e7b2faf409b4db61f68fcfce52623dd",
+        "review_depth_mode": "two-pass-independent-synthesis-v1",
+        "review_depth_passes": "2",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4",
+        "reviewer_turn_count": "155",
+        "terminal_model": "accounts/fireworks/models/glm-5p2",
+        "terminal_provider": "fireworks-glm"
+      },
+      "state": "unreviewed",
+      "summary": "finding_updates[0].mutation_proof is not a Git patch",
+      "suspicions": [
+        {
+          "citations": [],
+          "description": "finding_updates[0].mutation_proof is not a Git patch"
+        }
+      ],
+      "telemetry": {
+        "costs_usd": {
+          "declared": 1.51323438,
+          "declared_source": "pinned-fireworks-regular-rates",
+          "pi_calculated": 1.51323438,
+          "pi_calculated_source": "pi-turn-end-message-usage-cost-total",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable-in-pi-events"
+        },
+        "failure_category": "review-validation",
+        "finding_disposition": {
+          "active": 1,
+          "closed_equivalent": 0,
+          "new": 0,
+          "suspicions": 1,
+          "updated": 0,
+          "verified_fixed": 0
+        },
+        "outcome": "unreviewed",
+        "reuse": null,
+        "reviewer_latency_ms": 1514260,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": 6664097,
+          "cache_write": 0,
+          "input": 234204,
+          "output": 57358,
+          "source": "pi-turn-end-message-usage"
+        },
+        "turns": 155
+      },
+      "updated_findings": []
+    },
+    {
+      "active_blockers": [
+        "cc-6f8469a6098b"
+      ],
+      "at": "2026-08-25T14:43:37Z",
+      "base_branch_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+      "base_sha": "c56d24c8a55181b3f44e7f35a9de168b546ae01a",
+      "citations": [],
+      "claims_sha256": "30f6a257c8d3e11d8be3412090fe4876000782da5256348b1e9bd19ee7a08fa8",
+      "durations_ms": {
+        "ledger": 1,
+        "proofs": 2069,
+        "reviewer": 2008821,
+        "snapshot": 3616,
+        "total": 2014970
+      },
+      "head_sha": "265e93fea33feeb8a56d25610c4a9e8c5de53020",
+      "new_findings": [],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "execution_home": "/fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.852e_ohq/review-0/.crosscheck/pi-home",
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "5ae83ff5a35cc105835ad5046ba5ca0f1e7b2faf409b4db61f68fcfce52623dd",
+        "review_depth_mode": "two-pass-independent-synthesis-v1",
+        "review_depth_passes": "2",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4",
+        "reviewer_turn_count": "118",
+        "terminal_model": "accounts/fireworks/models/glm-5p2",
+        "terminal_provider": "fireworks-glm"
+      },
+      "state": "unreviewed",
+      "summary": "finding_updates[0].mutation_proof cannot certify a fix through the bash runner: the gate has no measured non-execution signal for bash, so a mutated run that never reached the named test is indistinguishable there from one that caught the regression. Runners whose non-execution the gate can classify: pytest",
+      "suspicions": [
+        {
+          "citations": [],
+          "description": "finding_updates[0].mutation_proof cannot certify a fix through the bash runner: the gate has no measured non-execution signal for bash, so a mutated run that never reached the named test is indistinguishable there from one that caught the regression. Runners whose non-execution the gate can classify: pytest"
+        }
+      ],
+      "telemetry": {
+        "costs_usd": {
+          "declared": 0.83537878,
+          "declared_source": "pinned-fireworks-regular-rates",
+          "pi_calculated": 0.83537878,
+          "pi_calculated_source": "pi-turn-end-message-usage-cost-total",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable-in-pi-events"
+        },
+        "failure_category": "review-validation",
+        "finding_disposition": {
+          "active": 1,
+          "closed_equivalent": 0,
+          "new": 0,
+          "suspicions": 1,
+          "updated": 0,
+          "verified_fixed": 0
+        },
+        "outcome": "unreviewed",
+        "reuse": null,
+        "reviewer_latency_ms": 2007808,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": 3793677,
+          "cache_write": 0,
+          "input": 115550,
+          "output": 32385,
+          "source": "pi-turn-end-message-usage"
+        },
+        "turns": 118
+      },
+      "updated_findings": []
+    },
+    {
+      "active_blockers": [
+        "cc-6f8469a6098b"
+      ],
+      "at": "2026-08-25T18:29:11Z",
+      "base_branch_sha": "fef0c591dc922c2c1b0d4ff82783a80c68ff4b00",
+      "base_sha": "fef0c591dc922c2c1b0d4ff82783a80c68ff4b00",
+      "citations": [],
+      "claims_sha256": "2cdcfafc27d5794bd699f1ffd1cccc5f76dc399d42fbcac03d88a49dba490d0b",
+      "durations_ms": {
+        "ledger": 3,
+        "proofs": 1103,
+        "reviewer": 326851,
+        "snapshot": 8980,
+        "total": 337292
+      },
+      "head_sha": "e50a9a44d0039115761f476f0beae38c5cc6c79e",
+      "new_findings": [],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "execution_home": "/fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.7se_42pl/review-0/.crosscheck/pi-home",
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "69dd1358462b0c00cf6e2b8a3a37fa6c7d88b2237b9ec3e473f186f70dd7d065",
+        "review_depth_mode": "two-pass-independent-synthesis-v1",
+        "review_depth_passes": "2",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4",
+        "reviewer_turn_count": "66",
+        "terminal_model": "accounts/fireworks/models/glm-5p2",
+        "terminal_provider": "fireworks-glm"
+      },
+      "state": "unreviewed",
+      "summary": "finding_updates[0].mutation_proof is not a Git patch",
+      "suspicions": [
+        {
+          "citations": [],
+          "description": "finding_updates[0].mutation_proof is not a Git patch"
+        }
+      ],
+      "telemetry": {
+        "costs_usd": {
+          "declared": 0.40764666,
+          "declared_source": "pinned-fireworks-regular-rates",
+          "pi_calculated": 0.40764666,
+          "pi_calculated_source": "pi-turn-end-message-usage-cost-total",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable-in-pi-events"
+        },
+        "failure_category": "review-validation",
+        "finding_disposition": {
+          "active": 1,
+          "closed_equivalent": 0,
+          "new": 0,
+          "suspicions": 1,
+          "updated": 0,
+          "verified_fixed": 0
+        },
+        "outcome": "unreviewed",
+        "reuse": null,
+        "reviewer_latency_ms": 325685,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": 1595309,
+          "cache_write": 0,
+          "input": 68213,
+          "output": 20183,
+          "source": "pi-turn-end-message-usage"
+        },
+        "turns": 66
+      },
+      "updated_findings": []
+    },
+    {
+      "active_blockers": [],
+      "at": "2026-08-25T18:38:28Z",
+      "base_branch_sha": "fef0c591dc922c2c1b0d4ff82783a80c68ff4b00",
+      "base_sha": "fef0c591dc922c2c1b0d4ff82783a80c68ff4b00",
+      "citations": [
+        {
+          "line": 3471,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 17,
+          "path": "tests/test_fm_crosscheck_ledger.py"
+        },
+        {
+          "line": 4978,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 5322,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 5042,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 5960,
+          "path": "tests/fm-crosscheck.test.sh"
+        }
+      ],
+      "claims_sha256": "59adce9b22d1cc54e0f0b8c436570e542dc315d67e16f02f22c78ceae41ba744",
+      "durations_ms": {
+        "ledger": 4,
+        "proofs": 4205,
+        "reviewer": 522428,
+        "snapshot": 7001,
+        "total": 534094
+      },
+      "head_sha": "e50a9a44d0039115761f476f0beae38c5cc6c79e",
+      "new_findings": [],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "execution_home": "/fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.j2cm3qgs/review-0/.crosscheck/pi-home",
+        "execution_proof": {
+          "actual_exit": 0,
+          "command": "bash .crosscheck/reproductions/repro.sh fef0c591dc922c2c1b0d4ff82783a80c68ff4b00 e50a9a44d0039115761f476f0beae38c5cc6c79e",
+          "expected_exit": 0,
+          "output": "CROSSCHECK_REPRO_SUCCESS_BASE_fef0c591dc92_HEAD_e50a9a44d003\n bin/fm-crosscheck.py                | 384 +++++++++++++++++++++++++++++++++++-\n docs/azure-requirements.md          |  15 +-\n docs/crosscheck.md                  |  14 +-\n tests/bridge-cutover-python.test.sh |   3 +-\n tests/fm-crosscheck.test.sh         | 170 +++++++++++++++-\n",
+          "output_contains": "CROSSCHECK_REPRO_SUCCESS_BASE_fef0c591dc92_HEAD_e50a9a44d00",
+          "reviewer_receipt": {
+            "contains": "CROSSCHECK_REPRO_RECEIPT_OK",
+            "output": "CROSSCHECK_REPRO_RECEIPT_START\nbase_sha=fef0c591dc922c2c1b0d4ff82783a80c68ff4b00\nhead_sha=e50a9a44d0039115761f476f0beae38c5cc6c79e\nHOME=/fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.j2cm3qgs/review-0/.crosscheck/pi-home\nPI_CODING_AGENT_DIR=/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm\nCROSSCHECK_REPRO_RECEIPT_OK\n",
+            "path": ".crosscheck/reproductions/repro-receipt.txt",
+            "sha256": "011459dc1f039678b87d66dcdb1eaf5458a787df689ee8a1b223034fa5ceb962"
+          },
+          "test_path": ".crosscheck/reproductions/repro.sh"
+        },
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "69dd1358462b0c00cf6e2b8a3a37fa6c7d88b2237b9ec3e473f186f70dd7d065",
+        "review_depth_mode": "two-pass-independent-synthesis-v1",
+        "review_depth_passes": "2",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4",
+        "reviewer_turn_count": "91",
+        "terminal_model": "accounts/fireworks/models/glm-5p2",
+        "terminal_provider": "fireworks-glm"
+      },
+      "state": "clear",
+      "summary": "Pass 2 (authoritative synthesis) review of the full diff between base fef0c591dc922c2c1b0d4ff82783a80c68ff4b00 and head e50a9a44d0039115761f476f0beae38c5cc6c79e. The PR implements a fixed two-pass independent challenge + authoritative synthesis protocol for regular GLM Crosscheck reviews, adds terminal provider/model readback tracking and review-depth (passes/mode) enforcement for successful current-contract records, and fixes durable finding cc-6f8469a6098b by gating the four terminal/depth field requirements to only clear and blocking states so that failed (tool-failure, unreviewed, cannot-certify) records remain reloadable. The durable finding is verified-fixed: the tracked pytest test tests/test_fm_crosscheck_ledger.py passes on clean code (exit 0), and the mutation patch that reverts the state gate (removing `and run[\"state\"] in {\"clear\", \"blocking\"}`) causes the test to fail with exit 1 for all three failed states. The two-pass run_reviewer implementation correctly manages challenge/synthesis recursion via a separate git checkout for the challenge pass, telemetry aggregation via combine_review_telemetry (which handles None values without inventing data), config cleanup in finally blocks, and terminal_identity readback that is fail-closed. The make_prompt and run_reviewer config type widening from dict[str, str] to dict[str, Any] is compatible with all callers. Internal config keys (_review_depth_pass, _review_depth_prior) are properly cleaned up before the reviewer record is persisted. Shell test updates for two-pass prompt logging, doubled telemetry economics, reuse-evidence enforcement, and failed-ledger reloadability are consistent with the implementation. The fm-worker-placement test refactor from random-kill to a deterministic sitecustomize.py barrier is a test-only change that improves reliability without touching implementation. No new findings identified in this pass.",
+      "suspicions": [],
+      "telemetry": {
+        "costs_usd": {
+          "declared": 0.68140754,
+          "declared_source": "pinned-fireworks-regular-rates",
+          "pi_calculated": 0.68140754,
+          "pi_calculated_source": "pi-turn-end-message-usage-cost-total",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable-in-pi-events"
+        },
+        "failure_category": null,
+        "finding_disposition": {
+          "active": 0,
+          "closed_equivalent": 0,
+          "new": 0,
+          "suspicions": 0,
+          "updated": 1,
+          "verified_fixed": 1
+        },
+        "outcome": "clear",
+        "reuse": null,
+        "reviewer_latency_ms": 520972,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": 2977901,
+          "cache_write": 0,
+          "input": 89609,
+          "output": 31602,
+          "source": "pi-turn-end-message-usage"
+        },
+        "turns": 91
+      },
+      "updated_findings": [
+        "cc-6f8469a6098b"
+      ]
+    },
+    {
+      "active_blockers": [
+        "cc-6f8469a6098b"
+      ],
+      "at": "2026-08-25T18:45:09Z",
+      "base_branch_sha": "cd8890feef612c0e5da0662f0dc37e3bd59b09e5",
+      "base_sha": "cd8890feef612c0e5da0662f0dc37e3bd59b09e5",
+      "citations": [],
+      "claims_sha256": "59adce9b22d1cc54e0f0b8c436570e542dc315d67e16f02f22c78ceae41ba744",
+      "durations_ms": {
+        "ledger": 2,
+        "proofs": 925,
+        "reviewer": 346469,
+        "snapshot": 8160,
+        "total": 355824
+      },
+      "head_sha": "01707a79442e8a678311c4b62bf06dd9c43988b1",
+      "new_findings": [],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "execution_home": "/fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.itcv2f3i/review-0/.crosscheck/pi-home",
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "69dd1358462b0c00cf6e2b8a3a37fa6c7d88b2237b9ec3e473f186f70dd7d065",
+        "review_depth_mode": "two-pass-independent-synthesis-v1",
+        "review_depth_passes": "2",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4",
+        "reviewer_turn_count": "76",
+        "terminal_model": "accounts/fireworks/models/glm-5p2",
+        "terminal_provider": "fireworks-glm"
+      },
+      "state": "unreviewed",
+      "summary": "artifact path must start with .crosscheck/reproductions/",
+      "suspicions": [
+        {
+          "citations": [],
+          "description": "artifact path must start with .crosscheck/reproductions/"
+        }
+      ],
+      "telemetry": {
+        "costs_usd": {
+          "declared": 0.45275332,
+          "declared_source": "pinned-fireworks-regular-rates",
+          "pi_calculated": 0.45275332,
+          "pi_calculated_source": "pi-turn-end-message-usage-cost-total",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable-in-pi-events"
+        },
+        "failure_category": "review-validation",
+        "finding_disposition": {
+          "active": 1,
+          "closed_equivalent": 0,
+          "new": 0,
+          "suspicions": 1,
+          "updated": 0,
+          "verified_fixed": 0
+        },
+        "outcome": "unreviewed",
+        "reuse": null,
+        "reviewer_latency_ms": 345468,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": 1930518,
+          "cache_write": 0,
+          "input": 68954,
+          "output": 19533,
+          "source": "pi-turn-end-message-usage"
+        },
+        "turns": 76
+      },
+      "updated_findings": []
+    },
+    {
+      "active_blockers": [
+        "cc-6f8469a6098b"
+      ],
+      "at": "2026-08-25T18:51:07Z",
+      "base_branch_sha": "cd8890feef612c0e5da0662f0dc37e3bd59b09e5",
+      "base_sha": "cd8890feef612c0e5da0662f0dc37e3bd59b09e5",
+      "citations": [],
+      "claims_sha256": "d23277bd010313775618f538432d90f4bd156361dca081739581b033a1cdfb3a",
+      "durations_ms": {
+        "ledger": 3,
+        "proofs": 703,
+        "reviewer": 325219,
+        "snapshot": 8838,
+        "total": 335049
+      },
+      "head_sha": "01707a79442e8a678311c4b62bf06dd9c43988b1",
+      "new_findings": [],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "execution_home": "/fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.9h4pe7ud/review-0/.crosscheck/pi-home",
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "69dd1358462b0c00cf6e2b8a3a37fa6c7d88b2237b9ec3e473f186f70dd7d065",
+        "review_depth_mode": "two-pass-independent-synthesis-v1",
+        "review_depth_passes": "2",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4",
+        "reviewer_turn_count": "66",
+        "terminal_model": "accounts/fireworks/models/glm-5p2",
+        "terminal_provider": "fireworks-glm"
+      },
+      "state": "unreviewed",
+      "summary": "artifact path must start with .crosscheck/reproductions/",
+      "suspicions": [
+        {
+          "citations": [],
+          "description": "artifact path must start with .crosscheck/reproductions/"
+        }
+      ],
+      "telemetry": {
+        "costs_usd": {
+          "declared": 0.41192304,
+          "declared_source": "pinned-fireworks-regular-rates",
+          "pi_calculated": 0.41192304,
+          "pi_calculated_source": "pi-turn-end-message-usage-cost-total",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable-in-pi-events"
+        },
+        "failure_category": "review-validation",
+        "finding_disposition": {
+          "active": 1,
+          "closed_equivalent": 0,
+          "new": 0,
+          "suspicions": 1,
+          "updated": 0,
+          "verified_fixed": 0
+        },
+        "outcome": "unreviewed",
+        "reuse": null,
+        "reviewer_latency_ms": 324096,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": 1644806,
+          "cache_write": 0,
+          "input": 66541,
+          "output": 20112,
+          "source": "pi-turn-end-message-usage"
+        },
+        "turns": 66
+      },
+      "updated_findings": []
+    },
+    {
+      "active_blockers": [],
+      "at": "2026-08-25T19:01:22Z",
+      "base_branch_sha": "cd8890feef612c0e5da0662f0dc37e3bd59b09e5",
+      "base_sha": "cd8890feef612c0e5da0662f0dc37e3bd59b09e5",
+      "citations": [
+        {
+          "line": 3471,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 17,
+          "path": "tests/test_fm_crosscheck_ledger.py"
+        },
+        {
+          "line": 4208,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 4744,
+          "path": "bin/fm-crosscheck.py"
+        },
+        {
+          "line": 2451,
+          "path": "tests/fm-crosscheck.test.sh"
+        },
+        {
+          "line": 441,
+          "path": "tests/fm-worker-placement.test.sh"
+        }
+      ],
+      "claims_sha256": "13051bb0013b76d219e833f5d3e14a2a6b40c7b7d1ae00e634503f133767d90e",
+      "durations_ms": {
+        "ledger": 4,
+        "proofs": 4736,
+        "reviewer": 588316,
+        "snapshot": 6482,
+        "total": 600067
+      },
+      "head_sha": "01707a79442e8a678311c4b62bf06dd9c43988b1",
+      "new_findings": [],
+      "reviewer": {
+        "account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "credential_identifier": "provider-binding:fireworks-glm:d2a164ff40de46af0f1888bfc83c72eb9e2ba298fd9da37c6db828076665f3db",
+        "credential_source": "pi-fireworks-glm-models-file",
+        "effort": "xhigh",
+        "executing_account_home": "/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm",
+        "execution_home": "/fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.uyy8e0ew/review-0/.crosscheck/pi-home",
+        "execution_proof": {
+          "actual_exit": 0,
+          "command": "bash .crosscheck/reproductions/repro.sh cd8890feef612c0e5da0662f0dc37e3bd59b09e5 01707a79442e8a678311c4b62bf06dd9c43988b1",
+          "expected_exit": 0,
+          "output": "CROSSCHECK_REPRO_DIFF_OK\ncrosscheck-repro-receipt-ok\n",
+          "output_contains": "CROSSCHECK_REPRO_DIFF_OK",
+          "reviewer_receipt": {
+            "contains": "crosscheck-repro-receipt-ok",
+            "output": "base_sha=cd8890feef612c0e5da0662f0dc37e3bd59b09e5\nhead_sha=01707a79442e8a678311c4b62bf06dd9c43988b1\nHOME=/fixture/firstmate-home/state/.azure-c1-accept-y4.crosscheck.uyy8e0ew/review-0/.crosscheck/pi-home\nPI_CODING_AGENT_DIR=/fixture/.local/share/agent-fleet/accounts/pi/fireworks-glm\nprovider_account_selector=fireworks-glm\nREPRO_RECEIPT_MARKER=crosscheck-repro-receipt-ok\n",
+            "path": ".crosscheck/reproductions/repro.receipt",
+            "sha256": "029fb967eaa9223cbb54f1b643e886ca93871d052243fb03afcd06083557f72c"
+          },
+          "test_path": ".crosscheck/reproductions/repro.sh"
+        },
+        "harness": "pi",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "review_contract_sha256": "69dd1358462b0c00cf6e2b8a3a37fa6c7d88b2237b9ec3e473f186f70dd7d065",
+        "review_depth_mode": "two-pass-independent-synthesis-v1",
+        "review_depth_passes": "2",
+        "review_family_mode": "cross-family-primary",
+        "reviewer_account_identity_sha256": "ef2922b9898cf708ea8021ad917bed30d7de01075f128bdd29233692580785e4",
+        "reviewer_identity_sha256": "51df1e691243dd9cb08606a9e0013a4fa4b9742ca344420e66662252fcb0b8a4",
+        "reviewer_turn_count": "58",
+        "terminal_model": "accounts/fireworks/models/glm-5p2",
+        "terminal_provider": "fireworks-glm"
+      },
+      "state": "clear",
+      "summary": "Pass 2 (authoritative synthesis) review of PR #330 against exact base cd8890feef612c0e5da0662f0dc37e3bd59b09e5 and exact head 01707a79442e8a678311c4b62bf06dd9c43988b1. The diff spans 7 files (682 insertions, 61 deletions): bin/fm-crosscheck.py, tests/test_fm_crosscheck_ledger.py, tests/fm-crosscheck.test.sh, tests/fm-worker-placement.test.sh, tests/bridge-cutover-python.test.sh, docs/azure-requirements.md, docs/crosscheck.md. The primary change implements a fixed two-pass independent challenge + authoritative synthesis protocol for regular GLM reviews, with bounded projection of challenge hypotheses into the synthesis prompt. The ledger validation now gates terminal_provider, terminal_model, review_depth_passes, and review_depth_mode to successful clear/blocking states only via `if current_regular_contract and run[\"state\"] in {\"clear\", \"blocking\"}:` at bin/fm-crosscheck.py:3471, keeping failed (tool-failure, unreviewed, cannot-certify) records reloadable for retry. Telemetry aggregation via combine_review_telemetry sums both passes conservatively without inventing unavailable values. The worker-placement crash test was replaced from a flaky probabilistic random-kill approach to a deterministic barrier-based approach using a sitecustomize.py monkey-patch. I independently verified the full diff via the reproduction helper, ran the tracked pytest test (passes at head, fails under the mutation patch with exit code 1 and three subTest errors), confirmed the mutation patch applies cleanly and reverts the state gate, and confirmed the test passes again after reverting. No new findings or suspicions identified.",
+      "suspicions": [],
+      "telemetry": {
+        "costs_usd": {
+          "declared": 0.3355342,
+          "declared_source": "pinned-fireworks-regular-rates",
+          "pi_calculated": 0.3355342,
+          "pi_calculated_source": "pi-turn-end-message-usage-cost-total",
+          "provider_reported": null,
+          "provider_reported_source": "unavailable-in-pi-events"
+        },
+        "failure_category": null,
+        "finding_disposition": {
+          "active": 0,
+          "closed_equivalent": 0,
+          "new": 0,
+          "suspicions": 0,
+          "updated": 1,
+          "verified_fixed": 1
+        },
+        "outcome": "clear",
+        "reuse": null,
+        "reviewer_latency_ms": 587099,
+        "schema": "firstmate.crosscheck-run-telemetry.v1",
+        "tokens": {
+          "cache_read": 1278680,
+          "cache_write": 0,
+          "input": 57211,
+          "output": 17369,
+          "source": "pi-turn-end-message-usage"
+        },
+        "turns": 58
+      },
+      "updated_findings": [
+        "cc-6f8469a6098b"
+      ]
+    }
+  ],
+  "schema": "firstmate.crosscheck-ledger.v2",
+  "task_id": "azure-c1-accept-y4"
+}

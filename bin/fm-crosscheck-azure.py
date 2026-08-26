@@ -26,7 +26,7 @@ import stat
 import subprocess
 import tempfile
 import time
-from typing import Any
+from typing import Any, Callable
 
 
 SCHEMA = "fm.azure-crosscheck/v1"
@@ -2084,6 +2084,7 @@ def run_azure_review(
     config: dict[str, str],
     author_account_identity: str,
     phase_timer: Any = None,
+    persist_result: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """FIFO lane admission around one reviewer run.
 
@@ -2114,6 +2115,7 @@ def run_azure_review(
             snapshot_value=snapshot_value, ledger=ledger, config=config,
             author_account_identity=author_account_identity, lane=lane,
             phase_timer=phase_timer,
+            persist_result=persist_result,
         )
     finally:
         release_review_lane(lane_handle)
@@ -2134,6 +2136,7 @@ def _run_azure_review_in_lane(
     author_account_identity: str,
     lane: int,
     phase_timer: Any = None,
+    persist_result: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     del root
     azure = runtime_config(home)
@@ -2428,6 +2431,8 @@ def _run_azure_review_in_lane(
                     "azure_identity": ledger_identity,
                 }
             )
+            if persist_result is not None:
+                persist_result(working_ledger, run)
             return working_ledger, run
         except core.CrosscheckError:
             raise

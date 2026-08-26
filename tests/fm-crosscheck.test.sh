@@ -643,6 +643,7 @@ elif scenario in {
     "readable-state-forgery",
     "stateful-forgery",
     "support-forgery",
+    "mixed-invalid-closure",
     "symlink-forgery",
     "unclassified-runner",
     "positional-target",
@@ -682,7 +683,7 @@ elif scenario in {
 -base
 +irrelevant
 """)
-    elif scenario == "support-forgery":
+    elif scenario in {"support-forgery", "mixed-invalid-closure"}:
         patch.parent.mkdir(parents=True, exist_ok=True)
         patch.write_text("""diff --git a/tests/helper.sh b/tests/helper.sh
 --- a/tests/helper.sh
@@ -706,6 +707,7 @@ elif scenario in {
         "readable-state-forgery": "tests/readable-state.test.sh",
         "stateful-forgery": "tests/stateful.test.sh",
         "support-forgery": "tests/support.test.sh",
+        "mixed-invalid-closure": "tests/support.test.sh",
         "symlink-forgery": "tests/symlink.test.sh",
         "positional-target": "tests/vacuous.test.sh",
         "path-dependent": "tests/pathdep.test.sh",
@@ -741,6 +743,31 @@ elif scenario in {
         "mutation_proof": mutation_proof,
         "equivalent_to": None,
     }]
+    if scenario == "mixed-invalid-closure":
+        sibling = protocol / "reproductions" / "sibling.sh"
+        sibling.parent.mkdir(parents=True, exist_ok=True)
+        sibling.write_text("#!/usr/bin/env bash\necho SIBLING-REPRODUCED\nexit 9\n")
+        os.chmod(sibling, 0o755)
+        base["finding_updates"].append({
+            "id": "cc-bbbbbbbbbbbb",
+            "status": "claimed-fixed",
+            "note": "The sibling remains claimed fixed.",
+            "reproduction": None,
+            "mutation_proof": None,
+            "equivalent_to": None,
+        })
+        base["new_findings"] = [{
+            "title": "Sibling reproduced defect",
+            "severity": "blocking",
+            "description": "A sibling defect remains independently reproducible.",
+            "citations": [{"path": "app.txt", "line": 1}],
+            "reproduction": {
+                "test_path": ".crosscheck/reproductions/sibling.sh",
+                "command": "bash .crosscheck/reproductions/sibling.sh",
+                "expected_exit": 9,
+                "output_contains": "SIBLING-REPRODUCED",
+            },
+        }]
 elif scenario in {
     "node-id-proof",
     "node-id-unmatched",
@@ -837,7 +864,10 @@ elif scenario == "unfound-reproduction-command":
         "title": "Evidence needing absent tooling",
         "severity": "blocking",
         "description": "The helper invokes a tool the review checkout does not carry.",
-        "citations": [{"path": "app.txt", "line": 1}],
+        "citations": [
+            {"path": "app.txt", "line": 1},
+            {"path": "app.txt", "line": 999},
+        ],
         "reproduction": {
             "test_path": ".crosscheck/reproductions/missing-tool.sh",
             "command": "bash .crosscheck/reproductions/missing-tool.sh",
@@ -3435,6 +3465,38 @@ assert value["runs"][-1]["state"] == "blocking"
   pass "new finding enters the ledger only with gate-executed reproduction evidence"
 }
 
+test_failed_new_finding_reproduction_becomes_a_suspicion() {
+  local record case_dir base head rc ledger
+  record=$(make_case degraded-new-finding)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  set +e
+  run_case "$case_dir" "$base" "$head" unfound-reproduction-command run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "degraded new finding reproduction"
+  assert_grep 'CROSSCHECK BLOCKING:' "$case_dir/err" \
+    "a failed new-finding reproduction voided the semantic review"
+  assert_no_grep 'CROSSCHECK TOOL-FAILURE' "$case_dir/err" \
+    "a failed new-finding reproduction remained a tool failure"
+  ledger="$case_dir/data/task-x1/crosscheck-ledger.json"
+  python3 - "$ledger" <<'PY' || fail "failed new-finding evidence was not preserved as a suspicion"
+import json
+import sys
+
+value = json.load(open(sys.argv[1]))
+run = value["runs"][-1]
+assert value["findings"] == [], value["findings"]
+assert run["state"] == "blocking", run
+assert len(run["suspicions"]) == 1, run["suspicions"]
+suspicion = run["suspicions"][0]
+assert "Evidence attempt failed" in suspicion["description"], suspicion
+assert "Dropped invalid citation" in suspicion["description"], suspicion
+assert suspicion["citations"] == [{"path": "app.txt", "line": 1}], suspicion
+PY
+  pass "failed new-finding evidence degrades to a run-scoped suspicion"
+}
+
 test_silence_never_closes_prior_finding() {
   local record case_dir base head rc
   record=$(make_case silence)
@@ -3504,7 +3566,7 @@ PY
   pass "a package-governed Jest test can certify a TypeScript mutation"
 }
 
-test_preexisting_jest_runner_cannot_certify() {
+test_preexisting_jest_runner_stays_blocking() {
   local record case_dir base head rc
   record=$(make_case preexisting-jest-runner)
   IFS=$'\t' read -r case_dir base head <<< "$record"
@@ -3523,8 +3585,8 @@ test_preexisting_jest_runner_cannot_certify() {
   rc=$?
   set -e
   expect_code 1 "$rc" "preexisting Jest runner"
-  assert_grep 'CROSSCHECK CANNOT-CERTIFY:' "$case_dir/err" \
-    "a preexisting Jest runner was not classified as unavailable proof"
+  assert_grep 'CROSSCHECK BLOCKING:' "$case_dir/err" \
+    "a preexisting Jest runner voided the semantic review"
   assert_grep 'Jest runner preexists lockfile materialization' "$case_dir/err" \
     "the proof did not reject the committed Jest runner"
   assert_no_grep 'crosscheck clear' "$case_dir/out" \
@@ -3532,7 +3594,7 @@ test_preexisting_jest_runner_cannot_certify() {
   pass "preexisting Jest runners never establish proof provenance"
 }
 
-test_local_fake_jest_package_cannot_certify() {
+test_local_fake_jest_package_stays_blocking() {
   local record case_dir base head rc
   record=$(make_case local-fake-jest-package)
   IFS=$'\t' read -r case_dir base head <<< "$record"
@@ -3553,8 +3615,8 @@ JSON
   rc=$?
   set -e
   expect_code 1 "$rc" "local fake Jest package"
-  assert_grep 'CROSSCHECK CANNOT-CERTIFY:' "$case_dir/err" \
-    "a local fake Jest package was not classified as unavailable proof"
+  assert_grep 'CROSSCHECK BLOCKING:' "$case_dir/err" \
+    "a local fake Jest package voided the semantic review"
   assert_grep 'local, linked, workspace, Git, or URL source' "$case_dir/err" \
     "the lockfile provenance check did not reject file: Jest"
   assert_no_grep 'crosscheck clear' "$case_dir/out" \
@@ -3562,7 +3624,7 @@ JSON
   pass "local fake Jest packages cannot establish registry provenance"
 }
 
-test_local_transitive_jest_package_cannot_certify() {
+test_local_transitive_jest_package_stays_blocking() {
   local record case_dir base head rc
   record=$(make_case local-transitive-jest-package)
   IFS=$'\t' read -r case_dir base head <<< "$record"
@@ -3583,8 +3645,8 @@ JSON
   rc=$?
   set -e
   expect_code 1 "$rc" "local transitive Jest package"
-  assert_grep 'CROSSCHECK CANNOT-CERTIFY:' "$case_dir/err" \
-    "a local transitive Jest package was not unavailable proof"
+  assert_grep 'CROSSCHECK BLOCKING:' "$case_dir/err" \
+    "a local transitive Jest package voided the semantic review"
   assert_grep 'runtime package jest-cli is a local or linked lock entry' "$case_dir/err" \
     "the authenticated closure did not reject local jest-cli"
   assert_no_grep 'crosscheck clear' "$case_dir/out" \
@@ -3644,7 +3706,7 @@ PY
   pass "a TypeScript test that misses the mutation remains blocking"
 }
 
-test_typescript_without_usable_route_is_cannot_certify() {
+test_typescript_without_usable_route_stays_blocking() {
   local record case_dir base head rc
   record=$(make_case typescript-no-route)
   IFS=$'\t' read -r case_dir base head <<< "$record"
@@ -3662,26 +3724,27 @@ JSON
   rc=$?
   set -e
   expect_code 1 "$rc" "TypeScript mutation with no usable certification route"
-  assert_grep 'CROSSCHECK CANNOT-CERTIFY:' "$case_dir/err" \
-    "an unavailable governed route was mislabeled as a review verdict"
+  assert_grep 'CROSSCHECK BLOCKING:' "$case_dir/err" \
+    "an unavailable governed route voided the semantic review"
   assert_no_grep 'crosscheck clear' "$case_dir/out" \
     "a missing TypeScript certification route silently cleared"
   "$CROSSCHECK_PYTHON" - \
     "$case_dir/data/task-x1/crosscheck-ledger.json" \
     "$case_dir/data/task-x1/crosscheck.md" <<'PY' \
-    || fail "cannot-certify outcome was not durable and explicit"
+    || fail "degraded closure outcome was not durable and explicit"
 import json
 from pathlib import Path
 import sys
 
 ledger = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-assert ledger["findings"][0]["lifecycle"] == "open", ledger["findings"][0]
-assert ledger["runs"][-1]["state"] == "cannot-certify", ledger["runs"][-1]
+finding = ledger["findings"][0]
+assert finding["lifecycle"] == "claimed-fixed", finding
+assert "changed JavaScript/TypeScript is governed by vitest" in finding["history"][-1]["note"], finding
+assert ledger["runs"][-1]["state"] == "blocking", ledger["runs"][-1]
 report = Path(sys.argv[2]).read_text(encoding="utf-8")
-assert "State: **CANNOT-CERTIFY**" in report, report
-assert "no trustworthy mutation-certification route" in report, report
+assert "State: **BLOCKING**" in report, report
 PY
-  pass "an unavailable language-governed route reports CANNOT-CERTIFY and never clears"
+  pass "an unavailable language-governed route stays blocking and never clears"
 }
 
 test_python_mutation_proof_is_byte_exact() {
@@ -3795,7 +3858,7 @@ test_unclassified_runner_cannot_clear_a_finding() {
   python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1]))
-assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+assert value["findings"][0]["lifecycle"] == "claimed-fixed", value["findings"][0]["lifecycle"]
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "an unclassified runner cleared a finding"
   pass "a runner with no measured non-execution signal cannot certify a fix"
@@ -3823,7 +3886,7 @@ test_flag_argument_cannot_rewrite_the_non_execution_signal() {
   python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1]))
-assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+assert value["findings"][0]["lifecycle"] == "claimed-fixed", value["findings"][0]["lifecycle"]
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "a flag that rewrote the non-execution signal cleared a finding"
   pass "a runner flag cannot rewrite the exit semantics the gate classifies"
@@ -3850,7 +3913,7 @@ test_positional_argument_cannot_supply_a_second_target() {
   python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1]))
-assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+assert value["findings"][0]["lifecycle"] == "claimed-fixed", value["findings"][0]["lifecycle"]
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "a vacuous named test cleared a finding through a second target"
   pass "a positional argument cannot smuggle in a second, unvalidated test target"
@@ -3892,7 +3955,7 @@ test_mutated_non_execution_cannot_clear_a_finding() {
   python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1]))
-assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+assert value["findings"][0]["lifecycle"] == "claimed-fixed", value["findings"][0]["lifecycle"]
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "a mutation that only broke collection cleared the finding"
   pass "a mutated run that never executed the test cannot clear a finding"
@@ -3925,7 +3988,7 @@ test_ancestor_runner_config_cannot_rewrite_the_non_execution_signal() {
   python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1]))
-assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+assert value["findings"][0]["lifecycle"] == "claimed-fixed", value["findings"][0]["lifecycle"]
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "an ancestor runner config cleared a finding"
 
@@ -3982,7 +4045,7 @@ test_ambient_addopts_cannot_rewrite_the_non_execution_signal() {
   python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1]))
-assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+assert value["findings"][0]["lifecycle"] == "claimed-fixed", value["findings"][0]["lifecycle"]
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "an exported runner option cleared a finding"
   pass "an exported runner option cannot reach the gate's own proof runs"
@@ -4028,7 +4091,7 @@ test_incomplete_proof_environment_fails_loudly() {
   python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1]))
-assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+assert value["findings"][0]["lifecycle"] == "claimed-fixed", value["findings"][0]["lifecycle"]
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "a proof that never ran cleared a finding"
   pass "an allowlist missing something the runner needs refuses at the baseline"
@@ -4114,7 +4177,7 @@ test_reviewer_env_dependent_evidence_names_the_difference() {
 }
 
 test_unfound_evidence_command_is_a_non_execution() {
-  local record case_dir base head rc
+  local record case_dir base head rc ledger
   record=$(make_case unfound-reproduction)
   IFS=$'\t' read -r case_dir base head <<< "$record"
   set +e
@@ -4123,8 +4186,17 @@ test_unfound_evidence_command_is_a_non_execution() {
   rc=$?
   set -e
   expect_code 1 "$rc" "evidence command that does not exist"
-  assert_grep 'never ran' "$case_dir/err" \
-    "an unfound evidence command was not reported as a non-execution"
+  assert_grep 'CROSSCHECK BLOCKING:' "$case_dir/err" \
+    "an unfound evidence command voided the semantic review"
+  ledger="$case_dir/data/task-x1/crosscheck-ledger.json"
+  python3 - "$ledger" <<'PY' || fail "an unfound evidence command lost its non-execution diagnosis"
+import json
+import sys
+
+run = json.load(open(sys.argv[1]))["runs"][-1]
+assert run["state"] == "blocking", run
+assert "never ran" in run["suspicions"][0]["description"], run
+PY
   pass "an evidence command that was never found is a non-execution"
 }
 
@@ -4231,8 +4303,8 @@ test_forged_git_diff_mutation_command_is_rejected() {
   python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1]))
-assert value["findings"][0]["lifecycle"] == "open"
-assert value["runs"][-1]["state"] == "unreviewed"
+assert value["findings"][0]["lifecycle"] == "claimed-fixed"
+assert value["runs"][-1]["state"] == "blocking"
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "forged git-diff command cleared the durable finding"
   pass "forged git-diff command cannot impersonate a named test"
@@ -4313,6 +4385,59 @@ PY
     fi
   done
   pass "mutation proof changes only cited non-test implementation paths"
+}
+
+test_invalid_closure_stays_blocking_and_preserves_siblings() {
+  local record case_dir base head rc ledger
+  record=$(make_case mixed-invalid-closure)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  ledger="$case_dir/data/task-x1/crosscheck-ledger.json"
+  python3 - "$ledger" <<'PY'
+import copy
+import json
+import sys
+
+path = sys.argv[1]
+value = json.load(open(path))
+value["findings"][0]["citations"] = [{"path": "tests/helper.sh", "line": 1}]
+sibling = copy.deepcopy(value["findings"][0])
+sibling.update({
+    "id": "cc-bbbbbbbbbbbb",
+    "title": "Sibling blocker",
+    "description": "A separate durable blocker.",
+    "citations": [{"path": "app.txt", "line": 1}],
+})
+value["findings"].append(sibling)
+with open(path, "w") as stream:
+    json.dump(value, stream)
+PY
+  set +e
+  run_case "$case_dir" "$base" "$head" mixed-invalid-closure run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "inadmissible closure proof"
+  assert_grep 'CROSSCHECK BLOCKING:' "$case_dir/err" \
+    "an inadmissible closure proof voided the semantic review"
+  assert_no_grep 'CROSSCHECK UNREVIEWED' "$case_dir/err" \
+    "an inadmissible closure proof rewrote the review as unreviewed"
+  python3 - "$ledger" <<'PY' || fail "inadmissible closure discarded sibling review work"
+import json
+import sys
+
+value = json.load(open(sys.argv[1]))
+by_id = {finding["id"]: finding for finding in value["findings"]}
+degraded = by_id["cc-aaaaaaaaaaaa"]
+assert degraded["lifecycle"] == "claimed-fixed", degraded
+assert "Gate proof result" in degraded["history"][-1]["note"], degraded
+assert by_id["cc-bbbbbbbbbbbb"]["lifecycle"] == "claimed-fixed", by_id
+assert len(value["findings"]) == 3, value["findings"]
+run = value["runs"][-1]
+assert run["state"] == "blocking", run
+assert len(run["new_findings"]) == 1, run
+PY
+  pass "inadmissible closure stays blocking and preserves sibling review work"
 }
 
 test_final_wait_and_residual_processes_are_bounded() {
@@ -4622,7 +4747,7 @@ PY
 }
 
 test_artifacts_cannot_escape_designated_subtrees() {
-  local record case_dir base head rc
+  local record case_dir base head rc ledger
   record=$(make_case escaped-reproduction)
   IFS=$'\t' read -r case_dir base head <<< "$record"
   set +e
@@ -4631,8 +4756,16 @@ test_artifacts_cannot_escape_designated_subtrees() {
   rc=$?
   set -e
   expect_code 1 "$rc" "escaped reproduction artifact"
-  assert_grep 'artifact path escapes .crosscheck/reproductions/' "$case_dir/err" \
-    "resolved artifact containment was not enforced: $(tr '\n' ' ' < "$case_dir/err")"
+  assert_grep 'CROSSCHECK BLOCKING:' "$case_dir/err" \
+    "escaped evidence voided the semantic review"
+  ledger="$case_dir/data/task-x1/crosscheck-ledger.json"
+  python3 - "$ledger" <<'PY' || fail "resolved artifact containment was not preserved in the suspicion"
+import json
+import sys
+
+run = json.load(open(sys.argv[1]))["runs"][-1]
+assert "artifact path escapes .crosscheck/reproductions/" in run["suspicions"][0]["description"], run
+PY
   pass "resolved evidence paths remain inside designated subtrees"
 }
 
@@ -4700,7 +4833,7 @@ test_reviewer_capture_override_is_validated() {
 }
 
 test_ordinary_output_paths_remain_bounded() {
-  local record case_dir base head rc
+  local record case_dir base head rc ledger
   "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" <<'PY' \
     || fail "ordinary run_command output did not retain the original ceiling"
 import importlib.util
@@ -4733,8 +4866,16 @@ PY
   rc=$?
   set -e
   expect_code 1 "$rc" "noisy reproduction output limit"
-  assert_grep 'exceeded the 200000-byte aggregate output limit' "$case_dir/err" \
-    "reproduction command did not retain the ordinary output limit"
+  assert_grep 'CROSSCHECK BLOCKING:' "$case_dir/err" \
+    "a noisy reproduction voided the semantic review"
+  ledger="$case_dir/data/task-x1/crosscheck-ledger.json"
+  python3 - "$ledger" <<'PY' || fail "reproduction command did not retain the ordinary output limit"
+import json
+import sys
+
+run = json.load(open(sys.argv[1]))["runs"][-1]
+assert "exceeded the 200000-byte aggregate output limit" in run["suspicions"][0]["description"], run
+PY
 
   record=$(make_case oversized-artifact)
   IFS=$'\t' read -r case_dir base head <<< "$record"
@@ -4792,7 +4933,7 @@ PY
   pass "later reviewers receive bounded lifecycle metadata and proof digests only"
 }
 
-test_nonexistent_mutation_proof_is_unreviewed() {
+test_nonexistent_mutation_proof_stays_blocking() {
   local record case_dir base head rc
   record=$(make_case missing-proof)
   IFS=$'\t' read -r case_dir base head <<< "$record"
@@ -4807,11 +4948,11 @@ test_nonexistent_mutation_proof_is_unreviewed() {
   python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1]))
-assert value["findings"][0]["lifecycle"] == "open"
-assert value["runs"][-1]["state"] == "unreviewed"
+assert value["findings"][0]["lifecycle"] == "claimed-fixed"
+assert value["runs"][-1]["state"] == "blocking"
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "missing mutation proof cleared the durable blocker"
-  pass "nonexistent mutation proof cannot clear a finding"
+  pass "nonexistent mutation proof stays blocking and cannot clear a finding"
 }
 
 test_mutation_proof_does_not_float_to_a_new_head() {
@@ -6194,6 +6335,7 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_reviewer_binary_never_resolves_from_working_directory|\
     test_gate_refuses_an_unsupported_interpreter|\
     test_pi_reviewer_accepts_only_successful_terminal_turn|\
+    test_pi_reviewer_follows_auto_retry_contract|\
     test_pi_reviewer_pins_sibling_node_before_path|\
     test_pi_reviewer_executes_bound_policy_profile|\
     test_pi_reviewer_failures_are_tool_failures|\
@@ -6221,17 +6363,20 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_completed_reviewer_suspicion_is_blocking|\
     test_reading_only_suspicion_is_a_tool_failure|\
     test_new_finding_requires_executed_reproduction|\
+    test_failed_new_finding_reproduction_becomes_a_suspicion|\
     test_silence_never_closes_prior_finding|\
+    test_verified_fix_executes_mutation_proof|\
     test_typescript_jest_mutation_proof_can_clear|\
-    test_preexisting_jest_runner_cannot_certify|\
-    test_local_fake_jest_package_cannot_certify|\
-    test_local_transitive_jest_package_cannot_certify|\
+    test_preexisting_jest_runner_stays_blocking|\
+    test_local_fake_jest_package_stays_blocking|\
+    test_local_transitive_jest_package_stays_blocking|\
     test_jest_runs_under_declared_node_major|\
     test_inadequate_typescript_jest_coverage_stays_blocking|\
-    test_typescript_without_usable_route_is_cannot_certify|\
+    test_typescript_without_usable_route_stays_blocking|\
     test_python_mutation_proof_is_byte_exact|\
     test_baseline_readable_state_is_destroyed_before_mutation|\
     test_mutation_is_bound_to_cited_non_test_implementation|\
+    test_invalid_closure_stays_blocking_and_preserves_siblings|\
     test_reviewer_output_uses_separate_capture_limit|\
     test_reviewer_capture_override_is_validated|\
     test_ordinary_output_paths_remain_bounded|\
@@ -6251,6 +6396,9 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_ambient_addopts_cannot_rewrite_the_non_execution_signal|\
     test_ancestor_runner_config_cannot_rewrite_the_non_execution_signal|\
     test_incomplete_proof_environment_fails_loudly|\
+    test_nonexistent_mutation_proof_stays_blocking|\
+    test_mutation_proof_does_not_float_to_a_new_head|\
+    test_equivalent_finding_reopens_when_direct_proof_regresses|\
     test_symlinked_directory_named_test_is_rejected|\
     test_symlinked_home_ancestor_still_clears|\
     test_reviewer_env_dependent_evidence_names_the_difference|\
@@ -6259,7 +6407,19 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_tampered_review_checkout_is_still_detected|\
     test_bulky_unauthorized_scratch_is_named_not_truncated|\
     test_evidence_capture_runs_on_older_interpreters|\
+    test_forged_git_diff_mutation_command_is_rejected|\
+    test_stateful_test_cannot_fabricate_mutation_causality|\
     test_evidence_batch_has_aggregate_deadline|\
+    test_remote_receipt_does_not_impersonate_model_environment|\
+    test_artifacts_cannot_escape_designated_subtrees|\
+    test_prompt_uses_only_bounded_ledger_projection|\
+    test_claims_lookup_error_never_reaches_reviewer|\
+    test_reviewer_configuration_failures_are_tool_failures|\
+    test_stopped_reviewer_and_wrong_head_are_unreviewed|\
+    test_pytest_runner_resolves_through_a_uv_aware_ladder|\
+    test_moved_default_branch_stays_reviewable|\
+    test_unavailable_reviewer_fails_over_to_the_next_account|\
+    test_verify_rechecks_live_head_and_claims|\
     test_run_records_local_lane_phase_durations|\
     test_failure_before_the_reviewer_records_no_reviewer_phase|\
     test_local_lane_run_records_no_compartment_phases|\
@@ -6288,9 +6448,9 @@ if [ "${FM_TEST_FOCUSED:-}" = review-safety-findings ]; then
   test_claude_reviewer_profile_is_retired
   test_same_model_review_is_adversarial_and_durable
   test_typescript_jest_mutation_proof_can_clear
-  test_preexisting_jest_runner_cannot_certify
-  test_local_fake_jest_package_cannot_certify
-  test_local_transitive_jest_package_cannot_certify
+  test_preexisting_jest_runner_stays_blocking
+  test_local_fake_jest_package_stays_blocking
+  test_local_transitive_jest_package_stays_blocking
   test_jest_runs_under_declared_node_major
   test_inadequate_typescript_jest_coverage_stays_blocking
   exit 0
@@ -6298,7 +6458,7 @@ fi
 
 if [ "${FM_TEST_FOCUSED:-}" = review-jest-runtime-closure ]; then
   test_typescript_jest_mutation_proof_can_clear
-  test_local_transitive_jest_package_cannot_certify
+  test_local_transitive_jest_package_stays_blocking
   exit 0
 fi
 
@@ -6349,15 +6509,16 @@ test_review_fetches_exact_pr_head_when_author_worktree_is_behind
 test_missing_pr_head_ref_fails_closed
 test_codex_reviewer_requires_bound_auth_and_clears_ambient_credentials
 test_new_finding_requires_executed_reproduction
+test_failed_new_finding_reproduction_becomes_a_suspicion
 test_silence_never_closes_prior_finding
 test_verified_fix_executes_mutation_proof
 test_typescript_jest_mutation_proof_can_clear
-test_preexisting_jest_runner_cannot_certify
-test_local_fake_jest_package_cannot_certify
-test_local_transitive_jest_package_cannot_certify
+test_preexisting_jest_runner_stays_blocking
+test_local_fake_jest_package_stays_blocking
+test_local_transitive_jest_package_stays_blocking
 test_jest_runs_under_declared_node_major
 test_inadequate_typescript_jest_coverage_stays_blocking
-test_typescript_without_usable_route_is_cannot_certify
+test_typescript_without_usable_route_stays_blocking
 test_python_mutation_proof_is_byte_exact
 test_node_id_selector_clears_a_passing_named_test
 test_absent_runner_is_never_a_test_outcome
@@ -6381,6 +6542,7 @@ test_forged_git_diff_mutation_command_is_rejected
 test_stateful_test_cannot_fabricate_mutation_causality
 test_baseline_readable_state_is_destroyed_before_mutation
 test_mutation_is_bound_to_cited_non_test_implementation
+test_invalid_closure_stays_blocking_and_preserves_siblings
 test_final_wait_and_residual_processes_are_bounded
 test_installed_sandbox_denies_shared_private_tmp
 test_symlinked_named_test_cannot_hide_test_mutation
@@ -6392,7 +6554,7 @@ test_reviewer_output_uses_separate_capture_limit
 test_reviewer_capture_override_is_validated
 test_ordinary_output_paths_remain_bounded
 test_prompt_uses_only_bounded_ledger_projection
-test_nonexistent_mutation_proof_is_unreviewed
+test_nonexistent_mutation_proof_stays_blocking
 test_mutation_proof_does_not_float_to_a_new_head
 test_recorded_argument_proof_loads_but_no_longer_clears
 test_equivalent_finding_reopens_when_direct_proof_regresses

@@ -5711,10 +5711,18 @@ def apply_review(
                         f"{label}.mutation_proof",
                         evidence_deadline,
                     )
-            except CrosscheckCoverageError as exc:
+            except CrosscheckError as exc:
                 status = "claimed-fixed"
-                proof = exc.proof
-                note = f"{note} Gate coverage result: {exc}"
+                proof = (
+                    exc.proof
+                    if isinstance(exc, CrosscheckCoverageError)
+                    else None
+                )
+                note = f"{note} Gate proof result: {exc}"
+                print(
+                    f"crosscheck: {label} closure proof degraded: {exc}",
+                    file=sys.stderr,
+                )
             require(equivalent_to is None, f"{label}.equivalent_to must be null")
         elif status == "closed-equivalent":
             equivalent = require_string(equivalent_to, f"{label}.equivalent_to")
@@ -5745,6 +5753,7 @@ def apply_review(
         updated_ids.append(target)
 
     new_ids: list[str] = []
+    degraded_suspicions: list[dict[str, Any]] = []
     for index, new in enumerate(review["new_findings"]):
         label = f"new_findings[{index}]"
         require(isinstance(new, dict), f"{label} must be an object")
@@ -5753,18 +5762,57 @@ def apply_review(
         severity = new.get("severity")
         require(severity in SEVERITIES, f"{label}.severity is invalid")
         description = require_string(new.get("description"), f"{label}.description")
-        citations = validate_citations(
-            new.get("citations"),
-            review_dir,
-            f"{label}.citations",
-            evidence_deadline,
-        )
+        citations: list[dict[str, Any]] = []
+        dropped: list[str] = []
+        raw_citations = new.get("citations")
+        if not isinstance(raw_citations, list) or not raw_citations:
+            dropped.append(f"{label}.citations must be a nonempty array")
+        elif len(raw_citations) > MAX_REVIEW_ITEMS:
+            dropped.append(f"{label}.citations has too many entries")
+        else:
+            for citation_index, citation in enumerate(raw_citations):
+                citation_label = f"{label}.citations[{citation_index}]"
+                try:
+                    citations.append(
+                        validate_citation(
+                            citation,
+                            review_dir,
+                            citation_label,
+                            evidence_deadline,
+                        )
+                    )
+                except CrosscheckError as citation_exc:
+                    dropped.append(f"{citation_label}: {citation_exc}")
+        evidence_failure: CrosscheckError | None = None
+        try:
+            reproduction = execute_bound_reproduction(
+                new.get("reproduction"),
+                f"{label}.reproduction",
+                evidence_deadline,
+            )
+        except CrosscheckError as exc:
+            evidence_failure = exc
+        if evidence_failure is not None or dropped:
+            failure_note = (
+                f" Evidence attempt failed: {evidence_failure}."
+                if evidence_failure is not None
+                else ""
+            )
+            drop_note = (
+                " Dropped invalid citation(s): " + "; ".join(dropped) + "."
+                if dropped
+                else ""
+            )
+            degraded_suspicions.append(
+                {
+                    "description": (
+                        f"{description}{failure_note}{drop_note}"
+                    ),
+                    "citations": citations,
+                }
+            )
+            continue
         new["citations"] = citations
-        reproduction = execute_bound_reproduction(
-            new.get("reproduction"),
-            f"{label}.reproduction",
-            evidence_deadline,
-        )
         identifier = finding_id(new)
         require(identifier not in by_id, f"{label} duplicates existing finding {identifier}; update it instead")
         finding = {
@@ -5788,7 +5836,7 @@ def apply_review(
         by_id[identifier] = finding
         new_ids.append(identifier)
 
-    suspicions: list[dict[str, Any]] = []
+    suspicions: list[dict[str, Any]] = degraded_suspicions
     for index, suspicion in enumerate(review["suspicions"]):
         label = f"suspicions[{index}]"
         require(isinstance(suspicion, dict), f"{label} must be an object")
@@ -6251,6 +6299,13 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
             write_ledger(ledger_path, ledger)
             atomic_write(report_path, render_report(ledger, run), mode=0o644)
 
+    def persist_azure_result(
+        admitted_ledger: dict[str, Any], admitted_run: dict[str, Any]
+    ) -> None:
+        nonlocal ledger
+        ledger = admitted_ledger
+        persist(admitted_run)
+
     config: dict[str, str] | None = None
     try:
         with timer.phase("snapshot"):
@@ -6373,6 +6428,9 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
                             # collect; it measures them into this same timer
                             # so one run record carries the whole clock.
                             phase_timer=timer,
+                            # The semantic result must land before Azure
+                            # cleanup can raise its separate tool-level alarm.
+                            persist_result=persist_azure_result,
                         )
                     else:
                         with timer.phase("reviewer"):
