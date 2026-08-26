@@ -129,7 +129,12 @@ export default function registerCrosscheckTools(pi) {
 		const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
 		included = new Map(manifest.included.map((record) => [record.path, record]));
 		for (const record of manifest.exclusions) excluded.add(record.path);
-		included.set(".crosscheck-snapshot/manifest.json", { path: ".crosscheck-snapshot/manifest.json", kind: "metadata", size: statSync(manifestPath).size });
+		included.set(".crosscheck-snapshot/manifest.json", {
+			path: ".crosscheck-snapshot/manifest.json",
+			kind: "metadata",
+			size: statSync(manifestPath).size,
+			_content: `${JSON.stringify(manifest, null, 2)}\n`,
+		});
 	} else {
 		included = new Map();
 		const walk = (directory, prefix = "") => {
@@ -200,7 +205,14 @@ export default function registerCrosscheckTools(pi) {
 	function repositoryText(raw) {
 		const file = repositoryFile(raw);
 		if (file.record.kind === "excluded") throw new Error("path was excluded from the bounded snapshot");
-		if (!repositoryTextCache.has(file.relative)) repositoryTextCache.set(file.relative, readFileSync(file.absolute, "utf8"));
+		if (!repositoryTextCache.has(file.relative)) {
+			repositoryTextCache.set(
+				file.relative,
+				typeof file.record._content === "string"
+					? file.record._content
+					: readFileSync(file.absolute, "utf8"),
+			);
+		}
 		return { ...file, text: repositoryTextCache.get(file.relative) };
 	}
 

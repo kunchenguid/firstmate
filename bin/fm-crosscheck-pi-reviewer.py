@@ -141,10 +141,16 @@ def repository_files(
             if relative in result:
                 raise ReviewError("repository snapshot repeats a path")
             result[relative] = {**exclusion, "kind": "excluded"}
+        review_manifest = json.dumps(
+            manifest,
+            sort_keys=True,
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n"
         result[".crosscheck-snapshot/manifest.json"] = {
             "path": ".crosscheck-snapshot/manifest.json",
             "kind": "metadata",
-            "_content": canonical_bytes(manifest).decode("utf-8") + "\n",
+            "_content": review_manifest,
         }
         return result
     result = {}

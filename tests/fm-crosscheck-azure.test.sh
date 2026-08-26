@@ -4079,6 +4079,61 @@ with tempfile.TemporaryDirectory() as temporary:
     assert replayed["verdict"]["head_sha"] == head
     assert replayed["evidence_files"] == []
 
+    large_manifest = {
+        "exclusions": [
+            {
+                "path": f"excluded/{index:04d}-{'x' * 80}.txt",
+                "reason": "oversized",
+                "size": 2 * 1024 * 1024 + index,
+            }
+            for index in range(700)
+        ],
+        "included": [{"path": "review.py", "kind": "file"}],
+    }
+    assert len(module.canonical_bytes(large_manifest)) > module.MAX_READ_BYTES
+    manifest_text = json.dumps(
+        large_manifest, sort_keys=True, ensure_ascii=False, indent=2
+    ) + "\n"
+    manifest_lines = manifest_text.splitlines()
+    manifest_read_args = {
+        "path": ".crosscheck-snapshot/manifest.json",
+        "start_line": 1,
+        "end_line": 20,
+    }
+    manifest_read_result = {
+        "path": ".crosscheck-snapshot/manifest.json",
+        "start_line": 1,
+        "end_line": 20,
+        "lines": [
+            {"line": number, "text": manifest_lines[number - 1]}
+            for number in range(1, 21)
+        ],
+    }
+    manifest_records = [
+        {
+            "seq": 1,
+            "name": "repo_read",
+            "arguments": manifest_read_args,
+            "result_sha256": module.value_digest(manifest_read_result),
+        },
+        {
+            "seq": 2,
+            "name": "finish_review",
+            "arguments": finish_args,
+            "result_sha256": module.value_digest({"finalized": True}),
+        },
+    ]
+    manifest_replay = module.replay_tool_log(
+        manifest_records,
+        repository=repository,
+        manifest=large_manifest,
+        head_sha=head,
+        base_sha=base,
+        executing_account_home="/account",
+        execution_home="/home",
+    )
+    assert manifest_replay["verdict"]["summary"] == finish_args["summary"]
+
     search_args = {"query": "absent", "paths": ["review.py"]}
     empty_search = {"matches": [], "truncated": False}
     search_records = [
@@ -4273,13 +4328,20 @@ mkdirSync(`${root}/.crosscheck-snapshot`);
 writeFileSync(`${root}/review.py`, "first\nsecond\n");
 writeFileSync(`${root}/target.py`, "target\n");
 symlinkSync("target.py", `${root}/link.py`);
-writeFileSync(`${root}/.crosscheck-snapshot/manifest.json`, JSON.stringify({
+const largeManifest = {
+  exclusions: Array.from({ length: 700 }, (_, index) => ({
+    path: `excluded/${String(index).padStart(4, "0")}-${"x".repeat(80)}.txt`,
+    reason: "oversized",
+    size: 2 * 1024 * 1024 + index,
+  })),
   included: [
     { path: "review.py", kind: "file" },
     { path: "link.py", kind: "symlink" },
   ],
-  exclusions: [],
-}));
+};
+const rawManifest = JSON.stringify(largeManifest);
+assert(Buffer.byteLength(rawManifest, "utf8") > 48 * 1024);
+writeFileSync(`${root}/.crosscheck-snapshot/manifest.json`, rawManifest);
 const schema = `${root}/schema.json`;
 const citation = { type: "array", items: { type: "object" } };
 const review = {
@@ -4317,6 +4379,13 @@ assert.deepEqual(tools.map((tool) => tool.name), [
 ]);
 assert(tools.every((tool) => tool.executionMode === "sequential"));
 const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
+const manifestPage = await byName.repo_read.execute("manifest", {
+  path: ".crosscheck-snapshot/manifest.json", start_line: 1, end_line: 20,
+});
+assert.deepEqual(manifestPage.details, { accepted: true });
+const manifestPayload = JSON.parse(manifestPage.content[0].text);
+assert.equal(manifestPayload.lines.length, 20);
+assert.equal(manifestPayload.lines[0].text, "{");
 const citations = Array.from({ length: 33 }, () => ({ path: "review.py", line: 1 }));
 const oversized = await byName.finish_review.execute("oversized", {
   verdict: "BLOCKING", summary: "blocked", citations,
@@ -4346,7 +4415,7 @@ const postFinish = await byName.repo_read.execute("after", { path: "review.py" }
 assert.equal(postFinish.terminate, true);
 assert.deepEqual(postFinish.details, { accepted: false, correctable: false });
 const events = readFileSync(log, "utf8").trim().split("\n").map(JSON.parse);
-assert.deepEqual(events.map((event) => event.name), ["request_lookup", "finish_review"]);
+assert.deepEqual(events.map((event) => event.name), ["repo_read", "request_lookup", "finish_review"]);
 JS
   pass "Pi extension exposes exactly eight sequential tools with immediate bounded correction"
 }

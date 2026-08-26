@@ -105,6 +105,7 @@ The interim claude reviewer lane is retired end to end: no `api.anthropic.com` h
 The request embeds the tracked verdict extension and Pi reviewer runtime with their SHA-256 digests because the model VM has no repository checkout.
 The guest byte-checks both sources before writing them, then the digest-bound runtime launches Pi with `--offline`, `--no-extensions`, and the exact explicit `--extension` path and validates the terminating tool event stream.
 The extension registers exactly eight strict JSON-schema constrained sequential tools: `repo_search`, `repo_read`, `submit_evidence_file`, `report_finding`, `report_suspicion`, `update_finding`, `request_lookup`, and `finish_review`.
+For model inspection, `repo_read` renders the identity-bound snapshot manifest as deterministic pretty JSON, so an exclusion inventory larger than one response remains line-pageable without changing the archive or manifest digest.
 The Pi generation schema represents `evidence_files` as bounded path/content records because strict-tool preparation does not support schema-valued object properties.
 The host refuses duplicate paths, converts those records to the existing manifest dictionary, and then applies the unchanged path, content, and aggregate bounds.
 The guest requires at least one turn, exactly one completed agent, and an accepted digest-bound event log ending in exactly one `finish_review` call. A final prose turn after a mixed tool batch cannot override that log.
