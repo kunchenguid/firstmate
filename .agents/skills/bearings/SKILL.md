@@ -16,8 +16,8 @@ Generate a complete current snapshot from the fleet's current state, so the capt
 Plain `/bearings` returns only the concise four-section chat digest.
 Only `/bearings file` writes the dated markdown report artifact and then returns the concise four-section chat digest linked to that report.
 Only `/bearings lavish` builds the interactive fleet board beside that digest, through `bin/fm-bearings-board.sh` (its header owns every board mechanic and the fm-bearings-board.v1 payload contract).
-A digest/build invocation is operationally read-only apart from the once-per-episode reconcile instruction and its atomic `state/<id>.reconcile-episode` record, plus the explicit per-mode artifacts: the dated report in file mode, and in lavish mode the board file plus the answer binding and source registration that `bin/fm-bearings-board.sh build` records through their own owners.
-During that invocation it never tears down a task, merges a PR, dispatches new work, steers a worker except through that reconcile hook, answers a decision, cleans up work, or mutates backlog or task state beyond the reconcile records.
+A digest/build invocation is operationally read-only apart from the cooldown-limited reconcile instruction and its `state/<id>.reconcile-nudged` record, plus the explicit per-mode artifacts: the dated report in file mode, and in lavish mode the board file plus the answer binding and source registration that `bin/fm-bearings-board.sh build` records through their own owners.
+During that invocation it never tears down a task, merges a PR, dispatches new work, steers a worker except through that reconcile hook, answers a decision, cleans up work, or mutates backlog or task state beyond the reconcile record.
 Board answers are acted on later under the normal authority rules; this skill's board-wake section explicitly owns the guarded routing at that time.
 
 ## Invocation modes
@@ -53,7 +53,8 @@ Board answers are acted on later under the normal authority rules; this skill's 
 2. **Ask any home whose own books disagree to reconcile them.**
    When the snapshot reports a secondmate home whose `invalidity` is `orphan_in_flight`, `unowned_current`, or `terminal_in_flight`, that home's backlog and its own task metadata disagree and only that home may fix it.
    Run `printf '%s\n' "$snapshot" | bin/fm-secondmate-reconcile.sh notify --snapshot -` inline immediately after gathering the snapshot, so the durable fire-and-forget enqueue finishes before digest composition without spawning any child or second snapshot.
-   The script header owns the episode identity, retry, clear, and fire-and-forget delivery contract; this hook arms no reply recovery or inbox escalation.
+   The script header owns the cooldown window, retry, and fire-and-forget delivery contract; this hook arms no reply recovery or inbox escalation.
+   A home is asked at most once per four-hour window, so running this on every recap costs nothing and cannot nag, while a mismatch still sitting there after the window earns one gentle re-nudge.
    Never edit another home's backlog or metadata from here, and never expect or wait on a reply: the mate acts asynchronously from its durable inbox while the digest is composed from the snapshot already in hand.
 
 3. **Compose the four-section chat digest from the fresh snapshot.**
@@ -153,7 +154,7 @@ Rules that keep the contract unambiguous:
 
 ## Supervision discipline
 
-During a digest/build invocation, this skill changes no fleet state beyond its reconcile instruction and atomic reconcile record, explicit report or board artifacts, binding, and source registration.
+During a digest/build invocation, this skill changes no fleet state beyond its reconcile instruction and cooldown record, explicit report or board artifacts, binding, and source registration.
 Do not tear down a task, merge a PR, dispatch queued work, steer a worker except through the reconcile hook, answer a queued decision, clean up work, or mutate any other `state/` or `data/` file during that invocation.
 If the state gathered for the digest suggests an action, name it in its section and leave it to the normal lifecycle and configured authority.
 On a later board wake, this read-only invocation rule yields to "Handling a board wake" and its guarded authority for captain-selected dispatches and merges.

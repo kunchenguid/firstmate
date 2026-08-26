@@ -186,26 +186,6 @@ run() {  # <home> <fakebin> <args...>
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" "$BEARINGS" "$@"
 }
 
-test_snapshot_observations_order_same_second_invocations() {
-  local home fakebin first second first_observation second_observation
-  home=$(make_home observation-order)
-  fakebin=$(make_fakebin "$home")
-  cat > "$home/data/backlog.md" <<'EOF'
-## In flight
-
-## Queued
-
-## Done
-EOF
-  first=$(run "$home" "$fakebin" --json) || fail "the first observation snapshot failed"
-  second=$(run "$home" "$fakebin" --json) || fail "the second observation snapshot failed"
-  first_observation=$(printf '%s' "$first" | jq -r .observation)
-  second_observation=$(printf '%s' "$second" | jq -r .observation)
-  [[ "$first_observation" < "$second_observation" ]] \
-    || fail "same-second snapshots were not uniquely ordered: $first_observation / $second_observation"
-  pass "same-second snapshots carry unique monotonic observation identities"
-}
-
 # End-to-end Domain Alpha regression fixture.
 # The parent event claims Phase 7 started, while the registered home has no child
 # metadata, every sample-rollout item is Done, and only an external legal hold remains.
@@ -1966,7 +1946,6 @@ EOF
   pass "main and secondmate captain actionability use the same blocker readiness"
 }
 
-test_snapshot_observations_order_same_second_invocations
 test_domain_alpha_stale_parent_event_does_not_become_current_work
 test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
 test_parent_activity_evidence_is_bounded_and_disclosed

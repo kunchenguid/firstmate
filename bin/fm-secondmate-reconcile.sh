@@ -1,48 +1,49 @@
 #!/usr/bin/env bash
-# fm-secondmate-reconcile.sh - ask a secondmate to reconcile its own books once
-# per inventory-mismatch episode.
+# fm-secondmate-reconcile.sh - ask a secondmate to reconcile its own books, at
+# most once per home per cooldown window.
 #
 # Usage:
 #   fm-secondmate-reconcile.sh notify [--snapshot <file>|-]
-#   fm-secondmate-reconcile.sh episode <mate-id>
+#   fm-secondmate-reconcile.sh nudged <mate-id>
 #
 # A backlog-vs-metadata inventory mismatch inside a secondmate home
 # (orphan_in_flight, unowned_current, terminal_in_flight) no longer makes that
 # home unreadable: bin/fm-fleet-snapshot.sh keeps its decisions, queued, landed,
-# and live work and carries the mismatch in `invalidity`. The books are still
+# and live work and carries the mismatch for renderers. The books are still
 # wrong, and only the home that owns them may fix them, so the parent sends one
 # reconcile instruction and stops there.
 #
 # What this script owns:
 #   - reading the mismatch from an already-produced fleet snapshot, so nothing
 #     here re-parses another home's state or runs a second child summary;
-#   - the once-per-episode contract. An episode identity is
-#     "<invalidity-kind>:<sorted mismatch ids>". A persistent mismatch keeps the
-#     same identity and is never re-sent, so a recap or digest loop cannot nag.
-#     A changed identity is a NEW episode and earns exactly one more send. A
-#     home whose mismatch clears records that transition, so a recurrence
-#     notifies again;
-#   - sending through bin/fm-send.sh, the existing steering transport, which
-#     records the instruction durably for local and remote mates alike.
+#   - the cooldown. One durable per-home timestamp records the last nudge, and a
+#     home is nudged only when that timestamp is older than the cooldown window
+#     (FM_RECONCILE_COOLDOWN_SECONDS, four hours). A recap or digest loop
+#     therefore cannot nag, while a mismatch still sitting there hours later
+#     earns one gentle re-nudge. Deliberately coarse: a timestamp cannot go
+#     stale, cannot mis-order against a concurrent snapshot, and cannot
+#     mis-classify a repair as a new problem, which an identity-precise record
+#     has to get right in every direction to avoid silently swallowing a nudge;
+#   - sending through bin/fm-send.sh's fire-and-forget plane, which records the
+#     instruction durably for local and remote mates alike while staying out of
+#     the steering inbox's re-ring and escalation ladder: the parent expects no
+#     reply, so nothing should chase one.
 #
 # What this script must never do:
 #   - edit the mate's backlog, metadata, or queue from the parent. The mate owns
 #     its own cleanup; the parent only asks.
-#   - block a snapshot or digest. Callers run it after their output is produced,
-#     and a send failure is reported, never fatal to the caller's own work.
+#   - block a snapshot or digest. The enqueue is a fast local durable write, and
+#     a send failure is reported, never fatal to the caller's own work.
 #
-# Exit status: 0 when every due home was either notified, deduped, or cleared;
-# 1 when at least one due send failed or remained completion-unknown.
-# A known-undelivered send records no episode, while an unknown completion keeps
-# its delivery identity so the next fresh snapshot retries the same logical delivery.
+# Exit status: 0 when every home in mismatch was nudged or was inside its
+# cooldown; 1 when at least one due send failed. A known-undelivered send
+# records nothing, so the next snapshot retries it; an unconfirmed send records
+# the nudge, because a duplicate ask is worse than one the mate may already have.
 #
-# Output, one line per home considered:
-#   sent: <mate-id> <episode>       one reconcile instruction was recorded
-#   dedupe: <mate-id> <episode>     same episode already notified; nothing sent
-#   cleared: <mate-id>              the mismatch is gone; atomic state records clear
-#   unconfirmed: <mate-id> <episode> transport completion is unknown
-#   stale: <mate-id> <generation>   an older observation was ignored
-#   failed: <mate-id> <episode>     the steer could not be recorded
+# Output, one line per home in mismatch:
+#   sent: <mate-id> <kind>          one reconcile instruction was recorded
+#   cooldown: <mate-id> <seconds>   nudged this recently; nothing sent
+#   failed: <mate-id> <kind>        the steer could not be recorded
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,6 +52,12 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+
+# One nudge per home per four hours.
+FM_RECONCILE_COOLDOWN_SECONDS=${FM_RECONCILE_COOLDOWN_SECONDS:-14400}
+case "$FM_RECONCILE_COOLDOWN_SECONDS" in
+  ''|*[!0-9]*) echo "fm-secondmate-reconcile: FM_RECONCILE_COOLDOWN_SECONDS must be a whole number of seconds" >&2; exit 2 ;;
+esac
 
 ACTIVE_LOCK=
 release_active_lock() {
@@ -63,77 +70,52 @@ trap 'release_active_lock; exit 130' INT TERM
 usage() {
   cat <<'EOF'
 usage: fm-secondmate-reconcile.sh notify [--snapshot <file>|-]
-       fm-secondmate-reconcile.sh episode <mate-id>
+       fm-secondmate-reconcile.sh nudged <mate-id>
 
-notify   ask every secondmate home with a NEW inventory-mismatch episode to
-         reconcile its own backlog against its own task metadata, exactly once
-         per episode. Reads an fm-fleet-snapshot.v1 or fm-bearings.v1 document
-         from --snapshot (or runs fm-fleet-snapshot.sh --json when omitted).
-episode  print the episode identity already notified for <mate-id>, if any.
+notify   ask every secondmate home whose backlog disagrees with its own task
+         metadata to reconcile it, at most once per home per cooldown window.
+         Reads an fm-fleet-snapshot.v1 or fm-bearings.v1 document from
+         --snapshot (or runs fm-fleet-snapshot.sh --json when omitted).
+nudged   print the epoch second of the last reconcile nudge sent to <mate-id>.
 EOF
 }
 
 fail() { echo "fm-secondmate-reconcile: $*" >&2; exit 2; }
 
-episode_path() {  # <mate-id>
-  printf '%s/%s.reconcile-episode\n' "$STATE" "$1"
+nudge_path() {  # <mate-id>
+  printf '%s/%s.reconcile-nudged\n' "$STATE" "$1"
 }
 
-observation_path() {  # <mate-id>
-  printf '%s/%s.reconcile-observed\n' "$STATE" "$1"
-}
-
-write_state() {  # <path> <state> <generation> [episode] [correlation]
-  local path=$1 state=$2 generation=$3 episode=${4:-} corr=${5:-}
-  if ! (umask 077; printf '%s\t%s\t%s\t%s\n' "$state" "$generation" "$episode" "$corr" > "$path.tmp") \
-    || ! mv -f -- "$path.tmp" "$path"; then
-    rm -f -- "$path.tmp"
-    return 1
-  fi
-}
-
-observation_is_stale() {  # <generation> <latest-generation>
-  [ -n "$2" ] && [[ "$1" < "$2" ]]
-}
-
-cmd_episode() {
-  local id path record tag generation episode corr
+cmd_nudged() {
+  local id path
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   id=$1
   case "$id" in ''|*/*|.*) fail "not a task id: $id" ;; esac
-  path=$(episode_path "$id")
+  path=$(nudge_path "$id")
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  record=$(cat "$path") || return 1
-  IFS=$'\t' read -r tag generation episode corr <<EOF_STATE
-$record
-EOF_STATE
-  case "$tag" in
-    sent|pending) [ -n "$episode" ] && printf '%s\n' "$episode" ;;
-    clear) return 1 ;;
-    *) printf '%s\n' "$record" ;;
-  esac
+  cat "$path"
 }
 
-# The instruction is deliberately plain: it names what disagrees and leaves the
-# repair entirely to the mate, which is the only home allowed to change it.
-episode_corr() {
+delivery_id() {
   local raw digest
   if command -v openssl >/dev/null 2>&1; then
     raw=$(openssl rand -hex 8 2>/dev/null || true)
   fi
   if [ -z "${raw:-}" ]; then
     if command -v shasum >/dev/null 2>&1; then
-      digest=$(printf '%s' "$$:$(date +%s%N 2>/dev/null || date +%s):$RANDOM:$RANDOM" | shasum -a 256 | awk '{print $1}') || return 1
+      digest=$(printf '%s' "$$:$(date +%s):$RANDOM:$RANDOM" | shasum -a 256 | awk '{print $1}') || return 1
     elif command -v sha256sum >/dev/null 2>&1; then
-      digest=$(printf '%s' "$$:$(date +%s%N 2>/dev/null || date +%s):$RANDOM:$RANDOM" | sha256sum | awk '{print $1}') || return 1
+      digest=$(printf '%s' "$$:$(date +%s):$RANDOM:$RANDOM" | sha256sum | awk '{print $1}') || return 1
     else
       return 1
     fi
-    raw=${digest:0:16}
+    raw=$(printf '%s' "$digest" | cut -c1-16)
   fi
   printf '%s' "$raw"
 }
 
+# The instruction is deliberately plain: it names what disagrees and leaves the
+# repair entirely to the mate, which is the only home allowed to change it.
 reconcile_text() {  # <kind> <ids-csv>
   local kind=$1 ids=$2 what
   case "$kind" in
@@ -148,12 +130,12 @@ reconcile_text() {  # <kind> <ids-csv>
   cat <<EOF
 Your home's backlog and its task metadata disagree, and only you can settle it: $what
 
-Please reconcile your own books: move each row to the section that matches reality, or clean up the leftover record. Nothing outside your home has been changed, and this is the only time you will be asked about this particular disagreement.
+Please reconcile your own books: move each row to the section that matches reality, or clean up the leftover record. Nothing outside your home has been changed, and no reply is expected.
 EOF
 }
 
 cmd_notify() {
-  local snapshot_src="" snapshot rows rc=0
+  local snapshot_src="" snapshot rows rc=0 now
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --snapshot) [ "$#" -ge 2 ] || fail "--snapshot needs a value"; snapshot_src=$2; shift 2 ;;
@@ -172,14 +154,13 @@ cmd_notify() {
     snapshot=$(cat "$snapshot_src")
   fi
   printf '%s' "$snapshot" | jq -e '
-    (.schema == "fm-fleet-snapshot.v1" or .schema == "fm-bearings.v1")
-    and (.generated | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
-    and (.observation | type == "string" and test("^[0-9]{20}-[0-9]{10}$"))
-  ' >/dev/null 2>&1 || fail "input is not a generated fm-fleet-snapshot.v1 or fm-bearings.v1 document"
+    .schema == "fm-fleet-snapshot.v1" or .schema == "fm-bearings.v1"
+  ' >/dev/null 2>&1 || fail "input is not an fm-fleet-snapshot.v1 or fm-bearings.v1 document"
 
+  # Only a real inventory mismatch is a books problem the mate can fix; every
+  # other invalidity is either unreadable state or nothing to reconcile.
   rows=$(printf '%s' "$snapshot" | jq -r '
-    .observation as $generation
-    | (if .schema == "fm-bearings.v1" then
+    (if .schema == "fm-bearings.v1" then
        (.secondmate_reconcile // [])[]
        | {id, kind:(.kind // ""), ids:(.ids // [])}
      else
@@ -189,121 +170,54 @@ cmd_notify() {
      end)
     | select((.id | type) == "string" and (.id | test("^[A-Za-z0-9._-]+$")))
     | .kind as $kind
-    | (if ["orphan_in_flight","unowned_current","terminal_in_flight"] | index($kind)
-       then (.ids | map(select(type == "string")) | sort)
-       else [] end) as $ids
-    | ($ids | map(@json) | join(", ")) as $ids_display
-    | ($ids | @json) as $ids_canonical
-    | [.id, (if ($ids | length) == 0 then "" else $kind end), $ids_display, $ids_canonical, $generation]
-    | join("\u001f")')
+    | select(["orphan_in_flight","unowned_current","terminal_in_flight"] | index($kind))
+    | [.id, $kind, (.ids | map(select(type == "string")) | sort | join(", "))]
+    | @tsv')
 
-  local id kind ids ids_canonical generation episode path observed_path observed prior corr lock send_rc
-  local state_tag state_generation state_episode state_corr pending_episode pending_corr pending_generation
-  while IFS=$'\x1f' read -r id kind ids ids_canonical generation; do
+  now=$(date +%s)
+  local id kind ids path last age lock did send_rc
+  while IFS=$'\t' read -r id kind ids; do
     [ -n "${id:-}" ] || continue
-    path=$(episode_path "$id")
-    observed_path=$(observation_path "$id")
+    path=$(nudge_path "$id")
     lock="$STATE/.$id.reconcile.lock"
     fm_lock_acquire_wait "$lock" || { printf 'failed: %s lock\n' "$id"; rc=1; continue; }
     ACTIVE_LOCK=$lock
-    observed=
-    if [ -f "$observed_path" ] && [ ! -L "$observed_path" ]; then observed=$(cat "$observed_path" 2>/dev/null || true); fi
-    prior=
-    if [ -f "$path" ] && [ ! -L "$path" ]; then prior=$(cat "$path" 2>/dev/null || true); fi
-    state_tag=
-    state_generation=
-    state_episode=
-    state_corr=
-    IFS=$'\t' read -r state_tag state_generation state_episode state_corr <<EOF_STATE
-$prior
-EOF_STATE
-    case "$state_tag" in
-      clear|sent|pending)
-        observed=$state_generation
-        ;;
-      *)
-        state_episode=$prior
-        state_tag=sent
-        ;;
-    esac
-    pending_episode=
-    pending_corr=
-    pending_generation=
-    if [ "$state_tag" = pending ]; then
-      pending_episode=$state_episode
-      pending_corr=$state_corr
-      pending_generation=$state_generation
-      if ! printf '%s' "$pending_generation" | grep -Eq '^[0-9]{20}-[0-9]{10}$'; then
-        pending_episode=$state_generation
-        pending_corr=$state_episode
-        pending_generation=$state_corr
-        observed=$pending_generation
-      fi
-    fi
-    if observation_is_stale "$generation" "$observed"; then
-      printf 'stale: %s %s\n' "$id" "$generation"
-      release_active_lock
-      continue
-    fi
-    if [ -z "$kind" ]; then
-      if write_state "$path" clear "$generation"; then
-        if [ "$state_tag" != clear ] && [ -n "$prior" ]; then printf 'cleared: %s\n' "$id"; fi
-      else
-        printf 'failed: %s observation\n' "$id"
-        rc=1
-      fi
-      release_active_lock
-      continue
-    fi
-    episode="$kind:$ids_canonical"
-    if [ "$state_tag" = sent ] && [ "$state_episode" = "$episode" ]; then
-      if write_state "$path" sent "$generation" "$episode"; then
-        printf 'dedupe: %s %s\n' "$id" "$episode"
-      else
-        printf 'failed: %s observation\n' "$id"
-        rc=1
-      fi
-      release_active_lock
-      continue
-    fi
-    corr=
-    if [ "$state_tag" = pending ] && [ "$pending_episode" = "$episode" ] \
-      && printf '%s' "$pending_corr" | grep -Eq '^[a-f0-9]{16}$'; then
-      corr=$pending_corr
-    else
-      corr=$(episode_corr) || {
-        printf 'failed: %s %s\n' "$id" "$episode"
-        rc=1
+    last=
+    if [ -f "$path" ] && [ ! -L "$path" ]; then last=$(cat "$path" 2>/dev/null || true); fi
+    case "$last" in ''|*[!0-9]*) last= ;; esac
+    if [ -n "$last" ]; then
+      age=$((now - last))
+      # A clock that moved backwards must not silence the home forever.
+      if [ "$age" -ge 0 ] && [ "$age" -lt "$FM_RECONCILE_COOLDOWN_SECONDS" ]; then
+        printf 'cooldown: %s %s\n' "$id" "$age"
         release_active_lock
         continue
-      }
+      fi
     fi
-    if ! write_state "$path" pending "$generation" "$episode" "$corr"; then
-      printf 'failed: %s %s\n' "$id" "$episode"
+    did=$(delivery_id) || {
+      printf 'failed: %s %s\n' "$id" "$kind"
       rc=1
       release_active_lock
       continue
-    fi
+    }
     send_rc=0
-    "$SCRIPT_DIR/fm-send.sh" "$id" --fire-and-forget "$corr" \
+    "$SCRIPT_DIR/fm-send.sh" "$id" --fire-and-forget "$did" \
       "$(reconcile_text "$kind" "$ids")" >/dev/null 2>&1 || send_rc=$?
-    if [ "$send_rc" -eq 3 ]; then
-      printf 'unconfirmed: %s %s\n' "$id" "$episode"
+    # exit 3 is "typed but unconfirmed": the mate may already hold the ask, so
+    # record the nudge rather than risk asking twice.
+    if [ "$send_rc" -ne 0 ] && [ "$send_rc" -ne 3 ]; then
+      printf 'failed: %s %s\n' "$id" "$kind"
       rc=1
       release_active_lock
       continue
     fi
-    if [ "$send_rc" -ne 0 ]; then
-      if ! write_state "$path" clear "$generation"; then rc=1; fi
-      printf 'failed: %s %s\n' "$id" "$episode"
-      rc=1
-      release_active_lock
-      continue
-    fi
-    if write_state "$path" sent "$generation" "$episode"; then
-      printf 'sent: %s %s\n' "$id" "$episode"
+    if (umask 077; printf '%s\n' "$now" > "$path.tmp") && mv -f -- "$path.tmp" "$path"; then
+      printf 'sent: %s %s\n' "$id" "$kind"
     else
-      printf 'sent-unrecorded: %s %s\n' "$id" "$episode"
+      rm -f -- "$path.tmp"
+      # The mate has the instruction; only this home's cooldown record is
+      # missing, so say so rather than letting the next run ask again in silence.
+      printf 'sent-unrecorded: %s %s\n' "$id" "$kind"
       rc=1
     fi
     release_active_lock
@@ -317,7 +231,7 @@ EOF
 cmd=$1; shift
 case "$cmd" in
   notify) cmd_notify "$@" ;;
-  episode) cmd_episode "$@" ;;
+  nudged) cmd_nudged "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
 esac
