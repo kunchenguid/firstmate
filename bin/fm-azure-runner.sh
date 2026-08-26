@@ -31,6 +31,7 @@
 #   fm-azure-runner.sh run --confirm-run --confirm-subscription <exact-id> \
 #     [--confirm-cost-admission-mode commissioning-bounded] \
 #     --task <id> --generation <id> --resource-class <class> \
+#     [--source-ref refs/heads/<name>] [--private-snapshot-from-head] \
 #     [--wall-seconds N] [--dependency <tracked-relative-path>]... \
 #     [--artifact <relative-output>]... -- <argv...>
 #   fm-azure-runner.sh resume --invocation <id>

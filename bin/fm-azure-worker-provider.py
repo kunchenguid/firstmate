@@ -428,7 +428,7 @@ def immutable_id(kind, value):
         role = value.get("roleDefinitionId") or properties.get("roleDefinitionId")
         return "{}|{}".format(principal, role) if principal and role else None
     if kind == "state-container":
-        return value.get("etag") or properties.get("etag") or value.get("version")
+        return value.get("id")
     if kind in MUTABLE_PROVISIONING_CHILD_KINDS:
         # Azure mutates provisioningState during ordinary VM lifecycle
         # transitions (including Succeeded -> Updating after deallocation).
@@ -1311,11 +1311,17 @@ def recorded_exact(
             # path stays fixed. Task commands and staging request/result blobs
             # also bind changing execution content through request/result
             # digests, so their path identity is the ownership fence here.
+            legacy_state_container = (
+                kind == "state-container"
+                and current.get("immutable_id") == current.get("id")
+                and prior.get("id") == current.get("id")
+            )
             if (
                 kind not in skip_immutable
                 and kind not in MUTABLE_PROVISIONING_CHILD_KINDS
                 and kind not in ("staging-request", "staging-result")
                 and current.get("immutable_id") != prior.get("immutable_id")
+                and not legacy_state_container
             ):
                 raise ProviderIdentityRefusal(
                     "{} immutable identity differs from the recorded assignment".format(kind)

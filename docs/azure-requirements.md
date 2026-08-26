@@ -64,8 +64,7 @@ digest `1f238e42...`, and an outcome bundle of one commit
 `r5-accept-readme-v3-20260822` (`asg-00000020`) and `r5-accept-package-v3-20260822`
 (`asg-00000021`) each returned exit 0, `timed_out false`, and `outcome_commits 0` for their
 read-only briefs. Evidence and paths are in R2/R3 and R5.
-Placement across distinct upstream accounts is R5, where the former single-profile placement
-residual is closed and now proven live.
+Provider-profile placement is R5, where live Pi execution and deterministic reusable assignment-private snapshots are recorded separately.
 
 ## R2/R3. Secondmates run in Azure, and can spawn crewmates in Azure
 
@@ -250,19 +249,11 @@ neither was the receipts strand:
    approval markers), alongside 377 passing units. Until those units skipped loudly off macOS, no
    intent could reach a green test step there.
 
-   Partially closed. The retained shard responses under
-   `$FM_HOME/state/azure-validation/shards/azv-36b2726cbcf3/*/response/` are the measurement, and
-   they name eleven failing test files, not three. Three classes are genuine host capabilities the
-   cell does not have, and those are now gated: a real tmux server it can create windows in
-   (`server exited unexpectedly` on the shard-2 and shard-4 workers), passwordless sudo with
-   `systemd-run` (`Linux systemd integration requires passwordless sudo`), and the `/usr/bin/cpp`
-   binding `bin/fm-account-directory.sh` needs before it can validate any Claude quota-axi
-   Keychain approval marker (`system openat binding unavailable`). Fifteen units across six test
-   files are bound to those three capabilities in `tests/host-capabilities.tsv`; the cell declares
-   the three absences by name in `bin/fm-azure-validation-shard-bridge.py`, and
-   `tests/host-capability-gate.sh` turns each into a loud `FM_HOST_CAPABILITY_SKIP`. The gate
-   refuses that declaration on Darwin, so macOS coverage is unchanged and cannot be switched off,
-   and CI declares nothing, so its coverage is unchanged too.
+   Partially closed.
+   The retained shard responses under `$FM_HOME/state/azure-validation/shards/azv-36b2726cbcf3/*/response/` are the measurement, and they name eleven failing test files, not three.
+   Four classes are genuine host capabilities the cell does not have, and those are now gated: a real tmux server it can create windows in (`server exited unexpectedly` on the shard-2 and shard-4 workers), passwordless sudo with `systemd-run` (`Linux systemd integration requires passwordless sudo`), the `/usr/bin/cpp` binding `bin/fm-account-directory.sh` needs before it can validate any Claude quota-axi Keychain approval marker (`system openat binding unavailable`), and outbound reach to the origin remote's host (`origin-egress`).
+   Fifty-two units across seven test files are bound to those four capabilities in `tests/host-capabilities.tsv`; the cell declares the four absences by name in `bin/fm-azure-validation-shard-bridge.py`, and `tests/host-capability-gate.sh` turns each into a loud `FM_HOST_CAPABILITY_SKIP`.
+   The gate refuses that declaration on Darwin, so macOS coverage is unchanged and cannot be switched off, and CI declares nothing, so its coverage is unchanged too.
 
    The other five failing files have now been MEASURED rather than inferred, by running the
    whole sealed suite in a local reproduction of the cell's own package closure (Ubuntu 24.04
@@ -297,11 +288,11 @@ neither was the receipts strand:
    iteration: the suite invokes every case through a single choke point, `run_partitioned_test`,
    so running each case in a subshell there reports every failure in one run instead of stopping
    at the first. Both files were run to completion with the network off - 143 of 143 cases - and
-   the result is exactly 33 units, all in the secondmate teardown/retirement family. An earlier
+   the result is exactly 37 units, all in the secondmate teardown/retirement family. An earlier
    one-at-a-time iteration had found only 19 and had not converged; the difference is why the
    partial set was not shipped.
 
-   BE CLEAR ABOUT WHAT THIS COSTS. Those 33 units are SKIPPED in the cell, not preserved by some
+   BE CLEAR ABOUT WHAT THIS COSTS. Those 37 units are SKIPPED in the cell, not preserved by some
    other route. The cell does not verify secondmate teardown or retirement authority at all: not
    the landed-work refusals, not the registry locking, not the network-authority pinning, not the
    child quiescence ordering. macOS and CI still run every one of them, and CI is where that
@@ -345,40 +336,24 @@ reaches `close` with its worktree disk released".
 
 Status: DONE, met live on 2026-08-22.
 
-Crosscheck on the pi fleet is done at the roster level. The current operating split is six Azure
-worker profiles across six distinct upstream accounts plus one separate local Firstmate profile;
-Azure profiles are projected into single-profile account homes by `bin/fm-pi-account-home.py`,
-with the roster repointed and read back through the real `bin/fm-crosscheck.py` reader and
-policy screen. Under the second 2026-08-19 amendment this roster is now the dormant crosscheck
-fallback; the pi fleet's primary duties are authors and no-mistakes.
-Crewmate placement now selects across the pool. The controller chooses one free profile inside the
-same lock hold and the same durable write that creates the queue entry, so selection and the lease
-are one act and the queue entry IS the lease; the unit of exclusion is the UPSTREAM ACCOUNT rather
-than the profile name, because two profiles can be re-logged into one account and what a crewmate
-contends for belongs to the account. The chosen profile is projected with `bin/fm-pi-account-home.py`
-into a controller-owned account home, and `bin/fm-spawn.sh` narrows the staged provider credential
-to it, so the worker receives exactly one account rather than the pooled `auth.json`. An exhausted
-pool refuses by name, listing every leased profile and the task holding it. Mechanics are owned by
-`docs/azure-workers.md` ("Provider-account placement across the Pi fleet").
-The host is also the sole OAuth refresh authority: staging requires twelve hours of access-token
-headroom against a six-hour worker shutdown deadline, so a guest cannot live long enough to rotate
-the copied refresh token independently of the Azure pool.
+The Pi multi-profile requirement applies to ordinary Codex/Pi workers, nested supervisors, and no-mistakes author work.
+Crosscheck's primary reviewer is GLM 5.2 through the separately staged `fireworks-glm` provider credential in its Azure model compartment.
+Pi is only the bounded guest CLI in that compartment, so Crosscheck consumes neither a Codex/Pi worker profile nor a worker slot.
+No-mistakes runs in its separate Azure runner environment.
+Both specialized lanes still consume the shared 40-vCPU specialized envelope and 128-vCPU regional ledger.
 
-Proven locally against a fixture provider by `tests/fm-worker-placement.test.sh` (eight concurrent
-placements racing the controller lock take eight distinct upstream accounts, read back from
-`controller.json`; exhaustion refuses; a compartment child, its compartment and an ordinary crewmate
-hold three distinct accounts; killing placements between selection and the durable lease orphans no
-account) and end to end through the real `bin/fm-spawn.sh` by `tests/fm-spawn-cloud.test.sh`, which
-asserts the staged credential is the leased single profile.
+Crewmate placement now load-balances the least-active usable profile with a stable tie-break, then reuses profiles through the independent sixteen-worker ceiling.
+The reusable `account_binding` remains a digest of upstream identity and is visible with per-profile active load, but it is not an exclusive lease.
+Every task generation receives a distinct writable projection keyed by an assignment-private binding, and the pooled `auth.json` never reaches a guest.
+The controller durably owns an interrupted projection before writing credential bytes, so exact replay keeps the same profile and path and `withdraw` can clean it.
+The host remains the sole OAuth refresh authority because the canonical profile must retain twelve hours of headroom before snapshot and the guest VM shuts down within six hours.
+Mechanics are owned by `docs/azure-workers.md` under "Provider-account placement across the Pi fleet".
 
-Operational consequence the owner must know: concurrent placements are now bounded by
-`min(FM_AZURE_WORKER_MAX, distinct upstream accounts in the pool)`. With the current six-account
-Azure pool the seventh concurrent placement refuses although MAX_WORKERS is 16, and compartments
-compete in the same pool. Sixteen crewmates cannot run on six accounts without sharing one.
-Raising the ceiling means adding profiles on distinct accounts to the Azure pool; adding profiles
-to the separate local Firstmate pool does not change Azure capacity.
+`tests/fm-worker-placement.test.sh` admits sixteen concurrent requests from three profiles, proves balanced loads of six/five/five, distinct projection homes, exact replay, interrupted-write recovery, same-profile cleanup isolation, host-only refresh, and concurrent specialized reservations.
+`tests/fm-spawn-cloud.test.sh` proves the staged credential is the one selected snapshot and repeats the twelve-hour preflight before use.
+The release lane deliberately does not run a sixteen-VM live campaign; C2's bounded live acceptance owner consumes this deterministic result separately.
 
-Acceptance: concurrent crewmates run on distinct pi profiles with no account collision.
+Acceptance: concurrent Codex/Pi workers use digest-bound reusable profile snapshots without sharing writable account homes, while specialized no-mistakes and GLM Crosscheck capacity remains outside the worker/profile ceiling.
 
 Met on real compute, which is what an earlier revision of this section still owed.
 The tracked evidence `simultaneous_assignments` array is derived from one controller snapshot holding four assignments simultaneously in `assigned` state, on four slots and four distinct upstream account bindings:
@@ -392,9 +367,9 @@ The tracked evidence `simultaneous_assignments` array is derived from one contro
 
 The two ordinary crewmates executed successfully: each returned exit 0, `timed_out false` and `outcome_commits 0` for its read-only inspection brief, with result digests `77c43f95...` and `55151c48...` (`executions[1]` and `executions[2]`).
 Each record in `release_proofs` records the `account` authority `proved` against exactly the binding above, so what the worker held is proved on release rather than only at staging.
-No account collision appears anywhere in that snapshot: four live workers, four bindings.
+That historical snapshot used four live workers with four bindings, so it proves the Pi placement path but does not exercise reusable same-profile snapshots.
 
-What this does NOT prove, stated so nobody reads more into it: four concurrent accounts were exercised, not the pool of eight, and the two ordinary briefs were read-only inspections.
+What this does NOT prove, stated so nobody reads more into it: four concurrent accounts were exercised, not profile reuse at sixteen, and the two ordinary briefs were read-only inspections.
 The committing leg is the compartment child, recorded in R2/R3.
 These limits are machine-readable in `limitations`.
 
@@ -1134,6 +1109,10 @@ The first of the three changes landed on 2026-08-19: a provider mutation applies
 commits only on success, and is refused if its effects reach outside the one compartment its slot
 owns.
 The later per-slot pending map and lock-discipline changes completed that work.
+The profile ceiling defect is also corrected in this implementation: sixteen ordinary worker/supervisor requests can reuse fewer host-owned Pi profiles through assignment-private snapshots.
+No-mistakes reservations and `fireworks-glm` Crosscheck model/tool/verifier reservations do not consume those sixteen worker slots or any Codex/Pi worker profile.
+They still share specialized-envelope, regional, exact-family, and spend admission with the worker fleet.
+`tests/fm-worker-placement.test.sh` proves that separation deterministically, while the live concurrent campaign remains the acceptance owed here.
 
 Crosscheck model admission now retains the shipped four-lane FIFO model while transient exact-family or shared-capacity pressure polls one durable allocator reservation identity within the configured queue wait.
 Timeout releases that exact queued identity, non-capacity refusals remain immediate, and reviewer credentials are rechecked after admission before staging or billable compute.

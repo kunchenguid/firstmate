@@ -239,6 +239,32 @@ def _claude_facts(value: dict[str, Any]) -> dict[str, Any]:
 _FACT_READERS = {"codex": _codex_facts, "pi": _pi_facts, "claude": _claude_facts}
 
 
+def credential_usable_through(
+    value: dict[str, Any],
+    *,
+    harness: str,
+    deadline: float,
+) -> bool:
+    """Whether one already-read credential remains usable past a deadline.
+
+    Stagers that select one entry from a pooled credential call this before
+    writing a snapshot.  Credential interpretation stays here with the expiry
+    owner, while token material stays in the caller's already-private memory.
+    """
+
+    reader = _FACT_READERS.get(harness)
+    if reader is None or not isinstance(value, dict):
+        return False
+    facts = reader(value)
+    if facts["never_expires"]:
+        return True
+    return bool(
+        facts["has_access"]
+        and facts["access_expires_at"] is not None
+        and facts["access_expires_at"] > float(deadline)
+    )
+
+
 def inspect_profile(
     profile: str | os.PathLike[str],
     *,
@@ -302,10 +328,8 @@ def inspect_profile(
         return record
 
     deadline = moment + max(0.0, float(margin_seconds))
-    access_live = (
-        facts["has_access"]
-        and facts["access_expires_at"] is not None
-        and facts["access_expires_at"] > deadline
+    access_live = credential_usable_through(
+        value, harness=resolved_harness, deadline=deadline
     )
     if access_live:
         record["state"] = "usable"

@@ -71,6 +71,9 @@ for marker in (
     "roll_daily_baseline", "daily_bound_refusal", "idle_deallocate_due",
     "daily_cost_baseline", "FM_AZURE_WORKER_DAILY_BOUND_OVERRIDE", "idle_deallocated_at",
     "record_daily_override_use", "last_steer_at",
+    "CLOUD_ACCOUNT_MIN_HEADROOM_SECONDS", "credential_usable_through",
+    "placement_projection_binding", "write_placement_snapshot",
+    "cleanup_placement_projection", "profile_active_load",
     "--confirm-orphan-children", "reparented_to", "orphaned_children",
     "compartment_projection",
     "command_compartment_chain_tip", "verified_chain_tip", "refuses to rewind",
@@ -146,6 +149,9 @@ for marker in (
     "backstop on RECORDED spend",
     "an ungated reserve lane could quietly burn past the bound",
     "no power-on lane exists",
+    "least-active usable profile", "assignment-private projection",
+    "maximum of sixteen", "`fireworks-glm`",
+    "consume no worker slot and no Codex/Pi worker profile",
 ):
     assert marker in doc, marker
 assert "hosted form service" in doc and "force-delete" in doc
@@ -410,16 +416,24 @@ except module.LifecycleError as exc:
 else:
     raise AssertionError("conflicting local/provider runner reservation was accepted")
 
-# Duplicate account and worktree ownership refuse independently.
+# Reusable upstream identity is expected, while assignment-private projection
+# and worktree ownership remain exclusive.
 existing = next(iter(state["queue"].values()))
+module.ensure_unique_bindings(state, dict(
+    item, task="other", account_binding=existing["account_binding"], worktree_binding="9" * 64
+))
+existing["account_projection_binding"] = "a" * 64
+existing["account_home"] = "/tmp/assignment-a"
 try:
     module.ensure_unique_bindings(state, dict(
-        item, task="other", account_binding=existing["account_binding"], worktree_binding="9" * 64
+        item, task="other", account_binding=existing["account_binding"],
+        account_projection_binding=existing["account_projection_binding"],
+        account_home=existing["account_home"], worktree_binding="9" * 64,
     ))
 except module.LifecycleError as exc:
-    assert "provider-account" in str(exc)
+    assert "assignment-private provider projection" in str(exc)
 else:
-    raise AssertionError("shared account lease was accepted")
+    raise AssertionError("shared assignment-private projection was accepted")
 try:
     module.ensure_unique_bindings(state, dict(
         item, task="other", account_binding="9" * 64, worktree_binding=existing["worktree_binding"]
@@ -429,7 +443,7 @@ except module.LifecycleError as exc:
 else:
     raise AssertionError("shared writable worktree was accepted")
 PY
-  pass "all reconciliation classes and quota, cost, shared-account, shared-worktree refusal controls distinguish unsafe state"
+  pass "reconciliation admits reusable account identity while preserving capacity, projection, and worktree isolation"
 }
 
 azure_provider_refusal_matrix() {
@@ -5075,25 +5089,21 @@ assert state["home_binding"] == hashlib.sha256(
     str(primary.resolve()).encode()).hexdigest(), state["home_binding"]
 assert item["home_binding"] != state["home_binding"]
 # The bindings are real mints from the task home's own authorities, and the
-# account lease is the CONTROLLER's placement decision over that home's pool:
-# the lowest free profile, bound to its upstream account and nothing else.
+# controller selected the least-loaded usable profile from that home's pool.
 assert item["account_profile"] == "openai-codex", item
 expected_binding = hashlib.sha256(json.dumps(
     {"provider": "pi", "upstream_account": hashlib.sha256(
         b"fixture-account-1").hexdigest()[:16]},
     sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 assert item["account_binding"] == expected_binding, item
-# The projected home is keyed on the LEASE IDENTITY, not the slot name: the
-# projection key and the exclusion key have to be the same function of the pool
-# or a re-logged slot silently overwrites a live placement's credential.
+# Writable projection identity is assignment-private rather than account-keyed.
 assert item["account_home"] == str(
-    primary / "state" / "azure-workers" / "accounts" / expected_binding), item
-# The leased home is a SINGLE-profile home, projected by the one projection
-# tool: a pooled home would put every signed-in account on the worker and let
-# the guest pick the first slot, which is the collision this requirement removes.
-leased = json.loads((Path(item["account_home"]) / "auth.json").read_text())
-assert list(leased) == ["openai-codex"], sorted(leased)
-assert leased["openai-codex"]["accountId"] == "fixture-account-1", item
+    primary / "state" / "azure-workers" / "accounts"
+    / item["account_projection_binding"]), item
+assert item["account_projection_binding"] != expected_binding, item
+snapshot = json.loads((Path(item["account_home"]) / "auth.json").read_text())
+assert list(snapshot) == ["openai-codex"], sorted(snapshot)
+assert snapshot["openai-codex"]["accountId"] == "fixture-account-1", item
 assert account.resolve() == (Path(str(root)) / "pi-pool").resolve(), account
 assert item["worktree_binding"] == hashlib.sha256(json.dumps(
     {"git_dir": str((worktree / ".git").resolve()), "worktree": str(worktree.resolve())},
@@ -5284,6 +5294,7 @@ assert result.returncode == 0, result.stderr
 controller = home / "state" / "azure-workers" / "controller.json"
 item = json.loads(controller.read_text())["queue"]["local-crew@gen-local"]
 assert item.pop("enqueued_at", None), "the queue item lost its enqueue timestamp"
+assert item.pop("projected_at", None), "the queue item lost its snapshot timestamp"
 
 
 def canonical(value):
@@ -5296,6 +5307,17 @@ def digest(value):
 
 head = subprocess.check_output(
     ["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip()
+home_identity = hashlib.sha256(str(home.resolve()).encode("utf-8")).hexdigest()
+pool_home = str(account.resolve())
+account_binding = digest({
+    "provider": "pi",
+    "upstream_account": hashlib.sha256(b"fixture-account-1").hexdigest()[:16],
+})
+projection_binding = digest({
+    "provider": "pi", "home_binding": home_identity, "task": "local-crew",
+    "task_generation": "gen-local", "account_pool_home": pool_home,
+    "account_profile": "openai-codex", "account_binding": account_binding,
+})
 expected = {
     "schema": "fm.worker-request/v1",
     "task": "local-crew",
@@ -5303,20 +5325,13 @@ expected = {
     # The parent-less lane still stamps the REQUESTING home, which on this lane
     # IS FM_HOME. --task-home changes where that identity is read from, never
     # what it is here.
-    "home_binding": hashlib.sha256(str(home.resolve()).encode("utf-8")).hexdigest(),
-    # The account lease is the CONTROLLER's placement over this task's pool:
-    # keyed on the upstream account, with the leased profile and its
-    # single-profile home recorded beside it.
-    "account_binding": digest({
-        "provider": "pi",
-        "upstream_account": hashlib.sha256(b"fixture-account-1").hexdigest()[:16],
-    }),
+    "home_binding": home_identity,
+    "account_binding": account_binding,
     "account_profile": "openai-codex",
-    "account_home": str(home / "state" / "azure-workers" / "accounts" / digest({
-        "provider": "pi",
-        "upstream_account": hashlib.sha256(b"fixture-account-1").hexdigest()[:16],
-    })),
-    "account_pool_home": str(account.resolve()),
+    "account_projection_binding": projection_binding,
+    "account_home": str(
+        home / "state" / "azure-workers" / "accounts" / projection_binding),
+    "account_pool_home": pool_home,
     "worktree_binding": digest(
         {"worktree": str(worktree.resolve()), "git_dir": str(git_dir.resolve())}),
     "repository_binding": hashlib.sha256(head.encode("ascii")).hexdigest(),
@@ -5330,7 +5345,7 @@ expected = {
 assert canonical(item) == canonical(expected), (canonical(item), canonical(expected))
 assert "parent_task" not in item and "task_home" not in item, item
 PY
-  pass "the parent-less local-secondmate request lane emits its exact pre-change queue item"
+  pass "the parent-less local-secondmate request records its exact reusable-profile snapshot identity"
 }
 
 verify_state_home_fence_golden() {
@@ -5696,8 +5711,19 @@ refused = run("authority-receipt", "--task", "child-1", "--task-generation", "ge
               check=False)
 assert refused.returncode != 0, "a foreign task home minted receipts: {}".format(refused.stdout)
 assert "does not match its recorded home binding" in refused.stderr, refused.stderr
+
+# Restore the exact released document, converge provider reset, and prove the
+# host cleanup removes only this completed assignment's projection.
+projection_home = Path(item["account_home"])
+assert projection_home.is_dir(), projection_home
+(primary / "state/azure-workers/controller.json").write_text(
+    json.dumps(final, sort_keys=True, separators=(",", ":")))
+run("reconcile", "--apply", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+completed = controller_state()
+assert completed["queue"]["child-1@gen-c1"]["status"] == "complete", completed
+assert not projection_home.exists(), "provider reset left the assignment projection behind"
 PY
-  pass "an admitted compartment child mints its five receipts from the task home and releases through the unchanged path"
+  pass "an admitted child releases through ordinary proofs and reset removes its exact profile projection"
 }
 
 task_home_registry_is_read_by_the_canonical_reader() {

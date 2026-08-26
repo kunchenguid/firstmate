@@ -315,7 +315,8 @@
       "aggregate-worker-hour-planning-threshold": "3500",
       "landing-worker-hour-reserve": "400"
     },
-    "budgetName": "[format('bud-{0}-monthly', parameters('namingPrefix'))]"
+    "budgetName": "[format('bud-{0}-monthly', parameters('namingPrefix'))]",
+    "resourcesDeploymentName": "[format('firstmate-pilot-resources-{0}', uniqueString(deployment().name))]"
   },
   "resources": [
     {
@@ -328,7 +329,7 @@
     {
       "type": "Microsoft.Resources/deployments",
       "apiVersion": "2022-09-01",
-      "name": "firstmate-pilot-resources",
+      "name": "[variables('resourcesDeploymentName')]",
       "resourceGroup": "[variables('safeResourceGroupName')]",
       "dependsOn": [
         "[resourceId('Microsoft.Resources/resourceGroups', variables('safeResourceGroupName'))]"
@@ -2266,11 +2267,11 @@
     },
     "blobPrivateEndpointNicId": {
       "type": "string",
-      "value": "[reference('firstmate-pilot-resources').outputs.blobPrivateEndpointNicId.value]"
+      "value": "[reference(variables('resourcesDeploymentName')).outputs.blobPrivateEndpointNicId.value]"
     },
     "blobPrivateEndpointNicResourceGuid": {
       "type": "string",
-      "value": "[reference('firstmate-pilot-resources').outputs.blobPrivateEndpointNicResourceGuid.value]"
+      "value": "[reference(variables('resourcesDeploymentName')).outputs.blobPrivateEndpointNicResourceGuid.value]"
     }
   }
 }

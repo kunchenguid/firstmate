@@ -1871,22 +1871,26 @@ SH
 }
 
 test_watcher_timeout_wrapper_uses_hard_kill_fallback() {
-  local dir state fakebin log
+  local dir state stubborn pid_file rc
   dir=$(make_case watcher-hard-timeout); state="$dir/state"
-  fakebin=$(fm_fakebin "$dir/hard-timeout")
-  log="$dir/hard-timeout.args"
-  cat > "$fakebin/timeout" <<'SH'
+  stubborn="$dir/ignore-term.sh"
+  pid_file="$dir/stubborn.pid"
+  cat > "$stubborn" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$*" > "$FM_FAKE_TIMEOUT_LOG"
+trap '' TERM
+printf '%s\n' "$$" > "$FM_FAKE_STUBBORN_PID"
+while :; do sleep 1; done
 SH
-  chmod +x "$fakebin/timeout"
-  # shellcheck disable=SC2031  # The PATH assignment intentionally scopes only the child.
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_FAKE_TIMEOUT_LOG="$log" bash -c '
+  chmod +x "$stubborn"
+  rc=0
+  FM_STATE_OVERRIDE="$state" FM_FAKE_STUBBORN_PID="$pid_file" bash -c '
     . "$1"
-    run_bounded 4 true
-  ' _ "$WATCH" || fail "watcher timeout wrapper invocation failed"
-  grep -F -- '--kill-after=1 4 true' "$log" >/dev/null \
-    || fail "watcher timeout wrapper omitted the hard KILL fallback"
+    run_bounded 1 "$2"
+  ' _ "$WATCH" "$stubborn" || rc=$?
+  [ "$rc" -eq 124 ] || fail "watcher timeout wrapper returned $rc instead of 124"
+  [ -s "$pid_file" ] || fail "watcher timeout fixture did not start"
+  ! kill -0 "$(cat "$pid_file")" 2>/dev/null \
+    || fail "watcher timeout wrapper left the TERM-resistant process alive"
   pass "watcher timeouts force-kill TERM-resistant subprocesses"
 }
 

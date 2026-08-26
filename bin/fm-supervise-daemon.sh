@@ -1314,6 +1314,30 @@ trim_log() {
 # classifiers above are sourceable for unit tests (tests/fm-daemon.test.sh).
 # ============================================================================
 
+fm_super_stop_watcher() {  # <watcher-pid>
+  local watcher_pid=$1 child current_parent i children=""
+  while read -r child; do
+    [ -n "$child" ] || continue
+    current_parent=$(ps -o ppid= -p "$child" 2>/dev/null | tr -d '[:space:]')
+    [ "$current_parent" = "$watcher_pid" ] || continue
+    children="${children}${children:+ }$child"
+    kill -TERM "$child" 2>/dev/null || true
+  done < <(ps -axo pid=,ppid= | awk -v parent="$watcher_pid" '$2 == parent { print $1 }')
+  # A bounded-command owner traps TERM so it can terminate and reap its own
+  # process group. Keep its watcher parent alive long enough to wait for that
+  # owner; killing both at once reparents the cleanup owner to launchd/init.
+  for child in $children; do
+    i=0
+    while [ "$i" -lt 50 ]; do
+      current_parent=$(ps -o ppid= -p "$child" 2>/dev/null | tr -d '[:space:]')
+      [ "$current_parent" = "$watcher_pid" ] || break
+      sleep 0.1
+      i=$((i + 1))
+    done
+  done
+  kill -TERM "$watcher_pid" 2>/dev/null || true
+}
+
 fm_super_main() {
   local STATE DELIVERY BACKEND TARGET backend_source target_source
   STATE="$(_state_root)"
@@ -1457,7 +1481,7 @@ fm_super_main() {
       escalate_flush "$STATE" 2>/dev/null || true
     fi
     if [ -n "${WATCHER_PID:-}" ]; then
-      kill "$WATCHER_PID" 2>/dev/null || true
+      fm_super_stop_watcher "$WATCHER_PID"
       wait "$WATCHER_PID" 2>/dev/null || true
     fi
     if [ -n "${CUR_TMP:-}" ]; then

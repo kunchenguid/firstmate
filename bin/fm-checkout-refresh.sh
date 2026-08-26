@@ -1601,9 +1601,15 @@ try:
             not mentions_home
             or len(program_arguments) != 4
             or not os.path.isabs(program_arguments[0])
-            or program_arguments[1:] != [script, "run-once", "--scheduled"]
+            or program_arguments[2:] != ["run-once", "--scheduled"]
         ):
             raise OSError("incomplete launch agent identity")
+        if program_arguments[1] != script:
+            print(
+                "checkout-refresh: audit: LaunchAgent script differs "
+                f"expected={script} observed={program_arguments[1]}; adopting observed namespace",
+                file=sys.stderr,
+            )
         label = entry.name[:-6]
         if authoritative_label != label:
             raise OSError("launch agent filename and Label differ")

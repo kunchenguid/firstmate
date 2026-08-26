@@ -6597,6 +6597,9 @@ SH
   git -C "$firstmate_source" fetch --quiet "$ROOT" "$firstmate_tip"
   git -C "$firstmate_source" checkout --quiet -b "$default" FETCH_HEAD
   git -C "$case_dir/project" remote set-url origin "$firstmate_source"
+  git -C "$case_dir/project" fetch --quiet "$ROOT" "$firstmate_tip"
+  git -C "$case_dir/wt" reset --quiet --hard "$firstmate_tip"
+  git -C "$case_dir/project" update-ref "refs/remotes/origin/$default" "$firstmate_tip"
   PATH=$original_path
   tip=$(git -C "$source" rev-parse refs/remotes/origin/main)
   git -C "$clone" remote set-url origin https://example.com/repository.git
@@ -6929,6 +6932,11 @@ test_secondmate_registry_updates_are_locked_and_literal() {
     "retiring foo.bar left its exact registry entry"
   pass "secondmate registry updates are serialized and compare ids literally"
 }
+
+if [ "${FM_TEST_FOCUSED:-}" = network-authority ]; then
+  test_secondmate_network_fetches_pin_validated_addresses
+  exit 0
+fi
 
 if [ "${FM_TEST_FOCUSED:-}" = tasktmp-safety ]; then
   test_teardown_removes_safe_tasktmp_and_accepts_absence

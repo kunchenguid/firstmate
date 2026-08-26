@@ -31,13 +31,15 @@ A present file that is unreadable, partial, malformed, expired, exhausted, wrong
 Once either selector validly chooses remote execution, the command never falls back to the Mac after any cloud, identity, quota, staging, execution, or integrity failure.
 `FM_AZURE_RUNNER_LOCAL_RECOVERY_CLASSES` is the only explicit local recovery selection.
 
-No billable resource was created while implementing this code.
-The first live invocation remains blocked until the foundation and this code are reviewed, landed, explicitly applied, and approved for the exact subscription.
+C2 no-mistakes run `01M0T2PJB0EZX8AA94WQV0WXA9` exposed the remaining production blocker before VM creation because its gate worktree was detached.
+Direct diagnostic invocations `azr-0a4691b5bbae` and `azr-949b35e79a57` both returned command exit 1 and safely cleaned their invocation compute to zero.
+Those attempts are failed evidence, not acceptance.
+A new billable acceptance remains blocked until this exact repair is on public `main` and the operator explicitly approves the exact subscription and run.
 
 ## Request and snapshot contract
 
 `prepare` refuses tracked changes, untracked files, and any origin identity other than a credential-free GitHub HTTPS URL.
-It also refuses a detached HEAD unless the caller supplies an exact public source ref or a digest-bound private bundle for that detached commit.
+It also refuses a detached HEAD unless the caller supplies an exact source ref whose public proof or sealed private bundle head equals that detached commit.
 By default the candidate must be reachable from a freshly advertised and fetched `refs/heads/main` default head.
 The explicit `--source-ref refs/heads/<branch>` seam alone requires the candidate commit to be the exact freshly advertised and fetched head of that public branch; it never accepts an ancestor, stale tracking ref, tag, or changed remote head.
 An explicit `--public-ref` may instead name only an advertised branch head or `refs/pull/<number>/head`, and the candidate must equal that ref's exact fetched head; mutable pull merge refs and unsafe ref shapes are refused, and the two source-ref seams are mutually exclusive.
@@ -45,8 +47,11 @@ A caller may additionally bind one or more exact `--public-ancestor` commits; pu
 Crosscheck evidence for a private GitHub repository supplies `--private-snapshot-bundle` without a parent reservation: the trusted host packages its clean exact-head review checkout, binds the authenticated PR ref and base ancestor, and stages only that digest-bound Git bundle so the evidence VM receives no GitHub credential.
 When that arbitrary repository does not contain Firstmate's Agent Fleet lock, the `crosscheck-tool` class uses only the sealed base toolchain and records an empty Python-wheel closure instead of requiring Firstmate-specific files.
 An Azure validation cell additionally supplies `--private-snapshot-bundle` with its parent-cell reservation so an unpushed pipeline-fix head can execute without prematurely changing the task branch on GitHub.
-Both private modes bind one exact source ref/head, a one-ref Git bundle, digest, size, and private staging object; the validation-cell mode additionally binds its parent cell and freshly proves the public origin's trusted default ref/head.
-The public proof runs in a fresh bare repository with system/global Git configuration, credentials, prompts, extra HTTP headers, and file transport disabled; private Crosscheck proof revalidates the clean checkout and bundle identities locally immediately before compute creation and retry.
+The per-run no-mistakes route instead supplies `--private-snapshot-from-head` with the deterministic private ref `refs/heads/fm-no-mistakes/<run-id>`.
+That direct mode seals the exact clean detached gate HEAD and its complete non-shallow ancestry into one self-contained bundle without guessing or pushing a task branch and without claiming a validation-cell parent.
+All three private modes bind one exact source ref/head, a one-ref Git bundle, digest, size, and private staging object.
+The parent mode additionally binds its exact cell and reservation.
+The public proof runs in a fresh bare repository with system/global Git configuration, credentials, prompts, extra HTTP headers, and file transport disabled; all modes repeat their exact public/private source proof immediately before compute creation and retry.
 No live worktree, primary home, provider account home, browser profile, or peer storage is mounted or copied.
 
 The canonical `fm.azure-command/v1` request binds these fields:
@@ -72,7 +77,8 @@ The fixed root bootstrap installs a hard-coded Ubuntu transport and Linux test-t
 Before each package operation it waits up to three minutes for the standard apt/dpkg locks, and apt carries the same bounded dpkg timeout, so normal image maintenance can finish without turning into a repository-command failure while a stuck lock still fails closed.
 Repository code cannot alter that privileged package list, all package and staging traffic is shaped to one megabit per second and ends before deny-all command networking starts, and invocation evidence must record the resolved package/image versions during real acceptance.
 The request records the exact-size, checksum-pinned ShellCheck 0.11.0 and uv 0.9.10 releases plus, when the snapshot contains the Agent Fleet `uv.lock`, the complete Linux x86_64 pytest/ruff wheel closure selected from that lock.
-When that lock is present, trusted root verifies the lock, archive, file set, sizes, and hashes, creates the Agent Fleet environment with an empty cache and networking disabled, and forces repository `uv run --locked` commands to use that already-synchronized offline environment.
+When that lock is present, trusted root verifies the lock, archive, file set, sizes, and hashes, creates the Agent Fleet environment with an empty cache and networking disabled, and installs the exact locked Agent Fleet source plus its release-local `agent-fleet` console entrypoint before repository code starts.
+The command wrapper then forces repository `uv run --locked` commands to use that synchronized offline environment through `UV_NO_SYNC=1`.
 
 ## Private control and VM boundary
 
@@ -149,6 +155,7 @@ The validation-cell dispatcher may request up to eight mixed-family invocations 
 A validation-owned invocation carries an exact `capacity-parent` cell id and complete parent vCPU reservation so the cell's pre-reserved processor shape and the child VM inventory cannot be double-counted or mistaken for unrelated capacity.
 Before admission and again before VM creation, the runner proves one live parent cell with the exact owner, deployment generation, home, lifecycle, id, and processor-reservation tags, then refuses a child beyond the reserved `(vCPUs - 8) / 4` slots.
 Each child still receives its own durable first-day reservation for its direct compute, storage, network, monitoring, and control meters; only the already-accounted $210 shared foundation reserve is omitted from that child reservation.
+A direct private no-mistakes bundle has no validation parent and therefore takes the ordinary standalone shared-capacity reservation and complete foundation cost bound exactly once.
 
 Immediately before reservation and again immediately before VM creation, the controller proves the exact subscription/resource-group IDs and owner/generation tags for the named foundation storage account, zero-data admission-control account/container and ETag, controller UAMI and its sole exact effective container role including inherited/group expansion, VNet and address space, validation and private-endpoint subnets, complete NSG rule set, NAT and bound Standard public IP, blob private endpoint and endpoint NIC, named approved blob connection, private-DNS zone, VNet link, zone group/config names, and private-access properties.
 It also proves current SKU capabilities and restrictions, current East US regional and selected-family free vCPU quota, month-to-date actual cost, forecast cost, the exact unambiguous Linux on-demand Consumption retail meter (never Spot, Low Priority, Windows, dev/test, reservation, or savings pricing), and active runner count.
@@ -348,10 +355,15 @@ local fallback, and `FM_AZURE_RUNNER_LOCAL_RECOVERY_CLASSES` remains the only
 explicit local opt-out.
 
 The lint payload preserves the tracked shell owner and locked Agent Fleet command unchanged inside the dispatched argv.
-For a validation-owned feature branch, the caller passes its exact current `refs/heads/<branch>` identity plus the one-ref private snapshot bundle.
-The runner binds and privately stages that unpushed commit, while a changed local bundle/head/tree or public default base refuses before compute creation.
+For the per-run no-mistakes route, the dispatcher binds the detached gate HEAD to `refs/heads/fm-no-mistakes/<run-id>` and asks the runner to build the complete one-ref private bundle inside its protected payload directory.
+That source ref is a deterministic run identity, not a guess at the author's branch.
+The direct route uses ordinary shared-capacity accounting and carries no validation-cell parent.
+For a validation-owned feature branch, the caller passes its exact current `refs/heads/<branch>` identity plus the one-ref private snapshot bundle and parent reservation.
+The runner binds and privately stages either unpushed commit, while a changed local bundle/head/tree or public default base refuses before compute creation.
 The ordinary test path runs the capability-derived real-Herdr host set locally and leaves complete behavior-inventory verification to required CI, as defined in [`configuration.md`](configuration.md#gate-defaults-no-mistakesyaml).
 When the `test` class is explicitly remote, `bin/fm-no-mistakes-test-command.sh` runs the sealed non-Herdr behavior inventory plus locked Agent Fleet checks on one Azure VM while every real-Herdr declaration runs through owned guarded labs on the Mac; a failed Azure shard is never replayed locally.
+The remote command declares exactly `real-tmux-server,passwordless-root-escalation,system-openat-binding,origin-egress` absent and emits the existing loud per-unit skips rather than adding failures to the skip inventory.
+The guest materializes complete source and default-branch history, so admitted non-Herdr fixtures retain their parent and historical-path graph instead of operating from a shallow root.
 Model review, document generation that requires a model, fixes, Git mutation, push, PR creation, CI monitoring, and gate decisions remain in no-mistakes' existing owner.
 A configured uncredentialed documentation command may use this runner like any other command, but this bridge never moves a model document step by implication.
 
@@ -373,6 +385,8 @@ bin/fm-azure-runner.sh cost
 
 The implementation tests use fake Azure APIs and local executor fixtures only.
 They create no Azure resource and incur no charge.
+Acceptance for the per-run no-mistakes repair remains blocked until this exact code lands on public `main` and one fresh routed `test=behavior-heavy` run passes on real Azure compute with exact remote execution proof and zero cleanup.
+Do not spend on an unlanded build, and do not weaken the foundation's `require_landed_code` gate to accelerate that acceptance.
 Real usability remains unclaimed until the approved deployment performs this bounded acceptance:
 
 1. Record Mac CPU, memory, swap, process count, and responsive interactive latency before launch.
