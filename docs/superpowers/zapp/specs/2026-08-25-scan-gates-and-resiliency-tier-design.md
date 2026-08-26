@@ -117,9 +117,10 @@ Created on the `bankrate` org and set on the demo repo on 2026-08-25. Verified l
 `bankrate/platform-cicd-v2-demo` → `resiliency_tier = Paper`, alongside `is_poc = true` and
 `is_soc2_compliant = false`.
 
-**Values are Title Case** — `Platinum`, not `platinum`. The rules file and the tier ranking must
-match, and the gate compares case-insensitively so a lowercase value in a hand-edited rules file
-cannot silently rank as unrecognised.
+**Values are Title Case because humans read them in the GitHub settings UI.** That is the right
+choice for the property and the wrong one to propagate into code. So the boundary lowercases:
+`value.toLowerCase()` on read, and the rules file, the tier ranking and every comparison use
+lowercase throughout. One `toLowerCase()` at the edge, no case handling anywhere else.
 
 **The property is optional and repo-editable, which bounds what this gate is worth.**
 `required: false` means a repo can simply not have it — handled by failing closed. More
@@ -200,24 +201,25 @@ rules:
     - "Terraform plan (speculative)"
 
   changeClasses:
-    # maxResiliencyTier is the MOST critical tier a class may touch, using the
-    # standard's own Title Case values. Ranking: Paper < Bronze < Silver < Gold
-    # < Platinum, so a higher tier is more critical and therefore stricter.
+    # maxResiliencyTier is the MOST critical tier a class may touch. Lowercase
+    # here; the repo property's Title Case value is lowercased on read.
+    # Ranking: paper < bronze < silver < gold < platinum, so a higher tier is
+    # more critical and therefore stricter.
     lockfile-only:
       minCoveragePct: 0
-      maxResiliencyTier: Platinum    # generated content only; safe anywhere
+      maxResiliencyTier: platinum    # generated content only; safe anywhere
       soc2Eligible: false
     dep-patch:
       minCoveragePct: 60
-      maxResiliencyTier: Gold        # everything but the 99.99% tier
+      maxResiliencyTier: gold        # everything but the 99.99% tier
       soc2Eligible: false
     dep-minor:
       minCoveragePct: 60
-      maxResiliencyTier: Silver
+      maxResiliencyTier: silver
       soc2Eligible: false
     dep-major:
       minCoveragePct: 60
-      maxResiliencyTier: Bronze
+      maxResiliencyTier: bronze
       soc2Eligible: false
 ```
 
@@ -289,10 +291,11 @@ Gates 11–14 read the class's thresholds, so they follow the existing rule: whe
   checks are ignored (a failing `Commit lint` is not a security finding).
 - **`coverageFloor`** — 62.99% against a floor of 60 passes; against 70 fails; absent fails; an
   unparseable title fails; a floor of 0 passes with any reported value.
-- **`resiliencyTierPermits`** — `Gold` against a `Gold` ceiling passes; `Platinum` against `Gold`
-  fails; `Paper` against `Gold` passes; the demo repo's real `Paper` passes every configured ceiling;
-  lowercase `paper` is accepted case-insensitively; unset fails; an unrecognised tier value fails
-  rather than ranking lowest.
+- **`resiliencyTierPermits`** — the property's Title Case `Gold` against a `gold` ceiling passes;
+  `Platinum` against `gold` fails; `Paper` against `gold` passes; the demo repo's real `Paper` passes
+  every configured ceiling; unset fails; an unrecognised tier value fails rather than ranking lowest.
+  The lowercasing is asserted directly, so a future Title Case value in the rules file fails loudly
+  at build time rather than silently ranking as unrecognised.
 - **`soc2Permits`** — a non-SOC2 repo passes regardless of `soc2Eligible`; a SOC2 repo passes only
   when `soc2Eligible` is true; unset fails.
 - **Property fetch** — parses the live response shape; an unset property is absent, not null; a
@@ -302,7 +305,7 @@ Gates 11–14 read the class's thresholds, so they follow the existing rule: whe
 - **Fixtures** — the three existing PR fixtures still produce their expected verdicts, with PR #27
   still a candidate under the loose starting thresholds.
 - **Rules validation** — `blockingChecks` must be an array of strings; `minCoveragePct` a number in
-  0–100; `maxResiliencyTier` one of the five tiers; `soc2Eligible` a boolean. Each fails the build.
+  0–100; `maxResiliencyTier` one of the five lowercase tiers; `soc2Eligible` a boolean. Each fails the build.
 
 ### Live validation
 
@@ -329,7 +332,8 @@ it back to `Paper`.
 
 - [x] `resiliency_tier` org custom property created, `single_select`, five tiers, documented as production — **done 2026-08-25**
 - [x] Set on `bankrate/platform-cicd-v2-demo` to `Paper` — **done 2026-08-25**
-- [ ] Tier comparison is case-insensitive; an unrecognised tier value fails rather than ranking lowest
+- [ ] The property value is lowercased on read; rules and ranking are lowercase throughout; an
+      unrecognised tier value fails rather than ranking lowest
 - [ ] `rules.blockingChecks` declared, validated at build time, overridable per repo
 - [ ] `minCoveragePct`, `maxResiliencyTier` and `soc2Eligible` on every change class, all validated
 - [ ] Gates 11–14 implemented in `GATE_ORDER`, with `freezeOff` still last
