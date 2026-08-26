@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-bearings-board.sh: fail-closed payload validation,
 # slot-injection round-trip through the built page, bind-before-arm, and
-# idempotent re-arm of the stable board source.
+# idempotent re-arm of the stable board source, plus the built board's
+# full-text tooltip invariant, asserted by running the shipped renderer against
+# a minimal DOM shim so the coverage never depends on a headless browser.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -102,6 +104,179 @@ EOF
 extract_payload() {  # <board-path>
   sed -n '/<script id="bearings-data" type="application\/json">/,/<\/script>/p' "$1" \
     | sed '1d;$d'
+}
+
+# Execute the shipped renderer from a built board page against a minimal DOM
+# shim and print the rendered node state as JSON, so tooltip behavior is
+# asserted from what the renderer actually produced rather than from a headless
+# browser that the runner may not have. The board page is generated public
+# output and the renderer is the real consumer under test.
+render_board_node_json() {  # <board-path>
+  local render
+  command -v node >/dev/null 2>&1 || return 4
+  render=$(BOARD_PAGE="$1" node --input-type=module <<'JS'
+import { readFileSync } from "node:fs";
+
+const html = readFileSync(process.env.BOARD_PAGE, "utf8");
+const dataBlock = html.match(
+  /<script id="bearings-data" type="application\/json">\n([\s\S]*?)\n<\/script>/);
+if (!dataBlock) throw new Error("the built board carries no bearings-data block");
+const rendererBlock = html
+  .slice(dataBlock.index + dataBlock[0].length)
+  .match(/<script>\n([\s\S]*?)\n<\/script>/);
+if (!rendererBlock) throw new Error("the built board carries no renderer script");
+
+class ClassList {
+  constructor(node) { this.node = node; }
+  tokens() {
+    return this.node.className ? this.node.className.split(/\s+/).filter(Boolean) : [];
+  }
+  write(tokens) { this.node.className = tokens.join(" "); }
+  contains(name) { return this.tokens().indexOf(name) !== -1; }
+  add(name) { if (!this.contains(name)) this.write(this.tokens().concat([name])); }
+  remove(name) { this.write(this.tokens().filter((t) => t !== name)); }
+  toggle(name, on) {
+    const want = on === undefined ? !this.contains(name) : !!on;
+    if (want) this.add(name); else this.remove(name);
+  }
+}
+
+class Element {
+  constructor(tag) {
+    this.tagName = String(tag).toUpperCase();
+    this.children = [];
+    this.parentNode = null;
+    this.id = "";
+    this.className = "";
+    this.attributes = {};
+    this.listeners = {};
+    this.ownText = "";
+    this.titleValue = undefined;
+    this.rawHtml = "";
+    this.classList = new ClassList(this);
+  }
+  get textContent() {
+    return this.ownText + this.children.map((c) => c.textContent).join("");
+  }
+  set textContent(value) {
+    this.children = [];
+    this.ownText = value == null ? "" : String(value);
+  }
+  /* title reflects a DOMString, so the DOM stringifies whatever it is given -
+     that is exactly what makes a null value observable as "null". */
+  get title() { return this.titleValue === undefined ? "" : this.titleValue; }
+  set title(value) { this.titleValue = String(value); }
+  get innerHTML() { return this.rawHtml; }
+  set innerHTML(value) {
+    this.rawHtml = value == null ? "" : String(value);
+    this.children = [];
+    this.ownText = "";
+  }
+  appendChild(node) { node.parentNode = this; this.children.push(node); return node; }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  getAttribute(name) {
+    return Object.prototype.hasOwnProperty.call(this.attributes, name)
+      ? this.attributes[name] : null;
+  }
+  addEventListener(type, fn) {
+    (this.listeners[type] = this.listeners[type] || []).push(fn);
+  }
+  matches(selector) {
+    const parts = selector.split(":");
+    const cls = parts[0].replace(/^\./, "");
+    if (cls && !this.classList.contains(cls)) return false;
+    return parts.slice(1).every((p) => (p === "checked" ? this.checked === true : false));
+  }
+  querySelectorAll(selector) {
+    const found = [];
+    const walk = (node) => node.children.forEach((child) => {
+      if (child.matches(selector)) found.push(child);
+      walk(child);
+    });
+    walk(this);
+    return found;
+  }
+  querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+}
+
+const byId = new Map();
+/* Each id node hangs off its own root so the collector below reports the id
+   node itself, not just whatever the renderer appends inside it. */
+const idRoots = [];
+for (const m of html.matchAll(/\bid="([^"]+)"/g)) {
+  const node = new Element("div");
+  node.id = m[1];
+  const root = new Element("div");
+  root.appendChild(node);
+  idRoots.push(root);
+  byId.set(m[1], node);
+}
+const main = new Element("main");
+main.className = "bb-main";
+const dataNode = byId.get("bearings-data");
+if (!dataNode) throw new Error("the built board carries no bearings-data element");
+dataNode.textContent = dataBlock[1];
+
+globalThis.window = {};
+globalThis.document = {
+  createElement: (tag) => new Element(tag),
+  getElementById: (id) => byId.get(id) || null,
+  querySelector: (selector) => (selector === ".bb-main" ? main : null),
+};
+new Function(rendererBlock[1])();
+
+const nodes = [];
+const collect = (node) => node.children.forEach((child) => {
+  nodes.push({
+    tag: child.tagName,
+    id: child.id || null,
+    classes: child.className ? child.className.split(/\s+/).filter(Boolean) : [],
+    text: child.textContent,
+    title: child.titleValue === undefined ? null : child.titleValue,
+    href: child.href === undefined ? null : child.href,
+    placeholder: child.placeholder === undefined ? null : child.placeholder,
+  });
+  collect(child);
+});
+/* anything under .bb-main means the renderer bailed to its fail-closed card */
+const errored = main.children.length > 0;
+collect(main);
+idRoots.forEach(collect);
+process.stdout.write(JSON.stringify({ errored, nodes }) + "\n");
+JS
+  ) || return 1
+  printf '%s' "$render" | jq -e '.errored == false' >/dev/null || return 3
+  # title reflects a DOMString, so absent text left to the DOM would surface as
+  # the literal "null" - no rendered node may ever advertise that as its value.
+  printf '%s' "$render" | jq -e 'all(.nodes[]; .title != "null")' >/dev/null || return 2
+  printf '%s' "$render" | jq -c 'del(.errored)'
+}
+
+# Render <board-path> and publish the node JSON as RENDERED_NODES. The guards
+# above run inside a command substitution, where fail would only exit the
+# subshell and let a generic caller message mask the real cause, so they report
+# through distinct exit codes that this caller turns into the exact diagnostic.
+render_board_nodes() {  # <board-path>
+  local rc
+  RENDERED_NODES=$(render_board_node_json "$1") && return 0
+  rc=$?
+  case "$rc" in
+    2) fail "the rendered board exposed a stringified null as a tooltip" ;;
+    3) fail "the renderer fell back to its fail-closed card instead of rendering the board" ;;
+    4) fail "node is required to render the board for the tooltip assertions" ;;
+    *) fail "the shipped renderer could not run over the built board" ;;
+  esac
+}
+
+# Assert a rendered node of <class> carries <want> as its exact full tooltip.
+# Pass "visible" to also require that the visible text is that same exact value.
+assert_node_title() {  # <render> <class> <want> [visible]
+  local also=""
+  # shellcheck disable=SC2016 # $want is a jq variable bound by --arg below, not a shell expansion.
+  [ "${4:-}" = visible ] && also=' and .text == $want'
+  printf '%s' "$1" | jq -e --arg cls "$2" --arg want "$3" \
+    "any(.nodes[]; (.classes | index(\$cls)) != null and .title == \$want$also)" \
+    >/dev/null || fail "the rendered board hid the full text of .$2: $3"
 }
 
 test_path_is_stable_and_home_scoped() {
@@ -224,6 +399,291 @@ test_build_injects_binds_then_arms() {
   run_procevent "$home" list | awk 'NR > 1 { print $1 }' | grep -Fxq "$sid" \
     || fail "the board source is not registered after build"
   pass "build injects the payload, binds any-origin, then arms the source"
+}
+
+test_rendered_truncated_text_has_full_native_tooltips() {
+  local home data board marker long_id render entry
+  home=$(make_home tooltips)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  marker='Long & exact "captain-facing" value <must stay text> '
+  long_id='long-slug-legal-charted-id-that-overflows-the-half-width-charted-column-and-stays-hoverable'
+  write_valid_payload "$data"
+  # Every row carries a truncation-prone value: markup-like long text on the
+  # repo-bearing rows, and the genuinely-no-repo rows fall back to the routing
+  # id, which the charted schema restricts to a slug.
+  jq --arg marker "$marker" --arg long_id "$long_id" '
+    .generated = ($marker + "generated stamp") |
+    .captains_call[0].repo = ($marker + "decision repo") |
+    .captains_call[1].pr_url = "https://github.com/example/sample/pull/12345678901234567890?view=full&mode=review" |
+    .captains_call += [{
+      "key": "sample-no-repo-decision",
+      "type": "decision",
+      "repo": null,
+      "title": "A decision that names no repository",
+      "options": [{ "value": "ack", "label": "Acknowledge" }]
+    }] |
+    .underway = [
+      {
+        "id": "underway-with-repo",
+        "repo": ($marker + "underway repo"),
+        "kind": "ship",
+        "state": ($marker + "working badge"),
+        "doing": ($marker + "underway title")
+      },
+      {
+        "id": ($marker + "underway id"),
+        "repo": "",
+        "kind": "ship",
+        "state": "working",
+        "doing": "a short underway line"
+      }
+    ] |
+    .landed = [
+      {
+        "id": "landed-with-repo",
+        "repo": ($marker + "landed repo"),
+        "what": ($marker + "landed title"),
+        "owner": ($marker + "landed owner"),
+        "pr_url": "https://github.com/example/sample/pull/98765432109876543210?view=full&mode=review"
+      },
+      {
+        "id": ($marker + "landed id"),
+        "repo": "",
+        "what": "a short landed line",
+        "owner": ($marker + "landed owner")
+      }
+    ] |
+    .charted = [
+      {
+        "id": "charted-with-repo",
+        "repo": ($marker + "charted repo"),
+        "title": ($marker + "charted title"),
+        "reason": ($marker + "charted reason"),
+        "dispatchable": true
+      },
+      {
+        "id": $long_id,
+        "repo": "",
+        "title": "a short charted line",
+        "reason": "",
+        "dispatchable": false
+      }
+    ]
+  ' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+
+  run_board "$home" build "$data" >/dev/null || fail "the long-text tooltip board did not build"
+  # The markup-like text stays inert data in the page, and only the renderer
+  # turns it back into an exact tooltip value.
+  grep -qF 'value \u003cmust stay text>' "$board" \
+    || fail "the markup-like tooltip text was not \\u003c-escaped in the injected payload"
+  grep -qF 'value <must stay text>' "$board" \
+    && fail "the built board embedded the markup-like tooltip text as live markup"
+
+  render_board_nodes "$board"
+  render=$RENDERED_NODES
+
+  for entry in \
+    "bb-decision__repo|${marker}decision repo" \
+    "bb-decision__link|https://github.com/example/sample/pull/12345678901234567890?view=full&mode=review" \
+    "fm-badge|${marker}working badge" \
+    "bb-row__title|${marker}underway title" \
+    "bb-row__sub|ship · ${marker}underway repo" \
+    "bb-row__sub|ship · ${marker}underway id" \
+    "bb-row__title|${marker}landed title" \
+    "bb-row__sub|${marker}landed repo · ${marker}landed owner" \
+    "bb-row__sub|${marker}landed id · ${marker}landed owner" \
+    "bb-row__pr|https://github.com/example/sample/pull/98765432109876543210?view=full&mode=review" \
+    "bb-row__title|${marker}charted title" \
+    "bb-row__sub|${marker}charted reason · ${marker}charted repo" \
+    "bb-row__sub|$long_id"; do
+    assert_node_title "$render" "${entry%%|*}" "${entry#*|}"
+  done
+
+  # The footer provenance is nowrap inside a flex-end row, so an overlong stamp
+  # escapes past the start edge where no scrolling can reach it.
+  printf '%s' "$render" | jq -e \
+    --arg want "fm-bearings-board.v1 · ${marker}generated stamp" '
+    any(.nodes[]; .id == "bb-provenance" and .text == $want and .title == $want)
+  ' >/dev/null || fail "the footer provenance did not expose its exact full text"
+
+  # Tooltips carry the payload text verbatim - the renderer must not smuggle
+  # entity-escaped or truncated text into the captain-facing value.
+  printf '%s' "$render" | jq -e '
+    [.nodes[] | select(.title != null) | .title | select(test("must stay text"))] as $titles
+    | ($titles | length) >= 8
+      and ($titles | all(contains("<must stay text>")
+        and (contains("&lt;") | not)
+        and (contains("&amp;") | not)
+        and (contains("&quot;") | not)))
+  ' >/dev/null || fail "a rendered tooltip did not carry the exact unescaped payload text"
+
+  # A genuinely-repo-less Captain's Call item shows no repo and must not
+  # advertise a stringified "null" as its hidden full text.
+  printf '%s' "$render" | jq -e '
+    any(.nodes[]; (.classes | index("bb-decision__repo")) != null
+      and .text == "" and .title == null)
+  ' >/dev/null || fail "a repo-less Captain's Call item produced a tooltip for absent text"
+
+  pass "the rendered board exposes exact full tooltips and none for absent text"
+}
+
+test_rendered_decision_body_text_exposes_full_values() {
+  local home data board token render entry
+  home=$(make_home decision-body)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  # One unbreakable token wider than the single-column card: without a
+  # full-text affordance the card's overflow:hidden clips it outright.
+  token='https://github.com/example/sample/pull/1234#issuecomment-2938471029384-with-an-unbreakable-tail'
+  write_valid_payload "$data"
+  jq --arg token "$token" '
+    .captains_call[0].title = ("Adopt the change tracked at " + $token) |
+    .captains_call[0].about = ("see " + $token) |
+    .captains_call[0].decide = ("compare against " + $token) |
+    .captains_call[0].options[0].label = ("Adopt per " + $token) |
+    .captains_call[0].options[0].hint = ("rationale at " + $token) |
+    .captains_call[1].detail = ("validation green, evidence at " + $token)
+  ' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+
+  run_board "$home" build "$data" >/dev/null \
+    || fail "the unbreakable-token decision board did not build"
+  render_board_nodes "$board"
+  render=$RENDERED_NODES
+
+  for entry in \
+    "bb-decision__title|Adopt the change tracked at $token" \
+    "bb-ctx__v|see $token" \
+    "bb-ctx__v|compare against $token" \
+    "bb-opt__label|Adopt per $token" \
+    "bb-opt__hint|rationale at $token" \
+    "bb-decision__detail|validation green, evidence at $token"; do
+    # The visible label keeps the text and the tooltip carries the same exact
+    # value - the affordance adds reach, it never replaces what is on screen.
+    assert_node_title "$render" "${entry%%|*}" "${entry#*|}" visible
+  done
+
+  # Static context keys are fully exposed, so they must stay tooltip-free.
+  printf '%s' "$render" | jq -e '
+    [.nodes[] | select((.classes | index("bb-ctx__k")) != null)] as $keys
+    | ($keys | length) >= 2 and ($keys | all(.title == null))
+  ' >/dev/null || fail "a fully exposed context key gained a redundant tooltip"
+
+  pass "decision card body text exposes its exact full value without hiding the label"
+}
+
+test_rendered_landed_pr_link_exposes_exact_url() {
+  local home data board url render
+  home=$(make_home landed-pr-tooltip)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  url='https://github.com/example/sample/pull/98765432109876543210?view=full&mode=review'
+  write_valid_payload "$data"
+  jq --arg url "$url" '.landed = [{
+    "id": "landed-pr-tooltip",
+    "repo": "sample",
+    "what": "Landed work with a pull request",
+    "owner": "firstmate",
+    "pr_url": $url
+  }]' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+
+  run_board "$home" build "$data" >/dev/null \
+    || fail "the landed-PR tooltip board did not build"
+  render_board_nodes "$board"
+  render=$RENDERED_NODES
+
+  printf '%s' "$render" | jq -e --arg url "$url" '
+    any(.nodes[]; (.classes | index("bb-row__pr")) != null
+      and .text == "#98765432109876543210?view=full&mode=review"
+      and .href == $url
+      and .title == $url)
+  ' >/dev/null || fail "the landed PR link did not preserve its label, href, and exact native title"
+
+  pass "the landed PR link exposes its exact URL without replacing its visible label"
+}
+
+test_rendered_freeform_hint_is_reachable_beyond_the_placeholder() {
+  local home data board hint render
+  home=$(make_home freeform-hint)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  # A hint far wider than a single-line field, with markup-like and unbreakable
+  # runs: the input clips its placeholder at the field edge with no ellipsis.
+  hint='or answer in your own words <e.g. "name the branch"> https://github.com/example/sample/compare/f170ced...aba38e6-and-an-unbreakable-tail'
+  write_valid_payload "$data"
+  jq --arg hint "$hint" '
+    .captains_call[0].allow_freeform = true |
+    .captains_call[0].freeform_hint = $hint |
+    .captains_call[1].allow_freeform = true |
+    del(.captains_call[1].freeform_hint)
+  ' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+
+  run_board "$home" build "$data" >/dev/null \
+    || fail "the long-freeform-hint board did not build"
+  grep -qF 'own words \u003ce.g.' "$board" \
+    || fail "the markup-like freeform hint was not \\u003c-escaped in the injected payload"
+
+  render_board_nodes "$board"
+  render=$RENDERED_NODES
+
+  # The visible placeholder keeps the hint and the tooltip carries the same
+  # exact value, so the full text is reachable without relying on the browser
+  # drawing the whole placeholder.
+  printf '%s' "$render" | jq -e --arg hint "$hint" '
+    any(.nodes[]; (.classes | index("bb-freeform")) != null
+      and .placeholder == $hint and .title == $hint)
+  ' >/dev/null || fail "the freeform input did not expose its exact full hint"
+
+  # The built-in fallback placeholder is short, fixed, and fully shown, so it
+  # must not gain a tooltip - and an absent hint must never surface as "null".
+  printf '%s' "$render" | jq -e '
+    any(.nodes[]; (.classes | index("bb-freeform")) != null
+      and .placeholder == "or answer in your own words\u2026" and .title == null)
+  ' >/dev/null || fail "the default freeform placeholder gained a tooltip"
+
+  pass "the freeform input exposes its exact full hint and none for the default"
+}
+
+test_rendered_static_badges_stay_tooltip_free() {
+  local home data board risk state render
+  home=$(make_home badge-tooltips)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  risk='elevated because the migration touches every tracked payload validator at once'
+  state='waiting on the authenticated fork push before the review gate can advance'
+  write_valid_payload "$data"
+  jq --arg risk "$risk" --arg state "$state" '
+    .captains_call[1].risk = $risk |
+    .underway = [{
+      "id": "underway-dynamic-state",
+      "repo": "sample",
+      "kind": "ship",
+      "state": $state,
+      "doing": "a short underway line"
+    }] |
+    .charted[0].reason = "blocked"
+  ' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+
+  run_board "$home" build "$data" >/dev/null \
+    || fail "the dynamic-badge board did not build"
+  render_board_nodes "$board"
+  render=$RENDERED_NODES
+
+  # Payload-derived badge text is unbounded, so it carries its full value.
+  printf '%s' "$render" | jq -e --arg risk "risk $risk" --arg state "$state" '
+    ([.nodes[] | select((.classes | index("fm-badge")) != null)]) as $badges
+    | ($badges | any(.text == $risk and .title == $risk))
+      and ($badges | any(.text == $state and .title == $state))
+  ' >/dev/null || fail "a dynamic badge did not expose its exact full text"
+
+  # Fixed short badge literals are always fully drawn, so they stay tooltip-free.
+  printf '%s' "$render" | jq -e '
+    ([.nodes[] | select((.classes | index("fm-badge")) != null)]) as $badges
+    | (["decision", "checks green", "waiting"] | all(. as $literal
+        | $badges | any(.text == $literal) and all(.text != $literal or .title == null)))
+  ' >/dev/null || fail "a fixed, fully visible badge literal gained a redundant tooltip"
+
+  pass "dynamic badges expose full text while fixed badge literals stay tooltip-free"
 }
 
 test_registration_cannot_consume_before_any_origin_binding() {
@@ -373,6 +833,11 @@ test_build_refuses_a_template_without_exactly_one_slot() {
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_build_injects_binds_then_arms
+test_rendered_truncated_text_has_full_native_tooltips
+test_rendered_decision_body_text_exposes_full_values
+test_rendered_landed_pr_link_exposes_exact_url
+test_rendered_freeform_hint_is_reachable_beyond_the_placeholder
+test_rendered_static_badges_stay_tooltip_free
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails
 test_rebuild_is_idempotent_and_does_not_double_arm
