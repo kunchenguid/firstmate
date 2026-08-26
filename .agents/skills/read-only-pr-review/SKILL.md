@@ -170,7 +170,8 @@ Do not write replacement code unless a minimal snippet is necessary to make the 
 
 ## Completion and captain handoff
 
-Before treating the review as complete, follow `captain-hold-lifecycle` when the report exposes an unresolved captain decision.
+Before treating the review as complete, follow `captain-hold-lifecycle` for every review, not only when the report exposes an unresolved captain decision.
+Scout teardown verifies that lifecycle's completion attestation, so hold each unresolved captain decision the report exposes, and attest completion with `--none` when the reviewed surface leaves nothing waiting on the captain.
 Confirm the report names the exact reviewed SHA, contains the verdict and ordered action items, records the checks run, distinguishes findings from residual risks, and confirms a clean project copy.
 
 Firstmate reads the report as evidence and relays a concise captain-facing summary with the verdict, highest-severity findings, ordered action items, full pull-request URL, and durable report path.
