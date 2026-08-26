@@ -341,6 +341,31 @@ HERDR_WORKSPACE_ID=w1
 This complete injection shape is verified only for Herdr 0.7.5.
 Firstmate requires both `HERDR_PANE_ID` and `HERDR_SOCKET_PATH` before accepting claimed launcher ancestry.
 
+Windows launcher identity was verified on 2026-08-26 against Herdr 0.8.2 under Git for Windows.
+The live pane supplied a native Windows drive socket path, the adapter canonicalized it to a Unix-absolute path, and exact pane, tab, and workspace resolution succeeded.
+
+```sh
+source bin/backends/herdr.sh
+session=$(fm_backend_herdr_session)
+case "$HERDR_SOCKET_PATH" in [A-Za-z]:[\\/]*) socket_style=windows-drive;; *) socket_style=other;; esac
+canonical=$(fm_backend_herdr_canonical_socket_path "$HERDR_SOCKET_PATH")
+case "$canonical" in /*) canonical_style=unix-absolute;; *) canonical_style=other;; esac
+fm_backend_herdr_launcher_identity "$session"
+rc=$?
+printf 'herdr_version=%s\nsession=%s\nsocket_style=%s\ncanonical_style=%s\nlauncher_identity_exit=%s\npane=%s\ntab=%s\nworkspace=%s\n' "$(herdr --version)" "$session" "$socket_style" "$canonical_style" "$rc" "$FM_BACKEND_HERDR_LAUNCHER_PANE_ID" "$FM_BACKEND_HERDR_LAUNCHER_TAB_ID" "$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID"
+```
+
+```text
+herdr_version=herdr 0.8.2
+session=default
+socket_style=windows-drive
+canonical_style=unix-absolute
+launcher_identity_exit=0
+pane=w5:p1
+tab=w5:t1
+workspace=w5
+```
+
 `pane get` reports the pane's current owning tab and workspace, which is what placement resolves from; the injected `HERDR_TAB_ID` and `HERDR_WORKSPACE_ID` are creation-time snapshots and are not read as current identity:
 
 ```sh

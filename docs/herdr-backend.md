@@ -49,6 +49,7 @@ The first workspace in a completely empty Herdr session must become focused beca
 
 Herdr does not enforce workspace or tab label uniqueness, so a label can never decide where a worker goes.
 Herdr 0.7.5 exports `HERDR_ENV`, `HERDR_PANE_ID`, `HERDR_SESSION`, `HERDR_SOCKET_PATH`, `HERDR_TAB_ID`, and `HERDR_WORKSPACE_ID` into every process it manages a pane for, and a Firstmate or secondmate agent's own commands inherit them.
+On Windows, Herdr supplies `HERDR_SOCKET_PATH` as a native drive path, which Firstmate normalizes through Git for Windows before comparing it with the session's live socket identity.
 Older injection shapes are unverified, so a claimed launcher pane without the injected socket identity cannot be trusted.
 With presentation spaces disabled, a crewmate or scout is created in the exact workspace that identity currently resolves to, read live from Herdr rather than from the injected snapshot, so the worker always appears beside the agent that launched it.
 Duplicate labels elsewhere in the session are irrelevant, and the globally focused workspace is never the target.

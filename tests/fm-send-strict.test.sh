@@ -223,17 +223,17 @@ test_copilot_hook_confirms_unstructured_submit() {
 
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
     FM_FAKE_TMUX_UNSTRUCTURED=1 FM_FAKE_COPILOT_ACK_FILE="$token" \
-    FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 "$SEND" copilot-lane "semantic send" \
+    FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 "$SEND" copilot-lane "/semantic-send" \
     >/dev/null 2>"$err"; rc=$?
   expect_code 0 "$rc" "Copilot's prompt hook should confirm a submit when its composer is unstructured"
-  assert_contains "$(cat "$log")" "literal=1 arg=semantic send" "Copilot semantic send should type the message once"
+  assert_contains "$(cat "$log")" "literal=1 arg=/semantic-send" "Copilot semantic send should type the command once"
   assert_contains "$(cat "$log")" "literal=0 arg=Enter" "Copilot semantic send should still submit with Enter"
 
   printf 'old-prompt-token\n' > "$token"
   : > "$log"
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
     FM_FAKE_TMUX_UNSTRUCTURED=1 FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 \
-    "$SEND" copilot-lane "unconfirmed send" >/dev/null 2>"$err"; rc=$?
+    "$SEND" copilot-lane "/unconfirmed-send" >/dev/null 2>"$err"; rc=$?
   [ "$rc" -ne 0 ] || fail "an unstructured Copilot submit succeeded without a new prompt-hook token"
   assert_contains "$(cat "$err")" "delivery unconfirmed" "missing Copilot prompt acknowledgement should remain loud"
   pass "fm-send Copilot: semantic prompt hooks confirm submission without screen-shape guesses"
