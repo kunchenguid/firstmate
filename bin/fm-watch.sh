@@ -156,7 +156,7 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
                                       # turn-end hook) coalesce into one wake
 # Busy state is decided by the semantic contract in bin/fm-busy-lib.sh, which
 # is the single owner of per-harness sources, source attribution, and the one
-# remaining rendered-text fallback (Grok only).
+# remaining harness-scoped rendered-text fallbacks (Grok and Agy).
 # Always-on wake triage: most wakes during a long crew validation are benign (a
 # working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
 # than wake firstmate's LLM for each, this watcher classifies every wake in bash
@@ -232,7 +232,7 @@ hash_pane() {
 # adapter whose semantic state is missing, malformed, stale, or unverified is
 # treated as not-provably-working and surfaces rather than being absorbed.
 # <tail40> is the same bounded capture already read for hashing and is
-# consumed only by the Grok-scoped fallback inside the contract.
+# consumed only by the Grok- and Agy-scoped fallbacks inside the contract.
 window_is_busy() {  # <window> <tail40>
   local w=$1 tail40=$2 task meta verdict
   task=$(window_to_task "$w" "$STATE")

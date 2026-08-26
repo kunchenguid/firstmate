@@ -63,7 +63,7 @@ fm_control_verb_allowed() {  # <verb>
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harness_supported() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse) return 0 ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy) return 0 ;;
   esac
   return 1
 }
@@ -87,6 +87,7 @@ fm_control_harness_family() {  # <recorded-harness>
     kimi*) printf 'kimi' ;;
     cursor*) printf 'cursor' ;;
     muse*) printf 'muse' ;;
+    agy*) printf 'agy' ;;
     *) return 1 ;;
   esac
 }
@@ -110,7 +111,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 # whose Esc only moves focus to the scrollback; grok cancels on Ctrl+C.
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|kimi|cursor|muse) printf 'Escape' ;;
+    claude|codex|opencode|pi|pi-signed|kimi|cursor|muse|agy) printf 'Escape' ;;
     grok) printf 'C-c' ;;
     *) return 1 ;;
   esac
@@ -121,7 +122,7 @@ fm_control_interrupt_key() {  # <harness>
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode) printf '2' ;;
-    claude|codex|pi|pi-signed|grok|kimi|cursor|muse) printf '1' ;;
+    claude|codex|pi|pi-signed|grok|kimi|cursor|muse|agy) printf '1' ;;
     *) return 1 ;;
   esac
 }
@@ -139,7 +140,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|agy) ;;
     *) return 1 ;;
   esac
 }
@@ -151,7 +152,7 @@ fm_control_interrupt_ack_source() {  # <harness>
     # after an interrupt was measured as variable - sometimes seconds, sometimes
     # not within 20 - so a cancellation claim built on it would be unreliable.
     # Normal turn completion is prompt, which is what the busy fold depends on.
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) printf 'none' ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|agy) printf 'none' ;;
     *) return 1 ;;
   esac
 }
@@ -159,7 +160,7 @@ fm_control_interrupt_ack_source() {  # <harness>
 # The command that exits the agent from its own composer.
 fm_control_exit_command() {  # <harness>
   case "${1-}" in
-    claude|opencode|grok|kimi|cursor|muse) printf '/exit' ;;
+    claude|opencode|grok|kimi|cursor|muse|agy) printf '/exit' ;;
     codex|pi|pi-signed) printf '/quit' ;;
     *) return 1 ;;
   esac
@@ -200,8 +201,13 @@ fm_control_backend_state_verified() {  # <backend>
 # pointing at a retired generation. Prints zero or more absolute paths, one per
 # line: worktree-resident hook files and firstmate-owned state tokens only,
 # never a harness's own managed config.
-fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
-  local harness=${1-} wt=${2-} state=${3-} id=${4-}
+#
+# agy is the one adapter whose hook file sits at a root CHOSEN at spawn time
+# from the four customization roots it discovers, so the caller passes the root
+# recorded alongside the task's token. An absent root means no task-local hook
+# was armed; a root outside the four is refused rather than deleted blind.
+fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [agy-hook-root]
+  local harness=${1-} wt=${2-} state=${3-} id=${4-} root=${5-}
   [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] || return 1
   case "$harness" in
     claude) printf '%s\n' "$wt/.claude/settings.local.json" ;;
@@ -224,28 +230,70 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
       printf '%s\n' "$state/$id.muse-session-current"
       ;;
     cursor) printf '%s\n' "$state/$id.cursor-session" ;;
+    agy)
+      printf '%s\n' "$wt/.fm-agy-turnend"
+      printf '%s\n' "$state/$id.agy-turnend-token"
+      case "$root" in
+        '') ;;
+        .agents|.agent|_agents|_agent) printf '%s\n' "$wt/$root/hooks.json" ;;
+        *) return 1 ;;
+      esac
+      ;;
   esac
 }
 
+# agy's task-local hooks.json lives inside a customization root the PROJECT
+# may own: spawn borrows a pre-existing hookless directory rather than always
+# creating one. The project may also have replaced the installed file while the
+# task ran, and a replacement can legitimately retain the generated task-token
+# entry, so content alone cannot prove firstmate ownership. Ownership is the
+# recorded provenance instead: spawn stores the exact bytes it installed on the
+# token file's fourth line, and only a file still byte-identical to that record
+# (and naming this task's token) is firstmate's to delete. Anything else,
+# including a missing record, is project configuration and stays. Both teardown
+# and the control plane's relaunch decide through this single owner.
+fm_control_agy_task_hook_owned() {  # <hook-file> <token> <installed-record>
+  local hook=${1-} token=${2-} record=${3-}
+  [ -n "$hook" ] && [ -n "$token" ] && [ -n "$record" ] || return 1
+  [ -f "$hook" ] && [ ! -L "$hook" ] || return 1
+  case "$record" in *"firstmate-task-turn-end-$token"*) ;; *) return 1 ;; esac
+  [ "$(cat -- "$hook" 2>/dev/null)" = "$record" ]
+}
+
 # The firstmate-owned global turn-end registry entry a harness mints per task.
-# grok and kimi are the two adapters whose turn-end hook is global and gated by
-# a private token file; every other adapter's wiring is fully covered by
-# fm_control_harness_wiring_paths. Prints the registry path or nothing.
+# grok, kimi, and agy are the adapters whose turn-end hook is gated by a
+# private token file; every other adapter's wiring is fully covered by
+# fm_control_harness_wiring_paths. agy's token file carries the chosen
+# customization root on its second line and, on its third, whether firstmate
+# created that root (created) or borrowed a pre-existing project directory
+# (preexisting); its fourth line records the exact hooks.json content spawn
+# installed, the provenance fm_control_agy_task_hook_owned compares against.
+# The root is handed back to fm_control_harness_wiring_paths and the owner
+# line decides whether retirement may remove the root itself.
+# Prints the registry path or nothing.
 fm_control_harness_turnend_token_path() {  # <harness> <state-dir> <id>
   local harness=${1-} state=${2-} id=${3-}
   [ -n "$state" ] && [ -n "$id" ] || return 1
   case "$harness" in
     grok) printf '%s\n' "$state/$id.grok-turnend-token" ;;
     kimi) printf '%s\n' "$state/$id.kimi-turnend-token" ;;
+    agy) printf '%s\n' "$state/$id.agy-turnend-token" ;;
   esac
 }
 
-fm_control_harness_turnend_auth_path() {  # <harness> <token>
-  local harness=${1-} token=${2-}
+# grok's and kimi's registries live in the harness's own home; agy's is
+# firstmate-private under the state directory, so that adapter needs the state
+# root and is refused rather than guessed at without one.
+fm_control_harness_turnend_auth_path() {  # <harness> <token> [state-dir]
+  local harness=${1-} token=${2-} state=${3-}
   case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
   case "$harness" in
     grok) printf '%s\n' "${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d/$token" ;;
     kimi) printf '%s\n' "$HOME/.kimi-code/fm-turn-end.d/$token" ;;
+    agy)
+      [ -n "$state" ] || return 1
+      printf '%s\n' "$state/agy-turn-end.d/$token"
+      ;;
     *) return 0 ;;
   esac
 }

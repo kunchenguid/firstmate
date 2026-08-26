@@ -2642,7 +2642,7 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # pair below every other candidate), preserving this adapter's original
 # consult-only-when-needed behavior.
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
-  local target=$1 cap caps verdict identity
+  local target=$1 cap caps verdict identity agy_state
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null); then
     caps=$(printf 'styled=1\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
@@ -2650,6 +2650,10 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
     caps=$(printf 'styled=0\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
   else
     printf 'unknown'
+    return 0
+  fi
+  if agy_state=$(fm_composer_separated_state "$cap"); then
+    printf '%s' "$agy_state"
     return 0
   fi
   verdict=$(fm_composer_classify_screen "$caps" "$cap")

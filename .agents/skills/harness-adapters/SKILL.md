@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse.
+  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, muse, and agy.
 user-invocable: false
 metadata:
   internal: true
@@ -59,10 +59,11 @@ Use that value for interrupt, exit, resume, and skill-invocation facts.
 
 ## Primary turn-end guard
 
-The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, and `cursor` have empirically validated hook paths for the "no turn ends blind" guard.
+The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `cursor`, and `agy` have empirically validated hook paths for the "no turn ends blind" guard.
 `claude` and `codex` block directly through Stop hooks that preserve exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
 `opencode`, `pi`, and `pi-signed` expose passive lifecycle callbacks and force one bounded follow-up when the shared predicate blocks.
 Grok selects native blocking or its pre-native bounded resume fallback from the exact running Stop payload; [`docs/turnend-guard.md`](../../../docs/turnend-guard.md) owns that contract.
+Agy returns one native same-session `continue` decision when the shared guard blocks and uses `executionNum` to allow every later Stop in that execution loop.
 Kimi is outside the primary turn-end guard scope, while `docs/turnend-guard.md` owns its separate guarded global hook for crew wake signals.
 muse is CREWMATE/SCOUT ONLY and has no primary integration at all: its plugin engine (its only hook surface) is disabled in the default build, and its Claude-compatible hook dialect names `asyncRewake` and model reawakening as explicitly unsupported, which is exactly what a firstmate primary's turn-end supervision needs.
 `bin/fm-spawn.sh` refuses a `--secondmate` launch on muse for that reason.
@@ -75,9 +76,10 @@ When changing any primary turn-end hook, validate the real harness behavior in a
 
 ## Primary pre-arm (PreToolUse) seatbelt
 
-The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, and `cursor` also have wired PreToolUse-equivalent hooks that deny a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
+The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `cursor`, and `agy` also have wired PreToolUse-equivalent hooks that deny a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
 `claude` and `codex` block directly through PreToolUse hooks; `grok` blocks the same way but requires every `$VAR` reference in its hook `command` string to carry an inline `:-default` or it fails to launch the hook entirely.
 `opencode`, `pi`, and `pi-signed` block by throwing from `tool.execute.before` / returning `{block: true}` from `tool_call`.
+`agy` passes `.toolCall.args.CommandLine` from its `run_command` PreToolUse hook and consumes the same stdout `decision=deny` object as Grok.
 The exact hook files, commands, output-shaping quirks (Claude Code only honors the deny when stdout is empty), and validation transcripts are owned by `docs/arm-pretool-check.md`.
 When changing any watcher-arm PreToolUse hook, validate the real harness behavior in a scratch project before trusting it, then update that doc.
 ## Primary delegation-shape guard
@@ -91,6 +93,7 @@ That deny list must not ship in tracked `.claude/settings.json` because it is Cl
 Two verified facts worth pinning here.
 The subagent tool presents to the model as `Agent`, and on Claude Code 2.1.217 both `Agent` and `Task` work as `permissions.deny` keys, verified by an A/B with a nonsense-name control.
 `permissions.allow` is a pre-approval list rather than an availability list, so there is no fail-closed positive allowlist.
+Agy 1.1.8 exposes agent selection but no verified in-session delegation-shaped tool token, so its subagent guard axis remains inspected but unwired under `docs/subagent-guard.md`.
 
 ## Primary session start
 
@@ -104,6 +107,7 @@ At session start, `bin/fm-session-start.sh` prints exactly one watcher supervisi
 Do not substitute another harness's wait shape when resuming supervision.
 Claude's Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns tokenless re-arm around `bin/fm-watch-arm.sh`, and Grok uses tracked background-notify cycles around `bin/fm-watch-arm.sh`.
 Codex uses bounded foreground checkpoints through `bin/fm-watch-checkpoint.sh` because Codex cannot reason while a foreground tool call is running.
+Agy uses the same bounded foreground checkpoint shape because no verified Agy background task can wake the same persistent TUI turn.
 OpenCode uses `.opencode/plugins/fm-primary-watch-arm.js`, which coordinates with the turn-end guard plugin and wakes the TUI with `client.session.promptAsync`.
 Pi and pi-signed use the tracked `.pi/extensions/fm-primary-turnend-guard.ts` plus the tracked `.pi/extensions/fm-primary-pi-watch.ts`, both project-local extensions the Pi engine auto-discovers once trusted.
 When changing any primary watcher adapter, update `docs/supervision-protocols/`, `docs/turnend-guard.md` if a shared idle or turn-end hook changed, and the relevant concise fact below.
@@ -133,6 +137,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 | cursor | `--model <model>` | none | Verified 2026-08-11 on Cursor Agent CLI 2026.08.11-e8db854. No effort flag exists, so firstmate records the requested effort in task metadata and omits it from the launch. Validate ids against `cursor-agent --list-models` rather than assuming a low/medium/high family: the live catalog carries only `-high` Grok ids. |
 | muse | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>`, and `ultra` only for an explicit `max` | Verified 2026-08-05 on Muse Code 0.1.0-R708.1. The flag accepts `none\|minimal\|low\|medium\|high\|xhigh\|ultra` and defaults to `high`. `ultra` is muse's max-class level, so it is reachable only through an explicit captain `max`, never from the generic fallback; `none` and `minimal` sit below the shared vocabulary and stay unreachable. |
+| agy | `--model <model>` | `--effort <low\|medium\|high>` | Verified 2026-07-30 on Anti-Gravity CLI 1.1.8. Both `xhigh` and `max` are rejected, so Firstmate omits them. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 Likewise, `harness=cursor` with `model=cursor-grok-4.5-*` is Cursor Agent CLI routing a Grok model, not the xAI Grok Build `grok` harness.
@@ -152,6 +157,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
 | cursor | Run `cursor-agent --list-models` (or the legacy `agent --list-models`), which lists the ids available to the current Cursor account. `cursor` is not the CLI name. |
+| agy | Run `agy models`, which lists the models available to the current Agy installation and account. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
@@ -173,6 +179,7 @@ Natural language is acceptable if uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the shared structural composer classifier; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
 - cursor: `/<skill>`, for example `/no-mistakes`. Cursor discovers firstmate's user-level skills. Its slash popup swallows the first Enter, so a genuine second Enter submits; the shared submit retry handles it.
+- agy: `/<skill>`, for example `/no-mistakes`; the first Enter may select the slash autocomplete item, so the shared submit retry is required.
 
 ## Submission acknowledgement hazards
 
@@ -311,7 +318,7 @@ For Grok's supported reasoning-effort values and omission behavior, see the [lau
 
 | Fact | Value |
 |---|---|
-| Busy state | The one remaining rendered-tail fallback, isolated to Grok until its structured lifecycle is live-verified: `Ctrl+c:cancel`, the mid-turn cancel hint shown in grok's keybind bar iff a turn is running. The idle bar shows only `Shift+Tab:mode │ Ctrl+.:shortcuts`. ASCII is matched rather than the braille spinner to avoid locale fragility. |
+| Busy state | One of two remaining harness-scoped rendered-tail fallbacks, isolated to Grok until its structured lifecycle is live-verified: `Ctrl+c:cancel`, the mid-turn cancel hint shown in grok's keybind bar iff a turn is running. The idle bar shows only `Shift+Tab:mode │ Ctrl+.:shortcuts`. ASCII is matched rather than the braille spinner to avoid locale fragility. |
 | Exit command | `/exit` typed into the composer exits the TUI cleanly and prints `Resume this session with: grok --resume <session-id>`; `Ctrl+Q` double-press within 1000ms remains a fallback; `Ctrl+D` is the quit key in VS Code family terminals; `Ctrl+C` is the interrupt, not the exit. |
 | Interrupt | single `Ctrl+C` (cancels the current turn; the footer shows `Ctrl+c:cancel` mid-turn). `Esc` only moves focus to the scrollback, it does NOT interrupt. |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`), same as claude. Opens a slash-autocomplete popup, so a too-fast Enter selects the popup entry instead of sending. For an argument-taking command that first Enter does not submit at all - it expands the selection into an argument-hint placeholder in the composer (e.g. `/compact` -> `/compact compaction instructions`, live-verified), leaving real text still sitting there unsubmitted; a genuine second Enter is required. `fm-send`'s retried Enter lands it on BOTH backends because the shared composer classifier recognizes that placeholder-filled text as still pending; Herdr may also confirm a real turn start through native agent state - see the incident below. |
@@ -534,3 +541,53 @@ A teardown refusal naming muse scratch is therefore correct behavior: inspect it
 muse is a day-0 `0.1.0` beta whose launcher polls a release channel hourly and can replace the running binary underneath the fleet, changing the process name with it.
 The captain accepted that risk, so firstmate does NOT set `MUSE_NO_AUTO_UPDATE=1`; a fleet that later wants stability can set it in the launch environment without any adapter change.
 Its plugin/hook engine reports `plugins are not available in this build` unless `MUSE_EXPERIMENTAL_PLUGINS=on`, which is why the busy source reads the session log instead of installing a hook.
+
+## agy (VERIFIED 2026-07-30, Anti-Gravity CLI 1.1.8)
+
+Anti-Gravity CLI uses the executable name `agy`.
+Firstmate supports its persistent interactive TUI and does not use the one-shot `--print --output-format stream-json` surface because a completed headless process cannot receive later `fm-send` steers in the same live session.
+
+| Fact | Value |
+|---|---|
+| Launch | Bare interactive `agy --dangerously-skip-permissions`, followed by readiness-gated absolute brief-pointer delivery. |
+| Models | Discover with `agy models`; the verified 1.1.8 listing included Gemini 3.6 Flash, Gemini 3.5 Flash, Gemini 3.1 Pro, Claude Sonnet 4.6, Claude Opus 4.6 Thinking, and GPT OSS 120B profiles. |
+| Busy-pane signature | ASCII footer `esc to cancel`, read only from the live bottom nonblank row so transcript or command-output copies of the phrase never read as busy; transient status text such as `Generating...`, `Loading...`, or `Running...` is not needed for classification. |
+| Exit command | `/exit`, which prints `agy --conversation=<uuid>` for exact resume. |
+| Interrupt | Single Escape returns the TUI to idle and prints `Interrupted · What should Antigravity CLI do instead?`; an already-started shell child may continue until it exits. |
+| Resume | `agy --continue` resumes the most recent conversation for the workspace, and `agy --conversation=<uuid>` resumes the exact id printed by `/exit`. |
+| Skill invocation | `/<skill>`, for example `/no-mistakes`; slash autocomplete can consume the first Enter, so submission verification retries Enter without retyping. |
+| Autonomy | `--dangerously-skip-permissions`; verified by an unattended shell tool call. |
+| Trust dialog | Fresh workspaces show `Do you trust the contents of this project?` with `Yes, I trust this folder` selected; Firstmate accepts only that exact surface with Enter. |
+| Environment marker | `ANTIGRAVITY_AGENT=1` in tool child processes; the parent TUI is detected by `agy` ancestry. Verified non-Agy workers spawned under an Agy primary launch with `env -u ANTIGRAVITY_AGENT` so the inherited marker cannot misclassify them; raw unverified launch commands pass through untouched (`bin/fm-spawn.sh`). |
+| Composer | A bare `>` row between two long horizontal separators, followed by `? for shortcuts` when idle or `esc to cancel` when busy. |
+| Effort | `--effort low`, `medium`, or `high`; 1.1.8 rejects `xhigh` and `max`. |
+
+Bare launch before prompt delivery is load-bearing.
+On a fresh trusted-path decision, Agy starts with zero project hooks, shows the trust dialog, then loads the project hooks after trust is accepted.
+An initial `--prompt-interactive` turn can therefore finish before the newly loaded Stop hook participates.
+Firstmate launches with no prompt, accepts only the exact verified trust dialog, waits for the complete empty composer, then sends `Read the brief at <absolute-path> and follow it exactly.`.
+Delivery is confirmed by the task turn-end marker, or by the echoed pointer text plus either the `esc to cancel` busy footer or a returned-to-idle empty composer.
+The idle-composer branch is load-bearing: secondmate spawns create no task-local turn-end hook, and a brief turn that starts and finishes between two polls leaves no busy footer to observe (`agy_wait_for_delivery` in `bin/fm-spawn.sh`, regression `tests/fm-agy-harness.test.sh`).
+
+The shared composer owner recognizes Agy's bare `>` only inside its complete separator pair with a verified footer.
+A bare unstructured `>` remains an unsafe shell prompt and returns `unknown`.
+Tmux, Herdr, Orca, and cmux route their composer decisions through this shared structure.
+Zellij has no cursor or ANSI composer primitive and retains its existing pane-diff submission proof, so a named Agy composer branch is not applicable there.
+
+Agy discovers `hooks.json` in `.agents`, `.agent`, `_agents`, and `_agent`.
+Firstmate selects the first root whose `hooks.json` is absent, creates one task-local Stop hook there, and refuses if every root is occupied or unsafe.
+It never merges with or overwrites project hook configuration.
+The generated hook calls `bin/fm-agy-turnend-hook.sh` with an exact workspace, the private `state/agy-turn-end.d/` registry, and a random task token.
+The script requires the Stop payload's sole `workspacePaths` entry, the worktree `.fm-agy-turnend` pointer, the expected token, and the private registry target to agree before it touches `state/<id>.turn-ended`.
+An arbitrary Agy session outside that bound Firstmate worktree has no matching hook, pointer, and registry tuple and cannot write task state.
+Teardown removes the generated hook, empty customization directory, pointer, private auth entry, and state token.
+A relaunch retires that same wiring through the control plane's tables before the replacement arms, so a switch away from Agy leaves no live hook and an Agy re-arm never orphans the previous customization root.
+
+The primary Firstmate checkout carries `.agents/hooks.json`.
+Its Stop hook calls `bin/fm-turnend-guard-agy.sh`, which invokes the shared primary predicate only for `executionNum: 0`.
+When the predicate blocks, the wrapper returns `{"decision":"continue","reason":"..."}` and Agy re-enters the same live execution loop.
+Every later execution number is allowed, which bounds the adapter to one forced follow-up.
+Agy 1.1.8 has no SessionStart hook event, verified by inspection of its installed lifecycle-hook contract, so the native session-start nudge is not applicable.
+Its primary supervision protocol uses bounded foreground checkpoints and does not assume an unverified background completion wake.
+
+The dated commands, payloads, and outputs are recorded in [`docs/verification/agy-harness.md`](../../../docs/verification/agy-harness.md).

@@ -48,7 +48,7 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 
 A target-existence check proves only that the pane exists.
 The deeper tmux agent-liveness probe first verifies exact window membership, then reads process names to distinguish a running harness from a bare idle shell.
-It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse process identities as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
+It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, Muse, and Agy process identities as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
 Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.
 
 For positive attribution, the probe combines two independent name sources rather than making either one load-bearing.
@@ -70,14 +70,16 @@ Run the real-harness guard after any harness upgrade and before trusting refresh
 Agent liveness and composer safety are separate checks.
 The tmux reader is a thin adapter over the fleet-wide classifier in `bin/fm-composer-lib.sh`: it contributes one styled full-pane capture, the `#{cursor_y}` cursor row, and foreground-process identity probes, and the shape containing the cursor - a complete bordered box (titled bottom borders tolerated), a bare agent-glyph row with its wrapped input, opencode's left bar, or Pi's identity-corroborated separator pair - normally decides the verdict.
 Real text in an identified shape is pending, while only positively proven emptiness reads empty.
+Before the classifier runs, the reader recognizes Agy's unbordered composer through the shared `fm_composer_separated_state` proof: two long separator rows around a `>` prompt with Agy's verified footer, the cursor inside that container, and no nonblank activity below the matched footer, so a composer scrolled above a returned shell prompt is never claimed.
+That proof is harness-scoped: it runs only when the caller declares the target's recorded harness is `agy` via `FM_COMPOSER_HARNESS`, because the separator rows and footer text also appear in Claude transcript output; any other pane falls through to its own classifier.
 A blank or otherwise unidentified cursor row is `unknown` and every consumer defers, except that a foreground process proven to be Cursor is re-read cursorlessly because Cursor parks its terminal cursor below its footer.
 That identity-gated exception preserves the strict container-proof rule for every other pane, so a modal dialog, a dead shell between stale rules, or a mid-redraw pane is never an injection target.
-The shared classifier accepts a shell glyph as an empty agent composer only inside a bordered container.
+The shared classifier accepts a shell glyph as an empty agent composer only inside a bordered container, and the Agy proof accepts one only inside Agy's complete separator container.
 A bare shell prompt is `unknown`, so away-mode escalation is never injected into a dead shell.
 
-Busy state is not read from rendered text on this backend.
+Converted harness busy state is not read from rendered text on this backend.
 A task's busy, idle, unknown, or dead verdict comes from the semantic busy-state contract owned by `bin/fm-busy-lib.sh`; [architecture](architecture.md#busy-state-is-semantic-per-adapter) owns its boundaries.
-The one remaining rendered-tail reader is Grok's isolated fallback inside that contract, which can only classify a Grok task.
+The two remaining rendered-tail readers are isolated fallbacks for Grok and Agy inside that contract, and each can classify only its own recorded harness.
 The submit acknowledgement and away-mode supervisor-pane busy guard below still consult rendered output, but only to decide whether input can be delivered, never to decide recorded task state.
 The supervisor guard selects only the detected primary harness's signature rather than a global union of vendor patterns.
 
@@ -104,6 +106,7 @@ Without that baseline, an `unknown` verdict is preserved untouched, so a busy-lo
 tests/fm-backend-tmux-smoke.test.sh
 tests/fm-tmux-agent-liveness.test.sh
 tests/fm-harness-liveness-drift-live-e2e.test.sh
+tests/fm-agy-harness.test.sh
 tests/fm-composer-ghost.test.sh
 tests/fm-kimi-harness.test.sh
 tests/fm-cursor-harness.test.sh

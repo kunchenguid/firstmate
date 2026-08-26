@@ -14,12 +14,13 @@
 #   <PreToolUse JSON on stdin> | bin/fm-arm-pretool-check.sh
 #   bin/fm-arm-pretool-check.sh --command '<cmd>' [--background true|false]
 #
-# Stdin mode extracts .toolInput.command for Grok or .tool_input.command for
-# Claude and Codex. Cursor delivers the same .tool_input.command shape with
-# tool_name "Shell" (verified live, cursor-agent 2026.08.11-e8db854), so it needs
-# no new extraction - only --cursor, which selects Cursor's own deny rendering
-# and marks this invocation as the Cursor registration rather than the
-# Claude-settings duplicate Cursor also loads.
+# Stdin mode extracts .toolInput.command for Grok, .tool_input.command for
+# Claude and Codex, or .toolCall.args.CommandLine for Agy. Cursor delivers the
+# same .tool_input.command shape with tool_name "Shell" (verified live,
+# cursor-agent 2026.08.11-e8db854), so it needs no new extraction - only
+# --cursor, which selects Cursor's own deny rendering and marks this invocation
+# as the Cursor registration rather than the Claude-settings duplicate Cursor
+# also loads.
 # CLI mode is used by OpenCode and Pi after their adapters extract the exact
 # command string.
 # --background remains accepted for compatibility, but harness-native tracked
@@ -117,7 +118,7 @@ if [ "$CMD_SET" -eq 0 ]; then
   if [ "$CURSOR_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
     exit 0
   fi
-  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
+  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // .toolCall.args.CommandLine // empty)' 2>/dev/null) || exit 0
   [ -n "$CMD" ] || exit 0
   # Kept for transport parity only.
   # shellcheck disable=SC2034

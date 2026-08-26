@@ -1403,6 +1403,18 @@ fm_super_main() {
   FM_SUPERVISOR_BACKEND="$discovered_backend"
   local BACKEND="$FM_SUPERVISOR_BACKEND"
 
+  # --- scope harness-specific composer proofs to the supervisor pane's own
+  # harness. The daemon is launched from the primary's process tree in the
+  # harness-native paths, so its own detected harness IS the supervisor pane's
+  # harness; the launch paths without inherited markers resolve to unknown and
+  # simply skip harness-scoped structural checks (fail-safe deferral).
+  # Detection always runs rather than deferring to an inherited value, because
+  # every OTHER reader of this contract resolves the harness of the exact pane
+  # it is about to read; an ambient value reaching this process came from some
+  # other pane's operation and would claim a different harness's structure.
+  FM_COMPOSER_HARNESS=$("$FM_DAEMON_DIR/fm-harness.sh" 2>/dev/null) || FM_COMPOSER_HARNESS=""
+  export FM_COMPOSER_HARNESS
+
   # --- refuse an unsupported supervisor backend loudly, before ever trying a
   # tmux/herdr-specific call against it (zellij, orca, and cmux have no verified
   # composer/busy primitives wired up for this daemon yet - AGENTS.md section 4

@@ -915,6 +915,50 @@ retire_busy_state() {
   fi
 }
 
+remove_agy_turnend_auth() {
+  local state_dir=$1 id=$2 token_path token='' path
+  token_path=$(fm_control_harness_turnend_token_path agy "$state_dir" "$id") || return 1
+  if [ -n "$token_path" ] && [ -f "$token_path" ]; then
+    IFS= read -r token < "$token_path" || [ -n "$token" ] || return 1
+  fi
+  case "$token" in fm.????????????) ;; *) return 0 ;; esac
+  path=$(fm_control_harness_turnend_auth_path agy "$token" "$state_dir") || return 1
+  [ -n "$path" ] || return 0
+  rm -f -- "$path"
+  rmdir "${path%/*}" 2>/dev/null || true
+}
+
+# Only the worktree-resident half of Agy's wiring is retired here: the state
+# token still has to name the auth entry that remove_agy_turnend_auth revokes
+# afterwards, so it is read through the same owner rather than removed with the
+# rest.
+remove_agy_task_hook() {
+  local wt=$1 state_dir=$2 id=$3 token_path token='' hook_root='' hook_root_owner='' hook_record=''
+  [ -n "$wt" ] && [ -d "$wt" ] || return 0
+  token_path=$(fm_control_harness_turnend_token_path agy "$state_dir" "$id") || return 1
+  [ -n "$token_path" ] || return 0
+  if [ -f "$token_path" ]; then
+    IFS= read -r token < "$token_path" || [ -n "$token" ] || return 0
+    hook_root=$(sed -n '2p' "$token_path" 2>/dev/null || true)
+    hook_root_owner=$(sed -n '3p' "$token_path" 2>/dev/null || true)
+    hook_record=$(sed -n '4p' "$token_path" 2>/dev/null || true)
+  fi
+  case "$token" in fm.????????????) ;; *) return 0 ;; esac
+  case "$hook_root" in .agents|.agent|_agents|_agent) ;; *) return 0 ;; esac
+  # The root may be a project directory spawn borrowed, and the project may
+  # have replaced the installed hook while the task ran, possibly retaining
+  # the generated token entry: only a hooks.json still byte-identical to the
+  # recorded install is removed, and only a firstmate-created root is pruned
+  # once emptied (fm-control-lib.sh owns the ownership test).
+  if fm_control_agy_task_hook_owned "$wt/$hook_root/hooks.json" "$token" "$hook_record"; then
+    rm -f "$wt/$hook_root/hooks.json"
+  fi
+  rm -f "$wt/.fm-agy-turnend"
+  if [ "$hook_root_owner" = created ]; then
+    rmdir "$wt/$hook_root" 2>/dev/null || true
+  fi
+}
+
 validate_pr_poll_cleanup() {
   local state_dir=$1 id=$2 quarantine state_device artifact has_artifact=0
   fm_task_id_path_safe "$id" || return 0
@@ -2465,12 +2509,14 @@ cleanup_firstmate_home_children() {
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+        remove_agy_task_hook "$child_wt" "$sub_state" "$child_id"
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+      remove_agy_task_hook "$child_wt" "$sub_state" "$child_id"
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
         "$child_wt/.opencode/plugins/fm-busy-state.js" \
         "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
@@ -2490,6 +2536,7 @@ cleanup_firstmate_home_children() {
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id" || return 1
     remove_kimi_turnend_auth "$sub_state" "$child_id" || return 1
+    remove_agy_turnend_auth "$sub_state" "$child_id" || return 1
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
     child_busy_gen=$(meta_value "$child_meta" busy_gen)
     if [ -z "$child_busy_gen" ]; then
@@ -2501,7 +2548,8 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
-      "$sub_state/$child_id.cursor-session"
+      "$sub_state/$child_id.cursor-session" \
+      "$sub_state/$child_id.agy-turnend-token"
   done
 }
 
@@ -2684,6 +2732,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
         git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
       fi
     fi
+    remove_agy_task_hook "$WT" "$STATE" "$ID"
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
@@ -2698,6 +2747,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     fi
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
+  remove_agy_task_hook "$WT" "$STATE" "$ID"
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   # Kills remaining processes in the worktree (including the agent), resets, returns
@@ -2806,6 +2856,7 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
+remove_agy_turnend_auth "$STATE" "$ID" || exit 1
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
@@ -2815,8 +2866,9 @@ retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
-  "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
-  "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
+  "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.agy-turnend-token" \
+  "$STATE/$ID.muse-session" "$STATE/$ID.muse-session-current" \
+  "$STATE/$ID.cursor-session" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the

@@ -56,6 +56,7 @@ make_tmux_stub() {  # <dir>
 #!/usr/bin/env bash
 set -u
 D=$FM_FAKE_DIR
+printf '%s\n' "${FM_COMPOSER_HARNESS-}" > "$D/composer-harness"
 case "${1:-}" in
   send-keys)
     shift
@@ -582,7 +583,7 @@ test_wiring_removal_failure_refuses_before_replacement_arm() {
 }
 
 test_turnend_auth_paths_are_owned_by_the_control_adapter() {
-  local dir state grok_path kimi_path token_path
+  local dir state grok_path kimi_path agy_path token_path
   dir=$(fm_test_tmproot fm-control-auth)
   state="$dir/state"
   mkdir -p "$state"
@@ -599,6 +600,22 @@ test_turnend_auth_paths_are_owned_by_the_control_adapter() {
     || fail "kimi's registry path should resolve under the home store, got '$kimi_path'"
   grok_path=$(GROK_HOME="$dir/gh" fm_control_harness_turnend_auth_path grok 'not a token/../..')
   [ -z "$grok_path" ] || fail "a malformed token must resolve to no path, got '$grok_path'"
+  printf 'fm.333333333333\n.agents\n' > "$state/x.agy-turnend-token"
+  token_path=$(fm_control_harness_turnend_token_path agy "$state" x)
+  [ "$token_path" = "$state/x.agy-turnend-token" ] \
+    || fail "the agy token path should be computed without reading it"
+  agy_path=$(fm_control_harness_turnend_auth_path agy fm.333333333333 "$state")
+  [ "$agy_path" = "$state/agy-turn-end.d/fm.333333333333" ] \
+    || fail "agy's registry path should resolve under the private state store, got '$agy_path'"
+  fm_control_harness_turnend_auth_path agy fm.333333333333 \
+    && fail "agy's registry path must be refused without the state root it lives under"
+  agy_path=$(fm_control_harness_wiring_paths agy "$dir/wt" "$state" x .agents)
+  [ "$agy_path" = "$dir/wt/.fm-agy-turnend
+$state/x.agy-turnend-token
+$dir/wt/.agents/hooks.json" ] \
+    || fail "agy's wiring should cover pointer, token, and task-local hook, got '$agy_path'"
+  fm_control_harness_wiring_paths agy "$dir/wt" "$state" x ../../etc >/dev/null \
+    && fail "a hook root outside agy's customization roots must be refused, not deleted"
   pass "fm-control-lib: one owner resolves each harness's turn-end registry entry, and refuses a malformed token"
 }
 
@@ -828,6 +845,134 @@ test_muse_session_binding_is_retired_on_a_harness_switch() {
   [ ! -e "$dir/home/state/rl31.muse-session-current" ] \
     || fail "the retired muse incarnation's resolved session pin must not outlive it"
   pass "fm-spawn --relaunch: switching away from muse retires its session binding"
+}
+
+# agy arms four artifacts per task: a task-local hooks.json under whichever
+# customization root was free, the worktree token pointer, the state token that
+# records both the token and that chosen root, and a firstmate-private registry
+# entry. Relaunching AWAY from agy must retire all four, or the retired
+# incarnation's hook keeps firing into the worktree for the life of the task.
+arm_agy_wiring() {  # <case-dir> <id> <hook-root> <token> [root-owner]
+  local dir=$1 id=$2 root=$3 token=$4 owner=${5:-created} hook
+  mkdir -p "$dir/home/state/agy-turn-end.d" "$dir/wt/$root"
+  printf '%s\n' "$dir/home/state/$id.turn-ended" \
+    > "$dir/home/state/agy-turn-end.d/$token"
+  hook=$(printf '{"firstmate-task-turn-end-%s":{}}' "$token")
+  printf '%s\n%s\n%s\n%s\n' "$token" "$root" "$owner" "$hook" \
+    > "$dir/home/state/$id.agy-turnend-token"
+  printf 'token=%s\n' "$token" > "$dir/wt/.fm-agy-turnend"
+  printf '%s\n' "$hook" > "$dir/wt/$root/hooks.json"
+}
+
+test_agy_wiring_is_retired_on_a_harness_switch() {
+  local dir
+  dir=$(new_case agywiring rl36)
+  add_ship_task "$dir" rl36 agy
+  arm_agy_wiring "$dir" rl36 .agents fm.abcdefabcdef
+  printf 'zsh' > "$dir/fake/command"
+  run_spawn "$dir" rl36 --relaunch --harness claude >/dev/null
+  [ ! -e "$dir/home/state/agy-turn-end.d/fm.abcdefabcdef" ] \
+    || fail "the retired agy incarnation's private registry entry must not outlive it"
+  [ ! -e "$dir/home/state/rl36.agy-turnend-token" ] \
+    || fail "the retired agy incarnation's state token must not outlive it"
+  [ ! -e "$dir/wt/.fm-agy-turnend" ] \
+    || fail "the retired agy incarnation's worktree pointer must not outlive it"
+  [ ! -e "$dir/wt/.agents/hooks.json" ] \
+    || fail "the retired agy incarnation's task-local hook must not outlive it"
+  [ ! -d "$dir/wt/.agents" ] \
+    || fail "the emptied customization root firstmate created must not be left behind"
+  pass "fm-spawn --relaunch: switching away from agy retires its whole hook wiring"
+}
+
+# A hook root spawn borrowed from the project (recorded as preexisting on the
+# token file's third line) is project property: retirement removes only the
+# firstmate-generated hook inside it and leaves the directory standing.
+test_agy_relaunch_preserves_a_borrowed_project_root() {
+  local dir
+  dir=$(new_case agykeeproot rl40)
+  add_ship_task "$dir" rl40 agy
+  arm_agy_wiring "$dir" rl40 .agents fm.abcdefabcdef preexisting
+  printf 'zsh' > "$dir/fake/command"
+  run_spawn "$dir" rl40 --relaunch --harness claude >/dev/null
+  [ ! -e "$dir/wt/.agents/hooks.json" ] \
+    || fail "the retired agy incarnation's task-local hook must not outlive it"
+  [ -d "$dir/wt/.agents" ] \
+    || fail "a pre-existing project customization root must survive retirement"
+  pass "fm-spawn --relaunch: a borrowed project customization root is never removed"
+}
+
+# A hooks.json the project authored into the borrowed root while the task ran
+# does not carry this task's turn-end marker, so retirement must leave it (and
+# the root) untouched rather than delete project configuration blind.
+test_agy_relaunch_preserves_a_project_authored_hook_file() {
+  local dir
+  dir=$(new_case agykeephook rl41)
+  add_ship_task "$dir" rl41 agy
+  arm_agy_wiring "$dir" rl41 .agents fm.abcdefabcdef preexisting
+  printf '{"project-owned":{}}\n' > "$dir/wt/.agents/hooks.json"
+  printf 'zsh' > "$dir/fake/command"
+  run_spawn "$dir" rl41 --relaunch --harness claude >/dev/null
+  [ "$(cat "$dir/wt/.agents/hooks.json" 2>/dev/null)" = '{"project-owned":{}}' ] \
+    || fail "a project-authored hooks.json must survive agy retirement"
+  [ -d "$dir/wt/.agents" ] \
+    || fail "the project root holding a project-authored hook must survive retirement"
+  [ ! -e "$dir/home/state/rl41.agy-turnend-token" ] \
+    || fail "the retired agy incarnation's state token must still be retired"
+  pass "fm-spawn --relaunch: a project-authored hooks.json is never deleted"
+}
+
+# A project replacement that RETAINS the generated task-token entry is still
+# project property: ownership is the recorded install provenance, not the file
+# contents, so retirement must leave any file that no longer matches the
+# recorded bytes.
+test_agy_relaunch_preserves_a_replaced_hook_retaining_the_token() {
+  local dir replaced
+  dir=$(new_case agykeeptoken rl42)
+  add_ship_task "$dir" rl42 agy
+  arm_agy_wiring "$dir" rl42 .agents fm.abcdefabcdef preexisting
+  replaced=$(printf '{"project-owned":{},"firstmate-task-turn-end-%s":{}}' fm.abcdefabcdef)
+  printf '%s\n' "$replaced" > "$dir/wt/.agents/hooks.json"
+  printf 'zsh' > "$dir/fake/command"
+  run_spawn "$dir" rl42 --relaunch --harness claude >/dev/null
+  [ "$(cat "$dir/wt/.agents/hooks.json" 2>/dev/null)" = "$replaced" ] \
+    || fail "a project hooks.json retaining the task token must survive agy retirement"
+  [ ! -e "$dir/home/state/rl42.agy-turnend-token" ] \
+    || fail "the retired agy incarnation's state token must still be retired"
+  pass "fm-spawn --relaunch: a project hooks.json retaining the task token is never deleted"
+}
+
+# A recorded hook root outside agy's four customization roots cannot be
+# retired safely, so the relaunch must refuse before arming a replacement
+# rather than leave the unknown hook live.
+test_agy_unknown_hook_root_refuses_the_relaunch() {
+  local dir out rc
+  dir=$(new_case agybadroot rl38)
+  add_ship_task "$dir" rl38 agy
+  arm_agy_wiring "$dir" rl38 .agents fm.abcdefabcdef
+  printf 'fm.abcdefabcdef\n../../etc\n' > "$dir/home/state/rl38.agy-turnend-token"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl38 --relaunch --harness claude); rc=$?
+  [ "$rc" -ne 0 ] || fail "an unrecognized recorded agy hook root must fail closed"$'\n'"$out"
+  assert_contains "$out" "could not retire agy wiring" \
+    "the refusal should name the wiring that could not be retired"
+  pass "fm-spawn --relaunch: an unrecognized agy hook root refuses instead of retiring blind"
+}
+
+# fm-control exports the target's composer scope and then invokes fm-spawn as a
+# plain relaunch child, so the replacement's own launch-boundary declaration is
+# what must decide every composer read of the NEW pane. Without it the child
+# would keep reading the replacement's pane under the retired adapter's proof.
+test_relaunch_scopes_composer_reads_to_the_replacement_harness() {
+  local dir declared
+  dir=$(new_case agyscope rl39)
+  add_ship_task "$dir" rl39 agy
+  arm_agy_wiring "$dir" rl39 .agents fm.abcdefabcdef
+  printf 'zsh' > "$dir/fake/command"
+  FM_COMPOSER_HARNESS=agy run_spawn "$dir" rl39 --relaunch --harness claude >/dev/null
+  declared=$(cat "$dir/fake/composer-harness" 2>/dev/null || true)
+  [ "$declared" = claude ] \
+    || fail "the replacement's pane must be read as claude, got '${declared:-none}'"
+  pass "fm-spawn --relaunch: composer reads are scoped to the replacement, never the retired adapter"
 }
 
 test_cursor_session_binding_is_retired_on_a_harness_switch() {
@@ -1337,6 +1482,12 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
+test_agy_wiring_is_retired_on_a_harness_switch
+test_agy_relaunch_preserves_a_borrowed_project_root
+test_agy_relaunch_preserves_a_project_authored_hook_file
+test_agy_relaunch_preserves_a_replaced_hook_retaining_the_token
+test_relaunch_scopes_composer_reads_to_the_replacement_harness
+test_agy_unknown_hook_root_refuses_the_relaunch
 test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -33,11 +33,15 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Claude, Pi, Grok, and Cursor set verified markers of their own; codex,
-  # opencode, Kimi, and Muse are markerless, so a foreign marker retained in a terminal
-  # multiplexer's stored environment can silently misidentify one of them before
-  # ancestry is consulted. This is a precedence hazard, not evidence that
-  # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
+  # Claude, Pi, Grok, Cursor, and Agy set verified markers of their own; codex,
+  # opencode, kimi, and muse are markerless, so a foreign marker retained in a
+  # terminal multiplexer's stored environment can silently misidentify one of
+  # them before ancestry is consulted. This is a precedence hazard, not
+  # evidence that CLAUDECODE inheritance into a kimi child was observed; it
+  # was not observed.
+  # Agy's marker is checked first because an Agy process launched from another
+  # harness may inherit that parent's marker while setting its own for tools.
+  [ "${ANTIGRAVITY_AGENT:-}" = "1" ] && { echo agy; return; }
   # Cursor is checked BEFORE claude, deliberately. cursor-agent does NOT clear
   # an inherited CLAUDECODE, so a cursor worker launched from a claude primary
   # carries BOTH markers and whichever is tested first wins. Cursor's own
@@ -93,6 +97,7 @@ detect_own() {
       # prefix rather than any exact name. Deliberately anchored, never *muse*, so
       # unrelated commands (musescore, amuse) cannot be misread as this harness.
       muse|muse-bin-*) echo muse; return ;;
+      agy) echo agy; return ;;
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
       node*|python*)
@@ -103,6 +108,7 @@ detect_own() {
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
+          *agy*) echo agy; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
     esac

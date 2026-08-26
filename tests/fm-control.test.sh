@@ -35,7 +35,7 @@ mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse"
+VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse agy"
 
 # The expectation table, written out independently of the implementation so a
 # silent change to either side shows up here. The fourth field is the composer
@@ -52,6 +52,7 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
     kimi) printf '/exit\tEscape\t1\t\n' ;;
     cursor) printf '/exit\tEscape\t1\t\n' ;;
     muse) printf '/exit\tEscape\t1\tC-u\n' ;;
+    agy) printf '/exit\tEscape\t1\t\n' ;;
     *) return 1 ;;
   esac
 }
@@ -125,6 +126,7 @@ case "${1:-}" in
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
+    printf '%s\n' "${FM_COMPOSER_HARNESS-}" > "$D/composer-harness"
     if [ -f "$D/pane" ]; then cat "$D/pane"; else printf '╭────╮\n│    │\n╰────╯\n'; fi
     exit 0 ;;
   list-windows)
@@ -200,6 +202,14 @@ run_control() {
     "$CONTROL" "$@" 2>&1
 }
 
+# run_send <case-dir> <args...>: the data plane against the same case fixture,
+# so both planes' composer-harness declaration is asserted from one stub.
+run_send() {
+  local dir=$1; shift
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_SEND_SETTLE=0 "$SEND" "$@" 2>&1
+}
+
 alive_as() {  # <case-dir> <command-name>
   printf '%s' "$2" > "$1/fake/command"
 }
@@ -267,7 +277,7 @@ test_harness_family_resolution() {
   for pair in claude:claude claude-latest:claude codex:codex codex-cli:codex \
       opencode:opencode grok:grok grok-2:grok kimi:kimi cursor:cursor \
       cursor-agent:cursor muse:muse muse-bin-0.1.0:muse pi:pi \
-      pi-signed:pi-signed; do
+      pi-signed:pi-signed agy:agy agy-1.1.8:agy; do
     recorded=${pair%%:*}
     want=${pair#*:}
     got=$(fm_control_harness_family "$recorded") \
@@ -282,6 +292,43 @@ test_harness_family_resolution() {
   [ "$(fm_control_harness_family pi-signed)" != "$(fm_control_harness_family pi)" ] \
     || fail "pi-signed must not collapse into pi"
   pass "fm-control-lib: a recorded harness resolves to its verified adapter without guessing"
+}
+
+# Every composer read this plane performs has to be scoped to the target's
+# harness, or an adapter whose composer is recognized only under its own scope
+# (agy) falls through to the generic classifier and the retried Enter that a
+# slash command's completion popup makes load-bearing stops after one press.
+test_control_declares_the_targets_composer_harness() {
+  local dir out rc pair
+  for pair in agy:agy agy-1.1.8:agy claude:claude cursor-agent:cursor; do
+    dir=$(new_case "composerharness-${pair%%:*}")
+    add_task "$dir" t1 "${pair%%:*}"
+    alive_as "$dir" "${pair%%:*}"
+    out=$(run_control "$dir" t1 exit); rc=$?
+    expect_code 0 "$rc" "exit on ${pair%%:*} should succeed"$'\n'"$out"
+    [ -f "$dir/fake/composer-harness" ] \
+      || fail "the control plane should read the composer for ${pair%%:*}"
+    [ "$(cat "$dir/fake/composer-harness")" = "${pair#*:}" ] \
+      || fail "a ${pair%%:*} task should declare composer harness '${pair#*:}', got '$(cat "$dir/fake/composer-harness")'"
+  done
+  pass "fm-control: every composer read is scoped to the target's verified adapter"
+}
+
+# The data plane declares the same contract from the same recorded value, so a
+# task recorded under a raw launch command's basename keeps its adapter's
+# composer proof on a steer exactly as it does on a lifecycle verb.
+test_send_declares_the_targets_composer_harness() {
+  local dir out rc pair
+  for pair in agy:agy agy-1.1.8:agy claude:claude; do
+    dir=$(new_case "sendharness-${pair%%:*}")
+    add_task "$dir" t1 "${pair%%:*}"
+    alive_as "$dir" "${pair%%:*}"
+    out=$(run_send "$dir" t1 "hello"); rc=$?
+    expect_code 0 "$rc" "a steer to ${pair%%:*} should succeed"$'\n'"$out"
+    [ "$(cat "$dir/fake/composer-harness")" = "${pair#*:}" ] \
+      || fail "fm-send to a ${pair%%:*} task should declare composer harness '${pair#*:}', got '$(cat "$dir/fake/composer-harness")'"
+  done
+  pass "fm-send: the steered pane's composer read is scoped to its verified adapter"
 }
 
 test_prefixed_recorded_harness_reaches_each_control_verb() {
@@ -878,6 +925,8 @@ test_interrupt_sends_each_harness_verified_key
 test_opencode_interrupts_twice_and_others_once
 test_unverified_harness_is_refused
 test_harness_family_resolution
+test_control_declares_the_targets_composer_harness
+test_send_declares_the_targets_composer_harness
 test_prefixed_recorded_harness_reaches_each_control_verb
 test_backend_key_capability_matrix
 test_harness_kind_capability

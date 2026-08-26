@@ -104,7 +104,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -176,6 +176,8 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
+# Agy uses the first available unoccupied customization root in the task
+# worktree, a private state registry, and a gitignored per-task pointer.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -260,6 +262,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-composer-lib.sh
+. "$SCRIPT_DIR/fm-composer-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -808,7 +812,8 @@ spawn_herdr_presentation_order_lock_acquire() {
 }
 
 clear_relaunch_harness_wiring() {
-  local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path path
+  local harness=$1 wt=$2 state=$3 id=$4
+  local token_path token hook_root hook_root_owner hook_record auth_path paths path
   # The wiring arms above match on harness PREFIXES, because a task launched
   # from a raw command records that command's basename rather than the exact
   # adapter name. The retirement tables are keyed by the exact adapter, so the
@@ -819,19 +824,51 @@ clear_relaunch_harness_wiring() {
   harness=$(fm_control_harness_family "$harness") || harness=
   token_path=$(fm_control_harness_turnend_token_path "$harness" "$state" "$id") || return 1
   token=
+  hook_root=
+  hook_root_owner=
+  hook_record=
   if [ -n "$token_path" ] && [ -f "$token_path" ]; then
     IFS= read -r token < "$token_path" || [ -n "$token" ] || return 1
+    # agy records the customization root it chose on the second line, root
+    # ownership (created|preexisting) on the third, and the exact installed
+    # hooks.json content on the fourth; every other adapter's token file has
+    # only the first, so these read empty there. The record is read here,
+    # before the loop below removes the token file itself.
+    hook_root=$(sed -n '2p' "$token_path" 2>/dev/null || true)
+    hook_root_owner=$(sed -n '3p' "$token_path" 2>/dev/null || true)
+    hook_record=$(sed -n '4p' "$token_path" 2>/dev/null || true)
   fi
-  auth_path=$(fm_control_harness_turnend_auth_path "$harness" "$token") || return 1
+  auth_path=$(fm_control_harness_turnend_auth_path "$harness" "$token" "$state") || return 1
   if [ -n "$auth_path" ]; then
     rm -f -- "$auth_path" || return 1
   fi
+  # Computed before the loop so a table refusal (an unrecognized recorded hook
+  # root, say) fails the retirement instead of being swallowed by the heredoc's
+  # command substitution and read as "nothing to retire".
+  paths=$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id" "$hook_root") || return 1
   while IFS= read -r path; do
     [ -n "$path" ] || continue
+    # agy's task-local hook sits inside a root the project may own and may
+    # have been replaced by a project-authored hooks.json while the task ran;
+    # only the file still matching the recorded install (fm-control-lib.sh
+    # owns the test) is retired, anything else is project configuration and
+    # stays.
+    if [ "$harness" = agy ] && [ -n "$hook_root" ] \
+       && [ "$path" = "$wt/$hook_root/hooks.json" ] \
+       && ! fm_control_agy_task_hook_owned "$path" "$token" "$hook_record"; then
+      continue
+    fi
     rm -f -- "$path" || return 1
   done <<EOF
-$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
+$paths
 EOF
+  # Only a root firstmate created may be removed once emptied; a pre-existing
+  # project directory (or a pre-owner-record token file, which reads as an
+  # empty owner) is left in place.
+  if [ "$harness" = agy ] && [ -n "$hook_root" ] \
+     && [ "$hook_root_owner" = created ]; then
+    rmdir "$wt/$hook_root" 2>/dev/null || true
+  fi
 }
 
 spawn_herdr_presentation_order_lock_release() {
@@ -1061,7 +1098,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1191,6 +1228,10 @@ launch_template() {
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # Agy's interactive TUI is the persistent steering surface.
+    # Launch bare so the project trust gate and Stop hooks settle before the
+    # first turn, then deliver only the absolute brief pointer below.
+    agy) printf '%s' 'agy __MODELFLAG____EFFORTFLAG__--dangerously-skip-permissions' ;;
     *) return 1 ;;
   esac
 }
@@ -1376,7 +1417,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1406,6 +1447,12 @@ effort_flag_for_harness() {
       # than passing a known-bad value.
       case "$effort" in
         low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
+    agy)
+      # Agy 1.1.8 accepts low, medium, and high and rejects xhigh and max.
+      case "$effort" in
+        low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
     pi|pi-signed)
@@ -2115,6 +2162,24 @@ fi
 # WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
 # worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
 : "${WT_TARGET:=$T}"
+
+# Declare THIS launch's target harness for every composer read below, the same
+# way bin/fm-send.sh and bin/fm-control.sh declare theirs. It is set on every
+# spawn rather than only for the adapters with a harness-scoped composer proof,
+# because this script also runs as fm-control's relaunch child and would
+# otherwise inherit the REPLACED adapter's declaration while reading the
+# replacement's pane. A raw launch command records its basename, so the value
+# resolves to its verified adapter first and falls back to the recorded name
+# when it resolves to none.
+#
+# Declared HERE, after the backend container exists, and never before it: a
+# tmux server takes its global environment from whichever process starts it, so
+# a spawn that stands the container up would otherwise make this one launch's
+# adapter name ambient for every pane created in that server afterwards - the
+# cross-harness composer claim this scope exists to prevent.
+FM_COMPOSER_HARNESS=$(fm_control_harness_family "$HARNESS") \
+  || FM_COMPOSER_HARNESS=$HARNESS
+export FM_COMPOSER_HARNESS
 spawn_send_text_line() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
@@ -2205,6 +2270,76 @@ kimi_wait_for_delivery() {
 }
 
 kimi_spawn_fail() {  # <detail>
+  printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+}
+
+agy_capture() {
+  fm_backend_capture "$BACKEND" "$T" 160 "$W" 2>/dev/null || true
+}
+
+agy_capture_has_trust_dialog() {  # <plain-pane-capture>
+  printf '%s\n' "$1" \
+    | grep -Eq '^[[:space:]]*Do you trust the contents of this project[?][[:space:]]*$' \
+    && printf '%s\n' "$1" \
+      | grep -Eq '^[[:space:]]*>[[:space:]]*Yes, I trust this folder[[:space:]]*$' \
+    && printf '%s\n' "$1" \
+      | grep -Eq '^[[:space:]]*No, exit[[:space:]]*$'
+}
+
+agy_capture_has_empty_composer() {  # <plain-pane-capture>
+  [ "$(fm_composer_separated_state "$1" 2>/dev/null || printf unknown)" = empty ]
+}
+
+agy_wait_for_ready() {
+  local pane i=0 max=${FM_AGY_READY_POLLS:-80} interval=${FM_AGY_POLL_INTERVAL:-0.5}
+  local trust_accepted=0
+  while [ "$i" -lt "$max" ]; do
+    pane=$(agy_capture)
+    if agy_capture_has_trust_dialog "$pane"; then
+      if [ "$trust_accepted" -eq 0 ]; then
+        spawn_send_key "$T" Enter || return 1
+        trust_accepted=1
+      fi
+    elif agy_capture_has_empty_composer "$pane"; then
+      return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+agy_wait_for_delivery() {
+  # Task-local turn-end hook creation is skipped for secondmate spawns (see
+  # the KIND=secondmate guard below), so $TURNEND never appears for that
+  # kind. Polling only for the transient busy footer is not enough either: a
+  # brief that starts and finishes between two polls leaves no busy sample to
+  # catch even though delivery genuinely succeeded. Once the transcript shows
+  # the pointer text, accept either the busy footer (mid-turn) or a
+  # returned-to-idle composer (already-completed turn) as proof, so a fast
+  # completion cannot read as a false delivery failure.
+  local pane i=0 max=${FM_AGY_DELIVERY_POLLS:-40} interval=${FM_AGY_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(agy_capture)
+    if [ -e "$TURNEND" ]; then
+      return 0
+    fi
+    if printf '%s\n' "$pane" | grep -Fq 'Read the brief at'; then
+      if printf '%s\n' "$pane" | grep -Fq 'esc to cancel'; then
+        return 0
+      fi
+      if agy_capture_has_empty_composer "$pane"; then
+        return 0
+      fi
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+agy_spawn_fail() {  # <detail>
   printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
 }
@@ -2586,6 +2721,62 @@ EOF
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-kimi-turnend"
       exclude_path '.fm-kimi-turnend'
       ;;
+    agy*)
+      # Agy discovers task-local hooks from four supported customization roots.
+      # Never merge with or overwrite a project's hooks.json.
+      # Select the first unoccupied root and fail closed when every root is
+      # already owned by the project. Whether the root existed before firstmate
+      # touched it is recorded alongside the token: a borrowed project
+      # directory must survive teardown and relaunch, only a firstmate-created
+      # one may be removed once emptied.
+      AGY_HOOK_ROOT=
+      AGY_HOOK_ROOT_OWNER=
+      for candidate in .agents .agent _agents _agent; do
+        if [ ! -e "$WT/$candidate" ] && [ ! -L "$WT/$candidate" ]; then
+          AGY_HOOK_ROOT=$candidate
+          AGY_HOOK_ROOT_OWNER=created
+          break
+        fi
+        if [ -d "$WT/$candidate" ] && [ ! -L "$WT/$candidate" ] \
+           && [ ! -e "$WT/$candidate/hooks.json" ] \
+           && [ ! -L "$WT/$candidate/hooks.json" ]; then
+          AGY_HOOK_ROOT=$candidate
+          AGY_HOOK_ROOT_OWNER=preexisting
+          break
+        fi
+      done
+      if [ -z "$AGY_HOOK_ROOT" ]; then
+        echo "error: refusing Agy spawn because .agents, .agent, _agents, and _agent already contain hooks.json or are unsafe; Firstmate will not merge or overwrite project hook configuration" >&2
+        exit 1
+      fi
+      AGY_AUTH_DIR="$STATE_REAL/agy-turn-end.d"
+      mkdir -p "$AGY_AUTH_DIR" "$WT/$AGY_HOOK_ROOT"
+      chmod 700 "$AGY_AUTH_DIR"
+      old_umask=$(umask)
+      umask 077
+      auth_file=$(mktemp "$AGY_AUTH_DIR/fm.XXXXXXXXXXXX")
+      umask "$old_umask"
+      token=${auth_file##*/}
+      printf '%s\n' "$TURNEND" > "$auth_file"
+      printf 'token=%s\n' "$token" > "$WT/.fm-agy-turnend"
+      agy_command=$(printf 'bash %s %s %s %s' \
+        "$(shell_quote "$FM_ROOT/bin/fm-agy-turnend-hook.sh")" \
+        "$(shell_quote "$AGY_AUTH_DIR")" \
+        "$(shell_quote "$token")" \
+        "$(shell_quote "$WT")")
+      agy_command=$(json_escape "$agy_command")
+      agy_hook_json=$(printf '{"firstmate-task-turn-end-%s":{"Stop":[{"type":"command","command":"%s","timeout":10}]}}' \
+        "$token" "$agy_command")
+      printf '%s\n' "$agy_hook_json" > "$WT/$AGY_HOOK_ROOT/hooks.json"
+      # The fourth token-file line is the provenance record retirement compares
+      # against: only a hooks.json still byte-identical to what was installed
+      # here is firstmate's to delete (fm-control-lib.sh owns the test).
+      printf '%s\n%s\n%s\n%s\n' \
+        "$token" "$AGY_HOOK_ROOT" "$AGY_HOOK_ROOT_OWNER" "$agy_hook_json" \
+        > "$STATE/$ID.agy-turnend-token"
+      exclude_path '.fm-agy-turnend'
+      exclude_path "$AGY_HOOK_ROOT/hooks.json"
+      ;;
   esac
 fi
 
@@ -2742,9 +2933,21 @@ case "$HARNESS" in
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
+# A verified worker must not inherit another harness's identity marker:
+# fm-harness.sh intentionally trusts verified markers before ancestry, so a
+# retained parent marker (Cursor's or Agy's) would classify the child and its
+# tools as the parent harness. Clearing at this launch boundary covers every
+# fm-spawn-started session; fm-harness.sh's marker ordering covers hand-started
+# ones.
+# Agy is absent on purpose: its launch must stay a bare `agy ...` literal so
+# the trust gate settles before any delivery, and its own marker outranks any
+# inherited one in bin/fm-harness.sh's precedence order.
 case "$HARNESS" in
+  cursor)
+    LAUNCH="env -u ANTIGRAVITY_AGENT $LAUNCH"
+    ;;
   claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
-    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
+    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ANTIGRAVITY_AGENT $LAUNCH"
     ;;
 esac
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
@@ -2849,6 +3052,30 @@ if [ "$HARNESS" = kimi ]; then
   fi
   if ! kimi_wait_for_delivery; then
     kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
+    exit 1
+  fi
+fi
+if [ "$HARNESS" = agy ]; then
+  if ! agy_wait_for_ready; then
+    agy_spawn_fail "Agy did not show the verified trust or ready surface before brief delivery"
+    exit 1
+  fi
+  AGY_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  AGY_SUBMIT_RETRIES=${FM_AGY_SUBMIT_RETRIES:-3}
+  AGY_SUBMIT_SLEEP=${FM_AGY_SUBMIT_SLEEP:-${FM_AGY_POLL_INTERVAL:-0.5}}
+  AGY_SUBMIT_SETTLE=${FM_AGY_SUBMIT_SETTLE:-0}
+  AGY_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
+    "$BACKEND" "$T" "$AGY_POINTER" "$AGY_SUBMIT_RETRIES" \
+    "$AGY_SUBMIT_SLEEP" "$AGY_SUBMIT_SETTLE" "$W") || {
+    agy_spawn_fail "Agy brief pointer could not be submitted"
+    exit 1
+  }
+  if [ "$AGY_SUBMIT_VERDICT" != empty ]; then
+    agy_spawn_fail "Agy brief pointer submission was not proven empty after Enter ($AGY_SUBMIT_VERDICT)"
+    exit 1
+  fi
+  if ! agy_wait_for_delivery; then
+    agy_spawn_fail "Agy brief pointer delivery was not confirmed"
     exit 1
   fi
 fi
