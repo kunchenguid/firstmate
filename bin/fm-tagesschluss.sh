@@ -40,6 +40,8 @@
 #   data/tagesschluss/<date>/bericht.md         the day report; final line
 #                                               "abschluss=ok" or "abschluss=befund: ..."
 #   data/tagesschluss/<date>/morgenpruefung.md  the morning check's verdict
+#   data/tagesschluss/<date>/streichliste.md    bin/fm-streichliste.sh's verbatim
+#                                               strike-candidate report
 #   (extraktion.tsv, forensik.md, lehren-kandidaten.md are owned by bin/fm-forensik.sh)
 #
 # Environment: FM_TAGESSCHLUSS_REBOOT (=1 arms the reboot), FM_TAGESSCHLUSS_REBOOT_CMD
@@ -47,7 +49,13 @@
 # FM_TAGESSCHLUSS_STATE_CMD (default bin/fm-crew-state.sh), FM_TAGESSCHLUSS_HALT_TIMEOUT
 # (seconds, default 1200), FM_TAGESSCHLUSS_HALT_POLL (default 30),
 # FM_TAGESSCHLUSS_UNIT_DIR (default ~/.config/systemd/user), FM_TAGESSCHLUSS_SYSTEMCTL
-# (default systemctl).
+# (default systemctl), FM_TAGESSCHLUSS_STREICHLISTE_CMD (default bin/fm-streichliste.sh).
+#
+# run also calls bin/fm-streichliste.sh (the drift-brake strike-candidate
+# list, single owner of that report) and writes its output verbatim to
+# data/tagesschluss/<date>/streichliste.md - informational only, like the
+# backpass pass below: a failure is recorded in bericht.md but never becomes
+# a befund and never keeps the day-close stop.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -141,6 +149,22 @@ case "$cmd" in
       befunde="${befunde:+$befunde; }forensik failed"
     fi
 
+    # 3b. Streichliste (drift-brake report): informational only, never a
+    # befund and never blocks the day close - see the file-level comment.
+    sl_cmd="${FM_TAGESSCHLUSS_STREICHLISTE_CMD:-$FM_ROOT/bin/fm-streichliste.sh}"
+    if [ -x "$sl_cmd" ]; then
+      if sl_out="$(FM_HOME="$FM_HOME" "$sl_cmd" 2>&1)"; then
+        printf '%s\n' "$sl_out" > "$out/streichliste.md"
+        streichliste_note="$out/streichliste.md"
+      else
+        sl_rc=$?
+        printf '%s\n' "$sl_out" > "$out/streichliste.md"
+        streichliste_note="FAILED (rc=$sl_rc, see $out/streichliste.md)"
+      fi
+    else
+      streichliste_note="skipped (bin/fm-streichliste.sh not executable)"
+    fi
+
     # 4. Reboot decision.
     if langlauf_active; then
       reboot_note="reboot deferred: registered long run ($(sed -n '2p' "$STATE/.tagesschluss-langlauf" 2>/dev/null))"
@@ -162,6 +186,7 @@ case "$cmd" in
       echo "stop: $stop_note"
       echo "halt: ${nicht_still:+NOT all halted: $nicht_still}${nicht_still:-all recorded tasks at a safe halt}"
       echo "forensik: $forensik_note"
+      echo "streichliste: $streichliste_note"
       echo "reboot: $reboot_note"
       echo "abschluss=$abschluss"
     } > "$out/bericht.md"

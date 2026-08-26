@@ -382,6 +382,41 @@ test_changed_mode_lints_only_the_changed_file() {
   pass "fm-lint.sh changed mode lints only the changed canonical file"
 }
 
+test_regel_eval_red_fails_lint() {
+  local tmp fakebin log diff_file out target regel_eval_root rc
+  tmp=$(fm_test_tmproot fm-lint-regel-eval-red)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  log="$tmp/shellcheck.log"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+  diff_file="$tmp/diff.nul"
+  target="bin/fm-install-shellcheck.sh"
+  fm_lint_write_diff_file "$diff_file" "$target"
+  # An empty root has no regeln/ dir, so bin/fm-regel-eval.sh fails FATAL
+  # immediately. FM_REGEL_EVAL_ROOT is the override the gate itself offers
+  # (tests/fm-regel-eval.test.sh uses the same one) so this stays a pure
+  # fixture, never the live rulebook; FM_REGEL_EVAL_SCHARF arms it so the red
+  # finding actually turns into a nonzero exit fm-lint.sh must propagate.
+  regel_eval_root="$tmp/regel-eval-root"
+  mkdir -p "$regel_eval_root"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    FM_TEST_GIT_BRANCH=feature \
+    FM_TEST_GIT_DIFF_FILE="$diff_file" \
+    FM_REGEL_EVAL_ROOT="$regel_eval_root" FM_HOME="$regel_eval_root" \
+    FM_REGEL_EVAL_SCHARF=1 \
+    "$LINT" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-lint.sh passed while the wired regel-eval gate was red"$'\n'"$out"
+  assert_contains "$out" "rule directory missing" \
+    "fm-lint.sh did not pass through the regel-eval gate's FATAL finding"
+  assert_contains "$out" "regel-eval:" \
+    "fm-lint.sh output did not show the wired regel-eval gate ran"
+  [ "$(cat "$log")" = "$target" ] \
+    || fail "wiring regel-eval changed which file ShellCheck linted"$'\n'"logged: $(cat "$log")"
+  pass "fm-lint.sh fails when the wired regel-eval gate is red"
+}
+
 test_ci_forces_full_lint_even_with_empty_diff() {
   local listed expected
   # No git stub: CI=true must short-circuit fm-lint.sh's mode selection before
@@ -1016,6 +1051,7 @@ test_jobs_are_deterministic_and_complete
 test_worker_trees_stop_on_signal
 test_seeded_module_boundary_parity
 test_changed_mode_lints_only_the_changed_file
+test_regel_eval_red_fails_lint
 test_ci_forces_full_lint_even_with_empty_diff
 test_main_branch_forces_full_lint
 test_explicit_path_bypasses_changed_logic
