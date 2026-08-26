@@ -12,14 +12,14 @@
 # the primary is about to end a turn.
 # Claude and codex can block directly by preserving exit status 2 and stderr.
 # OpenCode and pi adapters use the same predicate and force one bounded
-# follow-up because their turn-end events are passive. Grok delegates native
-# blocking when its running Stop payload advertises that capability, with one
-# bounded resume fallback for payloads from pre-native processes. Cursor calls
-# this guard back with --cursor from bin/fm-turnend-guard-cursor.sh and renders
-# exit 2 as one bounded follow-up, because exit 2 is a silent no-op on Cursor's
-# stop step; without that flag a Cursor-shaped payload is the Claude-settings
-# duplicate Cursor also loads, and this guard stands down.
-# See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
+# follow-up because their turn-end events are passive. OMP uses its native
+# blockable session_stop continuation. Grok delegates native blocking when its
+# running Stop payload advertises that capability, with one bounded resume
+# fallback for payloads from pre-native processes. Cursor calls this guard back
+# with --cursor from bin/fm-turnend-guard-cursor.sh and renders exit 2 as one
+# bounded follow-up, because exit 2 is a silent no-op on Cursor's stop step;
+# without that flag a Cursor-shaped payload is the Claude-settings duplicate
+# Cursor also loads, and this guard stands down.
 # and fail-open tradeoffs.
 #
 # Ships with TRACKED harness hook files at the repo root, so this file is
@@ -75,6 +75,7 @@ GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 CLAUDE_MODE=0
 CURSOR_MODE=0
+OMP_MODE=0
 SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
@@ -86,7 +87,8 @@ for arg in "$@"; do
   case "$arg" in
     --claude) CLAUDE_MODE=1 ;;
     --cursor) CURSOR_MODE=1 ;;
-    *) echo "usage: $(basename "$0") [--claude|--cursor]" >&2; exit 2 ;;
+    --omp) OMP_MODE=1 ;;
+    *) echo "usage: $(basename "$0") [--claude|--cursor|--omp]" >&2; exit 2 ;;
   esac
 done
 
@@ -161,7 +163,12 @@ budget_reset() {
 }
 
 fm_supervision_status "$STATE" "$GRACE"
-if [ "$FM_SUP_NEEDED" = false ]; then
+if [ "$CLAUDE_MODE" -eq 1 ] || [ "$OMP_MODE" -eq 1 ]; then
+  if [ "$FM_SUP_NEEDED" = false ]; then
+    [ -e "$FAILURE_NOTICE" ] || budget_reset
+    exit 0
+  fi
+elif [ "$FM_SUP_IN_FLIGHT" -eq 0 ]; then
   [ -e "$FAILURE_NOTICE" ] || budget_reset
   exit 0
 fi

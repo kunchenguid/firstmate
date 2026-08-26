@@ -2352,6 +2352,28 @@ EOF
   pass "session start preserves pi-signed primary identity while applying Pi extension guarantees"
 }
 
+test_omp_delivery_failure_is_surfaced_once() {
+  local rec root home fakebin out
+  rec=$(new_world omp-delivery-failure)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" omp
+  printf '%s\n' 'sendUserMessage rejected: primary session unavailable' > "$home/state/.omp-watch-delivery-failed"
+
+  out=$(run_named_harness_session_start omp "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "OMP_WATCH_DELIVERY: prior watcher follow-up delivery was rejected" \
+    "session start did not surface a rejected OMP watcher follow-up"
+  assert_contains "$out" "sendUserMessage rejected: primary session unavailable" \
+    "session start did not include the OMP delivery failure diagnostic"
+  assert_absent "$home/state/.omp-watch-delivery-failed" \
+    "session start did not consume the surfaced OMP delivery failure marker"
+
+  pass "session start surfaces an OMP watcher delivery failure once"
+}
+
 test_pi_diagnostic_rejects_stale_loaded_marker() {
   local rec root home fakebin out marker holder_pid
   rec=$(new_world pi-stale-loaded-marker)
@@ -2473,6 +2495,7 @@ test_tasks_axi_compatibility_is_probed_once
 test_session_start_preserves_ambiguous_pi_process
 test_session_start_preserves_transiently_unreadable_tmux
 test_session_start_preserves_proven_bare_shell_recovery
+test_omp_delivery_failure_is_surfaced_once
 test_session_start_relaunches_herdr_husk_secondmate
 test_status_tail_bounding
 test_status_tail_line_cap

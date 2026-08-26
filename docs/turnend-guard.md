@@ -34,12 +34,12 @@ Otherwise it calls `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] 
 The turn-end guard needs that strict check because it fires at the turn boundary, where the auto-arm is bringing a fresh watcher up for the upcoming idle period, and it cooperates with that arm rather than trusting a beacon left by the cycle that just ended.
 `bin/fm-guard.sh`, the pull warning, instead uses the model-aware `fm_watcher_supervision_verdict` from the same library, because it fires mid-turn when the auto-arm model runs no watcher at all.
 Under the Claude Stop auto-arm model a beacon fresh within grace is healthy even with no live watcher process, and only a beacon stale beyond grace (or absent) alarms.
-Under the Pi extension model a live identity-matched watcher is the ordinary healthy state, but a genuinely unheld lock with a beacon fresh within grace is also healthy while a live Pi session provably owns continuity, because `.pi/extensions/fm-primary-pi-watch.ts` tears the watcher down on every actionable wake and spawns the replacement itself.
+Under the OMP and Pi extension model a live identity-matched watcher is the ordinary healthy state, but a genuinely unheld lock with a beacon fresh within grace is also healthy while a live primary session provably owns continuity, because their tracked watcher extensions tear the watcher down on every actionable wake and spawn the replacement themselves.
 A lock is genuinely unheld only when the lock directory or its symlinked owner directory is absent, or when the existing lock records no pid at all.
 Any lock with a recorded pid remains down when its pid, home, watcher path, or process identity fails the strict watcher health check.
-That ownership proof is `fm_pi_extension_owns_supervision` in `bin/fm-wake-lib.sh`: both Pi primary extensions must be recorded in their state markers at their current on-disk builds by the process named in `state/.lock`, and that process must still be alive.
+That ownership proof is `fm_pi_extension_owns_supervision` or `fm_omp_extension_owns_supervision` in `bin/fm-wake-lib.sh`: both tracked primary extensions must be recorded in their state markers at their current on-disk builds by the live process named in `state/.lock`.
 Requiring the turn-end guard extension as well as the watch extension is deliberate, because a home without that structural backstop has no benign hand-off to tolerate.
-Without that proof an unheld lock alarms exactly as it did before, so an unloaded, version-drifted, or exited Pi session is loud immediately, and a cycle the extension never restores is loud once the beacon passes grace.
+Without that proof an unheld lock alarms exactly as it did before, so an unloaded, version-drifted, or exited primary session is loud immediately, and a cycle the extension never restores is loud once the beacon passes grace.
 Under every persistent-watcher harness a live identity-matched watcher with a fresh beacon is still required, so the pull guard keeps the same strict semantics there.
 Its banner names the true failing condition, either a missing live watcher process or a genuinely stale beacon with its real age, and keys the once-per-episode dedup on that condition rather than the beacon mtime.
 
@@ -53,6 +53,7 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
 - Codex registers a `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to the shared guard.
 - OpenCode listens for `session.idle` in `.opencode/plugins/fm-primary-turnend-guard.js`, lets the watcher coordinator act first, and calls `client.session.promptAsync` once when the guard returns 2.
 - Pi listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
+- OMP listens for `session_stop` in `.omp/extensions/fm-primary-turnend-guard.ts` and returns one `{ continue: true, additionalContext }` continuation when `bin/fm-turnend-guard.sh --omp` exits 2.
 - Cursor registers a `stop` hook in `.cursor/hooks.json` and delegates the whole turn boundary to `bin/fm-turnend-guard-cursor.sh`, the park described below.
   Cursor also loads `<project>/.claude/settings.json`, so every tracked Claude-shaped entrypoint whose event Cursor covers stands down on a Cursor-delivered payload through `bin/fm-hook-host-lib.sh`.
   That predicate reads the delivered payload's own `cursor_version`, never the environment: Cursor exports `CURSOR_INVOKED_AS`, `CURSOR_PROJECT_DIR`, and `CURSOR_VERSION` into every child process, so an environment guard would also disable the hooks of a Claude session started by hand from a Cursor pane, which is the hazard the `GROK_SESSION_ID` exclusion below records.
@@ -93,12 +94,12 @@ The alarm cannot repeat during that failure episode, and a later unhealthy stop 
 A positively verified healthy watcher clears the failure notice, alarm, and block budget for a future independent episode.
 A Claude failure notice describes the automatic mechanism as broken and does not direct a routine manual background arm.
 
-OpenCode, Pi, and pi-signed expose passive callbacks for this purpose.
-Their adapters fail open at the hook boundary to protect the user session but schedule one bounded follow-up when the predicate blocks.
+OpenCode, OMP, Pi, and pi-signed expose extension callbacks for this purpose.
+OpenCode, Pi, and pi-signed schedule one bounded follow-up when the predicate blocks, while OMP's `session_stop` event blocks directly with one continued turn.
 The generated prompts use the canonical `turn-end-guard` kind after the U+2063 `FIRSTMATE_OP: ` prefix, so Ahoy does not treat them as captain messages.
-Each passive adapter owns a loop latch.
+Each adapter owns a loop latch.
 Pi keeps the latch across internal tool turns and clears it only when the generated follow-up settles or delivery fails.
-OpenCode's forced follow-up is supported for persistent TUI sessions and remains fail-open in headless `opencode run`.
+OMP clears its continuation latch at the forced continuation's next stop, so it can neither end blind nor recurse indefinitely.
 
 Grok makes exactly one typed capability decision from each running Stop payload.
 A boolean `stopHookActive` selects native blocking, including both false on the initial stop and true on the bounded continuation.

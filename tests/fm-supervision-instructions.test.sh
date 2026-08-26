@@ -176,6 +176,21 @@ test_pi_snippet_uses_effective_extension_path() {
   pass "pi supervision snippet renders the effective extension path"
 }
 
+test_omp_snippet_renders_native_extensions() {
+  local home out turnend watch
+  home="$TMP_ROOT/omp-home"
+  turnend="$ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
+  watch="$ROOT/.omp/extensions/fm-primary-omp-watch.ts"
+  mkdir -p "$home/state" "$home/config"
+  out=$(FM_HOME="$home" "$RENDER" --harness omp)
+  assert_contains "$out" "Mode: OMP extension background wake." "OMP snippet missing native extension mode"
+  assert_contains "$out" "-e $turnend -e $watch" "OMP snippet did not render both native extension paths"
+  assert_contains "$out" "fm_watch_arm_omp" "OMP snippet did not direct extension-owned re-arm"
+  assert_not_contains "$out" "__FM_OMP_EXT__" "renderer leaked the OMP watcher extension placeholder"
+  assert_not_contains "$out" "__FM_OMP_TURNEND_EXT__" "renderer leaked the OMP turn-end extension placeholder"
+  pass "OMP supervision snippet renders native extension paths"
+}
+
 test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas
@@ -185,3 +200,4 @@ test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
 test_pi_snippet_uses_effective_extension_path
+test_omp_snippet_renders_native_extensions

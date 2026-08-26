@@ -184,6 +184,7 @@ Applicability turns on one question: does the harness expose built-in delegation
 | Codex | none | Not applicable, verified empirically below. Codex 0.144.1 exposes no subagent, sub-task, or delegated-agent tool, so there is nothing to remove or intercept. `.codex/hooks.json` is unchanged. |
 | Grok | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | OpenCode | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
+| OMP | present | Wired through `.omp/extensions/fm-primary-turnend-guard.ts`, which routes every non-bash tool call to `bin/fm-subagent-pretool-check.sh --tool` and returns `{block: true}` on a deny. |
 | Pi | none reported | Not wired pending live verification. See below. |
 
 ### Codex, verified not applicable

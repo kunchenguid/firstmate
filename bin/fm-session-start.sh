@@ -756,6 +756,31 @@ if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
     printf 'PI_WATCH_EXTENSION: not loaded - approve Pi project trust once per clone, then restart %s so %s and %s auto-load for turn-end guard and background wake coverage; use -e %s -e %s only if project hooks are not trusted\n' "$PI_RESTART_COMMAND" "$PI_TURNEND_EXT" "$PI_EXT" "$PI_TURNEND_EXT" "$PI_EXT"
   fi
 fi
+
+if [ "$PRIMARY_HARNESS" = omp ] && [ "$READ_ONLY" -eq 0 ]; then
+  OMP_EXT="$FM_ROOT/.omp/extensions/fm-primary-omp-watch.ts"
+  OMP_TURNEND_EXT="$FM_ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
+  OMP_WATCH_MARKER="$STATE/.omp-watch-extension-loaded"
+  OMP_TURNEND_MARKER="$STATE/.omp-turnend-extension-loaded"
+  OMP_LOCK="$STATE/.lock"
+  OMP_WATCH_VERSION=$(fm_pi_extension_version "$OMP_EXT" || printf '')
+  OMP_TURNEND_VERSION=$(fm_pi_extension_version "$OMP_TURNEND_EXT" || printf '')
+  if ! fm_pi_extension_loaded "$OMP_WATCH_MARKER" "$OMP_WATCH_VERSION" "$OMP_LOCK" \
+    || ! fm_pi_extension_loaded "$OMP_TURNEND_MARKER" "$OMP_TURNEND_VERSION" "$OMP_LOCK"; then
+    printf 'OMP_WATCH_EXTENSION: not loaded - restart plain omp so %s and %s auto-load from .omp/extensions for turn-end guard and background wake coverage; use -e %s -e %s only when auto-loading is unavailable\n' "$OMP_TURNEND_EXT" "$OMP_EXT" "$OMP_TURNEND_EXT" "$OMP_EXT"
+  fi
+  OMP_DELIVERY_FAILURE_MARKER="$STATE/.omp-watch-delivery-failed"
+  if [ -s "$OMP_DELIVERY_FAILURE_MARKER" ]; then
+    OMP_DELIVERY_FAILURE_HANDLING="$STATE/.omp-watch-delivery-failed.handling.$$"
+    if mv "$OMP_DELIVERY_FAILURE_MARKER" "$OMP_DELIVERY_FAILURE_HANDLING" 2>/dev/null; then
+      printf 'OMP_WATCH_DELIVERY: prior watcher follow-up delivery was rejected; the exact diagnostic follows.\n'
+      cat "$OMP_DELIVERY_FAILURE_HANDLING"
+      rm -f "$OMP_DELIVERY_FAILURE_HANDLING"
+    else
+      printf 'OMP_WATCH_DELIVERY: prior watcher follow-up delivery was rejected; inspect %s.\n' "$OMP_DELIVERY_FAILURE_MARKER"
+    fi
+  fi
+fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \
   --harness "$PRIMARY_HARNESS" \
   --read-only "$READ_ONLY" \

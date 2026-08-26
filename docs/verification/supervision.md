@@ -48,6 +48,22 @@ The earlier `sendUserMessage` counterfactual raced the positional prompt; the cu
 The installed pi-signed 0.82.0 wrapper repeated the Pi primary extension and session-start path on 2026-07-27.
 [`runtime-backends.md`](runtime-backends.md#tmux) owns the shared-ancestry evidence and authoritative selection-marker boundary.
 
+OMP 17.3.3 lifecycle smoke ran on 2026-08-14 in a disposable `FM_HOME`.
+
+```sh
+mkdir -p "$SMOKE_HOME"/{state,config,data}
+printf 'harness=omp\nbackend=tmux\nwindow=missing\n' > "$SMOKE_HOME/state/smoke.meta"
+FM_HOME="$SMOKE_HOME" FM_ROOT_OVERRIDE="$PWD" \
+  omp -p --no-session \
+  'Call fm_watch_arm_omp now. Then use the bash tool to run sleep 20, so you can receive any automatic watcher follow-up. When a follow-up says a supervised worker completed, reply with exactly OMP_FOLLOWUP_SMOKE_DONE and nothing else.'
+# While OMP remained in the sleep tool call:
+printf 'done: real supervised worker completion\n' > "$SMOKE_HOME/state/smoke.status"
+```
+
+Observed stdout was `OMP_FOLLOWUP_SMOKE_DONE`.
+The watcher ledger recorded `reason=actionable-signal` and `successor=started:<pid>`, while both OMP extension-loaded markers contained the current SHA-256 digest and the live primary process id.
+This proves the durable worker completion, extension-owned watcher wake, native `sendUserMessage(..., { deliverAs: "followUp" })` delivery, and automatic continued primary turn in one real OMP session.
+
 ### Run-tier source vocabulary and context-reset injection
 
 The run tier depends on three facts only the vendor can supply: the session-open source it reports, whether hook stdout reaches model context on a context-RESET open rather than only a cold one, and whether a worker the hook detaches survives the hook returning.
