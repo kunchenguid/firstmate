@@ -1510,7 +1510,29 @@ fi
 SECONDMATE_LANDED_JSON=$(secondmate_landed_from_current_json "$SECONDMATE_CURRENT_JSON") \
   || { echo "fm-fleet-snapshot: secondmate landed projection failed" >&2; exit 1; }
 
-jq -n \
+# Stage aggregate JSON so final assembly is not constrained by the process argv limit.
+SNAPSHOT_PAYLOAD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot.payload.XXXXXX") || {
+  echo "fm-fleet-snapshot: snapshot payload staging failed" >&2
+  exit 1
+}
+snapshot_payload_cleanup() {
+  rm -rf "$SNAPSHOT_PAYLOAD_DIR"
+}
+trap snapshot_payload_cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if ! printf '%s\n' "$BACKLOG_JSON" > "$SNAPSHOT_PAYLOAD_DIR/backlog.json" ||
+  ! printf '%s\n' "$TASKS_JSON" > "$SNAPSHOT_PAYLOAD_DIR/tasks.json" ||
+  ! printf '%s\n' "$MAIN_INVENTORY_JSON" > "$SNAPSHOT_PAYLOAD_DIR/main-inventory.json" ||
+  ! printf '%s\n' "$SCOUT_REPORTS_JSON" > "$SNAPSHOT_PAYLOAD_DIR/scout-reports.json" ||
+  ! printf '%s\n' "$SECONDMATE_CURRENT_JSON" > "$SNAPSHOT_PAYLOAD_DIR/secondmate-current.json" ||
+  ! printf '%s\n' "$SECONDMATE_LANDED_JSON" > "$SNAPSHOT_PAYLOAD_DIR/secondmate-landed.json"; then
+  echo "fm-fleet-snapshot: snapshot payload staging failed" >&2
+  exit 1
+fi
+
+if jq -n \
   --arg generated "$SNAPSHOT_NOW" \
   --arg fm_home "$FM_HOME" \
   --arg fm_root "$FM_ROOT" \
@@ -1518,13 +1540,19 @@ jq -n \
   --arg data "$DATA" \
   --arg config "$CONFIG" \
   --arg projects "$PROJECTS" \
-  --argjson backlog "$BACKLOG_JSON" \
-  --argjson tasks "$TASKS_JSON" \
-  --argjson main_inventory "$MAIN_INVENTORY_JSON" \
-  --argjson scout_reports "$SCOUT_REPORTS_JSON" \
-  --argjson secondmate_current "$SECONDMATE_CURRENT_JSON" \
-  --argjson secondmate_landed "$SECONDMATE_LANDED_JSON" \
-  'def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
+  --slurpfile backlog "$SNAPSHOT_PAYLOAD_DIR/backlog.json" \
+  --slurpfile tasks "$SNAPSHOT_PAYLOAD_DIR/tasks.json" \
+  --slurpfile main_inventory "$SNAPSHOT_PAYLOAD_DIR/main-inventory.json" \
+  --slurpfile scout_reports "$SNAPSHOT_PAYLOAD_DIR/scout-reports.json" \
+  --slurpfile secondmate_current "$SNAPSHOT_PAYLOAD_DIR/secondmate-current.json" \
+  --slurpfile secondmate_landed "$SNAPSHOT_PAYLOAD_DIR/secondmate-landed.json" \
+  '($backlog[0]) as $backlog
+   | ($tasks[0]) as $tasks
+   | ($main_inventory[0]) as $main_inventory
+   | ($scout_reports[0]) as $scout_reports
+   | ($secondmate_current[0]) as $secondmate_current
+   | ($secondmate_landed[0]) as $secondmate_landed
+   | def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
    def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
    def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
    {
@@ -1541,4 +1569,11 @@ jq -n \
      secondmate_guidance:{
        note:"For kind=secondmate, bearings selects validated structured state from that registered home; parent events and bounded terminal evidence are fallback-only supplements and never current-state authority."
      }
-   }'
+   }'; then
+  snapshot_rc=0
+else
+  snapshot_rc=$?
+fi
+snapshot_payload_cleanup
+trap - EXIT HUP INT TERM
+exit "$snapshot_rc"
