@@ -418,8 +418,8 @@ CHECKS_DORMANT_SECTION=""
 if [ -n "$CHECKS_DORMANT" ]; then
   if [ "$MODE" = no-mistakes ]; then
     DORMANT_WAIT="Never wait for, poll, or re-run checks at any point, including when the pipeline reaches its own CI step: that step is what does the waiting, and you are the one who must not sit on it."
-    DORMANT_STEP="If the pipeline can finish or move on without check results, let it; if it can only sit waiting for them, leave it there and complete the two obligations below."
-    DORMANT_PR_WRITE="The pipeline's generated description knows none of this, so add it yourself with \`gh-axi\` once the run is no longer active."
+    DORMANT_STEP="Your finish line is the pipeline having done everything it can: once it has pushed and the PR exists, you are at it and the two obligations below are all that remain. Its CI step may still be sitting on check results then - that is expected here, not a reason to wait, and not something you have to end."
+    DORMANT_PR_WRITE="The pipeline's generated description knows none of this, so add it yourself with \`gh-axi\` as soon as the PR exists; writing a PR description is not hand-editing code or fixing findings, so an active run is no reason to hold it back."
     DORMANT_INTENT=$'\n'"Carry this dormancy statement into your \`--intent\` as well, so the pipeline is not left inferring that a missing check is a defect in your change."
   else
     DORMANT_WAIT="Never wait for, poll, or re-run checks after you push."
@@ -492,7 +492,7 @@ EOF
       IFS= read -r -d '' DOD_TAIL <<EOF || true
 $CHECKS_DORMANT_SECTION
 
-When the PR exists and its description carries that statement, append \`done: PR {url} - automated checks did not run, verified locally\` to the status file and stop. You are finished.
+Once the pipeline has pushed, the PR exists, and its description carries that statement, append \`done: PR {url} - automated checks did not run, verified locally\` to the status file and stop. You are finished, whether or not the run is still sitting on its CI step.
 EOF
     else
       IFS= read -r -d '' DOD_TAIL <<'EOF' || true

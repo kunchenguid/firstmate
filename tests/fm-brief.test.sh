@@ -770,6 +770,14 @@ test_dormant_checks_replace_the_check_shaped_finish_line() {
     "dormant brief did not give the worker a reachable finish line"
   assert_grep "never park on it with \`paused:\`" "$brief" \
     "dormant brief let the worker park on the dormancy as a self-clearing external wait"
+  # The replacement finish line must itself be reachable: no-mistakes' ci step
+  # stays running for the whole CI-monitor phase on a captain-merge repo, so a
+  # done gate that waits for the run to end or go inactive is the same unbounded
+  # wait one level up.
+  assert_no_grep "no longer active" "$brief" \
+    "dormant brief re-gated the finish line on the pipeline run going inactive"
+  assert_grep "whether or not the run is still sitting on its CI step" "$brief" \
+    "dormant brief did not free the done report from the run's own state"
   pass "fm-brief.sh: a dormant-checks declaration replaces the check-shaped finish line"
 }
 
@@ -797,7 +805,7 @@ test_dormant_checks_require_local_evidence_and_pr_disclosure() {
   done
 
   # Only the pipeline-driven mode carries the pipeline-specific instructions.
-  assert_grep "add it yourself with \`gh-axi\` once the run is no longer active" \
+  assert_grep "add it yourself with \`gh-axi\` as soon as the PR exists" \
     "$home/data/brief-dormant-say-no-mistakes/brief.md" \
     "no-mistakes dormant brief must say how the disclosure reaches a pipeline-generated PR description"
   assert_grep "Carry this dormancy statement into your \`--intent\`" \
