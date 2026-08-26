@@ -219,7 +219,7 @@ family_for_basename() {
     fm-session-lock-ancestry.test.sh|fm-cursor-primary.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
     fm-wake-drain-unread-status.test.sh|\
-    fm-tool-update-check.test.sh|\
+    fm-runner-health-check.test.sh|fm-tool-update-check.test.sh|\
     fm-wake-queue.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-recovery-loop.test.sh|\
     fm-watch-triage.test.sh|fm-task-inbox.test.sh|\
     fm-watcher-lock.test.sh|fm-inactive-reconcile.test.sh)
@@ -572,6 +572,7 @@ tests/fm-remote-reply.test.sh 40906
 tests/fm-remote-secondmate-lifecycle-e2e.test.sh 170240
 tests/fm-remote-secondmate-parent-binding.test.sh 13064
 tests/fm-remote-secondmate-trace-context.test.sh 39927
+tests/fm-runner-health-check.test.sh 5176
 tests/fm-secondmate-harness.test.sh 123471
 tests/fm-secondmate-lifecycle-e2e.test.sh 6539
 tests/fm-secondmate-liveness.test.sh 16365

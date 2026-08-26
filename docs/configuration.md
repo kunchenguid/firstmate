@@ -478,6 +478,29 @@ The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the 
 So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 A budget that is not a whole number from 1 to 120 is still refused outright.
 
+## GitHub Actions runner health
+
+[`bin/fm-runner-health-check.sh`](../bin/fm-runner-health-check.sh) watches one named repository and one simple runner label through GitHub's repository `actions/runners` API.
+Arm it once per home with `bin/fm-runner-health-check.sh arm <owner/repo> <runner-label>`.
+For example, `bin/fm-runner-health-check.sh arm connectwithclayton/toolroll toolroll-mac` watches Toolroll's Apple-dependent runner.
+
+Arming writes `state/runner-health.check.sh` and binds its bytes through `bin/fm-check-register.sh`.
+The existing watcher polls that private check on its ordinary cadence and turns a report into a `check:` wake.
+It does not add work to session start, start a watcher by itself, or introduce another scheduler.
+
+The check prints `runner health: <owner/repo> runner label <runner-label> is offline` when a matching registration exists but none is online.
+It prints `runner health: <owner/repo> has no registered runner with label <runner-label>` when no registration carries the label.
+An online runner is healthy whether idle or busy, so healthy polls print nothing.
+Network errors, authentication errors, timeouts, and malformed API responses also print nothing and leave the last known report state unchanged.
+
+`state/.runner-health` records the target and last reported finding.
+The same outage therefore reports once, recovery clears the finding silently, and a later outage reports again.
+Changing between offline and missing is a changed finding and reports once in its new form.
+`bin/fm-runner-health-check.sh disarm` removes the shim, trust binding, and report record.
+
+`FM_RUNNER_HEALTH_PROBE_SECS` sets the API probe bound from 1 to 20 seconds and defaults to 8.
+The probe is cut further when necessary to leave three seconds inside `FM_CHECK_TIMEOUT` for process cleanup and local record handling.
+
 ## Relay (.env)
 
 Relay lets a firstmate instance answer public mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
