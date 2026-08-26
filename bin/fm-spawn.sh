@@ -153,7 +153,15 @@
 #   pre-existing path it adopts, and never a path whose mode it adjusts - and a
 #   marker directory that stops being one this account owns with neither group
 #   nor other able to write it refuses the spawn instead of being believed. That
-#   pair of conditions is the requirement, never one exact permission value.
+#   pair of conditions is the requirement, never one exact permission value, and
+#   the task temp root HOLDING that directory must meet it too: whoever can
+#   write the root can replace the entry for the marker directory inside it, so
+#   an adopted root anyone else can write refuses the spawn, while one this
+#   spawn created satisfies the requirement by construction. That root is named
+#   after the task id alone and so is shared by every home on the host spawning
+#   that id: creation of it is claimed atomically, and a refused spawn takes it
+#   back only by `rmdir`, so another home's marker or a live worker's build temp
+#   inside it keeps it standing rather than being deleted along with it.
 #   A probe that cannot be DELIVERED is a different failure from one that was
 #   delivered and never answered: the send is not retried past its own error,
 #   and the refusal names the unreachable endpoint rather than blaming
@@ -847,11 +855,23 @@ spawn_abort_cleanup() {
   # is also the window before GOTMPDIR is exported into any pane - so nothing
   # live can be using it, an adopted or foreign-planted root is never touched,
   # and a published task stays reapable by id through fm-teardown.
+  #
+  # `rmdir`, never `rm -rf`, and that is the whole point of these two lines. The
+  # root is named after the task id alone, so a second home spawning the same id
+  # shares this exact path, and "this spawn created it" does not mean "this
+  # spawn is the only one in it": the other home can have adopted it and put its
+  # own readiness marker or a launched worker's Go build temp inside. rmdir
+  # removes only the empty tree this spawn made and FAILS on anything else, so
+  # someone else's work is what keeps the root standing rather than what gets
+  # deleted. gotmp goes back when that happens, because it was never this
+  # spawn's alone to take away from a live worker pointing GOTMPDIR at it.
   if [ "$status" -ne 0 ]; then
     [ -z "$SPAWN_READY_ROOT" ] || rm -rf "$SPAWN_READY_ROOT" 2>/dev/null || true
     if [ "$SPAWN_TASK_TMP_CREATED" = 1 ] && [ -n "$TASK_TMP" ] \
        && [ ! -e "$STATE/${ID:-}.meta" ]; then
-      rm -rf "$TASK_TMP" 2>/dev/null || true
+      if rmdir "$TASK_TMP/gotmp" 2>/dev/null; then
+        rmdir "$TASK_TMP" 2>/dev/null || mkdir "$TASK_TMP/gotmp" 2>/dev/null || true
+      fi
     fi
   fi
   return "$status"
@@ -2407,7 +2427,23 @@ spawn_fail_after_meta() {  # <detail>
 # Created here, ahead of the first typed send, because the shell-readiness gate
 # below keeps its marker inside this same root and teardown already removes it.
 TASK_TMP="/tmp/fm-$ID"
-[ -d "$TASK_TMP" ] || SPAWN_TASK_TMP_CREATED=1
+# Creation is claimed by the CREATE, never by a preceding `[ -d ]` test. This
+# path is named after the task id alone, so it is shared by every home on the
+# host that spawns that id, and those homes serialize on per-home locks that say
+# nothing about each other. A test-then-set therefore lets two concurrent spawns
+# BOTH conclude they created this root - after which either one's refusal
+# cleanup below would remove a root the other is still using, taking out its
+# readiness marker or a launched worker's live GOTMPDIR. `mkdir` is atomic, so
+# exactly one of them can succeed and only that one may ever remove it.
+#
+# The mode comes from `umask` rather than a `chmod` afterwards: it lands with
+# the directory in the same syscall instead of on whatever the path names a
+# moment later, and it makes a root THIS spawn created private under any host
+# umask, so the privacy requirement below can never refuse a spawn over a root
+# of its own making.
+if (umask 077; mkdir "$TASK_TMP" 2>/dev/null); then
+  SPAWN_TASK_TMP_CREATED=1
+fi
 # Guarded, and not left to `set -e`, for the same reason the marker directory
 # below refuses out loud: /tmp is world-writable and a task id is an ordinary
 # predictable slug, so this whole root is a path another local account can
@@ -2490,6 +2526,28 @@ spawn_ready_root_private() {  # <dir> - on false, names the failed condition
   fi
   return 0
 }
+
+# An unguessable name inside the root is not on its own what keeps the marker
+# directory the spawn's own: the ENTRY for it lives in the root, so whoever can
+# write the root can rename or replace that entry with a symlink to anywhere
+# this account can write, and every later `rm -f`/`touch` of a fixed marker name
+# would then land through the replacement instead. Re-checking the marker
+# directory cannot undo that - a check and the operation after it are two steps,
+# and the swap fits between them. The one thing that closes it is the parent:
+# in a root no other account can write, the entry cannot be replaced at all.
+#
+# So the same private-directory requirement the marker directory must meet is
+# demanded of the root that holds it, and for the same reason - a root this
+# spawn just created satisfies it by construction (see the umask above), while
+# an adopted one that anybody else can write refuses the spawn instead of
+# yielding a marker that proves nothing. Demanded, never imposed: the root's
+# mode is still left exactly as found, because a spawn that chmod-ed a path
+# whose identity it never established would be aiming that mode change at
+# whatever a raced symlink pointed to.
+if ! spawn_ready_root_private "$TASK_TMP"; then
+  echo "error: task $ID's per-task temp root $TASK_TMP is not private: $SPAWN_READY_ROOT_PRIVACY_ISSUE, so another local account could replace the readiness-marker directory this spawn is about to create inside it and no marker there would be proof the endpoint shell ran what was typed into it; refusing to spawn" >&2
+  exit 1
+fi
 
 SPAWN_READY_ROOT=$(mktemp -d "$TASK_TMP/shell-ready.XXXXXXXX") || SPAWN_READY_ROOT=
 if [ -z "$SPAWN_READY_ROOT" ]; then

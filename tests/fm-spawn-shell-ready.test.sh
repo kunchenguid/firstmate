@@ -47,9 +47,14 @@
 # itself while leaving that root's mode alone, because a spawn that adjusted the
 # mode of a path it did not create would follow a symlink raced into place; a
 # second plants a root it cannot privately write and asserts a loud refusal
-# rather than a marker that proves nothing. A third case pins the re-send
-# cadence, which lands in the very scrollback an operator reads when a spawn is
-# slow.
+# rather than a marker that proves nothing; a third plants one any local account
+# CAN write and asserts the same refusal, because the entry for the marker
+# directory lives in that root and whoever writes the root can replace it. A
+# fourth case is about that root being shared rather than hostile - the task id
+# alone names it, so a second home spawning the same id is in the same path, and
+# a refused spawn must leave that home's marker standing instead of reaping the
+# root out from under it. A fifth pins the re-send cadence, which lands in the
+# very scrollback an operator reads when a spawn is slow.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -286,6 +291,12 @@ case "${1:-}" in
     exit 0
     ;;
   send-keys)
+    # A SECOND home spawning this same task id, using the same /tmp/fm-<id> the
+    # id alone names. Its readiness marker appears in that shared root while
+    # this spawn is still typing into its pane - which is the only moment a
+    # concurrent home is observable from here, and the moment that decides
+    # whether this spawn's own refusal cleanup takes that marker with it.
+    [ -z "${FM_FAKE_SHARED_ROOT_ENTRY:-}" ] || mkdir -p "$FM_FAKE_SHARED_ROOT_ENTRY"
     # A pane that is gone: the backend itself refuses to deliver, loudly, and
     # every attempt is recorded so a retry storm is visible to the test.
     if [ -f "$S/send-fails" ]; then
@@ -466,6 +477,8 @@ test_shell_that_never_reads_refuses_loudly() {
   assert_not_contains "$out" "spawned $id" "a refused spawn reported success"
   assert_absent "$STATE_DIR/launched.log" \
     "an agent was launched into a shell that is not reading input"
+  [ ! -d "$TASK_TMP_PATH" ] \
+    || fail "a refused spawn left behind the empty per-task temp root it created"
   pass "a shell that never reads input refuses the spawn with a bounded, loud diagnostic"
 }
 
@@ -787,6 +800,68 @@ test_temp_root_the_spawn_cannot_write_into_refuses_by_name() {
   pass "a temp root the spawn cannot write into refuses by name instead of a bare mkdir error"
 }
 
+# The other side of that cleanup, and the reason it is a `rmdir` rather than a
+# `rm -rf`. /tmp/fm-<id> is named after the task id and nothing else, so every
+# home on the host spawning that id shares this one path, and the per-home locks
+# firstmate takes say nothing about each other. "This spawn created the root" is
+# therefore not "this spawn is alone in it": a second home can adopt it moments
+# later and put its own readiness marker - or a launched worker's live GOTMPDIR
+# contents - inside. A refused spawn that removed the root recursively would
+# take that with it, turning another home's proven-ready shell into a false
+# readiness refusal or pulling a running worker's build temp out from under it.
+test_refused_spawn_leaves_another_homes_marker_in_the_shared_temp_root() {
+  local rec id out status foreign
+  id=shell-ready-shared-root-zf-$RUN_TAG
+  use_task_tmp "$id"
+  foreign="$TASK_TMP_PATH/shell-ready.other-home"
+  rec=$(make_shell_case shell-ready-shared-root "$id" 999 0)
+  read_shell_record "$rec"
+
+  out=$(run_shell_spawn "$id" FM_FAKE_SHARED_ROOT_ENTRY="$foreign" \
+    FM_SPAWN_SHELL_READY_POLLS=4 FM_SPAWN_SHELL_READY_INTERVAL=0.1 \
+    FM_SPAWN_SHELL_READY_RESEND=2)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should refuse when the shell never reads input"
+  [ -d "$foreign" ] \
+    || fail "the refused spawn deleted another home's readiness marker from the shared temp root $TASK_TMP_PATH"
+  [ -d "$TASK_TMP_PATH" ] \
+    || fail "the refused spawn removed a shared temp root another home still had work in"
+  pass "a refused spawn leaves another home's marker standing in the shared temp root"
+}
+
+# A marker directory is private because of the root it sits in, not only because
+# of its own unguessable name: the ENTRY for it lives in that root, so an
+# account that can write the root can rename it away and leave a symlink under
+# the same name, after which the fixed `worktree-entry` and `launch` marker
+# names are created and removed through the replacement instead. No re-check of
+# the marker directory can catch that - the swap fits between any check and the
+# operation it guards - so the requirement lands on the parent, where writing it
+# is the one thing that has to be impossible. /tmp is world-writable and a task
+# id is an ordinary predictable slug, so a root at a mode that grants that write
+# is a root another local account can plant.
+test_group_or_other_writable_temp_root_refuses_the_spawn() {
+  local rec id out status
+  id=shell-ready-lax-root-zg-$RUN_TAG
+  rec=$(make_shell_case shell-ready-lax-root "$id" 0 0)
+  read_shell_record "$rec"
+  use_task_tmp "$id"
+  mkdir -p "$TASK_TMP_PATH"
+  chmod 777 "$TASK_TMP_PATH"
+
+  out=$(run_shell_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should refuse a temp root any local account can write"
+  assert_contains "$out" "per-task temp root $TASK_TMP_PATH is not private" \
+    "the refusal did not name the temp root that cannot hold a trustworthy marker"$'\n'"$out"
+  assert_absent "$STATE_DIR/lines.log" \
+    "the spawn typed into the pane while its readiness marker could be replaced by another account"
+  assert_absent "$STATE_DIR/launched.log" \
+    "an agent was launched with a readiness marker another account could replace"
+  [ "$(path_mode "$TASK_TMP_PATH")" = 777 ] \
+    || fail "the spawn changed the mode of a temp root it did not create (now $(path_mode "$TASK_TMP_PATH"))"
+  pass "a group- or other-writable temp root refuses the spawn instead of holding an unprovable marker"
+}
+
 # No behaviour change for a pane whose shell is already reading: every spawn
 # pays this gate, so each gate must confirm on its FIRST poll rather than
 # looping. Proven STRUCTURALLY, by handing each gate a budget of exactly one
@@ -834,6 +909,8 @@ test_unconfirmed_probe_backs_off_instead_of_flooding_the_pane
 test_planted_temp_root_keeps_its_mode_and_the_marker_stays_private
 test_temp_root_that_cannot_hold_a_private_marker_refuses_the_spawn
 test_temp_root_the_spawn_cannot_write_into_refuses_by_name
+test_group_or_other_writable_temp_root_refuses_the_spawn
+test_refused_spawn_leaves_another_homes_marker_in_the_shared_temp_root
 test_ready_shell_pays_at_most_one_poll_per_gate
 
 echo "# all fm-spawn-shell-ready tests passed"
