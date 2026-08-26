@@ -188,6 +188,14 @@ api_state() {
 api_response_states() {
   local output=$1 body separator segment
   local -a lines
+
+  case "$output" in
+    online|offline|missing)
+      printf '%s\n' "$output"
+      return 0
+      ;;
+  esac
+
   lines=()
   while IFS= read -r line; do
     lines+=("$line")

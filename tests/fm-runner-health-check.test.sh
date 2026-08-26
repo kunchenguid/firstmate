@@ -32,6 +32,10 @@ set -u
 case "${FAKE_GH_AXI_MODE:-answer}" in
   auth-error) exit 1 ;;
   slow) sleep "${FAKE_GH_AXI_SLEEP:-10}" ;;
+  direct)
+    printf 'offline\n'
+    exit 0
+    ;;
   malformed)
     printf 'not an API response\n'
     exit 0
@@ -364,6 +368,21 @@ test_malformed_envelope_with_trailing_diagnostics_is_silent() {
   pass "a valid-looking envelope with trailing diagnostics is rejected"
 }
 
+test_direct_scalar_health_state_is_consumed() {
+  local home fakebin response out
+  home=$(make_home direct-scalar)
+  fakebin=$(make_fake_gh_axi direct-scalar)
+  response="$home/runners.json"
+  out="$home/out.txt"
+
+  write_runners "$response" offline false
+  run_check "$home" "$fakebin" "$response" "$out" FAKE_GH_AXI_MODE=direct
+  assert_contains "$(cat "$out")" "runner health: $REPOSITORY runner label $LABEL is offline" \
+    "a direct scalar health state was not reported"
+  expect_reported "$home" offline
+  pass "an exact direct scalar health state is accepted without weakening malformed-output rejection"
+}
+
 test_api_timeout_finishes_inside_the_watcher_bound() {
   local home fakebin response out before after elapsed
   home=$(make_home timeout)
@@ -533,6 +552,7 @@ test_record_destination_must_be_private_regular_file
 test_check_refuses_a_symlinked_state_directory
 test_paginated_api_results_are_aggregated_before_verdict
 test_malformed_envelope_with_trailing_diagnostics_is_silent
+test_direct_scalar_health_state_is_consumed
 test_api_timeout_finishes_inside_the_watcher_bound
 test_target_validation_refuses_unsafe_or_ambiguous_values
 test_arm_registers_a_targeted_shim_and_disarm_removes_it
