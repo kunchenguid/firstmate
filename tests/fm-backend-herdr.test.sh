@@ -4464,18 +4464,58 @@ test_recovery_ownership_refuses_malformed_pane_inventory() {
   pass "fm_backend_herdr_recovery_ownership_state: malformed pane rows fail closed"
 }
 
+test_recovery_ownership_refuses_malformed_session_inventory() {
+  local worktree out
+  worktree="$TMP_ROOT/ownership-malformed-session"
+  mkdir -p "$worktree"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "session list") printf "%s\n" '\''{"sessions":[{"name":"lab","running":true},{"name":"other","running":"true"}]}'\'' ;;
+      esac
+    }
+    fm_backend_herdr_recovery_ownership_state lab task "$1"
+  ' "$ROOT" "$worktree")
+  [ "$out" = unreadable ] || fail "a malformed session row should be unreadable, got '$out'"
+  pass "fm_backend_herdr_recovery_ownership_state: malformed session rows fail closed"
+}
+
+test_recovery_ownership_refuses_unreadable_foreground_cwd() {
+  local worktree missing out
+  worktree="$TMP_ROOT/ownership-unreadable-cwd"
+  missing="$worktree/deleted"
+  mkdir -p "$worktree"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    missing=$2
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "session list") printf "%s\n" '\''{"sessions":[{"name":"lab","running":true}]}'\'' ;;
+        "tab list") printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t1","label":"other","workspace_id":"w1"}]}}'\'' ;;
+        "pane list") printf "%s\n" '\''{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}'\'' ;;
+        "pane get") printf '\''{"result":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","foreground_cwd":"%s"}}}\n'\'' "$missing" ;;
+      esac
+    }
+    fm_backend_herdr_recovery_ownership_state lab task "$1"
+  ' "$ROOT" "$worktree" "$missing")
+  [ "$out" = unreadable ] || fail "an unreadable foreground cwd should be unreadable, got '$out'"
+  pass "fm_backend_herdr_recovery_ownership_state: unreadable foreground cwd fails closed"
+}
+
 test_recovery_ownership_parses_agent_not_found_body_after_nonzero_exit() {
   local worktree out
   worktree="$TMP_ROOT/ownership-agent-not-found"
   mkdir -p "$worktree"
   out=$(bash -c '
     . "$0/bin/backends/herdr.sh"
+    worktree=$1
     fm_backend_herdr_cli() {
       case "$2 $3" in
         "session list") printf "%s\n" '\''{"sessions":[{"name":"lab","running":true}]}'\'' ;;
         "tab list") printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t1","label":"fm-task","workspace_id":"w1"}]}}'\'' ;;
         "pane list") printf "%s\n" '\''{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}'\'' ;;
-        "pane get") printf '\''{"result":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","foreground_cwd":"%s"}}}\n'\'' "$1" ;;
+        "pane get") printf '\''{"result":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","foreground_cwd":"%s"}}}\n'\'' "$worktree" ;;
         "agent get") printf "%s\n" '\''{"error":{"code":"agent_not_found","message":"no agent"}}'\''; return 1 ;;
       esac
     }
@@ -4516,6 +4556,45 @@ test_create_task_reports_identity_before_post_create_failure() {
   [ "$(cat "$evidence.evidence")" = "w1:t-new w1:p-new" ] \
     || fail "the created identity was not reported before post-create failure"
   pass "fm_backend_herdr_create_task: publishes exact identity before post-create validation"
+}
+
+test_create_task_reconciles_identity_after_incomplete_response() {
+  local evidence out rc
+  evidence="$TMP_ROOT/create-task-reconcile"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    evidence=$1
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "tab list")
+          if [ -e "$evidence.created" ]; then
+            printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t-new","label":"fm-task","workspace_id":"w1"}]}}'\''
+          else
+            printf "%s\n" '\''{"result":{"tabs":[]}}'\''
+          fi
+          ;;
+        "tab create") : > "$evidence.created"; printf "%s\n" '\''{"result":{"tab":{"tab_id":"w1:t-new"}}}'\'' ;;
+        "pane list") printf "%s\n" '\''{"result":{"panes":[{"pane_id":"w1:p-new","tab_id":"w1:t-new"}]}}'\'' ;;
+      esac
+    }
+    record_created() {
+      printf "%s" "$FM_BACKEND_HERDR_CREATED_RAW_RESPONSE" > "$evidence.raw"
+      printf "%s %s" "$FM_BACKEND_HERDR_CREATED_TAB_ID" "$FM_BACKEND_HERDR_CREATED_PANE_ID" > "$evidence.ids"
+      printf "%s|%s\n" "$FM_BACKEND_HERDR_CREATED_TAB_ID" "$FM_BACKEND_HERDR_CREATED_PANE_ID" >> "$evidence.calls"
+    }
+    fm_backend_herdr_create_task lab:w1 fm-task /tmp "" record_created
+  ' "$ROOT" "$evidence" 2>&1); rc=$?
+  [ "$rc" = 0 ] || fail "incomplete create response should reconcile, got rc=$rc output=$out"
+  [ "$out" = "w1:t-new w1:p-new" ] || fail "reconciled create should return exact ids, got '$out'"
+  [ "$(cat "$evidence.raw")" = '{"result":{"tab":{"tab_id":"w1:t-new"}}}' ] \
+    || fail "the raw create response was not persisted before reconciliation"
+  [ "$(cat "$evidence.ids")" = "w1:t-new w1:p-new" ] \
+    || fail "the reconciled identity was not published to the callback"
+  [ "$(sed -n '1p' "$evidence.calls")" = 'w1:t-new|' ] \
+    || fail "the callback did not persist partial response identity before reconciliation"
+  [ "$(sed -n '2p' "$evidence.calls")" = 'w1:t-new|w1:p-new' ] \
+    || fail "the callback did not receive exact reconciled identity"
+  pass "fm_backend_herdr_create_task: reconciles exact identity after incomplete create output"
 }
 
 # shellcheck source=bin/fm-backend.sh
@@ -4704,5 +4783,8 @@ test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
 test_recovery_ownership_accepts_verified_multitab_inventory
 test_recovery_ownership_refuses_malformed_pane_inventory
+test_recovery_ownership_refuses_malformed_session_inventory
+test_recovery_ownership_refuses_unreadable_foreground_cwd
 test_recovery_ownership_parses_agent_not_found_body_after_nonzero_exit
 test_create_task_reports_identity_before_post_create_failure
+test_create_task_reconciles_identity_after_incomplete_response

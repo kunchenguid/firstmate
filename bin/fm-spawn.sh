@@ -708,6 +708,7 @@ RECOVERY_REPLACEMENT_TAB=
 RECOVERY_REPLACEMENT_PANE=
 RECOVERY_ATTEMPT_FILE=${FM_CONTROL_RECOVER_MISSING_ATTEMPT:-}
 RECOVERY_ATTEMPT_TX=${FM_CONTROL_RECOVER_MISSING_TX:-}
+RECOVERY_CREATE_RESPONSE_FILE=
 RECOVERY_WIRING_BACKUP_DIR=
 RECOVERY_WIRING_PENDING=0
 RECOVERY_OLD_TARGET=
@@ -764,15 +765,27 @@ recovery_cleanup_exact() {
 }
 
 recovery_replacement_record_created() {
+  local raw_tmp phase
   HERDR_TAB_ID=$FM_BACKEND_HERDR_CREATED_TAB_ID
   HERDR_PANE_ID=$FM_BACKEND_HERDR_CREATED_PANE_ID
-  [ -n "$HERDR_TAB_ID" ] && [ -n "$HERDR_PANE_ID" ] || return 1
   RECOVERY_REPLACEMENT_SESSION=$HERDR_SES
   RECOVERY_REPLACEMENT_TAB=$HERDR_TAB_ID
   RECOVERY_REPLACEMENT_PANE=$HERDR_PANE_ID
-  RECOVERY_REPLACEMENT_TARGET="$HERDR_SES:$HERDR_PANE_ID"
-  RECOVERY_REPLACEMENT_PENDING=1
-  recovery_attempt_write created
+  RECOVERY_CREATE_RESPONSE_FILE="$RECOVERY_ATTEMPT_FILE.create-response"
+  raw_tmp="$RECOVERY_CREATE_RESPONSE_FILE.tmp.${BASHPID:-$$}"
+  if ! printf '%s' "$FM_BACKEND_HERDR_CREATED_RAW_RESPONSE" > "$raw_tmp" \
+     || ! chmod 0600 "$raw_tmp" \
+     || ! mv -f "$raw_tmp" "$RECOVERY_CREATE_RESPONSE_FILE"; then
+    rm -f "$raw_tmp" 2>/dev/null || true
+    return 1
+  fi
+  phase=created-unresolved
+  if [ -n "$HERDR_TAB_ID" ] && [ -n "$HERDR_PANE_ID" ]; then
+    RECOVERY_REPLACEMENT_TARGET="$HERDR_SES:$HERDR_PANE_ID"
+    RECOVERY_REPLACEMENT_PENDING=1
+    phase=created
+  fi
+  recovery_attempt_write "$phase" "create_response=$RECOVERY_CREATE_RESPONSE_FILE"
 }
 
 parse_orca_worktree_result() {
@@ -2157,7 +2170,8 @@ elif [ "$RECOVER_MISSING" -eq 1 ]; then
   if ! fm_backend_herdr_create_task \
     "$HERDR_SES:$HERDR_WORKSPACE_ID" "$W" "$PROJ_ABS" "" \
     recovery_replacement_record_created >/dev/null; then
-    recovery_attempt_write allocation-failed || true
+    recovery_attempt_write allocation-failed \
+      "create_response=$RECOVERY_CREATE_RESPONSE_FILE" || true
     echo "error: could not allocate a fresh Herdr endpoint for missing-endpoint recovery of $ID; recovery evidence was retained" >&2
     exit 1
   fi
@@ -2712,14 +2726,11 @@ EOF
       if [ "$RECOVER_MISSING" -eq 1 ] \
          && [ -f "$RECOVERY_WIRING_BACKUP_DIR/original" ]; then
         claude_merged="$STATE_REAL/.$ID.claude-settings-merged.${BASHPID:-$$}"
-        if ! jq -s --arg needle "$FM_ROOT/bin/fm-busy-event.sh" \
-            --arg state "$STATE_REAL" --arg id "$ID" '
+        if ! jq -s --arg owner "$busy_cmd_prefix " '
           def firstmate_command:
             type == "object"
             and ((.command? // null) | type) == "string"
-            and (.command | contains($needle))
-            and (.command | contains($state))
-            and (.command | contains($id));
+            and (.command | contains($owner));
           def without_firstmate_commands:
             if ((.hooks? // null) | type) == "array" then
               .hooks |= map(select(firstmate_command | not))
