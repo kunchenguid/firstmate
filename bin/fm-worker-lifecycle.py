@@ -3628,6 +3628,21 @@ def command_capacity_reserve_shape(env, args):
     }, sort_keys=True, separators=(",", ":")))
 
 
+def matching_capacity_release(state, reservation_id, fence, receipt):
+    reservation = state["capacity_reservations"].get(reservation_id)
+    if reservation is None:
+        raise LifecycleError("capacity release has no exact durable reservation")
+    if reservation.get("fence_binding") != fence:
+        raise LifecycleError("capacity release fence binding is not exact")
+    if reservation.get("status") == "released":
+        if reservation.get("cleanup_receipt") != receipt:
+            raise LifecycleError("capacity reservation already has a different cleanup receipt")
+        return reservation, True
+    if reservation.get("status") not in ("queued", "reserved"):
+        raise LifecycleError("capacity reservation status is not releasable")
+    return reservation, False
+
+
 def command_capacity_release(env, args):
     if args.confirm_subscription != env["subscription"]:
         raise LifecycleError("--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
@@ -3636,19 +3651,23 @@ def command_capacity_release(env, args):
     receipt = require_binding("capacity cleanup receipt", args.cleanup_receipt)
     with controller_lock(env):
         state = load_state(env)
-        reservation = state["capacity_reservations"].get(reservation_id)
-        if reservation is None:
-            raise LifecycleError("capacity release has no exact durable reservation")
-        if reservation.get("fence_binding") != fence:
-            raise LifecycleError("capacity release fence binding is not exact")
-        if reservation.get("status") == "released":
-            if reservation.get("cleanup_receipt") != receipt:
-                raise LifecycleError("capacity reservation already has a different cleanup receipt")
+        _, already_released = matching_capacity_release(
+            state, reservation_id, fence, receipt
+        )
+        if already_released:
             print("capacity reservation already released with exact zero-compute proof")
             return
-        if reservation.get("status") not in ("queued", "reserved"):
-            raise LifecycleError("capacity reservation status is not releasable")
-        inventory = provider_call(env, "inventory")["inventory"]
+    # Azure inventory is a multi-minute read. It proves compute absence, but
+    # it does not need exclusive access to the durable controller document.
+    inventory = provider_call(env, "inventory")["inventory"]
+    with controller_lock(env):
+        state = load_state(env)
+        reservation, already_released = matching_capacity_release(
+            state, reservation_id, fence, receipt
+        )
+        if already_released:
+            print("capacity reservation already released with exact zero-compute proof")
+            return
         if any(
             item.get("reservation_id") == reservation_id and item.get("active") is True
             for item in inventory["capacity_reservations"]
