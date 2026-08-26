@@ -391,7 +391,11 @@ print_backlog_pointer() {
 # `fm-helm.sh show` exits 3 specifically when jq itself is missing (a tool
 # problem, not a content problem); that case must not be reported as an
 # invalid file - a valid captain-style.json would then be silently discarded
-# - so it is surfaced as its own loud, dependency-named diagnostic instead.
+# - so it is surfaced as its own loud, dependency-named diagnostic instead,
+# in the same "MISSING: <tool> (install: <command>)" shape
+# bin/fm-bootstrap.sh uses for every other missing-tool diagnostic. jq is an
+# accepted, documented hard dependency for /helm (bin/fm-helm.sh's header),
+# not something this caller works around.
 print_captain_style() {
   local path=$1 label=$2
   subsection "$label"
@@ -404,7 +408,7 @@ print_captain_style() {
   if [ "$status" -eq 0 ]; then
     printf '%s\n' "$out"
   elif [ "$status" -eq 3 ]; then
-    printf 'MISSING: jq - cannot validate %s (install jq to enable captain-style preferences); firstmate defaults apply until jq is installed\n' \
+    printf 'MISSING: jq (install: brew install jq  # or the platform'"'"'s package manager) - required for /helm; %s stays unread and firstmate defaults apply until jq is installed\n' \
       "$label"
   else
     printf 'INVALID: %s failed /helm'"'"'s schema validation - ignored, firstmate defaults apply (%s)\n' \

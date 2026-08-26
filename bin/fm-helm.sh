@@ -24,6 +24,11 @@
 # file in the same directory is renamed into place, so a failed write never
 # leaves a partial
 # config/captain-style.json behind.
+#
+# Dependency: jq is required. This is an accepted, documented hard
+# dependency for /helm specifically, the same convention used by this repo's
+# other JSON configs (config/watched-tools.json, config/crew-dispatch.json) -
+# not a bug and not something a future change here should work around.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,7 +38,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STYLE_FILE="$CONFIG/captain-style.json"
 
 usage() {
-  sed -n '2,26{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,31{s/^# \{0,1\}//;p;}' "$0"
 }
 
 print_error() {
@@ -44,10 +49,12 @@ print_error() {
 # error (2) and a content/schema failure (1) so callers - notably
 # fm-session-start.sh's captain-style reader - can tell "jq is missing" apart
 # from "the file is actually invalid" instead of conflating both into one
-# generic failure.
+# generic failure. The message itself follows bin/fm-bootstrap.sh's
+# "MISSING: <tool> (install: <command>)" convention so a missing jq reads the
+# same way here as it does anywhere else firstmate reports a missing tool.
 require_jq() {
   command -v jq >/dev/null 2>&1 || {
-    print_error "jq is required and was not found on PATH"
+    print_error 'jq is required for /helm and was not found on PATH - MISSING: jq (install: brew install jq  # or the platform'"'"'s package manager)'
     return 3
   }
 }

@@ -195,6 +195,8 @@ Shared captain preferences that apply across secondmate domains live only in the
 `config/captain-style.json` is an optional local, gitignored JSON object holding two compact captain-style axes: `language`, the language firstmate uses in its own chat and captain-facing artifacts, and `response_tone`, a free-text description of the desired vibe.
 It is the canonical source for those two axes; `data/captain.md`'s "Address and tone" and "Language" sections are short pointers here, and any deeper narrative preference that does not fit a single tone string stays as `data/captain.md` prose instead.
 The captain-invocable `/helm` command is the intended way to read and write it; [`bin/fm-helm.sh`](../bin/fm-helm.sh)'s header owns the exact schema, partial-field merge semantics, and atomic-write mechanics behind its `show` and `set` subcommands.
+`jq` is a required, accepted hard dependency for `/helm` - the same posture this repo already takes for its other JSON configs, `config/watched-tools.json` and `config/crew-dispatch.json`.
+A missing `jq` fails loudly and by name rather than being reported as an invalid file or silently applying defaults; `bin/fm-helm.sh`'s header owns the exact diagnostic.
 `language` governs only firstmate's own personal-facing chat and artifacts for the captain - never a project's tracked code, comments, commit messages, PR descriptions, or checked-in documentation, and never what language a crewmate uses in its own work.
 Unlike `config/crew-dispatch.json`, this file is not part of the inherited local material `secondmate-provisioning` propagates to secondmate homes; a secondmate wanting the same values needs its own `/helm` invocation in its own home.
 

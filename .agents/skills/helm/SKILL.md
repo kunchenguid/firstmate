@@ -20,6 +20,7 @@ It never changes a project's tracked code, comments, commit messages, PR descrip
 
 `config/captain-style.json`: local, gitignored, human-editable, same tier as `config/crew-dispatch.json`.
 `bin/fm-helm.sh`'s header owns the exact schema, merge semantics, and atomic-write mechanics; its `show` and `set` subcommands are the only way this skill reads or writes the file.
+`jq` is a required, accepted hard dependency for `/helm`, matching `config/watched-tools.json` and `config/crew-dispatch.json`; a missing `jq` fails loudly by name rather than silently discarding a valid file.
 Not propagated to secondmate homes today (unlike `config/crew-dispatch.json`); a secondmate wanting the same captain-style values needs its own `/helm` invocation in its own home.
 
 ## Invocation
