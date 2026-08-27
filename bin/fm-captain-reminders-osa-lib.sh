@@ -14,9 +14,20 @@
 # provide a `note` reporter, so diagnostics reach the operator the same way the
 # rest of the command's output does.
 #
-# THE MARKER IS ENFORCED HERE. `upsert` and `complete` select by the
-# `[fm:<task-id>]` body prefix and `list` reports only entries carrying it, so no
-# instruction from above can reach a reminder the captain wrote himself.
+# THE MARKER IS ENFORCED HERE. Every verb selects by the `[fm:<task-id>]` body
+# prefix - `list` reports only entries carrying it, and `upsert`, `complete`, and
+# `complete-one` can only reach entries carrying it - so no instruction from
+# above can touch a reminder the captain wrote himself. `complete-one` names a
+# specific reminder id, and that id is honored ONLY among entries already
+# matching the marker, so an id from anywhere else selects nothing.
+#
+# `list` reports one TAB-separated record per marked open entry:
+#   <task-id>  <reminder-id>  <has-due 0|1>  <age-seconds>
+# where age is relative to the moment of the read, so it is negative and more
+# negative means older. Reporting the reminder identity, its alert state, and its
+# age is what lets the caller decide which of several entries sharing a marker to
+# keep - that choice is deliberately made above this file, where it is testable
+# without a Reminders app.
 
 # One AppleScript per verb, materialized on demand. A file path rather than
 # stdin because the bounded runner backgrounds its child, and a backgrounded
@@ -37,13 +48,23 @@ on run argv
 	tell application "Reminders"
 		if (count of (lists whose name is listName)) is 0 then return ""
 		tell list listName
-			set bodies to body of (every reminder whose completed is false)
+			set live to (every reminder whose completed is false)
+			set bodies to body of live
+			set ids to id of live
+			set dues to due date of live
+			set births to creation date of live
 		end tell
 	end tell
+	set rightNow to current date
 	set found to {}
-	repeat with b in bodies
-		set t to my markerId(b)
-		if t is not "" then set end of found to t
+	repeat with i from 1 to (count of bodies)
+		set t to my markerId(item i of bodies)
+		if t is not "" then
+			set hasDue to "0"
+			if (item i of dues) is not missing value then set hasDue to "1"
+			set age to (((item i of births) - rightNow) as integer)
+			set end of found to (t & tab & ((item i of ids) as text) & tab & hasDue & tab & (age as text))
+		end if
 	end repeat
 	set AppleScript's text item delimiters to linefeed
 	set out to found as text
@@ -117,6 +138,28 @@ on run argv
 			repeat with r in (every reminder whose completed is false and body begins with pfx)
 				set completed of r to true
 				set n to n + 1
+			end repeat
+		end tell
+	end tell
+	return (n as text)
+end run
+APPLESCRIPT
+      ;;
+    complete-one)
+      cat <<'APPLESCRIPT'
+on run argv
+	set listName to item 1 of argv
+	set pfx to "[fm:" & (item 2 of argv) & "]"
+	set rid to item 3 of argv
+	set n to 0
+	tell application "Reminders"
+		if (count of (lists whose name is listName)) is 0 then return "0"
+		tell list listName
+			repeat with r in (every reminder whose completed is false and body begins with pfx)
+				if ((id of r) as text) is rid then
+					set completed of r to true
+					set n to n + 1
+				end if
 			end repeat
 		end tell
 	end tell

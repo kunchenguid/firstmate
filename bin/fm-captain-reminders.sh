@@ -31,7 +31,7 @@
 #   reminder note  -> `[fm:<task-id>] <hold reason>`
 #
 # THE MARKER IS THE SAFETY BOUNDARY. `[fm:<task-id>]` at the head of the note is
-# how a rerun recognizes what it already created, so nothing is ever duplicated.
+# how a rerun recognizes what it already created, so a rerun never duplicates.
 # It is also the hard limit on what this script may touch: an entry without that
 # marker is never read, matched, renamed, rewritten, or completed. The list is
 # the captain's own, and quietly editing something he wrote there is worse than
@@ -54,13 +54,26 @@
 # neither of those and is reported rather than defaulted, because filing the
 # captain's calls into a list he did not choose hides them on a synced account.
 #
-# CONCURRENCY. One projection lock under `state/` makes "never creates a
-# duplicate" hold when several callers fire at once. An ordinary projection that
-# loses the lock stands down and exits 0 - the holder is deriving the same full
-# set and will write the same entries. A projection carrying `--notify` does NOT
-# stand down: the holder's snapshot predates that call, so nobody else will ever
-# raise it. It waits inside its own deadline and, if that runs out, says the
-# alert was not delivered rather than exiting as though it had been.
+# CONCURRENCY, AND WHAT IS ACTUALLY GUARANTEED. One projection lock under
+# `state/` serializes callers. An ordinary projection that loses the lock stands
+# down and exits 0 - the holder is deriving the same full set and will write the
+# same entries. A projection carrying `--notify` does NOT stand down: the
+# holder's snapshot predates that call, so nobody else will ever raise it. It
+# waits inside its own deadline and, if that runs out, says the alert was not
+# delivered rather than exiting as though it had been.
+#
+# The lock cannot make duplication impossible, and this script does not claim it
+# does. Checking for an entry and creating one are not atomic at the Reminders
+# boundary, and the ways to close that last window all cost more than the window
+# does: they either weaken bin/fm-timeout-lib.sh's group-kill guarantee for the
+# whole repository, or push job control into session start (see the nesting note
+# in that library's header for why an outer bound cannot reach an inner one).
+# So the guarantee here is CONVERGENCE, not prevention: every projection ticks
+# off any extra entry sharing a marker, leaving exactly one open. A duplicate can
+# therefore exist briefly, and it is settled by the next pass - which is the same
+# property this whole capability already rests on. A transient second copy of a
+# call cannot make the captain miss it; losing his one alert can, which is why
+# the surviving entry is chosen as the one that will actually fire.
 #
 # DEGRADING. Never a hard failure for the caller, which is always some other
 # piece of work that must not be held up by a reminder.
@@ -78,7 +91,9 @@
 # `<cmd> <verb> <args...>` with the same arguments and the same stdout contract,
 # so the projection logic is exercised on a host with no Reminders app.
 # Verbs: `list <listname>`, `upsert <listname> <id> <title> <note> <due0|1>`,
-# `complete <listname> <id>`.
+# `complete <listname> <id>`, `complete-one <listname> <id> <reminder-id>`.
+# Which of several entries sharing a marker survives is decided in THIS file
+# rather than in AppleScript, so that rule is covered by the regression suite.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -133,6 +148,80 @@ list_contains() {  # <newline-separated-list> <value>
   esac
 }
 
+# Which of several entries sharing one marker survives, decided here rather than
+# in AppleScript so the rule is exercised by the regression suite on a host with
+# no Reminders app.
+#
+# The rule, in order:
+#   1. an entry that carries a due time beats one that does not, because that is
+#      the entry that will actually alert - ticking it off in favour of a silent
+#      twin would lose the very push a caller asked for;
+#   2. otherwise the older entry survives, so the accidental copy is the one that
+#      goes and anything the captain added to the original is kept.
+# Both keys come from the list read itself, so the outcome does not depend on
+# which entry happened to be scanned first.
+keeper_reminder_id() {  # <rows> <task-id>
+  printf '%s\n' "$1" | awk -F'\t' -v want="$2" '
+    NF >= 4 && $1 == want {
+      due = $3 + 0
+      age = $4 + 0
+      if (best == "" || due > best_due || (due == best_due && age < best_age)) {
+        best = $2
+        best_due = due
+        best_age = age
+      }
+    }
+    END { print best }
+  '
+}
+
+# Tick off every extra entry sharing a marker, keeping exactly one.
+#
+# This is convergence rather than prevention. Creating an entry cannot be made
+# atomic with checking for one at the Reminders boundary, and the alternatives
+# for closing that window all cost more than the window does: they either weaken
+# the repository's single owner of bounded execution or push job control into
+# session start. A transient duplicate cannot make the captain miss anything,
+# and every projection is a full idempotent pass, so applying that same property
+# one level down settles the list back to one open entry per call.
+CONVERGED_COUNT=0
+converge_duplicates() {  # <list-name> <rows> <dry-run 0|1>
+  local list_name=$1 rows=$2 dry=$3 dup_ids id keeper row_id row_rid _rest rc=0
+  CONVERGED_COUNT=0
+  dup_ids=$(printf '%s\n' "$rows" | awk -F'\t' '
+    NF >= 4 { seen[$1]++ }
+    END { for (k in seen) if (seen[k] > 1) print k }
+  ' | LC_ALL=C sort)
+  [ -n "$dup_ids" ] || return 0
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    keeper=$(keeper_reminder_id "$rows" "$id")
+    [ -n "$keeper" ] || continue
+    while IFS=$'\t' read -r row_id row_rid _rest; do
+      [ "$row_id" = "$id" ] || continue
+      [ "$row_rid" != "$keeper" ] || continue
+      if [ "$dry" -eq 1 ]; then
+        printf 'would tick off a duplicate entry for %s\n' "$id"
+        CONVERGED_COUNT=$((CONVERGED_COUNT + 1))
+        continue
+      fi
+      if projection_osa complete-one "$list_name" "$id" "$row_rid"; then
+        note "ticked off a duplicate entry for $id"
+        CONVERGED_COUNT=$((CONVERGED_COUNT + 1))
+      else
+        rc=1
+        [ "$PROJECTION_TIMED_OUT" -eq 0 ] || return 1
+      fi
+    done <<INNER
+$rows
+INNER
+  done <<EOF
+$dup_ids
+EOF
+  return "$rc"
+}
+
+
 PROJECTION_DEADLINE=0
 PROJECTION_REMAINING=0
 PROJECTION_TIMED_OUT=0
@@ -160,7 +249,7 @@ projection_osa() {  # <verb> <args...>
 }
 
 run_projection() {  # <dry-run 0|1> <notify-ids newline-separated>
-  local dry=$1 notify=$2 list_name desired desired_ids projected stale_ids=''
+  local dry=$1 notify=$2 list_name desired desired_ids projected projected_rows stale_ids=''
   local id title body due outcome now rc desired_count stale_count total remaining
   local failures=0 acted=0 processed=0
 
@@ -247,7 +336,17 @@ run_projection() {  # <dry-run 0|1> <notify-ids newline-separated>
     fi
     return 1
   fi
-  projected=$OSA_OUT
+  projected_rows=$OSA_OUT
+  projected=$(printf '%s\n' "$projected_rows" | cut -f1 | awk 'NF' | LC_ALL=C sort -u)
+  if ! converge_duplicates "$list_name" "$projected_rows" "$dry"; then
+    [ "$PROJECTION_TIMED_OUT" -eq 0 ] || {
+      note "projection did not finish before the ${TIMEOUT_SECS}s deadline while reconciling duplicate entries."
+      return 1
+    }
+    failures=$((failures + 1))
+  fi
+  acted=$((acted + CONVERGED_COUNT))
+
 
   while IFS= read -r id; do
     [ -n "$id" ] || continue

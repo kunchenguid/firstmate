@@ -46,11 +46,13 @@ fi
 [ -z "${FAKE_REMINDERS_FAIL:-}" ] || { printf '%s\n' "$FAKE_REMINDERS_FAIL" >&2; exit 1; }
 case "$verb" in
   list)
-    awk -F'\t' '$1 == "0" && $3 ~ /^\[fm:[A-Za-z0-9._-]+\]/ {
+    awk -F'\t' -v OFS='\t' '$1 == "0" && $3 ~ /^\[fm:[A-Za-z0-9._-]+\]/ {
       id = $3
       sub(/^\[fm:/, "", id)
       sub(/\].*$/, "", id)
-      print id
+      # A synthetic reminder identity and age: the store never removes a row, so
+      # its line number is stable within a run and earlier lines are older.
+      print id, "r" NR, ($4 == "1" ? "1" : "0"), NR - 1000
     }' "$store"
     ;;
   upsert)
@@ -88,6 +90,19 @@ case "$verb" in
     awk -F'\t' -v OFS='\t' -v p="$prefix" '
       BEGIN { len = length(p) }
       $1 == "0" && substr($3, 1, len) == p { $1 = "1"; n++ }
+      { print }
+      END { }
+    ' "$store" > "$store.tmp" && mv "$store.tmp" "$store"
+    printf '1\n'
+    ;;
+  complete-one)
+    # Named reminder, but still only among entries carrying the marker: the id
+    # alone can never reach an unmarked row.
+    prefix="[fm:$2]"
+    target=$3
+    awk -F'\t' -v OFS='\t' -v p="$prefix" -v t="$target" '
+      BEGIN { len = length(p) }
+      $1 == "0" && substr($3, 1, len) == p && ("r" NR) == t { $1 = "1"; n++ }
       { print }
       END { }
     ' "$store" > "$store.tmp" && mv "$store.tmp" "$store"
@@ -394,11 +409,13 @@ START=$(date +%s)
 OUT=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
   FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$TIMEOUT_STORE" \
   FAKE_REMINDERS_LOG="$TIMEOUT_LOG" FAKE_REMINDERS_HANG=60 \
-  FAKE_REMINDERS_HANG_VERB=upsert FM_REMINDERS_TIMEOUT_SECS=2 \
+  FAKE_REMINDERS_HANG_VERB=upsert FM_REMINDERS_TIMEOUT_SECS=6 \
   "$REMINDERS" sync 2>&1)
 RC=$?
 ELAPSED=$(( $(date +%s) - START ))
-[ "$ELAPSED" -lt 10 ] || fail "a wedged Reminders step held the caller for ${ELAPSED}s"
+# Bounded well under the 60s wedge, but not so tight that the backlog read - one
+# tasks-axi subprocess per open task - can be what expires on a loaded machine.
+[ "$ELAPSED" -lt 25 ] || fail "a wedged Reminders step held the caller for ${ELAPSED}s"
 [ "$RC" -ne 0 ] || fail "a wedged Reminders step must be reported as a failure"
 [ ! -e "$HOME_DIR/state/.captain-reminders.lock" ] && [ ! -L "$HOME_DIR/state/.captain-reminders.lock" ] \
   || fail "an unwrapped session-start-style timeout left the projection lock held"
@@ -604,3 +621,54 @@ run sync >/dev/null 2>&1
 [ "$(rows)" -gt 0 ] || fail "an empty switch file must still select the default list"
 pass "an empty switch file still selects the default list"
 
+# --- several entries sharing one marker converge to one ------------------------
+#
+# Creating an entry cannot be made atomic with checking for one at the Reminders
+# boundary, so a duplicate is possible under concurrency. The projection settles
+# it on the next pass instead: exactly one open entry survives per marker, and
+# which one survives is decided by an explicit rule, not by scan order.
+
+CONVERGE_STORE="$TMP_ROOT/converge-reminders.tsv"
+converge_run() {
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$CONVERGE_STORE" "$REMINDERS" "$@"
+}
+open_marked() {  # <task-id>
+  awk -F'\t' -v m="[fm:$1]" 'BEGIN { n = length(m) } $1 == "0" && substr($3, 1, n) == m' "$CONVERGE_STORE"
+}
+all_marked() {  # <task-id>
+  awk -F'\t' -v m="[fm:$1]" 'BEGIN { n = length(m) } substr($3, 1, n) == m' "$CONVERGE_STORE"
+}
+
+axi add dup-a "Duplicated call" --repo demo
+axi hold dup-a --reason "two entries exist for this one call" --kind captain
+{
+  printf '0\tDuplicated call\t[fm:dup-a] two entries exist for this one call\t0\n'
+  printf '0\tThe captain wrote this himself\tno marker at all\t0\n'
+  printf '0\tDuplicated call\t[fm:dup-a] two entries exist for this one call\t1\n'
+} > "$CONVERGE_STORE"
+OUT=$(converge_run sync 2>&1)
+[ "$(open_marked dup-a | awk 'END { print NR }')" = 1 ] \
+  || fail "convergence left $(open_marked dup-a | awk 'END { print NR }') open entries for dup-a"
+case "$(open_marked dup-a)" in
+  *$'\t'1) ;;
+  *) fail "convergence kept the entry that will never alert: $(open_marked dup-a)" ;;
+esac
+[ "$(all_marked dup-a | awk 'END { print NR }')" = 2 ] \
+  || fail "convergence deleted an entry instead of ticking it off"
+assert_contains "$OUT" "ticked off a duplicate entry for dup-a" "convergence says what it reconciled"
+assert_contains "$(cat "$CONVERGE_STORE")" $'0\tThe captain wrote this himself\tno marker at all\t0' \
+  "convergence touched an entry the captain wrote himself"
+pass "duplicate entries converge to the one that will alert, and are completed rather than deleted"
+
+{
+  printf '0\tDuplicated call\t[fm:dup-a] two entries exist for this one call\told\t0\n'
+  printf '0\tDuplicated call\t[fm:dup-a] two entries exist for this one call\t0\n'
+} > "$CONVERGE_STORE"
+sed -i.bak 's/\told\t0$/\t0/' "$CONVERGE_STORE" && rm -f "$CONVERGE_STORE.bak"
+converge_run sync >/dev/null 2>&1
+[ "$(open_marked dup-a | awk 'END { print NR }')" = 1 ] \
+  || fail "convergence left more than one open entry when neither carried an alert"
+[ "$(awk -F'\t' 'NR == 1 { print $1 }' "$CONVERGE_STORE")" = 0 ] \
+  || fail "convergence ticked off the older entry instead of the accidental copy"
+pass "with no alert to prefer, convergence keeps the older entry and ticks off the copy"

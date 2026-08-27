@@ -25,6 +25,24 @@
 # group; the perl fallback does it explicitly with setpgrp plus a negative pid,
 # and the bash fallback uses monitor mode to give the bounded child its own
 # process group before signaling its negative pid.
+#
+# NESTING DOES NOT COMPOSE, AND THAT IS THE COST OF THE GUARANTEE ABOVE.
+# Because every mechanism puts its child in a FRESH process group, an outer
+# bound's group kill cannot reach a command bounded by an inner one: the inner
+# child lives in a group the outer signal never names. So when a bounded command
+# itself bounds a subprocess, the outer expiry kills the middle layer and leaves
+# the innermost process running, orphaned, for the remainder of ITS own bound.
+# Measured on macOS with the perl mechanism: an outer bound of 2s expired and
+# killed its own group while the grandchild in the inner bound's group ran to
+# completion 25 seconds later.
+# This matters wherever a step runs inside an already-bounded parent - notably
+# every step of bin/fm-session-start.sh, whose whole child runs under
+# FM_SESSION_START_TIMEOUT. A step there that bounds its own subprocess is a
+# nested bound, so the outer truncation can leave that subprocess alive after the
+# step's own cleanup has already released whatever it was holding. Before adding
+# a bounded step inside another bound, decide what an orphaned innermost process
+# would still be able to do, and make that safe - do not assume the outer bound
+# will reach it.
 set -u
 
 fm_timeout_mechanism() {
