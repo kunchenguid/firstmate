@@ -642,13 +642,53 @@ fm_backend_cmux_endpoint_state() {  # <target> -> alive|missing|unreadable
   fi
 }
 
+# Return one authoritative inventory containing every workspace in every cmux
+# window. Bare `workspace list --json` is current-window-only, so it can never
+# prove global absence. Each workspace is annotated with its owning window for
+# the confirmed-close path. Any partial or ambiguous inventory fails closed.
+fm_backend_cmux_all_workspaces() {
+  local wins ids wid wss entries aggregate='[]'
+  local uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+  wins=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) || return 1
+  jq -e --arg uuid_re "$uuid_re" '
+    type == "array"
+    and all(.[];
+      type == "object"
+      and ((.id | type) == "string")
+      and (.id | test($uuid_re)))
+    and ([.[].id] | length == (unique | length))
+  ' <<<"$wins" >/dev/null 2>&1 || return 1
+  ids=$(jq -r '.[].id' <<<"$wins") || return 1
+
+  while IFS= read -r wid; do
+    [ -n "$wid" ] || continue
+    wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids --window "$wid" 2>/dev/null) \
+      || return 1
+    jq -e --arg uuid_re "$uuid_re" '
+      (.workspaces | type) == "array"
+      and all(.workspaces[];
+        type == "object"
+        and ((.id | type) == "string")
+        and (.id | test($uuid_re))
+        and ((.title | type) == "string"))
+    ' <<<"$wss" >/dev/null 2>&1 || return 1
+    entries=$(jq -c --arg wid "$wid" \
+      '[.workspaces[] | . + {"_fm_window_id": $wid}]' <<<"$wss") || return 1
+    aggregate=$(jq -cn --argjson current "$aggregate" --argjson next "$entries" \
+      '$current + $next') || return 1
+  done <<<"$ids"
+
+  jq -e '([.[].id] | length == (unique | length))' <<<"$aggregate" >/dev/null 2>&1 \
+    || return 1
+  jq -cn --argjson workspaces "$aggregate" '{workspaces: $workspaces}'
+}
+
 fm_backend_cmux_close_confirmed() {  # <target> [unused] [expected-label]
   local target=$1 expected_label=${3:-} inventory post stored_wsid wsid expected_title
-  local stored_count label_count wininfo win count
+  local stored_count label_count win count
   fm_backend_cmux_parse_target "$target" || return 1
   stored_wsid=$FM_BACKEND_CMUX_WORKSPACE
-  inventory=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 1
-  jq -e '.workspaces | type == "array"' <<<"$inventory" >/dev/null 2>&1 || return 1
+  inventory=$(fm_backend_cmux_all_workspaces) || return 1
   stored_count=$(jq -r --arg id "$stored_wsid" \
     '[.workspaces[]? | select(.id == $id)] | length' <<<"$inventory") || return 1
   [ "$stored_count" -le 1 ] || return 1
@@ -675,17 +715,18 @@ fm_backend_cmux_close_confirmed() {  # <target> [unused] [expected-label]
     wsid=$stored_wsid
   fi
 
-  wininfo=$(fm_backend_cmux_window_of_workspace "$wsid") || return 1
-  win=${wininfo%% *}
-  count=${wininfo##* }
+  win=$(jq -r --arg id "$wsid" \
+    '.workspaces[]? | select(.id == $id) | ._fm_window_id' <<<"$inventory") || return 1
   [ -n "$win" ] || return 1
+  count=$(jq -r --arg win "$win" \
+    '[.workspaces[]? | select(._fm_window_id == $win)] | length' <<<"$inventory") || return 1
+  [ "$count" -gt 0 ] || return 1
   if [ "$count" = 1 ]; then
     fm_backend_cmux_cli new-workspace --window "$win" --focus false --id-format uuids >/dev/null 2>&1 \
       || return 1
   fi
   fm_backend_cmux_cli close-workspace --workspace "$wsid" >/dev/null 2>&1 || return 1
-  post=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 1
-  jq -e '.workspaces | type == "array"' <<<"$post" >/dev/null 2>&1 || return 1
+  post=$(fm_backend_cmux_all_workspaces) || return 1
   jq -e --arg id "$wsid" '[.workspaces[]? | select(.id == $id)] | length == 0' \
     <<<"$post" >/dev/null 2>&1 || return 1
   if [ -n "$expected_label" ]; then

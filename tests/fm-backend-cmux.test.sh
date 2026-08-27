@@ -1067,15 +1067,25 @@ test_close_confirmed_recovers_stale_target_by_unique_label() {
   local dir fb title log
   dir="$TMP_ROOT/close-confirmed-stale-target"; mkdir -p "$dir/responses"
   title=$(cmux_expected_scoped_title fm-label)
-  # 1: authoritative inventory resolves the expected title to a refreshed UUID.
-  cmux_workspace_list_response "$dir" 1 "cccccccc-2222-2222-2222-222222222222" "$title"
-  # 2-3: locate that refreshed workspace in a non-last window.
-  cmux_windows_response "$dir" 2 "eeeeeeee-0000-0000-0000-000000000000" 2
+  # The current window has no task. The expected label lives in another window
+  # under a refreshed UUID and must not be mistaken for global absence.
+  cmux_windows_response "$dir" 1 \
+    "e1111111-0000-0000-0000-000000000000" 1 \
+    "e2222222-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 2 \
+    "ffffffff-0000-0000-0000-000000000000" "current-other"
   cmux_workspace_list_response "$dir" 3 \
     "cccccccc-2222-2222-2222-222222222222" "$title" \
-    "ffffffff-0000-0000-0000-000000000000" "other"
-  # 4 is the silent close; 5 proves both the refreshed UUID and title are gone.
-  cmux_workspace_list_response "$dir" 5 "ffffffff-0000-0000-0000-000000000000" "other"
+    "dddddddd-3333-3333-3333-333333333333" "remote-other"
+  # 4 is the silent close. The second full-window walk proves the refreshed
+  # UUID and expected label are absent from every window.
+  cmux_windows_response "$dir" 5 \
+    "e1111111-0000-0000-0000-000000000000" 1 \
+    "e2222222-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 6 \
+    "ffffffff-0000-0000-0000-000000000000" "current-other"
+  cmux_workspace_list_response "$dir" 7 \
+    "dddddddd-3333-3333-3333-333333333333" "remote-other"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_close_confirmed "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "" fm-label' "$ROOT"
@@ -1085,7 +1095,9 @@ test_close_confirmed_recovers_stale_target_by_unique_label() {
     "confirmed close did not close the refreshed workspace UUID"
   assert_not_contains "$log" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''aaaaaaaa-0000-0000-0000-000000000000' \
     "confirmed close must not target the stale stored UUID"
-  pass "fm_backend_cmux_close_confirmed: resolves a stale UUID by one expected task label, closes it, and confirms absence"
+  assert_contains "$log" $'\x1f''workspace'$'\x1f''list'$'\x1f''--json'$'\x1f''--id-format'$'\x1f''uuids'$'\x1f''--window'$'\x1f''e2222222-0000-0000-0000-000000000000' \
+    "confirmed close never inspected the non-current window"
+  pass "fm_backend_cmux_close_confirmed: resolves a stale UUID across all windows, closes it, and confirms global absence"
 }
 
 test_close_confirmed_refuses_ambiguous_or_unreadable_label_resolution() {
@@ -1093,9 +1105,11 @@ test_close_confirmed_refuses_ambiguous_or_unreadable_label_resolution() {
   title=$(cmux_expected_scoped_title fm-label)
 
   dir="$TMP_ROOT/close-confirmed-ambiguous"; mkdir -p "$dir/responses"
-  cmux_workspace_list_response "$dir" 1 \
-    "cccccccc-2222-2222-2222-222222222222" "$title" \
-    "dddddddd-3333-3333-3333-333333333333" "$title"
+  cmux_windows_response "$dir" 1 \
+    "e1111111-0000-0000-0000-000000000000" 1 \
+    "e2222222-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 "cccccccc-2222-2222-2222-222222222222" "$title"
+  cmux_workspace_list_response "$dir" 3 "dddddddd-3333-3333-3333-333333333333" "$title"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_close_confirmed "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "" fm-label' "$ROOT"
@@ -1120,15 +1134,21 @@ test_close_confirmed_refuses_still_live_refreshed_workspace() {
   local dir fb title status
   dir="$TMP_ROOT/close-confirmed-still-live"; mkdir -p "$dir/responses"
   title=$(cmux_expected_scoped_title fm-label)
-  cmux_workspace_list_response "$dir" 1 "cccccccc-2222-2222-2222-222222222222" "$title"
-  cmux_windows_response "$dir" 2 "eeeeeeee-0000-0000-0000-000000000000" 2
+  cmux_windows_response "$dir" 1 \
+    "e1111111-0000-0000-0000-000000000000" 1 \
+    "e2222222-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 2 "ffffffff-0000-0000-0000-000000000000" "current-other"
   cmux_workspace_list_response "$dir" 3 \
     "cccccccc-2222-2222-2222-222222222222" "$title" \
-    "ffffffff-0000-0000-0000-000000000000" "other"
-  # cmux reports close success, but authoritative inventory says it is still live.
-  cmux_workspace_list_response "$dir" 5 \
+    "dddddddd-3333-3333-3333-333333333333" "remote-other"
+  # cmux reports close success, but the second all-window inventory says it is still live.
+  cmux_windows_response "$dir" 5 \
+    "e1111111-0000-0000-0000-000000000000" 1 \
+    "e2222222-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 6 "ffffffff-0000-0000-0000-000000000000" "current-other"
+  cmux_workspace_list_response "$dir" 7 \
     "cccccccc-2222-2222-2222-222222222222" "$title" \
-    "ffffffff-0000-0000-0000-000000000000" "other"
+    "dddddddd-3333-3333-3333-333333333333" "remote-other"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_close_confirmed "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "" fm-label' "$ROOT"
@@ -1137,6 +1157,38 @@ test_close_confirmed_refuses_still_live_refreshed_workspace() {
   assert_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''cccccccc-2222-2222-2222-222222222222' \
     "still-live regression did not attempt to close the refreshed workspace"
   pass "fm_backend_cmux_close_confirmed: fails safely when refreshed workspace remains live after close"
+}
+
+test_close_confirmed_refuses_partial_or_ambiguous_window_inventory() {
+  local dir fb title status
+  title=$(cmux_expected_scoped_title fm-label)
+
+  dir="$TMP_ROOT/close-confirmed-partial-inventory"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 \
+    "e1111111-0000-0000-0000-000000000000" 1 \
+    "e2222222-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 "cccccccc-2222-2222-2222-222222222222" "$title"
+  printf '1\n' > "$dir/responses/3.exit"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_close_confirmed "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "" fm-label' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "confirmed close must refuse a failed query in any non-current window"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-workspace' \
+    "partial all-window inventory must not close the task found before the query failure"
+
+  dir="$TMP_ROOT/close-confirmed-duplicate-windows"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 \
+    "e1111111-0000-0000-0000-000000000000" 1 \
+    "e1111111-0000-0000-0000-000000000000" 1
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_close_confirmed "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "" fm-label' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "confirmed close must refuse duplicate window identifiers"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-workspace' \
+    "duplicate window identifiers must not trigger a workspace close"
+  pass "fm_backend_cmux_close_confirmed: refuses partial and duplicate-window inventories without closing"
 }
 
 # --- list_live: label-based orphan discovery ---------------------------------
@@ -1241,5 +1293,6 @@ test_kill_recovers_stale_target_by_label
 test_close_confirmed_recovers_stale_target_by_unique_label
 test_close_confirmed_refuses_ambiguous_or_unreadable_label_resolution
 test_close_confirmed_refuses_still_live_refreshed_workspace
+test_close_confirmed_refuses_partial_or_ambiguous_window_inventory
 test_list_live_filters_by_title_prefix
 test_secondmate_spawn_refuses_cmux_backend
