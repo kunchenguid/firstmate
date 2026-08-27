@@ -1405,8 +1405,8 @@ printf 'pr_head=%s\n' 'bb21cc' >> "$HOME_DIR/state/$reconcile_send_race_task.met
 run_ops reconcile-outbound "$reconcile_send_race-live-completion" --sent-message-id 1001 >/dev/null
 [ "$(run_ops inspect "$reconcile_send_race" | json_field "['state']")" = validating ] \
   || fail "live-completion reconciliation notified after PR head changed"
-assert_grep '"status": "delivered"' "$HOME_DIR/state/pavel-ops/outbox/$reconcile_send_race-live-completion.json" \
-  "changed-head reconciliation did not retain the delivered receipt"
+assert_grep '"status": "unknown"' "$HOME_DIR/state/pavel-ops/outbox/$reconcile_send_race-live-completion.json" \
+  "changed-head reconciliation marked a stale receipt delivered"
 pass "live-completion reconciliation validates the frozen head"
 
 live_retry=$(ingest 123 33 'Поменять цену доставки' | json_field "['event']")
@@ -1528,6 +1528,66 @@ fi
 [ "$(run_ops inspect "$stale_receipt" | json_field "['state']")" = live ] \
   || fail "stale delivered live-completion receipt mutated the live event"
 pass "delivered live-completion receipts are bound to PR head"
+
+stale_unknown_receipt=$(ingest 142 52 'Проверить старый unknown receipt после нового head' | json_field "['event']")
+run_ops classify "$stale_unknown_receipt" --as task --title 'Reject stale unknown receipt' --intent 'Reconcile only the current PR head' \
+  --reason 'ordinary delivery' --authority ordinary >/dev/null
+stale_unknown_task=$(run_ops inspect "$stale_unknown_receipt" | json_field "['task_id']")
+set_delivery_contracts "$stale_unknown_receipt" "$stale_unknown_task" 'https://github.com/o/r/pull/142' 'aa142a'
+STALE_UNKNOWN_FILE="$HOME_DIR/state/pavel-ops/events/$stale_unknown_receipt.json" python3 - <<'PY'
+import hashlib
+import json
+import os
+import time
+path = os.environ["STALE_UNKNOWN_FILE"]
+with open(path, encoding="utf-8") as handle:
+    event = json.load(handle)
+now = int(time.time())
+event["completion_text"] = "Готово: проверено."
+event["live_url"] = "https://example.test/product"
+for state, evidence in [
+    ("dispatched", "Pi worker exists in isolated copy"),
+    ("validating", "no-mistakes run owns current head"),
+    ("delivery_ready", "checks green on exact PR head"),
+    ("merge_queued", "guarded merge accepted by forge"),
+    ("landed", "forge reports PR merged at verified head"),
+    ("live", "live probe passed for https://example.test/product"),
+]:
+    event["transitions"].append({"at": now, "from": event["state"], "to": state, "evidence": evidence})
+    event["state"] = state
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
+    handle.write("\n")
+outbox = os.path.join(os.path.dirname(path), "..", "outbox", event["id"] + "-live-completion.json")
+os.makedirs(os.path.dirname(outbox), exist_ok=True)
+text = event["completion_text"]
+with open(outbox, "w", encoding="utf-8") as handle:
+    json.dump({
+        "schema": "fm-pavel-ops-outbound.v1",
+        "id": event["id"] + "-live-completion",
+        "event_id": event["id"],
+        "purpose": "live-completion",
+        "chat_id": "group",
+        "text": text,
+        "text_digest": hashlib.sha256(text.encode()).hexdigest(),
+        "pr_url": "https://github.com/o/r/pull/142",
+        "pr_head": "aa142a",
+        "status": "unknown",
+        "attempts": 1,
+        "created_at": now,
+        "updated_at": now,
+    }, handle)
+PY
+set_delivery_contracts "$stale_unknown_receipt" "$stale_unknown_task" 'https://github.com/o/r/pull/142' 'bb142b'
+set_live_completion_contracts "$stale_unknown_receipt" "$stale_unknown_task" 'https://github.com/o/r/pull/142' 'bb142b' 'https://example.test/product'
+if run_ops reconcile-outbound "$stale_unknown_receipt-live-completion" --sent-message-id 1421 >/dev/null 2>&1; then
+  fail "unknown live-completion receipt for an old head reconciled a newer head"
+fi
+[ "$(run_ops inspect "$stale_unknown_receipt" | json_field "['state']")" = live ] \
+  || fail "stale unknown live-completion receipt mutated the live event"
+assert_grep '"status": "unknown"' "$HOME_DIR/state/pavel-ops/outbox/$stale_unknown_receipt-live-completion.json" \
+  "stale unknown live-completion receipt was marked delivered"
+pass "unknown live-completion receipts are bound to PR head"
 
 # A delivered completion receipt after a crash reconciles the event without sending again.
 crashed=$(ingest 108 18 'Поменять SEO заголовок' | json_field "['event']")

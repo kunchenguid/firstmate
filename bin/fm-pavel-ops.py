@@ -1684,17 +1684,26 @@ def reconcile_outbound(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         raise OpsError("only an interrupted or delivery-unknown send requires reconciliation")
     event = home.load_event(outbound["event_id"])
     if args.sent_message_id:
-        outbound["status"] = "delivered"
-        outbound["telegram_message_id"] = args.sent_message_id
-        outbound["delivered_at"] = epoch()
-        if outbound["purpose"] == "live-completion" and event["state"] != "notified":
+        if outbound.get("purpose") == "live-completion" and event["state"] != "notified":
+            expected = expected_outbound_contract(
+                home,
+                event,
+                str(outbound.get("purpose") or ""),
+                str(outbound.get("text") or ""),
+                args.outbound,
+            )
+            validate_outbound_contract(args.outbound, outbound, expected)
             try:
                 validate_live_completion_contract(home, event)
             except OpsError as exc:
                 refuse_live_completion(home, event, exc)
-            else:
-                home.append_transition(event, "notified", f"Telegram message {args.sent_message_id} reconciled")
-                home.save_event(event)
+                return outbound
+        outbound["status"] = "delivered"
+        outbound["telegram_message_id"] = args.sent_message_id
+        outbound["delivered_at"] = epoch()
+        if outbound["purpose"] == "live-completion" and event["state"] != "notified":
+            home.append_transition(event, "notified", f"Telegram message {args.sent_message_id} reconciled")
+            home.save_event(event)
     elif args.confirm_not_sent:
         outbound["status"] = "retryable"
         outbound["last_error"] = "operator confirmed interrupted attempt did not send"
