@@ -116,6 +116,16 @@ printf 'watcher: FAILED - cycle ended without an actionable reason\n'
 exit 1
 SH
       ;;
+    reset-boundary)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+: > "$FM_HOME/state/arm-waiting"
+while [ ! -e "$FM_HOME/state/arm-release" ]; do sleep 0.02; done
+printf 'watcher: FAILED - cycle ended without an actionable reason\n'
+exit 1
+SH
+      ;;
     slow-actionable)
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -560,6 +570,46 @@ test_positive_recovery_budget_contention_preserves_episode() {
   assert_absent "$dir/state/.turnend-claude-blocks" "successful retry left the block budget"
   assert_absent "$dir/state/.claude-autoarm-failure-notified" "successful retry left the failure notice"
   pass "auto-arm: budget contention preserves the episode and forces a reset retry"
+}
+
+test_owner_mutex_contention_preserves_failure_episode_reset() {
+  local dir out hook_pid status watcher watcher_id holder i
+  dir=$(make_primary_dir "$TMP_ROOT/reset-owner-contention")
+  : > "$dir/state/task.meta"
+  : > "$dir/state/.turnend-claude-blocks"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  : > "$dir/state/.claude-autoarm-failure-alarmed"
+  write_arm_fixture "$dir" reset-boundary
+  sleep 60 &
+  watcher=$!
+  watcher_id=$(watcher_identity "$dir" "$watcher") || fail "could not identify reset-contention watcher"
+  record_watcher_lock "$dir" "$watcher" "$watcher_id"
+  touch "$dir/state/.last-watcher-beat"
+  out="$dir/state/hook.out"
+  run_autoarm_bg "$dir" "$out"
+  hook_pid=$RUN_AUTOARM_BG_PID
+  i=0
+  while [ ! -e "$dir/state/arm-waiting" ]; do
+    [ "$i" -lt 50 ] || fail "healthy owner never reached the reset boundary"
+    sleep 0.05
+    i=$((i + 1))
+  done
+  sleep 60 &
+  holder=$!
+  mkdir -p "$dir/state/.claude-autoarm.lock"
+  printf '%s\n' "$holder" > "$dir/state/.claude-autoarm.lock/pid"
+  : > "$dir/state/arm-release"
+  wait "$hook_pid"; status=$?
+  expect_code 0 "$status" "owner-mutex contention at reset must close quietly"
+  [ ! -s "$out" ] || fail "owner-mutex contention at reset produced output: $(cat "$out")"
+  assert_present "$dir/state/.turnend-claude-blocks" "contended reset deleted the block budget"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "contended reset deleted the failure notice"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "contended reset deleted the attended alarm"
+  kill "$holder" "$watcher" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
+  rm -rf "$dir/state/.claude-autoarm.lock"
+  pass "auto-arm: owner-mutex contention preserves successor episode state"
 }
 
 test_arms_for_x_mode_poll_need_without_inflight() {
@@ -1116,6 +1166,7 @@ test_unverified_clean_close_exhausts_retries
 test_post_alarm_actionable_close_is_suppressed
 test_benign_cycle_end_with_live_watcher_is_silent
 test_positive_recovery_budget_contention_preserves_episode
+test_owner_mutex_contention_preserves_failure_episode_reset
 test_arms_for_x_mode_poll_need_without_inflight
 test_single_flight_admits_exactly_one_owner
 test_abandoned_owner_claim_is_reclaimed_and_rearms

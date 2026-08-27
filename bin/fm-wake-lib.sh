@@ -1212,6 +1212,24 @@ fm_autoarm_still_owner() {  # <state-dir> <gen>
   [ "$FM_AUTOARM_GEN" = "$gen" ] && [ "$FM_AUTOARM_OWNER" = "$pid" ]
 }
 
+fm_autoarm_reset_owned() {  # <state-dir> <gen>
+  local state=$1 gen=$2 lock pid
+  lock="$state/.claude-autoarm.lock"
+  pid=${BASHPID:-$$}
+  fm_lock_try_acquire "$lock" || return 2
+  if ! fm_autoarm_ledger_read "$state" \
+    || [ "$FM_AUTOARM_GEN" != "$gen" ] || [ "$FM_AUTOARM_OWNER" != "$pid" ]; then
+    fm_lock_release "$lock"
+    return 2
+  fi
+  if ! fm_failure_episode_reset "$state"; then
+    fm_lock_release "$lock"
+    return 1
+  fi
+  fm_lock_release "$lock"
+  return 0
+}
+
 # LEGACY shim (see the contract comment above): the abandonment proof for a
 # lock-holding claim from a pre-generation build, recognizable by the role
 # file only such claims and the guard's short terminal-check hold publish.

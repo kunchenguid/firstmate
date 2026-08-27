@@ -254,17 +254,14 @@ if ! need_supervision; then
 fi
 
 if [ "$HEALTHY" -eq 1 ]; then
-  # Episode reset mutates shared failure state (notice, alarm, budget), so it
-  # is ownership-gated: a superseded owner must not reset its successor's
-  # episode. No supersession race remains past this check, because a healthy
-  # watcher was just verified (fresh beacon), which makes this claim
-  # non-stuck and therefore non-supersedable.
-  if ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
+  fm_autoarm_reset_owned "$STATE" "$MY_GEN"
+  RESET_RC=$?
+  if [ "$RESET_RC" -eq 0 ]; then
+    autoarm_record clean
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi
-  if fm_failure_episode_reset "$STATE"; then
-    autoarm_record clean
+  if [ "$RESET_RC" -eq 2 ]; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi
