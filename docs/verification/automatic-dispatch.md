@@ -155,7 +155,7 @@ bin/fm-route.sh status
 ```
 
 Status must report `mode: "off"`.
-For each new task, `automatic-dispatch` reads the valid `off` mode, hands the task to configured static dispatch, and stops before calling `fm-route.sh select`, `observe`, or `reserve`.
+With valid version 2 mode `off`, automatic-dispatch uses configured static dispatch and stops before account/candidate resolution, `select`, `observe`, `reserve`, or any routing ledger/state mutation.
 `fm-route.sh select` is a low-level JSON selector: it does not read or enforce policy mode and must not be called directly to test or perform rollback.
 Bootstrap validates and reports the edited policy; it does not rewrite routing state, stop workers, or turn the low-level selector into a static dispatcher.
 Active workers keep their recorded route and continue uninterrupted through their existing supervision and cleanup lifecycle.

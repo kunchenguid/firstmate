@@ -15,6 +15,12 @@ assert_grep 'visible policy diagnostic' "$SKILL" 'invalid policy diagnostic is m
 assert_grep 'static dispatch' "$SKILL" 'invalid policy fallback is missing'
 assert_grep 'no optimization state mutation' "$SKILL" 'invalid policy mutation boundary is missing'
 assert_grep "Do not call \`fm-route.sh select\`, \`observe\`, \`reserve\`" "$SKILL" 'invalid policy terminal boundary is missing'
+off_branch="With valid version 2 mode \`off\`, automatic-dispatch uses configured static dispatch and stops before account/candidate resolution, \`select\`, \`observe\`, \`reserve\`, or any routing ledger/state mutation."
+assert_grep "$off_branch" "$SKILL" 'valid off mode terminal branch is missing or incomplete'
+off_line=$(grep -nF "$off_branch" "$SKILL" | head -n 1 | cut -d: -f1)
+candidate_line=$(grep -nF 'Resolve native symbolic accounts' "$SKILL" | head -n 1 | cut -d: -f1)
+[ -n "$off_line" ] && [ -n "$candidate_line" ] && [ "$off_line" -lt "$candidate_line" ] \
+  || fail 'valid off mode must terminate before candidate resolution'
 assert_grep 'symbolic account is absent' "$SKILL" 'missing native account rule is missing'
 assert_grep 'qualified Pi' "$SKILL" 'Pi continuation rule is missing'
 assert_grep "call \`fm-route.sh observe\`" "$SKILL" 'simulation observation is missing'
