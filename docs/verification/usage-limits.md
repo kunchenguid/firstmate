@@ -5,7 +5,7 @@ Refresh it by re-running the commands below on the host in question.
 
 ## Environment
 
-- Date: 2026-08-26
+- Dates: 2026-08-26, extended 2026-08-27 with the live-fleet record and the predicted wall
 - Platform: Darwin 25.5.0
 - `quota-axi 0.1.17` (below the `FM_QUOTA_AXI_MIN` floor, which is the case the reading is required to survive)
 - `no-mistakes version v1.57.0 (0fcbbff) 2026-08-22T05:14:30Z`
@@ -38,6 +38,83 @@ HEADROOM_NEXT: <repo>/bin/fm-usage-wall.sh resume regenerates the resume record 
 ```
 
 `tests/fm-usage-wall.test.sh` pins the remaining unmeasurable paths - a failing gauge, a hanging gauge, a report with no derived-headroom block, and `auth_required` - along with the rule that `--allow-keychain-prompt` is never passed.
+
+`tight` is reached by either threshold independently, which a single reading can show.
+On 2026-08-27 the same command reported the measurable provider at 84 percent remaining and still called it `tight`, because the projected runway was inside the hour:
+
+```
+HEADROOM: claude tight pct=84 bound=five_hour resets=2026-08-27T08:39:59.783103+00:00 runway=35m confidence=early
+HEADROOM_SUMMARY: verdict=tight measured=1 tight=1 wall=0 unknown=5 source=quota-axi/0.1.17 build=below-floor(0.1.29)
+```
+
+## The gauge saw a real wall before it landed
+
+This is the guarantee working against a wall that actually arrived, rather than a constructed one.
+
+While this surface was being built on 2026-08-26, the gauge read the account's five-hour window at 9 percent remaining with roughly four minutes of projected runway.
+The worker recorded that reading, and the wall landed minutes later and stopped the account's workers, exactly as the reading projected.
+The work on every branch survived it, and the record below is what a session picks the fleet back up from.
+
+That is the whole point of reading the gauge before dispatching rather than after a crash log: the wall was visible while there was still time to act on it.
+
+## The record generates from real fleet state
+
+`bin/fm-usage-wall.sh resume --out <path>` run against a home with six tasks in flight, then read back from disk after the process that wrote it exited.
+`--out` writes only to the named path, so a read-only inspection never disturbs the home's own record.
+
+Task identifiers, local-copy paths, and pull-request URLs are redacted here because they are private fleet state; the structure and the verdicts are verbatim.
+Both load-bearing warnings fired on real data, unprompted:
+
+```
+# Resume record
+
+generated: 2026-08-27T03:46:06Z
+home: <home>
+source: bin/fm-usage-wall.sh resume
+tasks in flight: 6
+
+This record is GENERATED from live durable state. Do not hand-edit it; regenerate it.
+It carries state only. The recovery procedure is owned by the usage-limit-recovery skill.
+Nothing here is a merge authorisation: each task keeps the posture recorded on its own line.
+
+## <task-a>
+
+- kind: ship
+- merge posture: mode=no-mistakes yolo=off (the captain approves every merge)
+- runtime: harness=claude model=claude-opus-5 effort=xhigh backend=tmux
+- endpoint: <endpoint-a> (present)
+- local copy: <copy-1>
+  - SHARED: another task in this home records the same local copy; resolve which one owns it before resuming either
+- branch: <branch-a> head: feb6865 uncommitted: 2 unpushed commits: (branch not on origin)
+- pipeline: no run is attributed to this local copy
+- pull request: -
+- current state: state: working · source: pane · harness busy (claude-hook)
+- open captain calls: (none)
+- delivered instructions: 0 acknowledged, 0 still unread by the worker
+
+## <task-d>
+
+- kind: ship
+- merge posture: mode=no-mistakes yolo=off (the captain approves every merge)
+- runtime: harness=claude model=claude-opus-5 effort=high backend=tmux
+- endpoint: <endpoint-d> (present)
+- local copy: <copy-4>
+- branch: <branch-d> head: 2bf7e9ca uncommitted: 0 unpushed commits: 7
+- pipeline: run=01M10N2BCHBB680G3H0H7YQDSM status=running failed-steps=- custody=pipeline_owned next-action=continue_active_run head=4b2a52db (pipeline-only)
+  - the pipeline owns this branch; settle custody through its next-action before any new work on it
+  - the run holds commits this local copy does not have; rebuilding from the local head would silently redo work that already exists
+- pull request: -
+- current state: state: failed · source: run-step · run failed
+- open captain calls: (none)
+- delivered instructions: 0 acknowledged, 0 still unread by the worker
+```
+
+`<task-a>` and a second task record the same local copy, and the record flags the collision on both rows rather than silently picking one.
+`<task-d>` is the stranded shape the whole surface exists for: the run is `pipeline_owned`, its head is `pipeline-only` - not present in the local copy at all - and the record says in words that starting from the local head would rebuild work that already exists.
+Neither line is inferred from an incident write-up; both are computed from task metadata, the local copies, and the pipeline overview at the moment the command ran.
+
+The remaining four tasks are elided for length.
+`tests/fm-usage-wall.test.sh` pins the same behaviors portably, including that the record survives the process that wrote it, that regeneration replaces rather than accumulates, that a shared local copy is named on both rows, and that a broken record never replaces a good one.
 
 ## The endpoint-gone recovery, end to end
 

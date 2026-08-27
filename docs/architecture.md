@@ -222,6 +222,13 @@ Secondmate launches are exempt because they resolve the secondmate harness and a
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
 That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse while preserving the requested profile for later audit.
 
+## Provider usage limits
+
+Dispatch profiles choose which runtime a task gets; provider headroom is the separate question of whether that account can finish it.
+A limit reached mid-flight kills every worker on the account inside the same minute and leaves evidence that reads exactly like a fleet-wide crash, so the gauge is printed where dispatch decisions are made, the wall scan runs on any endpoint that is not alive, and the resume record is regenerated from durable state rather than written in advance.
+[`docs/usage-limit-survivability.md`](usage-limit-survivability.md) owns that design, `bin/fm-usage-wall.sh` owns the data, and the `usage-limit-recovery` skill owns the procedure.
+Nothing in it decides what to run: firstmate and the captain keep that.
+
 ## Optional secondmates
 
 `data/secondmates.md` records persistent secondmates with natural-language scopes, project clone lists, and home paths.
