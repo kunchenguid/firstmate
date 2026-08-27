@@ -849,12 +849,18 @@ spawn_abort_cleanup() {
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
   fi
-  # A refused spawn owns whatever it created under /tmp. Both gates are finished
-  # by the time this trap runs, so the marker root is dead either way; the task
-  # temp root goes only when THIS spawn created it and no meta names it, which
-  # is also the window before GOTMPDIR is exported into any pane - so nothing
-  # live can be using it, an adopted or foreign-planted root is never touched,
-  # and a published task stays reapable by id through fm-teardown.
+  # Everything below is scoped to a REFUSAL, which is the only outcome that owns
+  # what this spawn created under /tmp. Both gates are finished by the time this
+  # trap runs, so a refusal's marker root has no remaining reader and goes here;
+  # a spawn that SUCCEEDED leaves its own marker root standing, and fm-teardown
+  # reaps it by id with the rest of the root. That survivor is load-bearing, not
+  # a leak to tidy away: it is what makes another home's `rmdir` below fail on
+  # this shared root while this spawn's task is still live.
+  #
+  # The task temp root goes only when THIS spawn created it and no meta names
+  # it, which is also the window before GOTMPDIR is exported into any pane - so
+  # nothing live can be using it, an adopted or foreign-planted root is never
+  # touched, and a published task stays reapable by id through fm-teardown.
   #
   # `rmdir`, never `rm -rf`, and that is the whole point of these two lines. The
   # root is named after the task id alone, so a second home spawning the same id
@@ -2444,19 +2450,6 @@ TASK_TMP="/tmp/fm-$ID"
 if (umask 077; mkdir "$TASK_TMP" 2>/dev/null); then
   SPAWN_TASK_TMP_CREATED=1
 fi
-# Guarded, and not left to `set -e`, for the same reason the marker directory
-# below refuses out loud: /tmp is world-writable and a task id is an ordinary
-# predictable slug, so this whole root is a path another local account can
-# pre-create at a mode this one cannot write into. The window already exists by
-# now, so a bare `mkdir: .../gotmp: Permission denied` leaves the operator an
-# orphan pane and a path they have no reason to connect to a spawn - while the
-# adjacent failure of the marker directory inside this root explains itself in
-# full. Both are the same refusal and owe the same explanation.
-mkdir -p "$TASK_TMP/gotmp" || {
-  echo "error: could not create the per-task temp root $TASK_TMP for $ID (its own reason is above); a path under world-writable /tmp named after the task id may already belong to another local account, and the readiness marker that proves the endpoint shell ran what was typed into it lives there; refusing to spawn" >&2
-  exit 1
-}
-
 # The readiness marker below is a correctness boolean, so it lives in a
 # directory this spawn CREATED and never in one it adopted. /tmp is
 # world-writable and a task id is an ordinary slug, so /tmp/fm-<id> is a path
@@ -2527,6 +2520,38 @@ spawn_ready_root_private() {  # <dir> - on false, names the failed condition
   return 0
 }
 
+spawn_refuse_unprivate_task_tmp() {
+  echo "error: task $ID's per-task temp root $TASK_TMP is not private: $SPAWN_READY_ROOT_PRIVACY_ISSUE, so another local account could replace the readiness-marker directory this spawn is about to create inside it and no marker there would be proof the endpoint shell ran what was typed into it; refusing to spawn" >&2
+  exit 1
+}
+
+# Asked of a root this spawn ADOPTED before anything is written into it, and
+# not only before the marker directory is minted. `mkdir -p` follows a symlink
+# at the root position, so a root whose identity is still unestablished must
+# not receive gotmp either: a local account that pre-created /tmp/fm-<id> as a
+# link into a directory it controls would otherwise get a directory created
+# wherever it chose, and `SPAWN_TASK_TMP_CREATED` is 0 for exactly that root,
+# so the refusal cleanup above would never take it back. A root this spawn
+# created is private by construction (see the umask above) and a root that
+# cannot be created at all is still owned by the guarded `mkdir -p` below,
+# which names it.
+if [ "$SPAWN_TASK_TMP_CREATED" != 1 ] && { [ -e "$TASK_TMP" ] || [ -L "$TASK_TMP" ]; }; then
+  spawn_ready_root_private "$TASK_TMP" || spawn_refuse_unprivate_task_tmp
+fi
+
+# Guarded, and not left to `set -e`, for the same reason the marker directory
+# above refuses out loud: /tmp is world-writable and a task id is an ordinary
+# predictable slug, so this whole root is a path another local account can
+# pre-create at a mode this one cannot write into. The window already exists by
+# now, so a bare `mkdir: .../gotmp: Permission denied` leaves the operator an
+# orphan pane and a path they have no reason to connect to a spawn - while the
+# adjacent failure of the marker directory inside this root explains itself in
+# full. Both are the same refusal and owe the same explanation.
+mkdir -p "$TASK_TMP/gotmp" || {
+  echo "error: could not create the per-task temp root $TASK_TMP for $ID (its own reason is above); a path under world-writable /tmp named after the task id may already belong to another local account, and the readiness marker that proves the endpoint shell ran what was typed into it lives there; refusing to spawn" >&2
+  exit 1
+}
+
 # An unguessable name inside the root is not on its own what keeps the marker
 # directory the spawn's own: the ENTRY for it lives in the root, so whoever can
 # write the root can rename or replace that entry with a symlink to anywhere
@@ -2544,10 +2569,7 @@ spawn_ready_root_private() {  # <dir> - on false, names the failed condition
 # mode is still left exactly as found, because a spawn that chmod-ed a path
 # whose identity it never established would be aiming that mode change at
 # whatever a raced symlink pointed to.
-if ! spawn_ready_root_private "$TASK_TMP"; then
-  echo "error: task $ID's per-task temp root $TASK_TMP is not private: $SPAWN_READY_ROOT_PRIVACY_ISSUE, so another local account could replace the readiness-marker directory this spawn is about to create inside it and no marker there would be proof the endpoint shell ran what was typed into it; refusing to spawn" >&2
-  exit 1
-fi
+spawn_ready_root_private "$TASK_TMP" || spawn_refuse_unprivate_task_tmp
 
 SPAWN_READY_ROOT=$(mktemp -d "$TASK_TMP/shell-ready.XXXXXXXX") || SPAWN_READY_ROOT=
 if [ -z "$SPAWN_READY_ROOT" ]; then

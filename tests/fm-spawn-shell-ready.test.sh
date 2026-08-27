@@ -49,12 +49,16 @@
 # second plants a root it cannot privately write and asserts a loud refusal
 # rather than a marker that proves nothing; a third plants one any local account
 # CAN write and asserts the same refusal, because the entry for the marker
-# directory lives in that root and whoever writes the root can replace it. A
-# fourth case is about that root being shared rather than hostile - the task id
-# alone names it, so a second home spawning the same id is in the same path, and
-# a refused spawn must leave that home's marker standing instead of reaping the
-# root out from under it. A fifth pins the re-send cadence, which lands in the
-# very scrollback an operator reads when a spawn is slow.
+# directory lives in that root and whoever writes the root can replace it; a
+# fourth plants it as a SYMLINK elsewhere and asserts the refusal lands before
+# the spawn's own Go build temp is created through it, because `mkdir -p`
+# resolves that link and a root the spawn did not create is one its refusal
+# cleanup may not reclaim. A fifth case is about that root being shared rather
+# than hostile - the task id alone names it, so a second home spawning the same
+# id is in the same path, and a refused spawn must leave that home's marker
+# standing instead of reaping the root out from under it. A sixth pins the
+# re-send cadence, which lands in the very scrollback an operator reads when a
+# spawn is slow.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -264,16 +268,6 @@ submit_line() {
 
 case "$*" in
   *"#{pane_current_path}"*) cat "$S/cwd"; exit 0 ;;
-  # The pane's foreground command, which is what tells an agent-free pane from
-  # one running a harness. It is the fake shell until a launch line really ran,
-  # because the harness binary records itself here when it starts.
-  *"#{pane_current_command}"*)
-    if [ -f "$S/pane-command" ]; then cat "$S/pane-command"; else printf 'zsh\n'; fi
-    exit 0
-    ;;
-  # A tty no ps can read, so the foreground-process-group half of the liveness
-  # probe stays empty and the verdict rests on the command above alone.
-  *"#{pane_tty}"*) printf '/dev/fm-fake-tty\n'; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -354,9 +348,6 @@ SH
 set -u
 S="${FM_FAKE_SHELL_STATE:?FM_FAKE_SHELL_STATE unset}"
 printf 'launched\n' >> "$S/launched.log"
-# A launched harness is the pane's foreground command from here on, the way a
-# real exec would leave the pane looking.
-printf 'codex\n' > "$S/pane-command"
 exit 0
 SH
   chmod +x "$fakebin/codex"
@@ -857,9 +848,49 @@ test_group_or_other_writable_temp_root_refuses_the_spawn() {
     "the spawn typed into the pane while its readiness marker could be replaced by another account"
   assert_absent "$STATE_DIR/launched.log" \
     "an agent was launched with a readiness marker another account could replace"
+  [ ! -e "$TASK_TMP_PATH/gotmp" ] \
+    || fail "the spawn created gotmp inside a temp root any local account can write, before establishing that root's identity"
   [ "$(path_mode "$TASK_TMP_PATH")" = 777 ] \
     || fail "the spawn changed the mode of a temp root it did not create (now $(path_mode "$TASK_TMP_PATH"))"
   pass "a group- or other-writable temp root refuses the spawn instead of holding an unprovable marker"
+}
+
+# The same threat model one step earlier, and the reason the root's identity is
+# established BEFORE anything is written into it. /tmp/fm-<id> is a predictable
+# name another local account can pre-create as a SYMLINK into a directory it
+# controls, and `mkdir -p <root>/gotmp` resolves that link like any other path
+# component - so a spawn that created its Go build temp first and only then
+# asked what the root was would already have made a directory wherever the
+# planter pointed, at a path its own refusal cleanup cannot reclaim (the create
+# it never won means it must not remove anything). The refusal must therefore
+# land before the first write, and the planted link must be left exactly as
+# found, for the same reason no mode of it is ever adjusted.
+test_symlinked_temp_root_refuses_before_writing_into_it() {
+  local rec id out status target
+  id=shell-ready-linked-root-zh-$RUN_TAG
+  rec=$(make_shell_case shell-ready-linked-root "$id" 0 0)
+  read_shell_record "$rec"
+  target="$TMP_ROOT/shell-ready-linked-root/planted-elsewhere"
+  mkdir -p "$target"
+  use_task_tmp "$id"
+  ln -s "$target" "$TASK_TMP_PATH"
+
+  out=$(run_shell_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should refuse a temp root that is a symlink to somewhere else"
+  assert_contains "$out" "per-task temp root $TASK_TMP_PATH is not private" \
+    "the refusal did not name the temp root whose identity it could not establish"$'\n'"$out"
+  assert_contains "$out" "replaced by a symlink" \
+    "the refusal did not say the root was not a plain directory"$'\n'"$out"
+  [ ! -e "$target/gotmp" ] \
+    || fail "the spawn created $target/gotmp through the planted symlink before establishing the root's identity"
+  [ -L "$TASK_TMP_PATH" ] \
+    || fail "the spawn replaced the planted symlink at $TASK_TMP_PATH instead of leaving it as found"
+  assert_absent "$STATE_DIR/lines.log" \
+    "the spawn typed into the pane with its readiness marker pointed at another account's directory"
+  assert_absent "$STATE_DIR/launched.log" \
+    "an agent was launched with a symlinked per-task temp root"
+  pass "a symlinked temp root refuses the spawn before anything is written through it"
 }
 
 # No behaviour change for a pane whose shell is already reading: every spawn
@@ -910,6 +941,7 @@ test_planted_temp_root_keeps_its_mode_and_the_marker_stays_private
 test_temp_root_that_cannot_hold_a_private_marker_refuses_the_spawn
 test_temp_root_the_spawn_cannot_write_into_refuses_by_name
 test_group_or_other_writable_temp_root_refuses_the_spawn
+test_symlinked_temp_root_refuses_before_writing_into_it
 test_refused_spawn_leaves_another_homes_marker_in_the_shared_temp_root
 test_ready_shell_pays_at_most_one_poll_per_gate
 
