@@ -317,6 +317,81 @@ SH
   pass "foreign secondmate queue stalls notify once, remain byte-stable, and stay quiet when empty or healthy"
 }
 
+run_secondmate_stall_state_case() {  # <name> <busy|idle|unknown> <status-line-or-empty> <wake|quiet>
+  local name=$1 liveness=$2 status_line=$3 expected=$4 dir state sub fakebin out gen
+  dir=$(make_case "secondmate-stall-state-$name")
+  state="$dir/state"
+  sub="$dir/secondmate"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  mkdir -p "$sub/state"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$(( $(date +%s) - 10 ))" \
+    > "$sub/state/.wake-queue"
+  case "$liveness" in
+    busy)
+      "$ROOT/bin/fm-busy-event.sh" arm "$state" mate >/dev/null \
+        || fail "$name could not seed busy liveness"
+      ;;
+    idle)
+      gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" mate) \
+        || fail "$name could not arm liveness"
+      "$ROOT/bin/fm-busy-event.sh" apply "$state" mate idle --gen "$gen" \
+        --source claude-hook --event stop >/dev/null \
+        || fail "$name could not seed idle liveness"
+      ;;
+    unknown) ;;
+    *) fail "$name named unsupported liveness '$liveness'" ;;
+  esac
+  if [ -n "$status_line" ]; then
+    printf '%s\n' "$status_line" > "$state/mate.status"
+    prime_status_seen "$state" "$state/mate.status" \
+      || fail "$name could not prime the status marker"
+  fi
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$out" 2> "$dir/watch.err" || true
+  case "$expected" in
+    wake)
+      grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$out" >/dev/null \
+        || fail "$name did not wake for an aged foreign row: out=$(cat "$out"); err=$(cat "$dir/watch.err")"
+      ;;
+    quiet)
+      ! grep -F 'secondmate wake-loop stalled' "$out" >/dev/null \
+        || fail "$name woke for an aged foreign row: $(cat "$out")"
+      [ ! -s "$state/.wake-queue" ] \
+        || fail "$name durably queued a stall notification while it should be quiet"
+      ;;
+    *) fail "$name named unsupported expected result '$expected'" ;;
+  esac
+}
+
+test_secondmate_busy_aged_queue_stays_quiet() {
+  run_secondmate_stall_state_case busy busy '' quiet
+  pass "a provably busy secondmate with an aged queue row stays quiet"
+}
+
+test_secondmate_blocked_aged_queue_wakes() {
+  run_secondmate_stall_state_case blocked busy \
+    'blocked [key=routed]: waiting for the primary to route feedback' wake
+  pass "a secondmate whose latest status is blocked wakes despite busy evidence"
+}
+
+test_secondmate_idle_aged_queue_wakes() {
+  run_secondmate_stall_state_case idle idle 'working: previous turn completed' wake
+  pass "an idle non-blocked secondmate with an aged queue row wakes"
+}
+
+test_secondmate_unknown_liveness_aged_queue_wakes() {
+  run_secondmate_stall_state_case unknown unknown '' wake
+  pass "unknown secondmate liveness fails toward waking the primary"
+}
+
 test_secondmate_stall_marker_rejects_symlink() {
   local dir state sub fakebin marker outside expected
   dir=$(make_case secondmate-stall-marker-symlink)
@@ -996,6 +1071,10 @@ test_historical_annotation_skips_announced_status() {
 
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
+test_secondmate_blocked_aged_queue_wakes
+test_secondmate_idle_aged_queue_wakes
+test_secondmate_unknown_liveness_aged_queue_wakes
+test_secondmate_busy_aged_queue_stays_quiet
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash
 test_empty_prefix_mate_preserves_other_mate_receipt

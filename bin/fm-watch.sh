@@ -78,8 +78,10 @@
 #   check: secondmate wake-loop stalled: mate=<id> row=<seq> age=<seconds>s
 #                          the oldest valid row in an endpoint-recorded local
 #                          secondmate home's durable wake queue exceeded
-#                          FM_SECONDMATE_WAKE_STALL_SECS; observation is read-only
-#                          and one parent receipt suppresses repeats for that row
+#                          FM_SECONDMATE_WAKE_STALL_SECS while the mate was not
+#                          provably busy; blocked, idle, and unknown all wake,
+#                          observation is read-only, and one parent receipt
+#                          suppresses repeats for that row
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -403,6 +405,7 @@ secondmate_oldest_queue_row() {  # <queue-path>
 secondmate_wake_stall_tick() {
   local now=$(( $(date +%s) )) threshold=$SECONDMATE_WAKE_STALL_SECS
   local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age reason
+  local status_line status_verb busy_verdict
   case "$threshold" in ''|*[!0-9]*|0) threshold=60 ;; esac
   # Endpoint metadata admits this queue-loop check; secondmate-liveness owns registered mates whose endpoint is missing or dead.
   for meta in "$STATE"/*.meta; do
@@ -437,6 +440,16 @@ EOF
     case "$seq" in ''|*[!0-9]*) continue ;; esac
     age=$((now - epoch))
     [ "$age" -ge "$threshold" ] || continue
+    status_line=$(grep -v '^[[:space:]]*$' "$STATE/$task.status" 2>/dev/null | tail -1 || true)
+    status_verb=$(status_line_verb "$status_line")
+    if [ "$status_verb" != blocked ]; then
+      busy_verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE")
+      # Only positive proof of an active turn suppresses the alert. Idle and
+      # unknown both wake conservatively because missing a mate waiting on the
+      # primary is worse than an extra supervision turn; blocked always wakes
+      # above this branch even if liveness evidence races or lags the status.
+      [ "${busy_verdict%% *}" = busy ] && continue
+    fi
     row_key="$epoch-$seq"
     receipt="$receipt_dir/$row_key"
     if [ -e "$marker" ] || [ -L "$marker" ]; then

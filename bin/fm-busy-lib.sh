@@ -47,13 +47,15 @@
 # with the producing source as the second token. Precedence:
 #   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
 #   2. standalone Kimi before verification       -> unknown kimi-unverified
-#   3. a valid, gen-matching, source-trusted record -> its state and source
-#   4. no record at all: herdr's native busy verdict is trusted as busy
+#   3. Codex with no verified harness source may still accept an independent
+#      Herdr-native busy verdict; native idle remains inconclusive
+#   4. a valid, gen-matching, source-trusted record -> its state and source
+#   5. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
 #      muse session-log and cursor transcript pull sources, then the Grok-only
 #      temporary regex fallback classifies a grok task from its rendered tail,
 #      then unknown missing
-#   5. malformed, stale, or untrusted records -> unknown, never a fallback
+#   6. malformed, stale, or untrusted records -> unknown, never a fallback
 # The Grok arm is the ONLY rendered-text classification that survives the
 # redesign, because Grok's structured lifecycle was not credited-live-verified
 # in the approved audit; it is scoped to harness=grok and can never classify
@@ -80,8 +82,10 @@
 # fm_busy_codex_hooks_verified): the approved contract prefers Codex's
 # app-server turn lifecycle with capability negotiation, and sanctions its
 # stable lifecycle hooks as the intermediate. Neither is usable on the
-# installed binary, so Codex classifies unknown codex-unverified rather than
-# falling back to idle, and fm-spawn installs no Codex busy wiring.
+# installed binary, so Codex's own state classifies unknown codex-unverified
+# rather than falling back to idle, and fm-spawn installs no Codex busy wiring.
+# An independent Herdr-native busy verdict can still prove a Codex turn active;
+# it remains attributed to herdr-native and native idle stays inconclusive.
 # docs/verification/supervision.md owns the evidence for both probes.
 #
 # Sourcing: set -u and set -e safe; no subshell-unfriendly globals.
@@ -141,7 +145,8 @@ fm_busy_codex_hooks_verified() {
 
 # fm_busy_codex_semantic_source: 0 when ANY verified Codex semantic source
 # exists. fm-spawn arms and wires Codex only behind this gate, and the
-# classifier reports unknown codex-unverified until it opens.
+# classifier reports unknown codex-unverified until it opens unless the
+# independent Herdr backend proves the endpoint busy.
 fm_busy_codex_semantic_source() {
   fm_busy_codex_appserver_observable || fm_busy_codex_hooks_verified
 }
@@ -839,7 +844,7 @@ fm_busy_grok_tail_busy() {
 # if available, else reports unknown capture-failed.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
-  local out rc r_state r_source native log
+  local out rc r_state r_source native log codex_unverified=0
   case "$harness" in
     kimi*)
       if ! fm_busy_kimi_verified; then
@@ -849,8 +854,11 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       ;;
     codex*)
       if ! fm_busy_codex_semantic_source; then
-        printf 'unknown codex-unverified'
-        return 0
+        # Codex's own lifecycle sources are unverified, but that must not hide
+        # independent backend proof. Skip stored harness records, consult the
+        # existing Herdr-native busy-only branch below, and preserve the
+        # codex-unverified attribution when native state is idle or unreadable.
+        codex_unverified=1
       fi
       ;;
     cursor*)
@@ -872,7 +880,12 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       return 0
       ;;
   esac
-  out=$(fm_busy_record_read "$state" "$id") && rc=0 || rc=$?
+  if [ "$codex_unverified" = 1 ]; then
+    out=missing
+    rc=1
+  else
+    out=$(fm_busy_record_read "$state" "$id") && rc=0 || rc=$?
+  fi
   if [ "$rc" = 0 ]; then
     r_state=${out%% *}
     out=${out#* }
@@ -900,6 +913,10 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       printf 'busy herdr-native'
       return 0
     fi
+  fi
+  if [ "$codex_unverified" = 1 ]; then
+    printf 'unknown codex-unverified'
+    return 0
   fi
   case "$harness" in
     muse*)

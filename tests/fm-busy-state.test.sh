@@ -315,7 +315,31 @@ test_codex_unverified_gate() {
   [ "$out" = "unknown codex-unverified" ] || fail "unverified codex must classify unknown, got '$out'"
   [ -z "$(fm_busy_sources_for_harness codex)" ] \
     || fail "codex must trust no semantic source until one is verified"
-  pass "codex classifies unknown until a semantic source passes its verification gate"
+  pass "Codex without independent backend proof stays unknown until its own semantic source is verified"
+}
+
+test_codex_herdr_native_busy_is_independent_proof() {
+  local state out
+  state=$(new_state_dir codex-herdr-native-busy)
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_busy_state() { printf 'busy'; }
+  out=$(fm_busy_classify herdr s:p codex t1 "$state")
+  unset -f fm_backend_busy_state
+  [ "$out" = "busy herdr-native" ] \
+    || fail "Herdr-native busy must remain reachable when Codex's own sources are unverified, got '$out'"
+  pass "Herdr-native busy independently proves a Codex turn is active"
+}
+
+test_codex_herdr_native_idle_stays_unknown() {
+  local state out
+  state=$(new_state_dir codex-herdr-native-idle)
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_busy_state() { printf 'idle'; }
+  out=$(fm_busy_classify herdr s:p codex t1 "$state")
+  unset -f fm_backend_busy_state
+  [ "$out" = "unknown codex-unverified" ] \
+    || fail "Herdr-native idle must not hide Codex's unverified semantic sources, got '$out'"
+  pass "Herdr-native idle remains inconclusive for Codex"
 }
 
 test_kimi_unverified_gate() {
@@ -455,6 +479,8 @@ test_source_mismatch_cross_adapter
 test_converted_adapters_ignore_footer_text
 test_grok_regex_isolated
 test_codex_unverified_gate
+test_codex_herdr_native_idle_stays_unknown
+test_codex_herdr_native_busy_is_independent_proof
 test_kimi_unverified_gate
 test_cursor_ignores_rendered_and_native_signals
 test_dead_endpoint_overrides
