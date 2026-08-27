@@ -35,6 +35,46 @@ find_chrome() {
 
 CHROME=$(find_chrome) || { echo "skip: Chrome or Chromium not found"; exit 0; }
 
+dump_dom() {
+  local source=$1 dom=$2 profile=$3 width=$4 marker=$5
+  local chrome_pid chrome_wait=0 rendered=false
+  "$CHROME" \
+    --headless=new \
+    --disable-gpu \
+    --disable-dev-shm-usage \
+    --no-sandbox \
+    --user-data-dir="$profile" \
+    --window-size="$width,900" \
+    --virtual-time-budget=2000 \
+    --dump-dom \
+    "$source" > "$dom" 2>/dev/null &
+  chrome_pid=$!
+  while kill -0 "$chrome_pid" 2>/dev/null && [ "$chrome_wait" -lt 300 ]; do
+    if grep -Fq '</html>' "$dom" 2>/dev/null && grep -Fq "$marker" "$dom" 2>/dev/null; then
+      rendered=true
+      break
+    fi
+    sleep 0.1
+    chrome_wait=$((chrome_wait + 1))
+  done
+  kill "$chrome_pid" 2>/dev/null || true
+  wait "$chrome_pid" 2>/dev/null || true
+  if grep -Fq '</html>' "$dom" 2>/dev/null && grep -Fq "$marker" "$dom" 2>/dev/null; then
+    rendered=true
+  fi
+  [ "$rendered" = true ]
+}
+
+smoke_browser() {
+  local dom="$TMP_ROOT/smoke.html" profile="$TMP_ROOT/chrome-smoke"
+  if ! dump_dom \
+    'data:text/html,<html><body><div id="fm-browser-smoke">ready</div></body></html>' \
+    "$dom" "$profile" 800 'id="fm-browser-smoke"'; then
+    echo "skip: Chrome or Chromium could not render headless"
+    exit 0
+  fi
+}
+
 make_board() {
   local home="$TMP_ROOT/home" fakebin data long_title long_reason long_level long_detail board
   mkdir -p "$home/state" "$home/data"
@@ -137,29 +177,7 @@ JS
 
 render_viewport() {
   local board=$1 width=$2 dom="$TMP_ROOT/layout-$2.html" profile="$TMP_ROOT/chrome-$2"
-  local chrome_pid chrome_wait=0
-  "$CHROME" \
-    --headless=new \
-    --disable-gpu \
-    --no-sandbox \
-    --user-data-dir="$profile" \
-    --window-size="$width,900" \
-    --virtual-time-budget=2000 \
-    --dump-dom \
-    "file://$board" > "$dom" 2>/dev/null &
-  chrome_pid=$!
-  # A loaded CI runner can take more than ten seconds to start Chromium.
-  while kill -0 "$chrome_pid" 2>/dev/null && [ "$chrome_wait" -lt 300 ]; do
-    if grep -Fq '</html>' "$dom" 2>/dev/null && grep -Fq 'id="fm-layout-result"' "$dom" 2>/dev/null; then
-      break
-    fi
-    sleep 0.1
-    chrome_wait=$((chrome_wait + 1))
-  done
-  kill "$chrome_pid" 2>/dev/null || true
-  wait "$chrome_pid" 2>/dev/null || true
-  if ! grep -Fq '</html>' "$dom" 2>/dev/null \
-    || ! grep -Fq 'id="fm-layout-result"' "$dom" 2>/dev/null; then
+  if ! dump_dom "file://$board" "$dom" "$profile" "$width" 'id="fm-layout-result"'; then
     fail "the board did not render in a ${width}px browser viewport"
   fi
   node - "$dom" "$width" <<'JS' || fail "the board layout escaped its bounds at ${width}px"
@@ -190,6 +208,7 @@ if (!close(result.subtitleLines, 2)) throw new Error(`long subtitle did not reac
 JS
 }
 
+smoke_browser
 board=$(make_board) || exit 1
 render_viewport "$board" 1440
 render_viewport "$board" 620
