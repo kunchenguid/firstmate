@@ -41,8 +41,9 @@
 #                       recovery handling state, so both only run when locked.
 #                       It closes by restating this home's captain calls into the
 #                       captain's Reminders list when that projection is switched
-#                       on (bin/fm-captain-reminders.sh), bounded so it can never
-#                       delay the digest and never able to fail the startup.
+#                       on (bin/fm-captain-reminders.sh), which owns its own
+#                       whole-run ceiling so it can never delay the digest, and
+#                       which can never fail the startup.
 #   4. supervision-instructions - the one emitted operating block for the
 #                       detected primary harness.
 #   5. read-once contract - the do-not-re-read contract covering every source

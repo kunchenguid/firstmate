@@ -134,6 +134,7 @@ APPLESCRIPT
 OSA_OUT=
 OSA_TIMED_OUT=0
 OSA_TIMEOUT_SECS=
+# shellcheck disable=SC2034  # OSA_OUT and OSA_TIMED_OUT are read by the sourcing script.
 osa() {  # <verb> <args...>; sets OSA_OUT
   local verb=$1 rc err out timeout
   shift
