@@ -1131,47 +1131,216 @@ def output_record(record: dict[str, Any], as_json: bool) -> None:
     print(f"Approval required: {approval['kind'] if approval['required'] else 'no'}")
 
 
-def status_projection(record: dict[str, Any]) -> dict[str, Any]:
+def compact_status_error(incident_id: str, field: str) -> IncidentError:
+    return IncidentError(f"incident record has invalid compact status field {field}: {incident_id}")
+
+
+def compact_status_mapping(
+    value: Any,
+    incident_id: str,
+    field: str,
+    expected_keys: set[str],
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != expected_keys:
+        raise compact_status_error(incident_id, field)
+    return value
+
+
+def compact_status_string(value: Any, incident_id: str, field: str) -> None:
+    if type(value) is not str:
+        raise compact_status_error(incident_id, field)
+
+
+def compact_status_bool(value: Any, incident_id: str, field: str) -> None:
+    if type(value) is not bool:
+        raise compact_status_error(incident_id, field)
+
+
+def compact_status_count(value: Any, incident_id: str, field: str) -> None:
+    if type(value) is not int or value < 0:
+        raise compact_status_error(incident_id, field)
+
+
+def compact_status_count_pair(value: Any, incident_id: str, field: str) -> dict[str, Any]:
+    row = compact_status_mapping(value, incident_id, field, {"shown", "omitted"})
+    compact_status_count(row["shown"], incident_id, f"{field}.shown")
+    compact_status_count(row["omitted"], incident_id, f"{field}.omitted")
+    return row
+
+
+def validate_compact_status(record: dict[str, Any]) -> None:
     incident_id = record.get("id") if isinstance(record.get("id"), str) else "unknown"
-    string_fields = (
+    compact_status_mapping(
+        record,
+        incident_id,
+        "record",
+        {
+            "schema", "id", "summary", "updated_at", "phase", "flow", "outcome",
+            "diagnosis", "approval", "inventory", "safest_next_action",
+        },
+    )
+    for field in (
         "schema", "id", "summary", "updated_at", "phase", "outcome", "safest_next_action",
-    )
-    if any(not isinstance(record.get(key), str) for key in string_fields):
-        raise IncidentError(f"incident record is incomplete for compact status: {incident_id}")
-    if not isinstance(record.get("flow"), list):
-        raise IncidentError(f"incident record is incomplete for compact status: {incident_id}")
-    mapping_fields = ("diagnosis", "approval", "workers", "repository", "verification")
-    if any(not isinstance(record.get(key), dict) for key in mapping_fields):
-        raise IncidentError(f"incident record is incomplete for compact status: {incident_id}")
-    diagnosis = record["diagnosis"]
-    approval = record["approval"]
-    observations = diagnosis.get("observations")
-    if not isinstance(observations, dict):
-        raise IncidentError(f"incident record is incomplete for compact status: {incident_id}")
-    diagnosis_fields = (
-        "classification", "probable_root_cause", "code_change_required",
-        "hotfix_already_deployed", "operational_repair_ready",
-    )
-    approval_fields = ("required", "kind", "request", "status")
-    if (
-        any(key not in diagnosis for key in diagnosis_fields)
-        or any(key not in approval for key in approval_fields)
     ):
-        raise IncidentError(f"incident record is incomplete for compact status: {incident_id}")
+        compact_status_string(record[field], incident_id, field)
+    if record["schema"] != SCHEMA or not INCIDENT_RE.fullmatch(record["id"]):
+        raise compact_status_error(incident_id, "schema or id")
     try:
         updated_at = parse_time(record["updated_at"])
     except ValueError as exc:
-        raise IncidentError(f"incident record has an invalid updated_at: {incident_id}") from exc
+        raise compact_status_error(incident_id, "updated_at") from exc
     if updated_at.tzinfo is None:
-        raise IncidentError(f"incident record has an invalid updated_at: {incident_id}")
-    return {
-        "schema": record["schema"],
-        "id": record["id"],
-        "summary": record["summary"],
-        "updated_at": record["updated_at"],
-        "phase": record["phase"],
-        "flow": record["flow"],
-        "outcome": record["outcome"],
+        raise compact_status_error(incident_id, "updated_at")
+
+    flow = record["flow"]
+    if not isinstance(flow, list) or len(flow) != len(FLOW):
+        raise compact_status_error(incident_id, "flow")
+    for index, expected_name in enumerate(FLOW):
+        row = compact_status_mapping(flow[index], incident_id, f"flow[{index}]", {"name", "status"})
+        compact_status_string(row["name"], incident_id, f"flow[{index}].name")
+        compact_status_string(row["status"], incident_id, f"flow[{index}].status")
+        if row["name"] != expected_name:
+            raise compact_status_error(incident_id, f"flow[{index}].name")
+
+    diagnosis = compact_status_mapping(
+        record["diagnosis"],
+        incident_id,
+        "diagnosis",
+        {
+            "classification", "probable_root_cause", "code_change_required",
+            "hotfix_already_deployed", "operational_repair_ready",
+        },
+    )
+    for field in ("classification", "probable_root_cause", "code_change_required"):
+        compact_status_string(diagnosis[field], incident_id, f"diagnosis.{field}")
+    for field in ("hotfix_already_deployed", "operational_repair_ready"):
+        compact_status_bool(diagnosis[field], incident_id, f"diagnosis.{field}")
+
+    approval = compact_status_mapping(
+        record["approval"],
+        incident_id,
+        "approval",
+        {"required", "kind", "request", "status"},
+    )
+    compact_status_bool(approval["required"], incident_id, "approval.required")
+    for field in ("kind", "request", "status"):
+        compact_status_string(approval[field], incident_id, f"approval.{field}")
+
+    inventory = compact_status_mapping(
+        record["inventory"],
+        incident_id,
+        "inventory",
+        {"workers", "repository", "evidence", "verification"},
+    )
+    compact_status_count_pair(inventory["workers"], incident_id, "inventory.workers")
+    repository = compact_status_mapping(
+        inventory["repository"],
+        incident_id,
+        "inventory.repository",
+        {
+            "registered_worker_metadata", "candidate_worktrees", "worktrees",
+            "project_directories", "scan_repositories", "candidate_paths", "copies", "branches",
+        },
+    )
+    compact_status_count_pair(
+        repository["registered_worker_metadata"],
+        incident_id,
+        "inventory.repository.registered_worker_metadata",
+    )
+    for field in ("candidate_worktrees", "worktrees"):
+        row = compact_status_mapping(
+            repository[field],
+            incident_id,
+            f"inventory.repository.{field}",
+            {"repository", "shown", "omitted"},
+        )
+        compact_status_string(
+            row["repository"],
+            incident_id,
+            f"inventory.repository.{field}.repository",
+        )
+        compact_status_count(row["shown"], incident_id, f"inventory.repository.{field}.shown")
+        compact_status_count(row["omitted"], incident_id, f"inventory.repository.{field}.omitted")
+    compact_status_count_pair(
+        repository["project_directories"],
+        incident_id,
+        "inventory.repository.project_directories",
+    )
+    scan_repositories = compact_status_mapping(
+        repository["scan_repositories"],
+        incident_id,
+        "inventory.repository.scan_repositories",
+        {"omitted_at_least"},
+    )
+    compact_status_count(
+        scan_repositories["omitted_at_least"],
+        incident_id,
+        "inventory.repository.scan_repositories.omitted_at_least",
+    )
+    compact_status_count_pair(
+        repository["candidate_paths"],
+        incident_id,
+        "inventory.repository.candidate_paths",
+    )
+    copies = compact_status_mapping(
+        repository["copies"],
+        incident_id,
+        "inventory.repository.copies",
+        {"shown", "complete"},
+    )
+    compact_status_count(copies["shown"], incident_id, "inventory.repository.copies.shown")
+    compact_status_bool(copies["complete"], incident_id, "inventory.repository.copies.complete")
+    branches = compact_status_mapping(
+        repository["branches"],
+        incident_id,
+        "inventory.repository.branches",
+        {"shown", "omitted_at_least"},
+    )
+    compact_status_count(branches["shown"], incident_id, "inventory.repository.branches.shown")
+    compact_status_count(
+        branches["omitted_at_least"],
+        incident_id,
+        "inventory.repository.branches.omitted_at_least",
+    )
+
+    evidence = compact_status_mapping(
+        inventory["evidence"],
+        incident_id,
+        "inventory.evidence",
+        {"supporting_evidence", "runtime_errors", "external_providers", "local_services"},
+    )
+    for field, value in evidence.items():
+        compact_status_count_pair(value, incident_id, f"inventory.evidence.{field}")
+
+    verification = inventory["verification"]
+    if not isinstance(verification, dict) or set(verification) not in (set(), {"checks"}):
+        raise compact_status_error(incident_id, "inventory.verification")
+    if "checks" in verification:
+        compact_status_count_pair(
+            verification["checks"],
+            incident_id,
+            "inventory.verification.checks",
+        )
+
+
+def status_projection(record: dict[str, Any]) -> dict[str, Any]:
+    incident_id = record.get("id") if isinstance(record.get("id"), str) else "unknown"
+    mapping_fields = ("diagnosis", "approval", "workers", "repository", "verification")
+    if any(not isinstance(record.get(key), dict) for key in mapping_fields):
+        raise compact_status_error(incident_id, "record")
+    diagnosis = record["diagnosis"]
+    observations = diagnosis.get("observations")
+    if not isinstance(observations, dict):
+        raise compact_status_error(incident_id, "diagnosis.observations")
+    approval = record["approval"]
+    projection = {
+        "schema": record.get("schema"),
+        "id": record.get("id"),
+        "summary": record.get("summary"),
+        "updated_at": record.get("updated_at"),
+        "phase": record.get("phase"),
+        "flow": record.get("flow"),
+        "outcome": record.get("outcome"),
         "diagnosis": {
             key: diagnosis.get(key)
             for key in (
@@ -1189,8 +1358,10 @@ def status_projection(record: dict[str, Any]) -> dict[str, Any]:
             "evidence": record.get("diagnosis", {}).get("observations", {}).get("inventory", {}),
             "verification": record.get("verification", {}).get("inventory", {}),
         },
-        "safest_next_action": record["safest_next_action"],
+        "safest_next_action": record.get("safest_next_action"),
     }
+    validate_compact_status(projection)
+    return projection
 
 
 def triage(args: argparse.Namespace) -> int:

@@ -615,8 +615,8 @@ test_bounded_inventory_omissions_are_disclosed() {
   done
   jq '.id="z-current" | .summary="z-current" | .updated_at="2026-08-27T20:00:00Z"' \
     "$home/state/incidents/bounded-base.json" > "$home/state/incidents/z-current.json"
-  printf '{"schema":"fm-runtime-incident.v1","id":"malformed"}\n' \
-    > "$home/state/incidents/malformed.json"
+  jq '.id="malformed" | .summary="malformed" | .workers.inventory.omitted="unknown"' \
+    "$home/state/incidents/bounded-base.json" > "$home/state/incidents/malformed.json"
   out=$(FM_HOME="$home" FM_INCIDENT_STATUS_LIMIT=100 "$INCIDENT" status --json --compact)
   printf '%s' "$out" | jq -e '
     .input == {shown:64,omitted:1}
@@ -624,6 +624,7 @@ test_bounded_inventory_omissions_are_disclosed() {
       and ([.records[].id] | index("z-current")) != null
       and (.invalid | length) == 1
       and (.invalid[0].path | endswith("/malformed.json"))
+      and (.invalid[0].reason | contains("inventory.workers.omitted"))
       and .truncated == 0
   ' >/dev/null || fail "incident input bound hid omitted records: $out"
   human=$(FM_HOME="$home" FM_INCIDENT_STATUS_LIMIT=100 "$INCIDENT" status)
