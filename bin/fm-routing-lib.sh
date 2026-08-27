@@ -845,17 +845,75 @@ fm_route_validate_route_tuple() {
   case "$mode" in off|simulate|canary|automatic) ;; *) fm_route_diagnostic 'invalid routing mode'; return 1 ;; esac
 }
 
+fm_route_validate_circuits_file() {
+  local file=$1
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  jq --stream -n -e '
+    [inputs | select(length == 2) | .[0] | @json]
+    | group_by(.) | all(length == 1)
+  ' "$file" >/dev/null 2>&1 || return 1
+  jq -e '
+    def exact($keys): (keys_unsorted | sort) == ($keys | sort);
+    def identifier: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$");
+    def natural: type == "number" and floor == . and . >= 0;
+    def lane_record:
+      type == "object" and exact(["provider","openUntil"])
+      and (.provider | identifier)
+      and (.openUntil == null or (.openUntil | natural));
+    def event_record($key):
+      type == "object"
+      and exact(["taskId","generation","provider","lane","kind","timestamp","action","until"])
+      and (.taskId | identifier) and (.generation | identifier)
+      and $key == (.taskId + "|" + .generation)
+      and (.provider | identifier) and (.lane | identifier)
+      and (.kind | IN("transient","quota","auth","model","unsafe"))
+      and (.timestamp | natural)
+      and (.action | IN("retry","fallback","circuit-open","escalate"))
+      and (if .kind == "unsafe" then .action == "escalate"
+           elif .kind == "transient" then (.action | IN("retry","fallback","circuit-open"))
+           else (.action | IN("fallback","circuit-open")) end)
+      and (if .action == "circuit-open" then (.until | natural) and .until > .timestamp
+           elif .action == "escalate" then (.until == null or ((.until | natural) and .until > .timestamp))
+           else .until == null end);
+    type == "object" and exact(["lanes","events"])
+    and (.lanes | type) == "object" and (.events | type) == "object"
+    and (.lanes | to_entries | all((.key | identifier) and (.value | lane_record)))
+    and (.events | to_entries | all(. as $entry | $entry.value | event_record($entry.key)))
+    and (.events | to_entries | group_by(.value.lane) | all((map(.value.provider) | unique | length) == 1))
+    and (. as $state | .lanes | to_entries | all(
+      . as $lane
+      | ([$state.events[] | select(.lane == $lane.key)]) as $events
+      | ($events | length) > 0
+      and ($events | all(.provider == $lane.value.provider))
+      and (if $lane.value.openUntil == null then true
+           else ($events | any(.until == $lane.value.openUntil and (.action == "circuit-open" or .action == "escalate"))) end)
+    ))
+  ' "$file" >/dev/null 2>&1
+}
+
 fm_route_read_circuits() {
   local file="$FM_ROUTE_STATE/circuits.json"
-  if [ ! -s "$file" ]; then
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
     printf '{"lanes":{},"events":{}}\n'
     return 0
   fi
-  jq -ce 'select(type == "object" and (.lanes | type) == "object" and ((.events // {}) | type) == "object") | .events = (.events // {})' "$file" 2>/dev/null
+  [ -s "$file" ] || return 1
+  fm_route_validate_circuits_file "$file" || return 1
+  jq -ce . "$file" 2>/dev/null
 }
 
 fm_route_write_circuits() {
-  fm_route_atomic_json_value "$FM_ROUTE_STATE/circuits.json" "$1"
+  local destination="$FM_ROUTE_STATE/circuits.json" directory temporary
+  directory=$(dirname "$destination")
+  [ -d "$directory" ] && [ ! -L "$directory" ] || { fm_route_diagnostic 'invalid routing state'; return 1; }
+  temporary=$(mktemp "$directory/.routing-circuits.XXXXXX") || return 1
+  if printf '%s\n' "$1" >"$temporary" && fm_route_validate_circuits_file "$temporary"; then
+    mv -f "$temporary" "$destination"
+  else
+    rm -f "$temporary"
+    fm_route_diagnostic 'invalid routing state'
+    return 1
+  fi
 }
 
 fm_route_reserve() {

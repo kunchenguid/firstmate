@@ -1450,6 +1450,62 @@ test_unsafe_failure_always_escalates_without_corrupting_breakers() {
   pass "unsafe failures escalate durably while breaker timing remains authoritative"
 }
 
+assert_invalid_circuits_unchanged() {
+  local label=$1 file="$FM_STATE_OVERRIDE/routing/circuits.json" before after out rc
+  before=$(od -An -v -tx1 "$file")
+  set +e
+  out=$("$ROUTE" status --now 1200 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "$label: invalid circuits state was accepted by status"
+  [ "$out" = 'fm-route: invalid routing state' ] || fail "$label: status leaked a non-sanitized circuit diagnostic: $out"
+  set +e
+  out=$("$ROUTE" failure --task probe --generation gen-probe --provider xai --lane lane-1 --kind quota --now 1200 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "$label: invalid circuits state was accepted by mutation"
+  [ "$out" = 'fm-route: invalid routing state' ] || fail "$label: mutation leaked a non-sanitized circuit diagnostic: $out"
+  after=$(od -An -v -tx1 "$file")
+  [ "$after" = "$before" ] || fail "$label: rejected circuit state was mutated"
+}
+
+test_circuit_state_schema_is_exact_private_and_transactional() {
+  local file="$FM_STATE_OVERRIDE/routing/circuits.json" base="$LAB/circuits-valid.json" row label filter
+  reset_route_state
+  "$ROUTE" failure --task base --generation gen-1 --provider xai --lane lane-1 --kind quota --now 1000 >/dev/null
+  cp "$file" "$base"
+  "$ROUTE" status --now 1000 | jq -e '.openCircuits == []' >/dev/null || fail "valid closed circuit state was rejected"
+
+  while IFS='|' read -r label filter; do
+    [ -n "$label" ] || continue
+    jq "$filter" "$base" >"$file"
+    assert_invalid_circuits_unchanged "$label"
+  done <<'CASES'
+top-level token|.token="secret"
+nested cookie|.events["base|gen-1"].details={cookie:"secret"}
+unknown lane prompt|.lanes["lane-1"].prompt="secret"
+unknown event source|.events["base|gen-1"].source="secret"
+unknown event raw output|.events["base|gen-1"].rawOutput="secret"
+negative timestamp|.events["base|gen-1"].timestamp=-1
+fractional deadline|.lanes["lane-1"].openUntil=1.5
+malformed event key|.events["wrong|key"]=.events["base|gen-1"] | del(.events["base|gen-1"])
+malformed task identifier|.events["base|gen-1"].taskId="bad/id"
+open action without deadline|.events["base|gen-1"].action="circuit-open"
+retry action for quota|.events["base|gen-1"].action="retry"
+unbacked lane deadline|.lanes["lane-1"].openUntil=2800
+conflicting duplicate identity|.events["other|gen-2"]=.events["base|gen-1"]
+provider mismatch|.lanes["lane-1"].provider="other"
+CASES
+
+  printf '%s\n' '{"lanes":{},"events":{},"events":{}}' >"$file"
+  assert_invalid_circuits_unchanged 'duplicate events key'
+  printf '' >"$file"
+  assert_invalid_circuits_unchanged 'empty circuit file'
+  printf '{bad json\n' >"$file"
+  assert_invalid_circuits_unchanged 'malformed circuit JSON'
+  pass "circuit state rejects private, malformed, duplicate, and inconsistent records without mutation"
+}
+
 test_score_finalize_and_outcome_privacy_are_strict() {
   local outcome capability metadata="$FM_STATE_OVERRIDE/task-1.meta"
   reset_route_state
@@ -1808,6 +1864,7 @@ test_dead_owner_recovery_finishes_every_published_transition
 test_raw_claim_and_unauthenticated_active_reclaim_flags_are_removed
 test_failure_policy_and_circuit_breaker_are_bounded
 test_unsafe_failure_always_escalates_without_corrupting_breakers
+test_circuit_state_schema_is_exact_private_and_transactional
 test_score_finalize_and_outcome_privacy_are_strict
 test_cleanup_finalization_uses_canonical_capability_and_unknown_scores
 test_cleanup_resolution_preserves_every_terminal_exactly_once
