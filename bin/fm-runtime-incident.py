@@ -649,8 +649,15 @@ def collect_workers(
         task_id = meta.stem
         values = meta_values(meta)
         cwd_value = values.get("worktree") or values.get("home") or values.get("project")
-        cwd = Path(cwd_value).resolve() if cwd_value and cwd_value.startswith("/") else None
-        cwd_record = repo_record(cwd) if cwd and cwd.exists() else None
+        remote_host = values.get("remote_host") or None
+        remote_directory = f"{remote_host}:{cwd_value}" if remote_host and cwd_value else None
+        cwd = (
+            Path(cwd_value).resolve()
+            if not remote_host and cwd_value and cwd_value.startswith("/")
+            else None
+        )
+        cwd_exists = bool(cwd and cwd.exists())
+        cwd_record = repo_record(cwd) if cwd_exists else None
         objective = objectives.get(task_id) or brief_objective(data, task_id) or "objective unavailable"
         reported_event = latest_reported_event(state, task_id)
         current_state = current_worker_state(state, task_id)
@@ -660,11 +667,17 @@ def collect_workers(
         match_value: bool | None
         match_reason: str
         wrong_worktree = False
-        if not cwd or not cwd.exists():
+        if remote_host and (not cwd_value or not cwd_value.startswith("/")):
+            match_value = False
+            match_reason = "registered remote working directory is absent"
+            wrong_worktree = True
+        elif not remote_host and (not cwd or not cwd_exists):
             match_value = False
             match_reason = "registered working directory is absent"
             wrong_worktree = True
-        elif not cwd_record or cwd_record["origin"] != repo_info["canonical_remote"]:
+        elif not remote_host and (
+            not cwd_record or cwd_record["origin"] != repo_info["canonical_remote"]
+        ):
             match_value = False
             match_reason = "worker is operating in a different repository"
             wrong_worktree = True
@@ -680,7 +693,7 @@ def collect_workers(
             match_value = None
             match_reason = "insufficient objective terms to prove relevance"
 
-        registered_copy = copy_by_path.get(str(cwd)) if cwd else None
+        registered_copy = copy_by_path.get(str(cwd)) if cwd and not remote_host else None
         stale_path = bool(registered_copy and registered_copy["stale_remote"])
         if stale_path:
             wrong_worktree = True
@@ -688,7 +701,7 @@ def collect_workers(
             match_reason = "registered path is a superseded repository copy"
         entry = {
             "id": task_id,
-            "working_directory": str(cwd) if cwd else cwd_value,
+            "working_directory": remote_directory if remote_host else str(cwd) if cwd else cwd_value,
             "objective": objective,
             "current_state": current_state,
             "latest_reported_event": reported_event,
@@ -701,15 +714,27 @@ def collect_workers(
             "backend": values.get("backend", "tmux"),
             "kind": values.get("kind", "ship"),
         }
+        if remote_host:
+            entry["remote_host"] = remote_host
         registry.append(entry)
         if is_active:
             active.append(entry)
-        if not cwd or not cwd.exists():
+        if remote_host and (not cwd_value or not cwd_value.startswith("/")):
+            stale.append({
+                "id": task_id,
+                "path": remote_directory or remote_host,
+                "reason": "remote path is absent",
+            })
+        elif not remote_host and (not cwd or not cwd_exists):
             stale.append({"id": task_id, "path": cwd_value or "", "reason": "path is absent"})
         elif stale_path:
             stale.append({"id": task_id, "path": str(cwd), "reason": "path is superseded by newer origin/main evidence"})
         if is_active and wrong_worktree:
-            wrong.append({"id": task_id, "path": str(cwd) if cwd else cwd_value or "", "reason": match_reason})
+            wrong.append({
+                "id": task_id,
+                "path": entry["working_directory"] or "",
+                "reason": match_reason,
+            })
         if is_active and match_value is False:
             drifted.append({"id": task_id, "activity": current_state["state"], "reason": match_reason})
     return {

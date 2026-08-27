@@ -179,6 +179,48 @@ EOF
   pass "triage detects stale registry paths, duplicate clones, wrong working copies, and scope drift"
 }
 
+test_remote_worker_directory_remains_remote() {
+  local home origin repo remote_path qualified crew_state out
+  home=$(make_home remote-worker)
+  origin=$(make_origin remote-worker)
+  repo=$home/projects/titan
+  clone_origin "$origin" "$repo"
+  remote_path=$home/remote-host-only/titan
+  qualified=remote-mac:$remote_path
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] remote-worker - Restore Upstash quota after exhaustion (repo: titan) (kind: secondmate)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/remote-worker.meta" \
+    "worktree=$remote_path" \
+    "project=/srv/firstmate" \
+    "home=$remote_path" \
+    "remote_host=remote-mac" \
+    "kind=secondmate"
+  printf 'state: working · source: remote · repairing Upstash quota exhaustion\n' > \
+    "$home/state/remote-worker.current-state"
+  crew_state=$(make_crew_state_fake "$home")
+  out=$(FM_CREW_STATE_BIN="$crew_state" run_triage "$home" remote-worker "$repo" \
+    "Upstash quota exhaustion")
+  printf '%s' "$out" | jq -e --arg qualified "$qualified" '
+    (.workers.registry_entries[] | select(.id == "remote-worker")
+      | .working_directory == $qualified
+        and .remote_host == "remote-mac"
+        and .active == true
+        and .activity_matches_incident == true
+        and .wrong_worktree == false)
+      and ([.workers.active[].id] | index("remote-worker")) != null
+      and ([.workers.stale_registry_entries[].id] | index("remote-worker")) == null
+      and ([.workers.wrong_worktree[].id] | index("remote-worker")) == null
+      and ([.workers.scope_drifted[].id] | index("remote-worker")) == null
+  ' >/dev/null || fail "remote worker directory was evaluated as a local path: $out"
+  pass "triage preserves remote worker directory authority"
+}
+
 test_git_triage_probes_disable_optional_locks() {
   local home origin repo fakebin real_git marker out
   home=$(make_home read-only-git)
@@ -870,6 +912,7 @@ PY
 }
 
 test_repository_and_worker_reconciliation
+test_remote_worker_directory_remains_remote
 test_git_triage_probes_disable_optional_locks
 test_external_quota_no_code_lifecycle_and_status
 test_lifecycle_transitions_read_and_write_under_one_lock
