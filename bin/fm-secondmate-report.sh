@@ -7,6 +7,10 @@
 # status line that includes the same corr token is equally valid
 # (bin/fm-pending-reply-lib.sh).
 #
+# A correlation token that is not exactly 16 hexadecimal characters is refused
+# before anything is appended, because the parent ingest can only quarantine
+# such a line, never correlate it.
+#
 # Usage:
 #   fm-secondmate-report.sh <status-file> <verb> <corr_id> <note...>
 #   fm-secondmate-report.sh --doc <status-file> <verb> <corr_id> <doc-path> <note...>
@@ -50,13 +54,13 @@ shift 3
 case "$CORR" in
   corr=*) CORR=${CORR#corr=} ;;
 esac
-case "$CORR" in
-  [a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9]) ;;
-  *)
-    echo "error: corr_id must be 16 hex characters (got '$CORR')" >&2
-    exit 1
-    ;;
-esac
+# Refuse before anything is created or appended: the shared library is the one
+# owner of the correlation shape, and a token it will not produce must never
+# reach an append-only reply log.
+token=$(fm_pending_reply_corr_token "$CORR") || {
+  echo "error: corr_id must be 16 hex characters (got '$CORR')" >&2
+  exit 1
+}
 
 case "$STATUS_FILE" in
   '') usage ;;
@@ -67,7 +71,6 @@ if [ ! -d "$(dirname "$STATUS_FILE")" ]; then
   exit 1
 fi
 
-token=$(fm_pending_reply_corr_token "$CORR")
 if [ "$DOC_MODE" = 1 ]; then
   [ $# -ge 1 ] || usage
   DOC_PATH=$1

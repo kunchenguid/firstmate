@@ -13,6 +13,8 @@ REMOTE_INTERLEAVE="$TMP_ROOT/remote-interleave"
 REMOTE_UTF8="$TMP_ROOT/remote-utf8"
 REMOTE_KEYED="$TMP_ROOT/remote-keyed"
 REMOTE_MIXED="$TMP_ROOT/remote-mixed"
+REMOTE_STARVE="$TMP_ROOT/remote-starve"
+REMOTE_HELPER="$TMP_ROOT/remote-helper"
 REMOTE_SEQ122="$TMP_ROOT/remote-seq122"
 REMOTE_REVIEWER="$TMP_ROOT/remote-reviewer"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fake")
@@ -20,6 +22,8 @@ CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$REMOTE/state" "$REMOTE/data/reply" \
   "$REMOTE_INTERLEAVE/state" "$REMOTE_INTERLEAVE/data" "$REMOTE_UTF8/state" \
   "$REMOTE_KEYED/state" "$REMOTE_MIXED/state" "$REMOTE_MIXED/data/reply" \
+  "$REMOTE_STARVE/state" "$REMOTE_STARVE/data" \
+  "$REMOTE_HELPER/state" "$REMOTE_HELPER/data" \
   "$REMOTE_SEQ122/state" "$REMOTE_SEQ122/data" \
   "$REMOTE_REVIEWER/state" "$REMOTE_REVIEWER/data/review" "$CLAIMS"
 trap 'FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; fm_test_cleanup' EXIT
@@ -32,6 +36,8 @@ cat > "$PARENT/data/secondmates.md" <<EOF
 - mixed - mixed reply fixture (host: remote-mixed; root: $ROOT; home: $REMOTE_MIXED; scope: test; projects: alpha; added 2026-08-21)
 - seq122 - sequence 122 reply fixture (host: remote-seq122; root: $ROOT; home: $REMOTE_SEQ122; scope: test; projects: alpha; added 2026-08-21)
 - reviewer - reviewer reply fixture (host: remote-reviewer; root: $ROOT; home: $REMOTE_REVIEWER; scope: review; projects: alpha; added 2026-08-21)
+- starve - starvation matrix reply fixture (host: remote-starve; root: $ROOT; home: $REMOTE_STARVE; scope: test; projects: alpha; added 2026-08-27)
+- helper - producer-helper composition fixture (host: remote-helper; root: $ROOT; home: $REMOTE_HELPER; scope: test; projects: alpha; added 2026-08-27)
 EOF
 printf '# Detailed remote answer\n\nThe build is green.\n' > "$REMOTE/data/reply/report.md"
 : > "$REMOTE/state/parent-replies.status"
@@ -50,7 +56,7 @@ done
 host=$1
 entry=$2
 shift 2
-  case "$host" in remote-mac|remote-interleave|remote-utf8|remote-keyed|remote-mixed|remote-seq122|remote-reviewer) ;;
+  case "$host" in remote-mac|remote-interleave|remote-utf8|remote-keyed|remote-mixed|remote-seq122|remote-reviewer|remote-starve|remote-helper) ;;
     *) exit 91 ;;
   esac
 [ "$entry" = fm-remote-entrypoint.sh ] || exit 92
@@ -507,8 +513,8 @@ pass "correlated UTF-8 status text ingests and advances the cursor"
 remote_env "$ROOT/bin/fm-procevent.sh" start "$UTF8_SID" >/dev/null \
   || fail "utf8 mixed-validity capture was not recorded"
 UTF8_RESULT_TWO="$PARENT/state/procevent-inbox/$UTF8_SID.2.result"
-rebase_offset=$(sed -n 's/^to_offset=//p' "$UTF8_RESULT_TWO")
-rebase_hash=$(sed -n 's/^to_prefix_sha256=//p' "$UTF8_RESULT_TWO")
+rebase_offset=$(LC_ALL=C sed -n 's/^to_offset=//p' "$UTF8_RESULT_TWO")
+rebase_hash=$(LC_ALL=C sed -n 's/^to_prefix_sha256=//p' "$UTF8_RESULT_TWO")
 [ -n "$rebase_offset" ] && [ -n "$rebase_hash" ] \
   || fail "utf8 second capture did not record its committed cursor"
 printf 'done [corr=1010101010101010]: third utf8 reply\n' \
@@ -530,17 +536,17 @@ assert_contains "$utf8_handle_two" 'ingested: utf8 appended=0' \
 [ "$(grep -cF 'second utf8 reply' "$PARENT/state/utf8.status")" -eq 1 ] \
   || fail "mixed UTF-8 generation did not ingest its valid line exactly once"
 UTF8_QUARANTINE="$PARENT/state/remote-replies/quarantine/utf8"
-[ "$(grep -l '^reason=invalid-status$' "$UTF8_QUARANTINE"/*.quarantine | wc -l | tr -d ' ')" -eq 3 ] \
+[ "$(LC_ALL=C grep -l '^reason=invalid-status$' "$UTF8_QUARANTINE"/*.quarantine | wc -l | tr -d ' ')" -eq 3 ] \
   || fail "non-printable lines were not retained as three invalid-status artifacts"
 remote_env "$ROOT/bin/fm-procevent.sh" start "$UTF8_SID" >/dev/null \
   || fail "utf8 source did not capture after cursor rebase"
 UTF8_RESULT_THREE="$PARENT/state/procevent-inbox/$UTF8_SID.3.result"
-utf8_payload_boundary=$(grep -n -m 1 '^$' "$UTF8_RESULT_THREE" | cut -d: -f1)
+utf8_payload_boundary=$(LC_ALL=C grep -n -m 1 '^$' "$UTF8_RESULT_THREE" | cut -d: -f1)
 tail -n "+$((utf8_payload_boundary + 1))" "$UTF8_RESULT_THREE" \
-  | grep -F -q 'third utf8 reply' \
+  | LC_ALL=C grep -F -q 'third utf8 reply' \
   || fail "post-rebase capture did not begin after the rebased cursor"
 if tail -n "+$((utf8_payload_boundary + 1))" "$UTF8_RESULT_THREE" \
-  | grep -F -q 'second utf8 reply'; then
+  | LC_ALL=C grep -F -q 'second utf8 reply'; then
   fail "post-rebase capture replayed bytes from the rebased delta"
 fi
 pass "invalid UTF-8 and control lines quarantine while cursor rebase remains inspectable"
@@ -688,5 +694,279 @@ KEYED_OFFSET_TWO=$(sed -n 's/^offset=//p' "$PARENT/state/remote-replies/keyed.cu
 [ "$KEYED_OFFSET_TWO" -gt "$KEYED_OFFSET" ] \
   || fail "quarantined keyed lines did not advance the cursor"
 pass "empty, unclosed, and adjacent extra bracket groups remain invalid without wedging ingest"
+
+# --- malformed-token starvation matrix --------------------------------------
+#
+# One captured delta carrying malformed correlation tokens first, in the middle,
+# and last, with valid correlated lines on both sides of each. Before the ingest
+# isolation existed, the whole delta was refused at its first malformed line and
+# the cursor never moved, so every later valid update in that generation - and
+# in every generation after it - stayed invisible. Each assertion below fails if
+# that isolation is removed.
+
+new_delivered_pending() { # <task-id> <request-text>; prints the correlation id
+  local task=$1 text=$2 corr
+  corr=$(bash -c '
+    . "$1"
+    corr=$(fm_pending_reply_create "$2" "$2/state" "$3" "$4") || exit 1
+    fm_pending_reply_mark_delivered "$2/state" "$corr" 101 || exit 1
+    printf "%s" "$corr"
+  ' _ "$ROOT/bin/fm-pending-reply-lib.sh" "$PARENT" "$task" "$text") || return 1
+  printf '%s' "$corr"
+}
+
+pending_phase() { # <corr>
+  sed -n 's/^phase=//p' "$PARENT/state/pending-replies/$1" | tail -1
+}
+
+STARVE_CORR_ONE=$(new_delivered_pending starve 'first starvation-matrix request') \
+  || fail "could not create the first starvation-matrix expectation"
+STARVE_CORR_TWO=$(new_delivered_pending starve 'second starvation-matrix request') \
+  || fail "could not create the second starvation-matrix expectation"
+STARVE_CORR_THREE=$(new_delivered_pending starve 'third starvation-matrix request') \
+  || fail "could not create the third starvation-matrix expectation"
+
+{
+  printf 'working [corr=dc9b78419d7c1b6]: malformed first fifteen hex\n'
+  printf 'working [corr=%s]: valid after the first malformed line\n' "$STARVE_CORR_ONE"
+  printf 'needs-decision [corr=zzzzzzzzzzzzzzzz]: malformed middle nonhex\n'
+  printf 'working [corr=%s]: valid between malformed lines\n' "$STARVE_CORR_TWO"
+  printf 'blocked [corr=0123456789abcdef0]: malformed middle seventeen hex\n'
+  printf 'done [corr=%s]: valid before the last malformed line\n' "$STARVE_CORR_THREE"
+  printf 'failed [corr=eeeeeeeeeeeeeee]: malformed last fifteen hex\n'
+} > "$REMOTE_STARVE/state/parent-replies.status"
+STARVE_SOURCE="$TMP_ROOT/starve-source.before"
+cp "$REMOTE_STARVE/state/parent-replies.status" "$STARVE_SOURCE"
+STARVE_SID=$(remote_env "$ADAPTER" source-id starve)
+remote_env "$ADAPTER" arm starve >/dev/null \
+  || fail "could not arm the starvation-matrix fixture"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$STARVE_SID" >/dev/null \
+  || fail "starvation-matrix fixture was not captured"
+STARVE_RESULT="$PARENT/state/procevent-inbox/$STARVE_SID.1.result"
+STARVE_CAPTURE_HASH=$(sha256_file "$STARVE_RESULT")
+starve_out=$(remote_env "$ADAPTER" autohandle "$STARVE_SID" 1 "$STARVE_RESULT") \
+  || fail "malformed correlation tokens blocked completion of their captured delta"
+STARVE_STATUS="$PARENT/state/starve.status"
+
+for expected in \
+  "valid after the first malformed line" \
+  "valid between malformed lines" \
+  "valid before the last malformed line"; do
+  [ "$(grep -cF "$expected" "$STARVE_STATUS")" -eq 1 ] \
+    || fail "a valid correlated line did not ingest exactly once: $expected"
+done
+for rejected in \
+  "malformed first fifteen hex" \
+  "malformed middle nonhex" \
+  "malformed middle seventeen hex" \
+  "malformed last fifteen hex"; do
+  assert_no_grep "$rejected" "$STARVE_STATUS" \
+    "a malformed correlation line reached the parent status channel: $rejected"
+done
+STARVE_ORDER=$(grep -nF 'valid ' "$STARVE_STATUS" | cut -d: -f1 | tr '\n' ' ')
+[ "$STARVE_ORDER" = "1 2 3 " ] \
+  || fail "valid lines did not keep their source order: $STARVE_ORDER"
+
+for corr in "$STARVE_CORR_ONE" "$STARVE_CORR_TWO" "$STARVE_CORR_THREE"; do
+  [ "$(pending_phase "$corr")" = resolved ] \
+    || fail "a valid correlated line did not resolve its pending request: $corr"
+done
+
+STARVE_QUARANTINE="$PARENT/state/remote-replies/quarantine/starve"
+[ "$(find "$STARVE_QUARANTINE" -type f -name '*.quarantine' | wc -l | tr -d ' ')" -eq 4 ] \
+  || fail "the starvation matrix did not preserve one artifact per malformed line"
+[ "$(grep -l '^reason=invalid-correlation$' "$STARVE_QUARANTINE"/*.quarantine | wc -l | tr -d ' ')" -eq 4 ] \
+  || fail "malformed correlation tokens lack their stable quarantine reason"
+STARVE_OFFSET=$(sed -n 's/^offset=//p' "$PARENT/state/remote-replies/starve.cursor")
+STARVE_SOURCE_BYTES=$(LC_ALL=C wc -c < "$REMOTE_STARVE/state/parent-replies.status" | tr -d ' ')
+[ "$STARVE_OFFSET" = "$STARVE_SOURCE_BYTES" ] \
+  || fail "the cursor did not advance past a delta containing malformed tokens"
+cmp -s "$STARVE_SOURCE" "$REMOTE_STARVE/state/parent-replies.status" \
+  || fail "the starvation-matrix ingest rewrote its append-only remote source"
+[ "$(sha256_file "$STARVE_RESULT")" = "$STARVE_CAPTURE_HASH" ] \
+  || fail "the starvation-matrix ingest rewrote its append-only capture"
+assert_not_contains "$starve_out" 'malformed' \
+  "quarantined line content leaked through command output"
+pass "malformed tokens first, middle, and last cannot starve the valid lines around them"
+
+# The quarantine is private evidence, but a dropped reply must not be silently
+# invisible: exactly one bounded event announces the generation, carrying no
+# line bytes and never entering a task status stream.
+starve_notice_rows() {
+  grep -cF "remote-reply-quarantine:starve:" "$PARENT/state/.wake-queue" 2>/dev/null || true
+}
+[ "$(starve_notice_rows)" -eq 1 ] \
+  || fail "quarantined lines were not announced exactly once"
+assert_no_grep 'malformed first fifteen hex' "$PARENT/state/.wake-queue" \
+  "quarantined line bytes leaked into the event queue"
+assert_no_grep 'dc9b78419d7c1b6' "$PARENT/state/.wake-queue" \
+  "a malformed correlation token leaked into the event queue"
+assert_grep 'remote secondmate starve sent 4 reply line(s) that could not be correlated' \
+  "$PARENT/state/.wake-queue" \
+  "the quarantine announcement did not name its scale"
+assert_no_grep 'could not be correlated' "$STARVE_STATUS" \
+  "the quarantine announcement entered a task status stream"
+STARVE_NOTICE=$(find "$STARVE_QUARANTINE" -type f -name '*.notice' -print -quit)
+[ -n "$STARVE_NOTICE" ] \
+  || fail "the quarantine announcement left no durable receipt"
+assert_grep 'state=notified' "$STARVE_NOTICE" \
+  "the quarantine announcement receipt was left unconfirmed"
+pass "quarantined lines are announced once on the durable queue and never as status"
+
+# Replaying the same generation, and the same captured bytes under a second
+# generation, repeats no effect.
+starve_replay=$(remote_env "$ADAPTER" autohandle "$STARVE_SID" 1 "$STARVE_RESULT") \
+  || fail "replaying the starvation-matrix generation was not idempotent"
+assert_contains "$starve_replay" 'ingested: starve appended=0' \
+  "the starvation-matrix replay repeated an accepted-line effect"
+STARVE_RESULT_TWO="$PARENT/state/procevent-inbox/$STARVE_SID.7.result"
+cp -p "$STARVE_RESULT" "$STARVE_RESULT_TWO"
+cp -p "$PARENT/state/procevent-inbox/$STARVE_SID.1.adapter" \
+  "$PARENT/state/procevent-inbox/$STARVE_SID.7.adapter"
+starve_dup=$(remote_env "$ADAPTER" autohandle "$STARVE_SID" 7 "$STARVE_RESULT_TWO") \
+  || fail "a duplicate generation carrying the same bytes was refused"
+assert_contains "$starve_dup" 'ingested: starve appended=0' \
+  "a duplicate generation repeated an accepted-line effect"
+[ "$(find "$STARVE_QUARANTINE" -type f -name '*.quarantine' | wc -l | tr -d ' ')" -eq 4 ] \
+  || fail "a duplicate generation duplicated quarantine evidence"
+[ "$(starve_notice_rows)" -eq 1 ] \
+  || fail "a duplicate generation duplicated the quarantine announcement"
+for expected in "valid after the first malformed line" "valid between malformed lines"; do
+  [ "$(grep -cF "$expected" "$STARVE_STATUS")" -eq 1 ] \
+    || fail "a duplicate generation duplicated a valid line: $expected"
+done
+pass "a replayed and a duplicated generation repeat no ingest, quarantine, or announcement"
+
+# Crash boundary one: quarantine is durable, the valid effects are not yet.
+# Replay must land every valid line exactly once and add no second announcement.
+rm -f "$STARVE_STATUS" "$PARENT/state/remote-replies/starve.cursor"
+remote_env "$ADAPTER" ingest starve "$STARVE_RESULT" >/dev/null \
+  || fail "replay after a crash between quarantine and the valid effects failed"
+for expected in \
+  "valid after the first malformed line" \
+  "valid between malformed lines" \
+  "valid before the last malformed line"; do
+  [ "$(grep -cF "$expected" "$STARVE_STATUS")" -eq 1 ] \
+    || fail "replay after the quarantine boundary lost or duplicated a valid line: $expected"
+done
+[ "$(find "$STARVE_QUARANTINE" -type f -name '*.quarantine' | wc -l | tr -d ' ')" -eq 4 ] \
+  || fail "replay after the quarantine boundary duplicated quarantine evidence"
+[ "$(starve_notice_rows)" -eq 1 ] \
+  || fail "replay after the quarantine boundary duplicated the quarantine announcement"
+[ "$(sed -n 's/^offset=//p' "$PARENT/state/remote-replies/starve.cursor")" = "$STARVE_SOURCE_BYTES" ] \
+  || fail "replay after the quarantine boundary did not advance the cursor"
+pass "a crash between quarantine and the valid effects replays with no lost or repeated effect"
+
+# Crash boundary two: quarantine, announcement, and valid effects are durable,
+# the cursor advance is not. Replay must repeat nothing and advance the cursor.
+rm -f "$PARENT/state/remote-replies/starve.cursor"
+remote_env "$ADAPTER" ingest starve "$STARVE_RESULT" >/dev/null \
+  || fail "replay after a crash before the cursor advance failed"
+for expected in \
+  "valid after the first malformed line" \
+  "valid between malformed lines" \
+  "valid before the last malformed line"; do
+  [ "$(grep -cF "$expected" "$STARVE_STATUS")" -eq 1 ] \
+    || fail "replay before the cursor advance duplicated a valid line: $expected"
+done
+[ "$(find "$STARVE_QUARANTINE" -type f -name '*.quarantine' | wc -l | tr -d ' ')" -eq 4 ] \
+  || fail "replay before the cursor advance duplicated quarantine evidence"
+[ "$(starve_notice_rows)" -eq 1 ] \
+  || fail "replay before the cursor advance duplicated the quarantine announcement"
+[ "$(sed -n 's/^offset=//p' "$PARENT/state/remote-replies/starve.cursor")" = "$STARVE_SOURCE_BYTES" ] \
+  || fail "replay before the cursor advance left the cursor behind"
+pass "a crash between the valid effects and the cursor advance replays idempotently"
+
+# Crash boundary three: the announcement was claimed but its completion is
+# unproven. The still-queued event, not a second append, settles the claim.
+printf 'schema=fm-remote-reply-quarantine-notice.v1\nstate=claimed\nlines=4\nreasons=invalid-correlation\n' \
+  > "$STARVE_NOTICE"
+rm -f "$PARENT/state/remote-replies/starve.cursor"
+remote_env "$ADAPTER" ingest starve "$STARVE_RESULT" >/dev/null \
+  || fail "replay after an unproven quarantine announcement failed"
+[ "$(starve_notice_rows)" -eq 1 ] \
+  || fail "an unproven quarantine announcement was appended a second time"
+assert_grep 'state=notified' "$STARVE_NOTICE" \
+  "an unproven quarantine announcement was not settled against the queue"
+pass "an unproven quarantine announcement settles against the queue without repeating"
+
+printf 'schema=fm-remote-reply-quarantine-notice.v1\nstate=claimed\nlines=4\nreasons=invalid-correlation\n' \
+  > "$STARVE_NOTICE"
+wake_drain_out=$(remote_env "$ROOT/bin/fm-wake-drain.sh" 2>&1) \
+  || fail "the wake drain could not present the quarantine announcement"
+wake_ack_through=$(printf '%s\n' "$wake_drain_out" | sed -n 's/.*--ack-through \([0-9][0-9]*\).*/\1/p' | tail -1)
+wake_recovery_generation=$(printf '%s\n' "$wake_drain_out" | sed -n 's/.*--recovery-generation \([^ ]*\).*/\1/p' | tail -1)
+[ -n "$wake_ack_through" ] && [ -n "$wake_recovery_generation" ] \
+  || fail "the wake drain did not provide an acknowledgement command"
+remote_env "$ROOT/bin/fm-wake-drain.sh" \
+  --ack-through "$wake_ack_through" --recovery-generation "$wake_recovery_generation" >/dev/null \
+  || fail "the wake drain could not acknowledge the quarantine announcement"
+assert_grep 'state=notified' "$STARVE_NOTICE" \
+  "acknowledging the quarantine announcement did not confirm its receipt"
+[ "$(starve_notice_rows)" -eq 0 ] \
+  || fail "the acknowledged quarantine announcement remained queued"
+rm -f "$PARENT/state/remote-replies/starve.cursor"
+remote_env "$ADAPTER" ingest starve "$STARVE_RESULT" >/dev/null \
+  || fail "replay after the quarantine announcement was acknowledged failed"
+[ "$(starve_notice_rows)" -eq 0 ] \
+  || fail "replay duplicated an acknowledged quarantine announcement"
+pass "an acknowledged quarantine announcement remains exactly once after replay"
+
+# --- real composition through the producer helper ---------------------------
+#
+# The optional report helper is the producer, the runner is the capture, and the
+# adapter owns quarantine, correlation resolution, and the cursor. Drive all of
+# them together: the helper refuses the malformed token outright, a hand-written
+# malformed line is quarantined, and the helper-written lines still land.
+
+HELPER_CORR_ONE=$(new_delivered_pending helper 'first helper request') \
+  || fail "could not create the first helper expectation"
+HELPER_CORR_TWO=$(new_delivered_pending helper 'second helper request') \
+  || fail "could not create the second helper expectation"
+HELPER_LOG="$REMOTE_HELPER/state/parent-replies.status"
+
+"$ROOT/bin/fm-secondmate-report.sh" "$HELPER_LOG" working "$HELPER_CORR_ONE" 'helper reply before the defect' \
+  || fail "the report helper refused a valid correlation"
+set +e
+helper_refusal=$("$ROOT/bin/fm-secondmate-report.sh" "$HELPER_LOG" 'done' dc9b78419d7c1b6 'helper reply with a bad token' 2>&1)
+helper_refusal_rc=$?
+set -e
+[ "$helper_refusal_rc" -ne 0 ] \
+  || fail "the report helper appended a malformed correlation into the reply log"
+assert_contains "$helper_refusal" 'corr_id must be 16 hex characters' \
+  "the report helper refusal did not name the correlation shape"
+assert_no_grep 'helper reply with a bad token' "$HELPER_LOG" \
+  "a refused helper report still reached the append-only reply log"
+printf 'done [corr=dc9b78419d7c1b6]: hand written reply with a bad token\n' >> "$HELPER_LOG"
+"$ROOT/bin/fm-secondmate-report.sh" "$HELPER_LOG" 'done' "$HELPER_CORR_TWO" 'helper reply after the defect' \
+  || fail "the report helper refused the second valid correlation"
+
+HELPER_SID=$(remote_env "$ADAPTER" source-id helper)
+remote_env "$ADAPTER" arm helper >/dev/null \
+  || fail "could not arm the producer-helper fixture"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$HELPER_SID" >/dev/null \
+  || fail "producer-helper fixture was not captured"
+HELPER_RESULT="$PARENT/state/procevent-inbox/$HELPER_SID.1.result"
+remote_env "$ADAPTER" autohandle "$HELPER_SID" 1 "$HELPER_RESULT" >/dev/null \
+  || fail "a hand-written malformed line blocked the helper-written replies"
+HELPER_STATUS="$PARENT/state/helper.status"
+[ "$(grep -cF 'helper reply before the defect' "$HELPER_STATUS")" -eq 1 ] \
+  || fail "the helper-written reply before the defect did not ingest exactly once"
+[ "$(grep -cF 'helper reply after the defect' "$HELPER_STATUS")" -eq 1 ] \
+  || fail "the helper-written reply after the defect did not ingest exactly once"
+assert_no_grep 'hand written reply with a bad token' "$HELPER_STATUS" \
+  "a hand-written malformed line reached the parent status channel"
+for corr in "$HELPER_CORR_ONE" "$HELPER_CORR_TWO"; do
+  [ "$(pending_phase "$corr")" = resolved ] \
+    || fail "a helper-written reply did not resolve its pending request: $corr"
+done
+[ "$(find "$PARENT/state/remote-replies/quarantine/helper" -type f -name '*.quarantine' | wc -l | tr -d ' ')" -eq 1 ] \
+  || fail "the hand-written malformed line was not quarantined exactly once"
+[ "$(grep -cF "remote-reply-quarantine:helper:" "$PARENT/state/.wake-queue")" -eq 1 ] \
+  || fail "the helper composition did not announce its quarantined line exactly once"
+HELPER_BYTES=$(LC_ALL=C wc -c < "$HELPER_LOG" | tr -d ' ')
+[ "$(sed -n 's/^offset=//p' "$PARENT/state/remote-replies/helper.cursor")" = "$HELPER_BYTES" ] \
+  || fail "the helper composition did not advance the cursor past the whole delta"
+pass "producer, capture, quarantine, correlation resolution, and cursor compose end to end"
 
 echo "ALL TESTS PASSED"

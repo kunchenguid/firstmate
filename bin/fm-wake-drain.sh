@@ -302,6 +302,10 @@ if [ -n "$ACK_THROUGH" ]; then
     echo "wake drain: secondmate stall receipt could not be recorded safely" >&2
     exit 1
   }
+  fm_wake_commit_remote_reply_quarantine_receipts_through "$ACK_THROUGH" || {
+    echo "wake drain: remote reply quarantine receipt could not be recorded safely" >&2
+    exit 1
+  }
   if [ ! -s "$DRAIN_TMP" ]; then
     fm_recovery_marker_ack "$RECOVERY_MARKER" "$ACK_GENERATION"
     RECOVERY_ACK_STATUS=$?

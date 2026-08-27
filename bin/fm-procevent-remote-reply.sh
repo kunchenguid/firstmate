@@ -25,6 +25,10 @@
 # with an allowed lifecycle verb and strict corr=<16hex> are accepted, while an
 # invalid line or a line whose referenced document cannot be fetched is retained
 # in a private, provenance-bound quarantine and cannot block surrounding lines.
+# Each distinct captured result body that quarantined a line announces that fact
+# once on the durable wake queue, before the cursor advances, so a dropped reply
+# is never silently invisible; the announcement carries no line bytes and never
+# reaches a task status stream.
 # Legacy lines without corr= remain accepted only in the byte-zero compatibility
 # prefix. Exact accepted lines and quarantine artifacts are each committed at
 # most once. A data/*.md pointer is fetched through the path-confined remote file
@@ -55,7 +59,9 @@ MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+# Print the whole leading comment header, so help never drifts from the block
+# it documents when that block grows.
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 2; }
 
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -319,6 +325,69 @@ write_line_quarantine() { # <id> <result> <payload> <line-no> <reason> <detail> 
   mv -- "$tmp" "$path" || { rm -f -- "$tmp"; return 1; }
 }
 
+quarantine_notice_receipt_path() { # <id> <result-hash>
+  printf '%s/%s.notice\n' "$(quarantine_dir_path "$1")" "$2"
+}
+
+write_quarantine_notice_receipt() { # <path> <state> <count> <reasons>
+  local path=$1 notice_state=$2 count=$3 reasons=$4 tmp dir
+  dir=$(dirname "$path")
+  tmp=$(umask 077; mktemp "$dir/.notice.XXXXXX") || return 1
+  {
+    printf 'schema=fm-remote-reply-quarantine-notice.v1\n'
+    printf 'state=%s\n' "$notice_state"
+    printf 'lines=%s\n' "$count"
+    printf 'reasons=%s\n' "$reasons"
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$path" || { rm -f -- "$tmp"; return 1; }
+}
+
+# Announce this generation's quarantined lines to the durable wake queue exactly
+# once. The quarantine artifacts stay the authority and the only place the bytes
+# live; this is the bounded event line that keeps a dropped reply from being
+# silently invisible, which is the same failure the ingest isolation exists to
+# prevent. It never touches a task status stream.
+#
+# Durability: the receipt is claimed before the announcement and confirmed after
+# it, so a replay after a crash between the two resolves the unproven claim
+# against the queue itself rather than announcing a second time.
+notify_quarantine_once() { # <id> <result-hash> <count> <reasons>
+  local id=$1 result_hash=$2 count=$3 reasons=$4 dir receipt key payload notice_state queued status=0
+  dir=$(prepare_quarantine_dir "$id") || return 1
+  receipt=$(quarantine_notice_receipt_path "$id" "$result_hash")
+  key="remote-reply-quarantine:$id:$result_hash"
+  payload="check: remote secondmate $id sent $count reply line(s) that could not be correlated ($reasons); the valid lines were applied and the invalid ones are kept privately under state/remote-replies/quarantine/$id"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+    if ! [ -f "$receipt" ] || [ -L "$receipt" ]; then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 1
+    fi
+    notice_state=$(sed -n 's/^state=//p' "$receipt")
+    if [ "$notice_state" = notified ]; then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 0
+    fi
+    queued=$(fm_wake_queued_keys_locked check 2>/dev/null || true)
+    if printf '%s\n' "$queued" | grep -Fqx -- "$key"; then
+      write_quarantine_notice_receipt "$receipt" notified "$count" "$reasons" || status=$?
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return "$status"
+    fi
+  else
+    write_quarantine_notice_receipt "$receipt" claimed "$count" "$reasons" || status=$?
+  fi
+  if [ "$status" -eq 0 ]; then
+    fm_wake_append_locked check "$key" "$payload" || status=$?
+  fi
+  if [ "$status" -eq 0 ]; then
+    write_quarantine_notice_receipt "$receipt" notified "$count" "$reasons" || status=$?
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
 line_bytes_bounded_printable() { # <line>
   local line=$1 bytes
   [ -n "$line" ] || return 1
@@ -403,6 +472,7 @@ cmd_ingest() {
   local id=${1:-} result=${2:-} seq=${3:-} class blank payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
   local actual_bytes actual_hash line doc local_doc rewritten appended=0 quarantined=0 cursor_already=0 lock status_file tmp legacy_prefix=1
   local line_number=0 quarantine_reason quarantine_detail doc_failed accepted_corrs
+  local result_hash quarantine_reasons quarantine_reason_list
   validate_id "$id"
   remote_route_exists "$id"
   [ -f "$result" ] && [ ! -L "$result" ] || die "result file is unavailable or unsafe: $result"
@@ -457,6 +527,9 @@ cmd_ingest() {
   [ "$status" = delta ] && [ "$payload_bytes" -gt 0 ] || { fm_lock_release "$lock"; die "delta result has no payload"; }
   accepted_corrs="$tmp/accepted-corrs"
   : > "$accepted_corrs"
+  quarantine_reasons="$tmp/quarantine-reasons"
+  : > "$quarantine_reasons"
+  result_hash=$(sha256_file "$result") || { fm_lock_release "$lock"; die "cannot hash remote reply result"; }
   # shellcheck disable=SC2094 # Helpers read this payload but write only separate private artifacts.
   while IFS= read -r line || [ -n "$line" ]; do
     line_number=$((line_number + 1))
@@ -483,6 +556,7 @@ cmd_ingest() {
       write_line_quarantine "$id" "$result" "$payload" "$line_number" \
         "$quarantine_reason" "$quarantine_detail" "$from" "$to" "$from_hash" "$to_hash" \
         || { fm_lock_release "$lock"; die "cannot preserve invalid remote reply line"; }
+      printf '%s\n' "$quarantine_reason" >> "$quarantine_reasons"
       quarantined=$((quarantined + 1))
       legacy_prefix=0
       continue
@@ -503,6 +577,7 @@ cmd_ingest() {
       write_line_quarantine "$id" "$result" "$payload" "$line_number" \
         referenced-document-unfetchable "$quarantine_detail" "$from" "$to" "$from_hash" "$to_hash" \
         || { fm_lock_release "$lock"; die "cannot preserve remote reply line with an unavailable document"; }
+      printf 'referenced-document-unfetchable\n' >> "$quarantine_reasons"
       quarantined=$((quarantined + 1))
       continue
     fi
@@ -517,6 +592,11 @@ cmd_ingest() {
     [ -n "$corr" ] || continue
     fm_pending_reply_try_resolve "$STATE" "$corr" "$status_file" >/dev/null 2>&1 || true
   done < <(awk '!seen[$0]++' "$accepted_corrs")
+  if [ "$quarantined" -gt 0 ]; then
+    quarantine_reason_list=$(sort -u "$quarantine_reasons" | tr '\n' ',' | sed 's/,$//')
+    notify_quarantine_once "$id" "$result_hash" "$quarantined" "$quarantine_reason_list" \
+      || { fm_lock_release "$lock"; die "cannot surface quarantined remote reply lines"; }
+  fi
   if [ "$cursor_already" -eq 0 ]; then
     write_cursor "$id" "$to" "$to_hash" || { fm_lock_release "$lock"; die "cannot commit remote reply cursor"; }
   fi

@@ -633,11 +633,15 @@ else
     # durable parent expectation before delivery. Transport success never
     # resolves that expectation (see fm-pending-reply-lib.sh).
     existing_corr_explicit=0
+    if ! message_corr=$(fm_pending_reply_extract_corr "$MESSAGE"); then
+      echo "error: refusing to deliver a marked request containing a malformed correlation token for $TARGET_TASK_ID" >&2
+      exit 1
+    fi
     if [ "${FM_PENDING_REPLY_EXISTING_CORR+x}" = x ]; then
       existing_corr_explicit=1
       existing_corr=$FM_PENDING_REPLY_EXISTING_CORR
     else
-      existing_corr=$(fm_pending_reply_extract_corr "$MESSAGE")
+      existing_corr=$message_corr
     fi
     if [ -n "$existing_corr" ] \
       && fm_pending_reply_corr_reusable "$STATE" "$existing_corr" "$TARGET_TASK_ID"; then
@@ -655,7 +659,8 @@ else
         || { echo "error: failed to create parent pending-reply expectation for $TARGET_TASK_ID" >&2; exit 1; }
       PENDING_REPLY_CREATED=1
     fi
-    fm_pending_reply_embed_corr "$MESSAGE" "$PENDING_REPLY_CORR" MESSAGE
+    fm_pending_reply_embed_corr "$MESSAGE" "$PENDING_REPLY_CORR" MESSAGE \
+      || { echo "error: refusing to deliver a marked request with an invalid correlation token for $TARGET_TASK_ID" >&2; exit 1; }
     if [ "$PENDING_REPLY_CREATED" != 1 ] \
       && fm_pending_reply_delivery_attempt_unresolved "$STATE" "$PENDING_REPLY_CORR"; then
       if [ "$TARGET_BACKEND" = remote ]; then

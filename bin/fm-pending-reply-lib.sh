@@ -91,7 +91,6 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-classify-lib.sh"
 
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
-FM_PENDING_REPLY_CORR_RE='corr=[A-Fa-f0-9]{16}'
 FM_PENDING_REPLY_GRACE_DEFAULT=120
 
 fm_pending_reply_now() {
@@ -181,24 +180,56 @@ fm_pending_reply_new_id() {
   printf '%s' "$(printf '%s' "$raw" | tr 'A-F' 'a-f' | tr -cd 'a-f0-9' | cut -c1-16)"
 }
 
+# 0 when <value> is exactly 16 hexadecimal characters. This library is the one
+# owner of that shape: every producer and every reader routes its check here.
+fm_pending_reply_corr_valid() {  # <corr_id>
+  case "$1" in
+    ''|*[!A-Fa-f0-9]*) return 1 ;;
+  esac
+  [ "${#1}" -eq 16 ]
+}
+
+# Produce the wire token for <corr_id>, or refuse.
+# Every appendable corr= byte in the fleet comes from here, so a token that is
+# not exactly 16 hexadecimal characters is refused before it can be written:
+# one malformed token in an append-only reply log is an ingest-side quarantine
+# for that line forever, and the producer is the only place it can still be
+# stopped for free.
 fm_pending_reply_corr_token() {  # <corr_id>
+  fm_pending_reply_corr_valid "$1" || return 1
   printf 'corr=%s' "$1"
+}
+
+fm_pending_reply_corr_tokens() {  # <text>
+  local rest=$1 prefix after left corr next
+  while case "$rest" in *corr=*) true ;; *) false ;; esac; do
+    prefix=${rest%%corr=*}
+    after=${rest#*corr=}
+    left=
+    [ -z "$prefix" ] || left=${prefix:$((${#prefix} - 1)):1}
+    corr=${after:0:16}
+    next=${after:16:1}
+    case "$left" in [A-Za-z0-9_]) return 1 ;; esac
+    fm_pending_reply_corr_valid "$corr" || return 1
+    case "$next" in [A-Za-z0-9_]) return 1 ;; esac
+    printf '%s\n' "$(printf '%s' "$corr" | tr 'A-F' 'a-f')"
+    rest=$after
+  done
 }
 
 # Extract the first corr=<16hex> token from free text, or empty.
 fm_pending_reply_extract_corr() {  # <text>
-  local text=$1
-  printf '%s' "$text" | grep -oE "$FM_PENDING_REPLY_CORR_RE" 2>/dev/null | head -1 | cut -d= -f2- | tr 'A-F' 'a-f' || true
+  local corrs
+  corrs=$(fm_pending_reply_corr_tokens "$1") || return 1
+  printf '%s\n' "$corrs" | sed -n '1p'
 }
 
 # 0 if <text> carries the exact correlation token for <corr_id>.
 fm_pending_reply_text_has_corr() {  # <text> <corr_id>
-  local text=$1 corr=$2 token
-  token=$(fm_pending_reply_corr_token "$corr")
-  case "$text" in
-    *"$token"*) return 0 ;;
-  esac
-  return 1
+  local text=$1 corr=$2 corrs
+  fm_pending_reply_corr_valid "$corr" || return 1
+  corrs=$(fm_pending_reply_corr_tokens "$text") || return 1
+  printf '%s\n' "$corrs" | grep -Fqx "$(printf '%s' "$corr" | tr 'A-F' 'a-f')"
 }
 
 # Sanitize a short request summary: single line, bounded, no control chars.
@@ -222,7 +253,7 @@ fm_pending_reply_get() {  # <record-path> <key>
 
 fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
   local state=$1 corr=$2 task_id=$3 rec phase delivered
-  printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
+  fm_pending_reply_corr_valid "$corr" || return 1
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ "$(fm_pending_reply_get "$rec" task_id)" = "$task_id" ] || return 1
@@ -264,7 +295,8 @@ fm_pending_reply_set() {  # <record-path> <key> <value>
 fm_pending_reply_embed_corr() {  # <message> <corr_id> <result-var>
   local message=$1 corr=$2 result_var=$3 body token marked existing
   [ -n "$result_var" ] || return 2
-  token=$(fm_pending_reply_corr_token "$corr")
+  token=$(fm_pending_reply_corr_token "$corr") || return 2
+  fm_pending_reply_corr_tokens "$message" >/dev/null || return 2
   fm_message_mark_from_firstmate "$message" marked
   body=${marked#"$FM_FROMFIRST_MARK"}
   # Strip a leading corr=<16hex> plus following blanks (space/tab only).
@@ -289,7 +321,7 @@ fm_pending_reply_create() {  # <parent-home> <state-dir> <task_id> <request-text
   mkdir -p "$dir" || return 1
   chmod 700 "$dir" 2>/dev/null || true
   corr=$(fm_pending_reply_new_id)
-  [ "${#corr}" -eq 16 ] || return 1
+  fm_pending_reply_corr_valid "$corr" || return 1
   rec=$(fm_pending_reply_path "$state" "$corr")
   # Extremely unlikely collision; regenerate once.
   if [ -e "$rec" ]; then
@@ -896,9 +928,9 @@ fm_pending_reply_recovery_message() {  # <record-path>
   local rec=$1 corr summary token msg
   corr=$(fm_pending_reply_get "$rec" corr_id)
   summary=$(fm_pending_reply_get "$rec" request_summary)
-  token=$(fm_pending_reply_corr_token "$corr")
+  token=$(fm_pending_reply_corr_token "$corr") || return 1
   msg="REPOST REQUIRED: previous marked request had no correlated parent report. Reply on the parent status channel including ${token}. Original request: ${summary}"
-  fm_pending_reply_embed_corr "$msg" "$corr" msg
+  fm_pending_reply_embed_corr "$msg" "$corr" msg || return 1
   printf '%s' "$msg"
 }
 
@@ -932,7 +964,7 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   # A remote mate's report may exist and simply not have been mirrored yet.
   fm_pending_reply_missing_report_is_evidence "$state" "$task_id" "$completed" || return 1
   parent_home=$(fm_pending_reply_get "$rec" parent_home)
-  msg=$(fm_pending_reply_recovery_message "$rec")
+  msg=$(fm_pending_reply_recovery_message "$rec") || return 1
   sender_pid=${BASHPID:-$$}
   sender_identity=$(fm_pending_reply_pid_identity "$sender_pid") || return 1
   fm_pending_reply_set "$rec" recovery_sender_pid "$sender_pid" || return 1

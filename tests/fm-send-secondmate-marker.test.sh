@@ -156,6 +156,25 @@ test_exact_secondmate_task_id_is_marked() {
   pass "fm-send: an exact kind=secondmate task id is marked with corr exactly once"
 }
 
+test_marked_send_refuses_malformed_corr() {
+  local dir fb log home rc
+  dir="$TMP_ROOT/sm-malformed"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home sm-malformed)
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
+  run_send "$fb" "$home" "$log" "domain" "please inspect corr=0123456789abcdefG"; rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "a marked send accepted a malformed correlation token"
+  assert_absent "$home/state/domain.inbox/001.msg" \
+    "a refused marked send created an inbox record"
+  [ ! -d "$home/state/pending-replies" ] \
+    || [ -z "$(find "$home/state/pending-replies" -type f -print -quit)" ] \
+    || fail "a refused marked send created a pending-reply expectation"
+  [ ! -s "$log" ] \
+    || fail "a refused marked send reached the transport"
+  pass "fm-send: malformed correlation text is refused before any marked-send effect"
+}
+
 test_crewmate_target_is_not_marked() {
   local dir fb log home rc got
   dir="$TMP_ROOT/crew"; mkdir -p "$dir"
@@ -270,6 +289,7 @@ test_marked_send_preserves_trailing_newlines() {
 
 test_secondmate_target_is_marked
 test_exact_secondmate_task_id_is_marked
+test_marked_send_refuses_malformed_corr
 test_crewmate_target_is_not_marked
 test_explicit_window_is_not_marked
 test_key_path_is_not_marked

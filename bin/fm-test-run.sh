@@ -1016,8 +1016,13 @@ families_for_changed_path() {
       ;;
     bin/fm-pending-reply-lib.sh)
       printf '%s\n' __script__:fm-pending-reply.test.sh
+      printf '%s\n' __script__:fm-pending-reply-lib.test.sh
       printf '%s\n' secondmate
       printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-secondmate-report.sh)
+      printf '%s\n' __script__:fm-pending-reply-lib.test.sh
+      printf '%s\n' secondmate
       ;;
     bin/fm-secondmate*|bin/fm-remote*|bin/fm-on.sh|bin/fm-home-seed.sh|\
     bin/fm-backlog-handoff.sh|bin/fm-backlog-receive.sh|bin/fm-procevent-remote-reply.sh|\

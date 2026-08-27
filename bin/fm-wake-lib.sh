@@ -1122,21 +1122,31 @@ fm_wake_clean_field() {
 }
 
 fm_wake_append() {
-  local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
-  local recovery_marker
+  local kind=$1 key=$2 payload=$3 status=0
   case "$kind" in
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
   esac
 
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  fm_wake_append_locked "$kind" "$key" "$payload" || status=$?
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
+fm_wake_append_locked() {
+  local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
+  local recovery_marker
+  case "$kind" in
+    signal|stale|check|heartbeat) ;;
+    *) printf 'fm_wake_append_locked: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
+  esac
   clean_key=$(printf '%s' "$key" | fm_wake_clean_field)
   clean_payload=$(printf '%s' "$payload" | fm_wake_clean_field)
   epoch=$(date +%s)
   seq_file="$STATE/.wake-queue.seq"
   recovery_marker="$STATE/.watcher-down"
   status=0
-
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   _fm_recovery_marker_publish "$recovery_marker" downtime || status=$?
   if [ "$status" -eq 0 ]; then
     seq=$(cat "$seq_file" 2>/dev/null || echo 0)
@@ -1149,7 +1159,6 @@ fm_wake_append() {
   if [ "$status" -eq 0 ]; then
     printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" || status=$?
   fi
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
 }
 
@@ -1236,6 +1245,35 @@ fm_wake_commit_secondmate_stall_receipts_through() { # <cutoff>
   done < <(awk -F '\t' -v cutoff="$cutoff" '
     NF >= 5 && $2 ~ /^[0-9]+$/ && $2 <= cutoff && $3 == "check" \
       && $4 ~ /^secondmate-wake-loop-[A-Za-z0-9._-]+-[0-9]+-[0-9]+$/ { print $4 }
+  ' "$FM_WAKE_QUEUE" 2>/dev/null)
+}
+
+fm_wake_commit_remote_reply_quarantine_receipts_through() { # <cutoff>
+  local cutoff=$1 key rest id result_hash receipt tmp notice_state
+  while IFS= read -r key; do
+    rest=${key#remote-reply-quarantine:}
+    id=${rest%%:*}
+    result_hash=${rest#*:}
+    case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    case "$result_hash" in ''|*[!A-Fa-f0-9]*) return 1 ;; esac
+    [ "${#result_hash}" -eq 64 ] || return 1
+    receipt="$STATE/remote-replies/quarantine/$id/$result_hash.notice"
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+    notice_state=$(sed -n 's/^state=//p' "$receipt")
+    case "$notice_state" in
+      notified) continue ;;
+      claimed) ;;
+      *) return 1 ;;
+    esac
+    tmp=$(umask 077; mktemp "$(dirname "$receipt")/.notice.XXXXXX") || return 1
+    if ! sed 's/^state=claimed$/state=notified/' "$receipt" > "$tmp" \
+      || ! chmod 0600 "$tmp" || ! _fm_atomic_replace "$tmp" "$receipt"; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+  done < <(awk -F '\t' -v cutoff="$cutoff" '
+    NF >= 5 && $2 ~ /^[0-9]+$/ && $2 <= cutoff && $3 == "check" \
+      && $4 ~ /^remote-reply-quarantine:[A-Za-z0-9._-]+:[A-Fa-f0-9]{64}$/ { print $4 }
   ' "$FM_WAKE_QUEUE" 2>/dev/null)
 }
 

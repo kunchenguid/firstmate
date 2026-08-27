@@ -161,6 +161,8 @@ Marked requests keep the existing correlation contract.
 The remote charter appends replies to `state/parent-replies.status` in the remote home.
 A process-event source performs a non-destructive, cursor-anchored delta read, validates bounded correlated status lines independently, fetches only referenced `data/*.md` documents through the confined reader, and appends each accepted line at most once to the primary status channel.
 An invalid line or a line with an unfetchable document reference is retained in a private provenance-bound quarantine and does not block valid lines before or after it.
+A correlation token that is not exactly 16 hexadecimal characters can only ever be quarantined, so every producer helper refuses one before it is appended to the reply log.
+Each distinct captured result body that quarantined a line announces that once on the durable wake queue, before its cursor advances, carrying no line bytes and never entering a task status stream.
 The process-event runner automatically applies the exact captured generation through its immutable adapter identity, so ordinary domain homes and dedicated reviewer homes use this same ingest, correlation, cursor, re-arm, and acknowledgement owner.
 If application fails, the capture stays unacknowledged and its durable wake routes an idempotent retry through the same adapter.
 The source log is never truncated or consumed.
