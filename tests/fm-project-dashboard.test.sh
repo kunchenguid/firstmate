@@ -229,9 +229,10 @@ test_attention_next_step_is_an_action_not_a_bare_title() {
     (.projects[] | select(.name == "bravo")
       | .status == "needs_attention" and .next_step == "failed: gate rejected the push")
       and (.projects[] | select(.name == "beta")
-        | .status == "needs_attention" and .next_step == "PR awaiting review: beta-wait")
+        | .status != "needs_attention"
+          and .next_step == "Finished; awaiting teardown and completion record: beta-wait")
   ' >/dev/null || fail "attention next step was a bare task title: $out"
-  pass "failure and review-PR next steps read as actions"
+  pass "failure and finished-work next steps read as actions"
 }
 
 test_unattributable_secondmate_state_is_disclosed() {
@@ -498,7 +499,7 @@ test_bounded_snapshot_drops_are_disclosed_board_wide() {
   pass "bounded snapshot and registry drops surface as board-level disclosures"
 }
 
-test_merged_pr_is_landed_work_not_a_review_queue() {
+test_finished_task_awaiting_teardown_is_never_called_a_review_queue() {
   local home epoch out
   home=$(make_home merged-pr)
   write_fleet_fixture "$home"
@@ -507,10 +508,8 @@ test_merged_pr_is_landed_work_not_a_review_queue() {
   jq --arg home "$home" '
     .backlog.records |= map(if .id == "alpha-call" then .captain_actionable = false else . end)
     | .tasks |= map(if .id == "alpha-call" then .hints.open_decisions = [] else . end)
-    | .backlog.records += [{structured:true,id:"alpha-ship",repo:"alpha",title:"Ship alpha",state:"done",
-        hold_kind:null,pr_url:"https://github.com/example/alpha/pull/9",completion:{date:"2026-08-22"}},
-      {structured:true,id:"alpha-review",repo:"alpha",title:"Review alpha",state:"in_flight",
-        since:"2020-01-01",captain_actionable:false,unresolved_blocker_ids:[]}]
+    | .backlog.records += [{structured:true,id:"alpha-ship",repo:"alpha",title:"Ship alpha",
+        state:"in_flight",since:"2020-01-01",captain_actionable:false,unresolved_blocker_ids:[]}]
     | .tasks += [
         {id:"alpha-ship",kind:"ship",project:"alpha",
          paths:{meta:{path:($home + "/state/alpha-ship.meta"),present:true},
@@ -518,39 +517,35 @@ test_merged_pr_is_landed_work_not_a_review_queue() {
                 worktree:{path:null,present:false},home:{path:null,present:false},report:{path:null,present:false}},
          secondmate_projects:[],current_state:{state:"done",source:"fixture",detail:"run passed: PR merged/closed"},
          hints:{open_decisions:[]},pr:{url:"https://github.com/example/alpha/pull/9"},
-         backlog:{id:"alpha-ship",repo:"alpha",title:"Ship alpha"}},
-        {id:"alpha-review",kind:"ship",project:"alpha",
-         paths:{meta:{path:($home + "/state/alpha-ship.meta"),present:true},
-                status_log:{path:($home + "/state/alpha-ship.status"),present:true},
-                worktree:{path:null,present:false},home:{path:null,present:false},report:{path:null,present:false}},
-         secondmate_projects:[],current_state:{state:"done",source:"fixture",detail:"checks green: PR ready for review"},
-         hints:{open_decisions:[]},pr:{url:"https://github.com/example/alpha/pull/11"},
-         backlog:{id:"alpha-review",repo:"alpha",title:"Review alpha"}}]
+         backlog:{id:"alpha-ship",repo:"alpha",title:"Ship alpha"}}]
   ' "$home/fleet.json" > "$home/fleet.tmp"
   mv "$home/fleet.tmp" "$home/fleet.json"
   epoch=$(date +%s)
-  out=$(run_snapshot "$home" "$epoch") || fail "merged-PR snapshot failed"
+  out=$(run_snapshot "$home" "$epoch") || fail "awaiting-teardown snapshot failed"
   printf '%s' "$out" | jq -e '
-    .projects[] | select(.name == "alpha")
-    | .status == "needs_attention"
-      and .next_step == "PR awaiting review: Review alpha"
-      and (.landed | any(.id == "alpha-ship"))
-      and (.prs | any(.url == "https://github.com/example/alpha/pull/9"))
-  ' >/dev/null || fail "a merged PR was reported as awaiting review: $out"
+    .summary.awaiting_teardown == 1
+      and (.projects[] | select(.name == "alpha")
+        | .status == "active"
+          and .counts.awaiting_teardown == 1
+          and (.awaiting_teardown[0] | .id == "alpha-ship" and .owner == "main"
+               and .url == "https://github.com/example/alpha/pull/9")
+          and ([.decisions[],.failures[],.unreadable[]] | length) == 0
+          and (.prs | any(.url == "https://github.com/example/alpha/pull/9"))
+          and (.next_step | contains("awaiting review") | not))
+  ' >/dev/null || fail "a finished task in the merge-to-teardown window was misread: $out"
 
   jq '
-    .backlog.records |= map(select(.id != "alpha-review"))
-    | .tasks |= map(select(.id != "alpha-review"))
+    .tasks |= map(select(.id != "alpha-work" and .id != "alpha-call"))
+    | .backlog.records |= map(select(.id != "alpha-work" and .id != "alpha-call"))
   ' "$home/fleet.json" > "$home/fleet.tmp"
   mv "$home/fleet.tmp" "$home/fleet.json"
-  out=$(run_snapshot "$home" "$epoch") || fail "merged-only snapshot failed"
+  out=$(run_snapshot "$home" "$epoch") || fail "quiet-project snapshot failed"
   printf '%s' "$out" | jq -e '
     .projects[] | select(.name == "alpha")
-    | .status == "active"
-      and (.landed | any(.id == "alpha-ship"))
-      and ([.decisions[],.failures[],.unreadable[]] | length) == 0
-  ' >/dev/null || fail "a merged-but-not-torn-down task still painted the project red: $out"
-  pass "a merged PR reads as landed work, never as a review queue"
+    | .status != "needs_attention"
+      and .next_step == "Finished; awaiting teardown and completion record: Ship alpha"
+  ' >/dev/null || fail "finished work still painted the project red: $out"
+  pass "a finished task awaiting teardown is disclosed, never called a review queue"
 }
 
 test_unreadable_task_state_is_disclosed_not_idle() {
@@ -576,6 +571,71 @@ test_unreadable_task_state_is_disclosed_not_idle() {
           and .next_step == "Task state could not be read: bravo-work - worktree gone (torn down?)")
   ' >/dev/null || fail "an unreadable task left the project reading idle: $out"
   pass "a task whose state cannot be read is disclosed, not reported as idle"
+}
+
+test_a_hold_never_hides_another_open_decision() {
+  local home epoch out
+  home=$(make_home hold-vs-folds)
+  write_fleet_fixture "$home"
+  jq '
+    .backlog.records |= map(
+      if .id == "alpha-work" then .captain_actionable = true | .hold_kind = "captain"
+        | .hold_reason = "Approve the alpha budget"
+      else . end)
+    | .tasks |= map(
+        if .id == "alpha-work" then
+          .hints.open_decisions = [
+            {key:"route",verb:"needs-decision",summary:"Choose alpha route"},
+            {key:"budget",verb:"needs-decision",summary:"Approve the alpha budget"}]
+        else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "hold-vs-folds snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "alpha")
+    | ([.decisions[] | select(.id == "alpha-work") | .key] | sort) == ["alpha-work","budget","route"]
+      and (.deferred_decisions | length) == 0
+  ' >/dev/null || fail "a captain hold hid the other open decisions on its task: $out"
+
+  jq '
+    .backlog.records |= map(if .id == "alpha-work" then
+        .hold_reason = "SUPERSEDED by alpha-new" | .deferred_marker = true else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  out=$(run_snapshot "$home" "$epoch") || fail "deferred-hold-vs-folds snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "alpha")
+    | .status == "needs_attention"
+      and ([.decisions[] | select(.id == "alpha-work") | .key] | sort) == ["budget","route"]
+      and (.deferred_decisions | map(.id)) == ["alpha-work"]
+  ' >/dev/null || fail "a deferred hold silently swallowed live open decisions: $out"
+  pass "a captain hold never hides another open decision on the same task"
+}
+
+test_blank_detail_never_renders_a_blank_next_step() {
+  local home epoch out
+  home=$(make_home blank-detail)
+  write_fleet_fixture "$home"
+  jq '
+    .backlog.records |= map(select(.repo != "beta"))
+    | .tasks |= map(
+        if .id == "beta-wait" then .current_state = {state:"paused",source:"fixture",detail:""}
+        elif .id == "bravo-work" then .current_state = {state:"unknown",source:"fixture",detail:""}
+        else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "blank-detail snapshot failed"
+  printf '%s' "$out" | jq -e '
+    ([.projects[] | select(.next_step == "" or (.next_step | endswith(" - ")))] | length) == 0
+      and (.projects[] | select(.name == "beta")
+        | .status == "waiting" and .next_step == "paused" and .waiting[0].reason == "paused")
+      and (.projects[] | select(.name == "bravo")
+        | .status == "needs_attention"
+          and .next_step == "Task state could not be read: bravo-work - Task state could not be read")
+  ' >/dev/null || fail "a blank detail produced a blank next step: $out"
+  pass "an empty detail never renders as a blank next step"
 }
 
 test_one_captain_hold_is_one_decision() {
@@ -811,8 +871,10 @@ SH
 
 test_aggregation_status_precedence_and_secondmate_join
 test_distinct_unkeyed_decisions_are_all_surfaced
-test_merged_pr_is_landed_work_not_a_review_queue
+test_finished_task_awaiting_teardown_is_never_called_a_review_queue
 test_unreadable_task_state_is_disclosed_not_idle
+test_a_hold_never_hides_another_open_decision
+test_blank_detail_never_renders_a_blank_next_step
 test_one_captain_hold_is_one_decision
 test_blocked_status_fold_is_not_a_captain_decision
 test_backlog_order_survives_deduplication

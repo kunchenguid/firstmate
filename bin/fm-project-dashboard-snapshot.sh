@@ -20,10 +20,15 @@
 # A main-home task whose crew state reads back as unknown is disclosed in
 # unreadable[] and raises the project to needs_attention rather than letting the
 # card read idle.
-# A done task whose backlog row is already done is landed work, not a PR
-# awaiting review.
-# A captain hold recorded in both the backlog and the status fold is one
-# decision: the backlog row wins and the fold entry is dropped.
+# A done task whose backlog row is not yet done is finished work awaiting
+# teardown, disclosed in awaiting_teardown[]. Nothing local distinguishes a
+# merged PR from one awaiting review, so the board never claims either.
+# A captain hold and a status fold collapse to one decision only when the
+# pairing is unambiguous: one live hold and exactly one open needs-decision
+# fold on the same task. A deferred hold never suppresses a live fold, and a
+# task with several keyed folds keeps every one of them.
+# An empty-string detail is treated as an absent value everywhere, so no card
+# renders a blank next step.
 # Only needs-decision folds and non-deferred captain holds count as decisions;
 # deferred or superseded holds are disclosed in deferred_decisions[] instead of
 # painting the card red, matching the canonical bearings default view.
@@ -180,6 +185,10 @@ jq -n \
       (if (.project // "") == "" then null
        elif (.project | contains("/")) then (.project | split("/") | map(select(length > 0)) | last)
        else .project end));
+  def present:
+    if . == null then null
+    elif (type == "string") and ((gsub("[[:space:]]"; "")) == "") then null
+    else . end;
   def owner_items($owner):
     (($owner.record.active_children // []) + ($owner.record.decisions_open // [])
      + ($owner.record.holds // []) + ($owner.record.queued // []) + ($owner.record.landed // []));
@@ -201,7 +210,7 @@ jq -n \
     elif $status == "waiting" then "Waiting"
     else "Idle / queued" end;
   def concise($value; $fallback):
-    (($value // $fallback) | tostring | gsub("[[:space:]]+"; " ")) as $text
+    ((($value | present) // $fallback) | tostring | gsub("[[:space:]]+"; " ")) as $text
     | if ($text | length) > 150 then $text[:147] + "..." else $text end;
 
   $registry[0] as $projects_registry
@@ -247,7 +256,9 @@ jq -n \
            | select(.kind != "secondmate" and task_repo == $name) ]) as $tasks
       | ([ $fleet_data.backlog.records[]?
            | select(.structured == true and .repo == $name) ]) as $backlog
-      | ([ $backlog[] | select(.captain_actionable == true) | .id ]) as $captain_hold_ids
+      | ([ $backlog[]
+           | select(.captain_actionable == true and .deferred_marker != true)
+           | .id ]) as $live_hold_ids
       | ([ $backlog[] | select(.state == "done") | .id ]) as $landed_ids
       | ([ $mate_owners[]
            | select((.projects | index($name) != null)
@@ -256,30 +267,36 @@ jq -n \
       | ([ $tasks[]
            | select(.current_state.state == "working")
            | {id,title:(.backlog.title // .id),state:.current_state.state,
-              detail:(.current_state.detail // ""),owner:"main",pr_url:.pr.url} ]
+              detail:((.current_state.detail | present) // ""),owner:"main",pr_url:.pr.url} ]
          + [ $owners[] as $owner
              | $owner.record.active_children[]?
              | select(matches_project($owner; $name))
-             | {id,title:(.title // .id),state,detail:(.doing // ""),owner:$owner.id,pr_url:null} ]) as $active
+             | {id,title:(.title // .id),state,detail:((.doing | present) // ""),owner:$owner.id,pr_url:null} ]) as $active
       | ([ $tasks[] as $task
-           | select(($captain_hold_ids | index($task.id)) == null)
-           | ($task.hints.open_decisions // [])[]
-           | select(.verb == "needs-decision")
-           | {id:$task.id,key,title:(.summary // "Captain decision"),summary:(.summary // ""),
+           | ([ ($task.hints.open_decisions // [])[] | select(.verb == "needs-decision") ]) as $folds
+           | select((($live_hold_ids | index($task.id)) == null) or (($folds | length) != 1))
+           | $folds[]
+           | {id:$task.id,key,title:((.summary | present) // "Captain decision"),
+              summary:((.summary | present) // ""),
               deferred:false,owner:"main"} ]
          + [ $backlog[]
              | select(.captain_actionable == true)
-             | {id,key:.id,title:.title,summary:(.hold_reason // .title),
+             | {id,key:.id,title:.title,summary:((.hold_reason | present) // .title),
                 deferred:(.deferred_marker == true),owner:"main"} ]
          + [ $owners[] as $owner
-             | ([ $owner.record.decisions_open[]? | select(.source == "backlog") | .id ]) as $owner_hold_ids
+             | ([ $owner.record.decisions_open[]?
+                  | select(.source == "backlog" and .deferred_marker != true) | .id ]) as $owner_live_hold_ids
+             | ([ $owner.record.decisions_open[]?
+                  | select(.source == "status" and .verb != "blocked") ]) as $owner_folds
              | $owner.record.decisions_open[]?
              | . as $entry
              | select(.verb != "blocked")
-             | select(.source != "status" or (($owner_hold_ids | index($entry.id)) == null))
+             | select(.source != "status"
+                      or (($owner_live_hold_ids | index($entry.id)) == null)
+                      or (([ $owner_folds[] | select(.id == $entry.id) ] | length) != 1))
              | select(matches_project($owner; $name))
-             | {id,key:(.key // .id),title:(.summary // "Captain decision"),
-                summary:(.reason // .summary // ""),
+             | {id,key:(.key // .id),title:((.summary | present) // "Captain decision"),
+                summary:((.reason | present) // (.summary | present) // ""),
                 deferred:(.deferred_marker == true),owner:$owner.id} ]
         | dedupe_first([.owner,.id,.key])) as $decisions_all
       | ([ $decisions_all[] | select(.deferred | not) ]) as $decisions
@@ -287,27 +304,29 @@ jq -n \
       | ([ $tasks[]
            | select(.current_state.state == "failed" or .current_state.state == "blocked")
            | {id,title:(.backlog.title // .id),state:.current_state.state,
-              detail:(.current_state.detail // ""),owner:"main"} ]) as $failures
+              detail:((.current_state.detail | present) // ""),owner:"main"} ]) as $failures
       | ([ $tasks[] as $task
-           | select($task.current_state.state == "done" and $task.pr.url != null)
+           | select($task.current_state.state == "done")
            | select(($landed_ids | index($task.id)) == null)
-           | {id:$task.id,title:($task.backlog.title // $task.id),url:$task.pr.url,owner:"main"} ]) as $review_prs
+           | {id:$task.id,title:($task.backlog.title // $task.id),url:$task.pr.url,
+              detail:(($task.current_state.detail | present) // ""),owner:"main"} ]) as $awaiting_teardown
       | ([ $tasks[]
            | select(.current_state.state == "unknown")
            | {id,title:(.backlog.title // .id),state:.current_state.state,
-              reason:(.current_state.detail // "Task state could not be read"),owner:"main"} ]) as $unreadable
+              reason:((.current_state.detail | present) // "Task state could not be read"),owner:"main"} ]) as $unreadable
       | ([ $tasks[]
            | select(.current_state.state == "parked" or .current_state.state == "paused")
-           | {id,title:(.backlog.title // .id),reason:(.current_state.detail // .current_state.state),owner:"main"} ]
+           | {id,title:(.backlog.title // .id),
+              reason:((.current_state.detail | present) // .current_state.state),owner:"main"} ]
          + [ $backlog[]
              | select(.state == "queued" and
                  (((.unresolved_blocker_ids // []) | length) > 0 or
                   (.hold_reason != null and .captain_actionable != true)))
-             | {id,title,reason:(.hold_reason // .blocked_reason // "Waiting"),owner:"main"} ]
+             | {id,title,reason:((.hold_reason | present) // (.blocked_reason | present) // "Waiting"),owner:"main"} ]
          + [ $owners[] as $owner
              | $owner.record.holds[]?
              | select(matches_project($owner; $name))
-             | {id,title:(.title // .id),reason:(.reason // "Waiting"),owner:$owner.id} ]
+             | {id,title:(.title // .id),reason:((.reason | present) // "Waiting"),owner:$owner.id} ]
         | dedupe_first([.owner,.id])) as $waiting
       | ([ $backlog[]
            | select(.state == "queued")
@@ -355,8 +374,7 @@ jq -n \
          | dedupe_first([.owner,.kind,.id])) as $unattributed
       | ([ $unattributed[] | select(.kind != "landed") ]) as $unattributed_live
       | (if ($decisions | length) > 0 or ($failures | length) > 0 or
-             ($unreadable | length) > 0 or
-             ($review_prs | length) > 0 or ($unavailable_owners | length) > 0 or
+             ($unreadable | length) > 0 or ($unavailable_owners | length) > 0 or
              ($unattributed_live | length) > 0 then "needs_attention"
          elif ($active | length) > 0 then "active"
          elif ($waiting | length) > 0 then "waiting"
@@ -388,15 +406,17 @@ jq -n \
                        (if ($failures[0].detail // "") == "" then $failures[0].title else $failures[0].detail end))
                     elif ($unreadable | length) > 0 then
                       ("Task state could not be read: " + $unreadable[0].id + " - " + $unreadable[0].reason)
-                    elif ($review_prs | length) > 0 then ("PR awaiting review: " + $review_prs[0].title)
                     elif ($unattributed_live | length) > 0 then
                       ("Secondmate work is not attributable to one project: " + $unattributed_live[0].title)
                     else $unavailable_owners[0].reason end); "Review project state")
          elif $status == "active" then
            concise((if ($active[0].detail // "") == "" then $active[0].title else $active[0].detail end); "Work is under way")
          elif $status == "waiting" then
-           concise(($waiting[0].reason // $waiting[0].title); "Waiting on an external dependency")
+           concise((($waiting[0].reason | present) // $waiting[0].title); "Waiting on an external dependency")
          elif ($queued | length) > 0 then concise($queued[0].title; "Queued work")
+         elif ($awaiting_teardown | length) > 0 then
+           concise(("Finished; awaiting teardown and completion record: " + $awaiting_teardown[0].title);
+                   "Finished work awaiting teardown")
          else "No work queued" end) as $next_step
       | $registered + {
           status:$status,
@@ -413,6 +433,7 @@ jq -n \
           decisions:$decisions,
           failures:$failures,
           unreadable:$unreadable,
+          awaiting_teardown:$awaiting_teardown,
           waiting:$waiting,
           queued:$queued,
           landed:($landed_all[:5]),
@@ -426,6 +447,7 @@ jq -n \
           } ]),
           counts:{active:($active | length),decisions:($decisions | length),
             unreadable:($unreadable | length),
+            awaiting_teardown:($awaiting_teardown | length),
             waiting:($waiting | length),queued:($queued | length),landed:($landed_all | length),
             prs:($prs | length),unattributed:($unattributed | length),
             deferred_decisions:($deferred_decisions | length)}
@@ -448,7 +470,8 @@ jq -n \
         stale_risk:([$projects[] | select(.stale_risk)] | length),
         unattributed:([$projects[] | select((.unattributed | length) > 0)] | length),
         deferred_decisions:([$projects[].deferred_decisions[]] | length),
-        unreadable:([$projects[].unreadable[]] | length)
+        unreadable:([$projects[].unreadable[]] | length),
+        awaiting_teardown:([$projects[].awaiting_teardown[]] | length)
       }
     }
 ' > "$tmpdir/dashboard.json" || fail "project aggregation failed"

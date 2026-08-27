@@ -224,6 +224,12 @@ __FM_PROJECT_DASHBOARD_DATA__
     const detailGrid = node("div", "pd-detail-grid");
     const work = node("section", "pd-panel"); appendList(work, "Active work", project.active_work, {empty:"No active work"}); detailGrid.append(work);
     const calls = node("section", "pd-panel"); appendList(calls, "Decisions / attention", [...project.decisions, ...project.failures, ...project.unreadable], {empty:"No decisions pending"}); detailGrid.append(calls);
+    if (project.awaiting_teardown.length) {
+      const teardown = node("section", "pd-panel");
+      appendList(teardown, "Finished, awaiting teardown",
+        project.awaiting_teardown.map(item => ({...item, reason: item.detail || "Finished; tear down and record completion"})), {});
+      detailGrid.append(teardown);
+    }
     if (project.deferred_decisions.length) {
       const deferred = node("section", "pd-panel");
       appendList(deferred, "Deferred / superseded holds", project.deferred_decisions.map(item => ({...item, reason: item.summary || "Marked deferred or superseded"})), {});
