@@ -552,7 +552,8 @@ export default function (pi: ExtensionAPI) {
   // itself the captain-visible outcome, so the captain-facing note is
   // delivered silently (display: false) rather than printed or rendered a
   // second time; routine notes stay rendered except an explicitly silent
-  // no-change heartbeat. The read cursor advances once the note is handed to
+  // no-change heartbeat or an unchanged declared-external-wait recheck.
+  // The read cursor advances once the note is handed to
   // Pi; a crash inside Pi's
   // own delivery window leaves the outcome durable in the store, where
   // main's fm_branch_outcomes tool still reads it on demand.
@@ -598,7 +599,7 @@ export default function (pi: ExtensionAPI) {
       };
       pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
     } else {
-      const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${task}: ${summary}`, display: !(task === "fleet" && silent) };
+      const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${task}: ${summary}`, display: !silent };
       if (mainStreaming) {
         pi.sendMessage(message, { deliverAs: "nextTurn" });
       } else {
@@ -617,7 +618,7 @@ export default function (pi: ExtensionAPI) {
       name: "fm_branch_report",
       label: "Report supervision outcome",
       description:
-        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge an append-only note into the captain-facing main conversation. verdict captain surfaces it to the captain in one turn; routine notes render unless silent marks a no-change heartbeat.",
+        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge an append-only note into the captain-facing main conversation. verdict captain surfaces it to the captain in one turn; routine notes render unless silent marks a no-change heartbeat or an unchanged declared external wait.",
       parameters: Type.Object({
         task: Type.String({ description: "The task id the event belongs to (or 'fleet' for fleet-wide events)" }),
         verdict: Type.Union([Type.Literal("routine"), Type.Literal("captain")], {
@@ -629,7 +630,7 @@ export default function (pi: ExtensionAPI) {
         }),
         wake: Type.Optional(Type.String({ description: "The wake reason line this outcome answers" })),
         silent: Type.Optional(Type.Boolean({
-          description: "True only when a fleet-wide heartbeat review found literally nothing worth reporting; omit or use false whenever any action was taken or any routine result is worth a note",
+          description: "True for a fleet-wide heartbeat review that found literally nothing worth reporting, or for a later recheck of a declared external wait whose identity is unchanged; omit or use false for the first wait notice and whenever any action was taken or any routine result is worth a note",
         })),
       }),
       execute: async (_toolCallId, params) => {
@@ -638,7 +639,7 @@ export default function (pi: ExtensionAPI) {
         const summary = String((params as { summary: unknown }).summary || "").trim();
         const wake = String((params as { wake?: unknown }).wake ?? "").trim();
         const silent = (params as { silent?: unknown }).silent === true;
-        if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain") || (silent && (task !== "fleet" || verdictRaw !== "routine"))) {
+        if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain") || (silent && verdictRaw !== "routine")) {
           return {
             content: [{ type: "text", text: "invalid report: task, verdict (routine|captain), and summary are required" }],
             details: undefined,
@@ -663,7 +664,21 @@ export default function (pi: ExtensionAPI) {
             isError: true,
           };
         }
-        if (!mergeIntoMain(toolGeneration, appended.stdout, task, verdict, summary, silent)) {
+        let storedSilent = silent;
+        const listed = runOutcomeScript(["list", "--recent", "1"]);
+        if (listed.ok && listed.stdout) {
+          try {
+            const lines = listed.stdout.split("\n").filter((line) => line.length > 0);
+            const row = JSON.parse(lines[lines.length - 1] || "null") as { silent?: unknown };
+            if (row && typeof row === "object") {
+              if (row.silent === true) storedSilent = true;
+              else if (row.silent === false) storedSilent = false;
+            }
+          } catch {
+            // Keep the tool-argument silent flag when the just-written row is unreadable.
+          }
+        }
+        if (!mergeIntoMain(toolGeneration, appended.stdout, task, verdict, summary, storedSilent)) {
           return {
             content: [{ type: "text", text: `recorded seq ${appended.stdout}, but merge refused after supervision replacement or lock loss` }],
             details: undefined,
@@ -1392,7 +1407,8 @@ ${context.command}
 
   // Pi only calls this renderer for a message with display: true, which
   // mergeIntoMain sets for every routine note except an explicitly silent
-  // fleet heartbeat; captain-facing notes are never printed or rendered here.
+  // no-change heartbeat or unchanged declared-external-wait recheck;
+  // captain-facing notes are never printed or rendered here.
   pi.registerMessageRenderer?.("fm-branch-merge", (message, _options, theme) => {
     const note = textOfContent(message.content);
     const hasGlyph = note.startsWith(MERGE_NOTE_BOAT);
