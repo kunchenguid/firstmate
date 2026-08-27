@@ -4,6 +4,10 @@
 # clear volatile state, refresh/prune the project's clone for PR-based ship
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
 # (a secondmate teardown prints none, since secondmates are not backlog items).
+# REFUSES outright, --force included, when a ship or scout task's recorded
+# worktree resolves to the same path as its project clone: the discard target
+# would be the primary checkout rather than a disposable worktree. Only a
+# secondmate home is legitimately its own worktree.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -694,6 +698,22 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+
+# A secondmate home IS its own worktree, so worktree= and project= naming the
+# same path is correct there and only there. For a ship or scout task that
+# equality means the recorded discard target is the project's own clone: hard
+# resetting it, removing it, or killing its processes would operate on the
+# captain's checkout. Refuse before any destructive step, including under
+# --force: discard authority covers a task's work, never the clone it came
+# from (#1746).
+if [ "$KIND" != secondmate ] && [ -n "$WT" ] && [ -n "$PROJ" ]; then
+  WT_REAL=$(CDPATH='' cd -- "$WT" 2>/dev/null && pwd -P) || WT_REAL=$WT
+  PROJ_REAL=$(CDPATH='' cd -- "$PROJ" 2>/dev/null && pwd -P) || PROJ_REAL=$PROJ
+  if [ "$WT_REAL" = "$PROJ_REAL" ]; then
+    echo "REFUSED: $ID records the project clone '$PROJ' as its worktree, so cleanup would discard the primary checkout; preserving task state. Correct worktree= in $META before tearing down." >&2
+    exit 1
+  fi
+fi
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
 PUBLIC_FOLLOWUP_STATE=$STATE
 PUBLIC_FOLLOWUP_WORK_HOME=main

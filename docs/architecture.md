@@ -182,6 +182,8 @@ For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved tas
 `fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
 Its header owns the exact refusal mechanics, while `tests/fm-spawn-pool-base-freshen.test.sh` owns the portable regression coverage.
 
+`fm-teardown.sh` closes the same hole from the other end: when a ship or scout task's recorded `worktree=` resolves to the same path as its `project=`, cleanup refuses outright, `--force` included, before any process kill, worktree return, or state removal, because the discard target would be the primary checkout (only a secondmate home is legitimately its own worktree).
+
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
 The primary checkout is healthy on its default branch, and linked worktrees or secondmate homes are healthy at detached HEAD.
@@ -190,7 +192,7 @@ Only a named non-default branch checked out in `FM_ROOT` is a worktree tangle.
 `fm-tangle-lib.sh` resolves the default branch from `origin/HEAD`, then local `main` or `master`, and classifies that named non-default primary branch as the tangle.
 `fm-guard.sh` prints the repair command on the next mutable fleet action, while `bin/fm-session-start.sh` reports the same condition through bootstrap as a `TANGLE:` line at session start.
 If another live session holds the fleet lock, both surfaces keep the alarm but switch to read-only wording with no repair command.
-Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating `fm/<id>`, then stop with a blocked status if it landed in the primary checkout.
+Ship and scout briefs both open with the same assertion telling the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before it branches, commits, or installs anything, then stop with a blocked status if it landed in the primary checkout.
 
 ## No-mistakes gate authority boundary
 

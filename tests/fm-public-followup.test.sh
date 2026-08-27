@@ -622,7 +622,8 @@ test_secondmate_teardown_requires_parent_binding() {
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child/projects/alpha-wt" "project=$child/projects/alpha" \
+    "kind=ship" "mode=local-only"
 
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
@@ -646,7 +647,8 @@ test_secondmate_teardown_requires_parent_binding() {
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child/projects/alpha-wt" "project=$child/projects/alpha" \
+    "kind=ship" "mode=local-only"
   assert_absent "$child/.fm-secondmate-parent" \
     "the legacy env-only binding case must not gain a durable parent record"
 
@@ -755,7 +757,8 @@ test_secondmate_teardown_resolves_parent_from_durable_record_when_env_lost() {
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child/projects/alpha-wt" "project=$child/projects/alpha" \
+    "kind=ship" "mode=local-only"
 
   # No FM_PUBLIC_FOLLOWUP_PRIMARY_HOME at all here: a restart of the secondmate
   # agent that drops the launch-time prefix must still find the real parent
@@ -788,7 +791,8 @@ test_secondmate_teardown_durable_record_missing_parent_registration_still_refuse
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child/projects/alpha-wt" "project=$child/projects/alpha" \
+    "kind=ship" "mode=local-only"
   # No parent/state/mate.meta at all: the parent never recorded this secondmate's
   # own agent, so its side of the binding is genuinely missing. A durable LOCAL
   # record naming the real parent path must not be enough on its own to bypass
@@ -821,11 +825,11 @@ test_secondmate_teardown_durable_record_with_unknown_field_succeeds() {
   parent_alias="$TMP_ROOT/teardown-durable-clean-parent-alias"
   ln -s "$parent" "$parent_alias"
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
-  fm_git_init_commit "$child/projects/worktree"
+  fm_git_worktree "$child/projects/worktree" "$child/projects/wt" fm/task-x1
   printf 'manual\n' > "$child/config/backlog-backend"
   fm_write_meta "$child/state/work-clean.meta" \
     "window=firstmate:fm-work-clean" "endpoint_task_id=work-clean" \
-    "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
+    "worktree=$child/projects/wt" "project=$child/projects/worktree" \
     "kind=ship" "mode=local-only"
 
   rc=0
@@ -853,11 +857,11 @@ test_secondmate_teardown_rejects_conflicting_live_and_durable_parent_bindings() 
   fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   fm_write_meta "$durable_parent/state/mate.meta" "kind=secondmate" "home=$child"
-  fm_git_init_commit "$child/projects/worktree"
+  fm_git_worktree "$child/projects/worktree" "$child/projects/wt" fm/task-x1
   printf 'manual\n' > "$child/config/backlog-backend"
   fm_write_meta "$child/state/work-conflict.meta" \
     "window=firstmate:fm-work-conflict" "endpoint_task_id=work-conflict" \
-    "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
+    "worktree=$child/projects/wt" "project=$child/projects/worktree" \
     "kind=ship" "mode=local-only"
 
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
@@ -885,7 +889,8 @@ test_secondmate_teardown_rejects_unsafe_durable_parent_records() {
     fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
     fm_write_meta "$child/state/work-child.meta" \
       "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-      "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+      "worktree=$child/projects/alpha-wt" "project=$child/projects/alpha" \
+    "kind=ship" "mode=local-only"
     parent_record="$child/.fm-secondmate-parent"
     case "$case_name" in
       symlink)
@@ -947,11 +952,11 @@ test_secondmate_teardown_rejects_nul_bearing_durable_parent_record() {
   fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
-  fm_git_init_commit "$child/projects/worktree"
+  fm_git_worktree "$child/projects/worktree" "$child/projects/wt" fm/task-x1
   printf 'manual\n' > "$child/config/backlog-backend"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
+    "worktree=$child/projects/wt" "project=$child/projects/worktree" \
     "kind=ship" "mode=local-only"
   pre=${parent_resolved%??????}
   suf=${parent_resolved#"$pre"}
@@ -978,7 +983,7 @@ test_secondmate_teardown_rejects_nul_bearing_durable_parent_record() {
 test_relay_disabled_unmarked_teardown_skips_public_path() {
   local home tasks_log out rc
   home=$(make_home teardown-disabled-unmarked relay-off)
-  fm_git_init_commit "$home/projects/worktree"
+  fm_git_worktree "$home/projects/worktree" "$home/projects/wt" fm/task-x1
   tasks_log="$home/tasks-axi.log"; : > "$tasks_log"
   printf 'manual\n' > "$home/config/backlog-backend"
   cat > "$home/fakebin/tasks-axi" <<'SH'
@@ -989,7 +994,7 @@ SH
   chmod +x "$home/fakebin/tasks-axi"
   fm_write_meta "$home/state/work-disabled.meta" \
     "window=firstmate:fm-work-disabled" "endpoint_task_id=work-disabled" \
-    "worktree=$home/projects/worktree" "project=$home/projects/worktree" \
+    "worktree=$home/projects/wt" "project=$home/projects/worktree" \
     "kind=ship" "mode=local-only"
 
   rc=0
@@ -1010,7 +1015,7 @@ test_relay_disabled_parent_allows_marked_child_teardown() {
   local parent child tasks_log out rc
   parent=$(make_home teardown-disabled-parent relay-off)
   child=$(make_home teardown-disabled-child relay-off)
-  fm_git_init_commit "$child/projects/worktree"
+  fm_git_worktree "$child/projects/worktree" "$child/projects/wt" fm/task-x1
   printf '%s\n' disabled-mate > "$child/.fm-secondmate-home"
   printf -- '- disabled-mate - synthetic (home: %s; scope: synthetic; projects: ; added 2026-07-30)\n' \
     "$child" > "$parent/data/secondmates.md"
@@ -1025,7 +1030,7 @@ SH
   chmod +x "$child/fakebin/tasks-axi"
   fm_write_meta "$child/state/work-disabled.meta" \
     "window=firstmate:fm-work-disabled" "endpoint_task_id=work-disabled" \
-    "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
+    "worktree=$child/projects/wt" "project=$child/projects/worktree" \
     "kind=ship" "mode=local-only"
 
   rc=0
@@ -1054,7 +1059,8 @@ test_secondmate_parent_binding_matches_literal_id() {
   fm_write_meta "$parent/state/mate.id.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-literal.meta" \
     "window=firstmate:fm-work-literal" "endpoint_task_id=work-literal" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child/projects/alpha-wt" "project=$child/projects/alpha" \
+    "kind=ship" "mode=local-only"
 
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \

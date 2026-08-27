@@ -219,12 +219,13 @@ case "$DELIVERED" in
 esac
 
 # --- a finished child worker inside the remote secondmate home --------------
-CHILD_WT="$REMOTE_HOME/projects/alpha"
+CHILD_PROJ="$REMOTE_HOME/projects/alpha"
+CHILD_WT="$REMOTE_HOME/projects/alpha-wt"
 mkdir -p "$REMOTE_HOME/state"
 write_child_meta() {
   fm_write_meta "$REMOTE_HOME/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$CHILD_WT" "project=$CHILD_WT" "harness=codex" "kind=ship" \
+    "worktree=$CHILD_WT" "project=$CHILD_PROJ" "harness=codex" "kind=ship" \
     "mode=local-only" "yolo=off"
 }
 mkdir -p "$TMP_ROOT/childfake"
