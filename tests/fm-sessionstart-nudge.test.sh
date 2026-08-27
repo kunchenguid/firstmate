@@ -600,11 +600,20 @@ await waitFor(() => existsSync(`${state}/completed-2`), "proven generation never
 const provenResult = await providerCall(proven, "proven prompt");
 assert(provenResult?.message?.content.includes("GENERATION_DIGEST_2"), "proven path lost startup context");
 assert(!provenResult.message.content.includes("Run `bin/fm-session-start.sh`"), "proven path used manual fallback");
+const provenPid = pidFor(2);
+const originalKill = process.kill;
+let staleGroupUseCount = 0;
+process.kill = (pid, signal) => {
+  if (pid === -provenPid) staleGroupUseCount += 1;
+  return Reflect.apply(originalKill, process, [pid, signal]);
+};
 
 // Shutdown owns interruption and the whole child process group. The pending
 // preflight settles without stale delivery.
 plan(3, "slow");
 const interrupted = begin("new", "session-interrupted");
+process.kill = originalKill;
+assert(staleGroupUseCount === 0, "replacement reused a completed generation's empty process group id");
 await waitFor(() => existsSync(`${state}/started-3`) && existsSync(`${state}/grandchild-3`),
   "interrupted generation never started its process tree");
 const interruptedCall = handlers.get("before_agent_start")({ prompt: "interrupted" }, interrupted);

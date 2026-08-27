@@ -125,6 +125,7 @@ type SessionstartGeneration = {
   delivered: boolean;
   child: ChildProcess | null;
   processGroupId: number | null;
+  processGroupMonitor: NodeJS.Timeout | null;
   childClosed: boolean;
   childClose: Promise<void> | null;
   stopPromise: Promise<void> | null;
@@ -172,6 +173,31 @@ function sessionstartProcessGroupAlive(processGroupId: number): boolean {
   } catch {
     return false;
   }
+}
+
+function clearSessionstartProcessGroup(
+  generation: SessionstartGeneration,
+  processGroupId: number,
+): void {
+  if (generation.processGroupId !== processGroupId) return;
+  generation.processGroupId = null;
+  if (generation.processGroupMonitor) clearTimeout(generation.processGroupMonitor);
+  generation.processGroupMonitor = null;
+}
+
+function monitorSessionstartProcessGroup(
+  generation: SessionstartGeneration,
+  processGroupId: number,
+): void {
+  if (process.platform === "win32" || generation.processGroupId !== processGroupId) return;
+  if (!sessionstartProcessGroupAlive(processGroupId)) {
+    clearSessionstartProcessGroup(generation, processGroupId);
+    return;
+  }
+  generation.processGroupMonitor = setTimeout(() => {
+    monitorSessionstartProcessGroup(generation, processGroupId);
+  }, 10);
+  generation.processGroupMonitor.unref();
 }
 
 function waitForSessionstartProcessGroupExit(
@@ -225,6 +251,11 @@ function stopSessionstartGeneration(generation: SessionstartGeneration): Promise
       await generation.result;
       return;
     }
+    if (!sessionstartProcessGroupAlive(processGroupId)) {
+      clearSessionstartProcessGroup(generation, processGroupId);
+      await generation.result;
+      return;
+    }
     try {
       process.kill(-processGroupId, "SIGTERM");
     } catch {
@@ -236,6 +267,9 @@ function stopSessionstartGeneration(generation: SessionstartGeneration): Promise
       } catch {
       }
       await waitForSessionstartProcessGroupExit(processGroupId, sessionstartRetireTimeoutMs);
+    }
+    if (!sessionstartProcessGroupAlive(processGroupId)) {
+      clearSessionstartProcessGroup(generation, processGroupId);
     }
   })();
   return generation.stopPromise;
@@ -276,6 +310,8 @@ function runSessionstartHook(generation: SessionstartGeneration): Promise<Sessio
       if (generation.childClosed) return;
       generation.childClosed = true;
       if (generation.child === child) generation.child = null;
+      const processGroupId = generation.processGroupId;
+      if (processGroupId) monitorSessionstartProcessGroup(generation, processGroupId);
       closeChild();
     };
     child.stdout?.on("data", (chunk: Buffer) => {
@@ -333,6 +369,7 @@ function createSessionstartGeneration(
     delivered: false,
     child: null,
     processGroupId: null,
+    processGroupMonitor: null,
     childClosed: false,
     childClose: null,
     stopPromise: null,
@@ -445,6 +482,10 @@ export default function (pi: ExtensionAPI) {
     const processGroupId = generation.processGroupId;
     if (!processGroupId) {
       if (generation.child) signalSessionstartChild(generation.child, "SIGKILL");
+      return;
+    }
+    if (!sessionstartProcessGroupAlive(processGroupId)) {
+      clearSessionstartProcessGroup(generation, processGroupId);
       return;
     }
     try {
