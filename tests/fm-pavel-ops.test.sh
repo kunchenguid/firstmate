@@ -243,13 +243,33 @@ run_ops transition "$event" dispatched --evidence 'Pi worker exists in isolated 
 run_ops transition "$event" validating --evidence 'no-mistakes run owns current head' >/dev/null
 run_ops transition "$event" delivery_ready --evidence 'checks green on exact PR head' >/dev/null
 run_ops transition "$event" merge_queued --evidence 'guarded merge accepted by forge' --pr-url 'https://github.com/o/r/pull/1' >/dev/null
+run_ops transition "$event" merge_queued --evidence 'guarded merge accepted by forge' --pr-url 'https://github.com/o/r/pull/1' >/dev/null
+if run_ops transition "$event" merge_queued --evidence 'guarded merge accepted by forge' --pr-url 'https://github.com/o/r/pull/99' >/dev/null 2>&1; then
+  fail "merge_queued replay accepted a changed PR URL"
+fi
+if run_ops transition "$event" merge_queued --evidence 'different merge evidence' --pr-url 'https://github.com/o/r/pull/1' >/dev/null 2>&1; then
+  fail "merge_queued replay accepted changed evidence"
+fi
+if run_ops transition "$event" merge_queued --evidence 'guarded merge accepted by forge' --pr-url 'https://github.com/o/r/pull/1' --live-url 'https://example.test/product' >/dev/null 2>&1; then
+  fail "merge_queued replay accepted an unrelated live URL"
+fi
 run_ops transition "$event" landed --evidence 'forge reports PR merged at verified head' >/dev/null
 if run_ops transition "$event" live --evidence 'deploy succeeded' >/dev/null 2>&1; then
   fail "live transition accepted no customer URL"
 fi
 run_ops transition "$event" live --evidence 'requested price is visible on the customer page' --live-url 'https://example.test/product' >/dev/null
+run_ops transition "$event" live --evidence 'requested price is visible on the customer page' --live-url 'https://example.test/product' >/dev/null
+if run_ops transition "$event" live --evidence 'requested price is visible on the customer page' --live-url 'https://example.test/other' >/dev/null 2>&1; then
+  fail "live replay accepted a changed live URL"
+fi
+if run_ops transition "$event" live --evidence 'different live evidence' --live-url 'https://example.test/product' >/dev/null 2>&1; then
+  fail "live replay accepted changed evidence"
+fi
 run_ops send "$event" --purpose live-completion --text 'Готово: цена уже на сайте.' >/dev/null || fail "live completion notification failed"
 run_ops send "$event" --purpose live-completion --text 'Готово: цена уже на сайте.' >/dev/null || fail "completion notification replay failed"
+if run_ops send "$event" --purpose live-completion --text 'Готово: другой текст.' >/dev/null 2>&1; then
+  fail "delivered completion replay accepted changed text"
+fi
 [ "$(grep -c . "$HTTP_LOG")" -eq 1 ] || fail "completion notification replay sent twice"
 [ "$(run_ops inspect "$event" | json_field "['state']")" = notified ] || fail "confirmed Telegram receipt did not complete notification"
 assert_grep 'chat_id=group' "$HTTP_LOG" "Telegram completion used the wrong chat"
@@ -322,6 +342,9 @@ PY
 if run_ops send "$unknown" --purpose qa --text 'Статус проверяется.' >/dev/null 2>&1; then
   fail "unknown Telegram delivery was retried and could duplicate the message"
 fi
+if run_ops send "$unknown" --purpose qa --text 'Другой статус.' >/dev/null 2>&1; then
+  fail "unknown outbound replay accepted changed text"
+fi
 [ "$(grep -c . "$HTTP_LOG")" -eq 1 ] || fail "unknown Telegram delivery reached the API again"
 recovery=$(run_ops recover --startup) || fail "Pavel startup recovery failed"
 printf '%s' "$recovery" | grep -F "unknown outbound $unknown-qa surfaced" >/dev/null \
@@ -330,6 +353,68 @@ run_ops reconcile-outbound "$unknown-qa" --sent-message-id 888 >/dev/null
 [ "$(run_ops inspect "$unknown" | json_field "['state']")" = conversation ] || fail "outbound reconciliation changed a conversation into work"
 assert_grep '"status": "delivered"' "$HOME_DIR/state/pavel-ops/outbox/$unknown-qa.json" "reconciled Telegram receipt was not retained"
 pass "interrupted Telegram sends stop for visible reconciliation instead of duplicating"
+
+# Retryable outbound records keep the same immutable send contract.
+retryable=$(ingest 109 19 'Статус?' | json_field "['event']")
+run_ops classify "$retryable" --as conversation --reason 'status question only' >/dev/null
+RETRYABLE_EVENT="$retryable" OUTBOX="$HOME_DIR/state/pavel-ops/outbox/$retryable-qa.json" python3 - <<'PY'
+import hashlib
+import json
+import os
+text = "Статус повторяется."
+with open(os.environ["OUTBOX"], "w", encoding="utf-8") as handle:
+    json.dump({
+        "schema": "fm-pavel-ops-outbound.v1",
+        "id": os.environ["RETRYABLE_EVENT"] + "-qa",
+        "event_id": os.environ["RETRYABLE_EVENT"],
+        "purpose": "qa",
+        "chat_id": "group",
+        "text": text,
+        "text_digest": hashlib.sha256(text.encode()).hexdigest(),
+        "status": "retryable",
+        "attempts": 1,
+        "created_at": 1,
+        "updated_at": 1,
+    }, handle)
+PY
+before_retryable_sends=$(grep -c . "$HTTP_LOG")
+if run_ops send "$retryable" --purpose qa --text 'Другой статус.' >/dev/null 2>&1; then
+  fail "retryable outbound replay accepted changed text"
+fi
+[ "$(grep -c . "$HTTP_LOG")" -eq "$before_retryable_sends" ] || fail "retryable text mismatch reached the API"
+run_ops send "$retryable" --purpose qa --text 'Статус повторяется.' >/dev/null \
+  || fail "retryable outbound with the same text did not resend"
+[ "$(grep -c . "$HTTP_LOG")" -eq $((before_retryable_sends + 1)) ] || fail "retryable outbound did not retry once"
+pass "retryable outbound records retain their send contract"
+
+wrong_chat=$(ingest 110 20 'Еще статус?' | json_field "['event']")
+run_ops classify "$wrong_chat" --as conversation --reason 'status question only' >/dev/null
+WRONG_CHAT_EVENT="$wrong_chat" OUTBOX="$HOME_DIR/state/pavel-ops/outbox/$wrong_chat-qa.json" python3 - <<'PY'
+import hashlib
+import json
+import os
+text = "Статус с неверным чатом."
+with open(os.environ["OUTBOX"], "w", encoding="utf-8") as handle:
+    json.dump({
+        "schema": "fm-pavel-ops-outbound.v1",
+        "id": os.environ["WRONG_CHAT_EVENT"] + "-qa",
+        "event_id": os.environ["WRONG_CHAT_EVENT"],
+        "purpose": "qa",
+        "chat_id": "another-group",
+        "text": text,
+        "text_digest": hashlib.sha256(text.encode()).hexdigest(),
+        "status": "sending",
+        "attempts": 1,
+        "created_at": 1,
+        "updated_at": 1,
+    }, handle)
+PY
+before_wrong_chat_sends=$(grep -c . "$HTTP_LOG")
+if run_ops send "$wrong_chat" --purpose qa --text 'Статус с неверным чатом.' >/dev/null 2>&1; then
+  fail "outbound replay accepted a changed chat contract"
+fi
+[ "$(grep -c . "$HTTP_LOG")" -eq "$before_wrong_chat_sends" ] || fail "chat contract mismatch reached the API"
+pass "outbound replays reject immutable contract mismatches"
 
 # Migration audit reports legacy work and an ahead clone without changing either.
 MIGRATION_CLONE="$TMP_ROOT/aln"

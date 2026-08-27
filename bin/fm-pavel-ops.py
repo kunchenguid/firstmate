@@ -566,11 +566,40 @@ def resolve_pavel(home: Home, args: argparse.Namespace) -> dict[str, Any]:
     return event
 
 
+def last_transition_evidence(event: dict[str, Any], state: str) -> str:
+    for transition_record in reversed(event.get("transitions", [])):
+        if transition_record.get("to") == state:
+            return str(transition_record.get("evidence", ""))
+    return ""
+
+
+def validate_transition_replay(event: dict[str, Any], args: argparse.Namespace) -> None:
+    if not args.evidence.strip():
+        raise OpsError("every lifecycle transition requires non-empty --evidence")
+    if last_transition_evidence(event, args.state) != args.evidence:
+        raise OpsError(f"event {event['id']} is already {args.state} with different evidence")
+    if args.state == "merge_queued":
+        if not args.pr_url or not PR_URL.fullmatch(args.pr_url):
+            raise OpsError("merge_queued requires a full HTTPS --pr-url")
+        if event.get("pr_url") != args.pr_url:
+            raise OpsError(f"event {event['id']} is already merge_queued with another PR URL")
+    elif args.pr_url:
+        raise OpsError("--pr-url is accepted only with merge_queued")
+    if args.state == "live":
+        if not args.live_url or not PR_URL.fullmatch(args.live_url):
+            raise OpsError("live requires a full HTTPS --live-url")
+        if event.get("live_url") != args.live_url:
+            raise OpsError(f"event {event['id']} is already live with another live URL")
+    elif args.live_url:
+        raise OpsError("--live-url is accepted only with live")
+
+
 def transition(home: Home, args: argparse.Namespace) -> dict[str, Any]:
     event = home.load_event(args.event)
     current = event["state"]
     expected = LIFECYCLE_NEXT.get(current)
     if current == args.state:
+        validate_transition_replay(event, args)
         return event
     if expected != args.state:
         raise OpsError(f"invalid Pavel lifecycle transition: {current} -> {args.state}")
@@ -582,10 +611,14 @@ def transition(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         if home.config["worker"].get("yolo") != "on":
             raise OpsError("Pavel autonomous merge authority is not enabled")
         event["pr_url"] = args.pr_url
+    elif args.pr_url:
+        raise OpsError("--pr-url is accepted only with merge_queued")
     if args.state == "live":
         if not args.live_url or not PR_URL.fullmatch(args.live_url):
             raise OpsError("live requires a full HTTPS --live-url")
         event["live_url"] = args.live_url
+    elif args.live_url:
+        raise OpsError("--live-url is accepted only with live")
     home.append_transition(event, args.state, args.evidence)
     home.save_event(event)
     home.audit("transition", event=event["id"], state=args.state, task=event.get("task_id"))
@@ -639,6 +672,23 @@ def telegram_send(home: Home, chat_id: str, text: str) -> str:
     return str(message_id)
 
 
+def expected_outbound_contract(home: Home, event: dict[str, Any], purpose: str, text: str, outbound_id: str) -> dict[str, str]:
+    return {
+        "schema": OUTBOUND_SCHEMA,
+        "id": outbound_id,
+        "event_id": event["id"],
+        "purpose": purpose,
+        "chat_id": str(home.config["telegram"].get("outbound_chat_id") or event["source"]["chat_id"]),
+        "text_digest": sha(text),
+    }
+
+
+def validate_outbound_contract(outbound_id: str, outbound: dict[str, Any], expected: dict[str, str]) -> None:
+    for key, value in expected.items():
+        if str(outbound.get(key, "")) != value:
+            raise OpsError(f"outbound {outbound_id} already exists with different {key}")
+
+
 def send_message(home: Home, args: argparse.Namespace) -> dict[str, Any]:
     event = home.load_event(args.event)
     purpose = args.purpose
@@ -652,8 +702,10 @@ def send_message(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         raise OpsError(f"cannot send {purpose} while event is {event['state']}")
     outbound_id = f"{event['id']}-{purpose}"
     path = outbound_path(home, outbound_id)
+    expected = expected_outbound_contract(home, event, purpose, args.text, outbound_id)
     if path.exists():
         outbound = read_json(path)
+        validate_outbound_contract(outbound_id, outbound, expected)
         status = outbound.get("status")
         if status == "delivered":
             if purpose == "live-completion" and event["state"] != "notified":
@@ -680,9 +732,9 @@ def send_message(home: Home, args: argparse.Namespace) -> dict[str, Any]:
             "id": outbound_id,
             "event_id": event["id"],
             "purpose": purpose,
-            "chat_id": str(home.config["telegram"].get("outbound_chat_id") or event["source"]["chat_id"]),
+            "chat_id": expected["chat_id"],
             "text": args.text,
-            "text_digest": sha(args.text),
+            "text_digest": expected["text_digest"],
             "status": "pending",
             "attempts": 0,
             "created_at": epoch(),
