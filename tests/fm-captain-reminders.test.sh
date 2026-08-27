@@ -35,10 +35,15 @@ cat > "$FAKE" <<'FAKE_EOF'
 set -u
 store=${FAKE_REMINDERS_STORE:?}
 [ -f "$store" ] || : > "$store"
-[ -z "${FAKE_REMINDERS_HANG:-}" ] || { sleep "$FAKE_REMINDERS_HANG"; exit 0; }
-[ -z "${FAKE_REMINDERS_FAIL:-}" ] || { printf '%s\n' "$FAKE_REMINDERS_FAIL" >&2; exit 1; }
 verb=$1
 shift
+[ -z "${FAKE_REMINDERS_LOG:-}" ] || printf '%s\n' "$verb" >> "$FAKE_REMINDERS_LOG"
+if [ -n "${FAKE_REMINDERS_HANG:-}" ] \
+  && { [ -z "${FAKE_REMINDERS_HANG_VERB:-}" ] || [ "$FAKE_REMINDERS_HANG_VERB" = "$verb" ]; }; then
+  sleep "$FAKE_REMINDERS_HANG"
+  exit 0
+fi
+[ -z "${FAKE_REMINDERS_FAIL:-}" ] || { printf '%s\n' "$FAKE_REMINDERS_FAIL" >&2; exit 1; }
 case "$verb" in
   list)
     awk -F'\t' '$1 == "0" && $3 ~ /^\[fm:[A-Za-z0-9._-]+\]/ {
@@ -152,6 +157,11 @@ run sync >/dev/null 2>&1
 [ "$(rows)" = 1 ] || fail "reruns duplicated the reminder: $(cat "$STORE")"
 [ "$BEFORE" = "$(cat "$STORE")" ] || fail "an unchanged rerun must not rewrite the entry"
 pass "a rerun recognizes its own entry and never creates a second one"
+OUT=$(run status 2>&1)
+assert_contains "$OUT" "would check call-a" "status describes checking an existing entry"
+assert_contains "$OUT" "only if its title or reason changed" "status limits refreshes to real drift"
+assert_not_contains "$OUT" "would refresh call-a" "status does not claim an unchanged entry will be rewritten"
+pass "status reports a conditional check rather than an unconditional refresh"
 
 # --- a call that is not held for the captain is not projected ------------------
 
@@ -231,25 +241,105 @@ LONG=$(awk 'BEGIN { while (i++ < 1200) printf "x" }')
 axi add call-e "Long one" --repo demo
 axi hold call-e --reason "$LONG" --kind captain
 run sync >/dev/null 2>&1
-assert_contains "$(row_for call-e)" "truncated" "an over-long reason says it was cut"
+assert_contains "$(row_for call-e)" "Firstmate 会话" "an over-long reason points back to the Firstmate session"
+assert_not_contains "$(row_for call-e)" "on the task" "the captain-facing notice does not point at an internal task"
 NOTE_LEN=$(row_for call-e | awk -F'\t' '{ print length($3) }')
 [ "$NOTE_LEN" -lt 1000 ] || fail "an over-long reason must be bounded, note is $NOTE_LEN characters"
-pass "an unusually long reason is bounded and marked as truncated"
+pass "an unusually long reason is bounded and points back to the session"
 
+
+# --- deferred calls leave the list until their date ----------------------------
+
+axi add call-future "Revisit the launch plan" --repo demo
+axi hold call-future --reason "captain will revisit this later" --kind captain
+run sync >/dev/null 2>&1
+axi hold call-future --reason "captain will revisit this later" --kind captain --until 2999-01-01
+run sync >/dev/null 2>&1
+case "$(row_for call-future)" in
+  1$'\t'*) pass "a future captain deferral is removed from the live projection" ;;
+  *) fail "a future captain deferral stayed live: $(row_for call-future)" ;;
+esac
+
+axi add call-due "Decide the overdue launch plan" --repo demo
+axi hold call-due --reason "captain decision is due again" --kind captain --until 2000-01-01
+run sync >/dev/null 2>&1
+assert_contains "$(row_for call-due)" "captain decision is due again" \
+  "a due captain deferral is projected despite tasks-axi's expired held bit"
+pass "captain deferrals stay hidden before their date and return when due"
 # --- a wedged Reminders step is bounded, never a hang --------------------------
 
+TIMEOUT_STORE="$TMP_ROOT/timeout-reminders.tsv"
+TIMEOUT_LOG="$TMP_ROOT/timeout-reminders.log"
+: > "$TIMEOUT_STORE"
+: > "$TIMEOUT_LOG"
 START=$(date +%s)
 OUT=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
-  FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$STORE" FAKE_REMINDERS_HANG=60 \
-  FM_REMINDERS_TIMEOUT_SECS=1 "$REMINDERS" sync 2>&1)
+  FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$TIMEOUT_STORE" \
+  FAKE_REMINDERS_LOG="$TIMEOUT_LOG" FAKE_REMINDERS_HANG=60 \
+  FAKE_REMINDERS_HANG_VERB=upsert FM_REMINDERS_TIMEOUT_SECS=2 \
+  "$REMINDERS" sync 2>&1)
 RC=$?
 ELAPSED=$(( $(date +%s) - START ))
-[ "$ELAPSED" -lt 30 ] || fail "a wedged Reminders step held the caller for ${ELAPSED}s"
+[ "$ELAPSED" -lt 10 ] || fail "a wedged Reminders step held the caller for ${ELAPSED}s"
 [ "$RC" -ne 0 ] || fail "a wedged Reminders step must be reported as a failure"
-assert_contains "$OUT" "bound" "the caller is told the step was abandoned at its bound"
+[ "$(grep -c '^list$' "$TIMEOUT_LOG")" = 1 ] || fail "the deadline test did not list once: $(cat "$TIMEOUT_LOG")"
+[ "$(grep -c '^upsert$' "$TIMEOUT_LOG")" = 1 ] || fail "the whole deadline allowed repeated wedged upserts: $(cat "$TIMEOUT_LOG")"
+assert_not_contains "$(cat "$TIMEOUT_LOG")" "complete" "no further Reminders calls run after the deadline"
+assert_contains "$OUT" "3 entries were left unprocessed" "the caller is told the exact unprocessed remainder"
 assert_contains "$OUT" "Automation" "the caller is told where to approve the automation prompt"
-pass "a wedged Reminders step is abandoned at its bound instead of hanging the caller (${ELAPSED}s)"
+pass "a wedged multi-entry sync stops at one whole-command deadline (${ELAPSED}s)"
 
+
+# --- an unreadable backlog snapshot touches no reminders ----------------------
+
+REAL_TASKS_AXI=$(command -v tasks-axi)
+BROKEN_BIN="$TMP_ROOT/broken-tasks-bin"
+mkdir -p "$BROKEN_BIN"
+cat > "$BROKEN_BIN/tasks-axi" <<'BROKEN_EOF'
+#!/usr/bin/env bash
+case "${FAKE_TASKS_AXI_MODE:-}:${1:-}" in
+  malformed-list:list)
+    printf '%s\n' 'count: 1' 'tasks[1]{id,state,kind,repo,title}:' '  malformed row'
+    exit 0
+    ;;
+  fail-show:show) exit 9 ;;
+esac
+exec "${REAL_TASKS_AXI:?}" "$@"
+BROKEN_EOF
+chmod +x "$BROKEN_BIN/tasks-axi"
+
+FAILURE_STORE="$TMP_ROOT/failure-reminders.tsv"
+FAILURE_LOG="$TMP_ROOT/failure-reminders.log"
+printf '0\tStale read\t[fm:stale-read] old reason\t0\n' > "$FAILURE_STORE"
+for mode in malformed-list fail-show; do
+  BEFORE=$(cat "$FAILURE_STORE")
+  : > "$FAILURE_LOG"
+  OUT=$(PATH="$BROKEN_BIN:$PATH" REAL_TASKS_AXI="$REAL_TASKS_AXI" FAKE_TASKS_AXI_MODE="$mode" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$FAILURE_STORE" \
+    FAKE_REMINDERS_LOG="$FAILURE_LOG" "$REMINDERS" sync 2>&1)
+  RC=$?
+  [ "$RC" -ne 0 ] || fail "$mode backlog failure reported success"
+  assert_contains "$OUT" "could not read or parse the captain backlog snapshot" \
+    "$mode backlog failure names the abandoned snapshot"
+  [ "$BEFORE" = "$(cat "$FAILURE_STORE")" ] || fail "$mode backlog failure changed reminders"
+  [ ! -s "$FAILURE_LOG" ] || fail "$mode backlog failure reached Reminders: $(cat "$FAILURE_LOG")"
+done
+pass "failed and malformed backlog reads abort before touching Reminders"
+
+# --- a genuinely empty captain backlog completes stale entries ----------------
+
+axi unhold call-d
+axi unhold call-e
+axi unhold call-due
+axi unhold call-future
+printf '0\tAnswered call\t[fm:empty-stale] old reason\t0\n' >> "$STORE"
+OUT=$(run sync 2>&1)
+assert_contains "$OUT" "ticked off empty-stale" "an empty captain snapshot still completes stale entries"
+case "$(row_for empty-stale)" in
+  1$'\t'*) pass "a genuinely empty captain snapshot completes stale marked entries" ;;
+  *) fail "an empty captain snapshot did not complete its stale entry: $(row_for empty-stale)" ;;
+esac
 # --- a refused authorization reads as instructions, not an error number ---------
 
 OUT=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \

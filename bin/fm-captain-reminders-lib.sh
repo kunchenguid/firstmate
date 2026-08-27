@@ -22,7 +22,7 @@ FM_REMINDERS_DEFAULT_LIST=Firstmate
 # silently ending mid-sentence.
 FM_REMINDERS_NOTE_LIMIT=900
 
-FM_REMINDERS_TRUNCATION_NOTICE=' [truncated - the full reason is on the task]'
+FM_REMINDERS_TRUNCATION_NOTICE=' [已截断，请回到 Firstmate 会话查看完整原因]'
 
 # Collapse to one clean line: a note and a reminder title are both single-line
 # surfaces, and a stray tab would also split this library's own TAB-separated
@@ -73,21 +73,43 @@ fm_reminders_marker_id() {  # <note>
   printf '%s\n' "$id"
 }
 
-# Every captain call this home is currently holding, one `<id>TAB<title>TABnote`
-# record per line, in backlog order. This is the whole data source of the
-# projection: `held=yes` plus `hold_kind=captain`, nothing inferred from prose.
+# Every unresolved captain call that is due now, one `<id>TAB<title>TABnote`
+# record per line, in backlog order. Captain-hold annotations survive a date
+# gate, so a future hold_until defers the entry and the live held bit is not the
+# ownership test.
 fm_reminders_desired() {
-  local id show title reason
+  local ids id show state hold_kind hold_until title reason today raw
+  ids=$(fm_open_task_ids) || return 1
+  today=$(date +%F) || return 1
+  case "$today" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) return 1 ;; esac
   while IFS= read -r id; do
     [ -n "$id" ] || continue
-    show=$(fm_task_show "$id") || continue
-    [ "$(fm_show_field "$show" held)" = yes ] || continue
-    [ "$(fm_show_field_value "$show" hold_kind)" = captain ] || continue
-    title=$(fm_reminders_one_line "$(fm_show_field_value "$show" title)")
+    show=$(fm_task_show "$id") || return 1
+    state=$(fm_show_field "$show" state)
+    case "$state" in queued|in_flight) ;; done) continue ;; *) return 1 ;; esac
+    raw=$(fm_show_field "$show" hold_kind)
+    [ -n "$raw" ] || return 1
+    hold_kind=$(fm_decode_shown_value "$raw") || return 1
+    [ "$hold_kind" = captain ] || continue
+    raw=$(fm_show_field "$show" hold_until)
+    [ -n "$raw" ] || return 1
+    hold_until=$(fm_decode_shown_value "$raw") || return 1
+    [ "$hold_until" != '-' ] || hold_until=''
+    if [ -n "$hold_until" ]; then
+      case "$hold_until" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) return 1 ;; esac
+      [[ "$hold_until" > "$today" ]] && continue
+    fi
+    raw=$(fm_show_field "$show" title)
+    [ -n "$raw" ] || return 1
+    title=$(fm_decode_shown_value "$raw") || return 1
+    title=$(fm_reminders_one_line "$title") || return 1
     [ -n "$title" ] || title=$id
-    reason=$(fm_show_field_value "$show" hold_reason)
+    raw=$(fm_show_field "$show" hold_reason)
+    [ -n "$raw" ] || return 1
+    reason=$(fm_decode_shown_value "$raw") || return 1
+    [ "$reason" != '-' ] || reason=''
     printf '%s\t%s\t%s\n' "$id" "$title" "$(fm_reminders_note "$id" "$reason")"
   done <<EOF
-$(fm_open_task_ids --state held)
+$ids
 EOF
 }

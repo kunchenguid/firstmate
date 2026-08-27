@@ -22,10 +22,10 @@
 # no event to lose, because a skipped run is repaired by the next one.
 # `status` is the same computation printed as a plan, touching nothing.
 #
-# WHAT IT PROJECTS. Every task in the active FM_HOME's backlog that is held with
-# `hold_kind=captain` - the calls the captain must rule on and the ones he must
-# carry out himself, which are the same thing in the data. Progress is not a
-# captain call and never appears here.
+# WHAT IT PROJECTS. Every unresolved task in the active FM_HOME carrying
+# `hold_kind=captain` whose hold_until date is absent or due - the calls the
+# captain must rule on and the ones he must carry out himself, which are the same
+# thing in the data. Progress and future deferrals never appear here.
 #
 #   reminder title -> the task title
 #   reminder note  -> `[fm:<task-id>] <hold reason>`
@@ -55,10 +55,11 @@
 # DEGRADING. Never a hard failure for the caller, which is always some other
 # piece of work that must not be held up by a reminder.
 #   - Not macOS, or no `osascript`: one diagnostic line, exit 0.
-#   - Every Reminders call is bounded by FM_REMINDERS_TIMEOUT_SECS (default 10)
-#     through bin/fm-timeout-lib.sh, which kills the whole process group. A
-#     first-run automation prompt only the captain can answer would otherwise
-#     hang this indefinitely, and this runs on the supervision path.
+#   - The whole projection and every individual Reminders call share the
+#     FM_REMINDERS_TIMEOUT_SECS deadline (default 10) through
+#     bin/fm-timeout-lib.sh, which kills the whole process group. A first-run
+#     automation prompt only the captain can answer would otherwise hang this
+#     indefinitely, and this runs on the supervision path.
 #   - A bound hit or a refused authorization prints what to do about it, in
 #     words, rather than an AppleScript error number.
 #
@@ -117,9 +118,31 @@ list_contains() {  # <newline-separated-list> <value>
   esac
 }
 
+PROJECTION_DEADLINE=0
+PROJECTION_TIMED_OUT=0
+
+projection_osa() {  # <verb> <args...>
+  local now remaining
+  now=$(date +%s) || { PROJECTION_TIMED_OUT=1; return 1; }
+  case "$now" in ''|*[!0-9]*) PROJECTION_TIMED_OUT=1; return 1 ;; esac
+  remaining=$((PROJECTION_DEADLINE - now))
+  if [ "$remaining" -le 0 ]; then
+    PROJECTION_TIMED_OUT=1
+    return 1
+  fi
+  OSA_TIMEOUT_SECS=$TIMEOUT_SECS
+  [ "$remaining" -ge "$OSA_TIMEOUT_SECS" ] || OSA_TIMEOUT_SECS=$remaining
+  if osa "$@"; then
+    return 0
+  fi
+  [ "$OSA_TIMED_OUT" -eq 0 ] || PROJECTION_TIMED_OUT=1
+  return 1
+}
+
 run_projection() {  # <dry-run 0|1> <notify-ids newline-separated>
-  local dry=$1 notify=$2 list_name desired desired_ids projected id title body
-  local due outcome failures=0 acted=0
+  local dry=$1 notify=$2 list_name desired desired_ids projected stale_ids=''
+  local id title body due outcome now desired_count stale_count total remaining
+  local failures=0 acted=0 processed=0
 
   list_name=$(fm_reminders_list_name "$CONFIG") || return 0
   if [ -z "$REMINDERS_EXEC" ]; then
@@ -134,18 +157,45 @@ run_projection() {  # <dry-run 0|1> <notify-ids newline-separated>
     return 1
   }
 
-  desired=$(fm_reminders_desired)
+  if ! desired=$(fm_reminders_desired); then
+    note "could not read or parse the captain backlog snapshot; nothing was projected."
+    return 1
+  fi
   desired_ids=$(printf '%s\n' "$desired" | cut -f1)
-  osa list "$list_name" || return 1
+  desired_count=$(printf '%s\n' "$desired" | awk 'NF { n++ } END { print n + 0 }')
+  now=$(date +%s) || { note "could not start the Reminders deadline; nothing was projected."; return 1; }
+  case "$now" in ''|*[!0-9]*) note "could not start the Reminders deadline; nothing was projected."; return 1 ;; esac
+  PROJECTION_DEADLINE=$((now + TIMEOUT_SECS))
+  PROJECTION_TIMED_OUT=0
+  if ! projection_osa list "$list_name"; then
+    if [ "$PROJECTION_TIMED_OUT" -eq 1 ]; then
+      note "projection did not finish before the ${TIMEOUT_SECS}s deadline; $desired_count backlog entries were left unprocessed and existing list entries were not inspected."
+    fi
+    return 1
+  fi
   projected=$OSA_OUT
 
-  # Every captain call the backlog holds: added when the list has no entry for
-  # it yet, refreshed in place when the title or the reason has moved on.
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    case "$id" in *[!A-Za-z0-9._-]*) continue ;; esac
+    list_contains "$desired_ids" "$id" && continue
+    list_contains "$stale_ids" "$id" && continue
+    if [ -n "$stale_ids" ]; then stale_ids="$stale_ids"$'\n'"$id"; else stale_ids=$id; fi
+  done <<EOF
+$projected
+EOF
+  stale_count=$(printf '%s\n' "$stale_ids" | awk 'NF { n++ } END { print n + 0 }')
+  total=$((desired_count + stale_count))
+
   while IFS=$'\t' read -r id title body; do
     [ -n "$id" ] || continue
     due=0
     if list_contains "$projected" "$id"; then
-      [ "$dry" -eq 0 ] || { printf 'would refresh %s (%s)\n' "$id" "$title"; acted=$((acted + 1)); continue; }
+      if [ "$dry" -eq 1 ]; then
+        printf 'would check %s (%s) and refresh it only if its title or reason changed\n' "$id" "$title"
+        acted=$((acted + 1))
+        continue
+      fi
     else
       list_contains "$notify" "$id" && due=1
       if [ "$dry" -eq 1 ]; then
@@ -158,7 +208,7 @@ run_projection() {  # <dry-run 0|1> <notify-ids newline-separated>
         continue
       fi
     fi
-    if osa upsert "$list_name" "$id" "$title" "$body" "$due"; then
+    if projection_osa upsert "$list_name" "$id" "$title" "$body" "$due"; then
       outcome=$OSA_OUT
       case "$outcome" in
         created)
@@ -172,34 +222,41 @@ run_projection() {  # <dry-run 0|1> <notify-ids newline-separated>
         updated) note "refreshed $id ($title)"; acted=$((acted + 1)) ;;
       esac
     else
+      [ "$PROJECTION_TIMED_OUT" -eq 0 ] || break
       failures=$((failures + 1))
     fi
+    processed=$((processed + 1))
   done <<EOF
 $desired
 EOF
 
-  # Marked entries the backlog no longer holds for the captain. Completed, never
-  # removed, so anything the captain added to the entry survives.
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    case "$id" in *[!A-Za-z0-9._-]*) continue ;; esac
-    list_contains "$desired_ids" "$id" && continue
-    if [ "$dry" -eq 1 ]; then
-      printf 'would tick off %s (no longer waiting on the captain)\n' "$id"
-      acted=$((acted + 1))
-      continue
-    fi
-    if osa complete "$list_name" "$id"; then
-      note "ticked off $id (no longer waiting on the captain)"
-      acted=$((acted + 1))
-    else
-      failures=$((failures + 1))
-    fi
-  done <<EOF
-$projected
+  if [ "$PROJECTION_TIMED_OUT" -eq 0 ]; then
+    while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      if [ "$dry" -eq 1 ]; then
+        printf 'would tick off %s (no longer waiting on the captain)\n' "$id"
+        acted=$((acted + 1))
+        continue
+      fi
+      if projection_osa complete "$list_name" "$id"; then
+        note "ticked off $id (no longer waiting on the captain)"
+        acted=$((acted + 1))
+      else
+        [ "$PROJECTION_TIMED_OUT" -eq 0 ] || break
+        failures=$((failures + 1))
+      fi
+      processed=$((processed + 1))
+    done <<EOF
+$stale_ids
 EOF
+  fi
 
-  # A named push that matched no captain call is a typo, not a quiet no-op.
+  if [ "$PROJECTION_TIMED_OUT" -eq 1 ]; then
+    remaining=$((total - processed))
+    note "projection did not finish before the ${TIMEOUT_SECS}s deadline; $remaining entries were left unprocessed."
+    return 1
+  fi
+
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     list_contains "$desired_ids" "$id" && continue

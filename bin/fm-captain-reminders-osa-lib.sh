@@ -133,33 +133,39 @@ APPLESCRIPT
 # stdout, because a step that fails has a diagnostic to print and a caller that
 # captured this in a command substitution would swallow exactly that.
 OSA_OUT=
+OSA_TIMED_OUT=0
+OSA_TIMEOUT_SECS=
 osa() {  # <verb> <args...>; sets OSA_OUT
-  local verb=$1 rc err out
+  local verb=$1 rc err out timeout
   shift
   err="$WORK_DIR/stderr"
   out="$WORK_DIR/stdout"
   : > "$err"
   : > "$out"
   OSA_OUT=
+  OSA_TIMED_OUT=0
+  timeout=${OSA_TIMEOUT_SECS:-$TIMEOUT_SECS}
+  case "$timeout" in ''|*[!0-9]*|0) timeout=$TIMEOUT_SECS ;; esac
   if [ -n "$REMINDERS_EXEC" ]; then
-    fm_run_timed "$TIMEOUT_SECS" "$REMINDERS_EXEC" "$verb" "$@" >"$out" 2>"$err"
+    fm_run_timed "$timeout" "$REMINDERS_EXEC" "$verb" "$@" >"$out" 2>"$err"
   else
-    fm_run_timed "$TIMEOUT_SECS" osascript "$(osa_file "$verb")" "$@" >"$out" 2>"$err"
+    fm_run_timed "$timeout" osascript "$(osa_file "$verb")" "$@" >"$out" 2>"$err"
   fi
   rc=$?
   OSA_OUT=$(cat "$out" 2>/dev/null || true)
   [ "$rc" -eq 0 ] && return 0
   OSA_OUT=
-  osa_diagnose "$verb" "$rc" "$err"
+  [ "$rc" -ne 124 ] || OSA_TIMED_OUT=1
+  osa_diagnose "$verb" "$rc" "$err" "$timeout"
   return 1
 }
 
 # Say what the captain can act on. An AppleScript error number is not that.
-osa_diagnose() {  # <verb> <rc> <stderr-file>
-  local verb=$1 rc=$2 text
+osa_diagnose() {  # <verb> <rc> <stderr-file> <timeout-seconds>
+  local verb=$1 rc=$2 text timeout=$4
   text=$(tr '\n' ' ' < "$3" 2>/dev/null | cut -c1-300)
   if [ "$rc" -eq 124 ]; then
-    note "the Reminders step '$verb' hit its ${TIMEOUT_SECS}s bound and was abandoned; nothing else was affected."
+    note "the Reminders step '$verb' hit its ${timeout}s bound and was abandoned."
     note "if macOS is waiting on a first-time automation prompt, approve it in System Settings > Privacy & Security > Automation (allow this terminal to control Reminders), then run this command again."
     return 0
   fi

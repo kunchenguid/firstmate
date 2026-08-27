@@ -54,15 +54,30 @@ fm_show_field_value() {  # <show-output> <field>
 }
 
 # Every still-open task id in this home's backlog, one per line. Extra arguments
-# are passed straight to `tasks-axi list` as filters. Only the first two
-# comma-separated listing fields are read - both are slugs that precede any
-# quoted title - so a title containing commas or quotes cannot shift them.
+# are passed straight to `tasks-axi list` as filters. The count and every returned
+# row must agree before any ids are emitted, so a failed or malformed listing can
+# never masquerade as an empty backlog.
 fm_open_task_ids() {  # [<tasks-axi list flags>...]
-  fm_tasks_axi list "$@" 2>/dev/null | awk -F, '
+  local output
+  output=$(fm_tasks_axi list "$@" 2>/dev/null) || return 1
+  printf '%s\n' "$output" | awk -F, '
+    /^count: [0-9]+($| of [0-9]+ total$| \(showing first [0-9]+\)$)/ {
+      value = $0
+      sub(/^count: /, "", value)
+      sub(/ .*/, "", value)
+      count = value + 0
+      seen_count++
+      next
+    }
     /^  [A-Za-z0-9._-]+,/ {
       id = $1
       sub(/^ +/, "", id)
-      if ($2 != "done") print id
+      rows++
+      if ($2 != "done") ids = ids (ids == "" ? "" : "\n") id
+    }
+    END {
+      if (seen_count != 1 || rows != count) exit 65
+      if (ids != "") print ids
     }
   '
 }
