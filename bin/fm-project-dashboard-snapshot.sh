@@ -18,8 +18,9 @@
 # is not guessed at: it is disclosed per owned project in unattributed[] and
 # raises that project only to the status its own kind would have produced, so an
 # unattributable queued or landed row never repaints a card.
-# A secondmate whose state can reach no registered project card at all is
-# disclosed board-wide in disclosures[].
+# Any secondmate item that can reach no registered project card - an unknown
+# repo, or no repo on an owner with no registered project - is disclosed
+# board-wide in disclosures[].
 # A main-home task whose crew state reads back as unknown is disclosed in
 # unreadable[] and raises the project to needs_attention rather than letting the
 # card read idle.
@@ -282,17 +283,28 @@ jq -n \
                    elif .surface == "queued" then "raise FM_SNAPSHOT_SECONDMATE_QUEUED"
                    else "raise FM_SNAPSHOT_SECONDMATE_CHILDREN" end)}),
        ($mate_owners[] as $owner
-        | select(($owner.projects | length) == 0)
         | ([ $projects_registry[].name ]) as $registered_names
+        | ([ $owner.projects[]
+             | . as $project
+             | select(($registered_names | index($project)) != null) ] | length) as $registered_projects
         | ([ owner_items($owner)[]
              | . as $item
-             | select((($item.repo // "") == "")
-                      or (($registered_names | index($item.repo)) == null)) ]) as $stranded
-        | select((($stranded | length) > 0) or ($owner.record.current.state == "unknown"))
-        | {surface:("secondmate " + $owner.id
-                    + " has no registered project, so its state reaches no project card: "
-                    + (($stranded | length) | tostring) + " item(s)"),
-           reveal:"record its projects in data/secondmates.md"}),
+             | select(if (($item.repo // "") != "")
+                      then ($registered_names | index($item.repo)) == null
+                      else $registered_projects == 0 end) ]) as $stranded
+        | (($registered_projects > 0)
+           or ([ owner_items($owner)[]
+                 | . as $item
+                 | select((($item.repo // "") != "")
+                          and (($registered_names | index($item.repo)) != null)) ] | length) > 0) as $reaches_a_card
+        | select((($stranded | length) > 0)
+                 or (($owner.record.current.state == "unknown") and ($reaches_a_card | not)))
+        | {surface:(if ($stranded | length) > 0 then
+                      ("secondmate " + $owner.id + " has state that reaches no project card: "
+                       + (($stranded | length) | tostring) + " item(s)")
+                    else ("secondmate " + $owner.id
+                          + " state is unavailable and reaches no project card") end),
+           reveal:"record its projects in data/secondmates.md, or label the work with a registered repo"}),
        (if $mate_registry.input_truncated == true then
           {surface:"secondmate registry input truncated by the bounded read",
            reveal:"raise FM_SNAPSHOT_REGISTRY_LINES or FM_SNAPSHOT_REGISTRY_BYTES"} else empty end) ]) as $disclosures
@@ -302,9 +314,6 @@ jq -n \
            | select(.kind != "secondmate" and task_repo == $name) ]) as $tasks
       | ([ $fleet_data.backlog.records[]?
            | select(.structured == true and .repo == $name) ]) as $backlog
-      | ([ $backlog[]
-           | select(.captain_actionable == true and .deferred_marker != true)
-           | .id ]) as $live_hold_ids
       | ([ $backlog[] | select(.state == "done") | .id ]) as $landed_ids
       | ([ $mate_owners[]
            | select((.projects | index($name) != null)
@@ -444,7 +453,8 @@ jq -n \
          elif ($waiting | length) > 0 then "waiting"
          else "idle_queued" end) as $base_status
       | (status_rank($base_status)) as $base_rank
-      | ([ $unattributed[] | select(kind_rank > $base_rank) ]) as $unattributed_escalating
+      | ([ $unattributed[] | select(kind_rank > $base_rank) ]
+         | sort_by(0 - kind_rank)) as $unattributed_escalating
       | (([ $base_rank ] + [ $unattributed_escalating[] | kind_rank ]) | max) as $rank
       | rank_status($rank) as $status
       | ([ $registered.added | date_epoch ]

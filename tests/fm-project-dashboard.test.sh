@@ -847,8 +847,8 @@ test_secondmate_reaching_no_project_is_disclosed() {
   out=$(run_snapshot "$home" "$epoch") || fail "orphan-mate snapshot failed"
   printf '%s' "$out" | jq -e '
     (.disclosures | any(
-        (.surface | startswith("secondmate delta-mate has no registered project"))
-        and .reveal == "record its projects in data/secondmates.md"))
+        (.surface | startswith("secondmate delta-mate has state that reaches no project card"))
+        and (.reveal | startswith("record its projects in data/secondmates.md"))))
       and ([.projects[] | select(.secondmates | length > 0)] | length) == 0
   ' >/dev/null || fail "a secondmate reaching no project card vanished silently: $out"
 
@@ -860,6 +860,88 @@ test_secondmate_reaching_no_project_is_disclosed() {
   printf '%s' "$out" | jq -e '.disclosures == []' >/dev/null \
     || fail "an attributable secondmate still reported as unreachable: $out"
   pass "a secondmate whose state reaches no project card is disclosed board-wide"
+}
+
+test_state_reaching_no_card_is_disclosed_whatever_the_clone_list() {
+  local home epoch out
+  home=$(make_home unregistered-clone-list)
+  write_fleet_fixture "$home"
+  jq '
+    .tasks |= map(if .id == "delta-mate" then .secondmate_projects = [] else . end)
+    | .secondmate_current.records |= map(
+        if .id == "delta-mate" then
+          .projects = ["gizmo"]
+          | .current = {state:"captain_decision",reason:null}
+          | .active_children = []
+          | .landed = []
+          | .decisions_open = [{id:"d1",key:"d1",verb:"needs-decision",
+              summary:"Approve the gizmo rollout",reason:null,repo:null,source:"status"}]
+        else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "unregistered clone-list snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .disclosures | any(
+      .surface == "secondmate delta-mate has state that reaches no project card: 1 item(s)")
+  ' >/dev/null || fail "an unregistered clone list silently dropped an open decision: $out"
+
+  jq '
+    .secondmate_current.records |= map(
+      if .id == "delta-mate" then
+        .active_children = [{id:"ac1",title:"Alpha child",repo:"alpha",state:"working",doing:"Working"}]
+      else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  out=$(run_snapshot "$home" "$epoch") || fail "visible-mate snapshot failed"
+  printf '%s' "$out" | jq -e '
+    (.projects[] | select(.name == "alpha")
+      | (.active_work | any(.id == "ac1")) and (.decisions | any(.id == "d1") | not))
+      and (.disclosures | any(
+            .surface == "secondmate delta-mate has state that reaches no project card: 1 item(s)"))
+  ' >/dev/null || fail "a visible secondmate lost its open decision with no disclosure: $out"
+
+  jq '
+    .secondmate_current.records |= map(
+      if .id == "delta-mate" then
+        .decisions_open = [{id:"d1",key:"d1",verb:"needs-decision",
+          summary:"Approve the gizmo rollout",reason:null,repo:"gizmo",source:"status"}]
+      else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  out=$(run_snapshot "$home" "$epoch") || fail "unregistered-repo snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .disclosures | any(
+      .surface == "secondmate delta-mate has state that reaches no project card: 1 item(s)")
+  ' >/dev/null || fail "an item labelled with an unregistered repo vanished silently: $out"
+  pass "secondmate state that reaches no project card is always disclosed"
+}
+
+test_next_step_names_the_item_that_set_the_status() {
+  local home epoch out
+  home=$(make_home escalator-order)
+  write_fleet_fixture "$home"
+  jq '
+    .tasks |= map(if .id == "delta-mate" then .secondmate_projects = ["delta","gamma"] else . end)
+    | .secondmate_current.records |= map(
+        if .id == "delta-mate" then
+          .projects = ["delta","gamma"]
+          | .landed = []
+          | .active_children = [{id:"ac1",title:"Some child work",repo:null,state:"working",doing:"Working"}]
+          | .decisions_open = [{id:"d1",key:"d1",verb:"needs-decision",summary:"Approve rollout",
+              reason:null,repo:null,source:"status"}]
+        else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "escalator-order snapshot failed"
+  printf '%s' "$out" | jq -e '
+    [.projects[] | select(.name == "delta" or .name == "gamma")]
+    | all(.status == "needs_attention"
+          and (.unattributed | map(.kind)) == ["active_work","decision"]
+          and .next_step == "Secondmate work is not attributable to one project: Approve rollout")
+  ' >/dev/null || fail "the next step named a lower-ranked escalator than the one that set the status: $out"
+  pass "the next step names the unattributable item that set the status"
 }
 
 extract_payload() {  # <board>
@@ -1096,6 +1178,8 @@ test_one_hold_reason_absorbs_at_most_one_fold
 test_finished_non_https_pr_link_does_not_fail_the_board
 test_unattributable_item_escalates_only_to_its_own_kind
 test_secondmate_reaching_no_project_is_disclosed
+test_state_reaching_no_card_is_disclosed_whatever_the_clone_list
+test_next_step_names_the_item_that_set_the_status
 test_attention_next_step_is_an_action_not_a_bare_title
 test_unattributable_secondmate_state_is_disclosed
 test_registered_secondmate_without_a_task_still_owns_its_projects
