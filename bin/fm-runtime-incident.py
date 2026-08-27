@@ -23,7 +23,8 @@ Evidence is a JSON object.  Supported observations are:
   diagnosis: {classification, probable_root_cause, supporting_evidence,
               code_change_required}
   approval: {kind,request}
-  verification: {runtime_path_ok, checks:[{name,status,evidence}]}
+  verification: {runtime_path_ok, companion_connectivity_required,
+                 checks:[{scope,name,status,evidence}]}
 
 The diagnosis is agent-adjudicated input, not a script inference from raw
 observations.  Omit it, or use unknown/not yet proven, while evidence remains
@@ -75,6 +76,12 @@ STOP_WORDS = {
     "when", "where", "which", "with", "worker", "worktree",
 }
 VERIFICATION_PASS = {"healthy", "ok", "pass", "passing"}
+VERIFICATION_REQUIRED_SCOPES = {
+    "production_identity",
+    "repaired_component_health",
+    "user_visible_path",
+}
+VERIFICATION_OPTIONAL_SCOPES = {"companion_connectivity"}
 DIAGNOSIS_CODE_REQUIREMENT = {
     "application code defect": "yes",
     "deployment/routing defect": "no",
@@ -1504,13 +1511,29 @@ def verify(args: argparse.Namespace) -> int:
     evidence = load_evidence(Path(args.evidence).resolve())
     verification = evidence.get("verification") if isinstance(evidence.get("verification"), dict) else {}
     checks = list_of_objects(verification.get("checks"))
+    companion_required = verification.get("companion_connectivity_required")
+    observed_scopes = {
+        row.get("scope")
+        for row in checks
+        if isinstance(row.get("scope"), str)
+    }
+    required_scopes = set(VERIFICATION_REQUIRED_SCOPES)
+    if companion_required is True:
+        required_scopes.update(VERIFICATION_OPTIONAL_SCOPES)
+    scopes_complete = bool(
+        type(companion_required) is bool
+        and observed_scopes <= VERIFICATION_REQUIRED_SCOPES | VERIFICATION_OPTIONAL_SCOPES
+        and required_scopes <= observed_scopes
+    )
     complete = bool(
         verification.get("runtime_path_ok") is True
         and checks
+        and scopes_complete
         and all(compact(row.get("status", "")).lower() in VERIFICATION_PASS for row in checks)
     )
     safe_checks, checks_omitted = bounded_items([
         {
+            "scope": compact(row.get("scope", "unscoped"), 40),
             "name": compact(row.get("name", "unnamed check"), 120),
             "status": compact(row.get("status", "unknown"), 40),
             "evidence": compact(row.get("evidence", ""), 200),

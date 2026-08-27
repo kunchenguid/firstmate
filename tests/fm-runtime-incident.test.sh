@@ -338,6 +338,27 @@ EOF
     --evidence "$home/failed-verification.json" >/dev/null 2>&1; then
     fail "failed runtime verification was reported complete"
   fi
+  cat > "$home/incomplete-verification.json" <<'EOF'
+{
+  "verification": {
+    "runtime_path_ok": true,
+    "companion_connectivity_required": false,
+    "checks": [
+      {
+        "scope": "user_visible_path",
+        "name": "user status path",
+        "status": "pass",
+        "evidence": "state visible"
+      }
+    ]
+  }
+}
+EOF
+  if FM_HOME="$home" FM_INCIDENT_NOW=2026-08-26T20:06:45Z \
+    "$INCIDENT" verify --incident quota-lifecycle \
+    --evidence "$home/incomplete-verification.json" >/dev/null 2>&1; then
+    fail "incomplete passing checks closed the complete runtime path"
+  fi
   bearings=$(FM_HOME="$home" "$BEARINGS" --json)
   printf '%s' "$bearings" | jq -e '
     .runtime_incidents[]
@@ -349,11 +370,12 @@ EOF
 {
   "verification": {
     "runtime_path_ok": true,
+    "companion_connectivity_required": true,
     "checks": [
-      {"name": "production identity", "status": "pass", "evidence": "expected release"},
-      {"name": "upstash quota", "status": "healthy", "evidence": "commands accepted"},
-      {"name": "companion pairing", "status": "pass", "evidence": "paired"},
-      {"name": "user status path", "status": "pass", "evidence": "state visible"}
+      {"scope": "production_identity", "name": "production identity", "status": "pass", "evidence": "expected release"},
+      {"scope": "repaired_component_health", "name": "upstash quota", "status": "healthy", "evidence": "commands accepted"},
+      {"scope": "companion_connectivity", "name": "companion pairing", "status": "pass", "evidence": "paired"},
+      {"scope": "user_visible_path", "name": "user status path", "status": "pass", "evidence": "state visible"}
     ]
   }
 }
@@ -978,10 +1000,23 @@ from pathlib import Path
 import sys
 
 checks = [
-    {"name": f"runtime-path-{index:03d}", "status": "pass", "evidence": "healthy"}
+    {
+        "scope": (
+            "production_identity" if index == 0
+            else "repaired_component_health" if index == 1
+            else "user_visible_path"
+        ),
+        "name": f"runtime-path-{index:03d}",
+        "status": "pass",
+        "evidence": "healthy",
+    }
     for index in range(300)
 ]
-Path(sys.argv[1]).write_text(json.dumps({"verification": {"runtime_path_ok": True, "checks": checks}}))
+Path(sys.argv[1]).write_text(json.dumps({"verification": {
+    "runtime_path_ok": True,
+    "companion_connectivity_required": False,
+    "checks": checks,
+}}))
 PY
   FM_HOME="$home" "$INCIDENT" verify --incident aggregate-record \
     --evidence "$home/large-verification.json" >/dev/null
