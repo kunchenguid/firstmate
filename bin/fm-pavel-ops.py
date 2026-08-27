@@ -31,6 +31,7 @@ OUTBOUND_SCHEMA = "fm-pavel-ops-outbound.v1"
 TELEGRAM_OFFSET_SCHEMA = "fm-pavel-ops-telegram-offset.v1"
 LIVE_CONTRACT_SCHEMA = "fm-pavel-ops-live-contract.v1"
 LIVE_PROOF_SCHEMA = "fm-pavel-ops-live-proof.v1"
+READINESS_CONTRACT_SCHEMA = "fm-pavel-ops-readiness-contract.v1"
 SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 PR_URL = re.compile(r"^https://[^\s]+$")
 _DRIVER_CAPABILITY = object()
@@ -790,6 +791,8 @@ def validated_pr_contract(home: Home, event: dict[str, Any], status: dict[str, A
 def require_fresh_ready_status(status: dict[str, Any], purpose: str) -> None:
     if status.get("state") not in {"delivery_ready", "done"}:
         raise OpsError(f"Pavel checks are no longer ready for {purpose}")
+    if status.get("format") == "fm-crew-state-text" and status.get("source") != "run-step":
+        raise OpsError(f"Pavel checks are not current-code run-step ready for {purpose}")
 
 
 def verify_pr_contract_unchanged(before: dict[str, str], after: dict[str, str], purpose: str) -> None:
@@ -797,6 +800,49 @@ def verify_pr_contract_unchanged(before: dict[str, str], after: dict[str, str], 
         raise OpsError(f"Pavel PR URL changed during {purpose}")
     if before["pr_head"] and after["pr_head"] != before["pr_head"]:
         raise OpsError(f"Pavel PR head changed during {purpose}")
+
+
+def readiness_contract_from_status(
+    home: Home,
+    event: dict[str, Any],
+    status: dict[str, Any],
+    purpose: str,
+) -> dict[str, Any]:
+    require_fresh_ready_status(status, purpose)
+    pr_contract = pr_contract_from_meta(home, event)
+    if status.get("format") != "fm-crew-state-text":
+        if str(status.get("pr_url") or "") != pr_contract["pr_url"]:
+            raise OpsError(f"Pavel structured status is not bound to the canonical PR for {purpose}")
+        if str(status.get("pr_head") or "") != pr_contract["pr_head"]:
+            raise OpsError(f"Pavel structured status is not bound to the canonical PR head for {purpose}")
+    return {
+        "schema": READINESS_CONTRACT_SCHEMA,
+        "event_id": event["id"],
+        "task_id": str(event.get("task_id") or ""),
+        "pr_url": pr_contract["pr_url"],
+        "pr_head": pr_contract["pr_head"],
+        "state": str(status.get("state") or ""),
+        "source": str(status.get("source") or ""),
+        "format": str(status.get("format") or "json"),
+        "evidence": str(status.get("evidence") or "")[:500],
+    }
+
+
+def persist_readiness_contract(home: Home, event: dict[str, Any], contract: dict[str, Any]) -> None:
+    event["readiness_contract"] = contract
+    home.save_event(event)
+
+
+def validate_existing_readiness_contract(event: dict[str, Any], contract: dict[str, Any]) -> None:
+    existing = event.get("readiness_contract")
+    if existing is None:
+        return
+    if not isinstance(existing, dict) or existing.get("schema") != READINESS_CONTRACT_SCHEMA:
+        raise OpsError("Pavel event has an invalid readiness contract")
+    if existing.get("pr_url") == contract.get("pr_url") and existing.get("pr_head") == contract.get("pr_head"):
+        return
+    if contract.get("format") == "fm-crew-state-text":
+        raise OpsError("Pavel text readiness is not bound to the changed PR head")
 
 
 def delivery_config(home: Home) -> dict[str, Any]:
@@ -993,7 +1039,13 @@ def owner_status(home: Home, event: dict[str, Any]) -> dict[str, Any]:
         first = output.strip().splitlines()[0] if output.strip() else ""
         match = re.fullmatch(r"state:\s*([A-Za-z0-9_-]+)(?:\s+.*)?", first)
         state = match.group(1) if match else "validating"
-        return {"state": state, "evidence": first[:500], "format": "fm-crew-state-text"}
+        source_match = re.search(r"(?:^|[·|;])\s*source:\s*([A-Za-z0-9_-]+)", first)
+        return {
+            "state": state,
+            "source": source_match.group(1) if source_match else "",
+            "evidence": first[:500],
+            "format": "fm-crew-state-text",
+        }
     if not isinstance(parsed, dict):
         raise OpsError("Pavel delivery status owner returned a non-object")
     return parsed
@@ -1067,20 +1119,25 @@ def drive(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         return driver_transition(home, event, "validating", str(status.get("evidence") or "no-mistakes validation is active"))
     if event["state"] == "validating":
         status = owner_status(home, event)
-        require_fresh_ready_status(status, "delivery")
-        pr_contract = validated_pr_contract(home, event, status)
+        readiness = readiness_contract_from_status(home, event, status, "delivery")
+        pr_contract = {"pr_url": readiness["pr_url"], "pr_head": readiness["pr_head"]}
         run_checked(home, [command_from_env(home, "FM_PAVEL_OPS_PR_CHECK", "fm-pr-check.sh"), task_id, pr_contract["pr_url"]])
         verify_pr_contract_unchanged(pr_contract, pr_contract_from_meta(home, event), "delivery readiness")
+        persist_readiness_contract(home, event, readiness)
+        event = home.load_event(event["id"])
         return driver_transition(home, event, "delivery_ready", str(status.get("evidence") or "checks green on exact PR head"))
     if event["state"] == "delivery_ready":
         status = owner_status(home, event)
-        require_fresh_ready_status(status, "merge")
-        pr_contract = validated_pr_contract(home, event, status)
+        readiness = readiness_contract_from_status(home, event, status, "merge")
+        validate_existing_readiness_contract(event, readiness)
+        pr_contract = {"pr_url": readiness["pr_url"], "pr_head": readiness["pr_head"]}
         pr_url = str(event.get("pr_url") or pr_contract["pr_url"])
         if pr_url != pr_contract["pr_url"]:
             raise OpsError("Pavel merge queue PR URL does not match the canonical PR owner record")
         run_checked(home, [command_from_env(home, "FM_PAVEL_OPS_PR_CHECK", "fm-pr-check.sh"), task_id, pr_url])
         verify_pr_contract_unchanged(pr_contract, pr_contract_from_meta(home, event), "merge readiness")
+        persist_readiness_contract(home, event, readiness)
+        event = home.load_event(event["id"])
         return driver_transition(home, event, "merge_queued", "guarded merge poll armed", pr_url=pr_url)
     if event["state"] == "merge_queued":
         pr_url = str(event.get("pr_url") or "")

@@ -609,7 +609,7 @@ printf '139000\n' > "$TASK_DB/live-$event.expected"
 run_ops drive "$event" >/dev/null
 task_meta="$HOME_DIR/state/$task_id.meta"
 printf 'pr=%s\npr_head=%s\n' 'https://github.com/o/r/pull/1' 'abc123' >> "$task_meta"
-printf '{"state":"done","evidence":"checks green on exact PR head"}\n' > "$PAVEL_STATUS_FILE"
+printf '{"state":"done","pr_url":"https://github.com/o/r/pull/1","pr_head":"abc123","evidence":"checks green on exact PR head"}\n' > "$PAVEL_STATUS_FILE"
 run_ops drive "$event" >/dev/null
 run_ops drive "$event" >/dev/null
 run_ops drive "$event" >/dev/null
@@ -622,7 +622,7 @@ run_ops drive "$event" >/dev/null
 [ "$(run_ops inspect "$event" | json_field "['state']")" = merge_queued ] \
   || fail "stale landed status without merge marker advanced past merge_queued"
 rm -f "$TASK_DB/.merge-unconfirmed"
-printf '{"state":"done","evidence":"checks green on exact PR head"}\n' > "$PAVEL_STATUS_FILE"
+printf '{"state":"done","pr_url":"https://github.com/o/r/pull/1","pr_head":"abc123","evidence":"checks green on exact PR head"}\n' > "$PAVEL_STATUS_FILE"
 run_ops drive "$event" >/dev/null
 if run_ops transition "$event" live --evidence 'deploy succeeded' >/dev/null 2>&1; then
   fail "live transition accepted no customer URL"
@@ -654,7 +654,7 @@ printf 'pr=%s\npr_head=%s\n' 'https://github.com/o/r/pull/405' 'abc124' >> "$HOM
 if run_ops drive "$stale_prose" >/dev/null 2>&1; then
   fail "driver accepted a canonical PR URL while validation was still active"
 fi
-printf 'state: done; checks green for https://github.com/o/r/pull/404\n' > "$PAVEL_STATUS_FILE"
+printf 'state: done · source: status-log · checks green for https://github.com/o/r/pull/404\n' > "$PAVEL_STATUS_FILE"
 if run_ops drive "$stale_prose" >/dev/null 2>&1; then
   fail "driver accepted a PR URL scraped from non-JSON status prose"
 fi
@@ -668,7 +668,7 @@ run_ops classify "$text_status" --as task --title 'Use crew state status' --inte
 run_ops drive "$text_status" >/dev/null
 text_status_task=$(run_ops inspect "$text_status" | json_field "['task_id']")
 printf 'pr=%s\npr_head=%s\n' 'https://github.com/o/r/pull/12' 'cc12dd' >> "$HOME_DIR/state/$text_status_task.meta"
-printf 'state: done checks green: PR ready for review\n' > "$PAVEL_STATUS_FILE"
+printf 'state: done · source: run-step · checks green: PR ready for review\n' > "$PAVEL_STATUS_FILE"
 run_ops drive "$text_status" >/dev/null
 run_ops drive "$text_status" >/dev/null
 [ "$(run_ops inspect "$text_status" | json_field "['state']")" = delivery_ready ] \
@@ -735,6 +735,10 @@ if run_ops drive "$head_race" >/dev/null 2>&1; then
   fail "delivery_ready merged after PR check changed the head"
 fi
 rm -f "$TASK_DB/.pr-check-head-change"
+printf 'state: done · source: run-step · checks green: PR ready for review\n' > "$PAVEL_STATUS_FILE"
+if run_ops drive "$head_race" >/dev/null 2>&1; then
+  fail "unheaded text readiness blessed the changed PR head on retry"
+fi
 [ "$(run_ops inspect "$head_race" | json_field "['state']")" = delivery_ready ] \
   || fail "head-race rejection mutated the event"
 pass "merge queue rejects PR head changes after check"
