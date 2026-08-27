@@ -160,12 +160,14 @@ def commit_is_ancestor(repo: Path, ancestor: str | None, descendant: str | None)
     return result.returncode == 0
 
 
-def forge_origin_key(host: str, path: str) -> str | None:
+def forge_origin_key(host: str, path: str, port: int | None = None) -> str | None:
     normalized_host = host.lower().strip("[]").rstrip(".")
     normalized_path = re.sub(r"/+", "/", unquote(path)).strip("/").removesuffix(".git")
     if not normalized_host or not normalized_path:
         return None
-    return f"forge://{normalized_host}/{normalized_path}"
+    host_key = f"[{normalized_host}]" if ":" in normalized_host else normalized_host
+    authority = f"{host_key}:{port}" if port is not None else host_key
+    return f"forge://{authority}/{normalized_path}"
 
 
 def normalize_origin(value: str | None, checkout: Path | None = None) -> str | None:
@@ -185,7 +187,19 @@ def normalize_origin(value: str | None, checkout: Path | None = None) -> str | N
         return "file://" + str(path.resolve())
     if "://" in value:
         parsed = urlparse(value)
-        return forge_origin_key(parsed.hostname or "", parsed.path)
+        try:
+            port = parsed.port
+        except ValueError:
+            return None
+        default_port = {
+            "git": 9418,
+            "http": 80,
+            "https": 443,
+            "ssh": 22,
+        }.get(parsed.scheme.lower())
+        if port == default_port:
+            port = None
+        return forge_origin_key(parsed.hostname or "", parsed.path, port)
     match = re.match(r"^(?:(?P<user>[^@/:]+)@)?(?P<host>[^:]+):(?P<path>.+)$", value)
     if match:
         return forge_origin_key(match.group("host"), match.group("path"))
@@ -1118,6 +1132,38 @@ def output_record(record: dict[str, Any], as_json: bool) -> None:
 
 
 def status_projection(record: dict[str, Any]) -> dict[str, Any]:
+    incident_id = record.get("id") if isinstance(record.get("id"), str) else "unknown"
+    string_fields = (
+        "schema", "id", "summary", "updated_at", "phase", "outcome", "safest_next_action",
+    )
+    if any(not isinstance(record.get(key), str) for key in string_fields):
+        raise IncidentError(f"incident record is incomplete for compact status: {incident_id}")
+    if not isinstance(record.get("flow"), list):
+        raise IncidentError(f"incident record is incomplete for compact status: {incident_id}")
+    mapping_fields = ("diagnosis", "approval", "workers", "repository", "verification")
+    if any(not isinstance(record.get(key), dict) for key in mapping_fields):
+        raise IncidentError(f"incident record is incomplete for compact status: {incident_id}")
+    diagnosis = record["diagnosis"]
+    approval = record["approval"]
+    observations = diagnosis.get("observations")
+    if not isinstance(observations, dict):
+        raise IncidentError(f"incident record is incomplete for compact status: {incident_id}")
+    diagnosis_fields = (
+        "classification", "probable_root_cause", "code_change_required",
+        "hotfix_already_deployed", "operational_repair_ready",
+    )
+    approval_fields = ("required", "kind", "request", "status")
+    if (
+        any(key not in diagnosis for key in diagnosis_fields)
+        or any(key not in approval for key in approval_fields)
+    ):
+        raise IncidentError(f"incident record is incomplete for compact status: {incident_id}")
+    try:
+        updated_at = parse_time(record["updated_at"])
+    except ValueError as exc:
+        raise IncidentError(f"incident record has an invalid updated_at: {incident_id}") from exc
+    if updated_at.tzinfo is None:
+        raise IncidentError(f"incident record has an invalid updated_at: {incident_id}")
     return {
         "schema": record["schema"],
         "id": record["id"],
@@ -1127,14 +1173,14 @@ def status_projection(record: dict[str, Any]) -> dict[str, Any]:
         "flow": record["flow"],
         "outcome": record["outcome"],
         "diagnosis": {
-            key: record["diagnosis"].get(key)
+            key: diagnosis.get(key)
             for key in (
                 "classification", "probable_root_cause", "code_change_required",
                 "hotfix_already_deployed", "operational_repair_ready",
             )
         },
         "approval": {
-            key: record["approval"].get(key)
+            key: approval.get(key)
             for key in ("required", "kind", "request", "status")
         },
         "inventory": {
@@ -1345,36 +1391,39 @@ def status(args: argparse.Namespace) -> int:
         raise IncidentError("--compact requires --json")
     if args.incident:
         record = read_incident(base, validate_incident_id(args.incident))
+        compact_record = status_projection(record)
         if args.compact:
-            record = status_projection(record)
+            record = compact_record
         output_record(record, args.json)
         return 0
     incident_dir = base["state"] / "incidents"
-    records: list[dict[str, Any]] = []
+    candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
     invalid: list[dict[str, str]] = []
-    incident_paths: list[Path] = []
     if incident_dir.is_dir():
-        incident_paths = sorted(incident_dir.glob("*.json"))
-        for path in incident_paths[:MAX_COPIES]:
+        for path in sorted(incident_dir.glob("*.json")):
             try:
                 record = read_incident(base, path.stem)
+                compact_record = status_projection(record)
             except IncidentError as exc:
                 invalid.append({"path": str(path), "reason": str(exc)})
                 continue
-            records.append(record)
-    records.sort(key=lambda row: (row.get("updated_at", ""), row.get("id", "")), reverse=True)
+            candidates.append((record, compact_record))
+    candidates.sort(
+        key=lambda row: (parse_time(row[0]["updated_at"]), row[0]["id"]),
+        reverse=True,
+    )
+    input_inventory = {
+        "shown": min(len(candidates), MAX_COPIES),
+        "omitted": max(0, len(candidates) - MAX_COPIES),
+    }
+    candidates = candidates[:MAX_COPIES]
     limit_value = os.environ.get("FM_INCIDENT_STATUS_LIMIT", str(DEFAULT_STATUS_LIMIT))
     if not limit_value.isdigit() or int(limit_value) < 1:
         raise IncidentError("FM_INCIDENT_STATUS_LIMIT must be a positive integer")
     limit = int(limit_value)
-    truncated = max(0, len(records) - limit)
-    records = records[:limit]
-    if args.compact:
-        records = [status_projection(record) for record in records]
-    input_inventory = {
-        "shown": min(len(incident_paths), MAX_COPIES),
-        "omitted": max(0, len(incident_paths) - MAX_COPIES),
-    }
+    truncated = max(0, len(candidates) - limit)
+    candidates = candidates[:limit]
+    records = [compact_record if args.compact else record for record, compact_record in candidates]
     result = {
         "schema": STATUS_SCHEMA,
         "records": records,

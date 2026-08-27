@@ -485,15 +485,15 @@ test_remaining_classifier_categories() {
 }
 
 test_repository_identity_normalizes_transports_and_relative_paths() {
-  local home origin ssh_repo https_repo crew_state out expected repo_a repo_b
+  local home origin ssh_repo https_repo crew_state out expected repo_a repo_b port_a port_b
   home=$(make_home transport-identity)
   origin=$(make_origin transport-identity)
   ssh_repo=$home/projects/titan-ssh
   https_repo=$home/projects/titan-https
   clone_origin "$origin" "$ssh_repo"
   clone_origin "$origin" "$https_repo"
-  git -C "$ssh_repo" remote set-url origin git@example.com:Acme/Titan.git
-  git -C "$https_repo" remote set-url origin https://copy-token@example.com/Acme/Titan.git
+  git -C "$ssh_repo" remote set-url origin ssh://git@example.com:22/Acme/Titan.git
+  git -C "$https_repo" remote set-url origin https://copy-token@example.com:443/Acme/Titan.git
   ssh_repo=$(cd "$ssh_repo" && pwd -P)
   https_repo=$(cd "$https_repo" && pwd -P)
   cat > "$home/data/backlog.md" <<'EOF'
@@ -531,6 +531,27 @@ EOF
           and .activity_matches_incident == true)
       and ([.repository.copies[] | has("origin_raw")] | any | not)
   ' >/dev/null || fail "transport-independent repository identity diverged: $out"
+
+  home=$(make_home port-identity)
+  origin=$(make_origin port-identity)
+  port_a=$home/projects/port-a
+  port_b=$home/projects/port-b
+  clone_origin "$origin" "$port_a"
+  clone_origin "$origin" "$port_b"
+  git -C "$port_a" remote set-url origin https://git.example:8443/acme/app.git
+  git -C "$port_b" remote set-url origin https://git.example:9443/acme/app.git
+  port_a=$(cd "$port_a" && pwd -P)
+  port_b=$(cd "$port_b" && pwd -P)
+  printf '{"production":{"origin":"ssh://git@git.example:8443/acme/app.git"}}\n' \
+    > "$home/production.json"
+  out=$(run_triage "$home" port-identity "$port_a" \
+    "Unknown production failure" --evidence "$home/production.json" --scan-root "$home/projects")
+  printf '%s' "$out" | jq -e --arg unrelated "$port_b" '
+    .repository.canonical_remote == "forge://git.example:8443/acme/app"
+      and .diagnosis.observations.production.origin == "forge://git.example:8443/acme/app"
+      and (.repository.copies | length) == 1
+      and ([.repository.copies[].path] | index($unrelated)) == null
+  ' >/dev/null || fail "non-default forge ports collapsed to one identity: $out"
 
   home=$(make_home relative-identity)
   origin=$(make_origin relative-identity)
@@ -587,15 +608,22 @@ test_bounded_inventory_omissions_are_disclosed() {
   assert_contains "$human" "Branches omitted by bound: at least 1" "human incident status hid branch omissions"
 
   rm -f "$home/state"/*.meta
-  for i in $(seq -w 1 64); do
+  for i in $(seq -w 1 63); do
     id=bounded-copy-$i
     jq --arg id "$id" '.id=$id | .summary=$id' \
       "$home/state/incidents/bounded-base.json" > "$home/state/incidents/$id.json"
   done
+  jq '.id="z-current" | .summary="z-current" | .updated_at="2026-08-27T20:00:00Z"' \
+    "$home/state/incidents/bounded-base.json" > "$home/state/incidents/z-current.json"
+  printf '{"schema":"fm-runtime-incident.v1","id":"malformed"}\n' \
+    > "$home/state/incidents/malformed.json"
   out=$(FM_HOME="$home" FM_INCIDENT_STATUS_LIMIT=100 "$INCIDENT" status --json --compact)
   printf '%s' "$out" | jq -e '
     .input == {shown:64,omitted:1}
       and (.records | length) == 64
+      and ([.records[].id] | index("z-current")) != null
+      and (.invalid | length) == 1
+      and (.invalid[0].path | endswith("/malformed.json"))
       and .truncated == 0
   ' >/dev/null || fail "incident input bound hid omitted records: $out"
   human=$(FM_HOME="$home" FM_INCIDENT_STATUS_LIMIT=100 "$INCIDENT" status)
@@ -604,9 +632,13 @@ test_bounded_inventory_omissions_are_disclosed() {
   view=$(FM_HOME="$home" "$VIEW")
   assert_contains "$view" "Warning: 1 incident record(s) are omitted by the input bound." \
     "fleet view hid incident input omissions"
+  assert_contains "$view" "Warning: 1 incident record(s) could not be read." \
+    "fleet view hid an independently invalid incident"
   bearings=$(FM_HOME="$home" "$BEARINGS" --json)
   printf '%s' "$bearings" | jq -e '
-    .omitted | any(.surface == "runtime incident records omitted by input bound: 1")
+    ([.runtime_incidents[].id] | index("z-current")) != null
+      and (.omitted | any(.surface == "runtime incident records omitted by input bound: 1"))
+      and (.omitted | any(.surface == "runtime incident record(s) unreadable: 1"))
   ' >/dev/null || fail "Bearings hid incident input omissions: $bearings"
   pass "bounded worker, repository, branch, and incident omissions stay visible"
 }
