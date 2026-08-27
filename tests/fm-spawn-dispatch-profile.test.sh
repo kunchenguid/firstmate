@@ -653,6 +653,8 @@ print(value["issuer"], value["task"]["task_id"], value["author"]["harness"], val
   assert_contains "$shape" "$leased_worktree" \
     "Pi spawn launch provenance did not bind the leased task worktree"
   git -C "$leased_worktree" checkout -qb codex/crosscheck-provenance-fixture
+  git -C "$leased_worktree" config user.email fixture@example.com
+  git -C "$leased_worktree" config user.name Fixture
   printf 'authored after launch\n' > "$leased_worktree/crosscheck-provenance-fixture.txt"
   git -C "$leased_worktree" add crosscheck-provenance-fixture.txt
   git -C "$leased_worktree" commit -qm 'test: author after launch'

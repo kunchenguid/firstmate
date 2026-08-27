@@ -245,7 +245,7 @@ def routing_lock(path):
         os.close(handle)
 
 
-def operator_environment_values(expected_subscription):
+def operator_environment_values(expected_subscription=None):
     """Return exact values from one validated read of the operator environment.
 
     The daemon step inherits only HOME and PATH. A routing selection therefore
@@ -365,7 +365,10 @@ set +a
                 path, ", ".join(missing)
             )
         )
-    if values["FM_AZURE_SUBSCRIPTION_ID"] != expected_subscription:
+    if (
+        expected_subscription is not None
+        and values["FM_AZURE_SUBSCRIPTION_ID"] != expected_subscription
+    ):
         refuse(
             "routing file subscription {} does not match the operator Azure environment subscription".format(
                 expected_subscription

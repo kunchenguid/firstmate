@@ -892,6 +892,41 @@ def crosscheck_core() -> Any:
     return module
 
 
+@functools.lru_cache(maxsize=1)
+def operator_azure_environment() -> dict[str, str]:
+    """Load the coordinator's proven fleet environment for launchd service use."""
+
+    module_path = BIN_DIR / "fm-azure-runner-routing.py"
+    spec = importlib.util.spec_from_file_location(
+        "fm_crosscheck_slack_azure_environment", module_path
+    )
+    require(
+        spec is not None and spec.loader is not None,
+        "central Azure environment owner is unavailable",
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        values = module.operator_environment_values()
+    except SystemExit as exc:
+        raise SlackExposureError(
+            f"central Azure environment validation failed with exit {exc.code}"
+        ) from exc
+    require(
+        isinstance(values, dict)
+        and values
+        and all(
+            isinstance(name, str)
+            and name.startswith("FM_AZURE_")
+            and isinstance(value, str)
+            and value
+            for name, value in values.items()
+        ),
+        "central Azure environment owner returned malformed values",
+    )
+    return dict(values)
+
+
 @functools.lru_cache(maxsize=128)
 def crosscheck_model_family(model: str) -> str:
     """Use the core gate's exact family classifier, never a Slack-local guess."""
@@ -2706,6 +2741,7 @@ def main() -> int:
             )
             for name in (config.app_token_env, config.bot_token_env, config.github_token_env):
                 os.environ.pop(name, None)
+            os.environ.update(operator_azure_environment())
         if args.command == "attest-launch":
             path = Path(args.config) if args.config else default_config_path()
             config = load_config(path)
@@ -2737,7 +2773,9 @@ def main() -> int:
             config = load_config(path)
             load_provenance_key(config.provenance_key_file)
             configured_credentials(config)
-            print("preflight: config, provenance key, and central credentials are ready")
+            print(
+                "preflight: config, provenance key, central credentials, and Azure fleet are ready"
+            )
             return 0
         if args.command == "selftest":
             path = Path(args.config) if args.config else default_config_path()

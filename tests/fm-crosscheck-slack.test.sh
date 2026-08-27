@@ -1232,6 +1232,18 @@ fixture = root / "service-fixture"
 bin_dir = fixture / "bin"
 bin_dir.mkdir(parents=True)
 home.mkdir()
+azure_dir = home / ".fm-azure"
+azure_dir.mkdir()
+fleet = azure_dir / "fleet.env"
+fleet.write_text("""FM_AZURE_TENANT_ID=11111111-1111-1111-1111-111111111111
+FM_AZURE_SUBSCRIPTION_ID=22222222-2222-2222-2222-222222222222
+FM_AZURE_NAMING_PREFIX=fixture
+FM_AZURE_STORAGE_NAME=fixturestorage
+FM_AZURE_OWNER_TAG=fixture-owner
+FM_AZURE_DEPLOYMENT_GENERATION=fixture-generation
+FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID=33333333-3333-3333-3333-333333333333
+""")
+fleet.chmod(0o600)
 config_path = fixture / "config.json"
 config = json.loads(original_config.read_text())
 config["keychain_services"] = dict(app_token="fixture-app", bot_token="fixture-bot", github_token="fixture-github")
@@ -1301,6 +1313,13 @@ assert 'fixture-keychain-secret' not in plist.read_text()
 command = agent['ProgramArguments']
 result = subprocess.run([command[0], 'preflight', *command[2:]], env=agent['EnvironmentVariables'], capture_output=True, text=True, timeout=30)
 assert result.returncode == 0, result.stdout + result.stderr
+assert 'Azure fleet are ready' in result.stdout
+fleet_off = fleet.with_suffix('.env.off')
+fleet.rename(fleet_off)
+result = invoke('start')
+assert result.returncode != 0, 'start accepted a missing central Azure fleet environment'
+assert not launch_log.exists(), 'missing Azure fleet validation mutated service state'
+fleet_off.rename(fleet)
 result = invoke('start')
 assert result.returncode == 0, result.stdout + result.stderr
 assert 'bootstrap' in launch_log.read_text()

@@ -31,26 +31,42 @@ write_plist() {
   mkdir -p "$AGENT_DIR" "$LOG_DIR"
   temporary=$(mktemp "$AGENT_DIR/.$LABEL.XXXXXX")
   trap 'rm -f "$temporary"' EXIT
-  plutil -create xml1 "$temporary"
-  plutil -insert Label -string "$LABEL" "$temporary"
-  plutil -insert ProgramArguments -array "$temporary"
-  plutil -insert ProgramArguments.0 -string "$WRAPPER" "$temporary"
-  plutil -insert ProgramArguments.1 -string run "$temporary"
-  plutil -insert ProgramArguments.2 -string --config "$temporary"
-  plutil -insert ProgramArguments.3 -string "$CONFIG" "$temporary"
-  plutil -insert ProgramArguments.4 -string --keychain-only "$temporary"
-  plutil -insert EnvironmentVariables -dictionary "$temporary"
-  plutil -insert EnvironmentVariables.HOME -string "$HOME" "$temporary"
-  plutil -insert EnvironmentVariables.PATH -string "$PATH" "$temporary"
-  plutil -insert EnvironmentVariables.FM_CROSSCHECK_PYTHON -string "$interpreter" "$temporary"
-  plutil -insert EnvironmentVariables.FM_HOME -string "$FM_HOME" "$temporary"
-  plutil -insert EnvironmentVariables.FM_CROSSCHECK_SLACK_CONFIG \
-    -string "$CONFIG" "$temporary"
-  plutil -insert RunAtLoad -bool true "$temporary"
-  plutil -insert KeepAlive -bool true "$temporary"
-  plutil -insert ThrottleInterval -integer 10 "$temporary"
-  plutil -insert StandardOutPath -string "$STDOUT_LOG" "$temporary"
-  plutil -insert StandardErrorPath -string "$STDERR_LOG" "$temporary"
+  "$interpreter" - "$temporary" "$LABEL" "$WRAPPER" "$CONFIG" "$HOME" \
+    "$PATH" "$interpreter" "$FM_HOME" "$STDOUT_LOG" "$STDERR_LOG" <<'PY'
+import plistlib
+import sys
+
+(
+    destination,
+    label,
+    wrapper,
+    config,
+    home,
+    path,
+    interpreter,
+    fm_home,
+    stdout_log,
+    stderr_log,
+) = sys.argv[1:]
+document = {
+    "Label": label,
+    "ProgramArguments": [wrapper, "run", "--config", config, "--keychain-only"],
+    "EnvironmentVariables": {
+        "HOME": home,
+        "PATH": path,
+        "FM_CROSSCHECK_PYTHON": interpreter,
+        "FM_HOME": fm_home,
+        "FM_CROSSCHECK_SLACK_CONFIG": config,
+    },
+    "RunAtLoad": True,
+    "KeepAlive": True,
+    "ThrottleInterval": 10,
+    "StandardOutPath": stdout_log,
+    "StandardErrorPath": stderr_log,
+}
+with open(destination, "wb") as handle:
+    plistlib.dump(document, handle, fmt=plistlib.FMT_XML, sort_keys=True)
+PY
   chmod 600 "$temporary"
   validate_plist "$temporary"
   mv "$temporary" "$PLIST"
