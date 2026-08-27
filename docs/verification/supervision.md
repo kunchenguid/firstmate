@@ -599,6 +599,84 @@ ok - a bare-shell secondmate wakes despite its stale busy record
 exit=0
 ```
 
+### Multiline status-event red/green record
+
+The subsequent status-event hardening case ran on the same platform and Bash version recorded above.
+The unfixed revision was `378ae31d2a271046771e4296f0e78df233a6b6c2`, and the fixed version was its review working tree with the source and test changes recorded in this section.
+The multiline blocked case was RED before and GREEN after, so it demonstrates the fix.
+
+The exact additional preparation reused `run_test` and `run_case` from above:
+
+```sh
+status_unfixed_root=$PWD/.verification-status-unfixed
+[ ! -e "$status_unfixed_root" ] || exit 73
+mkdir "$status_unfixed_root"
+git archive 378ae31d2a271046771e4296f0e78df233a6b6c2 | tar -x -C "$status_unfixed_root"
+cp tests/fm-wake-queue.test.sh "$status_unfixed_root/tests/"
+```
+
+#### Fix demonstration: blocked event with continuation lines
+
+This proves that an aged queue wakes when the latest state-bearing event is `blocked:` even if later physical lines only continue its detail and the mate otherwise has busy evidence.
+
+Unfixed command:
+
+```sh
+run_case 378ae31-unfixed "$status_unfixed_root" tests/fm-wake-queue.test.sh test_self_held_lock_reclaims_instead_of_deadlocking test_secondmate_multiline_blocked_aged_queue_wakes
+```
+
+Full unfixed output:
+
+```text
+CASE revision=378ae31-unfixed test=test_secondmate_multiline_blocked_aged_queue_wakes
+not ok - multiline-blocked did not wake for an aged foreign row: out=checkpoint: no actionable wake within 2s; err=
+exit=1
+```
+
+Fixed command:
+
+```sh
+run_case review-fixed "$fixed_root" tests/fm-wake-queue.test.sh test_self_held_lock_reclaims_instead_of_deadlocking test_secondmate_multiline_blocked_aged_queue_wakes
+```
+
+Full fixed output:
+
+```text
+CASE revision=review-fixed test=test_secondmate_multiline_blocked_aged_queue_wakes
+ok - a multiline blocked secondmate wakes despite trailing continuation lines
+exit=0
+```
+
+#### Fixed single-line regression guards
+
+These existing cases show that the state-event reader preserves the single-line busy, blocked, idle, and unknown outcomes.
+
+Fixed commands:
+
+```sh
+run_case review-fixed "$fixed_root" tests/fm-wake-queue.test.sh test_self_held_lock_reclaims_instead_of_deadlocking test_secondmate_busy_aged_queue_stays_quiet
+run_case review-fixed "$fixed_root" tests/fm-wake-queue.test.sh test_self_held_lock_reclaims_instead_of_deadlocking test_secondmate_blocked_aged_queue_wakes
+run_case review-fixed "$fixed_root" tests/fm-wake-queue.test.sh test_self_held_lock_reclaims_instead_of_deadlocking test_secondmate_idle_aged_queue_wakes
+run_case review-fixed "$fixed_root" tests/fm-wake-queue.test.sh test_self_held_lock_reclaims_instead_of_deadlocking test_secondmate_unknown_liveness_aged_queue_wakes
+```
+
+Full fixed output:
+
+```text
+CASE revision=review-fixed test=test_secondmate_busy_aged_queue_stays_quiet
+ok - a provably busy secondmate with an aged queue row stays quiet
+exit=0
+CASE revision=review-fixed test=test_secondmate_blocked_aged_queue_wakes
+ok - a secondmate whose latest status is blocked wakes despite busy evidence
+exit=0
+CASE revision=review-fixed test=test_secondmate_idle_aged_queue_wakes
+ok - an idle non-blocked secondmate with an aged queue row wakes
+exit=0
+CASE revision=review-fixed test=test_secondmate_unknown_liveness_aged_queue_wakes
+ok - unknown secondmate liveness fails toward waking the primary
+exit=0
+```
+
 ## Turn-end guard
 
 The blocking and bounded-follow-up mechanisms were validated across six harnesses on 2026-07-08 through 2026-08-13, with Cursor's stop-hook park validated on 2026-08-13 and Claude's replacement Stop-owned path revalidated on 2026-08-14.

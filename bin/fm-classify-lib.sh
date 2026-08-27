@@ -92,11 +92,45 @@ FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
-# Return the last non-blank line of a status file (empty if missing/blank).
+# Return the latest state-bearing event in a status file (empty if none).
 last_status_line() {
   local f=$1
   [ -e "$f" ] || return 0
-  grep -v '^[[:space:]]*$' "$f" 2>/dev/null | tail -1
+  FM_CLASSIFY_LAST_CAPTAIN_RE="${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}" \
+    FM_CLASSIFY_LAST_CUSTOM_RE="${FM_CAPTAIN_RE:+1}" \
+    FM_CLASSIFY_LAST_PAUSE="${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" \
+    FM_CLASSIFY_LAST_RESOLVE="${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}" \
+    FM_CLASSIFY_LAST_HELD="${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" \
+    awk '
+      function trim(value) {
+        sub(/^[[:space:]]+/, "", value)
+        sub(/[[:space:]]+$/, "", value)
+        return value
+      }
+      BEGIN {
+        captain_re = tolower(ENVIRON["FM_CLASSIFY_LAST_CAPTAIN_RE"])
+        if (ENVIRON["FM_CLASSIFY_LAST_CUSTOM_RE"] == "") {
+          captain_re = "^[[:space:]]*(" captain_re ")"
+        }
+      }
+      {
+        line = $0
+        if (line ~ /^[[:space:]]*$/) next
+        verb = line
+        sub(/:.*/, "", verb)
+        sub(/\[.*/, "", verb)
+        verb = trim(verb)
+        if (verb == "working" || verb == "needs-decision" || verb == "blocked" ||
+            verb == "done" || verb == "failed" ||
+            verb == ENVIRON["FM_CLASSIFY_LAST_PAUSE"] ||
+            verb == ENVIRON["FM_CLASSIFY_LAST_RESOLVE"] ||
+            verb == ENVIRON["FM_CLASSIFY_LAST_HELD"] ||
+            tolower(line) ~ captain_re) {
+          last = line
+        }
+      }
+      END { if (last != "") print last }
+    ' "$f" 2>/dev/null || true
 }
 
 # 0 if the given (last) status line's leading verb is a real terminal captain verb

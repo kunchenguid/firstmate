@@ -440,7 +440,7 @@ EOF
     case "$seq" in ''|*[!0-9]*) continue ;; esac
     age=$((now - epoch))
     [ "$age" -ge "$threshold" ] || continue
-    status_line=$(grep -v '^[[:space:]]*$' "$STATE/$task.status" 2>/dev/null | tail -1 || true)
+    status_line=$(last_status_line "$STATE/$task.status")
     status_verb=$(status_line_verb "$status_line")
     if [ "$status_verb" != blocked ]; then
       backend=$(fm_backend_of_meta "$meta")

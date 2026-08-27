@@ -392,6 +392,14 @@ test_secondmate_blocked_aged_queue_wakes() {
   pass "a secondmate whose latest status is blocked wakes despite busy evidence"
 }
 
+test_secondmate_multiline_blocked_aged_queue_wakes() {
+  run_secondmate_stall_state_case multiline-blocked busy \
+    'blocked [key=routed]: waiting for the primary to route feedback
+the routing request includes two affected files
+the secondmate remains stopped on that request' wake
+  pass "a multiline blocked secondmate wakes despite trailing continuation lines"
+}
+
 test_secondmate_idle_aged_queue_wakes() {
   run_secondmate_stall_state_case idle idle 'working: previous turn completed' wake
   pass "an idle non-blocked secondmate with an aged queue row wakes"
@@ -1092,6 +1100,7 @@ test_historical_annotation_skips_announced_status() {
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
 test_secondmate_blocked_aged_queue_wakes
+test_secondmate_multiline_blocked_aged_queue_wakes
 test_secondmate_idle_aged_queue_wakes
 test_secondmate_unknown_liveness_aged_queue_wakes
 test_secondmate_busy_aged_queue_stays_quiet
