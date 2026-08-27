@@ -93,8 +93,9 @@
 #                                   kinds.
 #          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
 #                                   as a possible wedge (default 240)
-#          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared wait (external
-#                                   or captain-held) re-surfaces as a recheck
+#          FM_PAUSE_RESURFACE_SECS  seconds a declared wait (external or
+#                                   captain-held) stays declared, idle or busy,
+#                                   before it re-surfaces as a recheck
 #                                   (default 3600)
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
@@ -454,10 +455,11 @@ stale_marker_remove() {  # <window> <state>
 
 # Pause marker: state/.subsuper-paused-<key> holds the epoch a declared wait (a
 # paused: external wait or a verified captain-held transfer) was first observed
-# idle. Housekeeping ages it against PAUSE_RESURFACE_SECS (much longer than a
-# wedge) and re-surfaces the wait once per window. Recording is create-if-absent
-# so the timestamp is stable across a churny idle pane (many
-# distinct stale hashes map to one marker), keeping the cadence hash-immune.
+# declared, whether its pane read idle or busy. Housekeeping ages it against
+# PAUSE_RESURFACE_SECS (much longer than a wedge) and re-surfaces the wait once
+# per window. Recording is create-if-absent so the timestamp is stable across a
+# churny pane (many distinct stale hashes map to one marker), keeping the cadence
+# hash-immune.
 pause_marker_record() {  # <window> <state> - create if absent
   local win=$1 state=$2 key marker
   key=$(_stale_key "$(window_to_task "$win" "$state")")
