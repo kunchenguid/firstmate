@@ -37,7 +37,11 @@
 # decisions[] or deferred_decisions[] and never in queued[], so one open question
 # is never shown twice on a card.
 # A Done row still held for the captain is a transfer record, not shipped work,
-# so it is absent from both landed[] and prs[].
+# so it is absent from both landed[] and prs[] whichever record supplied the
+# link. A row held for the captain that is still in flight keeps its PR link.
+# Work already shown as waiting is not repeated under queued[]: each item has
+# exactly one lifecycle place, and it returns to queued[] only once its blocker
+# or hold clears.
 # landed[] and prs[] are the two surfaces fed by the append-only Done section;
 # both publish at most five rows, newest completion first, and carry the true
 # total in counts. prs[] lists current work ahead of completed work, and a task
@@ -465,6 +469,7 @@ jq -n \
              | select(matches_project($owner; $name))
              | {id,title:(.title // .id),reason:((.reason | present) // "Waiting"),owner:$owner.id} ]
         | dedupe_first([.owner,.id])) as $waiting
+      | ([ $waiting[] | (.owner + "\u001f" + .id) ]) as $waiting_keys
       | ([ $backlog[]
            | select(.state == "queued" and .captain_actionable != true)
            | {id,title,reason:(.hold_reason // .blocked_reason // ""),since,owner:"main"} ]
@@ -473,7 +478,9 @@ jq -n \
              | select(matches_project($owner; $name) and .captain_actionable != true)
              | {id,title,reason:(.hold_reason // .blocked_reason // ""),since:(.since // null),
                 owner:$owner.id} ]
-        | dedupe_first([.owner,.id])) as $queued
+        | dedupe_first([.owner,.id])
+        | map(. as $row
+              | select(($waiting_keys | index($row.owner + "\u001f" + $row.id)) == null))) as $queued
       | ([ $backlog[]
            | select(.state == "done" and .hold_kind != "captain")
            | {id,title,completed:(.completion.date // .merged // .reported // .done),
@@ -487,12 +494,14 @@ jq -n \
       | ([ $tasks[] as $task
            | select($task.pr.url != null)
            | (([ $backlog[] | select(.id == $task.id and .state == "done") ][0]) // null) as $done_row
+           | select($done_row == null or $done_row.hold_kind != "captain")
            | {id:$task.id,title:($task.backlog.title // $task.id),url:$task.pr.url,owner:"main",
               current:($done_row == null),
               completed:(if $done_row == null then null
                          else ($done_row.completion.date // $done_row.merged
                                // $done_row.reported // $done_row.done) end)} ]
-         + [ $backlog[] | select(.pr_url != null and .hold_kind != "captain")
+         + [ $backlog[]
+             | select(.pr_url != null and (.state != "done" or .hold_kind != "captain"))
              | {id,title,url:.pr_url,owner:"main",
                 current:(.state != "done"),
                 completed:(if .state == "done"

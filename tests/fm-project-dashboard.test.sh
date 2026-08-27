@@ -1345,14 +1345,21 @@ test_captain_held_done_row_is_neither_landed_nor_a_pr_link() {
   local home epoch out
   home=$(make_home captain-held-done)
   write_fleet_fixture "$home"
-  jq '
+  jq --arg home "$home" '
     .backlog.records = [
       {structured:true,id:"cap",repo:"alpha",title:"Captain transfer record",state:"done",
        hold_kind:"captain",hold_reason:"handed to the captain",
        pr_url:"https://github.com/example/alpha/pull/1",completion:{date:"2026-08-25"}},
       {structured:true,id:"old",repo:"alpha",title:"Older landing",state:"done",hold_kind:null,
        pr_url:"https://github.com/example/alpha/pull/3",completion:{date:"2026-01-01"}}]
-    | .tasks = []
+    | .tasks = [
+        {id:"cap",kind:"ship",project:"alpha",
+         paths:{meta:{path:($home + "/state/alpha-work.meta"),present:true},
+                status_log:{path:($home + "/state/alpha-work.status"),present:true},
+                worktree:{path:null,present:false},home:{path:null,present:false},report:{path:null,present:false}},
+         secondmate_projects:[],current_state:{state:"done",source:"fixture",detail:"handed over"},
+         hints:{open_decisions:[]},pr:{url:"https://github.com/example/alpha/pull/1"},
+         backlog:{id:"cap",repo:"alpha",title:"Captain transfer record"}}]
     | .secondmate_current.records = []
   ' "$home/fleet.json" > "$home/fleet.tmp"
   mv "$home/fleet.tmp" "$home/fleet.json"
@@ -1364,6 +1371,70 @@ test_captain_held_done_row_is_neither_landed_nor_a_pr_link() {
       and (.prs | map(.id)) == ["old"] and .counts.prs == 1
   ' >/dev/null || fail "a captain-held done row reached the landed or PR surface: $out"
   pass "a Done row still held for the captain is neither landed work nor a PR link"
+}
+
+test_captain_held_in_flight_row_keeps_its_pr_link() {
+  local home epoch out
+  home=$(make_home captain-held-in-flight)
+  write_fleet_fixture "$home"
+  jq '
+    .backlog.records = [
+      {structured:true,id:"a-hold",repo:"alpha",title:"Held for the captain",state:"in_flight",
+       current_role:"held",hold_kind:"captain",hold_reason:"Which rollout order?",
+       captain_actionable:false,unresolved_blocker_ids:[],
+       pr_url:"https://github.com/example/alpha/pull/11"},
+      {structured:true,id:"a-old",repo:"alpha",title:"Older landing",state:"done",hold_kind:null,
+       pr_url:"https://github.com/example/alpha/pull/3",completion:{date:"2026-01-01"}}]
+    | .tasks = []
+    | .secondmate_current.records = []
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "captain-held in-flight snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "alpha")
+    | .status == "waiting"
+      and (.waiting | map(.id)) == ["a-hold"]
+      and (.prs | map(.id)) == ["a-hold","a-old"]
+      and .counts.prs == 2
+  ' >/dev/null || fail "a still-in-flight captain hold lost its PR link: $out"
+  pass "a captain hold that is still in flight keeps its PR link"
+}
+
+test_waiting_work_is_not_repeated_under_queued_next() {
+  local home epoch out
+  home=$(make_home waiting-vs-queued)
+  write_fleet_fixture "$home"
+  jq '
+    .backlog.records = [
+      {structured:true,id:"a-block",repo:"alpha",title:"Blocked on the vendor",state:"queued",
+       since:"2020-01-01",captain_actionable:false,hold_kind:"external",
+       hold_reason:"Vendor SDK is not released",unresolved_blocker_ids:["vendor"]},
+      {structured:true,id:"a-free",repo:"alpha",title:"Ready to start",state:"queued",
+       since:"2020-01-01",captain_actionable:false,unresolved_blocker_ids:[]}]
+    | .tasks = []
+    | .secondmate_current.records |= map(
+        if .id == "delta-mate" then
+          .active_children = []
+          | .landed = []
+          | .holds = [{id:"d-hold",title:"Delta hold",repo:"delta",reason:"Waiting on vendor"}]
+          | .queued = [{id:"d-hold",title:"Delta hold",repo:"delta",captain_actionable:false},
+                       {id:"d-next",title:"Delta next",repo:"delta",captain_actionable:false}]
+        else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "waiting-vs-queued snapshot failed"
+  printf '%s' "$out" | jq -e '
+    (.projects[] | select(.name == "alpha")
+      | (.waiting | map(.id)) == ["a-block"]
+        and (.queued | map(.id)) == ["a-free"]
+        and .counts.waiting == 1 and .counts.queued == 1)
+      and (.projects[] | select(.name == "delta")
+        | (.waiting | map(.id)) == ["d-hold"]
+          and (.queued | map(.id)) == ["d-next"])
+  ' >/dev/null || fail "waiting work was repeated under queued next: $out"
+  pass "waiting work appears only under waiting, never also under queued next"
 }
 
 extract_payload() {  # <board>
@@ -1632,6 +1703,8 @@ test_done_row_naming_an_unregistered_project_is_disclosed
 test_pull_request_list_is_bounded_like_landed
 test_captain_decision_is_not_also_queued_work
 test_captain_held_done_row_is_neither_landed_nor_a_pr_link
+test_captain_held_in_flight_row_keeps_its_pr_link
+test_waiting_work_is_not_repeated_under_queued_next
 test_attention_next_step_is_an_action_not_a_bare_title
 test_unattributable_secondmate_state_is_disclosed
 test_registered_secondmate_without_a_task_still_owns_its_projects
