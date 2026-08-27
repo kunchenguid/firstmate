@@ -73,10 +73,17 @@ $1
 EOF
 }
 
+# git check-ignore consults core.excludesFile, so a machine whose global gitignore
+# lists .env.local would silently flip the unignored cases into ignored ones and the
+# suite would pass or fail per machine. Point every spawn's git at empty global and
+# system configs so only the fixture's own .gitignore decides.
 run_spawn() {
   local id=$1
   shift
-  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  local empty="$TMP_ROOT/empty-gitconfig"
+  [ -f "$empty" ] || : > "$empty"
+  GIT_CONFIG_GLOBAL="$empty" GIT_CONFIG_SYSTEM="$empty" \
+    FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$POOL_DIR" \
@@ -458,6 +465,59 @@ test_unanswerable_filesystem_question_still_refuses() {
 # The warn-and-skip branch decides whether an unignored .env.local is copied in.
 # Copying one would land untracked work that teardown refuses, stranding the slot,
 # so spawn must proceed without seeding and say why.
+# Firstmate authors the seeded copy, so when a project drops its ignore rule that
+# copy becomes firstmate's own untracked artifact and the next acquisition's clean
+# check refuses the slot. Byte-identity to the current source proves authorship, so
+# retiring it destroys nothing; anything that differs is the task's work and stays.
+test_unignored_copy_matching_the_source_is_retired() {
+  local rec id out status
+  id='pool-env-local-r8'
+  rec=$(make_case env-local-unignored-match "$id")
+  read_case_record "$rec"
+
+  # No .gitignore publish, so the path is not ignored. The slot holds a copy that is
+  # byte-identical to the clone's current source: this seeding's own earlier work.
+  printf 'FIXTURE_MARKER=authored-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
+  chmod 0600 "$PROJECT_DIR/.env.local"
+  cp -p "$PROJECT_DIR/.env.local" "$POOL_DIR/.env.local"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should retire its own unignored copy and continue"
+  [ ! -e "$POOL_DIR/.env.local" ] \
+    || fail "spawn left its own unignored copy wedging the pool slot"
+  assert_contains "$out" "no longer ignores .env.local" \
+    "spawn did not explain why it removed its own unignored copy"
+  pass "an unignored copy identical to the current source is retired so the slot stays usable"
+}
+
+test_unignored_copy_differing_from_the_source_is_kept() {
+  local rec id out status before after
+  id='pool-env-local-r9'
+  rec=$(make_case env-local-unignored-differs "$id")
+  read_case_record "$rec"
+
+  printf 'FIXTURE_MARKER=authored-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
+  chmod 0600 "$PROJECT_DIR/.env.local"
+  # Content the task itself wrote: it differs, so it is real work and must survive.
+  printf 'FIXTURE_MARKER=the-task-own-work-not-a-real-credential\n' > "$POOL_DIR/.env.local"
+  chmod 0600 "$POOL_DIR/.env.local"
+  before=$(cksum < "$POOL_DIR/.env.local")
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "spawn should refuse rather than silently deleting the task's own unignored file"
+  [ -f "$POOL_DIR/.env.local" ] \
+    || fail "spawn deleted an unignored file it could not prove was its own"
+  after=$(cksum < "$POOL_DIR/.env.local")
+  [ "$after" = "$before" ] \
+    || fail "spawn modified an unignored file that was the task's own work"
+  assert_contains "$out" "remove it by hand" \
+    "the refusal did not tell the operator how to clear the slot"
+  pass "an unignored copy that differs from the source is preserved and the refusal is actionable"
+}
+
 test_unignored_local_env_file_is_not_seeded() {
   local rec id out status
   id='pool-env-local-r5'
@@ -784,6 +844,8 @@ test_interrupted_seed_scratch_does_not_outlive_revocation
 test_cross_filesystem_layout_degrades_to_a_loud_skip
 test_unanswerable_filesystem_question_still_refuses
 test_unignored_local_env_file_is_not_seeded
+test_unignored_copy_matching_the_source_is_retired
+test_unignored_copy_differing_from_the_source_is_kept
 test_stale_submodule_pin_explains_itself
 test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work

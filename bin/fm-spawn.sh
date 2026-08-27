@@ -1856,10 +1856,79 @@ spawn_path_device() {  # <path>
   fi
 }
 
-seed_spawn_worktree_local_env() {  # <worktree>
-  local worktree=$1 source target tmp ignored check_err gitdir stage_device tree_device
+# Firstmate authors a file inside a worktree it does not own, so every edge of that
+# ownership is settled deliberately here rather than falling out of branch order.
+# The whole contract, in one place:
+#
+#   source absent + target absent      no-op
+#   ignore check unresolvable          refuse (cannot establish, never assume benign)
+#   not ignored + target absent        warn, skip
+#   not ignored + target present       retire only if byte-identical to the current
+#                                      source, else refuse with the manual cleanup;
+#                                      runs pre-refresh, since the base refresh's
+#                                      clean check would otherwise refuse first
+#   target is a directory              refuse
+#   source absent + clone searchable   retire (a revoked credential must not persist)
+#   source absent + clone unsearchable refuse (deletion not positively established)
+#   source a broken symlink            never retires; warns, and names a stale target
+#   source a symlink to a regular file seeds the dereferenced content
+#   target a symlink                   publish replaces the link, retire removes it
+#   git dir unresolvable/unwritable    refuse
+#   filesystem identity unreadable     refuse
+#   genuine cross-device               degrade to a loud skip, naming a stale target
+#   staging scratch                    swept at entry, on every path
+#
+# Retiring never degrades: it needs no staging, and it is the half that carries the
+# real risk. Seeding is a convenience and may degrade. Contents are never printed.
+seed_spawn_worktree_local_env() {  # <worktree> <pre-refresh|post-refresh>
+  local worktree=$1 phase=$2 source target tmp ignored check_err gitdir stage_device tree_device cmp_status
   source="$PROJ_ABS/.env.local"
   target="$worktree/.env.local"
+  # Retiring an unignored copy has to happen BEFORE the base refresh, not with the
+  # rest of this contract after it. Such a copy is untracked work, so the refresh's
+  # own clean check refuses the slot first and nothing downstream ever runs - the
+  # same trap that made an earlier scratch sweep unreachable. One owner still holds
+  # the whole lifecycle; it just runs in two ordered phases, because the wedge it
+  # must clear is precisely what the step in between refuses to touch.
+  if [ "$phase" = pre-refresh ]; then
+    { [ -e "$target" ] || [ -L "$target" ]; } || return 0
+    ignored=0
+    check_err=$(git -C "$worktree" check-ignore -q .env.local 2>&1) || ignored=$?
+    if [ "$ignored" -gt 1 ]; then
+      echo "error: could not determine whether '$worktree' ignores .env.local; git check-ignore exited $ignored${check_err:+: $check_err}" >&2
+      echo "error: refusing to retire '$target' while that check is unresolved" >&2
+      return 1
+    fi
+    [ "$ignored" -eq 1 ] || return 0
+    if [ -L "$target" ] || [ ! -f "$target" ]; then
+      echo "error: '$target' is not ignored by the project and is not a regular file, so it cannot be proven to be this seeding's own copy" >&2
+      echo "error: the base refresh will refuse '$worktree' as uncommitted work; inspect '$target' and remove it by hand once you know it holds no work worth keeping" >&2
+      return 1
+    fi
+    if [ ! -f "$source" ]; then
+      echo "error: '$target' is not ignored by the project and '$source' is missing, so it cannot be proven to be this seeding's own copy rather than the task's own work" >&2
+      echo "error: the base refresh will refuse '$worktree' as uncommitted work; inspect '$target' and remove it by hand once you know it holds no work worth keeping" >&2
+      return 1
+    fi
+    cmp_status=0
+    cmp -s "$source" "$target" || cmp_status=$?
+    if [ "$cmp_status" -gt 1 ]; then
+      echo "error: could not compare '$target' against '$source' to tell this seeding's own copy from the task's work; cmp exited $cmp_status" >&2
+      echo "error: the base refresh will refuse '$worktree' as uncommitted work; inspect '$target' and remove it by hand once you know it holds no work worth keeping" >&2
+      return 1
+    fi
+    if [ "$cmp_status" -ne 0 ]; then
+      echo "error: '$target' is not ignored by the project and differs from '$source', so it is the task's own work and this seeding will not remove it" >&2
+      echo "error: the base refresh will refuse '$worktree' as uncommitted work; save anything worth keeping out of '$target', then remove it by hand" >&2
+      return 1
+    fi
+    if ! rm -f "$target"; then
+      echo "error: could not retire this seeding's own unignored copy at '$target'; remove it by hand so the base refresh does not refuse '$worktree' as uncommitted work" >&2
+      return 1
+    fi
+    echo "warning: removed this seeding's own copy at '$target' because the project no longer ignores .env.local; restore that ignore rule so crew worktrees can carry it again" >&2
+    return 0
+  fi
   # Clear the staging area on the way in, before any branch below can return. A
   # copy killed mid-flight leaves a scratch file holding the captain's credential
   # bytes, and a linked worktree's git directory is reachable from inside the
@@ -1894,7 +1963,48 @@ seed_spawn_worktree_local_env() {  # <worktree>
     return 1
   fi
   if [ "$ignored" -eq 1 ]; then
-    echo "warning: not seeding .env.local into '$worktree' because the project does not ignore it; add it to .gitignore so crew worktrees can carry it" >&2
+    if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+      echo "warning: not seeding .env.local into '$worktree' because the project does not ignore it; add it to .gitignore so crew worktrees can carry it" >&2
+      return 0
+    fi
+    # Reachable only when the ignore rule changed between the two phases.
+    # An unignored copy already sitting here is untracked work, so the next
+    # acquisition's clean check refuses the slot before this seeding runs again and
+    # nothing can free it. Firstmate authors this file now, so refusing to retire it
+    # would leave its own artifact wedging the slot for good. Retire it only when it
+    # is byte-identical to the clone's CURRENT source: matching bytes prove it is
+    # this seeding's copy rather than the task's work, and deleting it destroys
+    # nothing because that exact content still exists in the clone. Current is the
+    # only sound referent - a name, size, or timestamp check would pass for a file a
+    # task wrote itself, and an older revision would authorize deleting content the
+    # clone no longer has. Anything that cannot be positively compared is refused.
+    if [ -L "$target" ] || [ ! -f "$target" ]; then
+      echo "error: '$target' is not ignored by the project and is not a regular file, so it cannot be proven to be this seeding's own copy" >&2
+      echo "error: the next acquisition of '$worktree' will refuse it as uncommitted work; inspect '$target' and remove it by hand once you know it holds no work worth keeping" >&2
+      return 1
+    fi
+    if [ ! -f "$source" ]; then
+      echo "error: '$target' is not ignored by the project and '$source' is missing, so it cannot be proven to be this seeding's own copy rather than the task's own work" >&2
+      echo "error: the next acquisition of '$worktree' will refuse it as uncommitted work; inspect '$target' and remove it by hand once you know it holds no work worth keeping" >&2
+      return 1
+    fi
+    cmp_status=0
+    cmp -s "$source" "$target" || cmp_status=$?
+    if [ "$cmp_status" -gt 1 ]; then
+      echo "error: could not compare '$target' against '$source' to tell this seeding's own copy from the task's work; cmp exited $cmp_status" >&2
+      echo "error: the next acquisition of '$worktree' will refuse it as uncommitted work; inspect '$target' and remove it by hand once you know it holds no work worth keeping" >&2
+      return 1
+    fi
+    if [ "$cmp_status" -ne 0 ]; then
+      echo "error: '$target' is not ignored by the project and differs from '$source', so it is the task's own work and this seeding will not remove it" >&2
+      echo "error: the next acquisition of '$worktree' will refuse it as uncommitted work; save anything worth keeping out of '$target', then remove it by hand" >&2
+      return 1
+    fi
+    if ! rm -f "$target"; then
+      echo "error: could not retire this seeding's own unignored copy at '$target'; remove it by hand so the next acquisition of '$worktree' is not refused as uncommitted work" >&2
+      return 1
+    fi
+    echo "warning: removed this seeding's own copy at '$target' because the project no longer ignores .env.local; restore that ignore rule so crew worktrees can carry it again" >&2
     return 0
   fi
   if [ -d "$target" ]; then
@@ -1918,7 +2028,14 @@ seed_spawn_worktree_local_env() {  # <worktree>
     return 0
   fi
   if [ ! -f "$source" ]; then
+    # Not a positively established deletion (a broken symlink lands here too), so
+    # the copy below is never retired on this path. Say what the slot actually
+    # holds: claiming it is empty while it still serves an earlier copy is how a
+    # rotated-out credential passes for a current one.
     echo "warning: not seeding .env.local into '$worktree' because '$source' is not a regular file" >&2
+    if [ -e "$target" ] || [ -L "$target" ]; then
+      echo "warning: '$worktree' still holds an earlier .env.local that could not be refreshed, so it may be out of date; replace it from '$PROJ_ABS' by hand before a task relies on it" >&2
+    fi
     return 0
   fi
   # Stage the copy inside the worktree's own git directory, never in the working
@@ -1949,7 +2066,11 @@ seed_spawn_worktree_local_env() {  # <worktree>
   fi
   if [ "$stage_device" != "$tree_device" ]; then
     echo "warning: '$gitdir' and '$worktree' are on different filesystems, so .env.local cannot be published there by atomic rename and was not seeded" >&2
-    echo "warning: '$worktree' has no .env.local and any task running in it will find no credentials; copy '$source' into '$worktree' by hand before that task needs them" >&2
+    if [ -e "$target" ] || [ -L "$target" ]; then
+      echo "warning: '$worktree' still holds an earlier .env.local that could not be refreshed, so it may be out of date; copy '$source' over it by hand before a task relies on it" >&2
+    else
+      echo "warning: '$worktree' has no .env.local and any task running in it will find no credentials; copy '$source' into '$worktree' by hand before that task needs them" >&2
+    fi
     return 0
   fi
   tmp=$(mktemp "$gitdir/fm-env-local.XXXXXX") || {
@@ -2460,8 +2581,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  seed_spawn_worktree_local_env "$WT" pre-refresh || exit 1
   freshen_spawn_worktree_base "$WT" || exit 1
-  seed_spawn_worktree_local_env "$WT" || exit 1
+  seed_spawn_worktree_local_env "$WT" post-refresh || exit 1
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
