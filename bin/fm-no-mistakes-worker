@@ -646,6 +646,13 @@ def cleanup_service(config, task, generation, assignment, request_digest):
     deadline = time.monotonic() + config["cleanup_timeout_seconds"]
     last_reconcile_error = None
     while time.monotonic() < deadline:
+        status = last_json(lifecycle(config, "status", "--json", timeout=120), "lifecycle status")
+        matches = [
+            item for item in status.get("account_placements", [])
+            if item.get("task") == task and item.get("task_generation") == generation
+        ]
+        if not matches:
+            return
         remaining = deadline - time.monotonic()
         try:
             lifecycle(

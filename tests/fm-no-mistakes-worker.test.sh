@@ -68,6 +68,9 @@ if command == "request":
     release_pending.unlink(missing_ok=True)
     print("queued")
 elif command == "reconcile":
+    if (root / "reconcile-must-not-run").exists():
+        print("fixture reconcile was forbidden", file=sys.stderr)
+        raise SystemExit(86)
     failures = root / "reconcile-failures"
     if failures.exists():
         remaining = int(failures.read_text().strip())
@@ -426,6 +429,27 @@ assert_contains "$(cat "$TMP_ROOT/calls.log")" "request --task" "wrapper bypasse
 assert_contains "$(cat "$TMP_ROOT/calls.log")" "--role no-mistakes" "wrapper did not request the service role"
 assert_contains "$(cat "$TMP_ROOT/calls.log")" "service-complete" "wrapper did not release from execution evidence"
 pass "wrapper allocates, executes, returns semantic evidence, and cleans through lifecycle"
+
+: > "$TMP_ROOT/calls.log"
+touch "$TMP_ROOT/reconcile-must-not-run"
+"$WRAPPER" --config "$TMP_ROOT/config.json" execute \
+  --request "$TMP_ROOT/request.json" --payload "$PAYLOAD" \
+  --result "$TMP_ROOT/result-replay.json" --outcome "$TMP_ROOT/outcome-replay.bundle" \
+  --step-outcome "$TMP_ROOT/step-outcome-replay.json" \
+  || fail "a completed cached review waited on unrelated global reconciliation"
+python3 - "$TMP_ROOT/result-replay.json" "$TMP_ROOT/calls.log" <<'PY' \
+  || fail "cached result replay did not short-circuit after exact cleanup proof"
+import json, pathlib, sys
+result = json.loads(pathlib.Path(sys.argv[1]).read_text())
+calls = pathlib.Path(sys.argv[2]).read_text().splitlines()
+assert result["outcome"] == "succeeded", result
+assert any(line.startswith("service-complete ") for line in calls), calls
+assert any(line == "status --json" for line in calls), calls
+assert not any(line.startswith("reconcile ") for line in calls), calls
+assert not any(line.startswith("execute ") for line in calls), calls
+PY
+rm "$TMP_ROOT/reconcile-must-not-run"
+pass "cached result returns immediately when exact task cleanup is already proven"
 
 printf 'ok\n' > "$TMP_ROOT/mode"
 printf '2\n' > "$TMP_ROOT/reconcile-failures"
