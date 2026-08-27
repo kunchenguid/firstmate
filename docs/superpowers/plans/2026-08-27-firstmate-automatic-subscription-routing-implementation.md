@@ -90,7 +90,7 @@ An agent-only skill owns task classification, decomposition, live catalog eviden
 
 - Consumes: `FM_CONFIG_OVERRIDE` or `$FM_HOME/config/crew-dispatch.json`.
 - Produces: `fm-dispatch-policy.sh validate [FILE]`, `mode [FILE]`, `limits [FILE]`, `profile PROFILE_ID [FILE]`, and `describe [FILE]`.
-- Produces: normalized JSON profiles with `id`, `harness`, optional `model`, optional `effort`, `provider`, `lane`, optional symbolic `account`, `reasoningClass`, and `workTypes`.
+- Produces: normalized JSON profiles with `id`, `harness`, `model`, optional `effort`, `provider`, `lane`, optional symbolic `account`, `reasoningClass`, and `workTypes`; version 2 requires a concrete non-`default` model while version 1 retains optional model semantics.
 - Preserves: the existing unversioned rule and inline profile schema as version 1 compatibility input.
 
 - [ ] **Step 1: Write failing policy contract tests.**

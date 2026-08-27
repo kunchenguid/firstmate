@@ -619,13 +619,10 @@ test_reserve_is_bound_to_authoritative_policy_and_selection_evidence() {
   jq '.profiles["pi-test"].model="default"' "$FM_CONFIG_OVERRIDE/crew-dispatch.json" >"$LAB/default-policy.json"
   mv "$LAB/default-policy.json" "$FM_CONFIG_OVERRIDE/crew-dispatch.json"
   jq '.[0].model="default"' "$CANDIDATES" >"$LAB/default-model-candidates.json"
-  "$ROUTE" select --request "$REQUEST" --candidates "$LAB/default-model-candidates.json" --now 1000 >"$LAB/default-model-decision.json"
-  expect_failure_contains 'selected policy profile requires a concrete model' "$ROUTE" reserve \
-    --task task-1 --generation gen-default-model --profile pi-test --provider provider \
-    --lane lane-1 --account none --class standard --work-type implementation --risk low \
-    --mode automatic --request "$REQUEST" --candidates "$LAB/default-model-candidates.json" \
-    --decision "$LAB/default-model-decision.json" --now 1000
+  expect_failure_contains 'active dispatch policy is invalid' "$ROUTE" select \
+    --request "$REQUEST" --candidates "$LAB/default-model-candidates.json" --now 1000
 
+  seed_v2_policy automatic
   ln -s "$REQUEST" "$LAB/request-link.json"
   expect_failure_contains 'request file is unsafe or unreadable' "$ROUTE" reserve \
     --task task-1 --generation gen-symlink --profile pi-test --provider provider \
@@ -684,16 +681,66 @@ test_legacy_unbound_reservations_are_cleanup_only() {
   capability=$(claim_path legacy gen-1)
   jq 'del(.bindingVersion,.launchHarness,.launchModel,.launchEffort,.requestDigest,.candidatesDigest,.decisionDigest,.policyDigest)' "$reservation" >"$reservation.next"
   mv "$reservation.next" "$reservation"
-  "$ROUTE" begin-admission --task legacy --generation gen-1 --profile profile-1 --provider openai \
+  expect_failure_contains 'legacy active reservation cannot be relaunched without an authoritative binding' "$ROUTE" begin-admission --task legacy --generation gen-1 --profile profile-1 --provider openai \
     --lane codex-primary --account codex-primary --class standard --work-type implementation \
     --risk medium --mode automatic --launch-harness codex --launch-model ignored-legacy \
-    --launch-effort none --transition inherit --metadata-file "$metadata" --claim-file "$capability" >/dev/null \
-    || fail "legacy active reservation could not enter authenticated recovery"
-  "$ROUTE" abort-admission --task legacy --claim-file "$capability" >/dev/null \
-    || fail "legacy inherited admission did not roll back"
+    --launch-effort none --transition inherit --metadata-file "$metadata" --claim-file "$capability"
   jq -e '.admissionState == "active" and (has("bindingVersion") | not)' "$reservation" >/dev/null \
-    || fail "legacy inherited rollback did not preserve active capacity"
-  pass "legacy unbound pending routes cannot launch while active routes remain recoverable"
+    || fail "legacy inherited refusal mutated active capacity"
+  [ ! -e "$FM_STATE_OVERRIDE/routing/admissions/legacy.json" ] \
+    || fail "legacy inherited refusal published an admission journal"
+  "$ROUTE" release --task legacy --generation gen-1 --claim-file "$capability" >/dev/null \
+    || fail "legacy active reservation could not still converge through cleanup"
+  reset_route_state
+  rm -f "$metadata"
+  reserve_route legacy gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  activate_fresh_admission legacy gen-1 "$metadata" >/dev/null
+  capability=$(claim_path legacy gen-1)
+  reservation=$(reservation_path legacy gen-1)
+  jq 'del(.bindingVersion,.launchHarness,.launchModel,.launchEffort,.requestDigest,.candidatesDigest,.decisionDigest,.policyDigest)' "$reservation" >"$reservation.next"
+  mv "$reservation.next" "$reservation"
+  "$ROUTE" finalize --task legacy --generation gen-1 --terminal completed --claim-file "$capability" >/dev/null \
+    || fail "legacy active reservation could not converge through finalize"
+  [ ! -e "$reservation" ] || fail "legacy finalize retained reservation"
+
+  reset_route_state
+  rm -f "$metadata"
+  reserve_route legacy gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  activate_fresh_admission legacy gen-1 "$metadata" >/dev/null
+  reservation=$(reservation_path legacy gen-1)
+  jq 'del(.bindingVersion,.launchHarness,.launchModel,.launchEffort,.requestDigest,.candidatesDigest,.decisionDigest,.policyDigest)' "$reservation" >"$reservation.next"
+  mv "$reservation.next" "$reservation"
+  cleanup_finalize legacy gen-1 completed implementation >/dev/null \
+    || fail "legacy active reservation could not converge through cleanup-finalize"
+  [ ! -e "$reservation" ] || fail "legacy cleanup-finalize retained reservation"
+  pass "legacy unbound routes are cleanup-only and cannot choose arbitrary relaunch identity"
+}
+
+test_begin_admission_revalidates_the_active_policy_before_mutation() {
+  local metadata="$FM_STATE_OVERRIDE/policy-race.meta" reservation capability before mode variant outside
+  for variant in off changed deleted symlink; do
+    reset_route_state
+    reserve_route policy-race gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+    reservation=$(reservation_path policy-race gen-1)
+    capability=$(claim_path policy-race gen-1)
+    before=$(sha256sum "$reservation" | awk '{print $1}')
+    case "$variant" in
+      off) jq '.routing.mode="off"' "$FM_CONFIG_OVERRIDE/crew-dispatch.json" >"$LAB/policy.next"; mv "$LAB/policy.next" "$FM_CONFIG_OVERRIDE/crew-dispatch.json" ;;
+      changed) jq '.profiles["profile-1"].model="changed-model"' "$FM_CONFIG_OVERRIDE/crew-dispatch.json" >"$LAB/policy.next"; mv "$LAB/policy.next" "$FM_CONFIG_OVERRIDE/crew-dispatch.json" ;;
+      deleted) rm -f "$FM_CONFIG_OVERRIDE/crew-dispatch.json" ;;
+      symlink) outside="$LAB/outside-policy.json"; cp "$FM_CONFIG_OVERRIDE/crew-dispatch.json" "$outside"; rm -f "$FM_CONFIG_OVERRIDE/crew-dispatch.json"; ln -s "$outside" "$FM_CONFIG_OVERRIDE/crew-dispatch.json" ;;
+    esac
+    expect_failure_contains 'active dispatch policy' "$ROUTE" begin-admission --task policy-race --generation gen-1 --profile profile-1 --provider openai \
+      --lane codex-primary --account codex-primary --class standard --work-type implementation \
+      --risk medium --mode automatic --launch-harness codex --launch-model model-profile-1 \
+      --launch-effort none --transition fresh --metadata-file "$metadata" --claim-file "$capability"
+    [ "$(sha256sum "$reservation" | awk '{print $1}')" = "$before" ] || fail "$variant policy race mutated reservation"
+    [ ! -e "$capability" ] && [ ! -e "$FM_STATE_OVERRIDE/routing/admissions/policy-race.json" ] \
+      && [ ! -e "$metadata" ] || fail "$variant policy race published an admission artifact"
+  done
+  rm -f "$FM_CONFIG_OVERRIDE/crew-dispatch.json"
+  seed_v2_policy automatic
+  pass "begin admission revalidates active policy before any route mutation"
 }
 
 test_bound_admission_rejects_published_launch_identity_tamper() {
@@ -1633,6 +1680,7 @@ test_reserve_requires_a_bounded_work_type
 test_reserve_is_bound_to_authoritative_policy_and_selection_evidence
 test_reserve_rejects_a_decision_staled_by_authoritative_load
 test_legacy_unbound_reservations_are_cleanup_only
+test_begin_admission_revalidates_the_active_policy_before_mutation
 test_bound_admission_rejects_published_launch_identity_tamper
 test_canary_cap_is_atomic_and_duplicate_reserve_is_idempotent
 test_lane_account_and_burst_caps_are_enforced

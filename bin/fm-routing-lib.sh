@@ -1015,6 +1015,46 @@ fm_route_reserve_locked() {
   fm_route_public_reservation "$updated"
 }
 
+# A bound route may start or restart only while the exact policy that selected it
+# remains active. This runs under the routing lock and performs no routing-state
+# mutation; callers invoke it before claim paths, journals, or metadata are touched.
+fm_route_validate_current_policy_binding_locked() {
+  local reservation=$1 policy canonical digest profile mode work_type account effort
+  [ "$(jq -r '.bindingVersion // 0' <<<"$reservation")" = 1 ] \
+    || { fm_route_diagnostic 'reservation-binding-required'; return 1; }
+  policy=$(fm_route_capture_v2_policy) || return 1
+  canonical=$(jq -Sc . <<<"$policy") || { fm_route_diagnostic 'active dispatch policy is invalid'; return 1; }
+  digest=$(fm_route_claim_hash "$canonical") || return 1
+  [ "$digest" = "$(jq -r .policyDigest <<<"$reservation")" ] \
+    || { fm_route_diagnostic 'active dispatch policy changed; re-evaluate'; return 1; }
+  mode=$(jq -r '.mode' <<<"$reservation") || return 1
+  case "$(jq -r '.routing.mode // "automatic"' <<<"$canonical")" in
+    canary|automatic) ;;
+    off|simulate) fm_route_diagnostic 'active dispatch policy does not admit launches'; return 1 ;;
+    *) fm_route_diagnostic 'active dispatch policy is invalid'; return 1 ;;
+  esac
+  [ "$(jq -r '.routing.mode // "automatic"' <<<"$canonical")" = "$mode" ] \
+    || { fm_route_diagnostic 'routing mode does not match active policy'; return 1; }
+  profile=$(jq -r '.profile' <<<"$reservation") || return 1
+  work_type=$(jq -r '.workType' <<<"$reservation") || return 1
+  account=$(jq -r '.account' <<<"$reservation") || return 1
+  effort=$(jq -c '.launchEffort' <<<"$reservation") || return 1
+  jq -e --arg profile "$profile" --arg provider "$(jq -r .provider <<<"$reservation")" \
+      --arg lane "$(jq -r .lane <<<"$reservation")" --arg account "$account" \
+      --arg harness "$(jq -r .launchHarness <<<"$reservation")" \
+      --arg model "$(jq -r .launchModel <<<"$reservation")" --arg workType "$work_type" \
+      --argjson effort "$effort" '
+      .profiles[$profile] as $p
+      | ($p | type) == "object"
+        and $p.provider == $provider and $p.lane == $lane
+        and ($p.account // "none") == $account
+        and $p.harness == $harness and $p.model == $model
+        and ($p.effort // null) == $effort
+        and ($p.workTypes | index($workType) != null)
+    ' <<<"$canonical" >/dev/null 2>&1 \
+    || { fm_route_diagnostic 'reservation route no longer matches active policy'; return 1; }
+}
+
 fm_route_verify_locked() {
   local task=$1 generation=$2 profile=$3 provider=$4 lane=$5 account=$6 task_class=$7 work_type=$8 risk=$9 mode=${10} reservation
   reservation=$(fm_route_find_reservation_path "$task" "$generation") || { fm_route_diagnostic 'reservation-not-found'; return 1; }
@@ -1121,19 +1161,21 @@ fm_route_begin_admission_locked() {
         && [ "$launch_model" = "$(jq -r .launchModel <<<"$current")" ] \
         && [ "$launch_effort" = "$expected_effort" ] \
         || { fm_route_diagnostic 'launch-binding-mismatch'; return 1; }
+      fm_route_validate_current_policy_binding_locked "$current" || return 1
       fm_route_validate_claim_file_path "$task" "$generation" "$claim_file" || return 1
       [ ! -e "$claim_file" ] || { fm_route_diagnostic 'unexpected admission capability'; return 1; }
       ;;
     inherit)
       [ -z "$prior_generation$prior_claim_file" ] || { fm_route_diagnostic 'unexpected prior reservation'; return 1; }
       [ "$state" = active ] || { fm_route_diagnostic 'reservation-not-active'; return 1; }
+      [ "$(jq -r '.bindingVersion // 0' <<<"$current")" = 1 ] \
+        || { fm_route_diagnostic 'legacy active reservation cannot be relaunched without an authoritative binding'; return 1; }
+      [ "$launch_harness" = "$(jq -r .launchHarness <<<"$current")" ] \
+        && [ "$launch_model" = "$(jq -r .launchModel <<<"$current")" ] \
+        && [ "$launch_effort" = "$expected_effort" ] \
+        || { fm_route_diagnostic 'launch-binding-mismatch'; return 1; }
+      fm_route_validate_current_policy_binding_locked "$current" || return 1
       fm_route_authorize_reservation "$task" "$generation" "$claim_file" "$current" || return 1
-      if [ "$(jq -r '.bindingVersion // 0' <<<"$current")" = 1 ]; then
-        [ "$launch_harness" = "$(jq -r .launchHarness <<<"$current")" ] \
-          && [ "$launch_model" = "$(jq -r .launchModel <<<"$current")" ] \
-          && [ "$launch_effort" = "$expected_effort" ] \
-          || { fm_route_diagnostic 'launch-binding-mismatch'; return 1; }
-      fi
       prior=$target
       ;;
     replacement)
@@ -1150,6 +1192,7 @@ fm_route_begin_admission_locked() {
         && [ "$launch_model" = "$(jq -r .launchModel <<<"$current")" ] \
         && [ "$launch_effort" = "$expected_effort" ] \
         || { fm_route_diagnostic 'launch-binding-mismatch'; return 1; }
+      fm_route_validate_current_policy_binding_locked "$current" || return 1
       fm_route_validate_claim_file_path "$task" "$generation" "$claim_file" || return 1
       [ ! -e "$claim_file" ] || { fm_route_diagnostic 'unexpected admission capability'; return 1; }
       fm_route_authorize_reservation "$task" "$prior_generation" "$prior_claim_file" "$prior_current" || return 1
@@ -1158,6 +1201,8 @@ fm_route_begin_admission_locked() {
     off)
       [ -z "$prior_generation$prior_claim_file" ] || { fm_route_diagnostic 'unexpected prior reservation'; return 1; }
       [ "$state" = active ] || { fm_route_diagnostic 'reservation-not-active'; return 1; }
+      [ "$(jq -r '.bindingVersion // 0' <<<"$current")" = 1 ] \
+        || { fm_route_diagnostic 'legacy active reservation cannot be relaunched without an authoritative binding'; return 1; }
       fm_route_authorize_reservation "$task" "$generation" "$claim_file" "$current" || return 1
       prior=$target
       target=null

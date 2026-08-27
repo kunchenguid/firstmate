@@ -279,19 +279,19 @@ The fixed circuit breaker opens a lane after three failures within 900 seconds a
 Omitted `limits`, `circuitBreaker`, and `transientRetries` receive their implemented defaults; supplied policy-carried values must match the fixed contract.
 
 `profiles` maps non-empty identifiers to profile objects.
-Each profile requires `harness`, `provider`, `lane`, `reasoningClass`, and a non-empty `workTypes` string array.
-The recognized optional fields are `model`, `effort`, and `account`; normalized profile output drops every other field.
+Each profile requires `harness`, a concrete non-`default` `model`, `provider`, `lane`, `reasoningClass`, and a non-empty `workTypes` string array.
+The recognized optional fields are `effort` and `account`; normalized profile output drops every other field.
 Version 2 supports only `claude`, `codex`, `pi`, and `pi-signed` harnesses.
 `reasoningClass` is one of `basic`, `standard`, `strong`, or `maximum`.
 Claude, Pi, and pi-signed accept `low`, `medium`, `high`, `xhigh`, or `max` effort, while Codex accepts `low`, `medium`, `high`, or `xhigh`.
-An omitted model or effort uses the selected harness default for that axis.
+Version 2 never permits an omitted or `default` model because routed admission must bind one exact launch identity. An omitted effort is the explicit omission sentinel: routing persists JSON `null`, spawn passes no `--effort`, and relaunch must preserve that omission. Version 1 retains its optional model and effort behavior.
 Native Claude and Codex profiles require a lowercase symbolic `account` identifier.
 Pi and pi-signed profiles must omit `account`; their normalized routing candidate uses the literal account `none` because Pi provider capacity is represented by `lane`, not a native account store.
 The example uses current intended work types such as `mechanical`, `implementation`, `architecture`, `debugging`, `security`, and `review`; routing requests independently validate their bounded work type.
 
 A selected version 2 launch carries the nine routing fields `generation`, `profile`, `provider`, `lane`, `account`, `class`, `work-type`, `risk`, and `mode` into the existing spawn lifecycle.
 Immediately before a native launch, the symbolic account resolves through this home's declared account map and binds only its allowed harness environment name to the declared readable configuration directory.
-Spawn admission authenticates the exact reserved task generation through a protected capability; relaunch preserves that route, and guarded cleanup releases only the matching generation.
+Spawn admission authenticates the exact reserved task generation through a protected capability and revalidates the unchanged active version 2 policy under the routing lock before creating any admission artifact; relaunch preserves that route, and guarded cleanup releases only the matching generation. Legacy active routes without an authoritative binding remain cleanup-compatible but cannot relaunch.
 The [`automatic-dispatch` skill](../.agents/skills/automatic-dispatch/SKILL.md) owns selection, reserve-before-spawn ordering, and fallback, while `fm-spawn.sh`, `fm-control.sh`, and `fm-teardown.sh` own the exact capability and lifecycle mechanics.
 
 Each `rules` entry requires a non-empty natural-language `when` and a non-empty `use` array of profile identifiers.

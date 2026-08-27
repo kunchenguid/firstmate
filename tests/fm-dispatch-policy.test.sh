@@ -67,13 +67,23 @@ test_v2_requires_safe_routing_bounds() {
 }
 
 test_v2_requires_complete_safe_profiles() {
-  write_policy '{"schemaVersion":2,"profiles":{"native":{"harness":"codex","provider":"openai","lane":"codex-primary","reasoningClass":"strong","workTypes":["implementation"]}}}'
+  write_policy '{"schemaVersion":2,"profiles":{"native":{"harness":"codex","model":"gpt-test","provider":"openai","lane":"codex-primary","reasoningClass":"strong","workTypes":["implementation"]}}}'
   expect_failure_contains 'native claude and codex profiles need account' "$POLICY" validate "$POLICY_FILE"
-  write_policy '{"schemaVersion":2,"profiles":{"pi":{"harness":"pi","provider":"xai","lane":"pi-xai-1","account":"pi-xai-1","reasoningClass":"strong","workTypes":["architecture"]}}}'
+  write_policy '{"schemaVersion":2,"profiles":{"pi":{"harness":"pi","model":"grok-test","provider":"xai","lane":"pi-xai-1","account":"pi-xai-1","reasoningClass":"strong","workTypes":["architecture"]}}}'
   expect_failure_contains 'pi and pi-signed profiles cannot set account' "$POLICY" validate "$POLICY_FILE"
-  write_policy '{"schemaVersion":2,"profiles":{"pi":{"harness":"pi","provider":"xai","lane":"pi-xai-1","reasoningClass":"strong","workTypes":["architecture"]}},"rules":[{"when":"architecture","use":["missing"]}]}'
+  write_policy '{"schemaVersion":2,"profiles":{"pi":{"harness":"pi","model":"grok-test","provider":"xai","lane":"pi-xai-1","reasoningClass":"strong","workTypes":["architecture"]}},"rules":[{"when":"architecture","use":["missing"]}]}'
   expect_failure_contains 'unknown named profile: missing' "$POLICY" validate "$POLICY_FILE"
   pass "version 2 requires safe accounts and existing named profile references"
+}
+
+test_v2_requires_a_concrete_model_but_v1_keeps_optional_model() {
+  write_policy '{"schemaVersion":2,"profiles":{"pi":{"harness":"pi","provider":"xai","lane":"pi-xai-1","reasoningClass":"strong","workTypes":["architecture"]}}}'
+  expect_failure_contains 'profile pi needs a concrete model' "$POLICY" validate "$POLICY_FILE"
+  write_policy '{"schemaVersion":2,"profiles":{"pi":{"harness":"pi","model":"default","provider":"xai","lane":"pi-xai-1","reasoningClass":"strong","workTypes":["architecture"]}}}'
+  expect_failure_contains 'profile pi needs a concrete model' "$POLICY" validate "$POLICY_FILE"
+  write_policy '{"rules":[{"when":"anything","use":{"harness":"pi"}}]}'
+  "$POLICY" validate "$POLICY_FILE" || fail "version 1 optional model compatibility was rejected"
+  pass "version 2 requires concrete models while version 1 preserves optional models"
 }
 
 test_v1_rejects_routing_values_that_readers_consume() {
@@ -121,6 +131,7 @@ test_v2_normalizes_named_profile
 test_v2_rejects_secret_fields
 test_v2_requires_safe_routing_bounds
 test_v2_requires_complete_safe_profiles
+test_v2_requires_a_concrete_model_but_v1_keeps_optional_model
 test_v1_rejects_routing_values_that_readers_consume
 test_v2_restricts_profiles_to_phase_one_harnesses
 test_profile_projects_only_documented_fields

@@ -95,7 +95,13 @@ policy_validate() {
       elif ($profile.harness? | type) != "string" or ($profile.harness | length) == 0 then "profile " + $id + " needs harness"
       elif ["claude","codex","pi","pi-signed"] | index($profile.harness) | not then "unsupported version 2 harness: " + $profile.harness
       elif verified($profile.harness) | not then "unverified harness: " + $profile.harness
-      elif $profile | has("model") and (((.model | type) != "string") or (.model | length) == 0) then "profile " + $id + " model must be a non-empty string"
+      elif (($profile | has("model") | not)
+            or (($profile.model | type) != "string")
+            or ($profile.model == "default")
+            or (($profile.model | length) == 0)
+            or (($profile.model | length) > 256)
+            or (($profile.model | test("^[A-Za-z0-9][A-Za-z0-9._:/-]*$") | not)))
+        then "profile " + $id + " needs a concrete model"
       elif $profile | has("effort") and (((.effort | type) != "string") or (.effort | length) == 0) then "profile " + $id + " effort must be a non-empty string"
       elif effort_ok($profile.harness; $profile.effort) | not then "invalid effort: " + $profile.harness + ":" + $profile.effort
       elif ($profile.provider? | type) != "string" or ($profile.provider | length) == 0 then "profile " + $id + " needs provider"

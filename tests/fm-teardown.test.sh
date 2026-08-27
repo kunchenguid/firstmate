@@ -227,7 +227,7 @@ make_active_routed_task() {
   fm_test_reserve_bound "$ROOT" "$case_dir" "$case_dir/state" task-x1 "$generation" \
     profile-1 openai codex-primary codex-primary standard "$work_type" medium automatic \
     claude claude-test none 100 >/dev/null
-  FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" begin-admission \
+  FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" begin-admission \
     --task task-x1 --generation "$generation" --profile profile-1 \
     --provider openai --lane codex-primary --account codex-primary \
     --class standard --work-type "$work_type" --risk medium --mode automatic --transition fresh \
@@ -263,7 +263,7 @@ make_stale_inherited_admission() {
   capability=$(route_claim_path "$case_dir" task-x1 gen-task-x1)
   journal="$case_dir/state/routing/admissions/task-x1.json"
   reservation=$(route_reservation_path "$case_dir" task-x1 gen-task-x1)
-  (FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" begin-admission \
+  (FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" begin-admission \
     --task task-x1 --generation gen-task-x1 --profile profile-1 \
     --provider openai --lane codex-primary --account codex-primary \
     --class standard --work-type review --risk medium --mode automatic --transition inherit \

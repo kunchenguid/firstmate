@@ -442,6 +442,35 @@ test_explicit_off_relaunch_suppresses_inherited_route_metadata() {
   pass "fm-spawn relaunch: explicit route-mode off suppresses inherited routing"
 }
 
+test_explicit_off_cannot_relaunch_an_unbound_legacy_route() {
+  local dir out rc reservation capability meta
+  dir=$(new_case routed-legacy-off rl36legacy)
+  add_ship_task "$dir" rl36legacy claude
+  mkdir -p "$dir/home/config" "$dir/claude-primary"
+  jq -n --arg config_dir "$dir/claude-primary" \
+    '{version:1,accounts:{"claude-primary":{harness:"claude",envName:"CLAUDE_CONFIG_DIR",configDir:$config_dir}}}' \
+    > "$dir/home/config/crew-accounts.json"
+  activate_test_route "$dir" rl36legacy gen-old
+  reservation="$dir/home/state/routing/reservations/rl36legacy/gen-old.json"
+  capability="$dir/home/state/routing/claims/rl36legacy/gen-old.cap"
+  meta="$dir/home/state/rl36legacy.meta"
+  jq 'del(.bindingVersion,.launchHarness,.launchModel,.launchEffort,.requestDigest,.candidatesDigest,.decisionDigest,.policyDigest)' \
+    "$reservation" >"$reservation.next"
+  mv "$reservation.next" "$reservation"
+  cp "$reservation" "$reservation.before"
+  cp "$capability" "$capability.before"
+  cp "$meta" "$meta.before"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl36legacy --relaunch --route-mode off --model arbitrary); rc=$?
+  expect_code 1 "$rc" "explicit off must not convert an unbound route into arbitrary launch authority"
+  assert_contains "$out" "matching routing reservation is required" "legacy explicit-off refusal was not diagnosed"
+  cmp -s "$reservation.before" "$reservation" || fail "legacy explicit-off refusal changed reservation"
+  cmp -s "$capability.before" "$capability" || fail "legacy explicit-off refusal changed capability"
+  cmp -s "$meta.before" "$meta" || fail "legacy explicit-off refusal changed metadata"
+  pass "fm-spawn relaunch: explicit off cannot bypass an unbound legacy route"
+}
+
 test_explicit_reroute_requires_a_distinct_reserved_generation() {
   local dir out rc reservation
   dir=$(new_case routed-replacement rl37)
@@ -1551,6 +1580,7 @@ test_relaunch_preserves_and_readmits_the_original_route_generation
 test_bound_inherited_route_uses_the_effective_relaunch_identity
 test_relaunch_upgrades_legacy_eight_field_route_metadata
 test_explicit_off_relaunch_suppresses_inherited_route_metadata
+test_explicit_off_cannot_relaunch_an_unbound_legacy_route
 test_explicit_reroute_requires_a_distinct_reserved_generation
 test_routed_relaunch_prepublication_failures_preserve_old_capacity
 test_relaunch_serializes_concurrent_durable_metadata_publication
