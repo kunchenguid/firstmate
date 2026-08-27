@@ -299,7 +299,11 @@ fm_herdr_lab_name() { # <label>
 }
 
 fm_herdr_lab_usage() {
-  sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "${BASH_SOURCE[0]}"
 }
 
 fm_herdr_lab_main() {

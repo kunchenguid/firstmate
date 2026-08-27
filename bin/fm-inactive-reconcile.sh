@@ -521,7 +521,11 @@ case "$mode" in
     acknowledge_notice "$2"
     ;;
   -h|--help)
-    sed -n '2,40{s/^# \{0,1\}//;p;}' "$0"
+    awk '
+      NR == 1 { next }
+      /^#/ { sub(/^# ?/, ""); print; next }
+      { exit }
+    ' "$0"
     ;;
   *)
     printf 'usage: fm-inactive-reconcile.sh scan [--startup]\n' >&2

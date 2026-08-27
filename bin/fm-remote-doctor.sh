@@ -70,7 +70,14 @@ LAUNCH_AGENT_LOG_DIR="${HOME:-}/Library/Logs"
 LAUNCH_AGENT_LOG="$LAUNCH_AGENT_LOG_DIR/$LAUNCH_AGENT_LABEL.log"
 ENTRYPOINT_LINK="${HOME:-}/.local/bin/fm-remote-entrypoint.sh"
 
-usage() { sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() {
+  awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "$0"
+  exit 2
+}
 
 MODE=check
 case "${1:-}" in
