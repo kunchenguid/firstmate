@@ -7,11 +7,7 @@
 # does not acquire the session lock, drain wakes, arm watchers, steer, relaunch,
 # acknowledge records, or otherwise repair anything.
 #
-# Activation is not in this phase. The smallest later integration is a custom
-# watcher slow-check that runs this command and prints one line only when the
-# high-confidence fingerprint set changes, so a finding enters the durable wake
-# queue and unchanged repeats stay quiet. Cron and Herdr composer injection add
-# no recovery the wake queue and watcher continuity do not already provide.
+# The checker is not scheduled or activated automatically.
 #
 # Findings are mechanically provable Firstmate operational failures: dead or
 # missing local agents, a Codex worker whose pane shows the exact resume banner
