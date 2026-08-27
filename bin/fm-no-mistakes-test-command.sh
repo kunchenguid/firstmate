@@ -9,6 +9,38 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 DISPATCH="$ROOT/bin/fm-azure-runner-dispatch.sh"
 
+run_azure_worker_required() {
+  # This command is already running inside Firstmate's isolated no-mistakes
+  # Azure worker. Re-entering the general Azure validation dispatcher here
+  # adds another provision/teardown cycle and makes the service depend on
+  # unrelated fleet tests. Keep this lane to the executable transport and
+  # lifecycle contracts that can break no-mistakes consumption.
+  local tests=() relative
+  while IFS= read -r relative; do
+    [ -n "$relative" ] || continue
+    tests+=("$ROOT/$relative")
+  done < <(python3 "$ROOT/bin/fm-azure-service-test-scope.py" list)
+  [ "${#tests[@]}" -gt 0 ] || {
+    echo "no-mistakes Azure worker focused suite is empty" >&2
+    return 1
+  }
+  printf 'no-mistakes: Azure worker focused suite files=%s; CI owns broader repository coverage\n' \
+    "${#tests[@]}"
+  FM_NO_MISTAKES_AZURE_WORKER=0 "$ROOT/tests/run.sh" "${tests[@]}"
+}
+
+case "${FM_NO_MISTAKES_AZURE_WORKER:-0}" in
+  1)
+    run_azure_worker_required
+    exit $?
+    ;;
+  0) ;;
+  *)
+    printf 'FM_NO_MISTAKES_AZURE_WORKER must be 0 or 1\n' >&2
+    exit 2
+    ;;
+esac
+
 run_local_required() {
   command -v tmux >/dev/null || { echo "tmux is required for e2e tests" >&2; return 1; }
   tmux -V

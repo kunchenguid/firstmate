@@ -14,6 +14,7 @@ fm-autocompact.test.sh	hermetic
 fm-azure-cell-image.test.sh	hermetic
 fm-azure-pilot.test.sh	hermetic
 fm-azure-runner.test.sh	hermetic
+fm-azure-service-test-scope.test.sh	hermetic
 fm-azure-runtime-bundle.test.sh	hermetic
 fm-azure-validation.test.sh	hermetic
 fm-backend-autodetect-smoke.test.sh	herdr-lab

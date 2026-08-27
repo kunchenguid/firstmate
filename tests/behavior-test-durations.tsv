@@ -22,6 +22,7 @@
 1000	tests/fm-azure-cell-image.test.sh
 1000	tests/fm-azure-pilot.test.sh
 5000	tests/fm-azure-runner.test.sh
+1000	tests/fm-azure-service-test-scope.test.sh
 25000	tests/fm-azure-runtime-bundle.test.sh
 8000	tests/fm-azure-validation.test.sh
 20	tests/fm-backend-autodetect-smoke.test.sh

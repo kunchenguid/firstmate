@@ -1058,6 +1058,7 @@ make_dispatch_fixture() {  # <root>: real dispatch + step code, capturing runner
   mkdir -p "$root/bin" "$root/tests"
   cp "$ROOT/bin/fm-azure-runner-dispatch.sh" "$root/bin/fm-azure-runner-dispatch.sh"
   cp "$ROOT/bin/fm-no-mistakes-test-command.sh" "$root/bin/fm-no-mistakes-test-command.sh"
+  cp "$ROOT/bin/fm-azure-service-test-scope.py" "$root/bin/fm-azure-service-test-scope.py"
   cp "$ROOT/bin/fm-azure-runner-command.sh" "$root/bin/fm-azure-runner-command.sh"
   cp "$ROOT/bin/fm-azure-runner-routing.py" "$root/bin/fm-azure-runner-routing.py"
   cp "$ROOT/bin/fm-azure-runner.py" "$root/bin/fm-azure-runner.py"
@@ -1372,6 +1373,33 @@ PY
     ! grep -q -- '--skip-herdr' "$log" \
       || fail "the local host set selected the non-Herdr path"
   }
+
+  # A no-mistakes Azure guest is already the isolated execution boundary.
+  # It runs only the service transport/lifecycle regression set in that worker
+  # and must never recurse through the general Azure dispatcher or Herdr lane.
+  rm -f "$fixture/captured" "$fixture/local-runs"
+  out=$(cd "$gatewt" && env HOME="$anchor" PATH="$fakebin:$PATH" \
+    FM_NO_MISTAKES_AZURE_WORKER=1 \
+    "$fixture/bin/fm-no-mistakes-test-command.sh" 2>&1) \
+    || fail "the no-mistakes Azure worker focused suite failed"
+  [ ! -e "$fixture/captured" ] \
+    || fail "the no-mistakes Azure worker recursively dispatched another Azure runner"
+  assert_contains "$out" "Azure worker focused suite files=10" \
+    "the no-mistakes Azure worker did not identify its focused suite"
+  [ "$(wc -l < "$fixture/local-runs" | tr -d ' ')" -eq 1 ] \
+    || fail "the no-mistakes Azure worker did not run one focused suite invocation"
+  for required in \
+    fm-azure-pilot.test.sh fm-azure-runner.test.sh fm-cloud-provider-seal.test.sh \
+    fm-no-mistakes-reattach.test.sh fm-no-mistakes-runtime.test.sh \
+    fm-no-mistakes-worker.test.sh fm-worker-lifecycle.test.sh \
+    fm-worker-outcome-transport.test.sh fm-worker-placement.test.sh \
+    fm-worker-supervisor.test.sh; do
+    grep -q "$required" "$fixture/local-runs" \
+      || fail "the no-mistakes Azure worker focused suite omitted $required"
+  done
+  ! grep -q 'fm-fixture-herdr.test.sh' "$fixture/local-runs" \
+    || fail "the no-mistakes Azure worker entered the unrelated Herdr suite"
+  pass "the no-mistakes Azure worker runs its focused service suite without nested Azure or Herdr"
 
   # The daemon-owned production path has no FM_AZURE_RUNNER_REMOTE_CLASSES.
   # A valid per-run selection must still choose the split lane, and inspection
