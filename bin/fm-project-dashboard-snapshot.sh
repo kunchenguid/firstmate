@@ -33,6 +33,11 @@
 # whose (repo: ...) label names an unregistered project. A done row that carries
 # no label and whose task has been torn down has no signal linking it to any
 # project, so it is dropped rather than reported as fleet incompleteness.
+# A captain-actionable queued row is a decision, not queued work: it appears in
+# decisions[] or deferred_decisions[] and never in queued[], so one open question
+# is never shown twice on a card.
+# A Done row still held for the captain is a transfer record, not shipped work,
+# so it is absent from both landed[] and prs[].
 # landed[] and prs[] are the two surfaces fed by the append-only Done section;
 # both publish at most five rows, newest completion first, and carry the true
 # total in counts. prs[] lists current work ahead of completed work, and a task
@@ -461,14 +466,13 @@ jq -n \
              | {id,title:(.title // .id),reason:((.reason | present) // "Waiting"),owner:$owner.id} ]
         | dedupe_first([.owner,.id])) as $waiting
       | ([ $backlog[]
-           | select(.state == "queued")
-           | {id,title,reason:(.hold_reason // .blocked_reason // ""),since,owner:"main",
-              captain_actionable:(.captain_actionable // false)} ]
+           | select(.state == "queued" and .captain_actionable != true)
+           | {id,title,reason:(.hold_reason // .blocked_reason // ""),since,owner:"main"} ]
          + [ $owners[] as $owner
              | $owner.record.queued[]?
-             | select(matches_project($owner; $name))
-             | {id,title,reason:(.hold_reason // .blocked_reason // ""),since:(.since // null),owner:$owner.id,
-                captain_actionable:(.captain_actionable // false)} ]
+             | select(matches_project($owner; $name) and .captain_actionable != true)
+             | {id,title,reason:(.hold_reason // .blocked_reason // ""),since:(.since // null),
+                owner:$owner.id} ]
         | dedupe_first([.owner,.id])) as $queued
       | ([ $backlog[]
            | select(.state == "done" and .hold_kind != "captain")
@@ -488,7 +492,7 @@ jq -n \
               completed:(if $done_row == null then null
                          else ($done_row.completion.date // $done_row.merged
                                // $done_row.reported // $done_row.done) end)} ]
-         + [ $backlog[] | select(.pr_url != null)
+         + [ $backlog[] | select(.pr_url != null and .hold_kind != "captain")
              | {id,title,url:.pr_url,owner:"main",
                 current:(.state != "done"),
                 completed:(if .state == "done"

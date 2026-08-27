@@ -1304,6 +1304,68 @@ test_pull_request_list_is_bounded_like_landed() {
   pass "the pull-request list keeps current work and the newest landings"
 }
 
+test_captain_decision_is_not_also_queued_work() {
+  local home epoch out
+  home=$(make_home decision-vs-queued)
+  write_fleet_fixture "$home"
+  jq '
+    .backlog.records += [{structured:true,id:"alpha-next",repo:"alpha",title:"Real queued work",
+      state:"queued",since:"2020-01-01",captain_actionable:false,unresolved_blocker_ids:[]}]
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "decision-vs-queued snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "alpha")
+    | (.decisions | any(.id == "alpha-call"))
+      and (.queued | map(.id)) == ["alpha-next"]
+      and (.queued | any(.id == "alpha-call") | not)
+  ' >/dev/null || fail "a captain decision was listed as queued work too: $out"
+
+  jq '
+    .backlog.records |= map(select(.repo != "alpha"))
+    | .backlog.records += [{structured:true,id:"a-defer",repo:"alpha",title:"Superseded question",
+        state:"queued",since:"2020-01-01",captain_actionable:true,hold_kind:"captain",
+        hold_reason:"SUPERSEDED by alpha-new",deferred_marker:true,unresolved_blocker_ids:[]}]
+    | .tasks |= map(select(.project != "alpha"))
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  out=$(run_snapshot "$home" "$epoch") || fail "deferred-only snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "alpha")
+    | .status == "idle_queued"
+      and .queued == []
+      and (.deferred_decisions | map(.id)) == ["a-defer"]
+      and .next_step == "No work queued"
+  ' >/dev/null || fail "a deferred captain hold was named as the next queued step: $out"
+  pass "a captain decision is never also listed as queued work"
+}
+
+test_captain_held_done_row_is_neither_landed_nor_a_pr_link() {
+  local home epoch out
+  home=$(make_home captain-held-done)
+  write_fleet_fixture "$home"
+  jq '
+    .backlog.records = [
+      {structured:true,id:"cap",repo:"alpha",title:"Captain transfer record",state:"done",
+       hold_kind:"captain",hold_reason:"handed to the captain",
+       pr_url:"https://github.com/example/alpha/pull/1",completion:{date:"2026-08-25"}},
+      {structured:true,id:"old",repo:"alpha",title:"Older landing",state:"done",hold_kind:null,
+       pr_url:"https://github.com/example/alpha/pull/3",completion:{date:"2026-01-01"}}]
+    | .tasks = []
+    | .secondmate_current.records = []
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "captain-held-done snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "alpha")
+    | (.landed | map(.id)) == ["old"] and .counts.landed == 1
+      and (.prs | map(.id)) == ["old"] and .counts.prs == 1
+  ' >/dev/null || fail "a captain-held done row reached the landed or PR surface: $out"
+  pass "a Done row still held for the captain is neither landed work nor a PR link"
+}
+
 extract_payload() {  # <board>
   sed -n '/<script id="project-dashboard-data" type="application\/json">/,/<\/script>/p' "$1" | sed '1d;$d'
 }
@@ -1568,6 +1630,8 @@ test_home_summary_discloses_its_own_holds_truncation
 test_torn_down_done_rows_do_not_raise_the_incomplete_banner
 test_done_row_naming_an_unregistered_project_is_disclosed
 test_pull_request_list_is_bounded_like_landed
+test_captain_decision_is_not_also_queued_work
+test_captain_held_done_row_is_neither_landed_nor_a_pr_link
 test_attention_next_step_is_an_action_not_a_bare_title
 test_unattributable_secondmate_state_is_disclosed
 test_registered_secondmate_without_a_task_still_owns_its_projects
