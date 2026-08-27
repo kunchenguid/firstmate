@@ -50,9 +50,10 @@ SH
   cat > "$fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in
-  --version:*) printf '%s\n' '0.2.4' ;;
+  --version:*) printf '%s\n' '0.3.0' ;;
   update:--help) printf '%s\n' '--archive-body' ;;
   mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
+  add:--help) printf '%s\n' 'usage: tasks-axi add <id> "<title>" --epic <slug>' ;;
 esac
 SH
   cat > "$fakebin/tmux" <<'SH'

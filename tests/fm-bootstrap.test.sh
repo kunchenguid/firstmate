@@ -85,7 +85,7 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
-  add_tasks_axi "$fakebin" "0.2.4"
+  add_tasks_axi "$fakebin" "0.3.0"
   add_quota_axi "$fakebin"
   printf '%s\n' "$fakebin"
 }
@@ -123,6 +123,11 @@ if [ "\${1:-}" = update ] && [ "\${2:-}" = --help ]; then
 fi
 if [ "\${1:-}" = mv ] && [ "\${2:-}" = --help ]; then
   printf '%s\n' '$mv_usage'
+  exit 0
+fi
+if [ "\${1:-}" = add ] && [ "\${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi add <id> "<title>" --epic <slug> [flags]'
+  printf '%s\n' '  --epic <slug>      required epic membership'
   exit 0
 fi
 exit 0
@@ -297,16 +302,16 @@ test_bootstrap_reporting() {
         ;;
     esac
   done <<'ROWS'
-treehouse --lease support is accepted silently^1^0.2.4^1^manual^empty^^
-treehouse without --lease reports an upgrade, gh auth is fine^0^0.2.4^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
-compatible tasks-axi is silent by default^1^0.2.4^1^-^empty^^
+treehouse --lease support is accepted silently^1^0.3.0^1^manual^empty^^
+treehouse without --lease reports an upgrade, gh auth is fine^0^0.3.0^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
+compatible tasks-axi is silent by default^1^0.3.0^1^-^empty^^
 missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 tasks-axi without archive-body is required by default^1^0.2.4:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 tasks-axi without multi-id mv is required by default^1^0.2.4:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-missing quota-axi is required by default^1^0.2.4^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
+missing quota-axi is required by default^1^0.3.0^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
 manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-manual backlog backend suppresses tasks-axi availability^1^0.2.4^1^manual^empty^^
+manual backlog backend suppresses tasks-axi availability^1^0.3.0^1^manual^empty^^
 ROWS
   pass "bootstrap reports treehouse lease + tasks-axi/quota-axi bootstrap contracts"
 }
@@ -438,9 +443,9 @@ test_tasks_axi_min_version() {
         [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
     esac
   done <<'ROWS'
-minimum tasks-axi version is accepted^0.2.4^empty
-newer tasks-axi patch is accepted^0.2.5^empty
-newer tasks-axi minor is accepted^0.3.0^empty
+minimum tasks-axi version is accepted^0.3.0^empty
+newer tasks-axi patch is accepted^0.3.1^empty
+newer tasks-axi minor is accepted^0.4.0^empty
 newer tasks-axi major is accepted^1.0.0^empty
 older tasks-axi with features reports an upgrade^0.1.1^missing
 the patch just below the floor reports an upgrade^0.2.3^missing

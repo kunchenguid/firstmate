@@ -49,9 +49,10 @@ cat > "$REMOTE_ROOT/bin/tasks-axi" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\${FM_REMOTE_JOB_ACTIVE:-absent}" >> "$TOOL_PROBE_LOG"
 case "\${1:-}:\${2:-}" in
-  --version:*) printf '0.2.4\n' ;;
+  --version:*) printf '0.3.0\n' ;;
   update:--help) printf '%s\n' --archive-body ;;
   mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
+  add:--help) printf '%s\n' 'usage: tasks-axi add <id> "<title>" --epic <slug>' ;;
 esac
 SH
 cp "$ROOT/bin/fm-remote-doctor.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" \
@@ -326,9 +327,10 @@ printf '#!/usr/bin/env bash\nprintf "{\\\"server\\\":{\\\"running\\\":false}}\\n
 cat > "$DOCTOR_BIN/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in
-  --version:*) printf '0.2.4\n' ;;
+  --version:*) printf '0.3.0\n' ;;
   update:--help) printf '%s\n' --archive-body ;;
   mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
+  add:--help) printf '%s\n' 'usage: tasks-axi add <id> "<title>" --epic <slug>' ;;
 esac
 SH
 printf '#!/usr/bin/env bash\nexit 0\n' > "$DOCTOR_BIN/treehouse"
