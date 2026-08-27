@@ -37,6 +37,8 @@ set -u
 . "$ROOT/bin/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-marker-lib.sh
 . "$ROOT/bin/fm-marker-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$ROOT/bin/fm-task-inbox-lib.sh"
 
 SEND="$ROOT/bin/fm-send.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -354,6 +356,38 @@ test_remote_retry_failure_preserves_ambiguous_expectation() {
   pass "fm-send remote: a failed retry cannot erase an earlier ambiguous delivery"
 }
 
+test_remote_fire_and_forget_never_arms_reply_recovery() {
+  local dir fb ssh_log home rhome rc count delivery action
+  dir="$TMP_ROOT/remote-fire-and-forget"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home remote-fire-and-forget)
+  home=$(setup_remote_parent_home remote-fire-and-forget "$rhome")
+  delivery=0123456789abcdef
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_FAKE_SSH_AFTER_AMBIGUOUS_RC=1 \
+    "$SEND" rsm --fire-and-forget "$delivery" "reconcile your own books" \
+    >"$dir/out" 2>"$dir/err" || rc=$?
+  expect_code 3 "$rc" "an ambiguous fire-and-forget delivery must report unconfirmed"
+  [ "$(find "$home/state/pending-replies" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')" = 0 ] \
+    || fail "fire-and-forget delivery created a pending-reply expectation"
+  count=$(find "$rhome/state/parent-route/rsm.inbox" -name '*.msg' | wc -l | tr -d ' ')
+  [ "$count" = 1 ] || fail "the ambiguous fire-and-forget delivery did not land exactly once"
+  action=$(FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_RING_MAX=0 \
+    fm_task_inbox_due_action "$rhome/state/parent-route" rsm)
+  [ "$action" = quiet ] || fail "the remote fire-and-forget record armed inbox escalation: $action"
+
+  send_env "$fb" "$home" "$ssh_log" \
+    "$SEND" rsm --fire-and-forget "$delivery" "reconcile your own books" \
+    >"$dir/retry.out" 2>"$dir/retry.err" \
+    || fail "the fire-and-forget retry failed"
+  count=$(find "$rhome/state/parent-route/rsm.inbox" -name '*.msg' | wc -l | tr -d ' ')
+  [ "$count" = 1 ] || fail "the same fire-and-forget delivery id created a duplicate remote record"
+  grep -F "delivery=$delivery" "$(remote_inbox_records "$rhome" | head -1)" >/dev/null \
+    || fail "the remote record omitted its fire-and-forget delivery identity"
+  pass "fm-send remote: fire-and-forget delivery is idempotent without reply recovery"
+}
+
 test_remote_send_revalidates_after_retirement_lock() {
   local dir rhome meta lock ready release rc sender_pid holder_pid
   dir="$TMP_ROOT/remote-retire-race"; mkdir -p "$dir"
@@ -423,6 +457,36 @@ test_remote_send_revalidates_parent_route_after_retirement_lock() {
   [ -z "$(pending_record "$home")" ] \
     || fail "a parent-route retirement failure left a created pending expectation"
   pass "fm-send remote: enqueue revalidates the parent route under its metadata lock"
+}
+
+test_remote_expected_host_revalidates_final_route() {
+  local dir fb ssh_log home rhome rc err count
+  dir="$TMP_ROOT/remote-expected-host"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home remote-expected-host)
+  home=$(setup_remote_parent_home remote-expected-host "$rhome")
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" \
+    FM_SEND_EXPECTED_SPAWN_GEN="" FM_SEND_EXPECTED_REMOTE_HOST=remote-mac \
+    "$SEND" rsm --fire-and-forget 1111111111111111 "matching expected host" \
+    >"$dir/match.out" 2>"$dir/match.err" || rc=$?
+  expect_code 0 "$rc" "a matching expected remote host must allow delivery"
+  count=$(remote_inbox_records "$rhome" | grep -c . || true)
+  [ "$count" = 1 ] || fail "a matching expected remote host did not deliver exactly once"
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" \
+    FM_SEND_EXPECTED_SPAWN_GEN="" FM_SEND_EXPECTED_REMOTE_HOST=retired-mac \
+    "$SEND" rsm --fire-and-forget 2222222222222222 "stale expected host" \
+    >"$dir/mismatch.out" 2>"$dir/mismatch.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a mismatched expected remote host reported delivery"
+  err=$(cat "$dir/mismatch.err")
+  assert_contains "$err" "retired or changed route" \
+    "a mismatched expected remote host did not report the route replacement: $err"
+  count=$(remote_inbox_records "$rhome" | grep -c . || true)
+  [ "$count" = 1 ] || fail "a mismatched expected remote host reached the remote inbox"
+  pass "fm-send remote: expected host is enforced by final route validation"
 }
 
 test_remote_resolve_key_closes_at_enqueue() {
@@ -620,8 +684,10 @@ test_local_pending_does_not_close_resolve_key() {
 test_remote_steer_lands_in_remote_inbox
 test_remote_rerun_is_idempotent
 test_remote_retry_failure_preserves_ambiguous_expectation
+test_remote_fire_and_forget_never_arms_reply_recovery
 test_remote_send_revalidates_after_retirement_lock
 test_remote_send_revalidates_parent_route_after_retirement_lock
+test_remote_expected_host_revalidates_final_route
 test_remote_resolve_key_closes_at_enqueue
 test_remote_slash_rides_inbox
 test_remote_real_failure_still_fails

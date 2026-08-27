@@ -113,7 +113,9 @@ validate_payload() {  # <data.json>
     def charted_item:
       type == "object" and repo_marker and (.id | slug(128))
       and (.title | nonempty_string) and (.reason | type == "string")
-      and (.dispatchable | type == "boolean");
+      and (.dispatchable | type == "boolean")
+      and ((has("kind") | not) or (.kind == "queued" or .kind == "warning"))
+      and (if .kind == "warning" then .dispatchable == false else true end);
     type == "object"
     and (.schema == $schema)
     and (.home | nonempty_string)
@@ -125,6 +127,8 @@ validate_payload() {  # <data.json>
     and (.charted | type == "array")
     and ((has("charted_more") | not)
       or ((.charted_more | type == "number") and (.charted_more >= 0) and (.charted_more | floor == .)))
+    and ((has("charted_warning_more") | not)
+      or ((.charted_warning_more | type == "number") and (.charted_warning_more >= 0) and (.charted_warning_more | floor == .)))
     and ([.captains_call[] | call_item] | all)
     and ([.underway[] | underway_item] | all)
     and ([.landed[] | landed_item] | all)
@@ -151,7 +155,7 @@ command_build() {
   board=$(board_path)
   (umask 077; mkdir -p "${board%/*}") || fail "cannot create ${board%/*}"
   tmp=$(umask 077; mktemp "${board%/*}/.board.XXXXXX") || fail "cannot stage the board"
-  if ! BOARD_JSON="$json" perl -pe "s/^\\Q$PLACEHOLDER\\E\$/\$ENV{BOARD_JSON}/" "$TEMPLATE" > "$tmp"; then
+  if ! BOARD_JSON="$json" perl -pe "s/^\\Q$PLACEHOLDER\\E\\r?\$/\$ENV{BOARD_JSON}/" "$TEMPLATE" > "$tmp"; then
     rm -f -- "$tmp"
     fail "cannot inject the board data"
   fi

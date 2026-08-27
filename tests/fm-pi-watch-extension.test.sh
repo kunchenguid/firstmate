@@ -620,7 +620,7 @@ EOF
   pass "Pi dispatcher flags a fleet-wide heartbeat offer as branch-eligible"
 }
 
-test_pi_heartbeat_with_main_owned_queue_row_stays_on_main() {
+test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-heartbeat-mixed-queue-root"
   home="$TMP_ROOT/pi-heartbeat-mixed-queue-home"
@@ -684,23 +684,129 @@ writeFileSync(
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-heartbeat-mixed-queue", {}, undefined, undefined, {});
-for (let i = 0; i < 250 && !prompt; i += 1) {
+// The offer is what this asserts on, so wait for it and then give any
+// erroneous main delivery a real chance to land before calling it absent.
+for (let i = 0; i < 250 && offers.length === 0; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
-if (offers.length !== 1 || offers[0].heartbeat !== true || offers[0].eligible !== false) {
-  throw new Error(`mixed heartbeat offer had unsafe eligibility: ${JSON.stringify(offers)}`);
+for (let i = 0; i < 25 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
 }
-if (!prompt.includes("FIRSTMATE WATCHER WAKE: heartbeat")) {
-  throw new Error(`mixed heartbeat wake did not stay on main: ${prompt}`);
+if (offers.length !== 1 || offers[0].heartbeat !== true || offers[0].eligible !== true) {
+  throw new Error(`a co-present check row made the heartbeat offer ineligible: ${JSON.stringify(offers)}`);
+}
+if (prompt) {
+  throw new Error(`a co-present check row rode the heartbeat into main: ${prompt}`);
 }
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 process.exit(0);
 EOF
   )
   status=$?
-  expect_code 0 "$status" "heartbeat with a main-owned queue row must stay on main: $out"
+  expect_code 0 "$status" "a heartbeat must not ride a co-present check row into main: $out"
   [ -z "$out" ] || fail "Pi mixed heartbeat-queue test printed output: $out"
-  pass "heartbeat with a main-owned queue row stays on main"
+  pass "a co-present check row neither vetoes nor rides a heartbeat into main"
+}
+
+# Every check the main session alone can act on stays on main, even when an
+# unrelated task-local row in the same queue is perfectly branch-eligible. The
+# no-op checks the branch never sees are suppressed at their source instead
+# (bin/fm-procevent-lavish.sh "silent"), so what remains under a `check:`
+# trigger is exactly the main-only set, and each named class is driven here
+# through the real dispatcher.
+test_pi_main_only_check_classes_stay_on_main() {
+  local repo home plugin log stop out status reason label
+  repo="$TMP_ROOT/pi-main-only-check-root"
+  home="$TMP_ROOT/pi-main-only-check-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$home/projects/approved"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf '%s\n' "${FM_TEST_REASON:?}"
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  while IFS='|' read -r label reason; do
+    [ -n "$label" ] || continue
+    log="$TMP_ROOT/pi-main-only-check-$label.log"
+    stop="$TMP_ROOT/pi-main-only-check-$label.stop"
+    out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
+      FM_TEST_REASON="$reason" node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const offers = [];
+let prompt = "";
+let tool = null;
+const handlers = new Map();
+const bus = {
+  on(channel, handler) {
+    handlers.set(channel, [...(handlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of handlers.get(channel) ?? []) handler(data);
+  },
+};
+bus.on("fm-branch-supervision:dispatch", (offer) => {
+  offers.push({ message: offer.message, eligible: offer.eligible });
+  if (offer.eligible) offer.accept();
+});
+const pi = {
+  on() {},
+  events: bus,
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt = message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+// A task-local row the branch would happily take sits in the same queue, so
+// only the check-kind TRIGGER itself can be what keeps this wake on main.
+writeFileSync(
+  `${process.env.FM_HOME}/state/.wake-queue`,
+  "1\t1\tsignal\ttask-a.status\tsignal: task-a.status\n2\t2\tcheck\tmain-only\t" + process.env.FM_TEST_REASON + "\n",
+);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-main-only-check", {}, undefined, undefined, {});
+for (let i = 0; i < 250 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (offers.length !== 1 || offers[0].eligible !== false) {
+  throw new Error(`a main-only check was offered to the branch: ${JSON.stringify(offers)}`);
+}
+if (!prompt.includes(`FIRSTMATE WATCHER WAKE: ${process.env.FM_TEST_REASON}`)) {
+  throw new Error(`a main-only check did not reach main: ${prompt}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+    )
+    status=$?
+    expect_code 0 "$status" "the $label check class must stay on main: $out"
+    [ -z "$out" ] || fail "Pi main-only check test ($label) printed output: $out"
+  done <<'CLASSES'
+relay-mention|check: x-mention 1234567890
+credential-failure|check: gh auth check failed; re-authenticate before dispatch
+merge-confirmation|check: task-a.check.sh: PR merged
+real-board-answer|check: procevent lavish lavish-abcdef0123456789 1
+CLASSES
+  pass "every main-only check class still reaches main, never the supervision branch"
 }
 
 test_pi_heartbeat_restoration_failure_stays_on_main() {
@@ -2705,7 +2811,8 @@ test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
 test_pi_branch_offer_owns_actionable_wake
 test_pi_branch_offer_flags_heartbeat
-test_pi_heartbeat_with_main_owned_queue_row_stays_on_main
+test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check
+test_pi_main_only_check_classes_stay_on_main
 test_pi_heartbeat_restoration_failure_stays_on_main
 test_pi_watcher_failure_never_offered_to_branch
 test_pi_handling_delivery_failure_is_typed_once
