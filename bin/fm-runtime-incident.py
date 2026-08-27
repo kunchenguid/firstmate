@@ -31,11 +31,12 @@ observations.  Omit it, or use unknown/not yet proven, while evidence remains
 ambiguous.  The script validates that an actionable diagnosis has the exact
 proof, authority, and approval mechanics required by its selected workflow.
 
-The command never executes a repair.  After the exact approval has been
-obtained, perform the narrow provider or service operation with its supported
-operator surface, then use `repair` to record that fact and `verify` with fresh
-end-to-end evidence.  A code-change workflow is ready only when triage returns
-`code_change_required: yes`.
+The command never executes a repair.  When the adjudicated workflow requires
+captain approval, obtain and record that exact approval before performing the
+narrow provider or service operation.  Use `repair` to record either that
+completed operation or a code fix completed through the normal release process,
+then use `verify` with fresh end-to-end evidence.  A code-change workflow is
+ready only when triage returns `code_change_required: yes`.
 """
 
 from __future__ import annotations
@@ -1066,8 +1067,14 @@ def flow_state(current: str, *, code_required: str, approval_required: bool) -> 
             {"name": "triage", "status": "complete"},
             {"name": "diagnosis", "status": "complete"},
             {"name": "approval", "status": "not_applicable"},
-            {"name": "repair", "status": "not_applicable"},
-            {"name": "verification", "status": "pending_after_release"},
+            {
+                "name": "repair",
+                "status": "complete" if current == "verification" else "pending_after_release",
+            },
+            {
+                "name": "verification",
+                "status": "current" if current == "verification" else "pending_after_release",
+            },
         ]
     current_index = FLOW.index(current)
     result: list[dict[str, str]] = []
@@ -1570,31 +1577,39 @@ def repair(args: argparse.Namespace) -> int:
     now = utc_now()
 
     def transition(record: dict[str, Any]) -> None:
-        if record.get("phase") != "repair":
-            raise IncidentError("an operational repair must start from the repair phase")
+        code_required = record["diagnosis"]["code_change_required"]
+        expected_phase = "diagnosis" if code_required == "yes" else "repair"
+        if record.get("phase") != expected_phase:
+            raise IncidentError("the diagnosed repair is not ready to be recorded")
         if record.get("repair", {}).get("status") != "pending":
-            raise IncidentError("the operational repair is no longer pending")
+            raise IncidentError("the diagnosed repair is no longer pending")
         if record.get("verification", {}).get("status") != "pending":
             raise IncidentError("verification has already started or completed")
-        if record["diagnosis"]["code_change_required"] != "no":
-            raise IncidentError("an operational repair is allowed only after a no-code diagnosis")
-        if not record["diagnosis"].get("operational_repair_ready"):
-            raise IncidentError("the diagnosis has not identified an operational repair")
         approval = record["approval"]
-        if approval.get("required") and approval.get("status") != "approved":
-            raise IncidentError("the exact operational approval is still pending")
-        if not approval.get("required") and approval.get("status") != "not_required":
-            raise IncidentError("the operational approval state is invalid")
+        if code_required == "no":
+            if not record["diagnosis"].get("operational_repair_ready"):
+                raise IncidentError("the diagnosis has not identified an operational repair")
+            if approval.get("required") and approval.get("status") != "approved":
+                raise IncidentError("the exact operational approval is still pending")
+            if not approval.get("required") and approval.get("status") != "not_required":
+                raise IncidentError("the operational approval state is invalid")
+        elif code_required == "yes":
+            if record.get("outcome") != "escalate_to_code_change":
+                raise IncidentError("the code repair has not been escalated through the normal workflow")
+            if approval.get("required") or approval.get("status") != "not_required":
+                raise IncidentError("a code repair has an invalid operational approval state")
+        else:
+            raise IncidentError("the diagnosis has not selected a repair workflow")
         record["repair"] = {"status": "complete", "note": compact(args.note, 300), "recorded_at": now}
         record["phase"] = "verification"
         record["updated_at"] = now
         record["flow"] = flow_state(
             "verification",
-            code_required="no",
+            code_required=code_required,
             approval_required=bool(approval.get("required")),
         )
         record["safest_next_action"] = (
-            "Verify production identity, provider health, companion connectivity, and the complete user-visible runtime path."
+            "Verify production identity, repaired component health, companion connectivity, and the complete user-visible runtime path."
         )
 
     record = update_incident(base, incident_id, transition)
@@ -1641,7 +1656,7 @@ def verify(args: argparse.Namespace) -> int:
 
     def transition(record: dict[str, Any]) -> None:
         if record.get("phase") != "verification" or record["repair"].get("status") != "complete":
-            raise IncidentError("record the approved repair before verification")
+            raise IncidentError("record the completed operational repair or released code fix before verification")
         if record.get("verification", {}).get("status") not in {"pending", "failed"}:
             raise IncidentError("incident verification is already complete")
         record["verification"] = {
@@ -1661,10 +1676,17 @@ def verify(args: argparse.Namespace) -> int:
             {"name": name, "status": "complete" if complete or name != "verification" else "current"}
             for name in FLOW
         ]
-        if not record["approval"].get("required"):
+        code_required = record["diagnosis"]["code_change_required"]
+        if code_required == "yes":
+            record["flow"][2]["status"] = "not_applicable"
+        elif not record["approval"].get("required"):
             record["flow"][2]["status"] = "not_required"
         record["safest_next_action"] = (
-            "Incident verification is complete; close the incident without code, release, or unrelated cleanup."
+            (
+                "Incident verification is complete; close the incident without unrelated cleanup."
+                if code_required == "yes"
+                else "Incident verification is complete; close the incident without code, release, or unrelated cleanup."
+            )
             if complete
             else "Verification did not prove the complete runtime path; keep the incident open and gather the failed check evidence."
         )
@@ -1768,7 +1790,10 @@ def parser() -> argparse.ArgumentParser:
     approve_parser.add_argument("--json", action="store_true")
     approve_parser.set_defaults(func=approve)
 
-    repair_parser = sub.add_parser("repair", help="record a completed narrow operational repair")
+    repair_parser = sub.add_parser(
+        "repair",
+        help="record a completed narrow operation or normally released code fix",
+    )
     repair_parser.add_argument("--incident", required=True)
     repair_parser.add_argument("--note", required=True)
     repair_parser.add_argument("--json", action="store_true")

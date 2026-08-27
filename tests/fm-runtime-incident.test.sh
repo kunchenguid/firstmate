@@ -640,8 +640,42 @@ EOF
     .diagnosis.code_change_required == "yes"
       and .outcome == "escalate_to_code_change"
       and .guardrails.new_worktree_allowed == true
+      and (.flow[] | select(.name == "repair") | .status) == "pending_after_release"
+      and (.flow[] | select(.name == "verification") | .status) == "pending_after_release"
   ' >/dev/null || fail "proven code escalation was not monotonic: $out"
-  pass "runtime evidence proving an application defect escalates to one current-main code workflow"
+  if FM_HOME="$home" "$INCIDENT" verify --incident code-defect \
+    --evidence "$home/defect.json" >/dev/null 2>&1; then
+    fail "code-defect verification bypassed the released-repair transition"
+  fi
+  FM_HOME="$home" FM_INCIDENT_NOW=2026-08-26T21:05:00Z \
+    "$INCIDENT" repair --incident code-defect \
+    --note "Released the incident fix through the repository's normal workflow." >/dev/null
+  cat > "$home/code-verified.json" <<'EOF'
+{
+  "verification": {
+    "runtime_path_ok": true,
+    "companion_connectivity_required": false,
+    "checks": [
+      {"scope": "production_identity", "name": "production identity", "status": "pass", "evidence": "released fix is deployed"},
+      {"scope": "repaired_component_health", "name": "status endpoint", "status": "healthy", "evidence": "valid account request succeeds"},
+      {"scope": "user_visible_path", "name": "account status", "status": "pass", "evidence": "status is visible"}
+    ]
+  }
+}
+EOF
+  FM_HOME="$home" FM_INCIDENT_NOW=2026-08-26T21:06:00Z \
+    "$INCIDENT" verify --incident code-defect --evidence "$home/code-verified.json" >/dev/null
+  out=$(FM_HOME="$home" "$INCIDENT" status --incident code-defect --json)
+  printf '%s' "$out" | jq -e '
+    .phase == "verification"
+      and .repair.status == "complete"
+      and .verification.status == "complete"
+      and (.flow[] | select(.name == "approval") | .status) == "not_applicable"
+      and (.flow[] | select(.name == "repair") | .status) == "complete"
+      and (.flow[] | select(.name == "verification") | .status) == "complete"
+      and .safest_next_action == "Incident verification is complete; close the incident without unrelated cleanup."
+  ' >/dev/null || fail "released code repair could not complete runtime verification: $out"
+  pass "runtime evidence proving an application defect escalates and completes post-release verification"
 }
 
 test_raw_evidence_requires_agent_judgment() {
@@ -742,12 +776,29 @@ EOF
   fi
   FM_HOME="$home" "$INCIDENT" repair --incident no-approval \
     --note "Refreshed the local route cache." >/dev/null
+  cat > "$home/no-approval-verified.json" <<'EOF'
+{
+  "verification": {
+    "runtime_path_ok": true,
+    "companion_connectivity_required": false,
+    "checks": [
+      {"scope": "production_identity", "name": "production identity", "status": "pass", "evidence": "expected release"},
+      {"scope": "repaired_component_health", "name": "local route cache", "status": "healthy", "evidence": "current release selected"},
+      {"scope": "user_visible_path", "name": "local status path", "status": "pass", "evidence": "status is visible"}
+    ]
+  }
+}
+EOF
+  FM_HOME="$home" "$INCIDENT" verify --incident no-approval \
+    --evidence "$home/no-approval-verified.json" >/dev/null
   out=$(FM_HOME="$home" "$INCIDENT" status --incident no-approval --json)
   printf '%s' "$out" | jq -e '
     .phase == "verification"
       and .approval.status == "not_required"
       and .repair.status == "complete"
-  ' >/dev/null || fail "approval-free operational repair did not reach verification: $out"
+      and .verification.status == "complete"
+      and (.flow[] | select(.name == "approval") | .status) == "not_required"
+  ' >/dev/null || fail "approval-free operational repair did not complete verification: $out"
   pass "agent decisions control code escalation and operational approval routing"
 }
 

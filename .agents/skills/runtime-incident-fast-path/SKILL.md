@@ -44,10 +44,11 @@ When production already contains a proposed hotfix, do not recreate or redeploy 
 ## No-code diagnosis
 
 When the result says `code_change_required: no`, create no new working copy and run no code tests, CI, pull-request, or repository release process.
-Ask only for the exact operational approval named by the result, such as a paid plan change, credential creation, production configuration mutation, route correction, or managed-service restart.
+When `approval.required` is true, ask only for the exact operational approval named by the result, such as a paid plan change, credential creation, production configuration mutation, route correction, or managed-service restart.
 Do not bundle a second operational change into that request.
-
-After the captain gives that exact approval, record it with `approve`, perform only the narrow operation through the provider's or service's supported operator surface, and record the completed action with `repair`.
+After the captain gives that exact approval, record it with `approve` before performing the operation.
+When `approval.required` is false, do not invoke `approve`; proceed only with the narrow repair the agent adjudicated as already within authority.
+In either case, perform only the adjudicated operation through the provider's or service's supported operator surface and record the completed action with `repair`.
 Then verify the complete runtime path with fresh evidence, including production identity, repaired dependency or service health, companion connectivity when relevant, and the end-user-visible request or status path.
 Use `verify` only when every named check has actually passed.
 
@@ -56,6 +57,7 @@ Use `verify` only when every named check has actually passed.
 When the result says `code_change_required: yes`, select the one authoritative origin and a single clean continuation from its current default branch.
 Preserve every unrelated change and copy, transfer only incident-related changes, and keep the current origin default branch's policy and workflow files authoritative.
 Then use the repository's normal implementation, validation, review, and release process.
+After that process releases the fix, use `repair` to record the released code repair and `verify` to record fresh evidence from the complete runtime path.
 The no-code fast path never authorizes a code workflow; only reproduced runtime evidence that proves the defect does.
 
 ## Status projection
