@@ -5,6 +5,11 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# Keep strict output assertions independent of the invoking terminal's color
+# preferences. Node warns when both variables are inherited, even though the
+# extension itself printed nothing.
+unset FORCE_COLOR NO_COLOR
+
 TMP_ROOT=$(fm_test_tmproot fm-calm-pi-extension)
 EXT="$ROOT/.pi/extensions/fm-calm.ts"
 ASSISTANT_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts"

@@ -32,15 +32,22 @@ make_case() {
   for sibling in \
     fm-backend.sh \
     fm-classify-lib.sh \
+    fm-composer-lib.sh \
     fm-control-lib.sh \
+    fm-cursor-lib.sh \
     fm-gate-refuse-lib.sh \
+    fm-lease-lib.sh \
     fm-lock-lib.sh \
+    fm-marker-lib.sh \
     fm-nm-run-lib.sh \
+    fm-operational-input.sh \
+    fm-pending-reply-lib.sh \
     fm-pr-lib.sh \
     fm-public-followup-lib.sh \
     fm-secondmate-parent-lib.sh \
     fm-secondmate-registry-lib.sh \
     fm-timeout-lib.sh \
+    fm-tmux-lib.sh \
     fm-wake-lib.sh \
     fm-x-lib.sh; do
     ln -s "$ROOT/bin/$sibling" "$fake/bin/$sibling"

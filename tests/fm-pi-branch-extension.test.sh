@@ -2827,14 +2827,16 @@ const result = {
 };
 const ui = { requestRender() {} };
 const stockRow = new ToolExecutionComponent("fm_branch_outcomes", "stock", args, { showImages: false }, stockDefinition, ui, process.cwd());
-const actualRow = new ToolExecutionComponent("fm_branch_outcomes", "actual", args, { showImages: false }, actualDefinition, ui, process.cwd());
+const actualRow = new ToolExecutionComponent("fm_branch_outcomes", "stock", args, { showImages: false }, actualDefinition, ui, process.cwd());
 for (const row of [stockRow, actualRow]) {
   row.markExecutionStarted();
   row.setArgsComplete();
   row.updateResult(result);
 }
-if (JSON.stringify(actualRow.render(100)) !== JSON.stringify(stockRow.render(100))) {
-  throw new Error("Calm-off ToolExecutionComponent rendering differs from Pi stock");
+const calmOffActual = JSON.stringify(actualRow.render(100));
+const calmOffStock = JSON.stringify(stockRow.render(100));
+if (calmOffActual !== calmOffStock) {
+  throw new Error(`Calm-off ToolExecutionComponent rendering differs from Pi stock: actual=${calmOffActual} stock=${calmOffStock}`);
 }
 pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: false });
 actualRow.invalidate();

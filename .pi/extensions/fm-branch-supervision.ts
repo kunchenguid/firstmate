@@ -1368,7 +1368,8 @@ ${context.command}
         .map((item) => normalizeOutcomesToolOutput(item.text))
         .join("\n");
       const shellState = context.state as OutcomesToolShellState;
-      shellState.result = output ? new Text(theme.fg("toolOutput", output), 0, 0) : new Container();
+      const styledOutput = output.split("\n").map((line) => theme.fg("toolOutput", line)).join("\n");
+      shellState.result = output ? new Text(styledOutput, 0, 0) : new Container();
       refreshOutcomesToolShell(shellState, theme, context);
       return new Container();
     },
