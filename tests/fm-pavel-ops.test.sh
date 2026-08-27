@@ -210,9 +210,52 @@ ambiguous_task=$(run_ops inspect "$ambiguous" | json_field "['task_id']")
 assert_grep '--kind external' "$TASK_DB/$ambiguous_task.holds" "business ambiguity did not wait externally on Pavel"
 answer_event=$(ingest 104 14 'Белый, фото выше' | json_field "['event']")
 run_ops resolve-pavel "$ambiguous" --reply-event "$answer_event" --answer 'Белый, фото выше' >/dev/null
+run_ops resolve-pavel "$ambiguous" --reply-event "$answer_event" --answer 'Белый, фото выше' >/dev/null
+if run_ops resolve-pavel "$ambiguous" --reply-event "$answer_event" --answer 'Черный, фото ниже' >/dev/null 2>&1; then
+  fail "resolved Pavel clarification accepted a changed answer"
+fi
 [ "$(run_ops inspect "$ambiguous" | json_field "['state']")" = ready ] || fail "Pavel answer did not resume the original task"
 assert_grep 'unheld' "$TASK_DB/$ambiguous_task.holds" "Pavel answer did not lift the external wait"
 pass "genuine business ambiguity routes to Pavel and resumes automatically"
+
+partial_ambiguity=$(ingest 111 21 'Уточнить баннер' | json_field "['event']")
+run_ops classify "$partial_ambiguity" --as task --title 'Clarify banner' --intent 'Set Pavel requested banner' \
+  --reason 'banner choice changes the customer result' --authority business-ambiguity \
+  --question 'Какой баннер использовать?' >/dev/null
+partial_task=$(run_ops inspect "$partial_ambiguity" | json_field "['task_id']")
+partial_reply=$(ingest 112 22 'Первый баннер' | json_field "['event']")
+PARTIAL_REPLY="$partial_reply" PARTIAL_TASK="$partial_task" EVENT_FILE="$HOME_DIR/state/pavel-ops/events/$partial_reply.json" python3 - <<'PY'
+import json
+import os
+import time
+path = os.environ["EVENT_FILE"]
+with open(path, encoding="utf-8") as handle:
+    event = json.load(handle)
+event["classification"] = {
+    "as": "reply",
+    "authority": None,
+    "related_task": os.environ["PARTIAL_TASK"],
+    "reason": "Pavel clarification answer",
+}
+event["related_task"] = os.environ["PARTIAL_TASK"]
+event["state"] = "reply"
+event["transitions"].append({
+    "at": int(time.time()),
+    "from": "captured",
+    "to": "reply",
+    "evidence": "Первый баннер",
+})
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
+    handle.write("\n")
+PY
+if run_ops resolve-pavel "$partial_ambiguity" --reply-event "$partial_reply" --answer 'Второй баннер' >/dev/null 2>&1; then
+  fail "partial Pavel clarification accepted changed reply evidence"
+fi
+run_ops resolve-pavel "$partial_ambiguity" --reply-event "$partial_reply" --answer 'Первый баннер' >/dev/null
+[ "$(run_ops inspect "$partial_ambiguity" | json_field "['state']")" = ready ] \
+  || fail "partial Pavel clarification replay did not resume"
+pass "partial Pavel clarification replays retain their answer contract"
 
 # A hard boundary alone routes to the captain owner.
 hard=$(ingest 105 15 'Дайте пароль подрядчику' | json_field "['event']")
@@ -354,6 +397,32 @@ run_ops reconcile-outbound "$unknown-qa" --sent-message-id 888 >/dev/null
 assert_grep '"status": "delivered"' "$HOME_DIR/state/pavel-ops/outbox/$unknown-qa.json" "reconciled Telegram receipt was not retained"
 pass "interrupted Telegram sends stop for visible reconciliation instead of duplicating"
 
+# Retryable failures remain recoverable even if a crash happens before wake publication.
+failed=$(ingest 113 23 'Проверить доставку' | json_field "['event']")
+run_ops classify "$failed" --as task --title 'Check delivery' --intent 'Check Pavel requested delivery behavior' \
+  --reason 'ordinary site behavior change' --authority ordinary >/dev/null
+run_ops transition "$failed" dispatched --evidence 'Pi worker exists in isolated copy' >/dev/null
+failed_task=$(run_ops inspect "$failed" | json_field "['task_id']")
+printf 'harness=pi\n' > "$HOME_DIR/state/$failed_task.meta"
+FAILED_FILE="$HOME_DIR/state/pavel-ops/events/$failed.json" python3 - <<'PY'
+import json
+import os
+import time
+path = os.environ["FAILED_FILE"]
+with open(path, encoding="utf-8") as handle:
+    event = json.load(handle)
+event["wake_pending"] = False
+event["last_error"] = "worker transport timed out"
+event["failures"] = [{"at": int(time.time()), "stage": "dispatch", "error": "worker transport timed out"}]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
+    handle.write("\n")
+PY
+failure_recovery=$(run_ops recover --startup) || fail "Pavel failure recovery failed"
+printf '%s' "$failure_recovery" | grep -F "re-woke $failed at dispatched" >/dev/null \
+  || fail "crash-cut retryable failure was not surfaced during recovery"
+pass "retryable failures survive crashes before wake publication"
+
 # Retryable outbound records keep the same immutable send contract.
 retryable=$(ingest 109 19 'Статус?' | json_field "['event']")
 run_ops classify "$retryable" --as conversation --reason 'status question only' >/dev/null
@@ -415,6 +484,19 @@ if run_ops send "$wrong_chat" --purpose qa --text 'Статус с неверн�
 fi
 [ "$(grep -c . "$HTTP_LOG")" -eq "$before_wrong_chat_sends" ] || fail "chat contract mismatch reached the API"
 pass "outbound replays reject immutable contract mismatches"
+
+printf 'adoptable\n' > "$TASK_DB/pavel-adopt"
+run_ops adopt-task pavel-adopt --state ready --note 'legacy task is ready' >/dev/null
+run_ops adopt-task pavel-adopt --state ready --note 'legacy task is ready' >/dev/null
+if run_ops adopt-task pavel-adopt --state live --note 'legacy task is ready' >/dev/null 2>&1; then
+  fail "legacy adoption replay accepted a changed state"
+fi
+if run_ops adopt-task pavel-adopt --state ready --note 'legacy task is live' >/dev/null 2>&1; then
+  fail "legacy adoption replay accepted a changed note"
+fi
+[ "$(run_ops inspect legacy-task-pavel-adopt | json_field "['state']")" = ready ] \
+  || fail "legacy adoption mismatch mutated state"
+pass "legacy adoption replays validate their contract"
 
 # Migration audit reports legacy work and an ahead clone without changing either.
 MIGRATION_CLONE="$TMP_ROOT/aln"

@@ -539,16 +539,28 @@ def classify(home: Home, args: argparse.Namespace) -> dict[str, Any]:
 def resolve_pavel(home: Home, args: argparse.Namespace) -> dict[str, Any]:
     event = home.load_event(args.event)
     reply = home.load_event(args.reply_event)
+    task_id = event.get("task_id")
+    if not task_id:
+        raise OpsError("clarification event has no backlog task")
+    contract = {"reply_event": reply["id"], "related_task": task_id, "answer": args.answer}
+    existing_contract = event.get("pavel_resolution")
+    if existing_contract is not None and existing_contract != contract:
+        raise OpsError("Pavel clarification resolution already exists with different details")
+    if event["state"] == "ready":
+        if existing_contract == contract and reply.get("related_task") == task_id:
+            return event
+        raise OpsError("Pavel clarification was already resolved with different details")
     if event["state"] != "awaiting_pavel":
         raise OpsError("only an event awaiting Pavel can be resolved by Pavel")
     if reply["state"] not in {"captured", "reply", "conversation"}:
         raise OpsError("the Pavel answer event is not available for clarification resolution")
-    task_id = event.get("task_id")
-    if not task_id:
-        raise OpsError("clarification event has no backlog task")
     if reply["state"] != "captured" and reply.get("related_task") != task_id:
         raise OpsError("the classified Pavel answer belongs to another task")
-    run_checked(home, ["tasks-axi", "unhold", task_id])
+    if reply["state"] != "captured" and last_transition_evidence(reply, "reply") not in {"", args.answer}:
+        raise OpsError("Pavel clarification answer event already has different evidence")
+    if existing_contract is None:
+        event["pavel_resolution"] = contract
+        home.save_event(event)
     if reply["state"] == "captured":
         reply["classification"] = {
             "as": "reply", "authority": None, "related_task": task_id,
@@ -557,6 +569,7 @@ def resolve_pavel(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         reply["related_task"] = task_id
         home.append_transition(reply, "reply", args.answer)
         home.save_event(reply)
+    run_checked(home, ["tasks-axi", "unhold", task_id])
     event.setdefault("clarifications", []).append(
         {"at": epoch(), "reply_event": reply["id"], "answer": args.answer}
     )
@@ -630,10 +643,12 @@ def record_failure(home: Home, args: argparse.Namespace) -> dict[str, Any]:
     event["attempts"] = int(event.get("attempts", 0)) + 1
     event["last_error"] = args.error
     event.setdefault("failures", []).append({"at": epoch(), "stage": args.stage, "error": args.error})
+    event["wake_pending"] = True
     home.save_event(event)
     home.audit("retryable-failure", event=event["id"], stage=args.stage, attempt=event["attempts"])
-    event["wake_pending"] = not ensure_wake(home, event, f"Pavel task {event.get('task_id') or event['id']} needs retry at {args.stage}")
-    home.save_event(event)
+    if ensure_wake(home, event, f"Pavel task {event.get('task_id') or event['id']} needs retry at {args.stage}"):
+        event["wake_pending"] = False
+        home.save_event(event)
     return event
 
 
@@ -819,6 +834,8 @@ def recover(home: Home, startup: bool = False) -> list[str]:
             meta = home.state / f"{event['task_id']}.meta"
             if not meta.exists():
                 needs_wake = True
+            if event.get("last_error") or event.get("failures"):
+                needs_wake = True
         if event.get("state") in {"landed", "live"}:
             needs_wake = True
         if needs_wake:
@@ -853,10 +870,20 @@ def adopt(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         raise OpsError(f"cannot adopt missing backlog task {args.task_id}")
     event_id = f"legacy-task-{args.task_id}"
     path = home.event_path(event_id)
-    if path.exists():
-        return home.load_event(event_id)
     state = args.state
     authority = "business-ambiguity" if state == "awaiting_pavel" else "ordinary"
+    if path.exists():
+        event = home.load_event(event_id)
+        if (
+            event.get("state") != state
+            or event.get("task_id") != args.task_id
+            or event.get("authority") != authority
+            or event.get("classification", {}).get("reason") != args.note
+            or event.get("source", {}).get("text") != args.note
+            or last_transition_evidence(event, state) != args.note
+        ):
+            raise OpsError(f"legacy task {args.task_id} was already adopted with different details")
+        return event
     event = {
         "schema": EVENT_SCHEMA,
         "id": event_id,
