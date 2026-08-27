@@ -51,6 +51,10 @@
 #   (al) a failed gh read falls back to the gh-axi view, which can prove a merge
 #   (am) a failed merge command still names an outcome read that proves a landed
 #       or queued pull request, without masking the forge failure
+#   (an) a refusal after a zero-exit merge quotes the forge's own output, marked
+#       apart from the wrapper's verdict and never leaked to stdout
+#   (ao) a caller-requested auto-merge on a queue-less base refuses and says
+#       auto-merge is armed with nothing merged or queued yet
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -550,6 +554,87 @@ test_github_unreadable_outcome_keeps_pr_bookkeeping() {
   assert_present "$case_dir/state/task-x1.check.sh" \
     "github-outcome-read-fails: no merge poll was armed for a merge that may have landed"
   pass "fm-pr-merge keeps PR bookkeeping when it cannot read a successful merge call's outcome"
+}
+
+test_github_refusal_quotes_the_forge_output() {
+  local case_dir rc
+  case_dir=$(make_case github-refusal-quotes-forge)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 6161616161616161616161616161616161616161
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+case "${1:-} ${2:-}" in
+  "pr merge") echo "will be added to the merge queue when all requirements are met" ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+  write_github_outcome "$case_dir" OPEN false false main
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/65 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-refusal-quotes-forge: an unproved merge must fail"
+  assert_grep 'error: > will be added to the merge queue when all requirements are met' \
+    "$case_dir/stderr" \
+    "github-refusal-quotes-forge: the forge's own explanation was discarded on the refusal"
+  assert_grep "not this script's verdict" "$case_dir/stderr" \
+    "github-refusal-quotes-forge: the forge's text was not marked as the forge's own"
+  assert_grep 'error: GitHub merge outcome was not successful: state=OPEN, merged=false, isInMergeQueue=false' \
+    "$case_dir/stderr" "github-refusal-quotes-forge: the wrapper's own verdict was lost"
+  # A forge sentence about the merge queue must never stand on its own line, or
+  # it reads as this script's verdict rather than as quoted forge output.
+  ! grep -qxF 'will be added to the merge queue when all requirements are met' \
+    "$case_dir/stderr" \
+    || fail "github-refusal-quotes-forge: forge text was emitted as the wrapper's own line"
+  assert_no_grep 'will be added to the merge queue' "$case_dir/stdout" \
+    "github-refusal-quotes-forge: the forge's unverified report leaked to stdout"
+  assert_no_grep 'verified: ' "$case_dir/stdout" \
+    "github-refusal-quotes-forge: an unproved merge was reported as verified"
+  pass "fm-pr-merge refuses with the forge's own output quoted apart from its verdict"
+}
+
+test_github_auto_merge_without_queue_refuses_legibly() {
+  local case_dir rc spelling
+  for spelling in --auto --auto=true; do
+    case_dir=$(make_case "github-auto-no-queue${spelling#--auto}")
+    mkdir -p "$case_dir/wt"
+    add_gh_mocks "$case_dir" 7171717171717171717171717171717171717171
+    write_github_outcome "$case_dir" OPEN false false main
+    : > "$case_dir/github-rules"
+    : > "$case_dir/gh-axi.log"
+    : > "$case_dir/gh.log"
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/66 \
+      -- "$spelling" --merge \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "github-auto-no-queue: an armed but unlanded auto-merge must still fail"
+    assert_grep 'state=OPEN, merged=false, isInMergeQueue=false' "$case_dir/stderr" \
+      "github-auto-no-queue: refusal did not name the concrete observed state"
+    assert_grep 'auto-merge was requested and armed for https://github.com/example/repo/pull/66' \
+      "$case_dir/stderr" "github-auto-no-queue: the refusal never explained the armed auto-merge"
+    assert_grep 'nothing is merged or in the merge queue yet' "$case_dir/stderr" \
+      "github-auto-no-queue: the refusal left the operator to infer the pending state"
+    grep -qxF "pr merge 66 --repo example/repo $spelling --merge" "$case_dir/gh-axi.log" \
+      || fail "github-auto-no-queue: the attempted merge was changed unexpectedly"
+    [ "$(wc -l < "$case_dir/gh-axi.log" | tr -d '[:space:]')" = 1 ] \
+      || fail "github-auto-no-queue: the wrapper attempted more than one merge"
+    assert_grep 'pr=https://github.com/example/repo/pull/66' "$case_dir/state/task-x1.meta" \
+      "github-auto-no-queue: the attempted merge lost its PR reference"
+    assert_present "$case_dir/state/task-x1.check.sh" \
+      "github-auto-no-queue: the attempted merge did not leave its poll armed"
+  done
+  pass "fm-pr-merge explains an armed auto-merge that landed nothing on a queue-less base"
 }
 
 test_github_failed_gh_read_falls_back_to_gh_axi() {
@@ -1684,6 +1769,8 @@ test_pr_metadata_is_recorded_before_the_forge_call
 test_merge_failure_propagates_after_recording
 test_github_open_unqueued_outcome_refuses
 test_github_unreadable_outcome_keeps_pr_bookkeeping
+test_github_refusal_quotes_the_forge_output
+test_github_auto_merge_without_queue_refuses_legibly
 test_github_failed_gh_read_falls_back_to_gh_axi
 test_github_failed_merge_names_an_observed_landed_state
 test_github_without_gh_still_uses_gh_axi_merge

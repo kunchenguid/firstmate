@@ -18,7 +18,11 @@
 # If the pull request remains open and the base branch has an effective
 # merge_queue rule, the refusal names the queue's configured merge method and
 # the exact -- --auto --<method> retry flags. No method is selected for the
-# caller.
+# caller. A caller-requested --auto that leaves the pull request neither merged
+# nor queued is refused the same way and says auto-merge was armed with nothing
+# landed or queued yet, read from the caller's own arguments rather than from
+# the forge's prose. Every refusal quotes the forge command's own output,
+# marked as the forge's text and kept apart from this script's verdict.
 # GitLab adds no method flag at all: its merge method is the project's own
 # setting, which the merge API applies, and imposing squash there would override
 # that convention rather than mirror the GitHub default.
@@ -93,6 +97,26 @@ caller_has_merge_method() {
     esac
   done
   return 1
+}
+
+# Whether the caller's own extra arguments asked for auto-merge, including the
+# --flag=value spelling the forge's flag parser accepts. --disable-auto cancels
+# the request, and gh exposes no short option that could bundle either flag.
+caller_requested_auto_merge() {
+  local arg requested=1
+  for arg in "$@"; do
+    case "$arg" in
+      --auto) requested=0 ;;
+      --auto=*)
+        case "${arg#--auto=}" in
+          [tT]|[tT][rR][uU][eE]|1) requested=0 ;;
+          *) requested=1 ;;
+        esac
+        ;;
+      --disable-auto) requested=1 ;;
+    esac
+  done
+  return "$requested"
 }
 
 reject_repo_overrides() {
@@ -430,12 +454,28 @@ record_pr_metadata() {
   }
 }
 
+github_report_forge_output() {
+  local output=$1 line
+  [ -n "$output" ] || return 0
+  echo "error: the merge command's own output follows, quoted; it is the forge CLI's report, not this script's verdict:" >&2
+  while IFS= read -r line; do
+    printf 'error: > %s\n' "$line" >&2
+  done <<OUTPUT
+$output
+OUTPUT
+}
+
+FM_PR_GITHUB_AUTO_REQUESTED=false
 github_report_unmerged_outcome() {
   printf 'error: GitHub merge outcome was not successful: state=%s, merged=%s, isInMergeQueue=%s\n' \
     "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED" >&2
   if [ "$FM_PR_GITHUB_STATE" != OPEN ] || [ "$FM_PR_GITHUB_MERGED" != false ] \
     || [ "$FM_PR_GITHUB_QUEUED" != false ]; then
     return 0
+  fi
+  if [ "$FM_PR_GITHUB_AUTO_REQUESTED" = true ]; then
+    printf 'error: auto-merge was requested and armed for %s, but nothing is merged or in the merge queue yet, so this run refuses instead of reporting an unproved merge\n' \
+      "$URL" >&2
   fi
   if github_read_queue_method; then
     case "$FM_PR_GITHUB_QUEUE_METHOD" in
@@ -481,6 +521,9 @@ case "$PROVIDER" in
     if ! caller_has_merge_method "$@"; then
       merge_args=(--squash)
     fi
+    if caller_requested_auto_merge "$@"; then
+      FM_PR_GITHUB_AUTO_REQUESTED=true
+    fi
     if merge_output=$(gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1); then
       :
@@ -508,6 +551,7 @@ case "$PROVIDER" in
         "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED"
       exit 0
     else
+      github_report_forge_output "$merge_output"
       github_report_unmerged_outcome
       exit 1
     fi
