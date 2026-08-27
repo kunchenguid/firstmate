@@ -52,7 +52,8 @@
 #     endpoint.codex_session is collected only for local in-flight Codex tasks
 #     whose agent is not already proven dead: resume_banner is true when the
 #     bounded backend pane capture contains the exact Codex exit banner.
-#     paths.status_log.last_event.mtime_epoch is the status-file mtime.
+#     paths.status_log.last_event.mtime_epoch is the status-file mtime, and
+#     handoff_required marks a scaffold-declared stop state that awaits Firstmate.
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
@@ -314,12 +315,13 @@ snapshot_file_mtime() {  # <path>
 }
 
 status_event_json() {  # <status-log>
-  local log=$1 present=0 raw='' verb='' note='' mtime_json=null
+  local log=$1 present=0 raw='' verb='' note='' mtime_json=null handoff_required=0
   if [ -f "$log" ]; then
     present=1
     raw=$(last_nonempty_line "$log" || true)
     verb=$(status_line_verb "$raw")
     note=$(status_line_note "$raw")
+    status_is_terminal_verb "$raw" && handoff_required=1
     mtime_json=$(snapshot_file_mtime "$log" || true)
     case "$mtime_json" in
       ''|*[!0-9]*) mtime_json=null ;;
@@ -332,7 +334,8 @@ status_event_json() {  # <status-log>
     --arg note "$note" \
     --argjson present "$(bool_json "$present")" \
     --argjson mtime_epoch "$mtime_json" \
-    '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw,mtime_epoch:$mtime_epoch}}'
+    --argjson handoff_required "$(bool_json "$handoff_required")" \
+    '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw,mtime_epoch:$mtime_epoch,handoff_required:$handoff_required}}'
 }
 
 # Exact Codex-cli exit banner. Health treats this as one of two independent

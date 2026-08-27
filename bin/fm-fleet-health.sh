@@ -15,7 +15,7 @@
 #
 # Findings are mechanically provable Firstmate operational failures: dead or
 # missing local agents, a Codex worker whose pane shows the exact resume banner
-# or a bare shell while the task is still in flight, a worker `done:` signal
+# or a bare shell while the task is still in flight, a scaffold-contracted stop signal
 # with no later status append or steering inbox activity for
 # FM_FLEET_HEALTH_HANDOFF_STALE_SECS (default 1800), unavailable or invalid
 # secondmate summaries, broken or overdue reply delivery, aged unacknowledged
@@ -78,8 +78,8 @@ JSON is the stable machine-readable output contract.
 
 The checker consumes fm-fleet-snapshot.sh --json once, with remote SSH probes
 disabled by default, and never mutates fleet state.
-FM_FLEET_HEALTH_HANDOFF_STALE_SECS (default 1800) is the age after a `done:`
-status line with no later status append or steering-inbox activity that
+FM_FLEET_HEALTH_HANDOFF_STALE_SECS (default 1800) is the age after a contracted
+stop status with no later status append or steering-inbox activity that
 becomes a missed-handoff finding.
 EOF
 }
@@ -187,6 +187,7 @@ snapshot_shape_valid() {
       and (.paths.status_log | type) == "object"
       and (.paths.status_log.last_event | type) == "object"
       and (.paths.status_log.last_event.state | type) == "string"
+      and (.paths.status_log.last_event.handoff_required | type) == "boolean"
       and (.paths.status_log.last_event | nullable_key("mtime_epoch"; "number"))
       and (.pr | type) == "object"
       and (.pr | nullable_key("url"; "string"))
@@ -611,7 +612,7 @@ EVALUATED=$(jq -n \
                   "aged";$n)),
       ($snapshot.tasks[]?
         | select(.kind != "secondmate")
-        | select((.paths.status_log.last_event.state // "") == "done")
+        | select(.paths.status_log.last_event.handoff_required == true)
         | . as $t
         | ($t.paths.status_log.last_event.mtime_epoch) as $mtime
         | if ($mtime == null or $now_epoch == 0) then
