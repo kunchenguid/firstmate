@@ -1055,14 +1055,6 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
 fi
 
-# Before acquiring the watcher lock or enumerating any runnable check, replace
-# or quarantine checks created by older versions. The migration compares bytes
-# and reads data only; it never invokes legacy check files through Bash.
-"$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || {
-  echo "watcher: PR check migration blocked; refusing to execute state checks" >&2
-  exit 1
-}
-
 if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   BEAT="$STATE/.last-watcher-beat"
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
@@ -1135,6 +1127,13 @@ printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
+# Run the non-executing PR-check preflight only after this watcher owns the
+# singleton and reaches its first loop iteration. The initial beat below is
+# therefore honest: this process holds the home lock, has registered its
+# identity, and is in the supervision loop. It does not claim that preflight
+# completed or that a normal signal/check scan has run yet.
+startup_migration_pending=1
+
 # A merged poll may have queued its terminal wake and then lost the process
 # between receipt publication and fixed-path removal.
 # Finish only identity-bound retirement receipts before any check can run.
@@ -1188,6 +1187,14 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+
+  if [ "$startup_migration_pending" -eq 1 ]; then
+    "$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe --watcher-lock-held="$WATCHER_PID" || {
+      echo "watcher: PR check migration blocked; refusing to execute state checks" >&2
+      exit 1
+    }
+    startup_migration_pending=0
+  fi
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery

@@ -350,8 +350,11 @@ export default function (pi: ExtensionAPI) {
 
   function waitForRetry(attempt: number): Promise<void> {
     return new Promise((resolveRetry) => {
-      const timer = setTimeout(resolveRetry, retryDelay(attempt));
-      timer.unref();
+      // The actionable-close restoration chain is an owned delivery contract,
+      // not a best-effort background retry. Once an unready successor is
+      // retired there may be no child handle left to keep Pi alive; retain the
+      // timer until we launch the next bounded attempt or surface its failure.
+      setTimeout(resolveRetry, retryDelay(attempt));
     });
   }
 

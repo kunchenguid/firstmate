@@ -1097,6 +1097,62 @@ EOF
   pass "Pi hung successor falls back to one typed actionable wake"
 }
 
+test_pi_hung_successor_recovery_keeps_the_runtime_alive() {
+  local repo home plugin log prompt out status
+  repo="$TMP_ROOT/pi-hung-successor-runtime-root"
+  home="$TMP_ROOT/pi-hung-successor-runtime-home"
+  log="$TMP_ROOT/pi-hung-successor-runtime.log"
+  prompt="$TMP_ROOT/pi-hung-successor-runtime.prompt"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: synthetic wake\n'
+  exit 0
+fi
+trap 'exit 0' TERM INT
+while :; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_PROMPT_FILE="$prompt" FM_PI_ARM_READY_TIMEOUT_MS=250 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    writeFileSync(process.env.FM_PROMPT_FILE, message);
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-hung-successor-runtime", {}, undefined, undefined, {});
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi hung-successor runtime control must start"
+  [ -z "$out" ] || fail "Pi hung-successor runtime control printed output: $out"
+  [ -f "$prompt" ] || fail "Pi left the restoration chain before delivering the bounded hung-successor wake"
+  grep -q 'signal: synthetic wake' "$prompt" \
+    || fail "Pi runtime control lost the original actionable wake"
+  grep -q 'could not restore watcher continuity after 2 retries' "$prompt" \
+    || fail "Pi runtime control did not deliver the bounded restoration failure"
+  [ "$(wc -l < "$log" | tr -d '[:space:]')" -eq 4 ] \
+    || fail "Pi runtime control did not launch the bounded successor and retries"
+  pass "Pi hung-successor restoration keeps the runtime alive through wake delivery"
+}
+
 test_pi_unretired_successor_falls_back_without_retry() {
   local repo home plugin log release out status
   repo="$TMP_ROOT/pi-unretired-successor-root"
@@ -2817,6 +2873,7 @@ test_pi_heartbeat_restoration_failure_stays_on_main
 test_pi_watcher_failure_never_offered_to_branch
 test_pi_handling_delivery_failure_is_typed_once
 test_pi_hung_successor_falls_back_to_typed_wake
+test_pi_hung_successor_recovery_keeps_the_runtime_alive
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
 test_pi_empty_close_retries_instead_of_disappearing

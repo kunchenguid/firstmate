@@ -260,8 +260,9 @@ function retryDelay(attempt) {
 
 function waitForRetry(attempt) {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, retryDelay(attempt));
-    timer.unref();
+    // A recovery wake is not best-effort: keep this arm's restoration chain
+    // alive until it launches the next bounded attempt or reports the failure.
+    setTimeout(resolve, retryDelay(attempt));
   });
 }
 
