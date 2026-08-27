@@ -40,19 +40,48 @@ It says nothing about whether the resulting brief, project, or delivery mode is 
 It classifies the tool NAME by shape rather than against a fixed list.
 The tracked Claude PreToolUse matcher is `.*`, so every Claude tool name reaches the script and the script is the single owner of classification.
 A stem-enumerating matcher would reintroduce the fail-open-by-enumeration problem this guard exists to solve, because any future tool name outside the matcher would be silently missed before the script could inspect it.
+
+The script classifies a name into one of two shapes, because they carry different hazards and therefore different scopes.
 A tool is delegation-shaped when its normalized lowercase name contains one of these stems:
 
 ```text
-agent  subagent  task  workflow  cron  schedul  worktree
+agent  subagent  task  workflow  worktree
 delegate  spawn  dispatch  handoff  remote  sendmessage  monitor
 ```
+
+A tool is self-scheduling-shaped when it contains one of these stems:
+
+```text
+schedul  cron
+```
+
+Ordinary delegation creates a SEPARATE unit of work, so the hazard is work firstmate does not know about, and that hazard exists only where a fleet is operated.
+Self-scheduling creates no separate worker at all: it re-invokes the CALLER'S OWN session on a timer.
+That is a different hazard, and it is worst exactly where the old scope test was inert.
+Each timer wake replays the caller's entire accumulated context, so a one-line "nothing changed yet" turn is billed at the whole session's size, and every additional cycle is more expensive than the last because the session keeps growing.
+Nothing bounds the loop: it has no durable fleet record, no turn ceiling, and no wall-clock ceiling, so supervision can neither see it nor stop it.
+It is also redundant, because firstmate already owns a strictly cheaper way for a worker to wait.
+`bin/fm-watch.sh` runs `state/<id>.check.sh` polls as plain shell in the watcher process and wakes a session only when the check actually prints something, so an empty poll costs no model context at all.
+A worker that must wait therefore appends a `paused:` or `blocked:` status line and lets that supervision-owned poll wake it, with firstmate arming a custom condition through `bin/fm-check-register.sh`.
+
+So the two shapes are scoped differently:
+
+| Shape | Primary or secondmate home | Crewmate/scout task worktree | Non-firstmate repo |
+|---|---|---|---|
+| Ordinary delegation | denied | allowed | inert |
+| Self-scheduling | denied | denied | inert |
+
+A crewmate spawning a sub-agent for a slice of its own task stays legitimate and stays allowed.
+A crewmate putting itself in a timer loop does not, so that one shape follows the worker into its worktree.
+Neither shape ever fires outside firstmate territory: an unrelated repository on the machine is untouched, so a scheduling-shaped name there is never classified.
 
 Three exclusions keep the shape test from producing false positives.
 
 - A name beginning `mcp__` is never classified.
   An MCP server chooses its own tool names, a task or agent noun there is common, and it has no bearing on fleet dispatch.
-- `OBSERVE_ONLY_TOOLS`: the exact names `taskoutput`, `taskstop`, `taskget`, `tasklist`, `cronlist`, `bashoutput`, and `killshell` are allowed.
+- `OBSERVE_ONLY_TOOLS`: the exact names `taskoutput`, `taskstop`, `taskget`, `tasklist`, `cronlist`, `crondelete`, `bashoutput`, and `killshell` are allowed.
   These observe or stop work that already exists rather than creating it, and denying them at this layer could strand already-running work with no way to inspect or end it.
+  `crondelete` is on this list for exactly that reason: cancelling a schedule stops work and creates none, and once self-scheduling denial reaches task worktrees, a worker that already owns a schedule would otherwise have no way to cancel it.
   A Claude primary's optional local deny list may still remove them from the schema.
   The shipped guard stays narrower on purpose so it can never be the reason a runaway task cannot be stopped.
 - `PLAN_ONLY_TOOLS`: the exact names `taskcreate` and `taskupdate` are allowed.

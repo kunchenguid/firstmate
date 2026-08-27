@@ -356,6 +356,11 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. The task as briefed is the whole scope. Work you discover mid-task that is not required to finish
+   the briefed task - newly appearing items of the same kind, adjacent cleanups, follow-on opportunities -
+   is reported to firstmate, not absorbed into this task. Report it with a status line and keep going
+   on the briefed scope; firstmate decides whether it becomes a separate task. Corrections genuinely
+   required to make the briefed work correct are part of this task, not new scope.
 
 $INBOX_SECTION
 
@@ -475,6 +480,11 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. The task as briefed is the whole scope. Work you discover mid-task that is not required to finish
+   the briefed task - newly appearing items of the same kind, adjacent cleanups, follow-on opportunities -
+   is reported to firstmate, not absorbed into this task. Report it with a status line and keep going
+   on the briefed scope; firstmate decides whether it becomes a separate task. Corrections genuinely
+   required to make the briefed work correct are part of this task, not new scope.
 
 $INBOX_SECTION
 

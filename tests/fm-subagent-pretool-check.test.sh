@@ -79,7 +79,7 @@ test_guard_denies_every_currently_known_delegation_tool() {
   local tool
   for tool in $DELEGATION_TOOLS; do
     case "$tool" in
-      TaskOutput|TaskStop|TaskGet|TaskList|CronList) continue ;;
+      TaskOutput|TaskStop|TaskGet|TaskList|CronList|CronDelete) continue ;;
       TaskCreate|TaskUpdate) continue ;;
     esac
     expect_deny "known delegation tool" "$tool"
@@ -276,6 +276,91 @@ test_missing_jq_stdin_transport_fails_open() {
   pass "missing jq for stdin transport fails open rather than denying every tool call"
 }
 
+test_self_scheduling_denied_in_worktree() {
+  local child="$TMP_ROOT/child-sched" rc=0 actual
+  git -C "$PRIMARY" worktree add -q -b fixture-child-sched "$child"
+  mkdir -p "$child/bin" "$child/state"
+  printf '# fixture\n' > "$child/AGENTS.md"
+
+  local tool
+  for tool in ScheduleWakeup CronCreate ScheduleJob CronSchedule; do
+    rc=0
+    : > "$OUT"
+    : > "$ERR"
+    FM_ROOT_OVERRIDE="$child" FM_HOME="$child" FM_STATE_OVERRIDE="$child/state" \
+      "$CHECK" --claude --tool "$tool" > "$OUT" 2> "$ERR" || rc=$?
+    [ "$rc" -eq 2 ] || fail "self-scheduling tool $tool must be denied in task worktree, got exit $rc"
+
+    actual=$(jq -r '.systemMessage' "$ERR")
+    case "$actual" in
+      *"[subagent-dispatch]"*) ;;
+      *) fail "deny message must start with [subagent-dispatch], got: $actual" ;;
+    esac
+    case "$actual" in
+      *"blocked tool: $tool"*) ;;
+      *) fail "deny message must contain blocked tool: $tool, got: $actual" ;;
+    esac
+    case "$actual" in
+      *"paused:"*|*"blocked:"*) ;;
+      *) fail "deny message must mention status line wait path, got: $actual" ;;
+    esac
+    case "$actual" in
+      *"bin/fm-spawn.sh"*) fail "deny message must NOT mention fm-spawn.sh, got: $actual" ;;
+    esac
+  done
+
+  # Allow ordinary delegation
+  for tool in Agent Task SpawnWorker EnterWorktree; do
+    rc=0
+    FM_ROOT_OVERRIDE="$child" FM_HOME="$child" FM_STATE_OVERRIDE="$child/state" \
+      "$CHECK" --claude --tool "$tool" > "$OUT" 2> "$ERR" || rc=$?
+    [ "$rc" -eq 0 ] || fail "ordinary delegation $tool must be allowed in task worktree, got exit $rc"
+  done
+
+  # Allow ordinary tools
+  for tool in Bash Read Write; do
+    rc=0
+    FM_ROOT_OVERRIDE="$child" FM_HOME="$child" FM_STATE_OVERRIDE="$child/state" \
+      "$CHECK" --claude --tool "$tool" > "$OUT" 2> "$ERR" || rc=$?
+    [ "$rc" -eq 0 ] || fail "ordinary tool $tool must be allowed in task worktree, got exit $rc"
+  done
+
+  # Escape hatch allows self-scheduling in worktree
+  rc=0
+  FM_ALLOW_SUBAGENT=1 FM_ROOT_OVERRIDE="$child" FM_HOME="$child" FM_STATE_OVERRIDE="$child/state" \
+    "$CHECK" --claude --tool ScheduleWakeup > "$OUT" 2> "$ERR" || rc=$?
+  [ "$rc" -eq 0 ] || fail "escape hatch must allow self-scheduling in task worktree, got exit $rc"
+
+  # CronDelete and CronList allowed in worktree
+  for tool in CronDelete CronList; do
+    rc=0
+    FM_ROOT_OVERRIDE="$child" FM_HOME="$child" FM_STATE_OVERRIDE="$child/state" \
+      "$CHECK" --claude --tool "$tool" > "$OUT" 2> "$ERR" || rc=$?
+    [ "$rc" -eq 0 ] || fail "$tool must be allowed in task worktree, got exit $rc"
+  done
+
+  # CronDelete and CronList allowed in primary
+  for tool in CronDelete CronList; do
+    expect_allow "observe/stop tool" "$tool"
+  done
+
+  pass "self-scheduling tools are denied in worktree, ordinary delegation allowed, crondelete allowed"
+}
+
+test_self_scheduling_inert_in_non_firstmate_repo() {
+  local plain="$TMP_ROOT/plain-sched" rc=0
+  mkdir -p "$plain/bin"
+  git -C "$plain" init -q
+
+  for tool in ScheduleWakeup CronCreate; do
+    rc=0
+    FM_ROOT_OVERRIDE="$plain" FM_HOME="$plain" FM_STATE_OVERRIDE="$plain/state" \
+      "$CHECK" --claude --tool "$tool" > "$OUT" 2> "$ERR" || rc=$?
+    [ "$rc" -eq 0 ] || fail "self-scheduling $tool must be inert in non-firstmate repo, got exit $rc"
+  done
+  pass "self-scheduling tools are inert in non-firstmate repo"
+}
+
 test_guard_denies_every_currently_known_delegation_tool
 test_guard_denies_hypothetical_future_tools
 test_guard_allows_ordinary_and_observe_only_tools
@@ -289,3 +374,5 @@ test_secondmate_home_is_in_scope
 test_stdin_transports_and_output_shapes
 test_malformed_transport_fails_open
 test_missing_jq_stdin_transport_fails_open
+test_self_scheduling_denied_in_worktree
+test_self_scheduling_inert_in_non_firstmate_repo
