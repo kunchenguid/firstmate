@@ -1412,6 +1412,95 @@ test_max_defer_empty_swallow_types_once_and_alarms() {
   pass "max-defer on an empty stuck pane types once, alarms, and preserves the buffer"
 }
 
+# The overnight incident: a submit-confirmation false-negative (the digest lands
+# and starts a real turn, but the idle composer is misread as still pending)
+# makes every housekeeping tick's batch flush re-inject the SAME digest forever.
+# Drive persistent non-confirmation across many ticks and assert re-injection is
+# hard-capped (initial attempt + at most one max-defer escape), the wedge alarm
+# fires exactly once, and the buffer stays durable for return catch-up.
+test_persistent_nonconfirmation_caps_reinjection() {
+  local dir state fakebin sent alert i injects alerts
+  dir=$(make_bordered_case reinject-cap)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  alert="$dir/alert.log"; : > "$alert"
+  touch "$dir/.swallow"
+  escalate_add "$state" "needs-decision: pick A"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+  # A prior test in this sourced process may have advanced the alarm-notify
+  # throttle epoch; reset it so this episode's single alarm is not suppressed.
+  WEDGE_ALARM_LAST_EPOCH=0
+  # Persistent submit non-confirmation: the digest "lands" (composer reset to
+  # bordered-empty each tick) but the fake's persist-swallow leaves the typed
+  # text so the submit-ack keeps reading pending - the confirmation
+  # false-negative that drove the loop. Without the cap this types once per tick.
+  for i in $(seq 1 8); do
+    printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
+    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+      FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_INJECT_CONFIRM_SLEEP=0.05 \
+      FM_WEDGE_ALARM_LOG="$alert" FM_WEDGE_ALARM_CHANNEL=osascript \
+      FM_ESCALATE_BATCH_SECS=1 FM_MAX_DEFER_SECS=1 housekeeping "$state"
+  done
+  injects=$(grep -c 'Supervisor escalate' "$sent" 2>/dev/null || true)
+  alerts=$(grep -c . "$alert" 2>/dev/null || true)
+  [ "$injects" -le 2 ] \
+    || fail "re-injection not capped: typed the digest $injects times across 8 ticks (expected <= 2)"
+  [ "$injects" -ge 1 ] || fail "cap suppressed the initial delivery attempt entirely"
+  [ "$alerts" -eq 1 ] \
+    || fail "wedge alarm fired $alerts times across 8 ticks (expected exactly 1)"
+  [ -s "$state/.subsuper-inject-wedged" ] \
+    || fail "no durable wedge marker after persistent non-confirmation"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "buffer lost after capping (must stay durable for return catch-up)"
+  pass "persistent submit non-confirmation caps re-injection (<= 2), alarms once, keeps the buffer durable"
+}
+
+# The cap is per-buffered-content, never a permanent daemon mute. A genuinely
+# distinct escalation arriving after a wedge cap must be attempted again, and
+# once delivery is positively confirmed (pane affirmatively empty, submit
+# confirmed) every cap/wedge marker clears so normal injection fully resumes.
+test_new_escalation_after_cap_rearms_and_confirmed_flush_resumes() {
+  local dir state fakebin sent i capped_injects after
+  dir=$(make_bordered_case reinject-cap-rearm)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  touch "$dir/.swallow"
+  escalate_add "$state" "needs-decision: pick A"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+  WEDGE_ALARM_LAST_EPOCH=0
+  # Drive the first content to the capped state.
+  for i in 1 2 3; do
+    printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
+    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+      FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_INJECT_CONFIRM_SLEEP=0.05 \
+      FM_WEDGE_ALARM_CHANNEL=off \
+      FM_ESCALATE_BATCH_SECS=1 FM_MAX_DEFER_SECS=1 housekeeping "$state"
+  done
+  [ -e "$state/.subsuper-inject-capped" ] \
+    || fail "content was not capped after persistent non-confirmation"
+  capped_injects=$(grep -c 'Supervisor escalate' "$sent" 2>/dev/null || true)
+  # A genuinely distinct escalation arrives and the pane is now healthy (submit
+  # confirms empty). The cap must lift for the changed content, deliver, and
+  # clear every marker.
+  rm -f "$dir/.swallow"
+  escalate_add "$state" "blocked: db credential expired"
+  printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_INJECT_CONFIRM_SLEEP=0.05 FM_WEDGE_ALARM_CHANNEL=off \
+    FM_ESCALATE_BATCH_SECS=1 FM_MAX_DEFER_SECS=1 housekeeping "$state"
+  after=$(grep -c 'Supervisor escalate' "$sent" 2>/dev/null || true)
+  [ "$after" -gt "$capped_injects" ] \
+    || fail "cap suppressed a genuinely new escalation (was $capped_injects, now $after)"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "confirmed flush of the re-armed content did not clear the buffer"
+  [ ! -e "$state/.subsuper-inject-capped" ] || fail "cap marker survived a positively confirmed flush"
+  [ ! -e "$state/.subsuper-inject-failed" ] || fail "failed marker survived a positively confirmed flush"
+  [ ! -e "$state/.subsuper-inject-wedged" ] || fail "wedge marker survived a positively confirmed flush"
+  pass "a distinct escalation re-arms the cap and a confirmed flush resumes normal injection"
+}
+
 test_max_defer_flushes_empty_idle_pane() {
   local dir state fakebin sent
   dir=$(make_bordered_case maxdefer-recover)
@@ -2170,6 +2259,8 @@ test_pane_input_pending_bordered_with_text_is_pending
 test_submit_ack_confirms_on_bordered_empty_composer
 test_submit_ack_reports_pending_on_persistent_swallow
 test_max_defer_empty_swallow_types_once_and_alarms
+test_persistent_nonconfirmation_caps_reinjection
+test_new_escalation_after_cap_rearms_and_confirmed_flush_resumes
 test_max_defer_flushes_empty_idle_pane
 test_max_defer_pending_composer_alarms_without_typing
 test_normal_flush_clears_stale_wedge_marker
