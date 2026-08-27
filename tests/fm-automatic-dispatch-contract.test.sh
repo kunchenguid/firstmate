@@ -23,8 +23,16 @@ candidate_line=$(grep -nF 'Resolve native symbolic accounts' "$SKILL" | head -n 
   || fail 'valid off mode must terminate before candidate resolution'
 assert_grep 'symbolic account is absent' "$SKILL" 'missing native account rule is missing'
 assert_grep 'qualified Pi' "$SKILL" 'Pi continuation rule is missing'
-assert_grep "call \`fm-route.sh observe\`" "$SKILL" 'simulation observation is missing'
-assert_grep 'launch nothing' "$SKILL" 'simulation no-launch boundary is missing'
+simulate_branch="With valid simulation mode, call \`fm-route.sh observe\` after selection, launch nothing, and stop before reserve/spawn."
+assert_grep "$simulate_branch" "$SKILL" 'valid simulation terminal branch is missing or incomplete'
+simulate_line=$(grep -nF "$simulate_branch" "$SKILL" | head -n 1 | cut -d: -f1)
+select_line=$(grep -nF "Call \`fm-route.sh select --request FILE --candidates FILE\`" "$SKILL" | head -n 1 | cut -d: -f1)
+reserve_line=$(grep -nF 'Process each ready slot transactionally as select -> reserve' "$SKILL" | head -n 1 | cut -d: -f1)
+first_simulate_line=$(grep -nF 'simulation' "$SKILL" | head -n 1 | cut -d: -f1)
+[ -n "$simulate_line" ] && [ -n "$select_line" ] && [ -n "$reserve_line" ] \
+  && [ "$simulate_line" -gt "$select_line" ] && [ "$simulate_line" -lt "$reserve_line" ] \
+  && [ "$first_simulate_line" = "$simulate_line" ] \
+  || fail 'valid simulation must select then observe and stop before reserve/spawn'
 assert_grep 'stop immediately on unsafe or uncertain writes' "$SKILL" 'unsafe write stop is missing'
 assert_grep 'quota-array-dispatch' "$SKILL" 'quota interpretation owner is missing'
 assert_grep 'authoritative catalog' "$SKILL" 'catalog ownership is missing'

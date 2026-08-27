@@ -81,7 +81,8 @@ When an invalid version 2 file is active, bootstrap must emit one visible `CREW_
 
 ## Simulation gate
 
-In simulation, Firstmate classifies and selects each representative task, records the privacy-safe proposed route through `fm-route.sh observe`, and launches no routed worker.
+With valid simulation mode, Firstmate continues through account eligibility, catalog and quota evidence, exact request/candidate construction, and `fm-route.sh select`.
+It then records the privacy-safe proposal through `fm-route.sh observe`, launches nothing, and stops before reserve/spawn.
 Collect at least twenty representative observations, including trivial, standard, decomposable, ambiguous, high-risk, and review work where those classes are genuinely present.
 
 Run:

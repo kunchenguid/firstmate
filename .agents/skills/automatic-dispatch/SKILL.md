@@ -19,7 +19,6 @@ metadata:
    On version 2 failure, emit one visible policy diagnostic, use configured static dispatch, and make no optimization state mutation.
    Do not call `fm-route.sh select`, `observe`, `reserve`, or the outcome ledger on this path.
    With valid version 2 mode `off`, automatic-dispatch uses configured static dispatch and stops before account/candidate resolution, `select`, `observe`, `reserve`, or any routing ledger/state mutation.
-   In simulation, report the static proposal and launch nothing; then stop this procedure.
 4. Resolve native symbolic accounts with `fm-account-lane.sh` without inspecting credentials.
    A native profile whose symbolic account is absent from this home is ineligible; continue evaluating qualified Pi or other local profiles before static fallback.
 5. Use each runtime's authoritative catalog for model support and provider family.
@@ -30,7 +29,7 @@ metadata:
 8. Run `fm-route.sh select` and show its exact fit, capacity, load, uncertainty, and tie evidence.
    `maxWorkers` is only a concurrency ceiling; never reuse one selection for another subtask.
    Call `fm-route.sh select --request FILE --candidates FILE` for that subtask only.
-9. With a valid policy in simulation mode, call `fm-route.sh observe` for the proposed route and launch nothing.
+9. With valid simulation mode, call `fm-route.sh observe` after selection, launch nothing, and stop before reserve/spawn.
 10. Process each ready slot transactionally as select -> reserve -> immediately spawn before routing the next ready slot; never bulk-reserve slots for later spawn.
     Reserve with `fm-route.sh reserve --task TASK --generation GENERATION --profile PROFILE --provider PROVIDER --lane LANE --account ACCOUNT --class CLASS --work-type WORK_TYPE --risk RISK --mode MODE`.
     Give `fm-spawn.sh` all nine route fields: `--route-generation`, `--route-profile`, `--route-provider`, `--route-lane`, `--route-account`, `--route-class`, `--route-work-type`, `--route-risk`, and `--route-mode`.
