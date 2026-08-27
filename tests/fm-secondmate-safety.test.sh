@@ -8,6 +8,7 @@
 # operator flow lives in fm-secondmate-lifecycle-e2e.test.sh; this file keeps the
 # destructive-invariant coverage that an e2e run cannot deterministically reach.
 set -u
+export FM_CROSSCHECK_AUTOSTART_TEST_DISABLE=firstmate-pr-check-nonautostart-test-v1
 
 # shellcheck source=tests/secondmate-helpers.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"

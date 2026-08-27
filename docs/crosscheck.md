@@ -1,16 +1,40 @@
 # Crosscheck
 
-Crosscheck is an on-demand, exact-head PR reviewer. It is independent of
-Firstmate task orchestration: any agent or operator that can run the supported
-wrapper and read the configured Firstmate home can use it.
+Crosscheck is an exact-head PR reviewer that starts automatically when Firstmate registers a PR-ready task and remains available on demand.
+It is independent of Firstmate task orchestration: any agent or operator that can run the supported wrapper and read the configured Firstmate home can use it.
 
-Crosscheck does one job. It reviews the current PR head, returns `CLEAR` or
-`BLOCKING`, and records cited findings and suspicions against that exact SHA.
+Crosscheck does one job.
+It reviews the current PR head, returns `CLEAR` or `BLOCKING`, and records cited findings and suspicions against that exact SHA.
 It does not rerun CI, manufacture proof scripts, or launch verifier VMs.
 
 ## Run it
 
-Use a unique task ID and the full public GitHub PR URL:
+The normal Firstmate path is PR-ready registration:
+
+```sh
+FM_HOME=/Users/dongkeun/firstmate-home \
+  bin/fm-pr-check.sh <task-id> \
+  https://github.com/OWNER/REPO/pull/NUMBER
+```
+
+Registration records the live PR head, arms the merge poll, durably requests Crosscheck, starts one task-local coordinator, and returns without waiting for the review.
+A matching active request is reused, and a matching exact-head and exact-claims `CLEAR` result is verified without another review.
+Registering a new head replaces the queued request so the coordinator reviews that head next.
+Registration holds the task metadata lock from head capture through poll emission and request publication, so an older capture cannot replace a newer registration.
+A short task-local handoff lock couples request publication, status reconciliation, and coordinator retirement; it is never held during review execution.
+A dead or failed coordinator releases its task-local lock and retries when the same registration command runs again.
+The merge poll observes live GitHub merge state before reporting launcher failures, so manual completion and merge still trigger cleanup without granting merge authorization.
+Unrelated task coordinators share no launcher lock, so the Azure lane-capacity and cost-admission controls remain the only review spending authority.
+
+Before launching a review, the coordinator loads the authoritative operator-private fleet environment from `~/.fm-azure/fleet.env` by default.
+`FM_CROSSCHECK_FLEET_ENV` may select another absolute file.
+The launcher opens that file without following symlinks and requires a current-operator-owned regular file that is not group or world writable.
+It sources the already-open file only inside the Crosscheck child, suppresses output from the source operation, and never copies environment values into argv, prompts, logs, repository files, or launcher records.
+
+Missing, unsafe, or incomplete fleet configuration does not undo or fail PR registration.
+The task remains honestly uncleared, the actionable failure is recorded in `state/<task-id>.crosscheck-autostart.json` and `state/<task-id>.crosscheck-autostart.log`, and the task check surfaces it for repair and retry.
+
+For an explicit on-demand run, use a unique task ID and the full public GitHub PR URL:
 
 ```sh
 set -a
@@ -21,15 +45,14 @@ FM_HOME=/Users/dongkeun/firstmate-home \
   https://github.com/OWNER/REPO/pull/NUMBER
 ```
 
-The fleet environment is operator-private Azure configuration. Load it into the
-process environment; never paste its values into a prompt or command.
+The fleet environment is operator-private Azure configuration.
+Load it into the process environment; never paste its values into a prompt or command.
 
-A new task ID needs no pre-created metadata file. Existing state must match the
-same task and PR identity or the run fails closed.
+A new task ID needs no pre-created metadata file.
+Existing state must match the same task and PR identity or the run fails closed.
 
-The command exits zero only for a valid `CLEAR` verdict on the live head. A
-finding, unresolved suspicion, stale head, provider failure, malformed verdict,
-or infrastructure failure exits nonzero and is never presented as clearance.
+The command exits zero only for a valid `CLEAR` verdict on the live head.
+A finding, unresolved suspicion, stale head, provider failure, malformed verdict, or infrastructure failure exits nonzero and is never presented as clearance.
 
 Results are written to:
 

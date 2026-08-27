@@ -8,6 +8,7 @@
 # merge API. The gh-axi double emits only recorded 0.1.25 TOON shapes and
 # rejects the unsupported raw-gh and unguarded `pr merge` surfaces.
 set -u
+export FM_CROSSCHECK_AUTOSTART_TEST_DISABLE=firstmate-pr-check-nonautostart-test-v1
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"

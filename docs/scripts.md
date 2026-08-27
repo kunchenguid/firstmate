@@ -106,7 +106,7 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-crosscheck-slack.sh` | Run, preflight, selftest, or issue exact-head provenance for the Slack Crosscheck lane |
 | `fm-crosscheck-slack.py` | Serve allowlisted, metered, exact-head Slack reviews through the shared core lanes |
 | `fm-crosscheck-slack-service.sh` | Install and operate the credential-free macOS launchd wrapper for the central listener |
-| `fm-pr-check.sh`         | Record `pr=` and `pr_head=` for a PR-ready task, then arm the watcher's merge poll   |
+| `fm-pr-check.sh`         | Register a PR-ready task; see [Crosscheck operator flow](crosscheck.md#run-it) |
 | `fm-pr-merge.sh`         | Require exact-head crosscheck, record PR metadata, and atomically merge or enqueue the reviewed SHA |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-report-contract-lib.sh` | Render the shared ship completion-report contract inserted into briefs and continuation prompts |

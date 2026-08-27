@@ -2,7 +2,7 @@
 # Run or verify the independent exact-head crosscheck ledger for a task PR.
 #
 # Usage:
-#   fm-crosscheck.sh run <task-id> <full GitHub PR URL>
+#   fm-crosscheck.sh run <task-id> <full GitHub PR URL> [--expected-head <SHA>]
 #   fm-crosscheck.sh verify <task-id> <full GitHub PR URL>
 #   fm-crosscheck.sh status
 #   fm-crosscheck.sh timings <task-id>
@@ -10,7 +10,9 @@
 #   fm-crosscheck.sh merge <task-id> <full GitHub PR URL> <reviewed SHA> <method> [--allow-queue]
 #
 # `run` is intentionally independent of no-mistakes so both reviews can be in
-# flight together once a PR exists. `verify` is the merge-gate operation: it
+# flight together once a PR exists. The task-local PR-registration coordinator
+# uses `--expected-head` to refuse a moved head before reviewer or Azure spend.
+# `verify` is the merge-gate operation: it
 # re-reads live GitHub state, requires the latest attempt for that exact head
 # and claims document to be clear, and prints only the reviewed SHA.
 # `timings` is the read-only C1 breakdown: it prints the per-phase duration

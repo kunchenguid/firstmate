@@ -70,6 +70,7 @@
 # The task metadata needs a session-scoped handle for the same reason - see
 # docs/tmux-backend.md "Proving absence needs a session-scoped handle".
 set -u
+export FM_CROSSCHECK_AUTOSTART_TEST_DISABLE=firstmate-pr-check-nonautostart-test-v1
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"

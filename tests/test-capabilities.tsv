@@ -81,6 +81,7 @@ fm-pi-primary-live-e2e.test.sh	hermetic
 fm-pi-primary-types.test.sh	hermetic
 fm-pi-refresh.test.sh	hermetic
 fm-pi-watch-extension.test.sh	hermetic
+fm-pr-crosscheck-autostart.test.sh	hermetic
 fm-pr-merge.test.sh	hermetic
 fm-process-tree.test.sh	hermetic
 fm-prompt-exec.test.sh	hermetic

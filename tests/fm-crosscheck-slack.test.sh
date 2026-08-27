@@ -1315,6 +1315,38 @@ with Path({str(launch_log)!r}).open('a') as handle:
 sys.exit(1 if sys.argv[1] == 'print' else 0)
 """)
 launchctl.chmod(0o755)
+# Model the macOS plist editor on every host; the emitted plist is parsed below
+# and its actual service command is executed with the emitted environment.
+plutil = bin_dir / "plutil"
+plutil.write_text(f"#!{sys.executable}\n" + """
+import plistlib
+from pathlib import Path
+import sys
+args = sys.argv[1:]
+path = Path(args[-1])
+if args[0] == '-create':
+    value = {}
+else:
+    value = plistlib.loads(path.read_bytes())
+    parts = args[1].split('.')
+    parent = value
+    for part in parts[:-1]:
+        parent = parent[int(part)] if isinstance(parent, list) else parent[part]
+    kind = args[2]
+    item = {'-array': [], '-dictionary': {}}.get(kind)
+    if kind == '-string':
+        item = args[3]
+    elif kind == '-bool':
+        item = args[3] == 'true'
+    elif kind == '-integer':
+        item = int(args[3])
+    if isinstance(parent, list):
+        parent.insert(int(parts[-1]), item)
+    else:
+        parent[parts[-1]] = item
+path.write_bytes(plistlib.dumps(value))
+""")
+plutil.chmod(0o755)
 environment = dict(os.environ, HOME=str(home), FM_HOME=str(fm_home), FM_ROOT_OVERRIDE=str(fixture), FM_CROSSCHECK_SLACK_CONFIG=str(config_path), FM_CROSSCHECK_PYTHON=sys.executable, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'])
 for name in ('app_token_env', 'bot_token_env', 'github_token_env'):
     environment[config[name]] = 'fixture-inherited-secret'

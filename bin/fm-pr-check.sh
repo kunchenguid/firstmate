@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Record a PR-ready task: appends pr=<url> and GitHub's pr_head=<sha> to
-# state/<id>.meta when available, then arms the watcher's merge poll by writing
-# state/<id>.check.sh, which prints one line when the PR is merged or its lookup
-# fails (the watcher's check contract: output = wake, silence = keep sleeping).
-# With central Slack config installed, then binds the live PR head to the signed
-# launch record created before the task agent started. Issuance failure exits
-# nonzero after poll setup.
+# Register a PR-ready task: append pr=<url> and GitHub's pr_head=<sha> to
+# state/<id>.meta, arm the watcher's merge poll, and asynchronously start the
+# independent exact-head Crosscheck review. Registration returns after the
+# task-local coordinator is requested; review latency never parks the caller.
+# Matching active or CLEAR heads deduplicate, failed/dead coordinators remain
+# visible and retryable, and unrelated tasks never share a launcher lock.
+# A task-local registration lock orders head capture and publication without
+# holding the account metadata lock across the remote lookup.
+# With central Slack config installed, binds the live PR head to the signed
+# launch record created before the task agent started before requesting review.
+# Issuance failure exits nonzero after poll setup.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -26,6 +30,32 @@ META="$STATE/$ID.meta"
 LOOKUP_WT=
 LOOKUP_GENERATION=
 PR_HEAD=
+CROSSCHECK_AUTOSTART="$SCRIPT_DIR/fm-crosscheck-autostart.py"
+CROSSCHECK_AUTOSTART_ENABLED=1
+case "${FM_CROSSCHECK_AUTOSTART_TEST_DISABLE:-}" in
+  '') ;;
+  firstmate-pr-check-nonautostart-test-v1)
+    [ "${FM_TEST_RUNNER_ACTIVE:-}" = firstmate-test-runner-v1 ] || {
+      echo "error: the Crosscheck autostart test bypass is available only inside the sealed behavior-test runner" >&2
+      exit 1
+    }
+    CROSSCHECK_AUTOSTART_ENABLED=0
+    ;;
+  *)
+    echo "error: invalid FM_CROSSCHECK_AUTOSTART_TEST_DISABLE value" >&2
+    exit 1
+    ;;
+esac
+REGISTRATION_LOCK=$(fm_account_lock_acquire "$STATE" "$ID" pr-registration \
+  "PR registration" "${FM_ACCOUNT_META_LOCK_WAIT_SECONDS:-10}") || exit 1
+META_LOCK=
+release_meta_lock() {
+  if [ -n "$META_LOCK" ]; then
+    fm_account_meta_lock_release "$META_LOCK" >/dev/null 2>&1 || true
+  fi
+  fm_account_meta_lock_release "$REGISTRATION_LOCK" >/dev/null 2>&1 || true
+}
+trap release_meta_lock EXIT
 META_LOCK=$(fm_account_meta_lock_acquire "$STATE" "$ID") || exit 1
 if [ ! -f "$META" ]; then
   fm_account_meta_lock_release "$META_LOCK"
@@ -54,7 +84,10 @@ if [ -z "$LOOKUP_GENERATION" ]; then
     exit 1
   fi
 fi
+# Serialize head capture/publication only against other registrations, not
+# account-session updates or task retirement during a remote lookup.
 fm_account_meta_lock_release "$META_LOCK"
+META_LOCK=
 if ! PR_HEAD_LOOKUP=$("$FM_ROOT/bin/fm-github-pr.py" head "$URL" 2>&1); then
   PR_HEAD_DIAGNOSTIC=$(printf '%s' "$PR_HEAD_LOOKUP" | tr '\r\n' '  ')
   printf 'UNREVIEWED: PR head lookup failed: %.500s\n' "$PR_HEAD_DIAGNOSTIC" >&2
@@ -62,10 +95,6 @@ if ! PR_HEAD_LOOKUP=$("$FM_ROOT/bin/fm-github-pr.py" head "$URL" 2>&1); then
 fi
 PR_HEAD=$PR_HEAD_LOOKUP
 META_LOCK=$(fm_account_meta_lock_acquire "$STATE" "$ID") || exit 1
-release_meta_lock() {
-  fm_account_meta_lock_release "$META_LOCK" >/dev/null 2>&1 || true
-}
-trap release_meta_lock EXIT
 if [ -f "$META" ]; then
   CURRENT_WT=$(fm_account_meta_value "$META" worktree)
   CURRENT_GENERATION=$(fm_account_meta_value "$META" generation_id)
@@ -85,11 +114,24 @@ else
 fi
 CHECK_TMP=$(mktemp "$STATE/.$ID.check.XXXXXX") || exit 1
 printf -v PR_ADAPTER_Q '%q' "$FM_ROOT/bin/fm-github-pr.py"
+printf -v CROSSCHECK_AUTOSTART_Q '%q' "$CROSSCHECK_AUTOSTART"
+printf -v ID_Q '%q' "$ID"
 printf -v URL_Q '%q' "$URL"
+printf -v PR_HEAD_Q '%q' "$PR_HEAD"
+printf -v GENERATION_Q '%q' "$LOOKUP_GENERATION"
 cat > "$CHECK_TMP" <<EOF
 if ! state=\$($PR_ADAPTER_Q state $URL_Q 2>&1); then
   diagnostic=\$(printf '%s' "\$state" | tr '\r\n' '  ')
   printf 'UNREVIEWED: PR state lookup failed: %.500s\n' "\$diagnostic"
+  exit 0
+fi
+if [ "\$state" = MERGED ]; then
+  echo "merged"
+  exit 0
+fi
+if ! crosscheck_state=\$($CROSSCHECK_AUTOSTART_Q status $ID_Q $URL_Q $PR_HEAD_Q $GENERATION_Q 2>&1); then
+  diagnostic=\$(printf '%s' "\$crosscheck_state" | tr '\r\n' '  ')
+  printf 'UNREVIEWED: Crosscheck autostart failed: %.500s\n' "\$diagnostic"
   exit 0
 fi
 case "\$state" in
@@ -100,8 +142,6 @@ esac
 EOF
 chmod +x "$CHECK_TMP"
 mv "$CHECK_TMP" "$STATE/$ID.check.sh"
-fm_account_meta_lock_release "$META_LOCK"
-trap - EXIT
 SLACK_CONFIG=${FM_CROSSCHECK_SLACK_CONFIG:-$FM_HOME/config/crosscheck-slack.json}
 if [ -f "$SLACK_CONFIG" ]; then
   "$FM_ROOT/bin/fm-crosscheck-slack.sh" attest-task \
@@ -111,3 +151,16 @@ if [ -f "$SLACK_CONFIG" ]; then
     }
 fi
 echo "armed: state/$ID.check.sh polls $URL"
+if [ "$CROSSCHECK_AUTOSTART_ENABLED" = 1 ]; then
+  if CROSSCHECK_AUTOSTART_OUT=$("$CROSSCHECK_AUTOSTART" start \
+    "$ID" "$URL" "$PR_HEAD" "$LOOKUP_GENERATION" 2>&1); then
+    printf '%s\n' "$CROSSCHECK_AUTOSTART_OUT"
+  else
+    CROSSCHECK_AUTOSTART_DIAGNOSTIC=$(printf '%s' "$CROSSCHECK_AUTOSTART_OUT" | tr '\r\n' '  ')
+    printf 'UNREVIEWED: Crosscheck autostart launcher failed: %.500s\n' \
+      "$CROSSCHECK_AUTOSTART_DIAGNOSTIC" >&2
+  fi
+fi
+fm_account_meta_lock_release "$META_LOCK"
+fm_account_meta_lock_release "$REGISTRATION_LOCK"
+trap - EXIT

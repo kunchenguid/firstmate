@@ -88,6 +88,7 @@
 4000	tests/fm-pi-refresh.test.sh
 3750	tests/fm-pi-retry-continuity.test.sh
 3170	tests/fm-pi-watch-extension.test.sh
+14000	tests/fm-pr-crosscheck-autostart.test.sh
 1574	tests/fm-pr-merge.test.sh
 6030	tests/fm-process-tree.test.sh
 802	tests/fm-prompt-exec.test.sh

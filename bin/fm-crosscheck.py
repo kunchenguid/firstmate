@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Fail-closed independent review ledger bound to an exact pull-request head."""
+"""Fail-closed independent review ledger bound to an exact pull-request head.
+
+The public `run TASK URL` surface resolves the live head itself.
+The PR-registration coordinator additionally passes `--expected-head SHA` so a head change between registration and launch refuses before reviewer or Azure spending.
+"""
 
 from __future__ import annotations
 
@@ -6954,7 +6958,13 @@ def write_ledger(path: Path, ledger: dict[str, Any]) -> None:
     atomic_write(path, encoded)
 
 
-def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
+def run_crosscheck(
+    root: Path,
+    home: Path,
+    task_id: str,
+    url: str,
+    expected_head: str | None = None,
+) -> int:
     # C1 (docs/azure-requirements.md): the invocation's clock starts here, so
     # the recorded `total` covers everything the caller waits for, including
     # the unattributed gaps between the named phases.
@@ -6985,6 +6995,11 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
             snapshot_value = github_snapshot(root, url)
         except CrosscheckError as exc:
             tool_fail(f"GitHub snapshot preflight failed: {exc}")
+        if expected_head is not None and snapshot_value["head_sha"] != expected_head:
+            tool_fail(
+                "registered PR head changed before Crosscheck launch: expected "
+                f"{expected_head}, observed {snapshot_value['head_sha']}"
+            )
     with timer.phase("ledger"):
         try:
             ledger = load_ledger(ledger_path, task_id, url)
@@ -7796,6 +7811,8 @@ def build_parser() -> argparse.ArgumentParser:
         command = subparsers.add_parser(name)
         command.add_argument("task_id")
         command.add_argument("pr_url")
+        if name == "run":
+            command.add_argument("--expected-head")
     timings = subparsers.add_parser("timings")
     timings.add_argument("task_id")
     economics = subparsers.add_parser("economics")
@@ -7904,7 +7921,16 @@ def main() -> int:
             except BlockingIOError:
                 tool_fail("another crosscheck operation already owns this task")
             if args.command == "run":
-                return run_crosscheck(root, home, args.task_id, args.pr_url)
+                expected_head = args.expected_head
+                if expected_head is not None and SHA_RE.fullmatch(expected_head) is None:
+                    tool_fail("expected registered PR head must be one 40-hex SHA")
+                return run_crosscheck(
+                    root,
+                    home,
+                    args.task_id,
+                    args.pr_url,
+                    expected_head,
+                )
             if args.command == "verify":
                 return verify_crosscheck(root, home, args.task_id, args.pr_url)
             return merge_crosschecked(

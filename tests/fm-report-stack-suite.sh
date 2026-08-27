@@ -277,8 +277,13 @@ test_legacy_cutover_preserves_fresh_reports_and_retires_expired_raw_paths() {
     FM_REPORT_LEGACY_CUTOVER_TEST_READY="$ready" FM_REPORT_LEGACY_CUTOVER_TEST_PROCEED="$proceed" \
     "$SCRIPT" render > "$output" 2>&1 &
   pid=$!
-  for _ in $(seq 1 100); do [ -e "$ready" ] && break; sleep 0.02; done
-  [ -e "$ready" ] || { kill -TERM "$pid" 2>/dev/null || true; fail "legacy cutover preparation gate did not open"; }
+  # Preparation runs filesystem helpers; synchronize on readiness, not a two-second speed budget.
+  if ! fm_test_wait_for_file "$ready" "$pid"; then
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    cat "$output" >&2
+    fail "legacy cutover preparation gate did not open"
+  fi
   assert_grep 'fresh bytes' "$stack/entries/legacy-fresh/report.md" \
     "bounded legacy migration hid an unstaged fresh report"
   assert_grep 'second fresh bytes' "$stack/entries/legacy-fresh-two/report.md" \

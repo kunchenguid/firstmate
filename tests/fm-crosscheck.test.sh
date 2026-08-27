@@ -3462,6 +3462,30 @@ assert run["state"] == "clear"
   pass "a pipeline-updated PR is reviewed at its exact remote head while the author worktree remains behind"
 }
 
+test_registered_expected_head_refuses_a_moved_head_before_spend() {
+  local record case_dir base head expected rc
+  record=$(make_case registered-head-moved)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  expected=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  [ "$expected" != "$head" ] || fail "expected-head fixture did not move"
+  set +e
+  run_case "$case_dir" "$base" "$head" clear run --expected-head "$expected" \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "moved registered head"
+  assert_grep "registered PR head changed before Crosscheck launch: expected $expected, observed $head" \
+    "$case_dir/err" \
+    "moved registered head did not produce the exact pre-spend diagnostic"
+  assert_absent "$case_dir/codex.log" \
+    "reviewer launched after the registered exact head changed"
+  assert_absent "$case_dir/pi.log" \
+    "Pi reviewer launched after the registered exact head changed"
+  assert_absent "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    "head mismatch fabricated a durable review attempt"
+  pass "a moved registered head refuses before reviewer or Azure spending"
+}
+
 test_missing_pr_head_ref_fails_closed() {
   local record case_dir base head rc
   record=$(make_case missing-pr-head-ref)
@@ -6691,6 +6715,7 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_missing_metadata_for_existing_task_fails_closed|\
     test_existing_task_metadata_identity_collision_fails_closed|\
     test_review_fetches_exact_pr_head_when_author_worktree_is_behind|\
+    test_registered_expected_head_refuses_a_moved_head_before_spend|\
     test_missing_pr_head_ref_fails_closed|\
     test_codex_reviewer_requires_bound_auth_and_clears_ambient_credentials|\
     test_launcher_requires_supported_python|\
@@ -6845,6 +6870,7 @@ test_mismatched_state_without_metadata_fails_closed
 test_missing_metadata_for_existing_task_fails_closed
 test_existing_task_metadata_identity_collision_fails_closed
 test_review_fetches_exact_pr_head_when_author_worktree_is_behind
+test_registered_expected_head_refuses_a_moved_head_before_spend
 test_missing_pr_head_ref_fails_closed
 test_codex_reviewer_requires_bound_auth_and_clears_ambient_credentials
 test_null_ledger_fails_without_normalization

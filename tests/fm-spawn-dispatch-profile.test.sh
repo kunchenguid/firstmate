@@ -657,7 +657,9 @@ print(value["issuer"], value["task"]["task_id"], value["author"]["harness"], val
   git -C "$leased_worktree" config user.name Fixture
   printf 'authored after launch\n' > "$leased_worktree/crosscheck-provenance-fixture.txt"
   git -C "$leased_worktree" add crosscheck-provenance-fixture.txt
-  git -C "$leased_worktree" commit -qm 'test: author after launch'
+  git -C "$leased_worktree" -c user.name='Firstmate Tests' \
+    -c user.email='tests@example.invalid' commit -qm 'test: author after launch' \
+    || fail "could not commit the post-launch authorship fixture"
   exact_head=$(git -C "$leased_worktree" rev-parse HEAD)
   printf 'pr=https://github.com/ruby-labs/firstmate/pull/999\npr_head=%s\n' \
     "$exact_head" >> "$HOME_DIR/state/$id.meta"
