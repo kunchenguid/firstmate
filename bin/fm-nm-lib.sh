@@ -127,6 +127,9 @@ _fm_nm_is_semver_core_version() {  # <core>
 _fm_nm_is_semver_prerelease_id() {  # <prerelease>
   local token remaining=$1
   [ -n "$remaining" ] || return 1
+  case "$remaining" in
+    *.) return 1 ;;
+  esac
   while [ -n "$remaining" ]; do
     token=${remaining%%.*}
     case "$token" in
@@ -141,6 +144,9 @@ _fm_nm_is_semver_prerelease_id() {  # <prerelease>
 _fm_nm_is_semver_build_id() {  # <build>
   local token remaining=$1
   [ -n "$remaining" ] || return 1
+  case "$remaining" in
+    *.) return 1 ;;
+  esac
   while [ -n "$remaining" ]; do
     token=${remaining%%.*}
     case "$token" in
