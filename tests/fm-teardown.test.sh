@@ -220,19 +220,19 @@ route_reservation_path() {
 }
 
 make_active_routed_task() {
-  local case_dir=$1 generation=${2:-gen-task-x1} metadata capability candidate
+  local case_dir=$1 generation=${2:-gen-task-x1} work_type=${3:-review} metadata capability candidate
   metadata="$case_dir/state/task-x1.meta"
   capability=$(route_claim_path "$case_dir" task-x1 "$generation")
   candidate="$metadata.route-candidate"
   FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" reserve \
     --task task-x1 --generation "$generation" --profile profile-1 \
     --provider openai --lane codex-primary --account codex-primary \
-    --class standard --work-type implementation --risk medium \
+    --class standard --work-type "$work_type" --risk medium \
     --mode automatic --now 100 >/dev/null
   FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" begin-admission \
     --task task-x1 --generation "$generation" --profile profile-1 \
     --provider openai --lane codex-primary --account codex-primary \
-    --class standard --risk medium --mode automatic --transition fresh \
+    --class standard --work-type "$work_type" --risk medium --mode automatic --transition fresh \
     --metadata-file "$metadata" --claim-file "$capability" >/dev/null
   cp "$metadata" "$candidate"
   {
@@ -242,6 +242,7 @@ make_active_routed_task() {
     printf 'route_lane=codex-primary\n'
     printf 'route_account=codex-primary\n'
     printf 'route_class=standard\n'
+    printf 'route_work_type=%s\n' "$work_type"
     printf 'route_risk=medium\n'
     printf 'route_mode=automatic\n'
   } >>"$candidate"
@@ -261,7 +262,7 @@ make_stale_inherited_admission() {
   (FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" begin-admission \
     --task task-x1 --generation gen-task-x1 --profile profile-1 \
     --provider openai --lane codex-primary --account codex-primary \
-    --class standard --risk medium --mode automatic --transition inherit \
+    --class standard --work-type review --risk medium --mode automatic --transition inherit \
     --metadata-file "$metadata" --claim-file "$capability" >/dev/null) &
   wait "$!" || fail "stale inherited admission setup failed"
   old=$(( $(date +%s) - 301 ))
@@ -341,7 +342,7 @@ test_successful_teardown_finalizes_routed_generation_once() {
   [ ! -e "$capability" ] || fail "successful cleanup leaked its capability"
   [ "$(jq -s '[.[] | select(.taskId == "task-x1" and .generation == "gen-task-x1")] | length' "$outcomes")" -eq 1 ] \
     || fail "successful cleanup did not write exactly one generation outcome"
-  jq -e 'select(.taskId == "task-x1") | .terminal == "completed" and .tests == "pass" and .review == "pass" and .redundant == "no"' "$outcomes" >/dev/null \
+  jq -e 'select(.taskId == "task-x1") | .workType == "review" and .terminal == "completed" and .tests == "pass" and .review == "pass" and .redundant == "no"' "$outcomes" >/dev/null \
     || fail "successful cleanup did not merge the pending score"
 
   if run_teardown "$case_dir" >/dev/null 2>&1; then
@@ -350,6 +351,45 @@ test_successful_teardown_finalizes_routed_generation_once() {
   [ "$(jq -s '[.[] | select(.taskId == "task-x1" and .generation == "gen-task-x1")] | length' "$outcomes")" -eq 1 ] \
     || fail "cleanup replay duplicated the terminal outcome"
   pass "successful cleanup finalizes one generation exactly once"
+}
+
+test_teardown_accepts_legacy_eight_field_route_metadata() {
+  local case_dir metadata outcomes
+  case_dir=$(make_case routed-legacy-metadata)
+  write_meta "$case_dir" no-mistakes ship
+  make_active_routed_task "$case_dir" gen-task-x1 implementation
+  metadata="$case_dir/state/task-x1.meta"
+  sed '/^route_work_type=/d' "$metadata" > "$metadata.legacy"
+  mv "$metadata.legacy" "$metadata"
+  outcomes="$case_dir/state/routing/outcomes.jsonl"
+
+  run_teardown "$case_dir" >/dev/null
+  jq -e 'select(.taskId == "task-x1") | .workType == "implementation" and .terminal == "completed"' \
+    "$outcomes" >/dev/null \
+    || fail "legacy routed teardown did not derive work type from its exact reservation"
+  pass "legacy eight-field routed metadata finalizes through its authoritative reservation"
+}
+
+test_legacy_teardown_replays_after_terminal_ledger_publish() {
+  local case_dir metadata outcomes
+  case_dir=$(make_case routed-legacy-ledger)
+  write_meta "$case_dir" no-mistakes ship
+  make_active_routed_task "$case_dir" gen-task-x1 implementation
+  metadata="$case_dir/state/task-x1.meta"
+  sed '/^route_work_type=/d' "$metadata" > "$metadata.legacy"
+  mv "$metadata.legacy" "$metadata"
+  outcomes="$case_dir/state/routing/outcomes.jsonl"
+  FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" cleanup-finalize \
+    --task task-x1 --generation gen-task-x1 --profile profile-1 \
+    --provider openai --lane codex-primary --account codex-primary \
+    --class standard --work-type implementation --risk medium --mode automatic \
+    --terminal completed >/dev/null
+
+  run_teardown "$case_dir" >/dev/null
+  [ ! -e "$metadata" ] || fail "legacy ledger-published cleanup replay retained metadata"
+  [ "$(jq -s '[.[] | select(.taskId == "task-x1" and .generation == "gen-task-x1")] | length' "$outcomes")" -eq 1 ] \
+    || fail "legacy ledger-published cleanup replay duplicated its outcome"
+  pass "legacy eight-field cleanup replays from its exact terminal outcome"
 }
 
 test_missing_routing_capability_refuses_before_cleanup() {
@@ -420,7 +460,7 @@ test_teardown_replays_after_terminal_ledger_publish() {
   FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" cleanup-finalize \
     --task task-x1 --generation gen-task-x1 --profile profile-1 \
     --provider openai --lane codex-primary --account codex-primary \
-    --class standard --risk medium --mode automatic --terminal completed >/dev/null
+    --class standard --work-type review --risk medium --mode automatic --terminal completed >/dev/null
   [ -f "$case_dir/state/task-x1.meta" ] || fail "ledger-publish crash setup lost task metadata"
 
   run_teardown "$case_dir" >/dev/null
@@ -488,7 +528,7 @@ test_terminal_conflict_preflight_is_read_only() {
   FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" cleanup-finalize \
     --task task-x1 --generation gen-task-x1 --profile profile-1 \
     --provider openai --lane codex-primary --account codex-primary \
-    --class standard --risk medium --mode automatic --terminal failed_safe >/dev/null
+    --class standard --work-type review --risk medium --mode automatic --terminal failed_safe >/dev/null
   before_outcome=$(od -An -v -tx1 "$outcomes")
   before_meta=$(od -An -v -tx1 "$case_dir/state/task-x1.meta")
 
@@ -2984,6 +3024,8 @@ test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
 test_refused_teardown_keeps_routed_generation
 test_successful_teardown_finalizes_routed_generation_once
+test_teardown_accepts_legacy_eight_field_route_metadata
+test_legacy_teardown_replays_after_terminal_ledger_publish
 test_missing_routing_capability_refuses_before_cleanup
 test_routed_finalization_failure_after_return_converges_on_retry
 test_teardown_replays_after_terminal_ledger_publish

@@ -274,32 +274,32 @@ claim_path() {
 }
 
 cleanup_ready() {
-  local task=$1 generation=$2
+  local task=$1 generation=$2 work_type=${3:-implementation}
   "$ROUTE" cleanup-ready --task "$task" --generation "$generation" \
     --profile profile-1 --provider openai --lane codex-primary \
-    --account codex-primary --class standard --risk medium --mode automatic \
+    --account codex-primary --class standard --work-type "$work_type" --risk medium --mode automatic \
     --terminal completed
 }
 
 cleanup_finalize() {
-  local task=$1 generation=$2 terminal=${3:-completed}
+  local task=$1 generation=$2 terminal=${3:-completed} work_type=${4:-implementation}
   "$ROUTE" cleanup-finalize --task "$task" --generation "$generation" \
     --profile profile-1 --provider openai --lane codex-primary \
-    --account codex-primary --class standard --risk medium --mode automatic \
+    --account codex-primary --class standard --work-type "$work_type" --risk medium --mode automatic \
     --terminal "$terminal"
 }
 
 begin_fresh_admission() {
-  local task=$1 generation=$2 metadata=$3
+  local task=$1 generation=$2 metadata=$3 work_type=${4:-implementation}
   "$ROUTE" begin-admission --task "$task" --generation "$generation" \
     --profile profile-1 --provider openai --lane codex-primary \
-    --account codex-primary --class standard --risk medium --mode automatic \
+    --account codex-primary --class standard --work-type "$work_type" --risk medium --mode automatic \
     --transition fresh --metadata-file "$metadata" \
     --claim-file "$(claim_path "$task" "$generation")"
 }
 
 write_route_metadata() {
-  local file=$1 generation=$2 profile=${3:-profile-1} lane=${4:-codex-primary} account=${5:-codex-primary}
+  local file=$1 generation=$2 profile=${3:-profile-1} lane=${4:-codex-primary} account=${5:-codex-primary} work_type=${6:-implementation}
   {
     printf 'task=task-1\n'
     printf 'route_generation=%s\n' "$generation"
@@ -308,45 +308,46 @@ write_route_metadata() {
     printf 'route_lane=%s\n' "$lane"
     printf 'route_account=%s\n' "$account"
     printf 'route_class=standard\n'
+    printf 'route_work_type=%s\n' "$work_type"
     printf 'route_risk=medium\n'
     printf 'route_mode=automatic\n'
   } >"$file"
 }
 
 activate_fresh_admission() {
-  local task=$1 generation=$2 metadata=$3 candidate capability
+  local task=$1 generation=$2 metadata=$3 work_type=${4:-implementation} candidate capability
   candidate="$metadata.candidate"
   capability=$(claim_path "$task" "$generation")
-  begin_fresh_admission "$task" "$generation" "$metadata" >/dev/null
-  write_route_metadata "$candidate" "$generation"
+  begin_fresh_admission "$task" "$generation" "$metadata" "$work_type" >/dev/null
+  write_route_metadata "$candidate" "$generation" profile-1 codex-primary codex-primary "$work_type"
   "$ROUTE" prepare-admission --task "$task" --candidate "$candidate" --claim-file "$capability" >/dev/null
   mv "$candidate" "$metadata"
   "$ROUTE" commit-admission --task "$task" --claim-file "$capability" >/dev/null
 }
 
 begin_inherited_admission() {
-  local task=$1 generation=$2 metadata=$3
+  local task=$1 generation=$2 metadata=$3 work_type=${4:-implementation}
   "$ROUTE" begin-admission --task "$task" --generation "$generation" \
     --profile profile-1 --provider openai --lane codex-primary \
-    --account codex-primary --class standard --risk medium --mode automatic \
+    --account codex-primary --class standard --work-type "$work_type" --risk medium --mode automatic \
     --transition inherit --metadata-file "$metadata" \
     --claim-file "$(claim_path "$task" "$generation")"
 }
 
 begin_off_admission() {
-  local task=$1 generation=$2 metadata=$3 profile=${4:-profile-1} lane=${5:-codex-primary} account=${6:-codex-primary}
+  local task=$1 generation=$2 metadata=$3 profile=${4:-profile-1} lane=${5:-codex-primary} account=${6:-codex-primary} work_type=${7:-implementation}
   "$ROUTE" begin-admission --task "$task" --generation "$generation" \
     --profile "$profile" --provider openai --lane "$lane" \
-    --account "$account" --class standard --risk medium --mode automatic \
+    --account "$account" --class standard --work-type "$work_type" --risk medium --mode automatic \
     --transition off --metadata-file "$metadata" \
     --claim-file "$(claim_path "$task" "$generation")"
 }
 
 begin_replacement_admission() {
-  local task=$1 generation=$2 prior_generation=$3 metadata=$4
+  local task=$1 generation=$2 prior_generation=$3 metadata=$4 work_type=${5:-implementation}
   "$ROUTE" begin-admission --task "$task" --generation "$generation" \
     --profile profile-2 --provider openai --lane codex-secondary \
-    --account codex-secondary --class standard --risk medium --mode automatic \
+    --account codex-secondary --class standard --work-type "$work_type" --risk medium --mode automatic \
     --transition replacement --prior-generation "$prior_generation" \
     --metadata-file "$metadata" --claim-file "$(claim_path "$task" "$generation")" \
     --prior-claim-file "$(claim_path "$task" "$prior_generation")"
@@ -438,9 +439,16 @@ test_lane_account_and_burst_caps_are_enforced() {
 test_reservation_verification_and_generation_release_are_exact() {
   reset_route_state
   reserve_route task-1 gen-1 profile-1 openai codex-primary codex-primary high_risk high automatic >/dev/null
-  "$ROUTE" verify-reservation --task task-1 --generation gen-1 --profile profile-1 --provider openai --lane codex-primary --account codex-primary --class high_risk --risk high --mode automatic >/dev/null \
+  "$ROUTE" verify-reservation --task task-1 --generation gen-1 --profile profile-1 --provider openai --lane codex-primary --account codex-primary --class high_risk --work-type implementation --risk high --mode automatic >/dev/null \
     || fail "exact reservation did not verify"
-  expect_failure_contains 'reservation-mismatch' "$ROUTE" verify-reservation --task task-1 --generation gen-1 --profile wrong --provider openai --lane codex-primary --account codex-primary --class high_risk --risk high --mode automatic
+  [ "$("$ROUTE" reservation-work-type --task task-1 --generation gen-1 \
+    --profile profile-1 --provider openai --lane codex-primary \
+    --account codex-primary --class high_risk --risk high --mode automatic)" = implementation ] \
+    || fail "legacy metadata compatibility did not resolve authoritative work type"
+  expect_failure_contains 'reservation-mismatch' "$ROUTE" reservation-work-type \
+    --task task-1 --generation gen-1 --profile wrong --provider openai \
+    --lane codex-primary --account codex-primary --class high_risk --risk high --mode automatic
+  expect_failure_contains 'reservation-mismatch' "$ROUTE" verify-reservation --task task-1 --generation gen-1 --profile wrong --provider openai --lane codex-primary --account codex-primary --class high_risk --work-type implementation --risk high --mode automatic
   expect_failure_contains 'reservation-generation-mismatch' "$ROUTE" release --task task-1 --generation wrong
   [ -f "$(reservation_path task-1 gen-1)" ] || fail "wrong generation released a live reservation"
   "$ROUTE" release --task task-1 --generation gen-1 >/dev/null || fail "reservation release failed"
@@ -511,13 +519,35 @@ test_claim_release_is_exact_and_stale_claims_are_recoverable() {
   pass "admission rollback requires the exact protected capability"
 }
 
-test_spawn_claim_requires_an_implementation_reservation() {
+test_spawn_claim_requires_the_authoritative_reservation_work_type() {
+  local metadata="$FM_STATE_OVERRIDE/task-1.meta" outcome
   reset_route_state
-  WORK_TYPE_OVERRIDE=research \
+  WORK_TYPE_OVERRIDE=review \
     reserve_route task-1 gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
   expect_failure_contains 'reservation-mismatch' \
-    begin_fresh_admission task-1 gen-1 "$FM_STATE_OVERRIDE/task-1.meta"
-  pass "spawn admission cannot claim a non-implementation reservation"
+    begin_fresh_admission task-1 gen-1 "$metadata" implementation
+  expect_failure_contains 'reservation-mismatch' "$ROUTE" verify-reservation \
+    --task task-1 --generation gen-1 --profile profile-1 --provider openai \
+    --lane codex-primary --account codex-primary --class standard \
+    --work-type implementation --risk medium --mode automatic --now 1000
+  "$ROUTE" verify-reservation --task task-1 --generation gen-1 \
+    --profile profile-1 --provider openai --lane codex-primary \
+    --account codex-primary --class standard --work-type review --risk medium \
+    --mode automatic --now 1000 >/dev/null \
+    || fail "review reservation could not be verified with its authoritative work type"
+  activate_fresh_admission task-1 gen-1 "$metadata" review
+  jq -e '.workType == "review" and .admissionState == "active"' \
+    "$(reservation_path task-1 gen-1)" >/dev/null \
+    || fail "review admission did not preserve work type"
+  cleanup_ready task-1 gen-1 review >/dev/null
+  outcome=$(cleanup_finalize task-1 gen-1 completed review)
+  jq -e '.workType == "review" and .terminal == "completed"' <<<"$outcome" >/dev/null \
+    || fail "review finalization did not preserve work type"
+  [ "$("$ROUTE" reservation-work-type --task task-1 --generation gen-1 \
+    --profile profile-1 --provider openai --lane codex-primary \
+    --account codex-primary --class standard --risk medium --mode automatic)" = review ] \
+    || fail "finalized legacy compatibility did not resolve work type from terminal outcome"
+  pass "routed lifecycle validates and preserves the authoritative work type"
 }
 
 test_active_generation_can_hold_one_distinct_pending_replacement() {
@@ -1113,7 +1143,7 @@ test_cleanup_preflight_recovers_stale_admission_before_finalizing() {
   capability=$(claim_path cleanup gen-1)
   ("$ROUTE" begin-admission --task cleanup --generation gen-1 \
     --profile profile-1 --provider openai --lane codex-primary \
-    --account codex-primary --class standard --risk medium --mode automatic \
+    --account codex-primary --class standard --work-type implementation --risk medium --mode automatic \
     --transition inherit --metadata-file "$metadata" --claim-file "$capability" >/dev/null) &
   wait "$!" || fail "stale cleanup admission setup failed"
   age_admission cleanup gen-1
@@ -1224,6 +1254,7 @@ test_every_single_value_option_rejects_duplicates() {
   expect_failure_contains 'usage:' "$ROUTE" select --request "$REQUEST" --request "$REQUEST" --candidates "$CANDIDATES"
   expect_failure_contains 'usage:' "$ROUTE" reserve --task one --task two
   expect_failure_contains 'usage:' "$ROUTE" verify-reservation --profile one --profile two
+  expect_failure_contains 'usage:' "$ROUTE" reservation-work-type --task one --task two
   expect_failure_contains 'usage:' "$ROUTE" claim-reservation --claim aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --claim bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   expect_failure_contains 'usage:' "$ROUTE" activate-reservation --task one --task two
   expect_failure_contains 'usage:' "$ROUTE" release --generation one --generation two
@@ -1256,7 +1287,7 @@ test_lane_account_and_burst_caps_are_enforced
 test_reservation_verification_and_generation_release_are_exact
 test_reservation_claim_blocks_concurrent_lifecycle_until_activation
 test_claim_release_is_exact_and_stale_claims_are_recoverable
-test_spawn_claim_requires_an_implementation_reservation
+test_spawn_claim_requires_the_authoritative_reservation_work_type
 test_active_generation_can_hold_one_distinct_pending_replacement
 test_fresh_admission_uses_only_a_protected_capability_file
 test_fresh_admission_journal_commits_only_the_published_metadata

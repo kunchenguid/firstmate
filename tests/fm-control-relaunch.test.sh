@@ -186,19 +186,19 @@ meta_field() {  # <case-dir> <id> <key>
 }
 
 activate_test_route() {  # <case-dir> <task> <generation>
-  local dir=$1 task=$2 generation=$3 capability candidate metadata
+  local dir=$1 task=$2 generation=$3 work_type=${4:-implementation} capability candidate metadata
   capability="$dir/home/state/routing/claims/$task/$generation.cap"
   candidate="$dir/home/state/$task.meta.route-candidate"
   metadata="$dir/home/state/$task.meta"
   FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
     "$ROOT/bin/fm-route.sh" reserve --task "$task" --generation "$generation" \
       --profile claude-sonnet --provider anthropic --lane claude-primary \
-      --account claude-primary --class standard --work-type implementation \
+      --account claude-primary --class standard --work-type "$work_type" \
       --risk medium --mode automatic --now 1000 >/dev/null
   FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
     "$ROOT/bin/fm-route.sh" begin-admission --task "$task" --generation "$generation" \
       --profile claude-sonnet --provider anthropic --lane claude-primary \
-      --account claude-primary --class standard --risk medium --mode automatic \
+      --account claude-primary --class standard --work-type "$work_type" --risk medium --mode automatic \
       --transition fresh --claim-file "$capability" --metadata-file "$metadata" \
       >/dev/null
   cp "$metadata" "$candidate"
@@ -209,6 +209,7 @@ activate_test_route() {  # <case-dir> <task> <generation>
     printf '%s\n' 'route_lane=claude-primary'
     printf '%s\n' 'route_account=claude-primary'
     printf '%s\n' 'route_class=standard'
+    printf 'route_work_type=%s\n' "$work_type"
     printf '%s\n' 'route_risk=medium'
     printf '%s\n' 'route_mode=automatic'
   } >> "$candidate"
@@ -341,7 +342,7 @@ test_relaunch_preserves_and_readmits_the_original_route_generation() {
   jq -n --arg config_dir "$dir/claude-primary" \
     '{version:1,accounts:{"claude-primary":{harness:"claude",envName:"CLAUDE_CONFIG_DIR",configDir:$config_dir}}}' \
     > "$dir/home/config/crew-accounts.json"
-  activate_test_route "$dir" rl35 gen-original
+  activate_test_route "$dir" rl35 gen-original review
   reservation="$dir/home/state/routing/reservations/rl35/gen-original.json"
 
   out=$(run_control "$dir" rl35 relaunch --note "continue on the admitted route"); rc=$?
@@ -350,10 +351,32 @@ test_relaunch_preserves_and_readmits_the_original_route_generation() {
     || fail "routed relaunch changed the original route generation"
   [ "$(meta_field "$dir" rl35 route_account)" = claude-primary ] \
     || fail "routed relaunch lost the native account binding"
+  [ "$(meta_field "$dir" rl35 route_work_type)" = review ] \
+    || fail "routed relaunch lost the authoritative work type"
   assert_present "$reservation" "successful relaunch released the live route reservation"
   assert_grep "CLAUDE_CONFIG_DIR='$dir/claude-primary'" "$dir/fake/literal" \
     "routed relaunch did not restore its native account environment"
   pass "fm-control relaunch: original route generation and account binding survive replacement"
+}
+
+test_relaunch_upgrades_legacy_eight_field_route_metadata() {
+  local dir out rc meta
+  dir=$(new_case routed-legacy rl35legacy)
+  add_ship_task "$dir" rl35legacy claude
+  mkdir -p "$dir/home/config" "$dir/claude-primary"
+  jq -n --arg config_dir "$dir/claude-primary" \
+    '{version:1,accounts:{"claude-primary":{harness:"claude",envName:"CLAUDE_CONFIG_DIR",configDir:$config_dir}}}' \
+    > "$dir/home/config/crew-accounts.json"
+  activate_test_route "$dir" rl35legacy gen-legacy implementation
+  meta="$dir/home/state/rl35legacy.meta"
+  sed '/^route_work_type=/d' "$meta" > "$meta.legacy"
+  mv "$meta.legacy" "$meta"
+
+  out=$(run_control "$dir" rl35legacy relaunch --note "upgrade legacy route metadata"); rc=$?
+  expect_code 0 "$rc" "legacy routed relaunch should resolve its reservation work type"$'\n'"$out"
+  [ "$(meta_field "$dir" rl35legacy route_work_type)" = implementation ] \
+    || fail "legacy routed relaunch did not republish authoritative work type"
+  pass "fm-control relaunch: legacy eight-field metadata upgrades from its exact reservation"
 }
 
 test_explicit_off_relaunch_suppresses_inherited_route_metadata() {
@@ -392,7 +415,7 @@ test_explicit_reroute_requires_a_distinct_reserved_generation() {
   out=$(run_spawn "$dir" rl37 --relaunch --harness claude \
     --route-generation gen-old --route-profile claude-sonnet --route-provider anthropic \
     --route-lane claude-primary --route-account claude-primary --route-class standard \
-    --route-risk medium --route-mode automatic); rc=$?
+    --route-work-type implementation --route-risk medium --route-mode automatic); rc=$?
   expect_code 1 "$rc" "same-generation explicit reroute must fail"
   assert_contains "$out" "newly reserved route generation must differ from the recorded generation" \
     "same-generation reroute was not diagnosed"
@@ -407,7 +430,7 @@ test_explicit_reroute_requires_a_distinct_reserved_generation() {
   out=$(run_spawn "$dir" rl37 --relaunch --harness claude \
     --route-generation gen-new --route-profile claude-sonnet --route-provider anthropic \
     --route-lane claude-primary --route-account claude-primary --route-class standard \
-    --route-risk medium --route-mode automatic); rc=$?
+    --route-work-type implementation --route-risk medium --route-mode automatic); rc=$?
   expect_code 0 "$rc" "distinct reserved reroute should succeed"$'\n'"$out"
   [ "$(meta_field "$dir" rl37 route_generation)" = gen-new ] \
     || fail "distinct reserved reroute did not publish its new generation"
@@ -455,7 +478,7 @@ test_routed_relaunch_prepublication_failures_preserve_old_capacity() {
           run_spawn "$dir" "rl-$transition" --relaunch --harness claude \
             --route-generation gen-new --route-profile claude-sonnet --route-provider anthropic \
             --route-lane claude-primary --route-account claude-primary --route-class standard \
-            --route-risk medium --route-mode automatic); rc=$?
+            --route-work-type implementation --route-risk medium --route-mode automatic); rc=$?
         ;;
     esac
     expect_code 1 "$rc" "$transition relaunch should fail before route metadata publication"$'\n'"$out"
@@ -1488,6 +1511,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_preserves_and_readmits_the_original_route_generation
+test_relaunch_upgrades_legacy_eight_field_route_metadata
 test_explicit_off_relaunch_suppresses_inherited_route_metadata
 test_explicit_reroute_requires_a_distinct_reserved_generation
 test_routed_relaunch_prepublication_failures_preserve_old_capacity

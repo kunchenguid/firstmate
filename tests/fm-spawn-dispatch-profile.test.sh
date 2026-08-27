@@ -115,11 +115,11 @@ enable_dispatch_profile() {
 }
 
 reserve_route() {
-  local home=$1 task=$2 generation=$3 profile=$4 provider=$5 lane=$6 account=$7 task_class=$8 risk=$9 mode=${10}
+  local home=$1 task=$2 generation=$3 profile=$4 provider=$5 lane=$6 account=$7 task_class=$8 risk=$9 mode=${10} work_type=${11:-implementation}
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     "$ROOT/bin/fm-route.sh" reserve --task "$task" --generation "$generation" \
       --profile "$profile" --provider "$provider" --lane "$lane" --account "$account" \
-      --class "$task_class" --work-type implementation --risk "$risk" --mode "$mode" \
+      --class "$task_class" --work-type "$work_type" --risk "$risk" --mode "$mode" \
       --now 1000 >/dev/null
 }
 
@@ -134,7 +134,7 @@ make_account_map() {
 
 ROUTED_ARGS=(--route-generation gen-1 --route-profile pi-kimi --route-provider moonshot
   --route-lane pi-moonshot-1 --route-account none --route-class standard
-  --route-risk medium --route-mode automatic)
+  --route-work-type implementation --route-risk medium --route-mode automatic)
 
 make_seeded_secondmate_home() {
   local home=$1 id=$2
@@ -884,10 +884,22 @@ test_partial_and_duplicate_route_tuples_are_refused() {
   assert_contains "$out" "complete route metadata tuple" "partial route was not diagnosed"
   assert_absent "$HOME_DIR/state/$id.meta" "partial route published metadata"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness pi --route-generation gen-1 --route-profile pi-kimi \
+    --route-provider moonshot --route-lane pi-moonshot-1 --route-account none \
+    --route-class standard --route-risk medium --route-mode automatic)
+  status=$?
+  expect_code 2 "$status" "legacy eight-field routed spawn must fail as usage"
+  assert_contains "$out" "complete route metadata tuple" "missing route work type was not diagnosed"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" --harness pi --route-generation gen-1 --route-generation gen-2)
   status=$?
   expect_code 2 "$status" "duplicate route flags must fail as usage"
   assert_contains "$out" "duplicate option: --route-generation" "duplicate route flag was not diagnosed"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness pi --route-work-type review --route-work-type debugging)
+  status=$?
+  expect_code 2 "$status" "duplicate route work-type flags must fail as usage"
+  assert_contains "$out" "duplicate option: --route-work-type" "duplicate route work type was not diagnosed"
   pass "partial and duplicate route tuples are refused before mutation"
 }
 
@@ -901,7 +913,7 @@ test_mismatched_and_path_unsafe_routes_do_not_release_an_owned_reservation() {
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" --harness pi --route-generation gen-1 --route-profile wrong \
     --route-provider moonshot --route-lane pi-moonshot-1 --route-account none \
-    --route-class standard --route-risk medium --route-mode automatic)
+    --route-class standard --route-work-type implementation --route-risk medium --route-mode automatic)
   status=$?
   expect_code 1 "$status" "mismatched route must fail"
   assert_contains "$out" "matching routing reservation is required" "route mismatch was not diagnosed"
@@ -909,7 +921,7 @@ test_mismatched_and_path_unsafe_routes_do_not_release_an_owned_reservation() {
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" --harness pi --route-generation '../gen-1' --route-profile pi-kimi \
     --route-provider moonshot --route-lane pi-moonshot-1 --route-account none \
-    --route-class standard --route-risk medium --route-mode automatic)
+    --route-class standard --route-work-type implementation --route-risk medium --route-mode automatic)
   status=$?
   expect_code 1 "$status" "path-unsafe route generation must fail"
   assert_present "$reservation" "an invalid generation released the valid reservation"
@@ -921,13 +933,22 @@ test_routed_spawn_records_the_complete_route() {
   id=route-record-z23
   rec=$(make_spawn_case route-record pi "$id")
   read_case_record "$rec"
-  reserve_route "$HOME_DIR" "$id" gen-1 pi-kimi moonshot pi-moonshot-1 none standard medium automatic
+  reserve_route "$HOME_DIR" "$id" gen-1 pi-kimi moonshot pi-moonshot-1 none standard medium automatic review
+  local -a review_args=(--route-generation gen-1 --route-profile pi-kimi --route-provider moonshot
+    --route-lane pi-moonshot-1 --route-account none --route-class standard
+    --route-work-type review --route-risk medium --route-mode automatic)
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" --harness pi --model cliproxyapi/kimi-k3 "${ROUTED_ARGS[@]}")
   status=$?
+  expect_code 1 "$status" "mismatched routed work type must fail"
+  assert_present "$HOME_DIR/state/routing/reservations/$id/gen-1.json" \
+    "work-type mismatch released the authoritative reservation"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness pi --model cliproxyapi/kimi-k3 "${review_args[@]}")
+  status=$?
   expect_code 0 "$status" "reserved routed spawn should succeed"
   for expected in generation=gen-1 profile=pi-kimi provider=moonshot lane=pi-moonshot-1 \
-    account=none class=standard risk=medium mode=automatic; do
+    account=none class=standard work_type=review risk=medium mode=automatic; do
     key=${expected%%=*}
     assert_grep "route_$expected" "$HOME_DIR/state/$id.meta" "missing route $key metadata"
   done
@@ -1007,7 +1028,7 @@ test_native_routes_bind_only_the_allowlisted_account_environment() {
     "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
     --harness codex --model gpt-5.6-sol --route-generation gen-1 --route-profile codex-sol \
     --route-provider openai --route-lane codex-secondary --route-account codex-secondary \
-    --route-class standard --route-risk medium --route-mode automatic)
+    --route-class standard --route-work-type implementation --route-risk medium --route-mode automatic)
   status=$?
   expect_code 0 "$status" "native Codex routed spawn should succeed"
   launch=$(cat "$LAUNCH_LOG")
@@ -1027,7 +1048,7 @@ test_native_harness_mismatch_and_pi_account_binding_are_refused() {
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" --harness claude --route-generation gen-1 --route-profile codex-sol \
     --route-provider openai --route-lane codex-secondary --route-account codex-secondary \
-    --route-class standard --route-risk medium --route-mode automatic)
+    --route-class standard --route-work-type implementation --route-risk medium --route-mode automatic)
   status=$?
   expect_code 1 "$status" "native account harness mismatch must fail"
   assert_contains "$out" "route account harness does not match launch harness" "native account harness mismatch was not diagnosed"
@@ -1040,7 +1061,7 @@ test_native_harness_mismatch_and_pi_account_binding_are_refused() {
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" --harness pi --route-generation gen-1 --route-profile pi-kimi \
     --route-provider moonshot --route-lane pi-moonshot-1 --route-account codex-secondary \
-    --route-class standard --route-risk medium --route-mode automatic)
+    --route-class standard --route-work-type implementation --route-risk medium --route-mode automatic)
   status=$?
   expect_code 1 "$status" "Pi native account binding must fail"
   assert_contains "$out" "Pi routes require route account none" "Pi account semantics were not diagnosed"
@@ -1089,7 +1110,7 @@ SH
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
       "$id" --secondmate --harness codex --route-generation gen-1 \
       --route-profile codex-sol --route-provider openai --route-lane codex-primary \
-      --route-account codex-primary --route-class standard --route-risk medium \
+      --route-account codex-primary --route-class standard --route-work-type implementation --route-risk medium \
       --route-mode automatic)
   status=$?
   expect_code 1 "$status" "remote secondmate routed launch must fail"

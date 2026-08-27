@@ -408,7 +408,8 @@ git commit -m "feat: select subscription routing profiles"
 **Interfaces:**
 
 - Produces: `fm-route.sh reserve --task ID --generation GENERATION --profile ID --provider NAME --lane NAME --account ACCOUNT_ID|none --class CLASS --work-type TYPE --risk RISK --mode MODE [--burst]`.
-- Produces: `fm-route.sh verify-reservation --task ID --generation GENERATION --profile ID --provider NAME --lane NAME --account ACCOUNT_ID|none --class CLASS --risk RISK --mode MODE`.
+- Produces: `fm-route.sh verify-reservation --task ID --generation GENERATION --profile ID --provider NAME --lane NAME --account ACCOUNT_ID|none --class CLASS --work-type TYPE --risk RISK --mode MODE`.
+- Produces: migration-only `fm-route.sh reservation-work-type` for an exact legacy eight-field tuple; returns the authoritative type from its strict reservation or exact terminal outcome.
 - Produces: `fm-route.sh release --task ID --generation GENERATION`.
 - Produces: `fm-route.sh failure --task ID --generation GENERATION --provider NAME --lane NAME --kind transient|quota|auth|model|unsafe --now EPOCH`.
 - Produces: `fm-route.sh score --task ID --generation GENERATION --terminal completed|failed_safe|escalated|cancelled|superseded --tests pass|fail|unknown --review pass|fail|unknown --redundant yes|no --now EPOCH`.
@@ -514,18 +515,19 @@ git commit -m "feat: bound routing capacity and failures"
 
 **Interfaces:**
 
-- Consumes new spawn flags: `--route-generation`, `--route-profile`, `--route-provider`, `--route-lane`, `--route-account`, `--route-class`, `--route-risk`, and `--route-mode`.
+- Consumes new spawn flags: `--route-generation`, `--route-profile`, `--route-provider`, `--route-lane`, `--route-account`, `--route-class`, `--route-work-type`, `--route-risk`, and `--route-mode`.
 - Requires a matching reservation before a routed launch can publish task metadata.
-- Adds task metadata fields: `route_generation`, `route_profile`, `route_provider`, `route_lane`, `route_account`, `route_class`, `route_risk`, and `route_mode`.
+- Adds task metadata fields: `route_generation`, `route_profile`, `route_provider`, `route_lane`, `route_account`, `route_class`, `route_work_type`, `route_risk`, and `route_mode`.
 - Resolves native account IDs through `fm-account-lane.sh` and binds only the allowlisted configuration environment variable for that launch.
 - Leaves static launches byte-compatible when no route flags are supplied or routing mode is `off`.
+- Upgrades legacy eight-field routed metadata only by resolving the missing work type from the exact strictly validated reservation; never default or guess it.
 
 - [ ] **Step 1: Write failing spawn admission tests.**
 
 ```bash
 test_routed_spawn_requires_matching_reservation() {
   enable_dispatch_profile "$HOME_DIR"
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$ID" "$PROJ_DIR" --harness pi --model cliproxyapi/kimi-k3 --route-generation gen-1 --route-profile pi-kimi --route-provider moonshot --route-lane pi-moonshot-1 --route-account none --route-class standard --route-risk medium --route-mode automatic)
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$ID" "$PROJ_DIR" --harness pi --model cliproxyapi/kimi-k3 --route-generation gen-1 --route-profile pi-kimi --route-provider moonshot --route-lane pi-moonshot-1 --route-account none --route-class standard --route-work-type implementation --route-risk medium --route-mode automatic)
   expect_code 1 "$?" 'unreserved routed spawn must fail'
   assert_contains "$out" 'matching routing reservation is required' 'spawn bypassed route admission'
 }
@@ -564,18 +566,18 @@ Expected: FAIL because route flags are not recognized.
 ```bash
 route_args_complete() {
   [ -n "$ROUTE_GENERATION" ] && [ -n "$ROUTE_PROFILE" ] && [ -n "$ROUTE_PROVIDER" ] \
-    && [ -n "$ROUTE_LANE" ] && [ -n "$ROUTE_ACCOUNT" ] && [ -n "$ROUTE_CLASS" ] && [ -n "$ROUTE_RISK" ] && [ -n "$ROUTE_MODE" ]
+    && [ -n "$ROUTE_LANE" ] && [ -n "$ROUTE_ACCOUNT" ] && [ -n "$ROUTE_CLASS" ] && [ -n "$ROUTE_WORK_TYPE" ] && [ -n "$ROUTE_RISK" ] && [ -n "$ROUTE_MODE" ]
 }
 
 route_args_present() {
-  [ -n "$ROUTE_GENERATION$ROUTE_PROFILE$ROUTE_PROVIDER$ROUTE_LANE$ROUTE_ACCOUNT$ROUTE_CLASS$ROUTE_RISK$ROUTE_MODE" ]
+  [ -n "$ROUTE_GENERATION$ROUTE_PROFILE$ROUTE_PROVIDER$ROUTE_LANE$ROUTE_ACCOUNT$ROUTE_CLASS$ROUTE_WORK_TYPE$ROUTE_RISK$ROUTE_MODE" ]
 }
 
 if route_args_complete; then
   "$SCRIPT_DIR/fm-route.sh" verify-reservation \
     --task "$ID" --generation "$ROUTE_GENERATION" --profile "$ROUTE_PROFILE" \
     --provider "$ROUTE_PROVIDER" --lane "$ROUTE_LANE" --class "$ROUTE_CLASS" \
-    --account "$ROUTE_ACCOUNT" --risk "$ROUTE_RISK" --mode "$ROUTE_MODE"
+    --account "$ROUTE_ACCOUNT" --work-type "$ROUTE_WORK_TYPE" --risk "$ROUTE_RISK" --mode "$ROUTE_MODE"
 elif route_args_present; then
   echo 'error: routed spawn requires the complete route metadata tuple' >&2
   exit 2
@@ -614,10 +616,11 @@ git commit -m "feat: enforce routed launch accounts"
 
 **Interfaces:**
 
-- Consumes the route fields already recorded in task metadata.
+- Consumes the complete route fields already recorded in task metadata, including authoritative `route_work_type`.
 - Consumes an optional prior `fm-route.sh score` record for tests, review, and redundant-output facts.
 - Produces exactly one terminal outcome and releases exactly one reservation after cleanup is confirmed.
 - Preserves the reservation when teardown refuses or exits before durable task cleanup.
+- Accepts legacy eight-field routed metadata only when its exact reservation authoritatively supplies the missing work type.
 
 - [ ] **Step 1: Write failing cleanup and scoring tests.**
 
@@ -688,7 +691,7 @@ git commit -m "feat: finalize routed task outcomes"
 
 - Consumes: one authorized task, `config/crew-dispatch.json`, current installed catalogs, one quota-axi snapshot, active route state, and the repository delivery posture.
 - Produces: the normalized request and candidate JSON accepted by `fm-route.sh select`.
-- Produces: one or more existing `fm-spawn.sh` calls only after successful reservations.
+- Produces: one or more existing `fm-spawn.sh` calls only after successful reservations, carrying `--route-work-type` in every complete routed tuple.
 - Preserves: `quota-array-dispatch` as the single owner of quota evidence interpretation.
 
 - [ ] **Step 1: Write failing contract checks for the new skill trigger and safety text.**

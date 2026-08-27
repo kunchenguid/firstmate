@@ -18,7 +18,8 @@
 #   refused as a flag value.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [route tuple]
 #   A route tuple is --route-generation, --route-profile, --route-provider,
-#   --route-lane, --route-account, --route-class, --route-risk, and --route-mode.
+#   --route-lane, --route-account, --route-class, --route-work-type,
+#   --route-risk, and --route-mode.
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
@@ -283,6 +284,7 @@ ROUTE_PROVIDER=
 ROUTE_LANE=
 ROUTE_ACCOUNT=
 ROUTE_CLASS=
+ROUTE_WORK_TYPE=
 ROUTE_RISK=
 ROUTE_MODE=
 HARNESS_SET=0
@@ -298,6 +300,7 @@ ROUTE_PROVIDER_SET=0
 ROUTE_LANE_SET=0
 ROUTE_ACCOUNT_SET=0
 ROUTE_CLASS_SET=0
+ROUTE_WORK_TYPE_SET=0
 ROUTE_RISK_SET=0
 ROUTE_MODE_SET=0
 ROUTE_FLAGS_PRESENT=0
@@ -324,6 +327,7 @@ for a in "$@"; do
       route-lane) [ "$ROUTE_LANE_SET" -eq 0 ] || { echo "error: duplicate option: --route-lane" >&2; exit 2; }; ROUTE_LANE=$a; ROUTE_LANE_SET=1 ;;
       route-account) [ "$ROUTE_ACCOUNT_SET" -eq 0 ] || { echo "error: duplicate option: --route-account" >&2; exit 2; }; ROUTE_ACCOUNT=$a; ROUTE_ACCOUNT_SET=1 ;;
       route-class) [ "$ROUTE_CLASS_SET" -eq 0 ] || { echo "error: duplicate option: --route-class" >&2; exit 2; }; ROUTE_CLASS=$a; ROUTE_CLASS_SET=1 ;;
+      route-work-type) [ "$ROUTE_WORK_TYPE_SET" -eq 0 ] || { echo "error: duplicate option: --route-work-type" >&2; exit 2; }; ROUTE_WORK_TYPE=$a; ROUTE_WORK_TYPE_SET=1 ;;
       route-risk) [ "$ROUTE_RISK_SET" -eq 0 ] || { echo "error: duplicate option: --route-risk" >&2; exit 2; }; ROUTE_RISK=$a; ROUTE_RISK_SET=1 ;;
       route-mode) [ "$ROUTE_MODE_SET" -eq 0 ] || { echo "error: duplicate option: --route-mode" >&2; exit 2; }; ROUTE_MODE=$a; ROUTE_MODE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
@@ -361,6 +365,8 @@ for a in "$@"; do
     --route-account=*) [ "$ROUTE_ACCOUNT_SET" -eq 0 ] || { echo "error: duplicate option: --route-account" >&2; exit 2; }; ROUTE_ACCOUNT=${a#--route-account=}; ROUTE_ACCOUNT_SET=1 ;;
     --route-class) want_value=route-class ;;
     --route-class=*) [ "$ROUTE_CLASS_SET" -eq 0 ] || { echo "error: duplicate option: --route-class" >&2; exit 2; }; ROUTE_CLASS=${a#--route-class=}; ROUTE_CLASS_SET=1 ;;
+    --route-work-type) want_value=route-work-type ;;
+    --route-work-type=*) [ "$ROUTE_WORK_TYPE_SET" -eq 0 ] || { echo "error: duplicate option: --route-work-type" >&2; exit 2; }; ROUTE_WORK_TYPE=${a#--route-work-type=}; ROUTE_WORK_TYPE_SET=1 ;;
     --route-risk) want_value=route-risk ;;
     --route-risk=*) [ "$ROUTE_RISK_SET" -eq 0 ] || { echo "error: duplicate option: --route-risk" >&2; exit 2; }; ROUTE_RISK=${a#--route-risk=}; ROUTE_RISK_SET=1 ;;
     --route-mode) want_value=route-mode ;;
@@ -376,7 +382,7 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
-for route_value in ROUTE_GENERATION ROUTE_PROFILE ROUTE_PROVIDER ROUTE_LANE ROUTE_ACCOUNT ROUTE_CLASS ROUTE_RISK ROUTE_MODE; do
+for route_value in ROUTE_GENERATION ROUTE_PROFILE ROUTE_PROVIDER ROUTE_LANE ROUTE_ACCOUNT ROUTE_CLASS ROUTE_WORK_TYPE ROUTE_RISK ROUTE_MODE; do
   route_set_var="${route_value}_SET"
   [ "${!route_set_var}" -eq 0 ] || [ -n "${!route_value}" ] || {
     route_option=${route_value#ROUTE_}
@@ -390,7 +396,7 @@ ROUTE_REQUESTED=0
 if [ "$ROUTE_GENERATION_SET" -eq 1 ] || [ "$ROUTE_PROFILE_SET" -eq 1 ] \
   || [ "$ROUTE_PROVIDER_SET" -eq 1 ] || [ "$ROUTE_LANE_SET" -eq 1 ] \
   || [ "$ROUTE_ACCOUNT_SET" -eq 1 ] || [ "$ROUTE_CLASS_SET" -eq 1 ] \
-  || [ "$ROUTE_RISK_SET" -eq 1 ] || [ "$ROUTE_MODE_SET" -eq 1 ]; then
+  || [ "$ROUTE_WORK_TYPE_SET" -eq 1 ] || [ "$ROUTE_RISK_SET" -eq 1 ] || [ "$ROUTE_MODE_SET" -eq 1 ]; then
   ROUTE_FLAGS_PRESENT=1
 fi
 if [ "$ROUTE_MODE_SET" -eq 1 ] && [ "$ROUTE_MODE" = off ]; then
@@ -401,13 +407,14 @@ if [ "$ROUTE_MODE_SET" -eq 1 ] && [ "$ROUTE_MODE" = off ]; then
   ROUTE_LANE=''
   ROUTE_ACCOUNT=''
   ROUTE_CLASS=''
+  ROUTE_WORK_TYPE=''
   ROUTE_RISK=''
   ROUTE_MODE=''
 elif [ "$ROUTE_FLAGS_PRESENT" = 1 ]; then
   if [ "$ROUTE_GENERATION_SET" -ne 1 ] || [ "$ROUTE_PROFILE_SET" -ne 1 ] \
     || [ "$ROUTE_PROVIDER_SET" -ne 1 ] || [ "$ROUTE_LANE_SET" -ne 1 ] \
     || [ "$ROUTE_ACCOUNT_SET" -ne 1 ] || [ "$ROUTE_CLASS_SET" -ne 1 ] \
-    || [ "$ROUTE_RISK_SET" -ne 1 ] || [ "$ROUTE_MODE_SET" -ne 1 ]; then
+    || [ "$ROUTE_WORK_TYPE_SET" -ne 1 ] || [ "$ROUTE_RISK_SET" -ne 1 ] || [ "$ROUTE_MODE_SET" -ne 1 ]; then
     echo "error: routed spawn requires the complete route metadata tuple" >&2
     exit 2
   fi
@@ -790,13 +797,22 @@ spawn_route_begin() {  # <fresh|inherit|replacement|off> [prior-generation]
   if ! "$FM_ROOT/bin/fm-route.sh" begin-admission \
       --task "$ID" --generation "$ROUTE_GENERATION" --profile "$ROUTE_PROFILE" \
       --provider "$ROUTE_PROVIDER" --lane "$ROUTE_LANE" --account "$ROUTE_ACCOUNT" \
-      --class "$ROUTE_CLASS" --risk "$ROUTE_RISK" --mode "$ROUTE_MODE" \
+      --class "$ROUTE_CLASS" --work-type "$ROUTE_WORK_TYPE" --risk "$ROUTE_RISK" --mode "$ROUTE_MODE" \
       --transition "$transition" --metadata-file "$STATE/$ID.meta" \
       --claim-file "$ROUTE_CLAIM_FILE" "${prior_args[@]}" >/dev/null 2>&1; then
     echo "error: matching routing reservation is required and must be authorized" >&2
     return 1
   fi
   ROUTE_ADMISSION_STARTED=1
+}
+
+spawn_resolve_legacy_route_work_type() {
+  "$FM_ROOT/bin/fm-route.sh" reservation-work-type \
+    --task "$ID" --generation "$RECORDED_ROUTE_GENERATION" \
+    --profile "$RECORDED_ROUTE_PROFILE" --provider "$RECORDED_ROUTE_PROVIDER" \
+    --lane "$RECORDED_ROUTE_LANE" --account "$RECORDED_ROUTE_ACCOUNT" \
+    --class "$RECORDED_ROUTE_CLASS" --risk "$RECORDED_ROUTE_RISK" \
+    --mode "$RECORDED_ROUTE_MODE"
 }
 
 spawn_abort_cleanup() {
@@ -984,7 +1000,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   if [ "$ROUTE_REQUESTED" = 1 ]; then
     shared_args+=(--route-generation "$ROUTE_GENERATION" --route-profile "$ROUTE_PROFILE" \
       --route-provider "$ROUTE_PROVIDER" --route-lane "$ROUTE_LANE" \
-      --route-account "$ROUTE_ACCOUNT" --route-class "$ROUTE_CLASS" \
+      --route-account "$ROUTE_ACCOUNT" --route-class "$ROUTE_CLASS" --route-work-type "$ROUTE_WORK_TYPE" \
       --route-risk "$ROUTE_RISK" --route-mode "$ROUTE_MODE")
   fi
   # One delivery contract applies to every pair in a batch, exactly like the shared
@@ -1151,13 +1167,24 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RECORDED_ROUTE_LANE=$(fm_meta_get "$RELAUNCH_META" route_lane)
   RECORDED_ROUTE_ACCOUNT=$(fm_meta_get "$RELAUNCH_META" route_account)
   RECORDED_ROUTE_CLASS=$(fm_meta_get "$RELAUNCH_META" route_class)
+  RECORDED_ROUTE_WORK_TYPE=$(fm_meta_get "$RELAUNCH_META" route_work_type)
   RECORDED_ROUTE_RISK=$(fm_meta_get "$RELAUNCH_META" route_risk)
   RECORDED_ROUTE_MODE=$(fm_meta_get "$RELAUNCH_META" route_mode)
-  if [ -n "$RECORDED_ROUTE_GENERATION$RECORDED_ROUTE_PROFILE$RECORDED_ROUTE_PROVIDER$RECORDED_ROUTE_LANE$RECORDED_ROUTE_ACCOUNT$RECORDED_ROUTE_CLASS$RECORDED_ROUTE_RISK$RECORDED_ROUTE_MODE" ] \
+  if [ -z "$RECORDED_ROUTE_WORK_TYPE" ] \
+    && [ -n "$RECORDED_ROUTE_GENERATION" ] && [ -n "$RECORDED_ROUTE_PROFILE" ] \
+    && [ -n "$RECORDED_ROUTE_PROVIDER" ] && [ -n "$RECORDED_ROUTE_LANE" ] \
+    && [ -n "$RECORDED_ROUTE_ACCOUNT" ] && [ -n "$RECORDED_ROUTE_CLASS" ] \
+    && [ -n "$RECORDED_ROUTE_RISK" ] && [ -n "$RECORDED_ROUTE_MODE" ]; then
+    if ! RECORDED_ROUTE_WORK_TYPE=$(spawn_resolve_legacy_route_work_type 2>/dev/null); then
+      echo "error: legacy routed metadata does not match its authoritative reservation" >&2
+      exit 1
+    fi
+  fi
+  if [ -n "$RECORDED_ROUTE_GENERATION$RECORDED_ROUTE_PROFILE$RECORDED_ROUTE_PROVIDER$RECORDED_ROUTE_LANE$RECORDED_ROUTE_ACCOUNT$RECORDED_ROUTE_CLASS$RECORDED_ROUTE_WORK_TYPE$RECORDED_ROUTE_RISK$RECORDED_ROUTE_MODE" ] \
     && { [ -z "$RECORDED_ROUTE_GENERATION" ] || [ -z "$RECORDED_ROUTE_PROFILE" ] \
       || [ -z "$RECORDED_ROUTE_PROVIDER" ] || [ -z "$RECORDED_ROUTE_LANE" ] \
       || [ -z "$RECORDED_ROUTE_ACCOUNT" ] || [ -z "$RECORDED_ROUTE_CLASS" ] \
-      || [ -z "$RECORDED_ROUTE_RISK" ] || [ -z "$RECORDED_ROUTE_MODE" ]; }; then
+      || [ -z "$RECORDED_ROUTE_WORK_TYPE" ] || [ -z "$RECORDED_ROUTE_RISK" ] || [ -z "$RECORDED_ROUTE_MODE" ]; }; then
     echo "error: routed relaunch requires the complete recorded route metadata tuple" >&2
     exit 2
   fi
@@ -1169,6 +1196,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
       ROUTE_LANE=$RECORDED_ROUTE_LANE
       ROUTE_ACCOUNT=$RECORDED_ROUTE_ACCOUNT
       ROUTE_CLASS=$RECORDED_ROUTE_CLASS
+      ROUTE_WORK_TYPE=$RECORDED_ROUTE_WORK_TYPE
       ROUTE_RISK=$RECORDED_ROUTE_RISK
       ROUTE_MODE=$RECORDED_ROUTE_MODE
       spawn_route_begin off || exit 1
@@ -1187,6 +1215,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     ROUTE_LANE=$RECORDED_ROUTE_LANE
     ROUTE_ACCOUNT=$RECORDED_ROUTE_ACCOUNT
     ROUTE_CLASS=$RECORDED_ROUTE_CLASS
+    ROUTE_WORK_TYPE=$RECORDED_ROUTE_WORK_TYPE
     ROUTE_RISK=$RECORDED_ROUTE_RISK
     ROUTE_MODE=$RECORDED_ROUTE_MODE
     ROUTE_ACTIVE=1
@@ -2846,7 +2875,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx route_generation route_profile route_provider route_lane route_account route_class route_risk route_mode", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx route_generation route_profile route_provider route_lane route_account route_class route_work_type route_risk route_mode", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2873,6 +2902,7 @@ preserve_relaunch_meta() {
     echo "route_lane=$ROUTE_LANE"
     echo "route_account=$ROUTE_ACCOUNT"
     echo "route_class=$ROUTE_CLASS"
+    echo "route_work_type=$ROUTE_WORK_TYPE"
     echo "route_risk=$ROUTE_RISK"
     echo "route_mode=$ROUTE_MODE"
   fi
