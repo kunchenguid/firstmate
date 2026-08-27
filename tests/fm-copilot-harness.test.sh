@@ -172,6 +172,74 @@ test_windows_powershell_pretool_transport() {
   pass "Copilot PowerShell transport preserves native watcher-policy decisions"
 }
 
+test_windows_bearings_transport_avoids_ambient_bash() {
+  local out rc root
+  case "${OS:-}" in Windows_NT) ;; *) return 0 ;; esac
+  command -v powershell.exe >/dev/null 2>&1 || fail "PowerShell is required for Copilot's Windows bearings transport"
+  root=$(cygpath -w "$ROOT")
+  out=$(powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
+    \$ErrorActionPreference = 'Stop'
+    \$tempRoot = Join-Path \$env:TEMP ('fm-bearings-windows-' + [guid]::NewGuid().ToString('N'))
+    \$fakeBin = Join-Path \$tempRoot 'fakebin'
+    \$fixtureHome = Join-Path \$tempRoot 'home'
+    New-Item -ItemType Directory -Path \$fakeBin, (Join-Path \$fixtureHome 'data'), (Join-Path \$fixtureHome 'state') | Out-Null
+    try {
+      Add-Type -TypeDefinition @'
+using System;
+using System.Threading;
+public static class WrongBash {
+    public static int Main(string[] args) {
+        Thread.Sleep(12000);
+        return 97;
+    }
+}
+'@ -OutputAssembly (Join-Path \$fakeBin 'bash.exe') -OutputType ConsoleApplication
+      \$gitPath = (Get-Command git.exe -CommandType Application -ErrorAction Stop).Source
+      \$gitDirectory = Split-Path -Parent \$gitPath
+      \$jqPath = (Get-Command jq.exe -CommandType Application -ErrorAction Stop).Source
+      \$jqDirectory = Split-Path -Parent \$jqPath
+      \$env:Path = \"\$fakeBin;\$gitDirectory;\$jqDirectory;\$env:SystemRoot\\System32\"
+      \$ambient = (Get-Command bash.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+      if ((Split-Path -Parent \$ambient) -ne \$fakeBin) {
+        throw \"fixture did not put the hanging bash first: \$ambient\"
+      }
+      \$env:FM_HOME = \$fixtureHome
+      \$env:COPILOT_CLI = '1'
+      \$env:COPILOT_AGENT_SESSION_ID = 'bearings-windows-regression'
+      \$env:COPILOT_LOADER_PID = \$PID
+      \$watch = [System.Diagnostics.Stopwatch]::StartNew()
+      \$snapshot = & '$root\\bin\\fm-windows-git-bash.ps1' '$root\\bin\\fm-bearings-snapshot.sh' --json
+      \$status = \$LASTEXITCODE
+      \$watch.Stop()
+      if (\$status -ne 0) {
+        throw \"bearings snapshot exited \$status\"
+      }
+      if (\$watch.ElapsedMilliseconds -ge 8000) {
+        throw \"bearings snapshot crossed its shell-boundary budget: \$(\$watch.ElapsedMilliseconds)ms\"
+      }
+      \$parsed = \$snapshot | ConvertFrom-Json
+      if (\$parsed.schema -ne 'fm-bearings.v1') {
+        throw \"unexpected snapshot schema: \$(\$parsed.schema)\"
+      }
+      if (\$parsed.home -ne \$fixtureHome) {
+        throw \"snapshot lost FM_HOME: \$(\$parsed.home)\"
+      }
+      Write-Output \"ambient-bash=\$ambient\"
+      Write-Output \"snapshot-ms=\$(\$watch.ElapsedMilliseconds)\"
+      Write-Output \"snapshot-schema=\$(\$parsed.schema)\"
+    }
+    finally {
+      Remove-Item -LiteralPath \$tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  " 2>&1)
+  rc=$?
+  expect_code 0 "$rc" \
+    "Copilot's native Windows bearings command should bypass ambient bash: $out"
+  assert_contains "$out" "snapshot-schema=fm-bearings.v1" \
+    "Windows bearings transport did not return the canonical snapshot"
+  pass "Copilot Windows bearings transport bypasses a hanging ambient bash"
+}
+
 test_primary_stop_parks_and_bounds_forced_continuations() {
   local dir fakebin out reason parent_state parent_id=secondmate-copilot parent_gen
   dir="$TMP_ROOT/primary-stop"
@@ -297,6 +365,7 @@ test_windows_loader_pid_owns_session_lock
 test_loader_marker_rejects_foreign_live_process
 test_primary_session_start_returns_additional_context
 test_windows_powershell_pretool_transport
+test_windows_bearings_transport_avoids_ambient_bash
 test_primary_stop_parks_and_bounds_forced_continuations
 test_primary_repair_continuation_restores_parent_busy
 test_worker_hook_semantic_lifecycle

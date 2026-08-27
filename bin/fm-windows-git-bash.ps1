@@ -1,6 +1,19 @@
-# fm-windows-git-bash.ps1 - resolve Git Bash without relying on PATH order.
+# fm-windows-git-bash.ps1 - resolve or run Git Bash without relying on PATH order.
 #
-# Dot-source this file, then call Resolve-FirstmateGitBash.
+# Usage:
+#   . .\bin\fm-windows-git-bash.ps1
+#   Resolve-FirstmateGitBash
+#
+#   .\bin\fm-windows-git-bash.ps1 <bash-argument> [<bash-argument> ...]
+#
+# Dot-source the script to use Resolve-FirstmateGitBash from another PowerShell
+# script. Execute it with Bash arguments to run the resolved Git for Windows
+# Bash directly instead of an ambient bash.exe that may be the WSL launcher.
+[CmdletBinding()]
+param(
+    [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
+    [string[]] $GitBashArguments
+)
 
 function Resolve-FirstmateGitBash {
     [CmdletBinding()]
@@ -81,3 +94,22 @@ function Resolve-FirstmateGitBash {
 
     throw "Git Bash was not found. Run .\bin\fm-install-windows.ps1 to install Git for Windows, then retry."
 }
+
+if ($MyInvocation.InvocationName -eq ".") {
+    return
+}
+
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+if (-not $GitBashArguments -or $GitBashArguments[0] -in @("-h", "--help")) {
+    Write-Output "usage: fm-windows-git-bash.ps1 <bash-argument> [<bash-argument> ...]"
+    if (-not $GitBashArguments) {
+        exit 2
+    }
+    exit 0
+}
+
+$gitBashPath = Resolve-FirstmateGitBash
+& $gitBashPath @GitBashArguments
+exit $LASTEXITCODE

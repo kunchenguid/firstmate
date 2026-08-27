@@ -34,7 +34,8 @@ Board answers are acted on later under the normal authority rules; this skill's 
 ## What it does
 
 1. **Gather live fleet state with one deterministic command.**
-   Run `snapshot=$(bin/fm-bearings-snapshot.sh --json)` at invocation time and read that compact output.
+   At invocation time, run `bin/fm-bearings-snapshot.sh --json` directly from Bash and read that compact output.
+   From native Windows PowerShell, including GitHub Copilot CLI, pass those same arguments through `bin/fm-windows-git-bash.ps1` instead of invoking ambient `bash`; that script's header and `--help` own the exact calling mechanics.
    It is the single bounded, deterministic fleet-state source for Bearings.
    Do not create or consult a second fleet-state reader, parser contract, status-event-tail interpretation, visible-session recap, ad-hoc project probe, or ad-hoc `gh-axi`/`gh` query.
    The command's header and `--help` output own its exact fields, bounds, opt-ins, and output contract.

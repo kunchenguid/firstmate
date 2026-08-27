@@ -69,6 +69,10 @@ The adapter therefore accepts `COPILOT_LOADER_PID` only when `ps -W` proves that
 `tests/fm-copilot-harness.test.sh` pins the Windows ownership bridge, and `tests/fm-harness-liveness-drift-live-e2e.test.sh` includes Copilot in the installed-binary drift guard.
 The same Copilot release ignored dot-prefixed repository hook files and loaded visible hook configurations in descending filename order.
 `tests/fm-copilot-hooks-live-e2e.test.sh` refreshes that discovery and ordering evidence against the installed CLI.
+The native Windows Bearings command path was verified on 2026-08-27 against GitHub Copilot CLI 1.0.81.
+The regression puts a twelve-second non-Git `bash.exe` first on `PATH`, preserves native Copilot process markers, invokes the canonical local-only snapshot through `bin/fm-windows-git-bash.ps1`, and requires the expected schema and `FM_HOME` within eight seconds.
+The exact command was `. .\bin\fm-windows-git-bash.ps1; $bash = Resolve-FirstmateGitBash; & $bash .\tests\fm-copilot-harness.test.sh` from PowerShell.
+Its relevant output was `ok - Copilot Windows bearings transport bypasses a hanging ambient bash`, followed by `all fm-copilot-harness tests passed`.
 
 Bounded observed output:
 
