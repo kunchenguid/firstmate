@@ -92,44 +92,31 @@ FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
+status_line_is_state_event() {
+  local verb pause resolve held
+  verb=$(status_line_verb "$1")
+  pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  case "$verb" in
+    working|needs-decision|blocked|done|failed)
+      return 0
+      ;;
+    "$pause"|"$resolve"|"$held")
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # Return the latest state-bearing event in a status file (empty if none).
 last_status_line() {
-  local f=$1
+  local f=$1 line last=""
   [ -e "$f" ] || return 0
-  FM_CLASSIFY_LAST_CAPTAIN_RE="${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}" \
-    FM_CLASSIFY_LAST_PAUSE="${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" \
-    FM_CLASSIFY_LAST_RESOLVE="${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}" \
-    FM_CLASSIFY_LAST_HELD="${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" \
-    awk '
-      function trim(value) {
-        sub(/^[[:space:]]+/, "", value)
-        sub(/[[:space:]]+$/, "", value)
-        return value
-      }
-      BEGIN {
-        captain_re = tolower(ENVIRON["FM_CLASSIFY_LAST_CAPTAIN_RE"])
-      }
-      {
-        line = $0
-        if (line ~ /^[[:space:]]*$/) next
-        verb = line
-        sub(/:.*/, "", verb)
-        sub(/\[.*/, "", verb)
-        verb = trim(verb)
-        if (verb == "working" || verb == "needs-decision" || verb == "blocked" ||
-            verb == "done" || verb == "failed" ||
-            verb == ENVIRON["FM_CLASSIFY_LAST_PAUSE"] ||
-            verb == ENVIRON["FM_CLASSIFY_LAST_RESOLVE"] ||
-            verb == ENVIRON["FM_CLASSIFY_LAST_HELD"]) {
-          last = line
-          next
-        }
-        if (tolower(line) ~ captain_re) {
-          last = line
-        }
-      }
-      END { if (last != "") print last }
-    ' "$f" 2>/dev/null || true
+  while IFS= read -r line || [ -n "$line" ]; do
+    status_line_is_state_event "$line" && last=$line
+  done < "$f" 2>/dev/null || true
+  [ -z "$last" ] || printf '%s\n' "$last"
 }
 
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
@@ -166,6 +153,20 @@ status_is_captain_relevant() {
     esac
   fi
   printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
+}
+
+last_captain_relevant_status_line() {
+  local f=$1 line last=""
+  [ -e "$f" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    if status_line_is_state_event "$line"; then
+      last=$line
+    elif status_is_captain_relevant "$line"; then
+      last=$line
+    fi
+  done < "$f" 2>/dev/null || true
+  [ -n "$last" ] && status_is_captain_relevant "$last" || return 0
+  printf '%s\n' "$last"
 }
 
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure
@@ -1196,8 +1197,8 @@ window_to_task() {
   t="${w##*:}"; t="${t#fm-}"; printf '%s' "$t"
 }
 
-# 0 (actionable) if ANY status file listed in a "signal:" wake carries a
-# captain-relevant last line; 1 otherwise. Pass the space-separated file list that
+# 0 (actionable) if ANY status file listed in a "signal:" wake carries a latest
+# captain-relevant event; 1 otherwise. Pass the space-separated file list that
 # follows the "signal:" prefix. Non-.status arguments (e.g. .turn-ended markers,
 # which never carry a verb) are skipped. A 1 here is NOT "benign" on its own: a
 # no-verb signal (a bare turn-end, a working: note) is only benign when the crew is
@@ -1207,9 +1208,9 @@ signal_reason_is_actionable() {  # <file> ...
   for f in "$@"; do
     [ -e "$f" ] || continue
     case "$f" in *.status) ;; *) continue ;; esac
-    last=$(last_status_line "$f")
+    last=$(last_captain_relevant_status_line "$f")
     [ -n "$last" ] || continue
-    status_is_captain_relevant "$last" && return 0
+    return 0
   done
   return 1
 }
@@ -1388,18 +1389,18 @@ signal_crew_provably_working() {  # <file> ...
   return 0
 }
 
-# 0 (terminal/actionable) if a stale window's last status line is
+# 0 (terminal/actionable) if a stale window's latest relevant status event is
 # captain-relevant; 1 otherwise, including the no-status case. A 1 only means
 # "non-terminal"; the always-on watcher then applies crew_is_provably_working,
 # while the away-mode daemon applies its persistence recheck.
 stale_is_terminal() {  # <window> <state>
   local win=$1 state=$2 last
-  last=$(last_status_line "$state/$(window_to_task "$win" "$state").status")
-  [ -n "$last" ] && status_is_captain_relevant "$last"
+  last=$(last_captain_relevant_status_line "$state/$(window_to_task "$win" "$state").status")
+  [ -n "$last" ]
 }
 
-# Print "<file>\t<task>\t<last-line>" for every state/*.status whose last line is
-# captain-relevant. This is the cheap fleet-scan both supervisors run as a
+# Print "<file>\t<task>\t<last-line>" for every state/*.status with a latest
+# captain-relevant event. This is the cheap fleet-scan both supervisors run as a
 # catch-all backstop for a captain-relevant status the per-wake path might miss.
 # No dedup is applied here: each consumer dedupes against its own seen-state (the
 # daemon against .subsuper-seen-status-*, the watcher against .seen-* signatures).
@@ -1407,8 +1408,8 @@ scan_captain_relevant_statuses() {  # <state>
   local state=$1 f last task
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
-    last=$(last_status_line "$f")
-    status_is_captain_relevant "$last" || continue
+    last=$(last_captain_relevant_status_line "$f")
+    [ -n "$last" ] || continue
     task=$(basename "$f"); task="${task%.status}"
     printf '%s\t%s\t%s\n' "$f" "$task" "$last"
   done

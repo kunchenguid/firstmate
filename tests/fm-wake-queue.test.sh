@@ -400,6 +400,13 @@ the secondmate remains stopped on that request' wake
   pass "a multiline blocked secondmate wakes despite trailing continuation lines"
 }
 
+test_secondmate_blocked_detail_with_legacy_token_wakes() {
+  run_secondmate_stall_state_case blocked-detail-legacy-token busy \
+    'blocked [key=routed]: waiting for the primary to route feedback
+details: still blocked: route pending' wake
+  pass "a blocked event wins over legacy-relevant continuation prose"
+}
+
 test_secondmate_idle_aged_queue_wakes() {
   run_secondmate_stall_state_case idle idle 'working: previous turn completed' wake
   pass "an idle non-blocked secondmate with an aged queue row wakes"
@@ -1101,6 +1108,7 @@ test_self_held_lock_reclaims_instead_of_deadlocking
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
 test_secondmate_blocked_aged_queue_wakes
 test_secondmate_multiline_blocked_aged_queue_wakes
+test_secondmate_blocked_detail_with_legacy_token_wakes
 test_secondmate_idle_aged_queue_wakes
 test_secondmate_unknown_liveness_aged_queue_wakes
 test_secondmate_busy_aged_queue_stays_quiet

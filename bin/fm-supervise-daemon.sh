@@ -342,10 +342,14 @@ classify_signal() {  # <reason-after-colon> <state>
   local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen
   for f in $reason; do
     [ -e "$f" ] || continue
-    last=$(last_status_line "$f")
-    [ -n "$last" ] || continue
+    last=$(last_captain_relevant_status_line "$f")
+    if [ -z "$last" ]; then
+      last=$(last_status_line "$f")
+      [ -n "$last" ] || continue
+      distilled="${distilled}$(basename "$f"): ${last} | "
+      continue
+    fi
     distilled="${distilled}$(basename "$f"): ${last} | "
-    status_is_captain_relevant "$last" || continue
     rel=1
     # Dedupe against the catch-all scan: if this status was already escalated
     # (seen marker matches), skip escalating again. The seen marker is the
@@ -385,7 +389,8 @@ classify_stale() {  # <window> <state>
     printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
     return
   fi
-  if [ -n "$last" ] && status_is_captain_relevant "$last"; then
+  last=$(last_captain_relevant_status_line "$state/$task.status")
+  if [ -n "$last" ]; then
     # Independent of free-text captain-relevant matching: a nonterminal progress
     # verb (working:) must never take the terminal stale path. Seen-status dedupe
     # must not permanently suppress or clear possible-wedge aging merely because
@@ -543,17 +548,15 @@ mark_escalated_seen() {  # <kind> <arg> <state>
     signal)
       for f in $arg; do
         [ -e "$f" ] || continue
-        last=$(last_status_line "$f")
+        last=$(last_captain_relevant_status_line "$f")
         [ -n "$last" ] || continue
-        status_is_captain_relevant "$last" || continue
         task=$(basename "$f"); task="${task%.status}"
         mark_status_seen "$state" "$task" "$last"
       done ;;
     stale)
       task=$(window_to_task "$arg" "$state")
-      last=$(last_status_line "$state/$task.status")
-      [ -n "$last" ] && status_is_captain_relevant "$last" \
-        && mark_status_seen "$state" "$task" "$last" ;;
+      last=$(last_captain_relevant_status_line "$state/$task.status")
+      [ -n "$last" ] && mark_status_seen "$state" "$task" "$last" ;;
   esac
 }
 
@@ -1266,21 +1269,12 @@ handle_wake() {  # <reason> <state>
       # wake, escalates a wedge.
       if [ "$kind" = "stale" ]; then
         task=$(window_to_task "$arg" "$state")
-        last=$(last_status_line "$state/$task.status")
+        last=$(last_captain_relevant_status_line "$state/$task.status")
         # Clear wedge aging only for terminal (or legacy free-text) captain lines.
         # Nonterminal progress verbs keep possible-wedge markers even if free text
         # once looked captain-relevant or was written into a seen marker.
         _clear_wedge=0
-        if [ -n "$last" ] && status_is_captain_relevant "$last"; then
-          if status_is_terminal_verb "$last"; then
-            _clear_wedge=1
-          else
-            case "$(status_line_verb "$last")" in
-              working|resolved|captain-held) _clear_wedge=0 ;;
-              *) _clear_wedge=1 ;;
-            esac
-          fi
-        fi
+        [ -z "$last" ] || _clear_wedge=1
         if [ "$_clear_wedge" = 1 ]; then
           stale_marker_remove "$arg" "$state"
         else

@@ -765,6 +765,60 @@ ok - heartbeat surfaces legacy captain-relevant free text after working
 exit=0
 ```
 
+### State-event and legacy relevance separation red/green record
+
+The state-event separation case ran on the same platform and Bash version recorded above.
+The unfixed revision was `dbf827f8e9aeeae14f6645707d7e9bc107da29cd`, and the fixed version was its review working tree with the source and test changes recorded in this section.
+The case was RED before and GREEN after, so it demonstrates the fix.
+
+The exact current-code command was:
+
+```sh
+printf 'CASE revision=dbf827f-review10-unfixed test=test_secondmate_blocked_detail_with_legacy_token_wakes\n'
+bash -c '
+  . tests/wake-helpers.sh
+  eval "$(awk '\''$0 == \"test_self_held_lock_reclaims_instead_of_deadlocking\" { exit } /^\\. .*BASH_SOURCE/ { next } { print }'\'' tests/fm-wake-queue.test.sh)"
+  test_secondmate_blocked_detail_with_legacy_token_wakes
+'
+rc=$?
+printf 'exit=%s\n' "$rc"
+exit 0
+```
+
+Full current-code output:
+
+```text
+CASE revision=dbf827f-review10-unfixed test=test_secondmate_blocked_detail_with_legacy_token_wakes
+not ok - blocked-detail-legacy-token did not wake for an aged foreign row: out=checkpoint: no actionable wake within 2s; err=
+exit=1
+```
+
+The fixed-case runner and command were:
+
+```sh
+run_review10_fixed() {
+  local rc
+  printf 'CASE revision=review-fixed test=test_secondmate_blocked_detail_with_legacy_token_wakes\n'
+  bash -c '
+    . tests/wake-helpers.sh
+    eval "$(awk '\''$0 == \"test_self_held_lock_reclaims_instead_of_deadlocking\" { exit } /^\\. .*BASH_SOURCE/ { next } { print }'\'' tests/fm-wake-queue.test.sh)"
+    test_secondmate_blocked_detail_with_legacy_token_wakes
+  '
+  rc=$?
+  printf 'exit=%s\n' "$rc"
+  return "$rc"
+}
+run_review10_fixed
+```
+
+Full fixed output:
+
+```text
+CASE revision=review-fixed test=test_secondmate_blocked_detail_with_legacy_token_wakes
+ok - a blocked event wins over legacy-relevant continuation prose
+exit=0
+```
+
 ## Turn-end guard
 
 The blocking and bounded-follow-up mechanisms were validated across six harnesses on 2026-07-08 through 2026-08-13, with Cursor's stop-hook park validated on 2026-08-13 and Claude's replacement Stop-owned path revalidated on 2026-08-14.

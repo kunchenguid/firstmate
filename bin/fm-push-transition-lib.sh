@@ -116,9 +116,8 @@ _hb_surfaced_path() {
 mark_surfaced() {  # <status-file>
   local f=$1 task last
   task=$(basename "$f"); task="${task%.status}"
-  last=$(last_status_line "$f")
+  last=$(last_captain_relevant_status_line "$f")
   [ -n "$last" ] || return 0
-  status_is_captain_relevant "$last" || return 0
   printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
 }
 
