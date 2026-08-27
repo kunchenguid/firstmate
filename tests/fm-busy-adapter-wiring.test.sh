@@ -318,16 +318,18 @@ test_claude_hooks_merge_preserves_committed_project_settings() {
   rec=$(make_spawn_case claude-project-settings claude "$id")
   read_case_record "$rec"
   # fm-spawn freshens a pooled worktree by fetching and hard-resetting to
-  # origin's default branch (freshen_spawn_worktree_base), so a project's
-  # committed file must be pushed to that origin - not just committed
-  # locally - to survive into the spawned worktree.
+  # origin's DEFAULT branch (freshen_spawn_worktree_base), so a project's
+  # committed file must be pushed to the branch origin/HEAD actually points
+  # at - the fixture repo's own initial branch, which follows the machine's
+  # init.defaultBranch - or on a master-default machine the push would mint a
+  # second, non-default branch and the file would never reach the worktree.
   mkdir -p "$PROJ_DIR/.claude"
   printf '%s\n' '{"permissions":{"allow":["Bash(npm test)"]},"enabledPlugins":{"context7":true}}' \
     > "$PROJ_DIR/.claude/settings.local.json"
   git -C "$PROJ_DIR" add .claude/settings.local.json
   git -C "$PROJ_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
     commit -qm 'project commits its own claude settings'
-  git -C "$PROJ_DIR" push -q origin HEAD:main
+  git -C "$PROJ_DIR" push -q origin "HEAD:$(git -C "$PROJ_DIR" rev-parse --abbrev-ref HEAD)"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "claude spawn should succeed over a committed project settings file: $out"
@@ -340,8 +342,9 @@ test_claude_hooks_merge_preserves_committed_project_settings() {
     || fail "spawn must preserve the project's own committed enabledPlugins"
   for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
     jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "claude hook settings lack $ev"
-    jq -e ".entries[\"$ev\"]" "$state/$id.claude-settings-owned" >/dev/null \
-      || fail "the ownership record must hold the $ev entry the spawn merged in"
+    jq -e --arg ev "$ev" '.commands[$ev][0] | type == "string"' \
+      "$state/$id.claude-settings-owned" >/dev/null \
+      || fail "the ownership record must hold the $ev hook command the spawn merged in"
   done
 
   out=$(classify claude "$id" "$state")
@@ -368,7 +371,10 @@ test_claude_hooks_spawn_refuses_unmergeable_settings_untouched() {
   git -C "$PROJ_DIR" add .claude/settings.local.json
   git -C "$PROJ_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
     commit -qm 'project commits a mid-edit, syntactically invalid claude settings file'
-  git -C "$PROJ_DIR" push -q origin HEAD:main
+  # Push to the fixture repo's own initial branch so the committed file
+  # reaches the spawned worktree whatever the machine's init.defaultBranch is
+  # (see test_claude_hooks_merge_preserves_committed_project_settings).
+  git -C "$PROJ_DIR" push -q origin "HEAD:$(git -C "$PROJ_DIR" rev-parse --abbrev-ref HEAD)"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" 2>&1); rc=$?
   [ "$rc" -ne 0 ] \
@@ -381,7 +387,13 @@ test_claude_hooks_spawn_refuses_unmergeable_settings_untouched() {
     || fail "a refused spawn must leave the project's original bytes untouched, got $(cat "$settings" 2>/dev/null)"
   assert_absent "$state/$id.claude-settings-owned" \
     "a refused spawn must not write a claude settings ownership record"
-  pass "claude spawn refuses an unmergeable committed settings file loudly, leaving its bytes untouched"
+  # The refusal fires before the busy contract is armed, so a dispatch
+  # attempt against such a project leaves no armed busy records behind.
+  assert_absent "$state/$id.busy-gen" \
+    "a refused spawn must not leave an armed busy generation behind"
+  assert_absent "$state/$id.busy-state" \
+    "a refused spawn must not leave a seeded busy-state record behind"
+  pass "claude spawn refuses an unmergeable committed settings file loudly, leaving its bytes untouched and no armed busy records"
 }
 
 test_codex_unverified_until_a_semantic_source_exists() {

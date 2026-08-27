@@ -680,7 +680,7 @@ test_tracked_claude_settings_restored_not_deleted_on_teardown() {
   record="$case_dir/state/task-x1.claude-settings-owned"
   printf '%s\n' '{"permissions":{"allow":["Bash(npm test)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen1"}]}]}}' \
     > "$settings"
-  printf '%s\n' '{"version":1,"entries":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen1"}]}]}}' \
+  printf '%s\n' '{"version":1,"commands":{"Stop":["fm-busy-event.sh apply gen1"]}}' \
     > "$record"
 
   set +e
@@ -722,14 +722,22 @@ test_tracked_claude_settings_without_record_refuses_teardown() {
 
   expect_code 1 "$rc" "claude-settings-no-record: teardown must refuse when no record proves the diff is firstmate's own"
   grep -q REFUSED "$case_dir/stderr" || fail "claude-settings-no-record: no REFUSED line in stderr"
-  pass "a tracked settings diff with no ownership record refuses teardown instead of being guessed firstmate's own"
+  # The refusal must be actionable: with the settings file as the only dirty
+  # path and no record, the operator is told exactly which file to inspect
+  # instead of hunting for uncommitted work that may not exist.
+  grep -q 'only uncommitted change is .claude/settings.local.json' "$case_dir/stderr" \
+    || fail "claude-settings-no-record: the refusal must name the settings file as the only dirty path, got $(cat "$case_dir/stderr")"
+  grep -q 'claude-settings-owned' "$case_dir/stderr" \
+    || fail "claude-settings-no-record: the refusal must name the missing ownership record"
+  pass "a tracked settings diff with no ownership record refuses teardown with a note naming the file and the missing record"
 }
 
 # The discard scenario the ownership record exists to prevent: an UNCOMMITTED
 # project hook whose command text mentions fm-busy-event.sh sits alongside
-# firstmate's own recorded entry. It is not deep-equal to the recorded entry,
-# so it must survive the strip, keep the file dirty, and refuse teardown -
-# never be silently classified as firstmate's and discarded by the restore.
+# firstmate's own recorded entry. Its command is not string-equal to any
+# recorded command, so it must survive the strip, keep the file dirty, and
+# refuse teardown - never be silently classified as firstmate's and discarded
+# by the restore.
 test_claude_settings_lookalike_project_hook_still_refuses_teardown() {
   local case_dir rc settings
   case_dir=$(make_case claude-settings-lookalike)
@@ -741,7 +749,7 @@ test_claude_settings_lookalike_project_hook_still_refuses_teardown() {
   settings="$case_dir/wt/.claude/settings.local.json"
   printf '%s\n' '{"permissions":{"allow":["Bash(npm test)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen1"}]},{"hooks":[{"type":"command","command":"project edit that mentions fm-busy-event.sh"}]}]}}' \
     > "$settings"
-  printf '%s\n' '{"version":1,"entries":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen1"}]}]}}' \
+  printf '%s\n' '{"version":1,"commands":{"Stop":["fm-busy-event.sh apply gen1"]}}' \
     > "$case_dir/state/task-x1.claude-settings-owned"
 
   set +e
@@ -794,7 +802,7 @@ test_claude_settings_real_edit_still_refuses_teardown() {
   # what refuses, not a missing record.
   printf '%s\n' '{"permissions":{"allow":["Bash(npm test)","Bash(npm run lint)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen1"}]}]}}' \
     > "$settings"
-  printf '%s\n' '{"version":1,"entries":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen1"}]}]}}' \
+  printf '%s\n' '{"version":1,"commands":{"Stop":["fm-busy-event.sh apply gen1"]}}' \
     > "$case_dir/state/task-x1.claude-settings-owned"
 
   set +e

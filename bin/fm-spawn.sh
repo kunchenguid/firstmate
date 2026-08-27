@@ -173,12 +173,14 @@
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # claude merges its busy hooks into <worktree>/.claude/settings.local.json (a path a
 # project may itself commit) and writes state/<id>.claude-settings-owned, a
-# {"version":1,"preexisted":<bool>,"entries":{...}} record of the exact entries it
-# merged in and whether the file existed before firstmate's first install; that
-# record, not any content match, is the sole authority for which entries are
-# firstmate's own when a relaunch strips them, a respawn replaces them, or teardown
-# restores the file (bin/fm-control-lib.sh owns the contract). An existing settings
-# file that is not a mergeable JSON object refuses the spawn with the file untouched.
+# {"version":1,"preexisted":<bool>,"commands":{...}} record of the exact hook
+# command strings it merged in and whether the file existed before firstmate's
+# first install; that record, not any content match, is the sole authority for
+# which hooks are firstmate's own when a relaunch strips them, a respawn replaces
+# them, or teardown restores the file (bin/fm-control-lib.sh owns the contract).
+# An existing settings file that is not a mergeable JSON object refuses the spawn
+# with the file untouched, probed before the busy contract is armed so the
+# refusal leaves no armed busy records behind.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
@@ -2404,6 +2406,18 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
+    claude*)
+      # Probe the settings file BEFORE arming the busy contract, so an
+      # unmergeable committed file refuses the spawn without leaving armed
+      # busy records behind; the install below re-checks as the write-time
+      # authority (bin/fm-control-lib.sh owns the mergeability contract).
+      if ! fm_control_claude_settings_mergeable "$WT/.claude/settings.local.json"; then
+        echo "error: $WT/.claude/settings.local.json exists but is not a JSON object firstmate can merge its claude busy hooks into; escalate to the captain to fix or remove that file in the project, then respawn (it is never overwritten: a project's own settings must survive a spawn)" >&2
+        exit 1
+      fi
+      ;;
+  esac
+  case "$HARNESS" in
     claude*|opencode*|pi|pi-signed)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
@@ -2445,8 +2459,8 @@ if [ "$KIND" != secondmate ]; then
       # env, enabledPlugins); merge our hooks into it rather than replacing the
       # whole file, or a real spawn destroys that committed configuration.
       # fm_control_claude_settings_install owns the merge contract: it records
-      # the exact entries written in state/<id>.claude-settings-owned as the
-      # ownership authority later strip/restore decisions use, and it REFUSES
+      # the exact hook commands written in state/<id>.claude-settings-owned as
+      # the ownership authority later strip/restore decisions use, and it REFUSES
       # a file it cannot prove it can merge into (unparseable, or not a JSON
       # object) with the original bytes untouched - an unmergeable committed
       # file fails the spawn loudly instead of being overwritten.

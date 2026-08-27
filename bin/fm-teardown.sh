@@ -26,7 +26,7 @@
 # file rather than replacing it, so the dirty check would otherwise false-refuse on
 # firstmate's own hook entries every time. restore_claude_settings_if_only_hooks_differ
 # restores that file to HEAD before the dirty check runs, but ONLY when the file's sole
-# working-tree difference from HEAD is the exact entries recorded in
+# working-tree difference from HEAD is hooks whose commands are recorded in
 # state/<id>.claude-settings-owned (proven by
 # fm_control_claude_settings_only_owned_differ in bin/fm-control-lib.sh); any other
 # difference is potentially real unlanded work and still refuses normally. The later
@@ -1421,6 +1421,25 @@ teardown_reset_claude_settings() {
   fi
 }
 
+# When a dirty refusal is about to fire and the ONLY uncommitted change is a
+# tracked .claude/settings.local.json with no ownership record to account for
+# it, name the file and the missing record: the likeliest cause is a task
+# armed by a firstmate from before the record existed (homes fast-forward
+# while tasks are live), and a bare "uncommitted changes present" would send
+# the operator hunting for work that may not exist. Purely additive to the
+# refusal - the predicate is never weakened and the refusal still stands.
+explain_claude_settings_refusal() {
+  local dirty_raw=$1 rest
+  [ ! -e "$STATE/$ID.claude-settings-owned" ] || return 0
+  rest=$(printf '%s\n' "$dirty_raw" \
+    | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' \
+    | grep -v '\.claude/settings\.local\.json$' | grep -v '^$' || true)
+  [ -z "$rest" ] || return 0
+  printf '%s\n' "$dirty_raw" | grep -q '^.[^?] \.claude/settings\.local\.json$' || return 0
+  echo "note: the only uncommitted change is .claude/settings.local.json, and no state/$ID.claude-settings-owned record exists for this task." >&2
+  echo "If this task was armed before firstmate recorded its claude hook ownership, that difference may be firstmate's own busy hooks; inspect 'git -C $WT diff -- .claude/settings.local.json' before asking the captain about --force." >&2
+}
+
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
@@ -1464,6 +1483,7 @@ validate_worktree_teardown_safety() {
     if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
+      [ -n "$dirty" ] && explain_claude_settings_refusal "$dirty_raw"
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
       echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       return 1
@@ -1471,6 +1491,7 @@ validate_worktree_teardown_safety() {
   elif [ -n "$dirty" ]; then
     echo "REFUSED: worktree $WT has uncommitted changes." >&2
     echo "uncommitted changes present" >&2
+    explain_claude_settings_refusal "$dirty_raw"
     echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
     return 1
   elif [ -n "$unpushed" ]; then

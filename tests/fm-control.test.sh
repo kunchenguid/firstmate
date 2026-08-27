@@ -311,8 +311,8 @@ test_claude_settings_install_preserves_project_keys_and_replaces_own_hooks() {
     || fail "install must keep a project's own hook group alongside firstmate's on a shared event, got $(jq -c '.hooks.Stop' "$settings")"
   assert_contains "$(jq -c '.hooks.Stop' "$settings")" "fm-busy-event.sh apply gen1" \
     "install must add firstmate's own hook entry"
-  [ "$(jq -c '.entries.Stop' "$record")" = "$(printf '%s' "$hooks1" | jq -c '.Stop')" ] \
-    || fail "install must record exactly the entries it wrote as the ownership authority"
+  [ "$(jq -c '.commands.Stop' "$record")" = '["fm-busy-event.sh apply gen1"]' ] \
+    || fail "install must record exactly the hook commands it wrote as the ownership authority, got $(cat "$record")"
 
   # A respawn (a fresh busy-gen re-arms the same task) must replace, not
   # accumulate, firstmate's own recorded entries, while a project hook whose
@@ -341,13 +341,16 @@ test_claude_settings_install_preserves_project_keys_and_replaces_own_hooks() {
     || fail "an absent existing file must produce a bare hooks document, got $(cat "$dir/absent.json")"
 
   # There is deliberately NO fallback for content install cannot prove it can
-  # merge into: unparseable JSON, a non-object top level (including an empty
-  # file), or a non-object hooks value must refuse with the original bytes
-  # untouched and no ownership record written.
+  # merge into: unparseable JSON, a non-object top level, or a non-object
+  # hooks value must refuse with the original bytes untouched and no
+  # ownership record written. The same criteria gate the spawn-time preflight
+  # probe, so it is asserted alongside each refusal.
   local bad
-  for bad in '{"permissions": {"allow": ["x"],}' '[]' '"a string"' ''; do
+  for bad in '{"permissions": {"allow": ["x"],}' '[]' '"a string"'; do
     printf '%s' "$bad" > "$dir/bad.json"
     rm -f "$dir/bad-record"
+    fm_control_claude_settings_mergeable "$dir/bad.json" \
+      && fail "the mergeability probe must refuse what install refuses: $(printf '%q' "$bad")"
     fm_control_claude_settings_install "$dir/bad.json" "$hooks1" "$dir/bad-record" 2>/dev/null \
       && fail "install must refuse a settings file it cannot merge into: $(printf '%q' "$bad")"
     [ "$(cat "$dir/bad.json")" = "$bad" ] \
@@ -356,15 +359,37 @@ test_claude_settings_install_preserves_project_keys_and_replaces_own_hooks() {
       || fail "a refused install must not write an ownership record"
   done
   printf '%s\n' '{"hooks":"not-an-object"}' > "$dir/bad.json"
+  fm_control_claude_settings_mergeable "$dir/bad.json" \
+    && fail "the mergeability probe must refuse a non-object hooks value"
   fm_control_claude_settings_install "$dir/bad.json" "$hooks1" "$dir/bad-record" 2>/dev/null \
     && fail "install must refuse a non-object hooks value"
 
-  # A corrupt ownership record can no longer prove which entries are
-  # firstmate's own, so install must refuse rather than guess.
+  # A zero-byte file is the one accepted degenerate case: it has no project
+  # content to protect, so refusing it would be a pure regression. It merges
+  # as the empty object, and preexisted stays true so clear never deletes it.
+  : > "$dir/empty.json"
+  rm -f "$dir/empty-record"
+  fm_control_claude_settings_mergeable "$dir/empty.json" \
+    || fail "the mergeability probe must accept a zero-byte settings file"
+  fm_control_claude_settings_install "$dir/empty.json" "$hooks1" "$dir/empty-record" \
+    || fail "install into a zero-byte settings file must succeed"
+  [ "$(jq -c 'keys' "$dir/empty.json")" = '["hooks"]' ] \
+    || fail "a zero-byte file must merge as the empty object, got $(cat "$dir/empty.json")"
+  jq -e '.preexisted == true' "$dir/empty-record" >/dev/null \
+    || fail "a zero-byte file existed before the install, so preexisted must stay true"
+
+  # A corrupt ownership record can no longer prove which hooks are
+  # firstmate's own, so install must refuse rather than guess - including a
+  # record from the superseded whole-entry schema, whose entries this reader
+  # deliberately does not reinterpret.
   printf '%s\n' 'not a record' > "$dir/corrupt-record"
   printf '%s\n' '{"hooks":{}}' > "$dir/ok.json"
   fm_control_claude_settings_install "$dir/ok.json" "$hooks1" "$dir/corrupt-record" 2>/dev/null \
     && fail "install must refuse an unreadable ownership record"
+  printf '%s\n' '{"version":1,"entries":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen0"}]}]}}' \
+    > "$dir/entries-only-record"
+  fm_control_claude_settings_install "$dir/ok.json" "$hooks1" "$dir/entries-only-record" 2>/dev/null \
+    && fail "install must refuse a record without a commands object rather than guess at ownership"
   pass "fm-control-lib: claude settings install preserves a project's own keys, hooks, and lookalike commands, fully replaces firstmate's own recorded entries on respawn, and refuses unmergeable content untouched"
 }
 
@@ -418,7 +443,7 @@ test_claude_settings_clear_strips_own_hooks_and_diff_predicate() {
   # A pre-existing file holding none of the recorded entries stays
   # byte-untouched: no rewrite may disturb a project file's own formatting.
   printf '{\n  "permissions": { "allow": ["Bash(npm test)"] }\n}\n' > "$dir/pretty.json"
-  printf '%s\n' '{"version":1,"preexisted":true,"entries":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gone-gen"}]}]}}' \
+  printf '%s\n' '{"version":1,"preexisted":true,"commands":{"Stop":["fm-busy-event.sh apply gone-gen"]}}' \
     > "$dir/pretty-record"
   fm_control_claude_settings_clear "$dir/pretty.json" "$dir/pretty-record" \
     || fail "clearing a file holding none of the recorded entries must succeed"
@@ -438,7 +463,7 @@ test_claude_settings_clear_strips_own_hooks_and_diff_predicate() {
   # An unparseable settings file fires no hooks and cannot be stripped, so
   # clear leaves it and its record in place rather than guessing.
   printf '%s' 'not json' > "$dir/unparseable.json"
-  printf '%s\n' '{"version":1,"entries":{"Stop":[]}}' > "$dir/unparseable-record"
+  printf '%s\n' '{"version":1,"commands":{"Stop":[]}}' > "$dir/unparseable-record"
   fm_control_claude_settings_clear "$dir/unparseable.json" "$dir/unparseable-record" 2>/dev/null \
     || fail "clearing an unparseable file must not fail the caller"
   [ "$(cat "$dir/unparseable.json")" = 'not json' ] \
@@ -448,7 +473,7 @@ test_claude_settings_clear_strips_own_hooks_and_diff_predicate() {
 
   fm_control_claude_settings_clear "$dir/does-not-exist.json" "$dir/never-written-record" \
     || fail "clearing a missing file with no record must be a silent no-op"
-  printf '%s\n' '{"version":1,"entries":{"Stop":[]}}' > "$dir/orphan-record"
+  printf '%s\n' '{"version":1,"commands":{"Stop":[]}}' > "$dir/orphan-record"
   fm_control_claude_settings_clear "$dir/does-not-exist.json" "$dir/orphan-record" \
     || fail "clearing a missing file must retire its orphaned record"
   [ ! -e "$dir/orphan-record" ] \
@@ -488,6 +513,77 @@ test_claude_settings_clear_strips_own_hooks_and_diff_predicate() {
     '{"hooks":{"UserPromptSubmit":[]}}' "$(cat "$dir/norm.json")" "$dir/norm-record" \
     || fail "an event left as an empty array after stripping must compare equal to it being absent at HEAD"
   pass "fm-control-lib: claude settings clear strips only recorded entries and retires the record, and the record-driven diff predicate refuses everything it cannot account for"
+}
+
+# The two real-world ways the previous whole-entry-equality design lost
+# ownership silently and permanently, now pinned as regressions:
+# 1. claude itself rewrites .claude/settings.local.json (a mid-task
+#    permission grant re-serializes it) and may add or default sibling
+#    fields on firstmate's entry - ownership must survive that rewrite,
+#    because the recorded COMMAND string is the identity, not the entry.
+# 2. an interruption between install's two writes must never orphan the
+#    previous incarnation's entries - the record is monotone (old commands
+#    unioned with fresh, written first), so a crash leaves it over-broad,
+#    never under-broad.
+test_claude_settings_ownership_survives_entry_rewrite_and_crash_window() {
+  local dir=$TMP_ROOT/claude-settings-drift settings record head gen1 gen2 file_with_gen1
+  mkdir -p "$dir"
+  settings=$dir/settings.local.json
+  record=$dir/claude-settings-owned
+  head='{"permissions":{"allow":["Bash(npm test)"]}}'
+  printf '%s\n' "$head" > "$settings"
+  gen1='{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply /st t1 --gen gen1"}]}]}'
+  gen2='{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply /st t1 --gen gen2"}]}]}'
+  fm_control_claude_settings_install "$settings" "$gen1" "$record" \
+    || fail "install before the drift simulation must succeed"
+
+  # Simulate claude's own rewrite: a defaulted matcher on the entry and an
+  # extra field on the inner hook, exactly what a re-serialization from
+  # claude's parsed model produces. The command string is untouched.
+  printf '%s\n' "$(jq -c '.hooks.Stop[0].matcher = "" | .hooks.Stop[0].hooks[0].timeout = 600' "$settings")" \
+    > "$settings"
+  fm_control_claude_settings_only_owned_differ "$head" "$(cat "$settings")" "$record" \
+    || fail "the diff predicate must still recognize firstmate's own hook after claude rewrites the entry"
+  fm_control_claude_settings_install "$settings" "$gen2" "$record" \
+    || fail "a respawn install over a rewritten entry must succeed"
+  [ "$(jq '.hooks.Stop | length' "$settings")" = 1 ] \
+    || fail "a respawn must still replace, not accumulate, a rewritten entry, got $(jq -c '.hooks.Stop' "$settings")"
+  assert_not_contains "$(jq -c '.hooks.Stop' "$settings")" "gen1" \
+    "a respawn must strip the rewritten previous-incarnation entry by its recorded command"
+  fm_control_claude_settings_clear "$settings" "$record" \
+    || fail "clear over a rewritten entry must succeed"
+  [ "$(jq -r '.permissions.allow[0]' "$settings")" = "Bash(npm test)" ] \
+    || fail "clear must leave the project's own content after stripping a rewritten entry"
+  assert_not_contains "$(jq -c '.hooks // {}' "$settings")" "fm-busy-event.sh" \
+    "clear must remove firstmate's own hook even after claude rewrote its entry"
+  [ ! -e "$record" ] \
+    || fail "clear must retire the record once its entries are stripped"
+
+  # The record is monotone: a reinstall's record still names the previous
+  # incarnation's commands, so the crash window between the record write and
+  # the settings write can never orphan the entries still in the file.
+  printf '%s\n' "$head" > "$settings"
+  rm -f "$record"
+  fm_control_claude_settings_install "$settings" "$gen1" "$record" \
+    || fail "gen1 install for the crash-window simulation must succeed"
+  file_with_gen1=$(cat "$settings")
+  fm_control_claude_settings_install "$settings" "$gen2" "$record" \
+    || fail "gen2 reinstall for the crash-window simulation must succeed"
+  jq -e '.commands.Stop | contains(["fm-busy-event.sh apply /st t1 --gen gen1"]) and contains(["fm-busy-event.sh apply /st t1 --gen gen2"])' \
+    "$record" >/dev/null \
+    || fail "a reinstall must union the old commands into the record, never narrow it, got $(cat "$record")"
+  # Reproduce the interrupted state: the record already names gen2, the
+  # settings write never landed and the file still holds gen1.
+  printf '%s\n' "$file_with_gen1" > "$settings"
+  fm_control_claude_settings_only_owned_differ "$head" "$(cat "$settings")" "$record" \
+    || fail "the over-broad record must still account for the previous incarnation's entries after a crash"
+  fm_control_claude_settings_clear "$settings" "$record" \
+    || fail "clear must succeed on the crash-window state"
+  [ "$(jq -c '.permissions.allow' "$settings")" = '["Bash(npm test)"]' ] \
+    || fail "clear on the crash-window state must preserve the project's content"
+  assert_not_contains "$(jq -c '.hooks // {}' "$settings")" "fm-busy-event.sh" \
+    "clear on the crash-window state must strip the stranded previous-incarnation entry"
+  pass "fm-control-lib: ownership survives claude rewriting the entry, and the monotone record covers the install crash window"
 }
 
 test_prefixed_recorded_harness_reaches_each_control_verb() {
@@ -1086,6 +1182,7 @@ test_unverified_harness_is_refused
 test_harness_family_resolution
 test_claude_settings_install_preserves_project_keys_and_replaces_own_hooks
 test_claude_settings_clear_strips_own_hooks_and_diff_predicate
+test_claude_settings_ownership_survives_entry_rewrite_and_crash_window
 test_prefixed_recorded_harness_reaches_each_control_verb
 test_backend_key_capability_matrix
 test_harness_kind_capability
