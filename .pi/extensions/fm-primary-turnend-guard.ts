@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -66,6 +66,7 @@ const sessionstartDeliveryBytes = 512 * 1024;
 type SessionStartContext = {
   sessionManager?: {
     getHeader?: () => { timestamp?: unknown } | null | undefined;
+    getSessionId?: () => unknown;
   };
 };
 
@@ -98,16 +99,138 @@ function startupRebuildSource(ctx: SessionStartContext): "resume" | "fork" | und
 const sessionstartTruncatedMarker =
   "\n\nPI SESSION-START DELIVERY TRUNCATED - the digest exceeded 512 KiB. " +
   "Treat omitted context as unread and inspect the named files directly before acting on it.";
+const sessionstartManualFallback =
+  "Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.";
+const sessionstartIneligibleExit = 3;
+const sessionstartRetireTimeoutMs = 1000;
 
-function runSessionstartHook(source: string): Promise<string> {
+// One active generation owns native startup from child launch through context
+// claim. Replacement activates first, serially retires every predecessor, and
+// lets only the matching session id claim one persistent provider prerequisite.
+type SessionstartSource = "startup" | "clear" | "resume" | "fork" | "compact";
+type SessionstartResult =
+  | { kind: "ready"; raw: string }
+  | { kind: "empty" | "failed" | "ineligible" | "cancelled" };
+type SessionstartMessage = {
+  customType: "firstmate-sessionstart-nudge";
+  content: string;
+  display: false;
+  details: { kind: "session-start" };
+};
+type SessionstartGeneration = {
+  id: number;
+  sessionId: string;
+  source: SessionstartSource;
+  stopping: boolean;
+  delivered: boolean;
+  child: ChildProcess | null;
+  childClosed: boolean;
+  childClose: Promise<void> | null;
+  stopPromise: Promise<void> | null;
+  result: Promise<SessionstartResult>;
+};
+
+let nextSessionstartGenerationId = 0;
+let activeSessionstartGeneration: SessionstartGeneration | null = null;
+
+function sessionIdFromContext(ctx: SessionStartContext): string {
+  try {
+    return String(ctx.sessionManager?.getSessionId?.() ?? "");
+  } catch {
+    return "";
+  }
+}
+
+function sessionstartGenerationIsLive(generation: SessionstartGeneration): boolean {
+  return activeSessionstartGeneration === generation && !generation.stopping;
+}
+
+function signalSessionstartChild(child: ChildProcess, signal: NodeJS.Signals): void {
+  const pid = child.pid;
+  if (!pid) return;
+  if (process.platform === "win32") {
+    const args = ["/pid", String(pid), "/t"];
+    if (signal === "SIGKILL") args.push("/f");
+    spawnSync("taskkill", args, { stdio: "ignore" });
+    return;
+  }
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    try {
+      child.kill(signal);
+    } catch {
+    }
+  }
+}
+
+function waitForSessionstartClose(generation: SessionstartGeneration, timeoutMs: number): Promise<void> {
+  if (generation.childClosed || !generation.childClose) return Promise.resolve();
+  return new Promise((resolveWait) => {
+    const timer = setTimeout(resolveWait, timeoutMs);
+    void generation.childClose?.then(() => {
+      clearTimeout(timer);
+      resolveWait();
+    });
+  });
+}
+
+function stopSessionstartGeneration(generation: SessionstartGeneration): Promise<void> {
+  if (generation.stopPromise) return generation.stopPromise;
+  generation.stopping = true;
+  generation.stopPromise = (async () => {
+    const child = generation.child;
+    if (!child || generation.childClosed) {
+      await generation.result;
+      return;
+    }
+    signalSessionstartChild(child, "SIGTERM");
+    await waitForSessionstartClose(generation, sessionstartRetireTimeoutMs);
+    if (!generation.childClosed) {
+      signalSessionstartChild(child, "SIGKILL");
+      await waitForSessionstartClose(generation, sessionstartRetireTimeoutMs);
+    }
+  })();
+  return generation.stopPromise;
+}
+
+function runSessionstartHook(generation: SessionstartGeneration): Promise<SessionstartResult> {
   return new Promise((resolveResult) => {
-    const child = spawn(`${root}/bin/fm-sessionstart-run.sh`, ["--source", source], {
-      stdio: ["ignore", "pipe", "ignore"],
+    let settled = false;
+    let closeChild: () => void = () => {};
+    const settle = (result: SessionstartResult): void => {
+      if (settled) return;
+      settled = true;
+      resolveResult(result);
+    };
+    let child: ChildProcess;
+    try {
+      child = spawn(
+        `${root}/bin/fm-sessionstart-run.sh`,
+        ["--source", generation.source, "--pi-prerequisite"],
+        {
+          detached: process.platform !== "win32",
+          stdio: ["ignore", "pipe", "ignore"],
+        },
+      );
+    } catch {
+      settle(generation.stopping ? { kind: "cancelled" } : { kind: "failed" });
+      return;
+    }
+    generation.child = child;
+    generation.childClose = new Promise<void>((resolveClose) => {
+      closeChild = resolveClose;
     });
     const chunks: Buffer[] = [];
     let retainedBytes = 0;
     let truncated = false;
-    child.stdout.on("data", (chunk: Buffer) => {
+    const markClosed = (): void => {
+      if (generation.childClosed) return;
+      generation.childClosed = true;
+      if (generation.child === child) generation.child = null;
+      closeChild();
+    };
+    child.stdout?.on("data", (chunk: Buffer) => {
       if (retainedBytes >= sessionstartDeliveryBytes) {
         truncated = true;
         return;
@@ -118,39 +241,109 @@ function runSessionstartHook(source: string): Promise<string> {
       retainedBytes += retained.length;
       if (retained.length !== chunk.length) truncated = true;
     });
-    child.on("error", () => resolveResult(""));
+    child.on("error", () => {
+      markClosed();
+      settle(generation.stopping ? { kind: "cancelled" } : { kind: "failed" });
+    });
     child.on("close", (code) => {
+      markClosed();
+      if (generation.stopping) {
+        settle({ kind: "cancelled" });
+        return;
+      }
+      if (code === sessionstartIneligibleExit) {
+        settle({ kind: "ineligible" });
+        return;
+      }
       if (code !== 0) {
-        resolveResult("");
+        settle({ kind: "failed" });
         return;
       }
       const raw = Buffer.concat(chunks).toString("utf8").trim();
-      resolveResult(truncated ? `${raw}${sessionstartTruncatedMarker}` : raw);
+      if (!raw) {
+        settle({ kind: "empty" });
+        return;
+      }
+      settle({
+        kind: "ready",
+        raw: truncated ? `${raw}${sessionstartTruncatedMarker}` : raw,
+      });
     });
   });
 }
 
-async function injectSessionstart(pi: ExtensionAPI, source: string): Promise<void> {
-  const raw = await runSessionstartHook(source);
-  if (!raw) return;
+function createSessionstartGeneration(
+  source: SessionstartSource,
+  sessionId: string,
+): SessionstartGeneration {
+  const previous = activeSessionstartGeneration;
+  const generation: SessionstartGeneration = {
+    id: ++nextSessionstartGenerationId,
+    sessionId,
+    source,
+    stopping: false,
+    delivered: false,
+    child: null,
+    childClosed: false,
+    childClose: null,
+    stopPromise: null,
+    result: Promise.resolve({ kind: "cancelled" }),
+  };
+  activeSessionstartGeneration = generation;
+  generation.result = (async (): Promise<SessionstartResult> => {
+    if (previous) await stopSessionstartGeneration(previous);
+    if (!sessionstartGenerationIsLive(generation)) return { kind: "cancelled" };
+    return runSessionstartHook(generation);
+  })();
+  return generation;
+}
+
+function sessionstartMessage(
+  generation: SessionstartGeneration,
+  result: SessionstartResult,
+): SessionstartMessage | undefined {
+  let raw = result.kind === "ready" ? result.raw : "";
+  if (!raw && ["startup", "clear", "compact"].includes(generation.source) &&
+      (result.kind === "empty" || result.kind === "failed")) {
+    raw = sessionstartManualFallback;
+  }
+  if (!raw) return undefined;
   try {
-    // Pi is the only adapter that injects a MESSAGE rather than hook stdout, so
-    // whatever it injects must carry operational provenance or the Ahoy skill
-    // would have to guess whether it was captain-authored. The wrapper already
-    // returns an encoded nudge on a context-preserving open, so only an
-    // unencoded digest needs the marker added here.
+    // The wrapper already returns an encoded nudge on a context-preserving
+    // open, so only an unencoded digest or fallback needs the marker added.
     const content = classifyFirstmateCurrentOperationalText(raw)
       ? raw
       : encodeFirstmateOperationalInput("session-start", raw);
-    pi.sendMessage({
+    return {
       customType: "firstmate-sessionstart-nudge",
       content,
       display: false,
       details: { kind: "session-start" },
-    });
+    };
   } catch {
+    return undefined;
   }
 }
+
+async function claimSessionstartMessage(
+  generation: SessionstartGeneration,
+  ctx?: SessionStartContext,
+): Promise<SessionstartMessage | undefined> {
+  const result = await generation.result;
+  if (!sessionstartGenerationIsLive(generation) || generation.delivered) return undefined;
+  const currentSessionId = ctx ? sessionIdFromContext(ctx) : "";
+  if (generation.sessionId && currentSessionId && generation.sessionId !== currentSessionId) {
+    return undefined;
+  }
+  generation.delivered = true;
+  return sessionstartMessage(generation, result);
+}
+
+const cleanupSessionstartOnProcessExit = (): void => {
+  const generation = activeSessionstartGeneration;
+  if (generation?.child) signalSessionstartChild(generation.child, "SIGKILL");
+};
+process.once("exit", cleanupSessionstartOnProcessExit);
 
 function runGuard(): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
@@ -197,20 +390,46 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.on?.("session_start", async (event, ctx) => {
+  let sessionstartGeneration: SessionstartGeneration | null = null;
+
+  pi.on?.("session_start", (event, ctx) => {
     const reason = String((event as { reason?: unknown }).reason ?? "");
     const source = reason === "startup"
       ? startupRebuildSource(ctx) ?? "startup"
       : { new: "clear", resume: "resume", fork: "fork" }[reason];
     markLoaded();
     if (!source) return;
-    await injectSessionstart(pi, source);
+    sessionstartGeneration = createSessionstartGeneration(
+      source as SessionstartSource,
+      sessionIdFromContext(ctx),
+    );
   });
 
-  // Pi's compaction equivalent. The digest is what a compacted session has just
-  // lost, so re-emitting it here is the point rather than a side effect.
-  pi.on?.("session_compact", async () => {
-    await injectSessionstart(pi, "compact");
+  pi.on?.("before_agent_start", async (_event, ctx) => {
+    const generation = sessionstartGeneration;
+    if (!generation) return;
+    const message = await claimSessionstartMessage(generation, ctx);
+    return message ? { message } : undefined;
+  });
+
+  // Pi's compaction equivalent. Manual compaction is idle and auto-compaction
+  // may retry without another before_agent_start, so the event keeps its
+  // existing delivery path while sharing generation ownership and cancellation.
+  pi.on?.("session_compact", async (_event, ctx) => {
+    const generation = createSessionstartGeneration("compact", sessionIdFromContext(ctx));
+    sessionstartGeneration = generation;
+    const message = await claimSessionstartMessage(generation, ctx);
+    if (!message || !sessionstartGenerationIsLive(generation)) return;
+    try {
+      pi.sendMessage(message);
+    } catch {
+      generation.delivered = false;
+    }
+  });
+
+  pi.on?.("session_shutdown", async () => {
+    const generation = sessionstartGeneration;
+    if (generation) await stopSessionstartGeneration(generation);
   });
 
   pi.on("tool_call", async (event) => {
