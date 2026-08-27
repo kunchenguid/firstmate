@@ -585,6 +585,72 @@ assert_grep 'deploy '"$task_id" "$TASK_DB/.owners" "driver did not compose the d
 assert_grep 'live-check https://example.test/product 139000 old-price' "$TASK_DB/.owners" "driver did not compose the live verification owner"
 pass "validated delivery is driver-owned and Pavel is notified after live proof"
 
+stale_prose=$(ingest 122 32 'Проверить PR' | json_field "['event']")
+run_ops classify "$stale_prose" --as task --title 'Check stale PR' --intent 'Ship via recorded PR only' \
+  --reason 'ordinary delivery' --authority ordinary >/dev/null
+run_ops drive "$stale_prose" >/dev/null
+printf '{"state":"validating","evidence":"no-mistakes validation is active"}\n' > "$PAVEL_STATUS_FILE"
+run_ops drive "$stale_prose" >/dev/null
+printf 'state: done; checks green for https://github.com/o/r/pull/404\n' > "$PAVEL_STATUS_FILE"
+if run_ops drive "$stale_prose" >/dev/null 2>&1; then
+  fail "driver accepted a PR URL scraped from non-JSON status prose"
+fi
+[ "$(run_ops inspect "$stale_prose" | json_field "['state']")" = validating ] \
+  || fail "stale prose PR rejection mutated the event"
+pass "delivery-ready ignores PR URLs in status prose"
+
+live_retry=$(ingest 123 33 'Поменять цену доставки' | json_field "['event']")
+run_ops classify "$live_retry" --as task --title 'Change shipping price' --intent 'Show the requested shipping price' \
+  --reason 'ordinary price change' --authority ordinary >/dev/null
+LIVE_RETRY_FILE="$HOME_DIR/state/pavel-ops/events/$live_retry.json" python3 - <<'PY'
+import hashlib
+import json
+import os
+import time
+path = os.environ["LIVE_RETRY_FILE"]
+with open(path, encoding="utf-8") as handle:
+    event = json.load(handle)
+now = int(time.time())
+event["completion_text"] = "Готово: цена уже на сайте."
+event["live_url"] = "https://example.test/product"
+for state, evidence in [
+    ("dispatched", "Pi worker exists in isolated copy"),
+    ("validating", "no-mistakes run owns current head"),
+    ("delivery_ready", "checks green on exact PR head"),
+    ("merge_queued", "guarded merge accepted by forge"),
+    ("landed", "forge reports PR merged at verified head"),
+    ("live", "live probe passed for https://example.test/product"),
+]:
+    event["transitions"].append({"at": now, "from": event["state"], "to": state, "evidence": evidence})
+    event["state"] = state
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
+    handle.write("\n")
+outbox = os.path.join(os.path.dirname(path), "..", "outbox", event["id"] + "-live-completion.json")
+os.makedirs(os.path.dirname(outbox), exist_ok=True)
+text = event["completion_text"]
+with open(outbox, "w", encoding="utf-8") as handle:
+    json.dump({
+        "schema": "fm-pavel-ops-outbound.v1",
+        "id": event["id"] + "-live-completion",
+        "event_id": event["id"],
+        "purpose": "live-completion",
+        "chat_id": "group",
+        "text": text,
+        "text_digest": hashlib.sha256(text.encode()).hexdigest(),
+        "status": "retryable",
+        "attempts": 1,
+        "created_at": now,
+        "updated_at": now,
+    }, handle)
+PY
+before_live_retry=$(grep -c . "$HTTP_LOG")
+run_ops drive "$live_retry" >/dev/null || fail "live retry did not reuse configured completion text"
+[ "$(grep -c . "$HTTP_LOG")" -eq $((before_live_retry + 1)) ] || fail "live retry did not send exactly once"
+[ "$(run_ops inspect "$live_retry" | json_field "['state']")" = notified ] \
+  || fail "live retry did not reconcile to notified"
+pass "live notification retries reuse the durable completion text"
+
 # A delivered completion receipt after a crash reconciles the event without sending again.
 crashed=$(ingest 108 18 'Поменять SEO заголовок' | json_field "['event']")
 run_ops classify "$crashed" --as task --title 'Change SEO title' --intent 'Set the requested SEO title' \
@@ -646,6 +712,7 @@ pass "delivered live-completion replay reconciles notification state"
 # A crash after send begins is surfaced and never retried without reconciliation.
 unknown=$(ingest 107 17 'Когда будет готово?' | json_field "['event']")
 run_ops classify "$unknown" --as conversation --reason 'status question only' >/dev/null
+before_unknown_sends=$(grep -c . "$HTTP_LOG")
 UNKNOWN_EVENT="$unknown" OUTBOX="$HOME_DIR/state/pavel-ops/outbox/$unknown-qa.json" python3 - <<'PY'
 import hashlib
 import json
@@ -672,7 +739,7 @@ fi
 if run_ops send "$unknown" --purpose qa --text 'Другой статус.' >/dev/null 2>&1; then
   fail "unknown outbound replay accepted changed text"
 fi
-[ "$(grep -c . "$HTTP_LOG")" -eq $((before_completion_sends + 1)) ] || fail "unknown Telegram delivery reached the API again"
+[ "$(grep -c . "$HTTP_LOG")" -eq "$before_unknown_sends" ] || fail "unknown Telegram delivery reached the API again"
 recovery=$(run_ops recover --startup) || fail "Pavel startup recovery failed"
 printf '%s' "$recovery" | grep -F "unknown outbound $unknown-qa surfaced" >/dev/null \
   || fail "unknown Telegram delivery was not made visible during recovery"

@@ -746,10 +746,32 @@ def task_meta(home: Home, event: dict[str, Any]) -> dict[str, str]:
 
 
 def pr_url_from_meta(home: Home, event: dict[str, Any]) -> str:
-    pr_url = task_meta(home, event).get("pr", "")
+    meta = task_meta(home, event)
+    pr_url = meta.get("pr", "")
     if not PR_URL.fullmatch(pr_url):
         raise OpsError("Pavel PR owner has not recorded a canonical PR URL")
+    pr_head = meta.get("pr_head", "")
+    if pr_head and not re.fullmatch(r"[0-9a-fA-F]{6,64}", pr_head):
+        raise OpsError("Pavel PR owner recorded an invalid PR head")
     return pr_url
+
+
+def delivery_config(home: Home) -> dict[str, Any]:
+    delivery = home.config.get("delivery", {})
+    if not isinstance(delivery, dict):
+        raise OpsError("pavel-ops delivery config must be an object")
+    return delivery
+
+
+def completion_text_for(home: Home, event: dict[str, Any]) -> str:
+    if event.get("completion_text"):
+        return str(event["completion_text"])
+    delivery = delivery_config(home)
+    configured = str(delivery.get("completion_text") or "").strip()
+    if configured:
+        return configured
+    live_url = str(event.get("live_url") or delivery.get("live_url") or "")
+    return f"Готово: результат уже на сайте {live_url}"
 
 
 def validate_dispatched_owner_record(home: Home, event: dict[str, Any]) -> dict[str, str]:
@@ -794,9 +816,7 @@ def owner_status(home: Home, event: dict[str, Any]) -> dict[str, Any]:
     try:
         parsed = json.loads(output)
     except json.JSONDecodeError:
-        urls = re.findall(r"https://[^\s)>\"]+", output)
-        state = "delivery_ready" if urls else "validating"
-        return {"state": state, "evidence": output.strip()[:500], "pr_url": urls[0] if urls else ""}
+        return {"state": "validating", "evidence": output.strip()[:500]}
     if not isinstance(parsed, dict):
         raise OpsError("Pavel delivery status owner returned a non-object")
     return parsed
@@ -872,10 +892,10 @@ def drive(home: Home, args: argparse.Namespace) -> dict[str, Any]:
     if event["state"] == "validating":
         status = owner_status(home, event)
         pr_url = str(status.get("pr_url") or "")
-        if not pr_url and status.get("state") in {"done", "delivery_ready"}:
+        if not pr_url:
             pr_url = pr_url_from_meta(home, event)
         if status.get("state") != "delivery_ready" or not PR_URL.fullmatch(pr_url):
-            if status.get("state") != "done" or not PR_URL.fullmatch(pr_url):
+            if not PR_URL.fullmatch(pr_url):
                 raise OpsError("Pavel delivery is not ready with a verified PR URL")
         run_checked(home, [command_from_env(home, "FM_PAVEL_OPS_PR_CHECK", "fm-pr-check.sh"), task_id, pr_url])
         return driver_transition(home, event, "delivery_ready", str(status.get("evidence") or "checks green on exact PR head"))
@@ -899,9 +919,7 @@ def drive(home: Home, args: argparse.Namespace) -> dict[str, Any]:
             return event
         return driver_transition(home, event, "landed", (output.strip() or "forge reports PR merged at verified head")[:500])
     if event["state"] == "landed":
-        delivery = home.config.get("delivery", {})
-        if not isinstance(delivery, dict):
-            raise OpsError("pavel-ops delivery config must be an object")
+        delivery = delivery_config(home)
         deploy_cmd = os.environ.get("FM_PAVEL_OPS_DEPLOY") or delivery.get("deploy_command")
         if deploy_cmd:
             run_checked(home, [str(deploy_cmd), task_id])
@@ -923,14 +941,15 @@ def drive(home: Home, args: argparse.Namespace) -> dict[str, Any]:
             if absent and absent in body:
                 raise OpsError("Pavel live probe found forbidden old behavior")
         evidence = f"live probe passed for {live_url}"
+        event["completion_text"] = completion_text_for(home, {**event, "live_url": live_url})
+        home.save_event(event)
         event = driver_transition(home, event, "live", evidence, live_url=live_url)
-        completion = str(delivery.get("completion_text") or f"Готово: результат уже на сайте {live_url}")
+        completion = completion_text_for(home, event)
         send_args = argparse.Namespace(event=event["id"], purpose="live-completion", text=completion)
         send_message(home, send_args)
         return home.load_event(event["id"])
     if event["state"] == "live":
-        status = owner_status(home, event)
-        completion = str(status.get("completion_text") or f"Готово: результат уже на сайте {event.get('live_url')}")
+        completion = completion_text_for(home, event)
         send_args = argparse.Namespace(event=event["id"], purpose="live-completion", text=completion)
         send_message(home, send_args)
         return home.load_event(event["id"])
