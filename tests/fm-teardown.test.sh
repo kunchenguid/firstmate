@@ -56,6 +56,7 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
+ROUTE="$ROOT/bin/fm-route.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 REAL_GIT_FOR_TEST=$(command -v git)
@@ -208,6 +209,172 @@ write_meta() {
     "project=$case_dir/project" \
     "kind=$kind" \
     "mode=$mode"
+}
+
+route_claim_path() {
+  printf '%s/routing/claims/%s/%s.cap\n' "$1/state" "$2" "$3"
+}
+
+route_reservation_path() {
+  printf '%s/routing/reservations/%s/%s.json\n' "$1/state" "$2" "$3"
+}
+
+make_active_routed_task() {
+  local case_dir=$1 generation=${2:-gen-task-x1} metadata capability candidate
+  metadata="$case_dir/state/task-x1.meta"
+  capability=$(route_claim_path "$case_dir" task-x1 "$generation")
+  candidate="$metadata.route-candidate"
+  FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" reserve \
+    --task task-x1 --generation "$generation" --profile profile-1 \
+    --provider openai --lane codex-primary --account codex-primary \
+    --class standard --work-type implementation --risk medium \
+    --mode automatic --now 100 >/dev/null
+  FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" begin-admission \
+    --task task-x1 --generation "$generation" --profile profile-1 \
+    --provider openai --lane codex-primary --account codex-primary \
+    --class standard --risk medium --mode automatic --transition fresh \
+    --metadata-file "$metadata" --claim-file "$capability" >/dev/null
+  cp "$metadata" "$candidate"
+  {
+    printf 'route_generation=%s\n' "$generation"
+    printf 'route_profile=profile-1\n'
+    printf 'route_provider=openai\n'
+    printf 'route_lane=codex-primary\n'
+    printf 'route_account=codex-primary\n'
+    printf 'route_class=standard\n'
+    printf 'route_risk=medium\n'
+    printf 'route_mode=automatic\n'
+  } >>"$candidate"
+  FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" prepare-admission \
+    --task task-x1 --candidate "$candidate" --claim-file "$capability" >/dev/null
+  mv "$candidate" "$metadata"
+  FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" commit-admission \
+    --task task-x1 --claim-file "$capability" >/dev/null
+}
+
+test_refused_teardown_keeps_routed_generation() {
+  local case_dir reservation capability
+  case_dir=$(make_case routed-refusal)
+  write_meta "$case_dir" no-mistakes ship
+  make_active_routed_task "$case_dir"
+  reservation=$(route_reservation_path "$case_dir" task-x1 gen-task-x1)
+  capability=$(route_claim_path "$case_dir" task-x1 gen-task-x1)
+  printf 'dirty\n' >"$case_dir/wt/uncommitted.txt"
+
+  if run_teardown "$case_dir" >/dev/null 2>&1; then
+    fail "routed refusal unexpectedly succeeded"
+  fi
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "routed refusal removed task metadata"
+  [ -f "$reservation" ] || fail "routed refusal released live capacity"
+  [ -f "$capability" ] || fail "routed refusal removed its protected capability"
+  [ ! -e "$case_dir/state/routing/outcomes.jsonl" ] || fail "routed refusal wrote a terminal outcome"
+  pass "refused cleanup preserves the exact routed generation"
+}
+
+test_successful_teardown_finalizes_routed_generation_once() {
+  local case_dir reservation capability outcomes
+  case_dir=$(make_case routed-success)
+  write_meta "$case_dir" no-mistakes ship
+  make_active_routed_task "$case_dir"
+  reservation=$(route_reservation_path "$case_dir" task-x1 gen-task-x1)
+  capability=$(route_claim_path "$case_dir" task-x1 gen-task-x1)
+  outcomes="$case_dir/state/routing/outcomes.jsonl"
+  FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" score --task task-x1 \
+    --generation gen-task-x1 --terminal completed --tests pass \
+    --review pass --redundant no --now 1000 >/dev/null
+
+  run_teardown "$case_dir" >/dev/null
+  [ ! -e "$reservation" ] || fail "successful cleanup leaked routed capacity"
+  [ ! -e "$capability" ] || fail "successful cleanup leaked its capability"
+  [ "$(jq -s '[.[] | select(.taskId == "task-x1" and .generation == "gen-task-x1")] | length' "$outcomes")" -eq 1 ] \
+    || fail "successful cleanup did not write exactly one generation outcome"
+  jq -e 'select(.taskId == "task-x1") | .terminal == "completed" and .tests == "pass" and .review == "pass" and .redundant == "no"' "$outcomes" >/dev/null \
+    || fail "successful cleanup did not merge the pending score"
+
+  if run_teardown "$case_dir" >/dev/null 2>&1; then
+    fail "teardown replay without task metadata unexpectedly succeeded"
+  fi
+  [ "$(jq -s '[.[] | select(.taskId == "task-x1" and .generation == "gen-task-x1")] | length' "$outcomes")" -eq 1 ] \
+    || fail "cleanup replay duplicated the terminal outcome"
+  pass "successful cleanup finalizes one generation exactly once"
+}
+
+test_missing_routing_capability_refuses_before_cleanup() {
+  local case_dir reservation capability
+  case_dir=$(make_case routed-missing-capability)
+  write_meta "$case_dir" no-mistakes ship
+  make_active_routed_task "$case_dir"
+  reservation=$(route_reservation_path "$case_dir" task-x1 gen-task-x1)
+  capability=$(route_claim_path "$case_dir" task-x1 gen-task-x1)
+  rm -f "$capability"
+
+  if run_teardown "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"; then
+    fail "cleanup ignored a missing routing capability"
+  fi
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "missing capability was detected after durable cleanup"
+  [ -f "$reservation" ] || fail "missing capability released routed capacity"
+  [ -d "$case_dir/wt" ] || fail "missing capability was detected after worktree return"
+  [ ! -e "$case_dir/state/routing/outcomes.jsonl" ] || fail "missing capability wrote an outcome"
+  pass "missing routing capability refuses before durable cleanup"
+}
+
+test_routed_finalization_failure_after_return_converges_on_retry() {
+  local case_dir capability reservation outcomes saved
+  case_dir=$(make_case routed-finalize-retry)
+  write_meta "$case_dir" no-mistakes ship
+  make_active_routed_task "$case_dir"
+  capability=$(route_claim_path "$case_dir" task-x1 gen-task-x1)
+  reservation=$(route_reservation_path "$case_dir" task-x1 gen-task-x1)
+  outcomes="$case_dir/state/routing/outcomes.jsonl"
+  saved="$case_dir/saved.cap"
+  cp "$capability" "$saved"
+  cat >"$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ] && [ ! -e "${FM_FINALIZE_FAULT_MARKER:?}" ]; then
+  printf 'corrupt\n' >"${FM_FINALIZE_FAULT_CAPABILITY:?}"
+  : >"$FM_FINALIZE_FAULT_MARKER"
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  FM_FINALIZE_FAULT_MARKER="$case_dir/returned" \
+  FM_FINALIZE_FAULT_CAPABILITY="$capability" \
+    run_teardown "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    && fail "post-return capability fault unexpectedly finalized"
+  [ -e "$case_dir/returned" ] || fail "finalization ran before worktree return"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "post-return finalization failure removed task metadata"
+  [ -f "$reservation" ] || fail "post-return finalization failure released capacity"
+  [ ! -e "$outcomes" ] || fail "post-return finalization failure wrote an outcome"
+
+  cp "$saved" "$capability"
+  chmod 600 "$capability"
+  FM_FINALIZE_FAULT_MARKER="$case_dir/returned" \
+  FM_FINALIZE_FAULT_CAPABILITY="$capability" \
+    run_teardown "$case_dir" >/dev/null
+  [ ! -e "$reservation" ] || fail "finalization retry leaked capacity"
+  [ "$(jq -s '[.[] | select(.taskId == "task-x1" and .generation == "gen-task-x1")] | length' "$outcomes")" -eq 1 ] \
+    || fail "finalization retry did not converge to one outcome"
+  pass "post-return finalization failures preserve a retryable exact generation"
+}
+
+test_teardown_replays_after_terminal_ledger_publish() {
+  local case_dir outcomes
+  case_dir=$(make_case routed-ledger-published)
+  write_meta "$case_dir" no-mistakes ship
+  make_active_routed_task "$case_dir"
+  outcomes="$case_dir/state/routing/outcomes.jsonl"
+  FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" cleanup-finalize \
+    --task task-x1 --generation gen-task-x1 --profile profile-1 \
+    --provider openai --lane codex-primary --account codex-primary \
+    --class standard --risk medium --mode automatic --terminal completed >/dev/null
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "ledger-publish crash setup lost task metadata"
+
+  run_teardown "$case_dir" >/dev/null
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "ledger-published cleanup replay retained metadata"
+  [ "$(jq -s '[.[] | select(.taskId == "task-x1" and .generation == "gen-task-x1")] | length' "$outcomes")" -eq 1 ] \
+    || fail "ledger-published cleanup replay duplicated its outcome"
+  pass "cleanup replay converges after terminal ledger publication"
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -2649,3 +2816,8 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_refused_teardown_keeps_routed_generation
+test_successful_teardown_finalizes_routed_generation_once
+test_missing_routing_capability_refuses_before_cleanup
+test_routed_finalization_failure_after_return_converges_on_retry
+test_teardown_replays_after_terminal_ledger_publish

@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-routing-lib.sh
 . "$SCRIPT_DIR/fm-routing-lib.sh"
 
-usage() { fm_route_diagnostic 'usage: fm-route.sh select|reserve|verify-reservation|begin-admission|prepare-admission|commit-admission|abort-admission|recover-admission|release|failure|score|finalize|observe|evidence|status|report ...'; exit 2; }
+usage() { fm_route_diagnostic 'usage: fm-route.sh select|reserve|verify-reservation|begin-admission|prepare-admission|commit-admission|abort-admission|recover-admission|release|failure|score|finalize|cleanup-ready|cleanup-finalize|observe|evidence|status|report ...'; exit 2; }
 require_value() { [ "$#" -ge 2 ] && [ -n "$2" ] || usage; }
 validate_now() { case "$1" in ''|*[!0-9]*) fm_route_diagnostic 'invalid --now: expected non-negative epoch'; return 1 ;; esac; }
 validate_terminal() { case "$1" in completed|failed_safe|escalated|cancelled|superseded) ;; *) fm_route_diagnostic 'invalid terminal outcome'; return 1 ;; esac; }
@@ -142,6 +142,25 @@ case "$command" in
     while [ "$#" -gt 0 ]; do claim_option "$1"; case "$1" in --task) require_value "$@"; TASK=$2; shift 2 ;; --generation) require_value "$@"; GENERATION=$2; shift 2 ;; --terminal) require_value "$@"; TERMINAL=$2; shift 2 ;; --claim-file) require_value "$@"; CLAIM_FILE=$2; shift 2 ;; *) usage ;; esac; done
     if ! fm_route_validate_identifier "$TASK" || ! fm_route_validate_identifier "$GENERATION"; then fm_route_diagnostic 'invalid finalize identifier'; exit 1; fi
     validate_terminal "$TERMINAL"; fm_routing_with_lock fm_route_finalize_locked "$TASK" "$GENERATION" "$TERMINAL" "$CLAIM_FILE"
+    ;;
+  cleanup-ready|cleanup-finalize)
+    TASK=''; GENERATION=''; PROFILE=''; PROVIDER=''; LANE=''; ACCOUNT=''; CLASS=''; RISK=''; MODE=''; TERMINAL=''
+    while [ "$#" -gt 0 ]; do claim_option "$1"; case "$1" in
+      --task) require_value "$@"; TASK=$2; shift 2 ;; --generation) require_value "$@"; GENERATION=$2; shift 2 ;;
+      --profile) require_value "$@"; PROFILE=$2; shift 2 ;; --provider) require_value "$@"; PROVIDER=$2; shift 2 ;;
+      --lane) require_value "$@"; LANE=$2; shift 2 ;; --account) require_value "$@"; ACCOUNT=$2; shift 2 ;;
+      --class) require_value "$@"; CLASS=$2; shift 2 ;; --risk) require_value "$@"; RISK=$2; shift 2 ;;
+      --mode) require_value "$@"; MODE=$2; shift 2 ;;
+      --terminal) require_value "$@"; TERMINAL=$2; shift 2 ;;
+      *) usage ;;
+    esac; done
+    fm_route_validate_route_tuple "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" implementation "$RISK" "$MODE"
+    validate_terminal "$TERMINAL"
+    if [ "$command" = cleanup-ready ]; then
+      fm_routing_with_lock fm_route_cleanup_ready_locked "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" "$RISK" "$MODE" "$TERMINAL"
+    else
+      fm_routing_with_lock fm_route_cleanup_finalize_locked "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" "$RISK" "$MODE" "$TERMINAL"
+    fi
     ;;
   observe)
     REQUEST=''; DECISION=''; NOW=$(date +%s)

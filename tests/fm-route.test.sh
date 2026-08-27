@@ -273,6 +273,22 @@ claim_path() {
   printf '%s/routing/claims/%s/%s.cap\n' "$FM_STATE_OVERRIDE" "$1" "$2"
 }
 
+cleanup_ready() {
+  local task=$1 generation=$2
+  "$ROUTE" cleanup-ready --task "$task" --generation "$generation" \
+    --profile profile-1 --provider openai --lane codex-primary \
+    --account codex-primary --class standard --risk medium --mode automatic \
+    --terminal completed
+}
+
+cleanup_finalize() {
+  local task=$1 generation=$2 terminal=${3:-completed}
+  "$ROUTE" cleanup-finalize --task "$task" --generation "$generation" \
+    --profile profile-1 --provider openai --lane codex-primary \
+    --account codex-primary --class standard --risk medium --mode automatic \
+    --terminal "$terminal"
+}
+
 begin_fresh_admission() {
   local task=$1 generation=$2 metadata=$3
   "$ROUTE" begin-admission --task "$task" --generation "$generation" \
@@ -1045,6 +1061,74 @@ test_score_finalize_and_outcome_privacy_are_strict() {
   pass "score and finalization are idempotent and privacy-safe"
 }
 
+test_cleanup_finalization_uses_canonical_capability_and_unknown_scores() {
+  local capability metadata="$FM_STATE_OVERRIDE/cleanup.meta" outcome
+  reset_route_state
+  rm -f "$metadata"
+  reserve_route cleanup gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  activate_fresh_admission cleanup gen-1 "$metadata" >/dev/null
+  capability=$(claim_path cleanup gen-1)
+
+  cleanup_ready cleanup gen-1 >/dev/null || fail "cleanup preflight rejected an active exact generation"
+  [ -f "$capability" ] || fail "cleanup preflight consumed its capability"
+  outcome=$(cleanup_finalize cleanup gen-1 completed) || fail "cleanup finalization failed"
+  jq -e '.terminal == "completed" and .tests == "unknown" and .review == "unknown" and .redundant == "no"' <<<"$outcome" >/dev/null \
+    || fail "cleanup inferred test or review success"
+  [ ! -e "$(reservation_path cleanup gen-1)" ] || fail "cleanup finalization leaked capacity"
+  [ ! -e "$capability" ] || fail "cleanup finalization leaked its capability"
+  cleanup_finalize cleanup gen-1 completed >/dev/null || fail "cleanup finalization replay was not idempotent"
+  expect_failure_contains 'terminal-outcome-conflict' cleanup_finalize cleanup gen-1 failed_safe
+  [ "$(jq -s '[.[] | select(.taskId == "cleanup" and .generation == "gen-1")] | length' "$FM_STATE_OVERRIDE/routing/outcomes.jsonl")" -eq 1 ] \
+    || fail "cleanup finalization replay duplicated its outcome"
+  pass "cleanup finalization derives the canonical capability and preserves unknown scores"
+}
+
+test_cleanup_preflight_rejects_missing_capability_and_corrupt_journal() {
+  local metadata="$FM_STATE_OVERRIDE/cleanup.meta" capability reservation before
+  reset_route_state
+  rm -f "$metadata"
+  reserve_route cleanup gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  activate_fresh_admission cleanup gen-1 "$metadata" >/dev/null
+  capability=$(claim_path cleanup gen-1)
+  reservation=$(reservation_path cleanup gen-1)
+  before=$(od -An -v -tx1 "$reservation")
+  rm -f "$capability"
+  expect_failure_contains 'invalid claim file' cleanup_ready cleanup gen-1
+  [ "$(od -An -v -tx1 "$reservation")" = "$before" ] || fail "missing capability mutated the reservation"
+  [ ! -e "$FM_STATE_OVERRIDE/routing/outcomes.jsonl" ] || fail "missing capability wrote an outcome"
+
+  printf '{bad json\n' >"$FM_STATE_OVERRIDE/routing/admissions/cleanup.json"
+  expect_failure_contains 'invalid admission state' cleanup_ready cleanup gen-1
+  [ "$(od -An -v -tx1 "$reservation")" = "$before" ] || fail "corrupt journal mutated the reservation"
+  [ ! -e "$FM_STATE_OVERRIDE/routing/outcomes.jsonl" ] || fail "corrupt journal wrote an outcome"
+  pass "cleanup preflight rejects missing capabilities and corrupt journals without mutation"
+}
+
+test_cleanup_preflight_recovers_stale_admission_before_finalizing() {
+  local metadata="$FM_STATE_OVERRIDE/cleanup.meta" capability journal
+  reset_route_state
+  rm -f "$metadata"
+  reserve_route cleanup gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  activate_fresh_admission cleanup gen-1 "$metadata" >/dev/null
+  capability=$(claim_path cleanup gen-1)
+  ("$ROUTE" begin-admission --task cleanup --generation gen-1 \
+    --profile profile-1 --provider openai --lane codex-primary \
+    --account codex-primary --class standard --risk medium --mode automatic \
+    --transition inherit --metadata-file "$metadata" --claim-file "$capability" >/dev/null) &
+  wait "$!" || fail "stale cleanup admission setup failed"
+  age_admission cleanup gen-1
+  journal="$FM_STATE_OVERRIDE/routing/admissions/cleanup.json"
+  jq '.ownerPid=99999999 | .ownerStart=("a" * 64)' "$journal" >"$journal.next"
+  mv "$journal.next" "$journal"
+
+  cleanup_ready cleanup gen-1 >/dev/null || fail "cleanup preflight did not recover stale admission"
+  [ ! -e "$FM_STATE_OVERRIDE/routing/admissions/cleanup.json" ] || fail "cleanup recovery retained its journal"
+  jq -e '.admissionState == "active"' "$(reservation_path cleanup gen-1)" >/dev/null \
+    || fail "cleanup recovery did not restore the active generation"
+  cleanup_finalize cleanup gen-1 completed >/dev/null || fail "recovered cleanup did not finalize"
+  pass "cleanup preflight recovers stale admission before terminal finalization"
+}
+
 test_observation_evidence_status_and_report_are_non_mutating() {
   local decision status report
   reset_route_state
@@ -1145,6 +1229,8 @@ test_every_single_value_option_rejects_duplicates() {
   expect_failure_contains 'usage:' "$ROUTE" failure --kind quota --kind auth
   expect_failure_contains 'usage:' "$ROUTE" score --tests pass --tests fail
   expect_failure_contains 'usage:' "$ROUTE" finalize --terminal completed --terminal cancelled
+  expect_failure_contains 'usage:' "$ROUTE" cleanup-ready --task one --task two
+  expect_failure_contains 'usage:' "$ROUTE" cleanup-finalize --terminal completed --terminal cancelled
   expect_failure_contains 'usage:' "$ROUTE" observe --decision "$LAB/duplicate-decision.json" --decision "$LAB/duplicate-decision.json"
   expect_failure_contains 'usage:' "$ROUTE" evidence --work-type implementation --work-type debugging
   expect_failure_contains 'usage:' "$ROUTE" status --now 1 --now 2
@@ -1186,6 +1272,9 @@ test_raw_claim_and_unauthenticated_active_reclaim_flags_are_removed
 test_failure_policy_and_circuit_breaker_are_bounded
 test_unsafe_failure_always_escalates_without_corrupting_breakers
 test_score_finalize_and_outcome_privacy_are_strict
+test_cleanup_finalization_uses_canonical_capability_and_unknown_scores
+test_cleanup_preflight_rejects_missing_capability_and_corrupt_journal
+test_cleanup_preflight_recovers_stale_admission_before_finalizing
 test_observation_evidence_status_and_report_are_non_mutating
 test_finalize_recovers_between_ledger_publish_and_reservation_delete
 test_observe_and_ledger_schemas_are_exact_and_sanitized
