@@ -202,13 +202,24 @@ EOF
 # Promotion is where a scout's ship contract is finally decided, so it requires the
 # same explicit values and writes them into the task's durable record.
 test_promote_requires_and_records_the_delivery_contract() {
-  local home meta out status blocked_data instructions_path
+  local home meta out status blocked_data instructions_path project worktree origin
   home="$TMP_ROOT/promote/home"
+  project="$TMP_ROOT/promote/project"
+  worktree="$TMP_ROOT/promote/worktree"
+  origin="$TMP_ROOT/promote/origin.git"
   mkdir -p "$home/state"
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  git clone --quiet --bare "$project" "$origin"
+  git -C "$project" remote add origin "file://$origin"
+  git -C "$project" worktree add --quiet --detach "$worktree" HEAD
   meta="$home/state/promote-d1.meta"
 
   write_scout_meta() {
-    printf 'window=fm-promote-d1\nkind=scout\nworktree=/tmp/wt\n' > "$meta"
+    printf 'window=fm-promote-d1\nkind=scout\nworktree=%s\nproject=%s\n' \
+      "$worktree" "$project" > "$meta"
   }
 
   write_scout_meta
@@ -269,10 +280,20 @@ test_promote_requires_and_records_the_delivery_contract() {
 # prints against a capturing fm-send.sh, and asserts on the message the worker would
 # actually receive - for every supported mode.
 test_promotion_delivers_the_real_definition_of_done() {
-  local home meta out sendroot payload mode id brief_dod delivered_dod
+  local home meta out sendroot payload mode id brief_dod delivered_dod project worktree origin
   home="$TMP_ROOT/promote-dod/home"
   sendroot="$TMP_ROOT/promote-dod/sendroot"
+  project="$TMP_ROOT/promote-dod/project"
+  worktree="$TMP_ROOT/promote-dod/worktree"
+  origin="$TMP_ROOT/promote-dod/origin.git"
   mkdir -p "$home/state" "$sendroot/bin"
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  git clone --quiet --bare "$project" "$origin"
+  git -C "$project" remote add origin "file://$origin"
+  git -C "$project" worktree add --quiet --detach "$worktree" HEAD
   cat > "$sendroot/bin/fm-send.sh" <<'STUB'
 #!/usr/bin/env bash
 # Capture the message a promoted worker would receive, instead of steering one.
@@ -283,7 +304,8 @@ STUB
   for mode in no-mistakes direct-PR local-only; do
     id="promote-dod-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
     meta="$home/state/$id.meta"
-    printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
+    printf 'window=fm-%s\nkind=scout\nworktree=%s\nproject=%s\n' \
+      "$id" "$worktree" "$project" > "$meta"
     out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1) \
       || fail "$mode: promotion should succeed"
 
@@ -346,6 +368,50 @@ STUB
   pass "fm-promote: a promoted worker receives the same mode-specific delivery contract a briefed one does"
 }
 
+test_promote_requires_origin_for_pr_backed_contracts() {
+  local home meta out status project worktree mode
+  home="$TMP_ROOT/promote-origin/home"
+  project="$TMP_ROOT/promote-origin/project"
+  worktree="$TMP_ROOT/promote-origin/worktree"
+  mkdir -p "$home/state"
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  git -C "$project" worktree add --quiet --detach "$worktree" HEAD
+  meta="$home/state/promote-origin-d2.meta"
+  printf 'window=fm-promote-origin-d2\nkind=scout\nworktree=%s\nproject=%s\n' \
+    "$worktree" "$project" > "$meta"
+
+  for mode in direct-PR no-mistakes; do
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      "$PROMOTE" promote-origin-d2 --mode "$mode" --yolo off 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$mode promotion created a PR-backed contract without origin"
+    assert_contains "$out" "has no origin remote" \
+      "$mode promotion did not name its missing origin"
+    assert_grep 'kind=scout' "$meta" "$mode missing-origin refusal changed the scout contract"
+  done
+
+  git -C "$project" remote add origin "file://$TMP_ROOT/promote-origin/missing.git"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PROMOTE" promote-origin-d2 --mode direct-PR --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion created a PR-backed contract with a failing origin"
+  assert_contains "$out" "could not fetch origin" \
+    "PR-backed promotion did not verify that origin was fetchable"
+  assert_grep 'kind=scout' "$meta" "failing-origin refusal changed the scout contract"
+
+  git -C "$project" remote remove origin
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PROMOTE" promote-origin-d2 --mode local-only --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "local-only promotion should not require origin"
+  assert_grep 'kind=ship' "$meta" "remote-less local-only promotion did not restore ship protection"
+  assert_grep 'mode=local-only' "$meta" "remote-less local-only promotion did not record its contract"
+  pass "fm-promote: only PR-backed promotions require a fetchable origin"
+}
+
 # The registry parser survives for the mechanical consumers only. It accepts the
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
@@ -387,5 +453,6 @@ test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promotion_delivers_the_real_definition_of_done
+test_promote_requires_origin_for_pr_backed_contracts
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"

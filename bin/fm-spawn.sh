@@ -1784,6 +1784,7 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
 # recorded task delivery differ, which is the exact drift this contract prevents.
 PROJECT_POSTURE=
 ALLOW_REMOTELESS_BASE=no
+REQUIRE_TASK_ORIGIN=no
 if [ "$KIND" != secondmate ]; then
   PROJ_NAME=$(basename "$PROJ_ABS")
   PROJECT_POSTURE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || PROJECT_POSTURE=
@@ -1792,6 +1793,9 @@ if [ "$KIND" != secondmate ]; then
       scout:|ship:local-only) ALLOW_REMOTELESS_BASE=yes ;;
     esac
   fi
+  case "$KIND:$MODE" in
+    ship:no-mistakes|ship:direct-PR) REQUIRE_TASK_ORIGIN=yes ;;
+  esac
 fi
 
 if [ "$KIND" = ship ]; then
@@ -1904,28 +1908,44 @@ EOF
   printf '%s' "$lines" >&2
 }
 
-freshen_spawn_worktree_base() {  # <worktree> <project> <allow-remoteless>
-  local worktree=$1 project=$2 allow_remoteless=$3 default target reset_target expected actual status remotes
-  remotes=$(git -C "$worktree" remote 2>/dev/null) || {
+freshen_spawn_worktree_base() {  # <worktree> <project> <allow-remoteless> <require-task-origin>
+  local worktree=$1 project=$2 allow_remoteless=$3 require_task_origin=$4
+  local default target reset_target expected actual status worktree_remotes project_remotes remote_dir
+  worktree_remotes=$(git -C "$worktree" remote 2>/dev/null) || {
     echo "error: could not inspect configured remotes for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
-  if printf '%s\n' "$remotes" | grep -qx origin; then
-    if ! git -C "$worktree" fetch --quiet origin; then
+  project_remotes=$(git -C "$project" remote 2>/dev/null) || {
+    echo "error: could not inspect configured remotes for project '$project'; refusing to launch from a potentially stale base" >&2
+    return 1
+  }
+  if [ "$require_task_origin" = yes ] \
+      && ! printf '%s\n' "$worktree_remotes" | grep -qx origin; then
+    echo "error: pooled worktree '$worktree' has no origin remote; a PR-backed task contract requires origin" >&2
+    return 1
+  fi
+  remote_dir=
+  if printf '%s\n' "$worktree_remotes" | grep -qx origin; then
+    remote_dir=$worktree
+  elif printf '%s\n' "$project_remotes" | grep -qx origin; then
+    remote_dir=$project
+  fi
+  if [ -n "$remote_dir" ]; then
+    if ! git -C "$remote_dir" fetch --quiet origin; then
       echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
       return 1
     fi
-    if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
+    if ! git -C "$remote_dir" remote set-head origin --auto >/dev/null 2>&1; then
       echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
       return 1
     fi
-    default=$(default_branch "$worktree") || {
+    default=$(default_branch "$remote_dir") || {
       echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
       return 1
     }
     target="origin/$default"
     reset_target=$target
-    if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
+    if ! git -C "$remote_dir" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
       echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
       return 1
     fi
@@ -1934,15 +1954,15 @@ freshen_spawn_worktree_base() {  # <worktree> <project> <allow-remoteless>
       return 1
     }
   else
-    if [ -n "$remotes" ]; then
-      echo "error: pooled worktree '$worktree' has configured remotes but no origin remote; refusing to launch without the required origin freshness guard" >&2
+    if [ -n "$worktree_remotes" ] || [ -n "$project_remotes" ]; then
+      echo "error: project '$project' or pooled worktree '$worktree' has configured remotes but no origin remote; refusing to launch without the required origin freshness guard" >&2
       return 1
     fi
     if [ "$allow_remoteless" != yes ]; then
       echo "error: pooled worktree '$worktree' has no origin remote; only a registered local-only project's scout or local-only ship may launch without one" >&2
       return 1
     fi
-    default=$(default_branch "$project") || {
+    default=$(local_default_branch "$project") || {
       echo "error: could not determine the local default branch for remote-less project '$project'; refusing to launch from a potentially stale base" >&2
       return 1
     }
@@ -2512,7 +2532,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
-  freshen_spawn_worktree_base "$WT" "$PROJ_ABS" "$ALLOW_REMOTELESS_BASE" || exit 1
+  freshen_spawn_worktree_base "$WT" "$PROJ_ABS" "$ALLOW_REMOTELESS_BASE" "$REQUIRE_TASK_ORIGIN" || exit 1
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

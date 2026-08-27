@@ -218,6 +218,27 @@ test_registered_remoteless_project_spawns_scout_and_local_ship() {
   pass "registered remote-less projects refresh locally for scouts and local-only ships"
 }
 
+test_remoteless_base_ignores_stale_origin_head_refs() {
+  local rec id out status current
+  id='pool-remoteless-stale-origin-head-r13'
+  rec=$(make_remoteless_case remoteless-stale-origin-head "$id" local-only)
+  read_case_record "$rec"
+  current=$(git -C "$PROJECT_DIR" rev-parse refs/heads/main)
+  git -C "$PROJECT_DIR" branch trunk "$INITIAL_SHA"
+  git -C "$PROJECT_DIR" update-ref refs/remotes/origin/trunk "$INITIAL_SHA"
+  git -C "$PROJECT_DIR" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/trunk
+  [ -z "$(git -C "$PROJECT_DIR" remote)" ] || fail "stale-ref fixture unexpectedly configured a remote"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "stale remote-tracking refs should not block a remote-less scout"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$current" ] \
+    || fail "remote-less scout selected a stale origin/HEAD branch instead of local main"
+  assert_grep 'must survive a newly spawned local branch' "$POOL_DIR/advanced-local.txt" \
+    "remote-less scout omitted current local-main content"
+  pass "remote-less base resolution ignores stale origin tracking refs"
+}
+
 test_remote_backed_postures_refuse_missing_origin() {
   local posture slug rec id out status before
   for posture in no-mistakes direct-PR no-mistakes-prod-only; do
@@ -265,7 +286,13 @@ test_configured_failing_origin_never_falls_back_to_local_base() {
   id='pool-local-failing-origin-r15'
   rec=$(make_remoteless_case local-failing-origin "$id" local-only)
   read_case_record "$rec"
-  git -C "$PROJECT_DIR" remote add origin "file://$CASE_DIR/missing-origin.git"
+  git -C "$PROJECT_DIR" config extensions.worktreeConfig true
+  git -C "$PROJECT_DIR" config --worktree remote.origin.url "file://$CASE_DIR/missing-origin.git"
+  git -C "$PROJECT_DIR" config --worktree remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+  [ "$(git -C "$PROJECT_DIR" remote)" = origin ] \
+    || fail "fixture did not configure origin in the authoritative project"
+  [ -z "$(git -C "$POOL_DIR" remote)" ] \
+    || fail "fixture leaked the project worktree's origin into the pooled worktree"
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
 
   out=$(run_spawn "$id" --scout)
@@ -275,7 +302,7 @@ test_configured_failing_origin_never_falls_back_to_local_base() {
     "configured failing origin was not kept on the origin freshness guard"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "failing-origin refusal moved the pooled worktree"
-  pass "a configured failing origin never degrades into remote-less local refresh"
+  pass "a project-worktree origin never degrades into remote-less local refresh"
 }
 
 test_dirty_pool_refuses_without_discarding_work() {
@@ -549,6 +576,7 @@ test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_registered_remoteless_project_spawns_scout_and_local_ship
+test_remoteless_base_ignores_stale_origin_head_refs
 test_remote_backed_postures_refuse_missing_origin
 test_remoteless_project_refuses_pr_ship_mode
 test_configured_failing_origin_never_falls_back_to_local_base
