@@ -942,11 +942,60 @@ test_secondmate_aggregate_over_argv_cap_survives() {
   pass "a fleet aggregate larger than the argv cap still snapshots"
 }
 
+# Before the JSONL staging, a per-mate record that failed to build broke the
+# next --argjson accumulation and the whole snapshot exited non-zero. The
+# --slurpfile roll-up skips an empty line, so the same failure must still be
+# loud instead of quietly shrinking records[] below shown. The wrapper fails
+# the first jq exec that emits a per-mate record, recognised by the documented
+# reconcile_inventory field every sampled secondmate_current record carries.
+write_record_failing_jq() {  # <fakebin> <scratch-dir> <trip-file>
+  local fakebin=$1 scratch=$2 trip=$3 real_jq
+  real_jq=$(command -v jq) || fail "jq is required to wrap"
+  cat > "$fakebin/jq" <<SH
+#!/usr/bin/env bash
+out=\$(mktemp '$scratch/jq-out.XXXXXX') || exit 3
+'$real_jq' "\$@" > "\$out"
+rc=\$?
+if [ "\$rc" -eq 0 ] && [ ! -e '$trip' ] && grep -q '"reconcile_inventory"' "\$out"; then
+  : > '$trip'
+  rm -f "\$out"
+  exit 5
+fi
+cat "\$out"
+rm -f "\$out"
+exit "\$rc"
+SH
+  chmod +x "$fakebin/jq"
+}
+
+test_secondmate_record_build_failure_fails_loudly() {
+  local home mate fakebin trip out err rc
+  home=$(make_home record-fail-parent)
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  mate=$TMP_ROOT/record-fail-mate
+  write_registered_mate "$home" failmate "$mate" 3
+  fakebin=$(make_fakebin "$home")
+  mkdir -p "$home/jq-scratch"
+  trip="$home/jq-record.tripped"
+  write_record_failing_jq "$fakebin" "$home/jq-scratch" "$trip"
+
+  err="$home/snapshot.err"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_SECONDMATE_TIMEOUT=60 \
+    "$SNAPSHOT" --json 2>"$err") && rc=0 || rc=$?
+  [ -e "$trip" ] || fail "fixture never reached a per-mate record build (rc=$rc): $(cat "$err")"
+  [ "$rc" -ne 0 ] || fail "a failed per-mate record build must fail the snapshot, got rc=0 with $(printf '%s' "$out" | jq -c '.secondmate_current | {shown, records:(.records | length)}')"
+  assert_grep 'registered secondmate aggregation failed' "$err" \
+    "a failed per-mate record build must name the aggregation failure: $(cat "$err")"
+  [ -z "$out" ] || fail "a failed snapshot must not print a partial document: $(printf '%s' "$out" | head -c 200)"
+  pass "a failed per-mate record build fails the snapshot instead of dropping the mate"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_oversized_backlog_survives_argv_cap
 test_oversized_secondmate_summary_survives_argv_cap
 test_secondmate_aggregate_over_argv_cap_survives
+test_secondmate_record_build_failure_fails_loudly
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state

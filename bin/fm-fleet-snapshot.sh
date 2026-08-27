@@ -226,6 +226,7 @@ trap 'exit 129' HUP
 
 jq_value_file() {  # <name> <json-value>
   local path="$SNAPSHOT_TMPDIR/$1.json"
+  [ -n "$2" ] || return 1
   printf '%s' "$2" >"$path" || return 1
   printf '%s' "$path"
 }
@@ -1365,7 +1366,7 @@ secondmate_current_json() {  # <parent-tasks-json-file>
          decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan,reconciliation:$reconciliation},
-         terminal_evidence:$terminal,contradiction:$contradiction}')
+         terminal_evidence:$terminal,contradiction:$contradiction}') || return 1
     else
       if [ -n "$event_raw" ]; then
         provenance='parent-event-fallback'
@@ -1395,7 +1396,7 @@ secondmate_current_json() {  # <parent-tasks-json-file>
          freshness:{status:$freshness,observed_at:$observed,age_seconds:$event_age},
          active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan},
-         terminal_evidence:$terminal,contradiction:false}')
+         terminal_evidence:$terminal,contradiction:false}') || return 1
     fi
     printf '%s\n' "$record" >>"$records_file" || return 1
   done <<EOF
