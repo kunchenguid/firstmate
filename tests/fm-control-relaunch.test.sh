@@ -25,6 +25,8 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -185,6 +187,32 @@ meta_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.meta" | tail -1 | cut -d= -f2-
 }
 
+make_x_linked_metadata() {  # <metadata-path>
+  local meta=$1 state home
+  state=${meta%/*}
+  home=${state%/*}
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    bash -c '
+      . "$1/bin/fm-wake-lib.sh"
+      . "$1/bin/fm-x-lib.sh"
+      fmx_meta_link_set "$2" request-19 1700000000 1 x 280
+    ' \
+    _ "$ROOT" "$meta"
+}
+
+make_x_followups_metadata() {  # <metadata-path>
+  local meta=$1 state home
+  state=${meta%/*}
+  home=${state%/*}
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    bash -c '
+      . "$1/bin/fm-wake-lib.sh"
+      . "$1/bin/fm-x-lib.sh"
+      fmx_meta_followups_set "$2" 1
+    ' \
+    _ "$ROOT" "$meta"
+}
+
 journal_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.control-relaunch" | tail -1 | cut -d= -f2-
 }
@@ -274,27 +302,42 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
 }
 
 test_relaunch_preserves_durable_task_metadata() {
-  local dir out rc
+  local dir out rc traceparent
   dir=$(new_case durable-meta rl19)
   add_ship_task "$dir" rl19 claude
+  local meta="$dir/home/state/rl19.meta"
   {
-    printf '%s\n' 'pr=https://github.com/example/repo/pull/19'
-    printf '%s\n' 'pr_head=feature/relaunch'
-    printf '%s\n' 'x_request=request-19'
     printf '%s\n' 'decisions_reviewed=1'
-  } >> "$dir/home/state/rl19.meta"
+    printf '%s\n' 'pr=https://github.com/example/repo/pull/19'
+    printf '%s\n' 'pr_head=0123456789abcdef0123456789abcdef01234567'
+  } >> "$meta"
+  make_x_linked_metadata "$meta" \
+    || fail "the relaunch fixture should build through the X metadata writer"
+  printf '%s\n' "$$" > "$dir/home/state/.lock"
+  printf '%s on\n' "$$" > "$dir/home/state/.trace-context-effective"
 
   out=$(run_control "$dir" rl19 relaunch --note "continuing review work"); rc=$?
   expect_code 0 "$rc" "relaunch should preserve durable metadata"$'\n'"$out"
   [ "$(meta_field "$dir" rl19 pr)" = "https://github.com/example/repo/pull/19" ] \
     || fail "the task PR must survive relaunch"
-  [ "$(meta_field "$dir" rl19 pr_head)" = "feature/relaunch" ] \
+  [ "$(meta_field "$dir" rl19 pr_head)" = "0123456789abcdef0123456789abcdef01234567" ] \
     || fail "the task PR head must survive relaunch"
   [ "$(meta_field "$dir" rl19 x_request)" = "request-19" ] \
     || fail "the task X request must survive relaunch"
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
-  pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+  traceparent=$(meta_field "$dir" rl19 traceparent)
+  fm_trace_context_valid "$traceparent" \
+    || fail "the trace-enabled relaunch must record a valid trace carrier"
+  make_x_linked_metadata "$meta" \
+    || fail "the shared link writer should update metadata after trace publication"
+  make_x_followups_metadata "$meta" \
+    || fail "the shared follow-up writer should update metadata after trace publication"
+  [ "$(tail -n 2 "$meta")" = $'pr=https://github.com/example/repo/pull/19\npr_head=0123456789abcdef0123456789abcdef01234567' ] \
+    || fail "PR metadata must remain the final lines after relaunch"
+  fm_pr_metadata_identity_parse "$meta" \
+    || fail "the relaunch-shaped metadata must pass PR identity parsing"
+  pass "fm-control relaunch: durable metadata survives replacement publication with PR lines last"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {

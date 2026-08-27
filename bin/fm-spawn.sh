@@ -196,6 +196,9 @@
 # one W3C traceparent= carrier, the same value injected into the pane as
 # TRACEPARENT; the default-off path writes neither, leaving the generated meta
 # and launch environment unchanged.
+# On relaunch, preserved pr= and pr_head= lines are published after every other
+# durable field; a trace-enabled publication places traceparent= before those
+# PR lines so the strict PR identity record remains parseable.
 #   --traceparent <carrier> delivers a carrier that a REMOTE parent already
 #   resolved and will record, instead of resolving one from this home's frozen
 #   decision. It is accepted only for --secondmate spawns, only as a strictly
@@ -2704,7 +2707,9 @@ preserve_relaunch_meta() {
       split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
-    !($1 in owned)
+    $1 == "pr" || $1 == "pr_head" { pr_lines[++pr_count] = $0; next }
+    !($1 in owned) { print }
+    END { for (i = 1; i <= pr_count; i++) print pr_lines[i] }
   ' "$RELAUNCH_META"
 }
 {
@@ -2749,11 +2754,11 @@ preserve_relaunch_meta() {
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-  if [ "$RELAUNCH" -eq 1 ]; then
-    preserve_relaunch_meta
-  fi
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
+  fi
+  if [ "$RELAUNCH" -eq 1 ]; then
+    preserve_relaunch_meta
   fi
 } > "$SPAWN_META_PATH"
 if [ "$RELAUNCH" -eq 1 ]; then
@@ -2841,8 +2846,15 @@ spawn_record_traceparent() {
   SPAWN_META_LOCK_HELD=1
   SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] \
-     || ! awk -F= '$1 != "traceparent"' "$meta" > "$SPAWN_META_TMP" \
-     || ! printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT" >> "$SPAWN_META_TMP" \
+     || ! awk -F= -v traceparent="$SPAWN_TRACEPARENT" '
+       $1 == "traceparent" { next }
+       $1 == "pr" || $1 == "pr_head" { pr_lines[++pr_count] = $0; next }
+       { print }
+       END {
+         print "traceparent=" traceparent
+         for (i = 1; i <= pr_count; i++) print pr_lines[i]
+       }
+     ' "$meta" > "$SPAWN_META_TMP" \
      || ! mv -f "$SPAWN_META_TMP" "$meta"; then
     status=1
     rm -f "$SPAWN_META_TMP" 2>/dev/null || true
