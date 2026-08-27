@@ -734,6 +734,7 @@ done
   launcher=$(fixture_pid "$dir" launcher-pid)
   session=$(fixture_pid "$dir" session-pid)
   recorded=$(fixture_pid "$dir" lock-after-start)
+  # shellcheck source=/dev/null
   ( . "$LIB" && fm_harness_pid_alive "$outsider" ) \
     || fail "fixture is wrong: the declared pid $outsider was not a live harness across the lock write"
   : > "$dir/state/outsider-stop"
