@@ -1063,6 +1063,82 @@ test_kill_recovers_stale_target_by_label() {
   pass "fm_backend_cmux_kill: recovers stale workspace/surface ids by expected label"
 }
 
+test_close_confirmed_recovers_stale_target_by_unique_label() {
+  local dir fb title log
+  dir="$TMP_ROOT/close-confirmed-stale-target"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-label)
+  # 1: authoritative inventory resolves the expected title to a refreshed UUID.
+  cmux_workspace_list_response "$dir" 1 "cccccccc-2222-2222-2222-222222222222" "$title"
+  # 2-3: locate that refreshed workspace in a non-last window.
+  cmux_windows_response "$dir" 2 "eeeeeeee-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 3 \
+    "cccccccc-2222-2222-2222-222222222222" "$title" \
+    "ffffffff-0000-0000-0000-000000000000" "other"
+  # 4 is the silent close; 5 proves both the refreshed UUID and title are gone.
+  cmux_workspace_list_response "$dir" 5 "ffffffff-0000-0000-0000-000000000000" "other"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_close_confirmed "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "" fm-label' "$ROOT"
+  expect_code 0 $? "confirmed close should recover a stale cmux UUID from one live expected label"
+  log=$(cat "$dir/log")
+  assert_contains "$log" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''cccccccc-2222-2222-2222-222222222222' \
+    "confirmed close did not close the refreshed workspace UUID"
+  assert_not_contains "$log" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''aaaaaaaa-0000-0000-0000-000000000000' \
+    "confirmed close must not target the stale stored UUID"
+  pass "fm_backend_cmux_close_confirmed: resolves a stale UUID by one expected task label, closes it, and confirms absence"
+}
+
+test_close_confirmed_refuses_ambiguous_or_unreadable_label_resolution() {
+  local dir fb title status
+  title=$(cmux_expected_scoped_title fm-label)
+
+  dir="$TMP_ROOT/close-confirmed-ambiguous"; mkdir -p "$dir/responses"
+  cmux_workspace_list_response "$dir" 1 \
+    "cccccccc-2222-2222-2222-222222222222" "$title" \
+    "dddddddd-3333-3333-3333-333333333333" "$title"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_close_confirmed "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "" fm-label' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "confirmed close must refuse duplicate live workspaces with the expected label"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-workspace' \
+    "ambiguous label resolution must not close either workspace"
+
+  dir="$TMP_ROOT/close-confirmed-unreadable"; mkdir -p "$dir/responses"
+  printf '1\n' > "$dir/responses/1.exit"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_close_confirmed "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "" fm-label' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "confirmed close must refuse an unreadable cmux inventory"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-workspace' \
+    "an unreadable inventory must not trigger a workspace close"
+  pass "fm_backend_cmux_close_confirmed: refuses ambiguous and unreadable expected-label resolution"
+}
+
+test_close_confirmed_refuses_still_live_refreshed_workspace() {
+  local dir fb title status
+  dir="$TMP_ROOT/close-confirmed-still-live"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-label)
+  cmux_workspace_list_response "$dir" 1 "cccccccc-2222-2222-2222-222222222222" "$title"
+  cmux_windows_response "$dir" 2 "eeeeeeee-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 3 \
+    "cccccccc-2222-2222-2222-222222222222" "$title" \
+    "ffffffff-0000-0000-0000-000000000000" "other"
+  # cmux reports close success, but authoritative inventory says it is still live.
+  cmux_workspace_list_response "$dir" 5 \
+    "cccccccc-2222-2222-2222-222222222222" "$title" \
+    "ffffffff-0000-0000-0000-000000000000" "other"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_close_confirmed "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "" fm-label' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "confirmed close must fail when the refreshed workspace remains live"
+  assert_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''cccccccc-2222-2222-2222-222222222222' \
+    "still-live regression did not attempt to close the refreshed workspace"
+  pass "fm_backend_cmux_close_confirmed: fails safely when refreshed workspace remains live after close"
+}
+
 # --- list_live: label-based orphan discovery ---------------------------------
 
 test_list_live_filters_by_title_prefix() {
@@ -1162,5 +1238,8 @@ test_kill_closes_workspace_directly_when_not_last
 test_kill_adds_sibling_when_last_in_window
 test_kill_is_best_effort_when_close_workspace_fails
 test_kill_recovers_stale_target_by_label
+test_close_confirmed_recovers_stale_target_by_unique_label
+test_close_confirmed_refuses_ambiguous_or_unreadable_label_resolution
+test_close_confirmed_refuses_still_live_refreshed_workspace
 test_list_live_filters_by_title_prefix
 test_secondmate_spawn_refuses_cmux_backend
