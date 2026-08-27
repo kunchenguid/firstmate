@@ -1860,6 +1860,17 @@ seed_spawn_worktree_local_env() {  # <worktree>
   local worktree=$1 source target tmp ignored check_err gitdir stage_device tree_device
   source="$PROJ_ABS/.env.local"
   target="$worktree/.env.local"
+  # Clear the staging area on the way in, before any branch below can return. A
+  # copy killed mid-flight leaves a scratch file holding the captain's credential
+  # bytes, and a linked worktree's git directory is reachable from inside the
+  # worktree, so a leftover would stay readable to every later task in this slot -
+  # outliving even the revocation the retire branch below exists to enforce.
+  # Sweeping at entry keeps that closed no matter which path this call takes, where
+  # a sweep further down would be skipped by every early return. The scratch is
+  # invisible to git, so a leftover directory here is harmless and must never
+  # become a refusal of its own.
+  gitdir=$(git -C "$worktree" rev-parse --absolute-git-dir 2>/dev/null) || gitdir=""
+  [ -z "$gitdir" ] || rm -f "$gitdir"/fm-env-local.* 2>/dev/null || true
   # Nothing to carry in, and no earlier task's copy left to retire.
   if [ ! -e "$source" ] && [ ! -L "$source" ] && [ ! -e "$target" ] && [ ! -L "$target" ]; then
     return 0
@@ -1918,25 +1929,29 @@ seed_spawn_worktree_local_env() {  # <worktree>
   # before this seeding does. A linked worktree's git directory resolves through
   # its .git file to the repository's worktrees/<name>, which is git's own storage
   # for that worktree: git never reports it as working-tree content, and it shares
-  # the worktree's filesystem so the publish below stays an atomic rename. Refuse
-  # rather than fall back to the tree when either property cannot be established,
-  # since a cross-device move would expose a partial credential file.
-  gitdir=$(git -C "$worktree" rev-parse --absolute-git-dir 2>/dev/null) || gitdir=""
+  # the worktree's filesystem so the publish below stays an atomic rename.
+  #
+  # A target this seeding cannot resolve or write, and a filesystem question it
+  # cannot answer at all, are states that stay refusals. A layout where the two
+  # genuinely sit on different filesystems is not: seeding is a convenience, and
+  # that layout spawned fine before firstmate owned it, so degrading to a loud skip
+  # beats turning it into a spawn that cannot start. Retiring a revoked copy above
+  # needs no staging and so never degrades with it.
   if [ -z "$gitdir" ] || [ ! -d "$gitdir" ] || [ ! -w "$gitdir" ]; then
     echo "error: could not resolve a writable git directory for '$worktree'; refusing to stage .env.local through the working tree where an interrupted copy would strand the worktree" >&2
     return 1
   fi
   stage_device=$(spawn_path_device "$gitdir") || stage_device=""
   tree_device=$(spawn_path_device "$worktree") || tree_device=""
-  if [ -z "$stage_device" ] || [ -z "$tree_device" ] || [ "$stage_device" != "$tree_device" ]; then
-    echo "error: cannot publish .env.local atomically because '$gitdir' and '$worktree' are not on one filesystem; refusing to seed rather than expose a partial credential file" >&2
+  if [ -z "$stage_device" ] || [ -z "$tree_device" ]; then
+    echo "error: could not read which filesystem '$gitdir' and '$worktree' are on, so .env.local cannot be published atomically; refusing rather than guessing" >&2
     return 1
   fi
-  # Retire any scratch an earlier interrupted seed left in that staging directory,
-  # so a killed copy cannot leave credential bytes sitting there indefinitely. It
-  # is invisible to git, so a leftover directory here is harmless and must not
-  # become a refusal of its own.
-  rm -f "$gitdir"/fm-env-local.* 2>/dev/null || true
+  if [ "$stage_device" != "$tree_device" ]; then
+    echo "warning: '$gitdir' and '$worktree' are on different filesystems, so .env.local cannot be published there by atomic rename and was not seeded" >&2
+    echo "warning: '$worktree' has no .env.local and any task running in it will find no credentials; copy '$source' into '$worktree' by hand before that task needs them" >&2
+    return 0
+  fi
   tmp=$(mktemp "$gitdir/fm-env-local.XXXXXX") || {
     echo "error: could not create a private temporary file while seeding .env.local for '$worktree'" >&2
     return 1

@@ -334,6 +334,127 @@ test_interrupted_local_env_seed_leaves_the_slot_acquirable() {
   pass "an interrupted local environment seed leaves the pool slot clean and acquirable"
 }
 
+staged_scratch_count() {
+  local gitdir
+  gitdir=$(git -C "$POOL_DIR" rev-parse --absolute-git-dir)
+  find "$gitdir" -maxdepth 1 -name 'fm-env-local.*' | wc -l | tr -d ' '
+}
+
+# The scratch a killed copy leaves behind holds the captain's credential bytes, and
+# a linked worktree's git directory is readable from inside the worktree, so it must
+# not outlive the revocation that retires the slot's own copy. Count the leftovers;
+# never read them.
+test_interrupted_seed_scratch_does_not_outlive_revocation() {
+  local rec id retry out status
+  id='pool-env-local-r7'
+  rec=$(make_case env-local-scratch-revoked "$id")
+  read_case_record "$rec"
+
+  ignore_local_env_file
+  : > "$PROJECT_DIR/.env.local"
+  chmod 0640 "$PROJECT_DIR/.env.local"
+  interrupt_local_env_seed_copy
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off) || true
+  [ -e "$CASE_DIR/seed-interrupted" ] \
+    || fail "the fixture never reached the staged copy, so nothing was interrupted"
+  [ "$(staged_scratch_count)" != 0 ] \
+    || fail "the fixture left no staged scratch, so revocation hygiene cannot be observed"
+
+  # The captain revokes by deleting the file, and the slot still holds an earlier
+  # task's copy, so the next acquisition takes the retire branch.
+  rm -f "$PROJECT_DIR/.env.local"
+  printf 'FIXTURE_MARKER=revoked-leftover-not-a-real-credential\n' > "$POOL_DIR/.env.local"
+  chmod 0600 "$POOL_DIR/.env.local"
+
+  retry='pool-env-local-r7-retry'
+  mkdir -p "$HOME_DIR/data/$retry"
+  printf 'brief for %s\n' "$retry" > "$HOME_DIR/data/$retry/brief.md"
+  out=$(run_spawn "$retry" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should reissue a slot after the source .env.local was revoked"
+  [ ! -e "$POOL_DIR/.env.local" ] \
+    || fail "spawn left a revoked .env.local in the reissued pool slot"
+  [ "$(staged_scratch_count)" = 0 ] \
+    || fail "a revoked credential survived in the slot's staging area after reissue"
+  pass "an interrupted seed's staged scratch does not outlive the credential's revocation"
+}
+
+# spawn_path_device asks stat which filesystem a path is on. The shim answers that
+# one question so a cross-filesystem layout can be exercised without a real mount,
+# and delegates every other stat call untouched.
+fake_device_answer() {
+  local mode=$1
+  cat > "$FAKEBIN_DIR/stat" <<SH
+#!/usr/bin/env bash
+set -u
+if { [ "\${1:-}" = -f ] && [ "\${2:-}" = %d ]; } || { [ "\${1:-}" = -c ] && [ "\${2:-}" = %d ]; }; then
+  if [ "$mode" = unreadable ]; then
+    exit 1
+  fi
+  case "\${3:-}" in
+    */worktrees/*) printf '4242\n' ;;
+    *) printf '1717\n' ;;
+  esac
+  exit 0
+fi
+command -p stat "\$@"
+SH
+  chmod +x "$FAKEBIN_DIR/stat"
+}
+
+# Seeding is a convenience, so a layout that cannot take an atomic rename degrades
+# to a loud skip rather than making the slot unspawnable. The warning has to be
+# actionable, or a worker finds no credentials and misreports the captain as the
+# blocker - the exact trap this seeding removes.
+test_cross_filesystem_layout_degrades_to_a_loud_skip() {
+  local rec id out status
+  id='pool-env-local-r8'
+  rec=$(make_case env-local-cross-device "$id")
+  read_case_record "$rec"
+
+  ignore_local_env_file
+  : > "$PROJECT_DIR/.env.local"
+  chmod 0640 "$PROJECT_DIR/.env.local"
+  fake_device_answer cross
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a cross-filesystem layout should still spawn"
+  [ ! -e "$POOL_DIR/.env.local" ] \
+    || fail "spawn seeded .env.local despite reporting it could not publish atomically"
+  assert_contains "$out" "on different filesystems" \
+    "spawn did not name the cross-filesystem layout as the cause"
+  assert_contains "$out" "will find no credentials" \
+    "spawn did not say plainly that the worktree carries no credential file"
+  assert_contains "$out" "by hand" \
+    "spawn did not tell the reader to copy the file from the project clone"
+  pass "a cross-filesystem layout spawns and warns instead of blocking the task"
+}
+
+# Only a positively established cross-filesystem layout degrades. A filesystem
+# question that cannot be answered at all is not that state and still refuses.
+test_unanswerable_filesystem_question_still_refuses() {
+  local rec id out status
+  id='pool-env-local-r9'
+  rec=$(make_case env-local-device-unreadable "$id")
+  read_case_record "$rec"
+
+  ignore_local_env_file
+  : > "$PROJECT_DIR/.env.local"
+  chmod 0640 "$PROJECT_DIR/.env.local"
+  fake_device_answer unreadable
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a filesystem state it could not establish"
+  [ ! -e "$POOL_DIR/.env.local" ] \
+    || fail "spawn seeded .env.local without establishing it could publish atomically"
+  assert_contains "$out" "could not read which filesystem" \
+    "spawn did not name the unreadable filesystem check as the reason it refused"
+  pass "an unestablished filesystem state refuses instead of degrading like a cross-filesystem one"
+}
+
 # The warn-and-skip branch decides whether an unignored .env.local is copied in.
 # Copying one would land untracked work that teardown refuses, stranding the slot,
 # so spawn must proceed without seeding and say why.
@@ -659,6 +780,9 @@ test_acquired_worktree_is_seeded_with_local_env_file
 test_acquired_worktree_refreshes_a_stale_local_env_file
 test_acquired_worktree_retires_a_local_env_file_the_captain_deleted
 test_interrupted_local_env_seed_leaves_the_slot_acquirable
+test_interrupted_seed_scratch_does_not_outlive_revocation
+test_cross_filesystem_layout_degrades_to_a_loud_skip
+test_unanswerable_filesystem_question_still_refuses
 test_unignored_local_env_file_is_not_seeded
 test_stale_submodule_pin_explains_itself
 test_unpushed_submodule_commit_is_still_uncommitted_work
