@@ -5,7 +5,7 @@ Refresh it by re-running the commands below on the host in question.
 
 ## Environment
 
-- Dates: 2026-08-26, extended 2026-08-27 with the live-fleet record and the predicted wall
+- Dates: 2026-08-26, extended 2026-08-27 with the live-fleet record, the predicted wall, and the wall this surface was itself stranded by
 - Platform: Darwin 25.5.0
 - `quota-axi 0.1.17` (below the `FM_QUOTA_AXI_MIN` floor, which is the case the reading is required to survive)
 - `no-mistakes version v1.57.0 (0fcbbff) 2026-08-22T05:14:30Z`
@@ -39,6 +39,25 @@ HEADROOM_NEXT: <repo>/bin/fm-usage-wall.sh resume regenerates the resume record 
 
 `tests/fm-usage-wall.test.sh` pins the remaining unmeasurable paths - a failing gauge, a hanging gauge, a report with no derived-headroom block, and `auth_required` - along with the rule that `--allow-keychain-prompt` is never passed.
 
+## An exhausted provider reads as `wall`, in prose and in the JSON
+
+Taken against the live `quota-axi` report with the account-level row's `effectivePercentRemaining` driven to `0`, which is the one field that separates an exhausted provider from a low one.
+Everything else in the report is the host's real output:
+
+```
+HEADROOM: claude wall pct=0 bound=five_hour resets=2026-08-27T18:39:59.918728+00:00 runway=9m confidence=early
+HEADROOM_SUMMARY: verdict=wall measured=1 tight=0 wall=1 unknown=5 source=quota-axi/0.1.17 build=below-floor(0.1.29)
+HEADROOM_NOTE: 1 provider(s) are AT the wall, not merely low - work on them has already stopped. Load the usage-limit-recovery skill.
+```
+
+The same reading through `--json`, which is what a programmatic consumer branches on:
+
+```
+.verdict = 'wall'  .wall = 1  .tight = 0
+```
+
+The distinction holds in both directions: the unmodified live report on the same host reported `.verdict = 'tight'  .wall = 0  .tight = 1`.
+
 `tight` is reached by either threshold independently, which a single reading can show.
 On 2026-08-27 the same command reported the measurable provider at 84 percent remaining and still called it `tight`, because the projected runway was inside the hour:
 
@@ -56,6 +75,33 @@ The worker recorded that reading, and the wall landed minutes later and stopped 
 The work on every branch survived it, and the record below is what a session picks the fleet back up from.
 
 That is the whole point of reading the gauge before dispatching rather than after a crash log: the wall was visible while there was still time to act on it.
+
+## The surface read the wall that stranded the surface
+
+On 2026-08-27 this work's own validation run went terminal-failed on a provider limit, which makes the run the best available test of the guarantee.
+`no-mistakes axi status` reported only `status: failed` and `error: agent fix: claude exited: exit status 1` - the shape that reads like a verdict on the code and is not one.
+The deciding evidence was one command away, in the step's own log:
+
+```
+$ no-mistakes axi logs --run <run> --step review --full
+  "I'll start by examining the current state of the code and the findings.You've hit your session limit - resets 1:40am (America/Los_Angeles)"
+  "claude exited pid=91188 error=claude exited: exit status 1: "
+```
+
+`diagnose` reads that same log and returns the verdict, with the recorded endpoint made unreadable so the scan is forced onto the step-log path:
+
+```
+USAGE_WALL: proof wall source=step-log:review line="  "I'll start by examining the current state of the code and the findings.You've hit your session limit - resets 1:40am (America/Los_Angeles)""
+USAGE_WALL_NEXT: this is a provider usage limit, not a crash - the work is intact. Load the usage-limit-recovery skill before touching the task.
+```
+
+That verdict is only correct because the run exposed a defect first.
+On the first attempt the same command returned `no-signature`: the vendor's session-window phrasing was not in the signature table, which had been built from the weekly-window wording observed in the 2026-08-23 incident.
+A real wall therefore read as an unrecognised failure.
+The phrasing is now in the table with the observed line as its provenance and a case in `tests/fm-usage-wall.test.sh`.
+
+This is the argument for the table's own rule rather than an exception to it.
+The signature list is only ever as complete as the phrasings actually observed, which is exactly why a miss returns `no-signature` and never "it crashed" - the negative that is not a verdict is what kept a missing pattern from becoming a wrong answer.
 
 ## The record generates from real fleet state
 
@@ -115,6 +161,32 @@ Neither line is inferred from an incident write-up; both are computed from task 
 
 The remaining four tasks are elided for length.
 `tests/fm-usage-wall.test.sh` pins the same behaviors portably, including that the record survives the process that wrote it, that regeneration replaces rather than accumulates, that a shared local copy is named on both rows, and that a broken record never replaces a good one.
+
+## The record tracks state changing under it
+
+The same command run twice across a custody change, on the task above.
+Before settling custody the record read:
+
+```
+- pipeline: run=<run> status=failed ... custody=pipeline_owned next-action=recover_custody head=b7e099d6 (pipeline-only)
+  - the pipeline owns this branch; settle custody through its next-action before any new work on it
+  - the run holds commits this local copy does not have; rebuilding from the local head would silently redo work that already exists
+```
+
+After the worker settled custody through that same `next_action`, a regenerated record read:
+
+```
+- pipeline: run=<run> status=failed failed-steps=review custody=custody_returned next-action=run_pipeline head=b7e099d6 (equal)
+```
+
+Both warnings dropped on their own because the condition they described was gone.
+Nothing was edited: a hand-written plan would still have carried the stale pair, which is the failure mode generating the record exists to remove.
+
+## Both scans are bounded by a budget, not by how much is broken
+
+`tests/fm-session-start.test.sh` measures the digest's per-task scan against a wedged backend and six dead endpoints - the post-wall shape - and asserts the shared budget bounds total cost below the per-task cost of the same fixture, that every task still gets a line, and that what the budget could not reach reports `unknown reason=scan-budget-exhausted` while the digest names those tasks as unchecked.
+`tests/fm-fleet-snapshot-view.test.sh` asserts the heartbeat view bounds a gauge that never answers and renders it as unknown rather than healthy or absent.
+`tests/fm-usage-wall.test.sh` asserts a step log that cannot be read reports `unknown reason=step-log-unreadable` rather than `no-signature`, that a partially read scan discloses its `unread=` steps, and that a limit line in a fourth failed step is still found.
 
 ## The endpoint-gone recovery, end to end
 
