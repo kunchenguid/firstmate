@@ -34,6 +34,20 @@
 #       recorded and the merge poll armed
 #   (y) agreeing queue rules still produce exact retry flags
 #   (z) conflicting queue rules report ambiguous retry guidance
+#   (aa) gh-axi remains usable when gh is absent
+#   (ab) a landed merge whose fallback outcome read fails keeps its poll armed
+#   (ac) a successful merge in a secondmate home reports the landed PR upward
+#       once, on the route its parent binding names, and a repeat merge of the
+#       same PR does not duplicate that line
+#   (ad) a refused or failed merge reports nothing
+#   (ae) a successful merge in a main home leaves a durable wake naming the PR
+#   (af) a secondmate home with no usable parent binding says so loudly instead
+#       of merging in silence
+#   (ag) an accepted queued GitHub merge emits nothing and leaves its poll armed
+#   (ah) an accepted queued GitLab merge emits nothing and leaves its poll armed
+#   (ai) an uncommitted marker retry never loses the durable outcome
+#   (aj) distinct merged PRs for a reused task each survive queue deduplication
+#   (ak) pr= is already recorded when the forge call that can land the merge runs
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -91,6 +105,10 @@ add_gh_mocks() {
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
   "pr merge") printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;
+  "pr view")
+    [ "$#" -eq 5 ] && [ "${4:-}" = --repo ] || exit 2
+    printf 'pull_request:\n  number: %s\n  state: %s\n' "$3" "${FM_TEST_GH_MERGE_STATE:-merged}"
+    ;;
 esac
 exit 0
 SH
@@ -198,11 +216,16 @@ case_dir=$(dirname "$FM_TEST_GLAB_JSON")
 case "${1:-} ${2:-}" in
   "mr view")
     [ ! -e "$case_dir/glab-view-fails" ] || exit 1
-    cat "$FM_TEST_GLAB_JSON"
+    if [ -e "$case_dir/glab-merge-called" ] && [ ! -e "$case_dir/glab-stays-open" ]; then
+      cat "$case_dir/mr-post.json"
+    else
+      cat "$FM_TEST_GLAB_JSON"
+    fi
     exit 0
     ;;
   "mr merge")
     [ ! -e "$case_dir/glab-merge-fails" ] || { echo "error: mr merge failed" >&2 ; exit 1 ; }
+    : > "$case_dir/glab-merge-called"
     exit 0
     ;;
 esac
@@ -257,6 +280,7 @@ make_gitlab_case() {
   : > "$case_dir/gh-axi.log"
   : > "$case_dir/glab.log"
   write_mr_json "$case_dir/mr.json" "$@"
+  write_mr_json "$case_dir/mr-post.json" state=merged
   printf '%s\n' "$case_dir"
 }
 
@@ -294,11 +318,13 @@ glab_merge_line() {
 run_pr_merge() {
   local case_dir=$1 rc; shift
   FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="${FM_TEST_HOME:-$ROOT}" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   FM_TEST_GH_LOG="$case_dir/gh.log" \
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
   FM_TEST_GH_RULES="$case_dir/github-rules" \
+  FM_TEST_META_AT_MERGE="$case_dir/meta-at-merge" \
   FM_TEST_REAL_MV="$REAL_MV" \
   FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   FM_TEST_GLAB_JSON="$case_dir/mr.json" \
@@ -342,6 +368,46 @@ test_verified_merge_records_pr_and_head() {
   grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
     || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
   pass "fm-pr-merge records pr= and pr_head= for a verified GitHub merge"
+}
+
+# The forge call is the point of no return: once gh-axi has merged, nothing this
+# script does afterwards can un-merge it. Proving pr= is already in the task's
+# meta at that moment is what makes a later failure unable to lose the merge.
+test_pr_metadata_is_recorded_before_the_forge_call() {
+  local case_dir rc
+  case_dir=$(make_case records-ahead-of-forge-call)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 5151515151515151515151515151515151515151
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+case "${1:-} ${2:-}" in
+  "pr merge")
+    cat "$FM_STATE_OVERRIDE/task-x1.meta" > "$FM_TEST_META_AT_MERGE"
+    printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}"
+    ;;
+  "pr view")
+    printf 'pull_request:\n  number: %s\n  state: merged\n' "$3"
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/meta-at-merge"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/62 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "records-ahead-of-forge-call: fm-pr-merge should succeed"
+  assert_grep 'pr merge 62 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    "records-ahead-of-forge-call: the merge abstraction was never invoked"
+  assert_grep 'pr=https://github.com/example/repo/pull/62' "$case_dir/meta-at-merge" \
+    "records-ahead-of-forge-call: the merge ran before pr= was recorded"
+  pass "fm-pr-merge records pr= before the forge call can land the merge"
 }
 
 test_merge_failure_propagates_after_recording() {
@@ -427,10 +493,10 @@ test_github_open_unqueued_outcome_refuses() {
   expect_code 1 "$rc" "github-open-unqueued: an unproved merge must fail"
   assert_grep 'state=OPEN, merged=false, isInMergeQueue=false' "$case_dir/stderr" \
     "github-open-unqueued: refusal did not name the concrete observed state"
-  assert_no_grep 'pr=https://github.com/example/repo/pull/52' "$case_dir/state/task-x1.meta" \
-    "github-open-unqueued: failed verification recorded the PR as landed work"
-  assert_absent "$case_dir/state/task-x1.check.sh" \
-    "github-open-unqueued: failed verification armed the merged-PR poll"
+  assert_grep 'pr=https://github.com/example/repo/pull/52' "$case_dir/state/task-x1.meta" \
+    "github-open-unqueued: the attempted merge lost its PR reference"
+  assert_present "$case_dir/state/task-x1.check.sh" \
+    "github-open-unqueued: the attempted merge did not leave its poll armed"
   pass "fm-pr-merge refuses a GitHub merge call that leaves the PR open and unqueued"
 }
 
@@ -464,6 +530,70 @@ test_github_unreadable_outcome_keeps_pr_bookkeeping() {
   pass "fm-pr-merge keeps PR bookkeeping when it cannot read a successful merge call's outcome"
 }
 
+test_github_without_gh_still_uses_gh_axi_merge() {
+  local case_dir ghless_path rc
+  case_dir=$(make_case github-without-gh)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 4141414141414141414141414141414141414141
+  rm "$case_dir/fakebin/gh"
+  ghless_path="$case_dir/path-without-gh"
+  mirror_path_without "$ghless_path" gh "$case_dir/fakebin"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  PATH="$ghless_path" run_pr_merge "$case_dir" task-x1 \
+    https://github.com/example/repo/pull/60 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "github-without-gh: gh-axi can prove a landed merge without gh"
+  assert_grep 'pr merge 60 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    "github-without-gh: the configured merge abstraction was not invoked"
+  assert_grep 'pr view 60 --repo example/repo' "$case_dir/gh-axi.log" \
+    "github-without-gh: the gh-axi fallback did not verify the landed state"
+  assert_grep 'verified: https://github.com/example/repo/pull/60 is merged' \
+    "$case_dir/stdout" "github-without-gh: the fallback did not report the proven merge"
+  pass "fm-pr-merge reaches and verifies the gh-axi merge path without gh"
+}
+
+test_github_without_gh_failed_read_keeps_bookkeeping() {
+  local case_dir ghless_path rc
+  case_dir=$(make_case github-without-gh-read-fails)
+  mkdir -p "$case_dir/wt"
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+case "${1:-} ${2:-}" in
+  "pr merge") exit 0 ;;
+  "pr view") exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+  ghless_path="$case_dir/path-without-gh"
+  mirror_path_without "$ghless_path" gh "$case_dir/fakebin"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  PATH="$ghless_path" run_pr_merge "$case_dir" task-x1 \
+    https://github.com/example/repo/pull/61 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-without-gh-read-fails: an unreadable outcome must fail"
+  assert_grep 'pr merge 61 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    "github-without-gh-read-fails: the merge call did not happen before the failed read"
+  assert_grep 'could not read the GitHub pull request outcome after the merge attempt' \
+    "$case_dir/stderr" "github-without-gh-read-fails: the failed read was not reported"
+  assert_grep 'pr=https://github.com/example/repo/pull/61' "$case_dir/state/task-x1.meta" \
+    "github-without-gh-read-fails: a landed merge lost its PR metadata"
+  assert_present "$case_dir/state/task-x1.check.sh" \
+    "github-without-gh-read-fails: a landed merge lost its merge poll"
+  pass "fm-pr-merge preserves bookkeeping when gh is absent and the fallback read fails"
+}
+
 test_github_zero_exit_queue_required_refuses_with_exact_retry() {
   local case_dir rc
   case_dir=$(make_case github-zero-exit-queue-required)
@@ -495,10 +625,10 @@ test_github_zero_exit_queue_required_refuses_with_exact_retry() {
     || fail "github-zero-exit-queue-required: the wrapper attempted more than one merge"
   assert_no_grep --auto "$case_dir/gh-axi.log" \
     "github-zero-exit-queue-required: queue flags were auto-applied to the attempted merge"
-  assert_no_grep 'pr=https://github.com/example/repo/pull/56' "$case_dir/state/task-x1.meta" \
-    "github-zero-exit-queue-required: failed verification recorded the PR as landed work"
-  assert_absent "$case_dir/state/task-x1.check.sh" \
-    "github-zero-exit-queue-required: failed verification armed the merged-PR poll"
+  assert_grep 'pr=https://github.com/example/repo/pull/56' "$case_dir/state/task-x1.meta" \
+    "github-zero-exit-queue-required: the attempted merge lost its PR reference"
+  assert_present "$case_dir/state/task-x1.check.sh" \
+    "github-zero-exit-queue-required: the attempted merge did not leave its poll armed"
   pass "fm-pr-merge reports exact queue retry flags after a zero-exit false success"
 }
 
@@ -525,10 +655,10 @@ test_github_closed_unqueued_outcome_omits_retry_flags() {
     "github-closed-unqueued: closed PR received unusable queue guidance"
   assert_no_grep '-- --auto --merge' "$case_dir/stderr" \
     "github-closed-unqueued: closed PR received retry flags"
-  assert_no_grep 'pr=https://github.com/example/repo/pull/57' "$case_dir/state/task-x1.meta" \
-    "github-closed-unqueued: failed verification recorded the PR as landed work"
-  assert_absent "$case_dir/state/task-x1.check.sh" \
-    "github-closed-unqueued: failed verification armed the merged-PR poll"
+  assert_grep 'pr=https://github.com/example/repo/pull/57' "$case_dir/state/task-x1.meta" \
+    "github-closed-unqueued: the attempted merge lost its PR reference"
+  assert_present "$case_dir/state/task-x1.check.sh" \
+    "github-closed-unqueued: the attempted merge did not leave its poll armed"
   pass "fm-pr-merge omits merge-queue retry guidance for a closed GitHub PR"
 }
 
@@ -1179,14 +1309,306 @@ test_github_still_forwards_sha_arg() {
   pass "fm-pr-merge leaves GitHub extra-arg handling unchanged, including --sha"
 }
 
+# --- durable merge outcome ---------------------------------------------------
+# A merge that lands must leave a record outside the merging agent's memory.
+# bin/fm-merge-outcome-lib.sh owns where that record goes; these cases pin the
+# behavior through the real merge entrypoint.
+
+# make_home_case <name> [<route> [<parent-home>]]: a case dir whose home is a
+# secondmate home bound to a parent, or a plain main home when no route is
+# given. Echoes the case dir; the home is "$case_dir/home".
+make_home_case() {
+  local name=$1 route=${2:-} parent=${3:-} case_dir home
+  case_dir=$(make_case "$name")
+  home="$case_dir/home"
+  mkdir -p "$home" "$case_dir/wt"
+  if [ -n "$route" ]; then
+    printf '%s\n' mate-x >"$home/.fm-secondmate-home"
+    {
+      printf 'schema=fm-secondmate-parent.v1\n'
+      printf 'route=%s\n' "$route"
+      [ "$route" != local ] || printf 'parent_home=%s\n' "$parent"
+    } >"$home/.fm-secondmate-parent"
+  fi
+  printf '%s\n' "$case_dir"
+}
+
+parent_reply_lines() {  # <file> <url>
+  grep -c -F "$2" "$1" 2>/dev/null || true
+}
+
+test_secondmate_merge_reports_upward_once() {
+  local case_dir replies url
+  url=https://github.com/example/repo/pull/61
+  case_dir=$(make_home_case secondmate-merge-reports remote)
+  add_gh_mocks "$case_dir" 5555555555555555555555555555555555555555
+  : >"$case_dir/gh-axi.log"
+  replies="$case_dir/state/parent-replies.status"
+
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr" || fail "secondmate-merge-reports: merge failed"
+
+  assert_grep "done [key=merged-task-x1]: merged task-x1 $url" "$replies" \
+    "secondmate-merge-reports: the landed PR was not reported upward"
+  [ "$(wc -l <"$replies")" -eq 1 ] \
+    || fail "secondmate-merge-reports: one merge produced more than one upward line"
+
+  # The same merge again: the forge accepts it in this fixture, so only the
+  # at-most-once contract can keep the parent from being told twice.
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
+    >"$case_dir/stdout2" 2>"$case_dir/stderr2" || fail "secondmate-merge-reports: repeat merge failed"
+  [ "$(parent_reply_lines "$replies" "$url")" -eq 1 ] \
+    || fail "secondmate-merge-reports: a repeat merge of the same PR duplicated the upward line"
+  pass "a merge a secondmate home performs itself is reported upward exactly once"
+}
+
+test_secondmate_merge_reports_on_the_local_route() {
+  local case_dir parent_status url
+  url=https://github.com/example/repo/pull/62
+  case_dir=$(make_home_case secondmate-merge-local local "$TMP_ROOT/secondmate-merge-local/parent")
+  mkdir -p "$TMP_ROOT/secondmate-merge-local/parent/state"
+  add_gh_mocks "$case_dir" 6666666666666666666666666666666666666666
+  : >"$case_dir/gh-axi.log"
+  parent_status="$TMP_ROOT/secondmate-merge-local/parent/state/mate-x.status"
+
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr" || fail "secondmate-merge-local: merge failed"
+
+  assert_grep "done [key=merged-task-x1]: merged task-x1 $url" "$parent_status" \
+    "secondmate-merge-local: the landed PR did not reach the parent home's channel"
+  [ ! -e "$case_dir/state/parent-replies.status" ] \
+    || fail "secondmate-merge-local: a local-route report also wrote the remote reply channel"
+  pass "a locally routed secondmate home reports the landed PR into its parent's own channel"
+}
+
+test_failed_merge_reports_nothing() {
+  local case_dir rc
+  case_dir=$(make_home_case failed-merge-silent remote)
+  add_gh_mocks_merge_fails "$case_dir"
+  : >"$case_dir/gh-axi.log"
+
+  set +e
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/63 \
+    >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "failed-merge-silent: a failed merge should propagate"
+  assert_absent "$case_dir/state/parent-replies.status" \
+    "failed-merge-silent: a merge that never landed was reported as landed"
+  pass "a refused or failed merge reports no outcome"
+}
+
+test_gitlab_refusal_reports_nothing() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-refusal-silent state=merged)
+  mkdir -p "$case_dir/home"
+  printf '%s\n' mate-x >"$case_dir/home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=remote\n' >"$case_dir/home/.fm-secondmate-parent"
+
+  set +e
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-refusal-silent: a refused GitLab merge should exit non-zero"
+  assert_absent "$case_dir/state/parent-replies.status" \
+    "gitlab-refusal-silent: a refused merge request was reported as landed"
+  pass "a GitLab merge refused before the forge call reports no outcome"
+}
+
+test_gitlab_merge_reports_upward() {
+  local case_dir url
+  case_dir=$(make_gitlab_case gitlab-merge-reports)
+  mkdir -p "$case_dir/home"
+  printf '%s\n' mate-x >"$case_dir/home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=remote\n' >"$case_dir/home/.fm-secondmate-parent"
+  url=$MR_URL
+
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr" || fail "gitlab-merge-reports: merge failed"
+
+  assert_grep "done [key=merged-task-x1]: merged task-x1 $url" \
+    "$case_dir/state/parent-replies.status" \
+    "gitlab-merge-reports: a landed merge request was not reported upward"
+  pass "a landed GitLab merge request is reported upward on the same channel"
+}
+
+test_queued_gitlab_merge_leaves_the_poll_armed() {
+  local case_dir
+  case_dir=$(make_gitlab_case queued-gitlab-merge)
+  mkdir -p "$case_dir/home"
+  : >"$case_dir/glab-stays-open"
+
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "queued-gitlab-merge: accepted merge command failed"
+
+  assert_absent "$case_dir/state/.wake-queue" \
+    "queued-gitlab-merge: a queued merge was reported as landed"
+  [ -f "$case_dir/state/task-x1.check.sh" ] \
+    || fail "queued-gitlab-merge: the merge poll was not left armed"
+  [ ! -e "$case_dir/state/task-x1.pr-poll-merge-notified" ] \
+    || fail "queued-gitlab-merge: a queued merge was marked as reported"
+  pass "a queued GitLab merge stays silent and leaves confirmation to the armed poll"
+}
+
+test_main_home_merge_leaves_a_durable_wake() {
+  local case_dir url
+  url=https://github.com/example/repo/pull/64
+  case_dir=$(make_home_case main-merge-wake)
+  add_gh_mocks "$case_dir" 7777777777777777777777777777777777777777
+  : >"$case_dir/gh-axi.log"
+
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr" || fail "main-merge-wake: merge failed"
+
+  assert_grep "$url" "$case_dir/state/.wake-queue" \
+    "main-merge-wake: a merge this home performed left no durable record naming the PR"
+  [ "$(grep -c -F "$url" "$case_dir/state/.wake-queue")" -eq 1 ] \
+    || fail "main-merge-wake: one merge produced more than one durable record"
+  assert_absent "$case_dir/state/parent-replies.status" \
+    "main-merge-wake: a main home wrote a parent reply channel it does not have"
+  pass "a merge a main home performs itself leaves one durable wake naming the PR"
+}
+
+test_queued_github_merge_leaves_the_poll_armed() {
+  local case_dir url
+  url=https://github.com/example/repo/pull/66
+  case_dir=$(make_home_case queued-github-merge)
+  add_gh_mocks "$case_dir" 9999999999999999999999999999999999999999
+  write_github_outcome "$case_dir" OPEN false true main
+  : >"$case_dir/gh-axi.log"
+
+  FM_TEST_GH_MERGE_STATE=open FM_TEST_HOME="$case_dir/home" \
+    run_pr_merge "$case_dir" task-x1 "$url" \
+      >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "queued-github-merge: accepted merge command failed"
+
+  assert_absent "$case_dir/state/.wake-queue" \
+    "queued-github-merge: a queued merge was reported as landed"
+  [ -f "$case_dir/state/task-x1.check.sh" ] \
+    || fail "queued-github-merge: the merge poll was not left armed"
+  [ ! -e "$case_dir/state/task-x1.pr-poll-merge-notified" ] \
+    || fail "queued-github-merge: a queued merge was marked as reported"
+  pass "a queued GitHub merge stays silent and leaves confirmation to the armed poll"
+}
+
+test_distinct_merged_prs_keep_distinct_wakes() {
+  local case_dir first_url second_url
+  first_url=https://github.com/example/repo/pull/68
+  second_url=https://github.com/example/repo/pull/69
+  case_dir=$(make_home_case distinct-merge-wakes)
+  add_gh_mocks "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  : >"$case_dir/gh-axi.log"
+
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$first_url" \
+    >"$case_dir/stdout-1" 2>"$case_dir/stderr-1" \
+    || fail "distinct-merge-wakes: first merge failed"
+  rm -f "$case_dir/state/task-x1.check.sh" \
+    "$case_dir/state/task-x1.pr-poll" \
+    "$case_dir/state/task-x1.pr-poll-registration"
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$second_url" \
+    >"$case_dir/stdout-2" 2>"$case_dir/stderr-2" \
+    || fail "distinct-merge-wakes: second merge failed"
+
+  [ "$(grep -c -F "$first_url" "$case_dir/state/.wake-queue")" -eq 1 ] \
+    || fail "distinct-merge-wakes: first merge wake was missing or duplicated"
+  [ "$(grep -c -F "$second_url" "$case_dir/state/.wake-queue")" -eq 1 ] \
+    || fail "distinct-merge-wakes: second merge wake was missing or duplicated"
+  FM_STATE_OVERRIDE="$case_dir/state" "$ROOT/bin/fm-wake-drain.sh" \
+    >"$case_dir/drain.out" 2>"$case_dir/drain.err" \
+    || fail "distinct-merge-wakes: wake drain failed"
+  assert_grep "$first_url" "$case_dir/drain.out" \
+    "distinct-merge-wakes: queue deduplication collapsed the first PR"
+  assert_grep "$second_url" "$case_dir/drain.out" \
+    "distinct-merge-wakes: queue deduplication collapsed the second PR"
+  pass "distinct merged PRs for one task retain distinct captain-facing wakes"
+}
+
+test_uncommitted_marker_retry_is_never_silent() {
+  local case_dir url count
+  url=https://github.com/example/repo/pull/67
+  case_dir=$(make_home_case uncommitted-wake-retry)
+  add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  : >"$case_dir/gh-axi.log"
+  cat >"$case_dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+case "${!#}" in
+  *.pr-poll-merge-notified)
+    if mkdir "$FM_TEST_MARKER_FAILURE.claim" 2>/dev/null; then
+      exit 1
+    fi
+    ;;
+esac
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  chmod +x "$case_dir/fakebin/mv"
+  export FM_TEST_MARKER_FAILURE="$case_dir/marker-failure"
+  export FM_TEST_REAL_MV
+  FM_TEST_REAL_MV=$(command -v mv)
+
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
+    >"$case_dir/stdout-1" 2>"$case_dir/stderr-1" \
+    || fail "uncommitted-wake-retry: landed merge was reported as failed"
+  assert_grep 'could not record the outcome' "$case_dir/stderr-1" \
+    "uncommitted-wake-retry: failed marker commit was not loud"
+  [ -f "$case_dir/state/task-x1.check.sh" ] \
+    || fail "uncommitted-wake-retry: failed commit disarmed the retry poll"
+  count=$(grep -c -F "$url" "$case_dir/state/.wake-queue")
+  [ "$count" -ge 1 ] \
+    || fail "uncommitted-wake-retry: failed marker commit lost the durable outcome"
+  [ ! -e "$case_dir/state/task-x1.pr-poll-merge-notified" ] \
+    || fail "uncommitted-wake-retry: failed marker commit was treated as complete"
+
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
+    >"$case_dir/stdout-2" 2>"$case_dir/stderr-2" \
+    || fail "uncommitted-wake-retry: retry failed"
+  unset FM_TEST_MARKER_FAILURE FM_TEST_REAL_MV
+  count=$(grep -c -F "$url" "$case_dir/state/.wake-queue")
+  [ "$count" -ge 1 ] \
+    || fail "uncommitted-wake-retry: retry left the merge silent"
+  [ -f "$case_dir/state/task-x1.pr-poll-merge-notified" ] \
+    || fail "uncommitted-wake-retry: retry did not commit the canonical marker"
+  pass "an uncommitted marker retry preserves at least one durable outcome"
+}
+
+test_secondmate_without_parent_binding_is_loud() {
+  local case_dir rc url
+  url=https://github.com/example/repo/pull/65
+  case_dir=$(make_home_case unbound-secondmate)
+  add_gh_mocks "$case_dir" 8888888888888888888888888888888888888888
+  : >"$case_dir/gh-axi.log"
+  # A secondmate identity with no parent binding: exactly the seeding gap that
+  # let three real merges land in silence.
+  printf '%s\n' mate-x >"$case_dir/home/.fm-secondmate-home"
+
+  set +e
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "unbound-secondmate: the merge itself landed and must not be reported as failed"
+  assert_grep 'could not report it upward' "$case_dir/stderr" \
+    "unbound-secondmate: a merge that could not be reported upward said nothing about it"
+  assert_absent "$case_dir/state/.wake-queue" \
+    "unbound-secondmate: a secondmate home fell back to the main-home record"
+  pass "a secondmate home that cannot report upward says so instead of merging in silence"
+}
+
 test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance
 test_github_conflicting_queue_rules_report_ambiguity
 test_verified_merge_records_pr_and_head
+test_pr_metadata_is_recorded_before_the_forge_call
 test_merge_failure_propagates_after_recording
 test_github_open_unqueued_outcome_refuses
 test_github_unreadable_outcome_keeps_pr_bookkeeping
+test_github_without_gh_still_uses_gh_axi_merge
+test_github_without_gh_failed_read_keeps_bookkeeping
 test_github_merged_outcome_is_verified
 test_github_verified_merge_requires_poll_recording
 test_github_queued_outcome_is_verified
@@ -1213,3 +1635,14 @@ test_gitlab_unreadable_state_refuses
 test_gitlab_invalid_head_refuses
 test_gitlab_missing_tool_refuses_before_recording
 test_gitlab_head_override_args_refuse_before_recording
+test_secondmate_merge_reports_upward_once
+test_secondmate_merge_reports_on_the_local_route
+test_gitlab_merge_reports_upward
+test_queued_gitlab_merge_leaves_the_poll_armed
+test_failed_merge_reports_nothing
+test_gitlab_refusal_reports_nothing
+test_main_home_merge_leaves_a_durable_wake
+test_queued_github_merge_leaves_the_poll_armed
+test_distinct_merged_prs_keep_distinct_wakes
+test_uncommitted_marker_retry_is_never_silent
+test_secondmate_without_parent_binding_is_loud
