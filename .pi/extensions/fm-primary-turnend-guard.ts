@@ -125,7 +125,6 @@ type SessionstartGeneration = {
   delivered: boolean;
   child: ChildProcess | null;
   processGroupId: number | null;
-  processGroupMonitor: NodeJS.Timeout | null;
   childClosed: boolean;
   childClose: Promise<void> | null;
   stopPromise: Promise<void> | null;
@@ -175,31 +174,6 @@ function sessionstartProcessGroupAlive(processGroupId: number): boolean {
   }
 }
 
-function clearSessionstartProcessGroup(
-  generation: SessionstartGeneration,
-  processGroupId: number,
-): void {
-  if (generation.processGroupId !== processGroupId) return;
-  generation.processGroupId = null;
-  if (generation.processGroupMonitor) clearTimeout(generation.processGroupMonitor);
-  generation.processGroupMonitor = null;
-}
-
-function monitorSessionstartProcessGroup(
-  generation: SessionstartGeneration,
-  processGroupId: number,
-): void {
-  if (process.platform === "win32" || generation.processGroupId !== processGroupId) return;
-  if (!sessionstartProcessGroupAlive(processGroupId)) {
-    clearSessionstartProcessGroup(generation, processGroupId);
-    return;
-  }
-  generation.processGroupMonitor = setTimeout(() => {
-    monitorSessionstartProcessGroup(generation, processGroupId);
-  }, 10);
-  generation.processGroupMonitor.unref();
-}
-
 function waitForSessionstartProcessGroupExit(
   processGroupId: number,
   timeoutMs: number,
@@ -247,12 +221,7 @@ function stopSessionstartGeneration(generation: SessionstartGeneration): Promise
       return;
     }
     const processGroupId = generation.processGroupId;
-    if (!processGroupId) {
-      await generation.result;
-      return;
-    }
-    if (!sessionstartProcessGroupAlive(processGroupId)) {
-      clearSessionstartProcessGroup(generation, processGroupId);
+    if (!child || !processGroupId) {
       await generation.result;
       return;
     }
@@ -268,9 +237,6 @@ function stopSessionstartGeneration(generation: SessionstartGeneration): Promise
       }
       await waitForSessionstartProcessGroupExit(processGroupId, sessionstartRetireTimeoutMs);
     }
-    if (!sessionstartProcessGroupAlive(processGroupId)) {
-      clearSessionstartProcessGroup(generation, processGroupId);
-    }
   })();
   return generation.stopPromise;
 }
@@ -284,14 +250,26 @@ function runSessionstartHook(generation: SessionstartGeneration): Promise<Sessio
       settled = true;
       resolveResult(result);
     };
+    const supervised = process.platform !== "win32";
+    const runner = `${root}/bin/fm-sessionstart-run.sh`;
     let child: ChildProcess;
     try {
       child = spawn(
-        `${root}/bin/fm-sessionstart-run.sh`,
-        ["--source", generation.source, "--pi-prerequisite"],
+        supervised ? process.execPath : runner,
+        supervised
+          ? [
+              `${extensionDir}/lib/fm-sessionstart-supervisor.mjs`,
+              runner,
+              "--source",
+              generation.source,
+              "--pi-prerequisite",
+            ]
+          : ["--source", generation.source, "--pi-prerequisite"],
         {
-          detached: process.platform !== "win32",
-          stdio: ["ignore", "pipe", "ignore"],
+          detached: supervised,
+          stdio: supervised
+            ? ["ignore", "pipe", "ignore", "ipc"]
+            : ["ignore", "pipe", "ignore"],
         },
       );
     } catch {
@@ -304,33 +282,26 @@ function runSessionstartHook(generation: SessionstartGeneration): Promise<Sessio
       closeChild = resolveClose;
     });
     const chunks: Buffer[] = [];
+    let observedBytes = 0;
     let retainedBytes = 0;
     let truncated = false;
+    let pendingCompletion: { code: number | null; bytes: number } | null = null;
+    const unrefSupervisor = (): void => {
+      if (!supervised) return;
+      child.unref();
+      child.channel?.unref();
+      const stdout = child.stdout as (NodeJS.ReadableStream & { unref?: () => void }) | null;
+      stdout?.unref?.();
+    };
     const markClosed = (): void => {
       if (generation.childClosed) return;
       generation.childClosed = true;
       if (generation.child === child) generation.child = null;
-      const processGroupId = generation.processGroupId;
-      if (processGroupId) monitorSessionstartProcessGroup(generation, processGroupId);
+      generation.processGroupId = null;
       closeChild();
     };
-    child.stdout?.on("data", (chunk: Buffer) => {
-      if (retainedBytes >= sessionstartDeliveryBytes) {
-        truncated = true;
-        return;
-      }
-      const remaining = sessionstartDeliveryBytes - retainedBytes;
-      const retained = chunk.length <= remaining ? chunk : chunk.subarray(0, remaining);
-      chunks.push(retained);
-      retainedBytes += retained.length;
-      if (retained.length !== chunk.length) truncated = true;
-    });
-    child.on("error", () => {
-      markClosed();
-      settle(generation.stopping ? { kind: "cancelled" } : { kind: "failed" });
-    });
-    child.on("close", (code) => {
-      markClosed();
+    const complete = (code: number | null): void => {
+      unrefSupervisor();
       if (generation.stopping) {
         settle({ kind: "cancelled" });
         return;
@@ -352,6 +323,47 @@ function runSessionstartHook(generation: SessionstartGeneration): Promise<Sessio
         kind: "ready",
         raw: truncated ? `${raw}${sessionstartTruncatedMarker}` : raw,
       });
+    };
+    const completePending = (): void => {
+      if (!pendingCompletion || observedBytes < pendingCompletion.bytes) return;
+      complete(pendingCompletion.code);
+      pendingCompletion = null;
+    };
+    child.stdout?.on("data", (chunk: Buffer) => {
+      observedBytes += chunk.length;
+      if (retainedBytes >= sessionstartDeliveryBytes) {
+        truncated = true;
+        completePending();
+        return;
+      }
+      const remaining = sessionstartDeliveryBytes - retainedBytes;
+      const retained = chunk.length <= remaining ? chunk : chunk.subarray(0, remaining);
+      chunks.push(retained);
+      retainedBytes += retained.length;
+      if (retained.length !== chunk.length) truncated = true;
+      completePending();
+    });
+    if (supervised) {
+      child.on("message", (message: unknown) => {
+        const result = message as { type?: unknown; code?: unknown; bytes?: unknown };
+        if (result.type !== "result" ||
+            (typeof result.code !== "number" && result.code !== null) ||
+            typeof result.bytes !== "number") return;
+        pendingCompletion = { code: result.code, bytes: result.bytes };
+        completePending();
+      });
+    }
+    child.on("error", () => {
+      markClosed();
+      settle(generation.stopping ? { kind: "cancelled" } : { kind: "failed" });
+    });
+    child.on("close", (code) => {
+      markClosed();
+      if (supervised) {
+        settle(generation.stopping ? { kind: "cancelled" } : { kind: "failed" });
+        return;
+      }
+      complete(code);
     });
   });
 }
@@ -369,7 +381,6 @@ function createSessionstartGeneration(
     delivered: false,
     child: null,
     processGroupId: null,
-    processGroupMonitor: null,
     childClosed: false,
     childClose: null,
     stopPromise: null,
@@ -389,8 +400,10 @@ function sessionstartMessage(
   result: SessionstartResult,
 ): SessionstartMessage | undefined {
   let raw = result.kind === "ready" ? result.raw : "";
-  if (!raw && ["startup", "clear", "compact"].includes(generation.source) &&
-      (result.kind === "empty" || result.kind === "failed")) {
+  if (!raw && result.kind === "failed") {
+    raw = sessionstartManualFallback;
+  } else if (!raw && ["startup", "clear", "compact"].includes(generation.source) &&
+      result.kind === "empty") {
     raw = sessionstartManualFallback;
   }
   if (!raw) return undefined;
@@ -482,10 +495,6 @@ export default function (pi: ExtensionAPI) {
     const processGroupId = generation.processGroupId;
     if (!processGroupId) {
       if (generation.child) signalSessionstartChild(generation.child, "SIGKILL");
-      return;
-    }
-    if (!sessionstartProcessGroupAlive(processGroupId)) {
-      clearSessionstartProcessGroup(generation, processGroupId);
       return;
     }
     try {

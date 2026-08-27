@@ -330,7 +330,8 @@ test_pi_startup_classifies_cli_continuations() {
   fixture="$TMP_ROOT/pi-continuation-source"
   mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
-  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
+    "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$fixture/.pi/extensions/lib/"
   cat > "$fixture/bin/fm-sessionstart-run.sh" <<'SH'
 #!/usr/bin/env bash
 source_name=
@@ -427,7 +428,8 @@ test_pi_sessionstart_generation_prerequisite() {
   fixture="$TMP_ROOT/pi-sessionstart-generation"
   mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
-  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
+    "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$fixture/.pi/extensions/lib/"
   cp "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/"
   cat > "$fixture/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -446,7 +448,8 @@ while [ $# -gt 0 ]; do
 done
 count=$(( $(wc -l < "$state/launches" 2>/dev/null || printf '0') + 1 ))
 behavior=$(cat "$state/behavior-$count")
-printf 'launch:%s:%s:%s:%s\n' "$count" "$behavior" "$source_name" "$$" >> "$state/launches"
+printf 'launch:%s:%s:%s:%s:%s\n' \
+  "$count" "$behavior" "$source_name" "$$" "${FM_SESSIONSTART_SUPERVISOR_PID:-}" >> "$state/launches"
 printf 'launch:%s\n' "$count" >> "$state/events"
 case "$behavior" in
   success)
@@ -572,6 +575,7 @@ const plan = (index, behavior) => {
 const release = (index) => writeFileSync(`${state}/release-${index}`, "\n");
 const launchLines = () => readFileSync(`${state}/launches`, "utf8").trim().split("\n").filter(Boolean);
 const pidFor = (index) => Number(launchLines().find((line) => line.startsWith(`launch:${index}:`))?.split(":")[4]);
+const supervisorFor = (index) => Number(launchLines().find((line) => line.startsWith(`launch:${index}:`))?.split(":")[5]);
 const grandchildFor = (index) => Number(readFileSync(`${state}/grandchild-${index}`, "utf8").trim());
 const startupMessages = () => providerCalls.map((call) => call.message).filter(Boolean);
 
@@ -600,11 +604,12 @@ await waitFor(() => existsSync(`${state}/completed-2`), "proven generation never
 const provenResult = await providerCall(proven, "proven prompt");
 assert(provenResult?.message?.content.includes("GENERATION_DIGEST_2"), "proven path lost startup context");
 assert(!provenResult.message.content.includes("Run `bin/fm-session-start.sh`"), "proven path used manual fallback");
-const provenPid = pidFor(2);
+const provenSupervisor = supervisorFor(2);
+assert(alive(provenSupervisor), "completed generation lost its stable supervisor owner");
 const originalKill = process.kill;
-let staleGroupUseCount = 0;
+let ownedGroupSignalCount = 0;
 process.kill = (pid, signal) => {
-  if (pid === -provenPid) staleGroupUseCount += 1;
+  if (pid === -provenSupervisor && signal !== 0) ownedGroupSignalCount += 1;
   return Reflect.apply(originalKill, process, [pid, signal]);
 };
 
@@ -613,7 +618,7 @@ process.kill = (pid, signal) => {
 plan(3, "slow");
 const interrupted = begin("new", "session-interrupted");
 process.kill = originalKill;
-assert(staleGroupUseCount === 0, "replacement reused a completed generation's empty process group id");
+assert(ownedGroupSignalCount > 0, "replacement did not retire the completed generation's stable owner");
 await waitFor(() => existsSync(`${state}/started-3`) && existsSync(`${state}/grandchild-3`),
   "interrupted generation never started its process tree");
 const interruptedCall = handlers.get("before_agent_start")({ prompt: "interrupted" }, interrupted);
@@ -670,42 +675,64 @@ const failedResult = await providerCall(failed, "failed");
 assert(failedResult?.message?.content.includes("Run `bin/fm-session-start.sh` now, exactly once"),
   "failed eligible attempt lost the manual fallback");
 
+plan(9, "error");
+const failedResume = begin("resume", "session-failed-resume");
+const failedResumeResult = await providerCall(failedResume, "failed resume");
+assert(failedResumeResult?.message?.content.includes("Run `bin/fm-session-start.sh` now, exactly once"),
+  "failed eligible resume lost the manual fallback");
+
+plan(10, "error");
+const failedFork = begin("fork", "session-failed-fork");
+const failedForkResult = await providerCall(failedFork, "failed fork");
+assert(failedForkResult?.message?.content.includes("Run `bin/fm-session-start.sh` now, exactly once"),
+  "failed eligible fork lost the manual fallback");
+
+plan(11, "empty");
+const emptyResume = begin("resume", "session-empty-resume");
+assert((await providerCall(emptyResume, "empty resume")) === undefined,
+  "empty context-restored resume injected a manual fallback");
+
+plan(12, "empty");
+const emptyFork = begin("fork", "session-empty-fork");
+assert((await providerCall(emptyFork, "empty fork")) === undefined,
+  "empty context-restored fork injected a manual fallback");
+
 // The wrapper's bounded timeout result and the extension's 512 KiB containment
 // remain loud provider prerequisites rather than falling back or going stale.
-plan(9, "timeout");
+plan(13, "timeout");
 const timed = begin("new", "session-timeout");
-await waitFor(() => existsSync(`${state}/started-9`), "timeout generation never started");
+await waitFor(() => existsSync(`${state}/started-13`), "timeout generation never started");
 const timedCall = providerCall(timed, "timeout");
 await delay(100);
 assert(!providerCalls.some((call) => call.prompt === "timeout"), "timeout provider call escaped before settlement");
-release(9);
+release(13);
 const timedResult = await timedCall;
 assert(timedResult?.message?.content.includes("STARTUP TRUNCATED - stage=bootstrap"), "timeout banner was lost");
 assert(!timedResult.message.content.includes("Run `bin/fm-session-start.sh`"), "bounded timeout incorrectly used manual fallback");
 
-plan(10, "truncate");
+plan(14, "truncate");
 const truncated = begin("new", "session-truncated");
 const truncatedResult = await providerCall(truncated, "truncated");
-assert(truncatedResult?.message?.content.includes("TRUNCATION_PREFIX_10"), "truncated digest lost its prefix");
+assert(truncatedResult?.message?.content.includes("TRUNCATION_PREFIX_14"), "truncated digest lost its prefix");
 assert(truncatedResult.message.content.includes("PI SESSION-START DELIVERY TRUNCATED"), "truncated digest was not loud");
-assert(!truncatedResult.message.content.includes("TRUNCATION_SUFFIX_10"), "truncated digest exceeded its bound");
+assert(!truncatedResult.message.content.includes("TRUNCATION_SUFFIX_14"), "truncated digest exceeded its bound");
 
 // Compaction keeps its supported asynchronous transport for retry-without-
 // preflight, but it shares the same generation cancellation and exactly-once claim.
-plan(11, "success");
+plan(15, "success");
 const compactContext = ctx("session-truncated");
 await handlers.get("session_compact")({}, compactContext);
-assert(sent.length === 1 && sent[0].content.includes("GENERATION_DIGEST_11"),
+assert(sent.length === 1 && sent[0].content.includes("GENERATION_DIGEST_15"),
   "compaction lost its existing persistent delivery");
 assert((await handlers.get("before_agent_start")({ prompt: "post compact" }, compactContext)) === undefined,
   "compaction delivered the same context twice");
 
-plan(12, "slow");
+plan(16, "slow");
 const compactPending = handlers.get("session_compact")({}, compactContext);
-await waitFor(() => existsSync(`${state}/started-12`) && existsSync(`${state}/grandchild-12`),
+await waitFor(() => existsSync(`${state}/started-16`) && existsSync(`${state}/grandchild-16`),
   "cancelled compaction generation never started");
-const compactPid = pidFor(12);
-const compactGrandchild = grandchildFor(12);
+const compactPid = pidFor(16);
+const compactGrandchild = grandchildFor(16);
 await handlers.get("session_shutdown")({ reason: "quit" }, compactContext);
 await compactPending;
 assert(sent.length === 1, "cancelled compaction delivered stale context");
@@ -727,7 +754,8 @@ test_pi_reload_releases_sessionstart_exit_listener() {
   fixture="$TMP_ROOT/pi-reload-exit-listener"
   mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
-  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
+    "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$fixture/.pi/extensions/lib/"
   cp "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/"
   cat > "$fixture/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -738,7 +766,7 @@ SH
 set -u
 state=${FM_HOME:?}/state
 index=$(( $(wc -l < "$state/launches" 2>/dev/null || printf '0') + 1 ))
-printf '%s:%s\n' "$index" "$$" >> "$state/launches"
+printf '%s:%s:%s\n' "$index" "$$" "${FM_SESSIONSTART_SUPERVISOR_PID:-}" >> "$state/launches"
 (
   trap '' TERM INT HUP
   while :; do sleep 30; done
@@ -812,10 +840,12 @@ for (let instance = 1; instance <= 2; instance += 1) {
       `reload ${instance} session ${session} startup generation never started`);
     const launch = readFileSync(`${state}/launches`, "utf8").trim().split("\n")[launchIndex - 1];
     const child = Number(launch.split(":")[1]);
+    const supervisor = Number(launch.split(":")[2]);
     const grandchild = Number(readFileSync(`${state}/grandchild-${launchIndex}`, "utf8").trim());
     if (launchIndex === 3) {
       await waitFor(() => !alive(child), "leader did not close before process-exit cleanup");
       assert(alive(grandchild), "TERM-resistant descendant exited with its leader");
+      assert(alive(supervisor), "leader close lost the stable supervisor owner");
       assert(process.listenerCount("exit") === baselineCount + 1,
         "leader close removed the active instance exit listener");
       const ownedListener = process.listeners("exit").find(
@@ -858,7 +888,8 @@ test_pi_large_sessionstart_digest_is_delivered_loudly() {
   git -C "$fixture" commit -q --allow-empty -m init
   : > "$fixture/AGENTS.md"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
-  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
+    "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$fixture/.pi/extensions/lib/"
   cp "$ROOT/bin/fm-sessionstart-run.sh" "$ROOT/bin/fm-sessionstart-nudge.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" "$ROOT/bin/fm-gate-refuse-lib.sh" \
     "$ROOT/bin/fm-hook-host-lib.sh" \
