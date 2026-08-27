@@ -789,6 +789,55 @@ EOF
   pass "a captain outcome reaches main's model as typed, self-describing input while routine notes stay plain"
 }
 
+test_captain_outcome_encoding_failure_delivers_plain_instruction() {
+  local repo home out status
+  repo="$TMP_ROOT/encoding-fallback-root"
+  home="$TMP_ROOT/encoding-fallback-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_OPERATIONAL_INPUT_SCRIPT="$repo/bin/missing-operational-input" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle, sentToMain }; })()`);
+const { dispatch, settle, sentToMain } = globalThis.__t;
+
+if (!dispatch("signal: encoding fallback probe").accepted) {
+  throw new Error("branch did not accept the encoding-fallback wake");
+}
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "encoding-fallback branch prompt");
+const session = globalThis.__fmSessions[0];
+const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+const result = await report.execute(
+  "encoding-fallback",
+  { task: "task-fallback", verdict: "captain", summary: "PR https://example.com/pr/fallback is ready" },
+  undefined,
+  undefined,
+  {},
+);
+if (result.isError) throw new Error(`fallback report failed: ${JSON.stringify(result)}`);
+if (sentToMain.length !== 1) throw new Error(`fallback delivered ${sentToMain.length} notes instead of one`);
+const delivered = sentToMain[0];
+if (delivered.message.display !== false) throw new Error("fallback captain note became visible");
+if (delivered.options.triggerTurn !== true || delivered.options.deliverAs !== "followUp") {
+  throw new Error(`fallback changed turn delivery: ${JSON.stringify(delivered.options)}`);
+}
+if (delivered.message.content.includes("FIRSTMATE_OP:")) {
+  throw new Error(`fallback unexpectedly carried an envelope: ${delivered.message.content}`);
+}
+if (!delivered.message.content.includes("Relay only this outcome") ||
+    !delivered.message.content.includes("Do not restate or repeat any earlier answer") ||
+    !delivered.message.content.includes("task-fallback: PR https://example.com/pr/fallback is ready")) {
+  throw new Error(`fallback lost its instruction or outcome: ${delivered.message.content}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "captain outcome encoding failure must degrade to plain instructed delivery: $out"
+  pass "a broken operational encoder still delivers one invisible instructed captain outcome as a follow-up"
+}
+
 test_branch_cache_key_is_per_home_stable() {
   local repo home_a home_b key_a1 key_a2 key_b
   repo="$TMP_ROOT/cache-key-root"
@@ -2819,6 +2868,7 @@ JS
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract
+test_captain_outcome_encoding_failure_delivers_plain_instruction
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
