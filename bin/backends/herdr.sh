@@ -2534,9 +2534,20 @@ fm_backend_herdr_current_path() {  # <target>
 # ATOMICALLY - mirrors tmux's `send-keys -t T text Enter`. Used for the fixed
 # spawn-time commands (treehouse get, the GOTMPDIR export). `pane run` types
 # the command and submits it in one call (verified).
+#
+# Submitting in one call means a herdr pane is never in either of the two
+# states bin/fm-spawn.sh's spawn_send_text_line reserves statuses 2 and 3 for
+# (a line typed but neither submitted nor cleared, and one typed and then
+# cleared again), so every failure here collapses to 1. The status this call
+# would otherwise return is the herdr PROCESS's own exit code - a third party's
+# numbering, unbounded and version-dependent, which this backend already treats
+# as untrustworthy everywhere else (results are read from JSON, never from
+# process exit status). Letting a herdr 2 or 3 through would make fm-spawn
+# describe an input line sitting in a pane that was never typed into, and at the
+# post-meta launch gate record that story as the task's durable last state.
 fm_backend_herdr_send_text_line() {  # <target> <text>
   fm_backend_herdr_target_ready "$1" || return 1
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1 || return 1
 }
 
 # fm_backend_herdr_send_literal: send TEXT as literal, UNSUBMITTED input - the
