@@ -1147,9 +1147,9 @@ launch_template() {
     pi|pi-signed)
       printf '%s' '__PIBIN____PITUIMODE__'
       if [ "$kind" = secondmate ]; then
-        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' ' __PIRESOURCEFLAGS____MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' ' __PIRESOURCEFLAGS____MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -2783,6 +2783,35 @@ sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+PIRESOURCEFLAGS=
+if [ "$HARNESS" = pi ] || [ "$HARNESS" = pi-signed ]; then
+  PI_AGENT_HOME=${PI_CODING_AGENT_DIR:-${HOME:-}/.pi/agent}
+  [ -n "$PI_AGENT_HOME" ] || { echo "error: cannot resolve Pi agent home for the local extension allowlist" >&2; exit 1; }
+  PIRESOURCEFLAGS='-ne '
+  if [ "$KIND" != secondmate ]; then
+    PI_FFF_EXTENSION="$PI_AGENT_HOME/npm/node_modules/@ff-labs/pi-fff/src/index.ts"
+    [ -f "$PI_FFF_EXTENSION" ] || { echo "error: required Pi worker extension missing: $PI_FFF_EXTENSION" >&2; exit 1; }
+    PIRESOURCEFLAGS="${PIRESOURCEFLAGS}-e $(shell_quote "$PI_FFF_EXTENSION") "
+  fi
+  if [ "$KIND" = scout ]; then
+    PI_WEB_EXTENSION="$PI_AGENT_HOME/extensions/pi-web-access/index.ts"
+    [ -f "$PI_WEB_EXTENSION" ] || { echo "error: required Pi scout extension missing: $PI_WEB_EXTENSION" >&2; exit 1; }
+    PIRESOURCEFLAGS="${PIRESOURCEFLAGS}-e $(shell_quote "$PI_WEB_EXTENSION") "
+  fi
+  if [ "$BACKEND" = herdr ]; then
+    PI_HERDR_EXTENSION="$PI_AGENT_HOME/extensions/herdr-agent-state.ts"
+    [ -f "$PI_HERDR_EXTENSION" ] || { echo "error: required Herdr Pi extension missing: $PI_HERDR_EXTENSION" >&2; exit 1; }
+    PIRESOURCEFLAGS="${PIRESOURCEFLAGS}-e $(shell_quote "$PI_HERDR_EXTENSION") "
+  fi
+  case "$MODEL" in
+    openai/*|openai-codex/*|openai-codex-fast/*)
+      PI_COMPACTION_EXTENSION="$PI_AGENT_HOME/extensions/pi-openai-server-compaction/src/index.ts"
+      [ -f "$PI_COMPACTION_EXTENSION" ] || { echo "error: required OpenAI Pi extension missing: $PI_COMPACTION_EXTENSION" >&2; exit 1; }
+      PIRESOURCEFLAGS="${PIRESOURCEFLAGS}-e $(shell_quote "$PI_COMPACTION_EXTENSION") "
+      ;;
+  esac
+fi
+LAUNCH=${LAUNCH//__PIRESOURCEFLAGS__/$PIRESOURCEFLAGS}
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}

@@ -3508,8 +3508,17 @@ JS
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/export $export_file"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
-  wait_for_text "$export_snapshot" "Session exported to: $export_file" \
-    || fail "/export did not complete while calm mode was on"
+  # Pi writes the export artifact reliably, but its pane status wording is not a
+  # stable contract across Pi releases. The file is the export completion signal;
+  # the HTML/session assertions below validate its contents.
+  active_wait=0
+  while [ ! -s "$export_file" ] && [ "$active_wait" -lt 120 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$export_snapshot" 2>/dev/null || true
+    sleep 0.05
+    active_wait=$((active_wait + 1))
+  done
+  tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$export_snapshot" 2>/dev/null || true
+  [ -s "$export_file" ] || fail "/export did not create the HTML session artifact while calm mode was on"
   node - "$export_file" <<'JS' || fail "calm-mode HTML export lost tool data or persisted synthetic provenance"
 const html = require("node:fs").readFileSync(process.argv[2], "utf8");
 const match = html.match(/<script id="session-data" type="application\/json">([^<]+)<\/script>/);

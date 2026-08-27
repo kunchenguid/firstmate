@@ -88,7 +88,15 @@ make_spawn_case() {
   wt="$case_dir/wt"
   launchlog="$case_dir/launch.log"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
-  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
+  mkdir -p \
+    "$home/data" "$home/projects" "$home/state" "$home/config" \
+    "$home/config/npm/node_modules/@ff-labs/pi-fff/src" \
+    "$home/config/extensions/pi-web-access" \
+    "$home/config/extensions/pi-openai-server-compaction/src"
+  : > "$home/config/npm/node_modules/@ff-labs/pi-fff/src/index.ts"
+  : > "$home/config/extensions/pi-web-access/index.ts"
+  : > "$home/config/extensions/herdr-agent-state.ts"
+  : > "$home/config/extensions/pi-openai-server-compaction/src/index.ts"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
@@ -124,6 +132,7 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    PI_CODING_AGENT_DIR="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
@@ -143,6 +152,7 @@ read_case_record() {
   IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR LAUNCH_LOG <<EOF
 $1
 EOF
+  export PI_CODING_AGENT_DIR="$HOME_DIR/config"
 }
 
 assert_meta_profile() {
@@ -623,8 +633,14 @@ test_pi_threads_model_and_max_effort() {
   expect_code 0 "$status" "pi spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi '$FAKEBIN_DIR/pi' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
-    "pi launch did not force the regular TUI while threading the requested model and max thinking level"
+  assert_contains "$launch" "FM_PI_HARNESS=pi '$FAKEBIN_DIR/pi' --tui-mode regular -ne -e" \
+    "pi launch did not force the regular TUI and explicit resource allowlist"
+  assert_contains "$launch" "'$HOME_DIR/config/npm/node_modules/@ff-labs/pi-fff/src/index.ts'" \
+    "pi launch did not load the required worker resource extension"
+  assert_contains "$launch" "'$HOME_DIR/config/extensions/pi-openai-server-compaction/src/index.ts'" \
+    "pi launch did not load the required OpenAI compaction extension"
+  assert_contains "$launch" "--model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+    "pi launch did not thread the requested model and max thinking level"
   assert_not_contains "$launch" "FM_FIRSTMATE_PI_LAUNCH_BRIEF=" \
     "pi launch still exports the removed Calm input-reroute binding"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
@@ -645,8 +661,14 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_contains "$out" "spawned $id harness=pi-signed" "pi-signed spawn did not preserve its visible identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
-    "pi-signed launch did not force the regular TUI with Pi's model, thinking, and extension semantics"
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular -ne -e" \
+    "pi-signed launch did not force the regular TUI and explicit resource allowlist"
+  assert_contains "$launch" "'$HOME_DIR/config/npm/node_modules/@ff-labs/pi-fff/src/index.ts'" \
+    "pi-signed launch did not load the required worker resource extension"
+  assert_contains "$launch" "'$HOME_DIR/config/extensions/pi-openai-server-compaction/src/index.ts'" \
+    "pi-signed launch did not load the required OpenAI compaction extension"
+  assert_contains "$launch" "--model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+    "pi-signed launch did not thread Pi's model and max thinking level"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi-signed launch lost the canonical typed launch-brief envelope"
   assert_present "$HOME_DIR/state/$id.pi-ext.ts" "pi-signed launch did not install Pi's turn-end extension"
@@ -735,7 +757,7 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
     "pi-signed secondmate spawn did not preserve its runtime identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed default default
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular -ne -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
     "pi-signed secondmate did not force the regular TUI with Pi's primary extension launch shape"
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
 }
