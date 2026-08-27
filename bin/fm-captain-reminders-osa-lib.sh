@@ -14,12 +14,18 @@
 # provide a `note` reporter, so diagnostics reach the operator the same way the
 # rest of the command's output does.
 #
-# THE MARKER IS ENFORCED HERE. Every verb selects by the `[fm:<task-id>]` body
-# prefix - `list` reports only entries carrying it, and `upsert`, `complete`, and
-# `complete-one` can only reach entries carrying it - so no instruction from
-# above can touch a reminder the captain wrote himself. `complete-one` names a
-# specific reminder id, and that id is honored ONLY among entries already
-# matching the marker, so an id from anywhere else selects nothing.
+# THE MARKER IS ENFORCED HERE. Every verb selects on the `[fm:<task-id>]` body,
+# because the captain-facing sentence owns the front of the note
+# (bin/fm-captain-reminders-lib.sh) - `list` reports only entries carrying it,
+# and `upsert`, `complete`, and `complete-one` can only reach entries carrying
+# it - so no instruction from above can touch a reminder the captain wrote
+# himself. `complete-one` names a specific reminder id, and that id is honored
+# ONLY among entries already matching the marker, so an id from anywhere else
+# selects nothing. Matching accepts the marker at EITHER end of the body - the
+# SUFFIX this version writes, or the PREFIX an entry created by a previous
+# version of this script carries - so those older entries keep matching until
+# `upsert` rewrites them to the suffix form on their next sync; only the suffix
+# form is ever written.
 #
 # `list` reports one TAB-separated record per marked open entry:
 #   <task-id>  <reminder-id>  <has-due 0|1>  <age-seconds>
@@ -85,10 +91,25 @@ on markerId(b)
 		return ""
 	end try
 	if (count of s) < 6 then return ""
-	if (text 1 thru 4 of s) is not "[fm:" then return ""
-	set o to offset of "]" in s
-	if o < 6 then return ""
-	return text 5 thru (o - 1) of s
+	if s ends with "]" then
+		set AppleScript's text item delimiters to "[fm:"
+		set parts to text items of s
+		set AppleScript's text item delimiters to ""
+		if (count of parts) < 2 then return ""
+		set tailPart to item (count of parts) of parts
+		if (count of tailPart) < 2 then return ""
+		return text 1 thru -2 of tailPart
+	end if
+	if s starts with "[fm:" then
+		set AppleScript's text item delimiters to "]"
+		set parts to text items of s
+		set AppleScript's text item delimiters to ""
+		if (count of parts) < 2 then return ""
+		set headPart to item 1 of parts
+		if (count of headPart) < 5 then return ""
+		return text 5 thru -1 of headPart
+	end if
+	return ""
 end markerId
 APPLESCRIPT
       ;;
@@ -106,7 +127,7 @@ on run argv
 			make new list with properties {name:listName}
 		end if
 		tell list listName
-			set matches to (every reminder whose completed is false and body begins with pfx)
+			set matches to (every reminder whose completed is false and (body ends with pfx or body starts with pfx))
 			if (count of matches) is 0 then
 				if wantDue then
 					set alertTime to current date
@@ -141,7 +162,7 @@ on run argv
 	tell application "Reminders"
 		if (count of (lists whose name is listName)) is 0 then return "0"
 		tell list listName
-			repeat with r in (every reminder whose completed is false and body begins with pfx)
+			repeat with r in (every reminder whose completed is false and (body ends with pfx or body starts with pfx))
 				set completed of r to true
 				set n to n + 1
 			end repeat
@@ -161,7 +182,7 @@ on run argv
 	tell application "Reminders"
 		if (count of (lists whose name is listName)) is 0 then return "0"
 		tell list listName
-			repeat with r in (every reminder whose completed is false and body begins with pfx)
+			repeat with r in (every reminder whose completed is false and (body ends with pfx or body starts with pfx))
 				if ((id of r) as text) is rid then
 					set completed of r to true
 					set n to n + 1

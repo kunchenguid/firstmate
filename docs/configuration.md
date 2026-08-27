@@ -228,10 +228,13 @@ The skill text owns the marker spelling, the tick order, and the reinforcement r
 
 `config/captain-reminders` is an optional local, gitignored switch that turns on a one-way projection of this home's captain calls into the macOS Reminders app, so a question raised on one day is still in front of the captain on the next.
 Absent, every `bin/fm-captain-reminders.sh` command is a silent no-op that exits 0 and nothing else changes; present, its first line, trimmed, is the target list name, and an empty file selects `Firstmate`.
-The projection covers every task held with `hold_kind=captain` - both the calls the captain must rule on and the ones he must carry out himself - and never carries progress.
+The projection covers every task held with `hold_kind=captain` - both the calls the captain must rule on and the ones he must carry out himself - and never carries progress or finished work.
+One call is one entry, each entry alerts him once when it is created, and recording his answer is what ticks it off.
 Firstmate's backlog stays the authority: nothing is ever read back from Reminders, so editing, flagging, reordering, or completing an entry there changes no task.
+Clearing an entry himself is the one thing the projection remembers, in `state/.captain-reminders-alerted`, so a restated entry never alerts him a second time.
 The file is per home and is NOT inherited by secondmate homes, because only the primary home speaks to the captain.
-The switch is a list name, not a policy: how each entry reads, when an entry is added, refreshed, or ticked off, what the `[fm:<task-id>]` marker protects, and how a push is requested are owned by `bin/fm-captain-reminders.sh`'s header.
+The switch is a list name, not a policy: how each entry reads, when an entry is added, refreshed, ticked off, or alerted, and what the `[fm:<task-id>]` marker protects are owned by `bin/fm-captain-reminders.sh`'s header.
+What must be registered as a captain call in the first place is owned by `AGENTS.md` section 9 and the `captain-hold-lifecycle` skill, not by this switch.
 Run `bin/fm-captain-reminders.sh status` for a dry run that prints what a sync would change without touching the list, including the first-time macOS automation approval when that is what is standing in the way.
 
 ## Secondmate routes (data/secondmates.md)

@@ -20,7 +20,7 @@
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
-#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD] [--notify]
+#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
 #   fm-captain-hold.sh bind <source-id> [<legacy-origin> | --any-origin]
@@ -39,13 +39,23 @@
 # records the captain's own deferral date through `tasks-axi hold --until`, so
 # a "revisit later" answer is stored as a date instead of a live card.
 #
+# WRITE THE REASON AND THE TITLE FOR THE CAPTAIN. They are not internal notes:
+# `bin/fm-captain-reminders.sh` projects them verbatim onto the captain's phone,
+# where they are the whole of what he sees. Both must obey `AGENTS.md` section
+# 9's captain-facing language rule and say what happened, where, and what he has
+# to do, in one line he can act on without opening anything else. No task id, no
+# worktree, no watcher, no teardown, no hold, no wake, no pipeline-state label.
+#
 # Every hold and every answer also refreshes this home's captain-facing
 # Reminders projection through bin/fm-captain-reminders.sh, which owns that
-# whole capability including its opt-in switch. `--notify` is the caller's own
-# judgment that this call blocks work and is worth interrupting the captain for;
-# without it the entry simply appears in his list. The projection is subordinate
-# in both directions: it reads the backlog and never writes back, and its
-# failure can never fail a hold or an answer.
+# whole capability including its opt-in switch. A hold names its own call to
+# that projection, so a newly registered call reaches the list even while
+# another projection holds the lock; every projected call alerts him once, so
+# there is no per-call urgency flag to pass. `--notify` is still accepted and
+# does nothing, because a call that did not need him would not be registered
+# here at all. The projection is subordinate in both directions: it reads the
+# backlog and never writes back, and its failure can never fail a hold or an
+# answer.
 #
 # `answer` records the captain's exact words and closes the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes,
@@ -363,12 +373,12 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
 # script's own `answer` command, so it sets FM_CAPTAIN_HOLD_DEFER_REMINDERS for
 # those children and refreshes once itself. Without that, a wedged Reminders app
 # would cost the batch its per-run bound once per key, on a supervision path.
-project_reminders() {  # <task-id to alert on, or empty>
+project_reminders() {  # <task-id this run carries, or empty>
   local script="$SCRIPT_DIR/fm-captain-reminders.sh"
   [ "${FM_CAPTAIN_HOLD_DEFER_REMINDERS:-0}" != 1 ] || return 0
   [ -x "$script" ] || return 0
   if [ -n "$1" ]; then
-    "$script" sync --notify "$1" >&2 || true
+    "$script" sync --fresh "$1" >&2 || true
   else
     "$script" sync >&2 || true
   fi
@@ -376,7 +386,7 @@ project_reminders() {  # <task-id to alert on, or empty>
 }
 
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' notify=0 show state existing_title body='' hold_kind
+  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -386,7 +396,8 @@ command_hold() {
       --repo) shift; repo=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
       --until) shift; until=${1:-} ;;
-      --notify) notify=1 ;;
+      # Accepted and ignored: every registered call alerts him once now.
+      --notify) ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -441,7 +452,9 @@ command_hold() {
   show=$(fm_task_show "$id") || fail "task $id disappeared while holding it"
   hold_kind=$(fm_show_field_value "$show" hold_kind)
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
-  if [ "$notify" = 1 ]; then project_reminders "$id"; else project_reminders ''; fi
+  # Always name this call: it is new to any projection already under way, and
+  # every registered call is by definition something the captain has to act on.
+  project_reminders "$id"
   printf '%s\n' "$id"
 }
 

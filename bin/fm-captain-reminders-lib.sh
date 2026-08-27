@@ -52,34 +52,68 @@ fm_reminders_list_name() {  # <config-dir>
   printf '%s\n' "$name"
 }
 
-# The note body for one captain call. The leading `[fm:<id>]` marker is what
-# makes the projection idempotent and what bounds it: bin/fm-captain-reminders.sh
-# reads, updates, and completes ONLY entries carrying it, so a reminder the
-# captain wrote by hand is never matched, changed, or completed.
-fm_reminders_note() {  # <task-id> <reason>
-  local id=$1 reason
+# The note body for one captain call, written for the captain rather than for
+# this script: the sentence the captain has to read comes first and the
+# `[fm:<id>]` marker sits at the very end, because the note is what a phone
+# shows under the title and a machine tag in that position was the first thing
+# he read every time.
+#
+# The marker keeps both of its jobs from that tail position: it is how a rerun
+# recognizes what it already created, and it is the hard limit on what this
+# projection may touch - bin/fm-captain-reminders.sh reads, updates, and
+# completes ONLY entries carrying it, so a reminder the captain wrote by hand is
+# never matched, changed, or completed. Only the tail placement is written now;
+# fm_reminders_marker_id still reads a leading placement too, because an entry
+# a previous version of this script wrote that way must keep matching until the
+# next sync rewrites it to this form.
+#
+# The optional project name is appended before the marker, so one glance answers
+# "where" as well as "what", without the caller having to write it into every
+# hold reason.
+fm_reminders_note() {  # <task-id> <reason> [project]
+  local id=$1 reason project
   reason=$(fm_reminders_one_line "$2")
   if [ "${#reason}" -gt "$FM_REMINDERS_NOTE_LIMIT" ]; then
     reason="${reason:0:$FM_REMINDERS_NOTE_LIMIT}$FM_REMINDERS_TRUNCATION_NOTICE"
   fi
-  printf '[fm:%s] %s\n' "$id" "$reason"
+  # A call with no recorded reason still has to say what it wants from him.
+  [ -n "$reason" ] || reason='等你定夺，具体情况回 Firstmate 会话看。'
+  project=$(fm_reminders_one_line "${3:-}")
+  [ -z "$project" ] || reason="${reason}（项目：${project}）"
+  printf '%s [fm:%s]\n' "$reason" "$id"
 }
 
 # The task id a note claims, or nonzero for any note this projection must not
 # touch. Deliberately strict: an id that is not a privacy-safe slug is treated
-# as unmarked rather than repaired.
+# as unmarked rather than repaired. fm_reminders_note now puts the marker at
+# the tail, but a note written by a version of this script before that change
+# carries it at the head instead, so both placements are recognized when
+# reading - an entry that version created must keep working here rather than
+# being treated as unmarked and orphaned. Only the tail placement is written.
 fm_reminders_marker_id() {  # <note>
   local note=$1 id
   case "$note" in
-    '[fm:'*']'*) ;;
-    *) return 1 ;;
+    *'[fm:'*']')
+      id=${note%']'}
+      id=${id##*'[fm:'}
+      case "$id" in
+        ''|*[!A-Za-z0-9._-]*) ;;
+        *) printf '%s\n' "$id"; return 0 ;;
+      esac
+      ;;
   esac
-  id=${note#'[fm:'}
-  id=${id%%']'*}
-  case "$id" in
-    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+  case "$note" in
+    '[fm:'*']'*)
+      id=${note#'[fm:'}
+      id=${id%%']'*}
+      case "$id" in
+        ''|*[!A-Za-z0-9._-]*) return 1 ;;
+      esac
+      printf '%s\n' "$id"
+      return 0
+      ;;
   esac
-  printf '%s\n' "$id"
+  return 1
 }
 
 # Every unresolved captain call that is due now, one `<id>TAB<title>TABnote`
@@ -87,7 +121,7 @@ fm_reminders_marker_id() {  # <note>
 # gate, so a future hold_until defers the entry and the live held bit is not the
 # ownership test.
 fm_reminders_desired() {
-  local ids id show state hold_kind hold_until title reason today raw rc
+  local ids id show state hold_kind hold_until title reason project today raw rc
   ids=$(fm_open_task_ids) || { rc=$?; return "$rc"; }
   today=$(date +%F) || return 1
   case "$today" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) return 1 ;; esac
@@ -112,12 +146,17 @@ fm_reminders_desired() {
     [ -n "$raw" ] || return 1
     title=$(fm_decode_shown_value "$raw") || return 1
     title=$(fm_reminders_one_line "$title") || return 1
-    [ -n "$title" ] || title=$id
+    # Never fall back to the task id: the id is exactly the internal spelling
+    # this surface must not put in front of the captain.
+    [ -n "$title" ] || title='一件等你处理的事'
     raw=$(fm_show_field "$show" hold_reason)
     [ -n "$raw" ] || return 1
     reason=$(fm_decode_shown_value "$raw") || return 1
     [ "$reason" != '-' ] || reason=''
-    printf '%s\t%s\t%s\n' "$id" "$title" "$(fm_reminders_note "$id" "$reason")"
+    # The project is context, not identity: an older record that never carried
+    # one simply projects without it rather than failing the whole snapshot.
+    project=$(fm_show_field_value "$show" repo)
+    printf '%s\t%s\t%s\n' "$id" "$title" "$(fm_reminders_note "$id" "$reason" "$project")"
   done <<EOF
 $ids
 EOF

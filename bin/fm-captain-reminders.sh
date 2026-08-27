@@ -10,11 +10,13 @@
 #
 # ONE WAY, ALWAYS. Firstmate's backlog is the authority and Reminders is a
 # window onto it. Nothing is ever read back: a reminder the captain edits,
-# reorders, flags, or completes changes nothing here, and the next sync simply
-# restates the backlog.
+# reorders, flags, or completes changes no task here, and the next sync simply
+# restates the backlog. The one thing that survives him ticking an entry off is
+# the memory that he was already alerted for that call, so restating it does not
+# ring him a second time - see ALERTING, ONCE PER CALL below.
 #
 # Usage:
-#   fm-captain-reminders.sh sync [--notify <task-id>]...
+#   fm-captain-reminders.sh sync [--fresh <task-id>]...
 #   fm-captain-reminders.sh status
 #
 # `sync` is an idempotent FULL projection, not an incremental one: it may be run
@@ -25,27 +27,51 @@
 # WHAT IT PROJECTS. Every unresolved task in the active FM_HOME carrying
 # `hold_kind=captain` whose hold_until date is absent or due - the calls the
 # captain must rule on and the ones he must carry out himself, which are the same
-# thing in the data. Progress and future deferrals never appear here.
+# thing in the data. Progress and future deferrals never appear here. Work that
+# is simply finished never appears here either: this list is the captain's own
+# to-do, not a log of what the fleet did, so an item exists only while it is
+# waiting on him and one call is always one entry, never merged with another.
 #
 #   reminder title -> the task title
-#   reminder note  -> `[fm:<task-id>] <hold reason>`
+#   reminder note  -> `<hold reason>（项目：<repo>） [fm:<task-id>]`
 #
-# THE MARKER IS THE SAFETY BOUNDARY. `[fm:<task-id>]` at the head of the note is
+# WRITTEN FOR THE CAPTAIN. The note leads with the sentence he has to read and
+# ends with the marker, because the note is what a phone shows under the title.
+# What makes that sentence readable is upstream of here: the hold reason and the
+# task title are captain-facing text by the contract in
+# bin/fm-captain-hold.sh's header, and this script projects them as written
+# rather than trying to rewrite internal wording into plain speech.
+#
+# THE MARKER IS THE SAFETY BOUNDARY. `[fm:<task-id>]` at the tail of the note is
 # how a rerun recognizes what it already created, so a rerun never duplicates.
-# It is also the hard limit on what this script may touch: an entry without that
-# marker is never read, matched, renamed, rewritten, or completed. The list is
-# the captain's own, and quietly editing something he wrote there is worse than
-# missing a projection entirely.
+# It is also the hard limit on what this script may touch: an entry without the
+# marker at either the tail or the head is never read, matched, renamed,
+# rewritten, or completed. The head placement is read-only, kept so an entry a
+# previous version of this script created there still matches and gets rewritten
+# to the tail form on its next sync instead of being orphaned; only the tail
+# form is ever written. The list is the captain's own, and quietly editing
+# something he wrote there is worse than missing a projection entirely.
 #
 # COMPLETION, NEVER DELETION. A marked entry whose task is no longer held for
-# the captain is marked COMPLETED. Nothing here deletes a reminder.
+# the captain is marked COMPLETED. Nothing here deletes a reminder. Recording
+# the captain's answer is what ends a call, so his entry disappears when he
+# rules on it rather than when the work it gated finally lands.
 #
-# PUSHING. A captain call only pushes when the caller says so: `--notify <id>`
-# sets a due time of now on that entry, so Reminders raises it - on the phone
-# too, which a desktop banner never reaches. It applies only to an entry created
-# by this run, so a rerun cannot re-alert a call the captain has already seen.
-# Whether a call is worth interrupting for is the caller's judgment, deliberately
-# not this script's: it never infers urgency.
+# ALERTING, ONCE PER CALL. Every entry this projection CREATES is given a due
+# time of now, so Reminders raises it - on the phone too, which a desktop banner
+# never reaches. Nothing reaches this list unless it needs the captain, so there
+# is nothing here worth adding silently.
+#
+# The bound on that is state/.captain-reminders-alerted, a durable record of the
+# calls he has already been rung for, pruned on every pass to the calls still
+# waiting on him. It exists because ticking an entry off hides it from every
+# query here, so without a memory outside the list the next pass would recreate
+# the entry and ring him again for something he has already read. An entry that
+# is merely refreshed never rings at all, because the Reminders side sets a due
+# time only on the entry it creates.
+#
+# `--fresh <id>` is not about alerting: it tells this run that it carries a call
+# the lock holder's snapshot predates, so it must not stand down on contention.
 #
 # SWITCH. Entirely inert until this home opts in with `config/captain-reminders`
 # (local, gitignored). Absent: every command is a silent no-op that exits 0.
@@ -57,10 +83,10 @@
 # CONCURRENCY, AND WHAT IS ACTUALLY GUARANTEED. One projection lock under
 # `state/` serializes callers. An ordinary projection that loses the lock stands
 # down and exits 0 - the holder is deriving the same full set and will write the
-# same entries. A projection carrying `--notify` does NOT stand down: the
+# same entries. A projection carrying `--fresh` does NOT stand down: the
 # holder's snapshot predates that call, so nobody else will ever raise it. It
-# waits inside its own deadline and, if that runs out, says the alert was not
-# delivered rather than exiting as though it had been.
+# waits inside its own deadline and, if that runs out, says the call did not
+# reach the list rather than exiting as though it had.
 #
 # The lock cannot make duplication impossible, and this script does not claim it
 # does. Checking for an entry and creating one are not atomic at the Reminders
@@ -155,7 +181,7 @@ list_contains() {  # <newline-separated-list> <value>
 # The rule, in order:
 #   1. an entry that carries a due time beats one that does not, because that is
 #      the entry that will actually alert - ticking it off in favour of a silent
-#      twin would lose the very push a caller asked for;
+#      twin would lose this call its one alert;
 #   2. otherwise the older entry survives, so the accidental copy is the one that
 #      goes and anything the captain added to the original is kept.
 # Both keys come from the list read itself, so the outcome does not depend on
@@ -221,6 +247,57 @@ EOF
   return "$rc"
 }
 
+# --- the already-rung record --------------------------------------------------
+#
+# Every entry this projection CREATES carries an alert, because by the captain's
+# own rule nothing reaches this list unless it needs him. That default is only
+# safe with a durable memory of which calls have already been put in front of
+# him, because an entry he ticks off while the call is still open is simply gone
+# from a projection's view - every query here filters on `completed is false` -
+# so the next pass would recreate it and ring him a second time for something he
+# has already read. Reading the list cannot answer this: a ticked-off entry is
+# invisible and a deleted one never existed.
+#
+# The record is therefore this file, in the same shape as the repo's other
+# "reported once" records (state/.tool-updates, state/<id>.pr-poll-merge-notified):
+# a schema line, then one task id per line.
+#
+# It is pruned to the calls that are still waiting on the captain on every pass,
+# so the memory lives exactly as long as the call does. A call he answers leaves
+# the backlog, leaves this record, and leaves his list; if the same work is
+# raised for him again later it is a new call and rings again, which is right.
+ALERTED_SCHEMA=fm-captain-reminders-alerted-v1
+ALERTED_RECORD=
+
+alerted_read() {
+  local first=1 line
+  [ -n "$ALERTED_RECORD" ] || return 0
+  [ -f "$ALERTED_RECORD" ] || return 0
+  while IFS= read -r line; do
+    if [ "$first" = 1 ]; then
+      first=0
+      # An unrecognized record is treated as no memory at all, which costs one
+      # extra alert rather than silently trusting a file this script did not write.
+      [ "$line" = "$ALERTED_SCHEMA" ] || return 0
+      continue
+    fi
+    case "$line" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    printf '%s\n' "$line"
+  done < "$ALERTED_RECORD"
+}
+
+alerted_write() {  # <newline-separated task ids>
+  local tmp
+  [ -n "$ALERTED_RECORD" ] || return 1
+  [ ! -L "$ALERTED_RECORD" ] || return 1
+  tmp=$(umask 077; mktemp "$ALERTED_RECORD.XXXXXX" 2>/dev/null) || return 1
+  {
+    printf '%s\n' "$ALERTED_SCHEMA"
+    printf '%s\n' "$1" | awk 'NF'
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$ALERTED_RECORD" || { rm -f -- "$tmp"; return 1; }
+}
+
 
 PROJECTION_DEADLINE=0
 PROJECTION_REMAINING=0
@@ -248,9 +325,10 @@ projection_osa() {  # <verb> <args...>
   return 1
 }
 
-run_projection() {  # <dry-run 0|1> <notify-ids newline-separated>
-  local dry=$1 notify=$2 list_name desired desired_ids projected projected_rows stale_ids=''
+run_projection() {  # <dry-run 0|1> <fresh-ids newline-separated>
+  local dry=$1 fresh=$2 list_name desired desired_ids projected projected_rows stale_ids=''
   local id title body due outcome now rc desired_count stale_count total remaining
+  local alerted='' to_alert='' alerted_next=''
   local failures=0 acted=0 processed=0
 
   list_name=$(fm_reminders_list_name "$CONFIG")
@@ -281,25 +359,26 @@ run_projection() {  # <dry-run 0|1> <notify-ids newline-separated>
   # shellcheck disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   PROJECTION_LOCK="$STATE/.captain-reminders.lock"
+  ALERTED_RECORD="$STATE/.captain-reminders-alerted"
   # Lock contention means one thing for an ordinary projection and the opposite
-  # for a named push.
+  # for a run carrying a call that was only just registered.
   #
   # An ordinary projection has an exact peer: the holder is deriving the same
   # full set from the same backlog and will write the same entries, so standing
   # down is the correct result rather than a failure, and it keeps a projection
   # from ever waiting on the deadline.
   #
-  # A named push has no such peer. The holder's snapshot was taken before this
-  # call existed, so it cannot create this entry and will never set its due time
-  # - and a later ordinary sync would then create it with no alert at all. The
-  # one push the caller explicitly authorized would be lost silently, which is
-  # exactly the failure this whole capability exists to prevent. So a named push
-  # waits, inside the deadline it already has, and says so plainly if it runs out.
+  # A run named with --fresh has no such peer. The holder's snapshot was taken
+  # before this call existed, so it cannot create this entry and will never ring
+  # it. Standing down would leave the captain's newest call sitting silently in
+  # the backlog until something else happened to sync, which is exactly the
+  # failure this whole capability exists to prevent. So such a run waits, inside
+  # the deadline it already has, and says so plainly if it runs out.
   if ! fm_lock_try_acquire "$PROJECTION_LOCK"; then
-    [ -n "$notify" ] || return 0
+    [ -n "$fresh" ] || return 0
     until fm_lock_try_acquire "$PROJECTION_LOCK"; do
       if ! projection_budget; then
-        note "another projection held the list for the whole ${TIMEOUT_SECS}s deadline; the alert for $(printf '%s' "$notify" | tr '\n' ' ') was NOT delivered."
+        note "another projection held the list for the whole ${TIMEOUT_SECS}s deadline; $(printf '%s' "$fresh" | tr '\n' ' ') did NOT reach the captain's list."
         return 1
       fi
       sleep 0.1
@@ -330,6 +409,20 @@ run_projection() {  # <dry-run 0|1> <notify-ids newline-separated>
   fi
   desired_ids=$(printf '%s\n' "$desired" | cut -f1)
   desired_count=$(printf '%s\n' "$desired" | awk 'NF { n++ } END { print n + 0 }')
+  # Which of these calls the captain has already been rung for, and which are
+  # new to him. Pruning to the calls still waiting on him happens here, in one
+  # place, so the memory can never outlive the call it belongs to.
+  alerted=$(alerted_read)
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    if list_contains "$alerted" "$id"; then
+      alerted_next=${alerted_next:+$alerted_next$'\n'}$id
+    else
+      to_alert=${to_alert:+$to_alert$'\n'}$id
+    fi
+  done <<EOF
+$desired_ids
+EOF
   if ! projection_osa list "$list_name"; then
     if [ "$PROJECTION_TIMED_OUT" -eq 1 ]; then
       note "projection did not finish before the ${TIMEOUT_SECS}s deadline; $desired_count backlog entries were left unprocessed and existing list entries were not inspected."
@@ -362,8 +455,11 @@ EOF
 
   while IFS=$'\t' read -r id title body; do
     [ -n "$id" ] || continue
+    # A created entry rings unless the captain has already been rung for this
+    # call. The Reminders side only ever sets a due time on the entry it
+    # creates, so an entry that is merely refreshed cannot ring either way.
     due=0
-    list_contains "$notify" "$id" && due=1
+    list_contains "$to_alert" "$id" && due=1
     if list_contains "$projected" "$id"; then
       if [ "$dry" -eq 1 ]; then
         printf 'would check %s (%s) and refresh it only if its title or reason changed\n' "$id" "$title"
@@ -373,9 +469,9 @@ EOF
     else
       if [ "$dry" -eq 1 ]; then
         if [ "$due" -eq 1 ]; then
-          printf 'would add %s (%s), alerting the captain now\n' "$id" "$title"
+          printf 'would add %s (%s) and alert the captain\n' "$id" "$title"
         else
-          printf 'would add %s (%s)\n' "$id" "$title"
+          printf 'would add %s (%s) without alerting him again\n' "$id" "$title"
         fi
         acted=$((acted + 1))
         continue
@@ -383,12 +479,19 @@ EOF
     fi
     if projection_osa upsert "$list_name" "$id" "$title" "$body" "$due"; then
       outcome=$OSA_OUT
+      # Reached his list under any outcome, so he has seen this call and must
+      # not be rung for it again. Recorded AFTER the entry exists, the same way
+      # this repo's other report-once records commit: a record that cannot be
+      # written costs at worst one repeated alert, while recording first would
+      # cost a call its only alert.
+      list_contains "$alerted_next" "$id" \
+        || alerted_next=${alerted_next:+$alerted_next$'\n'}$id
       case "$outcome" in
         created)
           if [ "$due" -eq 1 ]; then
             note "added $id ($title) and alerted the captain"
           else
-            note "added $id ($title)"
+            note "added $id ($title) without a fresh alert"
           fi
           acted=$((acted + 1))
           ;;
@@ -402,6 +505,13 @@ EOF
   done <<EOF
 $desired
 EOF
+
+  # One write per pass, placed here so a run cut short by the deadline still
+  # remembers the calls it did ring, instead of ringing them again next time.
+  if [ "$dry" -eq 0 ] && ! alerted_write "$alerted_next"; then
+    note "could not record which calls have already been alerted; a later sync may alert one of them a second time."
+    failures=$((failures + 1))
+  fi
 
   if [ "$PROJECTION_TIMED_OUT" -eq 0 ]; then
     while IFS= read -r id; do
@@ -433,9 +543,9 @@ EOF
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     list_contains "$desired_ids" "$id" && continue
-    note "nothing to alert for $id - it is not held for the captain in this home."
+    note "nothing to project for $id - it is not held for the captain in this home."
   done <<EOF
-$notify
+$fresh
 EOF
 
   if [ "$dry" -eq 1 ] && [ "$acted" -eq 0 ]; then
@@ -445,22 +555,22 @@ EOF
 }
 
 parse_and_run() {  # <dry-run 0|1> <args...>
-  local dry=$1 notify=''
+  local dry=$1 fresh=''
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --notify)
+      --fresh)
         shift
         case "${1:-}" in
-          ''|*[!A-Za-z0-9._-]*) note "--notify needs a task id"; return 2 ;;
+          ''|*[!A-Za-z0-9._-]*) note "--fresh needs a task id"; return 2 ;;
         esac
-        if [ -n "$notify" ]; then notify="$notify"$'\n'"$1"; else notify=$1; fi
+        if [ -n "$fresh" ]; then fresh="$fresh"$'\n'"$1"; else fresh=$1; fi
         ;;
       *) usage >&2; return 2 ;;
     esac
     shift
   done
-  run_projection "$dry" "$notify"
+  run_projection "$dry" "$fresh"
 }
 
 case "${1:-}" in

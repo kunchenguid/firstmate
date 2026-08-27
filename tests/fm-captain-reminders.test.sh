@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Behavior tests for the one-way projection of captain calls into Reminders:
-# what a sync derives from the backlog, that reruns never duplicate, that a call
-# the captain no longer owns is ticked off rather than deleted, that an entry
-# without the `[fm:<task-id>]` marker is never touched, that the whole thing is
-# inert until this home opts in, and that a wedged Reminders step is bounded
-# instead of hanging its caller.
+# what a sync derives from the backlog, that reruns never duplicate, that every
+# new entry alerts the captain exactly once and a rerun never alerts him again,
+# that a call the captain no longer owns is ticked off rather than deleted, that
+# an entry without the `[fm:<task-id>]` marker is never touched, that the whole
+# thing is inert until this home opts in, and that a wedged Reminders step is
+# bounded instead of hanging its caller.
 #
 # The Reminders app itself is replaced through FM_REMINDERS_EXEC by the fake
 # below, so this suite runs anywhere - including CI, which has no Reminders and
@@ -25,9 +26,10 @@ command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit
 #
 # One TSV row per reminder: completed<TAB>name<TAB>body<TAB>due. It matches
 # entries exactly the way the real AppleScript does - on the `[fm:<id>]` body
-# prefix, never on a name or a row position - so a test that shows an unmarked
-# row surviving is showing the real matching rule surviving, not a convenience
-# of the fake.
+# as a SUFFIX, or as a legacy PREFIX from an entry an older version of this
+# script created, never on a name or a row position - so a test that shows an
+# unmarked row surviving is showing the real matching rule surviving, not a
+# convenience of the fake.
 STORE="$TMP_ROOT/reminders.tsv"
 FAKE="$TMP_ROOT/fake-reminders.sh"
 cat > "$FAKE" <<'FAKE_EOF'
@@ -44,15 +46,28 @@ if [ -n "${FAKE_REMINDERS_HANG:-}" ] \
   exit 0
 fi
 [ -z "${FAKE_REMINDERS_FAIL:-}" ] || { printf '%s\n' "$FAKE_REMINDERS_FAIL" >&2; exit 1; }
+hasMarker='function hasMarker(b,    n) { n = length(p); return (substr(b, length(b) - n + 1) == p) || (substr(b, 1, n) == p) }'
 case "$verb" in
   list)
-    awk -F'\t' -v OFS='\t' '$1 == "0" && $3 ~ /^\[fm:[A-Za-z0-9._-]+\]/ {
-      id = $3
-      sub(/^\[fm:/, "", id)
-      sub(/\].*$/, "", id)
-      # A synthetic reminder identity and age: the store never removes a row, so
-      # its line number is stable within a run and earlier lines are older.
-      print id, "r" NR, ($4 == "1" ? "1" : "0"), NR - 1000
+    awk -F'\t' -v OFS='\t' '
+      function markerId(body,    id) {
+        if (body ~ /\[fm:[A-Za-z0-9._-]+\]$/) {
+          id = body
+          sub(/\]$/, "", id); sub(/^.*\[fm:/, "", id)
+          return id
+        }
+        if (body ~ /^\[fm:[A-Za-z0-9._-]+\]/) {
+          id = body
+          sub(/\].*$/, "", id); sub(/^\[fm:/, "", id)
+          return id
+        }
+        return ""
+      }
+      $1 == "0" {
+        id = markerId($3)
+        # A synthetic reminder identity and age: the store never removes a row, so
+        # its line number is stable within a run and earlier lines are older.
+        if (id != "") print id, "r" NR, ($4 == "1" ? "1" : "0"), NR - 1000
     }' "$store"
     ;;
   upsert)
@@ -61,11 +76,11 @@ case "$verb" in
     body=$4
     due=$5
     if [ -n "${FAKE_REMINDERS_COMPLETE_BEFORE_UPSERT:-}" ]; then
-      awk -F'\t' -v OFS='\t' -v p="$prefix" 'BEGIN { n = length(p) } $1 == "0" && substr($3, 1, n) == p { $1 = "1" } { print }' "$store" > "$store.tmp" && mv "$store.tmp" "$store"
+      awk -F'\t' -v OFS='\t' -v p="$prefix" "$hasMarker"' $1 == "0" && hasMarker($3) { $1 = "1" } { print }' "$store" > "$store.tmp" && mv "$store.tmp" "$store"
     fi
     exists=0
-    if awk -F'\t' -v p="$prefix" 'BEGIN { n = length(p) }
-      $1 == "0" && substr($3, 1, n) == p { found = 1 } END { exit !found }' "$store"; then
+    if awk -F'\t' -v p="$prefix" "$hasMarker"'
+      $1 == "0" && hasMarker($3) { found = 1 } END { exit !found }' "$store"; then
       exists=1
     fi
     if [ -n "${FAKE_REMINDERS_GATE:-}" ]; then
@@ -74,9 +89,8 @@ case "$verb" in
     fi
     if [ "$exists" -eq 1 ]; then
       before=$(cat "$store")
-      awk -F'\t' -v OFS='\t' -v p="$prefix" -v n="$name" -v b="$body" '
-        BEGIN { len = length(p) }
-        $1 == "0" && substr($3, 1, len) == p && !done { $2 = n; $3 = b; done = 1 }
+      awk -F'\t' -v OFS='\t' -v p="$prefix" -v n="$name" -v b="$body" "$hasMarker"'
+        $1 == "0" && hasMarker($3) && !done { $2 = n; $3 = b; done = 1 }
         { print }
       ' "$store" > "$store.tmp" && mv "$store.tmp" "$store"
       if [ "$before" = "$(cat "$store")" ]; then printf 'unchanged\n'; else printf 'updated\n'; fi
@@ -87,9 +101,8 @@ case "$verb" in
     ;;
   complete)
     prefix="[fm:$2]"
-    awk -F'\t' -v OFS='\t' -v p="$prefix" '
-      BEGIN { len = length(p) }
-      $1 == "0" && substr($3, 1, len) == p { $1 = "1"; n++ }
+    awk -F'\t' -v OFS='\t' -v p="$prefix" "$hasMarker"'
+      $1 == "0" && hasMarker($3) { $1 = "1"; n++ }
       { print }
       END { }
     ' "$store" > "$store.tmp" && mv "$store.tmp" "$store"
@@ -100,9 +113,8 @@ case "$verb" in
     # alone can never reach an unmarked row.
     prefix="[fm:$2]"
     target=$3
-    awk -F'\t' -v OFS='\t' -v p="$prefix" -v t="$target" '
-      BEGIN { len = length(p) }
-      $1 == "0" && substr($3, 1, len) == p && ("r" NR) == t { $1 = "1"; n++ }
+    awk -F'\t' -v OFS='\t' -v p="$prefix" -v t="$target" "$hasMarker"'
+      $1 == "0" && hasMarker($3) && ("r" NR) == t { $1 = "1"; n++ }
       { print }
       END { }
     ' "$store" > "$store.tmp" && mv "$store.tmp" "$store"
@@ -159,7 +171,11 @@ printf '\n' > "$HOME_DIR/config/captain-reminders"
 
 OUT=$(run status 2>&1)
 assert_contains "$OUT" "would add call-a" "status names the call it would add"
+assert_contains "$OUT" "alert the captain" "status says the new entry would alert him"
 [ "$(rows)" = 0 ] || fail "status must not write to the list"
+OUT=$(run status 2>&1)
+assert_contains "$OUT" "alert the captain" \
+  "a second plan still expects to alert him, so no plan ever spent his one alert"
 pass "status prints the plan and touches nothing"
 
 # --- the projection itself ----------------------------------------------------
@@ -169,11 +185,17 @@ assert_contains "$OUT" "added call-a" "sync reports the call it added"
 [ "$(rows)" = 1 ] || fail "expected exactly one reminder, list holds: $(cat "$STORE")"
 assert_contains "$(row_for call-a)" "Pick the exec path" "the reminder is titled with the task title"
 assert_contains "$(row_for call-a)" "three ways forward" "the reminder note carries the hold reason"
+assert_contains "$(row_for call-a)" "demo" "the reminder note says which project the call belongs to"
 assert_contains "$(row_for call-a)" "[fm:call-a]" "the reminder note carries the task marker"
 case "$(row_for call-a)" in
-  *$'\t'0) pass "an unnamed call is projected without an alert" ;;
-  *) fail "an unnamed call must not be given a due time: $(row_for call-a)" ;;
+  *'[fm:call-a]'$'\t'*) pass "the marker sits at the end of the note, behind the sentence he reads" ;;
+  *) fail "the marker must be the tail of the note, got: $(row_for call-a)" ;;
 esac
+case "$(row_for call-a)" in
+  *$'\t'1) pass "every new call is created with a due time so Reminders raises it" ;;
+  *) fail "a new call must alert the captain: $(row_for call-a)" ;;
+esac
+assert_contains "$OUT" "alerted the captain" "sync says it alerted him for the new call"
 
 # --- reruns are idempotent -----------------------------------------------------
 
@@ -244,11 +266,11 @@ FM_LOCK_STALE_AFTER=0 FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   || fail "stale-lock recovery duplicated the entry: $(cat "$CONCURRENT_STORE")"
 pass "a projection reclaims a lock whose owner process died"
 
-# --- a named push never stands down on lock contention ------------------------
+# --- a run carrying a just-registered call never stands down ------------------
 #
 # An ordinary projection may skip, because the lock holder is deriving the same
-# set. A --notify projection may not: the holder's snapshot predates this call,
-# so skipping would drop the one alert the caller authorized, silently.
+# set. A --fresh projection may not: the holder's snapshot predates this call,
+# so skipping would leave the captain's newest call out of his list entirely.
 
 : > "$CONCURRENT_STORE"
 : > "$CONCURRENT_LOG"
@@ -269,25 +291,25 @@ if [ ! -e "$CONCURRENT_GATE.entered" ]; then
   wait "$FIRST_PID" 2>/dev/null || true
   fail "the lock-owning projection never reached its create boundary"
 fi
-NOTIFY_START=$(date +%s)
-NOTIFY_OUT=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+FRESH_START=$(date +%s)
+FRESH_OUT=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
   FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$CONCURRENT_STORE" \
   FAKE_REMINDERS_LOG="$CONCURRENT_LOG" FM_REMINDERS_TIMEOUT_SECS=2 \
-  "$REMINDERS" sync --notify call-a 2>&1)
-NOTIFY_RC=$?
-NOTIFY_ELAPSED=$(( $(date +%s) - NOTIFY_START ))
+  "$REMINDERS" sync --fresh call-a 2>&1)
+FRESH_RC=$?
+FRESH_ELAPSED=$(( $(date +%s) - FRESH_START ))
 : > "$CONCURRENT_GATE.release"
 wait "$FIRST_PID" 2>/dev/null || true
-[ "$NOTIFY_RC" -ne 0 ] \
-  || fail "a named push that never reached the list must not report success"
-assert_contains "$NOTIFY_OUT" "NOT delivered" \
-  "a named push that ran out of time says the alert was not delivered"
-assert_contains "$NOTIFY_OUT" "call-a" "the undelivered alert names the call it was for"
-[ "$NOTIFY_ELAPSED" -ge 1 ] \
-  || fail "a named push must wait for the lock, not stand down immediately (${NOTIFY_ELAPSED}s)"
-[ "$NOTIFY_ELAPSED" -lt 30 ] \
-  || fail "a named push must stop waiting at its own deadline (${NOTIFY_ELAPSED}s)"
-pass "a named push waits for the lock and reports an undelivered alert rather than exiting clean"
+[ "$FRESH_RC" -ne 0 ] \
+  || fail "a run that never reached the list must not report success"
+assert_contains "$FRESH_OUT" "did NOT reach the captain's list" \
+  "a run that waited out its deadline says the call never reached him"
+assert_contains "$FRESH_OUT" "call-a" "the undelivered call is named"
+[ "$FRESH_ELAPSED" -ge 1 ] \
+  || fail "a named run must wait for the lock, not stand down immediately (${FRESH_ELAPSED}s)"
+[ "$FRESH_ELAPSED" -lt 30 ] \
+  || fail "a named run must stop waiting at its own deadline (${FRESH_ELAPSED}s)"
+pass "a run carrying a just-registered call waits for the lock and reports failure rather than exiting clean"
 
 # --- a call that is not held for the captain is not projected ------------------
 
@@ -324,6 +346,74 @@ assert_contains "$(cat "$STORE")" $'0\tcall-a\t\t0' \
   || fail "an unmarked reminder was duplicated or removed"
 pass "entries without the marker are never renamed, rewritten, or completed"
 
+# --- a legacy leading-marker entry converts in place, never rings again --------
+#
+# A note written by a version of this script before the marker moved to the
+# tail carries `[fm:<id>] reason` instead of `reason [fm:<id>]`. Reading must
+# still recognize it, so the call it represents keeps matching the entry the
+# captain already has instead of getting a silent duplicate; writing rewrites
+# it to the tail form in place, on the very first sync, and that rewrite alone
+# must never ring him again.
+
+LEGACY_HOME="$TMP_ROOT/legacy-home"
+mkdir -p "$LEGACY_HOME/data" "$LEGACY_HOME/state" "$LEGACY_HOME/config"
+cp "$ROOT/.tasks.toml" "$LEGACY_HOME/.tasks.toml"
+cat > "$LEGACY_HOME/data/backlog.md" <<'BACKLOG'
+## In flight
+
+## Queued
+
+## Done
+BACKLOG
+printf '\n' > "$LEGACY_HOME/config/captain-reminders"
+LEGACY_STORE="$TMP_ROOT/legacy-reminders.tsv"
+
+legacy_axi() { (cd "$LEGACY_HOME" && tasks-axi "$@" >/dev/null); }
+legacy_run() {  # <args...>
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LEGACY_HOME" FM_CONFIG_OVERRIDE="$LEGACY_HOME/config" \
+    FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$LEGACY_STORE" \
+    "$REMINDERS" "$@"
+}
+legacy_row() {  # <task-id>
+  grep -F "[fm:$1]" "$LEGACY_STORE" 2>/dev/null || true
+}
+legacy_note() {  # <task-id>
+  legacy_row "$1" | awk -F'\t' '{ print $3 }'
+}
+
+legacy_axi add legacy-a "Renew the certificate" --repo demo
+legacy_axi hold legacy-a --reason "still waiting on him" --kind captain
+
+{
+  printf '0\tRenew the certificate\t[fm:legacy-a] still waiting on him\t0\n'
+  printf '0\tThe captain wrote this himself\tno marker at all\t0\n'
+} > "$LEGACY_STORE"
+
+OUT=$(legacy_run sync 2>&1)
+assert_not_contains "$OUT" "alerted the captain" \
+  "converting a legacy leading-marker entry must not ring him again"
+[ "$(legacy_row legacy-a | grep -c .)" = 1 ] \
+  || fail "converting the legacy entry must not create a duplicate: $(legacy_row legacy-a)"
+case "$(legacy_note legacy-a)" in
+  *'[fm:legacy-a]') pass "the legacy leading-marker entry is rewritten to the trailing form in place" ;;
+  *) fail "expected the note rewritten to the trailing marker form, got: $(legacy_note legacy-a)" ;;
+esac
+assert_contains "$(cat "$LEGACY_STORE")" $'0\tThe captain wrote this himself\tno marker at all\t0' \
+  "converting the legacy entry never touches an entry the captain wrote himself"
+
+BEFORE=$(cat "$LEGACY_STORE")
+OUT=$(legacy_run sync 2>&1)
+[ -z "$OUT" ] || fail "a further sync of a converted entry must be a no-op, got: $OUT"
+[ "$BEFORE" = "$(cat "$LEGACY_STORE")" ] || fail "a further sync rewrote an already-converted entry"
+pass "a further sync of a converted entry is a no-op"
+
+legacy_axi unhold legacy-a
+legacy_run sync >/dev/null 2>&1
+case "$(legacy_row legacy-a)" in
+  1$'\t'*) pass "a converted entry is still ticked off automatically once no longer waiting on him" ;;
+  *) fail "the converted entry was not completed once no longer held: $(legacy_row legacy-a)" ;;
+esac
+
 # --- closing a call ticks the entry off and never deletes it -------------------
 
 assert_contains "$(row_for call-a)" "narrowed to A or C" "the closed call's entry survives"
@@ -341,32 +431,39 @@ assert_contains "$(row_for call-a)" "reopened after the worker" "a re-held call 
   || fail "expected the completed entry plus a fresh one, got: $(row_for call-a)"
 pass "re-holding a closed call adds a new entry and leaves the completed one alone"
 
-# --- pushing is by name only ---------------------------------------------------
+# --- every new call alerts, and only ever once ---------------------------------
 
 axi unhold call-a
 run sync >/dev/null 2>&1
 axi add call-d "Approve the migration window" --repo demo
 axi hold call-d --reason "nothing ships until this is settled" --kind captain
-OUT=$(run sync --notify call-d 2>&1)
-assert_contains "$OUT" "alerted the captain" "a named call reports that it alerted the captain"
+OUT=$(run sync --fresh call-d 2>&1)
+assert_contains "$OUT" "alerted the captain" "a new call reports that it alerted the captain"
 case "$(row_for call-d)" in
-  *$'\t'1) pass "a named call is created with a due time so Reminders raises it" ;;
-  *) fail "expected a due time on the named call, got: $(row_for call-d)" ;;
+  *$'\t'1) pass "a new call is created with a due time so Reminders raises it" ;;
+  *) fail "expected a due time on the new call, got: $(row_for call-d)" ;;
 esac
-OUT=$(run sync --notify call-d 2>&1)
+OUT=$(run sync --fresh call-d 2>&1)
 assert_not_contains "$OUT" "alerted the captain" "a rerun does not re-alert a call already projected"
-OUT=$(FAKE_REMINDERS_COMPLETE_BEFORE_UPSERT=1 run sync --notify call-d 2>&1)
+
+# The captain ticks his entry off while the call is still open. Every query here
+# filters on `completed is false`, so the projection cannot see what he did and
+# restates the call - but the durable record of who has already been rung must
+# keep that restatement silent.
+OUT=$(FAKE_REMINDERS_COMPLETE_BEFORE_UPSERT=1 run sync --fresh call-d 2>&1)
 ACTIVE_CALL_D=$(row_for call-d | grep '^0' || true)
-assert_contains "$OUT" "alerted the captain" "a named call completed after listing still alerts its replacement"
+assert_contains "$OUT" "added call-d" "a call ticked off while still open is restated"
+assert_not_contains "$OUT" "alerted the captain" \
+  "restating a call the captain has already read must not alert him again"
 case "$ACTIVE_CALL_D" in
-  *$'\t'1) pass "a replacement created after a stale list snapshot keeps its due time" ;;
-  *) fail "the replacement lost its due time: $(row_for call-d)" ;;
+  *$'\t'0) pass "an entry recreated after the captain ticked it off stays silent" ;;
+  *) fail "the replacement rang the captain a second time: $(row_for call-d)" ;;
 esac
 
-OUT=$(run sync --notify not-a-real-task 2>&1)
-assert_contains "$OUT" "nothing to alert for not-a-real-task" \
+OUT=$(run sync --fresh not-a-real-task 2>&1)
+assert_contains "$OUT" "nothing to project for not-a-real-task" \
   "a named task that is not a captain call is reported rather than silently dropped"
-pass "an alert happens only when the caller names the call, and only on first projection"
+pass "every call alerts him on its first projection and never again"
 
 # --- a long reason is bounded and says so --------------------------------------
 
@@ -448,7 +545,7 @@ chmod +x "$BROKEN_BIN/tasks-axi"
 
 FAILURE_STORE="$TMP_ROOT/failure-reminders.tsv"
 FAILURE_LOG="$TMP_ROOT/failure-reminders.log"
-printf '0\tStale read\t[fm:stale-read] old reason\t0\n' > "$FAILURE_STORE"
+printf '0\tStale read\told reason [fm:stale-read]\t0\n' > "$FAILURE_STORE"
 for mode in hang-list hang-show; do
   BEFORE=$(cat "$FAILURE_STORE")
   : > "$FAILURE_LOG"
@@ -491,7 +588,7 @@ axi unhold call-d
 axi unhold call-e
 axi unhold call-due
 axi unhold call-future
-printf '0\tAnswered call\t[fm:empty-stale] old reason\t0\n' >> "$STORE"
+printf '0\tAnswered call\told reason [fm:empty-stale]\t0\n' >> "$STORE"
 OUT=$(run sync 2>&1)
 assert_contains "$OUT" "ticked off empty-stale" "an empty captain snapshot still completes stale entries"
 case "$(row_for empty-stale)" in
@@ -531,13 +628,24 @@ hold_cmd() {  # <args...>
 }
 
 ID=$(hold_cmd hold call-f --title "Choose the rollout order" --repo demo \
-  --reason "two workers are idle until this is settled" --notify 2>/dev/null)
+  --reason "two workers are idle until this is settled" 2>/dev/null)
 [ "$ID" = call-f ] || fail "hold must still print only the task id, got: $ID"
 assert_contains "$(row_for call-f)" "Choose the rollout order" "creating a captain call projects it"
 case "$(row_for call-f)" in
-  *$'\t'1) pass "a hold raised with --notify alerts the captain" ;;
-  *) fail "expected --notify to set a due time, got: $(row_for call-f)" ;;
+  *$'\t'1) pass "registering a captain call alerts him, with no flag to remember" ;;
+  *) fail "expected a registered call to set a due time, got: $(row_for call-f)" ;;
 esac
+
+# The old per-call urgency flag is still accepted so a caller carrying it cannot
+# lose a captain call to a usage error; it simply decides nothing any more.
+ID=$(hold_cmd hold call-f2 --title "Approve the vendor swap" --repo demo \
+  --reason "the old contract lapses on Friday" --notify 2>/dev/null)
+[ "$ID" = call-f2 ] || fail "hold must still accept the retired flag, got: $ID"
+case "$(row_for call-f2)" in
+  *$'\t'1) pass "the retired urgency flag is accepted and changes nothing" ;;
+  *) fail "the retired flag changed the outcome: $(row_for call-f2)" ;;
+esac
+hold_cmd answer call-f2 --decision-file <(printf 'Swap it.\n') >/dev/null 2>&1
 
 printf 'Go with the second order.\n' > "$TMP_ROOT/decision.txt"
 hold_cmd answer call-f --decision-file "$TMP_ROOT/decision.txt" >/dev/null 2>&1
@@ -634,18 +742,18 @@ converge_run() {
     FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$CONVERGE_STORE" "$REMINDERS" "$@"
 }
 open_marked() {  # <task-id>
-  awk -F'\t' -v m="[fm:$1]" 'BEGIN { n = length(m) } $1 == "0" && substr($3, 1, n) == m' "$CONVERGE_STORE"
+  awk -F'\t' -v m="[fm:$1]" 'BEGIN { n = length(m) } $1 == "0" && substr($3, length($3) - n + 1) == m' "$CONVERGE_STORE"
 }
 all_marked() {  # <task-id>
-  awk -F'\t' -v m="[fm:$1]" 'BEGIN { n = length(m) } substr($3, 1, n) == m' "$CONVERGE_STORE"
+  awk -F'\t' -v m="[fm:$1]" 'BEGIN { n = length(m) } substr($3, length($3) - n + 1) == m' "$CONVERGE_STORE"
 }
 
 axi add dup-a "Duplicated call" --repo demo
 axi hold dup-a --reason "two entries exist for this one call" --kind captain
 {
-  printf '0\tDuplicated call\t[fm:dup-a] two entries exist for this one call\t0\n'
+  printf '0\tDuplicated call\ttwo entries exist for this one call [fm:dup-a]\t0\n'
   printf '0\tThe captain wrote this himself\tno marker at all\t0\n'
-  printf '0\tDuplicated call\t[fm:dup-a] two entries exist for this one call\t1\n'
+  printf '0\tDuplicated call\ttwo entries exist for this one call [fm:dup-a]\t1\n'
 } > "$CONVERGE_STORE"
 OUT=$(converge_run sync 2>&1)
 [ "$(open_marked dup-a | awk 'END { print NR }')" = 1 ] \
@@ -662,8 +770,8 @@ assert_contains "$(cat "$CONVERGE_STORE")" $'0\tThe captain wrote this himself\t
 pass "duplicate entries converge to the one that will alert, and are completed rather than deleted"
 
 {
-  printf '0\tDuplicated call\t[fm:dup-a] two entries exist for this one call\told\t0\n'
-  printf '0\tDuplicated call\t[fm:dup-a] two entries exist for this one call\t0\n'
+  printf '0\tDuplicated call\ttwo entries exist for this one call [fm:dup-a]\told\t0\n'
+  printf '0\tDuplicated call\ttwo entries exist for this one call [fm:dup-a]\t0\n'
 } > "$CONVERGE_STORE"
 sed -i.bak 's/\told\t0$/\t0/' "$CONVERGE_STORE" && rm -f "$CONVERGE_STORE.bak"
 converge_run sync >/dev/null 2>&1
@@ -710,7 +818,7 @@ pass "a list read starting with zero open entries reports nothing to reconcile"
 # 1: exactly one open marked entry already exists before this home's first sync.
 read_axi add read-one "Read one" --repo demo
 read_axi hold read-one --reason "single pre-existing entry" --kind captain
-printf '0\tRead one\t[fm:read-one] single pre-existing entry\t0\n' > "$READ_STORE"
+printf '0\tRead one\tsingle pre-existing entry（项目：demo） [fm:read-one]\t0\n' > "$READ_STORE"
 OUT=$(read_run sync 2>&1)
 [ -z "$OUT" ] || fail "a matching pre-existing single entry must need no change, got: $OUT"
 [ "$(awk 'END { print NR }' "$READ_STORE")" = 1 ] \
@@ -723,9 +831,9 @@ read_axi add read-two "Read two" --repo demo
 read_axi hold read-two --reason "second pre-existing entry" --kind captain
 read_axi add read-three "Read three" --repo demo
 {
-  printf '0\tRead one\t[fm:read-one] single pre-existing entry\t0\n'
-  printf '0\tRead two\t[fm:read-two] second pre-existing entry\t0\n'
-  printf '0\tStale one\t[fm:read-three] no longer held\t0\n'
+  printf '0\tRead one\tsingle pre-existing entry（项目：demo） [fm:read-one]\t0\n'
+  printf '0\tRead two\tsecond pre-existing entry（项目：demo） [fm:read-two]\t0\n'
+  printf '0\tStale one\tno longer held [fm:read-three]\t0\n'
 } > "$READ_STORE"
 OUT=$(read_run sync 2>&1)
 assert_contains "$OUT" "ticked off read-three" \
@@ -735,3 +843,101 @@ assert_not_contains "$OUT" "added read-two" "a many-entry read must not re-add a
 [ "$(awk -F'\t' '$1 == "0"' "$READ_STORE" | awk 'END { print NR }')" = 2 ] \
   || fail "a many-entry read left the wrong number of open entries: $(cat "$READ_STORE")"
 pass "a list read starting with several pre-existing open entries reconciles all of them correctly in one pass"
+
+# --- several calls landing at once, and one of them answered ------------------
+#
+# The whole reason this list exists: several pieces of work finish close
+# together, each raising something only the captain can settle, and the one that
+# needs him gets buried in the session. Each call must arrive as its OWN entry
+# with its OWN alert, answering one must clear only that one, and no later sync
+# may rebuild what he has cleared or ring him for what he has already read.
+
+MULTI_HOME="$TMP_ROOT/multi-home"
+mkdir -p "$MULTI_HOME/data" "$MULTI_HOME/state" "$MULTI_HOME/config"
+cp "$ROOT/.tasks.toml" "$MULTI_HOME/.tasks.toml"
+cat > "$MULTI_HOME/data/backlog.md" <<'BACKLOG'
+## In flight
+
+## Queued
+
+## Done
+BACKLOG
+printf '\n' > "$MULTI_HOME/config/captain-reminders"
+MULTI_STORE="$TMP_ROOT/multi-reminders.tsv"
+: > "$MULTI_STORE"
+
+multi_hold() {  # <args...>
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$MULTI_HOME" FM_STATE_OVERRIDE="$MULTI_HOME/state" \
+    FM_DATA_OVERRIDE="$MULTI_HOME/data" FM_CONFIG_OVERRIDE="$MULTI_HOME/config" \
+    FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$MULTI_STORE" \
+    "$HOLD" "$@"
+}
+multi_run() {  # <args...>
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$MULTI_HOME" FM_CONFIG_OVERRIDE="$MULTI_HOME/config" \
+    FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$MULTI_STORE" \
+    "$REMINDERS" "$@"
+}
+multi_row() {  # <task-id>
+  grep -F "[fm:$1]" "$MULTI_STORE" 2>/dev/null || true
+}
+multi_open() {  # <task-id>
+  multi_row "$1" | grep '^0' || true
+}
+
+multi_hold hold pick-db --title "Choose which database the invoicing service uses" \
+  --repo billing --reason "两个方案都能跑，价钱差一倍，需要你选一个" >/dev/null 2>&1
+multi_hold hold sign-key --title "Renew the signing certificate" \
+  --repo mobile --reason "证书周五过期，续期需要你本人登录苹果账号" >/dev/null 2>&1
+
+[ "$(multi_open pick-db | grep -c .)" = 1 ] \
+  || fail "the first call is not exactly one open entry: $(multi_row pick-db)"
+[ "$(multi_open sign-key | grep -c .)" = 1 ] \
+  || fail "the second call is not exactly one open entry: $(multi_row sign-key)"
+case "$(multi_open pick-db)" in
+  *$'\t'1) ;;
+  *) fail "the first call did not alert him: $(multi_open pick-db)" ;;
+esac
+case "$(multi_open sign-key)" in
+  *$'\t'1) ;;
+  *) fail "the second call did not alert him: $(multi_open sign-key)" ;;
+esac
+assert_contains "$(multi_open sign-key)" "证书周五过期" "each entry carries its own sentence"
+assert_contains "$(multi_open sign-key)" "mobile" "each entry says which project it belongs to"
+pass "two calls raised together arrive as two separate entries, each with its own alert"
+
+printf '选方案 B。\n' > "$TMP_ROOT/multi-decision.txt"
+multi_hold answer pick-db --decision-file "$TMP_ROOT/multi-decision.txt" >/dev/null 2>&1
+case "$(multi_row pick-db)" in
+  1$'\t'*) ;;
+  *) fail "the answered call was not ticked off: $(multi_row pick-db)" ;;
+esac
+[ "$(multi_open sign-key | grep -c .)" = 1 ] \
+  || fail "answering one call disturbed the other: $(multi_row sign-key)"
+pass "answering one call ticks off only that call and leaves the rest of his list alone"
+
+# He clears the remaining entry himself in Reminders while the call is still
+# open, and deletes another outright. Neither may come back ringing.
+awk -F'\t' -v OFS='\t' '$3 ~ /\[fm:sign-key\]$/ { $1 = "1" } { print }' "$MULTI_STORE" \
+  > "$MULTI_STORE.tmp" && mv "$MULTI_STORE.tmp" "$MULTI_STORE"
+OUT=$(multi_run sync 2>&1)
+assert_not_contains "$OUT" "alerted the captain" \
+  "a call restated after he cleared it must not ring again"
+case "$(multi_open sign-key)" in
+  *$'\t'0) ;;
+  *) fail "the restated entry rang him a second time: $(multi_open sign-key)" ;;
+esac
+grep -v -F "[fm:sign-key]" "$MULTI_STORE" > "$MULTI_STORE.tmp" && mv "$MULTI_STORE.tmp" "$MULTI_STORE"
+OUT=$(multi_run sync 2>&1)
+assert_not_contains "$OUT" "alerted the captain" \
+  "a call restated after he deleted its entry must not ring again"
+case "$(multi_open sign-key)" in
+  *$'\t'0) ;;
+  *) fail "a deleted entry came back ringing: $(multi_open sign-key)" ;;
+esac
+OUT=$(multi_run sync 2>&1)
+assert_not_contains "$OUT" "alerted the captain" "a further rerun still rings nothing"
+[ "$(multi_open sign-key | grep -c .)" = 1 ] \
+  || fail "reruns left more than one open entry: $(multi_row sign-key)"
+[ "$(multi_open pick-db | grep -c .)" = 0 ] \
+  || fail "an answered call came back into his list: $(multi_row pick-db)"
+pass "clearing or deleting an entry never earns him a repeat alert, and an answered call never returns"

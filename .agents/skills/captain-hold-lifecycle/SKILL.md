@@ -1,8 +1,8 @@
 ---
 name: captain-hold-lifecycle
 description: >-
-  Agent-only policy for completing investigations and visual reviews without losing unresolved captain calls, and for closing what the captain owns with his actual words.
-  Load before treating an investigation, scout report, structured review, or Lavish review as complete, before ending a visual review that exposed a captain decision, when recording or routing the captain's answer, and on any RECORD DIVERGENCE line the wake drain prints.
+  Agent-only policy for registering everything the captain has to act on, completing investigations and visual reviews without losing unresolved captain calls, and closing what the captain owns with his actual words.
+  Load before treating an investigation, scout report, structured review, or Lavish review as complete, before ending a visual review that exposed a captain decision, when an escalation needs the captain to act and it is not obvious whether to register it, when recording or routing the captain's answer, and on any RECORD DIVERGENCE line the wake drain prints.
 user-invocable: false
 metadata:
   internal: true
@@ -13,6 +13,16 @@ metadata:
 A decision is not a separate thing: it is simply a task waiting on the captain.
 The one primitive is an ordinary backlog task held for the captain (`tasks-axi hold <id> --kind captain`), its identity is the task id, and `bin/fm-captain-hold.sh` owns the deterministic mechanics this policy relies on.
 The agent performs the semantic inventory because scripts must not infer captain calls from report prose, visual-review artifacts, terminal output, or chat.
+
+## What counts as needing him
+
+`AGENTS.md` section 9 already requires every escalation that needs the captain to act to be registered here; this section is the test for the cases where that is not obvious.
+Ask what happens next if he never answers.
+If the work cannot proceed, or proceeds wrongly, until he decides, chooses, approves, merges, supplies a credential, or does something only he can do, it needs him.
+If the next step is firstmate's own and his reading changes nothing, it does not, however important it is to tell him.
+Uncertainty resolves toward registering: an entry he clears in a second costs him almost nothing, while an unregistered call is one he can only find by scrolling back through a session.
+Register one call per thing he must settle, so answering one clears exactly one item; two questions he can answer independently are two calls, while a set of questions that only makes sense together is one.
+His answer is what closes the call, not the work it gated, so never leave a call open waiting for the landing that follows his decision.
 
 ## Policy
 
