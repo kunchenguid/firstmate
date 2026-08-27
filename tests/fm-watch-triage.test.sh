@@ -47,8 +47,12 @@ ack_stopped_cycle() {  # <state>
 watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
   local state=$1 fakebin=$2 out=$3
   shift 3
+  # Extra assignments arrive as expanded WORDS, which bash no longer recognizes as
+  # assignments, so they go through `env` rather than being written inline. That is
+  # what lets a caller override one of the defaults above (a wider FM_POLL, say)
+  # instead of running its own copy of this launch line.
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$out" &
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 env "$@" "$WATCH" > "$out" &
 }
 
 # Wait up to <limit> 0.1s ticks while <pid> stays alive; 0 if still alive, 1 if it died.
@@ -1618,9 +1622,12 @@ test_endpoint_gone_alarms_despite_a_declared_pause() {
   key=$(printf '%s' "$window" | tr ':/.' '___')
   # The window is gone: the backend inventory is readable and does not list it, and
   # the capture fails - exactly what real tmux does for an absent target, verified
-  # against tmux 3.6a in docs/verification/runtime-backends.md.
-  unset FM_FAKE_TMUX_WINDOW FM_FAKE_TMUX_CAPTURE 2>/dev/null || true
-  export FM_FAKE_TMUX_MISSING_WINDOW=1
+  # against tmux 3.6a in docs/verification/runtime-backends.md. The flag file is what
+  # makes it gone, and it is never removed here, so every poll reads it as absent.
+  unset FM_FAKE_TMUX_CAPTURE 2>/dev/null || true
+  export FM_FAKE_TMUX_WINDOW="$window"
+  export FM_FAKE_TMUX_MISSING_WINDOW="$dir/gone.flag"
+  : > "$FM_FAKE_TMUX_MISSING_WINDOW"
   export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable'
 
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
@@ -1647,8 +1654,56 @@ test_endpoint_gone_alarms_despite_a_declared_pause() {
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
   [ "$wakes" -eq 0 ] || fail "a still-gone endpoint queued $wakes repeat alarms"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional lost-endpoint suppression stop"
-  unset FM_FAKE_CREW_STATE FM_FAKE_TMUX_MISSING_WINDOW
+  unset FM_FAKE_CREW_STATE FM_FAKE_TMUX_MISSING_WINDOW FM_FAKE_TMUX_WINDOW
   pass "a lost endpoint alarms once on its own evidence even under a standing declared pause"
+}
+
+# --- an ordinary teardown is not a lost endpoint -----------------------------
+# bin/fm-teardown.sh closes the runtime endpoint before it removes the task
+# metadata, and the watcher enumerates windows from that metadata without taking
+# the metadata lock, so a poll landing in that gap sees a window that is really
+# absent and really still recorded. Requiring the missing verdict on two
+# consecutive polls is what separates that completing task from a worker that
+# died: the alarm above still fires for an endpoint that stays gone, while a
+# single missing poll on its way out wakes nobody.
+test_teardown_race_does_not_alarm_as_a_lost_endpoint() {
+  local dir state fakebin out statusf window key sig pid wakes flag
+  dir=$(make_case endpoint-gone-teardown); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; statusf="$state/racing.status"
+  window="test:fm-racing"
+  flag="$dir/gone.flag"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/racing.meta"
+  printf 'paused: benchmark batch running, ~40-60 min expected\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-racing_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  unset FM_FAKE_TMUX_CAPTURE 2>/dev/null || true
+  export FM_FAKE_TMUX_WINDOW="$window"
+  export FM_FAKE_TMUX_MISSING_WINDOW="$flag"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable'
+  # Teardown has closed the endpoint but has not yet removed the metadata.
+  : > "$flag"
+
+  # A poll interval wide enough that the metadata removal below lands between the
+  # first missing poll and the second, which is the whole point of the fixture.
+  watch_bg "$state" "$fakebin" "$out" FM_POLL=3 FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=1200
+  pid=$!
+  # The first missing poll records a pending confirmation and nothing else.
+  wait_numeric_file "$state/.endpoint-gone-pending-$key" 150 \
+    || { reap "$pid"; fail "the first missing poll recorded no pending confirmation: $(cat "$out")"; }
+  [ -e "$state/.endpoint-gone-$key" ] \
+    && { reap "$pid"; fail "a single missing poll armed the lost-endpoint alarm"; }
+  # Teardown finishes: the metadata goes away, so the window stops being recorded
+  # at all and no second poll can ever confirm the first one.
+  rm -f "$state/racing.meta"
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a teardown-race window alarmed as a lost endpoint: $(cat "$out")"
+  fi
+  reap "$pid"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 0 ] || fail "an ordinary teardown queued $wakes lost-endpoint alarms"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional teardown-race stop"
+  unset FM_FAKE_CREW_STATE FM_FAKE_TMUX_MISSING_WINDOW FM_FAKE_TMUX_WINDOW
+  pass "an ordinary teardown's single missing poll never alarms as a lost endpoint"
 }
 
 test_wedge_escalation_resets_when_pane_becomes_active() {
@@ -3070,6 +3125,7 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_acknowledged_wedge_escalation_backs_off
 test_declared_pause_survives_a_redrawing_pane
 test_endpoint_gone_alarms_despite_a_declared_pause
+test_teardown_race_does_not_alarm_as_a_lost_endpoint
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
