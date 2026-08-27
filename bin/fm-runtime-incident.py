@@ -42,7 +42,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import urlparse
 
 
@@ -973,11 +973,19 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
             os.unlink(name)
 
 
-def atomic_write(path: Path, value: dict[str, Any]) -> None:
+def update_incident(
+    base: dict[str, Path],
+    incident_id: str,
+    transition: Callable[[dict[str, Any]], None],
+) -> dict[str, Any]:
+    path = incident_path(base, incident_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.with_suffix(".lock").open("a+") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        write_json(path, value)
+        record = read_incident(base, incident_id)
+        transition(record)
+        write_json(path, record)
+    return record
 
 
 def lifecycle_advanced(record: dict[str, Any]) -> bool:
@@ -1144,19 +1152,29 @@ def triage(args: argparse.Namespace) -> int:
 def approve(args: argparse.Namespace) -> int:
     base = paths()
     incident_id = validate_incident_id(args.incident)
-    record = read_incident(base, incident_id)
-    approval = record["approval"]
-    if not approval.get("required") or approval.get("status") != "pending":
-        raise IncidentError("incident has no pending operational approval")
-    if args.kind != approval.get("kind"):
-        raise IncidentError(f"approval kind must exactly match {approval.get('kind')}")
     now = utc_now()
-    approval.update({"status": "approved", "note": compact(args.note, 300), "approved_at": now})
-    record["phase"] = "repair"
-    record["updated_at"] = now
-    record["flow"] = flow_state("repair", code_required="no", approval_required=True)
-    record["safest_next_action"] = "Perform only the approved operational repair, then record it and verify the complete runtime path."
-    atomic_write(incident_path(base, incident_id), record)
+
+    def transition(record: dict[str, Any]) -> None:
+        approval = record["approval"]
+        if (
+            record.get("phase") != "approval"
+            or not approval.get("required")
+            or approval.get("status") != "pending"
+            or record.get("repair", {}).get("status") != "pending"
+            or record.get("verification", {}).get("status") != "pending"
+        ):
+            raise IncidentError("incident has no pending operational approval")
+        if args.kind != approval.get("kind"):
+            raise IncidentError(f"approval kind must exactly match {approval.get('kind')}")
+        approval.update({"status": "approved", "note": compact(args.note, 300), "approved_at": now})
+        record["phase"] = "repair"
+        record["updated_at"] = now
+        record["flow"] = flow_state("repair", code_required="no", approval_required=True)
+        record["safest_next_action"] = (
+            "Perform only the approved operational repair, then record it and verify the complete runtime path."
+        )
+
+    record = update_incident(base, incident_id, transition)
     output_record(record, args.json)
     return 0
 
@@ -1164,21 +1182,37 @@ def approve(args: argparse.Namespace) -> int:
 def repair(args: argparse.Namespace) -> int:
     base = paths()
     incident_id = validate_incident_id(args.incident)
-    record = read_incident(base, incident_id)
-    if record["diagnosis"]["code_change_required"] != "no":
-        raise IncidentError("an operational repair is allowed only after a no-code diagnosis")
-    if not record["diagnosis"].get("operational_repair_ready"):
-        raise IncidentError("the diagnosis has not identified an operational repair")
-    approval = record["approval"]
-    if approval.get("required") and approval.get("status") != "approved":
-        raise IncidentError("the exact operational approval is still pending")
     now = utc_now()
-    record["repair"] = {"status": "complete", "note": compact(args.note, 300), "recorded_at": now}
-    record["phase"] = "verification"
-    record["updated_at"] = now
-    record["flow"] = flow_state("verification", code_required="no", approval_required=bool(approval.get("required")))
-    record["safest_next_action"] = "Verify production identity, provider health, companion connectivity, and the complete user-visible runtime path."
-    atomic_write(incident_path(base, incident_id), record)
+
+    def transition(record: dict[str, Any]) -> None:
+        if record.get("phase") != "repair":
+            raise IncidentError("an operational repair must start from the repair phase")
+        if record.get("repair", {}).get("status") != "pending":
+            raise IncidentError("the operational repair is no longer pending")
+        if record.get("verification", {}).get("status") != "pending":
+            raise IncidentError("verification has already started or completed")
+        if record["diagnosis"]["code_change_required"] != "no":
+            raise IncidentError("an operational repair is allowed only after a no-code diagnosis")
+        if not record["diagnosis"].get("operational_repair_ready"):
+            raise IncidentError("the diagnosis has not identified an operational repair")
+        approval = record["approval"]
+        if approval.get("required") and approval.get("status") != "approved":
+            raise IncidentError("the exact operational approval is still pending")
+        if not approval.get("required") and approval.get("status") != "not_required":
+            raise IncidentError("the operational approval state is inconsistent")
+        record["repair"] = {"status": "complete", "note": compact(args.note, 300), "recorded_at": now}
+        record["phase"] = "verification"
+        record["updated_at"] = now
+        record["flow"] = flow_state(
+            "verification",
+            code_required="no",
+            approval_required=bool(approval.get("required")),
+        )
+        record["safest_next_action"] = (
+            "Verify production identity, provider health, companion connectivity, and the complete user-visible runtime path."
+        )
+
+    record = update_incident(base, incident_id, transition)
     output_record(record, args.json)
     return 0
 
@@ -1186,9 +1220,6 @@ def repair(args: argparse.Namespace) -> int:
 def verify(args: argparse.Namespace) -> int:
     base = paths()
     incident_id = validate_incident_id(args.incident)
-    record = read_incident(base, incident_id)
-    if record["repair"].get("status") != "complete":
-        raise IncidentError("record the approved repair before verification")
     evidence = load_evidence(Path(args.evidence).resolve())
     verification = evidence.get("verification") if isinstance(evidence.get("verification"), dict) else {}
     checks = list_of_objects(verification.get("checks"))
@@ -1206,25 +1237,32 @@ def verify(args: argparse.Namespace) -> int:
         for row in checks
     ]
     now = utc_now()
-    record["verification"] = {
-        "status": "complete" if complete else "failed",
-        "checks": safe_checks,
-        "recorded_at": now,
-    }
-    record["phase"] = "verification"
-    record["updated_at"] = now
-    record["flow"] = [
-        {"name": name, "status": "complete" if complete or name != "verification" else "current"}
-        for name in FLOW
-    ]
-    if not record["approval"].get("required"):
-        record["flow"][2]["status"] = "not_required"
-    record["safest_next_action"] = (
-        "Incident verification is complete; close the incident without code, release, or unrelated cleanup."
-        if complete
-        else "Verification did not prove the complete runtime path; keep the incident open and gather the failed check evidence."
-    )
-    atomic_write(incident_path(base, incident_id), record)
+
+    def transition(record: dict[str, Any]) -> None:
+        if record.get("phase") != "verification" or record["repair"].get("status") != "complete":
+            raise IncidentError("record the approved repair before verification")
+        if record.get("verification", {}).get("status") not in {"pending", "failed"}:
+            raise IncidentError("incident verification is already complete")
+        record["verification"] = {
+            "status": "complete" if complete else "failed",
+            "checks": safe_checks,
+            "recorded_at": now,
+        }
+        record["phase"] = "verification"
+        record["updated_at"] = now
+        record["flow"] = [
+            {"name": name, "status": "complete" if complete or name != "verification" else "current"}
+            for name in FLOW
+        ]
+        if not record["approval"].get("required"):
+            record["flow"][2]["status"] = "not_required"
+        record["safest_next_action"] = (
+            "Incident verification is complete; close the incident without code, release, or unrelated cleanup."
+            if complete
+            else "Verification did not prove the complete runtime path; keep the incident open and gather the failed check evidence."
+        )
+
+    record = update_incident(base, incident_id, transition)
     output_record(record, args.json)
     return 0 if complete else 1
 

@@ -228,6 +228,14 @@ test_external_quota_no_code_lifecycle_and_status() {
 EOF
   FM_HOME="$home" FM_INCIDENT_NOW=2026-08-26T20:07:00Z \
     "$INCIDENT" verify --incident quota-lifecycle --evidence "$home/verified.json" >/dev/null
+  if FM_HOME="$home" "$INCIDENT" repair --incident quota-lifecycle \
+    --note "repeat repair" >/dev/null 2>&1; then
+    fail "repeated repair regressed completed verification"
+  fi
+  if FM_HOME="$home" "$INCIDENT" verify --incident quota-lifecycle \
+    --evidence "$home/verified.json" >/dev/null 2>&1; then
+    fail "repeated verification rewrote a completed incident"
+  fi
   if run_triage "$home" quota-lifecycle "$repo" \
     "Titan companion cannot read state again" --evidence "$QUOTA_FIXTURE" >/dev/null 2>&1; then
     fail "retriage regressed an advanced incident lifecycle"
@@ -259,6 +267,69 @@ EOF
       and .flow == "triage → diagnosis → approval → repair → verification"
   ' >/dev/null || fail "bearings omitted the runtime-incident fast path: $bearings"
   pass "external quota failure requests one approval, records the narrow repair, and verifies the full path"
+}
+
+test_lifecycle_transitions_read_and_write_under_one_lock() {
+  local home origin repo record lock pending advanced ready release holder approver out i
+  home=$(make_home lifecycle-lock)
+  origin=$(make_origin lifecycle-lock)
+  repo=$home/projects/titan
+  clone_origin "$origin" "$repo"
+  run_triage "$home" lock-race "$repo" "Titan companion cannot read state" \
+    --evidence "$QUOTA_FIXTURE" >/dev/null
+  record=$home/state/incidents/lock-race.json
+  lock=$home/state/incidents/lock-race.lock
+  pending=$home/pending.json
+  advanced=$home/advanced.json
+  ready=$home/lock-ready
+  release=$home/lock-release
+  cp "$record" "$pending"
+  FM_HOME="$home" "$INCIDENT" approve --incident lock-race --kind paid_plan_change \
+    --note "Captain approved the Upstash plan upgrade." >/dev/null
+  FM_HOME="$home" "$INCIDENT" repair --incident lock-race \
+    --note "Upstash plan upgraded." >/dev/null
+  cp "$record" "$advanced"
+  cp "$pending" "$record"
+
+  python3 - "$lock" "$ready" "$release" <<'PY' &
+import fcntl
+from pathlib import Path
+import sys
+import time
+
+lock_path, ready_path, release_path = map(Path, sys.argv[1:])
+with lock_path.open("a+") as lock:
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    ready_path.touch()
+    while not release_path.exists():
+        time.sleep(0.01)
+PY
+  holder=$!
+  for i in $(seq 1 100); do
+    [ -e "$ready" ] && break
+    kill -0 "$holder" 2>/dev/null || fail "incident lock holder exited early"
+    sleep 0.01
+  done
+  [ -e "$ready" ] || fail "incident lock holder did not become ready"
+  FM_HOME="$home" "$INCIDENT" approve --incident lock-race --kind paid_plan_change \
+    --note "stale concurrent approval" >"$home/approve.out" 2>"$home/approve.err" &
+  approver=$!
+  sleep 0.2
+  kill -0 "$approver" 2>/dev/null || fail "concurrent approval did not wait for the incident lock"
+  cp "$advanced" "$record"
+  : > "$release"
+  wait "$holder" || fail "incident lock holder failed"
+  if wait "$approver"; then
+    fail "stale approval overwrote a repaired incident"
+  fi
+  out=$(FM_HOME="$home" "$INCIDENT" status --incident lock-race --json)
+  printf '%s' "$out" | jq -e '
+    .phase == "verification"
+      and .approval.status == "approved"
+      and .repair.status == "complete"
+      and .verification.status == "pending"
+  ' >/dev/null || fail "locked transition did not preserve the advanced incident: $out"
+  pass "incident transitions read, validate, mutate, and write under one lock"
 }
 
 test_proposed_hotfix_already_deployed() {
@@ -502,6 +573,7 @@ SH
 
 test_repository_and_worker_reconciliation
 test_external_quota_no_code_lifecycle_and_status
+test_lifecycle_transitions_read_and_write_under_one_lock
 test_proposed_hotfix_already_deployed
 test_proven_application_defect_escalates
 test_remaining_classifier_categories
