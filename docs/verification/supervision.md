@@ -782,7 +782,7 @@ bash -c '
 '
 rc=$?
 printf 'exit=%s\n' "$rc"
-exit 0
+exit "$rc"
 ```
 
 Full current-code output:
@@ -816,6 +816,101 @@ Full fixed output:
 ```text
 CASE revision=review-fixed test=test_secondmate_blocked_detail_with_legacy_token_wakes
 ok - a blocked event wins over legacy-relevant continuation prose
+exit=0
+```
+
+### Status-selector process-bound red/green record
+
+These cases ran on 2026-08-27 on the same platform and Bash version recorded above.
+The unfixed revision was `ef88783c71be8e882c975a1b6d5e4eb9d4dfc899`, and the fixed version was its review working tree with the source and test changes recorded in this section.
+The process-cost case was RED before and GREEN after, so it demonstrates the fix.
+The configurable-vocabulary case was GREEN before and after, so it is a regression guard for the existing selector contract rather than evidence that the performance defect was fixed.
+
+The exact unfixed process-cost command was:
+
+```sh
+printf 'CASE revision=ef88783-review11-unfixed test=test_status_selectors_bound_process_cost_across_history\n'
+bash -c '
+  . tests/wake-helpers.sh
+  eval "$(awk '\''$0 == "test_signal_reason_is_actionable_classifier" { exit } /^\\. .*BASH_SOURCE/ { next } { print }'\'' tests/fm-watch-triage.test.sh)"
+  test_status_selectors_bound_process_cost_across_history
+'
+rc=$?
+printf 'exit=%s\n' "$rc"
+exit 0
+```
+
+Full unfixed process-cost output:
+
+```text
+CASE revision=ef88783-review11-unfixed test=test_status_selectors_bound_process_cost_across_history
+not ok - selector shell subprocess work scaled with history: short=112 long=5712
+exit=1
+```
+
+The exact fixed process-cost command was:
+
+```sh
+printf 'CASE revision=review-fixed test=test_status_selectors_bound_process_cost_across_history\n'
+bash -c '
+  . tests/wake-helpers.sh
+  eval "$(awk '\''$0 == "test_signal_reason_is_actionable_classifier" { exit } /^\\. .*BASH_SOURCE/ { next } { print }'\'' tests/fm-watch-triage.test.sh)"
+  test_status_selectors_bound_process_cost_across_history
+'
+rc=$?
+printf 'exit=%s\n' "$rc"
+exit "$rc"
+```
+
+Full fixed process-cost output:
+
+```text
+CASE revision=review-fixed test=test_status_selectors_bound_process_cost_across_history
+ok - status selectors keep process cost constant across append-only history
+exit=0
+```
+
+The exact unfixed configurable-vocabulary command was:
+
+```sh
+printf 'CASE revision=ef88783-review11-unfixed test=test_status_selectors_preserve_configurable_vocabulary\n'
+bash -c '
+  . tests/wake-helpers.sh
+  eval "$(awk '\''$0 == "test_signal_reason_is_actionable_classifier" { exit } /^\\. .*BASH_SOURCE/ { next } { print }'\'' tests/fm-watch-triage.test.sh)"
+  test_status_selectors_preserve_configurable_vocabulary
+'
+rc=$?
+printf 'exit=%s\n' "$rc"
+exit 0
+```
+
+Full unfixed configurable-vocabulary output:
+
+```text
+CASE revision=ef88783-review11-unfixed test=test_status_selectors_preserve_configurable_vocabulary
+ok - status selectors preserve configurable state and relevance vocabularies
+exit=0
+```
+
+The exact fixed configurable-vocabulary command was:
+
+```sh
+printf 'CASE revision=review-fixed test=test_status_selectors_preserve_configurable_vocabulary\n'
+bash -c '
+  . tests/wake-helpers.sh
+  eval "$(awk '\''$0 == "test_signal_reason_is_actionable_classifier" { exit } /^\\. .*BASH_SOURCE/ { next } { print }'\'' tests/fm-watch-triage.test.sh)"
+  test_status_selectors_preserve_configurable_vocabulary
+'
+rc=$?
+printf 'exit=%s\n' "$rc"
+exit "$rc"
+```
+
+Full fixed configurable-vocabulary output:
+
+```text
+CASE revision=review-fixed test=test_status_selectors_preserve_configurable_vocabulary
+ok - status selectors preserve configurable state and relevance vocabularies
 exit=0
 ```
 

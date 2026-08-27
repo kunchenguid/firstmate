@@ -196,6 +196,110 @@ test_legacy_free_text_after_working_is_actionable_classifier() {
   pass "legacy captain-relevant free text after working remains actionable"
 }
 
+test_status_selectors_bound_process_cost_across_history() {
+  local dir state fakebin real_awk real_grep variant i
+  local short_shell long_shell short_scans long_scans
+  dir=$(make_case classify-selector-process-cost); state="$dir/state"
+  fakebin="$dir/fakebin"
+  real_awk=$(command -v awk)
+  real_grep=$(command -v grep)
+
+  cat > "$fakebin/awk" <<'SH'
+#!/usr/bin/env bash
+printf 'awk\n' >> "$FM_TEST_PROCESS_LOG"
+exec "$FM_TEST_REAL_AWK" "$@"
+SH
+  cat > "$fakebin/grep" <<'SH'
+#!/usr/bin/env bash
+printf 'grep\n' >> "$FM_TEST_PROCESS_LOG"
+exec "$FM_TEST_REAL_GREP" "$@"
+SH
+  chmod +x "$fakebin/awk" "$fakebin/grep"
+
+  for variant in short long; do
+    printf 'working: monitoring\n' > "$state/$variant.status"
+    i=0
+    while [ "$i" -lt 2 ]; do
+      printf 'detail %s\n' "$i" >> "$state/$variant.status"
+      i=$((i + 1))
+    done
+    if [ "$variant" = long ]; then
+      while [ "$i" -lt 202 ]; do
+        printf 'detail %s\n' "$i" >> "$state/$variant.status"
+        i=$((i + 1))
+      done
+    fi
+    printf 'PR #76 checks green\n' >> "$state/$variant.status"
+    : > "$dir/$variant.shell-trace"
+    : > "$dir/$variant.process-log"
+
+    CLASSIFY_LIB="$ROOT/bin/fm-classify-lib.sh" \
+      STATUS_FILE="$state/$variant.status" STATE_OUT="$dir/$variant.state" \
+      RELEVANT_OUT="$dir/$variant.relevant" TRACE_FILE="$dir/$variant.shell-trace" \
+      FAKEBIN="$fakebin" FM_TEST_PROCESS_LOG="$dir/$variant.process-log" \
+      FM_TEST_REAL_AWK="$real_awk" FM_TEST_REAL_GREP="$real_grep" \
+      bash -c '
+        . "$CLASSIFY_LIB"
+        PATH="$FAKEBIN:$PATH"
+        export PATH FM_TEST_PROCESS_LOG FM_TEST_REAL_AWK FM_TEST_REAL_GREP
+        exec 9>>"$TRACE_FILE"
+        set -T
+        trap '\''if [ "${BASH_SUBSHELL:-0}" -gt 0 ]; then printf "subshell\n" >&9; fi'\'' DEBUG
+        last_status_line "$STATUS_FILE" > "$STATE_OUT"
+        last_captain_relevant_status_line "$STATUS_FILE" > "$RELEVANT_OUT"
+        trap - DEBUG
+      ' || fail "$variant selector cost probe failed"
+
+    [ "$(cat "$dir/$variant.state")" = 'working: monitoring' ] \
+      || fail "$variant process probe changed state selection"
+    [ "$(cat "$dir/$variant.relevant")" = 'PR #76 checks green' ] \
+      || fail "$variant process probe changed relevance selection"
+  done
+
+  short_shell=$(wc -l < "$dir/short.shell-trace" | tr -d ' ')
+  long_shell=$(wc -l < "$dir/long.shell-trace" | tr -d ' ')
+  short_scans=$(wc -l < "$dir/short.process-log" | tr -d ' ')
+  long_scans=$(wc -l < "$dir/long.process-log" | tr -d ' ')
+  [ "$long_shell" -eq "$short_shell" ] \
+    || fail "selector shell subprocess work scaled with history: short=$short_shell long=$long_shell"
+  [ "$long_scans" -eq "$short_scans" ] \
+    || fail "selector external scans scaled with history: short=$short_scans long=$long_scans"
+  [ "$long_scans" -le 2 ] \
+    || fail "two selectors launched $long_scans external scans"
+  pass "status selectors keep process cost constant across append-only history"
+}
+
+test_status_selectors_preserve_configurable_vocabulary() {
+  local dir state status_file
+  dir=$(make_case classify-selector-vocabulary); state="$dir/state"
+  status_file="$state/task.status"
+
+  printf 'blocked [key=q1]: choose route\nawaiting: external release\n' > "$status_file"
+  [ "$(FM_CLASSIFY_PAUSED_VERB=awaiting last_status_line "$status_file")" = 'awaiting: external release' ] \
+    || fail "custom paused verb did not become the latest state event"
+  [ -z "$(FM_CLASSIFY_PAUSED_VERB=awaiting last_captain_relevant_status_line "$status_file")" ] \
+    || fail "custom paused verb did not mask earlier captain relevance"
+
+  printf 'blocked [key=q1]: choose route\nsettled [key=q1]: route chosen\n' > "$status_file"
+  [ "$(FM_CLASSIFY_RESOLVE_VERB=settled last_status_line "$status_file")" = 'settled [key=q1]: route chosen' ] \
+    || fail "custom resolved verb did not become the latest state event"
+  [ -z "$(FM_CLASSIFY_RESOLVE_VERB=settled last_captain_relevant_status_line "$status_file")" ] \
+    || fail "custom resolved verb did not mask earlier captain relevance"
+
+  printf 'blocked [key=q1]: choose route\ntransferred [key=q1]: captain owns it\n' > "$status_file"
+  [ "$(FM_CLASSIFY_CAPTAIN_HELD_VERB=transferred last_status_line "$status_file")" = 'transferred [key=q1]: captain owns it' ] \
+    || fail "custom captain-held verb did not become the latest state event"
+  [ -z "$(FM_CLASSIFY_CAPTAIN_HELD_VERB=transferred last_captain_relevant_status_line "$status_file")" ] \
+    || fail "custom captain-held verb did not mask earlier captain relevance"
+
+  printf 'working: monitoring\ncustom-verb: captain action\n' > "$status_file"
+  [ "$(FM_CAPTAIN_RE='custom-verb:' last_status_line "$status_file")" = 'working: monitoring' ] \
+    || fail "custom captain regex contaminated state-event selection"
+  [ "$(FM_CAPTAIN_RE='custom-verb:' last_captain_relevant_status_line "$status_file")" = 'custom-verb: captain action' ] \
+    || fail "custom captain regex did not preserve legacy relevance"
+  pass "status selectors preserve configurable state and relevance vocabularies"
+}
+
 test_stale_is_terminal_classifier() {
   local dir state
   dir=$(make_case classify-stale); state="$dir/state"
@@ -2643,6 +2747,8 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
 
 test_signal_reason_is_actionable_classifier
 test_legacy_free_text_after_working_is_actionable_classifier
+test_status_selectors_bound_process_cost_across_history
+test_status_selectors_preserve_configurable_vocabulary
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives

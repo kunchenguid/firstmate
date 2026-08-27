@@ -92,31 +92,41 @@ FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
-status_line_is_state_event() {
-  local verb pause resolve held
-  verb=$(status_line_verb "$1")
-  pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
-  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
-  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
-  case "$verb" in
-    working|needs-decision|blocked|done|failed)
-      return 0
-      ;;
-    "$pause"|"$resolve"|"$held")
-      return 0
-      ;;
-    *) return 1 ;;
-  esac
-}
-
 # Return the latest state-bearing event in a status file (empty if none).
 last_status_line() {
-  local f=$1 line last=""
+  local f=$1
   [ -e "$f" ] || return 0
-  while IFS= read -r line || [ -n "$line" ]; do
-    status_line_is_state_event "$line" && last=$line
-  done < "$f" 2>/dev/null || true
-  [ -z "$last" ] || printf '%s\n' "$last"
+  FM_CLASSIFY_SCAN_PAUSE="${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" \
+    FM_CLASSIFY_SCAN_RESOLVE="${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}" \
+    FM_CLASSIFY_SCAN_HELD="${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" \
+    awk '
+      function trim(value) {
+        sub(/^[[:space:]]+/, "", value)
+        sub(/[[:space:]]+$/, "", value)
+        return value
+      }
+      function line_verb(line, value) {
+        value = line
+        sub(/:.*/, "", value)
+        sub(/\[.*/, "", value)
+        return trim(value)
+      }
+      function is_state(verb) {
+        return verb == "working" || verb == "needs-decision" ||
+          verb == "blocked" || verb == "done" || verb == "failed" ||
+          verb == pause || verb == resolve || verb == held
+      }
+      BEGIN {
+        pause = ENVIRON["FM_CLASSIFY_SCAN_PAUSE"]
+        resolve = ENVIRON["FM_CLASSIFY_SCAN_RESOLVE"]
+        held = ENVIRON["FM_CLASSIFY_SCAN_HELD"]
+      }
+      {
+        line = $0
+        if (is_state(line_verb(line))) last = line
+      }
+      END { if (last != "") print last }
+    ' "$f" 2>/dev/null || true
 }
 
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
@@ -156,17 +166,53 @@ status_is_captain_relevant() {
 }
 
 last_captain_relevant_status_line() {
-  local f=$1 line last=""
+  local f=$1
   [ -e "$f" ] || return 0
-  while IFS= read -r line || [ -n "$line" ]; do
-    if status_line_is_state_event "$line"; then
-      last=$line
-    elif status_is_captain_relevant "$line"; then
-      last=$line
-    fi
-  done < "$f" 2>/dev/null || true
-  [ -n "$last" ] && status_is_captain_relevant "$last" || return 0
-  printf '%s\n' "$last"
+  FM_CLASSIFY_SCAN_CAPTAIN_RE="${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}" \
+    FM_CLASSIFY_SCAN_CUSTOM_RE="${FM_CAPTAIN_RE+x}" \
+    FM_CLASSIFY_SCAN_PAUSE="${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" \
+    FM_CLASSIFY_SCAN_RESOLVE="${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}" \
+    FM_CLASSIFY_SCAN_HELD="${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" \
+    awk '
+      function trim(value) {
+        sub(/^[[:space:]]+/, "", value)
+        sub(/[[:space:]]+$/, "", value)
+        return value
+      }
+      function line_verb(line, value) {
+        value = line
+        sub(/:.*/, "", value)
+        sub(/\[.*/, "", value)
+        return trim(value)
+      }
+      function is_state(verb) {
+        return verb == "working" || verb == "needs-decision" ||
+          verb == "blocked" || verb == "done" || verb == "failed" ||
+          verb == pause || verb == resolve || verb == held
+      }
+      function is_relevant(line, verb) {
+        if (line == "") return 0
+        verb = line_verb(line)
+        if (verb == "working" || verb == "resolved" ||
+            verb == "captain-held" || verb == pause) return 0
+        if (custom_re == "" &&
+            (verb == "done" || verb == "needs-decision" ||
+             verb == "blocked" || verb == "failed")) return 1
+        return tolower(line) ~ captain_re
+      }
+      BEGIN {
+        captain_re = tolower(ENVIRON["FM_CLASSIFY_SCAN_CAPTAIN_RE"])
+        custom_re = ENVIRON["FM_CLASSIFY_SCAN_CUSTOM_RE"]
+        pause = ENVIRON["FM_CLASSIFY_SCAN_PAUSE"]
+        resolve = ENVIRON["FM_CLASSIFY_SCAN_RESOLVE"]
+        held = ENVIRON["FM_CLASSIFY_SCAN_HELD"]
+      }
+      {
+        line = $0
+        if (is_state(line_verb(line)) || is_relevant(line)) last = line
+      }
+      END { if (last != "" && is_relevant(last)) print last }
+    ' "$f" 2>/dev/null || true
 }
 
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure
