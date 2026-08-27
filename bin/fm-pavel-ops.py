@@ -1543,7 +1543,7 @@ def collect_telegram(home: Home, args: argparse.Namespace) -> dict[str, Any]:
 
 
 def expected_outbound_contract(home: Home, event: dict[str, Any], purpose: str, text: str, outbound_id: str) -> dict[str, str]:
-    return {
+    expected = {
         "schema": OUTBOUND_SCHEMA,
         "id": outbound_id,
         "event_id": event["id"],
@@ -1551,6 +1551,15 @@ def expected_outbound_contract(home: Home, event: dict[str, Any], purpose: str, 
         "chat_id": str(home.config["telegram"].get("outbound_chat_id") or event["source"]["chat_id"]),
         "text_digest": sha(text),
     }
+    if purpose == "live-completion":
+        delivery_contract = event.get("delivery_contract")
+        if not isinstance(delivery_contract, dict) or delivery_contract.get("schema") != LIVE_CONTRACT_SCHEMA:
+            raise OpsError("Pavel live notification has no retained delivery contract")
+        expected["pr_url"] = str(delivery_contract.get("pr_url") or "")
+        expected["pr_head"] = str(delivery_contract.get("pr_head") or "")
+        if not expected["pr_url"] or not expected["pr_head"]:
+            raise OpsError("Pavel live notification has no retained PR identity")
+    return expected
 
 
 def validate_outbound_contract(outbound_id: str, outbound: dict[str, Any], expected: dict[str, str]) -> None:
@@ -1621,6 +1630,9 @@ def send_message(home: Home, args: argparse.Namespace) -> dict[str, Any]:
             "created_at": epoch(),
             "updated_at": epoch(),
         }
+        for key in ("pr_url", "pr_head"):
+            if key in expected:
+                outbound[key] = expected[key]
     if outbound.get("text_digest") != sha(args.text):
         raise OpsError(f"outbound {outbound_id} already exists with different text")
     outbound["status"] = "sending"

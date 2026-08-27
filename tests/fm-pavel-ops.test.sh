@@ -844,6 +844,10 @@ fi
 [ "$(run_ops inspect "$event" | json_field "['state']")" = notified ] || fail "confirmed Telegram receipt did not complete notification"
 assert_grep 'chat_id=group' "$HTTP_LOG" "Telegram completion used the wrong chat"
 assert_grep 'message' "$HOME_DIR/state/pavel-ops/outbox/$event-live-completion.json" "completion receipt was not retained"
+[ "$(json_field "['pr_url']" < "$HOME_DIR/state/pavel-ops/outbox/$event-live-completion.json")" = "https://github.com/o/r/pull/1" ] \
+  || fail "completion receipt did not retain the PR URL"
+[ "$(json_field "['pr_head']" < "$HOME_DIR/state/pavel-ops/outbox/$event-live-completion.json")" = "abc123" ] \
+  || fail "completion receipt did not retain the PR head"
 assert_grep 'pr-check' "$TASK_DB/.owners" "driver did not compose the PR registration owner"
 assert_grep 'pr-merge' "$TASK_DB/.owners" "driver did not compose the PR merge owner"
 assert_grep 'deploy '"$task_id" "$TASK_DB/.owners" "driver did not compose the deploy owner"
@@ -1328,6 +1332,8 @@ with open(outbox, "w", encoding="utf-8") as handle:
         "chat_id": "group",
         "text": text,
         "text_digest": hashlib.sha256(text.encode()).hexdigest(),
+        "pr_url": "https://github.com/o/r/pull/20",
+        "pr_head": "aa20bb",
         "status": "retryable",
         "attempts": 1,
         "created_at": now,
@@ -1386,6 +1392,8 @@ with open(outbox, "w", encoding="utf-8") as handle:
         "chat_id": "group",
         "text": text,
         "text_digest": hashlib.sha256(text.encode()).hexdigest(),
+        "pr_url": "https://github.com/o/r/pull/21",
+        "pr_head": "aa21bb",
         "status": "unknown",
         "attempts": 1,
         "created_at": now,
@@ -1442,6 +1450,8 @@ with open(outbox, "w", encoding="utf-8") as handle:
         "chat_id": "group",
         "text": text,
         "text_digest": hashlib.sha256(text.encode()).hexdigest(),
+        "pr_url": "https://github.com/o/r/pull/123",
+        "pr_head": "ab123c",
         "status": "retryable",
         "attempts": 1,
         "created_at": now,
@@ -1455,6 +1465,69 @@ run_ops drive "$live_retry" >/dev/null || fail "live retry did not reuse configu
 [ "$(run_ops inspect "$live_retry" | json_field "['state']")" = notified ] \
   || fail "live retry did not reconcile to notified"
 pass "live notification retries reuse the durable completion text"
+
+stale_receipt=$(ingest 141 51 'Проверить старый receipt после нового head' | json_field "['event']")
+run_ops classify "$stale_receipt" --as task --title 'Reject stale completion receipt' --intent 'Notify only the delivered PR head' \
+  --reason 'ordinary delivery' --authority ordinary >/dev/null
+stale_receipt_task=$(run_ops inspect "$stale_receipt" | json_field "['task_id']")
+set_delivery_contracts "$stale_receipt" "$stale_receipt_task" 'https://github.com/o/r/pull/139' 'aa139a'
+STALE_RECEIPT_FILE="$HOME_DIR/state/pavel-ops/events/$stale_receipt.json" STALE_RECEIPT_TASK="$stale_receipt_task" HOME_DIR="$HOME_DIR" python3 - <<'PY'
+import hashlib
+import json
+import os
+import time
+path = os.environ["STALE_RECEIPT_FILE"]
+with open(path, encoding="utf-8") as handle:
+    event = json.load(handle)
+now = int(time.time())
+event["completion_text"] = "Готово: проверено."
+event["live_url"] = "https://example.test/product"
+for state, evidence in [
+    ("dispatched", "Pi worker exists in isolated copy"),
+    ("validating", "no-mistakes run owns current head"),
+    ("delivery_ready", "checks green on exact PR head"),
+    ("merge_queued", "guarded merge accepted by forge"),
+    ("landed", "forge reports PR merged at verified head"),
+    ("live", "live probe passed for https://example.test/product"),
+]:
+    event["transitions"].append({"at": now, "from": event["state"], "to": state, "evidence": evidence})
+    event["state"] = state
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
+    handle.write("\n")
+outbox = os.path.join(os.path.dirname(path), "..", "outbox", event["id"] + "-live-completion.json")
+os.makedirs(os.path.dirname(outbox), exist_ok=True)
+text = event["completion_text"]
+with open(outbox, "w", encoding="utf-8") as handle:
+    json.dump({
+        "schema": "fm-pavel-ops-outbound.v1",
+        "id": event["id"] + "-live-completion",
+        "event_id": event["id"],
+        "purpose": "live-completion",
+        "chat_id": "group",
+        "text": text,
+        "text_digest": hashlib.sha256(text.encode()).hexdigest(),
+        "pr_url": "https://github.com/o/r/pull/139",
+        "pr_head": "aa139a",
+        "status": "delivered",
+        "attempts": 1,
+        "telegram_message_id": "1391",
+        "delivered_at": now,
+        "created_at": now,
+        "updated_at": now,
+    }, handle)
+PY
+set_delivery_contracts "$stale_receipt" "$stale_receipt_task" 'https://github.com/o/r/pull/139' 'bb139b'
+set_live_completion_contracts "$stale_receipt" "$stale_receipt_task" 'https://github.com/o/r/pull/139' 'bb139b' 'https://example.test/product'
+before_stale_receipt_sends=$(grep -c . "$HTTP_LOG")
+if run_ops send "$stale_receipt" --purpose live-completion --text 'Готово: проверено.' >/dev/null 2>&1; then
+  fail "delivered live-completion receipt for an old head notified a newer head"
+fi
+[ "$(grep -c . "$HTTP_LOG")" -eq "$before_stale_receipt_sends" ] \
+  || fail "stale delivered live-completion receipt sent again"
+[ "$(run_ops inspect "$stale_receipt" | json_field "['state']")" = live ] \
+  || fail "stale delivered live-completion receipt mutated the live event"
+pass "delivered live-completion receipts are bound to PR head"
 
 # A delivered completion receipt after a crash reconciles the event without sending again.
 crashed=$(ingest 108 18 'Поменять SEO заголовок' | json_field "['event']")
@@ -1501,6 +1574,8 @@ with open(os.environ["OUTBOX"], "w", encoding="utf-8") as handle:
         "chat_id": "group",
         "text": text,
         "text_digest": hashlib.sha256(text.encode()).hexdigest(),
+        "pr_url": "https://github.com/o/r/pull/2",
+        "pr_head": "aa22bb",
         "status": "delivered",
         "attempts": 1,
         "telegram_message_id": "999",
