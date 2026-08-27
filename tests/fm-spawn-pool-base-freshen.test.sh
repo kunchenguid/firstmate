@@ -158,6 +158,46 @@ test_unreachable_origin_refuses_stale_pool_base() {
   pass "an unreachable origin refuses a potentially stale pooled worktree"
 }
 
+test_reissued_pool_reseeds_local_env_file() {
+  local rec id out status source_mode source_uid source_gid target_mode target_uid target_gid
+  id='pool-env-local-r2'
+  rec=$(make_case env-local-reissue "$id")
+  read_case_record "$rec"
+
+  # The primary checkout owns the captain's local environment file. The pooled
+  # slot models a directory handed back after teardown without that ignored file.
+  : > "$PROJECT_DIR/.env.local"
+  chmod 0600 "$PROJECT_DIR/.env.local"
+  [ ! -e "$POOL_DIR/.env.local" ] \
+    || fail "the reissued-pool fixture unexpectedly started with .env.local"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should re-seed a reissued pool slot's .env.local"
+  [ -f "$POOL_DIR/.env.local" ] \
+    || fail "spawn did not restore .env.local in the reissued pool slot"
+
+  source_mode=$(stat -c %a "$PROJECT_DIR/.env.local" 2>/dev/null \
+    || stat -f %Lp "$PROJECT_DIR/.env.local")
+  source_uid=$(stat -c %u "$PROJECT_DIR/.env.local" 2>/dev/null \
+    || stat -f %u "$PROJECT_DIR/.env.local")
+  source_gid=$(stat -c %g "$PROJECT_DIR/.env.local" 2>/dev/null \
+    || stat -f %g "$PROJECT_DIR/.env.local")
+  target_mode=$(stat -c %a "$POOL_DIR/.env.local" 2>/dev/null \
+    || stat -f %Lp "$POOL_DIR/.env.local")
+  target_uid=$(stat -c %u "$POOL_DIR/.env.local" 2>/dev/null \
+    || stat -f %u "$POOL_DIR/.env.local")
+  target_gid=$(stat -c %g "$POOL_DIR/.env.local" 2>/dev/null \
+    || stat -f %g "$POOL_DIR/.env.local")
+  [ "$target_mode" = "$source_mode" ] \
+    || fail "re-seeded .env.local did not preserve its mode"
+  [ "$target_uid" = "$source_uid" ] \
+    || fail "re-seeded .env.local did not preserve its owner"
+  [ "$target_gid" = "$source_gid" ] \
+    || fail "re-seeded .env.local did not preserve its group"
+  pass "a reissued pooled worktree receives the primary checkout's local environment file"
+}
+
 test_direct_pr_and_scout_refresh_before_launch() {
   local rec id out status contract current
   for contract in direct-pr scout; do
@@ -456,6 +496,7 @@ test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
+test_reissued_pool_reseeds_local_env_file
 test_stale_submodule_pin_explains_itself
 test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work

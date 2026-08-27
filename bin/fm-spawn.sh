@@ -1839,6 +1839,35 @@ freshen_spawn_worktree_base() {  # <worktree>
   fi
 }
 
+# Seed the one checkout-local credential file from the captain's primary
+# checkout on every fresh Treehouse acquisition. Treehouse's reset/reissue path
+# does not restore ignored files, so this one owner deliberately handles both a
+# newly created slot and a reused slot after their common acquisition gate.
+seed_spawn_worktree_local_env() {  # <worktree>
+  local worktree=$1 source target tmp
+  source="$PROJ_ABS/.env.local"
+  target="$worktree/.env.local"
+  [ -f "$source" ] || return 0
+  if [ -d "$target" ]; then
+    echo "error: cannot seed .env.local because '$target' is a directory" >&2
+    return 1
+  fi
+  tmp=$(mktemp "$worktree/.fm-env-local.XXXXXX") || {
+    echo "error: could not create a private temporary file while seeding .env.local in '$worktree'" >&2
+    return 1
+  }
+  if ! cp -p "$source" "$tmp"; then
+    rm -f "$tmp"
+    echo "error: could not seed .env.local in '$worktree'" >&2
+    return 1
+  fi
+  if ! mv -f "$tmp" "$target"; then
+    rm -f "$tmp"
+    echo "error: could not publish the seeded .env.local in '$worktree'" >&2
+    return 1
+  fi
+}
+
 herdr_projection_meta_field_exact() {  # <meta> <key>
   local meta=$1 key=$2 count
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -2332,6 +2361,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
+  if [ "$BACKEND" != orca ]; then
+    seed_spawn_worktree_local_env "$WT" || exit 1
+  fi
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
