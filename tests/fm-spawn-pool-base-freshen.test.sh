@@ -345,6 +345,33 @@ test_remoteless_detached_primary_uses_configured_default() {
   pass "a detached remoteless primary resolves its default branch from init.defaultBranch"
 }
 
+test_remoteless_configured_default_beats_checked_out_feature_branch() {
+  local rec id out status trunk_tip feature_tip branch_head
+  id='pool-remoteless-config-wins-r11'
+  rec=$(make_remoteless_case remoteless-config-wins "$id" trunk)
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" checkout --quiet -b fm-unfinished-feature
+  printf 'unfinished feature work\n' > "$PROJECT_DIR/feature-only.txt"
+  git -C "$PROJECT_DIR" add feature-only.txt
+  git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm feature-work
+  git -C "$PROJECT_DIR" config init.defaultBranch "$DEFAULT_BRANCH"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should refresh from the configured default branch despite a checked-out feature branch"
+  trunk_tip=$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$DEFAULT_BRANCH")
+  feature_tip=$(git -C "$PROJECT_DIR" rev-parse refs/heads/fm-unfinished-feature)
+  branch_head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$branch_head" = "$trunk_tip" ] || fail "spawn did not refresh to the configured default branch's tip"
+  [ "$branch_head" != "$feature_tip" ] || fail "spawn based the pool on the primary's checked-out feature branch"
+  [ ! -e "$POOL_DIR/feature-only.txt" ] || fail "spawn propagated feature-branch work into the pooled worktree"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed config-wins spawn: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+    printf '# observed config-wins base: HEAD=%s trunk=%s feature=%s\n' "$branch_head" "$trunk_tip" "$feature_tip"
+  fi
+  pass "a configured init.defaultBranch outranks the primary's checked-out feature branch when refreshing the pool"
+}
+
 test_remoteless_unresolvable_default_refuses_pool() {
   local rec id out status before
   id='pool-remoteless-nodefault-r10'
@@ -377,6 +404,7 @@ test_remoteless_ship_and_scout_refresh_to_primary_default_tip
 test_remoteless_dirty_pool_refuses_without_discarding_work
 test_remoteless_non_main_default_refreshes_to_primary_tip
 test_remoteless_detached_primary_uses_configured_default
+test_remoteless_configured_default_beats_checked_out_feature_branch
 test_remoteless_unresolvable_default_refuses_pool
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
