@@ -33,6 +33,9 @@ disable_project_settings: true
 # The dispatch wrapper is local by default.
 # An operator may opt an exact command class into the private Azure runner; once
 # selected remote, a cloud or result failure is returned without local fallback.
+# A Firstmate no-mistakes Azure worker is already the isolated test boundary.
+# It runs the focused service suite owned by bin/fm-azure-service-test-scope.py
+# directly and never dispatches a nested validation fleet or Herdr lab.
 # Inside an admitted validation cell, the trusted default-branch command string
 # bypasses worktree scripts and delegates lint plus every behavior shard to the
 # root-owned bridge, so command children receive neither provider nor GitHub

@@ -404,6 +404,8 @@ The wrapper verifies the semantic bytes and head binding before writing the cont
 Repair results return one digest-bound single-ref bundle whose head must descend from the requested head, while review and test return no code bundle and must keep the exact requested head.
 The wrapper records a retryable local candidate before cleanup, releases through `service-complete` only after the lifecycle owns the exact execution result, and replays the candidate after a lost response instead of executing the step again.
 Admission, execute recovery, and cleanup use `service-reconcile`, which advances only the caller's exact task generation or replays that task's own pending slot claim rather than converging unrelated fleet work.
+The guest supervisor marks a no-mistakes Azure execution as the already-isolated test boundary, so the repository test command runs the focused service suite directly instead of recursively provisioning the general validation fleet or a Herdr lab.
+`bin/fm-azure-service-test-scope.py` owns that focused inventory and the narrow source set eligible for focused pull-request CI; an empty, mixed, or unknown diff and every push to `main` retain the complete behavior suite.
 The wrapper preserves first-seen admission, execute, and cleanup start/completion timestamps in the task's `phase-evidence.json`, so retries keep one stable latency record.
 No caller chooses an Azure account, sees a credential, invokes `fm-azure-runner.sh`, or bypasses lifecycle cleanup.
 

@@ -946,6 +946,10 @@ def execute(request, worktree, worktree_root):
     }
     argv = request["argv"]
     if request.get("worker_role") == "no-mistakes":
+        # The no-mistakes guest is already the isolated Azure test boundary.
+        # Its project command uses this fixed marker to avoid recursively
+        # dispatching another Azure validation fleet from inside the worker.
+        safe_env["FM_NO_MISTAKES_AZURE_WORKER"] = "1"
         # The repository must stay at the exact clean dispatched head, so the
         # controller-owned brief lives beside it in the verified staging root.
         # Resolve only the one argv field whose logical control-plane name is

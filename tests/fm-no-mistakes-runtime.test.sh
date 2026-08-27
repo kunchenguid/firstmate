@@ -49,6 +49,7 @@ set -eu
 [ "$5" = --brief ] && [ "$7" = --result ] && [ "$8" = outcome.json ]
 case "$6" in /*/.fm-task/brief.md) ;; *) exit 25 ;; esac
 [ -f "$6" ]
+[ "$FM_NO_MISTAKES_AZURE_WORKER" = 1 ]
 pi --mode json --no-session </dev/null >/dev/null
 head=$(git rev-parse HEAD)
 cat > outcome.json <<JSON
@@ -115,6 +116,7 @@ supervisor.stage_no_mistakes_runtime(bundle, guest / ".fm-runtime", enforce_linu
 (guest / ".fm-task" / "brief.md").write_text("review this exact head\n")
 os.environ["FM_WORKER_ACCOUNT_HOME"] = str(account)
 os.environ["FM_WORKER_OUTCOME_FILE"] = str(temporary / "outcome.bundle")
+os.environ["FM_NO_MISTAKES_AZURE_WORKER"] = "ambient-value-must-not-pass"
 request = {
     "task": "runtime-e2e", "task_generation": "generation-e2e",
     "assignment_generation": "asg-e2e", "request_digest": "2" * 64,
