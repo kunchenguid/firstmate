@@ -354,7 +354,7 @@ function confinedResult(command, home, file, content) {
   return spawnSync(process.env.FM_LOGBOOK_PYTHON || "python3", [atomicHelper(), command, home, relativePath(home, file)], {
     input: content,
     encoding: "buffer",
-    maxBuffer: 2 * 1024 * 1024,
+    maxBuffer: Infinity,
   });
 }
 
@@ -753,6 +753,12 @@ function commandMutation(home, mission, input, command) {
     if (!active) fail("no active logbook mission exists");
     if (active.registration.mission !== mission) fail(`active mission is ${active.registration.mission}`);
     const update = validateUpdate(input, command);
+    if (command === "close" && active.payload.status === "closed") {
+      assertRegularOrAbsent(files.registration, files.root);
+      removeConfinedFile(files.registration, files.home, files.root);
+      process.stdout.write(`closed: ${active.payload.milestones[0].id}\npage: ${active.page}\n`);
+      return;
+    }
     const next = applyUpdate(active.payload, update, command);
     writePagePayload(active.page, next, files.home, files.root);
     if (command === "close") {

@@ -161,6 +161,43 @@ test_milestones_are_retained_newest_first() {
   pass "meaningful updates retain all embedded milestone history newest first"
 }
 
+test_large_retained_history_remains_readable_and_mutable() {
+  local home page update
+  home=$(make_home large-history)
+  run_logbook "$home" start --mission "Large history mission" >/dev/null || fail "fixture start failed"
+  page=$(page_for "$home")
+  node - "$page" <<'NODE'
+const crypto = require("crypto");
+const fs = require("fs");
+const page = process.argv[2];
+const html = fs.readFileSync(page, "utf8");
+const match = html.match(/(<script id="firstmate-logbook-data" type="application\/json">\n)([\s\S]*?)(\n<\/script>)/);
+const payload = JSON.parse(match[2]);
+const latest = Date.now();
+payload.milestones = Array.from({ length: 1800 }, (_, index) => {
+  const at = new Date(latest - index * 1000).toISOString();
+  return {
+    id: at.replace(/[-:]/g, "").replace(".000", ""),
+    at,
+    kind: "verification",
+    title: "Retained evidence",
+    summary: "Retained mission evidence. ".repeat(20),
+    evidence: [{ label: "Evidence", value: "Retained detail ".repeat(60) }],
+    fingerprint: crypto.createHash("sha256").update(String(index)).digest("hex"),
+  };
+});
+fs.writeFileSync(page, `${html.slice(0, match.index)}${match[1]}${JSON.stringify(payload, null, 2)}${match[3]}${html.slice(match.index + match[0].length)}`);
+NODE
+  [ "$(wc -c < "$page" | tr -d ' ')" -gt $((2 * 1024 * 1024)) ] || fail "large-history fixture did not exceed two MiB"
+  run_logbook "$home" active | grep -q '^active: Large history mission$' || fail "active could not read retained history larger than two MiB"
+  update="$home/update.json"
+  write_stage_update "$update" "Large history advanced" "The retained history accepted a new stage." active
+  run_logbook "$home" update --mission "Large history mission" --input "$update" >/dev/null || fail "update could not read retained history larger than two MiB"
+  extract_payload "$page" | jq -e '(.milestones | length) == 1801 and .milestones[0].title == "Large history advanced"' >/dev/null \
+    || fail "large retained history did not preserve its new update"
+  pass "retained history larger than two MiB remains readable and mutable"
+}
+
 test_path_like_mission_is_confined() {
   local home out page resolved_home resolved_page
   home=$(make_home confinement)
@@ -332,9 +369,57 @@ JSON
   pass "close records the final outcome, preserves the page, and retires active registration"
 }
 
+test_close_recovers_a_closed_page_with_stale_registration() {
+  local home page input helper out rc
+  home=$(make_home close-recovery)
+  run_logbook "$home" start --mission "Interrupted close mission" >/dev/null || fail "fixture start failed"
+  page=$(page_for "$home")
+  input="$home/close.json"
+  cat > "$input" <<'JSON'
+{
+  "kind": "close",
+  "title": "Mission completed",
+  "summary": "The accepted outcome is finished and verified.",
+  "snapshot": {
+    "done": "The mission outcome is complete.",
+    "now": "The durable result is available.",
+    "next": "No further mission work is planned."
+  },
+  "gates": [
+    {"id": "mission-start", "label": "Mission started", "state": "passed", "evidence": [{"label": "Mission", "value": "Interrupted close mission"}]},
+    {"id": "mission-outcome", "label": "Mission outcome achieved", "state": "passed", "evidence": [{"label": "Result", "value": "Accepted outcome"}]},
+    {"id": "verification", "label": "Outcome verified", "state": "passed", "evidence": [{"label": "Test", "value": "Focused suite passed"}]}
+  ],
+  "outcome": "completed",
+  "final_outcome": "The accepted outcome is available with passing evidence.",
+  "evidence": [{"label": "Test", "value": "Focused suite passed"}]
+}
+JSON
+  helper="$home/fail-active-removal.sh"
+  cat > "$helper" <<'SH'
+#!/usr/bin/env bash
+if [ "$2" = remove ] && [ "$4" = data/logbook/active.json ]; then
+  exit 1
+fi
+exec python3 "$@"
+SH
+  chmod 700 "$helper"
+  set +e
+  out=$(FM_LOGBOOK_PYTHON="$helper" run_logbook "$home" close --mission "Interrupted close mission" --input "$input" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "fixture close unexpectedly removed its active registration"
+  assert_present "$home/data/logbook/active.json" "interrupted close did not retain the active registration"
+  extract_payload "$page" | jq -e '.status == "closed"' >/dev/null || fail "interrupted close did not publish the closed page"
+  run_logbook "$home" close --mission "Interrupted close mission" --input "$input" >/dev/null || fail "retry did not recover the stale active registration"
+  assert_absent "$home/data/logbook/active.json" "recovered close left the stale active registration"
+  pass "close retries retire a stale registration after page publication"
+}
+
 test_safe_creation_and_atomic_embedded_update
 test_malformed_and_invalid_updates_preserve_current_page
 test_milestones_are_retained_newest_first
+test_large_retained_history_remains_readable_and_mutable
 test_path_like_mission_is_confined
 test_symlinked_mission_directory_is_refused
 test_one_live_writer_refuses_a_competing_update
@@ -342,3 +427,4 @@ test_duplicate_update_is_refused
 test_non_immediate_duplicate_update_is_refused
 test_reordered_milestones_are_refused
 test_completed_close_records_outcome_and_preserves_page
+test_close_recovers_a_closed_page_with_stale_registration
