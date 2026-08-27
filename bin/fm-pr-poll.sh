@@ -27,8 +27,22 @@
 # does not grow with repository size - before ever fetching. The single-branch
 # fetch, and the merge-base/merge-tree tests that need it, run only when that
 # tip has moved since the last cached value. The cache is written only AFTER
-# an evaluation completes, never before the fetch, so a transient fetch
-# failure retries next cycle instead of being remembered as "already checked".
+# a NOT-landed evaluation completes, never before the fetch and never on a
+# landed evaluation: a landed verdict must reach bin/fm-watch.sh's durable wake
+# queue before anything records that this tip was ever seen, and this script
+# has no way to confirm that from inside one invocation. Caching the tip on a
+# landed verdict would let a crash between this script's exit and the wake
+# actually landing durably suppress that same merge forever, because the
+# unchanged destination tip would then read as "already evaluated" on every
+# later cycle. Leaving the tip uncached instead means only a bounded repeat of
+# this cheap test next cycle - a duplicate detection, never a lost one - until
+# bin/fm-watch.sh's retirement removes this poll altogether.
+#
+# The same git test also refuses to trust a same-named destination branch in
+# just any repository called "origin": <wt>'s origin remote must resolve to
+# the exact host and path the pull request was validated against, or the test
+# is unusable rather than a false "landed" from an unrelated or forked
+# repository that happens to carry equivalent content.
 #
 # This script deliberately sources nothing, including bin/fm-pr-lib.sh: its
 # behavior is fully captured by its own hash-registered bytes (bin/fm-pr-lib.sh's
@@ -133,6 +147,54 @@ git_ref_contains_head() {
   [ "$merged_tree" = "$dest_tree" ]
 }
 
+# Does <wt>'s "origin" remote address the exact same forge repository as the
+# validated PR identity (<host>, <path>)? A same-named destination branch
+# existing in an unrelated project, or in a fork, must never look "landed"
+# just because a remote called "origin" exists there too - this ties the git
+# test to the pull request's actual destination repository instead of trusting
+# the remote name alone. Reads the remote's configured URL directly rather
+# than through `git remote get-url`, which silently expands any local
+# `insteadOf` rewrite and would then be comparing the wrong string entirely -
+# the configured URL is what an operator (or a task's own clone) actually
+# pointed "origin" at, and that is the identity being bound here. Handles the
+# plain URL shapes git itself accepts: https(s)://[user[:token]@]host[:port]/
+# path(.git)?, the git@host:path.git scp-like form, and
+# ssh://[user@]host[:port]/path(.git)?. Any other shape, or no origin remote
+# at all, is unusable rather than a match.
+git_origin_matches_repo() {
+  local wt=$1 host=$2 path=$3 url rest host_part path_part
+  url=$(git -C "$wt" config --get remote.origin.url 2>/dev/null) || return 1
+  [ -n "$url" ] || return 1
+  case "$url" in
+    git@*:*)
+      rest=${url#git@}
+      host_part=${rest%%:*}
+      path_part=${rest#*:}
+      ;;
+    ssh://*)
+      rest=${url#ssh://}
+      rest=${rest#*@}
+      host_part=${rest%%/*}
+      path_part=${rest#*/}
+      ;;
+    https://*|http://*)
+      rest=${url#*://}
+      rest=${rest#*@}
+      host_part=${rest%%/*}
+      path_part=${rest#*/}
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  host_part=${host_part%%:*}
+  path_part=${path_part%.git}
+  path_part=${path_part%/}
+  [ -n "$host_part" ] && [ -n "$path_part" ] || return 1
+  host_part=$(printf '%s' "$host_part" | tr '[:upper:]' '[:lower:]')
+  [ "$host_part" = "$host" ] && [ "$path_part" = "$path" ]
+}
+
 # The destination's current tip, read with no object transfer so this is cheap
 # every cycle regardless of repository size. Empty on any failure (no origin,
 # no such branch, network error).
@@ -170,23 +232,27 @@ git_tip_cache_write() {
 }
 
 # The primary, provider-agnostic merge detector. <dest> is a branch NAME, not
-# a full ref; empty means "use the repository's default branch". Returns one
-# of three distinct outcomes so the caller can tell "confirmed not yet landed"
-# apart from "could not run at all": 0 = landed, 1 = not-landed (the test ran
-# to a conclusion - either a real negative or a cache-skip reusing a prior
-# real negative - and HEAD is not yet contained), 2 = unusable (no worktree,
-# no resolvable destination, no origin remote, an unreadable destination tip,
-# or a failed fetch). The caller falls through to its forge fallback on both
-# 1 and 2, since forge may only ever add a detection the git test missed and
-# never override one it already confirmed.
+# a full ref; empty means "use the repository's default branch". <host> and
+# <path> are the validated PR identity, bound to <wt>'s origin below so a
+# same-named destination in an unrelated repository can never read as landed.
+# Returns one of three distinct outcomes so the caller can tell "confirmed not
+# yet landed" apart from "could not run at all": 0 = landed, 1 = not-landed
+# (the test ran to a conclusion - either a real negative or a cache-skip
+# reusing a prior real negative - and HEAD is not yet contained), 2 = unusable
+# (no worktree, no resolvable destination, origin does not address the PR's
+# own repository, an unreadable destination tip, or a failed fetch). The
+# caller falls through to its forge fallback on both 1 and 2, since forge may
+# only ever add a detection the git test missed and never override one it
+# already confirmed. A landed (0) verdict deliberately never writes the tip
+# cache - see the header comment on why that ordering is load-bearing.
 git_merge_check() {
-  local wt=$1 dest=$2 cache=$3 cached tip
+  local wt=$1 dest=$2 cache=$3 host=$4 path=$5 cached tip
   git_worktree_valid "$wt" || return 2
   if [ -z "$dest" ]; then
     dest=$(git_default_branch "$wt") || return 2
   fi
   git check-ref-format --branch "$dest" >/dev/null 2>&1 || return 2
-  git -C "$wt" remote get-url origin >/dev/null 2>&1 || return 2
+  git_origin_matches_repo "$wt" "$host" "$path" || return 2
   cached=$(git_tip_cache_read "$cache")
   tip=$(git_dest_tip "$wt" "$dest")
   [ -n "$tip" ] || return 2
@@ -195,14 +261,13 @@ git_merge_check() {
   fi
   git -C "$wt" fetch --quiet origin "+refs/heads/$dest:refs/remotes/origin/$dest" >/dev/null 2>&1 || return 2
   if git_ref_contains_head "$wt" "refs/remotes/origin/$dest"; then
-    git_tip_cache_write "$cache" "$tip"
     return 0
   fi
   git_tip_cache_write "$cache" "$tip"
   return 1
 }
 
-git_merge_check "$worktree" "$dest" "$tip_cache"
+git_merge_check "$worktree" "$dest" "$tip_cache" "$host" "$path"
 git_status=$?
 case $git_status in
   0)
