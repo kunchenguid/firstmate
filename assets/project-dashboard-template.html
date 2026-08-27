@@ -248,7 +248,11 @@ __FM_PROJECT_DASHBOARD_DATA__
       ? `Recently landed (${project.landed.length} of ${project.counts.landed})`
       : "Recently landed";
     appendList(landed, landedTitle, project.landed, {empty:"No recent landed work"}); detailGrid.append(landed);
-    const prs = node("section", "pd-panel"); appendList(prs, "Pull requests", project.prs, {empty:"No PR links",links:true}); detailGrid.append(prs);
+    const prs = node("section", "pd-panel");
+    const prsTitle = project.counts.prs > project.prs.length
+      ? `Pull requests (${project.prs.length} of ${project.counts.prs})`
+      : "Pull requests";
+    appendList(prs, prsTitle, project.prs, {empty:"No PR links",links:true}); detailGrid.append(prs);
     details.append(detailGrid); card.append(details); grid.append(card);
   });
   if (!data.projects.length) grid.append(node("div", "pd-none", "No projects are registered in data/projects.md."));

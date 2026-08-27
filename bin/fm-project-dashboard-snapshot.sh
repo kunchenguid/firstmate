@@ -29,9 +29,12 @@
 # invalid main backlog inventory is disclosed board-wide.
 # The (repo: ...) metadata on a backlog row is optional, so a row without it
 # follows its task to that task's project; open main backlog rows and tasks that
-# reach no registered project at all are disclosed board-wide. A done row whose
-# task has been torn down carries no signal linking it to a project, so it is
-# left to the bounded landed history rather than reported as fleet incompleteness.
+# reach no registered project at all are disclosed board-wide, as is a done row
+# whose (repo: ...) label names an unregistered project. A done row that carries
+# no label and whose task has been torn down has no signal linking it to any
+# project, so it is dropped rather than reported as fleet incompleteness.
+# landed[] and prs[] are the two surfaces fed by the append-only Done section;
+# both publish at most five rows and carry the true total in counts.
 # A done task whose backlog row is not yet done is disclosed in finished[] with
 # the crew detail repeated verbatim. That detail is the only local record of
 # what done means for the task, so the board never infers a lifecycle stage -
@@ -322,7 +325,7 @@ jq -n \
                           + " state is unavailable and reaches no project card") end),
            reveal:"record its projects in data/secondmates.md, or label the work with a registered repo"}),
        (([ $fleet_data.backlog.records[]?
-           | select(.structured == true and .state != "done")
+           | select(.structured == true and (.state != "done" or (.repo // "") != ""))
            | . as $row
            | select(if ($row.repo // "") != ""
                     then ($registered_names | index($row.repo)) == null
@@ -481,7 +484,7 @@ jq -n \
              | select(matches_project($owner; $name) and .pr_url != null)
              | {id,title,url:.pr_url,owner:$owner.id} ]
         | dedupe_first(.url)
-        | map(. + {linkable:(.url | https_url)})) as $prs
+        | map(. + {linkable:(.url | https_url)})) as $prs_all
       | ([ $owners[] | select(.record.current.state == "unknown")
            | {id:.id,reason:(.record.current.reason // "Secondmate state unavailable")} ]) as $unavailable_owners
       | ([ $registered_owners[] as $owner
@@ -575,7 +578,7 @@ jq -n \
           waiting:$waiting,
           queued:$queued,
           landed:($landed_all[:5]),
-          prs:$prs,
+          prs:($prs_all[:5]),
           unattributed:$unattributed,
           deferred_decisions:$deferred_decisions,
           secondmates:([ $owners[] | {
@@ -587,7 +590,7 @@ jq -n \
             unreadable:($unreadable | length),
             finished:($finished | length),
             waiting:($waiting | length),queued:($queued | length),landed:($landed_all | length),
-            prs:($prs | length),unattributed:($unattributed | length),
+            prs:($prs_all | length),unattributed:($unattributed | length),
             deferred_decisions:($deferred_decisions | length)}
         }
     ] as $projects

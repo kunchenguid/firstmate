@@ -1231,6 +1231,62 @@ test_torn_down_done_rows_do_not_raise_the_incomplete_banner() {
   pass "only open backlog rows a reader can act on raise the incomplete banner"
 }
 
+test_done_row_naming_an_unregistered_project_is_disclosed() {
+  local home epoch out
+  home=$(make_home done-unregistered)
+  write_fleet_fixture "$home"
+  : > "$home/state/a1.meta"
+  : > "$home/state/a1.status"
+  jq --arg home "$home" '
+    .backlog.records = [
+      {structured:true,id:"gz",repo:"gizmo",title:"Gizmo done",state:"done",hold_kind:null,
+       pr_url:"https://github.com/example/gizmo/pull/1",completion:{date:"2026-08-21"}},
+      {structured:true,id:"old1",repo:null,title:"Shipped last month",state:"done",hold_kind:null,
+       pr_url:"https://github.com/example/alpha/pull/9",completion:{date:"2026-08-20"}},
+      {structured:true,id:"a1",repo:"alpha",title:"Current work",state:"in_flight",
+       since:"2020-01-01",captain_actionable:false,unresolved_blocker_ids:[]}]
+    | .tasks = [
+        {id:"a1",kind:"ship",project:"alpha",
+         paths:{meta:{path:($home + "/state/a1.meta"),present:true},
+                status_log:{path:($home + "/state/a1.status"),present:true},
+                worktree:{path:null,present:false},home:{path:null,present:false},report:{path:null,present:false}},
+         secondmate_projects:[],current_state:{state:"working",source:"fixture",detail:"Building"},
+         hints:{open_decisions:[]},pr:{url:null},backlog:{id:"a1",repo:"alpha",title:"Current work"}}]
+    | .secondmate_current.records = []
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "done-unregistered snapshot failed"
+  printf '%s' "$out" | jq -e '
+    (.disclosures | length) == 1
+      and (.disclosures[0].surface == "main backlog rows that reach no registered project: 1")
+  ' >/dev/null || fail "a done row naming an unregistered project was dropped silently, or torn-down history was counted: $out"
+  pass "a completed row naming an unregistered project is still disclosed"
+}
+
+test_pull_request_list_is_bounded_like_landed() {
+  local home epoch out
+  home=$(make_home pr-cap)
+  write_fleet_fixture "$home"
+  jq '
+    .backlog.records = [range(0;40) as $i | {structured:true,id:("done-" + ($i|tostring)),repo:"alpha",
+      title:("Landed " + ($i|tostring)),state:"done",hold_kind:null,
+      pr_url:("https://github.com/example/alpha/pull/" + (($i + 1)|tostring)),
+      completion:{date:"2026-08-20"}}]
+    | .tasks = []
+    | .secondmate_current.records = []
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "pr-cap snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "alpha")
+    | (.landed | length) == 5 and .counts.landed == 40
+      and (.prs | length) == 5 and .counts.prs == 40
+  ' >/dev/null || fail "the PR list grew with the whole done history: $out"
+  pass "the pull-request list is bounded like the landed list"
+}
+
 extract_payload() {  # <board>
   sed -n '/<script id="project-dashboard-data" type="application\/json">/,/<\/script>/p' "$1" | sed '1d;$d'
 }
@@ -1382,7 +1438,8 @@ test_board_caps_landed_visibly_and_honours_the_reader_fragment() {
   write_fleet_fixture "$home"
   jq '
     .backlog.records += [range(0;7) as $i | {structured:true,id:("alpha-done-" + ($i|tostring)),repo:"alpha",
-      title:("Landed " + ($i|tostring)),state:"done",hold_kind:null,pr_url:null,
+      title:("Landed " + ($i|tostring)),state:"done",hold_kind:null,
+      pr_url:("https://github.com/example/alpha/pull/1" + ($i|tostring)),
       completion:{date:("2026-08-1" + ($i|tostring))}}]
     | .tasks |= map(if .id == "delta-mate" then .secondmate_projects = ["delta"] else . end)
     | .secondmate_current.records |= map(
@@ -1410,6 +1467,7 @@ SH
   out=$(node "$driver" "$board" "" "delta") || fail "the --select seed was not honoured: $out"
   printf '%s' "$out" | jq -e '
     (.meta[] | select(.project == "alpha") | .panels | any(startswith("Recently landed (5 of 8)")))
+      and (.meta[] | select(.project == "alpha") | .panels | any(startswith("Pull requests (5 of 8)")))
   ' >/dev/null || fail "the landed list was capped without saying so: $out"
   printf '%s' "$out" | jq -e '
     (.meta[] | select(.project == "gamma")
@@ -1485,6 +1543,8 @@ test_main_state_reaching_no_registered_project_is_disclosed
 test_secondmate_holds_truncation_is_disclosed
 test_home_summary_discloses_its_own_holds_truncation
 test_torn_down_done_rows_do_not_raise_the_incomplete_banner
+test_done_row_naming_an_unregistered_project_is_disclosed
+test_pull_request_list_is_bounded_like_landed
 test_attention_next_step_is_an_action_not_a_bare_title
 test_unattributable_secondmate_state_is_disclosed
 test_registered_secondmate_without_a_task_still_owns_its_projects
