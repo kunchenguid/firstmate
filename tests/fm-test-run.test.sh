@@ -92,6 +92,7 @@ init_changed_fixture_repo() {
   local repo=$1 script
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/bin/fm-test-env-lib.sh" "$repo/bin/fm-test-env-lib.sh"
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
     fm-brief.test.sh \
@@ -507,6 +508,7 @@ test_jobs_parallel_scheduler_and_failure_propagation() {
   d=tests/fm-supervision-instructions.test.sh
   mkdir -p "$repo/bin" "$repo/tests" "$evidence" "$fake_bin"
   cp "$RUNNER" "$runner"
+  cp "$ROOT/bin/fm-test-env-lib.sh" "$repo/bin/fm-test-env-lib.sh"
   cat >"$fake_bin/stat" <<'SH'
 #!/usr/bin/env bash
 if [ "$1" = "-c" ] && [ "$2" = "%a" ]; then
@@ -703,6 +705,101 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+test_run_cannot_reach_the_live_home() {
+  local tmp repo sentinel probe out rc leaked
+  tmp=$(fm_test_tmproot fm-test-run-live-home)
+  repo="$tmp/repo"
+  sentinel="$tmp/live-home"
+  probe=tests/fm-live-home-probe.test.sh
+
+  # A home-shaped sentinel with one durable record already in it, so both a new
+  # write and a modified byte count are visible afterwards.
+  mkdir -p "$sentinel/state" "$sentinel/data"
+  printf 'sentinel\n' >"$sentinel/state/.wake-queue"
+
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/bin/fm-test-env-lib.sh" "$repo/bin/fm-test-env-lib.sh"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$repo/bin/fm-wake-lib.sh"
+  # The probe resolves its home the way every Firstmate script does, through the
+  # real shared library, and then writes a durable record there.
+  cat >"$repo/$probe" <<'SH'
+#!/usr/bin/env bash
+set -u
+# shellcheck source=/dev/null
+. "$(cd "$(dirname "$0")/../bin" && pwd)/fm-wake-lib.sh"
+fm_wake_append check live-home-probe probe >/dev/null 2>&1 || true
+printf 'PROBE_HOME=%s\n' "$FM_HOME"
+printf 'PROBE_STATE=%s\n' "$STATE"
+printf 'PROBE_STAGE_FILE=%s\n' "${FM_SESSION_START_STAGE_FILE:-none}"
+echo "ok - probe"
+SH
+  chmod +x "$repo/bin/fm-test-run.sh" "$repo/$probe"
+  # The probe reports a resolved path, so compare against a resolved one.
+  repo=$(cd "$repo" && pwd -P)
+
+  find "$sentinel" | LC_ALL=C sort >"$tmp/sentinel-before"
+
+  set +e
+  (
+    cd "$repo" || exit 1
+    export FM_HOME="$sentinel"
+    export FM_STATE_OVERRIDE="$sentinel/state"
+    export FM_DATA_OVERRIDE="$sentinel/data"
+    export FM_ROOT="$sentinel"
+    # A live session start leaves this behind in a worker's environment, and
+    # bin/fm-session-start.sh reads its presence as "the runtime bound is
+    # already applied", so a test that inherits one loses the bound it asserts.
+    export FM_SESSION_START_STAGE_FILE="$sentinel/stage"
+    bin/fm-test-run.sh "$probe"
+  ) >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "probe run failed ($rc): $(cat "$tmp/err")"
+
+  # Positive assertion, not "anywhere but the sentinel": a partial fix that
+  # cleared only FM_HOME would still resolve the state directory from an
+  # inherited override, and that must not read as a pass.
+  grep -Fq "PROBE_HOME=$repo" "$tmp/out" \
+    || fail "probe resolved a home outside its own repo: $(grep PROBE_ "$tmp/out")"
+  grep -Fq "PROBE_STATE=$repo/state" "$tmp/out" \
+    || fail "probe resolved a state directory outside its own repo: $(grep PROBE_ "$tmp/out")"
+  grep -Fq "PROBE_STAGE_FILE=none" "$tmp/out" \
+    || fail "a live session's control variable reached a test script: $(grep PROBE_STAGE "$tmp/out")"
+
+  [ "$(cat "$sentinel/state/.wake-queue")" = "sentinel" ] \
+    || fail "a test script wrote to the live home's durable queue"
+  find "$sentinel" | LC_ALL=C sort >"$tmp/sentinel-after"
+  leaked=$(comm -13 "$tmp/sentinel-before" "$tmp/sentinel-after" || true)
+  [ -z "$leaked" ] || fail "a test script created entries in the live home: $leaked"
+
+  pass "no run path hands a test script the live fleet home"
+}
+
+test_env_isolation_helper_clears_every_pointer() {
+  local out survivors name pattern
+  local -a pointers
+  # Drive the assertion from the lib's own list, so a pointer added there is
+  # exported and asserted here without a second copy to keep in step.
+  . "$ROOT/bin/fm-test-env-lib.sh"
+  [ -n "${FM_TEST_ENV_FLEET_POINTERS:-}" ] \
+    || fail "the shared library published no fleet pointer list"
+  # The helper is what both runners call; drive it directly with every pointer
+  # exported and confirm nothing survives into a child process.
+  out=$(
+    for name in $FM_TEST_ENV_FLEET_POINTERS; do
+      export "$name=/live-sentinel"
+    done
+    bash -c '. "$1/bin/fm-test-env-lib.sh"; fm_test_env_isolate || exit 1; env' \
+      _ "$ROOT"
+  ) || fail "fm_test_env_isolate refused with a clearable environment"
+  read -r -a pointers <<<"$FM_TEST_ENV_FLEET_POINTERS"
+  pattern=$(IFS='|'; printf '%s' "${pointers[*]}")
+  survivors=$(printf '%s\n' "$out" | grep -E "^($pattern)=" || true)
+  [ -z "$survivors" ] || fail "fleet pointers survived isolation: $survivors"
+  pass "the shared isolation helper clears every fleet pointer it owns"
+}
+
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
@@ -721,3 +818,5 @@ test_jobs_requires_proven_isolated
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
+test_run_cannot_reach_the_live_home
+test_env_isolation_helper_clears_every_pointer

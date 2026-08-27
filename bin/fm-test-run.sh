@@ -68,10 +68,25 @@
 # configured shard count is refused, so a CI matrix cannot silently drop a shard.
 # --changed is conservative: it over-selects related families rather than
 # under-selecting, and never expands to the complete suite unless --all.
+#
+# Every run, by every path, clears the ambient fleet environment before it starts
+# a script, so a suite started from inside a worker cannot reach the live home.
+# bin/fm-test-env-lib.sh owns that contract.
 set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
+
+# Clear the ambient fleet environment once, in this process, before anything can
+# start a test script. Every selected script - serial or --jobs worker - is a
+# child of this process, so no run path can hand a test the live home and no
+# caller has to remember a flag. bin/fm-test-env-lib.sh owns the pointer list.
+# shellcheck source=bin/fm-test-env-lib.sh
+. "$ROOT/bin/fm-test-env-lib.sh"
+fm_test_env_isolate || {
+  printf 'fm-test-run: refusing to run: the live fleet home is still reachable\n' >&2
+  exit 2
+}
 
 MODE=
 LIST_ONLY=0
@@ -910,7 +925,7 @@ families_for_changed_path() {
       # resolution in the caller; emit a marker family of __script__
       printf '%s\n' "__script__:$(basename "$path")"
       ;;
-    bin/fm-test-run.sh|bin/fm-test-isolation-proof.sh)
+    bin/fm-test-run.sh|bin/fm-test-isolation-proof.sh|bin/fm-test-env-lib.sh)
       printf '%s\n' pure-contract-unit
       ;;
     bin/backends/herdr*|bin/fm-herdr-lab.sh|tests/herdr-test-safety.sh)
@@ -1630,8 +1645,10 @@ if [ "$JOBS" -eq 1 ]; then
   done
 else
   # Bounded concurrent execution for proven-isolated scripts only. Each worker
-  # gets a private mode-0700 TMPDIR so mktemp roots cannot collide. Retries are
-  # never used as a green strategy.
+  # gets a private mode-0700 TMPDIR so mktemp roots cannot collide - that is
+  # collision avoidance between concurrent workers; fleet-home isolation is
+  # already inherited from this process. Retries are never used as a green
+  # strategy.
   declare -a WORKER_PIDS=()
   declare -a WORKER_IDX=()
   declare -a WORKER_SCRIPTS=()
@@ -1713,8 +1730,6 @@ else
       set +e
       export TMPDIR="$work/tmp"
       export TMP="$work/tmp"
-      unset FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \
-        FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
       cd "$ROOT" || exit 1
       begin_ms=$(now_ms)
       bash "$script" >"$work/output" 2>&1

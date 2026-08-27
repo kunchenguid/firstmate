@@ -99,6 +99,7 @@ tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVE
 `bin/fm-test-run.sh` is the single owner of behavior-suite selection, portable CI lane composition, optional local `--jobs` for the proven-isolated set only, per-script timing markers, family totals, the coverage guard, and the optional JSON timing artifact.
 Its header and `--help` own the flags, family labels, lanes, and changed-file map; this section only documents the entry points.
 `bin/fm-test-isolation-proof.sh` remains the single owner of the Phase 2 concurrent isolation proof and the exact proven candidate set; see `docs/fm-test-isolation-proof.md`.
+Both runners clear the ambient fleet environment once per run through `bin/fm-test-env-lib.sh`, the single owner of that pointer list, so no run path can hand a test the live firstmate home and no test has to clear the pointers itself; a runner that cannot clear them refuses to run.
 Portable shard balance evidence lives in `docs/fm-test-portable-shards.md`.
 Local no-mistakes Test stays intent-targeted and must not wire `commands.test` to `--all` or a `tests/*.test.sh` walk.
 Family selection is the ordinary local path; `--all` is deliberate full regression only.
