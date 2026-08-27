@@ -85,7 +85,7 @@ Their continuation classification is covered by portable tests, not claimed as l
 
 ### Pi `/new` provider prerequisite
 
-The real offline Pi regression ran on 2026-08-27 with Pi 0.84.0, an isolated home and session directory, a barrier-controlled native digest, and a deterministic local `streamSimple` provider.
+The real offline Pi regression ran on 2026-08-26 with Pi 0.84.0, an isolated home and session directory, a barrier-controlled native digest, and a deterministic local `streamSimple` provider.
 The provider makes no HTTP request and requires no user credential.
 Its missing-native branch deliberately requests `bin/fm-session-start.sh`, so an escaped first call reproduces the duplicate-producing manual path rather than passing vacuously.
 
