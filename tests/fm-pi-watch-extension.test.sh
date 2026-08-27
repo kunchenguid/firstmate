@@ -39,7 +39,6 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" "fm_watch_arm_pi" "tracked extension missing tool name"
   assert_contains "$text" "fm-watch-arm-pi" "tracked extension missing command name"
   assert_contains "$text" "fm-watch-arm.sh" "tracked extension missing watcher arm"
-  assert_contains "$text" "sendUserMessage" "tracked extension missing Pi wake API"
   assert_contains "$text" "deliverAs: \"followUp\"" "tracked extension missing followUp delivery"
   assert_contains "$text" ".pi-watch-extension-loaded" "tracked extension missing loaded marker"
   assert_contains "$text" 'createHash("sha256").update(readFileSync(extensionFile)).digest("hex")' "tracked extension does not self-hash its own content for extensionVersion"
@@ -97,14 +96,19 @@ import { pathToFileURL } from "node:url";
 let handler = null;
 let notification = "";
 let prompt = "";
+let promptType = "";
+let promptOptions = null;
 const pi = {
   on() {},
+  appendEntry() {},
   registerCommand(name, options) {
     if (name === "fm-watch-arm-pi") handler = options.handler;
   },
   registerTool() {},
-  sendUserMessage: async (message) => {
-    prompt = message;
+  sendMessage(message, options) {
+    prompt = message.content;
+    promptType = message.customType;
+    promptOptions = options;
   },
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
@@ -134,6 +138,14 @@ for (let i = 0; i < 50 && !prompt; i += 1) {
 }
 if (!prompt.includes("FIRSTMATE WATCHER WAKE")) {
   console.error(`missing follow-up prompt: ${prompt}`);
+  process.exit(1);
+}
+if (promptType !== "firstmate-watcher-wake") {
+  console.error(`wake was not a custom watcher message: ${promptType}`);
+  process.exit(1);
+}
+if (promptOptions?.deliverAs !== "followUp" || promptOptions?.triggerTurn !== true) {
+  console.error(`unexpected custom wake delivery: ${JSON.stringify(promptOptions)}`);
   process.exit(1);
 }
 if (!prompt.includes("external healthy watcher")) {
@@ -172,11 +184,12 @@ import { pathToFileURL } from "node:url";
 let tool = null;
 const pi = {
   on() {},
+  appendEntry() {},
   registerCommand() {},
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async () => {},
+  sendMessage() {},
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
@@ -220,9 +233,10 @@ const pi = {
   on(event, handler) {
     handlers.set(event, handler);
   },
+  appendEntry() {},
   registerCommand() {},
   registerTool() {},
-  sendUserMessage: async () => {},
+  sendMessage() {},
 };
 const before = process.listenerCount("exit");
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
@@ -266,11 +280,12 @@ import { pathToFileURL } from "node:url";
 let tool = null;
 const pi = {
   on() {},
+  appendEntry() {},
   registerCommand() {},
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async () => {},
+  sendMessage() {},
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
@@ -298,6 +313,543 @@ EOF
     fail "Pi arm child $pid survived process-exit cleanup"
   fi
   pass "Pi process-exit cleanup stops the attached arm child"
+}
+
+test_pi_compaction_preserves_direct_exchange_and_pending_input() {
+  local repo home plugin pi_bin pi_package_dir out status
+  fm_node_supports_ts_import || { pass "node lacks .ts import support, skipping Pi compaction-continuity check"; return; }
+  pi_bin=$(command -v pi 2>/dev/null || true)
+  [ -n "$pi_bin" ] || { pass "Pi is unavailable, skipping installed SessionManager compaction-continuity check"; return; }
+  pi_package_dir=$(cd "$(dirname "$pi_bin")/../lib/node_modules/@earendil-works/pi-coding-agent" 2>/dev/null && pwd -P) || {
+    pass "installed Pi package is unavailable, skipping SessionManager compaction-continuity check"
+    return
+  }
+  repo="$TMP_ROOT/pi-compaction-continuity-root"
+  home="$TMP_ROOT/pi-compaction-continuity-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'signal: deterministic supervision prompt\n'
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(NODE_OPTIONS=--disable-warning=ExperimentalWarning PLUGIN="$plugin" PI_PACKAGE_DIR="$pi_package_dir" REPO="$repo" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const { SessionManager } = await import(pathToFileURL(`${process.env.PI_PACKAGE_DIR}/dist/index.js`).href);
+const { Agent } = await import(pathToFileURL(`${process.env.PI_PACKAGE_DIR}/node_modules/@earendil-works/pi-agent-core/dist/index.js`).href);
+const { AssistantMessageEventStream } = await import(pathToFileURL(`${process.env.PI_PACKAGE_DIR}/node_modules/@earendil-works/pi-ai/dist/index.js`).href);
+let sessionManager = SessionManager.inMemory(process.env.REPO);
+const handlers = new Map();
+let tool = null;
+let automatedMessage = null;
+let automatedOptions = null;
+let pendingMessages = false;
+
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  appendEntry(customType, data) {
+    sessionManager.appendCustomEntry(customType, data);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendMessage(message, options) {
+    automatedMessage = message;
+    automatedOptions = options;
+  },
+};
+const ctx = {
+  get sessionManager() {
+    return sessionManager;
+  },
+  hasPendingMessages: () => pendingMessages,
+};
+async function input(text, streamingBehavior, images) {
+  await handlers.get("input")(
+    { type: "input", text, images, source: "interactive", streamingBehavior },
+    ctx,
+  );
+}
+async function finishMessage(message) {
+  await handlers.get("message_end")({ type: "message_end", message }, ctx);
+  sessionManager.appendMessage(message);
+}
+async function startAgent() {
+  await handlers.get("agent_start")({ type: "agent_start" }, ctx);
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (!tool) throw new Error("Pi watch tool was not registered");
+
+const providerContexts = [];
+let releaseInitial;
+let providerCall = 0;
+const usage = {
+  input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+const agent = new Agent({
+  initialState: {
+    systemPrompt: "queue regression",
+    model: { id: "fixture", name: "fixture", api: "openai-completions", provider: "fixture", baseUrl: "http://fixture", reasoning: false, input: ["text", "image"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 },
+    tools: [],
+  },
+  convertToLlm: (messages) => messages.map((message) => message.role === "custom"
+    ? { role: "user", content: [{ type: "text", text: message.content }], timestamp: message.timestamp }
+    : message),
+  streamFn: (_model, context) => {
+    providerContexts.push(structuredClone(context.messages));
+    const call = ++providerCall;
+    const stream = new AssistantMessageEventStream();
+    const finish = () => {
+      const message = { role: "assistant", content: [{ type: "text", text: `provider-${call}` }], api: "openai-completions", provider: "fixture", model: "fixture", usage, stopReason: "stop", timestamp: Date.now() };
+      stream.push({ type: "start", partial: { ...message, content: [], stopReason: "pending" } });
+      stream.push({ type: "done", reason: "stop", message });
+    };
+    if (call === 1) releaseInitial = finish;
+    else queueMicrotask(finish);
+    return stream;
+  },
+});
+const exactImage = { type: "image", data: "QUEUE-ORDER-IMAGE-DATA", mimeType: "image/png" };
+const initialRun = agent.prompt("INITIAL-HELD-RESPONSE");
+for (let i = 0; i < 100 && !releaseInitial; i += 1) await new Promise((resolve) => setTimeout(resolve, 1));
+if (!releaseInitial) throw new Error("controlled provider did not hold the initial response");
+agent.followUp({ role: "custom", customType: "firstmate-watcher-wake", content: "OLDER-AUTOMATION-FOLLOWUP", display: true, timestamp: Date.now() });
+agent.steer({ role: "user", content: [{ type: "text", text: "LATER-HUMAN-IMAGE-STEER" }, exactImage], timestamp: Date.now() });
+releaseInitial();
+await initialRun;
+await agent.waitForIdle();
+if (providerContexts.length !== 3) throw new Error(`expected three provider turns, got ${providerContexts.length}`);
+const secondTail = providerContexts[1].at(-1);
+const thirdTail = providerContexts[2].at(-1);
+if (secondTail?.role !== "user" || JSON.stringify(secondTail.content) !== JSON.stringify([{ type: "text", text: "LATER-HUMAN-IMAGE-STEER" }, exactImage])) {
+  throw new Error(`human image steer was reordered or altered: ${JSON.stringify(secondTail)}`);
+}
+if (thirdTail?.role !== "user" || JSON.stringify(thirdTail.content) !== JSON.stringify([{ type: "text", text: "OLDER-AUTOMATION-FOLLOWUP" }])) {
+  throw new Error(`older automation was starved or delivered early: ${JSON.stringify(thirdTail)}`);
+}
+
+const question = "DIRECT-CAPTAIN-Q-7: Which harbor token should remain reserved?";
+const answer = "DIRECT-CAPTAIN-A-7: amber.";
+const followup = "Which question did I ask before the automated supervision turn, and was it answered?";
+const queued = "QUEUED-CAPTAIN-Q-8: preserve this pending input too";
+const questionContent = [{ type: "text", text: question }];
+const answerContent = [{ type: "text", text: answer }];
+
+await input(question);
+await startAgent();
+await finishMessage({ role: "user", content: questionContent, timestamp: 1700000000100 });
+await finishMessage({
+  role: "assistant",
+  content: answerContent,
+  stopReason: "stop",
+  timestamp: 1700000000200,
+});
+
+await tool.execute("tool-compaction", {}, undefined, undefined, {});
+for (let i = 0; i < 100 && !automatedMessage; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!automatedMessage) throw new Error("watcher did not produce an automated prompt");
+if (automatedMessage.customType !== "firstmate-watcher-wake") {
+  throw new Error(`watcher prompt masqueraded as user input: ${automatedMessage.customType}`);
+}
+if (automatedOptions?.deliverAs !== "followUp" || automatedOptions?.triggerTurn !== true) {
+  throw new Error(`wrong watcher queue behavior: ${JSON.stringify(automatedOptions)}`);
+}
+const automatedEntryId = sessionManager.appendCustomMessageEntry(
+  automatedMessage.customType,
+  automatedMessage.content,
+  true,
+  automatedMessage.details,
+);
+sessionManager.appendMessage({
+  role: "assistant",
+  content: [{ type: "text", text: "Automated supervision handled." }],
+  stopReason: "stop",
+  timestamp: 1700000000300,
+});
+const compactionId = sessionManager.appendCompaction(
+  "Lossy summary without the direct captain exchange.",
+  automatedEntryId,
+  131874,
+  { fixture: "automated-boundary" },
+  true,
+);
+const compaction = sessionManager.getEntry(compactionId);
+if (compaction?.type !== "compaction" || compaction.firstKeptEntryId !== automatedEntryId) {
+  throw new Error("fixture did not compact at the automated-message boundary");
+}
+
+await input(followup);
+const followupContent = [{ type: "text", text: followup }];
+await finishMessage({ role: "user", content: followupContent, timestamp: 1700000000400 });
+const rebuilt = sessionManager.buildSessionContext().messages;
+if (rebuilt.some((message) => message.role === "user" && JSON.stringify(message.content) === JSON.stringify(questionContent))) {
+  throw new Error("SessionManager fixture unexpectedly retained the pre-boundary captain question");
+}
+if (!rebuilt.some((message) => message.role === "custom" && message.customType === "firstmate-watcher-wake")) {
+  throw new Error("SessionManager fixture lost the retained custom supervision prompt");
+}
+const result = await handlers.get("context")({ type: "context", messages: rebuilt }, ctx);
+const continuity = result?.messages?.find(
+  (message) => message.role === "custom" && message.customType === "firstmate-direct-exchange-continuity",
+);
+if (!continuity) throw new Error("rebuilt context lacks direct-exchange continuity");
+if (continuity.content.includes("Lossy summary without") && !continuity.content.includes(question)) {
+  throw new Error("continuity trusted the lossy summary instead of the exact exchange");
+}
+if (!continuity.content.includes("ANSWERED") || !continuity.content.includes(JSON.stringify(questionContent))) {
+  throw new Error(`exact answered question missing: ${continuity.content}`);
+}
+if (!continuity.content.includes(JSON.stringify(answerContent))) {
+  throw new Error(`exact assistant answer missing: ${continuity.content}`);
+}
+if (!continuity.content.includes("OPEN_REPLY_OBLIGATION") || !continuity.content.includes(JSON.stringify(followupContent))) {
+  throw new Error(`follow-up reply obligation missing: ${continuity.content}`);
+}
+if (!continuity.content.includes("not human-authored input") || !continuity.content.includes("custom messages")) {
+  throw new Error("continuity does not distinguish extension prompts from human input");
+}
+const continuityIndex = result.messages.indexOf(continuity);
+const followupIndex = result.messages.findIndex(
+  (message) => message.role === "user" && JSON.stringify(message.content) === JSON.stringify(followupContent),
+);
+if (continuityIndex < 0 || followupIndex < 0 || continuityIndex >= followupIndex) {
+  throw new Error("continuity metadata displaced the current human follow-up as the final prompt");
+}
+
+pendingMessages = true;
+await input(queued, "steer");
+const whilePending = await handlers.get("context")({ type: "context", messages: rebuilt }, ctx);
+const pendingContinuity = whilePending?.messages?.find(
+  (message) => message.role === "custom" && message.customType === "firstmate-direct-exchange-continuity",
+);
+if (pendingContinuity?.content.includes(queued)) {
+  throw new Error("pending human input bypassed Pi's queue and was injected early");
+}
+pendingMessages = false;
+sessionManager = SessionManager.inMemory(process.env.REPO);
+const provisional = "PROVISIONAL-CONSUMED-Q-8B";
+pendingMessages = true;
+await input(provisional, "steer");
+const provisionalResult = await handlers.get("context")({ type: "context", messages: rebuilt }, ctx);
+if (provisionalResult?.messages?.some((message) => message.customType === "firstmate-direct-exchange-continuity" && message.content.includes(provisional))) {
+  throw new Error("consumed provisional input was admitted by unrelated pending automation");
+}
+pendingMessages = false;
+const afterAutomationDrain = await handlers.get("context")({ type: "context", messages: rebuilt }, ctx);
+if (afterAutomationDrain?.messages?.some((message) => message.customType === "firstmate-direct-exchange-continuity" && message.content.includes(provisional))) {
+  throw new Error("consumed provisional input became continuity after unrelated automation drained");
+}
+pendingMessages = true;
+await input(provisional, "steer");
+await finishMessage({ role: "user", content: [{ type: "text", text: provisional }], timestamp: 1700000000410 });
+pendingMessages = false;
+const consumedRetryBoundaryId = sessionManager.appendCustomMessageEntry(
+  "firstmate-watcher-wake",
+  "FIRSTMATE WATCHER WAKE: unrelated automation after identical accepted retry",
+  true,
+  { version: 1, source: "firstmate-extension", kind: "watcher-wake" },
+);
+sessionManager.appendCompaction(
+  "Lossy summary that omits the identical accepted retry.",
+  consumedRetryBoundaryId,
+  131874,
+  { fixture: "consumed-identical-retry-boundary" },
+  true,
+);
+const consumedRetryResult = await handlers.get("context")(
+  { type: "context", messages: sessionManager.buildSessionContext().messages },
+  ctx,
+);
+const consumedRetryContinuity = consumedRetryResult?.messages?.find(
+  (message) => message.role === "custom" && message.customType === "firstmate-direct-exchange-continuity",
+);
+const consumedRetryObligations = consumedRetryContinuity?.content.match(/OPEN_REPLY_OBLIGATION/g) ?? [];
+if (consumedRetryObligations.length !== 1 || !consumedRetryContinuity.content.includes(JSON.stringify([{ type: "text", text: provisional }]))) {
+  throw new Error(`consumed input was confused with identical accepted retry: ${consumedRetryContinuity?.content}`);
+}
+const consumedRetryEntries = sessionManager.getBranch().filter((entry) => entry.type === "custom");
+const consumedRetryObservations = consumedRetryEntries.filter(
+  (entry) => entry.customType === "firstmate-direct-input-observation" && entry.data?.inputText === provisional,
+);
+const consumedRetryExchanges = consumedRetryEntries.filter(
+  (entry) => entry.customType === "firstmate-direct-exchange" && entry.data?.event === "submitted" && entry.data?.inputText === provisional,
+);
+if (consumedRetryObservations.length !== 2 || consumedRetryExchanges.length !== 1) {
+  throw new Error("input observations were promoted instead of admitting only the delivered identical retry");
+}
+
+sessionManager = SessionManager.inMemory(process.env.REPO);
+const duplicate = "DUPLICATE-QUEUED-CAPTAIN-Q: preserve both obligations";
+const duplicateContent = [{ type: "text", text: duplicate }];
+await input(duplicate, "steer");
+await input(duplicate, "steer");
+await finishMessage({ role: "user", content: duplicateContent, timestamp: 1700000000420 });
+await finishMessage({ role: "user", content: duplicateContent, timestamp: 1700000000430 });
+const duplicateEvents = sessionManager.getBranch().filter(
+  (entry) => entry.type === "custom" && entry.customType === "firstmate-direct-exchange",
+);
+const duplicateSubmissions = duplicateEvents.filter(
+  (entry) => entry.data?.event === "submitted" && entry.data?.inputText === duplicate,
+);
+const duplicateDeliveries = duplicateEvents.filter(
+  (entry) => entry.data?.event === "delivered" && JSON.stringify(entry.data?.content) === JSON.stringify(duplicateContent),
+);
+if (duplicateSubmissions.length !== 2 || new Set(duplicateSubmissions.map((entry) => entry.data.exchangeId)).size !== 2) {
+  throw new Error("duplicate submissions did not retain distinct exchange identities");
+}
+if (
+  duplicateDeliveries.length !== 2 ||
+  duplicateDeliveries[0]?.data?.exchangeId !== duplicateSubmissions[0]?.data?.exchangeId ||
+  duplicateDeliveries[1]?.data?.exchangeId !== duplicateSubmissions[1]?.data?.exchangeId
+) {
+  throw new Error("duplicate exact deliveries were not associated in submission order");
+}
+const duplicateBoundaryId = sessionManager.appendCustomMessageEntry(
+  "firstmate-watcher-wake",
+  "FIRSTMATE WATCHER WAKE: compact duplicate direct inputs",
+  true,
+  { version: 1, source: "firstmate-extension", kind: "watcher-wake" },
+);
+sessionManager.appendCompaction(
+  "Lossy summary that omits both duplicate direct inputs.",
+  duplicateBoundaryId,
+  131874,
+  { fixture: "duplicate-input-boundary" },
+  true,
+);
+const duplicateResult = await handlers.get("context")(
+  { type: "context", messages: sessionManager.buildSessionContext().messages },
+  ctx,
+);
+const duplicateContinuity = duplicateResult?.messages?.find(
+  (message) => message.role === "custom" && message.customType === "firstmate-direct-exchange-continuity",
+);
+const duplicateObligations = duplicateContinuity?.content.match(/OPEN_REPLY_OBLIGATION/g) ?? [];
+if (duplicateObligations.length !== 2) {
+  throw new Error(`compaction did not preserve two duplicate reply obligations: ${duplicateContinuity?.content}`);
+}
+
+sessionManager = SessionManager.inMemory(process.env.REPO);
+pendingMessages = false;
+const imageQueued = "QUEUED-CAPTAIN-IMAGE-Q-9: identify the attached harbor signal";
+const image = { type: "image", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB", mimeType: "image/png" };
+const imageSubmittedContent = [{ type: "text", text: imageQueued }, image];
+pendingMessages = true;
+await input(imageQueued, "followUp", [image]);
+pendingMessages = false;
+const imageBoundaryId = sessionManager.appendCustomMessageEntry(
+  "firstmate-watcher-wake",
+  "FIRSTMATE WATCHER WAKE: compaction before queued image delivery",
+  true,
+  { version: 1, source: "firstmate-extension", kind: "watcher-wake" },
+);
+sessionManager.appendCompaction(
+  "Lossy summary that omits the queued image submission.",
+  imageBoundaryId,
+  131874,
+  { fixture: "image-before-delivery-boundary" },
+  true,
+);
+const imageRebuilt = sessionManager.buildSessionContext().messages;
+if (JSON.stringify(imageRebuilt).includes(image.data)) {
+  throw new Error("image-before-delivery fixture unexpectedly retained the queued image in Pi context");
+}
+const imageBeforeDelivery = await handlers.get("context")({ type: "context", messages: imageRebuilt }, ctx);
+if (imageBeforeDelivery?.messages?.some((message) => message.customType === "firstmate-direct-exchange-continuity" && message.content.includes(imageQueued))) {
+  throw new Error("unadmitted queued image bypassed Pi ownership before delivery");
+}
+const imageSubmissionEntry = sessionManager.getBranch().find(
+  (entry) => entry.type === "custom" && entry.customType === "firstmate-direct-input-observation",
+);
+if (JSON.stringify(imageSubmissionEntry?.data?.inputContent) !== JSON.stringify(imageSubmittedContent)) {
+  throw new Error("provisional session contract did not preserve exact queued image content");
+}
+await finishMessage({ role: "user", content: imageSubmittedContent, timestamp: 1700000000450 });
+const deliveredBoundaryId = sessionManager.appendCustomMessageEntry(
+  "firstmate-watcher-wake",
+  "FIRSTMATE WATCHER WAKE: compaction after exact image delivery",
+  true,
+  { version: 1, source: "firstmate-extension", kind: "watcher-wake" },
+);
+sessionManager.appendCompaction(
+  "Lossy summary that omits the delivered image question.",
+  deliveredBoundaryId,
+  131874,
+  { fixture: "image-after-delivery-boundary" },
+  true,
+);
+const imageAfterDelivery = await handlers.get("context")(
+  { type: "context", messages: sessionManager.buildSessionContext().messages },
+  ctx,
+);
+const imageContinuity = imageAfterDelivery?.messages?.find(
+  (message) => message.role === "custom" && message.customType === "firstmate-direct-exchange-continuity",
+);
+if (!imageContinuity?.content.includes("OPEN_REPLY_OBLIGATION") || !imageContinuity.content.includes(JSON.stringify(imageSubmittedContent))) {
+  throw new Error(`compaction lost exact admitted image obligation: ${imageContinuity?.content}`);
+}
+
+sessionManager = SessionManager.inMemory(process.env.REPO);
+pendingMessages = false;
+const unanswered = "UNANSWERED-CAPTAIN-Q-10: Which reply remains due?";
+const unansweredContent = [{ type: "text", text: unanswered }];
+await input(unanswered);
+await finishMessage({ role: "user", content: unansweredContent, timestamp: 1700000000500 });
+const openAutomationId = sessionManager.appendCustomMessageEntry(
+  "firstmate-watcher-wake",
+  "FIRSTMATE WATCHER WAKE: deterministic open-obligation boundary",
+  true,
+  { version: 1, source: "firstmate-extension", kind: "watcher-wake" },
+);
+sessionManager.appendMessage({
+  role: "assistant",
+  content: [{ type: "text", text: "Automation handled without answering the captain." }],
+  stopReason: "stop",
+  timestamp: 1700000000600,
+});
+sessionManager.appendCompaction(
+  "Lossy summary that omits the unanswered direct question.",
+  openAutomationId,
+  131874,
+  { fixture: "open-obligation-boundary" },
+  true,
+);
+const openRebuilt = sessionManager.buildSessionContext().messages;
+if (openRebuilt.some((message) => message.role === "user")) {
+  throw new Error("open-obligation fixture unexpectedly retained the captain user message");
+}
+const openResult = await handlers.get("context")({ type: "context", messages: openRebuilt }, ctx);
+const openContinuity = openResult?.messages?.find(
+  (message) => message.role === "custom" && message.customType === "firstmate-direct-exchange-continuity",
+);
+if (!openContinuity?.content.includes("OPEN_REPLY_OBLIGATION") || !openContinuity.content.includes(JSON.stringify(unansweredContent))) {
+  throw new Error("compaction lost the exact unanswered captain obligation");
+}
+
+sessionManager = SessionManager.inMemory(process.env.REPO);
+const abortedQuestion = [{ type: "text", text: "ABORTED-RUN-CAPTAIN-Q: which answer remains due?" }];
+const laterQuestion = [{ type: "text", text: "LATER-RUN-CAPTAIN-Q: answer only this question" }];
+const joinedQuestion = [{ type: "text", text: "JOINED-RUN-CAPTAIN-Q: preserve joined delivery" }];
+const laterAnswer = [{ type: "text", text: "LATER-RUN-CAPTAIN-A: this question only" }];
+await startAgent();
+await finishMessage({ role: "user", content: abortedQuestion, timestamp: 1700000000700 });
+await startAgent();
+await finishMessage({ role: "user", content: laterQuestion, timestamp: 1700000000800 });
+await finishMessage({ role: "user", content: joinedQuestion, timestamp: 1700000000850 });
+await finishMessage({
+  role: "assistant",
+  content: laterAnswer,
+  stopReason: "stop",
+  timestamp: 1700000000900,
+});
+const runExchangeEvents = sessionManager.getBranch().filter(
+  (entry) => entry.type === "custom" && entry.customType === "firstmate-direct-exchange",
+);
+const laterRunAnswers = runExchangeEvents.filter(
+  (entry) => entry.data?.event === "answered" && JSON.stringify(entry.data?.content) === JSON.stringify(laterAnswer),
+);
+if (laterRunAnswers.length !== 2) {
+  throw new Error(`same-run deliveries were not both answered: ${JSON.stringify(laterRunAnswers)}`);
+}
+const runBoundaryId = sessionManager.appendCustomMessageEntry(
+  "firstmate-watcher-wake",
+  "FIRSTMATE WATCHER WAKE: compact run-attribution fixture",
+  true,
+  { version: 1, source: "firstmate-extension", kind: "watcher-wake" },
+);
+sessionManager.appendCompaction(
+  "Lossy summary that omits both run-attribution questions.",
+  runBoundaryId,
+  131874,
+  { fixture: "run-attribution-boundary" },
+  true,
+);
+const runResult = await handlers.get("context")(
+  { type: "context", messages: sessionManager.buildSessionContext().messages },
+  ctx,
+);
+const runContinuity = runResult?.messages?.find(
+  (message) => message.role === "custom" && message.customType === "firstmate-direct-exchange-continuity",
+);
+if (!runContinuity?.content.includes(`OPEN_REPLY_OBLIGATION\nHuman input, exact JSON: ${JSON.stringify(abortedQuestion)}`)) {
+  throw new Error(`aborted run obligation was incorrectly closed: ${runContinuity?.content}`);
+}
+if (!runContinuity.content.includes(`ANSWERED\nHuman input, exact JSON: ${JSON.stringify(joinedQuestion)}`)) {
+  throw new Error(`joined delivery in the later run was not answered: ${runContinuity.content}`);
+}
+if (!runContinuity.content.includes(JSON.stringify(laterAnswer))) {
+  throw new Error(`later run answer was not preserved: ${runContinuity.content}`);
+}
+
+sessionManager = SessionManager.inMemory(process.env.REPO);
+const retryQuestion = [{ type: "text", text: "RETRY-CAPTAIN-Q: close this after retry" }];
+const retryAnswer = [{ type: "text", text: "RETRY-CAPTAIN-A: closed after retry" }];
+await startAgent();
+await finishMessage({ role: "user", content: retryQuestion, timestamp: 1700000001000 });
+await startAgent();
+await finishMessage({ role: "assistant", content: retryAnswer, stopReason: "stop", timestamp: 1700000001100 });
+const retryEvents = sessionManager.getBranch().filter(
+  (entry) => entry.type === "custom" && entry.customType === "firstmate-direct-exchange",
+);
+const retryAnswered = retryEvents.find(
+  (entry) => entry.data?.event === "answered" && JSON.stringify(entry.data?.content) === JSON.stringify(retryAnswer),
+);
+if (!retryAnswered) throw new Error("successful retry did not answer the retained captain exchange");
+
+sessionManager = SessionManager.inMemory(process.env.REPO);
+const failedQuestion = [{ type: "text", text: "FAILED-CAPTAIN-Q: leave this open" }];
+const replacementQuestion = [{ type: "text", text: "REPLACEMENT-CAPTAIN-Q: answer this instead" }];
+const replacementAnswer = [{ type: "text", text: "REPLACEMENT-CAPTAIN-A: answered replacement" }];
+await startAgent();
+await finishMessage({ role: "user", content: failedQuestion, timestamp: 1700000001200 });
+await startAgent();
+await finishMessage({ role: "user", content: replacementQuestion, timestamp: 1700000001300 });
+await finishMessage({ role: "assistant", content: replacementAnswer, stopReason: "stop", timestamp: 1700000001400 });
+const replacementBoundaryId = sessionManager.appendCustomMessageEntry(
+  "firstmate-watcher-wake",
+  "FIRSTMATE WATCHER WAKE: retry replacement boundary",
+  true,
+  { version: 1, source: "firstmate-extension", kind: "watcher-wake" },
+);
+sessionManager.appendCompaction(
+  "Lossy summary that omits retry lifecycle exchanges.",
+  replacementBoundaryId,
+  131874,
+  { fixture: "retry-replacement-boundary" },
+  true,
+);
+const replacementResult = await handlers.get("context")(
+  { type: "context", messages: sessionManager.buildSessionContext().messages },
+  ctx,
+);
+const replacementContinuity = replacementResult?.messages?.find(
+  (message) => message.role === "custom" && message.customType === "firstmate-direct-exchange-continuity",
+);
+if (!replacementContinuity?.content.includes(`OPEN_REPLY_OBLIGATION\nHuman input, exact JSON: ${JSON.stringify(failedQuestion)}`)) {
+  throw new Error(`failed original question was incorrectly closed: ${replacementContinuity?.content}`);
+}
+if (!replacementContinuity.content.includes(`ANSWERED\nHuman input, exact JSON: ${JSON.stringify(replacementQuestion)}`)) {
+  throw new Error(`replacement question was not answered: ${replacementContinuity.content}`);
+}
+EOF
+)
+  status=$?
+  [ "$status" -eq 0 ] || printf '%s\n' "$out" >&2
+  expect_code 0 "$status" "Pi compaction continuity must preserve exact direct exchange and pending-input state"
+  [ -z "$out" ] || fail "Pi compaction-continuity test printed output: $out"
+  pass "Pi compaction continuity preserves exact human exchange across automated custom prompts"
 }
 
 test_opencode_primary_watch_plugin_uses_effective_state_home() {
@@ -863,12 +1415,25 @@ EOF
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
 
+if [ "${FM_PI_EXACT_DELIVERY_PROOF:-0}" = 1 ]; then
+  test_pi_compaction_preserves_direct_exchange_and_pending_input
+  printf '%s\n' 'PI_EXACT_DELIVERY_ASSOCIATION_PROOF_OK'
+  exit 0
+fi
+
+if [ "${FM_PI_RETRY_CONTINUITY_PROOF:-0}" = 1 ]; then
+  test_pi_compaction_preserves_direct_exchange_and_pending_input
+  printf '%s\n' 'PI_RETRY_CONTINUITY_PROOF_OK'
+  exit 0
+fi
+
 test_tracked_extension_present_and_self_hashing
 test_spawn_template_mentions_pi_watch_placeholder
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
+test_pi_compaction_preserves_direct_exchange_and_pending_input
 test_opencode_primary_watch_plugin_uses_effective_state_home
 test_opencode_primary_watch_plugin_sources_effective_config
 test_opencode_primary_watch_plugin_requires_session_lock
@@ -878,3 +1443,4 @@ test_opencode_watch_arm_rejects_spoofed_secondmate_markers
 test_opencode_primary_watch_plugin_rearms_after_wake
 test_opencode_watch_arm_coordinates_with_turnend_guard
 test_opencode_healthy_arm_output_does_not_suppress_guard
+printf '%s\n' 'PI_DIRECT_CONTINUITY_PROOF_OK'

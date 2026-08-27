@@ -58,6 +58,7 @@ This Firstmate tooling change requires no web-app, API, or realtime deployment.
 
 At session start, `bin/fm-session-start.sh` emits exactly one primary-harness supervision block rendered by `bin/fm-supervision-instructions.sh` from `docs/supervision-protocols/`.
 That block owns the live wait shape for the running primary harness: Claude and Grok use background-notify cycles, Codex uses bounded foreground checkpoints, Pi uses its two tracked primary extensions, and OpenCode uses its TUI plugin.
+Pi's supervision prompts remain custom-message context while exact direct exchanges and open reply obligations survive compaction through the contract in [`supervision-protocols/pi.md`](supervision-protocols/pi.md#input-provenance-and-compaction-continuity).
 `bin/fm-watch-arm.sh` remains the verified arm wrapper for protocols that call it; it forks the watcher as a tracked child, verifies it is genuinely alive with a fresh liveness beacon, and prints an honest initial status (`started` / `attached` / restart-only `healthy` / `FAILED`, the last exiting non-zero).
 On `attached` it stays live until that existing cycle ends so background-notify harnesses do not get an empty false wake from a healthy no-op exit.
 Because the initial status stays in the task's buffer long after the instant it describes, an attach is always closed by a terminal `FAILED` line - either `attached cycle ended` when the holder stops passing the liveness proof, or `attach interrupted` when the arm itself is signalled away - with the beacon age re-measured at exit and a non-zero status.

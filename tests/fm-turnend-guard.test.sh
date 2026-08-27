@@ -771,7 +771,6 @@ test_pi_extension_forces_followup() {
   content=$(cat "$ext")
   assert_contains "$content" 'agent_settled' "pi extension must run after one logical agent run settles"
   assert_contains "$content" 'fm-turnend-guard.sh' "pi extension must invoke the shared guard"
-  assert_contains "$content" 'sendUserMessage' "pi extension must force a follow-up turn"
   assert_contains "$content" 'deliverAs: "followUp"' "pi extension must queue the follow-up safely"
   assert_contains "$content" 'guardFollowupActive' "pi extension must carry a logical-run loop guard"
   assert_not_contains "$content" 'skipNextTurnEnd' "pi extension kept the internal-turn loop guard"
@@ -816,11 +815,12 @@ const pi = {
   on(event, handler) {
     handlers.set(event, handler);
   },
-  async sendUserMessage(message, options) {
+  sendMessage(message, options) {
     prompts += 1;
-    if (!message.includes("TURN WOULD END BLIND")) throw new Error(`unexpected prompt: ${message}`);
-    if (options?.deliverAs !== "followUp") throw new Error("guard prompt was not a follow-up");
-    await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+    if (message.customType !== "firstmate-turnend-guard") throw new Error(`unexpected prompt type: ${message.customType}`);
+    if (!message.content.includes("TURN WOULD END BLIND")) throw new Error(`unexpected prompt: ${message.content}`);
+    if (options?.deliverAs !== "followUp" || options?.triggerTurn !== true) throw new Error("guard prompt was not a triggering follow-up");
+    void handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
   },
 };
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
@@ -876,10 +876,10 @@ const pi = {
   on(event, handler) {
     handlers.set(event, handler);
   },
-  async sendUserMessage() {
+  sendMessage() {
     attempts += 1;
     if (attempts === 1) throw new Error("synthetic delivery failure");
-    await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+    void handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
   },
 };
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);

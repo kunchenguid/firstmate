@@ -79,9 +79,14 @@
 2770	tests/fm-no-mistakes-runtime.test.sh
 7260	tests/fm-no-mistakes-worker.test.sh
 2000	tests/fm-pi-account-home.test.sh
+4500	tests/fm-pi-direct-continuity-types.test.sh
+4250	tests/fm-pi-direct-continuity.test.sh
+5300	tests/fm-pi-exact-delivery-association.test.sh
+1500	tests/fm-pi-primary-compaction-live-e2e.test.sh
 10	tests/fm-pi-primary-live-e2e.test.sh
 80	tests/fm-pi-primary-types.test.sh
 4000	tests/fm-pi-refresh.test.sh
+3750	tests/fm-pi-retry-continuity.test.sh
 3170	tests/fm-pi-watch-extension.test.sh
 1574	tests/fm-pr-merge.test.sh
 802	tests/fm-prompt-exec.test.sh

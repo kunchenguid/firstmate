@@ -132,11 +132,17 @@ export default function (pi: ExtensionAPI) {
 
     guardFollowupActive = true;
     try {
-      await pi.sendUserMessage(
-        "TURN WOULD END BLIND - supervision is off. " +
-          "Resume supervision according to the session-start operating block before ending the turn.\n\n" +
-          result.stderr,
-        { deliverAs: "followUp" },
+      pi.sendMessage(
+        {
+          customType: "firstmate-turnend-guard",
+          content:
+            "TURN WOULD END BLIND - supervision is off. " +
+            "Resume supervision according to the session-start operating block before ending the turn.\n\n" +
+            result.stderr,
+          display: true,
+          details: { version: 1, source: "firstmate-extension", kind: "turnend-guard" },
+        },
+        { deliverAs: "followUp", triggerTurn: true },
       );
     } catch {
       guardFollowupActive = false;
