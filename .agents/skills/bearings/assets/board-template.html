@@ -503,6 +503,19 @@ __FM_BEARINGS_BOARD_DATA__
     return { level: text.slice(0, cut).trim(), detail: text.slice(cut + 1).trim() };
   }
 
+  /* A short, explicit list rather than broad detection. The board is written
+     in the captain's language, so "Faible" has to read as low just as "low"
+     does, and a level is compared trimmed and lower-cased.
+     Anything unrecognised stays on the alert tone on purpose: erring toward
+     caution is acceptable here and the reverse is not, since a low-risk pin
+     worn by a high risk tells the reader the opposite of the truth.
+     Extend this list when a language actually arrives - guessing at low-ness
+     from a substring would eventually match a word that means the opposite. */
+  var LOW_RISK_LEVELS = ["low", "faible"];
+  function isLowRisk(level) {
+    return LOW_RISK_LEVELS.indexOf(String(level == null ? "" : level).trim().toLowerCase()) >= 0;
+  }
+
   function ctxRow(k, v, rec) {
     var row = el("div", "bb-ctx__row" + (rec ? " bb-ctx__row--rec" : ""));
     row.appendChild(el("span", "bb-ctx__k", k));
@@ -518,9 +531,14 @@ __FM_BEARINGS_BOARD_DATA__
     var top = el("div", "bb-decision__top");
     if (item.type === "merge") {
       top.appendChild(badge("online", "checks green"));
-      var riskPin = badge(risk.level === "low" ? "neutral" : "warn", "risk " + risk.level);
-      riskPin.className += " bb-decision__risk";
-      top.appendChild(riskPin);
+      /* No level, no pin: a bare "risk" wearing an alert tone would announce a
+         risk the record never stated. Any justification carried by the value
+         still reaches the card body below. */
+      if (risk.level) {
+        var riskPin = badge(isLowRisk(risk.level) ? "neutral" : "warn", "risk " + risk.level);
+        riskPin.className += " bb-decision__risk";
+        top.appendChild(riskPin);
+      }
     } else {
       top.appendChild(badge("solid", "decision"));
       top.appendChild(el("span", "bb-decision__repo", item.repo));
