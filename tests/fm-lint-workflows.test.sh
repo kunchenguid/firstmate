@@ -514,8 +514,93 @@ SH
   pass "fm-lint.sh default path catches a self-broken ci.yml"
 }
 
+test_required_pr_workflows_are_fork_runnable_and_read_only() {
+  local out
+  out=$(python3 - "$ROOT/.github/workflows/ci.yml" "$ROOT/.github/workflows/no-mistakes-required.yml" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+
+def parse_workflow(path):
+    workflow = {
+        "name": None,
+        "events": set(),
+        "permissions": {},
+        "checkout_blocks": [],
+    }
+    lines = Path(path).read_text(encoding="utf-8").splitlines()
+    section = None
+    checkout = None
+    for raw in lines:
+        line = raw.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        stripped = line.strip()
+        if indent == 0:
+            section = None
+            if stripped.startswith("name:"):
+                workflow["name"] = stripped.split(":", 1)[1].strip().strip('"')
+            elif stripped == "on:":
+                section = "on"
+            elif stripped.startswith("on:"):
+                workflow["events"].add(stripped.split(":", 1)[1].strip())
+            elif stripped == "permissions:":
+                section = "permissions"
+            checkout = None
+            continue
+        if section == "on" and indent == 2:
+            event = stripped.split(":", 1)[0]
+            if event and not event.startswith("-"):
+                workflow["events"].add(event)
+        if section == "permissions" and indent == 2 and ":" in stripped:
+            key, value = stripped.split(":", 1)
+            workflow["permissions"][key.strip()] = value.strip()
+        if re.match(r"- uses: actions/checkout@", stripped):
+            checkout = {"repository": "", "ref": ""}
+            workflow["checkout_blocks"].append(checkout)
+            continue
+        if checkout is not None and indent >= 8 and ":" in stripped:
+            key, value = stripped.split(":", 1)
+            if key.strip() in checkout:
+                checkout[key.strip()] = value.strip()
+    return workflow
+
+
+workflows = {w["name"]: w for w in map(parse_workflow, sys.argv[1:])}
+required = ["CI", "Require no-mistakes"]
+for name in required:
+    if name not in workflows:
+        raise SystemExit(f"missing required workflow {name!r}")
+    workflow = workflows[name]
+    if "pull_request_target" not in workflow["events"]:
+        raise SystemExit(f"{name} must run on pull_request_target so fork PRs create jobs without maintainer approval")
+    if "pull_request" in workflow["events"]:
+        raise SystemExit(f"{name} must not use pull_request for required fork PR checks")
+    if workflow["permissions"].get("contents") != "read":
+        raise SystemExit(f"{name} must keep contents permission read-only")
+
+ci = workflows["CI"]
+if not ci["checkout_blocks"]:
+    raise SystemExit("CI must checkout the code under test")
+for index, checkout in enumerate(ci["checkout_blocks"], start=1):
+    if "head.repo.full_name" not in checkout["repository"]:
+        raise SystemExit(f"CI checkout {index} must select the pull request head repository")
+    if "head.sha" not in checkout["ref"]:
+        raise SystemExit(f"CI checkout {index} must select the immutable pull request head SHA")
+
+print("workflow-policy ok")
+PY
+  ) || fail "required PR workflow policy was not fork-runnable/read-only"$'\n'"$out"
+  assert_contains "$out" "workflow-policy ok" \
+    "workflow policy parser did not report success"
+  pass "required PR workflows run for fork PRs with read-only permissions"
+}
+
 test_pins_an_explicit_version
 test_current_workflows_pass
+test_required_pr_workflows_are_fork_runnable_and_read_only
 test_col0_heredoc_fails_with_clear_error
 test_valid_fixture_passes
 test_empty_workflows_dir_fails
