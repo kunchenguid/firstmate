@@ -1536,12 +1536,13 @@ conclude_task_no_mistakes_run() {  # <worktree>
 # `lsof` first, then a direct /proc read, then "none". Both real sources answer
 # the SAME question - which pids have their cwd under a given directory - so a
 # host without lsof keeps the task-owned scoping instead of widening to some
-# other process set.
+# other process set. A /proc mountpoint that exists but has no mounted procfs
+# behind it (no ./self, e.g. a chroot) is "none", not an empty successful scan.
 task_cwd_scan_source() {
   local proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
   if command -v lsof >/dev/null 2>&1; then
     printf 'lsof\n'
-  elif [ -d "$proc_root" ] && [ -r "$proc_root" ]; then
+  elif [ -d "$proc_root" ] && [ -r "$proc_root" ] && [ -e "$proc_root/self" ]; then
     printf 'proc\n'
   else
     printf 'none\n'
