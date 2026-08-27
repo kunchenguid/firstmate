@@ -1581,6 +1581,43 @@ test_missing_herdr_recovery_retires_a_completed_prior_transaction() {
   pass "missing Herdr recovery: completed evidence permits a later authorized recovery"
 }
 
+test_ordinary_relaunch_preserves_completed_recovery_for_later_missing_recovery() {
+  local dir out rc state attempt
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case relaunch-after-recovery mr18)
+  state="$dir/home/state"
+  attempt="$state/mr18.recover-missing.previous.2.attempt"
+  printf '%s\n' \
+    'v1' \
+    'task=mr18' \
+    'tx=previous.2' \
+    'phase=published' \
+    'new_endpoint=lab:w1:p2' > "$attempt"
+  printf '%s\n' \
+    'v1' \
+    'task=mr18' \
+    'phase=complete' \
+    'new_endpoint=lab:w1:p2' \
+    "attempt=$attempt" > "$state/mr18.control-recover-missing"
+  printf 'control_recover_missing_tx=previous.2\n' >> "$state/mr18.meta"
+
+  FM_FAKE_OLD_DEAD=1 \
+    out=$(run_herdr_control "$dir" mr18 relaunch --note 'ordinary relaunch after recovery'); rc=$?
+  expect_code 0 "$rc" "ordinary relaunch after completed recovery should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" mr18 control_recover_missing_tx)" = previous.2 ] \
+    || fail "ordinary relaunch must preserve the completed recovery binding"
+
+  unset FM_FAKE_OLD_DEAD
+  rm -f "$dir/fake/agent"
+  out=$(run_herdr_control "$dir" mr18 recover-missing --captain-authorized --note 'recover after the relaunched endpoint disappeared'); rc=$?
+  expect_code 0 "$rc" "a later missing endpoint should remain recoverable after ordinary relaunch"$'\n'"$out"
+  assert_contains "$out" "recovered mr18" "the later recovery should publish a fresh endpoint"
+  [ ! -e "$attempt" ] || fail "the later recovery should retire the completed prior attempt"
+  [ "$(meta_field "$dir" mr18 control_recover_missing_tx)" != previous.2 ] \
+    || fail "the later recovery must publish its own transaction binding"
+  pass "ordinary relaunch preserves completed recovery authority for a later missing endpoint"
+}
+
 test_missing_herdr_recovery_preserves_claude_worktree_settings() {
   local dir out rc settings state
   unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
@@ -1910,6 +1947,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_missing_herdr_recovery_requires_captain_authorization
 test_missing_herdr_recovery_reuses_dirty_copy_and_publishes_a_fresh_endpoint
 test_missing_herdr_recovery_retires_a_completed_prior_transaction
+test_ordinary_relaunch_preserves_completed_recovery_for_later_missing_recovery
 test_missing_herdr_recovery_preserves_claude_worktree_settings
 test_missing_herdr_recovery_reconciles_incomplete_create_response
 test_missing_herdr_recovery_refuses_contradictory_create_identity_without_cleanup
