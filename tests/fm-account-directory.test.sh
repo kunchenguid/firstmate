@@ -854,6 +854,121 @@ test_direct_claude_recovery_resolves_legacy_default_to_anchor() {
   pass "direct Claude recovery preserves explicit models and upgrades a legacy default to the Opus 5 anchor"
 }
 
+test_pi_recovery_adopts_legacy_local_task_identity() {
+  local record id out launch meta tasktmp source_home
+  reset_accounts
+  : > "$TMP_ROOT/agent-fleet.log"
+  id=pi-legacy-recovery-z3
+  record=$(make_spawn_case pi-legacy-recovery pi "$id")
+  read_spawn_case "$record"
+  source_home="$SPAWN_HOME/pi-source"
+  mkdir -p "$source_home"
+  printf '{"fixture":true}\n' > "$source_home/auth.json"
+
+  PI_CODING_AGENT_DIR="$source_home" \
+    run_direct_spawn "$SPAWN_HOME" "$SPAWN_WORKTREE" "$SPAWN_LAUNCH_LOG" \
+      "$id" "$SPAWN_PROJECT" >/dev/null 2>&1
+  meta=$SPAWN_HOME/state/$id.meta
+  tasktmp=$(sed -n 's/^tasktmp=//p' "$meta")
+  assert_no_grep 'account_home=' "$meta" "legacy local Pi metadata unexpectedly recorded account routing"
+  assert_no_grep 'worktree_git_dir=' "$meta" "legacy local Pi metadata unexpectedly recorded direct-routing identity"
+  assert_present "$tasktmp/pi-author-agent/auth.json" "initial Pi launch did not create its task-private author snapshot"
+  git -C "$SPAWN_WORKTREE" switch --quiet -c "fm/$id"
+  rm -f "$SPAWN_HOME/state/.fake-endpoint"
+
+  out=$(PI_CODING_AGENT_DIR="$source_home" \
+    run_direct_spawn "$SPAWN_HOME" "$SPAWN_WORKTREE" "$SPAWN_LAUNCH_LOG" \
+      "$id" --recover-direct-account 2>&1)
+  launch=$(cat "$SPAWN_LAUNCH_LOG")
+  assert_contains "$out" "spawned $id harness=pi" \
+    "legacy local Pi recovery did not create a replacement endpoint: $out"
+  assert_not_contains "$out" "unsupported harness 'pi'" \
+    "legacy local Pi recovery retained the obsolete harness refusal"
+  assert_not_contains "$out" "SPAWN_TASK_TMP: unbound variable" \
+    "legacy local Pi recovery tripped abort cleanup before task temp recovery"
+  assert_contains "$launch" "PI_CODING_AGENT_DIR='$tasktmp/pi-author-agent' pi" \
+    "legacy local Pi recovery did not reuse its task-private author snapshot"
+  assert_grep 'worktree_git_dir=' "$meta" \
+    "legacy local Pi recovery did not upgrade exact Git-dir metadata: $(cat "$meta")"
+  assert_grep 'worktree_git_dir_identity=' "$meta" \
+    "legacy local Pi recovery did not upgrade Git-dir identity metadata"
+  assert_grep "worktree_git_ref=refs/heads/fm/$id" "$meta" \
+    "legacy local Pi recovery did not preserve the observed task branch"
+  assert_no_grep 'account_home=' "$meta" \
+    "legacy local Pi recovery fabricated a direct account-directory binding"
+  assert_grep "tasktmp=$tasktmp" "$meta" \
+    "legacy local Pi recovery changed the task generation temp root"
+  [ ! -s "$TMP_ROOT/agent-fleet.log" ] || fail "legacy local Pi recovery invoked Agent Fleet"
+  pass "legacy local Pi recovery reuses its author snapshot and upgrades exact worktree identity"
+}
+
+test_pi_recovery_refuses_missing_author_snapshot() {
+  local record id meta tasktmp source_home out status
+  reset_accounts
+  id=pi-missing-author-snapshot-z3
+  record=$(make_spawn_case pi-missing-author-snapshot pi "$id")
+  read_spawn_case "$record"
+  source_home="$SPAWN_HOME/pi-source"
+  mkdir -p "$source_home"
+  printf '{"fixture":"original"}\n' > "$source_home/auth.json"
+
+  PI_CODING_AGENT_DIR="$source_home" \
+    run_direct_spawn "$SPAWN_HOME" "$SPAWN_WORKTREE" "$SPAWN_LAUNCH_LOG" \
+      "$id" "$SPAWN_PROJECT" >/dev/null 2>&1
+  meta=$SPAWN_HOME/state/$id.meta
+  tasktmp=$(sed -n 's/^tasktmp=//p' "$meta")
+  assert_present "$tasktmp/pi-author-agent/auth.json" \
+    "initial Pi launch did not create the author snapshot fixture"
+  git -C "$SPAWN_WORKTREE" switch --quiet -c "fm/$id"
+  rm -f "$SPAWN_HOME/state/.fake-endpoint"
+  rm -rf "$tasktmp/pi-author-agent"
+  printf '{"fixture":"ambient-replacement"}\n' > "$source_home/auth.json"
+  if out=$(PI_CODING_AGENT_DIR="$source_home" \
+    run_direct_spawn "$SPAWN_HOME" "$SPAWN_WORKTREE" "$SPAWN_LAUNCH_LOG" \
+      "$id" --recover-direct-account 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "Pi recovery accepted a missing task-private author snapshot"
+  assert_contains "$out" "task-private Pi author snapshot is unavailable" \
+    "Pi recovery did not identify the missing author identity boundary: $out"
+  assert_absent "$SPAWN_HOME/state/.fake-endpoint" \
+    "Pi recovery created an endpoint without its recorded author snapshot"
+  assert_absent "$tasktmp/pi-author-agent" \
+    "Pi recovery recreated the missing snapshot from ambient credentials"
+  [ ! -s "$SPAWN_LAUNCH_LOG" ] \
+    || fail "Pi recovery launched after refusing the missing author snapshot: $(cat "$SPAWN_LAUNCH_LOG")"
+  pass "legacy local Pi recovery fails closed without its task-private author snapshot"
+}
+
+test_direct_recovery_early_refusal_has_bounded_abort_cleanup() {
+  local record id meta out status
+  reset_accounts
+  id=pi-cloud-direct-refused-z3
+  record=$(make_spawn_case pi-cloud-direct-refused pi "$id")
+  read_spawn_case "$record"
+  meta=$SPAWN_HOME/state/$id.meta
+  printf '%s\n' \
+    'kind=ship' \
+    'harness=pi' \
+    'placement=azure' \
+    > "$meta"
+
+  if out=$(run_direct_spawn "$SPAWN_HOME" "$SPAWN_WORKTREE" "$SPAWN_LAUNCH_LOG" \
+    "$id" --recover-direct-account 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "direct recovery accepted cloud placement as a local Pi endpoint"
+  assert_contains "$out" "cannot convert recorded cloud placement" \
+    "early direct recovery refusal did not identify the incompatible placement: $out"
+  assert_not_contains "$out" "SPAWN_TASK_TMP: unbound variable" \
+    "early direct recovery refusal entered abort cleanup with an unset task temp: $out"
+  pass "early direct recovery refusal keeps abort cleanup bounded before task temp resolution"
+}
+
 test_observe_spawn_uses_direct_directory_without_agent_fleet() {
   local record id out launch meta
   reset_accounts
@@ -1428,6 +1543,13 @@ if [ "${FM_TEST_FOCUSED:-}" = direct-recovery-lifecycle ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = pi-direct-recovery ]; then
+  test_pi_recovery_adopts_legacy_local_task_identity
+  test_pi_recovery_refuses_missing_author_snapshot
+  test_direct_recovery_early_refusal_has_bounded_abort_cleanup
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = treehouse-per-home ]; then
   test_main_home_ship_and_scout_use_managed_treehouse_source
   exit 0
@@ -1454,6 +1576,9 @@ test_spawn_uses_direct_codex_home_without_agent_fleet
 test_spawn_uses_direct_claude_fallback_and_hook
 test_claude_spawn_rejects_mismatched_explicit_model
 test_direct_claude_recovery_resolves_legacy_default_to_anchor
+test_pi_recovery_adopts_legacy_local_task_identity
+test_pi_recovery_refuses_missing_author_snapshot
+test_direct_recovery_early_refusal_has_bounded_abort_cleanup
 test_observe_spawn_uses_direct_directory_without_agent_fleet
 test_direct_spawn_and_recovery_support_detached_worktree
 test_direct_recovery_preserves_recorded_task_context

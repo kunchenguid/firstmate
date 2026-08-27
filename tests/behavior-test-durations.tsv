@@ -89,6 +89,7 @@
 3750	tests/fm-pi-retry-continuity.test.sh
 3170	tests/fm-pi-watch-extension.test.sh
 1574	tests/fm-pr-merge.test.sh
+6030	tests/fm-process-tree.test.sh
 802	tests/fm-prompt-exec.test.sh
 261383	tests/fm-report-stack-a.test.sh
 243164	tests/fm-report-stack-b.test.sh

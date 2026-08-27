@@ -2,6 +2,8 @@
 # Shared bounded command runner for operations whose descendants must be
 # terminated and reaped before the caller releases lifecycle or Git locks.
 # Usage: fm_run_bounded <positive-seconds> <command> [args...]
+# After command reap, controller-pipe EOF releases the anchor unless an
+# unverified cleanup explicitly retains it as the guarded group identity.
 # After every call, FM_PROCESS_TREE_CLEANUP_STATUS is verified, unverified, or
 # not-started, while the function return preserves the wrapped command status.
 
@@ -202,8 +204,22 @@ fm_run_bounded() {
       while (1) {
         my $finish = "";
         my $finish_count = sysread $finish_read, $finish, 1;
-        exit 0 if defined $finish_count && $finish_count == 1 && $finish eq "F";
-        select undef, undef, undef, 1;
+        if (!defined $finish_count) {
+          next if $! == EINTR;
+          print STDERR "error: bounded command process-group anchor finish handshake read failed: $!\n";
+          exit $setup_failure;
+        }
+        # The only writer is the controller, and the command is already reaped.
+        # EOF therefore leaves no owned process for this anchor to supervise.
+        exit 0 if $finish_count == 0;
+        exit 0 if $finish_count == 1 && $finish eq "F";
+        if ($finish_count == 1 && $finish eq "R") {
+          # An unverified cleanup deliberately retains this identity anchor.
+          close $finish_read;
+          while (1) { select undef, undef, undef, 1 }
+        }
+        print STDERR "error: bounded command process-group anchor received an invalid finish acknowledgement\n";
+        exit $setup_failure;
       }
     }
     close $ready_write;
@@ -267,9 +283,16 @@ fm_run_bounded() {
     my $anchor_state = terminate_owned($anchor, $anchor);
     if (!defined $anchor_state) {
       close $status_read;
+      my $retain_sent;
+      {
+        local $SIG{PIPE} = "IGNORE";
+        my $written = syswrite $finish_write, "R";
+        $retain_sent = defined $written && $written == 1;
+      }
       close $finish_write;
       record_cleanup("unverified");
       my $guard = $ENV{FM_PROCESS_TREE_GUARD_FILE} || "the reported process group";
+      print STDERR "error: bounded command anchor retention could not be confirmed for group $anchor\n" if !$retain_sent;
       print STDERR "error: bounded command process cleanup could not be verified for anchored group $anchor; ownership remains guarded by $guard. Inspect that group, terminate only its remaining processes, and retry.\n";
       exit(defined $command_status ? $command_status : ($requested_status || $setup_failure));
     }

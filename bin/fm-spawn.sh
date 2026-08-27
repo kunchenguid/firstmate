@@ -109,10 +109,12 @@
 #   existing account_profile metadata. They retain the sealed Agent Fleet
 #   session/lease behavior needed to recover those already-managed generations;
 #   ship/scout launches never create that metadata.
-#   --recover-direct-account is the ship/scout account_home recovery path. It reloads kind,
+#   --recover-direct-account is the ship/scout endpoint recovery path. It reloads kind,
 #   project, worktree, harness, backend, model, effort, mode, yolo, and report
-#   requirements from metadata, selects a fresh account directory, and creates
-#   only a replacement endpoint in the recorded worktree.
+#   requirements from metadata and creates only a replacement endpoint in the
+#   recorded worktree. Claude and Codex select a fresh account directory. A
+#   legacy local Pi task reuses its task-private author snapshot and upgrades
+#   missing exact-worktree metadata from the observed, project-bound worktree.
 #   A --secondmate spawn also propagates the primary's declared inheritable config
 #   into the secondmate home's config/, so the secondmate's OWN crewmates,
 #   dispatch profiles, and backlog backend inherit the primary's settings
@@ -369,7 +371,7 @@ capture_direct_launch_authoritative_state() {
 }
 
 validate_direct_recovery_physical_identity() {
-  local worktree_real worktree_literal current_git_dir current_git_dir_identity
+  local worktree_real worktree_literal current_git_dir current_git_dir_identity expected_git_dir expected_git_dir_identity
   worktree_real=$(cd "$WT" 2>/dev/null && pwd -P) || worktree_real=
   worktree_literal=${WT%/}
   if [ -z "$worktree_real" ] || [ "$worktree_literal" != "$worktree_real" ]; then
@@ -378,9 +380,19 @@ validate_direct_recovery_physical_identity() {
   fi
   current_git_dir=$(git_worktree_dir_real "$WT" 2>/dev/null) || current_git_dir=
   current_git_dir_identity=$(git_directory_identity "$current_git_dir" 2>/dev/null) || current_git_dir_identity=
+  expected_git_dir=$RECORDED_WORKTREE_GIT_DIR
+  expected_git_dir_identity=$RECORDED_WORKTREE_GIT_DIR_IDENTITY
+  if [ "$PI_RECOVERY_ADOPT_GIT_IDENTITY" = 1 ]; then
+    if [ -z "$PI_RECOVERY_GIT_DIR" ]; then
+      PI_RECOVERY_GIT_DIR=$current_git_dir
+      PI_RECOVERY_GIT_DIR_IDENTITY=$current_git_dir_identity
+    fi
+    expected_git_dir=$PI_RECOVERY_GIT_DIR
+    expected_git_dir_identity=$PI_RECOVERY_GIT_DIR_IDENTITY
+  fi
   if [ -z "$current_git_dir" ] || [ -z "$current_git_dir_identity" ] \
-    || [ "$current_git_dir" != "$RECORDED_WORKTREE_GIT_DIR" ] \
-    || [ "$current_git_dir_identity" != "$RECORDED_WORKTREE_GIT_DIR_IDENTITY" ]; then
+    || [ "$current_git_dir" != "$expected_git_dir" ] \
+    || [ "$current_git_dir_identity" != "$expected_git_dir_identity" ]; then
     echo "error: recorded direct account recovery worktree '$WT' no longer has its exact Git-dir identity; refusing endpoint creation" >&2
     return 1
   fi
@@ -393,6 +405,28 @@ validate_direct_recovery_worktree_identity() {
   validate_direct_recovery_physical_identity || return 1
   current_git_ref=$(git_worktree_ref "$WT" 2>/dev/null || true)
   current_git_head=$(git_worktree_head "$WT" 2>/dev/null) || current_git_head=
+  if [ "$PI_RECOVERY_ADOPT_GIT_STATE" = 1 ]; then
+    if [ "$PI_RECOVERY_GIT_STATE_SET" = 0 ]; then
+      [ -n "$current_git_ref" ] || [ -n "$current_git_head" ] || {
+        echo "error: legacy Pi recovery worktree '$WT' has no authoritative Git state; refusing endpoint creation" >&2
+        return 1
+      }
+      PI_RECOVERY_GIT_REF=$current_git_ref
+      PI_RECOVERY_GIT_HEAD=
+      [ -n "$current_git_ref" ] || PI_RECOVERY_GIT_HEAD=$current_git_head
+      PI_RECOVERY_GIT_STATE_SET=1
+    fi
+    if [ "$current_git_ref" != "$PI_RECOVERY_GIT_REF" ] \
+      || { [ -z "$current_git_ref" ] && [ "$current_git_head" != "$PI_RECOVERY_GIT_HEAD" ]; }; then
+      echo "error: legacy Pi recovery worktree '$WT' changed Git state before endpoint creation" >&2
+      return 1
+    fi
+    WORKTREE_GIT_REF=$PI_RECOVERY_GIT_REF
+    WORKTREE_GIT_HEAD=$PI_RECOVERY_GIT_HEAD
+    WORKTREE_GIT_SETUP_REF=
+    WORKTREE_GIT_SETUP_HEAD=
+    return 0
+  fi
   if [ -n "$RECORDED_WORKTREE_GIT_SETUP_HEAD" ]; then
     if [ "$current_git_ref" = "$RECORDED_WORKTREE_GIT_REF" ]; then
       WORKTREE_GIT_REF=$current_git_ref
@@ -1364,6 +1398,15 @@ DIRECT_ACCOUNT_HOME=
 HERDR_AGENT_ENV=()
 DIRECT_ACCOUNT_RESPAWN=0
 DIRECT_ACCOUNT_PREPARE_DEFERRED=0
+PI_DIRECT_RECOVERY=0
+PI_RECOVERY_ADOPT_GIT_IDENTITY=0
+PI_RECOVERY_ADOPT_GIT_STATE=0
+PI_RECOVERY_GIT_DIR=
+PI_RECOVERY_GIT_DIR_IDENTITY=
+PI_RECOVERY_GIT_REF=
+PI_RECOVERY_GIT_HEAD=
+PI_RECOVERY_GIT_STATE_SET=0
+SPAWN_TASK_TMP=
 WORKTREE_GIT_DIR=
 WORKTREE_GIT_DIR_IDENTITY=
 WORKTREE_GIT_REF=
@@ -2557,6 +2600,13 @@ if [ "$RECOVERY_ACCOUNT" = 1 ]; then
     esac
     case "$RECORDED_HARNESS" in
       claude|codex) ;;
+      pi)
+        PI_DIRECT_RECOVERY=1
+        [ -z "$(fm_meta_get "$RESUME_META" placement)" ] || {
+          echo "error: --recover-direct-account cannot convert recorded cloud placement for $ID into a local Pi endpoint" >&2
+          exit 1
+        }
+        ;;
       *) echo "error: direct account recovery metadata has unsupported harness '$RECORDED_HARNESS' for $ID" >&2; exit 1 ;;
     esac
     [ -z "$(fm_meta_get "$RESUME_META" direct_spawn_cleanup)" ] || {
@@ -2567,20 +2617,29 @@ if [ "$RECOVERY_ACCOUNT" = 1 ]; then
       echo "error: rollback cleanup is pending for $ID; tear down the retained task state before recovery" >&2
       exit 1
     }
-    [ -n "$RECORDED_ACCOUNT_HOME" ] || { echo "error: direct account recovery metadata has no account_home for $ID" >&2; exit 1; }
+    [ "$PI_DIRECT_RECOVERY" = 1 ] || [ -n "$RECORDED_ACCOUNT_HOME" ] || { echo "error: direct account recovery metadata has no account_home for $ID" >&2; exit 1; }
     [ -z "$(fm_meta_get "$RESUME_META" account_profile)" ] || { echo "error: direct account recovery cannot replace legacy account_profile metadata for $ID" >&2; exit 1; }
     [ -z "$(fm_meta_get "$RESUME_META" account_rollback_cleanup)" ] || { echo "error: direct account recovery cannot bypass pending legacy rollback cleanup for $ID" >&2; exit 1; }
     [ -n "$RECORDED_PROJECT" ] || { echo "error: direct account recovery metadata has no project for $ID" >&2; exit 1; }
     [ -n "$RECORDED_WORKTREE" ] || { echo "error: direct account recovery metadata has no worktree for $ID" >&2; exit 1; }
-    [ -n "$RECORDED_WORKTREE_GIT_DIR" ] || { echo "error: direct account recovery metadata has no exact worktree Git-dir for $ID" >&2; exit 1; }
-    [ -n "$RECORDED_WORKTREE_GIT_DIR_IDENTITY" ] || { echo "error: direct account recovery metadata has no worktree Git-dir identity for $ID" >&2; exit 1; }
+    if [ -z "$RECORDED_WORKTREE_GIT_DIR" ] && [ -z "$RECORDED_WORKTREE_GIT_DIR_IDENTITY" ] \
+      && [ "$PI_DIRECT_RECOVERY" = 1 ]; then
+      PI_RECOVERY_ADOPT_GIT_IDENTITY=1
+    else
+      [ -n "$RECORDED_WORKTREE_GIT_DIR" ] || { echo "error: direct account recovery metadata has no exact worktree Git-dir for $ID" >&2; exit 1; }
+      [ -n "$RECORDED_WORKTREE_GIT_DIR_IDENTITY" ] || { echo "error: direct account recovery metadata has no worktree Git-dir identity for $ID" >&2; exit 1; }
+    fi
     if [ -n "$RECORDED_WORKTREE_GIT_REF" ] && [ -n "$RECORDED_WORKTREE_GIT_HEAD" ]; then
       echo "error: direct account recovery metadata has conflicting branch and detached HEAD identities for $ID" >&2
       exit 1
     fi
     if [ -z "$RECORDED_WORKTREE_GIT_REF" ] && [ -z "$RECORDED_WORKTREE_GIT_HEAD" ]; then
-      echo "error: direct account recovery metadata has no authoritative worktree Git state for $ID" >&2
-      exit 1
+      if [ "$PI_DIRECT_RECOVERY" = 1 ]; then
+        PI_RECOVERY_ADOPT_GIT_STATE=1
+      else
+        echo "error: direct account recovery metadata has no authoritative worktree Git state for $ID" >&2
+        exit 1
+      fi
     fi
     if [ -n "$RECORDED_WORKTREE_GIT_SETUP_REF" ] && [ -z "$RECORDED_WORKTREE_GIT_SETUP_HEAD" ]; then
       echo "error: direct account recovery metadata has an incomplete branch-setup identity for $ID" >&2
@@ -2914,6 +2973,19 @@ if [ "$DIRECT_ACCOUNT_RECOVERY" = 0 ] && [ "$ACCOUNT_EFFECTIVE_MODE" != off ] \
 fi
 case "$HARNESS" in
   claude|codex) ;;
+  pi)
+    if [ "$DIRECT_ACCOUNT_RESPAWN" = 1 ]; then
+      ACCOUNT_EFFECTIVE_MODE=off
+    elif [ "$ACCOUNT_POOL_SET" = 1 ] || [ "$ACCOUNT_PROFILE_SET" = 1 ]; then
+      echo "error: --account-pool/--account-profile requires a claude or codex harness, not '$HARNESS'" >&2
+      exit 1
+    elif [ "$ACCOUNT_EFFECTIVE_MODE" = enforce ]; then
+      echo "error: enforced account routing requires a claude or codex harness, not '$HARNESS'" >&2
+      exit 1
+    else
+      ACCOUNT_EFFECTIVE_MODE=off
+    fi
+    ;;
   *)
     if [ "$ACCOUNT_POOL_SET" = 1 ] || [ "$ACCOUNT_PROFILE_SET" = 1 ]; then
       echo "error: --account-pool/--account-profile requires a claude or codex harness, not '$HARNESS'" >&2
@@ -2930,7 +3002,10 @@ case "$HARNESS" in
     ACCOUNT_EFFECTIVE_MODE=off
     ;;
 esac
-if { [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ] \
+if [ "$DIRECT_ACCOUNT_RESPAWN" = 1 ] && [ "$HARNESS" = pi ]; then
+  DIRECT_ACCOUNT_ROUTING=1
+  DIRECT_ACCOUNT_HOME=$RECORDED_ACCOUNT_HOME
+elif { [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ] \
     || { [ "$RECOVERY_ACCOUNT" = 0 ] && [ "$KIND" != secondmate ]; }; } \
   && [ "$ACCOUNT_EFFECTIVE_MODE" != off ]; then
   if [ "$ACCOUNT_EFFECTIVE_MODE" = enforce ] && fm_account_test_lab_enabled \
@@ -3861,9 +3936,14 @@ persist_worktree_acquisition_phases || {
 # the recorded account_home is the binding the worker lifecycle stages, and
 # pi's own extension owns profile selection on the worker.
 if [ "$HARNESS" = pi ] && [ "$RAW_LAUNCH" != 1 ] && [ "$SPAWN_CLOUD" != azure ]; then
-  PI_AUTHOR_SOURCE_HOME=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
+  PI_AUTHOR_SOURCE_HOME=${DIRECT_ACCOUNT_HOME:-${RECORDED_ACCOUNT_HOME:-${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}}}
   PI_AUTHOR_ACCOUNT_HOME="$TASK_TMP/pi-author-agent"
-  if "$SCRIPT_DIR/fm-pi-author-snapshot.py" \
+  if [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ]; then
+    if [ ! -d "$PI_AUTHOR_ACCOUNT_HOME" ] || [ -L "$PI_AUTHOR_ACCOUNT_HOME" ]; then
+      echo "error: task-private Pi author snapshot is unavailable for $ID" >&2
+      exit 1
+    fi
+  elif "$SCRIPT_DIR/fm-pi-author-snapshot.py" \
     "$PI_AUTHOR_SOURCE_HOME" "$PI_AUTHOR_ACCOUNT_HOME"; then
     :
   else

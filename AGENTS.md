@@ -118,8 +118,9 @@ state/               volatile runtime signals; gitignored
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
   <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=, generation_id=, report_required=
-  Direct ship/scout: account_home=, worktree_git_dir=, worktree_git_dir_identity=, and exactly one of attached worktree_git_ref= or intentional-detached worktree_git_head=; worktree_git_setup_ref=/worktree_git_setup_head= are temporary only pending `fm/<id>`, and recovery accepts only that setup state or the authoritative ref before removing setup fields
-  Direct recovery validates the canonical worktree path, exact physical Git-dir identity, and authoritative final state before account preparation and again immediately before endpoint creation; any drift fails closed without launching.
+  Direct account-routed ship/scout: account_home=, worktree_git_dir=, worktree_git_dir_identity=, and exactly one of attached worktree_git_ref= or intentional-detached worktree_git_head=; worktree_git_setup_ref=/worktree_git_setup_head= are temporary only pending `fm/<id>`, and recovery accepts only that setup state or the authoritative ref before removing setup fields
+  Recovered legacy local Pi ship/scout metadata gains the same exact-worktree fields without account_home= after the recorded project and task-private author snapshot are verified.
+  Claude/Codex direct recovery validates the canonical worktree path, exact physical Git-dir identity, and authoritative final state before account preparation and again immediately before endpoint creation; legacy Pi adopts that identity only from its project-bound worktree and rechecks it before launch; any drift fails closed without launching.
   If endpoint removal after a failed new direct spawn cannot be confirmed, direct_spawn_cleanup=pending and rollback_pending=1 retain the endpoint and worktree identity for explicit teardown.
   A failed direct spawn before endpoint creation records direct_spawn_endpoint=not-created and empty window=; teardown skips endpoint quiescence and an unrun scout's report gate, never worktree safety
   Secondmate Agent Fleet routing and legacy managed recovery own account_pool=, account_profile=, account_task=, account_attempt=, and provider_session_id= (docs/configuration.md "Agent Fleet account routing").
@@ -258,7 +259,7 @@ Act on the digest's lock result exactly as section 3 requires and keep its drain
 Treat the printed `data/backlog.md`, `data/secondmates.md`, `state/*.meta`, and bounded `state/*.status` tails as already read; status tails are wake-event history, so use `bin/fm-crew-state.sh <id>` for current state and read only an individually named full log when older history matters.
 Use each recorded `window=` and `endpoint: alive|dead` result as the direct-report set and presence check; do not re-probe or sweep every `fm-*` tmux window, herdr tab, zellij tab, Orca terminal, or cmux workspace across homes.
 For a missing `window=` or dead endpoint, reconcile by kind through its meta.
-If ship/scout meta records `account_home=`, run `bin/fm-spawn.sh <id> --recover-direct-account` for fresh direct account-directory selection.
+If ship/scout meta records `account_home=`, or records a local `harness=pi` generation that predates direct-account metadata, run `bin/fm-spawn.sh <id> --recover-direct-account`; Claude/Codex select a fresh account directory, while legacy Pi reuses its task-private author snapshot and upgrades exact-worktree metadata.
 If it records `account_profile=`, try `bin/fm-spawn.sh <id> --resume-account`, then use `--continue-account` only after re-verifying live and repository state; `bin/fm-account-continuation.sh` owns the fail-closed packet contract.
 For ordinary crewmates, inspect recorded backend metadata first, use `treehouse status` for treehouse-backed tasks, and use recorded `orca_worktree_id=` and `terminal=` for Orca tasks.
 For unmanaged `kind=secondmate`, load `secondmate-provisioning` and follow its "Recovery" procedure.
@@ -405,7 +406,7 @@ bin/fm-spawn.sh <id> projects/<repo>             # uses the active crewmate harn
 bin/fm-spawn.sh <id> projects/<repo> --harness codex --model gpt-5.5 --effort high   # explicit profile axes
 bin/fm-spawn.sh <id> projects/<repo> --harness codex --account-pool codex-crew   # compatibility flag activating direct account-directory selection
 bin/fm-spawn.sh <id> projects/<repo> --harness claude --account-profile claude-2   # compatibility flag activating direct account-directory selection
-bin/fm-spawn.sh <id> --recover-direct-account    # metadata-preserving ship/scout direct account recovery with fresh selection
+bin/fm-spawn.sh <id> --recover-direct-account    # metadata-preserving ship/scout endpoint recovery; fresh Claude/Codex selection or legacy Pi snapshot reuse
 bin/fm-spawn.sh <id> --resume-account             # sticky legacy managed recovery; never a fresh prompt
 bin/fm-spawn.sh <id> --continue-account           # fresh legacy managed session from verified task-owned continuation state
 bin/fm-spawn.sh <id> projects/<repo> --backend <tmux|herdr|zellij|cmux>   # explicit new-task runtime backend (docs/configuration.md "Runtime backend")
