@@ -46,11 +46,12 @@ test_page_renders_without_sibling_access() {
 }
 
 test_missing_and_malformed_embedded_data_show_stale_state() {
-  local home page missing malformed out
+  local home page missing malformed semantic out
   home=$(make_mission stale-page)
   page=$(page_for "$home")
   missing="$home/missing.html"
   malformed="$home/malformed.html"
+  semantic="$home/semantic-malformed.html"
   perl -0777 -pe 's|<script id="firstmate-logbook-data" type="application/json">.*?</script>||s' "$page" > "$missing"
   out=$(render "$missing") || fail "missing-data shell did not remain usable"
   printf '%s' "$out" | jq -e '
@@ -65,6 +66,18 @@ test_missing_and_malformed_embedded_data_show_stale_state() {
     .status == "Data stale"
       and (.notice | contains("Progress data is unavailable or stale"))
   ' >/dev/null || fail "malformed embedded data did not show the explicit stale state: $out"
+
+  node - "$page" "$semantic" <<'NODE'
+const fs = require("fs");
+const [source, destination] = process.argv.slice(2);
+fs.writeFileSync(destination, fs.readFileSync(source, "utf8").replace('"state": "passed"', '"state": "invented"'));
+NODE
+  out=$(render "$semantic") || fail "semantically malformed-data shell did not remain usable"
+  printf '%s' "$out" | jq -e '
+    .status == "Data stale"
+      and (.notice | contains("Progress data is unavailable or stale"))
+      and (.notice | contains("invalid completion gates"))
+  ' >/dev/null || fail "semantically malformed embedded data did not show the explicit stale state: $out"
   pass "missing and malformed embedded data leave a usable shell with a visible stale warning"
 }
 

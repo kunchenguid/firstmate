@@ -175,6 +175,30 @@ test_path_like_mission_is_confined() {
   pass "mission text cannot escape the private logbook path"
 }
 
+test_symlinked_mission_directory_is_refused() {
+  local home page dir outside update before out rc
+  home=$(make_home symlink-confinement)
+  run_logbook "$home" start --mission "Symlink mission" >/dev/null || fail "fixture start failed"
+  page=$(page_for "$home")
+  dir=$(dirname "$page")
+  outside="$TMP_ROOT/outside-mission"
+  mkdir "$outside"
+  mv "$dir/index.html" "$outside/index.html"
+  rmdir "$dir"
+  ln -s "$outside" "$dir"
+  update="$home/update.json"
+  write_stage_update "$update" "Unsafe stage" "The confined page must remain unchanged." active
+  before=$(shasum -a 256 "$outside/index.html" | awk '{print $1}')
+  set +e
+  out=$(run_logbook "$home" update --mission "Symlink mission" --input "$update" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "symlinked mission directory was accepted"
+  assert_contains "$out" "unsafe directory component" "symlink refusal did not name the unsafe path"
+  [ "$(shasum -a 256 "$outside/index.html" | awk '{print $1}')" = "$before" ] || fail "symlinked path changed an outside page"
+  pass "intermediate symlinks cannot escape the logbook root"
+}
+
 test_one_live_writer_refuses_a_competing_update() {
   local home page before update lock out rc
   home=$(make_home writer)
@@ -185,6 +209,13 @@ test_one_live_writer_refuses_a_competing_update() {
   write_stage_update "$update" "Competing stage" "A competing stage finished." active
   lock="$home/data/logbook/.writer.lock"
   mkdir "$lock"
+  set +e
+  out=$(run_logbook "$home" update --mission "Writer mission" --input "$update" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a writer initializing its lock was displaced"
+  assert_contains "$out" "another logbook writer is active" "initializing writer refusal did not name the conflict"
+  [ "$(shasum -a 256 "$page" | awk '{print $1}')" = "$before" ] || fail "initializing writer changed the page"
   printf '{"pid":%s,"claimed_at":"2026-08-27T00:00:00Z"}\n' "$$" > "$lock/owner.json"
   set +e
   out=$(run_logbook "$home" update --mission "Writer mission" --input "$update" 2>&1)
@@ -195,6 +226,25 @@ test_one_live_writer_refuses_a_competing_update() {
   [ "$(shasum -a 256 "$page" | awk '{print $1}')" = "$before" ] || fail "competing writer changed the page"
   rm -rf "$lock"
   pass "one live writer owns each mutation"
+}
+
+test_duplicate_update_is_refused() {
+  local home page update before out rc
+  home=$(make_home duplicate)
+  run_logbook "$home" start --mission "Duplicate mission" >/dev/null || fail "fixture start failed"
+  page=$(page_for "$home")
+  update="$home/update.json"
+  write_stage_update "$update" "Accepted stage" "The qualifying stage is complete." active
+  run_logbook "$home" update --mission "Duplicate mission" --input "$update" >/dev/null || fail "first update failed"
+  before=$(shasum -a 256 "$page" | awk '{print $1}')
+  set +e
+  out=$(run_logbook "$home" update --mission "Duplicate mission" --input "$update" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "duplicate update was accepted"
+  assert_contains "$out" "duplicate logbook update refused" "duplicate refusal did not explain the conflict"
+  [ "$(shasum -a 256 "$page" | awk '{print $1}')" = "$before" ] || fail "duplicate update changed the page"
+  pass "duplicate qualifying updates are refused before publication"
 }
 
 test_completed_close_records_outcome_and_preserves_page() {
@@ -235,5 +285,7 @@ test_safe_creation_and_atomic_embedded_update
 test_malformed_and_invalid_updates_preserve_current_page
 test_milestones_are_retained_newest_first
 test_path_like_mission_is_confined
+test_symlinked_mission_directory_is_refused
 test_one_live_writer_refuses_a_competing_update
+test_duplicate_update_is_refused
 test_completed_close_records_outcome_and_preserves_page

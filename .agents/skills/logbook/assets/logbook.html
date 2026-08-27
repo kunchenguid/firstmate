@@ -162,29 +162,42 @@ __FIRSTMATE_LOGBOOK_PAYLOAD__
         return node;
       };
 
-      const validEvidence = (items) => Array.isArray(items) && items.every((item) =>
-        item && typeof item === "object" && typeof item.label === "string" &&
-        typeof item.value === "string" && (item.href === undefined || /^https:\/\//.test(item.href))
-      );
+      const MAX_ITEMS = 64;
+      const validText = (value) => typeof value === "string" && value.length > 0;
+      const validEvidence = (items, required = false) => Array.isArray(items) && items.length <= MAX_ITEMS &&
+        (!required || items.length > 0) && items.every((item) =>
+          item && typeof item === "object" && validText(item.label) &&
+          validText(item.value) && (item.href === undefined || (typeof item.href === "string" && /^https:\/\//.test(item.href)))
+        );
+      const validItems = (items, validateItem) => Array.isArray(items) && items.length <= MAX_ITEMS && items.every(validateItem);
+      const validGate = (item) => item && typeof item === "object" && validText(item.id) && validText(item.label) &&
+        new Set(["queued", "active", "passed", "blocked"]).has(item.state) && validEvidence(item.evidence);
+      const validMilestone = (item) => item && typeof item === "object" && validText(item.id) &&
+        Number.isFinite(Date.parse(item.at)) && new Set(["start", "stage-change", "verification", "diagnosed-failure", "resource-change", "blocker", "stage-completion", "checkpoint", "close"]).has(item.kind) &&
+        validText(item.title) && validText(item.summary) && validEvidence(item.evidence, true) &&
+        (item.fingerprint === undefined || (typeof item.fingerprint === "string" && /^[a-f0-9]{64}$/.test(item.fingerprint)));
+      const validBlocker = (item) => item && typeof item === "object" && validText(item.id) && validText(item.summary) &&
+        new Set(["open", "resolved"]).has(item.state) && validEvidence(item.evidence, true);
+      const validResource = (item) => item && typeof item === "object" && validText(item.id) && validText(item.label) &&
+        validText(item.boundary) && new Set(["within-boundary", "near-boundary", "boundary-reached", "changed"]).has(item.state) && validEvidence(item.evidence, true);
 
       const validate = (data) => {
         if (!data || data.schema !== SCHEMA) throw new Error("The progress file has an unsupported schema.");
-        if (!data.mission || typeof data.mission.title !== "string") throw new Error("The progress file has no mission title.");
+        if (!data.mission || !validText(data.mission.id) || !validText(data.mission.title)) throw new Error("The progress file has an invalid mission.");
         if (!new Set(["active", "closed"]).has(data.status)) throw new Error("The progress file has an invalid mission state.");
-        if (!Number.isFinite(Date.parse(data.updated_at))) throw new Error("The progress file has an invalid update time.");
-        if (!data.snapshot || ["done", "now", "next"].some((key) => typeof data.snapshot[key] !== "string")) {
+        if (!Number.isFinite(Date.parse(data.started_at)) || !Number.isFinite(Date.parse(data.updated_at))) throw new Error("The progress file has an invalid update time.");
+        if (!data.snapshot || ["done", "now", "next"].some((key) => !validText(data.snapshot[key])) ||
+          (data.snapshot.orientation !== undefined && !validText(data.snapshot.orientation)) ||
+          (data.snapshot.eli5 !== undefined && typeof data.snapshot.eli5 !== "boolean")) {
           throw new Error("The progress file has an incomplete snapshot.");
         }
-        if (!Array.isArray(data.gates) || data.gates.length === 0) throw new Error("The progress file has no completion gates.");
-        if (!Array.isArray(data.milestones) || data.milestones.length === 0) throw new Error("The progress file has no milestones.");
-        if (!Array.isArray(data.blockers) || !Array.isArray(data.resources)) throw new Error("The progress file has invalid boundary lists.");
-        const evidenceGroups = [
-          ...data.gates.map((item) => item.evidence),
-          ...data.milestones.map((item) => item.evidence),
-          ...data.blockers.map((item) => item.evidence),
-          ...data.resources.map((item) => item.evidence),
-        ];
-        if (!evidenceGroups.every(validEvidence)) throw new Error("The progress file has invalid evidence.");
+        if (!validItems(data.gates, validGate) || data.gates.length === 0) throw new Error("The progress file has invalid completion gates.");
+        if (!validItems(data.milestones, validMilestone) || data.milestones.length === 0) throw new Error("The progress file has invalid milestones.");
+        if (!validItems(data.blockers, validBlocker) || !validItems(data.resources, validResource)) throw new Error("The progress file has invalid boundary lists.");
+        if (data.status === "closed" && (!new Set(["completed", "stopped", "failed"]).has(data.outcome) || !validText(data.final_outcome))) {
+          throw new Error("The progress file has an invalid final outcome.");
+        }
+        if (data.status === "active" && (data.outcome !== undefined || data.final_outcome !== undefined)) throw new Error("The active progress file has a final outcome.");
         return data;
       };
 

@@ -138,7 +138,8 @@ Inside that region, exactly one `<script id="firstmate-logbook-data" type="appli
       "kind": "start | stage-change | verification | diagnosed-failure | resource-change | blocker | stage-completion | checkpoint | close",
       "title": "Short outcome title",
       "summary": "One outcome and consequence sentence",
-      "evidence": [{"label": "Evidence label", "value": "Exact safe value", "href": "optional HTTPS URL"}]
+      "evidence": [{"label": "Evidence label", "value": "Exact safe value", "href": "optional HTTPS URL"}],
+      "fingerprint": "Deterministic exact-update fingerprint"
     }
   ],
   "blockers": [
@@ -166,6 +167,7 @@ Inside that region, exactly one `<script id="firstmate-logbook-data" type="appli
 Every payload has at least one finite gate and one milestone.
 Milestones are retained for the mission and stored newest first.
 Each milestone ID begins with its UTC timestamp, which lets the captain ask `/bro explain the <time> update` later without Bro reading or writing this file.
+Each fingerprint identifies one exact validated update and refuses an immediate duplicate submission.
 Evidence arrays are the progressive-disclosure layer and use text-safe rendering only.
 An evidence `href` is optional and HTTPS-only.
 

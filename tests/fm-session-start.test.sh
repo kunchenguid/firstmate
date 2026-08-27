@@ -700,20 +700,21 @@ write_pi_loaded_markers() {
 # --- context digest: absent vs empty vs present -----------------------------
 
 test_context_digest_absent_empty_present() {
-  local rec root home fakebin out
+  local rec root home fakebin out node_bin
   rec=$(new_world context-digest)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
+  node_bin=$(command -v node)
+  printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$node_bin" > "$fakebin/node"
+  chmod +x "$fakebin/node"
 
   printf '%s\n' '- demo [no-mistakes] - a demo project (added 2026-07-01)' > "$home/data/projects.md"
   : > "$home/data/captain.md"
-  mkdir -p "$home/data/logbook"
-  cat > "$home/data/logbook/active.json" <<'JSON'
-{"schema":"firstmate-logbook-active.v1","mission_id":"release","mission":"Release mission","page":"data/logbook/missions/release/index.html","started_at":"2026-08-27T00:00:00Z"}
-JSON
+  FM_HOME="$home" node "$ROOT/.agents/skills/logbook/logbook.mjs" start --mission "Release mission" >/dev/null \
+    || fail "could not create a valid active logbook registration"
   # secondmates.md, captain-shared.md, and learnings.md deliberately absent
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
@@ -729,8 +730,8 @@ JSON
   assert_contains "$out" "data/learnings.md" "digest did not label the learnings.md section"
   assert_contains "$out" "Active logbook registration (load /logbook before meaningful mission milestones)" \
     "digest did not surface the active logbook discovery pointer"
-  assert_contains "$out" '"mission":"Release mission"' \
-    "digest did not print the active mission registration"
+  assert_contains "$out" "active: Release mission" \
+    "digest did not print the validated active mission registration"
 
   # Exactly four context ABSENT markers (secondmates.md, captain-shared.md,
   # learnings.md; backlog.md is covered by its own test) - and the
@@ -742,6 +743,26 @@ JSON
   assert_contains "$cap_section" "(present, empty)" "empty-but-present captain.md was not distinguished from ABSENT"
 
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
+}
+
+test_corrupt_logbook_registration_is_not_echoed() {
+  local rec root home fakebin out
+  rec=$(new_world corrupt-logbook-registration)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  mkdir -p "$home/data/logbook"
+  printf '%s\n' '{"schema":"firstmate-logbook-active.v1","mission":"Bearer secret-value-should-not-appear"}' > "$home/data/logbook/active.json"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "CORRUPT: active logbook registration could not be validated" \
+    "digest did not mark an invalid registration corrupt"
+  assert_not_contains "$out" "secret-value-should-not-appear" \
+    "digest echoed unvalidated private registration content"
+  pass "corrupt logbook registrations never echo private contents"
 }
 
 # --- lock refusal: read-only path --------------------------------------------
@@ -2465,6 +2486,7 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_corrupt_logbook_registration_is_not_echoed
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock

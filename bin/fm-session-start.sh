@@ -856,8 +856,13 @@ fi
 # transition; session start only makes the private record visible when present.
 if [ -e "$DATA/logbook/active.json" ]; then
   subsection "Active logbook registration (load /logbook before meaningful mission milestones)"
-  if [ -f "$DATA/logbook/active.json" ] && [ ! -L "$DATA/logbook/active.json" ]; then
-    cat "$DATA/logbook/active.json"
+  LOGBOOK_HELPER="$SCRIPT_DIR/../.agents/skills/logbook/logbook.mjs"
+  if [ -f "$DATA/logbook/active.json" ] && [ ! -L "$DATA/logbook/active.json" ] && [ -f "$LOGBOOK_HELPER" ]; then
+    if LOGBOOK_ACTIVE=$(FM_HOME="$FM_HOME" node "$LOGBOOK_HELPER" active 2>/dev/null) && [ -n "$LOGBOOK_ACTIVE" ]; then
+      printf '%s\n' "$LOGBOOK_ACTIVE"
+    else
+      printf 'CORRUPT: active logbook registration could not be validated\n'
+    fi
   else
     printf 'UNSAFE: expected an ordinary non-symlink file at %s\n' "$DATA/logbook/active.json"
   fi

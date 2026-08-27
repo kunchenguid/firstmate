@@ -53,6 +53,7 @@ const RESOURCE_STATES = new Set(["within-boundary", "near-boundary", "boundary-r
 const BLOCKER_STATES = new Set(["open", "resolved"]);
 const OUTCOMES = new Set(["completed", "stopped", "failed"]);
 const CHECKPOINT_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const LOCK_INITIALIZATION_GRACE_MS = 10 * 1000;
 const MAX_MISSION = 120;
 const MAX_TITLE = 120;
 const MAX_SUMMARY = 600;
@@ -129,8 +130,23 @@ function ensureDirectory(candidate, parentRoot, mode = 0o700) {
   fs.mkdirSync(candidate, { mode });
 }
 
+function assertDirectoryChain(candidate, root) {
+  assertInside(root, candidate);
+  const relative = path.relative(root, candidate);
+  let current = root;
+  const rootStat = fs.lstatSync(current);
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) fail(`unsafe directory component: ${current}`);
+  if (!relative) return;
+  for (const part of relative.split(path.sep)) {
+    current = path.join(current, part);
+    const stat = fs.lstatSync(current);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) fail(`unsafe directory component: ${current}`);
+  }
+}
+
 function assertRegularOrAbsent(candidate, root) {
   assertInside(root, candidate);
+  assertDirectoryChain(path.dirname(candidate), root);
   if (!fs.existsSync(candidate)) return;
   const stat = fs.lstatSync(candidate);
   if (stat.isSymbolicLink() || !stat.isFile()) fail(`unsafe logbook file: ${candidate}`);
@@ -324,8 +340,8 @@ function readInput(source, required) {
   }
 }
 
-function readJson(file, label) {
-  assertRegularOrAbsent(file, path.dirname(path.dirname(file)));
+function readJson(file, label, root) {
+  assertRegularOrAbsent(file, root);
   let value;
   try {
     value = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -342,11 +358,12 @@ function writeAtomicContent(file, content, root) {
   assertInside(root, temp);
   let fd;
   try {
-    fd = fs.openSync(temp, "wx", 0o600);
+    fd = fs.openSync(temp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
     fs.writeFileSync(fd, content, "utf8");
     fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = undefined;
+    assertDirectoryChain(dir, root);
     fs.renameSync(temp, file);
     const dirFd = fs.openSync(dir, "r");
     fs.fsyncSync(dirFd);
@@ -389,7 +406,8 @@ function buildPage(template, payload) {
   return source.replace(expected, payloadBlock(payload));
 }
 
-function readEmbeddedPayload(file) {
+function readEmbeddedPayload(file, root) {
+  assertRegularOrAbsent(file, root);
   const content = fs.readFileSync(file, "utf8");
   if (countOccurrences(content, PAYLOAD_BEGIN) !== 1 || countOccurrences(content, PAYLOAD_END) !== 1) {
     fail(`page does not contain exactly one delimited payload: ${file}`);
@@ -409,7 +427,7 @@ function readEmbeddedPayload(file) {
 
 function writePagePayload(file, payload, root) {
   assertRegularOrAbsent(file, root);
-  const { content } = readEmbeddedPayload(file);
+  const { content } = readEmbeddedPayload(file, root);
   writeAtomicContent(file, replacePayloadBlock(content, payloadBlock(payload)), root);
 }
 
@@ -417,34 +435,54 @@ function acquireWriter(layout) {
   ensureDirectory(layout.data, layout.home);
   ensureDirectory(layout.root, layout.home);
   const owner = path.join(layout.lock, "owner.json");
+  const token = crypto.randomBytes(16).toString("hex");
   const claim = () => {
     fs.mkdirSync(layout.lock, { mode: 0o700 });
-    fs.writeFileSync(owner, `${JSON.stringify({ pid: process.pid, claimed_at: new Date().toISOString() })}\n`, { mode: 0o600, flag: "wx" });
+    fs.writeFileSync(owner, `${JSON.stringify({ token, pid: process.pid, claimed_at: new Date().toISOString() })}\n`, { mode: 0o600, flag: "wx" });
   };
-  try {
-    claim();
-  } catch (error) {
-    if (error.code !== "EEXIST") throw error;
-    assertInside(layout.root, layout.lock);
-    const stat = fs.lstatSync(layout.lock);
-    if (stat.isSymbolicLink() || !stat.isDirectory()) fail(`unsafe writer lock: ${layout.lock}`);
-    if (fs.existsSync(owner) && fs.lstatSync(owner).isSymbolicLink()) fail(`unsafe writer owner record: ${owner}`);
-    let pid;
-    try { pid = JSON.parse(fs.readFileSync(owner, "utf8")).pid; } catch { pid = undefined; }
-    let live = false;
-    if (Number.isInteger(pid) && pid > 0) {
-      try { process.kill(pid, 0); live = true; } catch (probe) { if (probe.code === "EPERM") live = true; }
+  while (true) {
+    try {
+      claim();
+      break;
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      assertDirectoryChain(layout.root, layout.home);
+      const stat = fs.lstatSync(layout.lock);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) fail(`unsafe writer lock: ${layout.lock}`);
+      if (!fs.existsSync(owner)) {
+        if (Date.now() - stat.mtimeMs < LOCK_INITIALIZATION_GRACE_MS) {
+          fail("another logbook writer is active while claiming its lock");
+        }
+      } else {
+        const ownerStat = fs.lstatSync(owner);
+        if (ownerStat.isSymbolicLink() || !ownerStat.isFile()) fail(`unsafe writer owner record: ${owner}`);
+        let pid;
+        try { pid = JSON.parse(fs.readFileSync(owner, "utf8")).pid; } catch { pid = undefined; }
+        let live = false;
+        if (Number.isInteger(pid) && pid > 0) {
+          try { process.kill(pid, 0); live = true; } catch (probe) { if (probe.code === "EPERM") live = true; }
+        }
+        if (live) fail(`another logbook writer is active (pid ${pid})`);
+      }
+      const stale = `${layout.lock}.stale.${process.pid}.${crypto.randomBytes(4).toString("hex")}`;
+      try {
+        fs.renameSync(layout.lock, stale);
+      } catch (renameError) {
+        if (renameError.code === "ENOENT") continue;
+        throw renameError;
+      }
+      try { fs.rmSync(stale, { recursive: true, force: true }); } catch {}
     }
-    if (live) fail(`another logbook writer is active (pid ${pid})`);
-    const stale = `${layout.lock}.stale.${process.pid}.${crypto.randomBytes(4).toString("hex")}`;
-    fs.renameSync(layout.lock, stale);
-    try { claim(); } finally { fs.rmSync(stale, { recursive: true, force: true }); }
   }
   let released = false;
   return () => {
     if (released) return;
     released = true;
-    fs.rmSync(layout.lock, { recursive: true, force: true });
+    try {
+      assertDirectoryChain(layout.root, layout.home);
+      const value = readJson(owner, "writer owner record", layout.root);
+      if (value?.token === token) fs.rmSync(layout.lock, { recursive: true, force: true });
+    } catch {}
   };
 }
 
@@ -460,13 +498,14 @@ function validateRegistration(value, root) {
 }
 
 function validateMilestone(value, label) {
-  assertKeys(value, ["id", "at", "kind", "title", "summary", "evidence"], label);
+  assertKeys(value, ["id", "at", "kind", "title", "summary", "evidence", "fingerprint"], label);
   if (typeof value.id !== "string" || !ID_RE.test(value.id)) fail(`${label}.id is unsafe`);
   if (!Number.isFinite(Date.parse(value.at))) fail(`${label}.at is invalid`);
   if (!UPDATE_KINDS.has(value.kind)) fail(`${label}.kind is invalid`);
   validateText(value.title, `${label}.title`, MAX_TITLE);
   validateText(value.summary, `${label}.summary`, MAX_SUMMARY);
   validateEvidence(value.evidence, `${label}.evidence`, { requireOne: true });
+  if (typeof value.fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(value.fingerprint)) fail(`${label}.fingerprint is invalid`);
   return value;
 }
 
@@ -523,9 +562,23 @@ function milestoneId(at, milestones) {
   return id;
 }
 
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map((item) => stableJson(item)).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function updateFingerprint(update) {
+  return crypto.createHash("sha256").update(stableJson(update), "utf8").digest("hex");
+}
+
 function applyUpdate(payload, update, command) {
   if (payload.status !== "active") fail("the mission is closed and cannot be updated");
   const now = new Date().toISOString();
+  const fingerprint = updateFingerprint(update);
+  if (payload.milestones[0]?.fingerprint === fingerprint) fail("duplicate logbook update refused");
   if (update.kind === "checkpoint") {
     const previous = Date.parse(payload.milestones[0].at);
     if (Date.now() - previous < CHECKPOINT_INTERVAL_MS) fail("quiet checkpoint refused before a six-hour meaningful interval");
@@ -551,6 +604,7 @@ function applyUpdate(payload, update, command) {
     title: update.title,
     summary: update.summary,
     evidence: update.evidence,
+    fingerprint,
   };
   const next = {
     ...payload,
@@ -583,12 +637,12 @@ function loadActive(home, root) {
   const file = path.join(root, "active.json");
   assertRegularOrAbsent(file, root);
   if (!fs.existsSync(file)) return undefined;
-  const registration = validateRegistration(readJson(file, "active registration"), home);
+  const registration = validateRegistration(readJson(file, "active registration", root), home);
   const page = path.resolve(home, registration.page);
   assertInside(root, page);
   assertRegularOrAbsent(page, root);
   if (!fs.existsSync(page)) fail("active registration points to a missing mission page");
-  const embedded = readEmbeddedPayload(page);
+  const embedded = readEmbeddedPayload(page, root);
   const payload = validatePayload(embedded.payload, registration.mission, registration.mission_id);
   return { registration, page, payload };
 }
@@ -619,6 +673,7 @@ function commandStart(home, mission, input) {
       title: update.title,
       summary: update.summary,
       evidence: update.evidence,
+      fingerprint: updateFingerprint(update),
     };
     const payload = {
       schema: PAYLOAD_SCHEMA,
@@ -683,7 +738,7 @@ function commandActive(home) {
     process.stdout.write("inactive\n");
     return;
   }
-  if (fs.lstatSync(root).isSymbolicLink() || !fs.statSync(root).isDirectory()) fail(`unsafe logbook root: ${root}`);
+  assertDirectoryChain(root, home);
   const active = loadActive(home, root);
   if (!active || active.payload.status === "closed") {
     process.stdout.write("inactive\n");
