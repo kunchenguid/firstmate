@@ -109,7 +109,8 @@ test_aggregation_status_precedence_and_secondmate_join() {
       and (.projects[] | select(.name == "alpha")
         | .status == "needs_attention"
           and .counts.active == 1
-          and .counts.decisions == 2
+          and .counts.decisions == 1
+          and (.decisions | map(.id)) == ["alpha-call"]
           and (.landed | any(.id == "alpha-landed"))
           and (.prs | any(.url == "https://github.com/example/alpha/pull/7")))
       and (.projects[] | select(.name == "bravo") | .status == "active")
@@ -117,7 +118,7 @@ test_aggregation_status_precedence_and_secondmate_join() {
       and (.projects[] | select(.name == "gamma") | .status == "idle_queued" and .queued == [])
       and (.projects[] | select(.name == "delta")
         | .status == "active"
-          and .secondmates == [{id:"delta-mate",home:(.secondmates[0].home),remote:false,state:"active_child_work",unavailable:false,registered:true}]
+          and .secondmates == [{id:"delta-mate",home:(.secondmates[0].home),remote:false,state:"active_child_work",unavailable:false,in_clone_list:true}]
           and (.active_work | any(.id == "delta-child" and .owner == "delta-mate"))
           and (.landed | any(.id == "delta-landed" and .owner == "delta-mate")))
   ' >/dev/null || fail "project aggregation, precedence, or secondmate join was wrong: $out"
@@ -175,7 +176,7 @@ test_bounded_secondmate_state_keeps_registered_ownership_visible() {
   printf '%s' "$out" | jq -e '
     .projects[] | select(.name == "delta")
     | .status == "needs_attention"
-      and .secondmates == [{id:"delta-mate",home:null,remote:false,state:"unknown",unavailable:true,registered:true}]
+      and .secondmates == [{id:"delta-mate",home:null,remote:false,state:"unknown",unavailable:true,in_clone_list:true}]
       and .next_step == "Secondmate state unavailable from the bounded fleet snapshot"
   ' >/dev/null || fail "bounded secondmate state silently dropped registered project ownership: $out"
   pass "bounded secondmate state keeps ownership visible as explicit attention"
@@ -462,11 +463,11 @@ test_repo_labelled_secondmate_work_attributes_to_that_project() {
     (.projects[] | select(.name == "gamma")
       | .status == "active"
         and (.active_work | map(.id)) == ["cross-child"]
-        and (.secondmates | map({id,registered})) == [{id:"delta-mate",registered:false}])
+        and (.secondmates | map({id,in_clone_list})) == [{id:"delta-mate",in_clone_list:false}])
       and (.projects[] | select(.name == "delta")
         | .active_work == []
           and .counts.unattributed == 0
-          and (.secondmates | map({id,registered})) == [{id:"delta-mate",registered:true}])
+          and (.secondmates | map({id,in_clone_list})) == [{id:"delta-mate",in_clone_list:true}])
   ' >/dev/null || fail "repo-labelled secondmate work was dropped from every card: $out"
   pass "secondmate work naming a registered project lands on that project"
 }
@@ -495,6 +496,101 @@ test_bounded_snapshot_drops_are_disclosed_board_wide() {
   out=$(run_snapshot "$home" "$epoch") || fail "clean-disclosure snapshot failed"
   printf '%s' "$out" | jq -e '.disclosures == []' >/dev/null     || fail "a complete fleet read still reported a disclosure: $out"
   pass "bounded snapshot and registry drops surface as board-level disclosures"
+}
+
+test_merged_pr_is_landed_work_not_a_review_queue() {
+  local home epoch out
+  home=$(make_home merged-pr)
+  write_fleet_fixture "$home"
+  : > "$home/state/alpha-ship.meta"
+  : > "$home/state/alpha-ship.status"
+  jq --arg home "$home" '
+    .backlog.records |= map(if .id == "alpha-call" then .captain_actionable = false else . end)
+    | .tasks |= map(if .id == "alpha-call" then .hints.open_decisions = [] else . end)
+    | .backlog.records += [{structured:true,id:"alpha-ship",repo:"alpha",title:"Ship alpha",state:"done",
+        hold_kind:null,pr_url:"https://github.com/example/alpha/pull/9",completion:{date:"2026-08-22"}},
+      {structured:true,id:"alpha-review",repo:"alpha",title:"Review alpha",state:"in_flight",
+        since:"2020-01-01",captain_actionable:false,unresolved_blocker_ids:[]}]
+    | .tasks += [
+        {id:"alpha-ship",kind:"ship",project:"alpha",
+         paths:{meta:{path:($home + "/state/alpha-ship.meta"),present:true},
+                status_log:{path:($home + "/state/alpha-ship.status"),present:true},
+                worktree:{path:null,present:false},home:{path:null,present:false},report:{path:null,present:false}},
+         secondmate_projects:[],current_state:{state:"done",source:"fixture",detail:"run passed: PR merged/closed"},
+         hints:{open_decisions:[]},pr:{url:"https://github.com/example/alpha/pull/9"},
+         backlog:{id:"alpha-ship",repo:"alpha",title:"Ship alpha"}},
+        {id:"alpha-review",kind:"ship",project:"alpha",
+         paths:{meta:{path:($home + "/state/alpha-ship.meta"),present:true},
+                status_log:{path:($home + "/state/alpha-ship.status"),present:true},
+                worktree:{path:null,present:false},home:{path:null,present:false},report:{path:null,present:false}},
+         secondmate_projects:[],current_state:{state:"done",source:"fixture",detail:"checks green: PR ready for review"},
+         hints:{open_decisions:[]},pr:{url:"https://github.com/example/alpha/pull/11"},
+         backlog:{id:"alpha-review",repo:"alpha",title:"Review alpha"}}]
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "merged-PR snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "alpha")
+    | .status == "needs_attention"
+      and .next_step == "PR awaiting review: Review alpha"
+      and (.landed | any(.id == "alpha-ship"))
+      and (.prs | any(.url == "https://github.com/example/alpha/pull/9"))
+  ' >/dev/null || fail "a merged PR was reported as awaiting review: $out"
+
+  jq '
+    .backlog.records |= map(select(.id != "alpha-review"))
+    | .tasks |= map(select(.id != "alpha-review"))
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  out=$(run_snapshot "$home" "$epoch") || fail "merged-only snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "alpha")
+    | .status == "active"
+      and (.landed | any(.id == "alpha-ship"))
+      and ([.decisions[],.failures[],.unreadable[]] | length) == 0
+  ' >/dev/null || fail "a merged-but-not-torn-down task still painted the project red: $out"
+  pass "a merged PR reads as landed work, never as a review queue"
+}
+
+test_unreadable_task_state_is_disclosed_not_idle() {
+  local home epoch out
+  home=$(make_home unreadable-task)
+  write_fleet_fixture "$home"
+  jq '
+    .tasks |= map(
+        if .id == "bravo-work" then
+          .current_state = {state:"unknown",source:"fixture",detail:"worktree gone (torn down?)"}
+        else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "unreadable-task snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .summary.unreadable == 1
+      and (.projects[] | select(.name == "bravo")
+        | .status == "needs_attention"
+          and .counts.unreadable == 1
+          and (.unreadable[0] | .id == "bravo-work" and .owner == "main"
+               and .reason == "worktree gone (torn down?)")
+          and .next_step == "Task state could not be read: bravo-work - worktree gone (torn down?)")
+  ' >/dev/null || fail "an unreadable task left the project reading idle: $out"
+  pass "a task whose state cannot be read is disclosed, not reported as idle"
+}
+
+test_one_captain_hold_is_one_decision() {
+  local home epoch out
+  home=$(make_home single-decision)
+  write_fleet_fixture "$home"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "single-decision snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "alpha")
+    | .counts.decisions == 1
+      and (.decisions | map(.id)) == ["alpha-call"]
+      and .decisions[0].summary == "Choose release route"
+  ' >/dev/null || fail "one captain hold was counted as two decisions: $out"
+  pass "a hold recorded in both the backlog and the status fold is one decision"
 }
 
 extract_payload() {  # <board>
@@ -572,7 +668,12 @@ const result = {
   cards: cards.map(c => c.dataset.project),
   selected,
   banner: root.querySelectorAll(".pd-disclosures").map(b => b.text().trim()),
-  meta: cards.map(c => ({ project: c.dataset.project, meta: (c.querySelector(".pd-detail-meta") || { text: () => "" }).text() }))
+  meta: cards.map(c => ({
+    project: c.dataset.project,
+    meta: (c.querySelector(".pd-detail-meta") || { text: () => "" }).text(),
+    warn: c.querySelectorAll(".pd-meta-warn").map(w => w.text()),
+    panels: c.querySelectorAll(".pd-panel").map(panel => (panel.children[0] || { textContent: "" }).textContent)
+  }))
 };
 if (wantSelected !== undefined && JSON.stringify(selected) !== JSON.stringify(wantSelected === "" ? [] : [wantSelected])) {
   console.error("selection mismatch: " + JSON.stringify(selected));
@@ -627,6 +728,54 @@ test_board_renders_every_card_and_its_disclosures() {
   pass "the board renders every card, its disclosures, and survives a malformed fragment"
 }
 
+test_board_caps_landed_visibly_and_honours_the_reader_fragment() {
+  local home board driver out payload
+  command -v node >/dev/null 2>&1 || { pass "skipped board caps: node not found"; return 0; }
+  home=$(make_home board-caps)
+  write_fleet_fixture "$home"
+  jq '
+    .backlog.records += [range(0;7) as $i | {structured:true,id:("alpha-done-" + ($i|tostring)),repo:"alpha",
+      title:("Landed " + ($i|tostring)),state:"done",hold_kind:null,pr_url:null,
+      completion:{date:("2026-08-1" + ($i|tostring))}}]
+    | .tasks |= map(if .id == "delta-mate" then .secondmate_projects = ["delta"] else . end)
+    | .secondmate_current.records |= map(
+        if .id == "delta-mate" then
+          .projects = ["delta"]
+          | .active_children = [{id:"cross-child",title:"Gamma rollout",repo:"gamma",
+              state:"working",doing:"Working on gamma"}]
+        else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+
+  payload="$home/dashboard.json"
+  run_snapshot "$home" "$(date +%s)" --select delta > "$payload" || fail "board caps snapshot failed"
+  cat > "$home/fakebin/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$home/fakebin/lavish-axi"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" "$BOARD" build "$payload" >/dev/null \
+    || fail "board caps build failed"
+  board="$home/.lavish/project-dashboard.html"
+  driver="$home/board-driver.js"
+  write_board_driver "$driver"
+
+  out=$(node "$driver" "$board" "" "delta") || fail "the --select seed was not honoured: $out"
+  printf '%s' "$out" | jq -e '
+    (.meta[] | select(.project == "alpha") | .panels | any(startswith("Recently landed (5 of 8)")))
+  ' >/dev/null || fail "the landed list was capped without saying so: $out"
+  printf '%s' "$out" | jq -e '
+    (.meta[] | select(.project == "gamma")
+      | (.meta | contains("delta-mate")) and .warn == [])
+  ' >/dev/null || fail "a mate working outside its clone list was flagged as a failure: $out"
+
+  out=$(node "$driver" "$board" "#alpha" "alpha") \
+    || fail "the reader fragment lost to the build-time selection: $out"
+  out=$(node "$driver" "$board" "#not-a-project" "delta") \
+    || fail "an unknown fragment did not fall back to the built-in selection: $out"
+  pass "the board discloses the landed cap and lets the reader fragment win"
+}
+
 test_board_build_is_stable_read_only_and_selection_preserving() {
   local home source_home epoch payload board out before after
   source_home=$(make_home board-source)
@@ -662,6 +811,9 @@ SH
 
 test_aggregation_status_precedence_and_secondmate_join
 test_distinct_unkeyed_decisions_are_all_surfaced
+test_merged_pr_is_landed_work_not_a_review_queue
+test_unreadable_task_state_is_disclosed_not_idle
+test_one_captain_hold_is_one_decision
 test_blocked_status_fold_is_not_a_captain_decision
 test_backlog_order_survives_deduplication
 test_deferred_captain_hold_is_disclosed_not_escalated
@@ -678,3 +830,4 @@ test_selected_project_payload_is_validated
 test_bounded_secondmate_state_keeps_registered_ownership_visible
 test_board_build_is_stable_read_only_and_selection_preserving
 test_board_renders_every_card_and_its_disclosures
+test_board_caps_landed_visibly_and_honours_the_reader_fragment

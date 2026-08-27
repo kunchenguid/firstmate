@@ -54,9 +54,11 @@
 #     each home with explicit provenance, freshness, endpoint evidence, and unknown
 #     failure reasons. Parent status and bounded terminal evidence are historical,
 #     untrusted supplements only and never override readable structured-home facts.
-#     Every record carries projects, the registered project ownership from
+#     Every record carries projects, the non-exclusive clone list registered in
 #     data/secondmates.md unioned with the parent task metadata, so project-grained
-#     consumers can attribute a record without a live parent task.
+#     consumers can attribute a record without a live parent task. It is a clone
+#     list, not exclusive ownership: a secondmate may legitimately work on a
+#     project the list omits.
 #     Each structured-home record carries active_children, decisions_open, holds,
 #     queued, landed, endpoints, counts, and omitted. Actionable captain holds
 #     appear in decisions_open; blocked captain holds remain queued with metadata.

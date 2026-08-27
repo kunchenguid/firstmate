@@ -12,11 +12,18 @@
 # project ownership; a task-only secondmate the bounded read omitted is kept as
 # an explicit unavailable owner instead of disappearing.
 # Secondmate state whose repo names a registered project attributes to that
-# project even when the owner is not registered for it; the card marks such an
-# owner registered=false.
+# project even when the project is absent from the mate's clone list, which is
+# non-exclusive; secondmates[].in_clone_list records that without judging it.
 # Secondmate state that carries no repo and whose owner covers several projects
 # is not guessed at: it is disclosed per owned project in unattributed[] and
 # raises that project to needs_attention when it could have changed the status.
+# A main-home task whose crew state reads back as unknown is disclosed in
+# unreadable[] and raises the project to needs_attention rather than letting the
+# card read idle.
+# A done task whose backlog row is already done is landed work, not a PR
+# awaiting review.
+# A captain hold recorded in both the backlog and the status fold is one
+# decision: the backlog row wins and the fold entry is dropped.
 # Only needs-decision folds and non-deferred captain holds count as decisions;
 # deferred or superseded holds are disclosed in deferred_decisions[] instead of
 # painting the card red, matching the canonical bearings default view.
@@ -240,6 +247,8 @@ jq -n \
            | select(.kind != "secondmate" and task_repo == $name) ]) as $tasks
       | ([ $fleet_data.backlog.records[]?
            | select(.structured == true and .repo == $name) ]) as $backlog
+      | ([ $backlog[] | select(.captain_actionable == true) | .id ]) as $captain_hold_ids
+      | ([ $backlog[] | select(.state == "done") | .id ]) as $landed_ids
       | ([ $mate_owners[]
            | select((.projects | index($name) != null)
                     or (owner_items(.) | any(.repo == $name))) ]) as $owners
@@ -253,6 +262,7 @@ jq -n \
              | select(matches_project($owner; $name))
              | {id,title:(.title // .id),state,detail:(.doing // ""),owner:$owner.id,pr_url:null} ]) as $active
       | ([ $tasks[] as $task
+           | select(($captain_hold_ids | index($task.id)) == null)
            | ($task.hints.open_decisions // [])[]
            | select(.verb == "needs-decision")
            | {id:$task.id,key,title:(.summary // "Captain decision"),summary:(.summary // ""),
@@ -262,8 +272,11 @@ jq -n \
              | {id,key:.id,title:.title,summary:(.hold_reason // .title),
                 deferred:(.deferred_marker == true),owner:"main"} ]
          + [ $owners[] as $owner
+             | ([ $owner.record.decisions_open[]? | select(.source == "backlog") | .id ]) as $owner_hold_ids
              | $owner.record.decisions_open[]?
+             | . as $entry
              | select(.verb != "blocked")
+             | select(.source != "status" or (($owner_hold_ids | index($entry.id)) == null))
              | select(matches_project($owner; $name))
              | {id,key:(.key // .id),title:(.summary // "Captain decision"),
                 summary:(.reason // .summary // ""),
@@ -275,9 +288,14 @@ jq -n \
            | select(.current_state.state == "failed" or .current_state.state == "blocked")
            | {id,title:(.backlog.title // .id),state:.current_state.state,
               detail:(.current_state.detail // ""),owner:"main"} ]) as $failures
+      | ([ $tasks[] as $task
+           | select($task.current_state.state == "done" and $task.pr.url != null)
+           | select(($landed_ids | index($task.id)) == null)
+           | {id:$task.id,title:($task.backlog.title // $task.id),url:$task.pr.url,owner:"main"} ]) as $review_prs
       | ([ $tasks[]
-           | select(.current_state.state == "done" and .pr.url != null)
-           | {id,title:(.backlog.title // .id),url:.pr.url,owner:"main"} ]) as $review_prs
+           | select(.current_state.state == "unknown")
+           | {id,title:(.backlog.title // .id),state:.current_state.state,
+              reason:(.current_state.detail // "Task state could not be read"),owner:"main"} ]) as $unreadable
       | ([ $tasks[]
            | select(.current_state.state == "parked" or .current_state.state == "paused")
            | {id,title:(.backlog.title // .id),reason:(.current_state.detail // .current_state.state),owner:"main"} ]
@@ -337,6 +355,7 @@ jq -n \
          | dedupe_first([.owner,.kind,.id])) as $unattributed
       | ([ $unattributed[] | select(.kind != "landed") ]) as $unattributed_live
       | (if ($decisions | length) > 0 or ($failures | length) > 0 or
+             ($unreadable | length) > 0 or
              ($review_prs | length) > 0 or ($unavailable_owners | length) > 0 or
              ($unattributed_live | length) > 0 then "needs_attention"
          elif ($active | length) > 0 then "active"
@@ -367,6 +386,8 @@ jq -n \
                     elif ($failures | length) > 0 then
                       ($failures[0].state + ": " +
                        (if ($failures[0].detail // "") == "" then $failures[0].title else $failures[0].detail end))
+                    elif ($unreadable | length) > 0 then
+                      ("Task state could not be read: " + $unreadable[0].id + " - " + $unreadable[0].reason)
                     elif ($review_prs | length) > 0 then ("PR awaiting review: " + $review_prs[0].title)
                     elif ($unattributed_live | length) > 0 then
                       ("Secondmate work is not attributable to one project: " + $unattributed_live[0].title)
@@ -391,6 +412,7 @@ jq -n \
           active_work:$active,
           decisions:$decisions,
           failures:$failures,
+          unreadable:$unreadable,
           waiting:$waiting,
           queued:$queued,
           landed:($landed_all[:5]),
@@ -400,9 +422,10 @@ jq -n \
           secondmates:([ $owners[] | {
             id,home:.record.home,remote:.record.remote,state:.record.current.state,
             unavailable:(.record.current.state == "unknown"),
-            registered:((.projects | index($name)) != null)
+            in_clone_list:((.projects | index($name)) != null)
           } ]),
           counts:{active:($active | length),decisions:($decisions | length),
+            unreadable:($unreadable | length),
             waiting:($waiting | length),queued:($queued | length),landed:($landed_all | length),
             prs:($prs | length),unattributed:($unattributed | length),
             deferred_decisions:($deferred_decisions | length)}
@@ -424,7 +447,8 @@ jq -n \
         idle_queued:([$projects[] | select(.status == "idle_queued")] | length),
         stale_risk:([$projects[] | select(.stale_risk)] | length),
         unattributed:([$projects[] | select((.unattributed | length) > 0)] | length),
-        deferred_decisions:([$projects[].deferred_decisions[]] | length)
+        deferred_decisions:([$projects[].deferred_decisions[]] | length),
+        unreadable:([$projects[].unreadable[]] | length)
       }
     }
 ' > "$tmpdir/dashboard.json" || fail "project aggregation failed"

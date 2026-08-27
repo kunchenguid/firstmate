@@ -71,6 +71,7 @@ validate_payload() {  # <data.json>
       and (.active_work | type == "array")
       and (.decisions | type == "array")
       and (.failures | type == "array")
+      and (.unreadable | type == "array")
       and (.waiting | type == "array")
       and (.queued | type == "array")
       and (.landed | type == "array")
@@ -83,14 +84,14 @@ validate_payload() {  # <data.json>
            ((.last_activity.at | nonempty_string) and
             (.last_activity.age_days | type == "number") and
             (.last_activity.age_seconds | type == "number")))
-      and ([.active_work[],.decisions[],.failures[],.waiting[],.queued[],.landed[],
+      and ([.active_work[],.decisions[],.failures[],.unreadable[],.waiting[],.queued[],.landed[],
             .unattributed[],.deferred_decisions[] | owner_item] | all)
       and ([.prs[]
             | type == "object" and (.url | nonempty_string) and (.linkable | type == "boolean")
               and (.linkable == false or (.url | optional_https_url))] | all)
       and ([.secondmates[]
             | type == "object" and (.id | nonempty_string)
-              and (.unavailable | type == "boolean") and (.registered | type == "boolean")] | all);
+              and (.unavailable | type == "boolean") and (.in_clone_list | type == "boolean")] | all);
     type == "object"
     and (.schema == $schema)
     and (.home | nonempty_string)

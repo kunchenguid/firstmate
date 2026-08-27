@@ -180,7 +180,9 @@ __FM_PROJECT_DASHBOARD_DATA__
     if (!raw) return null;
     try { return decodeURIComponent(raw) || null; } catch { return raw; }
   };
-  const requestedSelection = data.selected_project || hashSelection();
+  const names = new Set(data.projects.map(project => project.name));
+  const fromHash = hashSelection();
+  const requestedSelection = (fromHash !== null && names.has(fromHash)) ? fromHash : data.selected_project;
   let selected = null;
   const setSelected = name => {
     selected = selected === name ? null : name;
@@ -210,21 +212,18 @@ __FM_PROJECT_DASHBOARD_DATA__
     meta.append(node("span", "", `Delivery: ${project.mode}${project.yolo ? " +yolo" : ""}`));
     meta.append(node("span", "", project.last_activity ? `Last activity: ${project.last_activity.age_days}d ago` : "Last activity: unknown"));
     if (project.secondmates.length) {
-      const label = project.secondmates.map(mate => {
-        const notes = [];
-        if (mate.unavailable) notes.push("state unavailable");
-        if (!mate.registered) notes.push("not registered for this project");
-        return notes.length ? `${mate.id} (${notes.join("; ")})` : mate.id;
-      }).join(", ");
+      const label = project.secondmates
+        .map(mate => (mate.unavailable ? `${mate.id} (state unavailable)` : mate.id))
+        .join(", ");
       const mates = node("span", "", `Secondmate: ${label}`);
-      if (project.secondmates.some(mate => mate.unavailable || !mate.registered)) mates.className = "pd-meta-warn";
+      if (project.secondmates.some(mate => mate.unavailable)) mates.className = "pd-meta-warn";
       meta.append(mates);
     }
     if (project.deferred_decisions.length) meta.append(node("span", "", `Deferred captain holds: ${project.deferred_decisions.length}`));
     details.append(meta);
     const detailGrid = node("div", "pd-detail-grid");
     const work = node("section", "pd-panel"); appendList(work, "Active work", project.active_work, {empty:"No active work"}); detailGrid.append(work);
-    const calls = node("section", "pd-panel"); appendList(calls, "Decisions / attention", [...project.decisions, ...project.failures], {empty:"No decisions pending"}); detailGrid.append(calls);
+    const calls = node("section", "pd-panel"); appendList(calls, "Decisions / attention", [...project.decisions, ...project.failures, ...project.unreadable], {empty:"No decisions pending"}); detailGrid.append(calls);
     if (project.deferred_decisions.length) {
       const deferred = node("section", "pd-panel");
       appendList(deferred, "Deferred / superseded holds", project.deferred_decisions.map(item => ({...item, reason: item.summary || "Marked deferred or superseded"})), {});
@@ -237,12 +236,16 @@ __FM_PROJECT_DASHBOARD_DATA__
     }
     const waits = node("section", "pd-panel"); appendList(waits, "Waiting", project.waiting, {empty:"No external waits"}); detailGrid.append(waits);
     const queue = node("section", "pd-panel"); appendList(queue, "Queued next", project.queued, {empty:"Nothing queued"}); detailGrid.append(queue);
-    const landed = node("section", "pd-panel"); appendList(landed, "Recently landed", project.landed, {empty:"No recent landed work"}); detailGrid.append(landed);
+    const landed = node("section", "pd-panel");
+    const landedTitle = project.counts.landed > project.landed.length
+      ? `Recently landed (${project.landed.length} of ${project.counts.landed})`
+      : "Recently landed";
+    appendList(landed, landedTitle, project.landed, {empty:"No recent landed work"}); detailGrid.append(landed);
     const prs = node("section", "pd-panel"); appendList(prs, "Pull requests", project.prs, {empty:"No PR links",links:true}); detailGrid.append(prs);
     details.append(detailGrid); card.append(details); grid.append(card);
   });
   if (!data.projects.length) grid.append(node("div", "pd-none", "No projects are registered in data/projects.md."));
-  if (requestedSelection && data.projects.some(project => project.name === requestedSelection)) setSelected(requestedSelection);
+  if (requestedSelection && names.has(requestedSelection)) setSelected(requestedSelection);
 })();
 </script>
 </body>
