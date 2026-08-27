@@ -67,13 +67,14 @@ error: unexpected argument '--bogus' found
 
 A root that does not exist is tolerated rather than fatal, and does not disturb the other roots in the same list.
 
-## Why the grant names directories
+## Why the grant is scoped per kind
 
 A root may be a single **file**: granting `data/backlog.md` made exactly that file writable while its sibling `data/captain.md` stayed denied.
-The report grant is nonetheless a directory - the task's own `data/<id>/` - and `state/` is a directory too, for firstmate's own reasons, not a codex limitation:
+That single-file capability is what lets the grant be scoped to the narrowest path each kind actually needs, so a mistaken worker command cannot reach another task's authoritative records:
 
-- `fm_lock_owner_dir` (`bin/fm-wake-lib.sh`) creates its owner directory with `mktemp -d "<lockpath>.owner.XXXXXX"`, so the path cannot be named ahead of time. The captain-hold completion gate takes that lock in `state/`, which is why `state/` has to be the whole directory rather than the `<id>.status` file alone.
-- The scout report at `data/<id>/report.md` does not exist yet at launch, while the task's `data/<id>/` directory already does (it holds `brief.md`), so the report grant names that directory.
+- A **ship crewmate** never runs the completion gate and writes no report. The only paths it needs outside its worktree are its OWN two per-task state files - `state/<id>.status` (the supervision line it appends) and `state/<id>.turn-ended` (the wake marker the codex `notify` hook touches on every turn) - plus the git common directory. `bin/fm-spawn.sh` pre-creates both files at launch so the single-file roots resolve and neither the append nor the touch needs the directory-create permission a file grant withholds; touching an existing `turn-ended` marker only bumps its mtime, which is exactly what `bin/fm-watch.sh` `busy_turn_over_age` reads, so pre-creation changes no busy-state behavior. Granting those files instead of `state/` keeps every OTHER task's status, meta, and completion locks out of reach.
+- A **scout** gets `state/` itself (a whole directory), the task's own `data/<id>/`, and the git common directory. `state/` must be the directory because `fm_lock_owner_dir` (`bin/fm-wake-lib.sh`) creates its owner directory with `mktemp -d "<lockpath>.owner.XXXXXX"` and `fm_meta_lock_path` makes a lock symlink beside it, both directly in `state/`; those new entries cannot be named ahead of time, so a per-file grant cannot serve them. The scout report at `data/<id>/report.md` does not exist yet at launch, while the task's `data/<id>/` directory already does (it holds `brief.md`), so the report grant names that directory.
+- A **secondmate** gets only the parent's `state/<id>.status` file (pre-created), because its own home is already its workspace and it runs its own completion gate there.
 
 The report is scoped to the task's own `data/<id>/`, **not** the shared `data/` root, on purpose.
 Backlog mutation is the parent firstmate's job and is never part of a crewmate's or scout's contract, so granting the whole of `data/` only exposed every other task's report and the shared `data/backlog.md` to a mistaken command for no contract reason.
@@ -84,10 +85,9 @@ $ codex sandbox ... -c "sandbox_workspace_write.writable_roots=[\"$FMH/data/back
 error: "EPERM: operation not permitted, open '.../data/backlog.md.lock'"
 ```
 
-So the grant is `state/`, the task's own `data/<id>/`, and the out-of-tree git common directory - never the shared `data/` root and never `$FM_HOME` itself, which keeps `.env`, `config/`, `projects/`, and every other home denied.
+So a ship crewmate gets its two `state/<id>.*` files and the git dir; a scout gets `state/`, its own `data/<id>/`, and the git dir; a secondmate gets the parent's `state/<id>.status` file - never the shared `data/` root and never `$FM_HOME` itself, which keeps `.env`, `config/`, `projects/`, and every other home denied.
 
-The captain-hold completion gate needs only the `state/` grant: `fm-captain-hold.sh complete` and `verify` both succeeded with `state/` alone, because their `tasks-axi` reads take no backlog lock.
-The `data/<id>/` grant is what a scout report needs.
+The captain-hold completion gate needs the whole `state/` grant a scout gets: `fm-captain-hold.sh complete` and `verify` both succeeded with `state/`, and both create the mktemp-named lock owner directory there. A ship crewmate never runs the gate, which is why its narrower two-file grant is sufficient.
 
 ## What this grant does not change
 
@@ -130,9 +130,9 @@ Cursor's sandbox therefore does not confine writes to the workspace the way code
 
 | Claim | Where it is enforced |
 |---|---|
-| The composed launch grants exactly `state/`, the task's own `data/<id>/`, and the out-of-tree git common dir for a crewmate or scout, and only the parent `state/` for a secondmate; the shared `data/` root is never granted | `tests/fm-codex-sandbox-grant.test.sh` (portable, no codex) |
+| The composed launch grants a ship crewmate only its own `state/<id>.status` + `state/<id>.turn-ended` files and the out-of-tree git common dir; a scout `state/`, its own `data/<id>/`, and the git dir; a secondmate only the parent's `state/<id>.status` file. The shared `data/` root, and (for ship/secondmate) the whole `state/` directory, are never granted | `tests/fm-codex-sandbox-grant.test.sh` (portable, no codex) |
 | No other adapter's launch acquired a grant | `tests/fm-codex-sandbox-grant.test.sh` |
-| The granted set is sufficient for a real status append, report, captain-hold completion gate, and commit, and each root is load-bearing | `tests/fm-codex-sandbox-grant.test.sh`, by making everything outside the emitted roots unwritable |
+| The scout set is sufficient for a real status append, report, captain-hold completion gate, and commit, and each root is load-bearing; the ship set is sufficient for a status append, turn-ended touch, and commit while the shared `state/` stays unwritable so a sibling task's records cannot be reached | `tests/fm-codex-sandbox-grant.test.sh`, by making everything outside the emitted roots unwritable |
 | codex still denies those paths without the grant and allows exactly them with it | `tests/fm-codex-sandbox-grant-live-e2e.test.sh` (opt-in, real binary) |
 | firstmate's own `--add-dir` flags reach that policy through a real model turn | `tests/fm-codex-sandbox-grant-live-e2e.test.sh`, `codex exec` half |
 

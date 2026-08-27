@@ -1104,46 +1104,70 @@ pi_supports_tui_mode() {
 
 # codex is the only adapter firstmate launches inside a filesystem sandbox
 # (-s workspace-write), which confines every shell command the worker runs to its
-# own worktree plus /tmp and $TMPDIR. Three things the crewmate contract requires
-# live OUTSIDE that worktree, so an ungranted codex worker is structurally unable
-# to finish its brief (observed 2026-08-26: a codex scout produced a complete
-# report it could not deliver, and fm-captain-hold.sh's lock retry recursed on the
-# denial until the filename was too long):
-#   state/      the status appends supervision reads, plus <id>.meta and the
-#               mktemp-named lock owner directories fm-captain-hold.sh's completion
-#               gate creates there (fm_lock_owner_dir in bin/fm-wake-lib.sh).
-#   data/<id>/  the scout report at data/<id>/report.md. This is the task's OWN
-#               data subdirectory, NOT the shared data/ root: the report is the
-#               only data write the contract makes (backlog mutation is the parent
-#               firstmate's job, never a crewmate's), so scoping the grant to the
-#               one task's directory keeps every OTHER task's report and the shared
-#               backlog out of a mistaken command's reach.
-#   the task worktree's git COMMON dir, which for a pooled worktree lives inside
-#               the primary checkout: without it `git add` is denied, so a codex
-#               ship task cannot stage or commit anything at all.
-# state/ has to be a whole DIRECTORY root, not a file root, because the completion
-# gate's lock owner directory is mktemp-named (state/.meta-<id>.lock.owner.XXXXXX)
-# and cannot be named ahead of time, so the worker needs write on state/ itself.
-# data/<id>/ is granted as a directory too, because report.md does not exist yet at
-# launch while the task's data/<id>/ dir (holding brief.md) already does. The grant
-# is that directory, the task's own data/<id>/, and that one git directory - never
-# $FM_HOME itself, which keeps .env, config/, projects/, and every other home denied.
-# --add-dir is used rather than -c sandbox_workspace_write.writable_roots=[...]
-# because it is additive: the -c form REPLACES an operator's own configured roots.
-# The brief's own rule against writing outside the worktree stays stricter than
-# this sandbox, so the grant is a backstop, not a permission. The harness-adapters
-# skill owns what this leaves a codex worker able to finish (network stays denied
-# on every root), and docs/verification/codex-sandbox.md owns the measurements.
+# own worktree plus /tmp and $TMPDIR. The paths the contract needs OUTSIDE that
+# worktree differ by kind, so an ungranted codex worker is structurally unable to
+# finish its brief (observed 2026-08-26: a codex scout produced a complete report
+# it could not deliver, and fm-captain-hold.sh's lock retry recursed on the denial
+# until the filename was too long). The grant is scoped as narrowly as the sandbox
+# mechanism allows PER KIND so a mistaken worker command cannot reach another
+# task's authoritative supervision records:
+#   ship crewmate: it never runs the completion gate and writes no report, so the
+#     only paths it needs outside its worktree are its OWN two per-task state
+#     FILES - state/<id>.status (the supervision line it appends with >>) and
+#     state/<id>.turn-ended (the wake marker its codex `notify` hook touches on
+#     every turn) - plus the git common dir below. Granting those two files, not
+#     state/, keeps EVERY other task's status, meta, and completion-lock records
+#     out of reach. Both are pre-created here so the single-file roots resolve and
+#     neither the append nor the touch needs the directory-create permission a
+#     file grant withholds; touching an existing turn-ended marker only bumps its
+#     mtime, which is exactly what the watcher ages (bin/fm-watch.sh
+#     busy_turn_over_age), so pre-creation changes no busy-state behavior.
+#   scout: state/ itself (a whole DIRECTORY root), because the captain-hold
+#     completion gate the scout runs creates a mktemp-named lock owner directory
+#     AND a lock symlink directly in state/ (fm_lock_owner_dir / fm_meta_lock_path
+#     in bin/fm-wake-lib.sh); creating a new entry there needs write on the
+#     directory and neither the mktemp suffix nor the symlink can be named ahead
+#     of time. Plus the task's OWN data/<id>/ for the report at data/<id>/report.md
+#     - NOT the shared data/ root (report.md does not exist at launch while the
+#     data/<id>/ dir holding brief.md already does), so every other task's report
+#     and the shared backlog stay out of a mistaken command's reach.
+#   secondmate: only the parent's state/<id>.status file (see below).
+#   the task worktree's git COMMON dir (ship + scout), which for a pooled worktree
+#     lives inside the primary checkout: without it `git add` is denied, so a codex
+#     task cannot stage or commit anything at all.
+# The grant is never $FM_HOME itself, which keeps .env, config/, projects/, and
+# every other home denied. --add-dir is used rather than
+# -c sandbox_workspace_write.writable_roots=[...] because it is additive: the -c
+# form REPLACES an operator's own configured roots. The brief's own rule against
+# writing outside the worktree stays stricter than this sandbox, so the grant is a
+# backstop, not a permission. The harness-adapters skill owns what this leaves a
+# codex worker able to finish (network stays denied on every root), and
+# docs/verification/codex-sandbox.md owns the measurements.
 codex_writable_roots() {  # <kind> <worktree> <id>; prints one absolute root per line
-  local kind=$1 worktree=$2 id=$3 wt_real gitdir
-  printf '%s\n' "$STATE"
+  local kind=$1 worktree=$2 id=$3 wt_real gitdir status_file turnend_file
+  status_file="$STATE/$id.status"
   # A secondmate's own home IS its workspace, so its data/, state/, projects/ and
-  # crewmate spawns are already inside the sandbox. The one path it needs outside
-  # is the status file the PARENT scaffolded in the parent's state dir, which is
-  # how every routed answer returns (bin/fm-brief.sh's charter). It commits
-  # nothing in its home, so it gets no data or git-directory grant.
-  [ "$kind" != secondmate ] || return 0
-  printf '%s\n' "$DATA/$id"
+  # crewmate spawns are already inside the sandbox, and it runs its OWN completion
+  # gate in its own home. The one path it needs outside is the status file the
+  # PARENT scaffolded in the parent's state dir, which is how every routed answer
+  # returns (bin/fm-brief.sh's charter). It gets ONLY that one file - not the
+  # parent's state dir, data/, or git objects. Pre-create it so the single-file
+  # root resolves and the append never needs directory-create permission.
+  if [ "$kind" = secondmate ]; then
+    : >> "$status_file" 2>/dev/null || true
+    printf '%s\n' "$status_file"
+    return 0
+  fi
+  if [ "$kind" = scout ]; then
+    printf '%s\n' "$STATE"
+    printf '%s\n' "$DATA/$id"
+  else
+    turnend_file="$STATE/$id.turn-ended"
+    : >> "$status_file" 2>/dev/null || true
+    : >> "$turnend_file" 2>/dev/null || true
+    printf '%s\n' "$status_file"
+    printf '%s\n' "$turnend_file"
+  fi
   wt_real=$(cd "$worktree" 2>/dev/null && pwd -P) || return 0
   gitdir=$(git -C "$worktree" rev-parse --git-common-dir 2>/dev/null) || return 0
   [ -n "$gitdir" ] || return 0

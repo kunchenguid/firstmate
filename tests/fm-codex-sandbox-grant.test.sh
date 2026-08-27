@@ -123,7 +123,7 @@ count_roots() { granted_roots "$1" | grep -c . || true; }
 
 # --- 1. Composition ---------------------------------------------------------
 
-test_ship_grants_state_data_and_out_of_tree_git_dir() {
+test_ship_grants_only_its_own_state_files_and_out_of_tree_git_dir() {
   local rec out roots gitdir
   rec=$(make_case ship); read_case "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
@@ -132,25 +132,37 @@ test_ship_grants_state_data_and_out_of_tree_git_dir() {
 
   gitdir=$(cd "$(git -C "$WT_DIR" rev-parse --git-common-dir)" && pwd -P)
   roots=$(granted_roots "$LAUNCH_LOG")
-  printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/state" \
-    || fail "the status/lock directory was not granted: $roots"
-  printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/data/$CASE_ID" \
-    || fail "the task's own report directory was not granted: $roots"
+  # A ship crewmate never runs the completion gate and writes no report, so it
+  # gets only its OWN two per-task state files plus the out-of-tree git dir.
+  printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/state/$CASE_ID.status" \
+    || fail "the task's own status file was not granted: $roots"
+  printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/state/$CASE_ID.turn-ended" \
+    || fail "the task's own turn-ended wake marker was not granted: $roots"
   printf '%s\n' "$roots" | grep -qxF "$gitdir" \
     || fail "the linked worktree's git common dir was not granted: $roots"
   [ "$(count_roots "$LAUNCH_LOG")" = 3 ] \
     || fail "expected exactly 3 granted roots, got: $roots"
 
-  # The grant is those three paths and nothing wider: $FM_HOME itself stays
-  # denied, which is what keeps .env, config/, and projects/ unwritable.
+  # The two granted state files must be pre-created so the single-file roots
+  # resolve, and neither the shared state directory nor any other task's records
+  # come with them.
+  [ -f "$HOME_DIR/state/$CASE_ID.status" ] \
+    || fail "the granted status file was not pre-created, so its single-file root cannot resolve"
+  [ -f "$HOME_DIR/state/$CASE_ID.turn-ended" ] \
+    || fail "the granted turn-ended file was not pre-created, so its single-file root cannot resolve"
+  printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/state" \
+    && fail "a ship crewmate must NOT receive the shared state directory; only its own two files: $roots"
+  printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/data/$CASE_ID" \
+    && fail "a ship crewmate writes no report, so it must not receive a data grant: $roots"
+
+  # The grant is those paths and nothing wider: $FM_HOME itself stays denied,
+  # which is what keeps .env, config/, and projects/ unwritable.
   printf '%s\n' "$roots" | grep -qxF "$HOME_DIR" \
     && fail "the firstmate home itself must never be granted: $roots"
   printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/config" \
     && fail "config/ must never be granted: $roots"
-  # The report grant is the task's OWN data/<id>/, never the shared data/ root, so
-  # a mistaken command cannot reach another task's report or the shared backlog.
   printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/data" \
-    && fail "the shared data/ root must never be granted; only the task's own data/<id>/: $roots"
+    && fail "the shared data/ root must never be granted: $roots"
   grep -q '__CODEXADDDIRS__' "$LAUNCH_LOG" \
     && fail "the placeholder leaked into the launch command"
 
@@ -159,10 +171,10 @@ test_ship_grants_state_data_and_out_of_tree_git_dir() {
   # rather than leaving it to be rediscovered at the gate.
   printf '%s\n' "$out" | grep -q 'cannot push, open the PR, or run validation itself' \
     || fail "a codex ship dispatch must name the network limit the grant does not lift: $out"
-  pass "codex ship: grants state/, data/, and the out-of-tree git common dir, and nothing else"
+  pass "codex ship: grants only its own status + turn-ended files and the out-of-tree git common dir, never the shared state directory"
 }
 
-test_scout_grant_matches_ship() {
+test_scout_grants_state_dir_data_and_out_of_tree_git_dir() {
   local rec out roots
   rec=$(make_case scout); read_case "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
@@ -170,14 +182,17 @@ test_scout_grant_matches_ship() {
   roots=$(granted_roots "$LAUNCH_LOG")
   printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/data/$CASE_ID" \
     || fail "a scout cannot deliver data/<id>/report.md without its own data/<id>/ grant: $roots"
+  # A scout runs the captain-hold completion gate, which creates a mktemp-named
+  # lock owner directory and a lock symlink directly in state/, so it needs write
+  # on the DIRECTORY - a per-file grant cannot serve those unnameable new entries.
   printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/state" \
-    || fail "a scout cannot append status or pass the completion gate without the state grant: $roots"
+    || fail "a scout cannot pass the completion gate without the state directory grant: $roots"
   printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/data" \
     && fail "a scout must not receive the shared data/ root, only its own data/<id>/: $roots"
   pass "codex scout: the report, status, and completion-gate paths are all granted, and the shared data/ root is not"
 }
 
-test_secondmate_grants_only_the_parent_status_directory() {
+test_secondmate_grants_only_the_parent_status_file() {
   local base prim sm smlog smfake roots out
   base="$TMP_ROOT/secondmate"
   prim="$base/primary"
@@ -202,14 +217,19 @@ test_secondmate_grants_only_the_parent_status_directory() {
     || fail "codex secondmate spawn failed: $out"
 
   roots=$(granted_roots "$smlog")
-  # A secondmate's own home IS its workspace, so only the parent status file it
+  # A secondmate's own home IS its workspace, so only the parent status FILE it
   # reports through is outside the sandbox. Copying the crewmate grant here would
-  # hand it the parent's data/ and git objects for no contract reason.
+  # hand it the parent's data/ and git objects for no contract reason, and even
+  # the parent's whole state/ would expose every sibling task's records.
   [ "$(count_roots "$smlog")" = 1 ] \
-    || fail "a secondmate must get exactly the parent status directory, got: $roots"
+    || fail "a secondmate must get exactly the parent status file, got: $roots"
+  printf '%s\n' "$roots" | grep -qxF "$prim/state/sm-a.status" \
+    || fail "the parent status file was not granted: $roots"
   printf '%s\n' "$roots" | grep -qxF "$prim/state" \
-    || fail "the parent status directory was not granted: $roots"
-  pass "codex secondmate: only the parent status directory is granted, not the crewmate set"
+    && fail "a secondmate must NOT receive the parent's whole state directory, only its own status file: $roots"
+  [ -f "$prim/state/sm-a.status" ] \
+    || fail "the granted parent status file was not pre-created, so its single-file root cannot resolve"
+  pass "codex secondmate: only the parent status file is granted, not the parent state directory or the crewmate set"
 }
 
 test_other_adapters_are_untouched() {
@@ -336,9 +356,51 @@ test_each_root_is_load_bearing() {
   pass "each granted root is load-bearing: removing it breaks the report, the completion-gate lock, or staging"
 }
 
-test_ship_grants_state_data_and_out_of_tree_git_dir
-test_scout_grant_matches_ship
-test_secondmate_grants_only_the_parent_status_directory
+# A ship crewmate's grant is its two per-task state FILES plus the git dir. Prove
+# that set carries the whole ship contract (status append, turn-ended touch,
+# commit) while the shared state directory - every OTHER task's records - stays
+# unwritable, which is the isolation the per-file grant buys over granting state/.
+test_ship_grant_is_sufficient_and_isolates_siblings() {
+  local rec out roots status_file turnend_file
+  rec=$(make_case ship-suff); read_case "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$CASE_ID" "$PROJ_DIR" codex --mode no-mistakes --yolo off) \
+    || fail "codex ship spawn failed: $out"
+  roots=$(granted_roots "$LAUNCH_LOG")
+  status_file="$HOME_DIR/state/$CASE_ID.status"
+  turnend_file="$HOME_DIR/state/$CASE_ID.turn-ended"
+
+  # Deny everything the ship grant did NOT name, including the state directory
+  # itself, then confirm the two granted files survive.
+  chmod a-w "$HOME_DIR" "$HOME_DIR/config" "$HOME_DIR/projects" "$HOME_DIR/state" 2>/dev/null || true
+  [ -w "$status_file" ] || fail "the confinement denied the GRANTED status file; the fixture is wrong, not the grant"
+  [ -w "$turnend_file" ] || fail "the confinement denied the GRANTED turn-ended file; the fixture is wrong, not the grant"
+
+  echo "working: setup done" >> "$status_file" \
+    || fail "a ship status append must survive with only the status-file grant"
+  touch "$turnend_file" \
+    || fail "the codex notify turn-ended touch must survive with only the turn-ended-file grant"
+  ( cd "$WT_DIR" && echo change > delivered.txt && git add delivered.txt \
+      && git -c user.email=t@t -c user.name=t commit -qm "delivered" ) \
+    || fail "a commit in the linked worktree must survive the confinement"
+  [ "$(git -C "$WT_DIR" log --oneline -1 --format=%s)" = delivered ] \
+    || fail "the commit did not land"
+
+  # Isolation: with state/ denied, a mistaken command targeting ANOTHER task's
+  # records (a new file in state/) fails - exactly what granting state/ would have
+  # allowed and what Greptile flagged.
+  if ( exec 2>/dev/null; echo x > "$HOME_DIR/state/sibling.status" ); then
+    chmod -R u+w "$HOME_DIR"
+    fail "the ship grant let a worker create a sibling task record in state/; the per-file grant is not isolating"
+  fi
+  chmod -R u+w "$HOME_DIR"
+  pass "ship grant is sufficient (status, turn-ended, commit) and isolates siblings: the shared state directory stays unwritable"
+}
+
+test_ship_grants_only_its_own_state_files_and_out_of_tree_git_dir
+test_scout_grants_state_dir_data_and_out_of_tree_git_dir
+test_secondmate_grants_only_the_parent_status_file
 test_other_adapters_are_untouched
+test_ship_grant_is_sufficient_and_isolates_siblings
 test_granted_set_is_sufficient_for_the_whole_contract
 test_each_root_is_load_bearing
