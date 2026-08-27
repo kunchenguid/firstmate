@@ -1176,7 +1176,7 @@ def parse_merge_confirmation(output: str) -> dict[str, Any]:
 def merge_confirmation_command(identity: tuple[str, str, str, str]) -> list[str]:
     provider, _host, repo, number = identity
     if provider == "github":
-        return ["gh-axi", "pr", "view", number, "--repo", repo, "--json", "state,headRefOid,url"]
+        return ["gh-axi", "api", f"/repos/{repo}/pulls/{number}"]
     if provider == "gitlab":
         return ["glab", "mr", "view", number, "--repo", repo, "--output", "json"]
     raise OpsError("Pavel merge confirmation does not support this PR provider")
@@ -1187,10 +1187,25 @@ def merge_confirmation_head(proof: dict[str, Any]) -> str:
         value = str(proof.get(key) or "")
         if value:
             return value
+    head = proof.get("head")
+    if isinstance(head, dict):
+        return str(head.get("sha") or "")
     diff_refs = proof.get("diff_refs")
     if isinstance(diff_refs, dict):
         return str(diff_refs.get("head_sha") or "")
     return ""
+
+
+def merge_confirmation_is_merged(proof: dict[str, Any]) -> bool:
+    if proof.get("merged") is True:
+        if "merged_at" in proof:
+            return bool(proof.get("merged_at"))
+        return True
+    return str(proof.get("state") or "").lower() == "merged"
+
+
+def merge_confirmation_url(proof: dict[str, Any]) -> str:
+    return str(proof.get("pr_url") or proof.get("html_url") or proof.get("web_url") or proof.get("url") or "")
 
 
 def forge_confirms_merged_head(home: Home, event: dict[str, Any], pr_contract: dict[str, str]) -> bool:
@@ -1203,11 +1218,11 @@ def forge_confirms_merged_head(home: Home, event: dict[str, Any], pr_contract: d
     else:
         output = run_checked(home, merge_confirmation_command(identity))
     proof = parse_merge_confirmation(output)
-    state = str(proof.get("state") or "").lower()
-    merged = proof.get("merged") is True or state == "merged"
-    if not merged:
+    if not merge_confirmation_is_merged(proof):
         return False
-    proof_url = str(proof.get("pr_url") or proof.get("url") or pr_contract["pr_url"])
+    proof_url = merge_confirmation_url(proof)
+    if not proof_url:
+        return False
     if proof_url != pr_contract["pr_url"]:
         return False
     return merge_confirmation_head(proof).lower() == pr_contract["pr_head"].lower()

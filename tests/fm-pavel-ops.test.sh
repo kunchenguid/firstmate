@@ -153,6 +153,22 @@ printf '{"state":"merged","merged":true,"pr_url":"%s","pr_head":"%s","task_id":"
 SH
 chmod 0755 "$FAKEBIN/fm-merge-confirm"
 
+cat > "$FAKEBIN/gh-axi" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf 'gh-axi %s\n' "$*" >> "$TASK_DB/.owners"
+[ "$1" = api ] || { printf 'expected gh-axi api\n' >&2; exit 2; }
+path=$2
+case "$path" in
+  /repos/o/r/pulls/*) number=${path##*/} ;;
+  *) printf 'unexpected gh-axi api path: %s\n' "$path" >&2; exit 2 ;;
+esac
+head_path="$TASK_DB/.gh-api-head-$number"
+head=$(cat "$head_path" 2>/dev/null || printf 'aa%sbb' "$number")
+printf '{"html_url":"https://github.com/o/r/pull/%s","state":"closed","merged":true,"merged_at":"2026-01-01T00:00:00Z","head":{"sha":"%s"}}\n' "$number" "$head"
+SH
+chmod 0755 "$FAKEBIN/gh-axi"
+
 cat > "$FAKEBIN/fm-live-check" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -295,6 +311,18 @@ run_ops_default_status() {
     FM_PAVEL_OPS_BRIEF="$FAKEBIN/fm-brief" FM_PAVEL_OPS_SPAWN="$FAKEBIN/fm-spawn" \
     FM_PAVEL_OPS_PR_CHECK="$FAKEBIN/fm-pr-check" \
     FM_PAVEL_OPS_PR_MERGE="$FAKEBIN/fm-pr-merge" FM_PAVEL_OPS_MERGE_CONFIRM="$FAKEBIN/fm-merge-confirm" \
+    FM_PAVEL_OPS_LIVE_CHECK="$FAKEBIN/fm-live-check" \
+    FM_PAVEL_OPS_CREW_STATE="$FAKEBIN/fm-crew-state" \
+    FM_PAVEL_OPS_TESTING=1 "$OPS" "$@"
+}
+
+run_ops_default_merge_confirm() {
+  PATH="$FAKEBIN:$PATH" TASK_DB="$TASK_DB" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+    PAVEL_STATUS_FILE="$PAVEL_STATUS_FILE" \
+    FM_PAVEL_CAPTAIN_HOLD="$FAKEBIN/captain-hold" \
+    FM_PAVEL_OPS_BRIEF="$FAKEBIN/fm-brief" FM_PAVEL_OPS_SPAWN="$FAKEBIN/fm-spawn" \
+    FM_PAVEL_OPS_STATUS="$FAKEBIN/fm-status" FM_PAVEL_OPS_PR_CHECK="$FAKEBIN/fm-pr-check" \
+    FM_PAVEL_OPS_PR_MERGE="$FAKEBIN/fm-pr-merge" \
     FM_PAVEL_OPS_LIVE_CHECK="$FAKEBIN/fm-live-check" \
     FM_PAVEL_OPS_CREW_STATE="$FAKEBIN/fm-crew-state" \
     FM_PAVEL_OPS_TESTING=1 "$OPS" "$@"
@@ -1034,6 +1062,42 @@ run_ops drive "$stale_marker" >/dev/null
   || fail "stale same-PR merge marker advanced to landed"
 rm -f "$TASK_DB/.merge-unconfirmed" "$TASK_DB/.merge-confirm-head"
 pass "landing requires forge-confirmed current PR head"
+
+default_github_confirm=$(ingest 138 48 'Проверить стандартный GitHub merge proof' | json_field "['event']")
+run_ops classify "$default_github_confirm" --as task --title 'Use default GitHub merge proof' --intent 'Confirm landed through GitHub API' \
+  --reason 'ordinary delivery' --authority ordinary >/dev/null
+run_ops drive "$default_github_confirm" >/dev/null
+default_github_confirm_task=$(run_ops inspect "$default_github_confirm" | json_field "['task_id']")
+printf 'pr=%s\npr_head=%s\n' 'https://github.com/o/r/pull/22' 'aa22bb' >> "$HOME_DIR/state/$default_github_confirm_task.meta"
+printf '{"state":"done","pr_url":"https://github.com/o/r/pull/22","pr_head":"aa22bb","evidence":"checks green on exact PR head"}\n' > "$PAVEL_STATUS_FILE"
+run_ops drive "$default_github_confirm" >/dev/null
+run_ops drive "$default_github_confirm" >/dev/null
+run_ops drive "$default_github_confirm" >/dev/null
+[ "$(run_ops inspect "$default_github_confirm" | json_field "['state']")" = merge_queued ] \
+  || fail "default GitHub confirmation setup did not reach merge_queued"
+run_ops_default_merge_confirm drive "$default_github_confirm" >/dev/null
+[ "$(run_ops inspect "$default_github_confirm" | json_field "['state']")" = landed ] \
+  || fail "default GitHub API merge proof did not record landed"
+grep -q '^gh-axi api /repos/o/r/pulls/22$' "$TASK_DB/.owners" \
+  || fail "default GitHub merge proof did not use gh-axi api pull endpoint"
+
+mismatched_github_confirm=$(ingest 139 49 'Проверить mismatch GitHub merge proof' | json_field "['event']")
+run_ops classify "$mismatched_github_confirm" --as task --title 'Reject mismatched GitHub merge proof' --intent 'Reject landed proof for another head' \
+  --reason 'ordinary delivery' --authority ordinary >/dev/null
+run_ops drive "$mismatched_github_confirm" >/dev/null
+mismatched_github_confirm_task=$(run_ops inspect "$mismatched_github_confirm" | json_field "['task_id']")
+printf 'pr=%s\npr_head=%s\n' 'https://github.com/o/r/pull/23' 'aa23bb' >> "$HOME_DIR/state/$mismatched_github_confirm_task.meta"
+printf '{"state":"done","pr_url":"https://github.com/o/r/pull/23","pr_head":"aa23bb","evidence":"checks green on exact PR head"}\n' > "$PAVEL_STATUS_FILE"
+run_ops drive "$mismatched_github_confirm" >/dev/null
+run_ops drive "$mismatched_github_confirm" >/dev/null
+run_ops drive "$mismatched_github_confirm" >/dev/null
+[ "$(run_ops inspect "$mismatched_github_confirm" | json_field "['state']")" = merge_queued ] \
+  || fail "mismatched GitHub confirmation setup did not reach merge_queued"
+printf 'bb23cc\n' > "$TASK_DB/.gh-api-head-23"
+run_ops_default_merge_confirm drive "$mismatched_github_confirm" >/dev/null
+[ "$(run_ops inspect "$mismatched_github_confirm" | json_field "['state']")" = merge_queued ] \
+  || fail "mismatched GitHub API merge proof advanced to landed"
+pass "default GitHub merge proof uses API and exact head"
 
 set_live_probe "$ambiguous" 'Белый, фото выше' ''
 printf 'Белый, фото выше\n' > "$TASK_DB/live-$ambiguous.expected"
