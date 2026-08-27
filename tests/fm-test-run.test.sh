@@ -25,8 +25,8 @@ test_list_all_exact_suite_coverage() {
     done | LC_ALL=C sort
   )
   [ -n "$listed" ] || fail "--list --all printed nothing"
-  missing=$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
-  extra=$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  missing=$(LC_ALL=C comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  extra=$(LC_ALL=C comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
   [ -z "$missing" ] || fail "--list --all missing scripts: $missing"
   [ -z "$extra" ] || fail "--list --all unexpected scripts: $extra"
   # No duplicates.
@@ -171,10 +171,8 @@ test_changed_dependency_selection_and_unmapped_failure() {
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm non-bin-source-change
 
   printf '\n' >>"$repo/src/unmapped.ts"
-  set +e
-  (cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) >"$tmp/out" 2>"$tmp/err"
-  rc=$?
-  set -e
+  rc=0
+  (cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) >"$tmp/out" 2>"$tmp/err" || rc=$?
   [ "$rc" -eq 2 ] || fail "unmapped changed source must fail with exit 2, got $rc"
   grep -Fq 'no changed-test mapping for source path: src/unmapped.ts' "$tmp/err" \
     || fail "unmapped changed source failure is not actionable: $(cat "$tmp/err")"
@@ -266,18 +264,14 @@ echo "not ok - fail"
 exit 1
 SH
   chmod +x "$pass_f" "$fail_f"
-  set +e
-  "$RUNNER" "$pass_f" "$fail_f" >"$tmp/out.txt" 2>"$tmp/err.txt"
-  rc=$?
-  set -e
+  rc=0
+  "$RUNNER" "$pass_f" "$fail_f" >"$tmp/out.txt" 2>"$tmp/err.txt" || rc=$?
   [ "$rc" -ne 0 ] || fail "aggregate exit must be non-zero when any script fails"
   grep -q 'FM_TEST_SUMMARY total=2 failed=1' "$tmp/out.txt" \
     || fail "summary should report total=2 failed=1: $(grep FM_TEST_SUMMARY "$tmp/out.txt")"
   # All-green stays 0.
-  set +e
-  "$RUNNER" "$pass_f" >"$tmp/out2.txt" 2>"$tmp/err2.txt"
-  rc=$?
-  set -e
+  rc=0
+  "$RUNNER" "$pass_f" >"$tmp/out2.txt" 2>"$tmp/err2.txt" || rc=$?
   [ "$rc" -eq 0 ] || { rm -rf "$tmp"; fail "aggregate exit must be 0 when every script passes"; }
   rm -rf "$tmp"
   pass "aggregate exit reflects any script failure"
@@ -323,10 +317,8 @@ echo "skip: herdr not found"
 exit 0
 SH
   chmod +x "$skip_f"
-  set +e
-  "$RUNNER" --fail-on-gate-skip 'herdr not found' "$skip_f" >"$out" 2>"$tmp/err.txt"
-  rc=$?
-  set -e
+  rc=0
+  "$RUNNER" --fail-on-gate-skip 'herdr not found' "$skip_f" >"$out" 2>"$tmp/err.txt" || rc=$?
   [ "$rc" -ne 0 ] || fail "fail-on-gate-skip must make herdr-not-found a hard failure"
   grep -q 'FM_TEST_SUMMARY total=1 failed=1' "$out" \
     || fail "summary must report failed=1 under fail-on-gate-skip: $(grep FM_TEST_SUMMARY "$out")"
@@ -359,7 +351,7 @@ test_portable_shard_union_and_coverage_guard() {
   herdr=$("$RUNNER" --list --family real-herdr-gated)
   [ -n "$s1" ] && [ -n "$s2" ] || fail "portable parallel shards must be non-empty"
   # Shards disjoint.
-  overlap=$(comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
+  overlap=$(LC_ALL=C comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
   [ -z "$overlap" ] || fail "portable parallel shards overlap: $overlap"
   # Union of shards equals proven-isolated.
   [ "$(printf '%s\n' "$s1" "$s2" | LC_ALL=C sort -u)" = \
@@ -440,53 +432,82 @@ test_portable_serial_shard_lane_refusals() {
 
   # A lane built for a different shard count must refuse rather than run a
   # partial suite: this is what keeps a CI matrix from silently dropping tests.
-  set +e
-  "$RUNNER" --list --lane "portable-serial-1of${other}" >"$tmp/out" 2>"$tmp/err"
-  rc=$?
-  set -e
+  rc=0
+  "$RUNNER" --list --lane "portable-serial-1of${other}" >"$tmp/out" 2>"$tmp/err" || rc=$?
   [ "$rc" -eq 2 ] || fail "mismatched shard count must refuse (exit 2), got $rc"
   [ ! -s "$tmp/out" ] || fail "mismatched shard count must not list tests"
   grep -Fq "configured for $count" "$tmp/err" \
     || fail "mismatch refusal must name the configured count: $(cat "$tmp/err")"
 
-  set +e
-  "$RUNNER" --list --lane "portable-serial-$((count + 1))of${count}" >"$tmp/out2" 2>"$tmp/err2"
-  rc=$?
-  set -e
+  rc=0
+  "$RUNNER" --list --lane "portable-serial-$((count + 1))of${count}" >"$tmp/out2" 2>"$tmp/err2" || rc=$?
   [ "$rc" -eq 2 ] || fail "out-of-range shard index must refuse (exit 2), got $rc"
   grep -Fq "outside 1..$count" "$tmp/err2" \
     || fail "range refusal message missing: $(cat "$tmp/err2")"
 
-  set +e
-  "$RUNNER" --list --lane portable-serial-1 >"$tmp/out3" 2>"$tmp/err3"
-  rc=$?
-  set -e
+  rc=0
+  "$RUNNER" --list --lane portable-serial-1 >"$tmp/out3" 2>"$tmp/err3" || rc=$?
   [ "$rc" -eq 2 ] || fail "shard lane without a count must refuse (exit 2), got $rc"
   rm -rf "$tmp"
   pass "portable serial shard lanes refuse mismatched, out-of-range, and countless names"
 }
 
+# Regression for the C-collation invariant documented by run_coverage_guard.
+test_coverage_guard_is_collation_independent() {
+  local tmp loc probe divergent rc n
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-collation.XXXXXX")
+
+  # Locales to prove clean: always C plus the ambient one the caller runs under.
+  # Any installed locale whose collation disagrees with byte order is the case
+  # that actually catches a locale-unsafe set operation, so add the first one.
+  divergent=
+  while IFS= read -r loc; do
+    [ -n "$loc" ] || continue
+    probe=$(printf 'a-b\na.a\n' | LC_ALL="$loc" sort 2>/dev/null | head -n 1) || continue
+    # Byte order puts "a-b" first ('-' 0x2D < '.' 0x2E). Dictionary collation
+    # ignores both separators at the primary weight and compares "ab" to "aa",
+    # putting "a.a" first - the exact disagreement that trips the guard.
+    [ "$probe" = "a.a" ] || continue
+    divergent="$loc"
+    break
+  done <<<"$(locale -a 2>/dev/null || true)"
+
+  n=0
+  for loc in C "${LC_ALL:-${LANG:-C}}" ${divergent:+"$divergent"}; do
+    rc=0
+    LC_ALL="$loc" "$RUNNER" --check-coverage >"$tmp/out" 2>"$tmp/err" || rc=$?
+    [ "$rc" -eq 0 ] \
+      || fail "coverage guard exited $rc under LC_ALL=$loc: $(cat "$tmp/err")"
+    [ ! -s "$tmp/err" ] \
+      || fail "coverage guard emitted stderr under LC_ALL=$loc: $(cat "$tmp/err")"
+    assert_contains "$(cat "$tmp/out")" "FM_TEST_COVERAGE ok" \
+      "coverage guard success marker under LC_ALL=$loc"
+    n=$((n + 1))
+  done
+
+  rm -rf "$tmp"
+  if [ -z "$divergent" ]; then
+    printf 'note: no dictionary-collation locale installed; ' >&2
+    printf 'collation-divergence leg not exercised\n' >&2
+  fi
+  pass "coverage guard is clean under $n locale(s), including collation divergence"
+}
+
 test_jobs_requires_proven_isolated() {
   local tmp rc shard_lane
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs.XXXXXX")
-  set +e
-  "$RUNNER" --jobs 2 --lane portable-serial >"$tmp/out" 2>"$tmp/err"
-  rc=$?
-  set -e
+  rc=0
+  "$RUNNER" --jobs 2 --lane portable-serial >"$tmp/out" 2>"$tmp/err" || rc=$?
   [ "$rc" -eq 2 ] || fail "--jobs with portable-serial must refuse (exit 2), got $rc"
   grep -Fq 'not in the proven-isolated set' "$tmp/err" \
     || fail "--jobs refusal message missing: $(cat "$tmp/err")"
-  set +e
-  "$RUNNER" --jobs 2 tests/fm-watcher-lock.test.sh >"$tmp/out2" 2>"$tmp/err2"
-  rc=$?
-  set -e
+  rc=0
+  "$RUNNER" --jobs 2 tests/fm-watcher-lock.test.sh >"$tmp/out2" 2>"$tmp/err2" || rc=$?
   [ "$rc" -eq 2 ] || fail "--jobs on watcher-lock must refuse, got $rc"
   # Sharding across runners never relaxes the serial rule inside one shard.
   shard_lane=$("$RUNNER" --list-lanes | grep -m1 '^portable-serial-[0-9]*of[0-9]*$')
-  set +e
-  "$RUNNER" --jobs 2 --lane "$shard_lane" >"$tmp/out3" 2>"$tmp/err3"
-  rc=$?
-  set -e
+  rc=0
+  "$RUNNER" --jobs 2 --lane "$shard_lane" >"$tmp/out3" 2>"$tmp/err3" || rc=$?
   [ "$rc" -eq 2 ] || fail "--jobs with a portable serial shard must refuse, got $rc"
   grep -Fq 'not in the proven-isolated set' "$tmp/err3" \
     || fail "shard --jobs refusal message missing: $(cat "$tmp/err3")"
@@ -553,12 +574,10 @@ touch "$SCHED_EVIDENCE/replacement-started"
 echo "ok - replacement fixture started before slow fixture finished"
 SH
   chmod +x "$runner" "$repo/$a" "$repo/$b" "$repo/$c" "$fake_bin/stat"
-  set +e
+  rc=0
   PATH="$fake_bin:$PATH" SCHED_EVIDENCE="$evidence" SCHED_WAIT_FOR_REPLACEMENT=1 \
     "$runner" --jobs 2 --json "$tmp/timing.json" \
-    "$a" "$b" "$c" >"$tmp/out" 2>"$tmp/err"
-  rc=$?
-  set -e
+    "$a" "$b" "$c" >"$tmp/out" 2>"$tmp/err" || rc=$?
   [ "$rc" -eq 0 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "jobs=2 must refill the first completed slot"; }
   begin_n=$(grep -c '^FM_TEST_BEGIN ' "$tmp/out" || true)
   end_n=$(grep -c '^FM_TEST_END ' "$tmp/out" || true)
@@ -581,10 +600,8 @@ echo "not ok - deliberate fail"
 exit 1
 SH
   chmod +x "$tmp/fail.test.sh"
-  set +e
-  "$runner" --jobs 2 "$a" "$tmp/fail.test.sh" >"$tmp/out3" 2>"$tmp/err3"
-  rc=$?
-  set -e
+  rc=0
+  "$runner" --jobs 2 "$a" "$tmp/fail.test.sh" >"$tmp/out3" 2>"$tmp/err3" || rc=$?
   [ "$rc" -eq 2 ] || fail "jobs with non-proven fail fixture must refuse before run, got $rc"
 
   # Parallel failure propagation stays inside the private runner fixture.
@@ -594,10 +611,9 @@ echo "not ok - deliberate proven-set fail"
 exit 1
 SH
   chmod +x "$repo/$b"
-  set +e
-  SCHED_EVIDENCE="$evidence" "$runner" --jobs 2 "$a" "$b" >"$tmp/out4" 2>"$tmp/err4"
-  rc=$?
-  set -e
+  rm -f "$evidence/slow-done"
+  rc=0
+  SCHED_EVIDENCE="$evidence" "$runner" --jobs 2 "$a" "$b" >"$tmp/out4" 2>"$tmp/err4" || rc=$?
   [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "jobs aggregate must be non-zero when a proven worker fails"; }
   grep -q 'FM_TEST_SUMMARY total=2 failed=1' "$tmp/out4" \
     || { rm -rf "$tmp"; fail "jobs failure summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out4")"; }
@@ -608,10 +624,8 @@ echo "skip: herdr not found" >&2
 exit 0
 SH
   chmod +x "$repo/$d"
-  set +e
-  "$runner" --jobs 2 --fail-on-gate-skip 'herdr not found' "$d" >"$tmp/out5" 2>"$tmp/err5"
-  rc=$?
-  set -e
+  rc=0
+  "$runner" --jobs 2 --fail-on-gate-skip 'herdr not found' "$d" >"$tmp/out5" 2>"$tmp/err5" || rc=$?
   [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "parallel stderr gate skip must hard-fail"; }
   grep -q 'FM_TEST_SUMMARY total=1 failed=1' "$tmp/out5" \
     || { rm -rf "$tmp"; fail "parallel stderr hard-fail summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out5")"; }
@@ -717,6 +731,7 @@ test_exclude_family
 test_portable_shard_union_and_coverage_guard
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_shard_lane_refusals
+test_coverage_guard_is_collation_independent
 test_jobs_requires_proven_isolated
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
