@@ -5,25 +5,159 @@ set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG_DIR=${FM_CONFIG_OVERRIDE:-${FM_HOME:-$ROOT}/config}
+POLICY_ENVELOPE=
 
 usage() {
   echo 'usage: fm-dispatch-policy.sh validate|mode|limits|profile|describe ...' >&2
   exit 2
 }
 
-policy_validate() {
-  local file=$1 err
-  command -v jq >/dev/null 2>&1 || {
-    echo 'jq is required to validate dispatch policy' >&2
-    return 1
+policy_fail() {
+  printf 'invalid dispatch policy: %s\n' "$1" >&2
+  return 1
+}
+
+policy_snapshot() {
+  local source=$1 envelope rc
+  command -v node >/dev/null 2>&1 || {
+    policy_fail dependency
+    return
   }
-  if ! jq -e . "$file" >/dev/null 2>&1; then
-    echo 'malformed JSON' >&2
-    return 1
+  if envelope=$(FM_POLICY_SOURCE="$source" node 2>/dev/null <<'NODE'
+const fs = require('fs');
+const source = process.env.FM_POLICY_SOURCE;
+const fd = fs.openSync(source, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+try {
+  if (!fs.fstatSync(fd).isFile()) process.exit(1);
+  const content = fs.readFileSync(fd);
+  try {
+    new TextDecoder('utf-8', {fatal: true}).decode(content);
+  } catch (_) {
+    process.exit(2);
+  }
+  process.stdout.write(JSON.stringify({content: content.toString('base64')}));
+} finally {
+  fs.closeSync(fd);
+}
+NODE
+  ); then
+    POLICY_ENVELOPE=$envelope
+  else
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+      policy_fail malformed-json
+      return
+    fi
+    policy_fail source
+    return
   fi
-  err=$(jq -r '
+}
+
+policy_stream() {
+  printf '%s\n' "$POLICY_ENVELOPE" | jq -jr '.content | @base64d' 2>/dev/null
+}
+
+policy_has_duplicate_keys() {
+  local scanner
+  scanner=$(cat <<'NODE'
+const fs = require('fs');
+const text = fs.readFileSync(0, 'utf8');
+JSON.parse(text);
+let at = 0;
+let duplicate = false;
+const ws = () => { while (/\s/.test(text[at] || '')) at += 1; };
+const string = () => {
+  const start = at++;
+  while (at < text.length) {
+    const char = text[at++];
+    if (char === '"') return JSON.parse(text.slice(start, at));
+    if (char === '\\') at += 1;
+  }
+  throw new Error('unterminated string');
+};
+const value = () => {
+  ws();
+  if (text[at] === '{') return object();
+  if (text[at] === '[') return array();
+  if (text[at] === '"') { string(); return; }
+  const match = text.slice(at).match(/^(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/);
+  if (!match) throw new Error('invalid value');
+  at += match[0].length;
+};
+const object = () => {
+  const keys = new Set();
+  at += 1;
+  ws();
+  if (text[at] === '}') { at += 1; return; }
+  for (;;) {
+    ws();
+    const key = string();
+    if (keys.has(key)) duplicate = true;
+    keys.add(key);
+    ws();
+    if (text[at++] !== ':') throw new Error('missing colon');
+    value();
+    ws();
+    if (text[at] === '}') { at += 1; return; }
+    if (text[at++] !== ',') throw new Error('missing comma');
+  }
+};
+const array = () => {
+  at += 1;
+  ws();
+  if (text[at] === ']') { at += 1; return; }
+  for (;;) {
+    value();
+    ws();
+    if (text[at] === ']') { at += 1; return; }
+    if (text[at++] !== ',') throw new Error('missing comma');
+  }
+};
+value();
+ws();
+if (at !== text.length) throw new Error('trailing content');
+process.exit(duplicate ? 1 : 0);
+NODE
+  )
+  node -e "$scanner" >/dev/null 2>&1
+}
+
+policy_validate() {
+  local err
+  command -v jq >/dev/null 2>&1 || {
+    policy_fail dependency
+    return
+  }
+  command -v node >/dev/null 2>&1 || {
+    policy_fail dependency
+    return
+  }
+  if ! policy_stream | jq -e . >/dev/null 2>&1; then
+    policy_fail malformed-json
+    return
+  fi
+  if ! policy_stream | policy_has_duplicate_keys; then
+    policy_fail duplicate-key
+    return
+  fi
+  err=$(policy_stream | jq -r '
     def verified($h):
       ["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","muse"] | index($h);
+    def route_identifier($value):
+      (($value | type) == "string")
+      and (($value | length) >= 1)
+      and (($value | length) <= 128)
+      and ($value | test("^[A-Za-z0-9][A-Za-z0-9._-]*$"));
+    def account_identifier($value):
+      (($value | type) == "string")
+      and (($value | length) >= 1)
+      and (($value | length) <= 128)
+      and ($value | test("^[a-z0-9][a-z0-9-]*$"));
+    def work_type($value):
+      (($value | type) == "string")
+      and (($value | length) >= 1)
+      and (($value | length) <= 64)
+      and ($value | test("^[a-z0-9][a-z0-9._-]*$"));
     def effort_ok($h; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
@@ -104,13 +238,13 @@ policy_validate() {
         then "profile " + $id + " needs a concrete model"
       elif $profile | has("effort") and (((.effort | type) != "string") or (.effort | length) == 0) then "profile " + $id + " effort must be a non-empty string"
       elif effort_ok($profile.harness; $profile.effort) | not then "invalid effort: " + $profile.harness + ":" + $profile.effort
-      elif ($profile.provider? | type) != "string" or ($profile.provider | length) == 0 then "profile " + $id + " needs provider"
-      elif ($profile.lane? | type) != "string" or ($profile.lane | length) == 0 then "profile " + $id + " needs lane"
-      elif $profile | has("account") and (((.account | type) != "string") or (.account | test("^[a-z0-9][a-z0-9-]*$") | not)) then "profile " + $id + " account must be a lowercase identifier"
+      elif (route_identifier($profile.provider) | not) then "profile " + $id + " needs provider"
+      elif (route_identifier($profile.lane) | not) then "profile " + $id + " needs lane"
+      elif $profile | has("account") and (account_identifier(.account) | not) then "profile " + $id + " account must be a lowercase identifier"
       elif ($profile.harness == "claude" or $profile.harness == "codex") and ($profile | has("account") | not) then "native claude and codex profiles need account"
       elif ($profile.harness == "pi" or $profile.harness == "pi-signed") and ($profile | has("account")) then "pi and pi-signed profiles cannot set account"
       elif ($profile.reasoningClass? | type) != "string" or (["basic","standard","strong","maximum"] | index($profile.reasoningClass) | not) then "profile " + $id + " has invalid reasoningClass"
-      elif ($profile.workTypes? | type) != "array" or ($profile.workTypes | length) == 0 or ($profile.workTypes | any((type != "string") or length == 0)) then "profile " + $id + " needs non-empty workTypes"
+      elif ($profile.workTypes? | type) != "array" or ($profile.workTypes | length) == 0 or ($profile.workTypes | any(work_type(.) | not)) then "profile " + $id + " needs non-empty workTypes"
       else "ok"
       end;
     def v2:
@@ -129,10 +263,10 @@ policy_validate() {
         elif ((.routing.circuitBreaker // $default_breaker).cooldownSeconds) != 1800 then "circuitBreaker cooldownSeconds must be 1800"
         elif ((.routing.transientRetries // 1) != 1) then "transientRetries must be 1"
         elif has("profiles") and (.profiles | type) != "object" then "profiles must be an object"
-        elif [(.profiles // {}) | keys[] | select(length == 0)] | length > 0 then "profile identifiers must be non-empty"
+        elif [(.profiles // {}) | keys[] | select(route_identifier(.) | not)] | length > 0 then "profile identifiers must be non-empty"
         elif has("rules") and (.rules | type) != "array" then "rules must be an array"
-        elif [(.rules // [])[]? | select((type != "object") or ((.when? | type) != "string") or (.when | length) == 0 or ((.use? | type) != "array") or (.use | length) == 0 or (.use | any((type != "string") or length == 0)))] | length > 0 then "each version 2 rule needs non-empty when and named use profiles"
-        elif has("default") and ((.default | type) != "array" or (.default | length) == 0 or (.default | any((type != "string") or length == 0))) then "version 2 default needs named profiles"
+        elif [(.rules // [])[]? | select((type != "object") or ((.when? | type) != "string") or (.when | length) == 0 or ((.use? | type) != "array") or (.use | length) == 0 or (.use | any(route_identifier(.) | not)))] | length > 0 then "each version 2 rule needs non-empty when and named use profiles"
+        elif has("default") and ((.default | type) != "array" or (.default | length) == 0 or (.default | any(route_identifier(.) | not))) then "version 2 default needs named profiles"
         else
           (.profiles // {}) as $profiles
           | [$profiles | to_entries[] | select(profile_error(.key; .value) != "ok") | profile_error(.key; .value)] as $profile_errors
@@ -143,41 +277,84 @@ policy_validate() {
               | if ($unknown | length) > 0 then "unknown named profile: " + $unknown[0] else "ok" end
             end
         end;
-    if type != "object" then "top-level value must be an object"
-    elif credential_field != null then "forbidden credential field: " + credential_field
-    elif ((.schemaVersion // 1) != 1 and (.schemaVersion // 1) != 2) then "schemaVersion must be 1 or 2"
-    elif routing_error != "ok" then routing_error
-    elif (.schemaVersion // 1) == 1 then v1
-    else v2
+    def v1_reason($error):
+      if $error == "ok" then "ok"
+      elif ($error | startswith("unknown select:")) then "selector"
+      elif (($error | startswith("unverified harness:"))
+            or ($error | startswith("invalid effort:"))
+            or ($error | contains("profile"))) then "profile"
+      else "schema"
+      end;
+    def v2_reason($error):
+      if $error == "ok" then "ok"
+      elif (($error | startswith("circuitBreaker"))
+            or ($error | startswith("transientRetries"))) then "routing"
+      elif ($error | startswith("unknown named profile:")) then "reference"
+      elif (($error | startswith("each version 2 rule"))
+            or ($error | startswith("version 2 default"))) then "schema"
+      else "profile"
+      end;
+    if type != "object" then "schema"
+    elif credential_field != null then "forbidden-field"
+    elif ((.schemaVersion // 1) != 1 and (.schemaVersion // 1) != 2) then "schema"
+    elif routing_error != "ok" then "routing"
+    elif (.schemaVersion // 1) == 1 then v1_reason(v1)
+    else v2_reason(v2)
     end
-  ' "$file")
-  [ "$err" = ok ] || {
-    printf '%s\n' "$err" >&2
-    return 1
+  ' 2>/dev/null) || {
+    policy_fail schema
+    return
   }
+  [ "$err" = ok ] || {
+    case "$err" in
+      forbidden-field|routing|schema|selector|profile|reference) ;;
+      *) err=schema ;;
+    esac
+    policy_fail "$err"
+    return
+  }
+}
+
+policy_read() {
+  local output
+  if ! output=$(policy_stream | jq "$@" 2>/dev/null); then
+    policy_fail read
+    return
+  fi
+  printf '%s\n' "$output"
 }
 
 case ${1:-} in
   validate)
     file=${2:-$CONFIG_DIR/crew-dispatch.json}
-    policy_validate "$file"
+    policy_snapshot "$file"
+    policy_validate
     ;;
   mode)
     file=${2:-$CONFIG_DIR/crew-dispatch.json}
-    policy_validate "$file"
-    jq -r '.routing.mode // "automatic"' "$file"
+    policy_snapshot "$file"
+    policy_validate
+    policy_read -r '.routing.mode // "automatic"'
     ;;
   limits)
     file=${2:-$CONFIG_DIR/crew-dispatch.json}
-    policy_validate "$file"
-    jq -c '.routing.limits // {canary:3,automatic:6,burst:8,perLane:2}' "$file"
+    policy_snapshot "$file"
+    policy_validate
+    policy_read -c '.routing.limits // {canary:3,automatic:6,burst:8,perLane:2}'
     ;;
   profile)
     [ "$#" -ge 2 ] || usage
     id=$2
     file=${3:-$CONFIG_DIR/crew-dispatch.json}
-    policy_validate "$file"
-    jq -ce --arg id "$id" '
+    case "$id" in
+      ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) policy_fail profile-id; exit 1 ;;
+    esac
+    [ "${#id}" -le 128 ] || { policy_fail profile-id; exit 1; }
+    policy_snapshot "$file"
+    policy_validate
+    # jq expands $id inside its own literal program.
+    # shellcheck disable=SC2016
+    policy_read -ce --arg id "$id" '
       .profiles[$id]
       | select(type == "object")
       | {
@@ -191,12 +368,13 @@ case ${1:-} in
         + (if has("model") then {model:.model} else {} end)
         + (if has("effort") then {effort:.effort} else {} end)
         + (if has("account") then {account:.account} else {} end)
-    ' "$file"
+    ' || exit 1
     ;;
   describe)
     file=${2:-$CONFIG_DIR/crew-dispatch.json}
-    policy_validate "$file"
-    jq -c '{schemaVersion:(.schemaVersion // 1),mode:(.routing.mode // "automatic")}' "$file"
+    policy_snapshot "$file"
+    policy_validate
+    policy_read -c '{schemaVersion:(.schemaVersion // 1),mode:(.routing.mode // "automatic")}'
     ;;
   *)
     usage

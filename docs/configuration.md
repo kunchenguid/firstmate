@@ -278,14 +278,14 @@ The fixed circuit breaker opens a lane after three failures within 900 seconds a
 `transientRetries` is fixed at one.
 Omitted `limits`, `circuitBreaker`, and `transientRetries` receive their implemented defaults; supplied policy-carried values must match the fixed contract.
 
-`profiles` maps non-empty identifiers to profile objects.
-Each profile requires `harness`, a concrete non-`default` `model`, `provider`, `lane`, `reasoningClass`, and a non-empty `workTypes` string array.
+`profiles` maps routing identifiers to profile objects; profile, provider, and lane identifiers are at most 128 characters and match `[A-Za-z0-9][A-Za-z0-9._-]*`.
+Each profile requires `harness`, a concrete non-`default` `model`, `provider`, `lane`, `reasoningClass`, and a non-empty `workTypes` array whose values are at most 64 characters and match `[a-z0-9][a-z0-9._-]*`.
 The recognized optional fields are `effort` and `account`; normalized profile output drops every other field.
 Version 2 supports only `claude`, `codex`, `pi`, and `pi-signed` harnesses.
 `reasoningClass` is one of `basic`, `standard`, `strong`, or `maximum`.
 Claude, Pi, and pi-signed accept `low`, `medium`, `high`, `xhigh`, or `max` effort, while Codex accepts `low`, `medium`, `high`, or `xhigh`.
 Version 2 never permits an omitted or `default` model because routed admission must bind one exact launch identity. An omitted effort is the explicit omission sentinel: routing persists JSON `null`, spawn passes no `--effort`, and relaunch must preserve that omission. Version 1 retains its optional model and effort behavior.
-Native Claude and Codex profiles require a lowercase symbolic `account` identifier.
+Native Claude and Codex profiles require a lowercase symbolic `account` identifier of at most 128 characters matching `[a-z0-9][a-z0-9-]*`.
 Pi and pi-signed profiles must omit `account`; their normalized routing candidate uses the literal account `none` because Pi provider capacity is represented by `lane`, not a native account store.
 The example uses current intended work types such as `mechanical`, `implementation`, `architecture`, `debugging`, `security`, and `review`; routing requests independently validate their bounded work type.
 
@@ -351,7 +351,8 @@ If no version 1 rule fits, firstmate resolves `default` through the same path be
 Validate a policy with `bin/fm-dispatch-policy.sh validate config/crew-dispatch.json` and a native account map with `bin/fm-account-lane.sh validate config/crew-accounts.json`.
 When the dispatch file exists, bootstrap validates it with `jq` and `fm-spawn.sh` refuses crewmate or scout launches without an explicit resolved harness.
 Valid files stay silent by default; `FM_BOOTSTRAP_VERBOSE_FACTS=1 bin/fm-bootstrap.sh` prints the active rules and default profile set.
-Malformed JSON, invalid schemas, unknown named profiles, unverified harnesses, and unsupported efforts are reported as one `CREW_DISPATCH: invalid config/crew-dispatch.json - ...` diagnostic.
+The policy reader reports invalid input as one bounded `invalid dispatch policy: <reason>` line, where `<reason>` is a fixed category such as `malformed-json`, `duplicate-key`, `forbidden-field`, `routing`, `schema`, `selector`, `profile`, or `reference`; it never echoes policy values, parser output, or file paths.
+Bootstrap suppresses the policy reader's output and reports every invalid policy as exactly one `CREW_DISPATCH: invalid config/crew-dispatch.json - invalid dispatch policy` diagnostic.
 An invalid account map is reported as one sanitized `CREW_ACCOUNTS: invalid config/crew-accounts.json - invalid account-lane configuration` diagnostic.
 Secondmate homes inherit `crew-dispatch.json` from the primary, but never inherit `crew-accounts.json`.
 See the [automatic dispatch verification guide](verification/automatic-dispatch.md) for staged activation, recovery, and rollback checks.

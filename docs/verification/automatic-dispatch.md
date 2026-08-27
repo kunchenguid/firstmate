@@ -77,7 +77,7 @@ bin/fm-dispatch-policy.sh validate /path/to/invalid-crew-dispatch.json
 ```
 
 Validation must exit non-zero with one sanitized reason.
-When an invalid version 2 file is active, bootstrap must emit one visible `CREW_DISPATCH: invalid config/crew-dispatch.json - ...` diagnostic, new work must use configured static dispatch, and `bin/fm-route.sh status` must show no optimization-state mutation caused by that fallback.
+When an invalid version 2 file is active, bootstrap must emit exactly one `CREW_DISPATCH: invalid config/crew-dispatch.json - invalid dispatch policy` diagnostic, new work must use configured static dispatch, and `bin/fm-route.sh status` must show no optimization-state mutation caused by that fallback.
 
 ## Simulation gate
 

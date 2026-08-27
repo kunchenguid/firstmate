@@ -989,15 +989,15 @@ EOF
 }
 
 crew_dispatch_validate() {
-  local file err
+  local file
   file="$CONFIG/crew-dispatch.json"
   [ -f "$file" ] || return 0
   if ! command -v jq >/dev/null 2>&1; then
     echo "MISSING: jq (install: $(install_cmd jq))"
     return 0
   fi
-  if ! err=$("$SCRIPT_DIR/fm-dispatch-policy.sh" validate "$file" 2>&1); then
-    echo "CREW_DISPATCH: invalid config/crew-dispatch.json - $err"
+  if ! "$SCRIPT_DIR/fm-dispatch-policy.sh" validate "$file" >/dev/null 2>&1; then
+    echo "CREW_DISPATCH: invalid config/crew-dispatch.json - invalid dispatch policy"
     return 0
   fi
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
