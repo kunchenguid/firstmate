@@ -16,7 +16,9 @@ validate() {
   if ! reason=$(jq -r '
     def forbidden: ["apiKey","token","secret","password","cookie","authorization"];
     def forbidden_key:
-      [ (., (paths(objects) as $path | getpath($path)))
+      [ (., (paths(objects) as $path
+            | select($path != ["accounts"])
+            | getpath($path)))
         | select(type == "object")
         | keys_unsorted[]
         | select(. as $key | forbidden | index($key))

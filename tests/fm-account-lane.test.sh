@@ -35,6 +35,15 @@ test_valid_native_accounts() {
   pass "account lanes resolve valid native Claude and Codex mappings"
 }
 
+test_credential_shaped_account_id_is_allowed() {
+  mkdir -p "$LAB/token"
+  write_accounts "$(jq -n --arg root "$LAB" '{version:1,accounts:{token:{harness:"claude",envName:"CLAUDE_CONFIG_DIR",configDir:($root+"/token")}}}')"
+  "$ACCOUNTS" validate "$ACCOUNTS_FILE"
+  [ "$("$ACCOUNTS" harness token "$ACCOUNTS_FILE")" = claude ] || fail "credential-shaped account ID did not resolve"
+  [ "$("$ACCOUNTS" config-dir token "$ACCOUNTS_FILE")" = "$LAB/token" ] || fail "credential-shaped account ID resolved the wrong directory"
+  pass "account lanes allow credential-shaped account IDs at the account-map boundary"
+}
+
 test_rejects_arbitrary_environment() {
   mkdir -p "$LAB/bad"
   write_accounts "$(jq -n --arg root "$LAB" '{version:1,accounts:{bad:{harness:"codex",envName:"PATH",configDir:($root+"/bad")}}}')"
@@ -64,6 +73,7 @@ test_selected_account_requires_readable_configuration_directory() {
 }
 
 test_valid_native_accounts
+test_credential_shaped_account_id_is_allowed
 test_rejects_arbitrary_environment
 test_rejects_credential_material
 test_selected_account_requires_readable_configuration_directory
