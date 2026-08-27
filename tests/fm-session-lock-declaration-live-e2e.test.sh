@@ -23,7 +23,7 @@
 # on-demand. tests/fm-session-lock-ancestry.test.sh pins the same logic portably
 # in CI with real processes and no harness. Run this guard after every Claude Code
 # upgrade and before trusting refreshed evidence in
-# docs/verification/runtime-backends.md.
+# docs/verification/supervision.md.
 #
 # Two real sessions are exercised, because they are different shapes and only the
 # second is the one the fix exists for:
