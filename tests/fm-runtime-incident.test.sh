@@ -179,14 +179,45 @@ EOF
   pass "triage detects stale registry paths, duplicate clones, wrong working copies, and scope drift"
 }
 
+test_git_triage_probes_disable_optional_locks() {
+  local home origin repo fakebin real_git marker out
+  home=$(make_home read-only-git)
+  origin=$(make_origin read-only-git)
+  repo=$home/projects/titan
+  clone_origin "$origin" "$repo"
+  fakebin=$home/fakebin
+  real_git=$(command -v git)
+  marker=$home/git-probe-used-optional-locks
+  mkdir -p "$fakebin"
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "${GIT_OPTIONAL_LOCKS:-}" != 0 ]; then
+  printf '%s\n' "$*" >> "${FM_GIT_PROBE_MARKER:?}"
+fi
+exec "${FM_REAL_GIT:?}" "$@"
+SH
+  chmod +x "$fakebin/git"
+  out=$(GIT_OPTIONAL_LOCKS=1 FM_REAL_GIT="$real_git" FM_GIT_PROBE_MARKER="$marker" \
+    PATH="$fakebin:$PATH" run_triage "$home" read-only-git "$repo" \
+    "Unknown production failure")
+  [ ! -e "$marker" ] || fail "triage Git probes allowed optional index locks"
+  printf '%s' "$out" | jq -e '
+    .repository.canonical_repository != null
+      and .guardrails.project_code_edited_during_triage == false
+  ' >/dev/null || fail "read-only Git probe enforcement broke triage: $out"
+  pass "triage disables optional locks for every Git probe"
+}
+
 test_external_quota_no_code_lifecycle_and_status() {
-  local home origin repo out view bearings snapshot
+  local home origin repo out view bearings snapshot bypass_evidence
   home=$(make_home quota-lifecycle)
   origin=$(make_origin quota-lifecycle)
   repo=$home/projects/titan
   clone_origin "$origin" "$repo"
+  bypass_evidence=$home/quota-with-approval-bypass.json
+  jq '.approval.required=false' "$QUOTA_FIXTURE" > "$bypass_evidence"
   out=$(run_triage "$home" quota-lifecycle "$repo" \
-    "Titan companion cannot read state" --evidence "$QUOTA_FIXTURE")
+    "Titan companion cannot read state" --evidence "$bypass_evidence")
   printf '%s' "$out" | jq -e '
     .phase == "approval"
       and .outcome == "operational_repair"
@@ -197,7 +228,9 @@ test_external_quota_no_code_lifecycle_and_status() {
       and .diagnosis.observations.production.health == "degraded"
       and .diagnosis.observations.external_providers[0].status == "quota_exhausted"
       and (.diagnosis.supporting_evidence | length) == 1
+      and .approval.required == true
       and .approval.kind == "paid_plan_change"
+      and .approval.status == "pending"
       and .guardrails.new_worktree_allowed == false
       and .guardrails.code_validation_allowed == false
       and .guardrails.other_worker_mutation_authorized == false
@@ -215,6 +248,11 @@ test_external_quota_no_code_lifecycle_and_status() {
       and .repair.status == "pending"
       and .verification.status == "pending"
   ' >/dev/null || fail "pending approval was not monotonic: $out"
+
+  if FM_HOME="$home" "$INCIDENT" repair --incident quota-lifecycle \
+    --note "repair before approval" >/dev/null 2>&1; then
+    fail "operational repair bypassed the explicit approval transition"
+  fi
 
   if FM_HOME="$home" "$INCIDENT" approve --incident quota-lifecycle \
     --kind service_restart --note wrong >/dev/null 2>&1; then
@@ -576,7 +614,7 @@ EOF
 }
 
 test_bounded_inventory_omissions_are_disclosed() {
-  local home origin repo crew_state out human view bearings id i
+  local home origin repo crew_state out human view bearings id i invalid_home invalid_human
   home=$(make_home bounded-omissions)
   origin=$(make_origin bounded-omissions)
   repo=$home/projects/titan
@@ -630,6 +668,10 @@ test_bounded_inventory_omissions_are_disclosed() {
   human=$(FM_HOME="$home" FM_INCIDENT_STATUS_LIMIT=100 "$INCIDENT" status)
   assert_contains "$human" "Warning: 1 incident record(s) omitted by the input bound." \
     "human incident list hid input omissions"
+  assert_contains "$human" "Warning: 1 invalid incident record(s) could not be read." \
+    "human incident list hid its invalid-record count"
+  assert_contains "$human" "/malformed.json:" \
+    "human incident list hid invalid-record details"
   view=$(FM_HOME="$home" "$VIEW")
   assert_contains "$view" "Warning: 1 incident record(s) are omitted by the input bound." \
     "fleet view hid incident input omissions"
@@ -641,6 +683,18 @@ test_bounded_inventory_omissions_are_disclosed() {
       and (.omitted | any(.surface == "runtime incident records omitted by input bound: 1"))
       and (.omitted | any(.surface == "runtime incident record(s) unreadable: 1"))
   ' >/dev/null || fail "Bearings hid incident input omissions: $bearings"
+
+  invalid_home=$(make_home invalid-only-status)
+  mkdir -p "$invalid_home/state/incidents"
+  printf '{"schema":"fm-runtime-incident.v1","id":"invalid-only"}\n' \
+    > "$invalid_home/state/incidents/invalid-only.json"
+  invalid_human=$(FM_HOME="$invalid_home" "$INCIDENT" status)
+  assert_contains "$invalid_human" "No readable runtime incidents recorded." \
+    "human status described an invalid-only ledger as empty"
+  assert_contains "$invalid_human" "Warning: 1 invalid incident record(s) could not be read." \
+    "human invalid-only status hid its invalid-record count"
+  assert_contains "$invalid_human" "/invalid-only.json:" \
+    "human invalid-only status hid record details"
   pass "bounded worker, repository, branch, and incident omissions stay visible"
 }
 
@@ -816,6 +870,7 @@ PY
 }
 
 test_repository_and_worker_reconciliation
+test_git_triage_probes_disable_optional_locks
 test_external_quota_no_code_lifecycle_and_status
 test_lifecycle_transitions_read_and_write_under_one_lock
 test_stale_remote_never_wins_fallback_authority

@@ -20,7 +20,7 @@ Evidence is a JSON object.  Supported observations are:
             defect_evidence:[...], reproduction, proven_path}
   external_providers: [{name,status,code}]
   local_services: [{name,status}]
-  approval: {required,kind,request}
+  approval: {kind,request}
   verification: {runtime_path_ok, checks:[{name,status,evidence}]}
 
 The command never executes a repair.  After the exact approval has been
@@ -118,6 +118,8 @@ def validate_incident_id(value: str) -> str:
 
 
 def run_git(repo: Path, *args: str, check: bool = False) -> str | None:
+    env = os.environ.copy()
+    env["GIT_OPTIONAL_LOCKS"] = "0"
     try:
         result = subprocess.run(
             ["git", "-C", str(repo), *args],
@@ -126,6 +128,7 @@ def run_git(repo: Path, *args: str, check: bool = False) -> str | None:
             stderr=subprocess.DEVNULL,
             timeout=GIT_TIMEOUT,
             check=False,
+            env=env,
         )
     except (OSError, subprocess.TimeoutExpired):
         if check:
@@ -147,17 +150,7 @@ def canonical_repo(path: Path) -> Path:
 def commit_is_ancestor(repo: Path, ancestor: str | None, descendant: str | None) -> bool:
     if not ancestor or not descendant:
         return False
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo), "merge-base", "--is-ancestor", ancestor, descendant],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=GIT_TIMEOUT,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return result.returncode == 0
+    return run_git(repo, "merge-base", "--is-ancestor", ancestor, descendant) is not None
 
 
 def forge_origin_key(host: str, path: str, port: int | None = None) -> str | None:
@@ -891,15 +884,15 @@ def classify(evidence: dict[str, Any], repo_info: dict[str, Any]) -> dict[str, A
         ),
     }
     default_kind, default_request = default_approvals.get(category, ("none", "No operational approval is currently identified."))
-    approval_required = bool(approval_input.get("required", code_required == "no" and category != "unknown"))
+    operational_repair_ready = code_required == "no" and category != "unknown"
+    approval_required = operational_repair_ready
     approval_kind = compact(approval_input.get("kind", default_kind), 80)
     approval_request = compact(approval_input.get("request", default_request), 300)
-    if code_required == "yes" or code_required == "not yet proven":
+    if not operational_repair_ready:
         approval_required = False
         approval_kind = "none"
         approval_request = "No operational mutation is authorized by the current diagnosis."
 
-    operational_repair_ready = code_required == "no" and category != "unknown"
     if code_required == "yes":
         next_action = "Start one current-main continuation and transfer only incident-related changes through the repository's normal validation and release process."
     elif code_required == "no" and not operational_repair_ready:
@@ -1383,11 +1376,8 @@ def triage(args: argparse.Namespace) -> int:
     elif not diagnosis["operational_repair_ready"]:
         phase = "diagnosis"
         outcome = "more_evidence_required"
-    elif diagnosis["code_change_required"] == "no" and diagnosis["approval"]["required"]:
+    elif diagnosis["operational_repair_ready"]:
         phase = "approval"
-        outcome = "operational_repair"
-    elif diagnosis["code_change_required"] == "no":
-        phase = "repair"
         outcome = "operational_repair"
     else:
         phase = "diagnosis"
@@ -1479,10 +1469,8 @@ def repair(args: argparse.Namespace) -> int:
         if not record["diagnosis"].get("operational_repair_ready"):
             raise IncidentError("the diagnosis has not identified an operational repair")
         approval = record["approval"]
-        if approval.get("required") and approval.get("status") != "approved":
+        if not approval.get("required") or approval.get("status") != "approved":
             raise IncidentError("the exact operational approval is still pending")
-        if not approval.get("required") and approval.get("status") != "not_required":
-            raise IncidentError("the operational approval state is inconsistent")
         record["repair"] = {"status": "complete", "note": compact(args.note, 300), "recorded_at": now}
         record["phase"] = "verification"
         record["updated_at"] = now
@@ -1606,12 +1594,18 @@ def status(args: argparse.Namespace) -> int:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
         if not records:
-            print("No runtime incidents recorded.")
+            print("No readable runtime incidents recorded." if invalid else "No runtime incidents recorded.")
         else:
             for index, record in enumerate(records):
                 if index:
                     print()
                 output_record(record, False)
+        if invalid:
+            if records:
+                print()
+            print(f"Warning: {len(invalid)} invalid incident record(s) could not be read.")
+            for row in invalid:
+                print(f"Invalid incident record: {row['path']}: {row['reason']}")
         if input_inventory["omitted"]:
             print()
             print(f"Warning: {input_inventory['omitted']} incident record(s) omitted by the input bound.")
