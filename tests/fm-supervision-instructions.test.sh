@@ -176,8 +176,21 @@ test_pi_snippet_uses_effective_extension_path() {
   pass "pi supervision snippet renders the effective extension path"
 }
 
+test_drain_ack_rendered_exactly_once() {
+  local harness out count
+  for harness in claude codex opencode pi pi-signed grok cursor not-real; do
+    out=$("$RENDER" --harness "$harness")
+    count=$(printf '%s\n' "$out" | grep -F -o 'WAKE_ACK_REQUIRED' | grep -c .)
+    if [ "$count" -ne 1 ]; then
+      fail "harness $harness rendered WAKE_ACK_REQUIRED $count times, expected exactly 1"
+    fi
+  done
+  pass "renderer emits the neutral drain/ack contract exactly once for every harness including unknown"
+}
+
 test_selected_harness_block_only
 test_unknown_fallback
+test_drain_ack_rendered_exactly_once
 test_conditional_stanzas
 test_repair_lines
 test_cross_harness_ordinary_continuation_and_repair_matrix
