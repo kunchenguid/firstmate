@@ -1829,15 +1829,26 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
 # fm-brief.sh records a ship brief's mode as a fixed "Delivery contract: mode=<mode>"
 # line. A spawn that disagrees would launch a worker whose instructions and whose
 # recorded task delivery differ, which is the exact drift this contract prevents.
-# Last matching line in the last `# Definition of done` before a relaunch
-# `## Progress note` wins: generated contracts are appended after {TASK} text
-# that may mention the same phrase or even copy the heading, and a later
-# progress note must not override them. If that section is missing, the last
-# matching line in the brief still wins. bin/fm-merge-local.sh uses the same
-# rule for landing.
+# Last matching line in the last `# Definition of done` before an fm-control
+# relaunch marker wins: generated contracts are appended after {TASK} text that
+# may mention the same phrases or headings, and a later progress note must not
+# override them. Truncation anchors on the exact generated marker (`## Progress
+# note (ISO-timestamp)` followed by `This task was relaunched.`), not on heading
+# text alone. When that section is missing, older one-line records are read
+# from the brief prefix before that marker only. bin/fm-merge-local.sh uses
+# the same rule for landing.
 brief_dod_section() {
   awk '
-    /^## Progress note/ { exit }
+    BEGIN { pending_relaunch=0 }
+    pending_relaunch && /^[[:space:]]*$/ { next }
+    pending_relaunch {
+      if ($0 ~ /^This task was relaunched\./) { exit }
+      pending_relaunch=0
+    }
+    /^## Progress note \([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\)$/ {
+      pending_relaunch=1
+      next
+    }
     /^# Definition of done[[:space:]]*$/ { grab=1; buf=""; next }
     /^#{1,6}[[:space:]]/ { grab=0; next }
     grab { buf = buf $0 ORS }
@@ -1845,13 +1856,36 @@ brief_dod_section() {
   ' "$1"
 }
 
+brief_truncated_prefix() {
+  awk '
+    BEGIN { pending_relaunch=0 }
+    pending_relaunch && /^[[:space:]]*$/ { next }
+    pending_relaunch {
+      if ($0 ~ /^This task was relaunched\./) { exit }
+      pending_relaunch=0
+    }
+    /^## Progress note \([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\)$/ {
+      pending_relaunch=1
+      next
+    }
+    { print }
+  ' "$1"
+}
+
+brief_contract_region_nonempty() {
+  local region=$1
+  [ -n "$(printf '%s' "$region" | sed '/^[[:space:]]*$/d' | head -n 1)" ]
+}
+
 brief_last_contract_word() {
-  local file=$1 prefix=$2 section value
+  local file=$1 prefix=$2 section region value
   section=$(brief_dod_section "$file")
-  value=$(printf '%s\n' "$section" | sed -n "s/^${prefix}\([^ ]*\).*$/\1/p" | tail -n 1)
-  if [ -z "$value" ]; then
-    value=$(sed -n "s/^${prefix}\([^ ]*\).*$/\1/p" "$file" | tail -n 1)
+  if brief_contract_region_nonempty "$section"; then
+    region=$section
+  else
+    region=$(brief_truncated_prefix "$file")
   fi
+  value=$(printf '%s\n' "$region" | sed -n "s/^${prefix}\([^ ]*\).*$/\1/p" | tail -n 1)
   printf '%s' "$value"
 }
 

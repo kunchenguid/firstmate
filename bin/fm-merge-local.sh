@@ -6,10 +6,11 @@
 # `Base branch contract: base_branch=<branch>` in that same brief (written by
 # --base-branch). For both lines the last match wins, because the generated
 # contract is appended after free-form {TASK} text that may mention the same
-# phrase. Both lookups read the `# Definition of done` section so a later
-# relaunch progress note cannot override the generated contract; if that
-# section is missing, the last matching line in the brief still wins so older
-# one-line records keep working. When the crew-branch line is absent, this
+# phrase. Both lookups read only the generated contract region: the last
+# `# Definition of done` before an fm-control relaunch marker when that section
+# exists, otherwise the brief prefix before that marker so older one-line
+# records keep working. A relaunch progress note is never scanned. When the
+# crew-branch line is absent from that region, this
 # script still uses fm/<id>. When the base-branch line is absent, it still
 # lands on the project's default branch. Omitted flags therefore stay
 # identical to today. An invalid recorded name refuses rather than falling back.
@@ -60,13 +61,23 @@ default_branch() {
   return 1
 }
 
-# Generated contracts live in the last `# Definition of done` before a relaunch
-# `## Progress note`. The last heading wins so replaceable task text cannot
-# hide the generated section with its own copy. A brief with no DOD section
-# (older one-line records) falls back to the whole file.
+# Generated contracts live in the last `# Definition of done` before an
+# fm-control relaunch marker. Truncation anchors on the exact generated marker
+# (`## Progress note (ISO-timestamp)` followed by `This task was relaunched.`),
+# not on heading text alone, so task-authored progress-note prose cannot hide
+# the generated section.
 brief_dod_section() {
   awk '
-    /^## Progress note/ { exit }
+    BEGIN { pending_relaunch=0 }
+    pending_relaunch && /^[[:space:]]*$/ { next }
+    pending_relaunch {
+      if ($0 ~ /^This task was relaunched\./) { exit }
+      pending_relaunch=0
+    }
+    /^## Progress note \([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\)$/ {
+      pending_relaunch=1
+      next
+    }
     /^# Definition of done[[:space:]]*$/ { grab=1; buf=""; next }
     /^#{1,6}[[:space:]]/ { grab=0; next }
     grab { buf = buf $0 ORS }
@@ -74,13 +85,38 @@ brief_dod_section() {
   ' "$1"
 }
 
+# Brief body before the first fm-control relaunch marker. Progress notes after
+# that marker are untrusted free text for contract lookup.
+brief_truncated_prefix() {
+  awk '
+    BEGIN { pending_relaunch=0 }
+    pending_relaunch && /^[[:space:]]*$/ { next }
+    pending_relaunch {
+      if ($0 ~ /^This task was relaunched\./) { exit }
+      pending_relaunch=0
+    }
+    /^## Progress note \([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\)$/ {
+      pending_relaunch=1
+      next
+    }
+    { print }
+  ' "$1"
+}
+
+brief_contract_region_nonempty() {
+  local region=$1
+  [ -n "$(printf '%s' "$region" | sed '/^[[:space:]]*$/d' | head -n 1)" ]
+}
+
 brief_last_contract() {
-  local file=$1 prefix=$2 section value
+  local file=$1 prefix=$2 section region value
   section=$(brief_dod_section "$file")
-  value=$(printf '%s\n' "$section" | sed -n "s/^${prefix}//p" | tail -n 1)
-  if [ -z "$value" ]; then
-    value=$(sed -n "s/^${prefix}//p" "$file" | tail -n 1)
+  if brief_contract_region_nonempty "$section"; then
+    region=$section
+  else
+    region=$(brief_truncated_prefix "$file")
   fi
+  value=$(printf '%s\n' "$region" | sed -n "s/^${prefix}//p" | tail -n 1)
   printf '%s' "$value"
 }
 

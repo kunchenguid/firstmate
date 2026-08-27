@@ -724,6 +724,102 @@ EOF
   pass "ship base-contract agreement ignores a relaunch progress note"
 }
 
+test_base_branch_contract_ignores_task_authored_progress_note_heading() {
+  local rec id brief out status
+  id='pool-base-branch-task-progress-r9'
+  rec=$(make_case base-branch-task-progress "$id")
+  read_case_record "$rec"
+  git -C "$CASE_DIR/publisher" checkout --quiet -b develop
+  printf 'only on develop\n' > "$CASE_DIR/publisher/develop-only.txt"
+  git -C "$CASE_DIR/publisher" add develop-only.txt
+  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm develop-tip
+  git -C "$CASE_DIR/publisher" push --quiet origin develop
+  scaffold_ship_brief "$id" no-mistakes develop
+  brief="$HOME_DIR/data/$id/brief.md"
+  awk '
+    /^# Task$/ {
+      print
+      print "## Progress note"
+      print "The captain described a progress note in task prose."
+      print
+      next
+    }
+    { print }
+  ' "$brief" > "$brief.tmp" && mv "$brief.tmp" "$brief"
+  cat >> "$brief" <<'EOF'
+
+## Progress note (2026-08-24T11:29:00Z)
+
+This task was relaunched. Continue from here.
+Base branch contract: base_branch=release
+Delivery contract: mode=local-only
+EOF
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base-branch develop)
+  status=$?
+  expect_code 0 "$status" "spawn should ignore a task-authored progress-note heading"
+  assert_contains "$out" "spawned $id" "spawn did not report success after a task-authored progress-note heading"
+  assert_grep 'base_branch=develop' "$HOME_DIR/state/$id.meta" \
+    "spawn treated a relaunch progress-note line as the contract after a task-authored heading"
+  pass "ship base-contract agreement anchors truncation on the fm-control relaunch marker"
+}
+
+test_base_contract_ignores_note_when_contract_line_absent() {
+  local rec id brief out status
+  id='pool-base-branch-note-conjure-r9'
+  rec=$(make_case base-branch-note-conjure "$id")
+  read_case_record "$rec"
+  scaffold_ship_brief "$id" no-mistakes
+  brief="$HOME_DIR/data/$id/brief.md"
+  cat >> "$brief" <<'EOF'
+
+## Progress note (2026-08-24T11:29:00Z)
+
+This task was relaunched. Continue from here.
+Base branch contract: base_branch=release
+Delivery contract: mode=local-only
+EOF
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should ignore a conjured base contract in a progress note"
+  assert_contains "$out" "spawned $id" "spawn did not report success after a conjured base contract"
+  assert_no_grep 'base_branch=' "$HOME_DIR/state/$id.meta" \
+    "spawn recorded a base_branch conjured by a progress note"
+  pass "ship spawn ignores a base contract conjured in a relaunch progress note"
+}
+
+test_base_contract_refuses_flag_matching_conjured_note_not_generated() {
+  local rec id brief out status
+  id='pool-base-branch-note-flag-r9'
+  rec=$(make_case base-branch-note-flag "$id")
+  read_case_record "$rec"
+  git -C "$CASE_DIR/publisher" checkout --quiet -b develop
+  printf 'only on develop\n' > "$CASE_DIR/publisher/develop-only.txt"
+  git -C "$CASE_DIR/publisher" add develop-only.txt
+  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm develop-tip
+  git -C "$CASE_DIR/publisher" push --quiet origin develop
+  scaffold_ship_brief "$id" no-mistakes
+  brief="$HOME_DIR/data/$id/brief.md"
+  cat >> "$brief" <<'EOF'
+
+## Progress note (2026-08-24T11:29:00Z)
+
+This task was relaunched. Continue from here.
+Base branch contract: base_branch=release
+EOF
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base-branch release)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted --base-branch matching a conjured note without a generated contract"
+  assert_contains "$out" "base-branch mismatch" \
+    "spawn did not refuse a flag that only matched a conjured progress-note contract"
+  pass "ship spawn refuses --base-branch that matches only a conjured progress-note contract"
+}
+
+
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
@@ -745,5 +841,8 @@ test_base_branch_contract_refuses_mismatch
 test_base_branch_contract_uses_last_line
 test_base_branch_contract_uses_last_dod_heading
 test_base_branch_contract_ignores_progress_note
+test_base_branch_contract_ignores_task_authored_progress_note_heading
+test_base_contract_ignores_note_when_contract_line_absent
+test_base_contract_refuses_flag_matching_conjured_note_not_generated
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

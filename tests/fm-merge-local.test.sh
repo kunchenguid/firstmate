@@ -366,6 +366,149 @@ EOF
   pass "fm-merge-local.sh ignores contract lines appended in a relaunch progress note"
 }
 
+test_task_authored_progress_note_heading_cannot_hide_generated_contracts() {
+  local case_dir home project
+  case_dir="$TMP_ROOT/task-progress-heading"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  mkdir -p "$home/data/task-progress-heading" "$home/state"
+
+  make_local_only_project "$project"
+  git -C "$project" checkout -qb feature/progress-decoy
+  printf 'progress decoy\n' > "$project/progress-decoy.txt"
+  git -C "$project" add progress-decoy.txt
+  git -C "$project" commit -qm progress-decoy
+  git -C "$project" checkout -q main
+  git -C "$project" checkout -qb feature/named-base
+  printf 'named base\n' > "$project/named-base.txt"
+  git -C "$project" add named-base.txt
+  git -C "$project" commit -qm named-base
+  git -C "$project" checkout -qb feature/authoritative-crew
+  printf 'crew work\n' > "$project/crew.txt"
+  git -C "$project" add crew.txt
+  git -C "$project" commit -qm crew-work
+  git -C "$project" checkout -q main
+
+  fm_write_meta "$home/state/task-progress-heading.meta" \
+    "project=$project" "kind=ship" "mode=local-only"
+  cat > "$home/data/task-progress-heading/brief.md" <<'EOF'
+# Task
+## Progress note
+The captain described a progress note in task prose.
+
+# Definition of done
+Base branch contract: base_branch=feature/named-base
+Crew branch: branch=feature/authoritative-crew
+
+## Progress note (2026-08-24T11:29:00Z)
+
+This task was relaunched. Continue from here.
+Crew branch: branch=feature/progress-decoy
+Base branch contract: base_branch=main
+EOF
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-merge-local.sh" task-progress-heading >/dev/null \
+    || fail "fm-merge-local.sh should ignore a task-authored progress-note heading"
+  git -C "$project" merge-base --is-ancestor feature/authoritative-crew feature/named-base \
+    || fail "a task-authored progress-note heading hid the generated landing contract"
+  git -C "$project" merge-base --is-ancestor feature/authoritative-crew main \
+    && fail "a relaunch progress-note decoy landed on the default branch"
+  git -C "$project" merge-base --is-ancestor feature/progress-decoy feature/named-base \
+    && fail "a relaunch progress-note crew branch was merged instead of the generated contract"
+  pass "fm-merge-local.sh anchors truncation on the fm-control relaunch marker, not heading text alone"
+}
+
+test_local_only_brief_branch_name_merges_custom_crew_branch() {
+  local case_dir home project brief
+  case_dir="$TMP_ROOT/brief-branch-name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  mkdir -p "$home/data/task-brief-bn" "$home/state"
+
+  make_local_only_project "$project"
+  git -C "$project" checkout -qb feature/TD-131-visual-dom-editor
+  printf 'custom scaffold work\n' > "$project/custom-scaffold.txt"
+  git -C "$project" add custom-scaffold.txt
+  git -C "$project" commit -qm custom-scaffold
+  git -C "$project" checkout -qb "fm/task-brief-bn"
+  printf 'stale fm id branch\n' > "$project/stale-fm-id.txt"
+  git -C "$project" add stale-fm-id.txt
+  git -C "$project" commit -qm stale-fm-id
+  git -C "$project" checkout -q main
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" task-brief-bn test-proj \
+    --mode local-only --branch-name feature/TD-131-visual-dom-editor >/dev/null \
+    || fail "fm-brief.sh could not scaffold a local-only --branch-name brief"
+  brief="$home/data/task-brief-bn/brief.md"
+  assert_grep 'Crew branch: branch=feature/TD-131-visual-dom-editor' "$brief" \
+    "local-only --branch-name brief did not record the crew branch contract"
+
+  fm_write_meta "$home/state/task-brief-bn.meta" \
+    "project=$project" "kind=ship" "mode=local-only"
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-merge-local.sh" task-brief-bn >/dev/null \
+    || fail "fm-merge-local.sh should merge a scaffolded local-only custom crew branch"
+  git -C "$project" merge-base --is-ancestor feature/TD-131-visual-dom-editor main \
+    || fail "scaffolded local-only custom crew branch was not merged into main"
+  git -C "$project" merge-base --is-ancestor "fm/task-brief-bn" main \
+    && fail "fm-merge-local.sh merged reconstructed fm/<id> instead of the scaffolded crew branch"
+  pass "fm-merge-local.sh merges a local-only fm-brief.sh --branch-name crew branch"
+}
+
+test_progress_note_cannot_conjure_absent_contract_lines() {
+  local case_dir home project main_before base_before
+  case_dir="$TMP_ROOT/note-conjure"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  mkdir -p "$home/data/task-conjure" "$home/state"
+
+  make_local_only_project "$project"
+  git -C "$project" checkout -qb feature/note-decoy-crew
+  printf 'decoy crew\n' > "$project/decoy-crew.txt"
+  git -C "$project" add decoy-crew.txt
+  git -C "$project" commit -qm decoy-crew
+  git -C "$project" checkout -q main
+  git -C "$project" checkout -qb feature/note-decoy-base
+  printf 'decoy base\n' > "$project/decoy-base.txt"
+  git -C "$project" add decoy-base.txt
+  git -C "$project" commit -qm decoy-base
+  git -C "$project" checkout -qb "fm/task-conjure"
+  printf 'real crew work\n' > "$project/real-crew.txt"
+  git -C "$project" add real-crew.txt
+  git -C "$project" commit -qm real-crew
+  git -C "$project" checkout -q main
+  main_before=$(git -C "$project" rev-parse HEAD)
+  base_before=$(git -C "$project" rev-parse feature/note-decoy-base)
+
+  fm_write_meta "$home/state/task-conjure.meta" \
+    "project=$project" "kind=ship" "mode=local-only"
+  cat > "$home/data/task-conjure/brief.md" <<'EOF'
+# Definition of done
+Delivery contract: mode=local-only
+
+## Progress note (2026-08-24T11:29:00Z)
+
+This task was relaunched. Continue from here.
+Crew branch: branch=feature/note-decoy-crew
+Base branch contract: base_branch=feature/note-decoy-base
+EOF
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-merge-local.sh" task-conjure >/dev/null \
+    || fail "fm-merge-local.sh should merge when no contract line was generated"
+  git -C "$project" merge-base --is-ancestor "fm/task-conjure" main \
+    || fail "absent crew contract did not fall back to fm/<id>"
+  git -C "$project" merge-base --is-ancestor "fm/task-conjure" feature/note-decoy-base \
+    && fail "a progress-note base contract landed on a conjured base branch"
+  git -C "$project" merge-base --is-ancestor feature/note-decoy-crew main \
+    && fail "a progress-note crew branch was merged instead of fm/<id>"
+  [ "$(git -C "$project" rev-parse feature/note-decoy-base)" = "$base_before" ] \
+    || fail "a conjured base branch was advanced during landing"
+  pass "fm-merge-local.sh ignores contract lines conjured in a relaunch progress note"
+}
+
 test_recorded_custom_branch_merges
 test_omitted_crew_branch_still_merges_fm_id
 test_invalid_recorded_branch_refuses
@@ -375,3 +518,6 @@ test_last_base_branch_line_wins_over_earlier_mention
 test_invalid_recorded_base_refuses
 test_task_authored_dod_heading_cannot_hide_generated_contracts
 test_progress_note_cannot_override_generated_contracts
+test_task_authored_progress_note_heading_cannot_hide_generated_contracts
+test_local_only_brief_branch_name_merges_custom_crew_branch
+test_progress_note_cannot_conjure_absent_contract_lines
