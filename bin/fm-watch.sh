@@ -405,7 +405,7 @@ secondmate_oldest_queue_row() {  # <queue-path>
 secondmate_wake_stall_tick() {
   local now=$(( $(date +%s) )) threshold=$SECONDMATE_WAKE_STALL_SECS
   local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age reason
-  local status_line status_verb busy_verdict
+  local status_line status_verb backend target agent_state busy_verdict
   case "$threshold" in ''|*[!0-9]*|0) threshold=60 ;; esac
   # Endpoint metadata admits this queue-loop check; secondmate-liveness owns registered mates whose endpoint is missing or dead.
   for meta in "$STATE"/*.meta; do
@@ -443,12 +443,16 @@ EOF
     status_line=$(grep -v '^[[:space:]]*$' "$STATE/$task.status" 2>/dev/null | tail -1 || true)
     status_verb=$(status_line_verb "$status_line")
     if [ "$status_verb" != blocked ]; then
-      busy_verdict=$(fm_busy_classify_meta_live "$meta" "$task" "$STATE")
-      # Only a live endpoint's exact busy verdict suppresses the alert. Cached,
-      # idle, unknown, dead, and unreadable state all wake because under-reporting
-      # a mate waiting on the primary is worse than one extra supervision turn;
-      # blocked always wakes even if liveness evidence races or lags the status.
-      [ "${busy_verdict%% *}" = busy ] && continue
+      backend=$(fm_backend_of_meta "$meta")
+      target=$(fm_backend_target_of_meta "$meta")
+      agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
+      # Suppression is the dangerous direction: only a positively alive agent's
+      # exact busy verdict stays quiet. Every other state wakes because a stopped
+      # mate can silently strand its queue, while an extra wake costs one turn.
+      if [ "$agent_state" = alive ]; then
+        busy_verdict=$(fm_busy_classify_meta_live "$meta" "$task" "$STATE")
+        [ "${busy_verdict%% *}" = busy ] && continue
+      fi
     fi
     row_key="$epoch-$seq"
     receipt="$receipt_dir/$row_key"

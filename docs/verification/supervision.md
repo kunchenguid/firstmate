@@ -551,6 +551,54 @@ ok - a dead secondmate endpoint wakes despite its stale busy record
 exit=0
 ```
 
+### Agent-liveness suppression red/green record
+
+The subsequent liveness-hardening case ran on the same platform and Bash version recorded above.
+The unfixed revision was `682dd8d0fe7dc5e75fa2bdd6a7bd3e9974b2c4b2`, and the fixed version was its review working tree with the source and test changes recorded in this section.
+The bare-shell stale-busy case was RED before and GREEN after, so it demonstrates the fix.
+
+The exact additional preparation reused `run_test` and `run_case` from above:
+
+```sh
+agent_unfixed_root=$PWD/.verification-agent-unfixed
+[ ! -e "$agent_unfixed_root" ] || exit 73
+mkdir "$agent_unfixed_root"
+git archive 682dd8d0fe7dc5e75fa2bdd6a7bd3e9974b2c4b2 | tar -x -C "$agent_unfixed_root"
+cp tests/fm-wake-queue.test.sh tests/wake-helpers.sh "$agent_unfixed_root/tests/"
+```
+
+#### Fix demonstration: bare shell with a stale busy record
+
+This proves that an aged queue wakes when a secondmate agent exits to a bare shell even if the endpoint remains present and its last semantic record still says busy.
+
+Unfixed command:
+
+```sh
+run_case 682dd8d-unfixed "$agent_unfixed_root" tests/fm-wake-queue.test.sh test_self_held_lock_reclaims_instead_of_deadlocking test_secondmate_bare_shell_with_stale_busy_record_wakes
+```
+
+Full unfixed output:
+
+```text
+CASE revision=682dd8d-unfixed test=test_secondmate_bare_shell_with_stale_busy_record_wakes
+not ok - bare-shell did not wake for an aged foreign row: out=checkpoint: no actionable wake within 2s; err=
+exit=1
+```
+
+Fixed command:
+
+```sh
+run_case review-fixed "$fixed_root" tests/fm-wake-queue.test.sh test_self_held_lock_reclaims_instead_of_deadlocking test_secondmate_bare_shell_with_stale_busy_record_wakes
+```
+
+Full fixed output:
+
+```text
+CASE revision=review-fixed test=test_secondmate_bare_shell_with_stale_busy_record_wakes
+ok - a bare-shell secondmate wakes despite its stale busy record
+exit=0
+```
+
 ## Turn-end guard
 
 The blocking and bounded-follow-up mechanisms were validated across six harnesses on 2026-07-08 through 2026-08-13, with Cursor's stop-hook park validated on 2026-08-13 and Claude's replacement Stop-owned path revalidated on 2026-08-14.
