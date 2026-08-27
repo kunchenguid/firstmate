@@ -6,6 +6,20 @@
 # These tests drive the real spawn path with a fake terminal, then prove it
 # starts the worker from the fetched origin/main tip or stops when origin is
 # unreachable.
+# They also pin the boundary between the two: a project with no origin remote
+# configured has no upstream to be stale against, so it launches with a notice,
+# while a configured origin that cannot be reached still refuses.
+# Skipping that refresh still refuses a pooled worktree carrying uncommitted
+# work, which no upstream is needed to detect.
+# A committed leftover reads as clean, so the same path also refuses a worktree
+# whose HEAD has left the local default branch tip, and never resets it away.
+# With no origin that default branch resolves locally: main or master when
+# present, otherwise the repository's sole local branch, so a custom-named
+# default (no main or master anywhere) still spawns instead of being refused as
+# unverifiable.
+# The primary checkout's HEAD is never trusted for that reading, so a primary
+# stranded on a feature branch cannot bless its own feature tip as the default
+# and let a pool sitting on that committed work through.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -63,6 +77,31 @@ make_case() {
   git -C "$publisher" add advanced-main.txt
   git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-main
   git -C "$publisher" push --quiet origin "$default"
+
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
+}
+
+# A project that lives only on this machine: a real repo, a real pooled
+# worktree, and no origin remote anywhere in its configuration.
+make_remoteless_case() {
+  local name=$1 id=$2 default=${3:-main} case_dir home project pool fakebin initial
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  pool="$case_dir/pool"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b "$default" "$project"
+  printf 'local only\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  initial=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" worktree add --quiet --detach "$pool" "$initial"
 
   printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
 }
@@ -227,11 +266,190 @@ test_unresolved_remote_default_refuses_pool() {
   pass "an unresolved remote default branch refuses the pooled worktree"
 }
 
+test_remoteless_project_spawns_with_a_skip_notice() {
+  local rec id out status before after remotes
+  id='pool-no-origin-r6'
+  rec=$(make_remoteless_case no-origin "$id")
+  read_case_record "$rec"
+  remotes=$(git -C "$POOL_DIR" remote)
+  [ -z "$remotes" ] || fail "fixture did not prove the project has no remote configured (saw '$remotes')"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should launch on a project that has no origin remote"
+  assert_contains "$out" "spawned $id" "spawn did not report success without an origin remote"
+  assert_contains "$out" "has no origin remote configured" \
+    "spawn skipped the base refresh silently instead of printing a notice"
+  after=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$after" = "$before" ] || fail "spawn moved the pooled worktree that has no upstream to compare against"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed no-origin spawn: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+    printf '# observed no-origin notice: %s\n' "$(printf '%s\n' "$out" | grep 'no origin remote' | tail -n 1)"
+  fi
+  pass "a project with no origin remote spawns and says the base refresh was skipped"
+}
+
+test_remoteless_custom_default_branch_spawns() {
+  local rec id out status before after
+  id='pool-no-origin-trunk-r10'
+  rec=$(make_remoteless_case no-origin-trunk "$id" trunk)
+  read_case_record "$rec"
+  [ -z "$(git -C "$POOL_DIR" remote)" ] || fail "fixture did not prove the project has no remote configured"
+  git -C "$POOL_DIR" show-ref --verify --quiet refs/heads/main \
+    && fail "fixture must not have a main branch, or it would prove the wrong resolution"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should launch on a no-origin project whose default branch is not main or master"
+  assert_contains "$out" "spawned $id" "spawn did not report success on a custom-named default branch"
+  assert_contains "$out" "has no origin remote configured" \
+    "spawn skipped the base refresh silently instead of printing a notice"
+  after=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$after" = "$before" ] || fail "spawn moved the pooled worktree while skipping the refresh"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed no-origin trunk spawn: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+  fi
+  pass "a no-origin project with a custom-named default branch spawns with the skip notice"
+}
+
+test_dirty_remoteless_pool_still_refuses() {
+  local rec id out status before
+  id='pool-no-origin-dirty-r7'
+  rec=$(make_remoteless_case no-origin-dirty "$id")
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  printf 'keep this local-only work\n' > "$POOL_DIR/uncommitted.txt"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded on a dirty pooled worktree that has no origin remote"
+  assert_contains "$out" "has uncommitted work; refusing to start a new task on top of it" \
+    "spawn did not clearly refuse unlanded work on a project with no origin remote"
+  case "$out" in
+    *"has no origin remote configured"*) fail "spawn announced a skipped refresh on a run it refused" ;;
+  esac
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD while refusing a dirty pooled worktree that has no origin remote"
+  assert_grep 'keep this local-only work' "$POOL_DIR/uncommitted.txt" \
+    "spawn discarded uncommitted work while refusing a pool that has no origin remote"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed no-origin dirty refusal: %s; preserved=%s\n' \
+      "$(printf '%s\n' "$out" | tail -n 1)" "$(cat "$POOL_DIR/uncommitted.txt")"
+  fi
+  pass "a dirty pooled worktree on a project with no origin remote is still refused"
+}
+
+test_committed_leftover_in_remoteless_pool_refuses() {
+  local rec id out status leftover tip
+  id='pool-no-origin-committed-r8'
+  rec=$(make_remoteless_case no-origin-committed "$id")
+  read_case_record "$rec"
+  tip=$(git -C "$POOL_DIR" rev-parse "$DEFAULT_BRANCH")
+  printf 'the only copy of this work\n' > "$POOL_DIR/previous-task.txt"
+  git -C "$POOL_DIR" add previous-task.txt
+  git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'previous task committed work'
+  leftover=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$leftover" != "$tip" ] || fail "fixture did not move the pool off the local default branch tip"
+  [ -z "$(git -C "$POOL_DIR" status --porcelain)" ] \
+    || fail "fixture must be committed, not dirty, or it would prove the wrong check"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn started a task on top of a previous task's committed work"
+  assert_contains "$out" "$POOL_DIR" "the refusal did not name the worktree it found"
+  assert_contains "$out" "$leftover" "the refusal did not name the commit the worktree is sitting on"
+  assert_contains "$out" "$tip" "the refusal did not name the branch tip it expected"
+  assert_contains "$out" "$DEFAULT_BRANCH" "the refusal did not name the local default branch"
+  case "$out" in
+    *"has no origin remote configured"*) fail "spawn announced a skipped refresh on a run it refused" ;;
+  esac
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$leftover" ] \
+    || fail "spawn moved HEAD away from the leftover commit instead of refusing"
+  assert_grep 'the only copy of this work' "$POOL_DIR/previous-task.txt" \
+    "spawn discarded a previous task's committed work while refusing"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed committed-leftover refusal: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+    printf '# observed preserved commit: HEAD=%s tip=%s\n' "$leftover" "$tip"
+  fi
+  pass "a pooled worktree holding a previous task's committed work is refused, not reset"
+}
+
+test_stranded_primary_feature_branch_is_not_read_as_the_default() {
+  local rec id out status feature_tip
+  id='pool-no-origin-stranded-r11'
+  rec=$(make_remoteless_case no-origin-stranded "$id" trunk)
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" checkout --quiet -b feature-work
+  printf 'the only copy of this feature work\n' > "$PROJECT_DIR/feature.txt"
+  git -C "$PROJECT_DIR" add feature.txt
+  git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'stranded feature work'
+  feature_tip=$(git -C "$PROJECT_DIR" rev-parse HEAD)
+  git -C "$POOL_DIR" checkout --quiet --detach "$feature_tip"
+  [ "$(git -C "$PROJECT_DIR" symbolic-ref --short HEAD)" = feature-work ] \
+    || fail "fixture did not strand the primary checkout on the feature branch"
+  [ -z "$(git -C "$POOL_DIR" status --porcelain)" ] \
+    || fail "fixture must be committed, not dirty, or it would prove the wrong check"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn blessed the stranded primary's feature branch as the local default"
+  assert_contains "$out" "could not determine the local default branch" \
+    "spawn did not refuse an ambiguous local default branch loudly"
+  case "$out" in
+    *"has no origin remote configured"*) fail "spawn announced a skipped refresh on a run it refused" ;;
+  esac
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$feature_tip" ] \
+    || fail "spawn moved HEAD away from the feature commit instead of refusing"
+  assert_grep 'the only copy of this feature work' "$POOL_DIR/feature.txt" \
+    "spawn discarded the stranded feature work while refusing"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed stranded-primary refusal: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+    printf '# observed preserved feature tip: %s\n' "$feature_tip"
+  fi
+  pass "a primary stranded on a feature branch never turns that branch into the local default"
+}
+
+test_unreachable_origin_is_not_read_as_a_missing_remote() {
+  local rec id out status before after
+  id='pool-unreachable-not-missing-r6'
+  rec=$(make_case unreachable-not-missing "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" remote set-url origin "file://$CASE_DIR/never-existed.git"
+  [ "$(git -C "$POOL_DIR" remote)" = origin ] \
+    || fail "fixture did not keep an origin remote configured while making it unreachable"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a configured but unreachable origin was treated as no remote and allowed the spawn"
+  assert_contains "$out" "could not fetch origin" \
+    "spawn did not refuse a configured origin it could not reach"
+  case "$out" in
+    *"has no origin remote configured"*) fail "an unreachable origin was reported as a missing remote" ;;
+  esac
+  after=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$after" = "$before" ] || fail "spawn changed the pooled worktree while refusing an unreachable origin"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed unreachable-not-missing refusal: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+  fi
+  pass "a configured origin that cannot be reached still refuses instead of being read as no remote"
+}
+
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
+test_remoteless_project_spawns_with_a_skip_notice
+test_remoteless_custom_default_branch_spawns
+test_dirty_remoteless_pool_still_refuses
+test_committed_leftover_in_remoteless_pool_refuses
+test_stranded_primary_feature_branch_is_not_read_as_the_default
+test_unreachable_origin_is_not_read_as_a_missing_remote
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
