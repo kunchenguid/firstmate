@@ -1543,17 +1543,38 @@ test_hook_claude_mode_stale_rewake_epoch_blocks() {
   pass "fm-turnend-guard --claude: stale rewake epoch does not allow a blind stop"
 }
 
-test_hook_claude_mode_budget_without_verified_failure_keeps_blocking() {
+# An auto-arm that never ran records no failure episode to verify, so the
+# exhausted-episode proof can never cover the case where supervision could not
+# start at all. Before this was the second fail-open condition, this fixture -
+# in-flight work, no watcher, no auto-arm evidence whatsoever - blocked every
+# stop indefinitely, and the only thing that ended the turn was Claude Code's
+# hard 8-consecutive-block override. The bound is what makes it safe: the valve
+# stays shut for the whole block budget and opens exactly once.
+test_hook_claude_mode_absent_autoarm_reaches_the_bounded_fail_open() {
   local dir out status i
-  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-budget")
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-absent-autoarm")
   : > "$dir/state/task1.meta"
-  for i in 1 2 3 4; do
+  assert_absent "$dir/state/.claude-autoarm-epoch" "fixture must start with no auto-arm evidence at all"
+  for i in 1 2 3; do
     out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
     expect_code 2 "$status" "--claude block $i must exit 2 within the budget"
+    assert_not_contains "$out" 'systemMessage' "block $i failed open before the budget was exhausted"
+    assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "block $i recorded an attended alarm inside the budget"
   done
-  assert_not_contains "$out" 'systemMessage' "budget exhaustion without verified auto-arm failure must not fail open"
-  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "unverified budget exhaustion recorded an attended alarm"
-  pass "fm-turnend-guard --claude: budget exhaustion alone cannot permit a blind stop"
+
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  expect_code 0 "$status" "an absent auto-arm with an exhausted budget must reach the bounded attended fail-open"
+  assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "absent-auto-arm fail-open was not unmistakable"
+  assert_contains "$out" 'never claimed this home at all' "absent-auto-arm fail-open did not name the real condition"
+  assert_not_contains "$out" 'last recorded an attempt' "a home with no ledger at all was reported as having recorded an attempt"
+  assert_contains "$out" 'Keep this session attended' "absent-auto-arm fail-open omitted the attended-session action"
+  assert_not_contains "$out" 'fm-watch-arm.sh' "absent-auto-arm fail-open assigned a manual watcher launch"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "absent-auto-arm fail-open did not consume the episode alarm"
+
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "a consumed attended alarm must make later unhealthy stops block again"
+  assert_not_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "absent-auto-arm alarm repeated in one episode"
+  pass "fm-turnend-guard --claude: an auto-arm that never claimed still reaches one bounded attended fail-open"
 }
 
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once() {
@@ -1575,23 +1596,68 @@ test_hook_claude_mode_verified_failure_alarm_is_loud_and_once() {
   pass "fm-turnend-guard --claude: verified fail-open is loud, bounded, attended, and non-repeating"
 }
 
-test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch() {
-  local no_notice notice_only out status
-  no_notice=$(make_primary_dir "$TMP_ROOT/hook-claude-alarm-no-notice")
-  : > "$no_notice/state/task1.meta"
-  printf 'epoch=3 owner_pid=999 outcome=failed-suppressed updated_at=1\n' > "$no_notice/state/.claude-autoarm-epoch"
-  touch -t 202001010000 "$no_notice/state/.claude-autoarm-epoch"
-  seed_claude_budget "$no_notice" 3
-  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$no_notice" true); status=$?
-  expect_code 2 "$status" "an exhausted failure epoch without the consumed notice must remain blocking"
+# The two conditions that open the valve are deliberately narrow, and these are
+# the boundaries that keep them narrow. A FRESH auto-arm entry means the
+# mechanism is running this event and must still be given the block, however
+# exhausted the budget is; and an exhausted budget alone never opens the valve
+# while the auto-arm is still establishing.
+test_hook_claude_mode_fail_open_refused_while_autoarm_is_establishing() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-alarm-establishing")
+  : > "$dir/state/task1.meta"
+  printf 'epoch=4 owner_pid=%s outcome=arming updated_at=%s\n' "$(nonexistent_pid)" "$(date +%s)" \
+    > "$dir/state/.claude-autoarm-epoch"
+  seed_claude_budget "$dir" 3
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "a fresh auto-arm entry must still block even with the budget exhausted"
+  assert_not_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "an establishing auto-arm was treated as an absent one"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "an establishing auto-arm consumed the attended alarm"
+  pass "fm-turnend-guard --claude: a fresh auto-arm entry keeps the fail-open shut"
+}
 
-  notice_only=$(make_primary_dir "$TMP_ROOT/hook-claude-alarm-no-epoch")
-  : > "$notice_only/state/task1.meta"
-  : > "$notice_only/state/.claude-autoarm-failure-notified"
-  seed_claude_budget "$notice_only" 3
-  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$notice_only" true); status=$?
-  expect_code 2 "$status" "a consumed notice without an exhausted failure epoch must remain blocking"
-  pass "fm-turnend-guard --claude: fail-open requires both exhausted retries and consumed notice"
+# The exhausted-episode path waits for the HANDOFF, not just for the outcome: it
+# requires the auto-arm's one failure notice to have been consumed as well as an
+# exhausted-failure ledger. This is the state between those two events - a fresh
+# failed-suppressed epoch with no notice yet - and it must still block, because
+# the auto-arm has not finished reporting. A fresh ledger is what keeps the
+# absent/stale path out of it, so this case can only be decided by the notice
+# precondition, and deleting that precondition flips it to a fail-open one block
+# early.
+test_hook_claude_mode_exhausted_episode_without_a_consumed_notice_blocks() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-alarm-no-notice")
+  : > "$dir/state/task1.meta"
+  printf 'epoch=4 owner_pid=%s outcome=failed-suppressed updated_at=%s\n' "$(nonexistent_pid)" "$(date +%s)" \
+    > "$dir/state/.claude-autoarm-epoch"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "fixture must start with no consumed failure notice"
+  seed_claude_budget "$dir" 3
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "an exhausted-failure ledger whose notice is not yet consumed must still block"
+  assert_not_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "the fail-open fired before the auto-arm's failure notice was consumed"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "a fail-open with no consumed notice consumed the attended alarm"
+  pass "fm-turnend-guard --claude: an exhausted episode without its consumed notice keeps blocking"
+}
+
+# A stale auto-arm entry is the same unrepairable condition as no entry at all:
+# the mechanism ran at some point and is not running now. It reaches the valve
+# through the absent path rather than needing a matching consumed notice, which
+# is precisely what an auto-arm that stopped running cannot produce. It is a
+# different FACT though, and the notice has to say which one it verified: an
+# attempt IS on record here, so reporting none would send a captain to the hook
+# wiring instead of to the outcome sitting in the ledger.
+test_hook_claude_mode_stale_autoarm_evidence_reaches_the_fail_open() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-alarm-stale")
+  : > "$dir/state/task1.meta"
+  printf 'epoch=3 owner_pid=999 outcome=failed-suppressed updated_at=1\n' > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  seed_claude_budget "$dir" 3
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "a stale auto-arm entry with an exhausted budget must reach the bounded attended fail-open"
+  assert_contains "$out" 'last recorded an attempt more than one event epoch ago' "a stale auto-arm entry did not report the stale condition it actually is"
+  assert_not_contains "$out" 'never claimed this home at all' "a stale auto-arm entry with a recorded attempt was reported as having left no attempt on record"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "the stale-evidence fail-open did not consume the episode alarm"
+  pass "fm-turnend-guard --claude: stale auto-arm evidence reaches the same bounded fail-open"
 }
 
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open() {
@@ -1738,9 +1804,11 @@ test_hook_claude_mode_integrated_monotonic_fail_open
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
 test_hook_claude_mode_stale_rewake_epoch_blocks
-test_hook_claude_mode_budget_without_verified_failure_keeps_blocking
+test_hook_claude_mode_absent_autoarm_reaches_the_bounded_fail_open
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
-test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch
+test_hook_claude_mode_fail_open_refused_while_autoarm_is_establishing
+test_hook_claude_mode_stale_autoarm_evidence_reaches_the_fail_open
+test_hook_claude_mode_exhausted_episode_without_a_consumed_notice_blocks
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim

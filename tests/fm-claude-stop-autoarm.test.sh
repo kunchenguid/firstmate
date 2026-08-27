@@ -22,6 +22,23 @@ ln -s /bin/bash "$FAKEBIN/claude"
 FAKE_CLAUDE="$FAKEBIN/claude"
 export FAKE_CLAUDE
 
+# Every fake harness this suite starts - the hook's own and the competing holder
+# alike - runs with the session-cohort signals cleared, from the one list
+# tests/lib.sh owns. Without that they inherit the captain session's launch
+# marker and pane id from the environment this suite was started in, which makes
+# the "other harness" holder genuinely part of the hook's own session cohort and
+# quietly turns the competing-session control below into a same-session one.
+#
+# Every fake harness also ends its command list with an explicit `exit $?` after
+# the hook, because bash exec's the last simple command of a `-c` string in place:
+# without that the harness-named process is REPLACED by the hook and disappears
+# from the tree, and the ancestry walk climbs past the fixture into the real
+# session running this suite instead of terminating inside the fixture. A bare
+# trailing no-op keeps the process but discards the hook's exit code, which is
+# itself an asserted outcome here, so the status is passed back explicitly.
+fm_test_clear_signals_argv
+CLEAN=("${FM_TEST_CLEAR_SIGNALS_ARGV[@]}")
+
 # Copy the hook and its sourced dependencies into a fixture checkout.
 install_autoarm_scripts() {
   local dir=$1
@@ -71,9 +88,10 @@ make_crewmate_worktree_dir() {
 run_autoarm() {
   local dir=$1 rc=0
   printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' \
-    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+    | "${CLEAN[@]}" FM_HOME="$dir" "$FAKE_CLAUDE" -c '
         printf "%s\n" "$$" > "$FM_HOME/state/.lock"
         "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+        exit $?
       ' 2>&1 || rc=$?
   printf 'RC=%s\n' "$rc" >&2
   return "$rc"
@@ -211,9 +229,10 @@ test_reclaims_stale_session_lock_before_arming() {
   printf '9999999\n' > "$dir/state/.lock"
   write_arm_fixture "$dir" actionable
   out=$(printf '%s\n' '{"session_id":"stale"}' \
-    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+    | "${CLEAN[@]}" FM_HOME="$dir" "$FAKE_CLAUDE" -c '
         printf "%s\n" "$$" > "$FM_HOME/state/expected-owner"
         "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+        exit $?
       ' 2>&1); status=$?
   expect_code 2 "$status" "a dead recorded session owner must be reclaimed before the actionable rewake"
   expected_owner=$(cat "$dir/state/expected-owner")
@@ -224,20 +243,52 @@ test_reclaims_stale_session_lock_before_arming() {
   pass "auto-arm: a demonstrably dead recorded session owner is reclaimed through fm-lock.sh before arming"
 }
 
+# The property the session lock exists for, so this control has to keep meaning
+# what it says: the holder must be a GENUINELY separate session. It reports the
+# two things that decide that - the ancestry the hook resolved, and the cohort
+# verdict on the holder - and asserts them before asserting inertness, because
+# both an inherited launch marker and a fake harness that exec'd itself away turn
+# this fixture into a same-session one that would pass for the wrong reason.
 test_inert_when_lock_held_by_other_harness() {
-  local dir other out status owner_after
+  local dir other out status owner_after harness_pid ancestry suite_ancestry p
   dir=$(make_primary_dir "$TMP_ROOT/other-lock")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" actionable
-  # The trailing no-op keeps the fake harness process alive instead of allowing
-  # bash to exec the final sleep into a non-harness process.
-  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  "${CLEAN[@]}" "$FAKE_CLAUDE" -c 'sleep 60; :' &
   other=$!
   printf '%s\n' "$other" > "$dir/state/.lock"
-  out=$(printf '%s\n' '{"session_id":"s"}' | FM_HOME="$dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' 2>&1); status=$?
+  out=$(printf '%s\n' '{"session_id":"s"}' \
+    | "${CLEAN[@]}" FM_HOME="$dir" FM_FIX_HOLDER="$other" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/hook-harness-pid"
+        . "$FM_HOME/bin/fm-session-lock-lib.sh"
+        fm_harness_ancestry_pids > "$FM_HOME/state/hook-ancestry"
+        if fm_session_same_cohort "$FM_FIX_HOLDER"; then
+          printf "yes\n" > "$FM_HOME/state/hook-cohort"
+        else
+          printf "no\n" > "$FM_HOME/state/hook-cohort"
+        fi
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+        exit $?
+      ' 2>&1); status=$?
   owner_after=$(cat "$dir/state/.lock")
+  harness_pid=$(tr -d '[:space:]' < "$dir/state/hook-harness-pid")
+  ancestry=$(tr '\n' ' ' < "$dir/state/hook-ancestry")
   kill "$other" 2>/dev/null || true
   wait "$other" 2>/dev/null || true
+
+  # Divergence: the walk terminated on the fixture's own harness, so it never
+  # reached the session running this suite, and the holder is genuinely outside
+  # this session's cohort rather than merely uncorroborated.
+  [ "$(printf '%s' "$ancestry" | tr -d '[:space:]')" = "$harness_pid" ] || fail \
+    "the hook resolved '$ancestry' as its harness ancestry instead of the fixture's own pid $harness_pid, so this fixture no longer terminates the walk inside itself"
+  suite_ancestry=$(bash -c '. "$0"; fm_harness_ancestry_pids' "$ROOT/bin/fm-session-lock-lib.sh" 2>/dev/null | tr '\n' ' ' || true)
+  for p in $suite_ancestry; do
+    assert_not_contains " $ancestry " " $p " \
+      "the hook's ancestry reached the session running this suite (pid $p), so the fixture's holder is not a separate session at all"
+  done
+  [ "$(cat "$dir/state/hook-cohort" 2>/dev/null)" = no ] || fail \
+    "the fixture's competing holder was accepted into this session's own cohort, so this control no longer tests a separate session"
+
   expect_code 0 "$status" "hook must stay inert when another live harness holds the session lock"
   [ "$owner_after" = "$other" ] || fail "hook replaced another live harness owner: expected $other, got $owner_after"
   [ ! -e "$dir/state/arm-ran" ] || fail "hook armed while another session owned the lock"
@@ -268,7 +319,8 @@ test_stale_lock_recovery_preserves_afk_and_need_gates() {
   : > "$afk_dir/state/.afk"
   printf '9999999\n' > "$afk_dir/state/.lock"
   write_arm_fixture "$afk_dir" actionable
-  out=$(printf '%s\n' '{"session_id":"stale-afk"}' | FM_HOME="$afk_dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' 2>&1); status=$?
+  out=$(printf '%s\n' '{"session_id":"stale-afk"}' \
+    | "${CLEAN[@]}" FM_HOME="$afk_dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"; exit $?' 2>&1); status=$?
   expect_code 0 "$status" "a stale owner must not widen the AFK gate"
   [ "$(cat "$afk_dir/state/.lock")" = 9999999 ] || fail "AFK stale lock was reclaimed despite away ownership"
   [ ! -e "$afk_dir/state/arm-ran" ] || fail "stale AFK home armed"
@@ -276,7 +328,8 @@ test_stale_lock_recovery_preserves_afk_and_need_gates() {
   idle_dir=$(make_primary_dir "$TMP_ROOT/stale-idle")
   printf '9999999\n' > "$idle_dir/state/.lock"
   write_arm_fixture "$idle_dir" actionable
-  out=$(printf '%s\n' '{"session_id":"stale-idle"}' | FM_HOME="$idle_dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' 2>&1); status=$?
+  out=$(printf '%s\n' '{"session_id":"stale-idle"}' \
+    | "${CLEAN[@]}" FM_HOME="$idle_dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"; exit $?' 2>&1); status=$?
   expect_code 0 "$status" "a stale owner must not widen the supervision-need gate"
   [ "$(cat "$idle_dir/state/.lock")" = 9999999 ] || fail "idle stale lock was reclaimed without supervision need"
   [ ! -e "$idle_dir/state/arm-ran" ] || fail "stale idle home armed"
@@ -297,12 +350,14 @@ test_resolves_outermost_claude_pid_in_nested_bgspare_chain() {
   # so bash cannot tail-exec-collapse it into the outer pid, which would
   # collapse the two-hop chain this test depends on down to one hop.
   out=$(printf '%s\n' '{"session_id":"nested"}' \
-    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+    | "${CLEAN[@]}" FM_HOME="$dir" "$FAKE_CLAUDE" -c '
         printf "%s\n" "$$" > "$FM_HOME/state/.lock"
         "$FAKE_CLAUDE" -c "
           printf \"%s\n\" \"\$\$\" > \"\$FM_HOME/state/inner-pid\"
           \"\$FM_HOME/bin/fm-claude-stop-autoarm.sh\"
+          exit \$?
         "
+        exit $?
       ' 2>&1); status=$?
   inner_pid=$(cat "$dir/state/inner-pid" 2>/dev/null || true)
   lock_pid=$(cat "$dir/state/.lock" 2>/dev/null || true)
@@ -516,7 +571,7 @@ test_single_flight_admits_exactly_one_owner() {
   dir=$(make_primary_dir "$TMP_ROOT/single-flight")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" slow-actionable
-  FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+  "${CLEAN[@]}" FM_HOME="$dir" "$FAKE_CLAUDE" -c '
     printf "%s\n" "$$" > "$FM_HOME/state/.lock"
     printf "%s\n" "{\"session_id\":\"s\"}" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >/dev/null 2>"$FM_HOME/state/err1" &
     p1=$!
@@ -524,6 +579,7 @@ test_single_flight_admits_exactly_one_owner() {
     p2=$!
     wait "$p1"; echo $? > "$FM_HOME/state/rc1"
     wait "$p2"; echo $? > "$FM_HOME/state/rc2"
+    :
   '
   rc1=$(cat "$dir/state/rc1")
   rc2=$(cat "$dir/state/rc2")

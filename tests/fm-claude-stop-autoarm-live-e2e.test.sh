@@ -147,13 +147,36 @@ FAKE_CLAUDE="$LAB/claude"
 ln -s /bin/bash "$FAKE_CLAUDE"
 mkdir -p "$LIVE_OWNER_HOME/state" "$LIVE_OWNER_HOME/config"
 printf 'project=fixture\n' > "$LIVE_OWNER_HOME/state/task.meta"
-"$FAKE_CLAUDE" -c 'sleep 3; :' &
+# Both fake harnesses start with every session-cohort signal cleared, from the
+# list tests/session-signals.sh derives from the library's own tables, because
+# this guard runs inside a REAL Claude session: inheriting its launch marker and
+# pane id would put the "competing" holder in the hook's own session cohort and
+# the control would prove nothing. The trailing no-op keeps each harness-named
+# process in the tree rather than letting bash exec it away, which would send the
+# ancestry walk past the fixture into that same real session.
+# shellcheck source=tests/session-signals.sh
+. "$ROOT/tests/session-signals.sh"
+fm_test_clear_signals_argv
+CLEAN=("${FM_TEST_CLEAR_SIGNALS_ARGV[@]}")
+"${CLEAN[@]}" "$FAKE_CLAUDE" -c 'sleep 3; :' &
 LIVE_OWNER_PID=$!
 printf '%s\n' "$LIVE_OWNER_PID" > "$LIVE_OWNER_HOME/state/.lock"
 LIVE_OWNER_RC=0
 printf '%s\n' '{"session_id":"live-owner-control"}' \
-  | FM_HOME="$LIVE_OWNER_HOME" FM_ROOT_OVERRIDE="$PROJECT" "$FAKE_CLAUDE" -c '"$FM_ROOT_OVERRIDE/bin/fm-claude-stop-autoarm.sh"' \
+  | "${CLEAN[@]}" FM_HOME="$LIVE_OWNER_HOME" FM_ROOT_OVERRIDE="$PROJECT" FM_FIX_HOLDER="$LIVE_OWNER_PID" \
+      "$FAKE_CLAUDE" -c '
+        . "$FM_ROOT_OVERRIDE/bin/fm-session-lock-lib.sh"
+        fm_harness_ancestry_pids > "$FM_HOME/state/hook-ancestry"
+        printf "%s\n" "$$" > "$FM_HOME/state/hook-harness-pid"
+        fm_session_same_cohort "$FM_FIX_HOLDER" && printf "yes\n" > "$FM_HOME/state/hook-cohort"
+        "$FM_ROOT_OVERRIDE/bin/fm-claude-stop-autoarm.sh"
+        exit $?
+      ' \
       >"$LAB/live-owner.out" 2>"$LAB/live-owner.err" || LIVE_OWNER_RC=$?
+[ "$(tr -d '[:space:]' < "$LIVE_OWNER_HOME/state/hook-ancestry")" = "$(tr -d '[:space:]' < "$LIVE_OWNER_HOME/state/hook-harness-pid")" ] \
+  || fail "the competing-owner control resolved '$(tr '\n' ' ' < "$LIVE_OWNER_HOME/state/hook-ancestry")' as its harness ancestry instead of its own fixture pid, so the walk left the fixture and the holder is not a separate session"
+[ ! -e "$LIVE_OWNER_HOME/state/hook-cohort" ] \
+  || fail "the competing-owner control's holder was accepted into this session's own cohort, so it no longer tests a separate session"
 [ "$LIVE_OWNER_RC" -eq 0 ] || fail "competing Stop hook returned $LIVE_OWNER_RC while another live session owned the home"
 [ "$(cat "$LIVE_OWNER_HOME/state/.lock")" = "$LIVE_OWNER_PID" ] || fail "competing Stop hook replaced the live session owner"
 [ ! -e "$LIVE_OWNER_HOME/state/arm-ran" ] || fail "competing Stop hook armed while another live session owned the home"

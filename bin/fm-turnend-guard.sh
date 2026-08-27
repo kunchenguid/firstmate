@@ -63,7 +63,10 @@
 #      with the repair banner, bounded to FM_CLAUDE_TURNEND_BLOCK_BUDGET
 #      (default 3) consecutive blocks per session - safely below Claude Code's
 #      hard 8-consecutive-block override - then allow one loud attended
-#      fail-open only for an already verified failure episode.
+#      fail-open. That valve opens on either an already verified failure episode
+#      or a verified ABSENT auto-arm, because an auto-arm that never ran records
+#      no failure to verify and must not therefore be un-endable; see
+#      failopen_condition_verified below.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -303,7 +306,7 @@ autoarm_owns_recovery() {
 terminal_fail_open() {
   local pid role old_session old_count
   [ "$COUNT" -gt "$BLOCK_BUDGET" ] || return 1
-  failure_episode_verified || return 1
+  failopen_condition_verified || return 1
   [ ! -e "$FAILURE_ALARM" ] || return 1
   if ! fm_lock_try_acquire "$OWNER_LOCK"; then
     pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
@@ -336,7 +339,7 @@ terminal_fail_open() {
   esac
   role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
   if [ "$role" != terminal-check ] || [ "$old_session" != "$SESSION_ID" ] \
-    || [ "$old_count" -le "$BLOCK_BUDGET" ] || ! failure_episode_verified \
+    || [ "$old_count" -le "$BLOCK_BUDGET" ] || ! failopen_condition_verified \
     || [ -e "$FAILURE_ALARM" ]; then
     fm_lock_release "$BUDGET_LOCK"
     fm_lock_release "$OWNER_LOCK"
@@ -373,6 +376,60 @@ failure_episode_verified() {
   esac
 }
 
+# The auto-arm left no evidence it is running this home at all: its epoch ledger
+# is absent, or the last entry is older than one event epoch.
+#
+# This is the SECOND, independent way into the attended fail-open, and it exists
+# because the first one cannot cover its own precondition. failure_episode_verified
+# above proves an auto-arm that ran and exhausted itself, so every reason the
+# auto-arm never ran - it stood down at its own identity gate, its hook is not
+# registered, its host stripped it - produced no failure episode to advance and
+# left this guard re-blocking with no way out but Claude's hard 8-block override.
+# Supervision being unstartable for a reason this guard cannot repair must reach
+# the same bounded valve however it arose, so this predicate is about the ABSENCE
+# of the mechanism rather than about any particular cause of that absence.
+#
+# It stays as narrow as the first one: away mode still owns supervision when
+# present, a fresh ledger entry still means the auto-arm is mid-flight and is
+# still given the block, and the caller's exhausted block budget and one-shot
+# alarm bound this path exactly as they bound the other.
+#
+# The two absences are one condition but not one fact, so which of them held is
+# recorded in FM_TURNEND_AUTOARM_ABSENCE: `absent` when there is no ledger at all
+# and nothing ever recorded an attempt, `stale` when an attempt is on record and
+# nothing has run since. Only the second is a statement the notice below could
+# get wrong by claiming the first.
+FM_TURNEND_AUTOARM_ABSENCE=
+autoarm_never_established() {
+  FM_TURNEND_AUTOARM_ABSENCE=
+  [ ! -e "$STATE/.afk" ] || return 1
+  if [ ! -e "$STATE/.claude-autoarm-epoch" ]; then
+    FM_TURNEND_AUTOARM_ABSENCE=absent
+    return 0
+  fi
+  [ "$(fm_path_age "$STATE/.claude-autoarm-epoch")" -ge "$EPOCH_FRESH" ] || return 1
+  FM_TURNEND_AUTOARM_ABSENCE=stale
+  return 0
+}
+
+# Either proof of an unrepairable supervision failure opens the one bounded
+# attended fail-open. FM_TURNEND_FAILOPEN_KIND records which of the three states
+# was verified, so the notice states what actually holds rather than describing an
+# exhausted retry that may never have happened or an attempt that is on record.
+FM_TURNEND_FAILOPEN_KIND=
+failopen_condition_verified() {
+  FM_TURNEND_FAILOPEN_KIND=
+  if failure_episode_verified; then
+    FM_TURNEND_FAILOPEN_KIND=exhausted
+    return 0
+  fi
+  if autoarm_never_established; then
+    FM_TURNEND_FAILOPEN_KIND=$FM_TURNEND_AUTOARM_ABSENCE
+    return 0
+  fi
+  return 1
+}
+
 i=0
 while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
   if autoarm_owns_recovery; then
@@ -404,7 +461,18 @@ if [ "$terminal_status" -eq 0 ]; then
   else
     NEED_DESC="X-mode relay polling active"
   fi
-  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
+  case "$FM_TURNEND_FAILOPEN_KIND" in
+    absent)
+      FAILOPEN_CAUSE="the Stop-owned auto-arm never claimed this home at all and left no attempt on record"
+      ;;
+    stale)
+      FAILOPEN_CAUSE="the Stop-owned auto-arm last recorded an attempt more than one event epoch ago and has not run since, so it is no longer establishing supervision"
+      ;;
+    *)
+      FAILOPEN_CAUSE="the Stop-owned auto-arm exhausted its bounded retries and one failure notice"
+      ;;
+  esac
+  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, %s, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC" "$FAILOPEN_CAUSE"
   exit 0
 fi
 [ "$terminal_status" -eq 2 ] && exit 0
