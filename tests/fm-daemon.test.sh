@@ -173,22 +173,112 @@ test_stale_diagnostic_wedge_survives_busy_housekeeping() {
       PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
         FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
     )
-    [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] \
-      || fail "$case_name enriched wedge did not produce exactly one escalation"
-    grep -F "${reason#stale: }" "$state/.subsuper-escalations" >/dev/null \
-      || fail "$case_name enriched wedge lost its demand-deep-inspection detail"
+    case "$case_name" in
+      paused)
+        # A current declared wait owns the cadence: the enriched wedge routes to the
+        # bounded PAUSE_RESURFACE_SECS recheck instead of escalating on the wedge
+        # cadence. test_enriched_wedge_under_declared_wait_uses_pause_cadence pins
+        # the full cadence, including the one recheck that still re-surfaces it.
+        [ ! -s "$state/.subsuper-escalations" ] \
+          || fail "paused enriched wedge escalated instead of routing to the pause cadence: $(cat "$state/.subsuper-escalations")"
+        [ -e "$state/.subsuper-paused-$key" ] \
+          || fail "paused enriched wedge erased ordinary pause tracking" ;;
+      *)
+        [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] \
+          || fail "$case_name enriched wedge did not produce exactly one escalation"
+        grep -F "${reason#stale: }" "$state/.subsuper-escalations" >/dev/null \
+          || fail "$case_name enriched wedge lost its demand-deep-inspection detail"
+        [ ! -e "$state/.subsuper-paused-$key" ] \
+          || fail "$case_name enriched wedge created pause tracking" ;;
+    esac
     [ ! -e "$state/.subsuper-stale-$key" ] \
       || fail "$case_name enriched wedge retained ordinary stale tracking"
-    case "$case_name" in
-      paused) [ -e "$state/.subsuper-paused-$key" ] \
-        || fail "paused enriched wedge erased ordinary pause tracking" ;;
-      *) [ ! -e "$state/.subsuper-paused-$key" ] \
-        || fail "$case_name enriched wedge created pause tracking" ;;
-    esac
     [ ! -s "$action_log" ] \
       || fail "$case_name enriched wedge interrupted or killed the busy worker"
   done
-  pass "enriched stale wedges bypass status absorption without disturbing busy workers"
+  pass "enriched stale wedges bypass status absorption except under a declared wait, without disturbing busy workers"
+}
+
+# The second half of issue #3149. The watcher's wedge timer emits an enriched
+# "idle Ns, possible wedge, escalation N" reason for any pane it reads as frozen -
+# including one whose crew has a CURRENT declared wait, because the watcher's own
+# provably-working classification and the crew's status line can disagree (a crew
+# that declares `paused:` while its no-mistakes run is still attributed to its code
+# reads `working` to pause_state_class and takes the wedge timer). handle_wake's
+# enriched-wedge override force-escalated every such reason, discarding the `pause`
+# verdict classify_stale had already returned for the same pane, so a healthy
+# declared wait was escalated once per STALE_ESCALATE_SECS for as long as it lasted.
+# A declaration is categorically stronger than the run-step/pane state the enriched
+# reason tells the supervisor not to re-absorb on, so it routes the pane to the long
+# PAUSE_RESURFACE_SECS recheck instead. This drives repeated enriched wedges through
+# the real handle_wake/housekeeping pair and asserts the cadence, not just one wake.
+test_enriched_wedge_under_declared_wait_uses_pause_cadence() {
+  local dir state fakebin task win pane key reason i escalations
+  dir=$(make_supercase enriched-wedge-declared-wait)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task=paused-wedge-w1; win="sess:fm-$task"; pane="$dir/pane.txt"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
+  printf 'working: dispatching the long audit\npaused: the audit engine is running to completion\n' \
+    > "$state/$task.status"
+  printf 'idle prompt $\n' > "$pane"
+  case "$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")" in
+    pause\|*) ;;
+    *) fail "the fixture's own classifier verdict is not a pause, so this case pins nothing about the override" ;;
+  esac
+
+  # Four consecutive wedge-cadence deliveries, exactly as the watcher emits them once
+  # a pane crosses STALE_ESCALATE_SECS repeatedly.
+  for i in 2 3 4 5; do
+    if [ "$i" -ge 3 ]; then
+      # Past FM_WEDGE_DEMAND_INSPECT_COUNT the watcher enriches the same reason with
+      # its demand-deep-inspection marker; a declaration outranks both forms.
+      reason="stale: $win (idle 250s, possible wedge, escalation $i, demand-deep-inspection: same pane has wedge-escalated $i times in a row - do not re-absorb on the run-step/pane state alone)"
+    else
+      reason="stale: $win (idle 250s, possible wedge, escalation $i)"
+    fi
+    LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+      FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
+      FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 housekeeping "$state"
+  done
+
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a declared wait escalated inside one PAUSE_RESURFACE_SECS window: $(cat "$state/.subsuper-escalations")"
+  [ -e "$state/.subsuper-paused-$key" ] \
+    || fail "an enriched wedge under a declared wait did not record pause tracking"
+  [ ! -e "$state/.subsuper-stale-$key" ] \
+    || fail "an enriched wedge under a declared wait left wedge aging in place"
+
+  # Past PAUSE_RESURFACE_SECS the wait must re-surface exactly once as an
+  # awaiting-external recheck (never a wedge) and reset its window.
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 FM_PAUSE_RESURFACE_SECS=3600 \
+    housekeeping "$state"
+  escalations=0
+  [ -s "$state/.subsuper-escalations" ] \
+    && escalations=$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')
+  [ "$escalations" = 1 ] || fail "the pause window produced $escalations escalations, expected exactly one recheck"
+  grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null \
+    || fail "the one pause-window escalation was not an awaiting-external recheck"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null \
+    && fail "the pause-window recheck was mislabeled a possible wedge"
+
+  # A later status append that stops declaring the wait ends the routing: the same
+  # enriched wedge escalates again, unchanged.
+  : > "$state/.subsuper-escalations"
+  printf 'working: the audit finished, resuming\n' >> "$state/$task.status"
+  reason="stale: $win (idle 250s, possible wedge, escalation 6)"
+  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 FM_PAUSE_RESURFACE_SECS=3600 \
+    housekeeping "$state"
+  grep -F "${reason#stale: }" "$state/.subsuper-escalations" >/dev/null \
+    || fail "wedge escalation was not restored after the crew left its declared wait"
+  [ ! -e "$state/.subsuper-paused-$key" ] \
+    || fail "pause tracking survived a status append that no longer declares the wait"
+  pass "an enriched wedge under a declared wait uses the pause cadence and restores wedge detection on resume"
 }
 
 test_stale_terminal_escalates() {
@@ -2024,6 +2114,7 @@ test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
+test_enriched_wedge_under_declared_wait_uses_pause_cadence
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
 test_stale_captain_held_classifies_pause
