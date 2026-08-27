@@ -2209,11 +2209,13 @@ SH
 # active_steps/last_activity signal at the moment an escalation would otherwise
 # fire, same restriction and same cost shape as the worktree-write probe above.
 test_wedge_deferred_by_fresh_pipeline_activity() {
-  local dir state fakebin out drain_out capture_file window key pane_hash sig pid wt back
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid wt back head_sha
   dir=$(make_case wedge-pipeline-fresh); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   window="test:fm-pipeline-fresh"; wt="$dir/wt"
-  mkdir -p "$wt"
+  fm_git_init_commit "$wt"
+  git -C "$wt" checkout -q -b test/fm-pipeline-fresh
+  head_sha=$(git -C "$wt" rev-parse HEAD)
   install_fake_no_mistakes "$fakebin"
   printf 'idle building output' > "$capture_file"
   printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/pfresh.meta"
@@ -2231,14 +2233,19 @@ test_wedge_deferred_by_fresh_pipeline_activity() {
   back=$(( $(date +%s) - 500 ))
   echo "$back" > "$state/.stale-since-$key"
   set_mtime "$back" "$state/.stale-since-$key"
-  export FM_FAKE_NM_STATUS='run:
-  id: "01FRESH"
+  # Backdate the fixture commit's tree past the stale-since anchor, so the
+  # worktree-write probe (checked before the pipeline probe) finds no evidence
+  # and this test actually exercises the pipeline-activity deferral path.
+  set_mtime "$back" "$wt/README.md"
+  export FM_FAKE_NM_STATUS="run:
+  id: \"01FRESH\"
   branch: test/fm-pipeline-fresh
+  head: $head_sha
   status: running
   steps[1]{step,status,findings,duration_ms}:
     test,running,0,45000
   active_steps[1]{step,active_for,last_activity,agent_pid,round}:
-    test,45s,3s ago,12345,round 1'
+    test,45s,3s ago,12345,round 1"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
@@ -2268,11 +2275,13 @@ test_wedge_deferred_by_fresh_pipeline_activity() {
 # step_quiet_warning. That must NOT be read as fresh evidence, so the unchanged
 # escalation schedule still fires exactly as it would with no pipeline at all.
 test_wedge_escalates_when_pipeline_activity_is_quiet() {
-  local dir state fakebin out drain_out capture_file window key pane_hash sig pid wt back
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid wt back head_sha
   dir=$(make_case wedge-pipeline-quiet); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   window="test:fm-pipeline-quiet"; wt="$dir/wt"
-  mkdir -p "$wt"
+  fm_git_init_commit "$wt"
+  git -C "$wt" checkout -q -b test/fm-pipeline-quiet
+  head_sha=$(git -C "$wt" rev-parse HEAD)
   install_fake_no_mistakes "$fakebin"
   printf 'idle building output' > "$capture_file"
   printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/pquiet.meta"
@@ -2286,14 +2295,16 @@ test_wedge_escalates_when_pipeline_activity_is_quiet() {
   back=$(( $(date +%s) - 500 ))
   echo "$back" > "$state/.stale-since-$key"
   set_mtime "$back" "$state/.stale-since-$key"
-  export FM_FAKE_NM_STATUS='run:
-  id: "01QUIET"
+  set_mtime "$back" "$wt/README.md"
+  export FM_FAKE_NM_STATUS="run:
+  id: \"01QUIET\"
   branch: test/fm-pipeline-quiet
+  head: $head_sha
   status: running
   steps[1]{step,status,findings,duration_ms}:
     test,running,0,720000
   active_steps[1]{step,active_for,last_activity,agent_pid,round}:
-    test,720s,quiet 12m,12345,round 1'
+    test,720s,quiet 12m,12345,round 1"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
@@ -2322,7 +2333,8 @@ test_wedge_escalates_when_axi_status_unavailable() {
   dir=$(make_case wedge-pipeline-unavailable); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   window="test:fm-pipeline-unavailable"; wt="$dir/wt"
-  mkdir -p "$wt"
+  fm_git_init_commit "$wt"
+  git -C "$wt" checkout -q -b test/fm-pipeline-unavailable
   install_fake_no_mistakes "$fakebin"
   printf 'idle building output' > "$capture_file"
   printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/punavail.meta"
@@ -2336,6 +2348,7 @@ test_wedge_escalates_when_axi_status_unavailable() {
   back=$(( $(date +%s) - 500 ))
   echo "$back" > "$state/.stale-since-$key"
   set_mtime "$back" "$state/.stale-since-$key"
+  set_mtime "$back" "$wt/README.md"
   export FM_FAKE_NM_EXIT=1
   export FM_FAKE_NM_STATUS=''
 
@@ -2352,6 +2365,64 @@ test_wedge_escalates_when_axi_status_unavailable() {
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the unavailable-status escalation was not queued"
   unset FM_FAKE_NM_EXIT FM_FAKE_NM_STATUS
   pass "a pane whose axi status call fails or is absent falls back to the unchanged wedge-escalation schedule"
+}
+
+# --- quiet pane, axi status answers for a DIFFERENT branch/head: still
+#     escalates -------------------------------------------------------------
+# `axi status` (bare) reports the active-or-most-recent run for the current
+# branch when one exists, else falls back to some other branch's run purely as
+# informational display. If crew_pipeline_step_active trusted that fallback
+# answer's active_steps table without checking it actually belongs to this
+# worktree's own branch/head, a totally unrelated crew's fresh pipeline
+# activity on the same host would defer THIS worktree's wedge even though its
+# own pipeline has no run at all (or has genuinely died).
+test_wedge_escalates_when_axi_status_is_another_branch() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid wt back
+  dir=$(make_case wedge-pipeline-other-branch); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-pipeline-other-branch"; wt="$dir/wt"
+  fm_git_init_commit "$wt"
+  git -C "$wt" checkout -q -b test/fm-pipeline-other-branch
+  install_fake_no_mistakes "$fakebin"
+  printf 'idle building output' > "$capture_file"
+  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/pother.meta"
+  printf 'working: still testing\n' > "$state/pother.status"
+  sig=$(seen_sig "$state/pother.status"); printf '%s' "$sig" > "$state/.seen-pother_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle building output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  back=$(( $(date +%s) - 500 ))
+  echo "$back" > "$state/.stale-since-$key"
+  set_mtime "$back" "$state/.stale-since-$key"
+  set_mtime "$back" "$wt/README.md"
+  # A different crew's own branch/head, with fresh active_steps - the fallback
+  # answer this worktree's own `axi status` would return if its own branch has
+  # no run.
+  export FM_FAKE_NM_STATUS='run:
+  id: "01OTHER"
+  branch: some/other-crew-branch
+  head: 0123456789abcdef0123456789abcdef01234567
+  status: running
+  steps[1]{step,status,findings,duration_ms}:
+    test,running,0,45000
+  active_steps[1]{step,active_for,last_activity,agent_pid,round}:
+    test,45s,3s ago,12345,round 1'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not escalate a pane whose axi status answer belongs to another branch"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the other-branch escalation did not print a stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "the other-branch escalation did not flag a possible wedge"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 1 ] || fail "the other-branch escalation was not counted"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the other-branch escalation failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the other-branch escalation was not queued"
+  unset FM_FAKE_NM_STATUS
+  pass "a pane whose axi status answer belongs to another branch/head still wedge-escalates, never borrows a stranger's liveness"
 }
 
 # The worktree recorded for a secondmate is a provisioned firstmate home, and that
@@ -3038,6 +3109,7 @@ test_write_deferral_resurfaces_on_the_bounded_cadence
 test_wedge_deferred_by_fresh_pipeline_activity
 test_wedge_escalates_when_pipeline_activity_is_quiet
 test_wedge_escalates_when_axi_status_unavailable
+test_wedge_escalates_when_axi_status_is_another_branch
 test_secondmate_home_supervision_churn_is_not_write_evidence
 test_timer_repair_drops_a_finished_write_deferral_chain
 test_terminal_first_sight_drops_a_finished_write_deferral_chain

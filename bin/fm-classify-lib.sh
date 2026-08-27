@@ -1446,16 +1446,28 @@ FM_PIPELINE_STATUS_TIMEOUT=${FM_PIPELINE_STATUS_TIMEOUT:-10}
 # no pipeline, or a pipeline that has genuinely stopped moving, still escalates
 # exactly as before.
 crew_pipeline_step_active() {  # <id> <state>
-  local id=$1 state=$2 wt kind out n block bound
+  local id=$1 state=$2 wt kind out n block bound branch run_branch run_head
   [ -n "$id" ] || return 1
   wt=$(grep '^worktree=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   [ -n "$wt" ] && [ -d "$wt" ] || return 1
   kind=$(grep '^kind=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   [ "$kind" != secondmate ] || return 1
+  branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  [ -n "$branch" ] || return 1
   bound=$FM_PIPELINE_STATUS_TIMEOUT
   case "$bound" in ''|*[!0-9]*|0) bound=10 ;; esac
   out=$(fm_nm_run "$wt" "$bound" axi status)
   [ -n "$out" ] || return 1
+  # axi status (bare) reports the active-or-most-recent run for the CURRENT
+  # branch when one exists, else falls back to some other branch's run purely
+  # as informational display (see fm-crew-state.sh's nm_runs_status_for_branch
+  # header). Reject that fallback answer before trusting active_steps: it can
+  # belong to a different crew's branch/head entirely, which would defer this
+  # worktree's wedge on someone else's liveness.
+  run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
+  [ -n "$run_branch" ] && [ "$run_branch" = "$branch" ] || return 1
+  run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head)")
+  fm_nm_head_matches_worktree "$wt" "$run_head" || return 1
   n=$(printf '%s\n' "$out" | grep -oE 'active_steps\[[0-9]+\]' | head -1 | grep -oE '[0-9]+')
   case "$n" in ''|0) return 1 ;; esac
   block=$(printf '%s\n' "$out" | awk -v n="$n" '/active_steps\[[0-9]+\]/{found=1; next} found && n>0 {print; n--}')
