@@ -577,6 +577,7 @@ answer_archived_replay() {  # <task-id> <release-0-or-1> <outcome>
   case "$recorded_mode" in
     released) [ "$release" = 1 ] || fail "task $id records this answer as a release; retry with --release" ;;
     answered) [ "$release" = 0 ] || fail "task $id records this answer as a close; retry without --release" ;;
+    *) [ "$release" = 0 ] || fail "task $id records this answer with mode ${recorded_mode:-unknown}; --release cannot reopen a closed task" ;;
   esac
   printf '%s: %s\n' "$outcome" "$id"
 }

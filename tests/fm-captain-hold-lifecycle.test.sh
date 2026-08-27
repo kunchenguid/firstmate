@@ -582,6 +582,71 @@ test_unanswered_hold_still_blocks_completion_once_archived() {
   pass "an archived captain-held task with no recorded answer still blocks completion"
 }
 
+# An archived replay is a close-mode contract, not a free success: only the
+# recorded mode may be replayed, and --release must never be satisfied by an
+# archived record whose mode is not literally "released" - a repaired, routed,
+# or pre-mode record is a closed task, and accepting --release would claim a
+# release the record proves never happened.
+test_archived_replay_refuses_release_unless_mode_says_released() {
+  local home id show out
+  home=$(make_home archived-replay-modes)
+  id=sample-replay-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Review the sample replay" --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample replay review\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold sample-replay-call --title "Choose the sample replay option" \
+    --reason "captain replay choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not register the captain-held task"
+  tasks_in "$home" "done" sample-replay-call >/dev/null \
+    || fail "could not close the call out of band"
+  printf 'Declined: keep the replay shape.\n' > "$home/replay.txt"
+  run_captain "$home" answer sample-replay-call --decision-file "$home/replay.txt" >/dev/null \
+    || fail "could not repair the out-of-band close"
+  show=$(tasks_in "$home" show sample-replay-call --full)
+  assert_contains "$show" "Resolution mode: repaired" \
+    "setup error: the repair record did not record mode repaired"
+  tasks_in "$home" "done" sample-replay-call --keep 0 >/dev/null \
+    || fail "could not archive the repaired call"
+  if tasks_in "$home" show sample-replay-call --full >/dev/null 2>&1; then
+    fail "setup error: the repaired call is still in the live backlog"
+  fi
+  grep -F "sample-replay-call" "$home/data/done-archive.md" >/dev/null \
+    || fail "setup error: the repaired call did not reach the archive"
+
+  out=$(run_captain "$home" answer sample-replay-call --decision-file "$home/replay.txt") \
+    || fail "an archived repaired record did not replay its close idempotently"
+  assert_contains "$out" "answered: sample-replay-call" \
+    "an archived repaired record replayed with the wrong outcome"
+  if run_captain "$home" answer sample-replay-call --decision-file "$home/replay.txt" --release \
+    > "$home/replay-release.out" 2> "$home/replay-release.err"; then
+    fail "--release was accepted for an archived record whose mode is not released"
+  fi
+  assert_grep "cannot reopen a closed task" "$home/replay-release.err" \
+    "the refused --release must say the archived record's mode blocks a release"
+  assert_not_contains "$(cat "$home/replay-release.out")" "released: sample-replay-call" \
+    "the refused --release still printed a released success"
+
+  run_captain "$home" hold sample-answered-call --title "Choose the answered option" \
+    --reason "captain answered choice pending" --repo sample >/dev/null \
+    || fail "could not register the second captain-held task"
+  printf 'Chosen by the captain.\n' > "$home/answered.txt"
+  run_captain "$home" answer sample-answered-call --decision-file "$home/answered.txt" >/dev/null \
+    || fail "could not answer the second call"
+  tasks_in "$home" "done" sample-answered-call --keep 0 >/dev/null \
+    || fail "could not archive the answered call"
+  grep -F "sample-answered-call" "$home/data/done-archive.md" >/dev/null \
+    || fail "setup error: the answered call did not reach the archive"
+  if run_captain "$home" answer sample-answered-call --decision-file "$home/answered.txt" --release \
+    > "$home/answered-release.out" 2> "$home/answered-release.err"; then
+    fail "--release was accepted for an archived record whose mode is answered"
+  fi
+  assert_grep "retry without --release" "$home/answered-release.err" \
+    "the refused --release on an answered record must name the mode mismatch"
+  pass "an archived replay accepts only the close mode its record proves"
+}
+
 # A post-teardown visual review completes against the surviving report and
 # durable tasks, with no volatile task metadata and no second decision database.
 test_visual_review_uses_shared_completion_owner() {
@@ -1271,6 +1336,7 @@ test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
 test_answered_hold_survives_archival_and_completes
 test_unanswered_hold_still_blocks_completion_once_archived
+test_archived_replay_refuses_release_unless_mode_says_released
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
