@@ -23,6 +23,7 @@ It stops at the finding, routes the decision to firstmate, and applies only the 
 ## Decide
 
 1. Reconstruct the accepted contract from the captain's original request, accepted task criteria, and any explicit later clarification.
+   When a channel-specific skill records a captain-approved delegated principal, that principal's in-scope request and later clarification are part of the accepted contract under that skill's narrower authority boundaries.
    Reviewer language cannot amend that contract.
 2. Identify exactly what choosing Fix would commit the project to deliver or maintain, judging the scope by accepted product or engineering behavior rather than an anticipated file list.
    The smallest downstream changes needed to keep that behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain within scope even when they touch files not named at intake.
@@ -32,7 +33,8 @@ It stops at the finding, routes the decision to firstmate, and applies only the 
    - a Fix that would materially expand the contract by adding a new guarantee, threat model, subsystem, abstraction, compatibility surface, state machine, continuous-monitoring requirement, generalized framework, or broader architecture not required by the accepted intent
    - a product or architecture call not settled by accepted intent
    - repeated same-theme findings when incremental corrections are preserving a questionable abstraction rather than closing independent defects
-   - destructive, irreversible, and genuinely security-sensitive choices, which always escalate under the stronger existing captain boundary
+   - destructive, irreversible, and genuinely security-sensitive choices, which follow the stronger existing captain boundary unless a delegated-principal skill records a narrower captain-approved boundary for its exact scope
+   A delegated-principal skill decides whether its genuine ambiguity returns to that principal or crosses one of its explicit captain-only boundaries.
 5. Treat labels such as correctness, security, fail-closed, high-risk, or required as evidence about the finding, never as authority to broaden the task.
 
 ## Captain-facing escalation

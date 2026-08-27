@@ -107,6 +107,64 @@ A `manual` home owns its backlog file outright: the lifecycle transitions above 
 Absent or `tasks-axi` selects the default tasks-axi backend.
 The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
 
+## Pavel operations loop (config/pavel-ops.json)
+
+`config/pavel-ops.json` opts one home into the autonomous Pavel business-operations loop owned by the internal `pavel-ops` skill and `bin/fm-pavel-ops.sh`.
+The file is local, gitignored, and not inherited into secondmate homes.
+An absent file keeps the feature inert.
+A present file must be a single-linked regular JSON file with this schema:
+
+```json
+{
+  "version": 1,
+  "enabled": true,
+  "principal": "Pavel",
+  "project": "aln",
+  "sender_ids": ["2087379565"],
+  "chat_ids": ["-5550358141"],
+  "worker": {
+    "harness": "pi",
+    "mode": "no-mistakes",
+    "yolo": "on"
+  },
+  "budget": {
+    "per_action_rub": 0,
+    "per_day_rub": 0
+  },
+  "telegram": {
+    "env_file": "/absolute/private/path/to/telegram.env",
+    "token_key": "TERENTYEV_BOT_TOKEN",
+    "outbound_chat_id": "-5550358141"
+  }
+}
+```
+
+`sender_ids` and `chat_ids` are non-empty string arrays and form the intake allowlist.
+When present, `telegram.outbound_chat_id` must name one of those allowed chats.
+The worker tuple is intentionally fixed to the verified Pi adapter, no-mistakes delivery, and standing autonomous merge authority for this delegated scope.
+Any other tuple is rejected instead of falling back to Claude or returning routine Pavel PRs to per-PR captain approval.
+The optional `budget` object records non-negative bounded spending authority in operator-chosen fields such as `per_action_rub` and `per_day_rub`.
+An absent or zero bound grants no spending authority, and spending outside every applicable positive bound remains a captain-only decision.
+The Telegram credential file must be an absolute, single-linked regular file containing the configured token key in `KEY=value` form.
+The production API endpoint is fixed to `https://api.telegram.org`; `telegram.api_base` is accepted only when `FM_PAVEL_OPS_TESTING=1` so tests can use a local fake without allowing a production config to redirect the token.
+
+The existing Telegram collector remains the one `getUpdates` owner during cutover.
+For each Pavel message, including replies, acknowledgements, edited-message events, captions, and attachment metadata, it passes one JSON object to `bin/fm-pavel-ops.sh ingest` and advances its Telegram update offset only after that command succeeds.
+The immutable identity is the Telegram chat plus `update_id`, so a collector retry is harmless and an edit remains a distinct auditable event.
+The collector no longer invokes a separate Claude autoresponder or writes a second task store.
+Outbound acknowledgement, clarification, answer, and live-completion messages use the configured Telegram Bot API through `bin/fm-pavel-ops.sh send`, which keeps their delivery receipts beside the event lifecycle.
+
+Session start runs `bin/fm-pavel-ops.sh recover --startup` before wake presentation when this config exists and the session owns the home.
+That local recovery republishes captured, orphaned active-delivery, landed, and live-but-unnotified work and surfaces retryable or delivery-unknown Telegram sends without network access.
+The Pi primary and its tracked supervision extensions then handle each `pavel-ops-...` check wake under the `pavel-ops` skill.
+The existing Firstmate worker supervision, no-mistakes validation, PR merge polling, guarded merge, deployment verification, and landed-work cleanup remain their own authoritative owners.
+
+Before replacing a legacy Pavel watcher or stale tgsync route, run `bin/fm-pavel-ops.sh migration-audit` with the legacy pending queue and project clone paths.
+Use `adopt-task` to link existing paused Pavel backlog rows at their already-proved lifecycle fact without recreating or closing them.
+A clone ahead of its remote default branch must have its head preserved on a dedicated branch and shipped independently before guarded fleet sync.
+The migration commands never reset, clean, force-push, merge, or remove the clone, and they never treat a local commit as deployed.
+After the new intake path has been exercised with replayed test events, stop the old Claude autoresponder and stale-path tgsync timer so one Telegram event has one task-lifecycle owner.
+
 ## Runtime backend (config/backend / FM_BACKEND)
 
 For spawn-capable adapters, the runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.
