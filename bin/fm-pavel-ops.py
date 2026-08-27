@@ -1263,17 +1263,16 @@ def drive(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         return driver_transition(home, event, "landed", (output.strip() or "forge reports PR merged at verified head")[:500])
     if event["state"] == "landed":
         delivery = delivery_config(home)
-        deploy_cmd = os.environ.get("FM_PAVEL_OPS_DEPLOY") or delivery.get("deploy_command")
-        if deploy_cmd:
-            run_checked(home, [str(deploy_cmd), task_id])
         live_url = str(delivery.get("live_url") or "")
         if not PR_URL.fullmatch(live_url):
             raise OpsError("Pavel live verification requires delivery.live_url")
-        pr_contract = pr_contract_from_meta(home, event)
-        pr_url = str(event.get("pr_url") or pr_contract["pr_url"])
-        if pr_url != pr_contract["pr_url"]:
-            raise OpsError("Pavel landed event PR URL does not match the canonical PR owner record")
-        contract = live_contract_for(home, event, live_url, pr_url, pr_contract["pr_head"])
+        merge_contract = merge_contract_for_landing(event)
+        if not meta_matches_merge_contract(home, event, merge_contract):
+            return return_to_validation(home, event, "canonical PR head changed after landing")
+        deploy_cmd = os.environ.get("FM_PAVEL_OPS_DEPLOY") or delivery.get("deploy_command")
+        if deploy_cmd:
+            run_checked(home, [str(deploy_cmd), task_id])
+        contract = live_contract_for(home, event, live_url, merge_contract["pr_url"], merge_contract["pr_head"])
         proof = verify_live(home, event, contract)
         evidence = f"live probe passed for {live_url}"
         event["live_proof"] = proof
@@ -1285,6 +1284,9 @@ def drive(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         send_message(home, send_args)
         return home.load_event(event["id"])
     if event["state"] == "live":
+        merge_contract = merge_contract_for_landing(event)
+        if not meta_matches_merge_contract(home, event, merge_contract):
+            return return_to_validation(home, event, "canonical PR head changed before notification")
         completion = completion_text_for(home, event)
         send_args = argparse.Namespace(event=event["id"], purpose="live-completion", text=completion)
         send_message(home, send_args)

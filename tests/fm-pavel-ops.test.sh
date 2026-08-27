@@ -326,6 +326,54 @@ with open(path, "w", encoding="utf-8") as handle:
 PY
 }
 
+set_delivery_contracts() {
+  local event_id=$1 task_id=$2 pr_url=$3 pr_head=$4
+  EVENT_FILE="$HOME_DIR/state/pavel-ops/events/$event_id.json" TASK_ID="$task_id" PR_URL="$pr_url" PR_HEAD="$pr_head" HOME_DIR="$HOME_DIR" python3 - <<'PY'
+import json
+import os
+path = os.environ["EVENT_FILE"]
+task_id = os.environ["TASK_ID"]
+pr_url = os.environ["PR_URL"]
+pr_head = os.environ["PR_HEAD"]
+with open(path, encoding="utf-8") as handle:
+    event = json.load(handle)
+event["pr_url"] = pr_url
+event["readiness_contract"] = {
+    "schema": "fm-pavel-ops-readiness-contract.v1",
+    "event_id": event["id"],
+    "task_id": task_id,
+    "pr_url": pr_url,
+    "pr_head": pr_head,
+    "state": "done",
+    "source": "fixture",
+    "format": "json",
+    "evidence": "checks green on exact PR head",
+}
+provider = "github"
+host = "github.com"
+repo = "o/r"
+number = pr_url.rsplit("/", 1)[1]
+event["merge_contract"] = {
+    "schema": "fm-pavel-ops-merge-contract.v1",
+    "event_id": event["id"],
+    "task_id": task_id,
+    "pr_url": pr_url,
+    "pr_head": pr_head,
+    "provider": provider,
+    "host": host,
+    "repo": repo,
+    "number": number,
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
+    handle.write("\n")
+with open(os.path.join(os.environ["HOME_DIR"], "state", task_id + ".meta"), "w", encoding="utf-8") as handle:
+    handle.write("kind=ship\nharness=pi\nmode=no-mistakes\nyolo=on\n")
+    handle.write(f"worktree={os.environ['HOME_DIR']}/worktrees/{task_id}\n")
+    handle.write(f"pr={pr_url}\npr_head={pr_head}\n")
+PY
+}
+
 # Intake publishes once and a replay neither creates a second event nor a second wake.
 out=$(ingest 100 10 'Поменять цену') || fail "first Pavel intake failed"
 event=$(printf '%s' "$out" | json_field "['event']")
@@ -677,6 +725,30 @@ assert_grep 'deploy '"$task_id" "$TASK_DB/.owners" "driver did not compose the d
 assert_grep 'live-check '"$event"' '"$task_id"' 139000' "$TASK_DB/.owners" "driver did not compose the live verification owner"
 pass "validated delivery is driver-owned and Pavel is notified after live proof"
 
+landed_meta_race=$(ingest 132 42 'Проверить смену head перед live' | json_field "['event']")
+run_ops classify "$landed_meta_race" --as task --title 'Reject landed PR head race' --intent 'Verify live only for the landed head' \
+  --reason 'ordinary delivery' --authority ordinary >/dev/null
+set_live_probe "$landed_meta_race" 'landed-head-a' ''
+printf 'landed-head-a\n' > "$TASK_DB/live-$landed_meta_race.expected"
+run_ops drive "$landed_meta_race" >/dev/null
+landed_meta_race_task=$(run_ops inspect "$landed_meta_race" | json_field "['task_id']")
+printf 'pr=%s\npr_head=%s\n' 'https://github.com/o/r/pull/18' 'aa18bb' >> "$HOME_DIR/state/$landed_meta_race_task.meta"
+printf '{"state":"done","pr_url":"https://github.com/o/r/pull/18","pr_head":"aa18bb","evidence":"checks green on exact PR head"}\n' > "$PAVEL_STATUS_FILE"
+run_ops drive "$landed_meta_race" >/dev/null
+run_ops drive "$landed_meta_race" >/dev/null
+run_ops drive "$landed_meta_race" >/dev/null
+run_ops drive "$landed_meta_race" >/dev/null
+[ "$(run_ops inspect "$landed_meta_race" | json_field "['state']")" = landed ] \
+  || fail "landed head race setup did not reach landed"
+owners_before_landed_meta_race=$(grep -c . "$TASK_DB/.owners")
+printf 'pr_head=%s\n' 'bb18cc' >> "$HOME_DIR/state/$landed_meta_race_task.meta"
+run_ops drive "$landed_meta_race" >/dev/null
+[ "$(run_ops inspect "$landed_meta_race" | json_field "['state']")" = validating ] \
+  || fail "changed landed PR head did not return to validation"
+[ "$(grep -c . "$TASK_DB/.owners")" -eq "$owners_before_landed_meta_race" ] \
+  || fail "changed landed PR head still invoked deploy or live owners"
+pass "live verification rejects metadata head changes after landing"
+
 stale_prose=$(ingest 122 32 'Проверить PR' | json_field "['event']")
 run_ops classify "$stale_prose" --as task --title 'Check stale PR' --intent 'Ship via recorded PR only' \
   --reason 'ordinary delivery' --authority ordinary >/dev/null
@@ -906,6 +978,7 @@ with open(os.path.join(os.environ["HOME_DIR"], "state", os.environ["AMBIGUOUS_TA
     handle.write(f"worktree={os.environ['HOME_DIR']}/worktrees/{os.environ['AMBIGUOUS_TASK']}\n")
     handle.write("pr=https://github.com/o/r/pull/126\npr_head=ab126c\n")
 PY
+set_delivery_contracts "$ambiguous" "$ambiguous_task" 'https://github.com/o/r/pull/126' 'ab126c'
 run_ops drive "$ambiguous" >/dev/null || fail "resolved clarification did not reach live proof"
 [ "$(run_ops inspect "$ambiguous" | json_field "['state']")" = notified ] \
   || fail "resolved clarification was not notified after live proof"
@@ -945,6 +1018,7 @@ with open(os.path.join(os.environ["HOME_DIR"], "state", os.environ["WRONG_LIVE_T
     handle.write(f"worktree={os.environ['HOME_DIR']}/worktrees/{os.environ['WRONG_LIVE_TASK']}\n")
     handle.write("pr=https://github.com/o/r/pull/124\npr_head=def456\n")
 PY
+set_delivery_contracts "$wrong_live" "$wrong_live_task" 'https://github.com/o/r/pull/124' 'def456'
 if run_ops drive "$wrong_live" >/dev/null 2>&1; then
   fail "global live expectation satisfied a different Pavel task"
 fi
@@ -955,6 +1029,8 @@ pass "live verification is bound to each Pavel event"
 live_retry=$(ingest 123 33 'Поменять цену доставки' | json_field "['event']")
 run_ops classify "$live_retry" --as task --title 'Change shipping price' --intent 'Show the requested shipping price' \
   --reason 'ordinary price change' --authority ordinary >/dev/null
+live_retry_task=$(run_ops inspect "$live_retry" | json_field "['task_id']")
+set_delivery_contracts "$live_retry" "$live_retry_task" 'https://github.com/o/r/pull/123' 'ab123c'
 LIVE_RETRY_FILE="$HOME_DIR/state/pavel-ops/events/$live_retry.json" python3 - <<'PY'
 import hashlib
 import json
@@ -1008,6 +1084,8 @@ pass "live notification retries reuse the durable completion text"
 crashed=$(ingest 108 18 'Поменять SEO заголовок' | json_field "['event']")
 run_ops classify "$crashed" --as task --title 'Change SEO title' --intent 'Set the requested SEO title' \
   --reason 'ordinary SEO change' --authority ordinary >/dev/null
+crashed_task=$(run_ops inspect "$crashed" | json_field "['task_id']")
+set_delivery_contracts "$crashed" "$crashed_task" 'https://github.com/o/r/pull/2' 'aa22bb'
 CRASHED_EVENT_FILE="$HOME_DIR/state/pavel-ops/events/$crashed.json" python3 - <<'PY'
 import json
 import os

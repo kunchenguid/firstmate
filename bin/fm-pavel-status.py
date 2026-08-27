@@ -31,7 +31,7 @@ def parse_meta(path: Path) -> dict[str, str]:
 def parse_crew_state(output: str) -> tuple[str, str, str]:
     first = output.strip().splitlines()[0] if output.strip() else ""
     state_match = re.fullmatch(r"state:\s*([A-Za-z0-9_-]+)(?:\s+.*)?", first)
-    source_match = re.search(r"(?:^|[·|;])\s*source:\s*([A-Za-z0-9_-]+)", first)
+    source_match = re.search(r"(?:^|[ \t]*[·|;][ \t]*)source:\s*([A-Za-z0-9_-]+)", first)
     return (
         state_match.group(1) if state_match else "validating",
         source_match.group(1) if source_match else "",
@@ -42,14 +42,21 @@ def parse_crew_state(output: str) -> tuple[str, str, str]:
 def worktree_head(meta: dict[str, str]) -> str:
     worktree = meta.get("worktree", "")
     if worktree:
-        result = subprocess.run(
-            ["git", "-C", worktree, "rev-parse", "HEAD"],
+        top = subprocess.run(
+            ["git", "-C", worktree, "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
             timeout=10,
         )
-        if result.returncode == 0:
-            return result.stdout.strip()
+        if top.returncode == 0 and Path(top.stdout.strip()).resolve() == Path(worktree).resolve():
+            result = subprocess.run(
+                ["git", "-C", worktree, "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
     return meta.get("worktree_head") or meta.get("head") or ""
 
 
