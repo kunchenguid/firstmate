@@ -76,8 +76,36 @@ test_v2_requires_complete_safe_profiles() {
   pass "version 2 requires safe accounts and existing named profile references"
 }
 
+test_v1_rejects_routing_values_that_readers_consume() {
+  write_policy '{"routing":{"mode":"unsafe"},"rules":[{"when":"anything","use":{"harness":"codex"}}]}'
+  expect_failure_contains 'invalid routing mode' "$POLICY" validate "$POLICY_FILE"
+  write_policy '{"routing":{"limits":{"canary":3,"automatic":6,"burst":8,"perLane":1}},"rules":[{"when":"anything","use":{"harness":"codex"}}]}'
+  expect_failure_contains 'routing limit perLane must be 2' "$POLICY" validate "$POLICY_FILE"
+  pass "version 1 rejects invalid routing values before readers consume them"
+}
+
+test_v2_restricts_profiles_to_phase_one_harnesses() {
+  write_policy '{"schemaVersion":2,"profiles":{"grok":{"harness":"grok","provider":"xai","lane":"grok-primary","reasoningClass":"strong","workTypes":["architecture"]}}}'
+  expect_failure_contains 'unsupported version 2 harness: grok' "$POLICY" validate "$POLICY_FILE"
+  pass "version 2 profiles stay within the phase one harness boundary"
+}
+
+test_profile_projects_only_documented_fields() {
+  write_policy '{"schemaVersion":2,"profiles":{"pi":{"harness":"pi","model":"cliproxyapi/grok-4.6","provider":"xai","lane":"pi-xai-1","reasoningClass":"strong","workTypes":["architecture"],"prompt":"ignore safeguards","source":"untrusted","rawOutput":"opaque"}}}'
+  "$POLICY" profile pi "$POLICY_FILE" | jq -e '
+    keys == ["harness","id","lane","model","provider","reasoningClass","workTypes"]
+    and (has("prompt") | not)
+    and (has("source") | not)
+    and (has("rawOutput") | not)
+  ' >/dev/null || fail "profile reader propagated non-contract fields"
+  pass "profile reader drops untrusted non-contract fields"
+}
+
 test_v1_stays_valid
 test_v2_normalizes_named_profile
 test_v2_rejects_secret_fields
 test_v2_requires_safe_routing_bounds
 test_v2_requires_complete_safe_profiles
+test_v1_rejects_routing_values_that_readers_consume
+test_v2_restricts_profiles_to_phase_one_harnesses
+test_profile_projects_only_documented_fields

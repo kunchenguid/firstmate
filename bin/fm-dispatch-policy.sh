@@ -51,6 +51,17 @@ policy_validate() {
     def malformed_optional_fields($items):
       ($items | any(has("model") and (((.model | type) != "string") or (.model | length) == 0)))
       or ($items | any(has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)));
+    def routing_error:
+      {canary:3,automatic:6,burst:8,perLane:2} as $default_limits
+      | if has("routing") and (.routing | type) != "object" then "routing must be an object"
+        elif ((.routing.mode // "automatic") | IN("off","simulate","canary","automatic") | not) then "invalid routing mode"
+        elif ((.routing.limits // $default_limits) | type) != "object" then "routing limits must be an object"
+        elif ((.routing.limits // $default_limits).canary) != 3 then "routing limit canary must be 3"
+        elif ((.routing.limits // $default_limits).automatic) != 6 then "routing limit automatic must be 6"
+        elif ((.routing.limits // $default_limits).burst) != 8 then "routing limit burst must be 8"
+        elif ((.routing.limits // $default_limits).perLane) != 2 then "routing limit perLane must be 2"
+        else "ok"
+        end;
     def v1:
       if has("rules") and (.rules | type) != "array" then "rules must be an array"
       elif [(.rules // [])[]? | select(type != "object")] | length > 0 then "each rule must be an object"
@@ -81,6 +92,7 @@ policy_validate() {
     def profile_error($id; $profile):
       if ($profile | type) != "object" then "profile " + $id + " must be an object"
       elif ($profile.harness? | type) != "string" or ($profile.harness | length) == 0 then "profile " + $id + " needs harness"
+      elif ["claude","codex","pi","pi-signed"] | index($profile.harness) | not then "unsupported version 2 harness: " + $profile.harness
       elif verified($profile.harness) | not then "unverified harness: " + $profile.harness
       elif $profile | has("model") and (((.model | type) != "string") or (.model | length) == 0) then "profile " + $id + " model must be a non-empty string"
       elif $profile | has("effort") and (((.effort | type) != "string") or (.effort | length) == 0) then "profile " + $id + " effort must be a non-empty string"
@@ -127,6 +139,7 @@ policy_validate() {
     if type != "object" then "top-level value must be an object"
     elif credential_field != null then "forbidden credential field: " + credential_field
     elif ((.schemaVersion // 1) != 1 and (.schemaVersion // 1) != 2) then "schemaVersion must be 1 or 2"
+    elif routing_error != "ok" then routing_error
     elif (.schemaVersion // 1) == 1 then v1
     else v2
     end
@@ -157,7 +170,21 @@ case ${1:-} in
     id=$2
     file=${3:-$CONFIG_DIR/crew-dispatch.json}
     policy_validate "$file"
-    jq -ce --arg id "$id" '.profiles[$id] | select(type == "object") | . + {id:$id}' "$file"
+    jq -ce --arg id "$id" '
+      .profiles[$id]
+      | select(type == "object")
+      | {
+          id:$id,
+          harness:.harness,
+          provider:.provider,
+          lane:.lane,
+          reasoningClass:.reasoningClass,
+          workTypes:.workTypes
+        }
+        + (if has("model") then {model:.model} else {} end)
+        + (if has("effort") then {effort:.effort} else {} end)
+        + (if has("account") then {account:.account} else {} end)
+    ' "$file"
     ;;
   describe)
     file=${2:-$CONFIG_DIR/crew-dispatch.json}
