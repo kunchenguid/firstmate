@@ -164,6 +164,8 @@ test_unreachable_origin_refuses_stale_pool_base() {
 # credentials and its contents must never reach a fixture, a log or an assertion.
 # Real projects ignore .env.local, and spawn deliberately seeds only an ignored
 # file so the copy never becomes untracked work that teardown would refuse.
+STAGED_COPY_DEFAULT_MODE=600
+
 ignore_local_env_file() {
   # Publish the ignore rule on the default branch the pooled worktree is refreshed
   # to, so the acquired worktree carries it exactly as a real project's clone does.
@@ -188,9 +190,14 @@ test_acquired_worktree_is_seeded_with_local_env_file() {
 
   # The primary checkout owns the captain's local environment file. The pooled
   # slot models a directory spawn acquires without that ignored file.
+  #
+  # 0640 is deliberate and load-bearing: a staged copy is created at the 0600
+  # mktemp default, so a source at 0600 would match the target whether or not the
+  # mode was preserved at all. The divergence assertion below keeps this case from
+  # going quietly vacuous again if that default ever changes.
   ignore_local_env_file
   : > "$PROJECT_DIR/.env.local"
-  chmod 0600 "$PROJECT_DIR/.env.local"
+  chmod 0640 "$PROJECT_DIR/.env.local"
   [ ! -e "$POOL_DIR/.env.local" ] \
     || fail "the pooled fixture unexpectedly started with .env.local"
 
@@ -202,6 +209,8 @@ test_acquired_worktree_is_seeded_with_local_env_file() {
 
   source_mode=$(stat -c %a "$PROJECT_DIR/.env.local" 2>/dev/null \
     || stat -f %Lp "$PROJECT_DIR/.env.local")
+  [ "$source_mode" != "$STAGED_COPY_DEFAULT_MODE" ] \
+    || fail "the fixture's source mode equals the staged copy's default mode, so mode preservation cannot be observed"
   source_uid=$(stat -c %u "$PROJECT_DIR/.env.local" 2>/dev/null \
     || stat -f %u "$PROJECT_DIR/.env.local")
   source_gid=$(stat -c %g "$PROJECT_DIR/.env.local" 2>/dev/null \
@@ -214,6 +223,9 @@ test_acquired_worktree_is_seeded_with_local_env_file() {
     || stat -f %g "$POOL_DIR/.env.local")
   [ "$target_mode" = "$source_mode" ] \
     || fail "re-seeded .env.local did not preserve its mode"
+  # uid and gid are the weaker signal: a single-user test run creates both files as
+  # the same owner, so these hold even where preservation was dropped. They pin the
+  # contract rather than discriminating, and mode above carries the real proof.
   [ "$target_uid" = "$source_uid" ] \
     || fail "re-seeded .env.local did not preserve its owner"
   [ "$target_gid" = "$source_gid" ] \
@@ -267,6 +279,59 @@ test_acquired_worktree_retires_a_local_env_file_the_captain_deleted() {
   [ ! -e "$POOL_DIR/.env.local" ] \
     || fail "spawn left a revoked .env.local in the reissued pool slot"
   pass "a local environment file deleted from the primary checkout does not survive in a reissued slot"
+}
+
+# A seed killed partway through must leave nothing in the working tree, because the
+# next acquisition refuses a slot that carries untracked work and teardown refuses
+# to return one, which would wedge the slot for good. The shim below kills spawn
+# exactly between staging the copy and publishing it, then a second spawn proves
+# the slot is still acquirable. Only presence and git's own view are asserted.
+interrupt_local_env_seed_copy() {
+  cat > "$FAKEBIN_DIR/cp" <<SH
+#!/usr/bin/env bash
+set -u
+for arg in "\$@"; do
+  case "\$arg" in
+    *fm-env-local.*)
+      if [ ! -e "$CASE_DIR/seed-interrupted" ]; then
+        : > "$CASE_DIR/seed-interrupted"
+        kill -9 \$PPID
+        exit 137
+      fi
+      ;;
+  esac
+done
+exec /bin/cp "\$@"
+SH
+  chmod +x "$FAKEBIN_DIR/cp"
+}
+
+test_interrupted_local_env_seed_leaves_the_slot_acquirable() {
+  local rec id retry out status
+  id='pool-env-local-r6'
+  rec=$(make_case env-local-interrupted "$id")
+  read_case_record "$rec"
+
+  ignore_local_env_file
+  : > "$PROJECT_DIR/.env.local"
+  chmod 0640 "$PROJECT_DIR/.env.local"
+  interrupt_local_env_seed_copy
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off) || true
+  [ -e "$CASE_DIR/seed-interrupted" ] \
+    || fail "the fixture never reached the staged copy, so nothing was interrupted"
+  [ -z "$(git -C "$POOL_DIR" -c core.quotePath=false status --porcelain)" ] \
+    || fail "an interrupted seed left work in the pool slot that the next acquisition would refuse"
+
+  retry='pool-env-local-r6-retry'
+  mkdir -p "$HOME_DIR/data/$retry"
+  printf 'brief for %s\n' "$retry" > "$HOME_DIR/data/$retry/brief.md"
+  out=$(run_spawn "$retry" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a slot whose earlier seed was interrupted should still be acquirable"
+  [ -f "$POOL_DIR/.env.local" ] \
+    || fail "the reissued slot was not seeded after an earlier interrupted seed"
+  pass "an interrupted local environment seed leaves the pool slot clean and acquirable"
 }
 
 # The warn-and-skip branch decides whether an unignored .env.local is copied in.
@@ -593,6 +658,7 @@ test_unreachable_origin_refuses_stale_pool_base
 test_acquired_worktree_is_seeded_with_local_env_file
 test_acquired_worktree_refreshes_a_stale_local_env_file
 test_acquired_worktree_retires_a_local_env_file_the_captain_deleted
+test_interrupted_local_env_seed_leaves_the_slot_acquirable
 test_unignored_local_env_file_is_not_seeded
 test_stale_submodule_pin_explains_itself
 test_unpushed_submodule_commit_is_still_uncommitted_work

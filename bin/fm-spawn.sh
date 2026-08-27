@@ -1848,8 +1848,16 @@ freshen_spawn_worktree_base() {  # <worktree>
 # Refreshing on each acquisition also keeps a slot from serving a stale credential
 # copy left behind by an earlier task, including when the captain revoked that
 # credential by deleting the file outright rather than by rewriting it.
+spawn_path_device() {  # <path>
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %d "$1" 2>/dev/null
+  else
+    stat -c %d "$1" 2>/dev/null
+  fi
+}
+
 seed_spawn_worktree_local_env() {  # <worktree>
-  local worktree=$1 source target tmp
+  local worktree=$1 source target tmp ignored check_err gitdir stage_device tree_device
   source="$PROJ_ABS/.env.local"
   target="$worktree/.env.local"
   # Nothing to carry in, and no earlier task's copy left to retire.
@@ -1861,7 +1869,20 @@ seed_spawn_worktree_local_env() {  # <worktree>
   # worktree forever. Say so once instead of wedging the task's cleanup later, and
   # for the same reason never remove a copy the project does not ignore: that one
   # is the task's own work, not this seeding's to retire.
-  if ! git -C "$worktree" check-ignore -q .env.local 2>/dev/null; then
+  #
+  # check-ignore answers 0 (ignored) or 1 (not ignored); anything else is git
+  # failing to answer at all. Reporting that as a missing ignore rule would send an
+  # operator to edit a .gitignore that already carries the rule while the task runs
+  # without credentials, which is the exact false blocker this seeding exists to
+  # remove. A state that cannot be established is never the benign one.
+  ignored=0
+  check_err=$(git -C "$worktree" check-ignore -q .env.local 2>&1) || ignored=$?
+  if [ "$ignored" -gt 1 ]; then
+    echo "error: could not determine whether '$worktree' ignores .env.local; git check-ignore exited $ignored${check_err:+: $check_err}" >&2
+    echo "error: refusing to seed or retire '$target' while that check is unresolved" >&2
+    return 1
+  fi
+  if [ "$ignored" -eq 1 ]; then
     echo "warning: not seeding .env.local into '$worktree' because the project does not ignore it; add it to .gitignore so crew worktrees can carry it" >&2
     return 0
   fi
@@ -1889,14 +1910,35 @@ seed_spawn_worktree_local_env() {  # <worktree>
     echo "warning: not seeding .env.local into '$worktree' because '$source' is not a regular file" >&2
     return 0
   fi
-  # A copy interrupted between mktemp and the atomic publish leaves a scratch file
-  # behind, and no .env.local ignore rule covers the .fm-env-local.* name. That
-  # leftover is untracked work: it fails the next acquisition's clean check and
-  # blocks teardown from returning the slot, wedging exactly what the ignore gate
-  # above exists to prevent. Sweep our own scratch before creating a new one.
-  rm -f "$worktree"/.fm-env-local.*
-  tmp=$(mktemp "$worktree/.fm-env-local.XXXXXX") || {
-    echo "error: could not create a private temporary file while seeding .env.local in '$worktree'" >&2
+  # Stage the copy inside the worktree's own git directory, never in the working
+  # tree. A scratch file in the tree is untracked work no .env.local rule covers,
+  # so an interrupted copy would fail the next acquisition's clean check and block
+  # teardown from returning the slot - the very wedge the ignore gate above exists
+  # to prevent, and one no later sweep could undo, because the clean check runs
+  # before this seeding does. A linked worktree's git directory resolves through
+  # its .git file to the repository's worktrees/<name>, which is git's own storage
+  # for that worktree: git never reports it as working-tree content, and it shares
+  # the worktree's filesystem so the publish below stays an atomic rename. Refuse
+  # rather than fall back to the tree when either property cannot be established,
+  # since a cross-device move would expose a partial credential file.
+  gitdir=$(git -C "$worktree" rev-parse --absolute-git-dir 2>/dev/null) || gitdir=""
+  if [ -z "$gitdir" ] || [ ! -d "$gitdir" ] || [ ! -w "$gitdir" ]; then
+    echo "error: could not resolve a writable git directory for '$worktree'; refusing to stage .env.local through the working tree where an interrupted copy would strand the worktree" >&2
+    return 1
+  fi
+  stage_device=$(spawn_path_device "$gitdir") || stage_device=""
+  tree_device=$(spawn_path_device "$worktree") || tree_device=""
+  if [ -z "$stage_device" ] || [ -z "$tree_device" ] || [ "$stage_device" != "$tree_device" ]; then
+    echo "error: cannot publish .env.local atomically because '$gitdir' and '$worktree' are not on one filesystem; refusing to seed rather than expose a partial credential file" >&2
+    return 1
+  fi
+  # Retire any scratch an earlier interrupted seed left in that staging directory,
+  # so a killed copy cannot leave credential bytes sitting there indefinitely. It
+  # is invisible to git, so a leftover directory here is harmless and must not
+  # become a refusal of its own.
+  rm -f "$gitdir"/fm-env-local.* 2>/dev/null || true
+  tmp=$(mktemp "$gitdir/fm-env-local.XXXXXX") || {
+    echo "error: could not create a private temporary file while seeding .env.local for '$worktree'" >&2
     return 1
   }
   if ! cp -p "$source" "$tmp"; then
