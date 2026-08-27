@@ -53,6 +53,7 @@ SH
 #!/usr/bin/env bash
 set -u
 if [ "${1:-}" = --version ]; then
+  [ -z "${FM_FAKE_CODEX_PROBE_LOG:-}" ] || printf '%s\n' "$0" >> "$FM_FAKE_CODEX_PROBE_LOG"
   printf 'codex-cli %s\n' "${FM_FAKE_CODEX_VERSION:-0.149.1}"
 fi
 exit 0
@@ -103,6 +104,7 @@ run_spawn() {
   CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CODEX_VERSION="${FM_TEST_CODEX_VERSION:-0.149.1}" \
+    FM_FAKE_CODEX_PROBE_LOG="${FM_TEST_CODEX_PROBE_LOG:-}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     GROK_HOME="$home/grok-home" \
@@ -428,19 +430,24 @@ test_codex_threads_model_and_effort() {
 }
 
 test_codex_threads_max_effort() {
-  local rec id out status launch
+  local rec id out status launch probe_log probed_binary
   id=profile-codex-max-z4
   rec=$(make_spawn_case profile-codex-max codex "$id")
   read_case_record "$rec"
+  probe_log="$CASE_DIR/codex-probe.log"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5.6-sol --effort max)
+  out=$(FM_TEST_CODEX_PROBE_LOG="$probe_log" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5.6-sol --effort max)
   status=$?
   expect_code 0 "$status" "codex spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5.6-sol' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
+  probed_binary=$(cat "$probe_log")
+  [ "$probed_binary" = "$FAKEBIN_DIR/codex" ] || fail "Codex max probe did not use the selected executable: $probed_binary"
+  assert_contains "$launch" "'$probed_binary' --model 'gpt-5.6-sol' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not thread max reasoning effort config"
-  pass "codex receives max through model_reasoning_effort"
+  pass "codex max probes and launches the same concrete executable"
 }
 
 test_old_codex_refuses_max_effort() {

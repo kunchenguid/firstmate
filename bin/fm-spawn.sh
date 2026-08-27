@@ -159,6 +159,7 @@
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
+#     __CODEXBIN__  quoted concrete Codex executable path when max needs a version probe
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -1139,9 +1140,9 @@ launch_template() {
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__CODEXBIN__ __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__CODEXBIN__ __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -1352,6 +1353,25 @@ resolve_muse_binary() {
   return 1
 }
 
+resolve_codex_binary() {
+  local candidate dir
+  candidate=$(command -v codex 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    case "$candidate" in
+      /*) printf '%s\n' "$candidate"; return 0 ;;
+      *)
+        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+        if [ -n "$dir" ]; then
+          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  echo "error: codex executable not found on PATH; install Codex or select a different verified harness" >&2
+  return 1
+}
+
 # muse_credential_present: 0 when a launched muse pane can reach its provider
 # without an interactive login. muse offers exactly two credential paths
 # (verified, muse 0.1.0-R708.1): the META_API_KEY environment variable, which
@@ -1393,8 +1413,8 @@ model_flag_for_harness() {
 }
 
 codex_supports_max_effort() {
-  local output version major minor patch extra
-  output=$(codex --version 2>/dev/null) || return 1
+  local binary=$1 output version major minor patch extra
+  output=$("$binary" --version 2>/dev/null) || return 1
   version=${output#codex-cli }
   [ "$version" != "$output" ] || return 1
   IFS='.' read -r major minor patch extra <<< "$version"
@@ -1420,7 +1440,7 @@ effort_flag_for_harness() {
       case "$effort" in
         low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
         max)
-          if codex_supports_max_effort; then
+          if codex_supports_max_effort "$CODEX_BIN"; then
             printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')"
           else
             echo "error: Codex max effort requires codex-cli 0.149.1 or newer with a parseable version; refusing to launch without the explicitly selected effort" >&2
@@ -2803,6 +2823,10 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
+CODEX_BIN=codex
+if [ "$HARNESS" = codex ] && [ "$EFFORT" = max ]; then
+  CODEX_BIN=$(resolve_codex_binary) || exit 1
+fi
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
@@ -2814,6 +2838,13 @@ LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
+  codex)
+    if [ "$CODEX_BIN" = codex ]; then
+      LAUNCH=${LAUNCH//__CODEXBIN__/codex}
+    else
+      LAUNCH=${LAUNCH//__CODEXBIN__/"$(shell_quote "$CODEX_BIN")"}
+    fi
+    ;;
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 esac
