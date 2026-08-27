@@ -20,7 +20,7 @@
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
-#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
+#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD] [--notify]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
 #   fm-captain-hold.sh bind <source-id> [<legacy-origin> | --any-origin]
@@ -38,6 +38,14 @@
 # idempotent; a task already closed is refused rather than reopened. `--until`
 # records the captain's own deferral date through `tasks-axi hold --until`, so
 # a "revisit later" answer is stored as a date instead of a live card.
+#
+# Every hold and every answer also refreshes this home's captain-facing
+# Reminders projection through bin/fm-captain-reminders.sh, which owns that
+# whole capability including its opt-in switch. `--notify` is the caller's own
+# judgment that this call blocks work and is worth interrupting the captain for;
+# without it the entry simply appears in his list. The projection is subordinate
+# in both directions: it reads the backlog and never writes back, and its
+# failure can never fail a hold or an answer.
 #
 # `answer` records the captain's exact words and closes the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes,
@@ -137,6 +145,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-tasks-show-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-tasks-show-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -214,53 +225,16 @@ load_decision() {  # <path>; sets DECISION_TEXT and DECISION_DIGEST
   DECISION_DIGEST=$(sha256_text "$decision")
 }
 
-tasks_axi() {
-  (cd "$FM_HOME" && tasks-axi "$@")
-}
-
 require_tasks_axi() {
   fm_tasks_axi_compatible || fail "compatible tasks-axi is required"
   tasks-axi hold --help 2>&1 | grep -F -- '--kind captain' >/dev/null \
     || fail "tasks-axi does not expose the captain-hold contract"
 }
 
-task_show() {  # <id>
-  tasks_axi show "$1" --full 2>/dev/null
-}
-
-show_field() {  # <show-output> <field>
-  local output=$1 field=$2
-  printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
-}
-
-decode_shown_value() {  # <shown-field>
-  local value=$1
-  case "$value" in
-    \"*\")
-      printf '%s' "$value" | perl -MJSON::PP -e '
-        local $/;
-        my $value = decode_json(<STDIN>);
-        binmode STDOUT, ":raw";
-        utf8::encode($value) if utf8::is_utf8($value);
-        print $value;
-      '
-      ;;
-    *) printf '%s' "$value" ;;
-  esac
-}
-
-# Decode show-encoded scalar fields and normalize the empty marker.
-show_field_value() {  # <show-output> <field>
-  local value
-  value=$(decode_shown_value "$(show_field "$1" "$2")")
-  [ "$value" != '-' ] || value=''
-  printf '%s' "$value"
-}
-
 origin_exists_here() {  # <origin-id>
   [ -f "$STATE/$1.meta" ] && return 0
   [ -f "$DATA/$1/report.md" ] && return 0
-  task_show "$1" >/dev/null 2>&1
+  fm_task_show "$1" >/dev/null 2>&1
 }
 
 list_has_key() {  # <comma-list> <key>
@@ -344,10 +318,10 @@ resolution_block() {  # <mode>
 # surviving even when a date gate has expired) or a recorded captain answer.
 verify_hold_durable() {  # <task-id>
   local id=$1 show state hold_kind body
-  show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
-  state=$(show_field "$show" state)
-  hold_kind=$(show_field_value "$show" hold_kind)
-  body=$(show_field "$show" body)
+  show=$(fm_task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
+  state=$(fm_show_field "$show" state)
+  hold_kind=$(fm_show_field_value "$show" hold_kind)
+  body=$(fm_show_field "$show" body)
   if body_has_resolution_record "$body"; then
     return 0
   fi
@@ -361,13 +335,13 @@ verify_hold_durable() {  # <task-id>
 # exact task id when it exists, else the legacy derived identity.
 resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
   local origin=$1 entry=$2 legacy
-  if task_show "$entry" >/dev/null 2>&1; then
+  if fm_task_show "$entry" >/dev/null 2>&1; then
     printf '%s' "$entry"
     return 0
   fi
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     legacy=$(legacy_hold_id "$origin" "$entry")
-    if task_show "$legacy" >/dev/null 2>&1; then
+    if fm_task_show "$legacy" >/dev/null 2>&1; then
       printf '%s' "$legacy"
       return 0
     fi
@@ -376,8 +350,33 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
   fail "no captain-held task $entry in $FM_HOME/data/backlog.md"
 }
 
+# Mirror this home's captain calls into the captain's Reminders list, which is
+# where he will actually see them once the conversation has moved on. Strictly
+# subordinate: the projection is off unless this home opted in, its own failure
+# never fails the hold or the answer that produced it, and its diagnostics go to
+# stderr because this command's stdout is the task id its caller reads. It
+# projects the WHOLE current set every time, so a run lost to any of that is
+# repaired by the next hold, answer, or session start rather than leaving a gap.
+#
+# Because it projects the whole set, a BATCH of answers needs exactly one run at
+# the end, not one per answer. `answers` closes each key by re-entering this
+# script's own `answer` command, so it sets FM_CAPTAIN_HOLD_DEFER_REMINDERS for
+# those children and refreshes once itself. Without that, a wedged Reminders app
+# would cost the batch its per-run bound once per key, on a supervision path.
+project_reminders() {  # <task-id to alert on, or empty>
+  local script="$SCRIPT_DIR/fm-captain-reminders.sh"
+  [ "${FM_CAPTAIN_HOLD_DEFER_REMINDERS:-0}" != 1 ] || return 0
+  [ -x "$script" ] || return 0
+  if [ -n "$1" ]; then
+    "$script" sync --notify "$1" >&2 || true
+  else
+    "$script" sync >&2 || true
+  fi
+  return 0
+}
+
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind
+  local id=${1:-} title='' reason='' repo='' origin='' until='' notify=0 show state existing_title body='' hold_kind
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -387,6 +386,7 @@ command_hold() {
       --repo) shift; repo=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
       --until) shift; until=${1:-} ;;
+      --notify) notify=1 ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -404,12 +404,12 @@ command_hold() {
     esac
   fi
   require_tasks_axi
-  if show=$(task_show "$id"); then
-    state=$(show_field "$show" state)
+  if show=$(fm_task_show "$id"); then
+    state=$(fm_show_field "$show" state)
     [ "$state" != "done" ] \
       || fail "task $id is already closed; a new captain call needs its own task"
     if [ -n "$title" ]; then
-      existing_title=$(show_field_value "$show" title)
+      existing_title=$(fm_show_field_value "$show" title)
       [ "$existing_title" = "$title" ] || fail "existing task $id has a different title"
     fi
   else
@@ -424,23 +424,24 @@ command_hold() {
     validate_one_line repo "$repo"
     [ -z "$origin" ] || body=$(printf 'Origin: %s' "$origin")
     if [ -n "$body" ]; then
-      tasks_axi add "$id" "$title" --repo "$repo" --body "$body" >/dev/null \
+      fm_tasks_axi add "$id" "$title" --repo "$repo" --body "$body" >/dev/null \
         || fail "could not create task $id"
     else
-      tasks_axi add "$id" "$title" --repo "$repo" >/dev/null \
+      fm_tasks_axi add "$id" "$title" --repo "$repo" >/dev/null \
         || fail "could not create task $id"
     fi
   fi
   if [ -n "$until" ]; then
-    tasks_axi hold "$id" --reason "$reason" --kind captain --until "$until" >/dev/null \
+    fm_tasks_axi hold "$id" --reason "$reason" --kind captain --until "$until" >/dev/null \
       || fail "could not hold task $id for the captain"
   else
-    tasks_axi hold "$id" --reason "$reason" --kind captain >/dev/null \
+    fm_tasks_axi hold "$id" --reason "$reason" --kind captain >/dev/null \
       || fail "could not hold task $id for the captain"
   fi
-  show=$(task_show "$id") || fail "task $id disappeared while holding it"
-  hold_kind=$(show_field_value "$show" hold_kind)
+  show=$(fm_task_show "$id") || fail "task $id disappeared while holding it"
+  hold_kind=$(fm_show_field_value "$show" hold_kind)
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
+  if [ "$notify" = 1 ]; then project_reminders "$id"; else project_reminders ''; fi
   printf '%s\n' "$id"
 }
 
@@ -449,7 +450,7 @@ command_hold() {
 write_resolution_record() {  # <task-id> <mode> <shown-body>
   local id=$1 mode=$2 body=$3 new_body tmp
   new_body=$(resolution_block "$mode")
-  body=$(decode_shown_value "$body") \
+  body=$(fm_decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
   if [ -n "$body" ]; then
     new_body=$(printf '%s\n\n%s' "$new_body" "$body")
@@ -460,7 +461,7 @@ write_resolution_record() {  # <task-id> <mode> <shown-body>
     rm -f -- "$tmp"
     fail "cannot stage the resolution record for $id"
   fi
-  if ! tasks_axi update "$id" --body-file "$tmp" --archive-body >/dev/null; then
+  if ! fm_tasks_axi update "$id" --body-file "$tmp" --archive-body >/dev/null; then
     rm -f -- "$tmp"
     fail "could not record the captain decision on $id"
   fi
@@ -469,9 +470,9 @@ write_resolution_record() {  # <task-id> <mode> <shown-body>
 
 close_answered() {  # <task-id> <release-0-or-1>
   if [ "$2" = 1 ]; then
-    tasks_axi unhold "$1" >/dev/null || fail "could not release captain-held task $1"
+    fm_tasks_axi unhold "$1" >/dev/null || fail "could not release captain-held task $1"
   else
-    tasks_axi "done" "$1" >/dev/null || fail "could not close answered captain-held task $1"
+    fm_tasks_axi "done" "$1" >/dev/null || fail "could not close answered captain-held task $1"
   fi
 }
 
@@ -490,10 +491,10 @@ command_answer() {
   validate_slug task-id "$id"
   load_decision "$decision_file"
   require_tasks_axi
-  show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
-  state=$(show_field "$show" state)
-  hold_kind=$(show_field_value "$show" hold_kind)
-  body=$(show_field "$show" body)
+  show=$(fm_task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
+  state=$(fm_show_field "$show" state)
+  hold_kind=$(fm_show_field_value "$show" hold_kind)
+  body=$(fm_show_field "$show" body)
   if [ "$release" = 1 ]; then outcome=released; else outcome=answered; fi
 
   if [ "$state" = "done" ]; then
@@ -516,9 +517,9 @@ command_answer() {
     [ "$hold_kind" = captain ] \
       || fail "task $id was never held for the captain; nothing to record an answer on"
     write_resolution_record "$id" repaired "$body"
-    show=$(task_show "$id") || fail "task $id disappeared while recording the answer"
-    [ "$(show_field "$show" state)" = "done" ] || fail "recording the answer reopened closed task $id"
-    body_has_resolution_record "$(show_field "$show" body)" \
+    show=$(fm_task_show "$id") || fail "task $id disappeared while recording the answer"
+    [ "$(fm_show_field "$show" state)" = "done" ] || fail "recording the answer reopened closed task $id"
+    body_has_resolution_record "$(fm_show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
     printf 'repaired: %s\n' "$id"
     return 0
@@ -544,8 +545,8 @@ command_answer() {
     fi
     write_resolution_record "$id" "$outcome" "$body"
     close_answered "$id" "$release"
-    show=$(task_show "$id") || fail "task $id disappeared after closing"
-    body_has_resolution_record "$(show_field "$show" body)" \
+    show=$(fm_task_show "$id") || fail "task $id disappeared after closing"
+    body_has_resolution_record "$(fm_show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
     printf '%s: %s\n' "$outcome" "$id"
     return 0
@@ -723,10 +724,10 @@ command_answers() {
     if [ -n "$legacy_key" ]; then
       legacy_digest=$(sha256_text "$(legacy_keyed_decision_text "$source" "$legacy_key" "$answer" "$label")")
     fi
-    show=$(task_show "$id") || { printf 'skipped: %s (absent)\n' "$id"; skipped=$((skipped + 1)); continue; }
-    state=$(show_field "$show" state)
-    hold_kind=$(show_field_value "$show" hold_kind)
-    body=$(show_field "$show" body)
+    show=$(fm_task_show "$id") || { printf 'skipped: %s (absent)\n' "$id"; skipped=$((skipped + 1)); continue; }
+    state=$(fm_show_field "$show" state)
+    hold_kind=$(fm_show_field_value "$show" hold_kind)
+    body=$(fm_show_field "$show" body)
     recorded_digest=$(recorded_decision_digest "$body" || true)
     recorded_mode=$(recorded_resolution_mode "$body" || true)
     if body_has_resolution_record "$body" \
@@ -752,7 +753,8 @@ command_answers() {
       continue
     fi
     # shellcheck disable=SC2086  # release_flag is empty or a single literal flag.
-    if "$0" answer "$id" --decision-file "$tmp" $release_flag </dev/null >/dev/null 2>"$err"; then
+    if FM_CAPTAIN_HOLD_DEFER_REMINDERS=1 \
+      "$0" answer "$id" --decision-file "$tmp" $release_flag </dev/null >/dev/null 2>"$err"; then
       printf 'closed: %s\n' "$id"
       closed=$((closed + 1))
     else
@@ -762,6 +764,8 @@ command_answers() {
     fi
   done
   rm -f -- "$tmp" "$err"
+  # One projection for the whole batch, now that every key has settled.
+  [ "$closed" -eq 0 ] || project_reminders ''
   printf 'answers: closed=%s skipped=%s\n' "$closed" "$skipped"
   [ "$skipped" -eq 0 ]
 }
@@ -907,18 +911,6 @@ EOF
 # Output: one `<task-id>\t<origin>\t<key>\t<title>` line per divergence, in
 # status-log then key order; nothing when the two records agree.
 
-# Every still-open task id in this home's backlog, one per line. Only the first
-# two comma-separated listing fields are read - both are slugs that precede any
-# quoted title - so a title containing commas or quotes cannot shift them.
-open_task_ids() {
-  tasks_axi list 2>/dev/null | awk -F, '
-    /^  [A-Za-z0-9._-]+,/ {
-      id = $1
-      sub(/^ +/, "", id)
-      if ($2 != "done") print id
-    }
-  '
-}
 
 # Every key token stated anywhere in a status log. A cheap candidate scan: it
 # over-includes tokens that are only prose, and status_key_closing_verb below is
@@ -948,7 +940,8 @@ command_diverged() {
   # compatibility floor and its extra probes: a listing this parser cannot read
   # simply yields no candidates and the report stays silent.
   command -v tasks-axi >/dev/null 2>&1 || return 0
-  ids=$(open_task_ids) || return 0
+  # shellcheck disable=SC2119  # every open task, deliberately unfiltered
+  ids=$(fm_open_task_ids) || return 0
   [ -n "$ids" ] || return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   for f in "$STATE"/*.status; do
@@ -968,13 +961,13 @@ command_diverged() {
       while IFS= read -r key; do
         list_has_line "$tokens" "$key" || continue
         [ "$(status_key_closing_verb "$f" "$key")" = "$resolve" ] || continue
-        show=$(task_show "$id") || continue
-        [ "$(show_field "$show" state)" != "done" ] || continue
-        [ "$(show_field_value "$show" hold_kind)" = captain ] || continue
+        show=$(fm_task_show "$id") || continue
+        [ "$(fm_show_field "$show" state)" != "done" ] || continue
+        [ "$(fm_show_field_value "$show" hold_kind)" = captain ] || continue
         # The title is the only free-text field here, and the report is
         # TAB-separated, so it goes through the same sanitizer every other
         # emitted field uses rather than being trusted to stay one clean line.
-        title=$(sanitize_field "$(show_field_value "$show" title)")
+        title=$(sanitize_field "$(fm_show_field_value "$show" title)")
         printf '%s\t%s\t%s\t%s\n' "$id" "$origin" "$key" "$title"
         break
       done <<INNER
@@ -988,7 +981,7 @@ EOF
 
 case "${1:-}" in
   hold) shift; command_hold "$@" ;;
-  answer) shift; command_answer "$@" ;;
+  answer) shift; command_answer "$@"; project_reminders '' ;;
   answers) shift; command_answers "$@" ;;
   bind) shift; command_bind "$@" ;;
   unbind) shift; command_unbind "$@" ;;

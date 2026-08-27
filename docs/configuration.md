@@ -224,6 +224,16 @@ The flag is per home and is not inherited by secondmate homes, because stow cade
 Only the file's presence is read, so its contents are ignored; remove it to return to the default contract on the next pass.
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
 
+## Captain reminders projection (config/captain-reminders)
+
+`config/captain-reminders` is an optional local, gitignored switch that turns on a one-way projection of this home's captain calls into the macOS Reminders app, so a question raised on one day is still in front of the captain on the next.
+Absent, every `bin/fm-captain-reminders.sh` command is a silent no-op that exits 0 and nothing else changes; present, its first line, trimmed, is the target list name, and an empty file selects `Firstmate`.
+The projection covers every task held with `hold_kind=captain` - both the calls the captain must rule on and the ones he must carry out himself - and never carries progress.
+Firstmate's backlog stays the authority: nothing is ever read back from Reminders, so editing, flagging, reordering, or completing an entry there changes no task.
+The file is per home and is NOT inherited by secondmate homes, because only the primary home speaks to the captain.
+The switch is a list name, not a policy: how each entry reads, when an entry is added, refreshed, or ticked off, what the `[fm:<task-id>]` marker protects, and how a push is requested are owned by `bin/fm-captain-reminders.sh`'s header.
+Run `bin/fm-captain-reminders.sh status` for a dry run that prints what a sync would change without touching the list, including the first-time macOS automation approval when that is what is standing in the way.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
@@ -694,6 +704,8 @@ FM_ZELLIJ_SESSION=firstmate  # zellij-only: named session for normal backend ops
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest; each line is capped by bin/fm-line-cap-lib.sh
 FM_SESSION_START_QUEUED_LIMIT=20   # plain queued backlog rows in the session-start digest; in-flight, held, and blocked rows are never bounded and done rows are never listed
+FM_REMINDERS_TIMEOUT_SECS=10   # maximum seconds for the whole Reminders projection and for any individual step within its remaining time; the process group is terminated on expiry, invalid or zero values use 10
+FM_REMINDERS_EXEC=   # test seam: route every Reminders step through this command as `<cmd> <verb> <args...>` instead of osascript, and skip the macOS platform guard; unset in production
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
 FM_BOOTSTRAP_NETWORK=all   # internal session-start phase split: all, skip (local steps only), or only (network steps only); see bin/fm-bootstrap.sh
 FM_STARTUP_NETWORK_TIMEOUT=120   # seconds bounding the whole deferred network stage; hitting it prints an actionable NETWORK_CHECKS line

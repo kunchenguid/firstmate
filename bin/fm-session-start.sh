@@ -39,6 +39,11 @@
 #   3. inactive outcomes + wake-drain - runs the local bounded inactive-outcome
 #                       reconciliation before presenting durable wakes and advancing
 #                       recovery handling state, so both only run when locked.
+#                       It closes by restating this home's captain calls into the
+#                       captain's Reminders list when that projection is switched
+#                       on (bin/fm-captain-reminders.sh), which owns its own
+#                       whole-run ceiling so it can never delay the digest, and
+#                       which can never fail the startup.
 #   4. supervision-instructions - the one emitted operating block for the
 #                       detected primary harness.
 #   5. read-once contract - the do-not-re-read contract covering every source
@@ -732,6 +737,10 @@ else
   else
     printf '(no queued wakes)\n'
   fi
+  # Restate what is waiting on the captain onto the surface he actually carries.
+  # Deliberately no fm_run_timed: the script owns a whole-run ceiling, and an outer wrapper creates a second process group that neither timeout owner can reach.
+  REMINDERS_OUT=$("$SCRIPT_DIR/fm-captain-reminders.sh" sync 2>&1) || true
+  [ -z "$REMINDERS_OUT" ] || printf '%s\n' "$REMINDERS_OUT"
 fi
 
 # --- 4. supervision operating instructions ----------------------------------
