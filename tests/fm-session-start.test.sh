@@ -710,6 +710,10 @@ EOF
 
   printf '%s\n' '- demo [no-mistakes] - a demo project (added 2026-07-01)' > "$home/data/projects.md"
   : > "$home/data/captain.md"
+  mkdir -p "$home/data/logbook"
+  cat > "$home/data/logbook/active.json" <<'JSON'
+{"schema":"firstmate-logbook-active.v1","mission_id":"release","mission":"Release mission","page":"data/logbook/missions/release/index.html","started_at":"2026-08-27T00:00:00Z"}
+JSON
   # secondmates.md, captain-shared.md, and learnings.md deliberately absent
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
@@ -723,6 +727,10 @@ EOF
 
   assert_contains "$out" "data/secondmates.md" "digest did not label the secondmates.md section"
   assert_contains "$out" "data/learnings.md" "digest did not label the learnings.md section"
+  assert_contains "$out" "Active logbook registration (load /logbook before meaningful mission milestones)" \
+    "digest did not surface the active logbook discovery pointer"
+  assert_contains "$out" '"mission":"Release mission"' \
+    "digest did not print the active mission registration"
 
   # Exactly four context ABSENT markers (secondmates.md, captain-shared.md,
   # learnings.md; backlog.md is covered by its own test) - and the

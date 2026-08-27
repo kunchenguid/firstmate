@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+# Behavior tests for the /logbook helper's public command interface.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+HELPER="$ROOT/.agents/skills/logbook/logbook.mjs"
+TMP_ROOT=$(fm_test_tmproot fm-logbook)
+
+command -v node >/dev/null 2>&1 || { echo "skip: node not found"; exit 0; }
+command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
+
+run_logbook() {  # <home> <args...>
+  local home=$1
+  shift
+  FM_HOME="$home" node "$HELPER" "$@"
+}
+
+make_home() {
+  local home="$TMP_ROOT/$1"
+  mkdir -p "$home/data" "$home/state"
+  printf '%s\n' "$home"
+}
+
+file_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
+file_inode() { stat -f '%i' "$1" 2>/dev/null || stat -c '%i' "$1"; }
+page_for() { find "$1/data/logbook/missions" -name index.html -type f -print | head -1; }
+
+extract_payload() {  # <page>
+  node - "$1" <<'NODE'
+const fs = require("fs");
+const html = fs.readFileSync(process.argv[2], "utf8");
+const match = html.match(/<script id="firstmate-logbook-data" type="application\/json">\n([\s\S]*?)\n<\/script>/);
+if (!match) process.exit(1);
+process.stdout.write(match[1] + "\n");
+NODE
+}
+
+shell_hash() {  # <page>
+  perl -0777 -pe 's/<!-- FIRSTMATE_LOGBOOK_PAYLOAD_BEGIN -->.*?<!-- FIRSTMATE_LOGBOOK_PAYLOAD_END -->/<PAYLOAD>/s' "$1" \
+    | shasum -a 256 | awk '{print $1}'
+}
+
+write_stage_update() {
+  cat > "$1" <<JSON
+{
+  "kind": "stage-change",
+  "title": "$2",
+  "summary": "The mission moved to a proven new stage.",
+  "snapshot": {
+    "done": "$3",
+    "now": "The next bounded stage is active.",
+    "next": "Verify the bounded result."
+  },
+  "gates": [
+    {
+      "id": "mission-outcome",
+      "label": "Mission outcome achieved",
+      "state": "$4",
+      "evidence": [{"label": "Result", "value": "Bounded stage evidence"}]
+    }
+  ],
+  "evidence": [{"label": "Result", "value": "Bounded stage evidence"}]
+}
+JSON
+}
+
+test_safe_creation_and_atomic_embedded_update() {
+  local home out page registration before_shell before_inode after_inode update
+  home=$(make_home safe-create)
+  out=$(run_logbook "$home" start --mission "Release mission") || fail "safe mission creation failed"
+  page=$(page_for "$home")
+  registration="$home/data/logbook/active.json"
+  assert_present "$page" "start did not create the self-contained HTML page"
+  assert_present "$registration" "start did not create the active registration"
+  [ "$(find "$(dirname "$page")" -type f | wc -l | tr -d ' ')" = 1 ] \
+    || fail "mission directory contains a sibling payload instead of one self-contained page"
+  assert_contains "$out" "created: " "start did not report the page it created"
+  [ "$(printf '%s\n' "$out" | awk '/^created: / {sub(/^created: /, ""); print}')" -ef "$page" ] \
+    || fail "start reported a different page from the one it created"
+  [ "$(file_mode "$page")" = 600 ] || fail "page mode is not private"
+  [ "$(file_mode "$registration")" = 600 ] || fail "registration mode is not private"
+  jq -e --arg page "${page#"$home/"}" '
+    .schema == "firstmate-logbook-active.v1" and .page == $page and (has("payload") | not)
+  ' "$registration" >/dev/null || fail "registration does not carry exactly one confined page path"
+  extract_payload "$page" | jq -e '.schema == "firstmate-logbook.v1" and .mission.title == "Release mission"' >/dev/null \
+    || fail "page does not carry a valid embedded mission payload"
+
+  before_shell=$(shell_hash "$page")
+  before_inode=$(file_inode "$page")
+  update="$home/update.json"
+  write_stage_update "$update" "Implementation stage complete" "The bounded implementation stage is complete." active
+  run_logbook "$home" update --mission "Release mission" --input "$update" >/dev/null \
+    || fail "valid update failed"
+  after_inode=$(file_inode "$page")
+  [ "$before_inode" != "$after_inode" ] || fail "update rewrote the page in place instead of replacing it atomically"
+  [ "$(shell_hash "$page")" = "$before_shell" ] || fail "update changed bytes outside the delimited payload block"
+  [ -z "$(find "$(dirname "$page")" -name '*.tmp' -print)" ] || fail "atomic update left a staged file behind"
+  extract_payload "$page" | jq -e '
+    .snapshot.done == "The bounded implementation stage is complete." and (.milestones | length) == 2
+  ' >/dev/null || fail "valid update did not publish the new embedded snapshot and milestone"
+  pass "start creates one private page and update atomically changes only its delimited payload"
+}
+
+test_malformed_and_invalid_updates_preserve_current_page() {
+  local home page before out rc bad
+  home=$(make_home malformed)
+  run_logbook "$home" start --mission "Validation mission" >/dev/null || fail "fixture start failed"
+  page=$(page_for "$home")
+  before=$(shasum -a 256 "$page" | awk '{print $1}')
+  bad="$home/bad.json"
+  printf '{not-json\n' > "$bad"
+  set +e
+  out=$(run_logbook "$home" update --mission "Validation mission" --input "$bad" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "malformed JSON was accepted"
+  assert_contains "$out" "not valid JSON" "malformed refusal did not explain the problem"
+  [ "$(shasum -a 256 "$page" | awk '{print $1}')" = "$before" ] || fail "malformed JSON changed the page"
+
+  cat > "$bad" <<'JSON'
+{
+  "kind": "verification",
+  "title": "Nearly 90% complete",
+  "summary": "This is an unsupported progress claim.",
+  "snapshot": {"done": "Some work", "now": "More work", "next": "Finish"},
+  "evidence": [{"label": "Guess", "value": "90%"}]
+}
+JSON
+  set +e
+  out=$(run_logbook "$home" update --mission "Validation mission" --input "$bad" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an unsupported percentage was accepted"
+  assert_contains "$out" "unsupported progress claim" "percentage refusal did not name the safety boundary"
+  [ "$(shasum -a 256 "$page" | awk '{print $1}')" = "$before" ] || fail "rejected percentage changed the page"
+  pass "malformed JSON and fake progress claims refuse without touching the page"
+}
+
+test_milestones_are_retained_newest_first() {
+  local home page update first_id second_id
+  home=$(make_home retention)
+  run_logbook "$home" start --mission "Retention mission" >/dev/null || fail "fixture start failed"
+  page=$(page_for "$home")
+  first_id=$(extract_payload "$page" | jq -r '.milestones[0].id')
+  update="$home/update.json"
+  write_stage_update "$update" "First stage complete" "The first bounded stage is complete." active
+  run_logbook "$home" update --mission "Retention mission" --input "$update" >/dev/null || fail "first update failed"
+  write_stage_update "$update" "Second stage complete" "The second bounded stage is complete." active
+  run_logbook "$home" update --mission "Retention mission" --input "$update" >/dev/null || fail "second update failed"
+  second_id=$(extract_payload "$page" | jq -r '.milestones[0].id')
+  [ "$second_id" != "$first_id" ] || fail "new update reused the initial milestone id"
+  extract_payload "$page" | jq -e --arg first "$first_id" '
+    (.milestones | length) == 3
+      and .milestones[0].title == "Second stage complete"
+      and .milestones[1].title == "First stage complete"
+      and .milestones[2].id == $first
+  ' >/dev/null || fail "newest-first update dropped or reordered milestone history"
+  pass "meaningful updates retain all embedded milestone history newest first"
+}
+
+test_path_like_mission_is_confined() {
+  local home out page resolved_home resolved_page
+  home=$(make_home confinement)
+  out=$(run_logbook "$home" start --mission "../../outside mission") || fail "safe slugging rejected a path-like title"
+  page=$(printf '%s\n' "$out" | awk '/^created: / {sub(/^created: /, ""); print}')
+  resolved_home=$(cd "$home" && pwd -P)
+  resolved_page=$(cd "$(dirname "$page")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$page")")
+  case "$resolved_page" in
+    "$resolved_home"/data/logbook/missions/*/index.html) ;;
+    *) fail "path-like mission escaped the private logbook root: $resolved_page" ;;
+  esac
+  [ ! -e "$TMP_ROOT/outside mission" ] || fail "path-like mission created an outside file"
+  pass "mission text cannot escape the private logbook path"
+}
+
+test_one_live_writer_refuses_a_competing_update() {
+  local home page before update lock out rc
+  home=$(make_home writer)
+  run_logbook "$home" start --mission "Writer mission" >/dev/null || fail "fixture start failed"
+  page=$(page_for "$home")
+  before=$(shasum -a 256 "$page" | awk '{print $1}')
+  update="$home/update.json"
+  write_stage_update "$update" "Competing stage" "A competing stage finished." active
+  lock="$home/data/logbook/.writer.lock"
+  mkdir "$lock"
+  printf '{"pid":%s,"claimed_at":"2026-08-27T00:00:00Z"}\n' "$$" > "$lock/owner.json"
+  set +e
+  out=$(run_logbook "$home" update --mission "Writer mission" --input "$update" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a competing live writer was accepted"
+  assert_contains "$out" "another logbook writer is active" "writer refusal did not name the conflict"
+  [ "$(shasum -a 256 "$page" | awk '{print $1}')" = "$before" ] || fail "competing writer changed the page"
+  rm -rf "$lock"
+  pass "one live writer owns each mutation"
+}
+
+test_completed_close_records_outcome_and_preserves_page() {
+  local home page input
+  home=$(make_home close)
+  run_logbook "$home" start --mission "Closing mission" >/dev/null || fail "fixture start failed"
+  page=$(page_for "$home")
+  input="$home/close.json"
+  cat > "$input" <<'JSON'
+{
+  "kind": "close",
+  "title": "Mission completed",
+  "summary": "The accepted outcome is finished and verified.",
+  "snapshot": {
+    "done": "The mission outcome is complete.",
+    "now": "The durable result is available.",
+    "next": "No further mission work is planned."
+  },
+  "gates": [
+    {"id": "mission-start", "label": "Mission started", "state": "passed", "evidence": [{"label": "Mission", "value": "Closing mission"}]},
+    {"id": "mission-outcome", "label": "Mission outcome achieved", "state": "passed", "evidence": [{"label": "Result", "value": "Accepted outcome"}]},
+    {"id": "verification", "label": "Outcome verified", "state": "passed", "evidence": [{"label": "Test", "value": "Focused suite passed"}]}
+  ],
+  "outcome": "completed",
+  "final_outcome": "The accepted outcome is available with passing evidence.",
+  "evidence": [{"label": "Test", "value": "Focused suite passed"}]
+}
+JSON
+  run_logbook "$home" close --mission "Closing mission" --input "$input" >/dev/null || fail "completed close failed"
+  assert_present "$page" "close deleted the durable page"
+  assert_absent "$home/data/logbook/active.json" "close left the mission registered active"
+  extract_payload "$page" | jq -e '.status == "closed" and .outcome == "completed" and .milestones[0].kind == "close"' >/dev/null \
+    || fail "close did not publish its embedded final outcome"
+  pass "close records the final outcome, preserves the page, and retires active registration"
+}
+
+test_safe_creation_and_atomic_embedded_update
+test_malformed_and_invalid_updates_preserve_current_page
+test_milestones_are_retained_newest_first
+test_path_like_mission_is_confined
+test_one_live_writer_refuses_a_competing_update
+test_completed_close_records_outcome_and_preserves_page

@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Firstmate Logbook</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --canvas: #FFFFFF;
+      --wash: #F7FBF9;
+      --hair: #E4EBE7;
+      --ink-1: #292929;
+      --ink-2: #5D5D5D;
+      --ink-3: #9E9E9E;
+      --pastel: #D9EFE6;
+      --pastel-strong: #A7E8CD;
+      --accent: #1BAF7A;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", sans-serif;
+      letter-spacing: -0.15px;
+      background: var(--wash);
+      color: var(--ink-1);
+    }
+    * { box-sizing: border-box; min-width: 0; }
+    html { background: var(--wash); }
+    body { margin: 0; background: var(--wash); font-size: 16px; line-height: 1.45; }
+    button { font: inherit; letter-spacing: inherit; }
+    .shell { width: min(1120px, calc(100% - 32px)); margin: 0 auto; padding: 40px 0 64px; }
+    .eyebrow { margin: 0 0 8px; color: var(--ink-2); font-size: 14px; font-weight: 500; letter-spacing: 0.4px; text-transform: uppercase; }
+    h1, h2 { margin: 0; font-size: 28px; font-weight: 500; line-height: 1.16; }
+    h2 { margin-bottom: 16px; }
+    p { margin: 0; }
+    .header { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; margin-bottom: 24px; }
+    .header__copy { max-width: 760px; }
+    .status-line { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-top: 14px; color: var(--ink-2); font-size: 14px; }
+    .chip { display: inline-flex; align-items: center; min-height: 30px; padding: 5px 12px; border-radius: 999px; background: var(--pastel); color: var(--ink-1); font-size: 14px; font-weight: 500; }
+    .refresh { flex: 0 0 auto; border: 1px solid var(--hair); border-radius: 999px; background: var(--canvas); color: var(--ink-1); padding: 9px 15px; font-size: 15px; font-weight: 500; cursor: pointer; }
+    .refresh:hover { border-color: var(--accent); }
+    .refresh:focus-visible { outline: 3px solid var(--pastel-strong); outline-offset: 2px; }
+    .notice { margin: 0 0 24px; padding: 16px; border: 1px solid var(--hair); border-radius: 16px; background: var(--canvas); color: var(--ink-2); }
+    .notice--error { border-color: #C2410C; color: var(--ink-1); }
+    .notice strong { font-weight: 500; }
+    .orientation { margin: 0 0 16px; color: var(--ink-2); }
+    .snapshot { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+    .snapshot-card { min-height: 150px; padding: 20px; border: 1px solid var(--hair); border-radius: 16px; background: var(--canvas); }
+    .snapshot-card[data-step="now"] { background: var(--pastel); }
+    .snapshot-card__number { display: flex; width: 30px; height: 30px; align-items: center; justify-content: center; margin-bottom: 22px; border-radius: 999px; background: var(--wash); color: var(--ink-2); font-size: 14px; font-weight: 500; }
+    .snapshot-card__label { margin-bottom: 6px; font-size: 14px; font-weight: 500; letter-spacing: 0.4px; text-transform: uppercase; }
+    .snapshot-card__text { color: var(--ink-1); overflow-wrap: anywhere; }
+    .pause { height: 24px; border-top: 1px solid var(--hair); }
+    .grid { display: grid; grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr); gap: 16px; align-items: start; }
+    .panel { margin-bottom: 16px; padding: 22px; border: 1px solid var(--hair); border-radius: 16px; background: var(--canvas); overflow: hidden; }
+    .panel__meta { margin: -8px 0 16px; color: var(--ink-2); font-size: 14px; }
+    .list { display: grid; gap: 10px; }
+    .row { padding: 14px 0; border-top: 1px solid var(--hair); }
+    .row:first-child { padding-top: 0; border-top: 0; }
+    .row:last-child { padding-bottom: 0; }
+    .row__head { display: flex; justify-content: space-between; gap: 14px; align-items: flex-start; }
+    .row__title { font-size: 15px; font-weight: 500; overflow-wrap: anywhere; }
+    .row__summary { margin-top: 5px; color: var(--ink-2); font-size: 15px; overflow-wrap: anywhere; }
+    .badge { flex: 0 0 auto; padding: 4px 9px; border-radius: 999px; background: var(--wash); color: var(--ink-2); font-size: 14px; }
+    .badge--passed, .badge--within-boundary { background: var(--pastel); color: var(--ink-1); }
+    .badge--active, .badge--changed { background: var(--pastel-strong); color: var(--ink-1); }
+    .badge--blocked, .badge--boundary-reached { border: 1px solid #C2410C; background: var(--canvas); color: var(--ink-1); }
+    details { margin-top: 10px; }
+    summary { color: var(--ink-2); font-size: 14px; cursor: pointer; }
+    .evidence { display: grid; gap: 8px; margin: 10px 0 0; padding: 0; list-style: none; }
+    .evidence li { padding: 10px 12px; border-radius: 8px; background: var(--wash); overflow-wrap: anywhere; }
+    .evidence__label { display: block; color: var(--ink-2); font-size: 14px; font-weight: 500; }
+    .evidence__value { color: var(--ink-1); font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 14px; letter-spacing: 0; }
+    .evidence a { color: var(--ink-1); text-decoration-color: var(--accent); text-underline-offset: 3px; }
+    .milestone__time { color: var(--ink-2); font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 14px; letter-spacing: 0; }
+    .empty { color: var(--ink-2); font-size: 15px; }
+    .final { margin-bottom: 16px; padding: 20px; border-radius: 16px; background: var(--pastel); }
+    .final strong { display: block; margin-bottom: 5px; font-weight: 500; }
+    [hidden] { display: none !important; }
+    @media (max-width: 760px) {
+      .shell { width: min(100% - 20px, 1120px); padding-top: 24px; }
+      .header { display: grid; }
+      .refresh { justify-self: start; }
+      .snapshot, .grid { grid-template-columns: minmax(0, 1fr); }
+      .snapshot-card { min-height: 0; }
+      .row__head { display: grid; }
+      .badge { justify-self: start; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="header">
+      <div class="header__copy">
+        <p class="eyebrow">Mission logbook</p>
+        <h1 id="mission-title">Loading mission progress</h1>
+        <div class="status-line">
+          <span class="chip" id="mission-status">Loading</span>
+          <span id="updated-at">Waiting for progress data</span>
+          <span id="updated-age"></span>
+        </div>
+      </div>
+      <button class="refresh" id="refresh" type="button">Refresh progress</button>
+    </header>
+
+    <div class="notice" id="load-notice" role="status" aria-live="polite">
+      Reading the latest validated progress payload.
+    </div>
+
+    <section aria-labelledby="snapshot-heading">
+      <h2 id="snapshot-heading">At a glance</h2>
+      <p class="orientation" id="orientation" hidden></p>
+      <div class="snapshot" id="snapshot"></div>
+      <div class="pause" aria-hidden="true"></div>
+    </section>
+
+    <section class="final" id="final" hidden>
+      <strong id="final-label"></strong>
+      <span id="final-outcome"></span>
+    </section>
+
+    <div class="grid">
+      <div>
+        <section class="panel" aria-labelledby="gates-heading">
+          <h2 id="gates-heading">Completion gates</h2>
+          <p class="panel__meta" id="gates-meta"></p>
+          <div class="list" id="gates"></div>
+        </section>
+
+        <section class="panel" id="blockers-panel" aria-labelledby="blockers-heading">
+          <h2 id="blockers-heading">Blockers</h2>
+          <div class="list" id="blockers"></div>
+        </section>
+
+        <section class="panel" id="resources-panel" aria-labelledby="resources-heading" hidden>
+          <h2 id="resources-heading">Resource boundaries</h2>
+          <div class="list" id="resources"></div>
+        </section>
+      </div>
+
+      <section class="panel" aria-labelledby="milestones-heading">
+        <h2 id="milestones-heading">Milestones</h2>
+        <p class="panel__meta">Newest first, with exact evidence behind each update.</p>
+        <div class="list" id="milestones"></div>
+      </section>
+    </div>
+  </main>
+
+  <!-- FIRSTMATE_LOGBOOK_PAYLOAD_BEGIN -->
+__FIRSTMATE_LOGBOOK_PAYLOAD__
+<!-- FIRSTMATE_LOGBOOK_PAYLOAD_END -->
+
+  <script>
+    (() => {
+      "use strict";
+      const SCHEMA = "firstmate-logbook.v1";
+      const $ = (id) => document.getElementById(id);
+      let currentUpdatedAt = null;
+
+      const text = (tag, className, value) => {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        node.textContent = String(value);
+        return node;
+      };
+
+      const validEvidence = (items) => Array.isArray(items) && items.every((item) =>
+        item && typeof item === "object" && typeof item.label === "string" &&
+        typeof item.value === "string" && (item.href === undefined || /^https:\/\//.test(item.href))
+      );
+
+      const validate = (data) => {
+        if (!data || data.schema !== SCHEMA) throw new Error("The progress file has an unsupported schema.");
+        if (!data.mission || typeof data.mission.title !== "string") throw new Error("The progress file has no mission title.");
+        if (!new Set(["active", "closed"]).has(data.status)) throw new Error("The progress file has an invalid mission state.");
+        if (!Number.isFinite(Date.parse(data.updated_at))) throw new Error("The progress file has an invalid update time.");
+        if (!data.snapshot || ["done", "now", "next"].some((key) => typeof data.snapshot[key] !== "string")) {
+          throw new Error("The progress file has an incomplete snapshot.");
+        }
+        if (!Array.isArray(data.gates) || data.gates.length === 0) throw new Error("The progress file has no completion gates.");
+        if (!Array.isArray(data.milestones) || data.milestones.length === 0) throw new Error("The progress file has no milestones.");
+        if (!Array.isArray(data.blockers) || !Array.isArray(data.resources)) throw new Error("The progress file has invalid boundary lists.");
+        const evidenceGroups = [
+          ...data.gates.map((item) => item.evidence),
+          ...data.milestones.map((item) => item.evidence),
+          ...data.blockers.map((item) => item.evidence),
+          ...data.resources.map((item) => item.evidence),
+        ];
+        if (!evidenceGroups.every(validEvidence)) throw new Error("The progress file has invalid evidence.");
+        return data;
+      };
+
+      const evidenceDetails = (items) => {
+        if (!items.length) return null;
+        const details = document.createElement("details");
+        const summary = text("summary", "", `Evidence (${items.length})`);
+        const list = text("ul", "evidence", "");
+        items.forEach((item) => {
+          const li = document.createElement("li");
+          li.appendChild(text("span", "evidence__label", item.label));
+          const value = text("span", "evidence__value", item.value);
+          if (item.href) {
+            const link = document.createElement("a");
+            link.href = item.href;
+            link.rel = "noreferrer";
+            link.target = "_blank";
+            link.appendChild(value);
+            li.appendChild(link);
+          } else {
+            li.appendChild(value);
+          }
+          list.appendChild(li);
+        });
+        details.appendChild(summary);
+        details.appendChild(list);
+        return details;
+      };
+
+      const stateRow = (titleValue, summaryValue, state, evidence) => {
+        const row = text("div", "row", "");
+        const head = text("div", "row__head", "");
+        const copy = text("div", "", "");
+        copy.appendChild(text("div", "row__title", titleValue));
+        if (summaryValue) copy.appendChild(text("div", "row__summary", summaryValue));
+        head.appendChild(copy);
+        head.appendChild(text("span", `badge badge--${state}`, state.replaceAll("-", " ")));
+        row.appendChild(head);
+        const details = evidenceDetails(evidence);
+        if (details) row.appendChild(details);
+        return row;
+      };
+
+      const formatTime = (iso) => new Intl.DateTimeFormat(undefined, {
+        dateStyle: "medium",
+        timeStyle: "short",
+      }).format(new Date(iso));
+
+      const updateAge = () => {
+        if (!currentUpdatedAt) return;
+        const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(currentUpdatedAt)) / 1000));
+        let age;
+        if (seconds < 60) age = "just now";
+        else if (seconds < 3600) age = `${Math.floor(seconds / 60)} min ago`;
+        else if (seconds < 86400) age = `${Math.floor(seconds / 3600)} hr ago`;
+        else age = `${Math.floor(seconds / 86400)} day${Math.floor(seconds / 86400) === 1 ? "" : "s"} ago`;
+        $("updated-age").textContent = age;
+      };
+
+      const render = (data) => {
+        document.title = `${data.mission.title} - Firstmate Logbook`;
+        $("mission-title").textContent = data.mission.title;
+        $("mission-status").textContent = data.status === "closed" ? "Closed" : "Active";
+        $("updated-at").textContent = `Updated ${formatTime(data.updated_at)}`;
+        currentUpdatedAt = data.updated_at;
+        updateAge();
+
+        $("orientation").hidden = !data.snapshot.orientation;
+        $("orientation").textContent = data.snapshot.orientation || "";
+        const snapshot = $("snapshot");
+        snapshot.replaceChildren();
+        [["done", "Done"], ["now", "Now"], ["next", "Next"]].forEach(([key, label], index) => {
+          const card = text("article", "snapshot-card", "");
+          card.dataset.step = key;
+          card.appendChild(text("span", "snapshot-card__number", index + 1));
+          card.appendChild(text("div", "snapshot-card__label", label));
+          card.appendChild(text("p", "snapshot-card__text", data.snapshot[key]));
+          snapshot.appendChild(card);
+        });
+
+        const gates = $("gates");
+        gates.replaceChildren();
+        data.gates.forEach((gate) => gates.appendChild(stateRow(gate.label, "", gate.state, gate.evidence)));
+        const passed = data.gates.filter((gate) => gate.state === "passed").length;
+        $("gates-meta").textContent = `${passed} of ${data.gates.length} gates complete`;
+
+        const blockers = $("blockers");
+        blockers.replaceChildren();
+        const orderedBlockers = [...data.blockers].sort((a, b) => (a.state === b.state ? 0 : a.state === "open" ? -1 : 1));
+        if (!orderedBlockers.length) blockers.appendChild(text("p", "empty", "No blockers are recorded."));
+        orderedBlockers.forEach((item) => blockers.appendChild(stateRow(item.summary, "", item.state, item.evidence)));
+
+        const resources = $("resources");
+        resources.replaceChildren();
+        $("resources-panel").hidden = data.resources.length === 0;
+        data.resources.forEach((item) => resources.appendChild(stateRow(item.label, item.boundary, item.state, item.evidence)));
+
+        const milestones = $("milestones");
+        milestones.replaceChildren();
+        data.milestones.forEach((item) => {
+          const row = text("article", "row", "");
+          const head = text("div", "row__head", "");
+          const copy = text("div", "", "");
+          copy.appendChild(text("div", "row__title", item.title));
+          copy.appendChild(text("div", "row__summary", item.summary));
+          head.appendChild(copy);
+          head.appendChild(text("time", "milestone__time", item.id));
+          row.appendChild(head);
+          const details = evidenceDetails(item.evidence);
+          if (details) row.appendChild(details);
+          milestones.appendChild(row);
+        });
+
+        $("final").hidden = data.status !== "closed";
+        if (data.status === "closed") {
+          $("final-label").textContent = `Final outcome: ${data.outcome}`;
+          $("final-outcome").textContent = data.final_outcome;
+        }
+        $("load-notice").hidden = true;
+        $("load-notice").className = "notice";
+      };
+
+      const showFailure = (error) => {
+        const notice = $("load-notice");
+        notice.hidden = false;
+        notice.className = "notice notice--error";
+        notice.replaceChildren();
+        notice.appendChild(text("strong", "", "Progress data is unavailable or stale. "));
+        notice.appendChild(text("span", "", `${error.message} The page shell is still usable; refresh after a validated payload is restored.`));
+        $("mission-status").textContent = "Data stale";
+      };
+
+      const load = () => {
+        const notice = $("load-notice");
+        notice.hidden = false;
+        notice.className = "notice";
+        notice.textContent = "Reading the latest validated progress payload.";
+        try {
+          const payloadNode = $("firstmate-logbook-data");
+          if (!payloadNode) throw new Error("The embedded progress data is missing.");
+          render(validate(JSON.parse(payloadNode.textContent)));
+        } catch (error) {
+          showFailure(error instanceof Error ? error : new Error("The embedded progress data could not be loaded."));
+        }
+      };
+
+      const refresh = () => {
+        const url = new URL(location.href);
+        url.searchParams.set("refresh", Date.now());
+        location.replace(url.href);
+      };
+      $("refresh").addEventListener("click", refresh);
+      window.firstmateLogbookRefresh = refresh;
+      window.firstmateLogbookReady = Promise.resolve().then(load);
+      setInterval(updateAge, 60000);
+    })();
+  </script>
+</body>
+</html>

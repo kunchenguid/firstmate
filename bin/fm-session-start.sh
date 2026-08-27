@@ -45,7 +45,8 @@
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
+#                       state/.afk, the private active logbook registration when
+#                       present, and a cheap per-task endpoint-liveness read:
 #                       read-only, always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
@@ -773,8 +774,8 @@ section "READ-ONCE CONTRACT"
 cat <<'EOF'
 Everything below is printed in full for this session start: every state/*.meta,
 a compact data/backlog.md listing, a bounded tail of every state/*.status,
-data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
-and data/learnings.md.
+the private active logbook registration when present, data/projects.md,
+data/secondmates.md, data/captain.md, data/captain-shared.md, and data/learnings.md.
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
 data/backlog.md or state/*.status: re-reading everything defeats the entire
 point of this command.
@@ -848,6 +849,18 @@ if [ -e "$STATE/.afk" ]; then
   printf 'present - away-mode supervision is active; the daemon owns the watcher.\n'
 else
   printf 'absent\n'
+fi
+
+# The active logbook registration is the tiny context-loss discovery pointer,
+# not a second work-state reader. /logbook owns its complete schema and every
+# transition; session start only makes the private record visible when present.
+if [ -e "$DATA/logbook/active.json" ]; then
+  subsection "Active logbook registration (load /logbook before meaningful mission milestones)"
+  if [ -f "$DATA/logbook/active.json" ] && [ ! -L "$DATA/logbook/active.json" ]; then
+    cat "$DATA/logbook/active.json"
+  else
+    printf 'UNSAFE: expected an ordinary non-symlink file at %s\n' "$DATA/logbook/active.json"
+  fi
 fi
 
 # Public commitments made through the myfirstmate relay. A promise to reply in a
