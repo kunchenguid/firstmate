@@ -4432,6 +4432,7 @@ test_recovery_ownership_accepts_verified_multitab_inventory() {
     fm_backend_herdr_cli() {
       case "$2 $3" in
         "session list") printf "%s\n" '\''{"sessions":[{"name":"lab","running":true}]}'\'' ;;
+        "workspace list") printf "%s\n" '\''{"result":{"workspaces":[{"workspace_id":"w1"}]}}'\'' ;;
         "tab list") printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t1","label":"other-1","workspace_id":"w1"},{"tab_id":"w1:t2","label":"other-2","workspace_id":"w1"}]}}'\'' ;;
         "pane list") printf "%s\n" '\''{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"},{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}'\'' ;;
         "pane get")
@@ -4448,6 +4449,34 @@ test_recovery_ownership_accepts_verified_multitab_inventory() {
   pass "fm_backend_herdr_recovery_ownership_state: joins workspace panes to their owning tabs"
 }
 
+test_recovery_ownership_scans_every_inventoried_workspace() {
+  local worktree out
+  worktree="$TMP_ROOT/ownership-multiworkspace"
+  mkdir -p "$worktree"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    worktree=$1
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "session list") printf "%s\n" '\''{"sessions":[{"name":"lab","running":true}]}'\'' ;;
+        "workspace list") printf "%s\n" '\''{"result":{"workspaces":[{"workspace_id":"w1"},{"workspace_id":"w2"}]}}'\'' ;;
+        "tab list")
+          case "$5" in
+            w1) printf "%s\n" '\''{"result":{"tabs":[]}}'\'' ;;
+            w2) printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w2:t1","label":"fm-task","workspace_id":"w2"}]}}'\'' ;;
+          esac
+          ;;
+        "pane list") printf "%s\n" '\''{"result":{"panes":[{"pane_id":"w2:p1","tab_id":"w2:t1"}]}}'\'' ;;
+        "pane get") printf '\''{"result":{"pane":{"pane_id":"w2:p1","tab_id":"w2:t1","workspace_id":"w2","foreground_cwd":"%s"}}}\n'\'' "$worktree" ;;
+        "agent get") printf "%s\n" '\''{"result":{"agent":{"agent_status":"working"}}}'\'' ;;
+      esac
+    }
+    fm_backend_herdr_recovery_ownership_state lab task "$1"
+  ' "$ROOT" "$worktree")
+  [ "$out" = live ] || fail "a live agent in a second inventoried workspace must be found, got '$out'"
+  pass "fm_backend_herdr_recovery_ownership_state: scans every workspace list entry, not just those seen in one tab list call"
+}
+
 test_recovery_ownership_refuses_malformed_pane_inventory() {
   local worktree out
   worktree="$TMP_ROOT/ownership-malformed"
@@ -4457,6 +4486,7 @@ test_recovery_ownership_refuses_malformed_pane_inventory() {
     fm_backend_herdr_cli() {
       case "$2 $3" in
         "session list") printf "%s\n" '\''{"sessions":[{"name":"lab","running":true}]}'\'' ;;
+        "workspace list") printf "%s\n" '\''{"result":{"workspaces":[{"workspace_id":"w1"}]}}'\'' ;;
         "tab list") printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t1","label":"other","workspace_id":"w1"}]}}'\'' ;;
         "pane list") printf "%s\n" '\''{"result":{"panes":[{"tab_id":"w1:t1"}]}}'\'' ;;
       esac
@@ -4476,6 +4506,7 @@ test_recovery_ownership_refuses_orphan_pane_inventory() {
     fm_backend_herdr_cli() {
       case "$2 $3" in
         "session list") printf "%s\n" '\''{"sessions":[{"name":"lab","running":true}]}'\'' ;;
+        "workspace list") printf "%s\n" '\''{"result":{"workspaces":[{"workspace_id":"w1"}]}}'\'' ;;
         "tab list") printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t1","label":"other","workspace_id":"w1"}]}}'\'' ;;
         "pane list") printf "%s\n" '\''{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"},{"pane_id":"w1:p-orphan","tab_id":"w1:t-missing"}]}}'\'' ;;
       esac
@@ -4495,6 +4526,7 @@ test_recovery_ownership_refuses_missing_tab_pane_inventory() {
     fm_backend_herdr_cli() {
       case "$2 $3" in
         "session list") printf "%s\n" '\''{"sessions":[{"name":"lab","running":true}]}'\'' ;;
+        "workspace list") printf "%s\n" '\''{"result":{"workspaces":[{"workspace_id":"w1"}]}}'\'' ;;
         "tab list") printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t-task","label":"fm-task","workspace_id":"w1"},{"tab_id":"w1:t-other","label":"other","workspace_id":"w1"}]}}'\'' ;;
         "pane list") printf "%s\n" '\''{"result":{"panes":[{"pane_id":"w1:p-other","tab_id":"w1:t-other"}]}}'\'' ;;
       esac
@@ -4533,6 +4565,7 @@ test_recovery_ownership_refuses_unreadable_foreground_cwd() {
     fm_backend_herdr_cli() {
       case "$2 $3" in
         "session list") printf "%s\n" '\''{"sessions":[{"name":"lab","running":true}]}'\'' ;;
+        "workspace list") printf "%s\n" '\''{"result":{"workspaces":[{"workspace_id":"w1"}]}}'\'' ;;
         "tab list") printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t1","label":"other","workspace_id":"w1"}]}}'\'' ;;
         "pane list") printf "%s\n" '\''{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}'\'' ;;
         "pane get") printf '\''{"result":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","foreground_cwd":"%s"}}}\n'\'' "$missing" ;;
@@ -4554,6 +4587,7 @@ test_recovery_ownership_parses_agent_not_found_body_after_nonzero_exit() {
     fm_backend_herdr_cli() {
       case "$2 $3" in
         "session list") printf "%s\n" '\''{"sessions":[{"name":"lab","running":true}]}'\'' ;;
+        "workspace list") printf "%s\n" '\''{"result":{"workspaces":[{"workspace_id":"w1"}]}}'\'' ;;
         "tab list") printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t1","label":"fm-task","workspace_id":"w1"}]}}'\'' ;;
         "pane list") printf "%s\n" '\''{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}'\'' ;;
         "pane get") printf '\''{"result":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","foreground_cwd":"%s"}}}\n'\'' "$worktree" ;;
@@ -4909,6 +4943,7 @@ test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
 test_recovery_ownership_accepts_verified_multitab_inventory
+test_recovery_ownership_scans_every_inventoried_workspace
 test_recovery_ownership_refuses_malformed_pane_inventory
 test_recovery_ownership_refuses_orphan_pane_inventory
 test_recovery_ownership_refuses_missing_tab_pane_inventory

@@ -1959,7 +1959,7 @@ fm_backend_herdr_recovery_path_state() {  # <worktree> <foreground-cwd>
 # through an uncertain inventory.
 fm_backend_herdr_recovery_ownership_state() {  # <recorded-session> <task-id> <worktree>
   local recorded_session=$1 task_id=$2 worktree=$3 sessions session_names session
-  local tabs tab_id tab_label workspace_id panes pane_id pane_info pane_code
+  local workspaces workspace_id tabs tab_id tab_label panes pane_id pane_info pane_code
   local pane_tab_id pane_workspace_id foreground path_state candidate agent_info agent_code
   local agent_status recorded_seen=0
   local tab_row
@@ -1995,122 +1995,137 @@ fm_backend_herdr_recovery_ownership_state() {  # <recorded-session> <task-id> <w
       return 0
     }
     [ "$session" = "$recorded_session" ] && recorded_seen=1
-    tabs=$(fm_backend_herdr_cli "$session" tab list 2>/dev/null) || {
+    workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || {
       printf 'unreadable'
       return 0
     }
-    if ! printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
+    if ! printf '%s' "$workspaces" | jq -e '
+      (.result.workspaces | type) == "array"
+      and all(.result.workspaces[];
+        ((.workspace_id | type) == "string") and ((.workspace_id | length) > 0))
+    ' >/dev/null 2>&1; then
       printf 'unreadable'
       return 0
     fi
-    while IFS=$'\t' read -r tab_row; do
-      [ -n "$tab_row" ] || continue
-      tab_id=${tab_row%%$'\t'*}
-      tab_label=${tab_row#*$'\t'}
-      workspace_id=${tab_label##*$'\t'}
-      tab_label=${tab_label%$'\t'*}
-      [ -n "$tab_id" ] && [ -n "$tab_label" ] && [ -n "$workspace_id" ] || {
-        printf 'ambiguous'
-        return 0
-      }
-      panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace_id" 2>/dev/null) || {
+    while IFS= read -r workspace_id; do
+      [ -n "$workspace_id" ] || {
         printf 'unreadable'
         return 0
       }
-      if ! printf '%s' "$panes" | jq -e \
-        --arg workspace "$workspace_id" --arg tab "$tab_id" --argjson tabs "$tabs" '
-        (.result.panes | type) == "array"
-        and ([.result.panes[] | select(.tab_id == $tab)] | length) > 0
-        and all(.result.panes[]; . as $pane |
-          (($pane.pane_id | type) == "string")
-          and (($pane.pane_id | length) > 0)
-          and (($pane.tab_id | type) == "string")
-          and (($pane.tab_id | length) > 0)
-          and ([
-            $tabs.result.tabs[]
-            | select(.workspace_id == $workspace and .tab_id == $pane.tab_id)
-          ] | length) == 1)
-      ' >/dev/null 2>&1; then
+      tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace_id" 2>/dev/null) || {
+        printf 'unreadable'
+        return 0
+      }
+      if ! printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
         printf 'unreadable'
         return 0
       fi
-      while IFS=$'\t' read -r pane_id pane_tab_id; do
-        [ -n "$pane_id" ] && [ -n "$pane_tab_id" ] || {
+      while IFS=$'\t' read -r tab_row; do
+        [ -n "$tab_row" ] || continue
+        tab_id=${tab_row%%$'\t'*}
+        tab_label=${tab_row#*$'\t'}
+        [ -n "$tab_id" ] && [ -n "$tab_label" ] || {
+          printf 'ambiguous'
+          return 0
+        }
+        panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace_id" 2>/dev/null) || {
           printf 'unreadable'
           return 0
         }
-        [ "$pane_tab_id" = "$tab_id" ] || continue
-        pane_info=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>/dev/null) || {
-          printf 'ambiguous'
-          return 0
-        }
-        pane_code=$(printf '%s' "$pane_info" | jq -r '.error.code // empty' 2>/dev/null)
-        [ -z "$pane_code" ] || {
-          printf 'ambiguous'
-          return 0
-        }
-        if ! printf '%s' "$pane_info" | jq -e --arg pane "$pane_id" --arg workspace "$workspace_id" '
-          .result.pane.pane_id == $pane
-          and ((.result.pane.tab_id | type) == "string")
-          and ((.result.pane.workspace_id | type) == "string")
-          and .result.pane.workspace_id == $workspace
-          and ((.result.pane.foreground_cwd | type) == "string")
-          and ((.result.pane.foreground_cwd | length) > 0)
+        if ! printf '%s' "$panes" | jq -e \
+          --arg tab "$tab_id" --argjson tabs "$tabs" '
+          (.result.panes | type) == "array"
+          and ([.result.panes[] | select(.tab_id == $tab)] | length) > 0
+          and all(.result.panes[]; . as $pane |
+            (($pane.pane_id | type) == "string")
+            and (($pane.pane_id | length) > 0)
+            and (($pane.tab_id | type) == "string")
+            and (($pane.tab_id | length) > 0)
+            and ([
+              $tabs.result.tabs[]
+              | select(.tab_id == $pane.tab_id)
+            ] | length) == 1)
         ' >/dev/null 2>&1; then
           printf 'unreadable'
           return 0
         fi
-        pane_tab_id=$(printf '%s' "$pane_info" | jq -r '.result.pane.tab_id' 2>/dev/null)
-        pane_workspace_id=$(printf '%s' "$pane_info" | jq -r '.result.pane.workspace_id' 2>/dev/null)
-        foreground=$(printf '%s' "$pane_info" | jq -r '.result.pane.foreground_cwd' 2>/dev/null)
-        [ "$pane_workspace_id" = "$workspace_id" ] && [ "$pane_tab_id" = "$tab_id" ] || {
-          printf 'ambiguous'
-          return 0
-        }
-        candidate=0
-        [ "$tab_label" = "fm-$task_id" ] && candidate=1
-        path_state=$(fm_backend_herdr_recovery_path_state "$worktree" "$foreground")
-        case "$path_state" in
-          match) candidate=1 ;;
-          outside) ;;
-          *) printf 'unreadable'; return 0 ;;
-        esac
-        [ "$candidate" = 1 ] || continue
-        agent_info=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>&1)
-        agent_code=$(printf '%s' "$agent_info" | jq -r '.error.code // empty' 2>/dev/null)
-        if [ "$agent_code" = agent_not_found ]; then
-          # A missing native registration is not enough to call a pane clear:
-          # a manually started agent can still be running in a Herdr pane that
-          # Firstmate did not register. Only the adapter's strict process
-          # inventory may downgrade this to an idle bare shell; every other
-          # shape remains ambiguous and refuses recovery.
-          fm_backend_herdr_pane_idle_shell_pid "$session" "$pane_id" >/dev/null 2>&1 || {
+        while IFS=$'\t' read -r pane_id pane_tab_id; do
+          [ -n "$pane_id" ] && [ -n "$pane_tab_id" ] || {
+            printf 'unreadable'
+            return 0
+          }
+          [ "$pane_tab_id" = "$tab_id" ] || continue
+          pane_info=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>/dev/null) || {
             printf 'ambiguous'
             return 0
           }
-          continue
-        fi
-        [ -z "$agent_code" ] || {
-          printf 'ambiguous'
-          return 0
-        }
-        agent_status=$(printf '%s' "$agent_info" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
-        case "$agent_status" in
-          working|idle|done|blocked)
-            printf 'live'
-            return 0
-            ;;
-          *)
+          pane_code=$(printf '%s' "$pane_info" | jq -r '.error.code // empty' 2>/dev/null)
+          [ -z "$pane_code" ] || {
             printf 'ambiguous'
             return 0
-            ;;
-        esac
-      done < <(printf '%s' "$panes" | jq -r '.result.panes[] | [.pane_id, .tab_id] | @tsv' 2>/dev/null)
-    done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | [
-      (if (.tab_id | type) == "string" then .tab_id else "" end),
-      (if (.label | type) == "string" then .label else "" end),
-      (if (.workspace_id | type) == "string" then .workspace_id else "" end)
-    ] | @tsv' 2>/dev/null)
+          }
+          if ! printf '%s' "$pane_info" | jq -e --arg pane "$pane_id" --arg workspace "$workspace_id" '
+            .result.pane.pane_id == $pane
+            and ((.result.pane.tab_id | type) == "string")
+            and ((.result.pane.workspace_id | type) == "string")
+            and .result.pane.workspace_id == $workspace
+            and ((.result.pane.foreground_cwd | type) == "string")
+            and ((.result.pane.foreground_cwd | length) > 0)
+          ' >/dev/null 2>&1; then
+            printf 'unreadable'
+            return 0
+          fi
+          pane_tab_id=$(printf '%s' "$pane_info" | jq -r '.result.pane.tab_id' 2>/dev/null)
+          pane_workspace_id=$(printf '%s' "$pane_info" | jq -r '.result.pane.workspace_id' 2>/dev/null)
+          foreground=$(printf '%s' "$pane_info" | jq -r '.result.pane.foreground_cwd' 2>/dev/null)
+          [ "$pane_workspace_id" = "$workspace_id" ] && [ "$pane_tab_id" = "$tab_id" ] || {
+            printf 'ambiguous'
+            return 0
+          }
+          candidate=0
+          [ "$tab_label" = "fm-$task_id" ] && candidate=1
+          path_state=$(fm_backend_herdr_recovery_path_state "$worktree" "$foreground")
+          case "$path_state" in
+            match) candidate=1 ;;
+            outside) ;;
+            *) printf 'unreadable'; return 0 ;;
+          esac
+          [ "$candidate" = 1 ] || continue
+          agent_info=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>&1)
+          agent_code=$(printf '%s' "$agent_info" | jq -r '.error.code // empty' 2>/dev/null)
+          if [ "$agent_code" = agent_not_found ]; then
+            # A missing native registration is not enough to call a pane clear:
+            # a manually started agent can still be running in a Herdr pane that
+            # Firstmate did not register. Only the adapter's strict process
+            # inventory may downgrade this to an idle bare shell; every other
+            # shape remains ambiguous and refuses recovery.
+            fm_backend_herdr_pane_idle_shell_pid "$session" "$pane_id" >/dev/null 2>&1 || {
+              printf 'ambiguous'
+              return 0
+            }
+            continue
+          fi
+          [ -z "$agent_code" ] || {
+            printf 'ambiguous'
+            return 0
+          }
+          agent_status=$(printf '%s' "$agent_info" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+          case "$agent_status" in
+            working|idle|done|blocked)
+              printf 'live'
+              return 0
+              ;;
+            *)
+              printf 'ambiguous'
+              return 0
+              ;;
+          esac
+        done < <(printf '%s' "$panes" | jq -r '.result.panes[] | [.pane_id, .tab_id] | @tsv' 2>/dev/null)
+      done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | [
+        (if (.tab_id | type) == "string" then .tab_id else "" end),
+        (if (.label | type) == "string" then .label else "" end)
+      ] | @tsv' 2>/dev/null)
+    done < <(printf '%s' "$workspaces" | jq -r '.result.workspaces[]? | (if (.workspace_id | type) == "string" then .workspace_id else "" end)' 2>/dev/null)
   done <<< "$session_names"
   [ "$recorded_seen" = 1 ] || {
     printf 'unreadable'
