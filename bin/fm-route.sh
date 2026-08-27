@@ -28,6 +28,16 @@ case "$command" in
       --now) require_value "$@"; NOW=$2; shift 2 ;; *) usage ;; esac; done
     [ -n "$REQUEST" ] && [ -r "$REQUEST" ] || { fm_route_diagnostic 'request file is required and must be readable'; exit 1; }
     [ -n "$CANDIDATES" ] && [ -r "$CANDIDATES" ] || { fm_route_diagnostic 'candidates file is required and must be readable'; exit 1; }
+    if fm_route_select_policy_guard; then
+      :
+    else
+      rc=$?
+      if [ "$rc" -eq 10 ]; then
+        fm_route_static_result
+        exit 0
+      fi
+      exit "$rc"
+    fi
     validate_now "$NOW"; fm_route_validate_request "$REQUEST"; fm_route_validate_candidates "$CANDIDATES"; fm_route_select "$REQUEST" "$CANDIDATES"
     ;;
   reserve|verify-reservation)

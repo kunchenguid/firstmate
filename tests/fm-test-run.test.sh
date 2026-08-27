@@ -645,24 +645,45 @@ SH
 
 test_herdr_ci_family_run_has_a_step_timeout() {
   # The required Herdr lane's hang tripwire is the family-run *step* bound, not
-  # the 75-minute job cap. Parse the workflow as YAML so nested `with.name`
-  # artifact keys cannot masquerade as the step contract.
-  command -v ruby >/dev/null 2>&1 \
-    || fail "ruby is required to parse .github/workflows/ci.yml as YAML"
+  # the 75-minute job cap. actionlint first proves the complete workflow is
+  # valid, then the self-contained indentation-aware reader selects only the
+  # authoritative tests-herdr job and its named step.
+  command -v actionlint >/dev/null 2>&1 \
+    || fail "pinned actionlint is required to validate .github/workflows/ci.yml"
+  actionlint "$ROOT/.github/workflows/ci.yml" \
+    || fail "actionlint rejected .github/workflows/ci.yml"
   local json job_timeout step_timeout
-  json=$(ruby -ryaml -rjson -e '
-doc = YAML.load_file(ARGV[0])
-job = doc.fetch("jobs").fetch("tests-herdr")
-step = job.fetch("steps").find { |s|
-  s.is_a?(Hash) && s["name"] == "Run real-Herdr family (serial, required)"
-}
-raise "missing family-run step" if step.nil?
-raise "family-run step has no timeout-minutes" unless step.key?("timeout-minutes")
-puts JSON.generate(
-  "job_timeout" => job.fetch("timeout-minutes"),
-  "step_timeout" => step.fetch("timeout-minutes")
-)
-' "$ROOT/.github/workflows/ci.yml") \
+  json=$(python3 - "$ROOT/.github/workflows/ci.yml" <<'PY'
+import json
+import re
+import sys
+
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+job_start = next((i for i, line in enumerate(lines) if line == "  tests-herdr:"), None)
+if job_start is None:
+    raise SystemExit("missing tests-herdr job")
+job_end = next((i for i in range(job_start + 1, len(lines))
+                if re.match(r"^  [A-Za-z0-9_-]+:\s*$", lines[i])), len(lines))
+job = lines[job_start:job_end]
+job_timeouts = [re.fullmatch(r"    timeout-minutes:\s*([0-9]+)\s*", line)
+                for line in job]
+job_timeouts = [match.group(1) for match in job_timeouts if match]
+step_name = "      - name: Run real-Herdr family (serial, required)"
+step_starts = [i for i, line in enumerate(job) if line == step_name]
+if len(step_starts) != 1:
+    raise SystemExit("missing or duplicate family-run step")
+step_start = step_starts[0]
+step_end = next((i for i in range(step_start + 1, len(job))
+                 if re.match(r"^      - ", job[i])), len(job))
+step_timeouts = [re.fullmatch(r"        timeout-minutes:\s*([0-9]+)\s*", line)
+                 for line in job[step_start:step_end]]
+step_timeouts = [match.group(1) for match in step_timeouts if match]
+if len(job_timeouts) != 1 or len(step_timeouts) != 1:
+    raise SystemExit("missing or duplicate authoritative timeout")
+print(json.dumps({"job_timeout": int(job_timeouts[0]),
+                  "step_timeout": int(step_timeouts[0])}))
+PY
+  ) \
     || fail "could not parse tests-herdr timeouts from ci.yml"
   job_timeout=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["job_timeout"])' <<<"$json") \
     || fail "could not read job timeout from parsed workflow"

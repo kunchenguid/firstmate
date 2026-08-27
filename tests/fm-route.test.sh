@@ -10,6 +10,7 @@ ROUTE="$ROOT/bin/fm-route.sh"
 REQUEST="$LAB/request.json"
 CANDIDATES="$LAB/candidates.json"
 export FM_STATE_OVERRIDE="$LAB/state"
+export FM_CONFIG_OVERRIDE="$LAB/config"
 
 command -v jq >/dev/null 2>&1 || fail "jq is required for routing tests"
 
@@ -55,6 +56,70 @@ write_candidate_array() {
 
 select_json() {
   "$ROUTE" select --request "$REQUEST" --candidates "$CANDIDATES" --now 1000
+}
+
+seed_v2_policy() {
+  mkdir -p "$FM_CONFIG_OVERRIDE"
+  jq -n --arg mode "$1" '{
+    schemaVersion:2,
+    routing:{mode:$mode},
+    profiles:{
+      "pi-test":{
+        harness:"pi",model:"model-only",provider:"provider",lane:"lane-1",
+        reasoningClass:"strong",workTypes:["implementation"]
+      }
+    },
+    default:["pi-test"]
+  }' >"$FM_CONFIG_OVERRIDE/crew-dispatch.json"
+}
+
+test_off_mode_returns_static_without_initializing_routing_state() {
+  local out
+  rm -rf "$FM_STATE_OVERRIDE/routing"
+  seed_v2_policy off
+  write_request standard implementation medium false 1 strong 3600
+  write_candidates "[$(candidate only lane-1 3 1 0 0 0 null)]"
+
+  out=$(select_json) || fail "off-mode selection failed"
+  jq -e '
+    . == {
+      action:"static",reason:"routing-mode-off",selected:null,ranked:[],
+      rejected:[],uncertainty:[],maxWorkers:1
+    }
+  ' <<<"$out" >/dev/null || fail "off mode did not return the exact static decision"
+  [ ! -e "$FM_STATE_OVERRIDE/routing" ] \
+    || fail "off-mode selection initialized or mutated routing state"
+
+  rm -f "$FM_CONFIG_OVERRIDE/crew-dispatch.json"
+  pass "valid version 2 off mode returns static without routing-state mutation"
+}
+
+test_policy_boundaries_are_explicit_and_fail_closed() {
+  local out rc
+  rm -rf "$FM_STATE_OVERRIDE/routing"
+  mkdir -p "$FM_CONFIG_OVERRIDE"
+  printf '%s\n' '{"schemaVersion":2,"routing":{"mode":"sideways"}}' \
+    >"$FM_CONFIG_OVERRIDE/crew-dispatch.json"
+  write_request standard implementation medium false 1 strong 3600
+  write_candidates "[$(candidate only lane-1 3 1 0 0 0 null)]"
+
+  set +e
+  out=$(select_json 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "invalid active policy did not fail closed"
+  [ "$out" = "fm-route: active dispatch policy is invalid" ] \
+    || fail "invalid active policy leaked an unstable diagnostic: $out"
+  [ ! -e "$FM_STATE_OVERRIDE/routing" ] \
+    || fail "invalid active policy initialized or mutated routing state"
+
+  rm -f "$FM_CONFIG_OVERRIDE/crew-dispatch.json"
+  out=$(select_json) || fail "missing policy did not retain direct selector compatibility"
+  jq -e '.action == "selected" and .selected.profile == "only"' <<<"$out" >/dev/null \
+    || fail "missing policy did not retain direct selector compatibility"
+  [ -d "$FM_STATE_OVERRIDE/routing/reservations" ] \
+    || fail "missing-policy direct selector did not follow its legacy state path"
+  pass "invalid active policy fails closed while absent policy keeps legacy selection"
 }
 
 expect_failure_contains() {
@@ -1271,6 +1336,8 @@ test_every_single_value_option_rejects_duplicates() {
 }
 
 test_fit_beats_quota
+test_off_mode_returns_static_without_initializing_routing_state
+test_policy_boundaries_are_explicit_and_fail_closed
 test_unknowns_are_disclosed_not_zero
 test_worker_budget_is_bounded
 test_every_decision_has_the_complete_output_shape

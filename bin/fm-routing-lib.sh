@@ -117,6 +117,35 @@ fm_route_worker_budget() {
   fi
 }
 
+fm_route_static_result() {
+  jq -n '{action:"static",reason:"routing-mode-off",selected:null,ranked:[],rejected:[],uncertainty:[],maxWorkers:1}'
+}
+
+# Return 10 only for an authoritative, valid version 2 policy in off mode.
+# Missing policy and version 1 retain the legacy low-level selector contract;
+# an active malformed policy fails closed with a stable diagnostic.
+fm_route_select_policy_guard() {
+  local config=${FM_CONFIG_OVERRIDE:-$FM_ROUTE_HOME/config}/crew-dispatch.json description schema mode
+  [ -e "$config" ] || return 0
+  [ -f "$config" ] && [ -r "$config" ] || {
+    fm_route_diagnostic 'active dispatch policy is unreadable'
+    return 1
+  }
+  description=$("$FM_ROUTE_ROOT/bin/fm-dispatch-policy.sh" describe "$config" 2>/dev/null) || {
+    fm_route_diagnostic 'active dispatch policy is invalid'
+    return 1
+  }
+  schema=$(jq -r '.schemaVersion' <<<"$description" 2>/dev/null) || {
+    fm_route_diagnostic 'active dispatch policy is invalid'
+    return 1
+  }
+  mode=$(jq -r '.mode' <<<"$description" 2>/dev/null) || {
+    fm_route_diagnostic 'active dispatch policy is invalid'
+    return 1
+  }
+  [ "$schema" != 2 ] || [ "$mode" != off ] || return 10
+}
+
 fm_route_require_directory() {
   local directory=$1 parent
   if [ -L "$directory" ] || { [ -e "$directory" ] && [ ! -d "$directory" ]; }; then

@@ -18,7 +18,7 @@ metadata:
 3. Validate policy and every profile.
    On version 2 failure, emit one visible policy diagnostic, use configured static dispatch, and make no optimization state mutation.
    Do not call `fm-route.sh select`, `observe`, `reserve`, or the outcome ledger on this path.
-   With valid version 2 mode `off`, automatic-dispatch uses configured static dispatch and stops before account/candidate resolution, `select`, `observe`, `reserve`, or any routing ledger/state mutation.
+   With valid version 2 mode `off`, automatic-dispatch uses configured static dispatch and stops before account/candidate resolution, `select`, `observe`, `reserve`, or any routing ledger/state mutation. Low-level `select` also returns static without state mutation; this is defense in depth, not the procedure.
 4. Resolve native symbolic accounts with `fm-account-lane.sh` without inspecting credentials.
    A native profile whose symbolic account is absent from this home is ineligible; continue evaluating qualified Pi or other local profiles before static fallback.
 5. Use each runtime's authoritative catalog for model support and provider family.
