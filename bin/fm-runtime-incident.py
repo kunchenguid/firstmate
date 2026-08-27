@@ -22,7 +22,7 @@ Evidence is a JSON object.  Supported observations are:
   local_services: [{name,status}]
   diagnosis: {classification, probable_root_cause, supporting_evidence,
               code_change_required}
-  approval: {kind,request}
+  approval: {required,kind,request}
   verification: {runtime_path_ok, companion_connectivity_required,
                  checks:[{scope,name,status,evidence}]}
 
@@ -83,13 +83,14 @@ VERIFICATION_REQUIRED_SCOPES = {
     "user_visible_path",
 }
 VERIFICATION_OPTIONAL_SCOPES = {"companion_connectivity"}
-DIAGNOSIS_CODE_REQUIREMENT = {
-    "application code defect": "yes",
-    "deployment/routing defect": "no",
-    "external dependency, quota, billing, credential, or configuration failure": "no",
-    "local background-service failure": "no",
-    "unknown": "not yet proven",
+DIAGNOSIS_CATEGORIES = {
+    "application code defect",
+    "deployment/routing defect",
+    "external dependency, quota, billing, credential, or configuration failure",
+    "local background-service failure",
+    "unknown",
 }
+CODE_CHANGE_DECISIONS = {"yes", "no", "not yet proven"}
 
 
 class IncidentError(RuntimeError):
@@ -768,6 +769,22 @@ def collect_workers(
 
         registered_copy = copy_by_path.get(str(cwd)) if cwd and not remote_host else None
         stale_path = bool(registered_copy and registered_copy["stale_remote"])
+        if cwd_record and not remote_host and registered_copy is None:
+            worker_remote_head = cwd_record.get("remote_default_head")
+            authoritative_remote_head = repo_info.get("authoritative_remote_head")
+            if worker_remote_head and authoritative_remote_head:
+                stale_path = bool(
+                    worker_remote_head != authoritative_remote_head
+                    and commit_is_ancestor(
+                        Path(repo_info["authoritative_repository"]),
+                        worker_remote_head,
+                        authoritative_remote_head,
+                    )
+                )
+                if not stale_path and worker_remote_head != authoritative_remote_head:
+                    wrong_worktree = None
+            else:
+                wrong_worktree = None
         if stale_path:
             repository_match = False
             wrong_worktree = True
@@ -893,7 +910,7 @@ def record_agent_diagnosis(evidence: dict[str, Any], repo_info: dict[str, Any]) 
         probable_input = diagnosis_input.get("probable_root_cause")
         code_required_input = diagnosis_input.get("code_change_required")
         supporting_input = diagnosis_input.get("supporting_evidence")
-        if not isinstance(category_input, str) or category_input not in DIAGNOSIS_CODE_REQUIREMENT:
+        if not isinstance(category_input, str) or category_input not in DIAGNOSIS_CATEGORIES:
             raise IncidentError("diagnosis.classification must be one supported incident category")
         if not isinstance(probable_input, str) or not probable_input.strip():
             raise IncidentError("diagnosis.probable_root_cause must be a non-empty string")
@@ -901,12 +918,12 @@ def record_agent_diagnosis(evidence: dict[str, Any], repo_info: dict[str, Any]) 
             raise IncidentError("diagnosis.supporting_evidence must be a non-empty list of strings")
         if any(not isinstance(item, str) or not item.strip() for item in supporting_input):
             raise IncidentError("diagnosis.supporting_evidence must contain only non-empty strings")
-        category = category_input
-        code_required = DIAGNOSIS_CODE_REQUIREMENT[category]
-        if code_required_input != code_required:
+        if not isinstance(code_required_input, str) or code_required_input not in CODE_CHANGE_DECISIONS:
             raise IncidentError(
-                f"diagnosis.code_change_required must be {code_required!r} for {category!r}"
+                "diagnosis.code_change_required must be yes, no, or not yet proven"
             )
+        category = category_input
+        code_required = code_required_input
         probable = compact(probable_input, 300)
         supporting_values = unique_strings(compact(item, 300) for item in supporting_input)
 
@@ -922,18 +939,26 @@ def record_agent_diagnosis(evidence: dict[str, Any], repo_info: dict[str, Any]) 
         )
         if not proof_complete:
             raise IncidentError(
-                "application code diagnosis requires defect_proven, defect_evidence, reproduction, and proven_path"
+                "a code-change diagnosis requires defect_proven, defect_evidence, reproduction, and proven_path"
             )
         if hotfix_already_deployed:
             raise IncidentError(
-                "application code diagnosis conflicts with an already-deployed proposed hotfix; continue agent diagnosis"
+                "the code-change diagnosis conflicts with an already-deployed proposed hotfix; continue agent diagnosis"
             )
         if repo_info.get("remote_default_conflict") or not repo_info.get("authoritative_remote_head"):
-            raise IncidentError("application code diagnosis requires one verified authoritative remote default head")
+            raise IncidentError("a code-change diagnosis requires one verified authoritative remote default head")
 
-    operational_repair_ready = code_required == "no" and category != "unknown"
-    approval_required = operational_repair_ready
-    if operational_repair_ready:
+    operational_repair_ready = code_required == "no"
+    approval_required_input = approval_input.get("required")
+    if diagnosis_input is not None and operational_repair_ready:
+        if type(approval_required_input) is not bool:
+            raise IncidentError("a no-code diagnosis requires boolean approval.required")
+        approval_required = approval_required_input
+    else:
+        if "required" in approval_input and type(approval_required_input) is not bool:
+            raise IncidentError("approval.required must be boolean")
+        approval_required = False
+    if operational_repair_ready and approval_required:
         approval_kind_input = approval_input.get("kind")
         approval_request_input = approval_input.get("request")
         if not isinstance(approval_kind_input, str) or not approval_kind_input.strip():
@@ -943,9 +968,12 @@ def record_agent_diagnosis(evidence: dict[str, Any], repo_info: dict[str, Any]) 
         approval_kind = compact(approval_kind_input, 80)
         approval_request = compact(approval_request_input, 300)
     else:
-        approval_required = False
         approval_kind = "none"
-        approval_request = "No operational mutation is authorized by the current diagnosis."
+        approval_request = (
+            "No captain approval is required for the adjudicated operational repair."
+            if operational_repair_ready
+            else "No operational mutation is authorized by the current diagnosis."
+        )
 
     if code_required == "yes":
         next_action = "Start one current-main continuation and transfer only incident-related changes through the repository's normal validation and release process."
@@ -1452,7 +1480,7 @@ def triage(args: argparse.Namespace) -> int:
         phase = "diagnosis"
         outcome = "more_evidence_required"
     elif diagnosis["operational_repair_ready"]:
-        phase = "approval"
+        phase = "approval" if diagnosis["approval"]["required"] else "repair"
         outcome = "operational_repair"
     else:
         phase = "diagnosis"
@@ -1553,8 +1581,10 @@ def repair(args: argparse.Namespace) -> int:
         if not record["diagnosis"].get("operational_repair_ready"):
             raise IncidentError("the diagnosis has not identified an operational repair")
         approval = record["approval"]
-        if not approval.get("required") or approval.get("status") != "approved":
+        if approval.get("required") and approval.get("status") != "approved":
             raise IncidentError("the exact operational approval is still pending")
+        if not approval.get("required") and approval.get("status") != "not_required":
+            raise IncidentError("the operational approval state is invalid")
         record["repair"] = {"status": "complete", "note": compact(args.note, 300), "recorded_at": now}
         record["phase"] = "verification"
         record["updated_at"] = now

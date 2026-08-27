@@ -226,6 +226,53 @@ EOF
   pass "triage preserves remote worker directory authority"
 }
 
+test_worker_omitted_by_candidate_cap_is_still_reconciled() {
+  local home origin seed stale current crew_state out i
+  home=$(make_home omitted-worker)
+  origin=$(make_origin omitted-worker)
+  seed=$TMP_ROOT/omitted-worker-seed
+  stale=$home/z-stale
+  clone_origin "$origin" "$stale"
+  advance_origin "$seed" "current incident baseline" 2026-08-22T12:00:00Z
+  current=$home/projects/titan-current
+  clone_origin "$origin" "$current"
+  stale=$(cd "$stale" && pwd -P)
+  current=$(cd "$current" && pwd -P)
+  for i in $(seq -w 1 63); do
+    mkdir -p "$home/projects/candidate-$i"
+  done
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] omitted-worker - Restore Titan after quota exhaustion (repo: titan) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/omitted-worker.meta" \
+    "worktree=$stale" \
+    "project=$stale" \
+    "harness=codex" \
+    "kind=ship"
+  printf 'state: working · source: pane · restoring Titan after quota exhaustion\n' \
+    > "$home/state/omitted-worker.current-state"
+  crew_state=$(make_crew_state_fake "$home")
+  out=$(FM_CREW_STATE_BIN="$crew_state" run_triage "$home" omitted-worker "$current" \
+    "Titan unavailable after quota exhaustion")
+  printf '%s' "$out" | jq -e --arg stale "$stale" '
+    .repository.inventory.candidate_paths.omitted == 1
+      and ([.repository.copies[].path] | index($stale)) == null
+      and (.workers.registry_entries[] | select(.id == "omitted-worker")
+        | .repository_match == false
+          and .wrong_worktree == true
+          and .activity_matches_incident == false
+          and .match_reason == "registered path is a superseded repository copy")
+      and ([.workers.stale_registry_entries[].id] | index("omitted-worker")) != null
+      and ([.workers.wrong_worktree[].id] | index("omitted-worker")) != null
+  ' >/dev/null || fail "candidate capping hid a stale worker checkout: $out"
+  pass "worker placement remains authoritative when repository candidates are capped"
+}
+
 test_git_triage_probes_disable_optional_locks() {
   local home origin repo fakebin real_git marker out
   home=$(make_home read-only-git)
@@ -256,13 +303,11 @@ SH
 }
 
 test_external_quota_no_code_lifecycle_and_status() {
-  local home origin repo out view bearings snapshot bypass_evidence invalid_kind invalid_request
+  local home origin repo out view bearings snapshot invalid_kind invalid_request
   home=$(make_home quota-lifecycle)
   origin=$(make_origin quota-lifecycle)
   repo=$home/projects/titan
   clone_origin "$origin" "$repo"
-  bypass_evidence=$home/quota-with-approval-bypass.json
-  jq '.approval.required=false' "$QUOTA_FIXTURE" > "$bypass_evidence"
   invalid_kind=$home/quota-with-empty-approval-kind.json
   invalid_request=$home/quota-with-invalid-approval-request.json
   jq '.approval.kind=""' "$QUOTA_FIXTURE" > "$invalid_kind"
@@ -276,7 +321,7 @@ test_external_quota_no_code_lifecycle_and_status() {
     fail "non-string approval request was accepted"
   fi
   out=$(run_triage "$home" quota-lifecycle "$repo" \
-    "Titan companion cannot read state" --evidence "$bypass_evidence")
+    "Titan companion cannot read state" --evidence "$QUOTA_FIXTURE")
   printf '%s' "$out" | jq -e '
     .phase == "approval"
       and .outcome == "operational_repair"
@@ -639,6 +684,73 @@ EOF
   pass "raw runtime evidence cannot replace agent diagnosis or authorize a workflow"
 }
 
+test_agent_owned_code_and_approval_decisions() {
+  local home origin repo out
+  home=$(make_home agent-decisions)
+  origin=$(make_origin agent-decisions)
+  repo=$home/projects/titan
+  clone_origin "$origin" "$repo"
+
+  cat > "$home/unproven-code.json" <<'EOF'
+{
+  "diagnosis": {
+    "classification": "application code defect",
+    "probable_root_cause": "The application path remains the leading suspected cause.",
+    "supporting_evidence": ["The failure is isolated to one application request path."],
+    "code_change_required": "not yet proven"
+  }
+}
+EOF
+  out=$(run_triage "$home" unproven-code "$repo" \
+    "One application request path remains unexplained" --evidence "$home/unproven-code.json")
+  printf '%s' "$out" | jq -e '
+    .phase == "diagnosis"
+      and .outcome == "more_evidence_required"
+      and .diagnosis.classification == "application code defect"
+      and .diagnosis.code_change_required == "not yet proven"
+      and .approval.required == false
+      and .guardrails.new_worktree_allowed == false
+  ' >/dev/null || fail "category mapping overrode the agent code decision: $out"
+
+  cat > "$home/no-approval.json" <<'EOF'
+{
+  "production": {"routing_mismatch": true},
+  "diagnosis": {
+    "classification": "deployment/routing defect",
+    "probable_root_cause": "A local route cache points at the previous release.",
+    "supporting_evidence": ["The local route cache differs from the production release identity."],
+    "code_change_required": "no"
+  },
+  "approval": {"required": false}
+}
+EOF
+  out=$(run_triage "$home" no-approval "$repo" \
+    "Local route cache points at the previous release" --evidence "$home/no-approval.json")
+  printf '%s' "$out" | jq -e '
+    .phase == "repair"
+      and .outcome == "operational_repair"
+      and .diagnosis.code_change_required == "no"
+      and .diagnosis.operational_repair_ready == true
+      and .approval.required == false
+      and .approval.status == "not_required"
+      and (.flow[] | select(.name == "approval") | .status) == "not_required"
+      and (.flow[] | select(.name == "repair") | .status) == "current"
+  ' >/dev/null || fail "agent approval decision did not control operational routing: $out"
+  if FM_HOME="$home" "$INCIDENT" approve --incident no-approval \
+    --kind route_cache_refresh --note wrong >/dev/null 2>&1; then
+    fail "no-approval operational routing accepted an approval transition"
+  fi
+  FM_HOME="$home" "$INCIDENT" repair --incident no-approval \
+    --note "Refreshed the local route cache." >/dev/null
+  out=$(FM_HOME="$home" "$INCIDENT" status --incident no-approval --json)
+  printf '%s' "$out" | jq -e '
+    .phase == "verification"
+      and .approval.status == "not_required"
+      and .repair.status == "complete"
+  ' >/dev/null || fail "approval-free operational repair did not reach verification: $out"
+  pass "agent decisions control code escalation and operational approval routing"
+}
+
 test_agent_adjudicated_categories() {
   local home origin repo out
   home=$(make_home categories)
@@ -656,6 +768,7 @@ test_agent_adjudicated_categories() {
     "code_change_required": "no"
   },
   "approval": {
+    "required": true,
     "kind": "production_route_change",
     "request": "Approve only the production route correction."
   }
@@ -677,6 +790,7 @@ EOF
     "code_change_required": "no"
   },
   "approval": {
+    "required": true,
     "kind": "service_restart",
     "request": "Approve only the companion-relay restart."
   }
@@ -998,6 +1112,7 @@ evidence = {
         "code_change_required": "no",
     },
     "approval": {
+        "required": True,
         "kind": "operational_provider_change",
         "request": "Approve only the diagnosed provider quota change.",
     },
@@ -1109,6 +1224,7 @@ PY
 
 test_repository_and_worker_reconciliation
 test_remote_worker_directory_remains_remote
+test_worker_omitted_by_candidate_cap_is_still_reconciled
 test_git_triage_probes_disable_optional_locks
 test_external_quota_no_code_lifecycle_and_status
 test_lifecycle_transitions_read_and_write_under_one_lock
@@ -1116,6 +1232,7 @@ test_stale_remote_never_wins_fallback_authority
 test_proposed_hotfix_already_deployed
 test_proven_application_defect_escalates
 test_raw_evidence_requires_agent_judgment
+test_agent_owned_code_and_approval_decisions
 test_agent_adjudicated_categories
 test_repository_identity_normalizes_transports_and_relative_paths
 test_bounded_inventory_omissions_are_disclosed
