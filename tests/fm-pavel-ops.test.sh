@@ -389,7 +389,8 @@ PY
 
 set_delivery_contracts() {
   local event_id=$1 task_id=$2 pr_url=$3 pr_head=$4
-  EVENT_FILE="$HOME_DIR/state/pavel-ops/events/$event_id.json" TASK_ID="$task_id" PR_URL="$pr_url" PR_HEAD="$pr_head" HOME_DIR="$HOME_DIR" python3 - <<'PY'
+  local event_file="$HOME_DIR/state/pavel-ops/events/$event_id.json"
+  EVENT_FILE="$event_file" TASK_ID="$task_id" PR_URL="$pr_url" PR_HEAD="$pr_head" HOME_DIR="$HOME_DIR" python3 - <<'PY'
 import json
 import os
 path = os.environ["EVENT_FILE"]
@@ -438,7 +439,8 @@ PY
 
 set_live_completion_contracts() {
   local event_id=$1 task_id=$2 pr_url=$3 pr_head=$4 live_url=$5
-  EVENT_FILE="$HOME_DIR/state/pavel-ops/events/$event_id.json" TASK_ID="$task_id" PR_URL="$pr_url" PR_HEAD="$pr_head" LIVE_URL="$live_url" HOME_DIR="$HOME_DIR" python3 - <<'PY'
+  local event_file="$HOME_DIR/state/pavel-ops/events/$event_id.json"
+  EVENT_FILE="$event_file" TASK_ID="$task_id" PR_URL="$pr_url" PR_HEAD="$pr_head" LIVE_URL="$live_url" HOME_DIR="$HOME_DIR" python3 - <<'PY'
 import hashlib
 import json
 import os
@@ -1117,7 +1119,8 @@ stale_marker=$(ingest 130 40 'Проверить старый маркер merge
 run_ops classify "$stale_marker" --as task --title 'Reject stale merge marker' --intent 'Record landed only for current head' \
   --reason 'ordinary delivery' --authority ordinary >/dev/null
 stale_marker_task=$(run_ops inspect "$stale_marker" | json_field "['task_id']")
-STALE_MARKER_FILE="$HOME_DIR/state/pavel-ops/events/$stale_marker.json" STALE_MARKER_TASK="$stale_marker_task" HOME_DIR="$HOME_DIR" python3 - <<'PY'
+stale_marker_file="$HOME_DIR/state/pavel-ops/events/$stale_marker.json"
+STALE_MARKER_FILE="$stale_marker_file" STALE_MARKER_TASK="$stale_marker_task" HOME_DIR="$HOME_DIR" python3 - <<'PY'
 import json
 import os
 import time
@@ -1233,7 +1236,8 @@ pass "default GitHub merge proof uses API and exact head"
 set_live_probe "$ambiguous" 'Белый, фото выше' ''
 printf 'Белый, фото выше\n' > "$TASK_DB/live-$ambiguous.expected"
 printf 'Белый, фото выше\n' > "$TASK_DB/live-$ambiguous.requires-answer"
-AMBIGUOUS_FILE="$HOME_DIR/state/pavel-ops/events/$ambiguous.json" AMBIGUOUS_TASK="$ambiguous_task" HOME_DIR="$HOME_DIR" python3 - <<'PY'
+ambiguous_file="$HOME_DIR/state/pavel-ops/events/$ambiguous.json"
+AMBIGUOUS_FILE="$ambiguous_file" AMBIGUOUS_TASK="$ambiguous_task" HOME_DIR="$HOME_DIR" python3 - <<'PY'
 import json
 import os
 import time
@@ -1273,7 +1277,8 @@ run_ops classify "$wrong_live" --as task --title 'Change SEO title' --intent 'Sh
 wrong_live_task=$(run_ops inspect "$wrong_live" | json_field "['task_id']")
 set_live_probe "$wrong_live" 'new seo title' ''
 printf '139000\n' > "$TASK_DB/live-$wrong_live.expected"
-WRONG_LIVE_FILE="$HOME_DIR/state/pavel-ops/events/$wrong_live.json" WRONG_LIVE_TASK="$wrong_live_task" HOME_DIR="$HOME_DIR" python3 - <<'PY'
+wrong_live_file="$HOME_DIR/state/pavel-ops/events/$wrong_live.json"
+WRONG_LIVE_FILE="$wrong_live_file" WRONG_LIVE_TASK="$wrong_live_task" HOME_DIR="$HOME_DIR" python3 - <<'PY'
 import json
 import os
 import time
@@ -1531,7 +1536,8 @@ run_ops classify "$stale_receipt" --as task --title 'Reject stale completion rec
   --reason 'ordinary delivery' --authority ordinary >/dev/null
 stale_receipt_task=$(run_ops inspect "$stale_receipt" | json_field "['task_id']")
 set_delivery_contracts "$stale_receipt" "$stale_receipt_task" 'https://github.com/o/r/pull/139' 'aa139a'
-STALE_RECEIPT_FILE="$HOME_DIR/state/pavel-ops/events/$stale_receipt.json" STALE_RECEIPT_TASK="$stale_receipt_task" HOME_DIR="$HOME_DIR" python3 - <<'PY'
+stale_receipt_file="$HOME_DIR/state/pavel-ops/events/$stale_receipt.json"
+STALE_RECEIPT_FILE="$stale_receipt_file" STALE_RECEIPT_TASK="$stale_receipt_task" HOME_DIR="$HOME_DIR" python3 - <<'PY'
 import hashlib
 import json
 import os
