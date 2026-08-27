@@ -407,6 +407,7 @@ Admission, execute recovery, and cleanup use `service-reconcile`, which advances
 The guest supervisor marks a no-mistakes Azure execution as the already-isolated test boundary, so the repository test command runs the focused service suite directly instead of recursively provisioning the general validation fleet or a Herdr lab.
 `bin/fm-azure-service-test-scope.py` owns that focused inventory and the narrow source set eligible for focused pull-request CI; an empty, mixed, or unknown diff and every push to `main` retain the complete behavior suite.
 The wrapper preserves first-seen admission, execute, and cleanup start/completion timestamps in the task's `phase-evidence.json`, so retries keep one stable latency record.
+That evidence is stored at `$FM_HOME/state/no-mistakes-workers/<task>/<generation>/phase-evidence.json` as epoch milliseconds. Subtract each phase's `*_started` value from its `*_completed` value to measure admission, guest execution, and cleanup independently; a missing completion timestamp means that phase has not durably finished and must not be reported as complete.
 No caller chooses an Azure account, sees a credential, invokes `fm-azure-runner.sh`, or bypasses lifecycle cleanup.
 
 The failed retained proof `azr-763d70ab8206` used the generic Azure runner, reached runtime dependency installation, then exited 125 at `guest bootstrap: isolated executor failed` without any structured result.
