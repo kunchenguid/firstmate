@@ -756,6 +756,25 @@ fm_backend_kill() {  # <backend> <target>
   esac
 }
 
+# fm_backend_close_confirmed: close one exact endpoint and return success only
+# when the backend's authoritative inventory or handle response proves it is
+# absent. This stricter operation is reserved for routed terminal accounting;
+# ordinary cleanup retains fm_backend_kill's historical best-effort behavior.
+fm_backend_close_confirmed() {  # <backend> <target> [backend-id] [expected-label]
+  local backend=$1
+  shift
+  [ -n "${1:-}" ] || { echo "error: refusing empty backend close target" >&2; return 1; }
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_close_confirmed "$@" ;;
+    zellij) fm_backend_zellij_close_confirmed "$@" ;;
+    orca) fm_backend_orca_close_confirmed "$@" ;;
+    cmux) fm_backend_cmux_close_confirmed "$@" ;;
+    herdr) echo "error: Herdr closure confirmation has a dedicated teardown path" >&2; return 1 ;;
+    *) echo "error: no confirmed close implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
 fm_backend_remove_worktree() {  # <backend> <worktree-id>
   local backend=$1
   shift

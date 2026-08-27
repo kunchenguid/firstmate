@@ -288,3 +288,37 @@ fm_backend_orca_kill() {  # <terminal-id>
   fm_backend_orca_tool_check || return 0
   orca terminal close --terminal "$1" --json >/dev/null 2>&1 || true
 }
+
+fm_backend_orca_endpoint_state() {  # <terminal-id> -> alive|missing|unreadable
+  local terminal=$1 out
+  fm_backend_orca_tool_check >/dev/null 2>&1 || { printf 'unreadable'; return 0; }
+  out=$(orca terminal read --terminal "$terminal" --limit 1 --json 2>/dev/null) || true
+  printf '%s' "$out" | node -e '
+const fs = require("fs");
+const raw = fs.readFileSync(0, "utf8").trim();
+if (!raw) { process.stdout.write("unreadable"); process.exit(0); }
+let data;
+try { data = JSON.parse(raw); }
+catch (_) { process.stdout.write("unreadable"); process.exit(0); }
+if (data.ok === false) {
+  const code = String((data.error && data.error.code) || "");
+  if (["terminal_handle_stale", "terminal_not_found", "not_found"].includes(code)) {
+    process.stdout.write("missing");
+  } else {
+    process.stdout.write("unreadable");
+  }
+  process.exit(0);
+}
+process.stdout.write("alive");
+' 2>/dev/null || printf 'unreadable'
+}
+
+fm_backend_orca_close_confirmed() {  # <terminal-id>
+  local terminal=$1 state out
+  state=$(fm_backend_orca_endpoint_state "$terminal")
+  [ "$state" != missing ] || return 0
+  [ "$state" = alive ] || return 1
+  out=$(orca terminal close --terminal "$terminal" --json) || return 1
+  printf '%s' "$out" | fm_backend_orca_json_ok || return 1
+  [ "$(fm_backend_orca_endpoint_state "$terminal")" = missing ]
+}

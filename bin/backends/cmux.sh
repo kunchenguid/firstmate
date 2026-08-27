@@ -628,6 +628,43 @@ fm_backend_cmux_kill() {  # <target> [unused] [expected-label]
   fm_backend_cmux_cli close-workspace --workspace "$wsid" >/dev/null 2>&1 || true
 }
 
+fm_backend_cmux_endpoint_state() {  # <target> -> alive|missing|unreadable
+  local target=$1 workspaces
+  fm_backend_cmux_parse_target "$target" || { printf 'unreadable'; return 0; }
+  workspaces=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) \
+    || { printf 'unreadable'; return 0; }
+  jq -e '.workspaces | type == "array"' <<<"$workspaces" >/dev/null 2>&1 \
+    || { printf 'unreadable'; return 0; }
+  if jq -e --arg id "$FM_BACKEND_CMUX_WORKSPACE" '[.workspaces[]? | select(.id == $id)] | length > 0' <<<"$workspaces" >/dev/null 2>&1; then
+    printf 'alive'
+  else
+    printf 'missing'
+  fi
+}
+
+fm_backend_cmux_close_confirmed() {  # <target> [unused] [expected-label]
+  local target=$1 expected_label=${3:-} state wsid wininfo win count
+  state=$(fm_backend_cmux_endpoint_state "$target")
+  [ "$state" != missing ] || return 0
+  [ "$state" = alive ] || return 1
+  fm_backend_cmux_parse_target "$target" || return 1
+  wsid=$FM_BACKEND_CMUX_WORKSPACE
+  if [ -n "$expected_label" ]; then
+    fm_backend_cmux_target_ready "$target" "$expected_label" || return 1
+    [ "$FM_BACKEND_CMUX_WORKSPACE" = "$wsid" ] || return 1
+  fi
+  wininfo=$(fm_backend_cmux_window_of_workspace "$wsid") || return 1
+  win=${wininfo%% *}
+  count=${wininfo##* }
+  [ -n "$win" ] || return 1
+  if [ "$count" = 1 ]; then
+    fm_backend_cmux_cli new-workspace --window "$win" --focus false --id-format uuids >/dev/null 2>&1 \
+      || return 1
+  fi
+  fm_backend_cmux_cli close-workspace --workspace "$wsid" >/dev/null 2>&1 || return 1
+  [ "$(fm_backend_cmux_endpoint_state "$target")" = missing ]
+}
+
 # fm_backend_cmux_list_live: recovery/orphan discovery. Lists every workspace
 # whose title is scoped to this firstmate home, by TITLE - never by trusting a
 # stored uuid, since workspace ids do NOT survive an app relaunch (finding #5).

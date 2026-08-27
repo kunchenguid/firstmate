@@ -139,6 +139,41 @@ fm_backend_tmux_kill() {  # <target>
   tmux kill-window -t "=$session:=$window" 2>/dev/null || true
 }
 
+fm_backend_tmux_endpoint_state() {  # <target> -> alive|missing|unreadable
+  local target=$1 session window windows status
+  case "$target" in
+    *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
+    *:*) session=${target%%:*}; window=${target#*:} ;;
+    *) printf 'unreadable'; return 0 ;;
+  esac
+  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  if [ "$status" -ne 0 ]; then
+    case "$windows" in
+      *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)") printf 'missing' ;;
+      *) printf 'unreadable' ;;
+    esac
+  elif printf '%s\n' "$windows" | grep -Fqx "$window"; then
+    printf 'alive'
+  else
+    printf 'missing'
+  fi
+}
+
+fm_backend_tmux_close_confirmed() {  # <target>
+  local target=$1 session window state
+  state=$(fm_backend_tmux_endpoint_state "$target")
+  [ "$state" != missing ] || return 0
+  [ "$state" = alive ] || return 1
+  session=${target%%:*}
+  window=${target#*:}
+  tmux kill-window -t "=$session:=$window" >/dev/null 2>&1 || return 1
+  [ "$(fm_backend_tmux_endpoint_state "$target")" = missing ]
+}
+
 # fm_backend_tmux_current_command: <target>'s live foreground process name -
 # tmux's own `#{pane_current_command}`, already resolved from the pty's
 # foreground process group (verified empirically with real tmux 3.6a: a

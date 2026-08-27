@@ -613,6 +613,54 @@ fm_backend_zellij_kill() {  # <target> [tab_id] [expected_label]
   fi
 }
 
+fm_backend_zellij_endpoint_state() {  # <target> [tab_id] -> alive|missing|unreadable
+  local target=$1 tab_id=${2:-} sessions panes tabs
+  fm_backend_zellij_parse_target "$target" || { printf 'unreadable'; return 0; }
+  sessions=$(zellij list-sessions --short --no-formatting 2>/dev/null) \
+    || { printf 'unreadable'; return 0; }
+  if ! printf '%s\n' "$sessions" | grep -qxF "$FM_BACKEND_ZELLIJ_SESSION"; then
+    printf 'missing'
+    return 0
+  fi
+  panes=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action list-panes --json 2>/dev/null) \
+    || { printf 'unreadable'; return 0; }
+  jq -e 'type == "array"' <<<"$panes" >/dev/null 2>&1 \
+    || { printf 'unreadable'; return 0; }
+  if jq -e --argjson p "$FM_BACKEND_ZELLIJ_PANE" '[.[]? | select(.id == $p and .is_plugin == false)] | length > 0' <<<"$panes" >/dev/null 2>&1; then
+    printf 'alive'
+    return 0
+  fi
+  case "$tab_id" in
+    ''|*[!0-9]*) printf 'missing'; return 0 ;;
+  esac
+  tabs=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action list-tabs --json 2>/dev/null) \
+    || { printf 'unreadable'; return 0; }
+  jq -e 'type == "array"' <<<"$tabs" >/dev/null 2>&1 \
+    || { printf 'unreadable'; return 0; }
+  if jq -e --argjson t "$tab_id" '[.[]? | select(.tab_id == $t)] | length > 0' <<<"$tabs" >/dev/null 2>&1; then
+    printf 'alive'
+  else
+    printf 'missing'
+  fi
+}
+
+fm_backend_zellij_close_confirmed() {  # <target> [tab_id] [expected_label]
+  local target=$1 fallback_tab_id=${2:-} expected_label=${3:-} state tab_id
+  state=$(fm_backend_zellij_endpoint_state "$target" "$fallback_tab_id")
+  [ "$state" != missing ] || return 0
+  [ "$state" = alive ] || return 1
+  fm_backend_zellij_parse_target "$target" || return 1
+  tab_id=$(fm_backend_zellij_tab_for_pane "$FM_BACKEND_ZELLIJ_SESSION" "$FM_BACKEND_ZELLIJ_PANE" 2>/dev/null)
+  [ -n "$tab_id" ] || tab_id=$fallback_tab_id
+  case "$tab_id" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -n "$expected_label" ]; then
+    fm_backend_zellij_tab_matches_label "$FM_BACKEND_ZELLIJ_SESSION" "$tab_id" "$expected_label" || return 1
+  fi
+  fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action close-tab-by-id "$tab_id" >/dev/null 2>&1 \
+    || return 1
+  [ "$(fm_backend_zellij_endpoint_state "$target" "$tab_id")" = missing ]
+}
+
 # fm_backend_zellij_list_live: recovery/orphan discovery. Lists every tab in
 # <session> whose title carries THIS firstmate home's own tag
 # (fm-<hometag>-, fm_backend_zellij_home_label) - never any other home's

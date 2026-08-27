@@ -1440,6 +1440,60 @@ fm_route_recover_for_cleanup_locked() {
   fm_route_recover_admission_locked "$task" "$claim_file" "$prior_claim_file" >/dev/null
 }
 
+fm_route_cleanup_admission_ready_locked() {
+  local task=$1 journal now owner_pid owner_start target_generation target_file claimed_at
+  local transition phase claim_file prior_claim_file target_hash outcome future
+  journal=$(fm_route_load_admission "$task") || return 1
+  now=$(date +%s)
+  [ "$((now - $(jq -r .createdAt <<<"$journal")))" -ge "$FM_ROUTE_CLAIM_TIMEOUT" ] \
+    || { fm_route_diagnostic 'admission owner is not stale'; return 1; }
+  owner_pid=$(jq -r .ownerPid <<<"$journal")
+  owner_start=$(jq -r .ownerStart <<<"$journal")
+  ! fm_route_owner_matches "$owner_pid" "$owner_start" \
+    || { fm_route_diagnostic 'admission owner is still live'; return 1; }
+  target_generation=$(jq -r '.target.generation // empty' <<<"$journal")
+  target_file=
+  if [ -n "$target_generation" ]; then
+    target_file=$(fm_route_optional_reservation_path "$task" "$target_generation") || return 1
+  fi
+  if [ -n "$target_file" ] && [ "$(jq -r '.admissionState // "reserved"' "$target_file")" = claimed ]; then
+    claimed_at=$(jq -r .claimedAt "$target_file")
+    [ "$((now - claimed_at))" -ge "$FM_ROUTE_CLAIM_TIMEOUT" ] \
+      || { fm_route_diagnostic 'admission claim is not stale'; return 1; }
+  fi
+  transition=$(jq -r .transition <<<"$journal")
+  phase=$(jq -r .phase <<<"$journal")
+  claim_file=
+  prior_claim_file=
+  case "$transition" in
+    fresh|inherit)
+      claim_file=$(fm_route_claim_file_path "$task" "$target_generation") || return 1
+      ;;
+    replacement)
+      claim_file=$(fm_route_claim_file_path "$task" "$target_generation") || return 1
+      prior_claim_file=$(fm_route_claim_file_path "$task" "$(jq -r '.prior.generation' <<<"$journal")") || return 1
+      ;;
+    off)
+      claim_file=$(fm_route_claim_file_path "$task" "$(jq -r '.prior.generation' <<<"$journal")") || return 1
+      ;;
+  esac
+  target_hash=$(jq -r '.targetClaimHash // empty' <<<"$journal")
+  if [ "$phase" = beginning ] && [ -z "$target_hash" ] \
+    && { [ "$transition" = fresh ] || [ "$transition" = replacement ]; }; then
+    journal=$(fm_route_authorize_beginning_target "$journal" "$claim_file") || return 1
+  else
+    fm_route_authorize_admission "$journal" "$claim_file" "$prior_claim_file" || return 1
+  fi
+  outcome=$(fm_route_admission_metadata_outcome "$journal") || return 1
+  if [ "$outcome" = commit ]; then
+    future=$(jq -c .target <<<"$journal")
+  else
+    future=$(jq -c .prior <<<"$journal")
+  fi
+  [ "$future" != null ] || { fm_route_diagnostic 'reservation-not-found'; return 1; }
+  printf '%s\n' "$future"
+}
+
 fm_route_cleanup_outcome_matches() {
   local existing=$1 profile=$2 provider=$3 lane=$4 account=$5 task_class=$6 risk=$7 mode=$8 terminal=$9
   jq -e --arg profile "$profile" --arg provider "$provider" --arg lane "$lane" \
@@ -1452,10 +1506,22 @@ fm_route_cleanup_outcome_matches() {
     ' <<<"$existing" >/dev/null
 }
 
+fm_route_cleanup_route_matches() {
+  local route=$1 task=$2 generation=$3 profile=$4 provider=$5 lane=$6 account=$7 task_class=$8 risk=$9 mode=${10}
+  jq -e --arg task "$task" --arg generation "$generation" --arg profile "$profile" \
+    --arg provider "$provider" --arg lane "$lane" --arg account "$account" \
+    --arg class "$task_class" --arg risk "$risk" --arg mode "$mode" '
+      ((has("taskId") | not) or .taskId == $task)
+      and .generation == $generation and .profile == $profile
+      and .provider == $provider and .lane == $lane and .account == $account
+      and .taskClass == $class and .workType == "implementation"
+      and .risk == $risk and .mode == $mode
+    ' <<<"$route" >/dev/null
+}
+
 fm_route_cleanup_ready_locked() {
   local task=$1 generation=$2 profile=$3 provider=$4 lane=$5 account=$6 task_class=$7 risk=$8 mode=$9 terminal=${10}
-  local reservation current admission claim_file outcomes existing
-  fm_route_recover_for_cleanup_locked "$task" || return 1
+  local reservation current admission claim_file outcomes existing future
   outcomes=$(fm_route_read_outcomes) || { fm_route_diagnostic 'invalid routing state'; return 1; }
   existing=$(jq -c --arg task "$task" --arg generation "$generation" \
     '.[] | select(.kind == "terminal" and .taskId == $task and .generation == $generation)' \
@@ -1471,20 +1537,21 @@ fm_route_cleanup_ready_locked() {
       return 0
     fi
   fi
+  admission=$(fm_route_admission_path "$task") || return 1
+  if [ -e "$admission" ]; then
+    future=$(fm_route_cleanup_admission_ready_locked "$task") || return 1
+    fm_route_cleanup_route_matches "$future" "$task" "$generation" "$profile" "$provider" "$lane" "$account" "$task_class" "$risk" "$mode" \
+      || { fm_route_diagnostic 'reservation-mismatch'; return 1; }
+    fm_route_public_reservation "$future"
+    return 0
+  fi
   reservation=$(fm_route_find_reservation_path "$task" "$generation") \
     || { fm_route_diagnostic 'reservation-not-found'; return 1; }
   current=$(jq -c . "$reservation" 2>/dev/null) \
     || { fm_route_diagnostic 'invalid routing state'; return 1; }
-  jq -e --arg task "$task" --arg generation "$generation" --arg profile "$profile" \
-    --arg provider "$provider" --arg lane "$lane" --arg account "$account" \
-    --arg class "$task_class" --arg risk "$risk" --arg mode "$mode" '
-      .taskId == $task and .generation == $generation and .profile == $profile
-      and .provider == $provider and .lane == $lane and .account == $account
-      and .taskClass == $class and .workType == "implementation"
-      and .risk == $risk and .mode == $mode and .admissionState == "active"
-    ' <<<"$current" >/dev/null || { fm_route_diagnostic 'reservation-mismatch'; return 1; }
-  admission=$(fm_route_admission_path "$task") || return 1
-  [ ! -e "$admission" ] || { fm_route_diagnostic 'admission recovery required'; return 1; }
+  fm_route_cleanup_route_matches "$current" "$task" "$generation" "$profile" "$provider" "$lane" "$account" "$task_class" "$risk" "$mode" \
+    && [ "$(jq -r '.admissionState // "reserved"' <<<"$current")" = active ] \
+    || { fm_route_diagnostic 'reservation-mismatch'; return 1; }
   claim_file=$(fm_route_claim_file_path "$task" "$generation") || return 1
   fm_route_authorize_reservation "$task" "$generation" "$claim_file" "$current" || return 1
   fm_route_public_reservation "$current"
@@ -1493,6 +1560,9 @@ fm_route_cleanup_ready_locked() {
 fm_route_cleanup_finalize_locked() {
   local task=$1 generation=$2 profile=$3 provider=$4 lane=$5 account=$6 task_class=$7 risk=$8 mode=$9 terminal=${10}
   local claim_file
+  fm_route_cleanup_ready_locked "$task" "$generation" "$profile" "$provider" "$lane" "$account" "$task_class" "$risk" "$mode" "$terminal" >/dev/null \
+    || return 1
+  fm_route_recover_for_cleanup_locked "$task" || return 1
   fm_route_cleanup_ready_locked "$task" "$generation" "$profile" "$provider" "$lane" "$account" "$task_class" "$risk" "$mode" "$terminal" >/dev/null \
     || return 1
   claim_file=$(fm_route_claim_file_path "$task" "$generation") || return 1

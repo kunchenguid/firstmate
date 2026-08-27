@@ -1121,11 +1121,12 @@ test_cleanup_preflight_recovers_stale_admission_before_finalizing() {
   jq '.ownerPid=99999999 | .ownerStart=("a" * 64)' "$journal" >"$journal.next"
   mv "$journal.next" "$journal"
 
-  cleanup_ready cleanup gen-1 >/dev/null || fail "cleanup preflight did not recover stale admission"
-  [ ! -e "$FM_STATE_OVERRIDE/routing/admissions/cleanup.json" ] || fail "cleanup recovery retained its journal"
-  jq -e '.admissionState == "active"' "$(reservation_path cleanup gen-1)" >/dev/null \
-    || fail "cleanup recovery did not restore the active generation"
+  cleanup_ready cleanup gen-1 >/dev/null || fail "cleanup preflight did not validate stale admission"
+  [ -e "$FM_STATE_OVERRIDE/routing/admissions/cleanup.json" ] || fail "cleanup preflight mutated its journal"
+  jq -e '.admissionState == "claimed"' "$(reservation_path cleanup gen-1)" >/dev/null \
+    || fail "cleanup preflight mutated the claimed generation"
   cleanup_finalize cleanup gen-1 completed >/dev/null || fail "recovered cleanup did not finalize"
+  [ ! -e "$FM_STATE_OVERRIDE/routing/admissions/cleanup.json" ] || fail "cleanup finalization retained its journal"
   pass "cleanup preflight recovers stale admission before terminal finalization"
 }
 
