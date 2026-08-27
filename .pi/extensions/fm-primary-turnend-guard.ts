@@ -255,7 +255,7 @@ function runSessionstartHook(generation: SessionstartGeneration): Promise<Sessio
     let child: ChildProcess;
     try {
       child = spawn(
-        supervised ? process.execPath : runner,
+        supervised ? "node" : runner,
         supervised
           ? [
               `${extensionDir}/lib/fm-sessionstart-supervisor.mjs`,
@@ -289,7 +289,7 @@ function runSessionstartHook(generation: SessionstartGeneration): Promise<Sessio
     const unrefSupervisor = (): void => {
       if (!supervised) return;
       child.unref();
-      child.channel?.unref();
+      child.channel?.unref?.();
       const stdout = child.stdout as (NodeJS.ReadableStream & { unref?: () => void }) | null;
       stdout?.unref?.();
     };
