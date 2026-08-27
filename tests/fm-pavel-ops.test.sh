@@ -161,6 +161,25 @@ state=$(run_ops inspect "$event" | json_field "['state']")
 run_ops classify "$event" --as task --title 'Change price' --intent 'Set the requested catalog price' \
   --reason 'explicit reversible price change' --authority ordinary >/dev/null
 [ "$(cat "$TASK_DB/.add-count")" -eq 1 ] || fail "classification replay duplicated the backlog task"
+if run_ops classify "$event" --as task --title 'Change price' --intent 'Set a different catalog price' \
+  --reason 'explicit reversible price change' --authority ordinary >/dev/null 2>&1; then
+  fail "classification replay accepted a changed intent"
+fi
+if run_ops classify "$event" --as task --title 'Change price urgently' --intent 'Set the requested catalog price' \
+  --reason 'explicit reversible price change' --authority ordinary >/dev/null 2>&1; then
+  fail "classification replay accepted a changed title"
+fi
+if run_ops classify "$event" --as task --title 'Change price' --intent 'Set the requested catalog price' \
+  --reason 'changed classification reason' --authority ordinary >/dev/null 2>&1; then
+  fail "classification replay accepted a changed reason"
+fi
+if run_ops classify "$event" --as task --title 'Change price' --intent 'Set the requested catalog price' \
+  --reason 'explicit reversible price change' --authority ordinary --task-id pavel-other >/dev/null 2>&1; then
+  fail "classification replay accepted a changed task id"
+fi
+[ "$(run_ops inspect "$event" | json_field "['classification']['intent']")" = 'Set the requested catalog price' ] \
+  || fail "classification mismatch mutated the accepted intent"
+[ "$(cat "$TASK_DB/.add-count")" -eq 1 ] || fail "rejected classification replay created another task"
 pass "ordinary Pavel authority creates one ready backlog task"
 
 # Conversation and reply events stay auditable without creating work.
@@ -179,6 +198,14 @@ ambiguous=$(ingest 103 13 'Добавить цвет' | json_field "['event']")
 run_ops classify "$ambiguous" --as task --title 'Add colour' --intent 'Add Pavel requested colour' \
   --reason 'which colour is commercially material' --authority business-ambiguity \
   --question 'Какой цвет и фото использовать?' >/dev/null
+run_ops classify "$ambiguous" --as task --title 'Add colour' --intent 'Add Pavel requested colour' \
+  --reason 'which colour is commercially material' --authority business-ambiguity \
+  --question 'Какой цвет и фото использовать?' >/dev/null
+if run_ops classify "$ambiguous" --as task --title 'Add colour' --intent 'Add Pavel requested colour' \
+  --reason 'which colour is commercially material' --authority business-ambiguity \
+  --question 'Какой оттенок использовать?' >/dev/null 2>&1; then
+  fail "business ambiguity replay accepted a changed question"
+fi
 ambiguous_task=$(run_ops inspect "$ambiguous" | json_field "['task_id']")
 assert_grep '--kind external' "$TASK_DB/$ambiguous_task.holds" "business ambiguity did not wait externally on Pavel"
 answer_event=$(ingest 104 14 'Белый, фото выше' | json_field "['event']")
@@ -191,6 +218,12 @@ pass "genuine business ambiguity routes to Pavel and resumes automatically"
 hard=$(ingest 105 15 'Дайте пароль подрядчику' | json_field "['event']")
 run_ops classify "$hard" --as task --title 'Share contractor access' --intent 'Give contractor requested access' \
   --reason 'requires credential disclosure' --authority hard-safety --safety credentials >/dev/null
+run_ops classify "$hard" --as task --title 'Share contractor access' --intent 'Give contractor requested access' \
+  --reason 'requires credential disclosure' --authority hard-safety --safety credentials >/dev/null
+if run_ops classify "$hard" --as task --title 'Share contractor access' --intent 'Give contractor requested access' \
+  --reason 'requires credential disclosure' --authority hard-safety --safety legal >/dev/null 2>&1; then
+  fail "hard-safety replay accepted a changed safety boundary"
+fi
 [ "$(run_ops inspect "$hard" | json_field "['state']")" = awaiting_nikita ] || fail "hard safety did not stop for Nikita"
 assert_grep 'hard safety boundary credentials' "$TASK_DB/.captain-holds" "hard safety did not register through the captain-hold owner"
 if run_ops classify "$(ingest 106 16 'Поменять текст' | json_field "['event']")" --as task \
@@ -222,6 +255,46 @@ run_ops send "$event" --purpose live-completion --text 'Готово: цена �
 assert_grep 'chat_id=group' "$HTTP_LOG" "Telegram completion used the wrong chat"
 assert_grep 'message' "$HOME_DIR/state/pavel-ops/outbox/$event-live-completion.json" "completion receipt was not retained"
 pass "validated delivery stays linear and Pavel is notified exactly once after live proof"
+
+# A delivered completion receipt after a crash reconciles the event without sending again.
+crashed=$(ingest 108 18 'Поменять SEO заголовок' | json_field "['event']")
+run_ops classify "$crashed" --as task --title 'Change SEO title' --intent 'Set the requested SEO title' \
+  --reason 'ordinary SEO change' --authority ordinary >/dev/null
+run_ops transition "$crashed" dispatched --evidence 'Pi worker exists in isolated copy' >/dev/null
+run_ops transition "$crashed" validating --evidence 'no-mistakes run owns current head' >/dev/null
+run_ops transition "$crashed" delivery_ready --evidence 'checks green on exact PR head' >/dev/null
+run_ops transition "$crashed" merge_queued --evidence 'guarded merge accepted by forge' --pr-url 'https://github.com/o/r/pull/2' >/dev/null
+run_ops transition "$crashed" landed --evidence 'forge reports PR merged at verified head' >/dev/null
+run_ops transition "$crashed" live --evidence 'requested SEO title is visible on the customer page' --live-url 'https://example.test/seo' >/dev/null
+CRASHED_EVENT="$crashed" OUTBOX="$HOME_DIR/state/pavel-ops/outbox/$crashed-live-completion.json" python3 - <<'PY'
+import hashlib
+import json
+import os
+text = "Готово: SEO заголовок уже на сайте."
+with open(os.environ["OUTBOX"], "w", encoding="utf-8") as handle:
+    json.dump({
+        "schema": "fm-pavel-ops-outbound.v1",
+        "id": os.environ["CRASHED_EVENT"] + "-live-completion",
+        "event_id": os.environ["CRASHED_EVENT"],
+        "purpose": "live-completion",
+        "chat_id": "group",
+        "text": text,
+        "text_digest": hashlib.sha256(text.encode()).hexdigest(),
+        "status": "delivered",
+        "attempts": 1,
+        "telegram_message_id": "999",
+        "delivered_at": 1,
+        "created_at": 1,
+        "updated_at": 1,
+    }, handle)
+PY
+before_replay_sends=$(grep -c . "$HTTP_LOG")
+run_ops send "$crashed" --purpose live-completion --text 'Готово: SEO заголовок уже на сайте.' >/dev/null \
+  || fail "delivered completion replay did not reconcile"
+[ "$(grep -c . "$HTTP_LOG")" -eq "$before_replay_sends" ] || fail "delivered completion replay sent again"
+[ "$(run_ops inspect "$crashed" | json_field "['state']")" = notified ] \
+  || fail "delivered completion replay did not mark the event notified"
+pass "delivered live-completion replay reconciles notification state"
 
 # A crash after send begins is surfaced and never retried without reconciliation.
 unknown=$(ingest 107 17 'Когда будет готово?' | json_field "['event']")

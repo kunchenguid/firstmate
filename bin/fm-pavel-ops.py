@@ -429,20 +429,50 @@ def hold_captain(home: Home, task_id: str, reason: str) -> None:
     run_checked(home, [owner, "hold", task_id, "--reason", safe_hold_reason(reason)])
 
 
+def classification_contract(event: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    if args.as_kind in ("conversation", "reply"):
+        return {
+            "as": args.as_kind,
+            "authority": args.authority,
+            "related_task": args.related_task,
+            "reason": args.reason,
+            "title": args.title or "",
+            "intent": args.intent or "",
+            "question": args.question or "",
+            "safety": args.safety or "",
+        }
+    task_id = args.task_id or default_task_id(event)
+    return {
+        "as": "task",
+        "authority": args.authority,
+        "related_task": args.related_task,
+        "reason": args.reason,
+        "task_id": task_id,
+        "title": args.title or "",
+        "intent": args.intent or "",
+        "question": args.question or "",
+        "safety": args.safety or "",
+    }
+
+
 def classify(home: Home, args: argparse.Namespace) -> dict[str, Any]:
     event = home.load_event(args.event)
     if not args.reason.strip():
         raise OpsError("classification requires a non-empty reason")
     if event["state"] != "captured":
-        wanted = {"as": args.as_kind, "authority": args.authority, "related_task": args.related_task}
+        wanted = classification_contract(event, args)
         existing = event.get("classification") or {}
-        if all(existing.get(k) == v for k, v in wanted.items()):
+        if existing == wanted and event.get("task_id") == wanted.get("task_id"):
+            return event
+        if existing == wanted and args.as_kind in ("conversation", "reply"):
             return event
         raise OpsError(f"event {event['id']} is already classified as {event['state']}")
 
     if args.as_kind in ("conversation", "reply"):
         if args.authority:
             raise OpsError("conversation and reply classifications do not take an authority route")
+        if args.title or args.intent or args.question or args.safety:
+            raise OpsError("conversation and reply classifications do not take task-only fields")
         if args.as_kind == "reply" and not args.related_task:
             raise OpsError("a conversational reply requires --related-task for auditability")
         event["classification"] = {
@@ -450,6 +480,10 @@ def classify(home: Home, args: argparse.Namespace) -> dict[str, Any]:
             "authority": None,
             "related_task": args.related_task,
             "reason": args.reason,
+            "title": "",
+            "intent": "",
+            "question": "",
+            "safety": "",
         }
         event["related_task"] = args.related_task
         home.append_transition(event, args.as_kind, args.reason)
@@ -459,6 +493,8 @@ def classify(home: Home, args: argparse.Namespace) -> dict[str, Any]:
 
     if not args.title or not args.title.strip() or not args.intent or not args.intent.strip() or not args.authority:
         raise OpsError("task classification requires non-empty --title, --intent, and --authority")
+    if args.related_task:
+        raise OpsError("task classification uses --task-id, not --related-task")
     if args.authority == "business-ambiguity" and not args.question:
         raise OpsError("business ambiguity requires one batched --question")
     if args.authority == "hard-safety":
@@ -477,6 +513,8 @@ def classify(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         "authority": args.authority,
         "related_task": None,
         "reason": args.reason,
+        "task_id": task_id,
+        "title": args.title,
         "intent": args.intent,
         "question": args.question or "",
         "safety": args.safety or "",
@@ -618,6 +656,18 @@ def send_message(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         outbound = read_json(path)
         status = outbound.get("status")
         if status == "delivered":
+            if purpose == "live-completion" and event["state"] != "notified":
+                message_id = outbound.get("telegram_message_id")
+                if message_id is None:
+                    raise OpsError(f"delivered outbound {outbound_id} lacks a Telegram receipt")
+                home.append_transition(event, "notified", f"Telegram message {message_id} reconciled")
+                home.save_event(event)
+                home.audit(
+                    "outbound-delivered-reconciled",
+                    event=event["id"],
+                    outbound=outbound_id,
+                    telegram_message_id=str(message_id),
+                )
             return outbound
         if status in {"sending", "unknown"}:
             raise OpsError(
