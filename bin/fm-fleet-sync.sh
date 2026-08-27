@@ -341,7 +341,8 @@ sync_project() {
     echo "$label: skipped: no origin remote"
     return 0
   fi
-  if [ "$(fm_forge_detect_provider "$PROJ")" = unknown ]; then
+  if [ "${FM_FLEET_SYNC_SKIP_UNKNOWN:-0}" = 1 ] \
+    && [ "$(fm_forge_detect_provider "$PROJ")" = unknown ]; then
     return 0
   fi
 
