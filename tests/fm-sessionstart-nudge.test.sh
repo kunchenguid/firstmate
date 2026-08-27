@@ -709,6 +709,113 @@ JS
   pass "Pi provider preflight owns one generation-bound startup prerequisite with deterministic fallback, replacement, cancellation, timeout, and truncation"
 }
 
+test_pi_reload_releases_sessionstart_exit_listener() {
+  local fixture out status=0
+  command -v node >/dev/null 2>&1 || {
+    echo "skip: node not found for Pi reload exit-listener test"
+    return 0
+  }
+  fixture="$TMP_ROOT/pi-reload-exit-listener"
+  mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/"
+  cp "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/"
+  cat > "$fixture/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fixture/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+state=${FM_HOME:?}/state
+index=$(( $(wc -l < "$state/launches" 2>/dev/null || printf '0') + 1 ))
+printf '%s:%s\n' "$index" "$$" >> "$state/launches"
+(
+  trap '' TERM INT
+  while :; do sleep 30; done
+) </dev/null >/dev/null 2>&1 &
+grandchild=$!
+printf '%s\n' "$grandchild" > "$state/grandchild-$index"
+trap 'exit 143' TERM INT
+: > "$state/started-$index"
+while :; do sleep 30; done
+SH
+  chmod +x "$fixture/bin/"*.sh
+  : > "$fixture/state/launches"
+
+  out=$(EXT="$fixture/.pi/extensions/fm-primary-turnend-guard.ts" \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
+    node --input-type=module 2>&1 <<'JS'
+import { existsSync, readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const state = `${process.env.FM_HOME}/state`;
+const baselineListeners = process.listeners("exit");
+const baselineCount = baselineListeners.length;
+const assert = (condition, message) => {
+  if (!condition) throw new Error(message);
+};
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const waitFor = async (predicate, message) => {
+  for (let i = 0; i < 600; i += 1) {
+    if (predicate()) return;
+    await delay(5);
+  }
+  throw new Error(message);
+};
+const alive = (pid) => {
+  try { process.kill(Number(pid), 0); return true; } catch { return false; }
+};
+const ctx = (sessionId) => ({
+  sessionManager: {
+    getHeader: () => ({ timestamp: new Date().toISOString() }),
+    getSessionId: () => sessionId,
+  },
+});
+
+for (let index = 1; index <= 3; index += 1) {
+  const handlers = new Map();
+  const pi = {
+    on(event, handler) { handlers.set(event, handler); },
+    sendMessage() {},
+  };
+  const extension = await import(
+    `${pathToFileURL(process.env.EXT).href}?reload=${index}-${Date.now()}`
+  );
+  extension.default(pi);
+  assert(process.listenerCount("exit") === baselineCount + 1,
+    `reload ${index} did not own exactly one exit listener`);
+  const current = ctx(`reload-${index}`);
+  handlers.get("session_start")({ reason: "new" }, current);
+  await waitFor(() => existsSync(`${state}/started-${index}`),
+    `reload ${index} startup generation never started`);
+  const launch = readFileSync(`${state}/launches`, "utf8").trim().split("\n")[index - 1];
+  const child = Number(launch.split(":")[1]);
+  const grandchild = Number(readFileSync(`${state}/grandchild-${index}`, "utf8").trim());
+  if (index === 3) {
+    const ownedListener = process.listeners("exit").find(
+      (listener) => !baselineListeners.includes(listener)
+    );
+    assert(ownedListener, "active reload had no process-exit cleanup listener");
+    ownedListener(0);
+    await waitFor(() => !alive(child) && !alive(grandchild),
+      "active process-exit cleanup left the startup process group alive");
+  }
+  await handlers.get("session_shutdown")({ reason: "reload" }, current);
+  assert(process.listenerCount("exit") === baselineCount,
+    `reload ${index} retained its exit listener after shutdown`);
+  assert((await handlers.get("before_agent_start")({ prompt: "stale" }, current)) === undefined,
+    `reload ${index} retained model-visible startup context after shutdown`);
+  assert(!alive(child) && !alive(grandchild),
+    `reload ${index} retained its stale startup process group`);
+}
+JS
+  ) || status=$?
+  expect_code 0 "$status" "Pi reload exit-listener ownership"
+  [ -z "$out" ] || fail "Pi reload exit-listener ownership printed output: $out"
+  pass "Pi reload shutdown releases its exit listener and stale startup generation"
+}
+
 test_pi_large_sessionstart_digest_is_delivered_loudly() {
   local fixture out status=0
   command -v node >/dev/null 2>&1 || {
@@ -867,4 +974,5 @@ test_run_gate_and_scope_are_silent
 test_run_reports_a_failed_session_start_as_digest_text
 test_pi_startup_classifies_cli_continuations
 test_pi_sessionstart_generation_prerequisite
+test_pi_reload_releases_sessionstart_exit_listener
 test_pi_large_sessionstart_digest_is_delivered_loudly

@@ -388,12 +388,6 @@ async function claimSessionstartMessage(
   return sessionstartMessage(generation, result);
 }
 
-const cleanupSessionstartOnProcessExit = (): void => {
-  const generation = activeSessionstartGeneration;
-  if (generation?.child) signalSessionstartChild(generation.child, "SIGKILL");
-};
-process.once("exit", cleanupSessionstartOnProcessExit);
-
 function runGuard(): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
     const child = spawn(`${root}/bin/fm-turnend-guard.sh`, {
@@ -440,6 +434,11 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 
 export default function (pi: ExtensionAPI) {
   let sessionstartGeneration: SessionstartGeneration | null = null;
+  const cleanupSessionstartOnProcessExit = (): void => {
+    const generation = sessionstartGeneration;
+    if (generation?.child) signalSessionstartChild(generation.child, "SIGKILL");
+  };
+  process.once("exit", cleanupSessionstartOnProcessExit);
 
   pi.on?.("session_start", (event, ctx) => {
     const reason = String((event as { reason?: unknown }).reason ?? "");
@@ -478,7 +477,12 @@ export default function (pi: ExtensionAPI) {
 
   pi.on?.("session_shutdown", async () => {
     const generation = sessionstartGeneration;
-    if (generation) await stopSessionstartGeneration(generation);
+    try {
+      if (generation) await stopSessionstartGeneration(generation);
+    } finally {
+      if (sessionstartGeneration === generation) sessionstartGeneration = null;
+      process.removeListener("exit", cleanupSessionstartOnProcessExit);
+    }
   });
 
   pi.on("tool_call", async (event) => {
