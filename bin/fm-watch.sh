@@ -699,9 +699,20 @@ clear_pause_tracking() {  # <window-key>
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# After fm-crew-state has fallen back to stopped or unknown, paused classification is
-# recovered only for a confidently dead ordinary crew, or for a secondmate, whose
-# endpoint liveness this function deliberately never reads.
+# A paused: line is the worker's explicit declaration that its LIVE endpoint is
+# waiting on an external condition, so endpoint liveness alone must not downgrade
+# that declaration to `none`. `none` sends the caller's first sight of each new
+# pane hash through surface_nonterminal_stale, and a live harness footer mints a
+# new hash on every capture, so the declared wait enqueued a bare stale wake - one
+# handling turn - per tick, while the polls in between logged it as absorbed.
+# Absorbing it here is bounded, not silent: handle_paused_stale still re-surfaces
+# the pane once per PAUSE_RESURFACE_SECS naming the wait's age, the recheck window
+# below still lapses into the authoritative read where a working verdict outranks
+# a stale pause and restores the wedge timer, and the caller clears pause tracking
+# the moment the declaration is lifted, which returns the pane to ordinary wedge
+# handling on the next poll. Nothing here changes a pane with no declaration.
+# captain-held recovery keeps its stricter endpoint-liveness gate because a live
+# decision gate may still need immediate captain attention.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive kind
   key=$(window_key "$win")
@@ -717,6 +728,10 @@ pause_state_class() {  # <window> <task>
   # far more common no-declaration path above still costs none.
   kind=$(window_kind "$win")
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
+    if status_is_paused "$last"; then
+      printf 'paused'
+      return
+    fi
     if [ "$kind" != secondmate ]; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
@@ -732,6 +747,11 @@ pause_state_class() {  # <window> <task>
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
     printf 'working'
+    return
+  fi
+  if status_is_paused "$last"; then
+    date +%s > "$recheck_file"
+    printf 'paused'
     return
   fi
   if [ "$kind" != secondmate ]; then
