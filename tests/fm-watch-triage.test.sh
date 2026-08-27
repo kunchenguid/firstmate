@@ -223,6 +223,61 @@ test_posix_class_captain_regex_surfaces_signal_and_heartbeat() {
   pass "case-insensitive POSIX-class captain regex surfaces signal and heartbeat paths"
 }
 
+test_configured_resolve_and_held_tokens_stay_quiet() {
+  local kind dir state fakebin out status_file sig pid i streak
+  local resolve_signal=0 resolve_heartbeat=0 held_signal=0 held_heartbeat=0
+  for kind in resolve held; do
+    dir=$(make_case "configured-$kind-token"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; status_file="$state/miss.status"
+    case "$kind" in
+      resolve)
+        export FM_CLASSIFY_RESOLVE_VERB=settled
+        unset FM_CLASSIFY_CAPTAIN_HELD_VERB
+        printf 'blocked [key=q1]: choose route\nsettled [key=q1]: PR ready\ndetails: route recorded\n' > "$status_file"
+        ;;
+      held)
+        unset FM_CLASSIFY_RESOLVE_VERB
+        export FM_CLASSIFY_CAPTAIN_HELD_VERB=transferred
+        printf 'blocked [key=q1]: choose route\ntransferred [key=q1]: checks green\ndetails: captain owns follow-up\n' > "$status_file"
+        ;;
+    esac
+    if ! status_is_captain_relevant "$(last_status_line "$status_file")" \
+        && ! signal_reason_is_actionable "$status_file"; then
+      case "$kind" in
+        resolve) resolve_signal=1 ;;
+        held) held_signal=1 ;;
+      esac
+    fi
+
+    sig=$(seen_sig "$status_file"); printf '%s' "$sig" > "$state/.seen-miss_status"
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+    pid=$!
+    i=0; streak=0
+    while [ "$i" -lt 100 ]; do
+      streak=$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)
+      [ "$streak" -ge 1 ] && break
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+      i=$((i + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null && [ "$streak" -ge 1 ] \
+        && [ ! -s "$out" ] && [ ! -s "$state/.wake-queue" ]; then
+      case "$kind" in
+        resolve) resolve_heartbeat=1 ;;
+        held) held_heartbeat=1 ;;
+      esac
+    fi
+    reap "$pid"
+  done
+  unset FM_CLASSIFY_RESOLVE_VERB FM_CLASSIFY_CAPTAIN_HELD_VERB
+
+  [ "$resolve_signal" -eq 1 ] && [ "$resolve_heartbeat" -eq 1 ] \
+    && [ "$held_signal" -eq 1 ] && [ "$held_heartbeat" -eq 1 ] \
+    || fail "configured terminal-equivalent tokens leaked: resolve-signal=$resolve_signal resolve-heartbeat=$resolve_heartbeat held-signal=$held_signal held-heartbeat=$held_heartbeat"
+  pass "configured resolve and held token prose stays quiet in signal and heartbeat paths"
+}
+
 test_status_selectors_bound_process_cost_across_history() {
   local dir state fakebin real_awk real_grep variant i
   local short_shell long_shell short_scans long_scans
@@ -2775,6 +2830,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
 test_signal_reason_is_actionable_classifier
 test_legacy_free_text_after_working_is_actionable_classifier
 test_posix_class_captain_regex_surfaces_signal_and_heartbeat
+test_configured_resolve_and_held_tokens_stay_quiet
 test_status_selectors_bound_process_cost_across_history
 test_status_selectors_preserve_configurable_vocabulary
 test_stale_is_terminal_classifier

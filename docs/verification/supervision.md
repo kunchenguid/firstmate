@@ -964,6 +964,56 @@ ok - case-insensitive POSIX-class captain regex surfaces signal and heartbeat pa
 exit=0
 ```
 
+### Configured terminal-equivalent token red/green record
+
+This case ran on 2026-08-27 on the same platform and Bash version recorded above.
+The unfixed revision was `a3ccc90d2067d1072b4016574284e9841823a21d`, and the fixed version was its review working tree with the source and test changes recorded in this section.
+The case was RED before and GREEN after, so it demonstrates that configured resolve and captain-held verbs suppress captain-looking prose through both signal and heartbeat paths.
+
+The exact unfixed command was:
+
+```sh
+printf 'CASE revision=a3ccc90-review13-unfixed test=test_configured_resolve_and_held_tokens_stay_quiet\n'
+bash -c '
+  . tests/wake-helpers.sh
+  eval "$(awk '\''$0 == "test_signal_reason_is_actionable_classifier" { exit } substr($0, 1, 1) == "." && index($0, "BASH_SOURCE") { next } { print }'\'' tests/fm-watch-triage.test.sh)"
+  test_configured_resolve_and_held_tokens_stay_quiet
+'
+rc=$?
+printf 'exit=%s\n' "$rc"
+exit 0
+```
+
+Full unfixed output:
+
+```text
+CASE revision=a3ccc90-review13-unfixed test=test_configured_resolve_and_held_tokens_stay_quiet
+not ok - configured terminal-equivalent tokens leaked: resolve-signal=0 resolve-heartbeat=0 held-signal=0 held-heartbeat=0
+exit=1
+```
+
+The exact fixed command was:
+
+```sh
+printf 'CASE revision=review-fixed test=test_configured_resolve_and_held_tokens_stay_quiet\n'
+bash -c '
+  . tests/wake-helpers.sh
+  eval "$(awk '\''$0 == "test_signal_reason_is_actionable_classifier" { exit } substr($0, 1, 1) == "." && index($0, "BASH_SOURCE") { next } { print }'\'' tests/fm-watch-triage.test.sh)"
+  test_configured_resolve_and_held_tokens_stay_quiet
+'
+rc=$?
+printf 'exit=%s\n' "$rc"
+exit "$rc"
+```
+
+Full fixed output:
+
+```text
+CASE revision=review-fixed test=test_configured_resolve_and_held_tokens_stay_quiet
+ok - configured resolve and held token prose stays quiet in signal and heartbeat paths
+exit=0
+```
+
 ## Turn-end guard
 
 The blocking and bounded-follow-up mechanisms were validated across six harnesses on 2026-07-08 through 2026-08-13, with Cursor's stop-hook park validated on 2026-08-13 and Claude's replacement Stop-owned path revalidated on 2026-08-14.

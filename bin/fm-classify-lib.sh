@@ -148,12 +148,14 @@ status_is_terminal_verb() {
 # only lines without those leading verbs may still match free-text tokens for
 # legacy bare lines such as "merged" or "PR ready".
 status_is_captain_relevant() {
-  local line=$1 verb
+  local line=$1 verb resolve held
   [ -n "$line" ] || return 1
   status_is_paused "$line" && return 1
   verb=$(status_line_verb "$line")
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   case "$verb" in
-    working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
+    working|"$resolve"|"$held")
       return 1
       ;;
   esac
@@ -166,7 +168,7 @@ status_is_captain_relevant() {
 }
 
 last_captain_relevant_status_line() {
-  local f=$1 captain_re pause resolve held line verb match_no match_text
+  local f=$1 captain_re pause resolve held line verb match_no
   local line_no=0 state_event relevant last="" last_relevant=0
   [ -e "$f" ] || return 0
   captain_re=${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}
@@ -174,11 +176,11 @@ last_captain_relevant_status_line() {
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   {
-    IFS=: read -r match_no match_text <&3 || match_no=
+    IFS=: read -r match_no _ <&3 || match_no=
     while IFS= read -r line || [ -n "$line" ]; do
       line_no=$((line_no + 1))
       while [ -n "$match_no" ] && [ "$match_no" -lt "$line_no" ]; do
-        IFS=: read -r match_no match_text <&3 || match_no=
+        IFS=: read -r match_no _ <&3 || match_no=
       done
       verb=${line%%:*}
       verb=${verb%%\[*}
@@ -193,7 +195,7 @@ last_captain_relevant_status_line() {
       relevant=0
       if [ -n "$line" ]; then
         case "$verb" in
-          working|resolved|captain-held|"$pause") ;;
+          working|"$resolve"|"$held"|"$pause") ;;
           *)
             if [ -z "${FM_CAPTAIN_RE+x}" ]; then
               case "$verb" in
