@@ -256,8 +256,8 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
-    "explicit no-mistakes brief did not render the pipeline definition of done"
+  assert_grep "immediately start \`no-mistakes axi run --intent" "$brief" \
+    "explicit no-mistakes brief did not render the self-starting pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only >/dev/null 2>&1 \
@@ -331,6 +331,16 @@ test_no_mistakes_dod_wording() {
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
     "no-mistakes DOD lost its guidance-reference sentence"
+  assert_grep "immediately start \`no-mistakes axi run --intent \"<accepted task contract>\"\`" "$brief" \
+    "no-mistakes DOD must make the implementation worker start validation immediately"
+  assert_grep "do not stop or wait for firstmate between the commit and validation" "$brief" \
+    "no-mistakes DOD retained a supervisor handoff between implementation and validation"
+  assert_grep "append \`working: starting no-mistakes\`, never a terminal \`done:\` before CI is green" "$brief" \
+    "no-mistakes DOD must keep the validation transition nonterminal"
+  assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+    "no-mistakes DOD retained the obsolete firstmate-triggered handoff"
+  assert_no_grep "append \`done: {summary}\`" "$brief" \
+    "no-mistakes DOD must not report terminal done before validation"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep '`no-mistakes axi run --help`' "$brief" \
     "no-mistakes DOD must render literal backticks around the help command"
