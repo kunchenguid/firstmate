@@ -553,7 +553,7 @@ SH
 }
 
 test_enrichment_preserves_all_unread_lines_and_status_file_failures() {
-  local dir state out i raw_count expected
+  local dir state out i raw_count expected actual
   dir=$(make_case complete-enrichment)
   state="$dir/state"
   out="$dir/drain.out"
@@ -579,8 +579,12 @@ test_enrichment_preserves_all_unread_lines_and_status_file_failures() {
   raw_count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
   [ "$raw_count" -eq 13 ] || fail "missing, unreadable, malformed, empty, or oversized status input hid a raw row"
 
-  expected="wake annotation: latest wake-EVENT observed at drain, not current state: huge.status: $(cat "$state/huge.status")"
-  grep -Fx "$expected" "$out" >/dev/null \
+  expected="$dir/huge.expected"
+  actual="$dir/huge.actual"
+  printf 'wake annotation: latest wake-EVENT observed at drain, not current state: huge.status: ' > "$expected"
+  cat "$state/huge.status" >> "$expected"
+  awk '/^wake annotation: latest wake-EVENT observed at drain, not current state: huge\.status: /' "$out" > "$actual"
+  cmp -s "$expected" "$actual" \
     || fail "the oversized unread status line was truncated or omitted"
   i=1
   while [ "$i" -le 8 ]; do
