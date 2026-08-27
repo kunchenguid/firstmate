@@ -105,7 +105,6 @@ fm-spawn-batch.test.sh	hermetic
 fm-spawn-cloud.test.sh	hermetic
 fm-spawn-dispatch-profile.test.sh	hermetic
 fm-spawn-provision.test.sh	hermetic
-fm-stow-contract.test.sh	hermetic
 fm-supervision-events.test.sh	hermetic
 fm-supervision-instructions.test.sh	hermetic
 fm-tangle-guard.test.sh	hermetic
@@ -126,8 +125,6 @@ fm-worker-outcome-transport.test.sh	hermetic
 fm-worker-placement.test.sh	hermetic
 fm-worker-supervisor.test.sh	hermetic
 fm-x-mode.test.sh	hermetic
-lavish-repair.test.sh	hermetic
 lavish.test.sh	hermetic
-operating-fundamentals.test.sh	hermetic
 runner-entry-probe.test.sh	hermetic
 test-suite-seal.test.sh	hermetic

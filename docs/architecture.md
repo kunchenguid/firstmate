@@ -4,7 +4,7 @@ How firstmate works, in depth.
 
 The [README](../README.md) carries the high-level diagram and a short synopsis.
 This document expands every part of it.
-firstmate's full operating manual for the orchestrator agent itself is [`AGENTS.md`](../AGENTS.md); this is the human-facing companion.
+[`AGENTS.md`](../AGENTS.md) is the orchestrator's always-loaded identity, authority, safety, routing, and trigger path; this document owns the detailed human-facing lifecycle contract.
 
 ## Event-driven supervision
 
@@ -17,7 +17,7 @@ Those actionable wakes are written to a durable local queue (`state/.wake-queue`
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crewmate is still working: an actively running no-mistakes step for that crewmate's branch or a backend busy signature.
 A crewmate that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
 A pause is a statement about the work rather than about the terminal, so wake classification honours it whether the crewmate's pane is alive, idle, or gone, and whatever its attributed no-mistakes run reports - parked, failed or cancelled, or unreadable.
-That classification never transfers custody of an in-flight validation run: `AGENTS.md` section 8 owns the boundary that requires the supervisor to steer a paused lane back to attending and driving its run.
+That classification never transfers custody of an in-flight validation run: the [`operating-fundamentals`](../.agents/skills/operating-fundamentals/SKILL.md) skill owns validation custody, and [`crew-steering`](../.agents/skills/crew-steering/SKILL.md) owns the corresponding correction.
 The single exception is an actively `working` run-step or busy pane, which supersedes the declaration because the crewmate resumed after making it.
 Absorption is gated on two proofs taken from one immutable read of the crewmate's current durable status stream: the pause verb carrying no failure vocabulary in its headline, and an empty keyed open/resolved fold, so a pause can never mask a still-unanswered decision.
 The Herdr native blocked-transition edge does not yet honour this invariant, which is a known defect tracked as `herdr-push-transition-pause-gate-h8`: on that edge a lane that owes an unanswered keyed decision can be silently absorbed and go quiet.

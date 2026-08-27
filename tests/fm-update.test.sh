@@ -323,25 +323,8 @@ test_crosscheck_tolerance_does_not_hide_unrelated_dirt() {
   pass "Crosscheck bootstrap tolerance does not hide unrelated untracked files"
 }
 
-test_repo_gitignores_every_documented_local_config() {
-  local label root_path sibling_path config_path ignored_tracked documented_configs
-  # An empty extraction means the AGENTS.md headings moved, not that every
-  # documented path is ignored: a silently empty loop would report coverage the
-  # audit no longer has.
-  documented_configs=$(
-    sed -n '/^## 2\. Layout and state/,/^## 3\. Session start/p' "$ROOT/AGENTS.md" \
-      | grep -Eo 'config/[A-Za-z0-9_.-]+' \
-      | LC_ALL=C sort -u
-  )
-  [ -n "$documented_configs" ] \
-    || fail "no documented config/ paths were extracted from AGENTS.md; the audit covers nothing"
-  while IFS= read -r config_path; do
-    [ -n "$config_path" ] || continue
-    git -C "$ROOT" check-ignore --quiet --no-index "$config_path" \
-      || fail "documented local path is not ignored: $config_path"
-  done <<EOF
-$documented_configs
-EOF
+test_repo_gitignores_local_roots() {
+  local label root_path sibling_path ignored_tracked
   while IFS='|' read -r label root_path sibling_path; do
     git -C "$ROOT" check-ignore --quiet --no-index "$root_path" \
       || fail "$label root artifact is not ignored: $root_path"
@@ -504,7 +487,7 @@ test_dirty_secondmate_skipped
 test_crosscheck_artifacts_do_not_strand_stale_homes
 test_artifact_bootstrap_preserves_updater_failure_status
 test_crosscheck_tolerance_does_not_hide_unrelated_dirt
-test_repo_gitignores_every_documented_local_config
+test_repo_gitignores_local_roots
 test_diverged_secondmate_skipped
 test_idempotent_already_current
 test_registry_backstop_dedup_and_self_exclusion

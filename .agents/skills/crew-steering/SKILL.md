@@ -1,9 +1,8 @@
 ---
 name: crew-steering
 description: >-
-  Agent-only practice for holding crewmates to the captain's bar.
-  Use before writing or materially revising a crewmate or secondmate brief and before live-steering a crewmate.
-  Applies ownership, evidence, premise-checking, quality, goal-fidelity, and directness without duplicating their authoritative contracts.
+  Agent-only practice for concise crewmate briefs and live corrections.
+  Load before writing or materially revising a crewmate or secondmate brief and before live-steering a crewmate, especially when ownership, recursive unblocking, validation custody, evidence, or goal fidelity is drifting.
 user-invocable: false
 metadata:
   internal: true
@@ -11,42 +10,40 @@ metadata:
 
 # Crewmate steering
 
-Steer every crewmate to the same bar the captain holds firstmate to.
-Apply this skill both while writing the initial brief and while live-steering work already in flight.
-Keep each brief or steer proportional: name the outcome, constraint, evidence, and next action, then stop.
+Use the smallest instruction that restores ownership of the captain's actual outcome.
+A brief or steer names the result, authority boundary, evidence, and next action, then stops.
+Point to the existing owner for procedure instead of copying its contract.
 
-## Apply it in both modes
+## Brief the outcome
 
-When writing a brief, make the expected result, authority boundaries, verification, and definition of done unmistakable.
-When live-steering, correct the smallest load-bearing mistake early and require the crewmate to carry the fix through implementation and proof.
-In both modes, preserve the captain's actual goal and use the existing owner for detail instead of copying its contract.
+State the concrete result and acceptance criteria before background.
+Name only constraints that change the worker's choices, plus the owning docs and scripts it must consult.
+Keep the definition of done observable and proportional to the task.
+Preserve mandatory safety stops, especially an unsafe or non-isolated worktree and any budget, credential-custody, irreversible-data-loss, or unlanded-work boundary.
 
-## 1. Demand ownership
+## Keep ownership live
 
-Require the crewmate to solve and implement the task: it never stops solely because work is hard or failing, it preserves mandated safety `blocked` stops such as unsafe or non-isolated worktree placement, and it exhausts its capability before following the solve-first escalation bar owned by `AGENTS.md` section 9.
-When a lane reports `paused:` while its run-step is active, apply the in-flight validation-custody boundary from `AGENTS.md` section 8: steer it back to attending and driving the run instead of accepting the pause.
+The crewmate owns solution and execution through proof, not merely an attempt or recommendation.
+Do not accept `almost there`, a passing neighboring test, or an unexplained stop as completion.
+Correct the smallest load-bearing mistake early and require the worker to carry that correction through implementation and direct evidence.
+Reject any quiet reframing of the captain's goal into a smaller win.
 
-## 2. Reject vague or optimistic claims
+## Unblock before escalating
 
-Treat `almost there` as unfinished, require real evidence because work is not done until proven, and review adversarially rather than rubber-stamping; `AGENTS.md` section 9 owns truthful outcome reporting and section 7's active delivery gate owns proof.
+When work reports blocked, ask which safe alternate method, resource, sequence, task split, or eligible lane was tried.
+Apply the same question recursively to a failed alternate while unaffected work continues.
+Do not route around safety or expand scope merely to stay busy.
+Escalate only a genuinely captain-owned action or an evidence-backed exhaustion of materially independent safe routes.
 
-## 3. Fact-check the load-bearing premise
+## Hold validation custody
 
-Reject a shallow-false premise without overcorrecting.
+The worker that starts validation owns every synchronous gate return through CI green, failure with evidence, or a new decision.
+A parked approval or fix-review step is not `paused:`; steer the worker to the current gate help and response.
+Do not let the worker hand-edit around, duplicate, abort, or restart a pipeline-owned fix.
+Keep additional ready work in the bounded validation queue rather than overloading shared capacity.
 
-## 4. Prefer quality and robustness
+## Finish cleanly
 
-Apply the captain's technical-decision bias and reject preserving a leaky component merely to save development cost or sunk work.
-
-## 5. Preserve goal fidelity
-
-Reject any quiet reframing of the task into a smaller win; prime directive 5 and `AGENTS.md` section 9 own the fixed-goal guardrail.
-
-## 6. Be direct and early
-
-Write specific, un-bloated briefs and steers, and correct a wrong path before it is built; `AGENTS.md` section 11 owns the brief contract.
-
-## Finish the steer
-
-End with the concrete result the crewmate must produce, the evidence that will prove it, and the next action it should take.
-Do not add motivational padding, duplicate background, or a second copy of an existing procedure.
+Require the promised artifact, verification, standalone report, and applicable landing evidence before accepting a terminal claim.
+End a steer with the concrete next action and proof expected from it.
+Do not add motivational padding, duplicate background, or another copy of existing procedure.

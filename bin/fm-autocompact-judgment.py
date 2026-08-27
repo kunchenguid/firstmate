@@ -236,8 +236,8 @@ def extract_transcript(path: Path) -> tuple[list[dict[str, str]], bool]:
 
 
 def extract_knowledge_routing(agents_text: str) -> str:
-    start_marker = "### Knowledge routing"
-    end_marker = "**Delivery mode (choose at add).**"
+    start_marker = "Route durable knowledge to one owner:"
+    end_marker = "\n## "
     start = agents_text.find(start_marker)
     end = agents_text.find(end_marker, start + len(start_marker))
     if start < 0 or end < 0:

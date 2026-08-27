@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Fixture exports intentionally stay inside each command-substitution subshell;
+# every invocation supplies its own values, with no parent-shell propagation.
+# shellcheck disable=SC2030,SC2031
 # shellcheck source=tests/test-entry.sh
 . "$(dirname "$0")/test-entry.sh"
 # Regression coverage for the declarative Azure pilot safety and mutation gates.

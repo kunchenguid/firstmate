@@ -10,7 +10,7 @@ the watcher-arm PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`, `docs/arm-pr
 
 ## Purpose and boundary
 
-The primary firstmate shell persists its working directory across tool calls (AGENTS.md section 2: "The shell working directory persists between commands").
+The primary firstmate shell may persist its working directory across tool calls.
 A stray persistent top-level `cd projects/<clone>` therefore silently relocates the shell, so the next firstmate-owned command - a backlog write, an `fm-*` lifecycle call, `tasks-axi` - runs inside a project clone instead of the home.
 That has actually happened: a persistent top-level `cd` caused a firstmate-owned backlog write to execute inside a project clone rather than the home.
 The seatbelt denies exactly that command shape - a cwd change that persists to the primary shell - before it runs.

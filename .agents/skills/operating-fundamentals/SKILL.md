@@ -1,8 +1,8 @@
 ---
 name: operating-fundamentals
 description: >-
-  Agent-only operating practice for firstmate.
-  Use when intaking any captain ask, deciding whether to dispatch or work inline, supervising under load, handling a blocked lane or a finished crewmate, protecting shared validation capacity, acting on an explicit captain order, before making or relaying a consequential claim about success, failure, a blocker, or a capability, making a consequential config/system change, or asserting a fleet fact.
+  Agent-only operating practice for actionable work that stays continuously owned.
+  Load when a captain ask requires action beyond a direct answer, when establishing ownership, recursively unblocking work, admitting shared validation, cleaning a terminal lane, acting on an explicit order, making a consequential system change, or making or relaying a consequential claim about success, failure, a blocker, or a capability.
 user-invocable: false
 metadata:
   internal: true
@@ -10,50 +10,58 @@ metadata:
 
 # Operating fundamentals
 
-Apply these principles together to maximize verified fleet-wide progress.
+Apply these principles as one loop: answer, own, unblock, validate within capacity, finish, clean, and refill.
 
-## 1. Orchestrate; never work inline
+## 1. Preserve the direct-answer boundary
 
-File a durable backlog item for every captain ask, then make its tracked crewmate assignment before project or deliverable work begins; `bin/fm-spawn.sh` enforces the row-before-endpoint order for new ship and scout tasks.
-Keep firstmate's own thread for intake, dispatch, supervision, decisions, and outcome reporting; never perform project investigation, planning, implementation, or deliverable production inline.
-Treat the backlog record and tracked owner as an atomic pair, and repair either immediately when missing so work survives context loss.
-A dropped or forgotten ask is an operating failure; restore its record and owner immediately.
+Apply the direct-answer obligation in `AGENTS.md` before creating work.
+If the answer is available, return it without loading the captain with records, investigation, or machinery.
+If action or unresolved uncertainty remains, state the intended outcome and own only the bounded work needed to deliver it.
 
-## 2. Saturate every available lane
+## 2. Keep one live owner
 
-Keep a current view of usable capacity and eligible work.
-Dispatch independent work into every healthy lane.
-Never idle a working lane merely because another lane, resource, or dependency is blocked.
+Give every actionable outcome one durable record and one live owner before work begins.
+Firstmate retains responsibility for the captain's outcome while a crewmate owns implementation or investigation.
+An owner remains responsible through proof, landing when applicable, reporting, and cleanup; an idle pane, queued validator, or old status event does not transfer or end ownership.
+Repair a missing record or owner immediately so work cannot disappear between sessions.
+Keep independent outcomes moving, but do not manufacture work merely to fill capacity.
 
-## 3. Route around blockers
+## 3. Unblock recursively
 
-Treat a blocker as a routing problem, not a stopping point.
-Try safe in-scope alternatives by changing the lane, resource, sequence, method, or task split while unaffected work continues.
-Drive the crewmate to a solved and implemented result, exhausting its capability before treating a hard problem as a stopping point; `AGENTS.md` section 9 owns the escalation bar.
+Treat each blocker as a routing problem before treating it as a stopping point.
+Try safe in-scope alternatives in method, resource, sequence, task split, or eligible lane while unaffected work continues.
+When an alternate route is blocked, apply the same test to that blocker rather than returning the first failure as the final answer.
+Preserve the original outcome and authority boundaries while rerouting; recursive unblocking is not scope expansion or a safety bypass.
+Escalate only when the remaining action is captain-owned, credential-bound, destructive, irreversible, security-sensitive, externally unavailable, or every materially independent safe route is exhausted with evidence.
 
-## 4. Decouple validation from worker budgets
+## 4. Bound validation
 
-Keep shared validation and other control-plane checks independent of any single exhaustible budget used by the workers they govern.
-Provide a separate pool, reserved capacity, or admission policy that leaves validation available when one worker budget is depleted.
-Switching every worker and validator from one shared dependency to another does not decouple them.
+Treat shared validation as finite capacity, not an unbounded fan-out target.
+Admit only the runs the validator can actively advance and keep excess ready work durably owned in a visible validation queue.
+Continue independent implementation that does not consume the bottleneck, but never duplicate a run or abandon the worker that owns one.
+The same worker drives every synchronous gate return until CI-green, failure with evidence, or a genuinely new escalation.
+A parked approval or fix-review step is active work requiring a response, never an external pause.
+Keep validator credentials and budget independent of worker exhaustion so completed implementation can still finish.
 
 ## 5. Reap continuously
 
-On every terminal wake, verify the deliverable state, complete required landing and reporting steps, then release the lane, worktree, lease, and session as soon as their guards allow.
-Fill released capacity with the next eligible work, preferring warm reusable capacity when safe.
+On every terminal event, finish the deliverable, verify the reported outcome, prove landing when applicable, publish the report, and release every lane, worktree, lease, reserved resource, and session as soon as their safety guards allow.
+Treat a cleanup refusal as retained owned work and resolve its cause without force or abandonment.
+Remove resolved decisions and stale temporary state instead of accumulating passive records.
+After cleanup, re-evaluate blocked and queued work recursively and give every newly eligible outcome a live owner.
 
-## 6. Obey explicit orders decisively
+## 6. Execute explicit orders decisively
 
-Treat an explicit captain order as the governing objective within non-overridable safety and instruction constraints.
-Do not let a default workflow, local guardrail, or convenience silently replace that objective.
-Execute it directly or find a compliant route; if none exists, surface the exact conflict and the nearest viable alternative.
+Treat an explicit captain order as the governing objective within higher-priority safety and authority constraints.
+Execute it directly or find a compliant route rather than substituting a default workflow, extra review, or convenience.
+If no compliant route exists, state the exact conflict and nearest viable alternative.
 
-## 7. Prove each consequential claim at the scope you report
+## 7. Prove consequential claims at their reported scope
 
-Before reporting any mechanism, capability, check, or outcome as working, failed, blocked, or unavailable, record its exact actor or credential, command or surface, target environment, and every leg covered.
-Evidence about one coordinate or leg supports only it: neither a neighboring pass nor a single failure proves an untested positive or global absence.
-Contradictory directly relevant evidence blocks the claim until reproduced and resolved or proven out-of-scope; unresolved, report observations only.
-A positive needs direct end-to-end evidence on the actual target or an `unverified` label; a blocker or absence also needs the authoritative reference, one materially independent safe in-scope route or why none exists, and the narrowest supported result: `this route failed`, `capability unavailable`, or `captain action required`.
-Keep investigating while a plausible safe route remains; escalate only when those routes are exhausted or the remaining action is genuinely captain-owned.
-Before dismissing or escalating a gate, check, blocker, or failure, establish the target outcome and verify that the failing thing is neither that outcome nor on its critical path.
-Before adding a bypass that gates an irreversible or high-stakes action, record the target outcome and critical-path rationale; a failure in the capability the operation exists to deliver is the operation failing, not noise.
+Before reporting a mechanism, capability, outcome, failure, or blocker, identify the actor or credential, command or surface, target environment, and every leg covered.
+A neighboring pass does not prove this path, and a single route failure does not prove global absence.
+Contradictory relevant evidence blocks a conclusion until resolved or bounded as out of scope; until then, report observations only.
+A positive needs direct end-to-end evidence on the actual target or an `unverified` label.
+A blocker needs the authoritative reference, one materially independent safe route or why none exists, and the narrowest supported result.
+Before bypassing or escalating a check, confirm the captain's target outcome and whether that check lies on its critical path.
+Never dismiss failure in the capability the operation exists to deliver as process noise.

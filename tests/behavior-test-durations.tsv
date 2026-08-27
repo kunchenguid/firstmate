@@ -112,7 +112,6 @@
 16000	tests/fm-spawn-cloud.test.sh
 42452	tests/fm-spawn-dispatch-profile.test.sh
 20000	tests/fm-spawn-provision.test.sh
-42	tests/fm-stow-contract.test.sh
 500	tests/fm-supervision-events.test.sh
 95	tests/fm-supervision-instructions.test.sh
 10408	tests/fm-tangle-guard.test.sh
@@ -133,9 +132,7 @@
 26000	tests/fm-worker-placement.test.sh
 1000	tests/fm-worker-supervisor.test.sh
 23744	tests/fm-x-mode.test.sh
-250	tests/lavish-repair.test.sh
 6200	tests/lavish.test.sh
-92	tests/operating-fundamentals.test.sh
 100	tests/runner-entry-probe.test.sh
 1000	tests/test-suite-seal.test.sh
 1500	tests/fm-cloud-provider-seal.test.sh

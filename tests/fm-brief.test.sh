@@ -78,21 +78,21 @@ test_no_mistakes_dod_wording() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
-  assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
-    "no-mistakes DOD lost its guidance-reference sentence"
+  assert_grep "Use the loaded no-mistakes skill" "$brief" \
+    "no-mistakes DOD lost its version-matched guidance owner"
   assert_no_grep "no-mistakes' own guidance" "$brief" \
     "no-mistakes DOD regressed to the apostrophe form that breaks bash -n"
   assert_grep "FM_HOME='$home' '$ROOT/bin/fm-no-mistakes-reattach.sh' $id" "$brief" \
-    "no-mistakes brief does not route the transient reconciliation timeout through the task-scoped helper"
-  assert_grep "retries only that transient read timeout after a read-only running-daemon preflight" "$brief" \
+    "no-mistakes brief does not route the exact reconciliation timeout through the task helper"
+  assert_grep "For the exact reconciliation socket-read timeout" "$brief" \
     "no-mistakes brief lost the bounded retry boundary"
-  assert_grep "Never stop, restart, or update the shared \`no-mistakes\` daemon" "$brief" \
+  assert_grep "Never stop, restart, or update the shared no-mistakes daemon" "$brief" \
     "no-mistakes brief lost the shared-daemon lifecycle prohibition"
-  assert_grep "Ordinary \`axi run\` calls \`EnsureDaemon\`" "$brief" \
-    "no-mistakes brief lost the upstream auto-start limitation"
-  assert_grep "strict no-start behavior requires an upstream attach-only operation" "$brief" \
-    "no-mistakes brief lost the explicit attach-only requirement"
-  pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
+  assert_grep "Once validation starts, own every synchronous gate return" "$brief" \
+    "no-mistakes brief lost live validation ownership"
+  assert_grep "At the first CI-green return" "$brief" \
+    "no-mistakes brief waits beyond the bounded ready point"
+  pass "fm-brief.sh: no-mistakes DOD preserves live bounded validation"
 }
 
 test_ship_project_memory_wording() {
@@ -103,13 +103,33 @@ test_ship_project_memory_wording() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
-  assert_grep "Record only project knowledge useful to almost every future session." "$brief" \
-    "project-memory contract lost the durable-knowledge bar"
-  assert_grep "prefer a pointer to the authoritative file, command, or doc over copying the detail" "$brief" \
-    "project-memory contract lost pointer-over-copy guidance"
-  assert_grep "lacks \`## Maintaining this file\`, add that short self-governance section" "$brief" \
-    "project-memory contract lost the self-governance add-in-same-pass rule"
-  pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
+  assert_grep "When durable project-intrinsic knowledge exists or agent-memory files already exist" "$brief" \
+    "project-memory trigger missing"
+  assert_grep "knowledge useful to almost every future project session" "$brief" \
+    "project-memory durable-knowledge bar missing"
+  assert_grep "point to authoritative code or docs instead of copying mechanics" "$brief" \
+    "project-memory pointer-over-copy guidance missing"
+  pass "fm-brief.sh: ship project memory stays proportional and owner-directed"
+}
+
+test_briefs_require_recursive_unblocking() {
+  local home kind id brief
+  home="$TMP_ROOT/recursive-unblock-home"
+  mkdir -p "$home/data"
+  for kind in ship scout secondmate; do
+    id="brief-unblock-$kind"
+    case "$kind" in
+      ship) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1 ;;
+      scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1 ;;
+      secondmate) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1 ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_grep "safe in-scope" "$brief" \
+      "$kind brief does not require safe alternate routes"
+    assert_no_grep "If you hit the same obstacle twice" "$brief" \
+      "$kind brief retains the passive two-attempt stop"
+  done
+  pass "fm-brief.sh: every scaffold recursively unblocks before reporting blocked"
 }
 
 test_ship_completion_report_contract() {
@@ -453,8 +473,8 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_no_grep '`paused: {why}`' "$brief" \
       "$kind brief still instructs the default paused status"
-    assert_grep 'or a blocker clears' "$brief" \
-      "$kind brief did not require durable resolution when a blocker clears"
+    assert_grep 'resolved: {how}' "$brief" \
+      "$kind brief did not require durable resolution when work resumes"
   done
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
@@ -464,6 +484,7 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_briefs_require_recursive_unblocking
 test_ship_completion_report_contract
 test_scout_completion_report_contract
 test_promoted_scout_receives_completion_contract

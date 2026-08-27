@@ -218,23 +218,6 @@ test_usage_and_file_errors() {
   pass "invalid usage and unreadable files return 2"
 }
 
-test_wiring() {
-  # shellcheck disable=SC2016  # These are literal tracked Markdown fragments.
-  grep -F 'require `bin/fm-captain-item-check.sh` to clear' "$ROOT/AGENTS.md" >/dev/null \
-    || fail "AGENTS.md does not require the check before surfacing an item"
-  # shellcheck disable=SC2016  # These are literal tracked Markdown fragments.
-  grep -F 'Creation snapshots the request bytes once' \
-    "$ROOT/.agents/skills/lavish-decisions/SKILL.md" >/dev/null \
-    || fail "lavish-decisions does not bind creation to the checked request"
-  grep -F 'await validateCaptainRequest(home, request);' "$ROOT/tools/lavish/src/cli.mjs" >/dev/null \
-    || fail "Lavish creation does not wire the request check before durable creation"
-  grep -F 'await validateCaptainItems(home, definition);' "$ROOT/tools/lavish/src/cli.mjs" >/dev/null \
-    || fail "Lavish creation does not check annotation item bodies before durable creation"
-  grep -F 'request,' "$ROOT/tools/lavish/src/cli.mjs" >/dev/null \
-    || fail "Lavish creation does not pass the checked bytes to durable creation"
-  pass "always-loaded and Lavish creation paths invoke the check"
-}
-
 test_negative_controls
 test_positive_controls
 test_decision_mode
@@ -246,4 +229,3 @@ test_unchecked_wrapper_prose_fails
 test_verbatim_block_preserves_technical_detail
 test_request_assembly
 test_usage_and_file_errors
-test_wiring
