@@ -216,7 +216,7 @@ Claude Code's primary watcher protocol is Stop-owned: the auto-arm hook fires on
 
 | Fact | Value |
 |---|---|
-| Busy state | Unknown until a semantic source is live-verified: the app-server turn lifecycle is unreachable for a pane worker, and project lifecycle hooks did not fire for a firstmate-launched worker. |
+| Busy state | Codex has no verified Codex-owned semantic source because the app-server turn lifecycle is unreachable for a pane worker and project lifecycle hooks did not fire for a firstmate-launched worker; `bin/fm-busy-lib.sh` owns the separately attributed Herdr-native busy-only exception, whose idle result remains inconclusive. |
 | Exit command | `/quit` (slash popup needs about 1 second between text and Enter; the shared submit path used by `fm-control` handles it) |
 | Interrupt | single Escape |
 | Skill invocation | `$<skill>` (e.g. `$no-mistakes`); `/<skill>` is claude-only and codex rejects it as "Unrecognized command" |
@@ -438,7 +438,7 @@ Kimi Code CLI launches from the absolute path resolved from `PATH`, falling back
 | Binary | Executable `kimi` from `PATH`, then executable `$HOME/.kimi-code/bin/kimi`; spawning refuses if neither exists. |
 | Launch | Bare interactive TUI with `--auto`, followed by readiness-gated pointer delivery; positional prompts are rejected. |
 | Models | `kimi-code/kimi-for-coding` (default), `kimi-code/kimi-for-coding-highspeed`, `kimi-code/k3`, and `kimi-code/k3-256k`. |
-| Busy state | Standalone Kimi is unknown until a semantic source is live-verified; prefer Wire's `prompt` request lifetime, then documented hooks including `Interrupt`. Kimi behind Pi uses Pi's lifecycle. Its moon-phase spinner is not a state source. |
+| Busy state | Standalone Kimi has no verified Kimi-owned semantic source, with Wire's `prompt` request lifetime preferred before documented hooks including `Interrupt`; Kimi behind Pi uses Pi's lifecycle, `bin/fm-busy-lib.sh` owns the separately attributed Herdr-native busy-only exception, and the moon-phase spinner is not a state source. |
 | Exit command | `/exit` |
 | Interrupt | Single Escape, which prints `Interrupted by user`. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; firstmate skills are discovered. |
@@ -468,7 +468,7 @@ The delivery-only spinner match covers the full moon-phase glyph set rather than
 `fm-spawn.sh` installs one marker-delimited Firstmate entry in `$HOME/.kimi-code/config.toml`, one silent always-zero hook script, and one private token registry under `$HOME/.kimi-code/fm-turn-end.d/`.
 Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, and the global hook touches that task's `state/<id>.turn-ended` only when the Stop payload's `cwd`, pointer, and registry entry all agree.
 A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding that the hook did not fire.
-The guarded turn-end signal remains a wake notification; standalone Kimi has no busy-state source until one is live-verified.
+The guarded turn-end signal remains a wake notification rather than a Kimi-owned busy-state source; `bin/fm-busy-lib.sh` owns independent backend classification, including the Herdr-native busy-only exception.
 
 ## muse (VERIFIED 2026-08-05, Muse Code 0.1.0-R708.1, build sha 427a430436)
 

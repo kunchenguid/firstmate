@@ -2322,8 +2322,8 @@ if [ "$KIND" != secondmate ]; then
   # submitted turn, so the seed record is busy/fm-spawn. The minted gen is
   # embedded into each adapter's wiring so an event from a superseded
   # incarnation is rejected as stale. Grok stays on its isolated rendered-tail
-  # fallback and standalone Kimi stays unknown until fm_busy_kimi_verified
-  # opens, so neither is armed here.
+  # fallback, while standalone Kimi has no verified Kimi-owned writer and leaves
+  # independent backend proof to the classifier, so neither is armed here.
   BUSY_GEN=
   case "$HARNESS" in
     codex*)
@@ -2342,9 +2342,10 @@ if [ "$KIND" != secondmate ]; then
       [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
       ;;
     kimi*)
-      # Standalone Kimi stays unknown until fm_busy_kimi_verified opens on a
-      # live-verified installed version (bin/fm-busy-lib.sh owns the gate and
-      # the required evidence). Arming without wiring would seed a busy record
+      # Standalone Kimi has no verified Kimi-owned source until
+      # fm_busy_kimi_verified opens on a live-verified installed version
+      # (bin/fm-busy-lib.sh owns the gate, independent backend proof, and the
+      # required evidence). Arming without wiring would seed a busy record
       # nothing can ever clear, so the arm waits for the wiring.
       if fm_busy_kimi_verified; then
         echo "error: kimi semantic busy-state wiring is not implemented; open the gate only together with verified wiring" >&2
@@ -2466,10 +2467,10 @@ EOF
       # probes and the evidence). Neither Codex path is usable on the
       # installed binary: a pane worker's turns are not observable through
       # the app-server protocol, and its lifecycle hooks did not fire for a
-      # firstmate-launched worker. Codex therefore classifies unknown with
-      # an explicit reason rather than falling back to idle, and no busy
-      # wiring is installed. The turn-end NOTIFICATION marker still rides
-      # the launch command via -c notify=[...] and __TURNEND__.
+      # firstmate-launched worker. Codex-owned state therefore remains unknown
+      # with an explicit reason absent separately attributed backend proof, and
+      # no Codex busy wiring is installed. The turn-end NOTIFICATION marker
+      # still rides the launch command via -c notify=[...] and __TURNEND__.
       ;;
     grok*)
       # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
