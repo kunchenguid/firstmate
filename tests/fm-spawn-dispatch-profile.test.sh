@@ -443,7 +443,7 @@ test_codex_threads_max_effort() {
   pass "codex receives max through model_reasoning_effort"
 }
 
-test_old_codex_omits_max_effort() {
+test_old_codex_refuses_max_effort() {
   local rec id out status launch
   id=profile-codex-old-max-z4b
   rec=$(make_spawn_case profile-codex-old-max codex "$id")
@@ -453,15 +453,30 @@ test_old_codex_omits_max_effort() {
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
     --model gpt-5 --effort max)
   status=$?
-  expect_code 0 "$status" "older Codex spawn with max effort should preserve the compatible launch path"
-  assert_contains "$out" "Codex max effort requires codex-cli 0.149.1 or newer" \
-    "older Codex max omission was silent"
+  expect_code 1 "$status" "older Codex spawn must refuse an explicit unsupported max effort"
+  assert_contains "$out" "refusing to launch without the explicitly selected effort" \
+    "older Codex max refusal was not actionable"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
-    "older Codex launch did not preserve the model flag"
-  assert_not_contains "$launch" "model_reasoning_effort" \
-    "older Codex launch received unsupported max reasoning effort"
-  pass "older Codex omits max with an actionable compatibility warning"
+  [ -z "$launch" ] || fail "older Codex launched after refusing max effort: $launch"
+  pass "older Codex refuses to launch without explicit max effort"
+}
+
+test_unparseable_codex_refuses_max_effort() {
+  local rec id out status launch
+  id=profile-codex-unparseable-max-z4c
+  rec=$(make_spawn_case profile-codex-unparseable-max codex "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_CODEX_VERSION=development \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5 --effort max)
+  status=$?
+  expect_code 1 "$status" "unparseable Codex version must refuse an explicit max effort"
+  assert_contains "$out" "requires codex-cli 0.149.1 or newer with a parseable version" \
+    "unparseable Codex max refusal did not identify the compatibility boundary"
+  launch=$(cat "$LAUNCH_LOG")
+  [ -z "$launch" ] || fail "unparseable Codex launched after refusing max effort: $launch"
+  pass "unparseable Codex version refuses to launch without explicit max effort"
 }
 
 test_grok_threads_model_and_reasoning_effort() {
@@ -836,7 +851,8 @@ test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_threads_max_effort
-test_old_codex_omits_max_effort
+test_old_codex_refuses_max_effort
+test_unparseable_codex_refuses_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort

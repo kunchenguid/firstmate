@@ -33,7 +33,7 @@ The decisive interactive header output was:
 ```
 
 The opt-in executable refresh guard is `FM_CODEX_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-codex-continuity-live-e2e.test.sh`.
-Firstmate therefore passes explicit max effort on codex-cli 0.149.1 or newer and preserves the compatible omission path with a warning on older or unparseable versions.
+Firstmate therefore passes explicit max effort on codex-cli 0.149.1 or newer and refuses to spawn on older or unparseable versions rather than silently downgrading the explicit selection.
 Low through xhigh remain version-independent.
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.

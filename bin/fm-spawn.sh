@@ -1423,7 +1423,8 @@ effort_flag_for_harness() {
           if codex_supports_max_effort; then
             printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')"
           else
-            echo "warning: Codex max effort requires codex-cli 0.149.1 or newer; omitting it for this launch" >&2
+            echo "error: Codex max effort requires codex-cli 0.149.1 or newer with a parseable version; refusing to launch without the explicitly selected effort" >&2
+            return 1
           fi
           ;;
       esac
@@ -2803,7 +2804,7 @@ sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
