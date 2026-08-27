@@ -66,6 +66,10 @@
 #     they retain independently trustworthy structured surfaces. An inventory
 #     mismatch also keeps the home's own current classification, which only an
 #     unavailable child state or an untrustworthy backlog collapses to unknown.
+#   runtime_incidents: {records[],invalid[],truncated} - locally recorded bounded incident
+#     triage and lifecycle state from fm-runtime-incident.py. Repository, worker,
+#     provider, and service observations remain read-only during triage; only the
+#     local incident ledger is written by that command.
 #   secondmate_guidance: return-channel action note for renderers and bearings.
 #
 # Compatibility: JSON is the primary machine-readable surface.
@@ -1396,6 +1400,18 @@ scout_report_lines() {
     | jq -s 'sort_by(.id)'
 }
 
+runtime_incidents_json() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    jq -n '{schema:"fm-runtime-incidents.v1",records:[],invalid:[{path:null,reason:"python3 unavailable"}],truncated:0}'
+    return 0
+  fi
+  if out=$("$SCRIPT_DIR/fm-runtime-incident.py" status --json --compact 2>/dev/null); then
+    printf '%s\n' "$out"
+  else
+    jq -n '{schema:"fm-runtime-incidents.v1",records:[],invalid:[{path:null,reason:"incident ledger unavailable"}],truncated:0}'
+  fi
+}
+
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 
@@ -1406,6 +1422,7 @@ if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
 fi
 
 SCOUT_REPORTS_JSON=$(scout_report_lines)
+RUNTIME_INCIDENTS_JSON=$(runtime_incidents_json)
 MAIN_INVENTORY_JSON=$(main_inventory_json "$BACKLOG_JSON" "$TASKS_JSON") \
   || { echo "fm-fleet-snapshot: main inventory summary failed" >&2; exit 1; }
 SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \
@@ -1425,6 +1442,7 @@ jq -n \
   --argjson tasks "$TASKS_JSON" \
   --argjson main_inventory "$MAIN_INVENTORY_JSON" \
   --argjson scout_reports "$SCOUT_REPORTS_JSON" \
+  --argjson runtime_incidents "$RUNTIME_INCIDENTS_JSON" \
   --argjson secondmate_current "$SECONDMATE_CURRENT_JSON" \
   --argjson secondmate_landed "$SECONDMATE_LANDED_JSON" \
   'def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
@@ -1439,6 +1457,7 @@ jq -n \
      tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
      main_inventory:$main_inventory,
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),
+     runtime_incidents:$runtime_incidents,
      secondmate_current:$secondmate_current,
      secondmate_landed:$secondmate_landed,
      secondmate_guidance:{

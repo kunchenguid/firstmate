@@ -58,11 +58,29 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
     else "\($r.blocked_by) - \($r.blocked_reason)" end;
   def backlog_row($r):
     "| \($r.id // "-") | \(dash($r.title // $r.raw)) | \(dash($r.repo)) | \(dash($r.kind)) | \(blocker($r)) | \(dash($r.pr_url // $r.report_path // $r.local_note)) |";
+  def incident_row($r):
+    "| \($r.id) | \($r.phase) | \($r.diagnosis.classification) | \($r.diagnosis.code_change_required) | \($r.approval.status) | \($r.safest_next_action) |";
 
   "# Fleet View",
   "",
   "Schema: \(.schema)",
   "Home: \(.fm_home)",
+  "",
+  "## Runtime Incident Fast Path",
+  "triage → diagnosis → approval → repair → verification",
+  (if (.runtime_incidents.records | length) == 0 then
+    "No runtime incidents recorded."
+   else
+    "| Incident | Current phase | Diagnosis | Code change | Approval | Safest next action |",
+    "| --- | --- | --- | --- | --- | --- |",
+    (.runtime_incidents.records[] | incident_row(.))
+   end),
+  (if (.runtime_incidents.invalid | length) > 0 then
+    "Warning: \(.runtime_incidents.invalid | length) incident record(s) could not be read."
+   else empty end),
+  (if (.runtime_incidents.truncated // 0) > 0 then
+    "Warning: \(.runtime_incidents.truncated) older incident record(s) are omitted from this bounded view."
+   else empty end),
   "",
   "## Under Way",
   (if (.tasks | length) == 0 then

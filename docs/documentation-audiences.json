@@ -141,6 +141,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/runtime-incident-fast-path/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/firstmate-codexapp/SKILL.md",
       "audience": "agent-runtime"
     },

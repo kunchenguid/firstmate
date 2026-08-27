@@ -1,0 +1,1170 @@
+#!/usr/bin/env python3
+"""Bounded runtime-incident triage and lifecycle ledger.
+
+The triage command is read-only with respect to repositories, workers,
+deployments, providers, and managed services.  Its only write is an atomic
+incident record under state/incidents so status views can expose progress.
+
+Usage:
+  fm-runtime-incident.py triage --incident ID --repo PATH --summary TEXT
+      [--evidence FILE] [--scan-root PATH]... [--term WORD]... [--json]
+  fm-runtime-incident.py approve --incident ID --kind KIND --note TEXT [--json]
+  fm-runtime-incident.py repair --incident ID --note TEXT [--json]
+  fm-runtime-incident.py verify --incident ID --evidence FILE [--json]
+  fm-runtime-incident.py status [--incident ID] [--json] [--compact]
+
+Evidence is a JSON object.  Supported observations are:
+  production: {origin, commit, proposed_hotfix_commit, routing_mismatch,
+               deployment_failed, health}
+  runtime: {errors:[{source,kind,code}], defect_proven,
+            defect_evidence:[...], reproduction, proven_path}
+  external_providers: [{name,status,code}]
+  local_services: [{name,status}]
+  approval: {required,kind,request}
+  verification: {runtime_path_ok, checks:[{name,status,evidence}]}
+
+The command never executes a repair.  After the exact approval has been
+obtained, perform the narrow provider or service operation with its supported
+operator surface, then use `repair` to record that fact and `verify` with fresh
+end-to-end evidence.  A code-change workflow is ready only when triage returns
+`code_change_required: yes`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+from typing import Any, Iterable
+from urllib.parse import urlparse
+
+
+SCHEMA = "fm-runtime-incident.v1"
+STATUS_SCHEMA = "fm-runtime-incidents.v1"
+FLOW = ["triage", "diagnosis", "approval", "repair", "verification"]
+INCIDENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+MAX_EVIDENCE_BYTES = 1024 * 1024
+MAX_COPIES = 64
+DEFAULT_STATUS_LIMIT = 20
+MAX_BRANCHES_PER_COPY = 100
+MAX_SCAN_DEPTH = 3
+GIT_TIMEOUT = 4
+STATE_READ_LIMIT = 1024 * 1024
+TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{2,}")
+STOP_WORDS = {
+    "about", "after", "again", "against", "being", "build", "change",
+    "current", "during", "error", "failure", "firstmate", "from", "have",
+    "incident", "into", "project", "production", "runtime", "should",
+    "that", "their", "then", "there", "these", "this", "through", "using",
+    "when", "where", "which", "with", "worker", "worktree",
+}
+EXTERNAL_FAILURES = {
+    "quota", "quota_exhausted", "command_quota_exceeded", "rate_limit",
+    "rate_limited", "billing", "billing_required", "payment_required",
+    "credential", "credentials", "credential_invalid", "unauthorized",
+    "configuration", "configuration_invalid", "config_invalid",
+}
+LOCAL_FAILURES = {"down", "failed", "stopped", "unhealthy", "unavailable"}
+VERIFICATION_PASS = {"healthy", "ok", "pass", "passing"}
+
+
+class IncidentError(RuntimeError):
+    """Expected refusal or invalid input."""
+
+
+def utc_now() -> str:
+    override = os.environ.get("FM_INCIDENT_NOW")
+    if override:
+        try:
+            parsed = dt.datetime.fromisoformat(override.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise IncidentError("FM_INCIDENT_NOW must be an ISO-8601 timestamp") from exc
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_time(value: str) -> dt.datetime:
+    return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def paths() -> dict[str, Path]:
+    script_root = Path(__file__).resolve().parent.parent
+    root = Path(os.environ.get("FM_ROOT_OVERRIDE", script_root)).resolve()
+    home = Path(os.environ.get("FM_HOME", os.environ.get("FM_ROOT_OVERRIDE", root))).resolve()
+    return {
+        "root": root,
+        "home": home,
+        "state": Path(os.environ.get("FM_STATE_OVERRIDE", home / "state")).resolve(),
+        "data": Path(os.environ.get("FM_DATA_OVERRIDE", home / "data")).resolve(),
+        "projects": Path(os.environ.get("FM_PROJECTS_OVERRIDE", home / "projects")).resolve(),
+    }
+
+
+def validate_incident_id(value: str) -> str:
+    if not INCIDENT_RE.fullmatch(value):
+        raise IncidentError("incident id must use only letters, numbers, dot, underscore, or dash")
+    return value
+
+
+def run_git(repo: Path, *args: str, check: bool = False) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=GIT_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        if check:
+            raise IncidentError(f"git inspection timed out or failed for {repo}")
+        return None
+    if result.returncode != 0:
+        if check:
+            raise IncidentError(f"not a readable Git repository: {repo}")
+        return None
+    return result.stdout.rstrip("\n")
+
+
+def canonical_repo(path: Path) -> Path:
+    value = run_git(path, "rev-parse", "--show-toplevel", check=True)
+    assert value is not None
+    return Path(value).resolve()
+
+
+def commit_is_ancestor(repo: Path, ancestor: str | None, descendant: str | None) -> bool:
+    if not ancestor or not descendant:
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "merge-base", "--is-ancestor", ancestor, descendant],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=GIT_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def normalize_origin(value: str | None) -> str | None:
+    if not value:
+        return None
+    value = value.strip()
+    if value.startswith("file://"):
+        parsed = urlparse(value)
+        return "file://" + str(Path(parsed.path).resolve()).removesuffix(".git")
+    if value.startswith("/"):
+        return "file://" + str(Path(value).resolve()).removesuffix(".git")
+    if "://" in value:
+        parsed = urlparse(value)
+        host = (parsed.hostname or "").lower()
+        port = f":{parsed.port}" if parsed.port else ""
+        path = parsed.path.rstrip("/").removesuffix(".git")
+        return f"{parsed.scheme.lower()}://{host}{port}{path}"
+    match = re.match(r"^(?:(?P<user>[^@/:]+)@)?(?P<host>[^:]+):(?P<path>.+)$", value)
+    if match:
+        return f"ssh://{match.group('host').lower()}/{match.group('path').rstrip('/').removesuffix('.git')}"
+    return value.rstrip("/").removesuffix(".git")
+
+
+def git_default_branch(repo: Path) -> str | None:
+    ref = run_git(repo, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+    if ref and ref.startswith("origin/"):
+        return ref.removeprefix("origin/")
+    for name in ("main", "master"):
+        if run_git(repo, "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{name}") is not None:
+            return name
+    return None
+
+
+def commit_epoch(repo: Path, ref: str | None) -> int | None:
+    if not ref:
+        return None
+    value = run_git(repo, "show", "-s", "--format=%ct", ref)
+    if value and value.isdigit():
+        return int(value)
+    return None
+
+
+def repo_record(path: Path) -> dict[str, Any] | None:
+    top_value = run_git(path, "rev-parse", "--show-toplevel")
+    if not top_value:
+        return None
+    top = Path(top_value).resolve()
+    origin_raw = run_git(top, "remote", "get-url", "origin")
+    origin = normalize_origin(origin_raw)
+    branch = run_git(top, "symbolic-ref", "--quiet", "--short", "HEAD")
+    head = run_git(top, "rev-parse", "HEAD")
+    common_dir_raw = run_git(top, "rev-parse", "--git-common-dir")
+    common_dir = None
+    if common_dir_raw:
+        candidate = Path(common_dir_raw)
+        common_dir = str((top / candidate).resolve() if not candidate.is_absolute() else candidate.resolve())
+    default_branch = git_default_branch(top)
+    remote_ref = f"refs/remotes/origin/{default_branch}" if default_branch else None
+    remote_head = run_git(top, "rev-parse", remote_ref) if remote_ref else None
+    status = run_git(top, "status", "--porcelain", "--untracked-files=normal")
+    branches_value = run_git(
+        top,
+        "for-each-ref",
+        f"--count={MAX_BRANCHES_PER_COPY}",
+        "--format=%(refname:short)\t%(objectname)",
+        "refs/heads",
+    )
+    branches: list[dict[str, str]] = []
+    for line in (branches_value or "").splitlines():
+        name, _, sha = line.partition("\t")
+        if name and sha:
+            branches.append({"name": name, "commit": sha})
+    return {
+        "path": str(top),
+        "common_dir": common_dir,
+        "origin": origin,
+        "branch": branch,
+        "detached": branch is None,
+        "head": head,
+        "head_epoch": commit_epoch(top, head),
+        "default_branch": default_branch,
+        "remote_default_head": remote_head,
+        "remote_default_epoch": commit_epoch(top, remote_head),
+        "clean": status == "",
+        "branches": branches,
+    }
+
+
+def parse_worktrees(repo: Path) -> list[dict[str, Any]]:
+    value = run_git(repo, "worktree", "list", "--porcelain") or ""
+    rows: list[dict[str, Any]] = []
+    current: dict[str, Any] = {}
+    for line in value.splitlines() + [""]:
+        if not line:
+            if current:
+                path = Path(current["path"])
+                record = repo_record(path)
+                rows.append({
+                    "path": str(path.resolve()),
+                    "head": current.get("head"),
+                    "branch": current.get("branch"),
+                    "detached": current.get("detached", False),
+                    "present": path.exists(),
+                    "clean": record.get("clean") if record else None,
+                })
+                current = {}
+            continue
+        key, _, val = line.partition(" ")
+        if key == "worktree":
+            current["path"] = val
+        elif key == "HEAD":
+            current["head"] = val
+        elif key == "branch":
+            current["branch"] = val.removeprefix("refs/heads/")
+        elif key == "detached":
+            current["detached"] = True
+    return rows
+
+
+def meta_values(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        if path.stat().st_size > STATE_READ_LIMIT:
+            return values
+        for line in path.read_text(errors="replace").splitlines():
+            key, sep, value = line.partition("=")
+            if sep and key and key not in values:
+                values[key] = value
+    except OSError:
+        pass
+    return values
+
+
+def registered_paths(state: Path) -> set[Path]:
+    result: set[Path] = set()
+    if not state.is_dir():
+        return result
+    for meta in sorted(state.glob("*.meta"))[:MAX_COPIES]:
+        values = meta_values(meta)
+        for key in ("worktree", "project", "home"):
+            value = values.get(key)
+            if value and value.startswith("/"):
+                result.add(Path(value))
+    return result
+
+
+def scan_for_repos(root: Path, max_depth: int = MAX_SCAN_DEPTH) -> Iterable[Path]:
+    if not root.is_dir():
+        return
+    base_depth = len(root.parts)
+    for current, dirs, files in os.walk(root):
+        path = Path(current)
+        depth = len(path.parts) - base_depth
+        dirs[:] = [d for d in dirs if d not in {".git", ".cache", "node_modules", "vendor"}]
+        if ".git" in files or (path / ".git").is_dir():
+            yield path
+            dirs.clear()
+            continue
+        if depth >= max_depth:
+            dirs.clear()
+
+
+def collect_repositories(repo: Path, state: Path, projects: Path, scan_roots: list[Path]) -> dict[str, Any]:
+    canonical = canonical_repo(repo)
+    primary = repo_record(canonical)
+    if not primary or not primary["origin"]:
+        raise IncidentError(f"canonical repository has no readable origin remote: {canonical}")
+    candidates: set[Path] = {canonical}
+    candidates.update(registered_paths(state))
+    candidates.update(Path(row["path"]) for row in parse_worktrees(canonical))
+    if projects.is_dir():
+        candidates.update(path for path in projects.iterdir() if path.is_dir())
+    for root in scan_roots:
+        for candidate in scan_for_repos(root):
+            candidates.add(candidate)
+            if len(candidates) >= MAX_COPIES:
+                break
+        if len(candidates) >= MAX_COPIES:
+            break
+
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in sorted(candidates, key=lambda p: str(p)):
+        record = repo_record(candidate)
+        if not record or record["path"] in seen:
+            continue
+        seen.add(record["path"])
+        if record["origin"] == primary["origin"]:
+            records.append(record)
+        if len(records) >= MAX_COPIES:
+            break
+
+    if not records:
+        records = [primary]
+    for row in records:
+        row["stale_remote"] = any(
+            other["remote_default_head"] != row["remote_default_head"]
+            and commit_is_ancestor(
+                Path(other["path"]),
+                row["remote_default_head"],
+                other["remote_default_head"],
+            )
+            for other in records
+        )
+    surviving_heads = sorted({
+        row["remote_default_head"]
+        for row in records
+        if not row["stale_remote"] and row["remote_default_head"]
+    })
+    remote_default_conflict = len(surviving_heads) > 1
+    for row in records:
+        row["current_main"] = bool(
+            row["remote_default_head"]
+            and row["head"] == row["remote_default_head"]
+            and row["branch"] == row["default_branch"]
+            and row["clean"]
+            and not row["stale_remote"]
+            and not remote_default_conflict
+        )
+    current_main = [row for row in records if row["current_main"]]
+    if current_main:
+        authoritative = sorted(current_main, key=lambda row: (row["path"] != str(canonical), row["path"]))[0]
+        authoritative_worktree: str | None = authoritative["path"]
+    elif not remote_default_conflict:
+        authoritative = sorted(
+            records,
+            key=lambda row: (
+                -(row["remote_default_epoch"] or -1),
+                row["path"] != str(canonical),
+                row["path"],
+            ),
+        )[0]
+        authoritative_worktree = None
+    else:
+        authoritative = next((row for row in records if row["path"] == str(canonical)), records[0])
+        authoritative_worktree = None
+
+    common_dirs = {row["common_dir"] for row in records if row["common_dir"]}
+    detached = [row["path"] for row in records if row["detached"]]
+    superseded = [row["path"] for row in records if row["stale_remote"]]
+    all_branches = [
+        {"repository": row["path"], **branch}
+        for row in records
+        for branch in row["branches"]
+    ]
+    return {
+        "canonical_repository": str(canonical),
+        "canonical_remote": primary["origin"],
+        "authoritative_repository": authoritative["path"],
+        "authoritative_worktree": authoritative_worktree,
+        "authoritative_default_branch": authoritative["default_branch"],
+        "authoritative_remote_head": authoritative["remote_default_head"] if not remote_default_conflict else None,
+        "remote_default_candidates": surviving_heads,
+        "remote_default_conflict": remote_default_conflict,
+        "copies": records,
+        "worktrees": parse_worktrees(Path(authoritative["path"])),
+        "branches": all_branches,
+        "multiple_copies_same_origin": len(common_dirs) > 1,
+        "detached_checkouts": detached,
+        "superseded_continuations": superseded,
+    }
+
+
+def backlog_objectives(data: Path) -> dict[str, str]:
+    result: dict[str, str] = {}
+    path = data / "backlog.md"
+    try:
+        if path.stat().st_size > STATE_READ_LIMIT:
+            return result
+        for line in path.read_text(errors="replace").splitlines():
+            match = re.match(r"^- \[[ xX]\] ([A-Za-z0-9._-]+) - (.*?)(?: \([^)]*:|$)", line)
+            if match:
+                result[match.group(1)] = match.group(2).strip()
+    except OSError:
+        pass
+    return result
+
+
+def brief_objective(data: Path, task_id: str) -> str | None:
+    path = data / task_id / "brief.md"
+    try:
+        if path.stat().st_size > STATE_READ_LIMIT:
+            return None
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+    in_task = False
+    for line in lines:
+        if line.strip() == "# Task":
+            in_task = True
+            continue
+        if in_task and line.startswith("#"):
+            break
+        if in_task and line.strip():
+            return line.strip()[:240]
+    return None
+
+
+def latest_activity(state: Path, task_id: str) -> tuple[str, bool]:
+    path = state / f"{task_id}.status"
+    try:
+        if path.stat().st_size > STATE_READ_LIMIT:
+            return "status record too large", True
+        lines = [line.strip() for line in path.read_text(errors="replace").splitlines() if line.strip()]
+    except OSError:
+        return "no status event", True
+    if not lines:
+        return "no status event", True
+    line = lines[-1][:240]
+    verb = line.split(":", 1)[0].strip().lower()
+    return line, verb not in {"done", "failed"}
+
+
+def terms(value: str) -> set[str]:
+    return {
+        token.lower()
+        for token in TOKEN_RE.findall(value)
+        if len(token) >= 4 and token.lower() not in STOP_WORDS
+    }
+
+
+def worker_age(meta: Path, values: dict[str, str], now: str) -> int | None:
+    epoch: int | None = None
+    match = re.match(r"^s([0-9]+)\.", values.get("spawn_gen", ""))
+    if match:
+        epoch = int(match.group(1))
+    if epoch is None:
+        try:
+            epoch = int(meta.stat().st_mtime)
+        except OSError:
+            return None
+    return max(0, int(parse_time(now).timestamp()) - epoch)
+
+
+def collect_workers(
+    state: Path,
+    data: Path,
+    repo_info: dict[str, Any],
+    incident_summary: str,
+    supplied_terms: list[str],
+) -> dict[str, Any]:
+    objectives = backlog_objectives(data)
+    incident_terms = terms(incident_summary + " " + " ".join(supplied_terms))
+    copy_by_path = {row["path"]: row for row in repo_info["copies"]}
+    authoritative_path = repo_info["authoritative_worktree"] or repo_info["authoritative_repository"]
+    now = utc_now()
+    registry: list[dict[str, Any]] = []
+    active: list[dict[str, Any]] = []
+    stale: list[dict[str, str]] = []
+    wrong: list[dict[str, str]] = []
+    drifted: list[dict[str, str]] = []
+    if not state.is_dir():
+        return {
+            "registry_entries": [], "active": [], "stale_registry_entries": [],
+            "wrong_worktree": [], "scope_drifted": [],
+        }
+
+    for meta in sorted(state.glob("*.meta"))[:MAX_COPIES]:
+        task_id = meta.stem
+        values = meta_values(meta)
+        cwd_value = values.get("worktree") or values.get("home") or values.get("project")
+        cwd = Path(cwd_value).resolve() if cwd_value and cwd_value.startswith("/") else None
+        cwd_record = repo_record(cwd) if cwd and cwd.exists() else None
+        objective = objectives.get(task_id) or brief_objective(data, task_id) or "objective unavailable"
+        activity, is_active = latest_activity(state, task_id)
+        objective_terms = terms(objective + " " + activity)
+        match_value: bool | None
+        match_reason: str
+        wrong_worktree = False
+        if not cwd or not cwd.exists():
+            match_value = False
+            match_reason = "registered working directory is absent"
+            wrong_worktree = True
+        elif not cwd_record or cwd_record["origin"] != repo_info["canonical_remote"]:
+            match_value = False
+            match_reason = "worker is operating in a different repository"
+            wrong_worktree = True
+        elif incident_terms and objective_terms:
+            overlap = sorted(incident_terms & objective_terms)
+            match_value = bool(overlap)
+            match_reason = f"matching terms: {', '.join(overlap)}" if overlap else "objective/activity does not match incident terms"
+        else:
+            match_value = None
+            match_reason = "insufficient objective terms to prove relevance"
+
+        registered_copy = copy_by_path.get(str(cwd)) if cwd else None
+        stale_path = bool(registered_copy and registered_copy["stale_remote"])
+        if stale_path:
+            wrong_worktree = True
+            match_value = False
+            match_reason = "registered path is a superseded repository copy"
+        entry = {
+            "id": task_id,
+            "working_directory": str(cwd) if cwd else cwd_value,
+            "objective": objective,
+            "activity": activity,
+            "age_seconds": worker_age(meta, values, now),
+            "active": is_active,
+            "activity_matches_incident": match_value,
+            "match_reason": match_reason,
+            "wrong_worktree": wrong_worktree,
+            "authoritative_worktree": authoritative_path,
+            "backend": values.get("backend", "tmux"),
+            "kind": values.get("kind", "ship"),
+        }
+        registry.append(entry)
+        if is_active:
+            active.append(entry)
+        if not cwd or not cwd.exists():
+            stale.append({"id": task_id, "path": cwd_value or "", "reason": "path is absent"})
+        elif stale_path:
+            stale.append({"id": task_id, "path": str(cwd), "reason": "path is superseded by newer origin/main evidence"})
+        if is_active and wrong_worktree:
+            wrong.append({"id": task_id, "path": str(cwd) if cwd else cwd_value or "", "reason": match_reason})
+        if is_active and match_value is False:
+            drifted.append({"id": task_id, "activity": activity, "reason": match_reason})
+    return {
+        "registry_entries": registry,
+        "active": active,
+        "stale_registry_entries": stale,
+        "wrong_worktree": wrong,
+        "scope_drifted": drifted,
+    }
+
+
+def load_evidence(path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return {}
+    try:
+        if path.stat().st_size > MAX_EVIDENCE_BYTES:
+            raise IncidentError(f"evidence exceeds {MAX_EVIDENCE_BYTES} bytes")
+        value = json.loads(path.read_text())
+    except OSError as exc:
+        raise IncidentError(f"cannot read evidence: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise IncidentError(f"evidence is not valid JSON: {path}") from exc
+    if not isinstance(value, dict):
+        raise IncidentError("evidence must be a JSON object")
+    return value
+
+
+def list_of_objects(value: Any) -> list[dict[str, Any]]:
+    return [row for row in value if isinstance(row, dict)] if isinstance(value, list) else []
+
+
+def compact(value: Any, maximum: int = 160) -> str:
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    return text[:maximum]
+
+
+def signal_value(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", compact(value).lower()).strip("_")
+
+
+def unique_strings(values: Iterable[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value and value not in seen:
+            result.append(value)
+            seen.add(value)
+    return result
+
+
+def classify(evidence: dict[str, Any], repo_info: dict[str, Any]) -> dict[str, Any]:
+    production = evidence.get("production") if isinstance(evidence.get("production"), dict) else {}
+    runtime = evidence.get("runtime") if isinstance(evidence.get("runtime"), dict) else {}
+    runtime_errors = list_of_objects(runtime.get("errors"))
+    providers = list_of_objects(evidence.get("external_providers"))
+    services = list_of_objects(evidence.get("local_services"))
+    approval_input = evidence.get("approval") if isinstance(evidence.get("approval"), dict) else {}
+
+    supporting: list[str] = []
+    external_rows: list[dict[str, Any]] = []
+    for row in runtime_errors:
+        signals = {signal_value(row.get(key, "")) for key in ("kind", "status", "code")}
+        if signals & EXTERNAL_FAILURES:
+            external_rows.append(row)
+            supporting.append(
+                "external provider "
+                + compact(row.get("source") or row.get("name") or "unknown")
+                + " reported "
+                + compact(row.get("code") or row.get("status") or row.get("kind") or "failure")
+            )
+    for row in providers:
+        signals = {signal_value(row.get(key, "")) for key in ("status", "code")}
+        if signals & EXTERNAL_FAILURES:
+            external_rows.append(row)
+            supporting.append(
+                "external provider "
+                + compact(row.get("name") or "unknown")
+                + " reported "
+                + compact(row.get("code") or row.get("status") or "failure")
+            )
+
+    production_origin = normalize_origin(production.get("origin")) if isinstance(production.get("origin"), str) else None
+    production_origin_mismatch = bool(production_origin and production_origin != repo_info["canonical_remote"])
+    deployment_signal = bool(
+        production.get("routing_mismatch") is True
+        or production.get("deployment_failed") is True
+        or production_origin_mismatch
+    )
+    if production.get("routing_mismatch") is True:
+        supporting.append("production routing identity does not match the expected route")
+    if production.get("deployment_failed") is True:
+        supporting.append("the production deployment is reported failed")
+    if production_origin_mismatch:
+        supporting.append("production identifies a different repository origin than the canonical incident repository")
+
+    failed_services = [row for row in services if compact(row.get("status", "")).lower() in LOCAL_FAILURES]
+    for row in failed_services:
+        supporting.append(
+            "local service " + compact(row.get("name", "unknown")) + " is " + compact(row.get("status", "unknown"))
+        )
+
+    defect_proven = runtime.get("defect_proven") is True
+    defect_evidence = [compact(item) for item in runtime.get("defect_evidence", []) if isinstance(item, str)]
+    if defect_proven:
+        supporting.extend(defect_evidence or ["runtime evidence explicitly proves an application defect"])
+
+    deployed = production.get("commit") if isinstance(production.get("commit"), str) else None
+    proposed = production.get("proposed_hotfix_commit") if isinstance(production.get("proposed_hotfix_commit"), str) else None
+    authoritative = Path(repo_info["authoritative_repository"])
+    hotfix_already_deployed = bool(
+        production.get("proposed_hotfix_present") is True
+        or commit_is_ancestor(authoritative, proposed, deployed)
+    )
+    if hotfix_already_deployed:
+        supporting.append("production already contains the proposed hotfix commit")
+
+    category_signals = sum(bool(value) for value in (external_rows, deployment_signal, failed_services, defect_proven))
+    if category_signals > 1:
+        category = "unknown"
+        code_required = "not yet proven"
+        probable = "conflicting runtime signals require a narrower counterfactual before any repair"
+    elif defect_proven:
+        category = "application code defect"
+        code_required = "yes"
+        probable = defect_evidence[0] if defect_evidence else "runtime evidence proves an application code defect"
+    elif external_rows:
+        category = "external dependency, quota, billing, credential, or configuration failure"
+        code_required = "no"
+        first = external_rows[0]
+        probable = (
+            compact(first.get("source") or first.get("name") or "external provider")
+            + " "
+            + compact(first.get("code") or first.get("status") or first.get("kind") or "failure")
+        )
+    elif deployment_signal:
+        category = "deployment/routing defect"
+        code_required = "no"
+        probable = "production deployment or routing identity does not match the expected release"
+    elif failed_services:
+        category = "local background-service failure"
+        code_required = "no"
+        probable = f"local service {compact(failed_services[0].get('name', 'unknown'))} is not healthy"
+    elif hotfix_already_deployed:
+        category = "unknown"
+        code_required = "no"
+        probable = "the proposed hotfix is already present in production, so repeating that code change cannot repair the incident"
+    else:
+        category = "unknown"
+        code_required = "not yet proven"
+        probable = "available evidence does not yet prove a code, deployment, provider, or local-service cause"
+
+    default_approvals = {
+        "external dependency, quota, billing, credential, or configuration failure": (
+            "operational_provider_change",
+            "Approve only the provider plan, credential, or production configuration change named by the diagnosis.",
+        ),
+        "deployment/routing defect": (
+            "production_routing_or_deployment_change",
+            "Approve only the production routing or deployment correction named by the diagnosis.",
+        ),
+        "local background-service failure": (
+            "service_restart",
+            "Approve only the named managed-service restart.",
+        ),
+    }
+    default_kind, default_request = default_approvals.get(category, ("none", "No operational approval is currently identified."))
+    approval_required = bool(approval_input.get("required", code_required == "no" and category != "unknown"))
+    approval_kind = compact(approval_input.get("kind", default_kind), 80)
+    approval_request = compact(approval_input.get("request", default_request), 300)
+    if code_required == "yes" or code_required == "not yet proven":
+        approval_required = False
+        approval_kind = "none"
+        approval_request = "No operational mutation is authorized by the current diagnosis."
+
+    operational_repair_ready = code_required == "no" and category != "unknown"
+    if code_required == "yes":
+        next_action = "Start one current-main continuation and transfer only incident-related changes through the repository's normal validation and release process."
+    elif code_required == "no" and not operational_repair_ready:
+        next_action = "Continue runtime diagnosis; production already contains the proposed hotfix, so do not repeat that code change."
+    elif code_required == "no" and approval_required:
+        next_action = approval_request
+    elif code_required == "no":
+        next_action = "Perform only the diagnosed operational repair, then verify the complete runtime path."
+    else:
+        next_action = "Gather the missing runtime or provider evidence; do not create a code branch or run validation yet."
+
+    return {
+        "classification": category,
+        "probable_root_cause": probable,
+        "supporting_evidence": unique_strings(supporting) or ["no decisive runtime evidence was supplied"],
+        "code_change_required": code_required,
+        "hotfix_already_deployed": hotfix_already_deployed,
+        "operational_repair_ready": operational_repair_ready,
+        "observations": {
+            "production": {
+                "origin": production_origin,
+                "commit": compact(production.get("commit", ""), 80) or None,
+                "health": compact(production.get("health", ""), 40) or None,
+                "routing_mismatch": production.get("routing_mismatch") is True,
+                "deployment_failed": production.get("deployment_failed") is True,
+            },
+            "runtime_errors": [
+                {
+                    "source": compact(row.get("source", "unknown"), 80),
+                    "kind": compact(row.get("kind", "unknown"), 80),
+                    "code": compact(row.get("code", "unknown"), 120),
+                }
+                for row in runtime_errors
+            ],
+            "external_providers": [
+                {
+                    "name": compact(row.get("name", "unknown"), 80),
+                    "status": compact(row.get("status", "unknown"), 80),
+                    "code": compact(row.get("code", ""), 120) or None,
+                }
+                for row in providers
+            ],
+            "local_services": [
+                {
+                    "name": compact(row.get("name", "unknown"), 80),
+                    "status": compact(row.get("status", "unknown"), 80),
+                }
+                for row in services
+            ],
+            "reproduction": compact(runtime.get("reproduction", ""), 240) or None,
+            "proven_path": compact(runtime.get("proven_path", ""), 240) or None,
+        },
+        "approval": {
+            "required": approval_required,
+            "kind": approval_kind,
+            "request": approval_request,
+            "status": "pending" if approval_required else "not_required",
+        },
+        "safest_next_action": next_action,
+    }
+
+
+def flow_state(current: str, *, code_required: str, approval_required: bool) -> list[dict[str, str]]:
+    if code_required == "yes":
+        return [
+            {"name": "triage", "status": "complete"},
+            {"name": "diagnosis", "status": "complete"},
+            {"name": "approval", "status": "not_applicable"},
+            {"name": "repair", "status": "not_applicable"},
+            {"name": "verification", "status": "pending_after_release"},
+        ]
+    current_index = FLOW.index(current)
+    result: list[dict[str, str]] = []
+    for index, name in enumerate(FLOW):
+        if index < current_index:
+            status = "complete"
+        elif index == current_index:
+            status = "current"
+        else:
+            status = "pending"
+        if name == "approval" and not approval_required:
+            status = "not_required"
+        result.append({"name": name, "status": status})
+    return result
+
+
+def incident_path(base: dict[str, Path], incident_id: str) -> Path:
+    return base["state"] / "incidents" / f"{incident_id}.json"
+
+
+def read_incident(base: dict[str, Path], incident_id: str) -> dict[str, Any]:
+    path = incident_path(base, incident_id)
+    try:
+        if path.stat().st_size > STATE_READ_LIMIT:
+            raise IncidentError(f"incident record is too large: {incident_id}")
+        value = json.loads(path.read_text())
+    except OSError as exc:
+        raise IncidentError(f"incident record not found: {incident_id}") from exc
+    except json.JSONDecodeError as exc:
+        raise IncidentError(f"incident record is malformed: {incident_id}") from exc
+    if not isinstance(value, dict) or value.get("schema") != SCHEMA or value.get("id") != incident_id:
+        raise IncidentError(f"incident record has the wrong schema or id: {incident_id}")
+    return value
+
+
+def atomic_write(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(".lock")
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w") as handle:
+                json.dump(value, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(name, path)
+        finally:
+            if os.path.exists(name):
+                os.unlink(name)
+
+
+def output_record(record: dict[str, Any], as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(record, indent=2, sort_keys=True))
+        return
+    print(f"Incident: {record['id']} - {record['summary']}")
+    print("Flow: triage → diagnosis → approval → repair → verification")
+    print(f"Current: {record['phase']}")
+    print(f"Classification: {record['diagnosis']['classification']}")
+    print(f"Probable root cause: {record['diagnosis']['probable_root_cause']}")
+    print(f"Authoritative repository: {record['repository']['authoritative_repository']}")
+    worktree = record["repository"].get("authoritative_worktree") or "no verified current-main checkout"
+    print(f"Authoritative working copy: {worktree}")
+    print(f"Code change required: {record['diagnosis']['code_change_required']}")
+    print(f"Unrelated or scope-drifted workers: {len(record['workers']['scope_drifted'])}")
+    print(f"Safest next action: {record['safest_next_action']}")
+    approval = record["approval"]
+    print(f"Approval required: {approval['kind'] if approval['required'] else 'no'}")
+
+
+def status_projection(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": record["schema"],
+        "id": record["id"],
+        "summary": record["summary"],
+        "updated_at": record["updated_at"],
+        "phase": record["phase"],
+        "flow": record["flow"],
+        "outcome": record["outcome"],
+        "diagnosis": {
+            key: record["diagnosis"].get(key)
+            for key in (
+                "classification", "probable_root_cause", "code_change_required",
+                "hotfix_already_deployed", "operational_repair_ready",
+            )
+        },
+        "approval": {
+            key: record["approval"].get(key)
+            for key in ("required", "kind", "request", "status")
+        },
+        "safest_next_action": record["safest_next_action"],
+    }
+
+
+def triage(args: argparse.Namespace) -> int:
+    base = paths()
+    incident_id = validate_incident_id(args.incident)
+    now = utc_now()
+    repo_info = collect_repositories(
+        Path(args.repo),
+        base["state"],
+        base["projects"],
+        [Path(path).resolve() for path in args.scan_root],
+    )
+    evidence = load_evidence(Path(args.evidence).resolve() if args.evidence else None)
+    workers = collect_workers(base["state"], base["data"], repo_info, args.summary, args.term)
+    diagnosis = classify(evidence, repo_info)
+    if diagnosis["code_change_required"] == "yes":
+        phase = "diagnosis"
+        outcome = "escalate_to_code_change"
+    elif not diagnosis["operational_repair_ready"]:
+        phase = "diagnosis"
+        outcome = "more_evidence_required"
+    elif diagnosis["code_change_required"] == "no" and diagnosis["approval"]["required"]:
+        phase = "approval"
+        outcome = "operational_repair"
+    elif diagnosis["code_change_required"] == "no":
+        phase = "repair"
+        outcome = "operational_repair"
+    else:
+        phase = "diagnosis"
+        outcome = "more_evidence_required"
+    existing_created = now
+    path = incident_path(base, incident_id)
+    if path.exists():
+        try:
+            existing_created = read_incident(base, incident_id).get("created_at", now)
+        except IncidentError:
+            existing_created = now
+    record = {
+        "schema": SCHEMA,
+        "id": incident_id,
+        "summary": compact(args.summary, 300),
+        "created_at": existing_created,
+        "updated_at": now,
+        "phase": phase,
+        "flow": flow_state(
+            phase,
+            code_required=diagnosis["code_change_required"],
+            approval_required=diagnosis["approval"]["required"],
+        ),
+        "outcome": outcome,
+        "diagnosis": {
+            key: diagnosis[key]
+            for key in (
+                "classification", "probable_root_cause", "supporting_evidence",
+                "code_change_required", "hotfix_already_deployed",
+                "operational_repair_ready", "observations",
+            )
+        },
+        "repository": repo_info,
+        "workers": workers,
+        "approval": diagnosis["approval"],
+        "repair": {"status": "pending", "note": None, "recorded_at": None},
+        "verification": {"status": "pending", "checks": [], "recorded_at": None},
+        "safest_next_action": diagnosis["safest_next_action"],
+        "guardrails": {
+            "project_code_edited_during_triage": False,
+            "new_worktree_allowed": diagnosis["code_change_required"] == "yes",
+            "code_validation_allowed": diagnosis["code_change_required"] == "yes",
+            "other_worker_mutation_authorized": False,
+        },
+    }
+    atomic_write(path, record)
+    output_record(record, args.json)
+    return 0
+
+
+def approve(args: argparse.Namespace) -> int:
+    base = paths()
+    incident_id = validate_incident_id(args.incident)
+    record = read_incident(base, incident_id)
+    approval = record["approval"]
+    if not approval.get("required") or approval.get("status") != "pending":
+        raise IncidentError("incident has no pending operational approval")
+    if args.kind != approval.get("kind"):
+        raise IncidentError(f"approval kind must exactly match {approval.get('kind')}")
+    now = utc_now()
+    approval.update({"status": "approved", "note": compact(args.note, 300), "approved_at": now})
+    record["phase"] = "repair"
+    record["updated_at"] = now
+    record["flow"] = flow_state("repair", code_required="no", approval_required=True)
+    record["safest_next_action"] = "Perform only the approved operational repair, then record it and verify the complete runtime path."
+    atomic_write(incident_path(base, incident_id), record)
+    output_record(record, args.json)
+    return 0
+
+
+def repair(args: argparse.Namespace) -> int:
+    base = paths()
+    incident_id = validate_incident_id(args.incident)
+    record = read_incident(base, incident_id)
+    if record["diagnosis"]["code_change_required"] != "no":
+        raise IncidentError("an operational repair is allowed only after a no-code diagnosis")
+    if not record["diagnosis"].get("operational_repair_ready"):
+        raise IncidentError("the diagnosis has not identified an operational repair")
+    approval = record["approval"]
+    if approval.get("required") and approval.get("status") != "approved":
+        raise IncidentError("the exact operational approval is still pending")
+    now = utc_now()
+    record["repair"] = {"status": "complete", "note": compact(args.note, 300), "recorded_at": now}
+    record["phase"] = "verification"
+    record["updated_at"] = now
+    record["flow"] = flow_state("verification", code_required="no", approval_required=bool(approval.get("required")))
+    record["safest_next_action"] = "Verify production identity, provider health, companion connectivity, and the complete user-visible runtime path."
+    atomic_write(incident_path(base, incident_id), record)
+    output_record(record, args.json)
+    return 0
+
+
+def verify(args: argparse.Namespace) -> int:
+    base = paths()
+    incident_id = validate_incident_id(args.incident)
+    record = read_incident(base, incident_id)
+    if record["repair"].get("status") != "complete":
+        raise IncidentError("record the approved repair before verification")
+    evidence = load_evidence(Path(args.evidence).resolve())
+    verification = evidence.get("verification") if isinstance(evidence.get("verification"), dict) else {}
+    checks = list_of_objects(verification.get("checks"))
+    complete = bool(
+        verification.get("runtime_path_ok") is True
+        and checks
+        and all(compact(row.get("status", "")).lower() in VERIFICATION_PASS for row in checks)
+    )
+    safe_checks = [
+        {
+            "name": compact(row.get("name", "unnamed check"), 120),
+            "status": compact(row.get("status", "unknown"), 40),
+            "evidence": compact(row.get("evidence", ""), 200),
+        }
+        for row in checks
+    ]
+    now = utc_now()
+    record["verification"] = {
+        "status": "complete" if complete else "failed",
+        "checks": safe_checks,
+        "recorded_at": now,
+    }
+    record["phase"] = "verification"
+    record["updated_at"] = now
+    record["flow"] = [
+        {"name": name, "status": "complete" if complete or name != "verification" else "current"}
+        for name in FLOW
+    ]
+    if not record["approval"].get("required"):
+        record["flow"][2]["status"] = "not_required"
+    record["safest_next_action"] = (
+        "Incident verification is complete; close the incident without code, release, or unrelated cleanup."
+        if complete
+        else "Verification did not prove the complete runtime path; keep the incident open and gather the failed check evidence."
+    )
+    atomic_write(incident_path(base, incident_id), record)
+    output_record(record, args.json)
+    return 0 if complete else 1
+
+
+def status(args: argparse.Namespace) -> int:
+    base = paths()
+    if args.compact and not args.json:
+        raise IncidentError("--compact requires --json")
+    if args.incident:
+        record = read_incident(base, validate_incident_id(args.incident))
+        if args.compact:
+            record = status_projection(record)
+        output_record(record, args.json)
+        return 0
+    incident_dir = base["state"] / "incidents"
+    records: list[dict[str, Any]] = []
+    invalid: list[dict[str, str]] = []
+    if incident_dir.is_dir():
+        for path in sorted(incident_dir.glob("*.json"))[:MAX_COPIES]:
+            try:
+                record = read_incident(base, path.stem)
+            except IncidentError as exc:
+                invalid.append({"path": str(path), "reason": str(exc)})
+                continue
+            records.append(record)
+    records.sort(key=lambda row: (row.get("updated_at", ""), row.get("id", "")), reverse=True)
+    limit_value = os.environ.get("FM_INCIDENT_STATUS_LIMIT", str(DEFAULT_STATUS_LIMIT))
+    if not limit_value.isdigit() or int(limit_value) < 1:
+        raise IncidentError("FM_INCIDENT_STATUS_LIMIT must be a positive integer")
+    limit = int(limit_value)
+    truncated = max(0, len(records) - limit)
+    records = records[:limit]
+    if args.compact:
+        records = [status_projection(record) for record in records]
+    result = {"schema": STATUS_SCHEMA, "records": records, "invalid": invalid, "truncated": truncated}
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    elif not records:
+        print("No runtime incidents recorded.")
+    else:
+        for index, record in enumerate(records):
+            if index:
+                print()
+            output_record(record, False)
+    return 0
+
+
+def parser() -> argparse.ArgumentParser:
+    root = argparse.ArgumentParser(description="Bounded FirstMate runtime-incident fast path")
+    sub = root.add_subparsers(dest="command", required=True)
+
+    triage_parser = sub.add_parser("triage", help="collect read-only evidence, classify, and record the diagnosis")
+    triage_parser.add_argument("--incident", required=True)
+    triage_parser.add_argument("--repo", required=True)
+    triage_parser.add_argument("--summary", required=True)
+    triage_parser.add_argument("--evidence")
+    triage_parser.add_argument("--scan-root", action="append", default=[])
+    triage_parser.add_argument("--term", action="append", default=[])
+    triage_parser.add_argument("--json", action="store_true")
+    triage_parser.set_defaults(func=triage)
+
+    approve_parser = sub.add_parser("approve", help="record the captain's exact operational approval")
+    approve_parser.add_argument("--incident", required=True)
+    approve_parser.add_argument("--kind", required=True)
+    approve_parser.add_argument("--note", required=True)
+    approve_parser.add_argument("--json", action="store_true")
+    approve_parser.set_defaults(func=approve)
+
+    repair_parser = sub.add_parser("repair", help="record a completed narrow operational repair")
+    repair_parser.add_argument("--incident", required=True)
+    repair_parser.add_argument("--note", required=True)
+    repair_parser.add_argument("--json", action="store_true")
+    repair_parser.set_defaults(func=repair)
+
+    verify_parser = sub.add_parser("verify", help="record fresh complete-runtime verification evidence")
+    verify_parser.add_argument("--incident", required=True)
+    verify_parser.add_argument("--evidence", required=True)
+    verify_parser.add_argument("--json", action="store_true")
+    verify_parser.set_defaults(func=verify)
+
+    status_parser = sub.add_parser("status", help="show one or all incident records")
+    status_parser.add_argument("--incident")
+    status_parser.add_argument("--json", action="store_true")
+    status_parser.add_argument("--compact", action="store_true")
+    status_parser.set_defaults(func=status)
+    return root
+
+
+def main() -> int:
+    args = parser().parse_args()
+    try:
+        return int(args.func(args))
+    except IncidentError as exc:
+        print(f"fm-runtime-incident: refused: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

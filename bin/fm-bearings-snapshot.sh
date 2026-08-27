@@ -114,6 +114,8 @@ Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
+  runtime_incidents{id,phase,classification,code_change_required,approval,
+                    safest_next_action,flow},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
@@ -450,6 +452,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       home: $home,
       generated: $now,
       prs: $prs,
+      runtime_incidents: [ (.runtime_incidents.records // [])[]
+        | {id,phase,classification:.diagnosis.classification,
+           code_change_required:.diagnosis.code_change_required,
+           approval:.approval.status,
+           safest_next_action:(.safest_next_action | trunc(160)),
+           flow:"triage → diagnosis → approval → repair → verification"} ],
       in_flight: (if $all_in_flight == 1 then $in_flight_all else $in_flight_all[:$in_flight_n] end),
       secondmates: (if $all_secondmates == 1 then $secondmates_all else $secondmates_all[:$secondmates_n] end),
       secondmate_reconcile: [ (.secondmate_current.records // [])[]
@@ -488,6 +496,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $all_in_flight == 0 and ($in_flight_all | length) > $in_flight_n then {surface:("in_flight showing \($in_flight_n) of \($in_flight_all | length)"), reveal:"--all-in-flight"} else empty end),
         (if $all_secondmates == 0 and ($secondmates_all | length) > $secondmates_n then {surface:("secondmates showing \($secondmates_n) of \($secondmates_all | length)"), reveal:"--all-secondmates"} else empty end),
         (if (($snap.secondmate_current.truncated // 0) > 0) then {surface:("registered secondmates omitted by snapshot bound: \($snap.secondmate_current.truncated)"), reveal:"raise FM_SNAPSHOT_SECONDMATES"} else empty end),
+        (if (($snap.runtime_incidents.truncated // 0) > 0) then {surface:("older runtime incidents omitted by snapshot bound: \($snap.runtime_incidents.truncated)"), reveal:"bin/fm-runtime-incident.py status"} else empty end),
+        (if (($snap.runtime_incidents.invalid // []) | length) > 0 then {surface:("runtime incident record(s) unreadable: \(($snap.runtime_incidents.invalid // []) | length)"), reveal:"bin/fm-runtime-incident.py status --json"} else empty end),
         (if $snap.secondmate_current.registry.input_truncated == true then {surface:"secondmate registry input truncated by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_LINES or FM_SNAPSHOT_REGISTRY_BYTES"} else empty end),
         (if $snap.secondmate_current.registry.records_truncated == true then {surface:"secondmate registry records omitted by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_RECORDS"} else empty end),
         (if $snap.secondmate_current.registry.available == false then {surface:("secondmate registry unavailable: " + ($snap.secondmate_current.registry.reason // "read failed")), reveal:"inspect data/secondmates.md"} else empty end),

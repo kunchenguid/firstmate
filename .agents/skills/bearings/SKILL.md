@@ -49,6 +49,8 @@ Board answers are acted on later under the normal authority rules; this skill's 
    The `(main-inventory)` gate is an action-free integrity warning rather than queued work.
    Render it under Charted Next with the related `omitted` disclosure, never invent an Underway row from backlog-only state, and never move it into Captain's Call.
    The same holds for a secondmate home whose current state is unavailable, and for a readable home whose `invalidity` reports a backlog-vs-metadata mismatch: the mismatch is a repair notice about that home's own books, not a reason to drop its separately projected decisions, queued, landed, or live work.
+   Render each `runtime_incidents` row with its complete `triage → diagnosis → approval → repair → verification` flow and current phase.
+   Put a pending operational approval in Captain's Call, active diagnosis, repair, or verification in Underway, and an unknown diagnosis waiting on non-captain evidence in Charted Next.
 
 2. **Ask any home whose own books disagree to reconcile them.**
    When the snapshot reports a secondmate home whose `invalidity` is `orphan_in_flight`, `unowned_current`, or `terminal_in_flight`, that home's backlog and its own task metadata disagree and only that home may fix it.

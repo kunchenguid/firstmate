@@ -1,0 +1,26 @@
+{
+  "production": {
+    "health": "degraded"
+  },
+  "runtime": {
+    "errors": [
+      {
+        "source": "upstash",
+        "kind": "quota",
+        "code": "command_quota_exceeded"
+      }
+    ]
+  },
+  "external_providers": [
+    {
+      "name": "upstash",
+      "status": "quota_exhausted",
+      "code": "command_quota_exceeded"
+    }
+  ],
+  "approval": {
+    "required": true,
+    "kind": "paid_plan_change",
+    "request": "Approve the Upstash plan upgrade only."
+  }
+}
