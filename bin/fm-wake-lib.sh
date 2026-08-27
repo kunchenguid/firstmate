@@ -226,6 +226,58 @@ fm_pi_extension_owns_supervision() {
   fm_pid_alive "$session_pid"
 }
 
+# fm_afk_daemon_lock_owner_dir <state>
+# Resolve state/.supervise-daemon.lock to its owner directory, whether the lock
+# is the symlink-based fm_lock_* form or a plain directory (older layout).
+fm_afk_daemon_lock_owner_dir() {
+  local state=$1 lockdir="$1/.supervise-daemon.lock"
+  if [ -L "$lockdir" ]; then
+    fm_lock_link_owner "$lockdir"
+    return
+  fi
+  [ -d "$lockdir" ] || return 1
+  printf '%s\n' "$lockdir"
+}
+
+# fm_afk_daemon_alive <state>
+# True when a live, identity-matched away-mode sub-supervisor daemon
+# (bin/fm-supervise-daemon.sh) currently holds state/.supervise-daemon.lock.
+# Identity-matched mirrors fm_watcher_lock_matches_pid: a bare pid match would
+# let a reused pid impersonate the daemon, so an unrecorded identity fails
+# closed rather than guessing.
+fm_afk_daemon_alive() {
+  local state=$1 ownerdir pid identity current
+  ownerdir=$(fm_afk_daemon_lock_owner_dir "$state") || return 1
+  pid=$(cat "$ownerdir/pid" 2>/dev/null) || return 1
+  fm_pid_alive "$pid" || return 1
+  identity=$(cat "$ownerdir/pid-identity" 2>/dev/null || true)
+  [ -n "$identity" ] || return 1
+  current=$(fm_pid_identity "$pid") || return 1
+  [ "$current" = "$identity" ]
+}
+
+# fm_afk_daemon_owns_supervision <state> [grace-seconds]
+# True when away mode is active, a live identity-matched sub-supervisor daemon
+# holds its own lock, and the watcher beacon it manages is fresh within grace.
+# This is the daemon-managed analogue of fm_pi_extension_owns_supervision above:
+# the daemon tears its watcher down and relaunches it after every actionable
+# wake and after a bounded crash-loop backoff (bin/fm-supervise-daemon.sh's
+# start_watcher), so state/.watch.lock is routinely and briefly either genuinely
+# unheld or still naming the just-exited pid during that hand-off, even while
+# the daemon itself and its beacon are perfectly healthy. fm_watcher_healthy
+# alone cannot tell that benign gap apart from a watcher that quietly died and
+# left a stale leftover beacon - a live daemon proves the gap is being actively
+# closed, exactly like a live Pi session proves its own extension hand-off.
+fm_afk_daemon_owns_supervision() {
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} beat age
+  [ -e "$state/.afk" ] || return 1
+  fm_afk_daemon_alive "$state" || return 1
+  beat="$state/.last-watcher-beat"
+  [ -e "$beat" ] || return 1
+  age=$(fm_path_age "$beat")
+  [ "$age" -lt "$grace" ]
+}
+
 # fm_watcher_supervision_verdict <state> <watch-path> [grace] [home] [root]
 # Model-aware "is supervision healthy right now" verdict for the pull warning
 # guard (bin/fm-guard.sh), NOT the arm layer or the turn-end guard. Sets:
