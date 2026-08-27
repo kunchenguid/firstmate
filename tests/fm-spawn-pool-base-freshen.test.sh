@@ -518,6 +518,59 @@ test_unignored_copy_differing_from_the_source_is_kept() {
   pass "an unignored copy that differs from the source is preserved and the refusal is actionable"
 }
 
+# A .env.local the project commits is version-controlled content, not this
+# seeding's artifact. git check-ignore cannot tell the difference: it consults the
+# index, so a tracked path reports not-ignored even when a .gitignore rule matches
+# it, which is why both variants below are exercised. Seeding over such a file would
+# write the captain's real credentials into a path the project commits, and deleting
+# it makes git report a deletion that the base refresh refuses as uncommitted work
+# and teardown then refuses to hand back. The source is deliberately edited away
+# from the committed bytes so either a retire or a seed-over is observable.
+track_local_env_file() {  # [with-ignore-rule]
+  git -C "$PROJECT_DIR" fetch --quiet origin
+  git -C "$PROJECT_DIR" reset --quiet --hard "origin/$DEFAULT_BRANCH"
+  printf 'FIXTURE_MARKER=committed-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
+  git -C "$PROJECT_DIR" add .env.local
+  if [ "${1:-}" = with-ignore-rule ]; then
+    printf '.env.local\n' > "$PROJECT_DIR/.gitignore"
+    git -C "$PROJECT_DIR" add .gitignore
+  fi
+  git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' \
+    -c user.email='tests@example.invalid' commit -qm track-local-env
+  git -C "$PROJECT_DIR" push --quiet origin "HEAD:$DEFAULT_BRANCH"
+  git -C "$POOL_DIR" fetch --quiet origin
+  git -C "$POOL_DIR" checkout --quiet --detach "origin/$DEFAULT_BRANCH"
+  printf 'FIXTURE_MARKER=captain-local-edit-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
+}
+
+test_tracked_local_env_file_is_never_touched() {
+  local rec id out status variant before after
+  for variant in plain with-ignore-rule; do
+    id="pool-env-local-tracked-$variant"
+    rec=$(make_case "env-local-tracked-$variant" "$id")
+    read_case_record "$rec"
+    track_local_env_file "$variant"
+
+    [ -f "$POOL_DIR/.env.local" ] \
+      || fail "the fixture did not check a tracked .env.local into the pool slot ($variant)"
+    before=$(cksum < "$POOL_DIR/.env.local")
+
+    out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+    status=$?
+    expect_code 0 "$status" "spawn should launch on a project that tracks .env.local ($variant)"
+    [ -f "$POOL_DIR/.env.local" ] \
+      || fail "spawn deleted the project's tracked .env.local ($variant)"
+    after=$(cksum < "$POOL_DIR/.env.local")
+    [ "$after" = "$before" ] \
+      || fail "spawn wrote over the project's tracked .env.local ($variant)"
+    [ -z "$(git -C "$POOL_DIR" -c core.quotePath=false status --porcelain)" ] \
+      || fail "spawn left the pool slot dirty around a tracked .env.local ($variant)"
+    assert_contains "$out" "because the project tracks that file" \
+      "spawn did not say it skipped .env.local because the project tracks it ($variant)"
+  done
+  pass "a tracked .env.local is neither seeded over nor retired, and the slot stays clean"
+}
+
 test_unignored_local_env_file_is_not_seeded() {
   local rec id out status
   id='pool-env-local-r5'
@@ -846,6 +899,7 @@ test_unanswerable_filesystem_question_still_refuses
 test_unignored_local_env_file_is_not_seeded
 test_unignored_copy_matching_the_source_is_retired
 test_unignored_copy_differing_from_the_source_is_kept
+test_tracked_local_env_file_is_never_touched
 test_stale_submodule_pin_explains_itself
 test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work
