@@ -536,8 +536,74 @@ test_flag_misuse_refuses() {
   pass "fm-send --resolve-key: --key, empty message, explicit targets, and malformed keys refuse loudly"
 }
 
+# memval-04 broadening: closing a worker decision/blocker with --resolve-key
+# pushes "how it cleared" into fleet memory best-effort, via the existing
+# fm-remember.sh entry point. These two cases prove the trigger fires with the
+# right fact shape when brain-axi is present, and is a silent no-op when it is
+# absent (the load-bearing fail-open invariant). Captain-held keys are NOT
+# exercised here: they route through the separate hold path that already
+# remembers, and this trigger only covers ordinary status-log decisions.
+
+# A brain-axi stub that appends each remembered fact (one per line) to
+# <dir>/brain.log so a test can assert what reached the binary.
+make_recording_brain() {  # <fakebin-dir> <log-path>
+  local fb=$1 log=$2
+  cat > "$fb/brain-axi" <<SH
+#!/usr/bin/env bash
+# args: remember <fact> --provenance <p> --store <s>
+[ "\${1:-}" = remember ] || exit 0
+printf '%s\n' "\${2:-}" >> "$log"
+exit 0
+SH
+  chmod +x "$fb/brain-axi"
+}
+
+test_resolved_decision_is_remembered() {
+  local dir fb log home rc brainlog
+  dir="$TMP_ROOT/remember"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; brainlog="$dir/brain.log"
+  make_recording_brain "$fb" "$brainlog"
+  home=$(setup_home remember)
+  fm_write_meta "$home/state/tr.meta" "window=sess:fm-tr" "kind=ship"
+  printf 'blocked [key=db-choice]: sqlite or postgres for the seed\n' > "$home/state/tr.status"
+
+  run_send "$fb" "$home" "$log" tr --resolve-key db-choice "sqlite, migrate later"; rc=$?
+  expect_code 0 "$rc" "the answer send should succeed"
+  grep -F 'resolved [key=db-choice]' "$home/state/tr.status" >/dev/null \
+    || fail "precondition: the decision should have been closed"
+  assert_present "$brainlog" "resolving a decision should push a fact into fleet memory"
+  assert_grep "Resolved [tr] decision 'db-choice': sqlite, migrate later" "$brainlog" \
+    "the remembered fact should name the task, the key, and the answer"
+  pass "fm-send --resolve-key: a resolved decision is remembered with task, key, and answer"
+}
+
+test_resolve_with_brain_absent_is_silent_noop() {
+  local dir fb log home rc out
+  dir="$TMP_ROOT/remember-absent"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home remember-absent)
+  fm_write_meta "$home/state/tn.meta" "window=sess:fm-tn" "kind=ship"
+  printf 'needs-decision [key=rollout]: big-bang or phased\n' > "$home/state/tn.status"
+
+  # A PATH with coreutils and the stubs but NO brain-axi: the resolve must still
+  # succeed and close the decision, with no extra noise on stderr.
+  : > "$log"
+  out=$(env PATH="$fb:/usr/bin:/bin" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" tn --resolve-key rollout "phased" 2>&1); rc=$?
+  expect_code 0 "$rc" "an absent brain-axi must never fail the resolve (fail open)"
+  grep -F 'resolved [key=rollout]: answered: phased' "$home/state/tn.status" >/dev/null \
+    || fail "the decision must still close when brain-axi is absent: $(cat "$home/state/tn.status")"
+  case "$out" in
+    *brain*|*remember*) fail "an absent brain-axi leaked memory noise to the caller: $out" ;;
+  esac
+  pass "fm-send --resolve-key: with brain-axi absent the remember is a silent no-op, the close still happens"
+}
+
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced
+test_resolved_decision_is_remembered
+test_resolve_with_brain_absent_is_silent_noop
 test_colon_first_key_position_is_answerable
 test_answer_starts_work_never_orphans
 test_routine_steer_never_closes

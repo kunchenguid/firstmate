@@ -72,3 +72,10 @@ before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null
 after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"
+
+# memval-04 broadening: a landed ship task is a durable outcome, so record it in
+# this home's fleet memory. fm-remember.sh owns every fail-open guard, so a
+# missing or slow brain-axi never affects the merge that already happened.
+FM_REMEMBER_PROVENANCE="ship $ID local-main" \
+  "$FM_ROOT/bin/fm-remember.sh" "Shipped $ID (${PROJ##*/}) to local $DEFAULT" \
+  >/dev/null 2>&1 || true

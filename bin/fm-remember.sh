@@ -3,10 +3,13 @@
 # home's fleet memory (memval-04). A side-effect only: it never blocks, never
 # changes the caller's exit status, and never emits diagnostic noise.
 #
-# It exists so firstmate's natural capture points - a durably recorded captain
-# decision (bin/fm-decision-hold.sh) and a /stow knowledge sweep (the stow skill)
-# - accumulate the home's memory automatically instead of only when someone runs
-# the write CLI by hand.
+# It exists so firstmate's natural capture points accumulate the home's memory
+# automatically instead of only when someone runs the write CLI by hand. Each
+# caller owns which durable, provenance-stamped fact it pushes; today these are a
+# recorded captain decision (bin/fm-captain-hold.sh), a resolved worker
+# decision/blocker (bin/fm-send.sh), a completed scout's finding
+# (bin/fm-teardown.sh), a landed ship outcome (bin/fm-merge-local.sh,
+# bin/fm-pr-merge.sh), and a /stow knowledge sweep (the stow skill).
 #
 # The write path is `brain-axi remember` against this home's store
 # (fm-brain-lib.sh resolves the path). remember carries mandatory provenance and

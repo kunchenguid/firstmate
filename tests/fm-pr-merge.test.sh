@@ -1123,6 +1123,69 @@ test_secondmate_without_parent_binding_is_loud() {
   pass "a secondmate home that cannot report upward says so instead of merging in silence"
 }
 
+# --- durable ship outcome pushed into fleet memory (memval-04 broadening) ----
+# A confirmed merge is a durable ship outcome, so fm-pr-merge records it in this
+# home's fleet memory via the existing fm-remember.sh. These cases prove the
+# fact shape when brain-axi is present, and the load-bearing fail-open invariant
+# when it is absent - a missing brain-axi must never affect a merge the forge
+# already confirmed.
+add_recording_brain() {  # <case_dir> <log-path>
+  local case_dir=$1 log=$2
+  cat > "$case_dir/fakebin/brain-axi" <<SH
+#!/usr/bin/env bash
+[ "\${1:-}" = remember ] || exit 0
+printf '%s\n' "\${2:-}" >> "$log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/brain-axi"
+}
+
+test_merged_pr_is_remembered() {
+  local case_dir rc brainlog
+  case_dir=$(make_case remember-merged)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
+  brainlog="$case_dir/brain.log"
+  add_recording_brain "$case_dir" "$brainlog"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "remember-merged: fm-pr-merge should succeed"
+  assert_present "$brainlog" "a confirmed merge should push a ship outcome into fleet memory"
+  assert_grep 'Shipped task-x1: https://github.com/example/repo/pull/9' "$brainlog" \
+    "the remembered fact should name the task and the merged PR URL"
+  pass "fm-pr-merge: a confirmed merge is remembered as a ship outcome"
+}
+
+test_merge_brain_absent_is_silent_noop() {
+  local case_dir rc
+  case_dir=$(make_case remember-absent)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
+  : > "$case_dir/gh-axi.log"
+
+  # A PATH with the case mocks and coreutils but NO brain-axi anywhere: the
+  # merge must still land and be confirmed, exit 0.
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+    PATH="$case_dir/fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$PR_MERGE" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "an absent brain-axi must never fail a confirmed merge (fail open)"
+  grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "the merge must still be invoked with brain-axi absent: $(cat "$case_dir/gh-axi.log")"
+  pass "fm-pr-merge: with brain-axi absent the remember is a silent no-op, the merge still lands"
+}
+
+test_merged_pr_is_remembered
+test_merge_brain_absent_is_silent_noop
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded

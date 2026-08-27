@@ -175,6 +175,80 @@ test_membership_stamp_and_id_guard() {
   pass "non-composed captain-hold stamps [<slug>] at creation and enforces the 64-char id cap"
 }
 
+# memval-04 broadening: a completed scout's one-line `done:` finding is pushed
+# into fleet memory as the task lands, via the existing fm-remember.sh. These
+# cases prove the trigger fires with the right fact shape when brain-axi is
+# present, and is a silent no-op when it is absent (fail-open). make_home's
+# fakebin has NO brain-axi, so every other teardown case here already exercises
+# the absent path; the explicit case below pins it.
+add_recording_brain() {  # <home> <log-path>
+  local home=$1 log=$2
+  cat > "$home/fakebin/brain-axi" <<SH
+#!/usr/bin/env bash
+# args: remember <fact> --provenance <p> --store <s>
+[ "\${1:-}" = remember ] || exit 0
+printf '%s\n' "\${2:-}" >> "$log"
+exit 0
+SH
+  chmod +x "$home/fakebin/brain-axi"
+}
+
+test_scout_finding_is_remembered() {
+  local home brainlog
+  home=$(make_home remember-scout)
+  brainlog="$home/brain.log"
+  add_recording_brain "$home" "$brainlog"
+  seed_scout_legacy_report_path "$home" scout-mem "[sample] Investigate the seed store"
+  # Overwrite the seed's generic done line with a concrete finding.
+  printf 'working: dug into the store\n' > "$home/state/scout-mem.status"
+  printf 'done: the seed store corrupts under concurrent writers; needs a lock\n' \
+    >> "$home/state/scout-mem.status"
+
+  run_teardown "$home" scout-mem > "$home/td.out" 2>/dev/null \
+    || fail "scout teardown failed"
+  assert_present "$brainlog" "a completed scout should push its finding into fleet memory"
+  assert_grep "Scout scout-mem finding: the seed store corrupts under concurrent writers; needs a lock" \
+    "$brainlog" "the remembered fact should carry the scout's one-line done finding"
+  pass "teardown: a scout's last done line is remembered as its finding"
+}
+
+test_scout_teardown_brain_absent_is_silent_noop() {
+  local home
+  home=$(make_home absent-brain-scout)
+  # No brain-axi in the fakebin (make_home installs none): the remember must be
+  # a pure no-op and teardown must still complete cleanly. Guard banners this
+  # sandbox emits (tangle/watcher) go to stderr and are dropped like the other
+  # teardown cases here; the fail-open proof is a clean rc 0 and completion.
+  seed_scout_legacy_report_path "$home" scout-abs "[sample] a quiet scout"
+  printf 'done: nothing surprising, the config is fine as-is\n' > "$home/state/scout-abs.status"
+  run_teardown "$home" scout-abs > "$home/td.out" 2>/dev/null \
+    || fail "scout teardown must succeed with brain-axi absent (fail open)"
+  grep -F 'teardown scout-abs complete' "$home/td.out" >/dev/null \
+    || fail "teardown did not report completion with brain-axi absent"
+  pass "teardown: a scout with brain-axi absent completes and the remember is a silent no-op"
+}
+
+# A scout whose status log carries no `done:` line (e.g. only decision/blocker
+# lines) must still tear down cleanly: the finding lookup finds nothing and
+# remembers nothing, and must never abort teardown under set -u.
+test_scout_without_done_line_tears_down_cleanly() {
+  local home brainlog
+  home=$(make_home no-done-line)
+  brainlog="$home/brain.log"
+  add_recording_brain "$home" "$brainlog"
+  seed_scout_legacy_report_path "$home" scout-nodone "[sample] no done line"
+  printf 'working: still digging, no verdict yet\n' > "$home/state/scout-nodone.status"
+  run_teardown "$home" scout-nodone > "$home/td.out" 2>/dev/null \
+    || fail "a scout with no done line must still tear down cleanly"
+  grep -F 'teardown scout-nodone complete' "$home/td.out" >/dev/null \
+    || fail "teardown did not complete for a scout with no done line"
+  assert_absent "$brainlog" "a scout with no done line must remember nothing"
+  pass "teardown: a scout with no done line tears down cleanly and remembers nothing"
+}
+
 test_teardown_does_not_symlink
 test_epic_slug_subcommand
 test_membership_stamp_and_id_guard
+test_scout_finding_is_remembered
+test_scout_teardown_brain_absent_is_silent_noop
+test_scout_without_done_line_tears_down_cleanly

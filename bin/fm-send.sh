@@ -615,6 +615,16 @@ fm_send_close_resolved_keys() {  # <answer-text>
       echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE. Close it manually with: echo 'resolved [key=$k]: <how it was answered>' >> $RESOLVE_STATUS_FILE - do not resend the answer." >&2
       return 1
     fi
+    # memval-04 broadening: a resolved worker decision/blocker and how it cleared
+    # is durable, reusable knowledge, so push it into this home's fleet memory
+    # once the close is genuinely written. fm-remember.sh owns every fail-open
+    # guard (memory unwired, brain-axi missing/slow), so a failure here never
+    # affects the answer. RESOLVE_STATUS_KEYS holds only ordinary status-log
+    # decisions; captain-held keys route through fm_send_feed_resolved_holds,
+    # which already records the captain's decision, so this never double-writes.
+    FM_REMEMBER_PROVENANCE="firstmate resolve on $RESOLVE_TASK_ID key $k" \
+      "$SCRIPT_DIR/fm-remember.sh" "Resolved [$RESOLVE_TASK_ID] decision '$k': $note" \
+      >/dev/null 2>&1 || true
   done
 }
 

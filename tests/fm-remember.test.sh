@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # tests/fm-remember.test.sh - guard behavior of bin/fm-remember.sh, the
-# best-effort fleet-memory push wired into decision-hold and /stow (memval-04).
+# best-effort fleet-memory push its callers wire at firstmate's natural capture
+# points (captain decisions, resolved worker decisions, scout findings, landed
+# ship outcomes, /stow sweeps) (memval-04).
 #
 # fm-remember.sh is a side-effect that must NEVER block or fail its caller. Its
 # write path is now `brain-axi remember`. The cases here drive the REAL script

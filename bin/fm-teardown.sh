@@ -1177,6 +1177,30 @@ backlog_refresh_reminder() {
   fi
 }
 
+# memval-04 broadening: a completed scout's one-line verdict is exactly what
+# fleet-memory recall should surface later, so remember the crewmate's own last
+# `done:` finding line as this task lands. fm-remember.sh owns every fail-open
+# guard, so a missing or slow brain-axi never affects teardown. Only scouts: a
+# ship's `done:` line is delivery boilerplate ("ready in branch ...") rather
+# than knowledge, and its durable landing artifact is remembered at the merge
+# gate (fm-merge-local.sh / fm-pr-merge.sh) instead. status_line_verb and
+# status_line_note are the shared status-line parsers (bin/fm-classify-lib.sh).
+remember_scout_finding() {
+  local status_file="$STATE/$ID.status" line finding=''
+  [ "$KIND" = scout ] || return 0
+  [ -f "$status_file" ] || return 0
+  # The last line whose verb is `done`: a scout appends it once at completion,
+  # and it carries its one-line finding.
+  while IFS= read -r line; do
+    [ "$(status_line_verb "$line")" = "done" ] || continue
+    finding=$(status_line_note "$line")
+  done < "$status_file"
+  [ -n "$finding" ] || return 0
+  FM_REMEMBER_PROVENANCE="scout $ID" \
+    "$SCRIPT_DIR/fm-remember.sh" "Scout $ID finding: $finding" \
+    >/dev/null 2>&1 || true
+}
+
 path_is_ancestor_of() {
   local ancestor=$1 path=$2
   [ -n "$ancestor" ] || return 1
@@ -2843,6 +2867,9 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+# Push a completed scout's finding into fleet memory while its status log is
+# still present: status_retire_presentation_task below removes it.
+remember_scout_finding
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \

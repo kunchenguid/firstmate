@@ -322,6 +322,14 @@ esac
 # Reached only after the forge confirmed the merge landed: set -e exits on a
 # refused or failed merge above, and a queued forge merge exits without an
 # outcome while its existing poll remains armed.
+# memval-04 broadening: a merged PR is a durable ship outcome, so record it in
+# this home's fleet memory. fm-remember.sh owns every fail-open guard, so a
+# missing or slow brain-axi never affects the merge that the forge already
+# confirmed above. The URL identifies the repository unambiguously.
+FM_REMEMBER_PROVENANCE="ship $ID $URL" \
+  "$SCRIPT_DIR/fm-remember.sh" "Shipped $ID: $URL" \
+  >/dev/null 2>&1 || true
+
 outcome_rc=0
 fm_merge_outcome_report "$FM_HOME" "$STATE" "$ID" "$URL" self || outcome_rc=$?
 case "$outcome_rc" in
