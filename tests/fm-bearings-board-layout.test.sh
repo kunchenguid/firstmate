@@ -178,6 +178,8 @@ if (!(result.riskValueLines > 1.5)) failures.push(`risk detail lines=${result.ri
 if (result.riskValueScrollWidth > result.riskValueClientWidth + 1) {
   failures.push(`risk detail scroll=${result.riskValueScrollWidth}, client=${result.riskValueClientWidth}`);
 }
+// The layout viewport excludes a classic scrollbar while innerWidth does not,
+// so compare overflow to clientWidth and the requested size to innerWidth.
 if (result.scrollWidth !== result.viewportWidth || result.windowWidth !== width) {
   failures.push(`document=${result.scrollWidth}, viewport=${result.viewportWidth}, window=${result.windowWidth}, requested=${width}`);
 }
