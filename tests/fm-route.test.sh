@@ -10,7 +10,8 @@ ROUTE="$ROOT/bin/fm-route.sh"
 REQUEST="$LAB/request.json"
 CANDIDATES="$LAB/candidates.json"
 export FM_STATE_OVERRIDE="$LAB/state"
-export FM_CONFIG_OVERRIDE="$LAB/config"
+export FM_HOME="$LAB"
+FM_CONFIG_OVERRIDE="$LAB/config"
 
 command -v jq >/dev/null 2>&1 || fail "jq is required for routing tests"
 
@@ -120,6 +121,74 @@ test_policy_boundaries_are_explicit_and_fail_closed() {
   [ -d "$FM_STATE_OVERRIDE/routing/reservations" ] \
     || fail "missing-policy direct selector did not follow its legacy state path"
   pass "invalid active policy fails closed while absent policy keeps legacy selection"
+}
+
+test_active_policy_path_is_contained_and_never_symlinked() {
+  local case_home outside real_config state out rc label
+  write_request standard implementation medium false 1 strong 3600
+  write_candidates "[$(candidate only lane-1 3 1 0 0 0 null)]"
+
+  for label in policy-symlink config-symlink home-symlink outside-override; do
+    case_home="$LAB/path-$label-home"
+    outside="$LAB/path-$label-outside"
+    real_config="$LAB/path-$label-real-config"
+    state="$LAB/path-$label-state"
+    mkdir -p "$case_home" "$outside" "$real_config"
+    seed_v2_policy off
+    cp "$FM_CONFIG_OVERRIDE/crew-dispatch.json" "$real_config/crew-dispatch.json"
+    case "$label" in
+      policy-symlink)
+        mkdir -p "$case_home/config"
+        ln -s "$real_config/crew-dispatch.json" "$case_home/config/crew-dispatch.json"
+        ;;
+      config-symlink) ln -s "$real_config" "$case_home/config" ;;
+      home-symlink)
+        rm -rf "$case_home"
+        mkdir -p "$outside/config"
+        cp "$real_config/crew-dispatch.json" "$outside/config/crew-dispatch.json"
+        ln -s "$outside" "$case_home"
+        ;;
+      outside-override)
+        mkdir -p "$case_home/config"
+        cp "$real_config/crew-dispatch.json" "$outside/crew-dispatch.json"
+        ;;
+    esac
+
+    set +e
+    if [ "$label" = outside-override ]; then
+      out=$(FM_HOME="$case_home" FM_CONFIG_OVERRIDE="$outside" FM_STATE_OVERRIDE="$state" \
+        "$ROUTE" select --request "$REQUEST" --candidates "$CANDIDATES" --now 1000 2>&1)
+    else
+      out=$(FM_HOME="$case_home" FM_STATE_OVERRIDE="$state" \
+        "$ROUTE" select --request "$REQUEST" --candidates "$CANDIDATES" --now 1000 2>&1)
+    fi
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "$label active policy path was accepted"
+    [ "$out" = "fm-route: active dispatch policy path is unsafe" ] \
+      || fail "$label emitted an unstable diagnostic: $out"
+    [ ! -e "$state/routing" ] || fail "$label mutated routing state"
+  done
+  rm -f "$FM_CONFIG_OVERRIDE/crew-dispatch.json"
+  pass "active policy rejects symlinked and out-of-home paths before state mutation"
+}
+
+test_version_one_policy_retains_selector_compatibility() {
+  local out
+  rm -rf "$FM_STATE_OVERRIDE/routing"
+  mkdir -p "$FM_CONFIG_OVERRIDE"
+  jq -n '{
+    schemaVersion:1,
+    routing:{mode:"off"},
+    default:{harness:"pi",model:"model-only"}
+  }' >"$FM_CONFIG_OVERRIDE/crew-dispatch.json"
+  write_request standard implementation medium false 1 strong 3600
+  write_candidates "[$(candidate only lane-1 3 1 0 0 0 null)]"
+  out=$(select_json) || fail "version 1 policy broke direct selector compatibility"
+  jq -e '.action == "selected" and .selected.profile == "only"' <<<"$out" >/dev/null \
+    || fail "version 1 policy was treated as version 2 rollback"
+  rm -f "$FM_CONFIG_OVERRIDE/crew-dispatch.json"
+  pass "version 1 policy retains legacy direct selector behavior"
 }
 
 expect_failure_contains() {
@@ -1338,6 +1407,8 @@ test_every_single_value_option_rejects_duplicates() {
 test_fit_beats_quota
 test_off_mode_returns_static_without_initializing_routing_state
 test_policy_boundaries_are_explicit_and_fail_closed
+test_active_policy_path_is_contained_and_never_symlinked
+test_version_one_policy_retains_selector_compatibility
 test_unknowns_are_disclosed_not_zero
 test_worker_budget_is_bounded
 test_every_decision_has_the_complete_output_shape

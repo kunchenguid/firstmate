@@ -121,11 +121,41 @@ fm_route_static_result() {
   jq -n '{action:"static",reason:"routing-mode-off",selected:null,ranked:[],rejected:[],uncertainty:[],maxWorkers:1}'
 }
 
+fm_route_path_has_symlink_component() {
+  local path=$1 parent
+  case "$path" in
+    /*) ;;
+    *) return 0 ;;
+  esac
+  while [ "$path" != / ]; do
+    [ ! -L "$path" ] || return 0
+    parent=$(dirname "$path")
+    [ "$parent" != "$path" ] || return 0
+    path=$parent
+  done
+  return 1
+}
+
 # Return 10 only for an authoritative, valid version 2 policy in off mode.
 # Missing policy and version 1 retain the legacy low-level selector contract;
 # an active malformed policy fails closed with a stable diagnostic.
 fm_route_select_policy_guard() {
-  local config=${FM_CONFIG_OVERRIDE:-$FM_ROUTE_HOME/config}/crew-dispatch.json description schema mode
+  local config_root="$FM_ROUTE_HOME/config" config="$FM_ROUTE_HOME/config/crew-dispatch.json" description schema mode path
+  if { [ -n "${FM_CONFIG_OVERRIDE:-}" ] && [ "$FM_CONFIG_OVERRIDE" != "$config_root" ]; } ||
+    fm_route_path_has_symlink_component "$FM_ROUTE_HOME" ||
+    fm_route_path_has_symlink_component "$config_root" ||
+    fm_route_path_has_symlink_component "$config"; then
+    fm_route_diagnostic 'active dispatch policy path is unsafe'
+    return 1
+  fi
+  for path in "$FM_ROUTE_HOME" "$config_root" "$config"; do
+    case "/${path#/}/" in
+      */../*|*/./*)
+        fm_route_diagnostic 'active dispatch policy path is unsafe'
+        return 1
+        ;;
+    esac
+  done
   [ -e "$config" ] || return 0
   [ -f "$config" ] && [ -r "$config" ] || {
     fm_route_diagnostic 'active dispatch policy is unreadable'

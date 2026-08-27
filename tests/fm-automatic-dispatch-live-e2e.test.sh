@@ -22,7 +22,13 @@ DECISION="$LAB/decision.json"
 PI_CATALOG="$LAB/pi-models.txt"
 QUOTA_REPORT="$LAB/quota.txt"
 mkdir -p "$HOME_DIR/config" "$HOME_DIR/state"
-trap 'rm -rf "$LAB"' EXIT
+
+capture_version() {
+  local destination=$1
+  shift
+  "$@" >"$destination" 2>&1 || return 1
+  sed -n '1p' "$destination"
+}
 
 safe_version() {
   local value=$1
@@ -37,9 +43,15 @@ cp "$ROOT/docs/examples/crew-dispatch.json" "$HOME_DIR/config/crew-dispatch.json
 jq '.routing.mode="simulate"' "$HOME_DIR/config/crew-dispatch.json" >"$LAB/policy.json"
 mv "$LAB/policy.json" "$HOME_DIR/config/crew-dispatch.json"
 
-claude_version=$(claude --version 2>&1 | head -n 1)
-codex_version=$(codex --version 2>&1 | head -n 1)
-pi_version=$(pi --version 2>&1 | head -n 1)
+if ! claude_version=$(capture_version "$LAB/claude.version" claude --version); then
+  fail "live automatic dispatch: Claude version probe failed"
+fi
+if ! codex_version=$(capture_version "$LAB/codex.version" codex --version); then
+  fail "live automatic dispatch: Codex version probe failed"
+fi
+if ! pi_version=$(capture_version "$LAB/pi.version" pi --version); then
+  fail "live automatic dispatch: Pi version probe failed"
+fi
 safe_version "$claude_version"
 safe_version "$codex_version"
 safe_version "$pi_version"
@@ -48,8 +60,9 @@ printf 'runtime codex version=%s\n' "$codex_version"
 printf 'runtime pi version=%s\n' "$pi_version"
 command -v quota-axi >/dev/null 2>&1 \
   || fail "live automatic dispatch: missing runtime quota-axi"
-quota_version=$(quota-axi --version 2>&1 | head -n 1) \
-  || fail "live automatic dispatch: quota-axi version probe failed"
+if ! quota_version=$(capture_version "$LAB/quota-axi.version" quota-axi --version); then
+  fail "live automatic dispatch: quota-axi version probe failed"
+fi
 safe_version "$quota_version"
 
 pi --list-models >"$PI_CATALOG" 2>/dev/null \
@@ -65,7 +78,9 @@ while IFS=$'\t' read -r id harness model; do
   esac
 done < <(jq -r '.profiles|to_entries[]|[.key,.value.harness,(.value.model//"")]|@tsv' "$HOME_DIR/config/crew-dispatch.json")
 
-claude --help 2>&1 | grep -Fq "sonnet" \
+claude --help >"$LAB/claude-help.txt" 2>&1 \
+  || fail "live automatic dispatch: Claude catalog probe failed"
+grep -Fq "sonnet" "$LAB/claude-help.txt" \
   || fail "live automatic dispatch: configured Claude alias unavailable: sonnet"
 codex_cache=${CODEX_HOME:-$HOME/.codex}/models_cache.json
 [ -r "$codex_cache" ] || fail "live automatic dispatch: Codex model catalog cache unavailable"
