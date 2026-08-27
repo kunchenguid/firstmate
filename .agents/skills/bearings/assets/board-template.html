@@ -189,14 +189,16 @@ a { color: inherit; text-decoration: none; }
 .bb-decision { display: flex; flex-direction: column; }
 .bb-decision__pad { padding: 18px 20px 16px; display: flex; flex-direction: column; gap: 12px; flex: 1; }
 .bb-decision__top { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
-/* The risk pin is the one badge carrying composed text rather than a one or
-   two word label, so it is the one badge that must survive a long value: an
-   enamel pin with white-space nowrap grew straight out of its card and got
-   cut off mid-sentence. It wraps instead of clipping, because a risk the
-   captain cannot finish reading is the defect, not the cure - and it shrinks
-   below its own text width and breaks an unbreakable token, so no value can
-   push it past the card edge. Every other badge is a genuine short label and
-   keeps the verbatim nowrap contract above. */
+/* Safety net, not the normal treatment: the pin now carries only the risk
+   level because splitRisk sends the justification down into the card body, so
+   in the ordinary case this rule changes nothing.
+   It stays because the pin is still the one badge fed a composed value, and a
+   value that never reaches a period - an absurd one, or a single unbroken
+   token - would otherwise grow straight out of its card and be cut off
+   mid-sentence, as the reported one was. It wraps rather than clips, may
+   shrink below its own text width, and breaks an unbreakable token, so no
+   value can push it past the card edge. Every other badge is a genuine short
+   label and keeps the verbatim nowrap contract above. */
 .bb-decision__risk { white-space: normal; overflow-wrap: anywhere; text-align: left;
   min-width: 0; flex: 0 1 auto; line-height: 1.35; }
 .bb-decision__repo { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); white-space: nowrap; }
@@ -483,6 +485,24 @@ __FM_BEARINGS_BOARD_DATA__
 
   /* Captain's Call deck: every item renders as the same full card */
   var deck = document.getElementById("bb-call");
+  /* The pin carries the risk level and nothing else. The captain reads these
+     cards to decide, so a justification he has to go hunting for is one he
+     will not read: it belongs in the card body, next to the about and decide
+     rows that are already built for prose.
+     The cut is the value's first period, which is the shape the value is
+     written in - "faible. Une vue derivee..." leaves "faible" on the pin and
+     sends the rest below. One stated rule beats a finer guess at where a
+     sentence ends.
+     A value with no period is already a bare level: it stays whole on the pin
+     and adds no row at all, because an empty row or an orphan label reads as a
+     missing justification rather than an absent one. */
+  function splitRisk(value) {
+    var text = String(value == null ? "" : value).trim();
+    var cut = text.indexOf(".");
+    if (cut < 0) return { level: text, detail: "" };
+    return { level: text.slice(0, cut).trim(), detail: text.slice(cut + 1).trim() };
+  }
+
   function ctxRow(k, v, rec) {
     var row = el("div", "bb-ctx__row" + (rec ? " bb-ctx__row--rec" : ""));
     row.appendChild(el("span", "bb-ctx__k", k));
@@ -493,11 +513,12 @@ __FM_BEARINGS_BOARD_DATA__
   data.captains_call.forEach(function (item) {
     var card = el("div", "fm-card fm-card--poster bb-decision");
     var pad = el("div", "bb-decision__pad");
+    var risk = item.type === "merge" ? splitRisk(item.risk) : null;
 
     var top = el("div", "bb-decision__top");
     if (item.type === "merge") {
       top.appendChild(badge("online", "checks green"));
-      var riskPin = badge(item.risk === "low" ? "neutral" : "warn", "risk " + item.risk);
+      var riskPin = badge(risk.level === "low" ? "neutral" : "warn", "risk " + risk.level);
       riskPin.className += " bb-decision__risk";
       top.appendChild(riskPin);
     } else {
@@ -510,6 +531,11 @@ __FM_BEARINGS_BOARD_DATA__
 
     if (item.type === "merge") {
       if (item.detail) pad.appendChild(el("p", "bb-decision__detail", item.detail));
+      if (risk.detail) {
+        var riskCtx = el("div", "bb-ctx");
+        riskCtx.appendChild(ctxRow("risk", risk.detail));
+        pad.appendChild(riskCtx);
+      }
       if (item.pr_url) {
         var pr = el("a", "bb-decision__link", item.pr_url);
         pr.href = item.pr_url; pr.target = "_blank"; pr.rel = "noopener";
