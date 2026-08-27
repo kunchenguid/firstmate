@@ -14,18 +14,27 @@ assert_grep 'never include prompts, source code, credentials' "$SKILL" 'privacy 
 assert_grep 'visible policy diagnostic' "$SKILL" 'invalid policy diagnostic is missing'
 assert_grep 'static dispatch' "$SKILL" 'invalid policy fallback is missing'
 assert_grep 'no optimization state mutation' "$SKILL" 'invalid policy mutation boundary is missing'
-assert_grep 'Do not call `fm-route.sh select`, `observe`, `reserve`' "$SKILL" 'invalid policy terminal boundary is missing'
+assert_grep "Do not call \`fm-route.sh select\`, \`observe\`, \`reserve\`" "$SKILL" 'invalid policy terminal boundary is missing'
 assert_grep 'symbolic account is absent' "$SKILL" 'missing native account rule is missing'
 assert_grep 'qualified Pi' "$SKILL" 'Pi continuation rule is missing'
-assert_grep 'reserve' "$SKILL" 'reservation step is missing'
-assert_grep 'before calling `fm-spawn.sh`' "$SKILL" 'reserve-before-spawn order is missing'
-assert_grep 'call `fm-route.sh observe`' "$SKILL" 'simulation observation is missing'
+assert_grep "call \`fm-route.sh observe\`" "$SKILL" 'simulation observation is missing'
 assert_grep 'launch nothing' "$SKILL" 'simulation no-launch boundary is missing'
 assert_grep 'stop immediately on unsafe or uncertain writes' "$SKILL" 'unsafe write stop is missing'
 assert_grep 'quota-array-dispatch' "$SKILL" 'quota interpretation owner is missing'
 assert_grep 'authoritative catalog' "$SKILL" 'catalog ownership is missing'
 assert_grep 'Do not add subtask lists' "$SKILL" 'strict request schema boundary is missing'
 assert_grep 'automatic-dispatch' "$ROOT/.agents/skills/quota-array-dispatch/SKILL.md" 'quota skill does not cross-reference routing ownership'
+
+assert_grep "Every independent subtask gets a unique bounded \`taskId\`, a fresh route generation, its own exact normalized request with its own \`workType\`, and its own \`fm-route.sh select\` call." "$SKILL" 'independent subtasks can share routing identity or selection'
+assert_grep "\`maxWorkers\` is only a concurrency ceiling; never reuse one selection for another subtask." "$SKILL" 'worker ceiling can be mistaken for reusable selection authority'
+assert_grep "Call \`fm-route.sh select --request FILE --candidates FILE\` for that subtask only." "$SKILL" 'selector command shape is not executable'
+assert_grep "Reserve with \`fm-route.sh reserve --task TASK --generation GENERATION --profile PROFILE --provider PROVIDER --lane LANE --account ACCOUNT --class CLASS --work-type WORK_TYPE --risk RISK --mode MODE\`." "$SKILL" 'reservation command shape is not executable'
+assert_grep 'Process each ready slot transactionally as select -> reserve -> immediately spawn before routing the next ready slot; never bulk-reserve slots for later spawn.' "$SKILL" 'slot admission is not transactionally ordered'
+for route_field in generation profile provider lane account class work-type risk mode; do
+  assert_grep "\`--route-$route_field\`" "$SKILL" "complete routed spawn tuple omits --route-$route_field"
+done
+assert_grep 'On reserve or spawn failure, use the existing exact abort cleanup or release for that task and generation, then stop and re-evaluate every remaining unspawned slot.' "$SKILL" 'failed slot cleanup can leak or stale later reservations'
+assert_grep "A high-risk reviewer is a distinct review subtask with its own \`taskId\`, generation, request, selection, and \`workType=review\`; the independent reviewer from a different provider than every implementer becomes ready only after reviewable implementation artifacts exist." "$SKILL" 'review can reuse implementation lifecycle identity'
 
 frontmatter=$(sed -n '2,/^---$/p' "$SKILL")
 assert_contains "$frontmatter" 'name: automatic-dispatch' 'skill frontmatter name is invalid'
