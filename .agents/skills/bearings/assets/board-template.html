@@ -204,12 +204,15 @@ a { color: inherit; text-decoration: none; }
 .bb-decision__repo { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); white-space: nowrap; }
 .bb-decision__title { margin: 0; font-size: var(--fs-h4); font-weight: 800; color: var(--text-strong); line-height: 1.25; }
 .bb-decision__detail { margin: 0; font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.45; }
-/* about / decide / recommended - three scannable context rows */
+/* about / decide / recommended - three scannable context rows.
+   The shared value boundary also receives composed text moved off the risk pin,
+   so it must break a justification even when that text is one unbroken token. */
 .bb-ctx { display: flex; flex-direction: column; gap: 6px; }
 .bb-ctx__row { display: grid; grid-template-columns: 78px minmax(0,1fr); gap: 8px; align-items: baseline; }
 .bb-ctx__k { font-family: var(--font-mono); font-size: var(--fs-2xs); letter-spacing: 0.04em;
   text-transform: uppercase; color: var(--text-faint); white-space: nowrap; }
-.bb-ctx__v { font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.4; min-width: 0; }
+.bb-ctx__v { font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.4; min-width: 0;
+  overflow-wrap: anywhere; }
 .bb-decision__link { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ocean-600); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
 .bb-decision__link:hover { text-decoration: underline; }
 /* One rhythm owner: the answer form is a flex column with the same 12px gap as

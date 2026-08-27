@@ -220,7 +220,8 @@ family_for_basename() {
     fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
       printf '%s\n' afk
       ;;
-    fm-bearings-board-render.test.sh|fm-bearings-snapshot.test.sh|\
+    fm-bearings-board-layout.test.sh|fm-bearings-board-render.test.sh|\
+    fm-bearings-snapshot.test.sh|\
     fm-fleet-snapshot-view.test.sh)
       printf '%s\n' snapshot-bearings
       ;;
