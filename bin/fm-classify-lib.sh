@@ -97,7 +97,6 @@ last_status_line() {
   local f=$1
   [ -e "$f" ] || return 0
   FM_CLASSIFY_LAST_CAPTAIN_RE="${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}" \
-    FM_CLASSIFY_LAST_CUSTOM_RE="${FM_CAPTAIN_RE:+1}" \
     FM_CLASSIFY_LAST_PAUSE="${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" \
     FM_CLASSIFY_LAST_RESOLVE="${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}" \
     FM_CLASSIFY_LAST_HELD="${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" \
@@ -109,9 +108,6 @@ last_status_line() {
       }
       BEGIN {
         captain_re = tolower(ENVIRON["FM_CLASSIFY_LAST_CAPTAIN_RE"])
-        if (ENVIRON["FM_CLASSIFY_LAST_CUSTOM_RE"] == "") {
-          captain_re = "^[[:space:]]*(" captain_re ")"
-        }
       }
       {
         line = $0
@@ -124,8 +120,11 @@ last_status_line() {
             verb == "done" || verb == "failed" ||
             verb == ENVIRON["FM_CLASSIFY_LAST_PAUSE"] ||
             verb == ENVIRON["FM_CLASSIFY_LAST_RESOLVE"] ||
-            verb == ENVIRON["FM_CLASSIFY_LAST_HELD"] ||
-            tolower(line) ~ captain_re) {
+            verb == ENVIRON["FM_CLASSIFY_LAST_HELD"]) {
+          last = line
+          next
+        }
+        if (tolower(line) ~ captain_re) {
           last = line
         }
       }

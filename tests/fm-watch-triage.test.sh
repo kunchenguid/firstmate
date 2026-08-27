@@ -186,6 +186,16 @@ test_signal_reason_is_actionable_classifier() {
   pass "signal_reason_is_actionable: benign absorbed, captain verbs and coalesced batches surfaced"
 }
 
+test_legacy_free_text_after_working_is_actionable_classifier() {
+  local dir state status_file
+  dir=$(make_case classify-legacy-after-working); state="$dir/state"
+  status_file="$state/task.status"
+  printf 'working: monitoring\nPR #76 checks green\n' > "$status_file"
+  signal_reason_is_actionable "$status_file" \
+    || fail "legacy captain-relevant free text after working was classified benign"
+  pass "legacy captain-relevant free text after working remains actionable"
+}
+
 test_stale_is_terminal_classifier() {
   local dir state
   dir=$(make_case classify-stale); state="$dir/state"
@@ -2521,6 +2531,24 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
 }
 
+test_heartbeat_backstop_surfaces_legacy_status_after_working() {
+  local dir state fakebin out drain_out sig pid
+  dir=$(make_case heartbeat-legacy-after-working); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  printf 'working: monitoring\nPR #76 checks green\n' > "$state/miss.status"
+  sig=$(seen_sig "$state/miss.status"); printf '%s' "$sig" > "$state/.seen-miss_status"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "heartbeat backstop missed legacy captain-relevant free text after working"
+  grep -Fx "heartbeat" "$out" >/dev/null || fail "legacy free-text backstop did not exit with a heartbeat wake"
+  [ "$(cat "$state/.hb-surfaced-miss" 2>/dev/null || true)" = "PR #76 checks green" ] \
+    || fail "legacy free-text backstop recorded the wrong surfaced status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after legacy free-text heartbeat failed"
+  grep "$(printf '\theartbeat\t')" "$drain_out" >/dev/null || fail "legacy free-text heartbeat was not queued"
+  pass "heartbeat surfaces legacy captain-relevant free text after working"
+}
+
 # --- beacon stays fresh while absorbing -------------------------------------
 
 test_beacon_stays_fresh_while_absorbing() {
@@ -2614,6 +2642,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
 }
 
 test_signal_reason_is_actionable_classifier
+test_legacy_free_text_after_working_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
@@ -2670,6 +2699,7 @@ test_procevent_surface_crash_boundaries
 test_procevent_marker_failure_exits_and_replays
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
+test_heartbeat_backstop_surfaces_legacy_status_after_working
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale

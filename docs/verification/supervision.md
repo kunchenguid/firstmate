@@ -677,6 +677,94 @@ ok - unknown secondmate liveness fails toward waking the primary
 exit=0
 ```
 
+### Legacy free-text status compatibility red/green record
+
+The legacy free-text compatibility cases ran on the same platform and Bash version recorded above.
+The unfixed revision was `d9f66a433a6b1cc3b970670779d5e530b1b96519`, and the fixed version was its review working tree with the source and test changes recorded in this section.
+Both the signal classifier and watcher heartbeat cases were RED before and GREEN after, so both demonstrate the fix.
+
+The exact current-code runner and commands were:
+
+```sh
+run_case() {
+  local test_name=$1 rc
+  printf 'CASE revision=d9f66a4-review9-unfixed test=%s\n' "$test_name"
+  bash -c '
+    . tests/wake-helpers.sh
+    eval "$(awk '\''$0 == \"test_signal_reason_is_actionable_classifier\" { exit } /^\\. .*BASH_SOURCE/ { next } { print }'\'' tests/fm-watch-triage.test.sh)"
+    "$1"
+  ' _ "$test_name"
+  rc=$?
+  printf 'exit=%s\n' "$rc"
+}
+run_case test_legacy_free_text_after_working_is_actionable_classifier
+run_case test_heartbeat_backstop_surfaces_legacy_status_after_working
+```
+
+Full current-code output:
+
+```text
+CASE revision=d9f66a4-review9-unfixed test=test_legacy_free_text_after_working_is_actionable_classifier
+not ok - legacy captain-relevant free text after working was classified benign
+exit=1
+CASE revision=d9f66a4-review9-unfixed test=test_heartbeat_backstop_surfaces_legacy_status_after_working
+not ok - heartbeat backstop missed legacy captain-relevant free text after working
+exit=1
+```
+
+The fixed-case runner was:
+
+```sh
+run_fixed_case() {
+  local test_name=$1 rc
+  printf 'CASE revision=review-fixed test=%s\n' "$test_name"
+  bash -c '
+    . tests/wake-helpers.sh
+    eval "$(awk '\''$0 == \"test_signal_reason_is_actionable_classifier\" { exit } /^\\. .*BASH_SOURCE/ { next } { print }'\'' tests/fm-watch-triage.test.sh)"
+    "$1"
+  ' _ "$test_name"
+  rc=$?
+  printf 'exit=%s\n' "$rc"
+  return "$rc"
+}
+```
+
+#### Fix demonstration: signal classifier preserves legacy free text
+
+This proves that an unanchored legacy captain-relevant line remains actionable when it follows a recognized nonterminal `working:` event.
+
+Fixed command:
+
+```sh
+run_fixed_case test_legacy_free_text_after_working_is_actionable_classifier
+```
+
+Full fixed output:
+
+```text
+CASE revision=review-fixed test=test_legacy_free_text_after_working_is_actionable_classifier
+ok - legacy captain-relevant free text after working remains actionable
+exit=0
+```
+
+#### Fix demonstration: heartbeat preserves legacy free text
+
+This proves that the real watcher heartbeat surfaces the same legacy captain-relevant line after its per-signal signature was already seen.
+
+Fixed command:
+
+```sh
+run_fixed_case test_heartbeat_backstop_surfaces_legacy_status_after_working
+```
+
+Full fixed output:
+
+```text
+CASE revision=review-fixed test=test_heartbeat_backstop_surfaces_legacy_status_after_working
+ok - heartbeat surfaces legacy captain-relevant free text after working
+exit=0
+```
+
 ## Turn-end guard
 
 The blocking and bounded-follow-up mechanisms were validated across six harnesses on 2026-07-08 through 2026-08-13, with Cursor's stop-hook park validated on 2026-08-13 and Claude's replacement Stop-owned path revalidated on 2026-08-14.
