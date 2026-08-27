@@ -768,14 +768,16 @@ pause_state_class() {  # <window> <task>
       return
     fi
   fi
-  # Recover paused classification for a declared wait that authoritative crew state
-  # could not name. Reaching here already proves the only two admissible cases: an
-  # ordinary crew whose agent the gate above confirmed dead, so no live decision gate
-  # is being silenced, or a secondmate, whose endpoint liveness is deliberately never
-  # read and so cannot supply that confirmation. Without the mate case a mate's
-  # captain hold - which has no current-state mapping and so arrives as `none` -
-  # would be silenced by every caller rather than taking the bounded re-surface
-  # cadence, and a forgotten hold would rot invisibly.
+  # Recover paused classification for a captain-held transfer that authoritative crew
+  # state could not name; a `paused:` declaration was already admitted above on the
+  # worker's own word and never reaches here, so nothing below gates it on liveness.
+  # Reaching here already proves the only two admissible cases: an ordinary crew whose
+  # agent the gate above confirmed dead, so no live decision gate is being silenced,
+  # or a secondmate, whose endpoint liveness is deliberately never read and so cannot
+  # supply that confirmation. Without the mate case a mate's captain hold - which has
+  # no current-state mapping and so arrives as `none` - would be silenced by every
+  # caller rather than taking the bounded re-surface cadence, and a forgotten hold
+  # would rot invisibly.
   [ "$class" = none ] && class=paused
   case "$class" in
     paused) date +%s > "$recheck_file" ;;
