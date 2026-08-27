@@ -1135,7 +1135,22 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    #
+    # --permission-mode auto, NOT --dangerously-skip-permissions. Verified 2026-08-22
+    # against Claude Code 2.1.237 on an account under an organization-managed settings
+    # policy that disables bypass-permissions mode: an INTERACTIVE session launched
+    # with --dangerously-skip-permissions is silently downgraded to manual mode (the
+    # pane footer reads "manual mode on"), so every Bash call stops on an approval
+    # dialog no unattended crewmate can answer. The same account runs headless
+    # `claude -p` under that flag without complaint, which is why only interactive
+    # agents are affected. auto mode survives the downgrade and executes normally, at
+    # the cost of a classifier that can refuse an individual command; a refused
+    # command is recoverable by the supervising firstmate, whereas a dialog on every
+    # command is not. An unprivileged container also cannot initialise the Bash
+    # sandbox at all (`apply-seccomp: write /proc/self/uid_map: Operation not
+    # permitted`), so each call falls back to the unsandboxed path, which is what
+    # surfaces the dialog on every command rather than only on risky ones.
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --permission-mode auto __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'

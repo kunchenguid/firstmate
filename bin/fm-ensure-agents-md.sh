@@ -4,9 +4,12 @@
 # real regular file whose canonical content is the two-line @AGENTS.md pointer
 # that Claude Code inlines at load time. Creates a minimal AGENTS.md skeleton
 # when neither file exists, promotes a real CLAUDE.md file when it is the only
-# file present (unless it is already the canonical pointer), converts a correct
-# CLAUDE.md -> AGENTS.md symlink into the pointer file, and refuses to clobber
-# distinct real files or wrong symlinks.
+# file present and reads as a trivial stub (unless it is already the canonical
+# pointer), converts a correct CLAUDE.md -> AGENTS.md symlink into the pointer
+# file, and refuses to clobber distinct real files, wrong symlinks, or an
+# authored CLAUDE.md - one with real document structure or enough content to
+# be a deliberate memory file rather than a placeholder (issue: promoting one
+# silently restructures deliberate content inside an unrelated diff).
 # Owns the canonical "## Maintaining this file" self-governance wording for
 # project AGENTS.md files, injecting it idempotently into created skeletons,
 # promoted CLAUDE.md files, and any existing AGENTS.md that still lacks it.
@@ -112,6 +115,23 @@ EOF
 is_canonical_claude_pointer() {
   [ -f "$CLAUDE" ] && [ ! -L "$CLAUDE" ] || return 1
   claude_pointer_content | cmp -s - "$CLAUDE"
+}
+
+# A CLAUDE.md that is not the canonical pointer is judged authored, and thus
+# refused instead of promoted, unless it is effectively empty (no non-blank
+# content at all).
+# Distinguishing a deliberate placeholder stub from authored prose by
+# inspecting the wording of a single line was tried and failed twice, each
+# time to a new counter-example, so that approach is abandoned rather than
+# sharpened again.
+# The two failure modes are not symmetric.
+# Wrongly promoting an authored file silently restructures somebody's real
+# documentation inside an unrelated change, while wrongly refusing a trivial
+# file costs one message and a few seconds of a human's time.
+# This predicate biases hard toward refusing, the same way a distinct real
+# AGENTS.md/CLAUDE.md pair is refused elsewhere in this script.
+is_authored_claude_md() {
+  grep -q '[^[:space:]]' "$CLAUDE" 2>/dev/null
 }
 
 # Write the canonical pointer as a regular file. Unlink a symlink first so the
@@ -237,6 +257,10 @@ if [ -e "$CLAUDE" ]; then
       write_skeleton
       echo "created: AGENTS.md and kept CLAUDE.md @AGENTS.md pointer in $DIR"
       exit 0
+    fi
+    if is_authored_claude_md; then
+      echo "conflict: CLAUDE.md in $DIR is an authored memory file, not the canonical @AGENTS.md pointer; promoting it would silently restructure deliberate content, so reconcile it manually instead" >&2
+      exit 1
     fi
     mv "$CLAUDE" "$AGENTS"
     ensure_maintenance_section

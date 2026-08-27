@@ -291,6 +291,19 @@ outcome: failed
 EOF
 }
 
+run_cancelled() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+outcome: cancelled
+EOF
+}
+
 run_ci_monitoring() {  # <branch>
   cat <<EOF
 run:
@@ -682,6 +695,78 @@ test_terminal_failed() {
   assert_contains "$out" "state: failed" "failed run -> failed"
   assert_contains "$out" "source: run-step" "failed -> run-step source"
   pass "terminal failed run is authoritative"
+}
+
+# A cancelled run with no recorded pr= is a genuine failure (nothing shipped),
+# so it must keep reading as failed - regression guard for report_cancelled_state.
+test_terminal_cancelled_without_pr_is_failed() {
+  reset_fakes
+  local d; d=$(new_case cancelled-no-pr)
+  make_repo_on_branch "$d/wt" fm/feat-cancel-nopr
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cancel-nopr.meta" "window=fm:fm-feat-cancel-nopr" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-cancel-nopr)"
+  local out; out=$(run_crew_state "$d" feat-cancel-nopr)
+  assert_contains "$out" "state: failed" "cancelled run with no pr= -> failed"
+  assert_contains "$out" "run cancelled" "cancelled run with no pr= keeps the plain cancelled detail"
+  pass "cancelled run with no delivery evidence still reads failed"
+}
+
+# The hm-triage-notify-a3 incident: firstmate cancels the run deliberately AFTER
+# a successful push (skipping a no-CI repo's day-long ci-step poll). meta's pr=
+# and pr_head= (recorded by fm-pr-check.sh once it validated the PR against the
+# forge) at the run's own pushed head must read as delivered, not failed.
+test_terminal_cancelled_with_matching_pr_is_delivered() {
+  reset_fakes
+  local d; d=$(new_case cancelled-with-pr)
+  make_repo_on_branch "$d/wt" fm/feat-cancel-pr
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cancel-pr.meta" "window=fm:fm-feat-cancel-pr" "worktree=$d/wt" "kind=ship" \
+    "pr=https://github.com/o/r/pull/9" "pr_head=$FM_FAKE_RUN_HEAD"
+  FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-cancel-pr)"
+  local out; out=$(run_crew_state "$d" feat-cancel-pr)
+  assert_contains "$out" "state: done" "cancelled run with a matching pushed PR -> done, not failed"
+  assert_contains "$out" "source: run-step" "delivered cancel -> run-step source"
+  assert_contains "$out" "cancelled after delivery" "delivered cancel names the distinct detail"
+  assert_contains "$out" "https://github.com/o/r/pull/9" "delivered cancel detail drops the PR url"
+  assert_not_contains "$out" "state: failed" "delivered work must never read as failed"
+  pass "cancelled run backed by a validated PR at its own pushed head reads as delivered"
+}
+
+# A recorded pr_head that does NOT match the cancelled run's own head means the
+# push behind the PR is not what this run actually validated, so it stays failed.
+test_terminal_cancelled_with_mismatched_pr_head_is_failed() {
+  reset_fakes
+  local d; d=$(new_case cancelled-stale-pr)
+  make_repo_on_branch "$d/wt" fm/feat-cancel-stale
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cancel-stale.meta" "window=fm:fm-feat-cancel-stale" "worktree=$d/wt" "kind=ship" \
+    "pr=https://github.com/o/r/pull/9" "pr_head=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+  FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-cancel-stale)"
+  local out; out=$(run_crew_state "$d" feat-cancel-stale)
+  assert_contains "$out" "state: failed" "cancelled run whose pr_head does not match the run head -> failed"
+  pass "cancelled run whose recorded pr_head diverges from the run's own head stays failed"
+}
+
+# GitLab merge requests never get a recorded pr_head (fm-pr-check.sh only reads
+# it from GitHub's JSON), so a cancelled run backed by a recorded pr= but no
+# pr_head has no head to compare against. It must read as its own unverified
+# state - never silently promoted to delivered, never misreported as failed.
+test_terminal_cancelled_with_pr_and_no_pr_head_is_unverified() {
+  reset_fakes
+  local d; d=$(new_case cancelled-pr-no-head)
+  make_repo_on_branch "$d/wt" fm/feat-cancel-nohead
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cancel-nohead.meta" "window=fm:fm-feat-cancel-nohead" "worktree=$d/wt" "kind=ship" \
+    "pr=https://gitlab.com/o/r/-/merge_requests/9"
+  FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-cancel-nohead)"
+  local out; out=$(run_crew_state "$d" feat-cancel-nohead)
+  assert_contains "$out" "state: unknown" "cancelled run with pr= but no pr_head -> unknown, not done or failed"
+  assert_contains "$out" "delivery unverified" "unverifiable cancel names the distinct detail"
+  assert_contains "$out" "https://gitlab.com/o/r/-/merge_requests/9" "unverifiable cancel detail names the PR url"
+  assert_not_contains "$out" "state: done" "unverifiable delivery must never be silently promoted to done"
+  assert_not_contains "$out" "state: failed" "unverifiable delivery must never be silently misreported as failed"
+  pass "cancelled run with a recorded PR but no comparable head reads as its own unverified state"
 }
 
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
@@ -1428,6 +1513,10 @@ test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
+test_terminal_cancelled_without_pr_is_failed
+test_terminal_cancelled_with_matching_pr_is_delivered
+test_terminal_cancelled_with_mismatched_pr_head_is_failed
+test_terminal_cancelled_with_pr_and_no_pr_head_is_unverified
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
