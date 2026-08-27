@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|prime-agent|grok|kimi|cursor|muse|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -38,19 +38,23 @@ detect_own() {
   # multiplexer's stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
-  # Cursor is checked BEFORE claude, deliberately. cursor-agent does NOT clear
-  # an inherited CLAUDECODE, so a cursor worker launched from a claude primary
-  # carries BOTH markers and whichever is tested first wins. Cursor's own
-  # markers are unambiguous when present, so ordering them first is what makes
-  # the verdict correct; bin/fm-spawn.sh additionally clears the foreign markers
-  # at the launch boundary. Both are kept: the launch sanitization only covers
-  # sessions fm-spawn started, while this ordering also covers a cursor session
-  # a human started by hand. Verified live on cursor-agent 2026.08.11-e8db854:
-  # CURSOR_INVOKED_AS=cursor-agent is set on the agent process itself, and
-  # CURSOR_AGENT=1 is set for the child/tool processes this script runs as.
+  # Cursor and prime-agent are checked BEFORE claude, deliberately. Their own
+  # markers are unambiguous and must outrank an inherited CLAUDECODE marker.
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
+  # prime-agent's resident worker inherits the daemon supervisor environment,
+  # so its own markers must be checked before the CLAUDECODE fast path.
+  if [ "${PI_CODING_AGENT:-}" = "true" ] \
+    && { [ -n "${PRIME_AGENT_CODING_AGENT_DIR:-}" ] \
+      || [ "${PRIME_AGENT_INTERNAL_DAEMON_WORKER:-}" = "1" ] \
+      || [ "${FM_PI_HARNESS:-}" = prime-agent ]; }; then
+    echo prime-agent
+    return
+  fi
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
+  # The rest of the Pi family. pi and pi-signed share PI_CODING_AGENT=true with
+  # prime-agent, so only the launch-boundary marker splits signed from plain;
+  # anything unmarked stays pi, exactly as before this adapter landed.
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
     return
@@ -93,6 +97,12 @@ detect_own() {
       # prefix rather than any exact name. Deliberately anchored, never *muse*, so
       # unrelated commands (musescore, amuse) cannot be misread as this harness.
       muse|muse-bin-*) echo muse; return ;;
+      # prime-agent's installed launcher keeps the exact binary name for the
+      # client TUI, the daemon supervisor, and every session worker (verified,
+      # prime-agent 0.7.1), so one anchored name covers all three. Anchored
+      # rather than globbed for the same reason as muse: no unrelated command
+      # should be read as this harness.
+      prime-agent) echo prime-agent; return ;;
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
       node*|python*)
@@ -103,6 +113,7 @@ detect_own() {
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
+          *prime-agent*) echo prime-agent; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
     esac

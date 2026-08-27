@@ -1326,6 +1326,24 @@ test_teardown_missing_busy_sidecar_completes() {
   pass "teardown completes when an exact busy-state sidecar is already absent"
 }
 
+test_teardown_removes_prime_agent_turnend_extension() {
+  local case_dir rc
+  case_dir=$(make_case prime-ext-cleanup)
+  write_meta "$case_dir" local-only ship
+  printf '%s\n' 'harness=prime-agent' >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' '// turn-end extension' > "$case_dir/state/task-x1.prime-ext.ts"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "prime-ext-cleanup: teardown should complete"
+  assert_absent "$case_dir/state/task-x1.prime-ext.ts" \
+    "prime-ext-cleanup: teardown left the prime-agent turn-end extension behind"
+  pass "teardown removes the prime-agent per-task turn-end extension"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -2600,6 +2618,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
+test_teardown_removes_prime_agent_turnend_extension
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence

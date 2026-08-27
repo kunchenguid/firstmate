@@ -56,6 +56,33 @@
 # so the tmux and herdr adapters cannot drift apart on what counts as ghost text.
 fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 
+# fm_tmux_composer_row_state: compatibility row verdict for callers that
+# already provide one styled row. Structural prime-agent surfaces are delegated
+# to the shared classifier's proof and all content decisions remain centralized.
+fm_tmux_composer_row_state() {  # <raw-row> [bordered] [allow-busy]
+  local raw=$1 bordered=${2:-0} plain stripped idle_re glyph prime_content
+  plain=$(printf '%s\n' "$raw" | fm_composer_strip_ansi)
+  plain="${plain#"${plain%%[![:space:]]*}"}"
+  plain="${plain%"${plain##*[![:space:]]}"}"
+  stripped=$(printf '%s\n' "$raw" | fm_composer_strip_ghost)
+  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+  stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  idle_re=${FM_COMPOSER_IDLE_RE:-}
+  if [ "$bordered" != 1 ] && fm_composer_row_is_prime_agent_surface "$raw" "$plain"; then
+    bordered=1
+    [ -n "$idle_re" ] || idle_re=$(fm_composer_prime_agent_idle_re)
+    if fm_composer_leading_prompt_glyph_var glyph "$stripped"; then
+      prime_content=${stripped#*"$glyph"}
+      fm_composer_normalize_trim_var prime_content
+      if fm_composer_idle_matches "$prime_content" "$idle_re" insensitive; then
+        printf 'empty'
+        return 0
+      fi
+    fi
+  fi
+  fm_composer_classify_content "$bordered" "$stripped" "$idle_re" insensitive "$plain" 1 1
+}
+
 # --- tmux composer capture and capability primitives ------------------------
 #
 # These four functions are the ONLY tmux-specific composer knowledge left:

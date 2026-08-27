@@ -463,6 +463,93 @@ fm_composer_idle_matches() {
   esac
 }
 
+# prime-agent's composer container (verified 2026-08-08, Prime Agent 0.7.1).
+# It draws no border at all: its editor renders a full-width BACKGROUND SURFACE
+# (theme `userMessageBg`, emitted as a truecolor or 256-colour SGR background
+# introducer `48;2`/`48;5`, colon form included) and puts its own `> ` prompt
+# prefix on the first surface row. Under the bare-glyph safety rule above that
+# idle composer would read `unknown` forever, so `fm-send` could never prove a
+# steer landed. The background surface IS the composer container here, the same
+# role a box border plays for claude and a separator pair plays for Pi under
+# herdr, so recognizing it structurally lets the caller pass bordered=1 without
+# weakening the rule: the dead shell this owner exists to protect against paints
+# no background run, so a bare `>` left behind after the agent exits still reads
+# `unknown`.
+# The 48 has to be read as a PARAMETER, never as a substring: a foreground run
+# carries arbitrary colour components, so `38;2;48;120;200` and
+# `38;2;200;48;10` both contain a 48 that introduces nothing. The walk below
+# therefore skips an introducer's payload (38/48/58, both the `;` and the ITU
+# `:` form) exactly the way fm_composer_strip_ghost's skip_color_payload does,
+# and only a 48 standing in a real parameter position counts. Without that, a
+# dead shell whose prompt is merely coloured would be promoted to a composer
+# container and read `empty` - the precise verdict fm_pane_input_pending and
+# fm_tmux_submit_enter_core accept as proof a pane is safe to type into.
+# A basic 40-47 background is deliberately NOT matched: prime-agent's theme
+# emits the truecolor or 256-colour form, and keeping the promotion as narrow as
+# the verified evidence means an unrecognized surface degrades to `unknown`,
+# which is the safe direction.
+# The background must also still be OPEN at the glyph, because the verified
+# shape is a `> ` prompt drawn ON the surface. Accepting one anywhere on the row
+# would promote the opposite arrangement - a foreground-coloured shell prompt
+# followed by background-filled padding - and accepting one that a later SGR 0
+# or SGR 49 already closed would promote a shell prompt that merely painted a
+# coloured segment earlier on the line. Both are dead shells, not composers, so
+# the walk carries the background state rather than stopping at the first 48.
+# fm_composer_prime_agent_idle_re: the five rotating start hints prime-agent
+# draws into an otherwise-empty composer (`START_HINTS`, dark truecolor
+# 38;2;113;113;122, luminance ~114). The shared ghost stripper already drops
+# them on an ANSI-capable capture, so this is the theme-independent backstop and
+# the only signal a plain-screen capture has.
+fm_composer_prime_agent_idle_re() {
+  printf '%s' '^Try "(refactor|fix bugs in|add tests for|explain how|improve performance in) @<filepath>( works)?"$'
+}
+
+fm_composer_row_is_prime_agent_surface() {  # <raw-styled-row> <plain-trimmed-row>
+  local raw=$1 plain=$2 csi=$'\033[' rest seq params p next i n open=0
+  case "$plain" in '>'|'> '*) ;; *) return 1 ;; esac
+  rest=${raw%%>*}
+  while :; do
+    case "$rest" in *"$csi"*) rest=${rest#*"$csi"} ;; *) break ;; esac
+    case "$rest" in *m*) seq=${rest%%m*} ;; *) break ;; esac
+    case "$seq" in *[!0-9\;:]*) continue ;; esac
+    [ -n "$seq" ] || { open=0; continue; }
+    IFS=';' read -r -a params <<< "$seq" || true
+    i=0
+    n=${#params[@]}
+    while [ "$i" -lt "$n" ]; do
+      p=${params[i]}
+      case "$p" in
+        *:*)
+          p=${p%%:*}
+          case "$p" in ''|*[!0-9]*) p=-1 ;; *) p=$((10#$p)) ;; esac
+          [ "$p" != 48 ] || open=1
+          i=$((i + 1))
+          continue
+          ;;
+        *[!0-9]*) i=$((i + 1)); continue ;;
+        '') p=0 ;;
+        *) p=$((10#$p)) ;;
+      esac
+      case "$p" in
+        0|49) open=0 ;;
+        38|48|58)
+          [ "$p" != 48 ] || open=1
+          next=${params[i + 1]-}
+          case "$next" in ''|*[!0-9]*) next=-1 ;; *) next=$((10#$next)) ;; esac
+          case "$next" in
+            5) i=$((i + 3)) ;;
+            2) i=$((i + 5)) ;;
+            *) i=$((i + 2)) ;;
+          esac
+          continue
+          ;;
+      esac
+      i=$((i + 1))
+    done
+  done
+  [ "$open" = 1 ]
+}
+
 # fm_composer_classify_content: the single shared composer-content verdict.
 #   <bordered> 1 when <content> came from a genuine agent-composer container (a
 #              bordered composer box, an identity-proven separated composer, or

@@ -35,6 +35,11 @@ mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
+# The harnesses whose mechanics are driven end to end below. prime-agent is
+# registered in the control-plane tables but is absent here on purpose: no
+# session provider classifies its pane yet (backend liveness is a later slice),
+# so a live prime-agent endpoint reads `ambiguous` and the verbs refuse before
+# they act. Its tables are covered directly instead, where the contract is real.
 VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse"
 
 # The expectation table, written out independently of the implementation so a
@@ -267,7 +272,7 @@ test_harness_family_resolution() {
   for pair in claude:claude claude-latest:claude codex:codex codex-cli:codex \
       opencode:opencode grok:grok grok-2:grok kimi:kimi cursor:cursor \
       cursor-agent:cursor muse:muse muse-bin-0.1.0:muse pi:pi \
-      pi-signed:pi-signed; do
+      pi-signed:pi-signed prime-agent:prime-agent prime-agent-0.7.1:prime-agent; do
     recorded=${pair%%:*}
     want=${pair#*:}
     got=$(fm_control_harness_family "$recorded") \
@@ -363,7 +368,8 @@ test_backend_key_capability_matrix() {
 # A verified adapter is not automatically verified for every task kind, and the
 # check has to sit on the pre-stop side of a relaunch: muse has no primary
 # supervision protocol, so bin/fm-spawn.sh refuses it for a secondmate, and
-# discovering that only after the running agent was stopped would strand the
+# prime-agent has the same crewmate/scout-only boundary. Discovering that only
+# after the running agent was stopped would strand the
 # secondmate with no agent at all.
 test_harness_kind_capability() {
   local harness
@@ -382,6 +388,39 @@ test_harness_kind_capability() {
   fm_control_harness_supports_kind someagent ship \
     && fail "an unverified harness must not claim any kind"
   pass "fm-control-lib: adapter capability is per task kind, not per adapter alone"
+}
+
+# prime-agent's control mechanics, asserted at the tables rather than end to
+# end: it is a verified crewmate/scout adapter whose pane no session provider
+# classifies yet, so the verbs cannot reach delivery on any backend and an
+# end-to-end assertion would prove something that is not true. What IS live
+# today is every table keyed off the family boundary, including the wiring path
+# a relaunch retires (covered end to end in fm-control-relaunch.test.sh).
+test_prime_agent_control_mechanics() {
+  local wiring
+  fm_control_harness_supported prime-agent \
+    || fail "prime-agent should be a verified control-plane adapter"
+  fm_control_harness_supports_kind prime-agent ship \
+    || fail "prime-agent should be able to run a ship task"
+  fm_control_harness_supports_kind prime-agent scout \
+    || fail "prime-agent should be able to run a scout task"
+  fm_control_harness_supports_kind prime-agent secondmate \
+    && fail "prime-agent has no secondmate launch template and must not claim a secondmate"
+  [ "$(fm_control_interrupt_key prime-agent)" = Escape ] \
+    || fail "prime-agent should interrupt on Escape"
+  [ "$(fm_control_interrupt_repeat prime-agent)" = 1 ] \
+    || fail "prime-agent should interrupt on a single Escape"
+  # Escape does not restore the cancelled prompt, so unlike muse there is
+  # nothing left in the composer for a clear key to remove.
+  [ -z "$(fm_control_interrupt_clear_key prime-agent)" ] \
+    || fail "prime-agent's interrupt leaves an empty composer and needs no clear key"
+  [ "$(fm_control_exit_command prime-agent)" = /quit ] \
+    || fail "prime-agent should exit with /quit"
+  wiring=$(fm_control_harness_wiring_paths prime-agent /wt /state t1) \
+    || fail "prime-agent should declare the per-task wiring a relaunch must retire"
+  [ "$wiring" = /state/t1.prime-ext.ts ] \
+    || fail "prime-agent's wiring should be its per-task turn-end extension, got '$wiring'"
+  pass "fm-control-lib: prime-agent's verified mechanics are registered in every table"
 }
 
 test_orca_refuses_an_escape_harness_interrupt() {
@@ -881,6 +920,7 @@ test_harness_family_resolution
 test_prefixed_recorded_harness_reaches_each_control_verb
 test_backend_key_capability_matrix
 test_harness_kind_capability
+test_prime_agent_control_mechanics
 test_orca_refuses_an_escape_harness_interrupt
 test_unverified_state_backends_refuse_stop_verbs
 test_state_verified_backends_are_exactly_tmux_and_herdr
