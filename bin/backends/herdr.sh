@@ -2017,8 +2017,10 @@ fm_backend_herdr_recovery_ownership_state() {  # <recorded-session> <task-id> <w
         printf 'unreadable'
         return 0
       }
-      if ! printf '%s' "$panes" | jq -e --arg workspace "$workspace_id" --argjson tabs "$tabs" '
+      if ! printf '%s' "$panes" | jq -e \
+        --arg workspace "$workspace_id" --arg tab "$tab_id" --argjson tabs "$tabs" '
         (.result.panes | type) == "array"
+        and ([.result.panes[] | select(.tab_id == $tab)] | length) > 0
         and all(.result.panes[]; . as $pane |
           (($pane.pane_id | type) == "string")
           and (($pane.pane_id | length) > 0)

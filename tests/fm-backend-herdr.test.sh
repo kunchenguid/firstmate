@@ -4486,6 +4486,25 @@ test_recovery_ownership_refuses_orphan_pane_inventory() {
   pass "fm_backend_herdr_recovery_ownership_state: orphan pane rows fail closed"
 }
 
+test_recovery_ownership_refuses_missing_tab_pane_inventory() {
+  local worktree out
+  worktree="$TMP_ROOT/ownership-missing-tab-pane"
+  mkdir -p "$worktree"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "session list") printf "%s\n" '\''{"sessions":[{"name":"lab","running":true}]}'\'' ;;
+        "tab list") printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t-task","label":"fm-task","workspace_id":"w1"},{"tab_id":"w1:t-other","label":"other","workspace_id":"w1"}]}}'\'' ;;
+        "pane list") printf "%s\n" '\''{"result":{"panes":[{"pane_id":"w1:p-other","tab_id":"w1:t-other"}]}}'\'' ;;
+      esac
+    }
+    fm_backend_herdr_recovery_ownership_state lab task "$1"
+  ' "$ROOT" "$worktree")
+  [ "$out" = unreadable ] || fail "a tab omitted from pane inventory should be unreadable, got '$out'"
+  pass "fm_backend_herdr_recovery_ownership_state: missing tab pane membership fails closed"
+}
+
 test_recovery_ownership_refuses_malformed_session_inventory() {
   local worktree out
   worktree="$TMP_ROOT/ownership-malformed-session"
@@ -4892,6 +4911,7 @@ test_wait_transition_clean_timeout_returns_1
 test_recovery_ownership_accepts_verified_multitab_inventory
 test_recovery_ownership_refuses_malformed_pane_inventory
 test_recovery_ownership_refuses_orphan_pane_inventory
+test_recovery_ownership_refuses_missing_tab_pane_inventory
 test_recovery_ownership_refuses_malformed_session_inventory
 test_recovery_ownership_refuses_unreadable_foreground_cwd
 test_recovery_ownership_parses_agent_not_found_body_after_nonzero_exit
