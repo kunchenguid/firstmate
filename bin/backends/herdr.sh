@@ -2017,13 +2017,17 @@ fm_backend_herdr_recovery_ownership_state() {  # <recorded-session> <task-id> <w
         printf 'unreadable'
         return 0
       }
-      if ! printf '%s' "$panes" | jq -e '
+      if ! printf '%s' "$panes" | jq -e --arg workspace "$workspace_id" --argjson tabs "$tabs" '
         (.result.panes | type) == "array"
-        and all(.result.panes[];
-          ((.pane_id | type) == "string")
-          and ((.pane_id | length) > 0)
-          and ((.tab_id | type) == "string")
-          and ((.tab_id | length) > 0))
+        and all(.result.panes[]; . as $pane |
+          (($pane.pane_id | type) == "string")
+          and (($pane.pane_id | length) > 0)
+          and (($pane.tab_id | type) == "string")
+          and (($pane.tab_id | length) > 0)
+          and ([
+            $tabs.result.tabs[]
+            | select(.workspace_id == $workspace and .tab_id == $pane.tab_id)
+          ] | length) == 1)
       ' >/dev/null 2>&1; then
         printf 'unreadable'
         return 0
@@ -2171,7 +2175,7 @@ fm_backend_herdr_agent_alive() {  # <target>
 fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id> [created_callback]
   local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} created_callback=${5:-}
   local session wsid list before_tab_ids dup_tabs dup dup_pane dup_tab_ids out raw_tab_id raw_pane_id tab_id pane_id
-  local callback_status=0 reconcile_list reconcile_tabs reconcile_tab reconcile_panes remaining_dup_tabs
+  local callback_status=0 reconcile_list reconcile_tabs reconcile_tab reconcile_panes reconcile_pane_info remaining_dup_tabs
   FM_BACKEND_HERDR_CREATED_TAB_ID=
   FM_BACKEND_HERDR_CREATED_PANE_ID=
   FM_BACKEND_HERDR_CREATED_RAW_RESPONSE=
@@ -2274,6 +2278,19 @@ EOF
     if { [ -n "$raw_tab_id" ] && [ "$raw_tab_id" != "$tab_id" ]; } \
        || { [ -n "$raw_pane_id" ] && [ "$raw_pane_id" != "$pane_id" ]; }; then
       echo "error: herdr tab create response identity contradicts post-create inventory" >&2
+      return 1
+    fi
+    reconcile_pane_info=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>/dev/null) || {
+      echo "error: could not verify reconciled pane identity after herdr tab create" >&2
+      return 1
+    }
+    if ! printf '%s' "$reconcile_pane_info" | jq -e \
+      --arg pane "$pane_id" --arg tab "$tab_id" --arg workspace "$wsid" '
+        .result.pane.pane_id == $pane
+        and .result.pane.tab_id == $tab
+        and .result.pane.workspace_id == $workspace
+      ' >/dev/null 2>&1; then
+      echo "error: reconciled pane identity does not belong to the created tab and workspace" >&2
       return 1
     fi
     # shellcheck disable=SC2034

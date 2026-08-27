@@ -336,6 +336,7 @@ ok - missing Herdr recovery: endpoint allocation failure retains recoverable evi
 ok - missing Herdr recovery: live endpoint ownership is refused
 ok - missing Herdr recovery: ambiguous endpoint evidence is refused
 ok - missing Herdr recovery: launch failure rolls back without changing the recorded task identity or instructions
+ok - missing Herdr recovery: early rollback reports a failed brief restoration truthfully
 ok - missing Herdr recovery: ordinary relaunch refuses the distinct missing-endpoint state
 ok - missing Herdr recovery: ordinary dead-endpoint relaunch remains unchanged
 ok - fm-spawn --recover-missing: the launch half cannot be used as a direct escape hatch
