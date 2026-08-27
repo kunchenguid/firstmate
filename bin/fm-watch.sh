@@ -440,6 +440,22 @@ EOF
     case "$seq" in ''|*[!0-9]*) continue ;; esac
     age=$((now - epoch))
     [ "$age" -ge "$threshold" ] || continue
+    row_key="$epoch-$seq"
+    receipt="$receipt_dir/$row_key"
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+      [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    fi
+    [ "$(cat "$marker" 2>/dev/null || true)" = "$row_key" ] && continue
+    [ "$(cat "$receipt" 2>/dev/null || true)" = "$row_key" ] && continue
+    notify_key="secondmate-wake-loop-$task-$row_key"
+    reason="check: secondmate wake-loop stalled: mate=$task row=$seq age=${age}s"
+    queued=$(fm_wake_queued_keys check)
+    if printf '%s\n' "$queued" | grep -Fx "$notify_key" >/dev/null 2>&1; then
+      fm_wake_secondmate_stall_receipt_write "$task" "$row_key" || return 1
+      fm_wake_secondmate_stall_marker_write "$task" "$row_key" || return 1
+      wake "$reason"
+      continue
+    fi
     status_line=$(last_status_line "$STATE/$task.status")
     status_verb=$(status_line_verb "$status_line")
     if [ "$status_verb" != blocked ]; then
@@ -455,15 +471,6 @@ EOF
         [ "${busy_verdict%% *}" = busy ] && continue
       fi
     fi
-    row_key="$epoch-$seq"
-    receipt="$receipt_dir/$row_key"
-    if [ -e "$marker" ] || [ -L "$marker" ]; then
-      [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
-    fi
-    [ "$(cat "$marker" 2>/dev/null || true)" = "$row_key" ] && continue
-    [ "$(cat "$receipt" 2>/dev/null || true)" = "$row_key" ] && continue
-    notify_key="secondmate-wake-loop-$task-$row_key"
-    reason="check: secondmate wake-loop stalled: mate=$task row=$seq age=${age}s"
     queued=$(fm_wake_queued_keys check)
     if ! printf '%s\n' "$queued" | grep -Fx "$notify_key" >/dev/null 2>&1; then
       fm_wake_append check "$notify_key" "$reason" || return 1

@@ -1014,6 +1014,67 @@ ok - configured resolve and held token prose stays quiet in signal and heartbeat
 exit=0
 ```
 
+### Notified secondmate stall probe-order red/green record
+
+This case ran on 2026-08-27 on the same platform and Bash version recorded above.
+The unfixed revision was `272ffad9be05e837f5d26768facbb1ad5025577e`, and the fixed version was its review working tree with the source and test changes recorded in this section.
+The case was RED before and GREEN after, so it demonstrates that an acknowledged or already-queued aged row crosses the durable one-shot boundary without repeating endpoint or busy probes, while queued crash recovery still completes its receipt and marker without changing the foreign queue.
+
+The exact unfixed command was:
+
+```sh
+printf 'CASE revision=272ffad9be05e837f5d26768facbb1ad5025577e test=test_notified_secondmate_stall_rows_skip_endpoint_probes\n'
+set +e
+bash -c '
+  . tests/wake-helpers.sh
+  eval "$(awk '\''$0 == "test_self_held_lock_reclaims_instead_of_deadlocking" { exit } index($0, "BASH_SOURCE") { next } { print }'\'' tests/fm-wake-queue.test.sh)"
+  test_notified_secondmate_stall_rows_skip_endpoint_probes
+'
+rc=$?
+printf 'exit=%s\n' "$rc"
+exit 0
+```
+
+Full unfixed output:
+
+```text
+CASE revision=272ffad9be05e837f5d26768facbb1ad5025577e test=test_notified_secondmate_stall_rows_skip_endpoint_probes
+not ok - an acknowledged stalled row still probed its endpoint: list-windows -t firstmate -F #{window_name}
+display-message -p -t firstmate:fm-mate #{pane_tty}
+display-message -p -t firstmate:fm-mate #{pane_tty}
+display-message -p -t firstmate:fm-mate #{pane_current_command}
+display-message -p -t firstmate:fm-mate #{pane_id}
+list-windows -t firstmate -F #{window_name}
+display-message -p -t firstmate:fm-mate #{pane_tty}
+display-message -p -t firstmate:fm-mate #{pane_tty}
+display-message -p -t firstmate:fm-mate #{pane_current_command}
+display-message -p -t firstmate:fm-mate #{pane_id}
+exit=1
+```
+
+The exact fixed command was:
+
+```sh
+printf 'CASE revision=review-fixed test=test_notified_secondmate_stall_rows_skip_endpoint_probes\n'
+set +e
+bash -c '
+  . tests/wake-helpers.sh
+  eval "$(awk '\''$0 == "test_self_held_lock_reclaims_instead_of_deadlocking" { exit } index($0, "BASH_SOURCE") { next } { print }'\'' tests/fm-wake-queue.test.sh)"
+  test_notified_secondmate_stall_rows_skip_endpoint_probes
+'
+rc=$?
+printf 'exit=%s\n' "$rc"
+exit "$rc"
+```
+
+Full fixed output:
+
+```text
+CASE revision=review-fixed test=test_notified_secondmate_stall_rows_skip_endpoint_probes
+ok - acknowledged and queued secondmate stalls skip endpoint probes without losing recovery
+exit=0
+```
+
 ## Turn-end guard
 
 The blocking and bounded-follow-up mechanisms were validated across six harnesses on 2026-07-08 through 2026-08-13, with Cursor's stop-hook park validated on 2026-08-13 and Claude's replacement Stop-owned path revalidated on 2026-08-14.

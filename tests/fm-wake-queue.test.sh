@@ -317,6 +317,83 @@ SH
   pass "foreign secondmate queue stalls notify once, remain byte-stable, and stay quiet when empty or healthy"
 }
 
+test_notified_secondmate_stall_rows_skip_endpoint_probes() {
+  local dir state sub fakebin epoch row_key receipt marker log row_before stall_count
+  dir=$(make_case secondmate-notified-stall-probes)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  fakebin="$dir/fakebin"
+  epoch=$(( $(date +%s) - 10 ))
+  row_key="$epoch-7"
+  receipt="$state/.secondmate-wake-stall-receipts/mate/$row_key"
+  marker="$state/.secondmate-wake-stall-mate"
+  log="$dir/tmux.log"
+  mkdir -p "$sub/state" "${receipt%/*}"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$epoch" > "$sub/state/.wake-queue"
+  row_before="$dir/foreign-before"
+  cp "$sub/state/.wake-queue" "$row_before"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${FM_FAKE_TMUX_LOG:?}"
+case "${1:-}" in
+  list-windows) printf 'fm-mate\n' ;;
+  display-message)
+    case "$*" in
+      *pane_current_command*) printf 'claude\n' ;;
+      *pane_tty*) printf '\n' ;;
+      *) printf '%%7\n' ;;
+    esac
+    ;;
+  capture-pane) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+
+  printf '%s' "$row_key" > "$receipt"
+  : > "$log"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_LOG="$log" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 \
+    > "$dir/watch-receipt.out" 2> "$dir/watch-receipt.err" || true
+  [ ! -s "$log" ] \
+    || fail "an acknowledged stalled row still probed its endpoint: $(cat "$log")"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "an acknowledged stalled row published another parent notification"
+  cmp -s "$row_before" "$sub/state/.wake-queue" \
+    || fail "acknowledged stall polling changed the foreign queue row"
+
+  rm -f "$receipt" "$marker"
+  append_wake "$state" check "secondmate-wake-loop-mate-$row_key" \
+    "check: secondmate wake-loop stalled: mate=mate row=7 age=10s" \
+    || fail "could not seed the queued stall publication"
+  : > "$log"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_LOG="$log" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 \
+    > "$dir/watch-queued.out" 2> "$dir/watch-queued.err" || true
+  [ ! -s "$log" ] \
+    || fail "a queued stalled row still probed its endpoint: $(cat "$log")"
+  stall_count=$(grep -c "secondmate-wake-loop-mate-$row_key" "$state/.wake-queue" || true)
+  [ "$stall_count" -eq 1 ] \
+    || fail "queued stall recovery changed the durable publication count"
+  [ "$(cat "$receipt" 2>/dev/null || true)" = "$row_key" ] \
+    || fail "queued stall recovery did not complete its durable receipt"
+  [ "$(cat "$marker" 2>/dev/null || true)" = "$row_key" ] \
+    || fail "queued stall recovery did not complete its marker"
+  cmp -s "$row_before" "$sub/state/.wake-queue" \
+    || fail "queued stall recovery changed the foreign queue row"
+  pass "acknowledged and queued secondmate stalls skip endpoint probes without losing recovery"
+}
+
 run_secondmate_stall_state_case() {  # <name> <busy|idle|unknown> <status-line-or-empty> <wake|quiet> [<live|dead|bare-shell>]
   local name=$1 liveness=$2 status_line=$3 expected=$4 endpoint=${5:-live}
   local dir state sub fakebin out gen pane_alive pane_command
@@ -1106,6 +1183,7 @@ test_historical_annotation_skips_announced_status() {
 
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
+test_notified_secondmate_stall_rows_skip_endpoint_probes
 test_secondmate_blocked_aged_queue_wakes
 test_secondmate_multiline_blocked_aged_queue_wakes
 test_secondmate_blocked_detail_with_legacy_token_wakes
