@@ -321,7 +321,9 @@ status_event_json() {  # <status-log>
     raw=$(last_nonempty_line "$log" || true)
     verb=$(status_line_verb "$raw")
     note=$(status_line_note "$raw")
-    status_is_terminal_verb "$raw" && handoff_required=1
+    case "$verb" in
+      done|blocked|failed) handoff_required=1 ;;
+    esac
     mtime_json=$(snapshot_file_mtime "$log" || true)
     case "$mtime_json" in
       ''|*[!0-9]*) mtime_json=null ;;

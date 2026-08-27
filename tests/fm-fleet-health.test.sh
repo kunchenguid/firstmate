@@ -656,6 +656,22 @@ test_missed_handoff_after_contracted_step_complete_signal() {
   pass "contracted step-complete signal is a missed handoff"
 }
 
+test_captain_decision_wait_is_not_missed_handoff() {
+  local home fakebin out rc=0
+  home=$(make_home captain-decision-wait)
+  write_live_ship "$home" decision-idle
+  printf 'needs-decision [key=shape]: choose an API\n' > "$home/state/decision-idle.status"
+  touch -t 202001011200 "$home/state/decision-idle.status"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm \
+    FM_FLEET_HEALTH_HANDOFF_STALE_SECS=60 "$HEALTH" --json) || rc=$?
+  printf '%s' "$out" | jq -e '
+    any(.findings[]; .kind == "missed-handoff" and .subject == "decision-idle") | not
+  ' >/dev/null || fail "captain decision wait was treated as a missed handoff: $out"
+  pass "captain decision waits stay out of missed handoffs"
+}
+
 test_handled_inbox_corruption_is_inconclusive() {
   local home fakebin out rc=0
   home=$(make_home handled-inbox-corruption)
@@ -1574,6 +1590,7 @@ test_missed_handoff_after_done_signal
 test_later_inbox_clears_missed_handoff
 test_recent_done_signal_is_not_missed_handoff
 test_missed_handoff_after_contracted_step_complete_signal
+test_captain_decision_wait_is_not_missed_handoff
 test_handled_inbox_corruption_is_inconclusive
 test_unreadable_local_endpoint_is_inconclusive
 test_terminal_unreadable_endpoint_is_inconclusive
