@@ -39,7 +39,17 @@
 #                          because files appearing there are liveness the pane and
 #                          the run step cannot show; that deferral still
 #                          re-surfaces once per PAUSE_RESURFACE_SECS, and a pane
-#                          that writes nothing keeps the unchanged schedule.
+#                          that writes nothing keeps the unchanged schedule. A
+#                          pane whose no-mistakes run reports a FRESH
+#                          active_steps last_activity during the quiet window is
+#                          deferred the same way (wedge_defer_pipeline), because a
+#                          long-running step (a multi-minute test or review pass)
+#                          legitimately renders nothing new to the pane for its
+#                          whole duration and the run-step read at classification
+#                          time only covers the FIRST poll of that stretch; a
+#                          `quiet`-prefixed last_activity, no active_steps table,
+#                          no attributable run, or an unavailable/erroring `axi
+#                          status` all keep the unchanged escalation schedule.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -528,10 +538,35 @@ wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
 
 # Drop a window's write-deferral chain wherever its stale bookkeeping resets, so
 # the bounded re-surface cadence is measured from the CURRENT quiet stretch and a
-# long-finished one cannot make the next deferral resurface immediately.
+# long-finished one cannot make the next deferral resurface immediately. Clears
+# both deferral chains a wedge can be deferred through - worktree writes and
+# fresh pipeline-step activity (wedge_defer_pipeline below) - since both are reset
+# at exactly the same points for exactly the same reason.
 clear_write_tracking() {  # <window-key>
   local key=$1
-  rm -f "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key"
+  rm -f "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key" \
+    "$STATE/.pipeline-since-$key" "$STATE/.pipeline-resurfaced-$key"
+}
+
+# Defer ONE wedge escalation for a pane that went quiet while its no-mistakes run
+# reports a FRESH active_steps last_activity (crew_pipeline_step_active in
+# fm-classify-lib.sh). Same deferral shape as wedge_defer_writing above - the
+# idle timer restarts so the next window probes again, a
+# .pipeline-since-<key> marker ages the whole deferral chain, and the bounded
+# PAUSE_RESURFACE_SECS cadence still re-checks it through the shared
+# resurface_absorbed so a pipeline that later stalls cannot stay invisible. The
+# escalation counter is left alone for the same reason wedge_defer_writing
+# leaves it alone: this is a deferral, not an escalation.
+wedge_defer_pipeline() {  # <window> <since-file> <triage-label> <idle-age>
+  local win=$1 since_file=$2 label=$3 age=$4 key psf page
+  key=$(window_key "$win")
+  psf="$STATE/.pipeline-since-$key"
+  [ -e "$psf" ] || date +%s > "$psf"
+  page=$(age_of "$psf")
+  date +%s > "$since_file"
+  resurface_absorbed "$win" "$STATE/.pipeline-resurfaced-$key" "$page" \
+    "stale: $win (idle ${age}s, no-mistakes pipeline step reports fresh activity for ${page}s, rechecked on a long cadence not a wedge; confirm the run is genuinely progressing)"
+  triage_log "absorbed $label (pipeline step reports fresh activity, idle ${age}s): $win"
 }
 
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
@@ -561,6 +596,10 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
+          return 0
+        fi
+        if crew_pipeline_step_active "$task" "$STATE"; then
+          wedge_defer_pipeline "$win" "$since_file" "$label" "$age"
           return 0
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))

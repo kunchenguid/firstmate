@@ -13,7 +13,7 @@
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
 #
-# There are three documented exceptions. The absorb classification
+# There are four documented exceptions. The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
 # read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
 # to decide whether a crew that just stopped its turn or went stale is working,
@@ -25,7 +25,10 @@
 # stays bounded by new appends instead of re-reading each task's whole lifetime
 # log every time. crew_worktree_written_since reads the task's meta file and walks
 # a bounded slice of its worktree instead of a status file, so callers run it only
-# at the moment they would otherwise escalate.
+# at the moment they would otherwise escalate. crew_pipeline_step_active makes its
+# own bounded `no-mistakes axi status` call for the same reason and under the same
+# restriction: callers reach it only at the moment they would otherwise escalate a
+# wedge, never on every poll.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -47,6 +50,17 @@ case $- in *u*) _fm_classify_nounset=on ;; *) _fm_classify_nounset=off ;; esac
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$_FM_CLASSIFY_LIB_DIR/fm-timeout-lib.sh"
+[ "$_fm_classify_nounset" = on ] || set +u
+unset _fm_classify_nounset
+
+# fm_nm_run, the shared bounded `no-mistakes` runner the pipeline-activity probe
+# below uses to call `axi status` cd'd into a crew's worktree. Same nounset
+# save/restore as fm-timeout-lib.sh above; fm-nm-run-lib.sh sets no shell options
+# of its own, but the restore stays for symmetry and future-proofing.
+case $- in *u*) _fm_classify_nounset=on ;; *) _fm_classify_nounset=off ;; esac
+# shellcheck source=bin/fm-nm-run-lib.sh
+# shellcheck disable=SC1091
+. "$_FM_CLASSIFY_LIB_DIR/fm-nm-run-lib.sh"
 [ "$_fm_classify_nounset" = on ] || set +u
 unset _fm_classify_nounset
 
@@ -1396,6 +1410,57 @@ crew_worktree_written_since() {  # <id> <state> <anchor-file>
       -type f -newer "$anchor" -print -quit 2>/dev/null || true)
   fi
   [ -n "$hit" ]
+}
+
+# Bounded seconds crew_pipeline_step_active's own `no-mistakes axi status` call may
+# take. Same not-a-positive-integer-is-not-a-bound contract as
+# FM_WORKTREE_WRITE_TIMEOUT above.
+FM_PIPELINE_STATUS_TIMEOUT=${FM_PIPELINE_STATUS_TIMEOUT:-10}
+
+# 0 when <id>'s worktree has a no-mistakes run reporting an `active_steps` table
+# (present only while a step is actively `running` or `fixing`, per `axi status`'s
+# own documented output contract) whose `last_activity` is NOT prefixed `quiet` -
+# no-mistakes itself adds that prefix only once its own `step_quiet_warning` has
+# elapsed with no step log or native-agent lifecycle activity. This is the fourth
+# liveness input the wedge detector has, after pane quietness, the run step at
+# classification time, and worktree writes, and it closes the gap none of those
+# three can see: a long-running pipeline step (a 540s test run, a 96s review pass)
+# legitimately renders nothing new to the pane for its entire duration, so the pane
+# hash stays on the SAME stale hash for that whole stretch. crew_is_provably_working
+# (via pause_state_class) already reads the run-step ONCE, at the moment that stale
+# hash is first classified, and wedge_timer_check deliberately never re-reads crew
+# state on repeat polls of an already-classified hash (that read is the costly one
+# fm-crew-state.sh's header calls out) - so a step that outlives one classification
+# window escalates purely on elapsed time even while it is demonstrably still
+# moving. This is the 2026-08-27 case: a worker raised two wedge escalations nine
+# minutes apart while its test step's own last_activity was seconds old. Callers
+# reach this ONLY at the moment they would otherwise escalate (see
+# crew_worktree_written_since above for the same restriction and its rationale),
+# so the per-poll cost stays exactly what it was before.
+#
+# 1 for every other outcome, including an id with no recorded worktree, a worktree
+# that is gone, a kind=secondmate task (its own supervision owns that signal), no
+# run attributable to this worktree, no active_steps table, a `quiet` last_activity
+# anywhere in the table, or a call that errors or times out. Absence of evidence
+# always leaves the caller's existing escalation schedule untouched, so a crew with
+# no pipeline, or a pipeline that has genuinely stopped moving, still escalates
+# exactly as before.
+crew_pipeline_step_active() {  # <id> <state>
+  local id=$1 state=$2 wt kind out n block bound
+  [ -n "$id" ] || return 1
+  wt=$(grep '^worktree=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  kind=$(grep '^kind=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ "$kind" != secondmate ] || return 1
+  bound=$FM_PIPELINE_STATUS_TIMEOUT
+  case "$bound" in ''|*[!0-9]*|0) bound=10 ;; esac
+  out=$(fm_nm_run "$wt" "$bound" axi status)
+  [ -n "$out" ] || return 1
+  n=$(printf '%s\n' "$out" | grep -oE 'active_steps\[[0-9]+\]' | head -1 | grep -oE '[0-9]+')
+  case "$n" in ''|0) return 1 ;; esac
+  block=$(printf '%s\n' "$out" | awk -v n="$n" '/active_steps\[[0-9]+\]/{found=1; next} found && n>0 {print; n--}')
+  printf '%s' "$block" | grep -Eqi '(^|[,[:space:]])quiet([,[:space:]]|$)' && return 1
+  return 0
 }
 
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably
