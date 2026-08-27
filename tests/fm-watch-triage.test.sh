@@ -2107,13 +2107,17 @@ test_wedge_escalation_deferred_while_worktree_is_written() {
   if ! wait_poll_cycle "$state" "$pid"; then
     reap "$pid"; fail "watcher wedge-escalated a quiet pane whose worktree was being written: $(cat "$out")"
   fi
+  # Freeze the phase before inspecting it. Leaving this watcher live across the
+  # assertions lets a heavily delayed runner age the restarted idle timer past
+  # the escalation threshold; that legitimate later escalation then leaks its
+  # retained counter into Phase B and makes the two-phase fixture nondeterministic.
+  reap "$pid"
   [ ! -s "$out" ] || { reap "$pid"; fail "a written-worktree deferral printed a wake reason: $(cat "$out")"; }
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a written-worktree deferral enqueued a wake"; }
   [ -e "$state/.writing-since-$key" ] || { reap "$pid"; fail "the write-deferral chain marker was not recorded"; }
   [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "a deferral advanced the wedge escalation counter"; }
   [ "$(cat "$state/.stale-since-$key" 2>/dev/null || echo 0)" -gt "$back" ] \
     || { reap "$pid"; fail "a deferral did not restart the idle timer, so the next window cannot re-probe"; }
-  reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A watcher stop"
 
   # Phase B: same fixture, same quiet pane, but nothing written during this idle
