@@ -1126,7 +1126,7 @@ the controller serializing them.
 
 ## C3. Cost guard
 
-Status: BUILT 2026-08-20; live acceptance pending.
+Status: DONE, met live on 2026-08-24.
 
 The requirement is that a day's spend cannot quietly reach 100 dollars.
 
@@ -1172,8 +1172,16 @@ recorded per-review cost, which it does not. No listener or acceptance is owed a
 
 Acceptance: a day cannot cross the bound without an explicit operator override, and a worker
 whose task ended deallocates unattended.
-The hermetic legs are covered in `tests/fm-worker-lifecycle.test.sh`; the live demonstration on
-billable capacity has not run yet.
+The 600-second idle-deallocation subject remained assigned without release proof until ordinary
+authority-backed cleanup.
+Positive recorded spend 2.983466 USD crossed a controlled 1 USD bound and refused new compute
+with `override=none`, after which the default 100 USD/no-override zero state was re-proved.
+The compact tracked record is
+[`docs/evidence/azure-c3-cost-guard-2026-08-24/evidence.json`](evidence/azure-c3-cost-guard-2026-08-24/evidence.json),
+with its claim map and verification commands in the adjacent
+[README](evidence/azure-c3-cost-guard-2026-08-24/README.md).
+Cost Management still lags by hours, so this acceptance remains a backstop on recorded spend,
+not a claim of real-time metering.
 
 ## Order of work
 

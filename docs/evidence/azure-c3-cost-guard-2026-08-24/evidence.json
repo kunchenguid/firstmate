@@ -1,0 +1,46 @@
+{
+  "schema": "fm.azure-c3-cost-guard-evidence/v1",
+  "acceptance_date": "2026-08-24",
+  "requirement": "C3",
+  "idle_deallocation": {
+    "threshold_seconds": 600,
+    "unattended_deallocation_observed": true,
+    "provider_power_state": "deallocated",
+    "queue_status_after_deallocation": "assigned",
+    "release_proof_after_deallocation": false,
+    "ordinary_authority_backed_cleanup_after_capture": true
+  },
+  "daily_bound": {
+    "utc_day": "2026-08-24",
+    "recorded_spend_usd": 2.983466,
+    "controlled_bound_usd": 1,
+    "override": "none",
+    "new_compute_refused": true,
+    "request_assigned": false,
+    "wind_down_available": true
+  },
+  "default_state_reproof": {
+    "daily_bound_usd": 100,
+    "override": "none",
+    "tripped": false,
+    "queue_depth": 0,
+    "desired_workers": 0,
+    "active_workers": 0,
+    "assignment_count": 0,
+    "used_vcpus": 0,
+    "committed_vcpus": 0
+  },
+  "telemetry_caveat": "Azure Cost Management actuals lag by hours; this is a backstop on recorded spend, not a real-time meter.",
+  "source_artifacts": {
+    "idle_subject_report_sha256": "10270961a947511e3a96b316ecfcc5fce617c2699f5fca7acd82ca76b0a5dce8",
+    "daily_bound_report_sha256": "155b020538f866cba11df2743d5e5149a81dc98d50853db6c99f90dd9d3949f1",
+    "zero_to_zero_completion_sha256": "4595bf49b7319db4acd0d334f4f520d6c2ee9a24fdb412050ec3dc486877962d"
+  },
+  "limitations": {
+    "cost_management_is_not_real_time": true,
+    "does_not_prove": [
+      "C1",
+      "C2"
+    ]
+  }
+}
