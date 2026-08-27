@@ -184,6 +184,10 @@ For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved tas
 `fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
 Its header owns the exact refusal mechanics, while `tests/fm-spawn-pool-base-freshen.test.sh` owns the portable regression coverage.
 
+That same acquisition gate is also where the task worktree gets the captain's checkout-local credential file: no worktree provider seeds git-ignored files, so `fm-spawn.sh` owns copying the project checkout's git-ignored `.env.local` into every fresh ship and scout worktree, new or reissued, and refreshes or retires that one copy on each acquisition rather than letting a pooled slot serve an earlier task's credential.
+Firstmate authors a file inside a worktree it does not own, so the boundary is deliberate rather than incidental: a tracked `.env.local` is the project's own version-controlled content and is never seeded over or deleted, a path the project does not ignore is reported instead of seeded because an untracked copy would wedge that slot's own clean check and its teardown, and a state that cannot be positively established refuses the spawn instead of assuming the benign case.
+The same header and test file own the mechanics and the regression coverage, while [`configuration.md`](configuration.md#project-local-environment-file-envlocal) owns what a captain sets for it.
+
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
 The primary checkout is healthy on its default branch, and linked worktrees or secondmate homes are healthy at detached HEAD.
