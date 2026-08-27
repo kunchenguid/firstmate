@@ -434,6 +434,10 @@ def hold_captain(home: Home, task_id: str, reason: str) -> None:
     run_checked(home, [owner, "hold", task_id, "--reason", safe_hold_reason(reason)])
 
 
+def source_text(event: dict[str, Any]) -> str:
+    return str(event.get("source", {}).get("text", "")).strip()
+
+
 def validate_existing_task_link(home: Home, event: dict[str, Any], task_id: str, explicit: bool) -> None:
     if not SAFE_ID.fullmatch(task_id):
         raise OpsError("task id is not path-safe")
@@ -455,6 +459,7 @@ def classification_contract(event: dict[str, Any], args: argparse.Namespace) -> 
             "authority": args.authority,
             "related_task": args.related_task,
             "reason": args.reason,
+            "answer": source_text(event) if args.as_kind == "reply" else "",
             "title": args.title or "",
             "intent": args.intent or "",
             "question": args.question or "",
@@ -499,6 +504,7 @@ def classify(home: Home, args: argparse.Namespace) -> dict[str, Any]:
             "authority": None,
             "related_task": args.related_task,
             "reason": args.reason,
+            "answer": source_text(event) if args.as_kind == "reply" else "",
             "title": "",
             "intent": "",
             "question": "",
@@ -578,7 +584,8 @@ def resolve_pavel(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         raise OpsError("the Pavel answer event is not available for clarification resolution")
     if reply["state"] != "captured" and reply.get("related_task") != task_id:
         raise OpsError("the classified Pavel answer belongs to another task")
-    if reply["state"] != "captured" and last_transition_evidence(reply, "reply") not in {"", args.answer}:
+    reply_answer = (reply.get("classification") or {}).get("answer") or source_text(reply)
+    if reply_answer != args.answer:
         raise OpsError("Pavel clarification answer event already has different evidence")
     if existing_contract is None:
         event["pavel_resolution"] = contract
@@ -586,7 +593,7 @@ def resolve_pavel(home: Home, args: argparse.Namespace) -> dict[str, Any]:
     if reply["state"] == "captured":
         reply["classification"] = {
             "as": "reply", "authority": None, "related_task": task_id,
-            "reason": "Pavel clarification answer",
+            "reason": "Pavel clarification answer", "answer": args.answer,
         }
         reply["related_task"] = task_id
         home.append_transition(reply, "reply", args.answer)

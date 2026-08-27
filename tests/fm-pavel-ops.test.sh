@@ -307,6 +307,24 @@ fi
   || fail "conversation resolution rejection mutated the waiting task"
 pass "Pavel clarification resolution rejects conversations"
 
+classified_reply_task=$(ingest 120 30 'Уточнить размер' | json_field "['event']")
+run_ops classify "$classified_reply_task" --as task --title 'Clarify size' --intent 'Set Pavel requested size' \
+  --reason 'size choice changes the customer result' --authority business-ambiguity \
+  --question 'Какой размер использовать?' >/dev/null
+classified_reply_task_id=$(run_ops inspect "$classified_reply_task" | json_field "['task_id']")
+classified_reply=$(ingest 121 31 'XL' | json_field "['event']")
+run_ops classify "$classified_reply" --as reply --related-task "$classified_reply_task_id" \
+  --reason 'Pavel clarification answer' >/dev/null
+if run_ops resolve-pavel "$classified_reply_task" --reply-event "$classified_reply" \
+  --answer 'L' >/dev/null 2>&1; then
+  fail "already-classified reply accepted a changed Pavel answer"
+fi
+run_ops resolve-pavel "$classified_reply_task" --reply-event "$classified_reply" --answer 'XL' >/dev/null
+run_ops resolve-pavel "$classified_reply_task" --reply-event "$classified_reply" --answer 'XL' >/dev/null
+[ "$(run_ops inspect "$classified_reply_task" | json_field "['state']")" = ready ] \
+  || fail "already-classified reply did not resolve the clarification"
+pass "already-classified replies resolve with source answer evidence"
+
 unknown_clarification=$(ingest 119 29 'Уточнить фото' | json_field "['event']")
 run_ops classify "$unknown_clarification" --as task --title 'Clarify photo' --intent 'Set Pavel requested photo' \
   --reason 'photo choice changes the customer result' --authority business-ambiguity \
