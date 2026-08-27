@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Opt-in credentialed Codex regression proving the continuity changes preserve
-# Codex's bounded foreground-checkpoint supervision path.
+# Opt-in credentialed Codex regression proving the continuity path and max
+# reasoning-effort launch configuration against the real installed harness.
 set -u
 
 if [ "${FM_CODEX_LIVE_E2E:-0}" != 1 ]; then
@@ -41,7 +41,8 @@ PROMPT='Run exactly `bin/fm-watch-checkpoint.sh --seconds 1` as one foreground s
     --dangerously-bypass-hook-trust \
     --dangerously-bypass-approvals-and-sandbox \
     --skip-git-repo-check \
-    -c 'model_reasoning_effort="low"' \
+    -c 'model="gpt-5.6-sol"' \
+    -c 'model_reasoning_effort="max"' \
     --json \
     "$PROMPT"
 ) > "$TRANSCRIPT" 2>&1 || fail "Codex credentialed checkpoint turn failed: $(tail -20 "$TRANSCRIPT")"
@@ -52,4 +53,6 @@ if grep -F 'watcher: started pid=' "$TRANSCRIPT" >/dev/null; then
   fail "Codex switched to the background arm path"
 fi
 
-printf 'ok - %s live E2E preserved the one-second foreground checkpoint path\n' "$CODEX_VERSION"
+grep -E '"type":"turn.completed".*"reasoning_output_tokens":[1-9][0-9]*' "$TRANSCRIPT" >/dev/null \
+  || fail "Codex $CODEX_VERSION completed without maximum-effort reasoning usage"
+printf 'ok - %s live E2E selected max and preserved the one-second foreground checkpoint path\n' "$CODEX_VERSION"

@@ -12,7 +12,7 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 | Skill invocation | `$<skill>`, for example `$no-mistakes`; `/<skill>` is Claude-only and Codex rejects it as "Unrecognized command". |
 | Resume | `codex resume <session-id>`, using the id printed on quit. |
 | Model flag | `--model <model>`. |
-| Effort flag | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'`, verified on codex-cli 0.142.1 whose installed schema contains `model_reasoning_effort`, active config uses it, and bundled catalog advertises only these four values while omitting `max`. |
+| Effort flag | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh\|max>"'`. Low through xhigh pass on every supported version. `max` passes on codex-cli 0.149.1 or newer; an older or unparseable version refuses the spawn rather than silently downgrading an explicit selection. The max compatibility probe and worker launch use the same resolved executable path. The boundary is anchored by 0.142.1 rejecting max and a live 0.149.1 session selecting `gpt-5.6-sol max`. `ultra` is outside Firstmate's shared effort vocabulary. |
 | Model discovery | Open the current interactive session's `/model` picker. |
 
 A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"

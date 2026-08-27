@@ -8,6 +8,22 @@ Exact task chronology, branch names, temporary homes, local paths, process ids, 
 
 ## tmux
 
+Codex max-effort launch was verified on 2026-08-27 against codex-cli 0.149.1.
+The real interactive harness was launched with the same configuration shape used by `fm-spawn.sh`:
+
+```sh
+codex -c 'model="gpt-5.6-sol"' -c 'model_reasoning_effort="max"'
+```
+
+The decisive interactive header output was:
+
+```text
+│ model:     gpt-5.6-sol max   /model to change        │
+  gpt-5.6-sol max · <worktree>
+```
+
+The opt-in executable refresh guard is `FM_CODEX_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-codex-continuity-live-e2e.test.sh`.
+
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
 
 ```sh
