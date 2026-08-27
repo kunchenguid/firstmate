@@ -106,6 +106,13 @@ cat "$PAVEL_STATUS_FILE"
 SH
 chmod 0755 "$FAKEBIN/fm-status"
 
+cat > "$FAKEBIN/fm-crew-state" <<'SH'
+#!/usr/bin/env bash
+set -eu
+cat "$PAVEL_STATUS_FILE"
+SH
+chmod 0755 "$FAKEBIN/fm-crew-state"
+
 cat > "$FAKEBIN/fm-pr-check" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -132,6 +139,19 @@ fi
 printf 'forge reports PR merged at verified head\n'
 SH
 chmod 0755 "$FAKEBIN/fm-pr-merge"
+
+cat > "$FAKEBIN/fm-merge-confirm" <<'SH'
+#!/usr/bin/env bash
+set -eu
+id=$1
+pr=$2
+head=$3
+if [ -f "$TASK_DB/.merge-confirm-head" ]; then
+  head=$(cat "$TASK_DB/.merge-confirm-head")
+fi
+printf '{"state":"merged","merged":true,"pr_url":"%s","pr_head":"%s","task_id":"%s"}\n' "$pr" "$head" "$id"
+SH
+chmod 0755 "$FAKEBIN/fm-merge-confirm"
 
 cat > "$FAKEBIN/fm-live-check" <<'SH'
 #!/usr/bin/env bash
@@ -262,7 +282,21 @@ run_ops() {
     FM_PAVEL_CAPTAIN_HOLD="$FAKEBIN/captain-hold" \
     FM_PAVEL_OPS_BRIEF="$FAKEBIN/fm-brief" FM_PAVEL_OPS_SPAWN="$FAKEBIN/fm-spawn" \
     FM_PAVEL_OPS_STATUS="$FAKEBIN/fm-status" FM_PAVEL_OPS_PR_CHECK="$FAKEBIN/fm-pr-check" \
-    FM_PAVEL_OPS_PR_MERGE="$FAKEBIN/fm-pr-merge" FM_PAVEL_OPS_LIVE_CHECK="$FAKEBIN/fm-live-check" \
+    FM_PAVEL_OPS_PR_MERGE="$FAKEBIN/fm-pr-merge" FM_PAVEL_OPS_MERGE_CONFIRM="$FAKEBIN/fm-merge-confirm" \
+    FM_PAVEL_OPS_LIVE_CHECK="$FAKEBIN/fm-live-check" \
+    FM_PAVEL_OPS_CREW_STATE="$FAKEBIN/fm-crew-state" \
+    FM_PAVEL_OPS_TESTING=1 "$OPS" "$@"
+}
+
+run_ops_default_status() {
+  PATH="$FAKEBIN:$PATH" TASK_DB="$TASK_DB" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+    PAVEL_STATUS_FILE="$PAVEL_STATUS_FILE" \
+    FM_PAVEL_CAPTAIN_HOLD="$FAKEBIN/captain-hold" \
+    FM_PAVEL_OPS_BRIEF="$FAKEBIN/fm-brief" FM_PAVEL_OPS_SPAWN="$FAKEBIN/fm-spawn" \
+    FM_PAVEL_OPS_PR_CHECK="$FAKEBIN/fm-pr-check" \
+    FM_PAVEL_OPS_PR_MERGE="$FAKEBIN/fm-pr-merge" FM_PAVEL_OPS_MERGE_CONFIRM="$FAKEBIN/fm-merge-confirm" \
+    FM_PAVEL_OPS_LIVE_CHECK="$FAKEBIN/fm-live-check" \
+    FM_PAVEL_OPS_CREW_STATE="$FAKEBIN/fm-crew-state" \
     FM_PAVEL_OPS_TESTING=1 "$OPS" "$@"
 }
 
@@ -667,13 +701,28 @@ run_ops classify "$text_status" --as task --title 'Use crew state status' --inte
   --reason 'ordinary delivery' --authority ordinary >/dev/null
 run_ops drive "$text_status" >/dev/null
 text_status_task=$(run_ops inspect "$text_status" | json_field "['task_id']")
-printf 'pr=%s\npr_head=%s\n' 'https://github.com/o/r/pull/12' 'cc12dd' >> "$HOME_DIR/state/$text_status_task.meta"
+printf 'pr=%s\npr_head=%s\nworktree_head=%s\n' 'https://github.com/o/r/pull/12' 'cc12dd' 'cc12dd' >> "$HOME_DIR/state/$text_status_task.meta"
 printf 'state: done · source: run-step · checks green: PR ready for review\n' > "$PAVEL_STATUS_FILE"
-run_ops drive "$text_status" >/dev/null
-run_ops drive "$text_status" >/dev/null
+run_ops_default_status drive "$text_status" >/dev/null
+run_ops_default_status drive "$text_status" >/dev/null
 [ "$(run_ops inspect "$text_status" | json_field "['state']")" = delivery_ready ] \
-  || fail "fm-crew-state text status did not advance green work"
-pass "delivery-ready accepts bounded crew-state done status"
+  || fail "structured default status helper did not advance green work"
+pass "delivery-ready accepts head-bound default status"
+
+mismatched_run=$(ingest 129 39 'Проверить другой head' | json_field "['event']")
+run_ops classify "$mismatched_run" --as task --title 'Reject unbound run head' --intent 'Merge only the run-step head' \
+  --reason 'ordinary delivery' --authority ordinary >/dev/null
+run_ops drive "$mismatched_run" >/dev/null
+mismatched_run_task=$(run_ops inspect "$mismatched_run" | json_field "['task_id']")
+printf 'pr=%s\npr_head=%s\nworktree_head=%s\n' 'https://github.com/o/r/pull/15' 'bb15cc' 'aa15bb' >> "$HOME_DIR/state/$mismatched_run_task.meta"
+printf 'state: done · source: run-step · checks green: PR ready for review\n' > "$PAVEL_STATUS_FILE"
+run_ops_default_status drive "$mismatched_run" >/dev/null
+if run_ops_default_status drive "$mismatched_run" >/dev/null 2>&1; then
+  fail "default status helper blessed a mismatched PR head"
+fi
+[ "$(run_ops inspect "$mismatched_run" | json_field "['state']")" = validating ] \
+  || fail "mismatched default readiness mutated past validation"
+pass "default readiness requires matching current head"
 
 pr_substitution=$(ingest 125 35 'Проверить подмену PR' | json_field "['event']")
 run_ops classify "$pr_substitution" --as task --title 'Reject PR substitution' --intent 'Ship only the registered PR' \
@@ -742,6 +791,46 @@ fi
 [ "$(run_ops inspect "$head_race" | json_field "['state']")" = delivery_ready ] \
   || fail "head-race rejection mutated the event"
 pass "merge queue rejects PR head changes after check"
+
+stale_marker=$(ingest 130 40 'Проверить старый маркер merge' | json_field "['event']")
+run_ops classify "$stale_marker" --as task --title 'Reject stale merge marker' --intent 'Record landed only for current head' \
+  --reason 'ordinary delivery' --authority ordinary >/dev/null
+stale_marker_task=$(run_ops inspect "$stale_marker" | json_field "['task_id']")
+STALE_MARKER_FILE="$HOME_DIR/state/pavel-ops/events/$stale_marker.json" STALE_MARKER_TASK="$stale_marker_task" HOME_DIR="$HOME_DIR" python3 - <<'PY'
+import json
+import os
+import time
+path = os.environ["STALE_MARKER_FILE"]
+with open(path, encoding="utf-8") as handle:
+    event = json.load(handle)
+now = int(time.time())
+for state, evidence in [
+    ("dispatched", "Pi worker exists in isolated copy"),
+    ("validating", "no-mistakes run owns current head"),
+    ("delivery_ready", "checks green on exact PR head"),
+    ("merge_queued", "guarded merge accepted by forge"),
+]:
+    event["transitions"].append({"at": now, "from": event["state"], "to": state, "evidence": evidence})
+    event["state"] = state
+event["pr_url"] = "https://github.com/o/r/pull/16"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
+    handle.write("\n")
+with open(os.path.join(os.environ["HOME_DIR"], "state", os.environ["STALE_MARKER_TASK"] + ".meta"), "w", encoding="utf-8") as handle:
+    handle.write("kind=ship\nharness=pi\nmode=no-mistakes\nyolo=on\n")
+    handle.write(f"worktree={os.environ['HOME_DIR']}/worktrees/{os.environ['STALE_MARKER_TASK']}\n")
+    handle.write("pr=https://github.com/o/r/pull/16\npr_head=bb16cc\n")
+with open(os.path.join(os.environ["HOME_DIR"], "state", os.environ["STALE_MARKER_TASK"] + ".pr-poll-merge-notified"), "w", encoding="utf-8") as handle:
+    handle.write("fm-pr-poll-merge-notified-v1\ngithub\ngithub.com\no/r\n16\n")
+os.chmod(os.path.join(os.environ["HOME_DIR"], "state", os.environ["STALE_MARKER_TASK"] + ".pr-poll-merge-notified"), 0o600)
+PY
+touch "$TASK_DB/.merge-unconfirmed"
+printf 'aa16bb\n' > "$TASK_DB/.merge-confirm-head"
+run_ops drive "$stale_marker" >/dev/null
+[ "$(run_ops inspect "$stale_marker" | json_field "['state']")" = merge_queued ] \
+  || fail "stale same-PR merge marker advanced to landed"
+rm -f "$TASK_DB/.merge-unconfirmed" "$TASK_DB/.merge-confirm-head"
+pass "landing requires forge-confirmed current PR head"
 
 set_live_probe "$ambiguous" 'Белый, фото выше' ''
 printf 'Белый, фото выше\n' > "$TASK_DB/live-$ambiguous.expected"

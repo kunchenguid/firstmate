@@ -791,8 +791,8 @@ def validated_pr_contract(home: Home, event: dict[str, Any], status: dict[str, A
 def require_fresh_ready_status(status: dict[str, Any], purpose: str) -> None:
     if status.get("state") not in {"delivery_ready", "done"}:
         raise OpsError(f"Pavel checks are no longer ready for {purpose}")
-    if status.get("format") == "fm-crew-state-text" and status.get("source") != "run-step":
-        raise OpsError(f"Pavel checks are not current-code run-step ready for {purpose}")
+    if status.get("format") == "fm-crew-state-text":
+        raise OpsError(f"Pavel checks require structured head-bound readiness for {purpose}")
 
 
 def verify_pr_contract_unchanged(before: dict[str, str], after: dict[str, str], purpose: str) -> None:
@@ -810,11 +810,10 @@ def readiness_contract_from_status(
 ) -> dict[str, Any]:
     require_fresh_ready_status(status, purpose)
     pr_contract = pr_contract_from_meta(home, event)
-    if status.get("format") != "fm-crew-state-text":
-        if str(status.get("pr_url") or "") != pr_contract["pr_url"]:
-            raise OpsError(f"Pavel structured status is not bound to the canonical PR for {purpose}")
-        if str(status.get("pr_head") or "") != pr_contract["pr_head"]:
-            raise OpsError(f"Pavel structured status is not bound to the canonical PR head for {purpose}")
+    if str(status.get("pr_url") or "") != pr_contract["pr_url"]:
+        raise OpsError(f"Pavel structured status is not bound to the canonical PR for {purpose}")
+    if str(status.get("pr_head") or "") != pr_contract["pr_head"]:
+        raise OpsError(f"Pavel structured status is not bound to the canonical PR head for {purpose}")
     return {
         "schema": READINESS_CONTRACT_SCHEMA,
         "event_id": event["id"],
@@ -841,8 +840,7 @@ def validate_existing_readiness_contract(event: dict[str, Any], contract: dict[s
         raise OpsError("Pavel event has an invalid readiness contract")
     if existing.get("pr_url") == contract.get("pr_url") and existing.get("pr_head") == contract.get("pr_head"):
         return
-    if contract.get("format") == "fm-crew-state-text":
-        raise OpsError("Pavel text readiness is not bound to the changed PR head")
+    raise OpsError("Pavel readiness proof changed from the recorded PR head")
 
 
 def delivery_config(home: Home) -> dict[str, Any]:
@@ -1031,7 +1029,7 @@ def driver_transition(
 
 
 def owner_status(home: Home, event: dict[str, Any]) -> dict[str, Any]:
-    command = command_from_env(home, "FM_PAVEL_OPS_STATUS", "fm-crew-state.sh")
+    command = command_from_env(home, "FM_PAVEL_OPS_STATUS", "fm-pavel-status.py")
     output = run_checked(home, [command, str(event.get("task_id") or event["id"])])
     try:
         parsed = json.loads(output)
@@ -1077,8 +1075,58 @@ def confirmed_merge_record(home: Home, event: dict[str, Any]) -> bool:
         return False
     if lines != ["fm-pr-poll-merge-notified-v1", *identity]:
         return False
-    pr_contract_from_meta(home, event)
-    return True
+    pr_contract = pr_contract_from_meta(home, event)
+    return forge_confirms_merged_head(home, event, pr_contract)
+
+
+def parse_merge_confirmation(output: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise OpsError("Pavel merge confirmation owner must return JSON") from exc
+    if not isinstance(parsed, dict):
+        raise OpsError("Pavel merge confirmation owner returned a non-object")
+    return parsed
+
+
+def merge_confirmation_command(identity: tuple[str, str, str, str]) -> list[str]:
+    provider, _host, repo, number = identity
+    if provider == "github":
+        return ["gh-axi", "pr", "view", number, "--repo", repo, "--json", "state,headRefOid,url"]
+    if provider == "gitlab":
+        return ["glab", "mr", "view", number, "--repo", repo, "--output", "json"]
+    raise OpsError("Pavel merge confirmation does not support this PR provider")
+
+
+def merge_confirmation_head(proof: dict[str, Any]) -> str:
+    for key in ("pr_head", "headRefOid", "head_oid", "head_sha", "sha"):
+        value = str(proof.get(key) or "")
+        if value:
+            return value
+    diff_refs = proof.get("diff_refs")
+    if isinstance(diff_refs, dict):
+        return str(diff_refs.get("head_sha") or "")
+    return ""
+
+
+def forge_confirms_merged_head(home: Home, event: dict[str, Any], pr_contract: dict[str, str]) -> bool:
+    identity = pr_identity(pr_contract["pr_url"])
+    if identity is None:
+        return False
+    override = os.environ.get("FM_PAVEL_OPS_MERGE_CONFIRM")
+    if override:
+        output = run_checked(home, [override, str(event.get("task_id") or ""), pr_contract["pr_url"], pr_contract["pr_head"]])
+    else:
+        output = run_checked(home, merge_confirmation_command(identity))
+    proof = parse_merge_confirmation(output)
+    state = str(proof.get("state") or "").lower()
+    merged = proof.get("merged") is True or state == "merged"
+    if not merged:
+        return False
+    proof_url = str(proof.get("pr_url") or proof.get("url") or pr_contract["pr_url"])
+    if proof_url != pr_contract["pr_url"]:
+        return False
+    return merge_confirmation_head(proof).lower() == pr_contract["pr_head"].lower()
 
 
 def drive(home: Home, args: argparse.Namespace) -> dict[str, Any]:
