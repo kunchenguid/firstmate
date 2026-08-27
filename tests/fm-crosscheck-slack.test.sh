@@ -583,6 +583,33 @@ json.dump(value, open(sys.argv[2], "w"))' "$CONFIG_MAIN" "$bad"
   pass "selftest validates config shape and refuses malformed configs by name"
 }
 
+test_slack_app_manifest_is_minimal_and_socket_only() {
+  app_dir="$ROOT/ops/slack-crosscheck"
+  output=$("$app_dir/get-manifest.sh" --source="$app_dir" 2>&1) \
+    || fail "Slack manifest hook failed: $output"
+  APP_MANIFEST_JSON="$output" "$PYTHON" - <<'PYTEST' \
+    || fail "Slack app manifest contract failed"
+import json
+import os
+
+manifest = json.loads(os.environ["APP_MANIFEST_JSON"])
+assert manifest["settings"] == {
+    "event_subscriptions": {"bot_events": ["app_mention"]},
+    "org_deploy_enabled": False,
+    "socket_mode_enabled": True,
+    "is_hosted": False,
+    "token_rotation_enabled": False,
+}
+assert manifest["oauth_config"]["scopes"]["bot"] == [
+    "app_mentions:read",
+    "chat:write",
+    "reactions:write",
+]
+assert "request_url" not in json.dumps(manifest).lower()
+PYTEST
+  pass "Slack app manifest is outbound-only and least-privileged"
+}
+
 test_missing_token_env_refuses_start() {
   output=$(perl -e 'alarm 60; exec @ARGV' -- \
     env -u FM_TEST_SLACK_APP_TOKEN -u FM_TEST_SLACK_BOT_TOKEN -u FM_TEST_GITHUB_READ_TOKEN \
@@ -1389,6 +1416,7 @@ test_tokens_never_reach_logs_or_ledgers() {
 UNITS=(
   test_pr_link_extraction
   test_selftest_validates_config_shape
+  test_slack_app_manifest_is_minimal_and_socket_only
   test_missing_token_env_refuses_start
   test_attestation_cli_derives_and_signs_author_identity
   test_mention_without_link_gets_usage_reply

@@ -1,0 +1,5 @@
+{
+  "hooks": {
+    "get-manifest": "./get-manifest.sh"
+  }
+}

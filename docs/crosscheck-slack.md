@@ -149,10 +149,27 @@ The listener logs only its nonsecret key ID.
 
 ## Credentials and app permissions
 
-The Slack app must have Socket Mode enabled.
-Its app-level token needs `connections:write`.
-Its bot token needs `app_mentions:read`, `chat:write`, `channels:history`, and `reactions:write`.
-Subscribe the app to `app_mention`, install it to the workspace, and invite it only to approved channels.
+The repository-owned Slack app manifest is in `ops/slack-crosscheck`.
+It enables Socket Mode, subscribes only to `app_mention`, and requests only `app_mentions:read`, `chat:write`, and `reactions:write` for the bot.
+Create or update the app through the official Slack CLI from that directory:
+
+```sh
+cd ops/slack-crosscheck
+$HOME/.slack/bin/slack manifest validate
+$HOME/.slack/bin/slack app install --team <team-id> --environment deployed
+```
+
+The app-level token is created in the app's Basic Information settings with only `connections:write`.
+No Request URL is configured.
+Install the app to the workspace and invite it only to the exact channels in `channel_allowlist`.
+
+Store credentials without putting values in shell history by running each command and entering the value only at the Keychain prompt:
+
+```sh
+security add-generic-password -U -a "$USER" -s firstmate-crosscheck-slack-app -w
+security add-generic-password -U -a "$USER" -s firstmate-crosscheck-slack-bot -w
+security add-generic-password -U -a "$USER" -s firstmate-crosscheck-github-read -w
+```
 
 The GitHub credential must be a read-only GitHub App installation token or fine-grained credential limited to the repositories in `repo_allowlist`.
 It needs pull request metadata and repository contents read access.
