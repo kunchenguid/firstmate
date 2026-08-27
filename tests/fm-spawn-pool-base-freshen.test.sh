@@ -372,6 +372,31 @@ test_remoteless_configured_default_beats_checked_out_feature_branch() {
   pass "a configured init.defaultBranch outranks the primary's checked-out feature branch when refreshing the pool"
 }
 
+test_remoteless_configured_default_beats_stale_main_ref() {
+  local rec id out status trunk_tip stale_main branch_head
+  id='pool-remoteless-config-over-main-r12'
+  rec=$(make_remoteless_case remoteless-config-over-main "$id" trunk)
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" branch main "$INITIAL_SHA"
+  git -C "$PROJECT_DIR" config init.defaultBranch "$DEFAULT_BRANCH"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should refresh from the configured default branch despite a retained stale main ref"
+  trunk_tip=$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$DEFAULT_BRANCH")
+  stale_main=$(git -C "$PROJECT_DIR" rev-parse refs/heads/main)
+  branch_head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$branch_head" = "$trunk_tip" ] || fail "spawn did not refresh to the configured default branch's tip"
+  [ "$branch_head" != "$stale_main" ] || fail "spawn based the pool on the retained stale main ref"
+  assert_grep 'must survive a newly spawned branch' "$POOL_DIR/advanced-local.txt" \
+    "spawn omitted trunk content while a stale main ref was retained"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed config-over-main spawn: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+    printf '# observed config-over-main base: HEAD=%s trunk=%s stale-main=%s\n' "$branch_head" "$trunk_tip" "$stale_main"
+  fi
+  pass "a configured init.defaultBranch outranks a retained stale main ref when refreshing the pool"
+}
+
 test_remoteless_unresolvable_default_refuses_pool() {
   local rec id out status before
   id='pool-remoteless-nodefault-r10'
@@ -405,6 +430,7 @@ test_remoteless_dirty_pool_refuses_without_discarding_work
 test_remoteless_non_main_default_refreshes_to_primary_tip
 test_remoteless_detached_primary_uses_configured_default
 test_remoteless_configured_default_beats_checked_out_feature_branch
+test_remoteless_configured_default_beats_stale_main_ref
 test_remoteless_unresolvable_default_refuses_pool
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
