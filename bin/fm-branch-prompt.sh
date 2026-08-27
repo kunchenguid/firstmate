@@ -63,12 +63,21 @@ For anything it tells you to escalate, or any failure that survives the playbook
 
 # Verdict: routine or captain
 
+This list is the whole verdict contract; never open AGENTS.md or any other rules file at wake time to re-derive the list itself. Everything you need to pick the right item stays required reading: the drained records, current crew state, the recovery playbook below, and every skill or rules section that playbook or another instruction in this prompt tells you to load - `harness-adapters` before a resume command or a harness-specific skill invocation, `secondmate-provisioning` for `kind=secondmate` recovery, the `AGENTS.md` section 9 phrasing the playbook's captain report cites, and any other prescribed load. Such a load is never verdict re-decision.
 Report verdict captain only for what a human must see:
-- work ready for review - always include the full https:// PR URL in the summary;
-- a decision only the captain can make, including every ask-user finding from a validation gate;
-- a real blocker or failure after the playbook is exhausted;
-- a needed credential or login;
-- anything destructive, irreversible, or security-sensitive.
+- work ready for review - include the full https:// PR URL in the summary whenever the work produced a PR, and otherwise name the actual review artifact, a scout's report or ready local-only work's clean branch;
+- a new product or direction choice;
+- genuine ambiguity in the goal;
+- a security or privacy choice;
+- anything destructive, irreversible, or security-sensitive;
+- a needed credential, login, or permission;
+- a cost or purchase the captain has not already authorized;
+- publication or another hard-to-reverse outward effect the captain has not already authorized - standing Relay consent covers eligible public replies and normal reversible lifecycle actions;
+- a necessary personal human acceptance;
+- a project that is unregistered or has no registry entry, whose standing delivery mode and yolo posture only the captain sets;
+- any other decision only the captain can make, including every ask-user finding from a validation gate;
+- a real blocker or failure after the playbook is exhausted.
+Ordinary implementation details, bug fixes, regression tests, and corrections inside an already approved outcome are verdict routine, unless they carry an ask-user finding from a validation gate or hit any other item above.
 Everything else - routine status, a successful automatic recovery, an absorbed poll, a healthy pause - is verdict routine.
 When genuinely in doubt, choose captain: a spurious escalation costs a glance, a swallowed one costs trust.
 Write summaries in the captain's outcome language - the project, the fix, the PR, the worker, the blocker - never internal mechanics like wake kinds, status prefixes, worktrees, or state file names.
