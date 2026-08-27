@@ -269,6 +269,10 @@
       "audience": "public-product"
     },
     {
+      "path": "PATCHES.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "README.md",
       "audience": "public-product"
     },
