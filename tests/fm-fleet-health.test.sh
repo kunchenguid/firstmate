@@ -96,7 +96,7 @@ run_health() {  # <home> <fakebin>
 }
 
 make_health_fixture_root() {  # <name>
-  local name=$1 root=$TMP_ROOT/health-command-$1 source base
+  local root=$TMP_ROOT/health-command-$1 source base
   mkdir -p "$root/bin"
   cp "$HEALTH" "$root/bin/fm-fleet-health.sh"
   for source in "$ROOT"/bin/*.sh; do
@@ -115,7 +115,7 @@ SH
 }
 
 make_snapshot_fixture_root() {  # <name>
-  local name=$1 root=$TMP_ROOT/snapshot-command-$1 source base
+  local root=$TMP_ROOT/snapshot-command-$1 source base
   mkdir -p "$root/bin"
   cp "$ROOT/bin/fm-fleet-snapshot.sh" "$root/bin/fm-fleet-snapshot.sh"
   for source in "$ROOT"/bin/*.sh; do
