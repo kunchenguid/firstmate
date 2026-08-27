@@ -468,7 +468,17 @@ def snapshot(url: str) -> dict[str, Any]:
 
 def parse_root_toon_array(document: str) -> None:
     lines = document.splitlines()
-    if not lines or ROOT_ARRAY_HEADER_RE.fullmatch(lines[0]) is None:
+    if not lines:
+        raise GitHubContractError("gh-axi returned an invalid root TOON array")
+    # The reference `toon` encoder renders an EMPTY root array as the bare
+    # inline form "[]", not a counted "[0]:" header, and gh-axi follows it.
+    # GitHub returns exactly that for a base branch with no rulesets (live
+    # since Ruby-Labs/relvino dropped its native merge-queue ruleset for the
+    # Mergify transition), so "[]" is a valid empty document with nothing
+    # further to parse - refusing it fails every direct merge closed.
+    if len(lines) == 1 and lines[0].strip() == "[]":
+        return
+    if ROOT_ARRAY_HEADER_RE.fullmatch(lines[0]) is None:
         raise GitHubContractError("gh-axi returned an invalid root TOON array")
     parse_toon_mapping("rules" + document)
 

@@ -93,7 +93,10 @@ case "${1:-} ${2:-}" in
     ;;
   "api /repos/ruby-dlee/firstmate/rules/branches/main")
     case "${FM_TEST_QUEUE_RULE:-absent}" in
-      absent) printf '%s\n' '[0]:' ;;
+      # The real `toon` encoder renders an empty root array as bare "[]",
+      # never "[0]:" - the fixture must not be more permissive than gh-axi
+      # (a "[0]:" stub hid a fail-closed crash on every ruleset-free base).
+      absent) printf '%s\n' '[]' ;;
       active)
         printf '%s\n' \
           '[1]:' \
