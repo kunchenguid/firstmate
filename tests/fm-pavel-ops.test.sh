@@ -792,6 +792,29 @@ fi
   || fail "head-race rejection mutated the event"
 pass "merge queue rejects PR head changes after check"
 
+merge_meta_race=$(ingest 131 41 'Проверить смену head после очереди' | json_field "['event']")
+run_ops classify "$merge_meta_race" --as task --title 'Reject queued PR head race' --intent 'Land only the queued PR head' \
+  --reason 'ordinary delivery' --authority ordinary >/dev/null
+run_ops drive "$merge_meta_race" >/dev/null
+merge_meta_race_task=$(run_ops inspect "$merge_meta_race" | json_field "['task_id']")
+printf 'pr=%s\npr_head=%s\n' 'https://github.com/o/r/pull/17' 'aa17bb' >> "$HOME_DIR/state/$merge_meta_race_task.meta"
+printf '{"state":"done","pr_url":"https://github.com/o/r/pull/17","pr_head":"aa17bb","evidence":"checks green on exact PR head"}\n' > "$PAVEL_STATUS_FILE"
+run_ops drive "$merge_meta_race" >/dev/null
+run_ops drive "$merge_meta_race" >/dev/null
+run_ops drive "$merge_meta_race" >/dev/null
+[ "$(run_ops inspect "$merge_meta_race" | json_field "['state']")" = merge_queued ] \
+  || fail "merge head race setup did not reach merge_queued"
+owners_before_merge_meta_race=$(grep -c . "$TASK_DB/.owners")
+printf 'pr_head=%s\n' 'bb17cc' >> "$HOME_DIR/state/$merge_meta_race_task.meta"
+printf 'bb17cc\n' > "$TASK_DB/.merge-confirm-head"
+run_ops drive "$merge_meta_race" >/dev/null
+[ "$(run_ops inspect "$merge_meta_race" | json_field "['state']")" = validating ] \
+  || fail "changed queued PR head did not return to validation"
+[ "$(grep -c . "$TASK_DB/.owners")" -eq "$owners_before_merge_meta_race" ] \
+  || fail "changed queued PR head still invoked the merge owner"
+rm -f "$TASK_DB/.merge-confirm-head"
+pass "landing rejects metadata head changes after merge queue"
+
 stale_marker=$(ingest 130 40 'Проверить старый маркер merge' | json_field "['event']")
 run_ops classify "$stale_marker" --as task --title 'Reject stale merge marker' --intent 'Record landed only for current head' \
   --reason 'ordinary delivery' --authority ordinary >/dev/null
@@ -813,6 +836,28 @@ for state, evidence in [
     event["transitions"].append({"at": now, "from": event["state"], "to": state, "evidence": evidence})
     event["state"] = state
 event["pr_url"] = "https://github.com/o/r/pull/16"
+event["readiness_contract"] = {
+    "schema": "fm-pavel-ops-readiness-contract.v1",
+    "event_id": event["id"],
+    "task_id": os.environ["STALE_MARKER_TASK"],
+    "pr_url": "https://github.com/o/r/pull/16",
+    "pr_head": "bb16cc",
+    "state": "done",
+    "source": "fixture",
+    "format": "json",
+    "evidence": "checks green on exact PR head",
+}
+event["merge_contract"] = {
+    "schema": "fm-pavel-ops-merge-contract.v1",
+    "event_id": event["id"],
+    "task_id": os.environ["STALE_MARKER_TASK"],
+    "pr_url": "https://github.com/o/r/pull/16",
+    "pr_head": "bb16cc",
+    "provider": "github",
+    "host": "github.com",
+    "repo": "o/r",
+    "number": "16",
+}
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
     handle.write("\n")

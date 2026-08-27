@@ -32,6 +32,7 @@ TELEGRAM_OFFSET_SCHEMA = "fm-pavel-ops-telegram-offset.v1"
 LIVE_CONTRACT_SCHEMA = "fm-pavel-ops-live-contract.v1"
 LIVE_PROOF_SCHEMA = "fm-pavel-ops-live-proof.v1"
 READINESS_CONTRACT_SCHEMA = "fm-pavel-ops-readiness-contract.v1"
+MERGE_CONTRACT_SCHEMA = "fm-pavel-ops-merge-contract.v1"
 SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 PR_URL = re.compile(r"^https://[^\s]+$")
 _DRIVER_CAPABILITY = object()
@@ -843,6 +844,66 @@ def validate_existing_readiness_contract(event: dict[str, Any], contract: dict[s
     raise OpsError("Pavel readiness proof changed from the recorded PR head")
 
 
+def merge_contract_from_readiness(event: dict[str, Any], readiness: dict[str, Any]) -> dict[str, Any]:
+    identity = pr_identity(str(readiness.get("pr_url") or ""))
+    if identity is None:
+        raise OpsError("Pavel readiness contract has an invalid PR URL")
+    return {
+        "schema": MERGE_CONTRACT_SCHEMA,
+        "event_id": event["id"],
+        "task_id": str(event.get("task_id") or ""),
+        "pr_url": str(readiness.get("pr_url") or ""),
+        "pr_head": str(readiness.get("pr_head") or ""),
+        "provider": identity[0],
+        "host": identity[1],
+        "repo": identity[2],
+        "number": identity[3],
+    }
+
+
+def merge_contract_for_landing(event: dict[str, Any]) -> dict[str, Any]:
+    contract = event.get("merge_contract")
+    if contract is None:
+        readiness = event.get("readiness_contract")
+        if not isinstance(readiness, dict) or readiness.get("schema") != READINESS_CONTRACT_SCHEMA:
+            raise OpsError("Pavel merge queue has no validated readiness contract")
+        contract = merge_contract_from_readiness(event, readiness)
+    if not isinstance(contract, dict) or contract.get("schema") != MERGE_CONTRACT_SCHEMA:
+        raise OpsError("Pavel merge queue has an invalid merge contract")
+    if contract.get("event_id") != event["id"] or contract.get("task_id") != str(event.get("task_id") or ""):
+        raise OpsError("Pavel merge contract is not bound to this event")
+    identity = pr_identity(str(contract.get("pr_url") or ""))
+    if identity is None or list(identity) != [
+        contract.get("provider"),
+        contract.get("host"),
+        contract.get("repo"),
+        contract.get("number"),
+    ]:
+        raise OpsError("Pavel merge contract PR identity is invalid")
+    if event.get("pr_url") != contract.get("pr_url"):
+        raise OpsError("Pavel merge queue PR URL changed after readiness")
+    if not re.fullmatch(r"[0-9a-fA-F]{6,64}", str(contract.get("pr_head") or "")):
+        raise OpsError("Pavel merge contract has an invalid PR head")
+    return contract
+
+
+def meta_matches_merge_contract(home: Home, event: dict[str, Any], contract: dict[str, Any]) -> bool:
+    try:
+        current = pr_contract_from_meta(home, event)
+    except OpsError:
+        return False
+    return current["pr_url"] == contract["pr_url"] and current["pr_head"].lower() == str(contract["pr_head"]).lower()
+
+
+def return_to_validation(home: Home, event: dict[str, Any], evidence: str) -> dict[str, Any]:
+    event.pop("readiness_contract", None)
+    event.pop("merge_contract", None)
+    home.append_transition(event, "validating", evidence)
+    home.save_event(event)
+    home.audit("transition", event=event["id"], state="validating", task=event.get("task_id"))
+    return event
+
+
 def delivery_config(home: Home) -> dict[str, Any]:
     delivery = home.config.get("delivery", {})
     if not isinstance(delivery, dict):
@@ -1059,8 +1120,8 @@ def pr_identity(pr_url: str) -> tuple[str, str, str, str] | None:
     return None
 
 
-def confirmed_merge_record(home: Home, event: dict[str, Any]) -> bool:
-    pr_url = str(event.get("pr_url") or "")
+def confirmed_merge_record(home: Home, event: dict[str, Any], contract: dict[str, Any]) -> bool:
+    pr_url = str(contract.get("pr_url") or "")
     task_id = str(event.get("task_id") or "")
     marker = home.state / f"{task_id}.pr-poll-merge-notified"
     if not marker.exists():
@@ -1075,8 +1136,7 @@ def confirmed_merge_record(home: Home, event: dict[str, Any]) -> bool:
         return False
     if lines != ["fm-pr-poll-merge-notified-v1", *identity]:
         return False
-    pr_contract = pr_contract_from_meta(home, event)
-    return forge_confirms_merged_head(home, event, pr_contract)
+    return forge_confirms_merged_head(home, event, {"pr_url": contract["pr_url"], "pr_head": contract["pr_head"]})
 
 
 def parse_merge_confirmation(output: str) -> dict[str, Any]:
@@ -1186,13 +1246,18 @@ def drive(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         verify_pr_contract_unchanged(pr_contract, pr_contract_from_meta(home, event), "merge readiness")
         persist_readiness_contract(home, event, readiness)
         event = home.load_event(event["id"])
+        event["merge_contract"] = merge_contract_from_readiness(event, readiness)
+        home.save_event(event)
         return driver_transition(home, event, "merge_queued", "guarded merge poll armed", pr_url=pr_url)
     if event["state"] == "merge_queued":
         pr_url = str(event.get("pr_url") or "")
         if not PR_URL.fullmatch(pr_url):
             raise OpsError("Pavel landed verification requires the recorded PR URL")
+        merge_contract = merge_contract_for_landing(event)
+        if not meta_matches_merge_contract(home, event, merge_contract):
+            return return_to_validation(home, event, "canonical PR head changed after merge queue")
         output = run_checked(home, [command_from_env(home, "FM_PAVEL_OPS_PR_MERGE", "fm-pr-merge.sh"), task_id, pr_url])
-        if not confirmed_merge_record(home, event):
+        if not confirmed_merge_record(home, event, merge_contract):
             home.audit("merge-unconfirmed", event=event["id"], pr_url=pr_url, output=output.strip()[:500])
             return event
         return driver_transition(home, event, "landed", (output.strip() or "forge reports PR merged at verified head")[:500])
