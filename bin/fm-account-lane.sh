@@ -12,18 +12,32 @@ ACCOUNT=${2:-}
 FILE=${3:-$CONFIG/crew-accounts.json}
 
 validate() {
-  jq -e '
+  local reason
+  if ! reason=$(jq -r '
     def forbidden: ["apiKey","token","secret","password","cookie","authorization"];
-    def forbidden_key: [paths(scalars) as $p | ($p[-1]|tostring) as $key | select(forbidden|index($key)) | $key][0] // null;
-    if type != "object" or .version != 1 or (.accounts|type) != "object" then error("invalid account-lane schema")
-    elif forbidden_key != null then error("forbidden credential field: \(forbidden_key)")
-    elif [.accounts|to_entries[]|select(.key|test("^[a-z0-9][a-z0-9-]*$")|not)]|length > 0 then error("invalid account id")
-    elif [.accounts[]|select(.harness != "claude" and .harness != "codex")]|length > 0 then error("account harness must be claude or codex")
-    elif [.accounts[]|select(.harness == "claude" and .envName != "CLAUDE_CONFIG_DIR")]|length > 0 then error("claude accounts require CLAUDE_CONFIG_DIR")
-    elif [.accounts[]|select(.harness == "codex" and .envName != "CODEX_HOME")]|length > 0 then error("codex accounts require CODEX_HOME")
-    elif [.accounts[]|select((.configDir|type) != "string" or (.configDir|startswith("/")|not))]|length > 0 then error("configDir must be absolute")
-    else . end
-  ' "$1" >/dev/null
+    def forbidden_key:
+      [ (., (paths(objects) as $path | getpath($path)))
+        | select(type == "object")
+        | keys_unsorted[]
+        | select(. as $key | forbidden | index($key))
+      ][0] // null;
+    if type != "object" or .version != 1 or (.accounts|type) != "object" then "invalid account-lane schema"
+    elif forbidden_key != null then "forbidden credential field: \(forbidden_key)"
+    elif [.accounts|to_entries[]|select(.key|test("^[a-z0-9][a-z0-9-]*$")|not)]|length > 0 then "invalid account id"
+    elif [.accounts[]|select(type != "object" or ((keys|sort) != ["configDir","envName","harness"]))]|length > 0 then "account fields must be harness, envName, and configDir"
+    elif [.accounts[]|select(.harness != "claude" and .harness != "codex")]|length > 0 then "account harness must be claude or codex"
+    elif [.accounts[]|select(.harness == "claude" and .envName != "CLAUDE_CONFIG_DIR")]|length > 0 then "claude accounts require CLAUDE_CONFIG_DIR"
+    elif [.accounts[]|select(.harness == "codex" and .envName != "CODEX_HOME")]|length > 0 then "codex accounts require CODEX_HOME"
+    elif [.accounts[]|select((.configDir|type) != "string" or (.configDir|startswith("/")|not))]|length > 0 then "configDir must be absolute"
+    else empty end
+  ' "$1" 2>/dev/null); then
+    echo "invalid account-lane schema" >&2
+    return 1
+  fi
+  if [ -n "$reason" ]; then
+    echo "$reason" >&2
+    return 1
+  fi
 }
 
 selected_config_dir() {

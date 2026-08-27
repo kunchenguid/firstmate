@@ -1025,14 +1025,14 @@ crew_dispatch_validate() {
 }
 
 crew_accounts_validate() {
-  local file err
+  local file
   file="$CONFIG/crew-accounts.json"
   [ -f "$file" ] || return 0
   # jq is already a universal bootstrap dependency, so leave its one diagnostic
   # to the tool detector rather than reporting a misleading invalid account map.
   command -v jq >/dev/null 2>&1 || return 0
-  if ! err=$("$SCRIPT_DIR/fm-account-lane.sh" validate "$file" 2>&1); then
-    echo "CREW_ACCOUNTS: invalid config/crew-accounts.json - $err"
+  if ! "$SCRIPT_DIR/fm-account-lane.sh" validate "$file" >/dev/null 2>&1; then
+    echo "CREW_ACCOUNTS: invalid config/crew-accounts.json - invalid account-lane configuration"
   fi
 }
 

@@ -49,6 +49,14 @@ test_rejects_credential_material() {
   pass "account lanes reject credential material"
 }
 
+test_rejects_nested_credential_material() {
+  mkdir -p "$LAB/bad"
+  write_accounts "$(jq -n --arg root "$LAB" '{version:1,accounts:{bad:{harness:"claude",envName:"CLAUDE_CONFIG_DIR",configDir:($root+"/bad"),token:{nested:"secret"}}}}')"
+  expect_failure_contains "forbidden credential field: token" "$ACCOUNTS" validate "$ACCOUNTS_FILE"
+  write_accounts "$(jq -n --arg root "$LAB" '{version:1,accounts:{bad:{harness:"claude",envName:"CLAUDE_CONFIG_DIR",configDir:($root+"/bad"),authorization:["secret"]}}}')"
+  expect_failure_contains "forbidden credential field: authorization" "$ACCOUNTS" validate "$ACCOUNTS_FILE"
+  pass "account lanes reject nested object and array credential material"
+}
 test_selected_account_requires_readable_configuration_directory() {
   write_accounts "$(jq -n --arg root "$LAB" '{version:1,accounts:{missing:{harness:"codex",envName:"CODEX_HOME",configDir:($root+"/missing")}}}')"
   expect_failure_contains "configDir must be an existing readable directory" "$ACCOUNTS" config-dir missing "$ACCOUNTS_FILE"
@@ -59,3 +67,4 @@ test_valid_native_accounts
 test_rejects_arbitrary_environment
 test_rejects_credential_material
 test_selected_account_requires_readable_configuration_directory
+test_rejects_nested_credential_material

@@ -1154,13 +1154,14 @@ test_crew_accounts_validation() {
   case_dir="$TMP_ROOT/accounts-invalid"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-  printf '%s\n' '{"version":1,"accounts":{"bad":{"harness":"codex","envName":"PATH","configDir":"/tmp"}}}' > "$case_dir/home/config/crew-accounts.json"
+  printf '%s\n' '{"version":1,"accounts":{"bad":{"harness":"codex","envName":"CODEX_HOME","configDir":"/tmp","token":{"payload":"do-not-log"}}}}' > "$case_dir/home/config/crew-accounts.json"
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
 
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$out" 'CREW_ACCOUNTS: invalid config/crew-accounts.json - jq: error' "bootstrap must report invalid home-local account maps"
-  assert_contains "$out" 'codex accounts require CODEX_HOME' "bootstrap must preserve the account-map validation reason"
+  [ "$out" = 'CREW_ACCOUNTS: invalid config/crew-accounts.json - invalid account-lane configuration' ] || fail "bootstrap account diagnostic was not stable and sanitized: $out"
+  assert_not_contains "$out" 'jq:' "bootstrap account diagnostic exposed jq output"
+  assert_not_contains "$out" 'do-not-log' "bootstrap account diagnostic exposed raw account-map payload"
   pass "bootstrap reports invalid crew-accounts.json without disabling static dispatch"
 }
 
