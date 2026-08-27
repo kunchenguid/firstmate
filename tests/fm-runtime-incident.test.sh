@@ -612,7 +612,7 @@ SH
 }
 
 test_aggregate_record_bounds_and_atomic_size_refusal() {
-  local home origin repo copy record out before after note i j size
+  local home origin repo copy record out bearings toon header json_fields toon_fields before after note i j size
   home=$(make_home aggregate-record)
   origin=$(make_origin aggregate-record)
   repo=$home/projects/titan-1
@@ -683,6 +683,19 @@ PY
     .records[] | select(.id == "aggregate-record")
       | .inventory.verification.checks == {shown:256,omitted:44}
   ' >/dev/null || fail "compact status hid verification omission metadata: $out"
+  bearings=$(FM_HOME="$home" "$BEARINGS" --json)
+  printf '%s' "$bearings" | jq -e '
+    ([.runtime_incidents[] | select(.id == "aggregate-record")] | length) == 1
+      and ([.runtime_incidents[] | select(.id == "aggregate-record" and has("inventory"))] | length) == 0
+      and (.omitted | any(.surface == "runtime incident aggregate-record has bounded triage inventory omissions"))
+  ' >/dev/null || fail "Bearings row leaked nested inventory or hid its omission warning: $bearings"
+  toon=$(FM_HOME="$home" "$BEARINGS")
+  header=$(printf '%s\n' "$toon" | grep -E '^runtime_incidents\[[0-9]+\]\{' || true)
+  [ -n "$header" ] || fail "Bearings TOON omitted the runtime incident table"
+  json_fields=$(printf '%s' "$bearings" | jq -r '.runtime_incidents[0] | keys_unsorted | join(",")')
+  toon_fields=$(printf '%s' "$header" | sed -E 's/^[^{]*\{//; s/\}:.*$//; s/"//g')
+  [ "$json_fields" = "$toon_fields" ] || \
+    fail "Bearings runtime incident fields diverged between JSON and TOON"
 
   run_triage "$home" size-refusal "$repo" "Provider quota exhaustion" \
     --evidence "$QUOTA_FIXTURE" >/dev/null
