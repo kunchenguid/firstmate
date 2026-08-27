@@ -182,6 +182,71 @@ fi
 [ "$(cat "$TASK_DB/.add-count")" -eq 1 ] || fail "rejected classification replay created another task"
 pass "ordinary Pavel authority creates one ready backlog task"
 
+crash_classify=$(ingest 114 24 'Поменять описание' | json_field "['event']")
+CRASH_CLASSIFY="$crash_classify" EVENT_FILE="$HOME_DIR/state/pavel-ops/events/$crash_classify.json" TASK_DB="$TASK_DB" python3 - <<'PY'
+import json
+import os
+path = os.environ["EVENT_FILE"]
+task_id = "pavel-crash-classify"
+with open(path, encoding="utf-8") as handle:
+    event = json.load(handle)
+contract = {
+    "as": "task",
+    "authority": "ordinary",
+    "related_task": None,
+    "reason": "ordinary content update",
+    "task_id": task_id,
+    "title": "Change description",
+    "intent": "Set the requested product description",
+    "question": "",
+    "safety": "",
+}
+event["pending_classification"] = contract
+event["task_id"] = task_id
+event["authority"] = "ordinary"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
+    handle.write("\n")
+with open(os.path.join(os.environ["TASK_DB"], task_id), "w", encoding="utf-8") as handle:
+    handle.write(f"Pavel event: {os.environ['CRASH_CLASSIFY']}\n")
+    handle.write("Accepted Pavel intent: Set the requested product description\n")
+PY
+before_crash_replay_adds=$(cat "$TASK_DB/.add-count")
+if run_ops classify "$crash_classify" --as task --title 'Change description' \
+  --intent 'Set another product description' --reason 'ordinary content update' \
+  --authority ordinary --task-id pavel-crash-classify >/dev/null 2>&1; then
+  fail "pending classification accepted a changed crash replay"
+fi
+run_ops classify "$crash_classify" --as task --title 'Change description' \
+  --intent 'Set the requested product description' --reason 'ordinary content update' \
+  --authority ordinary --task-id pavel-crash-classify >/dev/null
+[ "$(run_ops inspect "$crash_classify" | json_field "['state']")" = ready ] \
+  || fail "pending classification replay did not complete"
+[ "$(cat "$TASK_DB/.add-count")" -eq "$before_crash_replay_adds" ] \
+  || fail "pending classification replay created a duplicate task"
+pass "pending task classification replays keep their contract"
+
+unrelated=$(ingest 115 25 'Поменять блок' | json_field "['event']")
+printf 'unrelated backlog row\n' > "$TASK_DB/pavel-existing-unrelated"
+if run_ops classify "$unrelated" --as task --title 'Change block' --intent 'Set the requested block' \
+  --reason 'ordinary content update' --authority ordinary --task-id pavel-existing-unrelated >/dev/null 2>&1; then
+  fail "explicit classification accepted an unrelated existing task"
+fi
+printf 'Pavel event: tg-related\nAccepted Pavel intent: Existing Pavel task\n' > "$TASK_DB/pavel-existing-corrected"
+run_ops classify "$unrelated" --as task --title 'Change block' --intent 'Set the requested block' \
+  --reason 'ordinary content update' --authority ordinary --task-id pavel-existing-corrected >/dev/null
+[ "$(run_ops inspect "$unrelated" | json_field "['task_id']")" = pavel-existing-corrected ] \
+  || fail "explicit classification could not recover after unrelated task rejection"
+pavel_linked=$(ingest 116 26 'И еще кнопку' | json_field "['event']")
+printf 'Pavel event: tg-older\nAccepted Pavel intent: Existing Pavel task\n' > "$TASK_DB/pavel-existing-linked"
+run_ops classify "$pavel_linked" --as task --title 'Change linked button' \
+  --intent 'Add the requested button to the existing Pavel task' \
+  --reason 'adjacent Pavel message belongs to existing task' --authority ordinary \
+  --task-id pavel-existing-linked >/dev/null
+[ "$(run_ops inspect "$pavel_linked" | json_field "['task_id']")" = pavel-existing-linked ] \
+  || fail "Pavel-owned explicit task link was not retained"
+pass "explicit task ids must be Pavel-owned"
+
 # Conversation and reply events stay auditable without creating work.
 conversation=$(ingest 101 11 'Ок' | json_field "['event']")
 run_ops classify "$conversation" --as conversation --reason 'acknowledgement only' >/dev/null

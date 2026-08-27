@@ -396,9 +396,11 @@ def ensure_task(home: Home, event: dict[str, Any], task_id: str, title: str, int
     marker = f"Pavel event: {event['id']}"
     exists, detail = task_exists(home, task_id)
     if exists:
-        if not explicit and marker not in detail:
-            raise OpsError(f"task id {task_id} exists without this Pavel event marker")
-        return
+        if marker in detail:
+            return
+        if explicit and "Pavel event:" in detail:
+            return
+        raise OpsError(f"task id {task_id} exists without a Pavel event marker")
     source_text = event["source"].get("text", "").strip()
     body = (
         f"{marker}\n"
@@ -413,6 +415,9 @@ def ensure_task(home: Home, event: dict[str, Any], task_id: str, title: str, int
             "--kind", "ship", "--repo", home.config["project"], "--body", body,
         ],
     )
+    exists, detail = task_exists(home, task_id)
+    if not exists or marker not in detail:
+        raise OpsError(f"task id {task_id} was not durably linked to this Pavel event")
 
 
 def safe_hold_reason(reason: str) -> str:
@@ -427,6 +432,20 @@ def hold_external(home: Home, task_id: str, reason: str) -> None:
 def hold_captain(home: Home, task_id: str, reason: str) -> None:
     owner = os.environ.get("FM_PAVEL_CAPTAIN_HOLD", str(home.root / "bin" / "fm-captain-hold.sh"))
     run_checked(home, [owner, "hold", task_id, "--reason", safe_hold_reason(reason)])
+
+
+def validate_existing_task_link(home: Home, event: dict[str, Any], task_id: str, explicit: bool) -> None:
+    if not SAFE_ID.fullmatch(task_id):
+        raise OpsError("task id is not path-safe")
+    exists, detail = task_exists(home, task_id)
+    if not exists:
+        return
+    marker = f"Pavel event: {event['id']}"
+    if marker in detail:
+        return
+    if explicit and "Pavel event:" in detail:
+        return
+    raise OpsError(f"task id {task_id} exists without a Pavel event marker")
 
 
 def classification_contract(event: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -505,20 +524,21 @@ def classify(home: Home, args: argparse.Namespace) -> dict[str, Any]:
 
     task_id = args.task_id or default_task_id(event)
     explicit = bool(args.task_id)
+    wanted = classification_contract(event, args)
+    pending = event.get("pending_classification")
+    if pending is not None and pending != wanted:
+        raise OpsError(f"event {event['id']} has a pending classification with different details")
+    validate_existing_task_link(home, event, task_id, explicit)
+    if pending is None:
+        event["pending_classification"] = wanted
+        event["task_id"] = task_id
+        event["authority"] = args.authority
+        home.save_event(event)
     ensure_task(home, event, task_id, args.title, args.intent, explicit)
     event["task_id"] = task_id
     event["authority"] = args.authority
-    event["classification"] = {
-        "as": "task",
-        "authority": args.authority,
-        "related_task": None,
-        "reason": args.reason,
-        "task_id": task_id,
-        "title": args.title,
-        "intent": args.intent,
-        "question": args.question or "",
-        "safety": args.safety or "",
-    }
+    event["classification"] = wanted
+    event.pop("pending_classification", None)
     if args.authority == "ordinary":
         target = "ready"
         evidence = "ordinary reversible work inside accepted Pavel intent"
