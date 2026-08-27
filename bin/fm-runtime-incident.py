@@ -15,8 +15,8 @@ Usage:
 
 Evidence is a JSON object.  Supported observations are:
   production: {origin, commit, proposed_hotfix_commit, routing_mismatch,
-               deployment_failed, health}
-  runtime: {errors:[{source,kind,code}], defect_proven,
+               proposed_hotfix_present, deployment_failed, health}
+  runtime: {errors:[{source,name,kind,status,code}], defect_proven,
             defect_evidence:[...], reproduction, proven_path}
   external_providers: [{name,status,code}]
   local_services: [{name,status}]
