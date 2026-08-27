@@ -297,6 +297,43 @@ test_relaunch_preserves_durable_task_metadata() {
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
 }
 
+test_relaunch_preserves_and_readmits_the_original_route_generation() {
+  local dir out rc reservation
+  dir=$(new_case routed-meta rl35)
+  add_ship_task "$dir" rl35 claude
+  mkdir -p "$dir/home/config" "$dir/claude-primary"
+  jq -n --arg config_dir "$dir/claude-primary" \
+    '{version:1,accounts:{"claude-primary":{harness:"claude",envName:"CLAUDE_CONFIG_DIR",configDir:$config_dir}}}' \
+    > "$dir/home/config/crew-accounts.json"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$ROOT/bin/fm-route.sh" reserve --task rl35 --generation gen-original \
+      --profile claude-sonnet --provider anthropic --lane claude-primary \
+      --account claude-primary --class standard --work-type implementation \
+      --risk medium --mode automatic --now 1000 >/dev/null
+  {
+    printf '%s\n' 'route_generation=gen-original'
+    printf '%s\n' 'route_profile=claude-sonnet'
+    printf '%s\n' 'route_provider=anthropic'
+    printf '%s\n' 'route_lane=claude-primary'
+    printf '%s\n' 'route_account=claude-primary'
+    printf '%s\n' 'route_class=standard'
+    printf '%s\n' 'route_risk=medium'
+    printf '%s\n' 'route_mode=automatic'
+  } >> "$dir/home/state/rl35.meta"
+  reservation="$dir/home/state/routing/reservations/rl35.json"
+
+  out=$(run_control "$dir" rl35 relaunch --note "continue on the admitted route"); rc=$?
+  expect_code 0 "$rc" "routed relaunch should succeed on its original reservation"$'\n'"$out"
+  [ "$(meta_field "$dir" rl35 route_generation)" = gen-original ] \
+    || fail "routed relaunch changed the original route generation"
+  [ "$(meta_field "$dir" rl35 route_account)" = claude-primary ] \
+    || fail "routed relaunch lost the native account binding"
+  assert_present "$reservation" "successful relaunch released the live route reservation"
+  assert_grep "CLAUDE_CONFIG_DIR='$dir/claude-primary'" "$dir/fake/literal" \
+    "routed relaunch did not restore its native account environment"
+  pass "fm-control relaunch: original route generation and account binding survive replacement"
+}
+
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
   local dir control_pid link_pid rc i=0 traceparent prepare ready exported release
   dir=$(new_case metadata-race rl28)
@@ -1314,6 +1351,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_preserves_and_readmits_the_original_route_generation
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions

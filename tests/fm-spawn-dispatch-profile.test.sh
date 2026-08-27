@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2100 # Task ids are literal hyphenated slugs, not arithmetic expressions.
 # Behavior tests for fm-spawn.sh concrete dispatch profile flags.
 #
 # These tests drive fm-spawn through meta writing and launch construction with a
@@ -44,6 +45,7 @@ case "${1:-}" in
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
+    [ "${FM_FAKE_TMUX_FAIL:-0}" != 1 ] || exit 1
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do
@@ -104,6 +106,28 @@ enable_dispatch_profile() {
   printf '%s\n' '{"rules":[{"when":"current events","use":{"harness":"grok","model":"grok-4","effort":"high"}}],"default":{"harness":"codex","model":"gpt-5","effort":"medium"}}' \
     > "$home/config/crew-dispatch.json"
 }
+
+reserve_route() {
+  local home=$1 task=$2 generation=$3 profile=$4 provider=$5 lane=$6 account=$7 task_class=$8 risk=$9 mode=${10}
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-route.sh" reserve --task "$task" --generation "$generation" \
+      --profile "$profile" --provider "$provider" --lane "$lane" --account "$account" \
+      --class "$task_class" --work-type implementation --risk "$risk" --mode "$mode" \
+      --now 1000 >/dev/null
+}
+
+make_account_map() {
+  local home=$1 account=$2 harness=$3 env_name=$4 config_dir=$5
+  mkdir -p "$config_dir"
+  jq -n --arg account "$account" --arg harness "$harness" --arg env_name "$env_name" \
+    --arg config_dir "$config_dir" \
+    '{version:1,accounts:{($account):{harness:$harness,envName:$env_name,configDir:$config_dir}}}' \
+    > "$home/config/crew-accounts.json"
+}
+
+ROUTED_ARGS=(--route-generation gen-1 --route-profile pi-kimi --route-provider moonshot
+  --route-lane pi-moonshot-1 --route-account none --route-class standard
+  --route-risk medium --route-mode automatic)
 
 make_seeded_secondmate_home() {
   local home=$1 id=$2
@@ -826,6 +850,172 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_routed_spawn_requires_matching_reservation() {
+  local rec id out status
+  id=route-unreserved-z20
+  rec=$(make_spawn_case route-unreserved pi "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness pi --model cliproxyapi/kimi-k3 "${ROUTED_ARGS[@]}")
+  status=$?
+  expect_code 1 "$status" "unreserved routed spawn must fail"
+  assert_contains "$out" "matching routing reservation is required" "spawn bypassed route admission"
+  assert_absent "$HOME_DIR/state/$id.meta" "unreserved route published task metadata"
+  pass "routed spawns require a matching reservation before publication"
+}
+
+test_partial_and_duplicate_route_tuples_are_refused() {
+  local rec id out status
+  id=route-partial-z21
+  rec=$(make_spawn_case route-partial pi "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness pi --route-generation gen-1 --route-mode automatic)
+  status=$?
+  expect_code 2 "$status" "partial routed spawn must fail as usage"
+  assert_contains "$out" "complete route metadata tuple" "partial route was not diagnosed"
+  assert_absent "$HOME_DIR/state/$id.meta" "partial route published metadata"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness pi --route-generation gen-1 --route-generation gen-2)
+  status=$?
+  expect_code 2 "$status" "duplicate route flags must fail as usage"
+  assert_contains "$out" "duplicate option: --route-generation" "duplicate route flag was not diagnosed"
+  pass "partial and duplicate route tuples are refused before mutation"
+}
+
+test_mismatched_and_path_unsafe_routes_do_not_release_an_owned_reservation() {
+  local rec id out status reservation
+  id=route-mismatch-z22
+  rec=$(make_spawn_case route-mismatch pi "$id")
+  read_case_record "$rec"
+  reserve_route "$HOME_DIR" "$id" gen-1 pi-kimi moonshot pi-moonshot-1 none standard medium automatic
+  reservation="$HOME_DIR/state/routing/reservations/$id.json"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness pi --route-generation gen-1 --route-profile wrong \
+    --route-provider moonshot --route-lane pi-moonshot-1 --route-account none \
+    --route-class standard --route-risk medium --route-mode automatic)
+  status=$?
+  expect_code 1 "$status" "mismatched route must fail"
+  assert_contains "$out" "matching routing reservation is required" "route mismatch was not diagnosed"
+  assert_present "$reservation" "a mismatched route released another generation's reservation"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness pi --route-generation '../gen-1' --route-profile pi-kimi \
+    --route-provider moonshot --route-lane pi-moonshot-1 --route-account none \
+    --route-class standard --route-risk medium --route-mode automatic)
+  status=$?
+  expect_code 1 "$status" "path-unsafe route generation must fail"
+  assert_present "$reservation" "an invalid generation released the valid reservation"
+  pass "mismatched and path-unsafe routes cannot release another reservation"
+}
+
+test_routed_spawn_records_the_complete_route() {
+  local rec id out status key expected
+  id=route-record-z23
+  rec=$(make_spawn_case route-record pi "$id")
+  read_case_record "$rec"
+  reserve_route "$HOME_DIR" "$id" gen-1 pi-kimi moonshot pi-moonshot-1 none standard medium automatic
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness pi --model cliproxyapi/kimi-k3 "${ROUTED_ARGS[@]}")
+  status=$?
+  expect_code 0 "$status" "reserved routed spawn should succeed"
+  for expected in generation=gen-1 profile=pi-kimi provider=moonshot lane=pi-moonshot-1 \
+    account=none class=standard risk=medium mode=automatic; do
+    key=${expected%%=*}
+    assert_grep "route_$expected" "$HOME_DIR/state/$id.meta" "missing route $key metadata"
+  done
+  pass "routed spawn records the complete admitted route tuple"
+}
+
+test_launch_failure_releases_only_the_owned_generation() {
+  local rec id out status reservation
+  id=route-launch-fail-z24
+  rec=$(make_spawn_case route-launch-fail pi "$id")
+  read_case_record "$rec"
+  reserve_route "$HOME_DIR" "$id" gen-1 pi-kimi moonshot pi-moonshot-1 none standard medium automatic
+  reservation="$HOME_DIR/state/routing/reservations/$id.json"
+  out=$(FM_FAKE_TMUX_FAIL=1 run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness pi --model cliproxyapi/kimi-k3 "${ROUTED_ARGS[@]}")
+  status=$?
+  expect_code 1 "$status" "failed routed launch must report failure"
+  assert_absent "$reservation" "failed launch leaked routed capacity"
+  pass "launch failure releases the exact admitted route generation"
+}
+
+test_native_routes_bind_only_the_allowlisted_account_environment() {
+  local rec id out status launch
+  id=route-codex-native-z25
+  rec=$(make_spawn_case route-codex-native codex "$id")
+  read_case_record "$rec"
+  make_account_map "$HOME_DIR" codex-secondary codex CODEX_HOME "$HOME_DIR/codex-2"
+  reserve_route "$HOME_DIR" "$id" gen-1 codex-sol openai codex-secondary codex-secondary standard medium automatic
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR=/should/not/leak run_ship_spawn \
+    "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-5.6-sol --route-generation gen-1 --route-profile codex-sol \
+    --route-provider openai --route-lane codex-secondary --route-account codex-secondary \
+    --route-class standard --route-risk medium --route-mode automatic)
+  status=$?
+  expect_code 0 "$status" "native Codex routed spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$HOME_DIR/codex-2'" "Codex secondary account was not selected"
+  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" "Codex route received a Claude configuration path"
+  pass "native routes inject only their allowlisted account environment"
+}
+
+test_native_harness_mismatch_and_pi_account_binding_are_refused() {
+  local rec id out status reservation
+  id=route-harness-mismatch-z26
+  rec=$(make_spawn_case route-harness-mismatch claude "$id")
+  read_case_record "$rec"
+  make_account_map "$HOME_DIR" codex-secondary codex CODEX_HOME "$HOME_DIR/codex-2"
+  reserve_route "$HOME_DIR" "$id" gen-1 codex-sol openai codex-secondary codex-secondary standard medium automatic
+  reservation="$HOME_DIR/state/routing/reservations/$id.json"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness claude --route-generation gen-1 --route-profile codex-sol \
+    --route-provider openai --route-lane codex-secondary --route-account codex-secondary \
+    --route-class standard --route-risk medium --route-mode automatic)
+  status=$?
+  expect_code 1 "$status" "native account harness mismatch must fail"
+  assert_contains "$out" "route account harness does not match launch harness" "native account harness mismatch was not diagnosed"
+  assert_absent "$reservation" "admitted native mismatch leaked routed capacity"
+  id=route-pi-account-z27
+  rec=$(make_spawn_case route-pi-account pi "$id")
+  read_case_record "$rec"
+  reserve_route "$HOME_DIR" "$id" gen-1 pi-kimi moonshot pi-moonshot-1 codex-secondary standard medium automatic
+  reservation="$HOME_DIR/state/routing/reservations/$id.json"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness pi --route-generation gen-1 --route-profile pi-kimi \
+    --route-provider moonshot --route-lane pi-moonshot-1 --route-account codex-secondary \
+    --route-class standard --route-risk medium --route-mode automatic)
+  status=$?
+  expect_code 1 "$status" "Pi native account binding must fail"
+  assert_contains "$out" "Pi routes require route account none" "Pi account semantics were not diagnosed"
+  assert_absent "$reservation" "admitted Pi account mismatch leaked routed capacity"
+  pass "native harness mismatches and Pi account bindings are refused"
+}
+
+test_route_mode_off_preserves_static_launch_bytes() {
+  local rec id out status baseline_launch route_off_launch baseline_meta off_meta
+  id=route-off-z28
+  rec=$(make_spawn_case route-off pi "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness pi)
+  status=$?
+  expect_code 0 "$status" "baseline static launch should succeed"
+  baseline_launch=$(cat "$LAUNCH_LOG")
+  baseline_meta=$(sed -e '/^spawn_gen=/d' -e '/^busy_gen=/d' "$HOME_DIR/state/$id.meta")
+  rm -f "$HOME_DIR/state/$id.meta"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness pi --route-mode off)
+  status=$?
+  expect_code 0 "$status" "route mode off should use the static path"
+  route_off_launch=$(cat "$LAUNCH_LOG")
+  off_meta=$(sed -e '/^spawn_gen=/d' -e '/^busy_gen=/d' "$HOME_DIR/state/$id.meta")
+  [ "$route_off_launch" = "$baseline_launch" ] || fail "route mode off changed static launch bytes"
+  [ "$off_meta" = "$baseline_meta" ] || fail "route mode off changed static metadata bytes"
+  assert_not_contains "$off_meta" "route_" "route mode off persisted route metadata"
+  pass "route mode off remains byte-compatible with static launches"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
@@ -857,5 +1047,13 @@ test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_routed_spawn_requires_matching_reservation
+test_partial_and_duplicate_route_tuples_are_refused
+test_mismatched_and_path_unsafe_routes_do_not_release_an_owned_reservation
+test_routed_spawn_records_the_complete_route
+test_launch_failure_releases_only_the_owned_generation
+test_native_routes_bind_only_the_allowlisted_account_environment
+test_native_harness_mismatch_and_pi_account_binding_are_refused
+test_route_mode_off_preserves_static_launch_bytes
 
 echo "# all fm-spawn-dispatch-profile tests passed"
