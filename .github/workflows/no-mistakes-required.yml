@@ -49,6 +49,15 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -eu
+          # Only the base branch is checked out, so a base that predates the
+          # settle script has nothing to settle with - every PR raised before
+          # it reaches the base, the one adding it included. Leave the gate on
+          # its event-payload default there, exactly as an unreadable body
+          # does, instead of failing the check on a missing helper.
+          if [ ! -f bin/fm-attestation-settle.sh ]; then
+            echo "bin/fm-attestation-settle.sh is not on ${GITHUB_BASE_REF:-the base branch}; leaving the gate on its event-payload default." >&2
+            exit 0
+          fi
           bin/fm-attestation-settle.sh \
             --repo "$GITHUB_REPOSITORY" \
             --pr "$PR_NUMBER" \

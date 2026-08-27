@@ -265,3 +265,126 @@ test_settled_body_passes_the_gate_once_the_push_is_attested
 test_settled_body_reaches_the_action_as_a_step_output
 test_unattested_push_still_fails_after_a_bounded_wait
 test_unreadable_body_leaves_the_gate_on_the_event_payload
+
+# --- the base-checkout bootstrap seam ---------------------------------------
+#
+# The gate checks out the base branch on purpose, so the settle step runs
+# against a tree that carries bin/fm-attestation-settle.sh only once the script
+# has merged - never on the pull request that introduces it. Run 33125728778 on
+# PR #3160 hit exactly that: "bin/fm-attestation-settle.sh: No such file or
+# directory", exit 127, failing the whole gate on a PR whose body was fine.
+# These cases run the workflow's own step body, lifted out of the YAML, against
+# a base checkout with and without the script.
+
+SETTLE_WORKFLOW="$ROOT/.github/workflows/no-mistakes-required.yml"
+
+# Echo the gate's settle step body, after confirming the pinned action still
+# reads that step's output - which is what makes "no output" mean "judge the
+# event payload" rather than "judge nothing".
+settle_step_body() {
+  command -v ruby >/dev/null 2>&1 \
+    || fail "ruby is required to parse .github/workflows/no-mistakes-required.yml as YAML"
+  ruby -ryaml - "$SETTLE_WORKFLOW" <<'RB'
+doc = YAML.load_file(ARGV[0])
+steps = doc.fetch("jobs").fetch("check").fetch("steps")
+settle = steps.find { |s| s.is_a?(Hash) && s["id"] == "pr-body" }
+raise "the gate job has no settle step with id pr-body" if settle.nil?
+verify = steps.find { |s| s.is_a?(Hash) && s["uses"].to_s.include?("require-no-mistakes") }
+raise "the gate job no longer runs the pinned require-no-mistakes action" if verify.nil?
+wired = verify.fetch("with").fetch("pr-body").to_s.strip
+unless wired == "${{ steps.pr-body.outputs.body }}"
+  raise "the pinned action judges #{wired}, not the settle step output"
+end
+print settle.fetch("run")
+RB
+}
+
+# Lay out a base checkout the runner would hand the step, with the settle
+# script present or absent, and put the workflow's step body beside it.
+new_base_checkout() {
+  local dir=$1 with_settler=$2
+  mkdir -p "$dir/tree/bin" || fail "could not lay out the base checkout"
+  if [ "$with_settler" = with-settler ]; then
+    cp "$SETTLE" "$dir/tree/bin/fm-attestation-settle.sh" \
+      || fail "could not seed the settle script into the base checkout"
+    chmod +x "$dir/tree/bin/fm-attestation-settle.sh" \
+      || fail "could not make the seeded settle script executable"
+  fi
+  settle_step_body > "$dir/step.sh" \
+    || fail "could not lift the settle step out of the gate workflow"
+  : > "$dir/github-output"
+}
+
+# Run that step body the way the runner does: `bash -e`, from the checkout, with
+# the step's env and $GITHUB_OUTPUT bound.
+run_settle_step() {
+  local dir=$1 fakebin=$2
+  (
+    cd "$dir/tree" || exit 1
+    GITHUB_OUTPUT="$dir/github-output" \
+      GITHUB_REPOSITORY=owner/repo \
+      GITHUB_BASE_REF=main \
+      GH_TOKEN=stub-token \
+      PR_NUMBER=3006 \
+      PR_HEAD_SHA="$NEW_SHA" \
+      PATH="$fakebin:$PATH" \
+      bash -e "$dir/step.sh"
+  ) 2>"$dir/step.err"
+}
+
+test_base_without_the_settler_leaves_the_gate_on_the_event_payload() {
+  local dir fakebin output rc
+  dir=$(new_case base-without-settler)
+  new_base_checkout "$dir" without-settler
+  fakebin=$(install_gh_stub "$dir" 1)
+  rc=0
+  run_settle_step "$dir" "$fakebin" || rc=$?
+  expect_code 0 "$rc" "the gate step failed on a base branch that does not carry the settle script"
+  expect_code 0 "$(reads_made "$dir")" "the step claimed to read the PR body with no settle script to read it"
+  [ -z "$(github_output_value "$dir/github-output" body)" ] || \
+    fail "a base branch without the settle script still produced a pr-body input"
+  rc=0
+  output=$(run_verifier_from_payload "$dir" "$(attested_body "$NEW_SHA")" "$NEW_SHA") || rc=$?
+  expect_code 0 "$rc" "the event-payload fallback stopped judging a compliant body"
+  assert_contains "$output" "Found structurally compliant pipeline step attestation." \
+    "the event-payload fallback did not report the compliant body as compliant"
+  pass "a base branch without the settle script leaves the gate on its event-payload default"
+}
+
+test_base_without_the_settler_still_fails_a_stale_body() {
+  local dir fakebin output rc
+  dir=$(new_case base-without-settler-stale)
+  new_base_checkout "$dir" without-settler
+  fakebin=$(install_gh_stub "$dir" 1)
+  rc=0
+  run_settle_step "$dir" "$fakebin" || rc=$?
+  expect_code 0 "$rc" "the gate step failed on a base branch that does not carry the settle script"
+  rc=0
+  output=$(run_verifier_from_payload "$dir" "$(attested_body "$OLD_SHA")" "$NEW_SHA") || rc=$?
+  [ "$rc" -ne 0 ] || fail "skipping the settle step let an unattested push through the gate"
+  assert_contains "$output" "Pipeline attestation head_sha does not match the current PR head" \
+    "the skipped-settle fallback did not fail a body bound to another head"
+  pass "skipping the settle step never passes a body that does not bind to the pushed head"
+}
+
+test_base_with_the_settler_hands_the_settled_body_to_the_action() {
+  local dir fakebin recovered output rc
+  dir=$(new_case base-with-settler)
+  new_base_checkout "$dir" with-settler
+  fakebin=$(install_gh_stub "$dir" 1)
+  rc=0
+  run_settle_step "$dir" "$fakebin" || rc=$?
+  expect_code 0 "$rc" "the gate step failed with the settle script on the base branch"
+  expect_code 1 "$(reads_made "$dir")" "the step did not read the live PR body once the settler was present"
+  recovered=$(github_output_value "$dir/github-output" body)
+  assert_contains "$recovered" "$NEW_SHA" \
+    "the step handed the action no attestation for the pushed head"
+  rc=0
+  output=$(run_verifier "$recovered" "$NEW_SHA") || rc=$?
+  expect_code 0 "$rc" "the body the gate step settled was judged non-compliant at the pushed head"
+  pass "a base branch carrying the settle script hands the settled body to the pinned action"
+}
+
+test_base_without_the_settler_leaves_the_gate_on_the_event_payload
+test_base_without_the_settler_still_fails_a_stale_body
+test_base_with_the_settler_hands_the_settled_body_to_the_action
