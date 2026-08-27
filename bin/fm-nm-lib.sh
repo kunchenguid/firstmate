@@ -50,7 +50,7 @@ fm_nm_supports_watch() {
   bin=$(fm_nm_bin)
   command -v "$bin" >/dev/null 2>&1 || return 2
   output=$(fm_nm_help_probe watch --help) || return 1
-  printf '%s\n' "$output" | grep -Eq '^[[:space:]]*--pr([[:space:]]|$)'
+  printf '%s\n' "$output" | grep -Eq '^[[:space:]]*(-[A-Za-z0-9][[:space:]]*,[[:space:]]*)?--pr([[:space:],=]|$)'
 }
 
 # fm_nm_supports_axi_intent: does AXI run expose the required intent contract?
@@ -60,14 +60,127 @@ fm_nm_supports_axi_intent() {
   bin=$(fm_nm_bin)
   command -v "$bin" >/dev/null 2>&1 || return 2
   output=$(fm_nm_help_probe axi run --help) || return 1
-  printf '%s\n' "$output" | grep -Eq '^[[:space:]]*--intent([[:space:]]|$)'
+  printf '%s\n' "$output" | grep -Eq '^[[:space:]]*(-[A-Za-z0-9][[:space:]]*,[[:space:]]*)?--intent([[:space:],=]|$)'
+}
+
+_fm_nm_is_semver() {  # <version>
+  local v=$1 stripped=$1
+  case "$v" in
+    [vV]*) stripped=${v#[vV]} ;;
+  esac
+  case "$stripped" in
+    *[!0-9A-Za-z.+-]*) return 1 ;;
+  esac
+  _fm_nm_is_semver_core "$stripped" || return 1
+  return 0
+}
+
+_fm_nm_is_semver_core() {  # <core_plus_extensions>
+  local s=$1 core prerelease build
+  case "$s" in
+    *+*)
+      build=${s##*+}
+      s=${s%+*}
+      _fm_nm_is_semver_build_id "$build" || return 1
+      ;;
+  esac
+  case "$s" in
+    *-*)
+      prerelease=${s#*-}
+      core=${s%%-*}
+      _fm_nm_is_semver_prerelease_id "$prerelease" || return 1
+      ;;
+    *)
+      prerelease=
+      core=$s
+      ;;
+  esac
+  _fm_nm_is_semver_core_version "$core" || return 1
+  return 0
+}
+
+_fm_nm_is_semver_core_version() {  # <core>
+  local major minor patch
+  IFS='.' read -r major minor patch <<< "$1"
+  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] || return 1
+  case "$major" in
+    0) ;;
+    [1-9]*)
+      case "$major" in *[!0-9]*) return 1 ;; esac ;;
+    *) return 1 ;;
+  esac
+  case "$minor" in
+    0) ;;
+    [1-9]*)
+      case "$minor" in *[!0-9]*) return 1 ;; esac ;;
+    *) return 1 ;;
+  esac
+  case "$patch" in
+    0) ;;
+    [1-9]*)
+      case "$patch" in *[!0-9]*) return 1 ;; esac ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+_fm_nm_is_semver_prerelease_id() {  # <prerelease>
+  local token remaining=$1
+  [ -n "$remaining" ] || return 1
+  while [ -n "$remaining" ]; do
+    token=${remaining%%.*}
+    case "$token" in
+      ''|"$remaining") remaining= ;;
+      *) remaining=${remaining#*.} ;;
+    esac
+    _fm_nm_is_semver_identifier "$token" || return 1
+  done
+  return 0
+}
+
+_fm_nm_is_semver_build_id() {  # <build>
+  local token remaining=$1
+  [ -n "$remaining" ] || return 1
+  while [ -n "$remaining" ]; do
+    token=${remaining%%.*}
+    case "$token" in
+      ''|"$remaining") remaining= ;;
+      *) remaining=${remaining#*.} ;;
+    esac
+    case "$token" in
+      ''|*[!0-9A-Za-z-]*) return 1 ;;
+    esac
+  done
+  return 0
+}
+
+_fm_nm_is_semver_identifier() {  # <prerelease_token>
+  local tok=$1
+  [ -n "$tok" ] || return 1
+  case "$tok" in
+    *[!0-9A-Za-z-]*) return 1 ;;
+  esac
+  case "$tok" in
+    0) return 0 ;;
+    [1-9]*)
+      case "$tok" in
+        *[!0-9]*) return 0 ;;
+        *) return 0 ;;
+      esac ;;
+    0*)
+      case "$tok" in
+        *[!0-9]*) return 0 ;;
+        *) return 1 ;;
+      esac ;;
+    *) return 0 ;;
+  esac
 }
 
 _fm_nm_semver_prerelease_ge() {  # <a_prerelease> <b_prerelease>
   local a=$1 b=$2 a_len b_len i a_tok b_tok
-  [ -z "$a" ] && [ -z "$b" ] && return 0
-  [ -z "$a" ] && return 0
-  [ -z "$b" ] && return 1
+  [ -z "${a:-}" ] && [ -z "${b:-}" ] && return 0
+  [ -z "${a:-}" ] && return 0
+  [ -z "${b:-}" ] && return 1
   a_len=${#a}
   b_len=${#b}
   i=0
@@ -76,10 +189,10 @@ _fm_nm_semver_prerelease_ge() {  # <a_prerelease> <b_prerelease>
     b_tok=${b%%.*}
     [ "$a_tok" = "$a" ] && a= || a=${a#*.}
     [ "$b_tok" = "$b" ] && b= || b=${b#*.}
-    [ -z "$a_tok" ] && [ -z "$b_tok" ] && break
-    [ -z "$a_tok" ] && return 1
-    [ -z "$b_tok" ] && return 0
-    case "$a_tok$b_tok" in
+    [ -z "${a_tok:-}" ] && [ -z "${b_tok:-}" ] && break
+    [ -z "${a_tok:-}" ] && return 1
+    [ -z "${b_tok:-}" ] && return 0
+    case "${a_tok:-}${b_tok:-}" in
       *[!0-9]*)
         case "$a_tok" in
           *[!0-9]*)
@@ -149,7 +262,11 @@ fm_nm_bootstrap_compatible() {
   version_failed=0
   if output=$(fm_nm_help_probe --version); then
     version_token=$(printf '%s\n' "$output" | sed -nE 's/^no-mistakes version ([^[:space:]]+).*/\1/p' | head -n 1)
-    version=$(printf '%s\n' "$version_token" | sed -nE 's/^[vV]?([0-9]+)\.([0-9]+)\.([0-9]+)([-+].*)?$/\1.\2.\3\4/p')
+    if _fm_nm_is_semver "$version_token"; then
+      version=$(printf '%s\n' "$version_token" | sed -nE 's/^[vV]?([0-9]+\.[0-9]+\.[0-9]+([-+].*)?)$/\1/p')
+    else
+      version=
+    fi
   else
     version_failed=1
     version_token=

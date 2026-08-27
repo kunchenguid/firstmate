@@ -110,6 +110,17 @@ if [ "${1:-}" = watch ] && [ "${2:-}" = --help ]; then
     error)
       echo 'panic: runtime error' >&2
       exit 2 ;;
+    cobra-combined)
+      printf '%s\n' 'Usage:' '  no-mistakes watch [flags]' \
+        'Flags:' '  -p, --pr URL   URL of the pull/merge request to watch'
+      exit 0 ;;
+    cobra-alias)
+      printf '%s\n' 'Usage:' '  no-mistakes watch [flags]' \
+        'Flags:' '      --pr, --pull-request string   URL of the pull/merge request to watch'
+      exit 0 ;;
+    description-only)
+      printf '%s\n' 'Description: uses the --pr flag; no flags section'
+      exit 0 ;;
     *)
       printf '%s\n' 'Usage:' '  no-mistakes watch --pr <url> [flags]' \
         'Flags:' '      --pr string   URL of the pull/merge request to watch (required)'
@@ -127,6 +138,14 @@ if [ "${1:-}" = axi ] && [ "${2:-}" = run ] && [ "${3:-}" = --help ]; then
     error)
       echo 'panic: runtime error' >&2
       exit 2 ;;
+    cobra-combined)
+      printf '%s\n' 'Usage:' '  no-mistakes axi run [flags]' \
+        'Flags:' '  -i, --intent string   what the user set out to accomplish'
+      exit 0 ;;
+    cobra-alias)
+      printf '%s\n' 'Usage:' '  no-mistakes axi run [flags]' \
+        'Flags:' '      --intent, --goal string   what the user set out to accomplish'
+      exit 0 ;;
     *)
       printf '%s\n' 'Usage:' '  no-mistakes axi run [flags]' \
         'Flags:' '      --intent string   what the user set out to accomplish'
@@ -518,6 +537,13 @@ SemVer prerelease below exact floor is rejected^no-mistakes version v1.31.2-rc.1
 SemVer prerelease of lower version is rejected^no-mistakes version v1.31.1-rc.3 (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes v1.31.1-rc.3 is installed but below required v1.31.2; upgrade it before relying on Firstmate's validation contract (upgrade: no-mistakes update)
 SemVer with build metadata at floor is accepted^no-mistakes version v1.31.2+build.7 (fake)^ok^ok^ok^empty^
 SemVer prerelease with build metadata below floor is rejected^no-mistakes version v1.31.2-alpha.1+sha.a3b (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes v1.31.2-alpha.1+sha.a3b is installed but below required v1.31.2; upgrade it before relying on Firstmate's validation contract (upgrade: no-mistakes update)
+malformed SemVer leading zero major is unclassifiable^no-mistakes version v01.32.0 (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version cannot be compared with required v1.31.2 and it is not a recognized commit-hash development build; install or upgrade to a versioned build (upgrade: no-mistakes update)
+malformed SemVer empty prerelease is unclassifiable^no-mistakes version v1.32.0- (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version cannot be compared with required v1.31.2 and it is not a recognized commit-hash development build; install or upgrade to a versioned build (upgrade: no-mistakes update)
+malformed SemVer empty build metadata is unclassifiable^no-mistakes version v1.32.0+ (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version cannot be compared with required v1.31.2 and it is not a recognized commit-hash development build; install or upgrade to a versioned build (upgrade: no-mistakes update)
+malformed SemVer double-dot prerelease is unclassifiable^no-mistakes version v1.32.0-rc..1 (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version cannot be compared with required v1.31.2 and it is not a recognized commit-hash development build; install or upgrade to a versioned build (upgrade: no-mistakes update)
+SemVer meeting floor with cobra short-long watch and intent is accepted^no-mistakes version v1.31.2 (fake)^cobra-combined^cobra-combined^ok^empty^
+SemVer meeting floor with long-alias watch and intent is accepted^no-mistakes version v1.31.2 (fake)^cobra-alias^cobra-alias^ok^empty^
+SemVer meeting floor with watch flag only in description text is rejected^no-mistakes version v1.31.2 (fake)^description-only^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes v1.31.2 is installed but required capability watch --pr is unavailable; upgrade it before using direct-PR delivery (upgrade: no-mistakes update)
 SemVer meeting floor missing AXI intent is incompatible^no-mistakes version v1.31.2 (fake)^ok^no-intent^ok^exact^NM_INCOMPATIBLE: no-mistakes v1.31.2 is installed but required capability axi run --intent is unavailable; upgrade it before relying on Firstmate's validation contract (upgrade: no-mistakes update)
 newer SemVer missing AXI intent is incompatible^no-mistakes version v1.32.0 (fake)^ok^no-intent^ok^exact^NM_INCOMPATIBLE: no-mistakes v1.32.0 is installed but required capability axi run --intent is unavailable; upgrade it before relying on Firstmate's validation contract (upgrade: no-mistakes update)
 capable commit-hash build is accepted^no-mistakes version 5c46a8b (5c46a8b) 2026-08-26T06:12:28Z^ok^ok^ok^empty^
