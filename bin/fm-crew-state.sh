@@ -28,9 +28,10 @@
 #      unreachable or unreadable remote reports unknown-remote, never a false
 #      gone/dead.
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
-#      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
-#      fallback)? Branch name alone is not enough: a historical run on a reused
-#      branch whose head was rewritten or diverged must not be attributed.
+#      active or terminal (from `axi status`, its pipeline-owned branch_sync
+#      binding, or the coarse `no-mistakes runs` fallback)? Branch name alone is
+#      not enough: a historical run on a reused branch whose head was rewritten
+#      or diverged must not be attributed.
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
 #      the same line of history). Local work that advanced past the run head, or
@@ -430,6 +431,63 @@ nm_coarse_head_matches_worktree() {  # <short-sha>
   fm_nm_head_matches_worktree "$WT" "$1"
 }
 
+# `axi status` can name another run as the repository-wide active/recent one
+# while branch_sync identifies this worktree's pipeline-owned run. Accept that
+# alternate identity only when the binding is complete: branch_sync says the
+# pipeline owns it, its current head is on this worktree's history, and a
+# direct status lookup repeats the exact run ID, crew branch, and head.
+nm_branch_sync_field() {  # <key>
+  local key=$1
+  printf '%s\n' "$RUN_OUT" | awk -v key="$key" '
+    function indent(line) { match(line, /[^[:space:]]/); return RSTART - 1 }
+    /^[[:space:]]*branch_sync:[[:space:]]*$/ { base = indent($0); in_sync = 1; next }
+    in_sync && $0 ~ /[^[:space:]]/ && indent($0) <= base { exit }
+    in_sync && $0 ~ "^[[:space:]]*" key ":[[:space:]]*" {
+      sub("^[[:space:]]*" key ":[[:space:]]*", "")
+      print
+      exit
+    }
+  '
+}
+nm_branch_sync_pipeline_field() {  # <key>
+  local key=$1
+  printf '%s\n' "$RUN_OUT" | awk -v key="$key" '
+    function indent(line) { match(line, /[^[:space:]]/); return RSTART - 1 }
+    /^[[:space:]]*branch_sync:[[:space:]]*$/ { sync_indent = indent($0); in_sync = 1; next }
+    in_sync && $0 ~ /[^[:space:]]/ && indent($0) <= sync_indent { exit }
+    in_sync && /^[[:space:]]*pipeline:[[:space:]]*$/ { pipeline_indent = indent($0); in_pipeline = 1; next }
+    in_pipeline && $0 ~ /[^[:space:]]/ && indent($0) <= pipeline_indent { exit }
+    in_pipeline && $0 ~ "^[[:space:]]*" key ":[[:space:]]*" {
+      sub("^[[:space:]]*" key ":[[:space:]]*", "")
+      print
+      exit
+    }
+  '
+}
+nm_same_commit() {  # <head-a> <head-b>
+  local a b
+  a=$(git -C "$WT" rev-parse --verify "${1}^{commit}" 2>/dev/null) || return 1
+  b=$(git -C "$WT" rev-parse --verify "${2}^{commit}" 2>/dev/null) || return 1
+  [ "$a" = "$b" ]
+}
+nm_pipeline_owned_run() {
+  local pipeline_run pipeline_head pipeline_out detail_id detail_branch detail_head
+  [ "$(strip_quotes "$(nm_branch_sync_field state)")" = pipeline_owned ] || return 1
+  pipeline_run=$(strip_quotes "$(nm_branch_sync_pipeline_field run)")
+  pipeline_head=$(strip_quotes "$(nm_branch_sync_pipeline_field current_head)")
+  [ -n "$pipeline_run" ] && [ -n "$pipeline_head" ] || return 1
+  fm_nm_head_matches_worktree "$WT" "$pipeline_head" || return 1
+  pipeline_out=$(nm_run axi status --run "$pipeline_run")
+  [ -n "$pipeline_out" ] || return 1
+  detail_id=$(strip_quotes "$(fm_nm_field "$pipeline_out" id)")
+  detail_branch=$(strip_quotes "$(fm_nm_field "$pipeline_out" branch)")
+  detail_head=$(strip_quotes "$(fm_nm_field "$pipeline_out" head)")
+  [ "$detail_id" = "$pipeline_run" ] && [ "$detail_branch" = "$CREW_BRANCH" ] || return 1
+  nm_same_commit "$pipeline_head" "$detail_head" || return 1
+  fm_nm_head_matches_worktree "$WT" "$detail_head" || return 1
+  RUN_OUT=$pipeline_out
+}
+
 HAVE_RUN=0
 # RUN_SOURCE distinguishes the two ways HAVE_RUN=1 can happen: "full" means
 # $RUN_OUT is real `axi status` TOON with step/gate detail; "coarse" means only
@@ -446,6 +504,11 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
       HAVE_RUN=1
     else
+      if nm_pipeline_owned_run; then
+        HAVE_RUN=1
+      fi
+    fi
+    if [ "$HAVE_RUN" = 0 ]; then
       # The active-or-most-recent run is for another branch, or same branch with
       # a rewritten/diverged head (the CLI is alive and answered; only the
       # attribution missed) - try the coarse fallback.

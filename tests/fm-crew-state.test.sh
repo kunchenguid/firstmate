@@ -291,6 +291,16 @@ outcome: failed
 EOF
 }
 
+branch_sync_pipeline_owned() {  # <run-id> <current-head>
+  cat <<EOF
+branch_sync:
+  state: pipeline_owned
+  pipeline:
+    run: "$1"
+    current_head: "$2"
+EOF
+}
+
 run_ci_monitoring() {  # <branch>
   cat <<EOF
 run:
@@ -736,6 +746,67 @@ EOF
   assert_contains "$out" "state: working" "most recent (running) row wins over an older completed row"
   assert_contains "$out" "source: run-step" "most-recent-row resolution -> run-step source"
   pass "cross-branch attribution picks the branch's most recent row"
+}
+
+# A pipeline-owned review-fix round can advance its current head while the
+# isolated crew copy remains at the submitted head. The repository-wide status
+# may meanwhile name another run, and the coarse list can still contain an
+# older failed row at the submitted head. The proven branch_sync run identity
+# must win over that historical coarse row.
+test_pipeline_owned_run_beats_historical_coarse_failure() {
+  reset_fakes
+  local d base_head pipeline_head short out
+  d=$(new_case pipeline-owned-current)
+  make_repo_on_branch "$d/wt" fm/feat-pipeline-owned
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'pipeline-owned review fix'
+  pipeline_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" reset -q --hard "$base_head"
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/pipeline-owned.meta" "window=fm:fm-pipeline-owned" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)
+$(branch_sync_pipeline_owned 01CURRENT "$pipeline_head")"
+  FM_FAKE_RUN_HEAD="$pipeline_head"
+  FM_FAKE_AXI_STATUS_RUN="$(run_fixing fm/feat-pipeline-owned | sed 's/01RUN/01CURRENT/')"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+running    fm/other-crew aaaaaaa  2026-08-20 12:10
+failed     fm/feat-pipeline-owned ${short}  2026-08-20 12:00
+EOF
+)"
+  out=$(run_crew_state "$d" pipeline-owned)
+  assert_contains "$out" "state: working" "pipeline-owned review-fix run must not report historical failure"
+  assert_contains "$out" "source: run-step" "pipeline-owned run is authoritative"
+  assert_contains "$out" "validating (fixing)" "pipeline-owned review-fix round is surfaced"
+  pass "pipeline-owned run beats historical coarse failure"
+}
+
+# A branch_sync record that names a divergent tip has not proven pipeline
+# custody of this worktree. It must not weaken rewritten-tip protection.
+test_pipeline_owned_run_requires_current_head_binding() {
+  reset_fakes
+  local d divergent_head out
+  d=$(new_case pipeline-owned-divergent)
+  make_repo_on_branch "$d/wt" fm/feat-pipeline-divergent
+  git -C "$d/wt" checkout -q --orphan divergent-pipeline
+  git -C "$d/wt" commit -q --allow-empty -m 'unrelated pipeline tip'
+  divergent_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" checkout -q fm/feat-pipeline-divergent
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/pipeline-divergent.meta" "window=fm:fm-pipeline-divergent" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: current worker is active\n' > "$d/state/pipeline-divergent.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)
+$(branch_sync_pipeline_owned 01CURRENT "$divergent_head")"
+  FM_FAKE_RUN_HEAD="$divergent_head"
+  FM_FAKE_AXI_STATUS_RUN="$(run_fixing fm/feat-pipeline-divergent | sed 's/01RUN/01CURRENT/')"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" pipeline-divergent
+  out=$(run_crew_state "$d" pipeline-divergent)
+  assert_not_contains "$out" "source: run-step" "divergent branch_sync head must not bind a pipeline run"
+  assert_contains "$out" "source: status-log" "unbound pipeline record falls back to current state"
+  assert_contains "$out" "state: working" "unbound pipeline record does not mask current worker state"
+  pass "pipeline-owned run requires current-head binding"
 }
 
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
@@ -1430,6 +1501,8 @@ test_terminal_passed
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
+test_pipeline_owned_run_beats_historical_coarse_failure
+test_pipeline_owned_run_requires_current_head_binding
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
