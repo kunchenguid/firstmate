@@ -134,10 +134,13 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
-#   Before a fresh ship or scout worker starts, its clean task worktree fetches
-#   origin, resolves the current remote default branch, and resets to its tip.
-#   An unreachable origin, unresolved default branch, or non-clean worktree
-#   refuses the spawn rather than risking a PR based on stale history.
+#   Before a fresh ship or scout worker starts, its clean task worktree uses the
+#   fetched tip of origin's resolved default branch when origin exists. An
+#   originless scout or local-only ship instead uses the local main or master
+#   branch without creating a remote. An originless no-mistakes or direct-PR ship
+#   is refused because it cannot safely publish. An unreachable origin,
+#   unresolved default branch, or non-clean worktree refuses the spawn rather
+#   than risking work from an unverifiable base.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -1792,8 +1795,63 @@ EOF
   printf '%s' "$lines" >&2
 }
 
-freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
+freshen_spawn_worktree_local_base() {  # <worktree>
+  local worktree=$1 default target expected actual status branch
+  default=
+  for branch in main master; do
+    if git -C "$worktree" show-ref --verify --quiet "refs/heads/$branch"; then
+      default=$branch
+      break
+    fi
+  done
+  if [ -z "$default" ]; then
+    echo "error: could not determine local main or master branch for originless pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    return 1
+  fi
+  target="refs/heads/$default"
+  expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
+    echo "error: local base '$default' is not a commit for originless pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    return 1
+  }
+  status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
+    echo "error: could not inspect originless pooled worktree '$worktree' before refreshing its base" >&2
+    return 1
+  }
+  if [ -n "$status" ]; then
+    if describe_stale_submodule_pins "$worktree" "$status"; then
+      echo "error: pooled worktree '$worktree' has a stale submodule checkout, not uncommitted work; refusing to launch and leaving it untouched" >&2
+    else
+      echo "error: pooled worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its local base" >&2
+    fi
+    return 1
+  fi
+  if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
+    echo "error: could not reset originless pooled worktree '$worktree' to '$default'; refusing to launch from a potentially stale base" >&2
+    return 1
+  fi
+  actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+  if [ "$actual" != "$expected" ]; then
+    echo "error: originless pooled worktree '$worktree' is at '${actual:-unknown}', not current '$default' ('$expected'); refusing to launch" >&2
+    return 1
+  fi
+}
+
+freshen_spawn_worktree_base() {  # <worktree> <kind> <mode>
+  local worktree=$1 kind=$2 mode=$3 origin_remotes
+  if ! origin_remotes=$(git -C "$worktree" remote); then
+    echo "error: could not inspect remotes for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$origin_remotes" | grep -Fxq origin; then
+    if [ "$kind" = scout ] || { [ "$kind" = ship ] && [ "$mode" = local-only ]; }; then
+      freshen_spawn_worktree_local_base "$worktree"
+      return $?
+    fi
+    echo "error: pooled worktree '$worktree' has no origin; refusing to launch an originless $mode ship because only local-only ships and scouts may use a local base" >&2
+    return 1
+  fi
+
+  local default target expected actual status
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
@@ -2330,7 +2388,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
-  freshen_spawn_worktree_base "$WT" || exit 1
+  freshen_spawn_worktree_base "$WT" "$KIND" "$MODE" || exit 1
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

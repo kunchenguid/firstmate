@@ -67,6 +67,33 @@ make_case() {
   printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
 }
 
+make_originless_case() {
+  local name=$1 id=$2 default=${3:-main} case_dir home project pool fakebin initial
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  pool="$case_dir/pool"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b "$default" "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  initial=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" worktree add --quiet --detach "$pool" "$initial"
+
+  printf 'must survive an originless local-base refresh\n' > "$project/advanced-local-base.txt"
+  git -C "$project" add advanced-local-base.txt
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-local-base
+
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
+}
+
 read_case_record() {
   IFS='|' read -r CASE_DIR HOME_DIR PROJECT_DIR POOL_DIR FAKEBIN_DIR INITIAL_SHA DEFAULT_BRANCH <<EOF
 $1
@@ -450,6 +477,135 @@ test_stale_pin_beside_other_dirt_reports_one_verdict() {
   pass "a stale pin beside other dirt yields the conservative refusal alone, with no stale-pin line"
 }
 
+test_originless_local_bases_for_scout_and_local_ship() {
+  local rec id out status current remote_before remote_after
+
+  id='originless-scout-local-base-r12'
+  rec=$(make_originless_case originless-scout "$id" main)
+  read_case_record "$rec"
+  remote_before=$(git -C "$PROJECT_DIR" remote -v)
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "originless scout should launch from the local default branch"
+  assert_contains "$out" "spawned $id" "originless scout did not report success"
+  current=$(git -C "$PROJECT_DIR" rev-parse main)
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$current" ] \
+    || fail "originless scout did not refresh to the local main branch"
+  assert_grep 'must survive an originless local-base refresh' "$POOL_DIR/advanced-local-base.txt" \
+    "originless scout omitted the local main branch content"
+  [ -z "$(git -C "$POOL_DIR" status --porcelain)" ] \
+    || fail "originless scout left the pooled worktree dirty"
+  remote_after=$(git -C "$PROJECT_DIR" remote -v)
+  [ "$remote_after" = "$remote_before" ] \
+    || fail "originless scout changed the project's remote configuration"
+  [ -z "$(git -C "$POOL_DIR" remote -v)" ] \
+    || fail "originless scout added a remote to the pooled worktree"
+  assert_present "$HOME_DIR/state/$id.meta" "originless scout did not publish task metadata"
+  assert_grep 'kind=scout' "$HOME_DIR/state/$id.meta" "originless scout metadata has the wrong kind"
+
+  id='originless-local-ship-local-base-r12'
+  rec=$(make_originless_case originless-local-ship "$id" master)
+  read_case_record "$rec"
+  printf 'Delivery contract: mode=local-only\nbrief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
+  remote_before=$(git -C "$PROJECT_DIR" remote -v)
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "originless local-only ship should launch from the local default branch"
+  assert_contains "$out" "spawned $id" "originless local-only ship did not report success"
+  current=$(git -C "$PROJECT_DIR" rev-parse master)
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$current" ] \
+    || fail "originless local-only ship did not refresh to the local master branch"
+  assert_grep 'must survive an originless local-base refresh' "$POOL_DIR/advanced-local-base.txt" \
+    "originless local-only ship omitted the local master branch content"
+  [ -z "$(git -C "$POOL_DIR" status --porcelain)" ] \
+    || fail "originless local-only ship left the pooled worktree dirty"
+  remote_after=$(git -C "$PROJECT_DIR" remote -v)
+  [ "$remote_after" = "$remote_before" ] \
+    || fail "originless local-only ship changed the project's remote configuration"
+  [ -z "$(git -C "$POOL_DIR" remote -v)" ] \
+    || fail "originless local-only ship added a remote to the pooled worktree"
+  assert_present "$HOME_DIR/state/$id.meta" "originless local-only ship did not publish task metadata"
+  assert_grep 'kind=ship' "$HOME_DIR/state/$id.meta" "originless local-only ship metadata has the wrong kind"
+  assert_grep 'mode=local-only' "$HOME_DIR/state/$id.meta" "originless local-only ship metadata has the wrong mode"
+  pass "originless scouts and local-only ships refresh clean pooled worktrees from local main or master without adding a remote"
+}
+
+test_originless_publish_modes_refuse_without_origin() {
+  local rec id out status before mode
+  for mode in no-mistakes direct-PR; do
+    id="originless-$mode-refusal-r13"
+    rec=$(make_originless_case "originless-$mode-refusal" "$id")
+    read_case_record "$rec"
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
+    out=$(run_spawn "$id" --mode "$mode" --yolo off)
+    status=$?
+    [ "$status" -ne 0 ] || fail "originless $mode ship launched without an origin"
+    assert_contains "$out" "has no origin" "originless $mode ship did not explain the missing origin refusal"
+    assert_contains "$out" "refusing to launch" "originless $mode ship did not refuse launch"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+      || fail "originless $mode refusal moved the pooled worktree"
+    [ -z "$(git -C "$PROJECT_DIR" remote -v)" ] \
+      || fail "originless $mode refusal changed the project's remote configuration"
+    [ -z "$(git -C "$POOL_DIR" remote -v)" ] \
+      || fail "originless $mode refusal added a remote to the pooled worktree"
+    assert_absent "$HOME_DIR/state/$id.meta" "originless $mode refusal published task metadata"
+  done
+  pass "originless no-mistakes and direct-PR ships remain refused without a remote"
+}
+
+test_originless_allowed_modes_refuse_dirty_pool() {
+  local rec id out status before contract
+  for contract in scout local-only; do
+    id="originless-dirty-$contract-r14"
+    rec=$(make_originless_case "originless-dirty-$contract" "$id")
+    read_case_record "$rec"
+    if [ "$contract" = local-only ]; then
+      printf 'Delivery contract: mode=local-only\nbrief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
+    fi
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
+    printf 'keep this originless local work\n' > "$POOL_DIR/uncommitted.txt"
+    if [ "$contract" = scout ]; then
+      out=$(run_spawn "$id" --scout)
+    else
+      out=$(run_spawn "$id" --mode local-only --yolo off)
+    fi
+    status=$?
+    [ "$status" -ne 0 ] || fail "originless $contract launched despite a dirty pooled worktree"
+    assert_contains "$out" "is not clean" "originless $contract did not refuse a dirty pooled worktree"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+      || fail "originless $contract refusal moved the pooled worktree"
+    assert_grep 'keep this originless local work' "$POOL_DIR/uncommitted.txt" \
+      "originless $contract refusal discarded local work"
+    assert_absent "$HOME_DIR/state/$id.meta" "originless $contract refusal published task metadata"
+  done
+  pass "originless scouts and local-only ships refuse dirty pooled worktrees without discarding local work"
+}
+
+test_originless_missing_local_default_refuses() {
+  local rec id out status before
+  id='originless-missing-default-r15'
+  rec=$(make_originless_case missing-local-default "$id" feature)
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "originless scout launched without a local main or master branch"
+  assert_contains "$out" "could not determine local main or master branch" \
+    "originless scout did not refuse an unsafe missing local default"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "missing local default refusal moved the pooled worktree"
+  [ -z "$(git -C "$PROJECT_DIR" remote -v)" ] \
+    || fail "missing local default refusal changed the project's remote configuration"
+  [ -z "$(git -C "$POOL_DIR" remote -v)" ] \
+    || fail "missing local default refusal added a remote to the pooled worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" "missing local default refusal published task metadata"
+  pass "an originless spawn refuses when no local main or master branch can be proven"
+}
+
+test_originless_local_bases_for_scout_and_local_ship
+test_originless_publish_modes_refuse_without_origin
+test_originless_allowed_modes_refuse_dirty_pool
+test_originless_missing_local_default_refuses
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
