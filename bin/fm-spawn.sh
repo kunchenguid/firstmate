@@ -1745,6 +1745,31 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+# Resolve the default branch of a primary checkout that has no origin remote.
+# fm-ff-lib's default_branch only knows origin/HEAD and a local main/master, so
+# a registered local-only project on any other default name (e.g. trunk) needs
+# the primary checkout's own signals: the branch it has checked out, then a
+# configured init.defaultBranch that names an existing local branch. Echoes the
+# name, or returns 1 when no signal resolves an existing branch.
+remoteless_default_branch() {  # <primary-checkout>
+  local primary=$1 branch
+  if branch=$(default_branch "$primary"); then
+    printf '%s\n' "$branch"
+    return 0
+  fi
+  branch=$(git -C "$primary" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  if [ -n "$branch" ]; then
+    printf '%s\n' "$branch"
+    return 0
+  fi
+  branch=$(git -C "$primary" config --get init.defaultBranch 2>/dev/null || true)
+  if [ -n "$branch" ] && git -C "$primary" show-ref --verify --quiet "refs/heads/$branch"; then
+    printf '%s\n' "$branch"
+    return 0
+  fi
+  return 1
+}
+
 freshen_spawn_worktree_base() {  # <worktree> <primary-checkout>
   local worktree=$1 primary=$2 default target expected actual status
   if git -C "$worktree" remote get-url origin >/dev/null 2>&1; then
@@ -1773,9 +1798,11 @@ freshen_spawn_worktree_base() {  # <worktree> <primary-checkout>
     # No origin remote: a registered local-only project. The pool worktree
     # shares the primary checkout's object store and refs, so the primary's
     # own default-branch tip IS the freshest possible base; there is nothing
-    # external to fetch. Refuse rather than guess when that branch cannot be
-    # resolved.
-    default=$(default_branch "$primary") || {
+    # external to fetch. The default branch can carry any name here, so
+    # remoteless_default_branch falls back to the primary's own checked-out
+    # branch and init.defaultBranch after the main/master helper. Refuse
+    # rather than guess when no signal resolves an existing branch.
+    default=$(remoteless_default_branch "$primary") || {
       echo "error: could not determine the default branch of remoteless primary checkout '$primary' for pooled worktree '$worktree'; refusing to launch from a guessed base" >&2
       return 1
     }

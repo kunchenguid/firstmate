@@ -305,11 +305,53 @@ test_remoteless_dirty_pool_refuses_without_discarding_work() {
   pass "a dirty remoteless pooled worktree is refused without discarding its local work"
 }
 
+test_remoteless_non_main_default_refreshes_to_primary_tip() {
+  local rec id out status current branch_head
+  id='pool-remoteless-trunk-r8'
+  rec=$(make_remoteless_case remoteless-trunk "$id" trunk)
+  read_case_record "$rec"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should refresh a remoteless pooled worktree from a trunk default branch"
+  assert_contains "$out" "spawned $id" "spawn did not report success for a remoteless trunk project"
+  current=$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$DEFAULT_BRANCH")
+  branch_head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$branch_head" = "$current" ] || fail "spawn did not refresh to the remoteless primary's $DEFAULT_BRANCH tip"
+  [ "$branch_head" != "$INITIAL_SHA" ] || fail "fixture did not prove $DEFAULT_BRANCH advanced past the pool base"
+  assert_grep 'must survive a newly spawned branch' "$POOL_DIR/advanced-local.txt" \
+    "spawn omitted content committed to the remoteless trunk primary after pool allocation"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed remoteless trunk spawn: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+    printf '# observed remoteless trunk base: HEAD=%s primary/%s=%s\n' "$branch_head" "$DEFAULT_BRANCH" "$current"
+  fi
+  pass "a remoteless primary on a non-main default branch refreshes the pooled worktree to its tip"
+}
+
+test_remoteless_detached_primary_uses_configured_default() {
+  local rec id out status current branch_head
+  id='pool-remoteless-configured-r9'
+  rec=$(make_remoteless_case remoteless-configured "$id" trunk)
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" checkout --quiet --detach
+  git -C "$PROJECT_DIR" config init.defaultBranch "$DEFAULT_BRANCH"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should resolve a detached remoteless primary through init.defaultBranch"
+  current=$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$DEFAULT_BRANCH")
+  branch_head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$branch_head" = "$current" ] || fail "spawn did not refresh to the configured default branch's tip"
+  pass "a detached remoteless primary resolves its default branch from init.defaultBranch"
+}
+
 test_remoteless_unresolvable_default_refuses_pool() {
   local rec id out status before
-  id='pool-remoteless-nodefault-r8'
+  id='pool-remoteless-nodefault-r10'
   rec=$(make_remoteless_case remoteless-nodefault "$id" trunk)
   read_case_record "$rec"
+  git -C "$PROJECT_DIR" checkout --quiet --detach
+  git -C "$PROJECT_DIR" config init.defaultBranch missing-default
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
@@ -322,7 +364,7 @@ test_remoteless_unresolvable_default_refuses_pool() {
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf '# observed remoteless nodefault refusal: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
   fi
-  pass "an unresolvable default branch refuses the remoteless pooled worktree rather than guessing a base"
+  pass "a detached primary with no resolvable default branch refuses the remoteless pooled worktree rather than guessing a base"
 }
 
 test_stale_pool_base_refreshes_before_branching
@@ -333,6 +375,8 @@ test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
 test_remoteless_ship_and_scout_refresh_to_primary_default_tip
 test_remoteless_dirty_pool_refuses_without_discarding_work
+test_remoteless_non_main_default_refreshes_to_primary_tip
+test_remoteless_detached_primary_uses_configured_default
 test_remoteless_unresolvable_default_refuses_pool
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
