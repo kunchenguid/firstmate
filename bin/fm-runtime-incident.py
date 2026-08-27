@@ -54,6 +54,7 @@ MAX_EVIDENCE_BYTES = 1024 * 1024
 MAX_COPIES = 64
 DEFAULT_STATUS_LIMIT = 20
 MAX_BRANCHES_PER_COPY = 100
+MAX_AGGREGATE_ITEMS = 256
 MAX_SCAN_DEPTH = 3
 GIT_TIMEOUT = 4
 CREW_STATE_TIMEOUT = 12
@@ -405,12 +406,13 @@ def collect_repositories(repo: Path, state: Path, projects: Path, scan_roots: li
             and not remote_default_conflict
         )
     current_main = [row for row in records if row["current_main"]]
+    fallback_candidates = [row for row in records if not row["stale_remote"]]
     if current_main:
         authoritative = sorted(current_main, key=lambda row: (row["path"] != str(canonical), row["path"]))[0]
         authoritative_worktree: str | None = authoritative["path"]
     elif not remote_default_conflict:
         authoritative = sorted(
-            records,
+            fallback_candidates,
             key=lambda row: (
                 -(row["remote_default_epoch"] or -1),
                 row["path"] != str(canonical),
@@ -419,7 +421,10 @@ def collect_repositories(repo: Path, state: Path, projects: Path, scan_roots: li
         )[0]
         authoritative_worktree = None
     else:
-        authoritative = next((row for row in records if row["path"] == str(canonical)), records[0])
+        authoritative = next(
+            (row for row in fallback_candidates if row["path"] == str(canonical)),
+            fallback_candidates[0],
+        )
         authoritative_worktree = None
 
     authority_path = Path(authoritative["path"])
@@ -433,6 +438,13 @@ def collect_repositories(repo: Path, state: Path, projects: Path, scan_roots: li
     common_dirs = {row["common_dir"] for row in records if row["common_dir"]}
     detached = [row["path"] for row in records if row["detached"]]
     superseded = [row["path"] for row in records if row["stale_remote"]]
+    branch_budget = MAX_AGGREGATE_ITEMS
+    for row in records:
+        branches = row["branches"]
+        shown = branches[:branch_budget]
+        row["branches"] = shown
+        row["branches_omitted_at_least"] += len(branches) - len(shown)
+        branch_budget -= len(shown)
     all_branches = [
         {"repository": row["path"], **branch}
         for row in records
@@ -710,6 +722,10 @@ def list_of_objects(value: Any) -> list[dict[str, Any]]:
     return [row for row in value if isinstance(row, dict)] if isinstance(value, list) else []
 
 
+def bounded_items(values: list[Any]) -> tuple[list[Any], int]:
+    return values[:MAX_AGGREGATE_ITEMS], max(0, len(values) - MAX_AGGREGATE_ITEMS)
+
+
 def compact(value: Any, maximum: int = 160) -> str:
     text = re.sub(r"\s+", " ", str(value)).strip()
     return text[:maximum]
@@ -865,10 +881,36 @@ def classify(evidence: dict[str, Any], repo_info: dict[str, Any]) -> dict[str, A
     else:
         next_action = "Gather the missing runtime or provider evidence; do not create a code branch or run validation yet."
 
+    supporting_values = unique_strings(supporting) or ["no decisive runtime evidence was supplied"]
+    supporting_shown, supporting_omitted = bounded_items(supporting_values)
+    runtime_observations, runtime_omitted = bounded_items([
+        {
+            "source": compact(row.get("source", "unknown"), 80),
+            "kind": compact(row.get("kind", "unknown"), 80),
+            "code": compact(row.get("code", "unknown"), 120),
+        }
+        for row in runtime_errors
+    ])
+    provider_observations, providers_omitted = bounded_items([
+        {
+            "name": compact(row.get("name", "unknown"), 80),
+            "status": compact(row.get("status", "unknown"), 80),
+            "code": compact(row.get("code", ""), 120) or None,
+        }
+        for row in providers
+    ])
+    service_observations, services_omitted = bounded_items([
+        {
+            "name": compact(row.get("name", "unknown"), 80),
+            "status": compact(row.get("status", "unknown"), 80),
+        }
+        for row in services
+    ])
+
     return {
         "classification": category,
         "probable_root_cause": probable,
-        "supporting_evidence": unique_strings(supporting) or ["no decisive runtime evidence was supplied"],
+        "supporting_evidence": supporting_shown,
         "code_change_required": code_required,
         "hotfix_already_deployed": hotfix_already_deployed,
         "operational_repair_ready": operational_repair_ready,
@@ -880,31 +922,29 @@ def classify(evidence: dict[str, Any], repo_info: dict[str, Any]) -> dict[str, A
                 "routing_mismatch": production.get("routing_mismatch") is True,
                 "deployment_failed": production.get("deployment_failed") is True,
             },
-            "runtime_errors": [
-                {
-                    "source": compact(row.get("source", "unknown"), 80),
-                    "kind": compact(row.get("kind", "unknown"), 80),
-                    "code": compact(row.get("code", "unknown"), 120),
-                }
-                for row in runtime_errors
-            ],
-            "external_providers": [
-                {
-                    "name": compact(row.get("name", "unknown"), 80),
-                    "status": compact(row.get("status", "unknown"), 80),
-                    "code": compact(row.get("code", ""), 120) or None,
-                }
-                for row in providers
-            ],
-            "local_services": [
-                {
-                    "name": compact(row.get("name", "unknown"), 80),
-                    "status": compact(row.get("status", "unknown"), 80),
-                }
-                for row in services
-            ],
+            "runtime_errors": runtime_observations,
+            "external_providers": provider_observations,
+            "local_services": service_observations,
             "reproduction": compact(runtime.get("reproduction", ""), 240) or None,
             "proven_path": compact(runtime.get("proven_path", ""), 240) or None,
+            "inventory": {
+                "supporting_evidence": {
+                    "shown": len(supporting_shown),
+                    "omitted": supporting_omitted,
+                },
+                "runtime_errors": {
+                    "shown": len(runtime_observations),
+                    "omitted": runtime_omitted,
+                },
+                "external_providers": {
+                    "shown": len(provider_observations),
+                    "omitted": providers_omitted,
+                },
+                "local_services": {
+                    "shown": len(service_observations),
+                    "omitted": services_omitted,
+                },
+            },
         },
         "approval": {
             "required": approval_required,
@@ -960,11 +1000,13 @@ def read_incident(base: dict[str, Path], incident_id: str) -> dict[str, Any]:
 
 
 def write_json(path: Path, value: dict[str, Any]) -> None:
+    payload = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+    if len(payload) > STATE_READ_LIMIT:
+        raise IncidentError(f"incident record exceeds {STATE_READ_LIMIT} bytes: {value.get('id', path.stem)}")
     fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        with os.fdopen(fd, "w") as handle:
-            json.dump(value, handle, indent=2, sort_keys=True)
-            handle.write("\n")
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(name, path)
@@ -990,7 +1032,7 @@ def update_incident(
 
 def lifecycle_advanced(record: dict[str, Any]) -> bool:
     return bool(
-        record.get("phase") in {"repair", "verification"}
+        record.get("phase") in {"approval", "repair", "verification"}
         or record.get("diagnosis", {}).get("code_change_required") == "yes"
         or record.get("approval", {}).get("status") == "approved"
         or record.get("repair", {}).get("status") != "pending"
@@ -1048,6 +1090,12 @@ def output_record(record: dict[str, Any], as_json: bool) -> None:
     print(f"Scanned repositories omitted: at least {scanned_omitted}")
     print(f"Repository candidates omitted by bound: {inventory.get('candidate_paths', {}).get('omitted', 0)}")
     print(f"Branches omitted by bound: at least {inventory.get('branches', {}).get('omitted_at_least', 0)}")
+    evidence_inventory = record["diagnosis"].get("observations", {}).get("inventory", {})
+    evidence_omitted = sum(item.get("omitted", 0) for item in evidence_inventory.values())
+    print(f"Evidence items omitted by aggregate bounds: {evidence_omitted}")
+    verification_inventory = record.get("verification", {}).get("inventory", {})
+    verification_omitted = sum(item.get("omitted", 0) for item in verification_inventory.values())
+    print(f"Verification checks omitted by aggregate bounds: {verification_omitted}")
     print(f"Safest next action: {record['safest_next_action']}")
     approval = record["approval"]
     print(f"Approval required: {approval['kind'] if approval['required'] else 'no'}")
@@ -1076,6 +1124,8 @@ def status_projection(record: dict[str, Any]) -> dict[str, Any]:
         "inventory": {
             "workers": record.get("workers", {}).get("inventory", {"shown": 0, "omitted": 0}),
             "repository": record.get("repository", {}).get("inventory", {}),
+            "evidence": record.get("diagnosis", {}).get("observations", {}).get("inventory", {}),
+            "verification": record.get("verification", {}).get("inventory", {}),
         },
         "safest_next_action": record["safest_next_action"],
     }
@@ -1228,14 +1278,14 @@ def verify(args: argparse.Namespace) -> int:
         and checks
         and all(compact(row.get("status", "")).lower() in VERIFICATION_PASS for row in checks)
     )
-    safe_checks = [
+    safe_checks, checks_omitted = bounded_items([
         {
             "name": compact(row.get("name", "unnamed check"), 120),
             "status": compact(row.get("status", "unknown"), 40),
             "evidence": compact(row.get("evidence", ""), 200),
         }
         for row in checks
-    ]
+    ])
     now = utc_now()
 
     def transition(record: dict[str, Any]) -> None:
@@ -1247,6 +1297,12 @@ def verify(args: argparse.Namespace) -> int:
             "status": "complete" if complete else "failed",
             "checks": safe_checks,
             "recorded_at": now,
+            "inventory": {
+                "checks": {
+                    "shown": len(safe_checks),
+                    "omitted": checks_omitted,
+                }
+            },
         }
         record["phase"] = "verification"
         record["updated_at"] = now

@@ -203,6 +203,19 @@ test_external_quota_no_code_lifecycle_and_status() {
       and .guardrails.other_worker_mutation_authorized == false
   ' >/dev/null || fail "quota failure did not stay on the no-code fast path: $out"
 
+  if run_triage "$home" quota-lifecycle "$repo" \
+    "Titan companion cannot read state again" >/dev/null 2>&1; then
+    fail "retriage erased a pending operational approval"
+  fi
+  out=$(FM_HOME="$home" "$INCIDENT" status --incident quota-lifecycle --json)
+  printf '%s' "$out" | jq -e '
+    .phase == "approval"
+      and .approval.status == "pending"
+      and .approval.kind == "paid_plan_change"
+      and .repair.status == "pending"
+      and .verification.status == "pending"
+  ' >/dev/null || fail "pending approval was not monotonic: $out"
+
   if FM_HOME="$home" "$INCIDENT" approve --incident quota-lifecycle \
     --kind service_restart --note wrong >/dev/null 2>&1; then
     fail "mismatched approval kind was accepted"
@@ -330,6 +343,33 @@ PY
       and .verification.status == "pending"
   ' >/dev/null || fail "locked transition did not preserve the advanced incident: $out"
   pass "incident transitions read, validate, mutate, and write under one lock"
+}
+
+test_stale_remote_never_wins_fallback_authority() {
+  local home origin seed stale fresh fresh_head out
+  home=$(make_home stale-authority)
+  origin=$(make_origin stale-authority)
+  seed=$TMP_ROOT/stale-authority-seed
+  stale=$home/projects/titan-stale
+  fresh=$home/projects/titan-fresh
+  clone_origin "$origin" "$stale"
+  advance_origin "$seed" "newer history with older timestamp" 2026-08-19T12:00:00Z
+  clone_origin "$origin" "$fresh"
+  printf 'local diagnostic\n' > "$fresh/untracked.txt"
+  stale=$(cd "$stale" && pwd -P)
+  fresh=$(cd "$fresh" && pwd -P)
+  fresh_head=$(git -C "$fresh" rev-parse refs/remotes/origin/main)
+  out=$(run_triage "$home" stale-authority "$stale" \
+    "Unexplained production failure" --scan-root "$home/projects")
+  printf '%s' "$out" | jq -e --arg stale "$stale" --arg fresh "$fresh" --arg head "$fresh_head" '
+    .repository.authoritative_repository == $fresh
+      and .repository.authoritative_worktree == null
+      and .repository.authoritative_remote_head == $head
+      and (.repository.copies[] | select(.path == $stale) | .stale_remote == true)
+      and (.repository.copies[] | select(.path == $fresh) | .stale_remote == false)
+      and (.repository.superseded_continuations | index($stale)) != null
+  ' >/dev/null || fail "fallback authority selected a proven stale remote: $out"
+  pass "fallback authority excludes every proven stale remote"
 }
 
 test_proposed_hotfix_already_deployed() {
@@ -571,12 +611,117 @@ SH
   pass "worktree inventory follows selected authority and caps per-copy enrichment"
 }
 
+test_aggregate_record_bounds_and_atomic_size_refusal() {
+  local home origin repo copy record out before after note i j size
+  home=$(make_home aggregate-record)
+  origin=$(make_origin aggregate-record)
+  repo=$home/projects/titan-1
+  clone_origin "$origin" "$repo"
+  for i in 1 2 3; do
+    copy=$home/projects/titan-$i
+    if [ "$i" -ne 1 ]; then
+      clone_origin "$origin" "$copy"
+    fi
+    for j in $(seq -w 1 100); do
+      git -C "$copy" branch "inventory-$j"
+    done
+  done
+  python3 - "$home/large-evidence.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+providers = [
+    {"name": f"provider-{index:05d}", "status": "quota_exhausted", "code": "quota_exhausted"}
+    for index in range(7000)
+]
+Path(sys.argv[1]).write_text(json.dumps({"external_providers": providers}, separators=(",", ":")))
+PY
+  out=$(run_triage "$home" aggregate-record "$repo" \
+    "Provider quota exhaustion" --evidence "$home/large-evidence.json" \
+    --scan-root "$home/projects")
+  printf '%s' "$out" | jq -e '
+    (.repository.branches | length) == 256
+      and ([.repository.copies[].branches[]] | length) == 256
+      and .repository.inventory.branches.shown == 256
+      and .repository.inventory.branches.omitted_at_least >= 47
+      and (.diagnosis.supporting_evidence | length) == 256
+      and (.diagnosis.observations.external_providers | length) == 256
+      and .diagnosis.observations.inventory.supporting_evidence == {shown:256,omitted:6744}
+      and .diagnosis.observations.inventory.external_providers == {shown:256,omitted:6744}
+  ' >/dev/null || fail "aggregate record bounds or omission metadata were incomplete: $out"
+  record=$home/state/incidents/aggregate-record.json
+  size=$(wc -c < "$record")
+  [ "$size" -le 1048576 ] || fail "bounded incident record exceeded the readable size limit"
+  FM_HOME="$home" "$INCIDENT" status --incident aggregate-record --json >/dev/null || \
+    fail "bounded incident record was not readable after triage"
+  FM_HOME="$home" "$INCIDENT" approve --incident aggregate-record \
+    --kind operational_provider_change --note "approved provider repair" >/dev/null
+  FM_HOME="$home" "$INCIDENT" repair --incident aggregate-record \
+    --note "provider repair complete" >/dev/null
+  python3 - "$home/large-verification.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+checks = [
+    {"name": f"runtime-path-{index:03d}", "status": "pass", "evidence": "healthy"}
+    for index in range(300)
+]
+Path(sys.argv[1]).write_text(json.dumps({"verification": {"runtime_path_ok": True, "checks": checks}}))
+PY
+  FM_HOME="$home" "$INCIDENT" verify --incident aggregate-record \
+    --evidence "$home/large-verification.json" >/dev/null
+  out=$(FM_HOME="$home" "$INCIDENT" status --incident aggregate-record --json)
+  printf '%s' "$out" | jq -e '
+    .verification.status == "complete"
+      and (.verification.checks | length) == 256
+      and .verification.inventory.checks == {shown:256,omitted:44}
+  ' >/dev/null || fail "verification checks were not bounded with omission metadata: $out"
+  out=$(FM_HOME="$home" "$INCIDENT" status --json --compact)
+  printf '%s' "$out" | jq -e '
+    .records[] | select(.id == "aggregate-record")
+      | .inventory.verification.checks == {shown:256,omitted:44}
+  ' >/dev/null || fail "compact status hid verification omission metadata: $out"
+
+  run_triage "$home" size-refusal "$repo" "Provider quota exhaustion" \
+    --evidence "$QUOTA_FIXTURE" >/dev/null
+  record=$home/state/incidents/size-refusal.json
+  python3 - "$record" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+record = json.loads(path.read_text())
+record["padding"] = ""
+payload = json.dumps(record, indent=2, sort_keys=True) + "\n"
+record["padding"] = "x" * (1048560 - len(payload))
+path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+  before=$(cksum < "$record")
+  note=$(python3 -c 'print("n" * 300)')
+  if FM_HOME="$home" "$INCIDENT" approve --incident size-refusal \
+    --kind paid_plan_change --note "$note" >/dev/null 2>&1; then
+    fail "oversized lifecycle update replaced the readable incident ledger"
+  fi
+  after=$(cksum < "$record")
+  [ "$before" = "$after" ] || fail "size refusal did not preserve the prior incident ledger"
+  out=$(FM_HOME="$home" "$INCIDENT" status --incident size-refusal --json)
+  printf '%s' "$out" | jq -e '
+    .phase == "approval" and .approval.status == "pending"
+  ' >/dev/null || fail "size refusal left the incident ledger unreadable or advanced: $out"
+  pass "aggregate bounds disclose omissions and oversized writes preserve the ledger"
+}
+
 test_repository_and_worker_reconciliation
 test_external_quota_no_code_lifecycle_and_status
 test_lifecycle_transitions_read_and_write_under_one_lock
+test_stale_remote_never_wins_fallback_authority
 test_proposed_hotfix_already_deployed
 test_proven_application_defect_escalates
 test_remaining_classifier_categories
 test_remote_credentials_are_not_recorded
 test_bounded_inventory_omissions_are_disclosed
 test_worktree_inventory_is_authority_bound_and_enrichment_is_capped
+test_aggregate_record_bounds_and_atomic_size_refusal
