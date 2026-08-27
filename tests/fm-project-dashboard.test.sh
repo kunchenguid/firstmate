@@ -1587,6 +1587,38 @@ test_a_live_decision_is_never_queued_work() {
   pass "a live decision is never also listed as queued next work"
 }
 
+test_secondmate_live_decision_is_never_queued_work() {
+  local home epoch out
+  home=$(make_home mate-decision-queued)
+  write_fleet_fixture "$home"
+  jq '
+    .backlog.records = []
+    | .tasks |= map(select(.kind == "secondmate"))
+    | .secondmate_current.records |= map(
+        if .id == "delta-mate" then
+          .projects = ["delta"]
+          | .active_children = []
+          | .landed = []
+          | .holds = []
+          | .decisions_open = [{id:"d1",key:"k1",verb:"needs-decision",summary:"Which region?",
+              reason:null,repo:"delta",source:"status"}]
+          | .queued = [{id:"d1",title:"Pick the region",repo:"delta",captain_actionable:false},
+                       {id:"d2",title:"Real queued work",repo:"delta",captain_actionable:false}]
+        else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "secondmate live-decision snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "delta")
+    | (.decisions | map(.id)) == ["d1"]
+      and .waiting == []
+      and (.queued | map(.id)) == ["d2"]
+      and .counts.queued == 1
+  ' >/dev/null || fail "a secondmate live decision was also listed under queued next: $out"
+  pass "a secondmate live decision is never also listed as queued next work"
+}
+
 extract_payload() {  # <board>
   sed -n '/<script id="project-dashboard-data" type="application\/json">/,/<\/script>/p' "$1" | sed '1d;$d'
 }
@@ -1662,6 +1694,8 @@ const result = {
   cards: cards.map(c => c.dataset.project),
   selected,
   banner: root.querySelectorAll(".pd-disclosures").map(b => b.text().trim()),
+  scopeNote: ((html.match(/<p[^>]*id="scope-note"[^>]*>([\s\S]*?)<\/p>/) || [, ""])[1])
+    .replace(/<[^>]*>/g, "").trim(),
   meta: cards.map(c => ({
     project: c.dataset.project,
     meta: (c.querySelector(".pd-detail-meta") || { text: () => "" }).text(),
@@ -1734,11 +1768,9 @@ test_board_renders_every_card_and_its_disclosures() {
     | any(contains("Alpha shipped") and contains("main"))
   ' >/dev/null || fail "a note-less item lost its owner attribution: $out"
   printf '%s' "$out" | jq -e '
-    .meta[] | select(.project == "delta") | .items[]
-    | select(.title | startswith("Decisions recently resolved")) | .scopeNotes
-    | any(contains("Main-home decisions only")
-          and contains("v1 does not cover decisions resolved inside a secondmate home"))
-  ' >/dev/null || fail "the recently-resolved panel did not disclose its main-home-only scope: $out"
+    (.scopeNote | contains("recently resolved decisions cover main-home work only"))
+      and ([.meta[] | .items[] | .scopeNotes[]] | length) == 0
+  ' >/dev/null || fail "the main-home-only scope was not disclosed once, globally: $out"
   pass "the board renders every card, its disclosures, and survives a malformed fragment"
 }
 
@@ -1868,6 +1900,7 @@ test_captain_held_in_flight_row_keeps_its_pr_link
 test_date_deferred_decision_waits_until_it_is_due
 test_deferred_hold_leaves_its_parked_task_under_waiting
 test_a_live_decision_is_never_queued_work
+test_secondmate_live_decision_is_never_queued_work
 test_waiting_work_is_not_repeated_under_queued_next
 test_attention_next_step_is_an_action_not_a_bare_title
 test_unattributable_secondmate_state_is_disclosed

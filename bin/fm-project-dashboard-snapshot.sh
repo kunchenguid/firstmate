@@ -44,7 +44,7 @@
 # still in flight keeps its PR link.
 # resolved_decisions[] is main-home only in v1: the canonical home summary omits
 # a secondmate's completed captain-held rows, and this board does not widen that
-# contract, so a project owned by a secondmate says so on the card instead.
+# contract, so the board states that limitation once as a global scope note.
 # A captain decision that is due now appears only under decisions[], even when
 # its own task has parked awaiting the answer. Only a live, answer-ready
 # decision withholds an item from waiting[]: a decision deferred to a future

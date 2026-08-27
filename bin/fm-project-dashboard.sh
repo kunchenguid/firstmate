@@ -13,6 +13,11 @@
 # build validates and publishes a supplied snapshot before serving it.
 # path prints the stable home-scoped board path.
 #
+# The board's recently-resolved captain decisions cover main-home work only.
+# The canonical secondmate home summary omits a secondmate's completed
+# captain-held rows, and this board does not widen that contract, so the board
+# states that limitation once, globally.
+#
 # This board is read-only.
 # It never binds captain answers, registers a process-event source, polls
 # Lavish, merges, dispatches, archives, or mutates fleet records.
