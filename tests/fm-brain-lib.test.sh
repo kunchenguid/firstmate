@@ -79,8 +79,22 @@ test_available_true_when_binary_and_store_present() {
   pass "fm_brain_available is true when both the binary and the store are present"
 }
 
+test_by_honors_env_and_default() {
+  local out
+  out=$(BRAIN_BY="task-123" run_lib "$BASE_PATH" fm_brain_by default-tag)
+  [ "$out" = "task-123" ] || fail "fm_brain_by must honor \$BRAIN_BY, got: $out"
+
+  out=$(BRAIN_BY="" run_lib "$BASE_PATH" fm_brain_by default-tag)
+  [ "$out" = "default-tag" ] || fail "fm_brain_by must fallback to default, got: $out"
+
+  out=$(BRAIN_BY="" run_lib "$BASE_PATH" fm_brain_by)
+  [ "$out" = "" ] || fail "fm_brain_by without default must be empty, got: $out"
+  pass "fm_brain_by honors \$BRAIN_BY and falls back to caller default"
+}
+
 test_store_honors_override
 test_store_defaults_to_home
 test_available_false_when_binary_absent
 test_available_false_when_store_missing
 test_available_true_when_binary_and_store_present
+test_by_honors_env_and_default

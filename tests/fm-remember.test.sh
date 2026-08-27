@@ -37,9 +37,10 @@ make_fake_brain() {  # <dir> <mode>
     record)
       cat > "$fakebin/brain-axi" <<SH
 #!/usr/bin/env bash
-# args: remember <fact> --provenance <p> --store <s>
+# args: remember <fact> --provenance <p> --store <s> --by <b>
 [ "\${1:-}" = remember ] || exit 0
 printf '%s\n' "\${2:-}" >> "$dir/recorded"
+printf '%s\n' "\$*" >> "$dir/recorded_args"
 exit 0
 SH
       ;;
@@ -82,6 +83,8 @@ test_present_binary_receives_text() {
   assert_present "$dir/recorded" "wired brain-axi should have recorded the decision"
   assert_grep "chose SQLite over Postgres for the seed" "$dir/recorded" \
     "the decision text must reach brain-axi verbatim"
+  assert_grep "--by fm-remember" "$dir/recorded_args" \
+    "the default --by fm-remember attribution must reach brain-axi"
   pass "wired brain-axi receives the decision text verbatim"
 }
 
@@ -158,9 +161,22 @@ SH
   pass "unpinned remember lands in the sandbox, never \$HOME/.brain"
 }
 
+test_present_binary_honors_brain_by() {
+  local dir fakebin out rc
+  dir="$TMP_ROOT/wired-by"; mkdir -p "$dir"
+  fakebin=$(make_fake_brain "$dir" record)
+  out=$(BRAIN_BY="task-456" PATH="$fakebin:$BASE_PATH" BRAIN_STORE="$dir/store" "$REMEMBER" \
+    "decision with custom attribution" 2>&1); rc=$?
+  expect_code 0 "$rc" "present brain-axi call must exit 0"
+  assert_grep "--by task-456" "$dir/recorded_args" \
+    "an explicit \$BRAIN_BY must reach brain-axi via --by"
+  pass "wired brain-axi honors \$BRAIN_BY attribution"
+}
+
 test_absent_binary_does_nothing
 test_present_binary_receives_text
 test_failing_binary_is_swallowed
 test_slow_binary_is_bounded
 test_empty_text_is_a_noop
 test_unpinned_store_never_hits_home
+test_present_binary_honors_brain_by

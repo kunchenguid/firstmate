@@ -519,11 +519,13 @@ SH
 run_session_start() {
   local home=$1 root=$2 path=$3 pi_harness=${4:-}
   if [ -n "$pi_harness" ]; then
-    env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
+    env -u CLAUDECODE -u GROK_AGENT -u OMPCODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+      PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   else
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      -u OMPCODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   fi
@@ -532,7 +534,8 @@ run_session_start() {
 run_pi_session_start() {  # <home> <root> <path> [fm-session-start args...]
   local home=$1 root=$2 path=$3
   shift 3
-  env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS=pi \
+  env -u CLAUDECODE -u GROK_AGENT -u OMPCODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    PI_CODING_AGENT=true FM_PI_HARNESS=pi \
     FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
     "$SESSION_START" "$@"
@@ -542,6 +545,7 @@ run_named_harness_session_start() {  # <harness> <home> <root> <path> [fm-sessio
   local harness=$1 home=$2 root=$3 path=$4
   shift 4
   env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u OMPCODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     FM_FAKE_HARNESS="$harness" FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
     "$SESSION_START" "$@"
@@ -762,10 +766,12 @@ EOF
   printf 'Captain prefers proposal-first Vietnamese discussion.\n' > "$home/data/captain.md"
   store="$home/brainstore"; mkdir -p "$store"
 
-  # A brain-axi that answers the two read verbs with recognizable output.
-  cat > "$fakebin/brain-axi" <<'SH'
+  # A brain-axi that answers the two read verbs with recognizable output
+  # and records invocations for attribution verification.
+  cat > "$fakebin/brain-axi" <<SH
 #!/usr/bin/env bash
-case "${1:-}" in
+printf '%s\n' "\$*" >> "$home/brain_args.log"
+case "\${1:-}" in
   context_pack) echo 'PACK: ## Captain preferences (captain)' ;;
   delta)        echo 'DELTA: {"first_wake":true}' ;;
   *) exit 0 ;;
@@ -783,6 +789,8 @@ SH
   assert_contains "$out" "Memory recall (brain-axi)" "brain recall subsection missing when brain-axi is available"
   assert_contains "$out" "PACK: ## Captain preferences (captain)" "context_pack output missing from recall layer"
   assert_contains "$out" "DELTA:" "delta output missing from recall layer"
+  assert_grep "--by firstmate-auto" "$home/brain_args.log" \
+    "--by firstmate-auto attribution must be passed to automatic recall calls"
 
   # Fail-open: a brain-axi that errors on both verbs yields NO recall subsection,
   # yet the curated body still prints and session start still completes.
@@ -2024,6 +2032,7 @@ SH
 
   # shellcheck disable=SC2016 # $$ must expand in the launched shell, not here.
   out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u OMPCODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
     bash -c 'export FM_FAKE_HARNESS_PID=$$; exec "$1" 8 "$2"' _ "$nest" "$SESSION_START")
 
@@ -2060,6 +2069,7 @@ EOF
   append_wake "$home/state" signal task-r "done: queued after the re-emit too" || fail "seed second wake failed"
   reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS_PID=$$ PATH="$fakebin:$BASE_PATH" \
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u OMPCODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     "$SESSION_START" --reemit)
 
   assert_contains "$reemit" "SESSION START (CONTEXT RE-EMIT) - $home" "--reemit did not label itself"
@@ -2112,6 +2122,7 @@ SH
   # A full startup labels the workspace on the fresh path (the home basename,
   # here "home", not the code-root "root"/"firstmate").
   startup=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u OMPCODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     TMUX='' HERDR_ENV=1 HERDR_WORKSPACE_ID=ws1 HERDR_PANE_ID=p1 \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS_PID=$$ \
     PATH="$fakebin:$BASE_PATH" "$SESSION_START")
@@ -2123,6 +2134,7 @@ SH
   # itself re-labels, not the fresh start above.
   : > "$herdr_log"
   reemit=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u OMPCODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     TMUX='' HERDR_ENV=1 HERDR_WORKSPACE_ID=ws1 HERDR_PANE_ID=p1 \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS_PID=$$ \
     PATH="$fakebin:$BASE_PATH" "$SESSION_START" --reemit)
@@ -2332,6 +2344,7 @@ EOF
 
   reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u OMPCODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     "$SESSION_START" --reemit)
 
   # A re-emit skips the sweeps because it ALREADY ran them, not because it lacks
@@ -2347,6 +2360,7 @@ EOF
   printf '%s\n' "$holder_pid" > "$home/state/.lock"
   readonly_out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u OMPCODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     "$SESSION_START" --reemit)
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true

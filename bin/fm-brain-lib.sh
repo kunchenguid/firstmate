@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# fm-brain-lib.sh - one owner for resolving this home's brain-axi store and for
-# testing brain-axi availability. Sourced, never executed.
+# fm-brain-lib.sh - one owner for resolving this home's brain-axi store, testing
+# brain-axi availability, and resolving the attribution tag. Sourced, never
+# executed.
 #
 # brain-axi is an OPTIONAL, one-directional consumer dependency: firstmate calls
 # the `brain-axi` binary on PATH, and brain-axi never references firstmate. Every
 # caller MUST fail open - brain-axi absent, or its store missing, must never
 # break a firstmate flow (session start, remember, brief scaffold). Centralizing
-# the two questions every caller asks keeps the store path single-owned here.
+# the questions every caller asks keeps the store path single-owned here.
 #
 # Usage: . bin/fm-brain-lib.sh
 #   store=$(fm_brain_store)          # the home's store path
+#   by=$(fm_brain_by <default>)      # attribution tag: $BRAIN_BY wins, else <default>
 #   if fm_brain_available; then ...  # binary on PATH AND store dir present
 
 # fm_brain_store: print the home's brain-axi store path.
@@ -34,4 +36,12 @@ fm_brain_available() {
   local store
   store=$(fm_brain_store)
   [ -n "$store" ] && [ -d "$store" ]
+}
+
+# fm_brain_by: print the brain-axi attribution tag. An explicit $BRAIN_BY wins;
+# otherwise print the caller-supplied default (which may be empty). Dependency-free
+# and never fails: attribution is a pure additive tag, so a missing tag must not
+# break the brain-axi call or the lifecycle action around it.
+fm_brain_by() {
+  printf '%s\n' "${BRAIN_BY:-${1:-}}"
 }

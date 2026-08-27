@@ -49,8 +49,10 @@ main() {
   store=$(fm_brain_store)
   provenance=${FM_REMEMBER_PROVENANCE:-firstmate}
 
+  local by
+  by=$(fm_brain_by fm-remember)
   fm_run_timed "$FM_REMEMBER_TIMEOUT" \
-    brain-axi remember "$text" --provenance "$provenance" --store "$store" \
+    brain-axi remember "$text" --provenance "$provenance" --store "$store" --by "$by" \
     >/dev/null 2>&1 || true
   return 0
 }

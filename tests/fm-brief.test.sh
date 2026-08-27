@@ -449,6 +449,8 @@ test_brain_store_is_seeded_into_crewmate_briefs() {
   assert_grep "# Fleet memory (brain-axi)" "$ship" "ship brief lost the fleet-memory section"
   assert_grep "export BRAIN_STORE='/custom/fleet/store'" "$ship" \
     "ship brief did not seed the resolved store path"
+  assert_grep "export BRAIN_BY='brain-ship'" "$ship" \
+    "ship brief did not seed BRAIN_BY with task id"
   assert_grep "brain-axi is an OPTIONAL layer" "$ship" \
     "ship brief lost the optional-dependency note"
 
@@ -458,13 +460,15 @@ test_brain_store_is_seeded_into_crewmate_briefs() {
   assert_grep "# Fleet memory (brain-axi)" "$scout" "scout brief lost the fleet-memory section"
   assert_grep "export BRAIN_STORE='/custom/fleet/store'" "$scout" \
     "scout brief did not seed the resolved store path"
+  assert_grep "export BRAIN_BY='brain-scout'" "$scout" \
+    "scout brief did not seed BRAIN_BY with task id"
 
   FM_HOME="$home" FM_SECONDMATE_CHARTER='run the payments domain' \
     "$ROOT/bin/fm-brief.sh" brain-sm --secondmate proj1 >/dev/null 2>&1
   secondmate="$home/data/brain-sm/brief.md"
   assert_no_grep "Fleet memory (brain-axi)" "$secondmate" \
     "secondmate charter must not carry the crewmate fleet-memory section"
-  pass "fm-brief.sh: brain-axi store seeded into ship+scout briefs, absent from secondmate charter"
+  pass "fm-brief.sh: brain-axi store and attribution seeded into ship+scout briefs, absent from secondmate charter"
 }
 
 test_herdr_lab_contract_is_explicit_and_complete() {

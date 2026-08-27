@@ -420,8 +420,8 @@ print_home_memory() {
     "$SCRIPT_DIR/fm-startup-memory-budget.sh" read 2>/dev/null) || budget=7500
   case "$budget" in ''|*[!0-9]*) budget=7500 ;; esac
 
-  pack=$(brain-axi context_pack --pinned --budget-tokens "$budget" --store "$store" 2>/dev/null) || pack=
-  delta=$(brain-axi delta --agent firstmate --session "$(basename "$FM_HOME")" --store "$store" 2>/dev/null) || delta=
+  pack=$(brain-axi context_pack --pinned --by firstmate-auto --budget-tokens "$budget" --store "$store" 2>/dev/null) || pack=
+  delta=$(brain-axi delta --by firstmate-auto --agent firstmate --session "$(basename "$FM_HOME")" --store "$store" 2>/dev/null) || delta=
 
   [ -n "$pack$delta" ] || return 0
   subsection "Memory recall (brain-axi)"

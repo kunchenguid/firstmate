@@ -257,6 +257,7 @@ BRAIN_STORE_PATH=$(fm_brain_store)
 BRAIN_SECTION="# Fleet memory (brain-axi)
 This home shares a brain-axi knowledge store. Use the SAME store any external session uses - do not invent a private path:
    export BRAIN_STORE=$(shell_quote "$BRAIN_STORE_PATH")
+   export BRAIN_BY=$(shell_quote "$ID")
 Recall with \`brain-axi recall --query \"...\"\`, and record a durable decision or learning with \`brain-axi remember \"<fact>\" --provenance \"<source>\"\`.
 brain-axi is an OPTIONAL layer: if it is not on PATH, skip it - nothing in your task depends on it."
 
