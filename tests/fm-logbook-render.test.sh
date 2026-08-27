@@ -171,7 +171,33 @@ JSON
   pass "embedded captain values render as text rather than browser markup"
 }
 
+test_retained_milestones_render_beyond_boundary_item_limit() {
+  local home page retained out
+  home=$(make_mission retained-history)
+  page=$(page_for "$home")
+  retained="$home/retained.html"
+  node - "$page" "$retained" <<'NODE'
+const fs = require("fs");
+const [source, destination] = process.argv.slice(2);
+const html = fs.readFileSync(source, "utf8");
+const match = html.match(/(<script id="firstmate-logbook-data" type="application\/json">\n)([\s\S]*?)(\n<\/script>)/);
+const payload = JSON.parse(match[2]);
+const current = payload.milestones[0];
+for (let index = 1; index <= 64; index += 1) {
+  const at = new Date(Date.parse(current.at) - index * 1000).toISOString();
+  payload.milestones.push({...current, id: at.replaceAll("-", "").replaceAll(":", "").replace(".000", ""), at, fingerprint: index.toString(16).padStart(64, "0")});
+}
+fs.writeFileSync(destination, `${html.slice(0, match.index)}${match[1]}${JSON.stringify(payload, null, 2)}${match[3]}${html.slice(match.index + match[0].length)}`);
+NODE
+  out=$(render "$retained") || fail "long retained history did not render"
+  printf '%s' "$out" | jq -e '
+    .status == "Active" and (.milestoneTitles | length) == 65 and .notice == ""
+  ' >/dev/null || fail "renderer rejected retained milestone history beyond boundary item limit: $out"
+  pass "retained milestone history is not capped by boundary item limits"
+}
+
 test_page_renders_without_sibling_access
 test_missing_and_malformed_embedded_data_show_stale_state
 test_manual_refresh_reloads_same_page_and_reads_new_payload
 test_payload_text_is_rendered_as_text
+test_retained_milestones_render_beyond_boundary_item_limit

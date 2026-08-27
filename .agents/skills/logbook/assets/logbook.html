@@ -194,7 +194,7 @@ __FIRSTMATE_LOGBOOK_PAYLOAD__
           throw new Error("The progress file has an incomplete snapshot.");
         }
         if (!validItems(data.gates, validGate) || data.gates.length === 0) throw new Error("The progress file has invalid completion gates.");
-        if (!validItems(data.milestones, validMilestone) || data.milestones.length === 0) throw new Error("The progress file has invalid milestones.");
+        if (!Array.isArray(data.milestones) || data.milestones.length === 0 || !data.milestones.every(validMilestone)) throw new Error("The progress file has invalid milestones.");
         if (data.milestones.some((item, index) => index > 0 && Date.parse(item.at) > Date.parse(data.milestones[index - 1].at)) ||
           new Set(data.milestones.map((item) => item.id)).size !== data.milestones.length ||
           new Set(data.milestones.map((item) => item.fingerprint)).size !== data.milestones.length) {
