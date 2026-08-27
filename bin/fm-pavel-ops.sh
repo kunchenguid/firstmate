@@ -35,16 +35,21 @@
 # Delivery state is linear, driver-owned, and evidence-bearing:
 #   ready -> dispatched -> validating -> delivery_ready -> merge_queued
 #   -> landed -> live -> notified
-# `drive` composes the existing brief, Pi spawn, PR registration, merge, and live
-# verification owners before recording each delivery fact. Direct `transition`
-# input is reserved for that owner boundary, so a caller cannot declare a Pavel
-# result live with unaudited evidence. `merge_queued` requires a full PR URL and
-# the configured standing autonomy; `live` requires a full live URL. `notified`
-# is written only after Telegram returns a concrete message_id for a
-# live-completion send. An interrupted send stays `sending`, is surfaced by
-# recover, and is never retried until explicitly reconciled, preferring visible
-# uncertainty over a duplicate Pavel message. A confirmed Telegram API rejection
-# becomes retryable and may be retried safely.
+# `drive` composes the existing brief, Pi spawn, structured head-bound status,
+# PR registration, guarded merge, forge head confirmation, and live verification
+# owners before recording each delivery fact. Direct `transition` input is
+# reserved for that owner boundary, so a caller cannot declare a Pavel result
+# live with unaudited evidence. `merge_queued` requires a full PR URL and the
+# configured standing autonomy; `landed` requires both the merge marker and a
+# fresh forge read for the frozen PR URL/head; `live` requires a full live URL.
+# `notified` is written only after Telegram returns or reconciliation supplies a
+# concrete message_id for the current live-completion receipt. Live-completion
+# receipts are scoped by frozen PR URL/head, so a stale receipt for one head
+# neither satisfies nor blocks notification for another head. An interrupted
+# send stays `sending` or `unknown`, is surfaced by recover, and is never
+# retried until explicitly reconciled, preferring visible uncertainty over a
+# duplicate Pavel message. A confirmed Telegram API rejection becomes retryable
+# and may be retried safely.
 #
 # Session start calls `recover --startup` only when the opt-in config exists.
 # It also calls `arm-collector`, which registers one home-identity-bound

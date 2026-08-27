@@ -171,7 +171,10 @@ Session start runs `bin/fm-pavel-ops.sh arm-collector` and `recover --startup` b
 Arming registers one home-identity-bound process-event source; watcher reconciliation starts or recovers the long-polling collector child later, keeping Telegram network I/O off the blocking session-start path and preserving one `getUpdates` owner.
 That local recovery republishes captured, orphaned active-delivery, landed, and live-but-unnotified work and surfaces retryable or delivery-unknown Telegram sends without network access.
 The Pi primary and its tracked supervision extensions then handle each `pavel-ops-...` check wake under the `pavel-ops` skill by calling `bin/fm-pavel-ops.sh drive <event-id>`.
-The driver composes the existing Firstmate brief, Pi spawn, worker-state, task metadata PR record, PR registration, guarded merge, confirmed merge-outcome marker, deploy command, and live-verification owner before recording delivery progress; immediately before merge it requires fresh structured delivery-ready or done status for the same canonical PR/head, and landed is recorded only from the merge owner's durable outcome marker.
+The driver composes the existing Firstmate brief, Pi spawn, worker-state, task metadata PR record, PR registration, guarded merge, confirmed merge-outcome marker, deploy command, and live-verification owner before recording delivery progress.
+The default structured readiness helper authorizes delivery only from `run-step` status whose task metadata still names `harness=pi`, `mode=no-mistakes`, `yolo=on`, `kind=ship`, the configured project, the matching endpoint task id, and a live isolated git worktree whose current `HEAD` equals the canonical PR head.
+Immediately before merge it requires fresh structured delivery-ready or done status for the same canonical PR/head, and `landed` is recorded only after the merge marker and a fresh forge read both confirm the frozen PR URL/head.
+Live-completion receipts are scoped by the frozen PR URL/head, so an older receipt cannot satisfy or block a notification for a later head.
 
 Before replacing a legacy Pavel watcher or stale tgsync route, run `bin/fm-pavel-ops.sh migration-audit` with the legacy pending queue and project clone paths.
 Use `adopt-task` to link existing paused Pavel backlog rows at their already-proved lifecycle fact without recreating or closing them.
