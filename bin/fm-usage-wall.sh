@@ -81,7 +81,10 @@
 #   no-signature  evidence was read and nothing matched. This is NOT a claim that
 #                 the task crashed - only that no wall signature is present in
 #                 what was readable.
-#   unknown       the evidence could not be read at all.
+#   unknown       the evidence could not be read at all. A step log that failed
+#                 to read lands here (`reason=step-log-unreadable`), never on
+#                 `no-signature`, because "nothing matched" is a claim about
+#                 evidence that was actually read.
 # A negative therefore never hardens into "it really failed", which matters
 # because the signature table below is only as complete as the vendor phrasings
 # actually observed.
@@ -114,6 +117,9 @@
 # Tunables (env):
 #   FM_USAGE_WALL_QUOTA_TIMEOUT     bound on the quota-axi read (default 20s)
 #   FM_USAGE_WALL_NM_TIMEOUT        bound on each no-mistakes read (default 20s)
+#   FM_USAGE_WALL_SCAN_BUDGET       bound on diagnose's whole step-log scan
+#                                   (default 60s), so its cost is a constant
+#                                   rather than growing with failed-step count
 #   FM_USAGE_WALL_SNAPSHOT_TIMEOUT  bound on the fleet snapshot (default 300s)
 #   FM_USAGE_WALL_CAPTURE_LINES     endpoint lines scanned by diagnose (default 200)
 #   FM_USAGE_WALL_TIGHT_PCT         percent at or below which a reading is
@@ -145,6 +151,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 QUOTA_TIMEOUT=${FM_USAGE_WALL_QUOTA_TIMEOUT:-20}
 NM_TIMEOUT=${FM_USAGE_WALL_NM_TIMEOUT:-20}
+SCAN_BUDGET=${FM_USAGE_WALL_SCAN_BUDGET:-60}
 SNAPSHOT_TIMEOUT=${FM_USAGE_WALL_SNAPSHOT_TIMEOUT:-300}
 CAPTURE_LINES=${FM_USAGE_WALL_CAPTURE_LINES:-200}
 TIGHT_PCT=${FM_USAGE_WALL_TIGHT_PCT:-20}
@@ -183,6 +190,7 @@ non_negative_int() {  # <name> <value>
 }
 positive_int FM_USAGE_WALL_QUOTA_TIMEOUT "$QUOTA_TIMEOUT"
 positive_int FM_USAGE_WALL_NM_TIMEOUT "$NM_TIMEOUT"
+positive_int FM_USAGE_WALL_SCAN_BUDGET "$SCAN_BUDGET"
 positive_int FM_USAGE_WALL_SNAPSHOT_TIMEOUT "$SNAPSHOT_TIMEOUT"
 positive_int FM_USAGE_WALL_CAPTURE_LINES "$CAPTURE_LINES"
 non_negative_int FM_USAGE_WALL_TIGHT_PCT "$TIGHT_PCT"
@@ -201,11 +209,18 @@ non_negative_int FM_USAGE_WALL_TIGHT_RUNWAY_SECS "$TIGHT_RUNWAY"
 #   1-2  observed verbatim in the 2026-08-23 incident's review and test step
 #        logs ("You've hit your weekly limit - resets Aug 26 at 10am
 #        (Europe/Rome)") and in its 5-hour-window counterpart.
-#   3-5  the neighbouring exhaustion phrasings of the same vendor family.
+#   3    `session` observed verbatim on 2026-08-27 in this repo's own pipeline
+#        log ("You've hit your session limit - resets 1:40am
+#        (America/Los_Angeles)"), which stranded a run whose step log this
+#        command then read as `no-signature`. That miss is why the rule below
+#        says to diagnose a real wall rather than only a fixture: the table is
+#        only ever as complete as the phrasings actually observed, which is also
+#        why a negative is `no-signature` and never "it crashed".
+#   4-6  the neighbouring exhaustion phrasings of the same vendor family.
 # A phrasing that is not here yields `no-signature`, which this command
 # explicitly does not treat as proof of a crash. Add a pattern only with an
 # observed line to justify it, and extend tests/fm-usage-wall.test.sh with it.
-USAGE_WALL_PATTERNS='hit your (weekly|[0-9]+-hour|five-hour|daily|monthly) limit'
+USAGE_WALL_PATTERNS='hit your (weekly|session|[0-9]+-hour|five-hour|daily|monthly) limit'
 USAGE_WALL_PATTERNS="$USAGE_WALL_PATTERNS|usage limit reached"
 USAGE_WALL_PATTERNS="$USAGE_WALL_PATTERNS|hit your usage limit"
 USAGE_WALL_PATTERNS="$USAGE_WALL_PATTERNS|you have (reached|hit) your (usage|weekly|monthly) limit"
@@ -297,13 +312,19 @@ cmd_headroom() {
       'install it with npm install -g quota-axi to get a reading' "$json"
     return 0
   fi
-  quota_version=$(fm_run_timed "$QUOTA_TIMEOUT" quota-axi --version 2>/dev/null </dev/null) || quota_version=
-  quota_version=$(printf '%s' "$quota_version" | sed -n 's/.*\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1)
+  # Read --version ONCE. The floor check used to re-invoke quota-axi, which cost
+  # this reading three bounded calls against a single outer bound: a slow but
+  # working gauge then exhausted the caller's bound and printed `unknown` for a
+  # gauge that could have been read - a false unmeasurable in the one surface
+  # built to prevent them. bin/fm-quota-axi-lib.sh owns the comparison.
+  local version_raw
+  version_raw=$(fm_run_timed "$QUOTA_TIMEOUT" quota-axi --version 2>/dev/null </dev/null) || version_raw=
+  quota_version=$(printf '%s' "$version_raw" | sed -n 's/.*\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1)
   [ -n "$quota_version" ] || quota_version=unknown
   # A below-floor build is reported, not suppressed: bin/fm-bootstrap.sh owns the
   # operator-facing MISSING diagnostic, and blanking a parseable reading here
   # would be a false negative in exactly the case this gauge exists for.
-  fm_quota_axi_compatible "$QUOTA_TIMEOUT" || floor_note=" build=below-floor($FM_QUOTA_AXI_MIN)"
+  fm_quota_axi_version_at_least "$version_raw" || floor_note=" build=below-floor($FM_QUOTA_AXI_MIN)"
 
   # No --allow-keychain-prompt, ever: it blocks on a GUI dialog, and this runs
   # inside session start's bounded session-open hook.
@@ -383,9 +404,17 @@ cmd_headroom() {
 $effective
 EOF
 
+  # Verdict precedence. `wall` outranks `tight` because they are different
+  # states, not degrees of one: tight means a dispatch may still land, wall
+  # means that provider has already stopped and every worker on it is down.
+  # Collapsing the second into the first would leave the aggregate line - and
+  # `--json`'s `.verdict`, the field a programmatic reader branches on - unable
+  # to express the one condition this command exists to announce.
   if [ "$measured" -eq 0 ]; then
     summary_verdict=unknown
-  elif [ "$wall" -gt 0 ] || [ "$tight" -gt 0 ]; then
+  elif [ "$wall" -gt 0 ]; then
+    summary_verdict=wall
+  elif [ "$tight" -gt 0 ]; then
     summary_verdict=tight
   elif [ "$unknown" -gt 0 ]; then
     summary_verdict=partial
@@ -406,10 +435,13 @@ $rows
 EOF
   printf 'HEADROOM_SUMMARY: verdict=%s measured=%d tight=%d wall=%d unknown=%d source=quota-axi/%s%s\n' \
     "$summary_verdict" "$measured" "$tight" "$wall" "$unknown" "$quota_version" "$floor_note"
+  if [ "$wall" -gt 0 ]; then
+    printf 'HEADROOM_NOTE: %d provider(s) are AT the wall, not merely low - work on them has already stopped. Load the usage-limit-recovery skill.\n' "$wall"
+  fi
   if [ "$unknown" -gt 0 ] || [ "$measured" -eq 0 ]; then
     printf 'HEADROOM_NOTE: an unknown provider is UNMEASURED, not healthy - treat its headroom as unproven when deciding what to dispatch.\n'
   fi
-  if [ "$summary_verdict" = tight ] || [ "$summary_verdict" = unknown ]; then
+  if [ "$summary_verdict" = wall ] || [ "$summary_verdict" = tight ] || [ "$summary_verdict" = unknown ]; then
     printf 'HEADROOM_NEXT: %s/bin/fm-usage-wall.sh resume regenerates the resume record for the work now in flight.\n' "$FM_ROOT"
   fi
   line=$(printf '%s' "$rows" | grep -c . 2>/dev/null) || line=0
@@ -562,8 +594,15 @@ head_binding() {  # <worktree> <run-head>
   fi
 }
 
+# Every failed or cancelled step, in pipeline order. Deliberately uncapped: a
+# cap here silently decides which evidence counts, and a run whose fourth failed
+# step is the one carrying the vendor limit line would return `no-signature` -
+# the verdict this command defines as "read and nothing matched". The scan is
+# bounded by time instead (SCAN_BUDGET), which bounds cost without ever deciding
+# in advance that some evidence does not matter, and what the budget cut is
+# disclosed as `unread=` rather than folded into a clean result.
 failed_steps() {  # <axi-status-toon>
-  toon_steps "$1" | awk -F'\t' '$2 == "failed" || $2 == "cancelled" { print $1 }' | head -3
+  toon_steps "$1" | awk -F'\t' '$2 == "failed" || $2 == "cancelled" { print $1 }'
 }
 
 last_step() {  # <axi-status-toon>
@@ -636,7 +675,7 @@ cmd_diagnose() {
     return 0
   fi
 
-  local run steps step log_line
+  local run steps step log_line=''
   run=$(attributed_run "$wt") || run=
   if [ -z "$run" ]; then
     diagnose_inconclusive "$id" "${checked:-none}" no-attributed-run 'no pipeline run is attributed to this local copy'
@@ -650,15 +689,41 @@ cmd_diagnose() {
     diagnose_inconclusive "$id" "${checked:-none}" no-readable-steps "pipeline run $run_id lists no readable steps"
     return 0
   fi
+  local readable=0 unread='' logs bound spent
+  spent=0
   for step in $steps; do
-    checked="${checked:+$checked,}step-log:$step"
-    log_line=$(fm_nm_run "$wt" "$NM_TIMEOUT" axi logs --run "$run_id" --step "$step" --full | first_wall_line)
-    if [ -n "$log_line" ]; then
-      wall_verdict "$id" "step-log:$step" "$log_line"
-      return 0
+    bound=$((SCAN_BUDGET - spent))
+    [ "$bound" -gt "$NM_TIMEOUT" ] && bound=$NM_TIMEOUT
+    if [ "$bound" -le 0 ]; then
+      unread="${unread:+$unread,}$step"
+      continue
     fi
+    local started
+    started=$(date +%s)
+    # fm_nm_run_checked, not fm_nm_run: the fail-open variant discards the read's
+    # exit status, so a log that could not be read at all was indistinguishable
+    # from one read cleanly with no match - and `checked=` then named a step
+    # nothing had ever looked at. The status decides which of the two this is.
+    if logs=$(fm_nm_run_checked "$wt" "$bound" axi logs --run "$run_id" --step "$step" --full); then
+      readable=$((readable + 1))
+      checked="${checked:+$checked,}step-log:$step"
+      log_line=$(printf '%s\n' "$logs" | first_wall_line)
+      if [ -n "$log_line" ]; then
+        wall_verdict "$id" "step-log:$step" "$log_line"
+        return 0
+      fi
+    else
+      unread="${unread:+$unread,}$step"
+    fi
+    spent=$((spent + $(date +%s) - started))
   done
-  printf 'USAGE_WALL: %s no-signature checked=%s run=%s\n' "$id" "$checked" "$run_id"
+  if [ "$readable" -eq 0 ]; then
+    diagnose_inconclusive "$id" "${checked:-none}" step-log-unreadable \
+      "no step log of pipeline run $run_id could be read (unread: ${unread:-none})"
+    return 0
+  fi
+  printf 'USAGE_WALL: %s no-signature checked=%s run=%s%s\n' "$id" "$checked" "$run_id" \
+    "${unread:+ unread=$unread}"
   printf 'USAGE_WALL_NEXT: no usage-limit signature is present in what was readable; this is not proof the work crashed, so keep reading the evidence itself.\n'
 }
 

@@ -34,6 +34,11 @@ A gauge that rendered "could not read it" the same way as "plenty left" would be
 
 So `headroom` has three provider verdicts that mean a reading was taken (`ok`, `tight`, `wall`) and one that means none was (`unknown`), and there is no code path from a failed read to a healthy verdict.
 Absent, erroring, hanging, unparseable, unresolved, and unauthenticated all land on `unknown` with the concrete reason attached, and the one-time operator command is named on the line that needs it.
+
+The aggregate carries the same vocabulary, and `wall` outranks `tight` in it.
+Those are different states rather than degrees of one: `tight` means a dispatch may still land, while `wall` means that provider has already stopped and every worker on it is down.
+Collapsing the second into the first would leave the summary line, and the `.verdict` field a programmatic reader branches on, unable to express the single condition this surface exists to announce.
+An exhausted provider reported as merely tight is a false reading, not a conservative one.
 The command never passes `--allow-keychain-prompt` itself: it runs inside a session-open hook that blocks the first turn, and a blocking dialog there would cost the whole session.
 `tests/fm-usage-wall.test.sh` pins each of those paths separately, including that the flag is never passed.
 
@@ -84,6 +89,26 @@ Knowledge that fires only when recalled is the failure being corrected, so the r
 
 A cheap scan that finds nothing reports `unknown`, never `no-signature`.
 The 2026-08-23 evidence was in the step logs and not in the terminal, so a terminal-only negative is not a clean bill of health and must not read as one.
+
+The same rule governs evidence that could not be read at all.
+`no-signature` means the evidence was read and nothing matched, so a step log that failed to read reports `unknown reason=step-log-unreadable` instead, and a step nothing looked at is never listed as checked.
+
+## Why every bounded scan discloses what it skipped
+
+Both scans are bounded, and both are cheapest when nothing is wrong.
+That is the trap: a usage limit strands every worker on one account at once, so the state a scan costs most in is precisely the state it was built for, and an unbounded scan degrades exactly when it is needed.
+
+So the cost of each is a constant rather than a function of how much is broken.
+The digest's per-task scans share one budget across the whole fleet-state section instead of paying a bound per dead endpoint, and `diagnose`'s step-log scan shares one budget across the run's failed steps instead of paying a bound per step.
+`bin/fm-fleet-view.sh` bounds its gauge read for the same reason, because the heartbeat review must cost a constant too.
+
+A budget that runs out never buys silence.
+Whatever it could not reach is named as unscanned - `scan-budget-exhausted` in the digest, `unread=` on a `diagnose` verdict - so a partial scan can never be read as a clean one.
+That is the same rule the gauge follows: unmeasured is unknown, never fine.
+
+The step-log scan is deliberately uncapped by count.
+It previously stopped after the first three failed steps, which silently decided in advance which evidence counted: a run whose fourth failed step carried the vendor limit line would have returned `no-signature`, the verdict defined as read-and-nothing-matched.
+Bounding by time bounds cost without ever deciding that some evidence does not matter.
 
 ## Verification
 

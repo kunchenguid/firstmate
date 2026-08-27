@@ -20,6 +20,8 @@
 #     (f) a below-floor quota-axi still yields a reading, labelled as such
 #     (g) credentials are never prompted for: --allow-keychain-prompt is never
 #         passed
+#     (h) one reading costs one --version, so a slow gauge cannot exhaust the
+#         caller's bound and read as unmeasurable when it was readable
 #
 #   diagnose
 #     (h) a vendor limit line in the endpoint output is a `wall`
@@ -180,7 +182,34 @@ pass 'headroom labels a short runway tight independently of percent'
 CASE="$TMP_ROOT/hr-exhausted"; mkdir -p "$CASE"
 OUT=$(fake_quota "$CASE/fakebin" exhausted; run_headroom "$CASE/fakebin")
 assert_contains "$OUT" 'HEADROOM: claude wall pct=0' 'an exhausted window reads as a wall'
+# The aggregate must carry `wall`, not `tight`. These are different states, not
+# degrees of one, and the whole command exists to keep "getting low" separable
+# from "you have stopped"; an exhausted provider summarized as merely tight is a
+# false reading of the one condition the surface was built to announce.
+assert_contains "$OUT" 'verdict=wall' 'an exhausted provider makes the SUMMARY verdict wall, not tight'
+assert_not_contains "$OUT" 'verdict=tight' 'an exhausted provider is never summarized as merely tight'
+assert_contains "$OUT" 'AT the wall, not merely low' 'the wall summary says plainly that work has already stopped'
+assert_contains "$OUT" 'HEADROOM_NEXT' 'a wall reading names the resume record as the next step'
 pass 'headroom distinguishes an exhausted window from a merely tight one'
+
+# A programmatic reader branches on `.verdict`, so the JSON must carry the same
+# state the prose does.
+OUT=$(fake_quota "$CASE/fakebin" exhausted; run_headroom "$CASE/fakebin" --json)
+command -v jq >/dev/null 2>&1 && {
+  printf '%s' "$OUT" | jq -e '.verdict == "wall" and .wall == 1 and .tight == 0' >/dev/null \
+    || fail "--json .verdict must read wall for an exhausted provider: $OUT"
+  pass 'headroom --json reports an exhausted provider as verdict=wall for a programmatic reader'
+}
+
+# A tight-but-not-exhausted provider must still summarize as tight, so the two
+# states stay separable in both directions.
+CASE="$TMP_ROOT/hr-tight-json"; mkdir -p "$CASE"
+OUT=$(fake_quota "$CASE/fakebin" tight-pct; run_headroom "$CASE/fakebin" --json)
+command -v jq >/dev/null 2>&1 && {
+  printf '%s' "$OUT" | jq -e '.verdict == "tight" and .wall == 0 and .tight == 1' >/dev/null \
+    || fail "--json .verdict must stay tight for a low-but-live provider: $OUT"
+  pass 'headroom --json keeps a low-but-live provider separable from an exhausted one'
+}
 
 # --- headroom: every unmeasurable path reads unknown ------------------------
 
@@ -238,6 +267,34 @@ assert_no_grep '--allow-keychain-prompt' "$CASE/argv.log" \
   'headroom must never trigger the blocking credential prompt itself'
 pass 'headroom never passes --allow-keychain-prompt'
 
+# --- headroom: one reading costs one --version ------------------------------
+#
+# The floor check used to re-invoke quota-axi, so a single reading spent three
+# bounded calls against ONE outer bound. A slow but working gauge then blew that
+# bound and printed `unknown` for a gauge that could have been read - a false
+# unmeasurable in the one surface built to prevent them.
+CASE="$TMP_ROOT/hr-onever"; mkdir -p "$CASE"
+fake_quota "$CASE/fakebin" healthy 0.1.40 "$CASE/argv.log"
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'HEADROOM: claude ok' 'the reading still succeeds'
+VERSION_CALLS=$(grep -c -- '--version' "$CASE/argv.log" || true)
+[ "$VERSION_CALLS" = 1 ] \
+  || fail "one reading must cost exactly one quota-axi --version, got $VERSION_CALLS: $(cat "$CASE/argv.log")"
+TOTAL_CALLS=$(grep -c 'headroom-probe' "$CASE/argv.log" || true)
+[ "$TOTAL_CALLS" = 2 ] \
+  || fail "one reading must cost exactly two quota-axi invocations, got $TOTAL_CALLS: $(cat "$CASE/argv.log")"
+pass 'one headroom reading costs one --version and one report call, not three'
+
+# The floor verdict must not change now that it is compared from the captured
+# string rather than a second invocation.
+CASE="$TMP_ROOT/hr-onever-floor"; mkdir -p "$CASE"
+fake_quota "$CASE/fakebin" healthy 0.1.1 "$CASE/argv.log"
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'build=below-floor' 'a below-floor build is still labelled from the single captured version'
+VERSION_CALLS=$(grep -c -- '--version' "$CASE/argv.log" || true)
+[ "$VERSION_CALLS" = 1 ] || fail "the below-floor path must not re-invoke --version, got $VERSION_CALLS"
+pass 'the below-floor label is decided from the one captured version string'
+
 # --- headroom: resolved by field name, not column position ------------------
 
 CASE="$TMP_ROOT/hr-reordered"; mkdir -p "$CASE"
@@ -279,6 +336,11 @@ fi
 # --- diagnose fixtures ------------------------------------------------------
 
 WEEKLY_LIMIT_LINE="You've hit your weekly limit - resets Aug 26 at 10am (Europe/Rome)"
+# Observed verbatim on 2026-08-27 in this repo's own pipeline log, on the run
+# that stranded the very task adding this surface. The separator is the vendor's
+# U+00B7, and the window is the SESSION one rather than the weekly one - a
+# wording the first signature table missed, so a real wall read as no-signature.
+SESSION_LIMIT_LINE="You've hit your session limit "$'\u00b7'" resets 1:40am (America/Los_Angeles)"
 
 # make_task <case-dir> <task-id> -> exports CASE_HOME, CASE_WT, CASE_FB
 make_task() {  # <case-dir> <task-id>
@@ -354,6 +416,44 @@ SH
   chmod +x "$fb/no-mistakes"
 }
 
+# fake_nm_perstep <fakebin> <branch> <run-id> <run-status> <steps-blob>
+# Same two surfaces as fake_nm, but `axi logs --step X` serves $fb/log-X and
+# EXITS NON-ZERO when that file is absent. That distinction is the whole point:
+# an unreadable log and a log read cleanly with no match are different facts,
+# and the command must not collapse them.
+fake_nm_perstep() {
+  local fb=$1 branch=$2 run=$3 status=$4 steps=$5
+  cat > "$fb/nm-overview" <<SH
+repo: /fake/repo
+current_branch: $branch
+daemon: running
+active_run:
+  id: "$run"
+  branch: $branch
+  status: $status
+  head: deadbeef
+  steps[9]{step,status,findings,duration_ms}:
+$steps
+SH
+  cat > "$fb/no-mistakes" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = axi ] && [ "\${2:-}" = logs ]; then
+  step=
+  prev=
+  for a in "\$@"; do
+    if [ "\$prev" = --step ]; then step=\$a; fi
+    prev=\$a
+  done
+  [ -f "$fb/log-\$step" ] || exit 1
+  cat "$fb/log-\$step"
+  exit 0
+fi
+if [ "\${1:-}" = axi ]; then cat "$fb/nm-overview"; exit 0; fi
+exit 0
+SH
+  chmod +x "$fb/no-mistakes"
+}
+
 run_wall() {  # <home> <fakebin> <args...>
   local home=$1 fb=$2
   shift 2
@@ -389,6 +489,23 @@ assert_contains "$OUT" 'USAGE_WALL: logcrew wall source=step-log:review' \
 assert_contains "$OUT" "$WEEKLY_LIMIT_LINE" 'the step-log verdict quotes the line it matched'
 pass 'diagnose reads a usage wall out of a failed pipeline step log'
 
+# --- diagnose: the session-window phrasing is a wall too --------------------
+#
+# The table is only ever as complete as the phrasings actually observed, which
+# is why a miss reads as `no-signature` and never as "it crashed". This one was
+# found by diagnosing a real stranded run rather than a fixture.
+CASE="$TMP_ROOT/dx-session"; mkdir -p "$CASE"
+make_task "$CASE" sessioncrew
+printf 'idle shell\n' > "$CASE/capture.txt"
+fake_tmux "$CASE_FB" fm-sessioncrew "$CASE/capture.txt"
+printf 'I will start by examining the current state.%s\n' "$SESSION_LIMIT_LINE" > "$CASE/review.log"
+fake_nm "$CASE_FB" "fm/sessioncrew" RUNSESS failed '    review,failed,0,120' "$CASE/review.log"
+OUT=$(run_wall "$CASE_HOME" "$CASE_FB" diagnose sessioncrew)
+assert_contains "$OUT" 'USAGE_WALL: sessioncrew wall source=step-log:review' \
+  'the session-window limit phrasing is a usage wall, not an unrecognised failure'
+assert_contains "$OUT" 'session limit' 'the verdict quotes the line it matched'
+pass 'diagnose recognises the session-window limit phrasing'
+
 # --- diagnose: transient transport wording is not a wall --------------------
 
 CASE="$TMP_ROOT/dx-429"; mkdir -p "$CASE"
@@ -423,6 +540,66 @@ assert_contains "$OUT" 'unknown reason=endpoint-only-scan-inconclusive' \
   'a cheap scan that finds nothing is inconclusive, not a clean bill of health'
 assert_not_contains "$OUT" 'no-signature' 'the cheap scan must never claim the evidence was fully read'
 pass 'diagnose downgrades an endpoint-only negative to unknown'
+
+# An UNREADABLE step log must not be reported as read-and-clean. `no-signature`
+# is defined as "evidence was read and nothing matched", so emitting it after a
+# read that never produced anything is a false claim - and the `checked=` list
+# would even name a step nothing had looked at. This is the shape a large log
+# that does not stream out within the bound produces, which is exactly the
+# post-wall state.
+CASE="$TMP_ROOT/dx-log-unreadable"; mkdir -p "$CASE"
+make_task "$CASE" darklogcrew
+printf 'idle shell\n' > "$CASE/capture.txt"
+fake_tmux "$CASE_FB" fm-darklogcrew "$CASE/capture.txt"
+fake_nm_perstep "$CASE_FB" "fm/darklogcrew" RUNDARK failed \
+  '    review,failed,0,120
+    test,failed,0,120'
+OUT=$(run_wall "$CASE_HOME" "$CASE_FB" diagnose darklogcrew)
+assert_contains "$OUT" 'unknown reason=step-log-unreadable' \
+  'a step log that could not be read at all is unknown, never no-signature'
+assert_not_contains "$OUT" 'no-signature' \
+  'an unreadable log must never be reported as read-and-nothing-matched'
+assert_not_contains "$OUT" 'step-log:review' \
+  'a step that was never readable must not be listed as checked'
+assert_contains "$OUT" 'unread: review,test' 'the verdict names the logs it could not read'
+pass 'diagnose reports an unreadable step log as unknown rather than a clean read'
+
+# A PARTIAL read is disclosed rather than folded into a clean result: one log
+# read cleanly does not license silence about the one that could not be read.
+CASE="$TMP_ROOT/dx-log-partial"; mkdir -p "$CASE"
+make_task "$CASE" partcrew
+printf 'idle shell\n' > "$CASE/capture.txt"
+fake_tmux "$CASE_FB" fm-partcrew "$CASE/capture.txt"
+fake_nm_perstep "$CASE_FB" "fm/partcrew" RUNPART failed \
+  '    review,failed,0,120
+    test,failed,0,120'
+printf 'tests failed: 3 assertions\n' > "$CASE_FB/log-review"
+OUT=$(run_wall "$CASE_HOME" "$CASE_FB" diagnose partcrew)
+assert_contains "$OUT" 'no-signature' 'a readable clean log still yields no-signature'
+assert_contains "$OUT" 'step-log:review' 'the log that was read is named as checked'
+assert_contains "$OUT" 'unread=test' 'the log that was NOT read is disclosed on the same line'
+pass 'diagnose discloses a partially read scan instead of reporting it clean'
+
+# The scan used to stop after three failed steps, silently. A run whose FOURTH
+# failed step carries the vendor limit line would then return `no-signature` -
+# the exact false negative this command exists to prevent.
+CASE="$TMP_ROOT/dx-log-fourth"; mkdir -p "$CASE"
+make_task "$CASE" deepcrew
+printf 'idle shell\n' > "$CASE/capture.txt"
+fake_tmux "$CASE_FB" fm-deepcrew "$CASE/capture.txt"
+fake_nm_perstep "$CASE_FB" "fm/deepcrew" RUNDEEP failed \
+  '    intent,failed,0,10
+    rebase,failed,0,10
+    review,failed,0,10
+    test,failed,0,120'
+printf 'nothing here\n' > "$CASE_FB/log-intent"
+printf 'nothing here\n' > "$CASE_FB/log-rebase"
+printf 'nothing here\n' > "$CASE_FB/log-review"
+printf 'running tests\n%s\nclaude exited: exit status 1\n' "$WEEKLY_LIMIT_LINE" > "$CASE_FB/log-test"
+OUT=$(run_wall "$CASE_HOME" "$CASE_FB" diagnose deepcrew)
+assert_contains "$OUT" 'USAGE_WALL: deepcrew wall source=step-log:test' \
+  'the scan reaches the fourth failed step rather than silently stopping at three'
+pass 'diagnose scans every failed step, so a late limit line is still found'
 
 CASE="$TMP_ROOT/dx-nometa"; mkdir -p "$CASE/home/state"
 OUT=$( FM_HOME="$CASE/home" "$WALL" diagnose ghost 2>&1 )

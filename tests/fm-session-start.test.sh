@@ -21,6 +21,9 @@
 #   - orphan status logs whose task meta has already disappeared
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
+#   - the per-task usage-wall scan's shared budget: total cost stays a constant
+#     rather than growing with dead-endpoint count, what the budget cut reads as
+#     unscanned rather than clean, and a healthy fleet spends none of it
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
 #     fm-wake-drain.sh (their real, distinctive output appears verbatim), it
 #     does not reimplement their logic
@@ -1347,6 +1350,114 @@ EOF
   pass "herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone one"
 }
 
+# --- the wall scan's shared budget ------------------------------------------
+
+# make_fake_tmux_slow_capture <fakebin> <live-window>: liveness answers instantly
+# so the digest still reports each endpoint, but capture-pane hangs. That is the
+# post-wall shape: the scan is a pane read that normally costs milliseconds, and
+# costs its full bound exactly when a backend is wedged.
+make_fake_tmux_slow_capture() {
+  local fakebin=$1 live=$2
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+case "\${1:-}" in
+  capture-pane) sleep 30; exit 0 ;;
+  display-message)
+    target=""
+    prev=""
+    for a in "\$@"; do
+      [ "\$prev" = "-t" ] && target="\$a"
+      prev="\$a"
+    done
+    [ "\$target" = "$live" ] && { printf '%%1\n'; exit 0; }
+    exit 1
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+}
+
+test_wall_scan_budget_is_shared_across_tasks() {
+  local rec root home fakebin out unbudgeted_out n
+  local budgeted_ms unbudgeted_ms started exhausted scanned lines
+  rec=$(new_world wall-budget)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux_slow_capture "$fakebin" "fm-sess:live-window"
+
+  # Six dead endpoints: the shape a provider limit produces, because it strands
+  # every worker on that account inside the same minute.
+  for n in 1 2 3 4 5 6; do
+    printf 'window=fm-sess:dead-%s\nkind=ship\nbackend=tmux\n' "$n" > "$home/state/task-$n.meta"
+  done
+
+  # The property under test is that total scan cost is bounded by the BUDGET
+  # rather than by task count, so it is measured as a difference between two
+  # runs of the same fixture. An absolute threshold would be measuring the whole
+  # digest's overhead, not the scan.
+  started=$(date +%s)
+  out=$(FM_SESSION_START_WALL_TIMEOUT=1 FM_SESSION_START_WALL_BUDGET=2 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  budgeted_ms=$(( $(date +%s) - started ))
+
+  started=$(date +%s)
+  unbudgeted_out=$(FM_SESSION_START_WALL_TIMEOUT=1 FM_SESSION_START_WALL_BUDGET=600 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  unbudgeted_ms=$(( $(date +%s) - started ))
+
+  [ "$budgeted_ms" -lt "$(( unbudgeted_ms - 1 ))" ] \
+    || fail "the shared budget must bound total scan cost (budgeted ${budgeted_ms}s vs per-task ${unbudgeted_ms}s over 6 dead endpoints)"
+
+  # What the budget cut must read as UNSCANNED, never as clean. That is the same
+  # rule the gauge follows: an unknown is unknown, not fine.
+  assert_contains "$out" "unknown reason=scan-budget-exhausted" \
+    "tasks the budget could not reach must be reported as unscanned"
+  assert_contains "$out" "was NOT checked" \
+    "the digest must say plainly which tasks went unchecked"
+  assert_not_contains "$out" "no-signature" \
+    "a budget-exhausted scan must never report a clean read"
+
+  # The budget must actually stop work: strictly fewer tasks scanned than exist.
+  exhausted=$(printf '%s\n' "$out" | grep -c 'scan-budget-exhausted' || true)
+  [ "$exhausted" -ge 1 ] || fail "the budget never stopped any scan: $out"
+  scanned=$(( 6 - exhausted ))
+  [ "$scanned" -lt 6 ] || fail "the budget scanned every task, so it bounded nothing"
+
+  # Bounding the scan must not silently drop tasks: every one still gets a line,
+  # under both budgets.
+  lines=$(printf '%s\n' "$out" | grep -c '^USAGE_WALL: task-' || true)
+  [ "$lines" -eq 6 ] || fail "every task must keep a scan line, got $lines: $out"
+  for n in 1 2 3 4 5 6; do
+    assert_contains "$unbudgeted_out" "USAGE_WALL: task-$n " "task-$n lost its scan line under a generous budget"
+  done
+  assert_not_contains "$unbudgeted_out" "scan-budget-exhausted" \
+    "a budget large enough for every task must not report one exhausted"
+  pass "session start: the per-task wall scan shares one budget and discloses what it did not check"
+}
+
+test_wall_scan_budget_leaves_a_healthy_fleet_alone() {
+  local rec root home fakebin out
+  rec=$(new_world wall-budget-healthy)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live-window"
+
+  printf 'window=fm-sess:live-window\nkind=ship\n' > "$home/state/task-live.meta"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "endpoint: alive" "a live endpoint is still reported alive"
+  assert_not_contains "$out" "scan-budget-exhausted" \
+    "a fleet with no dead endpoints must never spend or report the scan budget"
+  pass "session start: the scan budget costs a healthy fleet nothing"
+}
+
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
@@ -2485,6 +2596,8 @@ test_status_tail_line_cap
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
+test_wall_scan_budget_is_shared_across_tasks
+test_wall_scan_budget_leaves_a_healthy_fleet_alone
 test_composition_invokes_real_scripts
 test_branch_outcome_replay_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched

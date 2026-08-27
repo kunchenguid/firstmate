@@ -361,6 +361,15 @@ SESSION_START_HEADROOM_TIMEOUT=${FM_SESSION_START_HEADROOM_TIMEOUT:-20}
 case "$SESSION_START_HEADROOM_TIMEOUT" in ''|*[!0-9]*|0) SESSION_START_HEADROOM_TIMEOUT=20 ;; esac
 SESSION_START_WALL_TIMEOUT=${FM_SESSION_START_WALL_TIMEOUT:-15}
 case "$SESSION_START_WALL_TIMEOUT" in ''|*[!0-9]*|0) SESSION_START_WALL_TIMEOUT=15 ;; esac
+# One budget shared by every per-task wall scan, so the digest's total scan cost
+# is a constant rather than 15s x dead-endpoint-count. This matters because the
+# scan is cheapest when nothing is wrong and worst in exactly the state it was
+# built for: a provider limit strands every worker on that account at once, and
+# a home holding five or six dead endpoints would otherwise spend a minute and a
+# half before the operator learned anything. When the budget runs out the
+# remaining tasks are reported as unscanned, never folded into a clean result.
+SESSION_START_WALL_BUDGET=${FM_SESSION_START_WALL_BUDGET:-45}
+case "$SESSION_START_WALL_BUDGET" in ''|*[!0-9]*|0) SESSION_START_WALL_BUDGET=45 ;; esac
 
 RULE='================================================================================'
 SUBRULE='--------------------------------------------------------------------------------'
@@ -832,6 +841,8 @@ fi
 subsection "Work under way (state/*.meta)"
 META_FOUND=0
 NOT_ALIVE_FOUND=0
+WALL_BUDGET_LEFT=$SESSION_START_WALL_BUDGET
+WALL_BUDGET_EXHAUSTED=0
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
   META_FOUND=1
@@ -853,10 +864,20 @@ for meta in "$STATE"/*.meta; do
       # remembering to look for it; a negative from it is deliberately
       # `unknown`, because the deciding evidence is in the pipeline step logs.
       NOT_ALIVE_FOUND=1
-      fm_run_timed "$SESSION_START_WALL_TIMEOUT" \
-        "$SCRIPT_DIR/fm-usage-wall.sh" diagnose "$id" --endpoint-only 2>/dev/null |
-        grep '^USAGE_WALL:' ||
-        printf 'USAGE_WALL: %s unknown reason=scan-did-not-complete checked=none\n' "$id"
+      scan_bound=$SESSION_START_WALL_TIMEOUT
+      [ "$scan_bound" -le "$WALL_BUDGET_LEFT" ] || scan_bound=$WALL_BUDGET_LEFT
+      if [ "$scan_bound" -le 0 ]; then
+        WALL_BUDGET_EXHAUSTED=1
+        printf 'USAGE_WALL: %s unknown reason=scan-budget-exhausted checked=none\n' "$id"
+      else
+        scan_started=$(date +%s)
+        fm_run_timed "$scan_bound" \
+          "$SCRIPT_DIR/fm-usage-wall.sh" diagnose "$id" --endpoint-only 2>/dev/null |
+          grep '^USAGE_WALL:' ||
+          printf 'USAGE_WALL: %s unknown reason=scan-did-not-complete checked=none\n' "$id"
+        WALL_BUDGET_LEFT=$((WALL_BUDGET_LEFT - ($(date +%s) - scan_started)))
+        [ "$WALL_BUDGET_LEFT" -ge 0 ] || WALL_BUDGET_LEFT=0
+      fi
     fi
   else
     printf 'endpoint: unknown (no window recorded)\n'
@@ -871,6 +892,11 @@ for meta in "$STATE"/*.meta; do
 done
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
 if [ "$NOT_ALIVE_FOUND" -eq 1 ]; then
+  if [ "$WALL_BUDGET_EXHAUSTED" -eq 1 ]; then
+    printf '\nThe %ss shared scan budget ran out: every task marked scan-budget-exhausted above was NOT checked.\n' \
+      "$SESSION_START_WALL_BUDGET"
+    printf 'Those are unscanned, not clear - scan them with %s/bin/fm-usage-wall.sh diagnose <id>.\n' "$FM_ROOT"
+  fi
   printf '\nA USAGE_WALL line above is a first read, not a verdict: run %s/bin/fm-usage-wall.sh diagnose <id>\n' "$FM_ROOT"
   printf 'for the pipeline step logs, and load usage-limit-recovery before treating any of it as a crash.\n'
 fi

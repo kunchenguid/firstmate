@@ -11,9 +11,21 @@
 # that account inside the same minute, so the gauge belongs next to the
 # dispatch decision rather than in a command someone has to think of running.
 # bin/fm-usage-wall.sh owns the reading, including every unmeasurable case.
+#
+# The read is bounded here as well as inside that command. Its internal bounds
+# are per-provider-call, so a wedged gauge could still cost this view several of
+# them in series; this view is rendered on the heartbeat path, so its total cost
+# has to be a constant. FM_FLEET_VIEW_HEADROOM_TIMEOUT is that constant, and a
+# bound hit prints the same unknown line as any other unreadable gauge - never a
+# healthy one, and never a silently omitted section.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
+
+HEADROOM_TIMEOUT=${FM_FLEET_VIEW_HEADROOM_TIMEOUT:-30}
+case "$HEADROOM_TIMEOUT" in ''|*[!0-9]*|0) HEADROOM_TIMEOUT=30 ;; esac
 
 usage() {
   cat <<'EOF'
@@ -34,8 +46,8 @@ esac
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-view: jq not found" >&2; exit 1; }
 
 SNAPSHOT=$("$SCRIPT_DIR/fm-fleet-snapshot.sh" --json) || exit $?
-HEADROOM=$("$SCRIPT_DIR/fm-usage-wall.sh" headroom 2>/dev/null) \
-  || HEADROOM='HEADROOM: (all providers) unknown reason=the headroom read did not complete'
+HEADROOM=$(fm_run_timed "$HEADROOM_TIMEOUT" "$SCRIPT_DIR/fm-usage-wall.sh" headroom 2>/dev/null) \
+  || HEADROOM="HEADROOM: (all providers) unknown reason=the headroom read did not complete within ${HEADROOM_TIMEOUT}s"
 
 printf '%s\n' "$SNAPSHOT" | jq -r '
   def dash($v): if $v == null or $v == "" then "-" else $v end;

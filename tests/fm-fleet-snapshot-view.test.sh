@@ -19,6 +19,18 @@ make_fakebin() {  # <dir>
 #!/usr/bin/env bash
 exit 0
 SH
+  # The view prints the provider-headroom gauge, so without this stub every
+  # view assertion below would query the real provider on any host that has
+  # quota-axi installed - a host-dependent test, and a real network read from
+  # a unit suite. The stub reports nothing readable, which the gauge is
+  # required to render as unknown rather than as healthy.
+  cat > "$fb/quota-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf '0.0.0\n'; exit 0 ;;
+esac
+exit 1
+SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -146,7 +158,7 @@ test_empty_fleet_json() {
       and .main_inventory.unstructured_current_count == 0
   ' >/dev/null \
     || fail "empty snapshot schema or absence markers wrong: $out"
-  view=$(FM_HOME="$home" "$VIEW")
+  view=$(PATH="$(make_fakebin "$home"):$PATH" FM_HOME="$home" "$VIEW")
   assert_contains "$view" "No live task metadata found." "empty fleet view should say no live metadata"
   pass "empty fleet snapshot and view use explicit absence markers"
 }
@@ -603,6 +615,33 @@ test_view_renders_snapshot() {
   pass "fleet view renders the snapshot without secondmate peek guidance"
 }
 
+# The view prints the provider-headroom gauge on the heartbeat path, so a wedged
+# gauge must cost the view a bounded constant and must render as unknown - never
+# as healthy, and never as a silently missing section.
+test_view_headroom_is_bounded_and_unknown_reads_unknown() {
+  local home fakebin view started elapsed
+  home=$(make_home headroom-bound)
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf '0.1.40
+'; exit 0 ;;
+esac
+sleep 60
+SH
+  chmod +x "$fakebin/quota-axi"
+
+  started=$(date +%s)
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FLEET_VIEW_HEADROOM_TIMEOUT=2 "$VIEW")
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 20 ] \
+    || fail "a wedged gauge must not cost the view more than its own bound (took ${elapsed}s)"
+  assert_contains "$view" "unknown" "a gauge that could not be read must render as unknown"
+  assert_not_contains "$view" "HEADROOM: claude ok" "a wedged gauge must never render as healthy"
+  pass "fleet view bounds the headroom read and renders an unreadable gauge as unknown"
+}
+
 test_view_renders_dead_secondmate_agent_status() {
   local home fakebin view
   home=$(make_home dead-secondmate)
@@ -799,6 +838,7 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+test_view_headroom_is_bounded_and_unknown_reads_unknown
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
