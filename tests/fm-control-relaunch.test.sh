@@ -190,18 +190,20 @@ activate_test_route() {  # <case-dir> <task> <generation>
   capability="$dir/home/state/routing/claims/$task/$generation.cap"
   candidate="$dir/home/state/$task.meta.route-candidate"
   metadata="$dir/home/state/$task.meta"
-  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
-    "$ROOT/bin/fm-route.sh" reserve --task "$task" --generation "$generation" \
-      --profile claude-sonnet --provider anthropic --lane claude-primary \
-      --account claude-primary --class standard --work-type "$work_type" \
-      --risk medium --mode automatic --now 1000 >/dev/null
+  fm_test_reserve_bound "$ROOT" "$dir/home" "$dir/home/state" "$task" "$generation" \
+    claude-sonnet anthropic claude-primary claude-primary standard "$work_type" medium automatic \
+    claude claude-sonnet-test none 1000 >/dev/null
   FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
     "$ROOT/bin/fm-route.sh" begin-admission --task "$task" --generation "$generation" \
       --profile claude-sonnet --provider anthropic --lane claude-primary \
       --account claude-primary --class standard --work-type "$work_type" --risk medium --mode automatic \
+      --launch-harness claude --launch-model claude-sonnet-test --launch-effort none \
       --transition fresh --claim-file "$capability" --metadata-file "$metadata" \
       >/dev/null
   cp "$metadata" "$candidate"
+  awk 'BEGIN{done=0} /^model=/{print "model=claude-sonnet-test"; done=1; next} {print} END{if (!done) print "model=claude-sonnet-test"}' \
+    "$candidate" >"$candidate.model"
+  mv "$candidate.model" "$candidate"
   {
     printf 'route_generation=%s\n' "$generation"
     printf '%s\n' 'route_profile=claude-sonnet'
@@ -359,6 +361,45 @@ test_relaunch_preserves_and_readmits_the_original_route_generation() {
   pass "fm-control relaunch: original route generation and account binding survive replacement"
 }
 
+test_bound_inherited_route_uses_the_effective_relaunch_identity() {
+  local dir out rc meta reservation
+  dir=$(new_case routed-effective-identity rl35binding)
+  add_ship_task "$dir" rl35binding claude
+  mkdir -p "$dir/home/config" "$dir/claude-primary"
+  jq -n --arg config_dir "$dir/claude-primary" \
+    '{version:1,accounts:{"claude-primary":{harness:"claude",envName:"CLAUDE_CONFIG_DIR",configDir:$config_dir}}}' \
+    > "$dir/home/config/crew-accounts.json"
+  activate_test_route "$dir" rl35binding gen-bound
+  printf 'zsh' > "$dir/fake/command"
+  meta="$dir/home/state/rl35binding.meta"
+  reservation="$dir/home/state/routing/reservations/rl35binding/gen-bound.json"
+  cp "$meta" "$meta.before"
+
+  out=$(run_spawn "$dir" rl35binding --relaunch --harness codex); rc=$?
+  expect_code 1 "$rc" "bound inherited harness override must fail"
+  assert_contains "$out" "matching routing reservation is required" "bound harness override was not diagnosed"
+  cmp -s "$meta.before" "$meta" || fail "bound harness override changed metadata"
+  assert_present "$reservation" "bound harness override retired active capacity"
+
+  out=$(run_spawn "$dir" rl35binding --relaunch --model opus); rc=$?
+  expect_code 1 "$rc" "bound inherited model override must fail"
+  assert_contains "$out" "matching routing reservation is required" "bound model override was not diagnosed"
+  cmp -s "$meta.before" "$meta" || fail "bound model override changed metadata"
+
+  out=$(run_spawn "$dir" rl35binding --relaunch --effort high); rc=$?
+  expect_code 1 "$rc" "bound inherited effort override must fail"
+  assert_contains "$out" "matching routing reservation is required" "bound effort override was not diagnosed"
+  cmp -s "$meta.before" "$meta" || fail "bound effort override changed metadata"
+
+  out=$(run_spawn "$dir" rl35binding --relaunch); rc=$?
+  expect_code 0 "$rc" "bound inherited no-flag relaunch should reuse its recorded identity"$'\n'"$out"
+  [ "$(meta_field "$dir" rl35binding harness)" = claude ] \
+    && [ "$(meta_field "$dir" rl35binding model)" = claude-sonnet-test ] \
+    && [ "$(meta_field "$dir" rl35binding effort)" = default ] \
+    || fail "bound no-flag relaunch did not preserve effective launch identity"
+  pass "fm-spawn relaunch: bound inherited admission checks the effective launch identity"
+}
+
 test_relaunch_upgrades_legacy_eight_field_route_metadata() {
   local dir out rc meta
   dir=$(new_case routed-legacy rl35legacy)
@@ -422,12 +463,10 @@ test_explicit_reroute_requires_a_distinct_reserved_generation() {
   [ "$(meta_field "$dir" rl37 route_generation)" = gen-old ] \
     || fail "same-generation refusal changed recorded routing"
 
-  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
-    "$ROOT/bin/fm-route.sh" reserve --task rl37 --generation gen-new \
-      --profile claude-sonnet --provider anthropic --lane claude-primary \
-      --account claude-primary --class standard --work-type implementation \
-      --risk medium --mode automatic --now 1010 >/dev/null
-  out=$(run_spawn "$dir" rl37 --relaunch --harness claude \
+  fm_test_reserve_bound "$ROOT" "$dir/home" "$dir/home/state" rl37 gen-new \
+    claude-sonnet anthropic claude-primary claude-primary standard implementation medium automatic \
+    claude claude-sonnet-test none 1010 >/dev/null
+  out=$(run_spawn "$dir" rl37 --relaunch --harness claude --model claude-sonnet-test \
     --route-generation gen-new --route-profile claude-sonnet --route-provider anthropic \
     --route-lane claude-primary --route-account claude-primary --route-class standard \
     --route-work-type implementation --route-risk medium --route-mode automatic); rc=$?
@@ -468,14 +507,12 @@ test_routed_relaunch_prepublication_failures_preserve_old_capacity() {
           run_spawn "$dir" "rl-$transition" --relaunch --route-mode off); rc=$?
         ;;
       replacement)
-        FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
-          "$ROOT/bin/fm-route.sh" reserve --task "rl-$transition" --generation gen-new \
-            --profile claude-sonnet --provider anthropic --lane claude-primary \
-            --account claude-primary --class standard --work-type implementation \
-            --risk medium --mode automatic --now 1010 >/dev/null
+        fm_test_reserve_bound "$ROOT" "$dir/home" "$dir/home/state" "rl-$transition" gen-new \
+          claude-sonnet anthropic claude-primary claude-primary standard implementation medium automatic \
+          claude claude-sonnet-test none 1010 >/dev/null
         new_res="$dir/home/state/routing/reservations/rl-$transition/gen-new.json"
         out=$(FM_REAL_MV="$real_mv" FM_FAKE_META_PUBLISH_MV_FAIL="$meta" \
-          run_spawn "$dir" "rl-$transition" --relaunch --harness claude \
+          run_spawn "$dir" "rl-$transition" --relaunch --harness claude --model claude-sonnet-test \
             --route-generation gen-new --route-profile claude-sonnet --route-provider anthropic \
             --route-lane claude-primary --route-account claude-primary --route-class standard \
             --route-work-type implementation --route-risk medium --route-mode automatic); rc=$?
@@ -1511,6 +1548,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_preserves_and_readmits_the_original_route_generation
+test_bound_inherited_route_uses_the_effective_relaunch_identity
 test_relaunch_upgrades_legacy_eight_field_route_metadata
 test_explicit_off_relaunch_suppresses_inherited_route_metadata
 test_explicit_reroute_requires_a_distinct_reserved_generation

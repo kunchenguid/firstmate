@@ -407,7 +407,7 @@ git commit -m "feat: select subscription routing profiles"
 
 **Interfaces:**
 
-- Produces: `fm-route.sh reserve --task ID --generation GENERATION --profile ID --provider NAME --lane NAME --account ACCOUNT_ID|none --class CLASS --work-type TYPE --risk RISK --mode MODE [--burst]`.
+- Produces: `fm-route.sh reserve --task ID --generation GENERATION --profile ID --provider NAME --lane NAME --account ACCOUNT_ID|none --class CLASS --work-type TYPE --risk RISK --mode MODE --request REQUEST.json --candidates CANDIDATES.json --decision DECISION.json [--burst]`; reservation re-runs the captured selection against authoritative load and the active version 2 policy under the routing lock and persists the policy-derived launch harness/model/effort binding.
 - Produces: `fm-route.sh verify-reservation --task ID --generation GENERATION --profile ID --provider NAME --lane NAME --account ACCOUNT_ID|none --class CLASS --work-type TYPE --risk RISK --mode MODE`.
 - Produces: migration-only `fm-route.sh reservation-work-type` for an exact legacy eight-field tuple; returns the authoritative type from its strict reservation or exact terminal outcome.
 - Produces: `fm-route.sh release --task ID --generation GENERATION`.

@@ -428,6 +428,7 @@ begin_fresh_admission() {
   "$ROUTE" begin-admission --task "$task" --generation "$generation" \
     --profile profile-1 --provider openai --lane codex-primary \
     --account codex-primary --class standard --work-type "$work_type" --risk medium --mode automatic \
+    --launch-harness codex --launch-model model-profile-1 --launch-effort none \
     --transition fresh --metadata-file "$metadata" \
     --claim-file "$(claim_path "$task" "$generation")"
 }
@@ -436,6 +437,9 @@ write_route_metadata() {
   local file=$1 generation=$2 profile=${3:-profile-1} lane=${4:-codex-primary} account=${5:-codex-primary} work_type=${6:-implementation}
   {
     printf 'task=task-1\n'
+    printf 'harness=codex\n'
+    printf 'model=model-%s\n' "$profile"
+    printf 'effort=default\n'
     printf 'route_generation=%s\n' "$generation"
     printf 'route_profile=%s\n' "$profile"
     printf 'route_provider=openai\n'
@@ -464,6 +468,7 @@ begin_inherited_admission() {
   "$ROUTE" begin-admission --task "$task" --generation "$generation" \
     --profile profile-1 --provider openai --lane codex-primary \
     --account codex-primary --class standard --work-type "$work_type" --risk medium --mode automatic \
+    --launch-harness codex --launch-model model-profile-1 --launch-effort none \
     --transition inherit --metadata-file "$metadata" \
     --claim-file "$(claim_path "$task" "$generation")"
 }
@@ -482,6 +487,7 @@ begin_replacement_admission() {
   "$ROUTE" begin-admission --task "$task" --generation "$generation" \
     --profile profile-2 --provider openai --lane codex-secondary \
     --account codex-secondary --class standard --work-type "$work_type" --risk medium --mode automatic \
+    --launch-harness codex --launch-model model-profile-2 --launch-effort none \
     --transition replacement --prior-generation "$prior_generation" \
     --metadata-file "$metadata" --claim-file "$(claim_path "$task" "$generation")" \
     --prior-claim-file "$(claim_path "$task" "$prior_generation")"
@@ -507,11 +513,12 @@ age_admission() {
 
 reserve_route() {
   local task=$1 generation=$2 profile=$3 provider=$4 lane=$5 account=$6 class=$7 risk=$8 mode=$9
-  local work_type=${WORK_TYPE_OVERRIDE:-implementation}
+  local work_type=${WORK_TYPE_OVERRIDE:-implementation} harness=pi now=${RESERVE_NOW_OVERRIDE:-1000}
   shift 9
-  "$ROUTE" reserve --task "$task" --generation "$generation" --profile "$profile" \
-    --provider "$provider" --lane "$lane" --account "$account" --class "$class" \
-    --work-type "$work_type" --risk "$risk" --mode "$mode" --now 1000 "$@"
+  [ "$account" = none ] || harness=codex
+  fm_test_reserve_bound "$ROOT" "$LAB" "$FM_STATE_OVERRIDE" "$task" "$generation" "$profile" \
+    "$provider" "$lane" "$account" "$class" "$work_type" "$risk" "$mode" "$harness" \
+    "model-$profile" none "$now" "$@"
 }
 
 test_reserve_requires_a_bounded_work_type() {
@@ -524,9 +531,203 @@ test_reserve_requires_a_bounded_work_type() {
   pass "reservations and requests share one bounded work-type contract"
 }
 
+test_reserve_is_bound_to_authoritative_policy_and_selection_evidence() {
+  local before
+  reset_route_state
+  seed_v2_policy automatic
+  write_request standard implementation low false 1 strong 60
+  write_candidates "[$(candidate pi-test lane-1 3 1 0 0 0 null | jq -c '.model="model-only"')]"
+  select_json >"$LAB/decision.json" || fail "could not capture authoritative decision"
+
+  before=$(find "$FM_STATE_OVERRIDE" -type f 2>/dev/null | sort)
+  expect_failure_contains 'selection evidence is required' "$ROUTE" reserve \
+    --task task-1 --generation gen-1 --profile pi-test --provider provider \
+    --lane lane-1 --account none --class standard --work-type implementation \
+    --risk low --mode automatic --now 1000
+  [ "$(find "$FM_STATE_OVERRIDE" -type f 2>/dev/null | sort)" = "$before" ] \
+    || fail "evidence-free reserve mutated routing state"
+
+  jq '.selected.profile="attacker"' "$LAB/decision.json" >"$LAB/tampered-decision.json"
+  expect_failure_contains 'selection-decision-mismatch' "$ROUTE" reserve \
+    --task task-1 --generation gen-1 --profile pi-test --provider provider \
+    --lane lane-1 --account none --class standard --work-type implementation \
+    --risk low --mode automatic --request "$REQUEST" --candidates "$CANDIDATES" \
+    --decision "$LAB/tampered-decision.json" --now 1000
+  [ ! -e "$FM_STATE_OVERRIDE/routing/reservations/task-1/gen-1.json" ] \
+    || fail "tampered decision created a reservation"
+
+  "$ROUTE" reserve --task task-1 --generation gen-1 --profile pi-test \
+    --provider provider --lane lane-1 --account none --class standard \
+    --work-type implementation --risk low --mode automatic --request "$REQUEST" \
+    --candidates "$CANDIDATES" --decision "$LAB/decision.json" --now 1000 \
+    | jq -e '.launchHarness == "pi" and .launchModel == "model-only" and .launchEffort == null and .bindingVersion == 1' >/dev/null \
+    || fail "valid selection did not persist the policy-derived launch binding"
+
+  for policy_mode in off simulate; do
+    reset_route_state
+    seed_v2_policy "$policy_mode"
+    before=$(find "$FM_STATE_OVERRIDE" -type f 2>/dev/null | sort)
+    expect_failure_contains "mode-does-not-reserve:$policy_mode" "$ROUTE" reserve \
+      --task task-1 --generation gen-denied --profile pi-test --provider provider \
+      --lane lane-1 --account none --class standard --work-type implementation \
+      --risk low --mode "$policy_mode" --request "$REQUEST" --candidates "$CANDIDATES" \
+      --decision "$LAB/decision.json" --now 1000
+    [ "$(find "$FM_STATE_OVERRIDE" -type f 2>/dev/null | sort)" = "$before" ] \
+      || fail "$policy_mode reserve refusal mutated routing state"
+  done
+
+  reset_route_state
+  seed_v2_policy automatic
+  expect_failure_contains 'selected route does not match active policy' "$ROUTE" reserve \
+    --task task-1 --generation gen-fake --profile pi-test --provider attacker \
+    --lane lane-1 --account none --class standard --work-type implementation \
+    --risk low --mode automatic --request "$REQUEST" --candidates "$CANDIDATES" \
+    --decision "$LAB/decision.json" --now 1000
+  [ ! -e "$FM_STATE_OVERRIDE/routing/reservations/task-1/gen-fake.json" ] \
+    || fail "caller-selected provider bypassed policy binding"
+  expect_failure_contains 'selected route does not match active policy' "$ROUTE" reserve \
+    --task task-1 --generation gen-fake-lane --profile pi-test --provider provider \
+    --lane attacker --account none --class standard --work-type implementation \
+    --risk low --mode automatic --request "$REQUEST" --candidates "$CANDIDATES" \
+    --decision "$LAB/decision.json" --now 1000
+  expect_failure_contains 'selected route does not match active policy' "$ROUTE" reserve \
+    --task task-1 --generation gen-fake-account --profile pi-test --provider provider \
+    --lane lane-1 --account attacker --class standard --work-type implementation \
+    --risk low --mode automatic --request "$REQUEST" --candidates "$CANDIDATES" \
+    --decision "$LAB/decision.json" --now 1000
+  expect_failure_contains 'selected profile does not match reservation' "$ROUTE" reserve \
+    --task task-1 --generation gen-unselected --profile pi-other --provider provider \
+    --lane lane-2 --account none --class standard --work-type implementation \
+    --risk low --mode automatic --request "$REQUEST" --candidates "$CANDIDATES" \
+    --decision "$LAB/decision.json" --now 1000
+
+  jq '.[0].harness="pi-signed"' "$CANDIDATES" >"$LAB/fake-harness-candidates.json"
+  "$ROUTE" select --request "$REQUEST" --candidates "$LAB/fake-harness-candidates.json" --now 1000 >"$LAB/fake-harness-decision.json"
+  expect_failure_contains 'selected route does not match active policy' "$ROUTE" reserve \
+    --task task-1 --generation gen-fake-harness --profile pi-test --provider provider \
+    --lane lane-1 --account none --class standard --work-type implementation --risk low \
+    --mode automatic --request "$REQUEST" --candidates "$LAB/fake-harness-candidates.json" \
+    --decision "$LAB/fake-harness-decision.json" --now 1000
+  jq '.[0].model="attacker/model"' "$CANDIDATES" >"$LAB/fake-model-candidates.json"
+  "$ROUTE" select --request "$REQUEST" --candidates "$LAB/fake-model-candidates.json" --now 1000 >"$LAB/fake-model-decision.json"
+  expect_failure_contains 'selected route does not match active policy' "$ROUTE" reserve \
+    --task task-1 --generation gen-fake-model --profile pi-test --provider provider \
+    --lane lane-1 --account none --class standard --work-type implementation --risk low \
+    --mode automatic --request "$REQUEST" --candidates "$LAB/fake-model-candidates.json" \
+    --decision "$LAB/fake-model-decision.json" --now 1000
+
+  jq '.profiles["pi-test"].model="default"' "$FM_CONFIG_OVERRIDE/crew-dispatch.json" >"$LAB/default-policy.json"
+  mv "$LAB/default-policy.json" "$FM_CONFIG_OVERRIDE/crew-dispatch.json"
+  jq '.[0].model="default"' "$CANDIDATES" >"$LAB/default-model-candidates.json"
+  "$ROUTE" select --request "$REQUEST" --candidates "$LAB/default-model-candidates.json" --now 1000 >"$LAB/default-model-decision.json"
+  expect_failure_contains 'selected policy profile requires a concrete model' "$ROUTE" reserve \
+    --task task-1 --generation gen-default-model --profile pi-test --provider provider \
+    --lane lane-1 --account none --class standard --work-type implementation --risk low \
+    --mode automatic --request "$REQUEST" --candidates "$LAB/default-model-candidates.json" \
+    --decision "$LAB/default-model-decision.json" --now 1000
+
+  ln -s "$REQUEST" "$LAB/request-link.json"
+  expect_failure_contains 'request file is unsafe or unreadable' "$ROUTE" reserve \
+    --task task-1 --generation gen-symlink --profile pi-test --provider provider \
+    --lane lane-1 --account none --class standard --work-type implementation --risk low \
+    --mode automatic --request "$LAB/request-link.json" --candidates "$CANDIDATES" \
+    --decision "$LAB/decision.json" --now 1000
+  pass "reserve is bound to authoritative policy and selection evidence"
+}
+
+test_reserve_rejects_a_decision_staled_by_authoritative_load() {
+  reset_route_state
+  mkdir -p "$FM_CONFIG_OVERRIDE"
+  jq -n '{schemaVersion:2,routing:{mode:"automatic"},profiles:{
+    a:{harness:"pi",model:"model-a",provider:"provider",lane:"lane-a",reasoningClass:"strong",workTypes:["review"]},
+    b:{harness:"pi",model:"model-b",provider:"provider",lane:"lane-b",reasoningClass:"strong",workTypes:["review"]}
+  },default:["a","b"]}' >"$FM_CONFIG_OVERRIDE/crew-dispatch.json"
+  jq -n '{taskId:"stale-task",taskClass:"standard",workType:"review",risk:"medium",independent:false,requestedWorkers:1,requiredReasoningClass:"strong",estimatedSeconds:60}' >"$LAB/stale-request.json"
+  jq -n '[
+    {profile:"a",harness:"pi",model:"model-a",provider:"provider",lane:"lane-a",account:"none",fitTier:3,reasoningClass:"strong",catalogSupported:true,authState:"usable",spendPriority:1,runwaySeconds:1000,activeLane:0,historySuccesses:0,historyAttempts:0,costTier:0},
+    {profile:"b",harness:"pi",model:"model-b",provider:"provider",lane:"lane-b",account:"none",fitTier:3,reasoningClass:"strong",catalogSupported:true,authState:"usable",spendPriority:1,runwaySeconds:1000,activeLane:0,historySuccesses:0,historyAttempts:0,costTier:1}
+  ]' >"$LAB/stale-candidates.json"
+  "$ROUTE" select --request "$LAB/stale-request.json" --candidates "$LAB/stale-candidates.json" --now 1000 >"$LAB/stale-decision.json"
+  jq -e '.selected.profile == "a"' "$LAB/stale-decision.json" >/dev/null || fail "stale-load fixture did not initially select a"
+  mkdir -p "$FM_STATE_OVERRIDE/routing/reservations/occupant"
+  jq -n '{taskId:"occupant",generation:"gen-old",profile:"legacy",provider:"provider",lane:"lane-a",account:"none",taskClass:"standard",workType:"review",risk:"medium",mode:"automatic",burst:false,createdAt:900,score:null,admissionState:"active",claimHash:("a"*64)}' \
+    >"$FM_STATE_OVERRIDE/routing/reservations/occupant/gen-old.json"
+  expect_failure_contains 'selection-decision-mismatch' "$ROUTE" reserve \
+    --task stale-task --generation gen-new --profile a --provider provider --lane lane-a \
+    --account none --class standard --work-type review --risk medium --mode automatic \
+    --request "$LAB/stale-request.json" --candidates "$LAB/stale-candidates.json" \
+    --decision "$LAB/stale-decision.json" --now 1000
+  [ ! -e "$FM_STATE_OVERRIDE/routing/reservations/stale-task/gen-new.json" ] \
+    || fail "stale load decision created a reservation"
+  pass "reserve re-evaluates selection under lock and rejects stale load decisions"
+}
+
+test_legacy_unbound_reservations_are_cleanup_only() {
+  local metadata="$FM_STATE_OVERRIDE/legacy.meta" reservation capability
+  reset_route_state
+  mkdir -p "$FM_STATE_OVERRIDE/routing/reservations/legacy"
+  reservation="$FM_STATE_OVERRIDE/routing/reservations/legacy/gen-1.json"
+  jq -n '{taskId:"legacy",generation:"gen-1",profile:"profile-1",provider:"openai",lane:"codex-primary",account:"codex-primary",taskClass:"standard",workType:"implementation",risk:"medium",mode:"automatic",burst:false,createdAt:1000,score:null,admissionState:"reserved"}' >"$reservation"
+  expect_failure_contains 'reservation-binding-required' "$ROUTE" begin-admission \
+    --task legacy --generation gen-1 --profile profile-1 --provider openai --lane codex-primary \
+    --account codex-primary --class standard --work-type implementation --risk medium --mode automatic \
+    --launch-harness codex --launch-model legacy-model --launch-effort none \
+    --transition fresh --metadata-file "$metadata" --claim-file "$(claim_path legacy gen-1)"
+  [ ! -e "$FM_STATE_OVERRIDE/routing/claims/legacy" ] \
+    || fail "refused unbound reservation created a claim directory"
+  jq -e '.admissionState == "reserved" and (has("bindingVersion") | not)' "$reservation" >/dev/null \
+    || fail "refused legacy reservation was mutated"
+
+  reset_route_state
+  reserve_route legacy gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  activate_fresh_admission legacy gen-1 "$metadata" >/dev/null
+  capability=$(claim_path legacy gen-1)
+  jq 'del(.bindingVersion,.launchHarness,.launchModel,.launchEffort,.requestDigest,.candidatesDigest,.decisionDigest,.policyDigest)' "$reservation" >"$reservation.next"
+  mv "$reservation.next" "$reservation"
+  "$ROUTE" begin-admission --task legacy --generation gen-1 --profile profile-1 --provider openai \
+    --lane codex-primary --account codex-primary --class standard --work-type implementation \
+    --risk medium --mode automatic --launch-harness codex --launch-model ignored-legacy \
+    --launch-effort none --transition inherit --metadata-file "$metadata" --claim-file "$capability" >/dev/null \
+    || fail "legacy active reservation could not enter authenticated recovery"
+  "$ROUTE" abort-admission --task legacy --claim-file "$capability" >/dev/null \
+    || fail "legacy inherited admission did not roll back"
+  jq -e '.admissionState == "active" and (has("bindingVersion") | not)' "$reservation" >/dev/null \
+    || fail "legacy inherited rollback did not preserve active capacity"
+  pass "legacy unbound pending routes cannot launch while active routes remain recoverable"
+}
+
+test_bound_admission_rejects_published_launch_identity_tamper() {
+  local metadata="$FM_STATE_OVERRIDE/task-1.meta" candidate capability rc
+  reset_route_state
+  reserve_route task-1 gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  begin_fresh_admission task-1 gen-1 "$metadata" >/dev/null
+  capability=$(claim_path task-1 gen-1)
+  candidate="$metadata.candidate"
+  write_route_metadata "$candidate" gen-1
+  sed 's/^model=model-profile-1$/model=attacker-model/' "$candidate" >"$candidate.tampered"
+  mv "$candidate.tampered" "$candidate"
+  set +e
+  "$ROUTE" prepare-admission --task task-1 --candidate "$candidate" --claim-file "$capability" \
+    >"$LAB/tampered-admission.out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "tampered admission candidate unexpectedly prepared"
+  assert_grep 'admission candidate launch mismatch' "$LAB/tampered-admission.out" \
+    "tampered admission candidate was not diagnosed"
+  [ ! -e "$metadata" ] || fail "tampered launch identity published metadata"
+  "$ROUTE" abort-admission --task task-1 --claim-file "$capability" >/dev/null \
+    || fail "tampered admission did not roll back"
+  pass "admission binds published harness, model, and effort to the reservation"
+}
+
 test_canary_cap_is_atomic_and_duplicate_reserve_is_idempotent() {
   local job rc successes=0
   reset_route_state
+  mkdir -p "$FM_CONFIG_OVERRIDE"
+  jq -n '{schemaVersion:2,routing:{mode:"canary"},profiles:([range(1;5) as $n | {
+    key:("profile-"+($n|tostring)),value:{harness:"pi",model:("model-profile-"+($n|tostring)),
+    provider:("provider-"+($n|tostring)),lane:("lane-"+($n|tostring)),reasoningClass:"strong",workTypes:["implementation"]}
+  }] | from_entries),default:["profile-1","profile-2","profile-3","profile-4"]}' >"$FM_CONFIG_OVERRIDE/crew-dispatch.json"
   for job in 1 2 3 4; do
     reserve_route "task-$job" "gen-$job" "profile-$job" "provider-$job" "lane-$job" none decomposable low canary >"$LAB/reserve-$job.out" 2>&1 &
     eval "pid_$job=$!"
@@ -904,6 +1105,13 @@ test_corrupt_reservation_state_is_rejected_without_mutation() {
   jq '.createdAt=1000.5' "$reservation" >"$reservation.next"
   mv "$reservation.next" "$reservation"
   expect_failure_contains 'invalid routing state' "$ROUTE" status
+
+  reset_route_state
+  reserve_route invalid-effort gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  reservation=$(reservation_path invalid-effort gen-1)
+  jq '.launchEffort="max"' "$reservation" >"$reservation.next"
+  mv "$reservation.next" "$reservation"
+  expect_failure_contains 'invalid routing state' "$ROUTE" status
   pass "every reservation read rejects non-exact state without mutation"
 }
 
@@ -1163,7 +1371,7 @@ test_failure_policy_and_circuit_breaker_are_bounded() {
   jq -e '.action == "circuit-open" and .until == 2900' <<<"$out" >/dev/null || fail "failure during cooldown extended the circuit"
   expect_failure_contains 'failure-conflict' "$ROUTE" failure --task quota-4 --generation gen-4 --provider moonshot --lane different-lane --kind unsafe --now 1200
   expect_failure_contains 'circuit-open' reserve_route blocked gen-1 profile-x moonshot pi-moonshot-1 none standard low automatic
-  "$ROUTE" reserve --task recovered --generation gen-1 --profile profile-x --provider moonshot --lane pi-moonshot-1 --account none --class standard --work-type implementation --risk low --mode automatic --now 2901 >/dev/null \
+  RESERVE_NOW_OVERRIDE=2901 reserve_route recovered gen-1 profile-x moonshot pi-moonshot-1 none standard low automatic >/dev/null \
     || fail "cooled-down circuit did not admit new work"
   out=$("$ROUTE" failure --task quota-4 --generation gen-4 --provider moonshot --lane pi-moonshot-1 --kind quota --now 4000) || fail "durable failure replay failed after cooldown"
   jq -e '.action == "circuit-open" and .until == 2900' <<<"$out" >/dev/null || fail "failure replay changed after cooldown"
@@ -1278,6 +1486,7 @@ test_cleanup_preflight_recovers_stale_admission_before_finalizing() {
   ("$ROUTE" begin-admission --task cleanup --generation gen-1 \
     --profile profile-1 --provider openai --lane codex-primary \
     --account codex-primary --class standard --work-type implementation --risk medium --mode automatic \
+    --launch-harness codex --launch-model model-profile-1 --launch-effort none \
     --transition inherit --metadata-file "$metadata" --claim-file "$capability" >/dev/null) &
   wait "$!" || fail "stale cleanup admission setup failed"
   age_admission cleanup gen-1
@@ -1387,6 +1596,7 @@ test_every_single_value_option_rejects_duplicates() {
   printf '%s\n' '{"action":"selected","maxWorkers":1,"ranked":[],"reason":"test","rejected":[],"selected":{},"uncertainty":[]}' >"$LAB/duplicate-decision.json"
   expect_failure_contains 'usage:' "$ROUTE" select --request "$REQUEST" --request "$REQUEST" --candidates "$CANDIDATES"
   expect_failure_contains 'usage:' "$ROUTE" reserve --task one --task two
+  expect_failure_contains 'usage:' "$ROUTE" reserve --request "$REQUEST" --request "$REQUEST"
   expect_failure_contains 'usage:' "$ROUTE" verify-reservation --profile one --profile two
   expect_failure_contains 'usage:' "$ROUTE" reservation-work-type --task one --task two
   expect_failure_contains 'usage:' "$ROUTE" claim-reservation --claim aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --claim bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -1420,6 +1630,10 @@ test_request_schema_is_strict
 test_candidate_schema_is_strict
 test_input_and_now_validation_are_sanitized
 test_reserve_requires_a_bounded_work_type
+test_reserve_is_bound_to_authoritative_policy_and_selection_evidence
+test_reserve_rejects_a_decision_staled_by_authoritative_load
+test_legacy_unbound_reservations_are_cleanup_only
+test_bound_admission_rejects_published_launch_identity_tamper
 test_canary_cap_is_atomic_and_duplicate_reserve_is_idempotent
 test_lane_account_and_burst_caps_are_enforced
 test_reservation_verification_and_generation_release_are_exact

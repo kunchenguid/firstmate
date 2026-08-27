@@ -136,6 +136,86 @@ fm_route_path_has_symlink_component() {
   return 1
 }
 
+fm_route_capture_json_file() {
+  local file=$1 label=$2 absolute parent base temporary old_umask result rc
+  case "$file" in /*) absolute=$file ;; *) absolute=$PWD/$file ;; esac
+  if fm_route_path_has_symlink_component "$absolute" || [ ! -f "$absolute" ] || [ ! -r "$absolute" ]; then
+    fm_route_diagnostic "$label file is unsafe or unreadable"
+    return 1
+  fi
+  old_umask=$(umask); umask 077
+  temporary=$(mktemp "${TMPDIR:-/tmp}/fm-route-capture.XXXXXXXX") || { umask "$old_umask"; return 1; }
+  umask "$old_umask"
+  parent=$(dirname "$absolute")
+  base=$(basename "$absolute")
+  if (
+    CDPATH='' cd -- "$parent" 2>/dev/null || exit 3
+    [ "$(pwd -P)" = "$parent" ] || exit 3
+    perl -MFcntl=:DEFAULT -e '
+      my ($path, $max, $destination) = @ARGV;
+      sysopen(my $source, $path, O_RDONLY | O_NOFOLLOW) or exit 3;
+      my @stat = stat $source or exit 3;
+      exit 3 unless -f _;
+      my $size = $stat[7];
+      exit 4 if $size > $max;
+      open(my $output, ">", $destination) or exit 5;
+      binmode $source; binmode $output;
+      my $remaining = $size;
+      while ($remaining > 0) {
+        my $wanted = $remaining > 65536 ? 65536 : $remaining;
+        my $read = read($source, my $buffer, $wanted);
+        exit 5 unless defined $read && $read > 0;
+        print {$output} $buffer or exit 5;
+        $remaining -= $read;
+      }
+      close $output or exit 5;
+    ' "$base" 1048576 "$temporary"
+  ); then
+    :
+  else
+    rc=$?
+    rm -f "$temporary"
+    if [ "$rc" -eq 4 ]; then
+      fm_route_diagnostic "$label file is too large"
+    else
+      fm_route_diagnostic "$label file is unsafe or unreadable"
+    fi
+    return 1
+  fi
+  if result=$(jq -c . "$temporary" 2>/dev/null); then
+    rm -f "$temporary"
+    printf '%s\n' "$result"
+  else
+    rm -f "$temporary"
+    fm_route_diagnostic "invalid $label JSON"
+    return 1
+  fi
+}
+
+fm_route_snapshot_temp() {
+  local value=$1 temporary old_umask
+  old_umask=$(umask); umask 077
+  temporary=$(mktemp "${TMPDIR:-/tmp}/fm-route-snapshot.XXXXXXXX") || { umask "$old_umask"; return 1; }
+  umask "$old_umask"
+  printf '%s\n' "$value" >"$temporary" || { rm -f "$temporary"; return 1; }
+  printf '%s\n' "$temporary"
+}
+
+fm_route_capture_v2_policy() {
+  local config="$FM_ROUTE_HOME/config/crew-dispatch.json" value temporary description
+  value=$(fm_route_capture_json_file "$config" 'active dispatch policy') || return 1
+  temporary=$(fm_route_snapshot_temp "$value") || return 1
+  if ! description=$("$FM_ROUTE_ROOT/bin/fm-dispatch-policy.sh" describe "$temporary" 2>/dev/null); then
+    rm -f "$temporary"
+    fm_route_diagnostic 'active dispatch policy is invalid'
+    return 1
+  fi
+  rm -f "$temporary"
+  jq -e '.schemaVersion == 2' <<<"$description" >/dev/null 2>&1 \
+    || { fm_route_diagnostic 'active dispatch policy version 2 is required'; return 1; }
+  printf '%s\n' "$value"
+}
+
 # Return 10 only for an authoritative, valid version 2 policy in off mode.
 # Missing policy and version 1 retain the legacy low-level selector contract;
 # an active malformed policy fails closed with a stable diagnostic.
@@ -394,6 +474,8 @@ fm_route_validate_reservation_file() {
     def identifier: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$");
     def work_type: type == "string" and test("^[a-z0-9][a-z0-9._-]{0,63}$");
     def hash: type == "string" and test("^[a-f0-9]{64}$");
+    def harness: IN("claude","codex","pi","pi-signed");
+    def model: type == "string" and . != "default" and test("^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$");
     def score:
       . == null or
       (type == "object"
@@ -412,9 +494,16 @@ fm_route_validate_reservation_file() {
       and (.mode | IN("canary","automatic")) and (.burst | type) == "boolean"
       and (.createdAt | type) == "number" and (.createdAt | floor) == .createdAt and .createdAt >= 0 and (.score | score);
     def base_keys: ["taskId","generation","profile","provider","lane","account","taskClass","workType","risk","mode","burst","createdAt","score"];
-    def state_keys: base_keys + ["admissionState"];
-    type == "object" and base and
-    (if exact(base_keys) then true
+    def binding_keys: ["bindingVersion","launchHarness","launchModel","launchEffort","requestDigest","candidatesDigest","decisionDigest","policyDigest"];
+    def binding:
+      .bindingVersion == 1 and (.launchHarness | harness) and (.launchModel | model)
+      and (.launchEffort == null or (.launchEffort | IN("low","medium","high","xhigh","max")))
+      and (.launchHarness != "codex" or .launchEffort != "max")
+      and (.requestDigest | hash) and (.candidatesDigest | hash) and (.decisionDigest | hash) and (.policyDigest | hash);
+    def selected_base_keys: base_keys + (if has("bindingVersion") then binding_keys else [] end);
+    def state_keys: selected_base_keys + ["admissionState"];
+    type == "object" and base and ((has("bindingVersion") | not) or binding) and
+    (if exact(selected_base_keys) then true
      elif .admissionState == "reserved" then exact(state_keys)
      elif .admissionState == "claimed" then
        (exact(state_keys + ["claimHash","claimedAt"])
@@ -619,7 +708,8 @@ fm_route_remove_admission_file() {
 }
 
 fm_route_route_object() {
-  jq -c '{generation,profile,provider,lane,account,taskClass,workType,risk,mode}' <<<"$1"
+  jq -c '{generation,profile,provider,lane,account,taskClass,workType,risk,mode}
+    + (if has("bindingVersion") then {bindingVersion,launchHarness,launchModel,launchEffort,requestDigest,candidatesDigest,decisionDigest,policyDigest} else {} end)' <<<"$1"
 }
 
 fm_route_validate_admission_file() {
@@ -629,12 +719,20 @@ fm_route_validate_admission_file() {
     def hash: type == "string" and test("^[a-f0-9]{64}$");
     def route:
       type == "object"
-      and exact(["generation","profile","provider","lane","account","taskClass","workType","risk","mode"])
+      and (exact(["generation","profile","provider","lane","account","taskClass","workType","risk","mode"])
+        or exact(["generation","profile","provider","lane","account","taskClass","workType","risk","mode","bindingVersion","launchHarness","launchModel","launchEffort","requestDigest","candidatesDigest","decisionDigest","policyDigest"]))
       and (.generation | identifier) and (.profile | identifier) and (.provider | identifier)
       and (.lane | identifier) and (.account | identifier)
       and (.taskClass | IN("trivial","standard","decomposable","ambiguous","high_risk"))
       and (.workType | type == "string" and test("^[a-z0-9][a-z0-9._-]{0,63}$")) and (.risk | IN("low","medium","high"))
-      and (.mode | IN("canary","automatic"));
+      and (.mode | IN("canary","automatic"))
+      and (if has("bindingVersion") then
+        .bindingVersion == 1 and (.launchHarness | IN("claude","codex","pi","pi-signed"))
+        and (.launchModel | type == "string" and . != "default" and test("^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$"))
+        and (.launchEffort == null or (.launchEffort | IN("low","medium","high","xhigh","max")))
+        and (.launchHarness != "codex" or .launchEffort != "max")
+        and (.requestDigest | hash) and (.candidatesDigest | hash) and (.decisionDigest | hash) and (.policyDigest | hash)
+      else true end);
     def snapshot:
       type == "object" and exact(["exists","digest"])
       and (.exists | type) == "boolean"
@@ -760,16 +858,111 @@ fm_route_write_circuits() {
   fm_route_atomic_json_value "$FM_ROUTE_STATE/circuits.json" "$1"
 }
 
+fm_route_reserve() {
+  local task=$1 generation=$2 profile=$3 provider=$4 lane=$5 account=$6 task_class=$7 work_type=$8 risk=$9 mode=${10} burst=${11} now=${12}
+  local request=${13} candidates=${14} decision=${15} policy policy_mode policy_digest
+  policy=$(fm_route_capture_v2_policy) || return 1
+  policy_mode=$(jq -er '.routing.mode // "automatic"' <<<"$policy") || return 1
+  case "$policy_mode" in
+    canary|automatic) ;;
+    off|simulate) fm_route_diagnostic "mode-does-not-reserve:$policy_mode"; return 1 ;;
+    *) fm_route_diagnostic 'active dispatch policy is invalid'; return 1 ;;
+  esac
+  [ "$mode" = "$policy_mode" ] || { fm_route_diagnostic 'routing mode does not match active policy'; return 1; }
+  policy_digest=$(fm_route_claim_hash "$(jq -Sc . <<<"$policy")") || return 1
+  fm_routing_with_lock fm_route_reserve_locked "$task" "$generation" "$profile" "$provider" "$lane" "$account" "$task_class" "$work_type" "$risk" "$mode" "$burst" "$now" "$request" "$candidates" "$decision" "$policy_digest"
+}
+
+fm_route_reserve_binding_locked() {
+  local task=$1 generation=$2 profile=$3 provider=$4 lane=$5 account=$6 task_class=$7 work_type=$8 risk=$9 mode=${10} request_file=${11} candidates_file=${12} decision_file=${13} expected_policy_digest=${14}
+  local policy request candidates decision policy_digest request_digest candidates_digest decision_digest
+  local request_tmp candidates_tmp decision_tmp policy_profile reservations outcomes max_workers computed normalized_decision launch_harness launch_model launch_effort policy_account
+  policy=$(fm_route_capture_v2_policy) || return 1
+  policy=$(jq -Sc . <<<"$policy") || return 1
+  policy_digest=$(fm_route_claim_hash "$policy") || return 1
+  [ "$policy_digest" = "$expected_policy_digest" ] || { fm_route_diagnostic 'active dispatch policy changed; re-evaluate'; return 1; }
+  [ "$(jq -r '.routing.mode // "automatic"' <<<"$policy")" = "$mode" ] \
+    || { fm_route_diagnostic 'routing mode does not match active policy'; return 1; }
+
+  request=$(fm_route_capture_json_file "$request_file" request) || return 1
+  candidates=$(fm_route_capture_json_file "$candidates_file" candidates) || return 1
+  decision=$(fm_route_capture_json_file "$decision_file" decision) || return 1
+  request_tmp=$(fm_route_snapshot_temp "$request") || return 1
+  candidates_tmp=$(fm_route_snapshot_temp "$candidates") || { rm -f "$request_tmp"; return 1; }
+  decision_tmp=$(fm_route_snapshot_temp "$decision") || { rm -f "$request_tmp" "$candidates_tmp"; return 1; }
+  if ! fm_route_validate_request "$request_tmp" || ! fm_route_validate_candidates "$candidates_tmp"; then
+    rm -f "$request_tmp" "$candidates_tmp" "$decision_tmp"
+    return 1
+  fi
+  if ! jq -e --arg task "$task" --arg class "$task_class" --arg workType "$work_type" --arg risk "$risk" \
+      '.taskId == $task and .taskClass == $class and .workType == $workType and .risk == $risk' "$request_tmp" >/dev/null; then
+    rm -f "$request_tmp" "$candidates_tmp" "$decision_tmp"
+    fm_route_diagnostic 'request-reservation-mismatch'
+    return 1
+  fi
+  max_workers=$(jq -r '[.taskClass,.independent,.requestedWorkers] | @tsv' "$request_tmp") || { rm -f "$request_tmp" "$candidates_tmp" "$decision_tmp"; return 1; }
+  # shellcheck disable=SC2086
+  max_workers=$(fm_route_worker_budget $max_workers) || { rm -f "$request_tmp" "$candidates_tmp" "$decision_tmp"; return 1; }
+  reservations=$(fm_route_read_reservations) || { rm -f "$request_tmp" "$candidates_tmp" "$decision_tmp"; fm_route_diagnostic 'invalid routing state'; return 1; }
+  reservations=$(jq -c --arg task "$task" --arg generation "$generation" \
+    '[.[] | select(.taskId != $task or .generation != $generation)]' <<<"$reservations") || { rm -f "$request_tmp" "$candidates_tmp" "$decision_tmp"; return 1; }
+  outcomes=$(fm_route_read_outcomes) || { rm -f "$request_tmp" "$candidates_tmp" "$decision_tmp"; fm_route_diagnostic 'invalid routing state'; return 1; }
+  computed=$(fm_route_select_ranked "$request_tmp" "$candidates_tmp" "$reservations" "$outcomes" "$max_workers") \
+    || { rm -f "$request_tmp" "$candidates_tmp" "$decision_tmp"; return 1; }
+  normalized_decision=$(jq -Sc . "$decision_tmp") || { rm -f "$request_tmp" "$candidates_tmp" "$decision_tmp"; return 1; }
+  rm -f "$request_tmp" "$candidates_tmp" "$decision_tmp"
+  [ "$(jq -Sc . <<<"$computed")" = "$normalized_decision" ] \
+    || { fm_route_diagnostic 'selection-decision-mismatch'; return 1; }
+  jq -e --arg profile "$profile" '.action == "selected" and .selected.profile == $profile' <<<"$computed" >/dev/null \
+    || { fm_route_diagnostic 'selected profile does not match reservation'; return 1; }
+
+  policy_profile=$(jq -ce --arg profile "$profile" '.profiles[$profile] | select(type == "object")' <<<"$policy") \
+    || { fm_route_diagnostic 'selected profile is absent from active policy'; return 1; }
+  launch_harness=$(jq -r '.harness' <<<"$policy_profile")
+  launch_model=$(jq -er '.model | select(type == "string" and length > 0 and . != "default")' <<<"$policy_profile" 2>/dev/null) \
+    || { fm_route_diagnostic 'selected policy profile requires a concrete model'; return 1; }
+  launch_effort=$(jq -c '.effort // null' <<<"$policy_profile") || return 1
+  policy_account=$(jq -r '.account // "none"' <<<"$policy_profile") || return 1
+  jq -e --arg workType "$work_type" '.workTypes | index($workType) != null' <<<"$policy_profile" >/dev/null \
+    || { fm_route_diagnostic 'work type is not allowed by selected policy profile'; return 1; }
+  jq -e --arg profile "$profile" --arg harness "$launch_harness" --arg model "$launch_model" \
+      --arg provider "$provider" --arg lane "$lane" --arg account "$account" \
+      --arg reasoning "$(jq -r '.reasoningClass' <<<"$policy_profile")" '
+      .selected.profile == $profile and .selected.harness == $harness and .selected.model == $model
+      and .selected.provider == $provider and .selected.lane == $lane and .selected.account == $account
+      and .selected.reasoningClass == $reasoning' <<<"$computed" >/dev/null \
+    || { fm_route_diagnostic 'selected route does not match active policy'; return 1; }
+  [ "$(jq -r '.provider' <<<"$policy_profile")" = "$provider" ] \
+    && [ "$(jq -r '.lane' <<<"$policy_profile")" = "$lane" ] \
+    && [ "$policy_account" = "$account" ] \
+    || { fm_route_diagnostic 'reservation route does not match active policy'; return 1; }
+  case "$launch_harness" in pi|pi-signed) [ "$account" = none ] || { fm_route_diagnostic 'Pi policy profiles require account none'; return 1; } ;; esac
+
+  request=$(jq -Sc . <<<"$request") || return 1
+  candidates=$(jq -Sc . <<<"$candidates") || return 1
+  request_digest=$(fm_route_claim_hash "$request") || return 1
+  candidates_digest=$(fm_route_claim_hash "$candidates") || return 1
+  decision_digest=$(fm_route_claim_hash "$normalized_decision") || return 1
+  jq -cn --arg harness "$launch_harness" --arg model "$launch_model" --argjson effort "$launch_effort" \
+    --arg requestDigest "$request_digest" --arg candidatesDigest "$candidates_digest" \
+    --arg decisionDigest "$decision_digest" --arg policyDigest "$policy_digest" \
+    '{bindingVersion:1,launchHarness:$harness,launchModel:$model,launchEffort:$effort,requestDigest:$requestDigest,candidatesDigest:$candidatesDigest,decisionDigest:$decisionDigest,policyDigest:$policyDigest}'
+}
+
 fm_route_reserve_locked() {
   local task=$1 generation=$2 profile=$3 provider=$4 lane=$5 account=$6 task_class=$7 work_type=$8 risk=$9 mode=${10} burst=${11} now=${12}
-  local reservation reservations task_reservations circuits existing total lane_total account_total cap updated
+  local request=${13} candidates=${14} decision=${15} policy_digest=${16}
+  local reservation reservations task_reservations circuits existing total lane_total account_total cap updated binding
+  binding=$(fm_route_reserve_binding_locked "$task" "$generation" "$profile" "$provider" "$lane" "$account" "$task_class" "$work_type" "$risk" "$mode" "$request" "$candidates" "$decision" "$policy_digest") || return 1
   mkdir -p "$FM_ROUTE_STATE/reservations"
   reservations=$(fm_route_read_reservations) || { fm_route_diagnostic 'invalid routing state'; return 1; }
   existing=$(jq -c --arg task "$task" --arg generation "$generation" \
     '.[] | select(.taskId == $task and .generation == $generation)' <<<"$reservations")
   if [ -n "$existing" ]; then
-    if jq -e --arg generation "$generation" --arg profile "$profile" --arg provider "$provider" --arg lane "$lane" --arg account "$account" --arg class "$task_class" --arg workType "$work_type" --arg risk "$risk" --arg mode "$mode" --argjson burst "$burst" '
+    if jq -e --arg generation "$generation" --arg profile "$profile" --arg provider "$provider" --arg lane "$lane" --arg account "$account" --arg class "$task_class" --arg workType "$work_type" --arg risk "$risk" --arg mode "$mode" --argjson burst "$burst" --argjson binding "$binding" '
       .generation == $generation and .profile == $profile and .provider == $provider and .lane == $lane and .account == $account and .taskClass == $class and .workType == $workType and .risk == $risk and .mode == $mode and .burst == $burst
+      and .bindingVersion == $binding.bindingVersion and .launchHarness == $binding.launchHarness and .launchModel == $binding.launchModel and .launchEffort == $binding.launchEffort
+      and .requestDigest == $binding.requestDigest and .candidatesDigest == $binding.candidatesDigest and .decisionDigest == $binding.decisionDigest and .policyDigest == $binding.policyDigest
     ' <<<"$existing" >/dev/null; then
       fm_route_public_reservation "$existing"
       return 0
@@ -815,8 +1008,8 @@ fm_route_reserve_locked() {
     account_total=$(jq --arg account "$account" '[.[] | select(.account == $account)] | length' <<<"$reservations")
     [ "$account_total" -lt 2 ] || { fm_route_diagnostic 'account-cap:2'; return 1; }
   fi
-  updated=$(jq -cn --arg task "$task" --arg generation "$generation" --arg profile "$profile" --arg provider "$provider" --arg lane "$lane" --arg account "$account" --arg class "$task_class" --arg workType "$work_type" --arg risk "$risk" --arg mode "$mode" --argjson burst "$burst" --argjson now "$now" \
-    '{taskId:$task,generation:$generation,profile:$profile,provider:$provider,lane:$lane,account:$account,taskClass:$class,workType:$workType,risk:$risk,mode:$mode,burst:$burst,createdAt:$now,score:null,admissionState:"reserved"}')
+  updated=$(jq -cn --arg task "$task" --arg generation "$generation" --arg profile "$profile" --arg provider "$provider" --arg lane "$lane" --arg account "$account" --arg class "$task_class" --arg workType "$work_type" --arg risk "$risk" --arg mode "$mode" --argjson burst "$burst" --argjson now "$now" --argjson binding "$binding" \
+    '{taskId:$task,generation:$generation,profile:$profile,provider:$provider,lane:$lane,account:$account,taskClass:$class,workType:$workType,risk:$risk,mode:$mode,burst:$burst,createdAt:$now,score:null,admissionState:"reserved"} + $binding')
   reservation=$(fm_route_reservation_path "$task" "$generation") || return 1
   fm_route_atomic_json_value "$reservation" "$updated" || return 1
   fm_route_public_reservation "$updated"
@@ -904,7 +1097,8 @@ fm_route_release_locked() {
 fm_route_begin_admission_locked() {
   local task=$1 generation=$2 profile=$3 provider=$4 lane=$5 account=$6 task_class=$7 work_type=$8 risk=$9 mode=${10} transition=${11} metadata=${12} claim_file=${13} owner_pid=${14} owner_start=${15}
   local prior_generation=${16:-} prior_claim_file=${17:-}
-  local reservation prior_reservation journal current prior_current state prior_state claim hash now before target prior beginning claimed
+  local launch_harness=${18:-} launch_model=${19:-} launch_effort=${20:-}
+  local reservation prior_reservation journal current prior_current state prior_state claim hash now before target prior beginning claimed expected_effort
   fm_route_validate_metadata_path "$task" "$metadata" || return 1
   reservation=$(fm_route_find_reservation_path "$task" "$generation") || { fm_route_diagnostic 'reservation-not-found'; return 1; }
   current=$(jq -c . "$reservation") || { fm_route_diagnostic 'invalid routing state'; return 1; }
@@ -915,11 +1109,18 @@ fm_route_begin_admission_locked() {
   ' <<<"$current" >/dev/null || { fm_route_diagnostic 'reservation-mismatch'; return 1; }
   state=$(jq -r '.admissionState // "reserved"' <<<"$current")
   target=$(fm_route_route_object "$current") || return 1
+  expected_effort=$(jq -r 'if .launchEffort == null then "none" else .launchEffort end' <<<"$current") || return 1
   prior=null
   case "$transition" in
     fresh)
       [ -z "$prior_generation$prior_claim_file" ] || { fm_route_diagnostic 'unexpected prior reservation'; return 1; }
       [ "$state" = reserved ] || { fm_route_diagnostic 'reservation-not-reserved'; return 1; }
+      [ "$(jq -r '.bindingVersion // 0' <<<"$current")" = 1 ] \
+        || { fm_route_diagnostic 'reservation-binding-required'; return 1; }
+      [ "$launch_harness" = "$(jq -r .launchHarness <<<"$current")" ] \
+        && [ "$launch_model" = "$(jq -r .launchModel <<<"$current")" ] \
+        && [ "$launch_effort" = "$expected_effort" ] \
+        || { fm_route_diagnostic 'launch-binding-mismatch'; return 1; }
       fm_route_validate_claim_file_path "$task" "$generation" "$claim_file" || return 1
       [ ! -e "$claim_file" ] || { fm_route_diagnostic 'unexpected admission capability'; return 1; }
       ;;
@@ -927,6 +1128,12 @@ fm_route_begin_admission_locked() {
       [ -z "$prior_generation$prior_claim_file" ] || { fm_route_diagnostic 'unexpected prior reservation'; return 1; }
       [ "$state" = active ] || { fm_route_diagnostic 'reservation-not-active'; return 1; }
       fm_route_authorize_reservation "$task" "$generation" "$claim_file" "$current" || return 1
+      if [ "$(jq -r '.bindingVersion // 0' <<<"$current")" = 1 ]; then
+        [ "$launch_harness" = "$(jq -r .launchHarness <<<"$current")" ] \
+          && [ "$launch_model" = "$(jq -r .launchModel <<<"$current")" ] \
+          && [ "$launch_effort" = "$expected_effort" ] \
+          || { fm_route_diagnostic 'launch-binding-mismatch'; return 1; }
+      fi
       prior=$target
       ;;
     replacement)
@@ -937,6 +1144,12 @@ fm_route_begin_admission_locked() {
       prior_current=$(jq -c . "$prior_reservation") || { fm_route_diagnostic 'invalid routing state'; return 1; }
       prior_state=$(jq -r '.admissionState // "reserved"' <<<"$prior_current")
       [ "$prior_state" = active ] || { fm_route_diagnostic 'prior reservation not active'; return 1; }
+      [ "$(jq -r '.bindingVersion // 0' <<<"$current")" = 1 ] \
+        || { fm_route_diagnostic 'reservation-binding-required'; return 1; }
+      [ "$launch_harness" = "$(jq -r .launchHarness <<<"$current")" ] \
+        && [ "$launch_model" = "$(jq -r .launchModel <<<"$current")" ] \
+        && [ "$launch_effort" = "$expected_effort" ] \
+        || { fm_route_diagnostic 'launch-binding-mismatch'; return 1; }
       fm_route_validate_claim_file_path "$task" "$generation" "$claim_file" || return 1
       [ ! -e "$claim_file" ] || { fm_route_diagnostic 'unexpected admission capability'; return 1; }
       fm_route_authorize_reservation "$task" "$prior_generation" "$prior_claim_file" "$prior_current" || return 1
@@ -1109,6 +1322,19 @@ fm_route_validate_candidate_route() {
     actual=$(fm_route_metadata_field "$file" "route_$key") || { fm_route_diagnostic 'admission candidate route mismatch'; return 1; }
     [ "$actual" = "$expected" ] || { fm_route_diagnostic 'admission candidate route mismatch'; return 1; }
   done
+  if [ "$(jq -r '.bindingVersion // 0' <<<"$target")" = 1 ]; then
+    for key in harness model effort; do
+      case "$key" in
+        harness) expected=$(jq -r .launchHarness <<<"$target") ;;
+        model) expected=$(jq -r .launchModel <<<"$target") ;;
+        effort) expected=$(jq -r 'if .launchEffort == null then "default" else .launchEffort end' <<<"$target") ;;
+      esac
+      actual=$(fm_route_metadata_field "$file" "$key") \
+        || { fm_route_diagnostic 'admission candidate launch mismatch'; return 1; }
+      [ "$actual" = "$expected" ] \
+        || { fm_route_diagnostic 'admission candidate launch mismatch'; return 1; }
+    done
+  fi
 }
 
 fm_route_prepare_admission_locked() {

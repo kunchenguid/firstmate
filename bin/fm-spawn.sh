@@ -20,6 +20,10 @@
 #   A route tuple is --route-generation, --route-profile, --route-provider,
 #   --route-lane, --route-account, --route-class, --route-work-type,
 #   --route-risk, and --route-mode.
+#   A fresh or replacement routed launch also requires explicit --harness and
+#   concrete --model flags matching its policy-bound reservation, plus --effort
+#   exactly when that policy profile sets one. Positional harness/launch-command
+#   compatibility is static-only because it cannot prove routed launch identity.
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
@@ -766,6 +770,9 @@ ROUTE_CLAIM_FILE=
 ROUTE_PRIOR_CLAIM_FILE=
 ROUTE_ACCOUNT_ENV_NAME=
 ROUTE_ACCOUNT_CONFIG_DIR=
+ROUTE_LAUNCH_HARNESS=
+ROUTE_LAUNCH_MODEL=
+ROUTE_LAUNCH_EFFORT=none
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -786,10 +793,14 @@ parse_orca_worktree_result() {
 
 spawn_route_begin() {  # <fresh|inherit|replacement|off> [prior-generation]
   local transition=$1 prior_generation=${2:-}
-  local -a prior_args
+  local -a prior_args binding_args
   ROUTE_CLAIM_FILE="$STATE/routing/claims/$ID/$ROUTE_GENERATION.cap"
   ROUTE_PRIOR_CLAIM_FILE=
   prior_args=()
+  binding_args=()
+  if [ "$transition" != off ]; then
+    binding_args=(--launch-harness "$ROUTE_LAUNCH_HARNESS" --launch-model "$ROUTE_LAUNCH_MODEL" --launch-effort "$ROUTE_LAUNCH_EFFORT")
+  fi
   if [ "$transition" = replacement ]; then
     ROUTE_PRIOR_CLAIM_FILE="$STATE/routing/claims/$ID/$prior_generation.cap"
     prior_args=(--prior-generation "$prior_generation" --prior-claim-file "$ROUTE_PRIOR_CLAIM_FILE")
@@ -799,7 +810,7 @@ spawn_route_begin() {  # <fresh|inherit|replacement|off> [prior-generation]
       --provider "$ROUTE_PROVIDER" --lane "$ROUTE_LANE" --account "$ROUTE_ACCOUNT" \
       --class "$ROUTE_CLASS" --work-type "$ROUTE_WORK_TYPE" --risk "$ROUTE_RISK" --mode "$ROUTE_MODE" \
       --transition "$transition" --metadata-file "$STATE/$ID.meta" \
-      --claim-file "$ROUTE_CLAIM_FILE" "${prior_args[@]}" >/dev/null 2>&1; then
+      --claim-file "$ROUTE_CLAIM_FILE" "${binding_args[@]}" "${prior_args[@]}" >/dev/null 2>&1; then
     echo "error: matching routing reservation is required and must be authorized" >&2
     return 1
   fi
@@ -1034,6 +1045,9 @@ if [ "$KIND" = secondmate ] && [ "$ROUTE_FLAGS_PRESENT" = 1 ] \
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$ROUTE_REQUESTED" = 1 ]; then
   ROUTE_ACTIVE=1
+  ROUTE_LAUNCH_HARNESS=$HARNESS_ARG
+  ROUTE_LAUNCH_MODEL=$MODEL
+  [ "$EFFORT_SET" -eq 0 ] || ROUTE_LAUNCH_EFFORT=$EFFORT
   spawn_route_begin fresh || exit 1
 fi
 if [ "$RELAUNCH" -eq 1 ]; then
@@ -1157,6 +1171,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  RELAUNCH_PRIOR_MODEL=$(fm_meta_get "$RELAUNCH_META" model)
+  RELAUNCH_PRIOR_EFFORT=$(fm_meta_get "$RELAUNCH_META" effort)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -1207,6 +1223,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
       exit 1
     fi
     ROUTE_ACTIVE=1
+    ROUTE_LAUNCH_HARNESS=$HARNESS_ARG
+    ROUTE_LAUNCH_MODEL=$MODEL
+    ROUTE_LAUNCH_EFFORT=none
+    [ "$EFFORT_SET" -eq 0 ] || ROUTE_LAUNCH_EFFORT=$EFFORT
     spawn_route_begin replacement "$RECORDED_ROUTE_GENERATION" || exit 1
   elif [ -n "$RECORDED_ROUTE_GENERATION" ]; then
     ROUTE_GENERATION=$RECORDED_ROUTE_GENERATION
@@ -1219,6 +1239,20 @@ if [ "$RELAUNCH" -eq 1 ]; then
     ROUTE_RISK=$RECORDED_ROUTE_RISK
     ROUTE_MODE=$RECORDED_ROUTE_MODE
     ROUTE_ACTIVE=1
+    ROUTE_LAUNCH_HARNESS=${HARNESS_ARG:-$RELAUNCH_PRIOR_HARNESS}
+    if [ "$MODEL_SET" -eq 1 ]; then
+      ROUTE_LAUNCH_MODEL=$MODEL
+    else
+      ROUTE_LAUNCH_MODEL=$RELAUNCH_PRIOR_MODEL
+      [ "$RELAUNCH_PRIOR_MODEL" = default ] || MODEL=$RELAUNCH_PRIOR_MODEL
+    fi
+    if [ "$EFFORT_SET" -eq 1 ]; then
+      ROUTE_LAUNCH_EFFORT=$EFFORT
+    else
+      ROUTE_LAUNCH_EFFORT=$RELAUNCH_PRIOR_EFFORT
+      [ "$RELAUNCH_PRIOR_EFFORT" = default ] || EFFORT=$RELAUNCH_PRIOR_EFFORT
+    fi
+    [ "$ROUTE_LAUNCH_EFFORT" != default ] || ROUTE_LAUNCH_EFFORT=none
     spawn_route_begin inherit || exit 1
   fi
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)

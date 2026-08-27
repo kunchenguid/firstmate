@@ -42,7 +42,12 @@ assert_grep 'automatic-dispatch' "$ROOT/.agents/skills/quota-array-dispatch/SKIL
 assert_grep "Every independent subtask gets a unique bounded \`taskId\`, a fresh route generation, its own exact normalized request with its own \`workType\`, and its own \`fm-route.sh select\` call." "$SKILL" 'independent subtasks can share routing identity or selection'
 assert_grep "\`maxWorkers\` is only a concurrency ceiling; never reuse one selection for another subtask." "$SKILL" 'worker ceiling can be mistaken for reusable selection authority'
 assert_grep "Call \`fm-route.sh select --request FILE --candidates FILE\` for that subtask only." "$SKILL" 'selector command shape is not executable'
-assert_grep "Reserve with \`fm-route.sh reserve --task TASK --generation GENERATION --profile PROFILE --provider PROVIDER --lane LANE --account ACCOUNT --class CLASS --work-type WORK_TYPE --risk RISK --mode MODE\`." "$SKILL" 'reservation command shape is not executable'
+assert_grep "Reserve with \`fm-route.sh reserve --task TASK --generation GENERATION --profile PROFILE --provider PROVIDER --lane LANE --account ACCOUNT --class CLASS --work-type WORK_TYPE --risk RISK --mode MODE --request REQUEST.json --candidates CANDIDATES.json --decision DECISION.json\`." "$SKILL" 'reservation command shape is not executable'
+assert_grep "Any stale decision or policy change means stop and re-evaluate" "$SKILL" 'reservation does not fail closed on stale selector evidence'
+assert_grep 'Pass the selected policy' "$SKILL" 'spawn does not carry the selected policy launch identity'
+for launch_field in harness model effort; do
+  assert_grep "\`--$launch_field" "$SKILL" "policy-bound spawn omits --$launch_field"
+done
 assert_grep 'Process each ready slot transactionally as select -> reserve -> immediately spawn before routing the next ready slot; never bulk-reserve slots for later spawn.' "$SKILL" 'slot admission is not transactionally ordered'
 for route_field in generation profile provider lane account class work-type risk mode; do
   assert_grep "\`--route-$route_field\`" "$SKILL" "complete routed spawn tuple omits --route-$route_field"

@@ -304,3 +304,53 @@ assert_absent() {
 assert_present() {
   [ -e "$1" ] || fail "$2"
 }
+
+# Build the same policy/request/candidate/decision evidence a routed caller must
+# produce, then reserve the exact selected tuple. Test-only serialization keeps
+# concurrent cap tests from racing their shared policy fixture.
+fm_test_reserve_bound() {
+  local root=$1 home=$2 state=$3 task=$4 generation=$5 profile=$6 provider=$7 lane=$8 account=$9
+  local task_class=${10} work_type=${11} risk=${12} mode=${13} harness=${14} model=${15} effort=${16} now=${17}
+  shift 17
+  local config="$home/config/crew-dispatch.json" evidence="$home/.test-route-evidence/$task-$generation-$profile-$provider-$lane-$account-$task_class-$work_type-$risk-$mode" lock="$home/.test-policy.lock"
+  local policy_tmp profile_json
+  mkdir -p "$home/config" "$evidence"
+  while ! mkdir "$lock" 2>/dev/null; do :; done
+  if [ -s "$config" ] && jq -e '.schemaVersion == 2' "$config" >/dev/null 2>&1; then
+    profile_json=$(jq -cn --arg harness "$harness" --arg model "$model" --arg provider "$provider" \
+      --arg lane "$lane" --arg account "$account" --arg workType "$work_type" --arg effort "$effort" '
+      {harness:$harness,model:$model,provider:$provider,lane:$lane,reasoningClass:"strong",workTypes:[$workType]}
+      + (if ($harness == "claude" or $harness == "codex") then {account:$account} else {} end)
+      + (if $effort == "none" then {} else {effort:$effort} end)')
+    if ! jq -e --arg mode "$mode" --arg profile "$profile" --argjson value "$profile_json" \
+      '(.routing.mode // "automatic") == $mode and .profiles[$profile] == $value' "$config" >/dev/null; then
+      policy_tmp=$(mktemp "$home/config/.policy.XXXXXX")
+      jq --arg mode "$mode" --arg profile "$profile" --argjson value "$profile_json" \
+        '.routing.mode=$mode | .profiles[$profile]=$value | .default=([.default[]? | select(. != $profile)] + [$profile])' \
+        "$config" >"$policy_tmp" && mv "$policy_tmp" "$config"
+    fi
+  else
+    profile_json=$(jq -cn --arg harness "$harness" --arg model "$model" --arg provider "$provider" \
+      --arg lane "$lane" --arg account "$account" --arg workType "$work_type" --arg effort "$effort" '
+      {harness:$harness,model:$model,provider:$provider,lane:$lane,reasoningClass:"strong",workTypes:[$workType]}
+      + (if ($harness == "claude" or $harness == "codex") then {account:$account} else {} end)
+      + (if $effort == "none" then {} else {effort:$effort} end)')
+    jq -n --arg mode "$mode" --arg profile "$profile" --argjson value "$profile_json" \
+      '{schemaVersion:2,routing:{mode:$mode},profiles:{($profile):$value},default:[$profile]}' >"$config"
+  fi
+  rmdir "$lock"
+  if [ ! -s "$evidence/decision.json" ]; then
+    jq -n --arg task "$task" --arg class "$task_class" --arg workType "$work_type" --arg risk "$risk" \
+      '{taskId:$task,taskClass:$class,workType:$workType,risk:$risk,independent:false,requestedWorkers:1,requiredReasoningClass:"strong",estimatedSeconds:60}' >"$evidence/request.json"
+    jq -n --arg profile "$profile" --arg harness "$harness" --arg model "$model" --arg provider "$provider" \
+      --arg lane "$lane" --arg account "$account" \
+      '[{profile:$profile,harness:$harness,model:$model,provider:$provider,lane:$lane,account:$account,fitTier:3,reasoningClass:"strong",catalogSupported:true,authState:"usable",spendPriority:1,runwaySeconds:1000,activeLane:0,historySuccesses:0,historyAttempts:0,costTier:1}]' >"$evidence/candidates.json"
+    FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$root/bin/fm-route.sh" select \
+      --request "$evidence/request.json" --candidates "$evidence/candidates.json" --now "$now" >"$evidence/decision.json" || return 1
+  fi
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$root/bin/fm-route.sh" reserve \
+    --task "$task" --generation "$generation" --profile "$profile" --provider "$provider" --lane "$lane" \
+    --account "$account" --class "$task_class" --work-type "$work_type" --risk "$risk" --mode "$mode" \
+    --request "$evidence/request.json" --candidates "$evidence/candidates.json" --decision "$evidence/decision.json" \
+    --now "$now" "$@"
+}

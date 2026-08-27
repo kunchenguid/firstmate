@@ -116,11 +116,11 @@ enable_dispatch_profile() {
 
 reserve_route() {
   local home=$1 task=$2 generation=$3 profile=$4 provider=$5 lane=$6 account=$7 task_class=$8 risk=$9 mode=${10} work_type=${11:-implementation}
-  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
-    "$ROOT/bin/fm-route.sh" reserve --task "$task" --generation "$generation" \
-      --profile "$profile" --provider "$provider" --lane "$lane" --account "$account" \
-      --class "$task_class" --work-type "$work_type" --risk "$risk" --mode "$mode" \
-      --now 1000 >/dev/null
+  local harness=pi model=cliproxyapi/kimi-k3
+  if [ "$account" != none ]; then harness=codex; model=gpt-5.6-sol; fi
+  fm_test_reserve_bound "$ROOT" "$home" "$home/state" "$task" "$generation" "$profile" \
+    "$provider" "$lane" "$account" "$task_class" "$work_type" "$risk" "$mode" \
+    "$harness" "$model" none 1000 >/dev/null
 }
 
 make_account_map() {
@@ -1037,7 +1037,7 @@ test_native_routes_bind_only_the_allowlisted_account_environment() {
   pass "native routes inject only their allowlisted account environment"
 }
 
-test_native_harness_mismatch_and_pi_account_binding_are_refused() {
+test_policy_launch_binding_mismatches_are_refused_without_claiming() {
   local rec id out status reservation
   id=route-harness-mismatch-z26
   rec=$(make_spawn_case route-harness-mismatch claude "$id")
@@ -1051,8 +1051,8 @@ test_native_harness_mismatch_and_pi_account_binding_are_refused() {
     --route-class standard --route-work-type implementation --route-risk medium --route-mode automatic)
   status=$?
   expect_code 1 "$status" "native account harness mismatch must fail"
-  assert_contains "$out" "route account harness does not match launch harness" "native account harness mismatch was not diagnosed"
-  assert_absent "$reservation" "admitted native mismatch leaked routed capacity"
+  assert_contains "$out" "matching routing reservation is required" "native account harness mismatch was not diagnosed"
+  assert_present "$reservation" "native launch mismatch consumed the pending reservation"
   id=route-pi-account-z27
   rec=$(make_spawn_case route-pi-account pi "$id")
   read_case_record "$rec"
@@ -1064,9 +1064,35 @@ test_native_harness_mismatch_and_pi_account_binding_are_refused() {
     --route-class standard --route-work-type implementation --route-risk medium --route-mode automatic)
   status=$?
   expect_code 1 "$status" "Pi native account binding must fail"
-  assert_contains "$out" "Pi routes require route account none" "Pi account semantics were not diagnosed"
-  assert_absent "$reservation" "admitted Pi account mismatch leaked routed capacity"
-  pass "native harness mismatches and Pi account bindings are refused"
+  assert_contains "$out" "matching routing reservation is required" "Pi/account launch binding mismatch was not diagnosed"
+  assert_present "$reservation" "Pi/account launch mismatch consumed the pending reservation"
+  pass "policy launch binding mismatches are refused before claiming capacity"
+}
+
+test_policy_model_and_effort_mismatches_are_refused_before_side_effects() {
+  local rec id out status reservation
+  id=route-launch-binding-z27b
+  rec=$(make_spawn_case route-launch-binding pi "$id")
+  read_case_record "$rec"
+  reserve_route "$HOME_DIR" "$id" gen-1 pi-kimi moonshot pi-moonshot-1 none standard medium automatic
+  reservation="$HOME_DIR/state/routing/reservations/$id/gen-1.json"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness pi --model attacker/model "${ROUTED_ARGS[@]}")
+  status=$?
+  expect_code 1 "$status" "policy-bound model mismatch must fail"
+  assert_contains "$out" "matching routing reservation is required" "model mismatch was not diagnosed"
+  assert_present "$reservation" "model mismatch claimed or released the reservation"
+  assert_absent "$HOME_DIR/state/$id.meta" "model mismatch published task metadata"
+  assert_absent "$HOME_DIR/state/routing/claims/$id" "model mismatch created claim state"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness pi --model cliproxyapi/kimi-k3 --effort high "${ROUTED_ARGS[@]}")
+  status=$?
+  expect_code 1 "$status" "policy-bound effort mismatch must fail"
+  assert_contains "$out" "matching routing reservation is required" "effort mismatch was not diagnosed"
+  assert_present "$reservation" "effort mismatch claimed or released the reservation"
+  assert_absent "$HOME_DIR/state/$id.meta" "effort mismatch published task metadata"
+  assert_absent "$HOME_DIR/state/routing/claims/$id" "effort mismatch created claim state"
+  pass "policy model and effort mismatches fail before routed spawn side effects"
 }
 
 test_route_mode_off_preserves_static_launch_bytes() {
@@ -1168,7 +1194,8 @@ test_routed_spawn_records_the_complete_route
 test_launch_failure_releases_only_the_owned_generation
 test_claim_ownership_spans_endpoint_setup_through_metadata_publication
 test_native_routes_bind_only_the_allowlisted_account_environment
-test_native_harness_mismatch_and_pi_account_binding_are_refused
+test_policy_launch_binding_mismatches_are_refused_without_claiming
+test_policy_model_and_effort_mismatches_are_refused_before_side_effects
 test_route_mode_off_preserves_static_launch_bytes
 test_remote_secondmate_refuses_all_route_flags_before_dispatch
 

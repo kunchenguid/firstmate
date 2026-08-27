@@ -224,18 +224,22 @@ make_active_routed_task() {
   metadata="$case_dir/state/task-x1.meta"
   capability=$(route_claim_path "$case_dir" task-x1 "$generation")
   candidate="$metadata.route-candidate"
-  FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" reserve \
-    --task task-x1 --generation "$generation" --profile profile-1 \
-    --provider openai --lane codex-primary --account codex-primary \
-    --class standard --work-type "$work_type" --risk medium \
-    --mode automatic --now 100 >/dev/null
+  fm_test_reserve_bound "$ROOT" "$case_dir" "$case_dir/state" task-x1 "$generation" \
+    profile-1 openai codex-primary codex-primary standard "$work_type" medium automatic \
+    claude claude-test none 100 >/dev/null
   FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" begin-admission \
     --task task-x1 --generation "$generation" --profile profile-1 \
     --provider openai --lane codex-primary --account codex-primary \
     --class standard --work-type "$work_type" --risk medium --mode automatic --transition fresh \
+    --launch-harness claude --launch-model claude-test --launch-effort none \
     --metadata-file "$metadata" --claim-file "$capability" >/dev/null
   cp "$metadata" "$candidate"
+  awk 'BEGIN{done=0} /^model=/{print "model=claude-test"; done=1; next} {print} END{if (!done) print "model=claude-test"}' \
+    "$candidate" >"$candidate.model"
+  mv "$candidate.model" "$candidate"
   {
+    printf 'harness=claude\n'
+    printf 'effort=default\n'
     printf 'route_generation=%s\n' "$generation"
     printf 'route_profile=profile-1\n'
     printf 'route_provider=openai\n'
@@ -263,6 +267,7 @@ make_stale_inherited_admission() {
     --task task-x1 --generation gen-task-x1 --profile profile-1 \
     --provider openai --lane codex-primary --account codex-primary \
     --class standard --work-type review --risk medium --mode automatic --transition inherit \
+    --launch-harness claude --launch-model claude-test --launch-effort none \
     --metadata-file "$metadata" --claim-file "$capability" >/dev/null) &
   wait "$!" || fail "stale inherited admission setup failed"
   old=$(( $(date +%s) - 301 ))

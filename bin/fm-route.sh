@@ -41,19 +41,23 @@ case "$command" in
     validate_now "$NOW"; fm_route_validate_request "$REQUEST"; fm_route_validate_candidates "$CANDIDATES"; fm_route_select "$REQUEST" "$CANDIDATES"
     ;;
   reserve|verify-reservation)
-    TASK=''; GENERATION=''; PROFILE=''; PROVIDER=''; LANE=''; ACCOUNT=''; CLASS=''; WORK_TYPE=''; RISK=''; MODE=''; NOW=$(date +%s); BURST=false
+    TASK=''; GENERATION=''; PROFILE=''; PROVIDER=''; LANE=''; ACCOUNT=''; CLASS=''; WORK_TYPE=''; RISK=''; MODE=''; REQUEST=''; CANDIDATES=''; DECISION=''; NOW=$(date +%s); BURST=false
     while [ "$#" -gt 0 ]; do claim_option "$1"; case "$1" in
       --task) require_value "$@"; TASK=$2; shift 2 ;; --generation) require_value "$@"; GENERATION=$2; shift 2 ;;
       --profile) require_value "$@"; PROFILE=$2; shift 2 ;; --provider) require_value "$@"; PROVIDER=$2; shift 2 ;;
       --lane) require_value "$@"; LANE=$2; shift 2 ;; --account) require_value "$@"; ACCOUNT=$2; shift 2 ;;
       --class) require_value "$@"; CLASS=$2; shift 2 ;; --work-type) require_value "$@"; WORK_TYPE=$2; shift 2 ;; --risk) require_value "$@"; RISK=$2; shift 2 ;;
       --mode) require_value "$@"; MODE=$2; shift 2 ;; --now) require_value "$@"; NOW=$2; shift 2 ;;
+      --request) [ "$command" = reserve ] || usage; require_value "$@"; REQUEST=$2; shift 2 ;;
+      --candidates) [ "$command" = reserve ] || usage; require_value "$@"; CANDIDATES=$2; shift 2 ;;
+      --decision) [ "$command" = reserve ] || usage; require_value "$@"; DECISION=$2; shift 2 ;;
       --burst) [ "$command" = reserve ] || usage; BURST=true; shift ;; *) usage ;; esac; done
     if [ "$command" = reserve ]; then
       [ -n "$WORK_TYPE" ] || { fm_route_diagnostic 'work-type is required'; exit 1; }
       fm_route_validate_route_tuple "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" "$WORK_TYPE" "$RISK" "$MODE"
       validate_now "$NOW"
-      fm_routing_with_lock fm_route_reserve_locked "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" "$WORK_TYPE" "$RISK" "$MODE" "$BURST" "$NOW"
+      [ -n "$REQUEST" ] && [ -n "$CANDIDATES" ] && [ -n "$DECISION" ] || { fm_route_diagnostic 'selection evidence is required'; exit 1; }
+      fm_route_reserve "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" "$WORK_TYPE" "$RISK" "$MODE" "$BURST" "$NOW" "$REQUEST" "$CANDIDATES" "$DECISION"
     else
       [ -n "$WORK_TYPE" ] || { fm_route_diagnostic 'work-type is required'; exit 1; }
       fm_route_validate_route_tuple "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" "$WORK_TYPE" "$RISK" "$MODE"
@@ -74,22 +78,28 @@ case "$command" in
     fm_routing_with_lock fm_route_reservation_work_type_locked "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" "$RISK" "$MODE"
     ;;
   begin-admission)
-    TASK=''; GENERATION=''; PROFILE=''; PROVIDER=''; LANE=''; ACCOUNT=''; CLASS=''; WORK_TYPE=''; RISK=''; MODE=''; TRANSITION=''; METADATA_FILE=''; CLAIM_FILE=''; PRIOR_GENERATION=''; PRIOR_CLAIM_FILE=''
+    TASK=''; GENERATION=''; PROFILE=''; PROVIDER=''; LANE=''; ACCOUNT=''; CLASS=''; WORK_TYPE=''; RISK=''; MODE=''; TRANSITION=''; METADATA_FILE=''; CLAIM_FILE=''; PRIOR_GENERATION=''; PRIOR_CLAIM_FILE=''; LAUNCH_HARNESS=''; LAUNCH_MODEL=''; LAUNCH_EFFORT=''
     while [ "$#" -gt 0 ]; do claim_option "$1"; case "$1" in
       --task) require_value "$@"; TASK=$2; shift 2 ;; --generation) require_value "$@"; GENERATION=$2; shift 2 ;;
       --profile) require_value "$@"; PROFILE=$2; shift 2 ;; --provider) require_value "$@"; PROVIDER=$2; shift 2 ;;
       --lane) require_value "$@"; LANE=$2; shift 2 ;; --account) require_value "$@"; ACCOUNT=$2; shift 2 ;;
       --class) require_value "$@"; CLASS=$2; shift 2 ;; --work-type) require_value "$@"; WORK_TYPE=$2; shift 2 ;; --risk) require_value "$@"; RISK=$2; shift 2 ;;
       --mode) require_value "$@"; MODE=$2; shift 2 ;; --transition) require_value "$@"; TRANSITION=$2; shift 2 ;;
+      --launch-harness) require_value "$@"; LAUNCH_HARNESS=$2; shift 2 ;; --launch-model) require_value "$@"; LAUNCH_MODEL=$2; shift 2 ;;
+      --launch-effort) require_value "$@"; LAUNCH_EFFORT=$2; shift 2 ;;
       --metadata-file) require_value "$@"; METADATA_FILE=$2; shift 2 ;; --claim-file) require_value "$@"; CLAIM_FILE=$2; shift 2 ;;
       --prior-generation) require_value "$@"; PRIOR_GENERATION=$2; shift 2 ;; --prior-claim-file) require_value "$@"; PRIOR_CLAIM_FILE=$2; shift 2 ;;
       *) usage ;;
     esac; done
     fm_route_validate_route_tuple "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" "$WORK_TYPE" "$RISK" "$MODE"
     case "$TRANSITION" in fresh|inherit|replacement|off) ;; *) fm_route_diagnostic 'invalid admission transition'; exit 1 ;; esac
+    if [ "$TRANSITION" != off ]; then
+      [ -n "$LAUNCH_HARNESS" ] && [ -n "$LAUNCH_MODEL" ] && [ -n "$LAUNCH_EFFORT" ] \
+        || { fm_route_diagnostic 'launch binding is required'; exit 1; }
+    fi
     OWNER_PID=$PPID
     OWNER_START=$(fm_route_process_start "$OWNER_PID") || { fm_route_diagnostic 'admission owner identity is unavailable'; exit 1; }
-    fm_routing_with_lock fm_route_begin_admission_locked "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" "$WORK_TYPE" "$RISK" "$MODE" "$TRANSITION" "$METADATA_FILE" "$CLAIM_FILE" "$OWNER_PID" "$OWNER_START" "$PRIOR_GENERATION" "$PRIOR_CLAIM_FILE"
+    fm_routing_with_lock fm_route_begin_admission_locked "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" "$WORK_TYPE" "$RISK" "$MODE" "$TRANSITION" "$METADATA_FILE" "$CLAIM_FILE" "$OWNER_PID" "$OWNER_START" "$PRIOR_GENERATION" "$PRIOR_CLAIM_FILE" "$LAUNCH_HARNESS" "$LAUNCH_MODEL" "$LAUNCH_EFFORT"
     ;;
   prepare-admission)
     TASK=''; CANDIDATE=''; CLAIM_FILE=''; PRIOR_CLAIM_FILE=''
