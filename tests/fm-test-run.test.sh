@@ -66,6 +66,14 @@ test_account_lane_family_mapping() {
   pass "account-lane coverage is classified with session bootstrap"
 }
 
+test_route_family_mapping() {
+  local listed
+  listed=$("$RUNNER" --list --family pure-contract-unit)
+  printf '%s\n' "$listed" | grep -Fx 'tests/fm-route.test.sh' >/dev/null \
+    || fail "routing selector coverage must be part of the pure-contract-unit family"
+  pass "routing selector coverage is classified as a pure contract"
+}
+
 test_single_script_selection() {
   local listed
   listed=$("$RUNNER" --list tests/fm-lint.test.sh)
@@ -714,6 +722,7 @@ assert len(doc["scripts"])==3
 test_list_all_exact_suite_coverage
 test_family_selection
 test_account_lane_family_mapping
+test_route_family_mapping
 test_single_script_selection
 test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure
