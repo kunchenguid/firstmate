@@ -268,7 +268,7 @@ test_snapshot_task_evidence_requires_keys_and_known_states() {
   local home fixture out rc=0 mutation snapshot
   home=$(make_home malformed-task-evidence)
   fixture=$(make_health_fixture_root malformed-task-evidence)
-  snapshot='{"schema":"fm-fleet-snapshot.v1","generated":"2026-01-01T00:00:00Z","fm_home":"/tmp/home","roots":{"fm_root":"/tmp/root","state":"/tmp/state","data":"/tmp/data","config":"/tmp/config","projects":"/tmp/projects"},"backlog":{"path":"/tmp/backlog.md","present":false,"records":[]},"tasks":[{"id":"task","kind":"ship","remote":null,"current_state":{"state":"working"},"endpoint":{"agent_state":"alive","agent_alive":"alive","probe":"local","codex_session":{"collected":true,"reason":null,"resume_banner":null}},"paths":{"status_log":{"last_event":{"state":"working","handoff_required":false,"mtime_epoch":null}}},"pr":{"url":null,"source":"absent"}}],"scout_reports":[],"collection":{"state":{"present":true,"available":true,"invalid_metadata_count":0,"invalid_metadata":[]}},"main_inventory":{"valid":true,"reason":null},"secondmate_current":{"records":[],"truncated":0,"registry":{"available":true,"complete":true,"input_truncated":false,"records_truncated":false}},"secondmate_landed":{"records":[],"truncated":[],"unreadable":[],"partial":[]},"secondmate_guidance":{"note":"fixture"}}'
+  snapshot='{"schema":"fm-fleet-snapshot.v1","generated":"2026-01-01T00:00:00Z","fm_home":"/tmp/home","roots":{"fm_root":"/tmp/root","state":"/tmp/state","data":"/tmp/data","config":"/tmp/config","projects":"/tmp/projects"},"backlog":{"path":"/tmp/backlog.md","present":false,"records":[]},"tasks":[{"id":"task","kind":"ship","remote":null,"current_state":{"state":"working"},"endpoint":{"agent_state":"alive","agent_alive":"alive","probe":"local","codex_session":{"collected":true,"reason":null,"resume_banner":null}},"paths":{"status_log":{"available":true,"reason":null,"last_event":{"state":"working","handoff_required":false,"mtime_epoch":null}}},"pr":{"url":null,"source":"absent"}}],"scout_reports":[],"collection":{"state":{"present":true,"available":true,"invalid_metadata_count":0,"invalid_metadata":[]}},"main_inventory":{"valid":true,"reason":null},"secondmate_current":{"records":[],"truncated":0,"registry":{"available":true,"complete":true,"input_truncated":false,"records_truncated":false}},"secondmate_landed":{"records":[],"truncated":[],"unreadable":[],"partial":[]},"secondmate_guidance":{"note":"fixture"}}'
   for mutation in omit-endpoint-exists invalid-state invalid-agent-state invalid-agent-alive invalid-probe; do
     if [ "$mutation" = omit-endpoint-exists ]; then
       snapshot=$(printf '%s' "$snapshot" | jq 'del(.tasks[0].endpoint.exists)')
@@ -651,9 +651,44 @@ test_missed_handoff_after_contracted_step_complete_signal() {
   expect_code 1 "$rc" "contracted step-complete signal should be actionable"
   printf '%s' "$out" | jq -e '
     any(.findings[]; .kind == "missed-handoff" and .subject == "step-idle"
-        and .confidence == "high")
+        and .confidence == "high"
+        and (.evidence | contains("signaled blocked awaiting the next instruction")))
   ' >/dev/null || fail "contracted step-complete missed handoff was not reported: $out"
   pass "contracted step-complete signal is a missed handoff"
+}
+
+test_failed_status_is_not_missed_handoff() {
+  local home fakebin out rc=0
+  home=$(make_home failed-not-handoff)
+  write_live_ship "$home" failed-task
+  printf 'failed: tests did not pass\n' > "$home/state/failed-task.status"
+  touch -t 202001011200 "$home/state/failed-task.status"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm \
+    FM_FLEET_HEALTH_HANDOFF_STALE_SECS=60 "$HEALTH" --json) || rc=$?
+  printf '%s' "$out" | jq -e '
+    any(.findings[]; .kind == "missed-handoff" and .subject == "failed-task") | not
+  ' >/dev/null || fail "failed status was treated as a completed handoff: $out"
+  pass "failed statuses do not assert a missed handoff"
+}
+
+test_dangling_status_log_is_inconclusive() {
+  local home fakebin out rc=0
+  home=$(make_home dangling-status-log)
+  write_live_ship "$home" dangling-status
+  rm "$home/state/dangling-status.status"
+  ln -s "$home/state/missing-status-target" "$home/state/dangling-status.status"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "dangling task status evidence should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    any(.findings[]; .kind == "missed-handoff-inconclusive"
+        and .subject == "dangling-status"
+        and .evidence == "task status-log evidence could not be established")
+  ' >/dev/null || fail "dangling status-log evidence was hidden: $out"
+  pass "dangling status-log evidence remains inconclusive"
 }
 
 test_captain_decision_wait_is_not_missed_handoff() {
@@ -1016,21 +1051,19 @@ SH
   pass "recovery sender ownership distinguishes orphaned and unreadable"
 }
 
-test_inconsistent_recovery_outcome_is_inconclusive() {
+test_committed_recovery_outcome_transition_is_valid() {
   local home fakebin out rc=0
   home=$(make_home inconsistent-recovery-outcome)
   write_pending "$home" 3333333333333333 half-written recovery_sending "" 120 "$$" sender confirmed
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$HEALTH" --json) || rc=$?
-  expect_code 3 "$rc" "half-written recovery outcome should be inconclusive"
+  expect_code 0 "$rc" "observable recovery outcome transition should remain valid"
   printf '%s' "$out" | jq -e '
-    .status == "inconclusive"
-      and any(.findings[]; .kind == "pending-reply-inconclusive"
-              and .subject == "pending-replies"
-              and .evidence == "1 pending-reply record(s) are invalid")
-      and (any(.findings[]; .kind == "pending-reply-broken" and .subject == "half-written") | not)
-  ' >/dev/null || fail "half-written recovery outcome did not remain inconclusive: $out"
-  pass "half-written recovery outcomes remain inconclusive"
+    .status == "healthy"
+      and (any(.findings[]; .kind == "pending-reply-inconclusive") | not)
+      and (any(.findings[]; .kind == "pending-reply-broken") | not)
+  ' >/dev/null || fail "observable recovery outcome transition was rejected: $out"
+  pass "committed recovery outcomes remain valid before the phase advance"
 }
 
 test_inconclusive_secondmate_summary_not_broken() {
@@ -1299,6 +1332,25 @@ test_dangling_procevent_registry_is_inconclusive() {
   pass "dangling process-event registry remains unavailable"
 }
 
+test_dangling_procevent_source_claim_is_inconclusive() {
+  local home fakebin claim_root out rc=0
+  home=$(make_home dangling-procevent-source-claim)
+  mkdir -p "$home/state/procevent"
+  printf 'adapter=lavish\nargc=1\nargv:\npoll\n' > "$home/state/procevent/source-one.source"
+  claim_root="$home/procevent-claims"
+  mkdir -p "$claim_root"
+  ln -s "$claim_root/missing-claim-target" "$claim_root/source-one.claim"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm \
+    FM_PROCEVENT_CLAIM_ROOT="$claim_root" "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "dangling source claim should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    any(.findings[]; .kind == "result-listener-inconclusive" and .subject == "source-one")
+      and (any(.findings[]; .kind == "result-listener-missing" and .subject == "source-one") | not)
+  ' >/dev/null || fail "dangling source claim was classified as missing: $out"
+  pass "dangling process-event source claims remain inconclusive"
+}
+
 test_paused_ship_still_requires_pr_listener() {
   local home fakebin out rc=0
   home=$(make_home paused-pr-listener)
@@ -1391,6 +1443,25 @@ test_invalid_pr_listener_evidence_is_inconclusive() {
       and (any(.findings[]; .kind == "result-listener-missing" and .subject == "invalid-pr") | not)
   ' >/dev/null || fail "invalid PR-listener evidence became actionable: $out"
   pass "invalid PR-listener evidence remains inconclusive"
+}
+
+test_unrelated_pr_listener_corruption_preserves_missing_listener() {
+  local home fakebin out rc=0
+  home=$(make_home unrelated-pr-listener-corruption)
+  write_live_ship "$home" missing-listener
+  printf 'pr=https://github.com/example/alpha/pull/25\n' >> "$home/state/missing-listener.meta"
+  printf 'paused: waiting for CI\n' > "$home/state/missing-listener.status"
+  printf 'not a valid merge-poll listener\n' > "$home/state/unrelated.check.sh"
+  chmod 0600 "$home/state/unrelated.check.sh"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "unrelated PR-listener corruption should preserve both verdicts"
+  printf '%s' "$out" | jq -e '
+    any(.findings[]; .kind == "result-listener-inconclusive" and .subject == "pr-polls")
+      and any(.findings[]; .kind == "result-listener-missing" and .subject == "missing-listener")
+  ' >/dev/null || fail "unrelated PR-listener corruption suppressed a proven missing listener: $out"
+  pass "unrelated PR-listener corruption does not suppress missing listeners"
 }
 
 test_matching_retired_pr_listener_is_not_missing() {
@@ -1612,6 +1683,8 @@ test_missed_handoff_after_done_signal
 test_later_inbox_clears_missed_handoff
 test_recent_done_signal_is_not_missed_handoff
 test_missed_handoff_after_contracted_step_complete_signal
+test_failed_status_is_not_missed_handoff
+test_dangling_status_log_is_inconclusive
 test_captain_decision_wait_is_not_missed_handoff
 test_handled_inbox_corruption_is_inconclusive
 test_unrelated_inbox_corruption_preserves_missed_handoff
@@ -1626,7 +1699,7 @@ test_unknown_worker_state_is_inconclusive
 test_registry_only_remote_evidence_is_inconclusive
 test_pending_reply_broken_and_historical_noise_omitted
 test_recovery_sending_owner_verdicts
-test_inconsistent_recovery_outcome_is_inconclusive
+test_committed_recovery_outcome_transition_is_valid
 test_inconclusive_secondmate_summary_not_broken
 test_invalid_secondmate_summary_uses_normalized_kind
 test_truncated_secondmate_inventory_is_inconclusive
@@ -1639,10 +1712,12 @@ test_inventory_and_missing_listener
 test_invalid_procevent_registration_is_inconclusive
 test_dangling_procevent_claim_root_is_inconclusive
 test_dangling_procevent_registry_is_inconclusive
+test_dangling_procevent_source_claim_is_inconclusive
 test_paused_ship_still_requires_pr_listener
 test_invalid_current_pr_metadata_is_inconclusive
 test_unknown_worker_state_does_not_create_missing_pr_listener
 test_invalid_pr_listener_evidence_is_inconclusive
+test_unrelated_pr_listener_corruption_preserves_missing_listener
 test_matching_retired_pr_listener_is_not_missing
 test_inconclusive_dominates_actionable_status
 test_unreadable_supervision_lock_is_inconclusive

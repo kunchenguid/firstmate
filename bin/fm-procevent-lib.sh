@@ -300,6 +300,7 @@ fm_procevent_pid_state() {
 fm_procevent_claim_state_locked() {
   local claim registration current_identity
   claim=$(fm_procevent_claim_path "$1")
+  [ -L "$claim" ] && [ ! -e "$claim" ] && return 2
   [ -e "$claim" ] || return 1
   fm_procevent_claim_load_locked "$1" || return 2
   if [ "$FM_PROCEVENT_CLAIM_TERMINAL" = terminal ] && [ -n "$FM_PROCEVENT_CLAIM_REG_IDENTITY" ]; then

@@ -181,6 +181,8 @@ snapshot_shape_valid() {
       and (.endpoint.codex_session | nullable_key("resume_banner"; "boolean"))
       and (.paths | type) == "object"
       and (.paths.status_log | type) == "object"
+      and (.paths.status_log.available | type) == "boolean"
+      and (.paths.status_log | nullable_key("reason"; "string"))
       and (.paths.status_log.last_event | type) == "object"
       and (.paths.status_log.last_event.state | type) == "string"
       and (.paths.status_log.last_event.handoff_required | type) == "boolean"
@@ -611,12 +613,18 @@ EVALUATED=$(jq -n \
                   "aged";$n)),
       ($snapshot.tasks[]?
         | select(.kind != "secondmate")
+        | select(.paths.status_log.available == false)
+        | finding("missed-handoff-inconclusive";.id;"notice";"inconclusive";
+                  "task status-log evidence could not be established";"status-log-unavailable";1)),
+      ($snapshot.tasks[]?
+        | select(.kind != "secondmate")
+        | select(.paths.status_log.available == true)
         | select(.paths.status_log.last_event.handoff_required == true)
         | . as $t
         | ($t.paths.status_log.last_event.mtime_epoch) as $mtime
         | if ($mtime == null or $now_epoch == 0) then
             finding("missed-handoff-inconclusive";$t.id;"notice";"inconclusive";
-                    "done-signal age could not be established";"mtime-unavailable";1)
+                    "handoff-signal age could not be established";"mtime-unavailable";1)
           elif ($now_epoch - $mtime) < $handoff_stale then
             empty
           elif inbox_activity_available($t.id) == false then
@@ -627,17 +635,21 @@ EVALUATED=$(jq -n \
             empty
           else
             finding("missed-handoff";$t.id;"warning";"high";
-                    ("worker signaled done with no later status append or steering message for at least "
+                    ("worker signaled " + $t.paths.status_log.last_event.state
+                     + " awaiting the next instruction, with no later status append or steering message for at least "
                      + ($handoff_stale|tostring) + "s");
-                    "stale-done";1)
+                    ("stale-" + $t.paths.status_log.last_event.state);1)
           end),
       ($snapshot.tasks[]?
         | select(.kind == "ship")
         | select((.pr.url // null) != null)
         | select(.pr.source == "meta")
-        | select($prs.available == true)
         | .id as $id
-        | if .current_state.state == "unknown" then
+        | if any((($prs.invalid // []) + ($prs.unreadable // []) + ($prs.metadata_invalid // []))[]?; .id == $id) then
+            finding("result-listener-inconclusive";$id;"notice";"inconclusive";
+                    "PR-listener evidence for this task is invalid or unreadable";
+                    "task-listener-unavailable";1)
+          elif .current_state.state == "unknown" then
             finding("result-listener-inconclusive";$id;"notice";"inconclusive";
                     "worker lifecycle state is unknown, so PR-listener requirement cannot be established";
                     "worker-state-unknown";1)

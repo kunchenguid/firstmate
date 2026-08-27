@@ -52,8 +52,9 @@
 #     endpoint.codex_session is collected only for local in-flight Codex tasks
 #     whose agent is not already proven dead: resume_banner is true when the
 #     bounded backend pane capture contains the exact Codex exit banner.
-#     paths.status_log.last_event.mtime_epoch is the status-file mtime, and
-#     handoff_required marks a scaffold-declared stop state that awaits Firstmate.
+#     paths.status_log.available preserves invalid or unreadable log evidence;
+#     last_event.mtime_epoch is the status-file mtime, and handoff_required marks
+#     a scaffold-declared stop state that awaits Firstmate.
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
@@ -315,14 +316,18 @@ snapshot_file_mtime() {  # <path>
 }
 
 status_event_json() {  # <status-log>
-  local log=$1 present=0 raw='' verb='' note='' mtime_json=null handoff_required=0
+  local log=$1 present=0 available=1 reason='' raw='' verb='' note='' mtime_json=null handoff_required=0
+  if { [ -L "$log" ] && [ ! -e "$log" ]; } || { [ -e "$log" ] && { [ ! -f "$log" ] || [ ! -r "$log" ]; }; }; then
+    available=0
+    reason='status log is invalid or unreadable'
+  fi
   if [ -f "$log" ]; then
     present=1
     raw=$(last_nonempty_line "$log" || true)
     verb=$(status_line_verb "$raw")
     note=$(status_line_note "$raw")
     case "$verb" in
-      done|blocked|failed) handoff_required=1 ;;
+      done|blocked) handoff_required=1 ;;
     esac
     mtime_json=$(snapshot_file_mtime "$log" || true)
     case "$mtime_json" in
@@ -334,10 +339,12 @@ status_event_json() {  # <status-log>
     --arg raw "$raw" \
     --arg verb "$verb" \
     --arg note "$note" \
+    --arg reason "$reason" \
     --argjson present "$(bool_json "$present")" \
+    --argjson available "$(bool_json "$available")" \
     --argjson mtime_epoch "$mtime_json" \
     --argjson handoff_required "$(bool_json "$handoff_required")" \
-    '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw,mtime_epoch:$mtime_epoch,handoff_required:$handoff_required}}'
+    '{path:$path,present:$present,available:$available,reason:(if $reason == "" then null else $reason end),kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw,mtime_epoch:$mtime_epoch,handoff_required:$handoff_required}}'
 }
 
 # Exact Codex-cli exit banner. Health treats this as one of two independent
@@ -560,7 +567,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 
 task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
-  local remote_host remote_root remote_state remote_rc remote_home_present
+  local remote_host remote_root remote_state remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_state agent_alive probe meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json codex_session_json

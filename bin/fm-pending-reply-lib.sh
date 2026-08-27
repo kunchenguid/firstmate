@@ -225,7 +225,7 @@ fm_pending_reply_record_valid() {  # <record-path>
   outcome=$(fm_pending_reply_get "$rec" recovery_delivery_outcome)
   case "$outcome" in ''|confirmed|failed|unknown) ;; *) return 1 ;; esac
   case "$phase:$outcome" in
-    awaiting_report:|delivery_unknown:|recovery_sending:|recovery_sent:confirmed|recovery_failed:failed|recovery_unknown:unknown) ;;
+    awaiting_report:|delivery_unknown:|recovery_sending:|recovery_sending:confirmed|recovery_sent:confirmed|recovery_failed:failed|recovery_unknown:unknown) ;;
     escalated:|escalated:confirmed|escalated:failed|escalated:unknown) ;;
     resolved:|resolved:confirmed|resolved:failed|resolved:unknown) ;;
     *) return 1 ;;
