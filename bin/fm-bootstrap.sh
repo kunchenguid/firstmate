@@ -10,6 +10,7 @@
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
+#                 "CREW_ACCOUNTS: invalid config/crew-accounts.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
@@ -1023,6 +1024,18 @@ crew_dispatch_validate() {
   fi
 }
 
+crew_accounts_validate() {
+  local file err
+  file="$CONFIG/crew-accounts.json"
+  [ -f "$file" ] || return 0
+  # jq is already a universal bootstrap dependency, so leave its one diagnostic
+  # to the tool detector rather than reporting a misleading invalid account map.
+  command -v jq >/dev/null 2>&1 || return 0
+  if ! err=$("$SCRIPT_DIR/fm-account-lane.sh" validate "$file" 2>&1); then
+    echo "CREW_ACCOUNTS: invalid config/crew-accounts.json - $err"
+  fi
+}
+
 startup_memory_budget_setup() {
   # Primary bootstrap owns default publication. A secondmate is deliberately
   # passive here because its setting must converge from the primary through the
@@ -1125,6 +1138,7 @@ detect_local_config() {
     echo "MISSING_MANUAL: cursor-agent (instructions: $(manual_install_url cursor-agent))"
   fi
   crew_dispatch_validate
+  crew_accounts_validate
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"

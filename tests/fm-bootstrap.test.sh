@@ -1149,6 +1149,21 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+test_crew_accounts_validation() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/accounts-invalid"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '{"version":1,"accounts":{"bad":{"harness":"codex","envName":"PATH","configDir":"/tmp"}}}' > "$case_dir/home/config/crew-accounts.json"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" 'CREW_ACCOUNTS: invalid config/crew-accounts.json - jq: error' "bootstrap must report invalid home-local account maps"
+  assert_contains "$out" 'codex accounts require CODEX_HOME' "bootstrap must preserve the account-map validation reason"
+  pass "bootstrap reports invalid crew-accounts.json without disabling static dispatch"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
@@ -1177,3 +1192,4 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_crew_accounts_validation

@@ -58,6 +58,14 @@ test_family_selection() {
   pass "family selection returns a proper subset of the suite"
 }
 
+test_account_lane_family_mapping() {
+  local listed
+  listed=$("$RUNNER" --list --family session-bootstrap)
+  printf '%s\n' "$listed" | grep -Fx 'tests/fm-account-lane.test.sh' >/dev/null \
+    || fail "account-lane coverage must be part of the session-bootstrap family"
+  pass "account-lane coverage is classified with session bootstrap"
+}
+
 test_single_script_selection() {
   local listed
   listed=$("$RUNNER" --list tests/fm-lint.test.sh)
@@ -705,6 +713,7 @@ assert len(doc["scripts"])==3
 
 test_list_all_exact_suite_coverage
 test_family_selection
+test_account_lane_family_mapping
 test_single_script_selection
 test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure
