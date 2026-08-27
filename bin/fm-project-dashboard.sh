@@ -76,17 +76,21 @@ validate_payload() {  # <data.json>
       and (.landed | type == "array")
       and (.prs | type == "array")
       and (.unattributed | type == "array")
+      and (.deferred_decisions | type == "array")
       and (.secondmates | type == "array")
       and (.counts | type == "object")
       and (.last_activity == null or
            ((.last_activity.at | nonempty_string) and
             (.last_activity.age_days | type == "number") and
             (.last_activity.age_seconds | type == "number")))
-      and ([.active_work[],.decisions[],.failures[],.waiting[],.queued[],.landed[],.unattributed[] | owner_item] | all)
+      and ([.active_work[],.decisions[],.failures[],.waiting[],.queued[],.landed[],
+            .unattributed[],.deferred_decisions[] | owner_item] | all)
       and ([.prs[]
             | type == "object" and (.url | nonempty_string) and (.linkable | type == "boolean")
               and (.linkable == false or (.url | optional_https_url))] | all)
-      and ([.secondmates[] | type == "object" and (.id | nonempty_string)] | all);
+      and ([.secondmates[]
+            | type == "object" and (.id | nonempty_string)
+              and (.unavailable | type == "boolean") and (.registered | type == "boolean")] | all);
     type == "object"
     and (.schema == $schema)
     and (.home | nonempty_string)
@@ -94,6 +98,9 @@ validate_payload() {  # <data.json>
     and (.stale_after_days | type == "number" and . >= 0 and floor == .)
     and (.selected_project | optional_string)
     and (.projects | type == "array")
+    and (.disclosures | type == "array")
+    and ([.disclosures[]
+          | type == "object" and (.surface | nonempty_string) and (.reveal | nonempty_string)] | all)
     and ([.projects[] | project] | all)
     and (([.projects[].name] | unique | length) == (.projects | length))
     and (.selected_project as $selected

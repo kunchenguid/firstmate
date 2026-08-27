@@ -83,6 +83,9 @@ h1 { margin: 0; color: var(--ink-900); font: 2rem/1.1 var(--font-display); }
 .pd-item strong { display: block; color: var(--ink-900); font-size: .86rem; }
 .pd-item small { display: block; color: var(--ink-500); font-size: .74rem; }
 .pd-empty { color: var(--ink-300); font-size: .8rem; font-style: italic; }
+.pd-meta-warn { color: var(--rust-600); font-weight: 700; }
+.pd-disclosures { margin-bottom: 18px; padding: 14px 16px; background: var(--gold-100); border: 2px solid var(--ink-900); border-radius: 11px; box-shadow: var(--shadow-hard-sm); }
+.pd-disclosures > strong { display: block; margin-bottom: 8px; color: var(--ink-900); font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; }
 .pd-unlinked { color: var(--ink-300); font-family: var(--font-mono); font-size: .68rem; }
 .pd-link { color: var(--ocean-600); font-weight: 800; text-decoration: underline; text-underline-offset: 2px; }
 .pd-none { padding: 44px; color: var(--ink-500); text-align: center; background: var(--paper-000); border: 2px dashed var(--cream-line); border-radius: 13px; }
@@ -131,6 +134,18 @@ __FM_PROJECT_DASHBOARD_DATA__
   const itemNote = item => item.detail || item.reason || item.summary || item.completed || "";
 
   document.getElementById("generated").textContent = `Updated ${data.generated} · stale after ${data.stale_after_days} days`;
+  if (data.disclosures.length) {
+    const banner = node("section", "pd-disclosures");
+    banner.append(node("strong", "", "Fleet state is incomplete"));
+    const list = node("ul", "pd-list");
+    data.disclosures.forEach(item => {
+      const row = node("li", "pd-item");
+      row.append(node("strong", "", item.surface), node("small", "", item.reveal));
+      list.append(row);
+    });
+    banner.append(list);
+    document.querySelector(".pd-main").insertBefore(banner, document.getElementById("stats"));
+  }
   const statRows = [
     [data.summary.total, "Registered"], [data.summary.active, "Active"],
     [data.summary.needs_attention, "Attention"], [data.summary.waiting, "Waiting"],
@@ -160,7 +175,12 @@ __FM_PROJECT_DASHBOARD_DATA__
     panel.append(list);
   };
 
-  const requestedSelection = data.selected_project || (decodeURIComponent(location.hash.slice(1)) || null);
+  const hashSelection = () => {
+    const raw = location.hash.slice(1);
+    if (!raw) return null;
+    try { return decodeURIComponent(raw) || null; } catch { return raw; }
+  };
+  const requestedSelection = data.selected_project || hashSelection();
   let selected = null;
   const setSelected = name => {
     selected = selected === name ? null : name;
@@ -189,11 +209,27 @@ __FM_PROJECT_DASHBOARD_DATA__
     const meta = node("div", "pd-detail-meta");
     meta.append(node("span", "", `Delivery: ${project.mode}${project.yolo ? " +yolo" : ""}`));
     meta.append(node("span", "", project.last_activity ? `Last activity: ${project.last_activity.age_days}d ago` : "Last activity: unknown"));
-    if (project.secondmates.length) meta.append(node("span", "", `Secondmate: ${project.secondmates.map(mate => mate.id).join(", ")}`));
+    if (project.secondmates.length) {
+      const label = project.secondmates.map(mate => {
+        const notes = [];
+        if (mate.unavailable) notes.push("state unavailable");
+        if (!mate.registered) notes.push("not registered for this project");
+        return notes.length ? `${mate.id} (${notes.join("; ")})` : mate.id;
+      }).join(", ");
+      const mates = node("span", "", `Secondmate: ${label}`);
+      if (project.secondmates.some(mate => mate.unavailable || !mate.registered)) mates.className = "pd-meta-warn";
+      meta.append(mates);
+    }
+    if (project.deferred_decisions.length) meta.append(node("span", "", `Deferred captain holds: ${project.deferred_decisions.length}`));
     details.append(meta);
     const detailGrid = node("div", "pd-detail-grid");
     const work = node("section", "pd-panel"); appendList(work, "Active work", project.active_work, {empty:"No active work"}); detailGrid.append(work);
     const calls = node("section", "pd-panel"); appendList(calls, "Decisions / attention", [...project.decisions, ...project.failures], {empty:"No decisions pending"}); detailGrid.append(calls);
+    if (project.deferred_decisions.length) {
+      const deferred = node("section", "pd-panel");
+      appendList(deferred, "Deferred / superseded holds", project.deferred_decisions.map(item => ({...item, reason: item.summary || "Marked deferred or superseded"})), {});
+      detailGrid.append(deferred);
+    }
     if (project.unattributed.length) {
       const unattributed = node("section", "pd-panel");
       appendList(unattributed, "Not attributable", project.unattributed.map(item => ({...item, reason: `${item.kind} · owner covers several projects`})), {});

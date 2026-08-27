@@ -117,7 +117,7 @@ test_aggregation_status_precedence_and_secondmate_join() {
       and (.projects[] | select(.name == "gamma") | .status == "idle_queued" and .queued == [])
       and (.projects[] | select(.name == "delta")
         | .status == "active"
-          and .secondmates == [{id:"delta-mate",home:(.secondmates[0].home),remote:false,state:"active_child_work",unavailable:false}]
+          and .secondmates == [{id:"delta-mate",home:(.secondmates[0].home),remote:false,state:"active_child_work",unavailable:false,registered:true}]
           and (.active_work | any(.id == "delta-child" and .owner == "delta-mate"))
           and (.landed | any(.id == "delta-landed" and .owner == "delta-mate")))
   ' >/dev/null || fail "project aggregation, precedence, or secondmate join was wrong: $out"
@@ -175,7 +175,7 @@ test_bounded_secondmate_state_keeps_registered_ownership_visible() {
   printf '%s' "$out" | jq -e '
     .projects[] | select(.name == "delta")
     | .status == "needs_attention"
-      and .secondmates == [{id:"delta-mate",home:null,remote:false,state:"unknown",unavailable:true}]
+      and .secondmates == [{id:"delta-mate",home:null,remote:false,state:"unknown",unavailable:true,registered:true}]
       and .next_step == "Secondmate state unavailable from the bounded fleet snapshot"
   ' >/dev/null || fail "bounded secondmate state silently dropped registered project ownership: $out"
   pass "bounded secondmate state keeps ownership visible as explicit attention"
@@ -343,8 +343,288 @@ SH
   pass "a non-https PR link is disclosed instead of failing every project"
 }
 
+test_blocked_status_fold_is_not_a_captain_decision() {
+  local home epoch out
+  home=$(make_home blocked-fold)
+  write_fleet_fixture "$home"
+  jq '
+    .tasks |= map(
+      if .id == "bravo-work" then
+        .current_state = {state:"blocked",source:"fixture",detail:"waiting on vendor key"}
+        | .hints.open_decisions = [{key:"default",verb:"blocked",summary:"waiting on vendor key"}]
+      else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "blocked-fold snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "bravo")
+    | .status == "needs_attention"
+      and .counts.decisions == 0
+      and .decisions == []
+      and (.failures | map(.id)) == ["bravo-work"]
+      and .next_step == "blocked: waiting on vendor key"
+  ' >/dev/null || fail "a blocked status-fold entry was counted as a captain decision: $out"
+  pass "blocked work stays a failure and never becomes a captain decision"
+}
+
+test_backlog_order_survives_deduplication() {
+  local home epoch out
+  home=$(make_home backlog-order)
+  write_fleet_fixture "$home"
+  jq '
+    .backlog.records = [
+      {structured:true,id:"zz-top-priority",repo:"alpha",title:"Ship the exporter",state:"queued",
+       since:"2020-01-01",captain_actionable:false,unresolved_blocker_ids:[]},
+      {structured:true,id:"aa-later",repo:"alpha",title:"Tidy the docs",state:"queued",
+       since:"2020-01-01",captain_actionable:false,unresolved_blocker_ids:[]}
+    ]
+    | .tasks = []
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "backlog-order snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "alpha")
+    | (.queued | map(.id)) == ["zz-top-priority","aa-later"]
+      and .next_step == "Ship the exporter"
+  ' >/dev/null || fail "deduplication resorted the captain's backlog order: $out"
+  pass "backlog order survives deduplication of queued work"
+}
+
+test_deferred_captain_hold_is_disclosed_not_escalated() {
+  local home epoch out
+  home=$(make_home deferred-hold)
+  write_fleet_fixture "$home"
+  jq '
+    .backlog.records |= map(
+      if .id == "alpha-call" then
+        .title = "Old thing" | .hold_kind = "captain"
+        | .hold_reason = "SUPERSEDED by alpha-new" | .deferred_marker = true
+      else . end)
+    | .tasks |= map(if .id == "alpha-call" then .hints.open_decisions = [] else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "deferred-hold snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .summary.deferred_decisions == 1
+      and (.projects[] | select(.name == "alpha")
+        | .status == "active"
+          and .counts.decisions == 0
+          and .decisions == []
+          and .counts.deferred_decisions == 1
+          and (.deferred_decisions[0] | .id == "alpha-call" and .owner == "main"))
+  ' >/dev/null || fail "a superseded captain hold still painted the card red: $out"
+  pass "deferred captain holds are disclosed instead of demanding attention"
+}
+
+test_captain_hold_next_step_keeps_the_question() {
+  local home epoch out
+  home=$(make_home hold-question)
+  write_fleet_fixture "$home"
+  jq '
+    .backlog.records |= map(
+      if .id == "alpha-call" then
+        .title = "Build the exporter" | .hold_reason = "choose between S3 and GCS"
+      else . end)
+    | .tasks |= map(if .id == "alpha-call" then .hints.open_decisions = [] else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "hold-question snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "alpha")
+    | .status == "needs_attention"
+      and .next_step == "Build the exporter: choose between S3 and GCS"
+  ' >/dev/null || fail "the captain hold next step dropped the question: $out"
+  pass "a captain hold next step carries the question, not just the row title"
+}
+
+test_repo_labelled_secondmate_work_attributes_to_that_project() {
+  local home epoch out
+  home=$(make_home cross-repo)
+  write_fleet_fixture "$home"
+  jq '
+    .tasks |= map(if .id == "delta-mate" then .secondmate_projects = ["delta"] else . end)
+    | .secondmate_current.records |= map(
+        if .id == "delta-mate" then
+          .projects = ["delta"]
+          | .active_children = [{id:"cross-child",title:"Gamma rollout",repo:"gamma",
+              state:"working",doing:"Working on gamma"}]
+          | .landed = []
+        else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "cross-repo snapshot failed"
+  printf '%s' "$out" | jq -e '
+    (.projects[] | select(.name == "gamma")
+      | .status == "active"
+        and (.active_work | map(.id)) == ["cross-child"]
+        and (.secondmates | map({id,registered})) == [{id:"delta-mate",registered:false}])
+      and (.projects[] | select(.name == "delta")
+        | .active_work == []
+          and .counts.unattributed == 0
+          and (.secondmates | map({id,registered})) == [{id:"delta-mate",registered:true}])
+  ' >/dev/null || fail "repo-labelled secondmate work was dropped from every card: $out"
+  pass "secondmate work naming a registered project lands on that project"
+}
+
+test_bounded_snapshot_drops_are_disclosed_board_wide() {
+  local home epoch out
+  home=$(make_home bounded-disclosure)
+  write_fleet_fixture "$home"
+  jq '
+    .secondmate_current.truncated = 3
+    | .secondmate_current.registry = {available:true,complete:false,records_truncated:true,
+        input_truncated:false,reason:null}
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "bounded-disclosure snapshot failed"
+  printf '%s' "$out" | jq -e '
+    (.disclosures | length) == 2
+      and (.disclosures | any(.surface == "registered secondmates omitted by the snapshot bound: 3"
+                              and .reveal == "raise FM_SNAPSHOT_SECONDMATES"))
+      and (.disclosures | any(.surface == "secondmate registry records omitted by the bounded read"))
+  ' >/dev/null || fail "bounded snapshot drops were not disclosed: $out"
+  out=$(run_snapshot "$home" "$epoch" --select delta) || fail "clean-disclosure snapshot failed"
+  jq '.secondmate_current.truncated = 0 | .secondmate_current.registry = {available:true,complete:true,records_truncated:false,input_truncated:false,reason:null}'     "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  out=$(run_snapshot "$home" "$epoch") || fail "clean-disclosure snapshot failed"
+  printf '%s' "$out" | jq -e '.disclosures == []' >/dev/null     || fail "a complete fleet read still reported a disclosure: $out"
+  pass "bounded snapshot and registry drops surface as board-level disclosures"
+}
+
 extract_payload() {  # <board>
   sed -n '/<script id="project-dashboard-data" type="application\/json">/,/<\/script>/p' "$1" | sed '1d;$d'
+}
+
+write_board_driver() {  # <path>
+  cat > "$1" <<'JS'
+const fs = require("fs");
+const [boardPath, hash, wantSelected] = process.argv.slice(2);
+const html = fs.readFileSync(boardPath, "utf8");
+
+class El {
+  constructor(tag) {
+    this.tagName = tag; this.children = []; this._class = ""; this._text = "";
+    this.dataset = {}; this.attrs = {}; this.style = {};
+    this.classList = {
+      toggle: (name, on) => {
+        const set = new Set(this._class.split(/\s+/).filter(Boolean));
+        if (on) set.add(name); else set.delete(name);
+        this._class = [...set].join(" ");
+      }
+    };
+  }
+  get className() { return this._class; }
+  set className(v) { this._class = v || ""; }
+  get textContent() { return this._text; }
+  set textContent(v) { this._text = v === undefined || v === null ? "" : String(v); this.children = []; }
+  append(...nodes) { nodes.forEach(n => this.children.push(n)); }
+  insertBefore(node, ref) {
+    const i = this.children.indexOf(ref);
+    this.children.splice(i < 0 ? this.children.length : i, 0, node);
+  }
+  setAttribute(k, v) { this.attrs[k] = String(v); }
+  getAttribute(k) { return this.attrs[k]; }
+  addEventListener() {}
+  _walk(out) { this.children.forEach(c => { out.push(c); c._walk(out); }); return out; }
+  _matches(sel) { return this._class.split(/\s+/).includes(sel.slice(1)); }
+  querySelectorAll(sel) { return this._walk([]).filter(n => n._matches(sel)); }
+  querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
+  text() {
+    return (this._text || "") + this.children.map(c => c.text()).join(" ");
+  }
+}
+
+const root = new El("body");
+const byId = {};
+["project-dashboard-data", "project-grid", "generated", "stats"].forEach(id => {
+  byId[id] = new El("div");
+});
+const main = new El("main"); main.className = "pd-main";
+main.append(byId.generated, byId.stats, byId["project-grid"]);
+root.append(byId["project-dashboard-data"], main);
+
+const payload = html
+  .split('<script id="project-dashboard-data" type="application/json">')[1]
+  .split("</script>")[0];
+byId["project-dashboard-data"]._text = payload;
+
+global.document = {
+  getElementById: id => byId[id] || null,
+  createElement: tag => new El(tag),
+  querySelector: sel => (sel === ".pd-main" ? main : root.querySelector(sel)),
+  querySelectorAll: sel => root.querySelectorAll(sel)
+};
+global.location = { hash, pathname: "/project-dashboard.html", search: "" };
+global.history = { replaceState: (a, b, url) => { global.location._replaced = url; } };
+
+const script = html.split("</script>").slice(-2)[0].split("<script>").pop();
+new Function(script)();
+
+const cards = root.querySelectorAll(".pd-card");
+const selected = cards.filter(c => c._class.includes("is-selected")).map(c => c.dataset.project);
+const result = {
+  cards: cards.map(c => c.dataset.project),
+  selected,
+  banner: root.querySelectorAll(".pd-disclosures").map(b => b.text().trim()),
+  meta: cards.map(c => ({ project: c.dataset.project, meta: (c.querySelector(".pd-detail-meta") || { text: () => "" }).text() }))
+};
+if (wantSelected !== undefined && JSON.stringify(selected) !== JSON.stringify(wantSelected === "" ? [] : [wantSelected])) {
+  console.error("selection mismatch: " + JSON.stringify(selected));
+  process.exit(3);
+}
+console.log(JSON.stringify(result));
+
+JS
+}
+
+build_board_for_render() {  # <home>
+  local home=$1 payload
+  payload="$home/dashboard.json"
+  run_snapshot "$home" "$(date +%s)" > "$payload" || return 1
+  cat > "$home/fakebin/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$home/fakebin/lavish-axi"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" "$BOARD" build "$payload" >/dev/null || return 1
+  printf '%s\n' "$home/.lavish/project-dashboard.html"
+}
+
+test_board_renders_every_card_and_its_disclosures() {
+  local home board driver out
+  command -v node >/dev/null 2>&1 || { pass "skipped board rendering: node not found"; return 0; }
+  home=$(make_home board-render)
+  write_fleet_fixture "$home"
+  jq '
+    .secondmate_current.truncated = 2
+    | .secondmate_current.registry = {available:true,complete:false,records_truncated:false,
+        input_truncated:false,reason:null}
+    | .secondmate_current.records = []
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  board=$(build_board_for_render "$home") || fail "board build for rendering failed"
+  driver="$home/board-driver.js"
+  write_board_driver "$driver"
+
+  out=$(node "$driver" "$board" "#%zz" "") \
+    || fail "a malformed URL fragment stopped the board from rendering: $out"
+  printf '%s' "$out" | jq -e '
+    (.cards) == ["alpha","bravo","beta","gamma","delta","epsilon","zeta"]
+      and .selected == []
+      and (.banner | length) == 1
+      and (.banner[0] | contains("registered secondmates omitted by the snapshot bound: 2"))
+      and (.meta | any(.project == "delta" and (.meta | contains("delta-mate (state unavailable)"))))
+  ' >/dev/null || fail "board rendering lost cards, disclosures, or unavailable-secondmate state: $out"
+
+  out=$(node "$driver" "$board" "#delta" "delta") \
+    || fail "the board did not expand the requested project: $out"
+  pass "the board renders every card, its disclosures, and survives a malformed fragment"
 }
 
 test_board_build_is_stable_read_only_and_selection_preserving() {
@@ -382,6 +662,12 @@ SH
 
 test_aggregation_status_precedence_and_secondmate_join
 test_distinct_unkeyed_decisions_are_all_surfaced
+test_blocked_status_fold_is_not_a_captain_decision
+test_backlog_order_survives_deduplication
+test_deferred_captain_hold_is_disclosed_not_escalated
+test_captain_hold_next_step_keeps_the_question
+test_repo_labelled_secondmate_work_attributes_to_that_project
+test_bounded_snapshot_drops_are_disclosed_board_wide
 test_attention_next_step_is_an_action_not_a_bare_title
 test_unattributable_secondmate_state_is_disclosed
 test_registered_secondmate_without_a_task_still_owns_its_projects
@@ -391,3 +677,4 @@ test_stale_risk_is_strictly_older_than_eight_days
 test_selected_project_payload_is_validated
 test_bounded_secondmate_state_keeps_registered_ownership_visible
 test_board_build_is_stable_read_only_and_selection_preserving
+test_board_renders_every_card_and_its_disclosures
