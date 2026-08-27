@@ -21,9 +21,11 @@
 #   - orphan status logs whose task meta has already disappeared
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
-#   - the per-task usage-wall scan's shared budget: total cost stays a constant
-#     rather than growing with dead-endpoint count, what the budget cut reads as
-#     unscanned rather than clean, and a healthy fleet spends none of it
+#   - the per-task usage-wall scan's shared budget: it covers every endpoint the
+#     digest cannot read as alive, including one with no window recorded; total
+#     cost stays a constant rather than growing with not-alive count; what the
+#     budget cut reads as unscanned rather than clean; and a healthy fleet
+#     spends none of it
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
 #     fm-wake-drain.sh (their real, distinctive output appears verbatim), it
 #     does not reimplement their logic
@@ -1440,6 +1442,62 @@ EOF
   pass "session start: the per-task wall scan shares one budget and discloses what it did not check"
 }
 
+# An endpoint with NO recorded window is not alive either, and it is itself a
+# named recovery trigger, so it must get the same scan and the same routing text
+# as a dead one. It used to be the one not-alive state outside the surface three
+# tracked documents promised covered every not-alive endpoint.
+test_wall_scan_covers_an_endpoint_with_no_window() {
+  local rec root home fakebin out
+  rec=$(new_world wall-nowindow)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live-window"
+
+  printf 'kind=ship\nbackend=tmux\n' > "$home/state/task-nowindow.meta"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "endpoint: unknown (no window recorded)" \
+    "an endpoint with no recorded window is still reported as such"
+  assert_contains "$out" "USAGE_WALL: task-nowindow unknown" \
+    "an endpoint with no window gets the same wall scan, and its honest answer is unknown"
+  assert_not_contains "$out" "USAGE_WALL: task-nowindow no-signature" \
+    "a task with no terminal to read must never be reported as read-and-clean"
+  assert_contains "$out" "load usage-limit-recovery before treating any of it as a crash" \
+    "a not-alive endpoint must carry the routing text, whatever made it not alive"
+  pass "session start: an endpoint with no recorded window is scanned like any other not-alive endpoint"
+}
+
+# The no-window scan draws from the SAME shared budget as the dead-endpoint
+# scans rather than getting a bound of its own. The fixture spends the whole
+# budget on wedged dead endpoints first (they sort before the no-window ones), so
+# a no-window task reached afterwards must report itself as unscanned exactly as
+# a dead one would - not quietly scanned outside the budget.
+test_wall_scan_budget_covers_no_window_endpoints() {
+  local rec root home fakebin out n
+  rec=$(new_world wall-nowindow-budget)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux_slow_capture "$fakebin" "fm-sess:live-window"
+
+  for n in 1 2 3 4; do
+    printf 'window=fm-sess:dead-%s\nkind=ship\nbackend=tmux\n' "$n" > "$home/state/d-$n.meta"
+  done
+  printf 'kind=ship\nbackend=tmux\n' > "$home/state/z-nowindow.meta"
+
+  out=$(FM_SESSION_START_WALL_TIMEOUT=1 FM_SESSION_START_WALL_BUDGET=2 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "USAGE_WALL: z-nowindow unknown reason=scan-budget-exhausted" \
+    "a no-window endpoint reached after the shared budget is spent must report itself unscanned"
+  assert_contains "$out" "was NOT checked" \
+    "the digest must name the tasks the budget could not reach"
+  pass "session start: no-window scans share the one fleet-state scan budget"
+}
+
 test_wall_scan_budget_leaves_a_healthy_fleet_alone() {
   local rec root home fakebin out
   rec=$(new_world wall-budget-healthy)
@@ -2597,6 +2655,8 @@ test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_wall_scan_budget_is_shared_across_tasks
+test_wall_scan_covers_an_endpoint_with_no_window
+test_wall_scan_budget_covers_no_window_endpoints
 test_wall_scan_budget_leaves_a_healthy_fleet_alone
 test_composition_invokes_real_scripts
 test_branch_outcome_replay_and_lease_sweep

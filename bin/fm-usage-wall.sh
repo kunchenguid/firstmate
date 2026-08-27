@@ -42,6 +42,14 @@
 # by column position, so a provider, window, or field added upstream shifts
 # nothing.
 #
+# Per provider a reading is `ok`, `tight`, or `wall`, and no reading at all is
+# `unknown`. The aggregate adds one verdict the per-provider line cannot need:
+# `partial`, some providers measured and healthy while others were never read.
+# Precedence is wall > tight > partial > ok, and `unknown` is reserved for a
+# reading nobody got. `partial` is not a hedge - on a host where one provider is
+# measurable and five are not it is the NORMAL healthy reading - so it carries
+# the same next-step pointer every other actionable verdict does.
+#
 # UNMEASURABLE IS UNKNOWN, NEVER FINE. This is the whole point of the command,
 # so it is structural rather than conventional: a reading is emitted only from a
 # present, parseable `effective` row whose `effectivePercentRemaining` is a
@@ -58,12 +66,18 @@
 # unknown line as the one-time operator action instead.
 #
 # It reports below-floor builds rather than suppressing them. bin/fm-quota-axi-lib.sh
-# owns FM_QUOTA_AXI_MIN for the dispatch-profile feature and bin/fm-bootstrap.sh
+# owns FM_QUOTA_AXI_MIN, the version extraction, and the comparison; bin/fm-bootstrap.sh
 # owns turning a failing check into the operator MISSING diagnostic. A gauge that
 # blanked itself to `unknown` on an older-but-working build would be a false
 # negative in exactly the situation it exists for, so a parseable reading is
 # still reported and the summary carries `build=below-floor(<min>)` so the
 # reading is never mistaken for a fully supported one.
+#
+# A build that could not be READ is a third state, `build=unknown`, never
+# `below-floor`: the comparator treats an empty string as incompatible, so
+# labelling straight off it would print a definite claim about a version nobody
+# measured. The four build labels are therefore `below-floor(<min>)`, `unknown`,
+# `unavailable` (no gauge at all), and nothing when the build clears the floor.
 #
 # --- diagnose ---------------------------------------------------------------
 #
@@ -84,7 +98,12 @@
 #   unknown       the evidence could not be read at all. A step log that failed
 #                 to read lands here (`reason=step-log-unreadable`), never on
 #                 `no-signature`, because "nothing matched" is a claim about
-#                 evidence that was actually read.
+#                 evidence that was actually read. A scan that ran out of budget
+#                 before reading anything lands here too, under its own reason
+#                 (`scan-budget-exhausted`), because a read nothing attempted is
+#                 not a read that failed.
+# A partial scan discloses both separately: `unread=` names logs that resisted a
+# read, `unscanned=` names logs the budget never reached.
 # A negative therefore never hardens into "it really failed", which matters
 # because the signature table below is only as complete as the vendor phrasings
 # actually observed.
@@ -115,7 +134,12 @@
 # about it.
 #
 # Tunables (env):
-#   FM_USAGE_WALL_QUOTA_TIMEOUT     bound on the quota-axi read (default 20s)
+#   FM_USAGE_WALL_QUOTA_TIMEOUT     bound on the WHOLE headroom reading (default
+#                                   20s), shared cumulatively by the version and
+#                                   report calls rather than granted to each, so
+#                                   one reading can never cost a caller more
+#                                   than this and read as unmeasurable when it
+#                                   was readable
 #   FM_USAGE_WALL_NM_TIMEOUT        bound on each no-mistakes read (default 20s)
 #   FM_USAGE_WALL_SCAN_BUDGET       bound on diagnose's whole step-log scan
 #                                   (default 60s), so its cost is a constant
@@ -297,7 +321,7 @@ humanize_secs() {  # <seconds>
 }
 
 cmd_headroom() {
-  local json=0 out rc quota_version floor_note='' line
+  local json=0 out rc quota_version build_state=ok build_note='' line
   while [ $# -gt 0 ]; do
     case "$1" in
       --json) json=1 ;;
@@ -312,32 +336,56 @@ cmd_headroom() {
       'install it with npm install -g quota-axi to get a reading' "$json"
     return 0
   fi
-  # Read --version ONCE. The floor check used to re-invoke quota-axi, which cost
-  # this reading three bounded calls against a single outer bound: a slow but
-  # working gauge then exhausted the caller's bound and printed `unknown` for a
-  # gauge that could have been read - a false unmeasurable in the one surface
-  # built to prevent them. bin/fm-quota-axi-lib.sh owns the comparison.
-  local version_raw
-  version_raw=$(fm_run_timed "$QUOTA_TIMEOUT" quota-axi --version 2>/dev/null </dev/null) || version_raw=
-  quota_version=$(printf '%s' "$version_raw" | sed -n 's/.*\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1)
-  [ -n "$quota_version" ] || quota_version=unknown
-  # A below-floor build is reported, not suppressed: bin/fm-bootstrap.sh owns the
-  # operator-facing MISSING diagnostic, and blanking a parseable reading here
-  # would be a false negative in exactly the case this gauge exists for.
-  fm_quota_axi_version_at_least "$version_raw" || floor_note=" build=below-floor($FM_QUOTA_AXI_MIN)"
+  # ONE cumulative budget for the whole reading, spent across both quota-axi
+  # calls rather than granted to each. A per-call bound made the worst case
+  # 2 x QUOTA_TIMEOUT while both callers bound the whole command at or below
+  # that total, so a working gauge answering each call inside its own bound
+  # still blew the caller's and printed `unknown` for a gauge that was fully
+  # readable - a false unmeasurable in the one surface built to prevent them.
+  # The version is labelling and the report is the reading, so the version gets
+  # at most a quarter of the budget and can never starve the report.
+  local version_raw version_bound started spent report_bound
+  version_bound=$((QUOTA_TIMEOUT / 4))
+  [ "$version_bound" -ge 1 ] || version_bound=1
+  started=$(date +%s)
+  version_raw=$(fm_run_timed "$version_bound" quota-axi --version 2>/dev/null </dev/null) || version_raw=
+  spent=$(($(date +%s) - started))
+  # An UNREAD version is not an old one. bin/fm-quota-axi-lib.sh owns both the
+  # extraction and the comparison, and its comparator returns "incompatible" for
+  # an empty string, so labelling straight off it would print `below-floor` for a
+  # current build whose `--version` merely timed out - a definite claim about a
+  # fact never measured, in the surface whose whole rule is that an unmeasured
+  # read is unknown. The three states are kept apart.
+  quota_version=$(fm_quota_axi_version_string "$version_raw")
+  if [ -z "$quota_version" ]; then
+    quota_version=unknown
+    build_state=unknown
+  elif ! fm_quota_axi_version_at_least "$version_raw"; then
+    # A below-floor build is reported, not suppressed: bin/fm-bootstrap.sh owns
+    # the operator-facing MISSING diagnostic, and blanking a parseable reading
+    # here would be a false negative in exactly the case this gauge exists for.
+    build_state=below-floor
+  fi
+  build_note=$(headroom_build_note "$build_state")
 
+  report_bound=$((QUOTA_TIMEOUT - spent))
+  if [ "$report_bound" -le 0 ]; then
+    headroom_unmeasurable "quota-axi did not answer within ${QUOTA_TIMEOUT}s" \
+      'treat every provider as unproven when deciding what to dispatch' "$json" "$quota_version" "$build_state"
+    return 0
+  fi
   # No --allow-keychain-prompt, ever: it blocks on a GUI dialog, and this runs
   # inside session start's bounded session-open hook.
-  out=$(fm_run_timed "$QUOTA_TIMEOUT" quota-axi 2>/dev/null </dev/null)
+  out=$(fm_run_timed "$report_bound" quota-axi 2>/dev/null </dev/null)
   rc=$?
   if [ "$rc" -eq 124 ]; then
     headroom_unmeasurable "quota-axi did not answer within ${QUOTA_TIMEOUT}s" \
-      'treat every provider as unproven when deciding what to dispatch' "$json" "$quota_version$floor_note"
+      'treat every provider as unproven when deciding what to dispatch' "$json" "$quota_version" "$build_state"
     return 0
   fi
   if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
     headroom_unmeasurable "quota-axi exited $rc with no readable report" \
-      'treat every provider as unproven when deciding what to dispatch' "$json" "$quota_version$floor_note"
+      'treat every provider as unproven when deciding what to dispatch' "$json" "$quota_version" "$build_state"
     return 0
   fi
 
@@ -347,7 +395,7 @@ cmd_headroom() {
   providers=$(printf '%s\n' "$out" | toon_block providers 'provider,status,authStatus,plan,source')
   if [ -z "$effective" ]; then
     headroom_unmeasurable 'quota-axi printed no effective-headroom block' \
-      'treat every provider as unproven when deciding what to dispatch' "$json" "$quota_version$floor_note"
+      'treat every provider as unproven when deciding what to dispatch' "$json" "$quota_version" "$build_state"
     return 0
   fi
 
@@ -404,12 +452,16 @@ cmd_headroom() {
 $effective
 EOF
 
-  # Verdict precedence. `wall` outranks `tight` because they are different
+  # Verdict precedence: wall > tight > partial > ok, with unknown reserved for a
+  # reading nobody got. `wall` outranks `tight` because they are different
   # states, not degrees of one: tight means a dispatch may still land, wall
   # means that provider has already stopped and every worker on it is down.
   # Collapsing the second into the first would leave the aggregate line - and
   # `--json`'s `.verdict`, the field a programmatic reader branches on - unable
-  # to express the one condition this command exists to announce.
+  # to express the one condition this command exists to announce. `partial` is
+  # that same rule one level up: some providers measured and healthy, others
+  # never read at all, which is neither `ok` nor `unknown` and must not borrow
+  # either one's meaning.
   if [ "$measured" -eq 0 ]; then
     summary_verdict=unknown
   elif [ "$wall" -gt 0 ]; then
@@ -424,7 +476,7 @@ EOF
 
   if [ "$json" -eq 1 ]; then
     headroom_json "$summary_verdict" "$measured" "$tight" "$wall" "$unknown" \
-      "$quota_version" "$floor_note" "$rows"
+      "$quota_version" "$build_state" "$rows"
     return 0
   fi
   while IFS="$(printf '\t')" read -r provider verdict detail; do
@@ -434,16 +486,22 @@ EOF
 $rows
 EOF
   printf 'HEADROOM_SUMMARY: verdict=%s measured=%d tight=%d wall=%d unknown=%d source=quota-axi/%s%s\n' \
-    "$summary_verdict" "$measured" "$tight" "$wall" "$unknown" "$quota_version" "$floor_note"
+    "$summary_verdict" "$measured" "$tight" "$wall" "$unknown" "$quota_version" "$build_note"
   if [ "$wall" -gt 0 ]; then
     printf 'HEADROOM_NOTE: %d provider(s) are AT the wall, not merely low - work on them has already stopped. Load the usage-limit-recovery skill.\n' "$wall"
   fi
   if [ "$unknown" -gt 0 ] || [ "$measured" -eq 0 ]; then
     printf 'HEADROOM_NOTE: an unknown provider is UNMEASURED, not healthy - treat its headroom as unproven when deciding what to dispatch.\n'
   fi
-  if [ "$summary_verdict" = wall ] || [ "$summary_verdict" = tight ] || [ "$summary_verdict" = unknown ]; then
-    printf 'HEADROOM_NEXT: %s/bin/fm-usage-wall.sh resume regenerates the resume record for the work now in flight.\n' "$FM_ROOT"
-  fi
+  # `partial` carries the pointer too. It is the honest mixed reading, and on a
+  # host where most providers are unmeasurable it is the COMMON reading rather
+  # than an edge case, so leaving it without a next step would drop the pointer
+  # exactly where it is read most.
+  case "$summary_verdict" in
+    wall|tight|unknown|partial)
+      printf 'HEADROOM_NEXT: %s/bin/fm-usage-wall.sh resume regenerates the resume record for the work now in flight.\n' "$FM_ROOT"
+      ;;
+  esac
   line=$(printf '%s' "$rows" | grep -c . 2>/dev/null) || line=0
   [ "$line" -gt 0 ] || printf 'HEADROOM: (no provider rows) unknown reason=no-effective-rows\n'
 }
@@ -459,17 +517,46 @@ headroom_unknown_reason() {  # <scope> <provider-status>
   esac
 }
 
+# headroom_build_note: the one owner of the build label, so the summary line and
+# every unmeasurable exit describe the same build the same way. Four states, kept
+# apart on purpose: `ok` says nothing, `below-floor` is a version that was READ
+# and found older than the floor, `unknown` is a version that could not be read
+# at all, and `unavailable` is no gauge to read.
+headroom_build_note() {  # <build-state>
+  case "$1" in
+    below-floor) printf ' build=below-floor(%s)' "$FM_QUOTA_AXI_MIN" ;;
+    unknown) printf ' build=unknown' ;;
+  esac
+}
+
+# headroom_json_prefix: the single owner of the `fm-usage-wall-headroom.v1` key
+# set, up to the opening of `providers`. Both emitters below go through it, so
+# one schema id can only ever mean one shape: a consumer that branches on the
+# id never has to discover which keys the path it happened to hit included.
+# `reason` is present on every path and is empty when the read succeeded;
+# `build` and `below_floor` are present on every path too.
+headroom_json_prefix() {  # <verdict> <measured> <tight> <wall> <unknown> <source> <build-state> <reason>
+  printf '{"schema":"fm-usage-wall-headroom.v1","verdict":"%s","measured":%d,"tight":%d,"wall":%d,"unknown":%d,' \
+    "$1" "$2" "$3" "$4" "$5"
+  printf '"source":"%s","build":"%s","below_floor":%s,"reason":"%s","providers":[' \
+    "$(json_escape "$6")" "$(json_escape "$7")" \
+    "$([ "$7" = below-floor ] && printf true || printf false)" \
+    "$(json_escape "$8")"
+}
+
 # headroom_unmeasurable: the single exit for every path that could not read a
 # gauge at all. There is deliberately no path from here to `ok`.
-headroom_unmeasurable() {  # <reason> <advice> <json> [<source>]
-  local reason=$1 advice=$2 json=$3 source=${4:-unavailable}
+headroom_unmeasurable() {  # <reason> <advice> <json> [<version>] [<build-state>]
+  local reason=$1 advice=$2 json=$3 version=${4:-unavailable} build=${5:-unavailable} note
+  note=$(headroom_build_note "$build")
   if [ "$json" -eq 1 ]; then
-    printf '{"schema":"fm-usage-wall-headroom.v1","verdict":"unknown","measured":0,"tight":0,"wall":0,"unknown":1,'
-    printf '"source":"%s","reason":"%s","providers":[]}\n' "$(json_escape "$source")" "$(json_escape "$reason")"
+    headroom_json_prefix unknown 0 0 0 1 "quota-axi/$version" "$build" "$reason"
+    printf ']}\n'
     return 0
   fi
   printf 'HEADROOM: (all providers) unknown reason=%s\n' "$reason"
-  printf 'HEADROOM_SUMMARY: verdict=unknown measured=0 tight=0 wall=0 unknown=1 source=quota-axi/%s\n' "$source"
+  printf 'HEADROOM_SUMMARY: verdict=unknown measured=0 tight=0 wall=0 unknown=1 source=quota-axi/%s%s\n' \
+    "$version" "$note"
   printf 'HEADROOM_NOTE: headroom is UNMEASURED, not healthy - %s.\n' "$advice"
   printf 'HEADROOM_NEXT: %s/bin/fm-usage-wall.sh resume regenerates the resume record for the work now in flight.\n' "$FM_ROOT"
 }
@@ -478,12 +565,10 @@ json_escape() {  # <text>
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/\\t/g'
 }
 
-headroom_json() {  # <verdict> <measured> <tight> <wall> <unknown> <version> <floor> <rows>
-  local verdict=$1 measured=$2 tight=$3 wall=$4 unknown=$5 version=$6 floor=$7 rows=$8 first=1
-  printf '{"schema":"fm-usage-wall-headroom.v1","verdict":"%s","measured":%d,"tight":%d,"wall":%d,"unknown":%d,' \
-    "$verdict" "$measured" "$tight" "$wall" "$unknown"
-  printf '"source":"quota-axi/%s","below_floor":%s,"providers":[' \
-    "$(json_escape "$version")" "$([ -n "$floor" ] && printf true || printf false)"
+headroom_json() {  # <verdict> <measured> <tight> <wall> <unknown> <version> <build-state> <rows>
+  local verdict=$1 measured=$2 tight=$3 wall=$4 unknown=$5 version=$6 build=$7 rows=$8 first=1
+  headroom_json_prefix "$verdict" "$measured" "$tight" "$wall" "$unknown" \
+    "quota-axi/$version" "$build" ''
   while IFS="$(printf '\t')" read -r provider pverdict detail; do
     [ -n "$provider" ] || continue
     [ "$first" -eq 1 ] || printf ','
@@ -536,10 +621,21 @@ endpoint_evidence() {  # <meta> <task-id> -> "readable|unreadable\t<line>"
 # the two are scoped differently and only one of them answers this question:
 # `axi status` reports the repo's active-or-most-recent run, which on a repo
 # with several worktrees validating at once is routinely another task's run,
-# while the bare overview reports the invoking worktree's own `active_run` and,
-# when there is none, a `runs` table carrying the run IDs a targeted
-# `axi status --run <id>` needs. (Verified against no-mistakes v1.57.0; the run
-# IDs are in that table, and each row carries its branch and head.)
+# while the bare overview reports the invoking worktree's own `active_run`.
+#
+# Provenance of the `runs` fallback below, because a bare "verified" claim with
+# no version on it is how two tracked files came to disagree about this one
+# surface. Verified 2026-08-27 against no-mistakes v1.57.0: `no-mistakes axi
+# --help` documents the bare invocation as "shows the current state" and lists
+# abort/logs/respond/run/status/sync - no runs-listing subcommand. bin/fm-crew-state.sh
+# records the same absence against v1.32.2, so the two agree rather than
+# conflict; neither observation has ever shown a `runs` table under `axi`.
+# The fallback parse is kept anyway and is deliberately shaped so it costs
+# nothing to be wrong: when the overview carries no such table the parse yields
+# nothing, attribution ends at `unknown reason=no-attributed-run`, and no
+# further call is made. It is tolerance for a shape upstream may print, not a
+# claim that it does; tests/fm-usage-wall.test.sh exercises the path with a
+# fixture that serves one, so the tolerance itself is known to still work.
 #
 # Attribution binds on the run's BRANCH, and the head relationship is reported
 # separately as evidence rather than used to discard the run. That split is
@@ -689,13 +785,20 @@ cmd_diagnose() {
     diagnose_inconclusive "$id" "${checked:-none}" no-readable-steps "pipeline run $run_id lists no readable steps"
     return 0
   fi
-  local readable=0 unread='' logs bound spent
+  # `unread` and `unscanned` are separate lists on purpose. A log that failed to
+  # read and a log nothing ever looked at are different facts: the first says
+  # the evidence resisted, the second says the budget ran out before reaching
+  # it. Folding the second into the first reported a read that never happened as
+  # one that failed, and reported `step-log-unreadable` for steps nothing had
+  # attempted - the same unmeasured-read-as-something-definite this command
+  # exists to refuse.
+  local readable=0 unread='' unscanned='' logs bound spent
   spent=0
   for step in $steps; do
     bound=$((SCAN_BUDGET - spent))
     [ "$bound" -gt "$NM_TIMEOUT" ] && bound=$NM_TIMEOUT
     if [ "$bound" -le 0 ]; then
-      unread="${unread:+$unread,}$step"
+      unscanned="${unscanned:+$unscanned,}$step"
       continue
     fi
     local started
@@ -718,12 +821,17 @@ cmd_diagnose() {
     spent=$((spent + $(date +%s) - started))
   done
   if [ "$readable" -eq 0 ]; then
-    diagnose_inconclusive "$id" "${checked:-none}" step-log-unreadable \
-      "no step log of pipeline run $run_id could be read (unread: ${unread:-none})"
+    if [ -n "$unread" ]; then
+      diagnose_inconclusive "$id" "${checked:-none}" step-log-unreadable \
+        "no step log of pipeline run $run_id could be read (unread: $unread${unscanned:+; unscanned: $unscanned})"
+    else
+      diagnose_inconclusive "$id" "${checked:-none}" scan-budget-exhausted \
+        "the ${SCAN_BUDGET}s scan budget ran out before any step log of pipeline run $run_id was read (unscanned: ${unscanned:-none})"
+    fi
     return 0
   fi
-  printf 'USAGE_WALL: %s no-signature checked=%s run=%s%s\n' "$id" "$checked" "$run_id" \
-    "${unread:+ unread=$unread}"
+  printf 'USAGE_WALL: %s no-signature checked=%s run=%s%s%s\n' "$id" "$checked" "$run_id" \
+    "${unread:+ unread=$unread}" "${unscanned:+ unscanned=$unscanned}"
   printf 'USAGE_WALL_NEXT: no usage-limit signature is present in what was readable; this is not proof the work crashed, so keep reading the evidence itself.\n'
 }
 

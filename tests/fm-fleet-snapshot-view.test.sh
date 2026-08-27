@@ -64,7 +64,11 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux"
+  # quota-axi belongs in this list: `command -v` ignores a file that is not
+  # executable, so a non-executable stub is inert and the view falls through to
+  # the real gauge on any host that has one - a host-dependent test and a real
+  # provider read from a unit suite.
+  chmod +x "$fb/no-mistakes" "$fb/quota-axi" "$fb/tmux"
   printf '%s\n' "$fb"
 }
 
@@ -642,6 +646,24 @@ SH
   pass "fleet view bounds the headroom read and renders an unreadable gauge as unknown"
 }
 
+# The view's gauge must come from the fixture's stub, not from whatever gauge the
+# host happens to have installed. A stub that is present but NOT executable is
+# invisible to `command -v`, so the view silently falls through to the real
+# provider read - a host-dependent suite and a network read from a unit test.
+# This asserts the stub's own distinctive verdict, which the real gauge on any
+# host would not produce.
+test_view_headroom_reads_the_stubbed_gauge() {
+  local home fakebin view
+  home=$(make_home headroom-stub)
+  fakebin=$(make_fakebin "$home")
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
+  assert_contains "$view" "unknown reason=quota-axi exited 1" \
+    "the view must read the fixture's gauge, not the host's"
+  assert_not_contains "$view" "HEADROOM: claude ok" \
+    "a stubbed unreadable gauge must never render as a healthy reading"
+  pass "fleet view reads the stubbed gauge, so the suite is host-independent"
+}
+
 test_view_renders_dead_secondmate_agent_status() {
   local home fakebin view
   home=$(make_home dead-secondmate)
@@ -839,6 +861,7 @@ test_parked_scout_decision_stays_pending() {
 }
 
 test_view_headroom_is_bounded_and_unknown_reads_unknown
+test_view_headroom_reads_the_stubbed_gauge
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure

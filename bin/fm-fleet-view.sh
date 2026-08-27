@@ -12,12 +12,17 @@
 # dispatch decision rather than in a command someone has to think of running.
 # bin/fm-usage-wall.sh owns the reading, including every unmeasurable case.
 #
-# The read is bounded here as well as inside that command. Its internal bounds
-# are per-provider-call, so a wedged gauge could still cost this view several of
-# them in series; this view is rendered on the heartbeat path, so its total cost
-# has to be a constant. FM_FLEET_VIEW_HEADROOM_TIMEOUT is that constant, and a
-# bound hit prints the same unknown line as any other unreadable gauge - never a
-# healthy one, and never a silently omitted section.
+# The read is bounded here as well as inside that command, because this view is
+# rendered on the heartbeat path and its total cost has to be a constant.
+# FM_FLEET_VIEW_HEADROOM_TIMEOUT is that constant, and a bound hit prints the
+# same unknown line as any other unreadable gauge - never a healthy one, and
+# never a silently omitted section.
+#
+# The inner reading budget is defaulted strictly BELOW this outer bound. An
+# inner bound at or above the outer one is a false-unmeasurable generator: the
+# outer kill lands first, so a gauge that was about to answer is reported as one
+# that could not be read, in the surface built to prevent exactly that. An
+# operator who sets FM_USAGE_WALL_QUOTA_TIMEOUT explicitly still wins.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,7 +51,10 @@ esac
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-view: jq not found" >&2; exit 1; }
 
 SNAPSHOT=$("$SCRIPT_DIR/fm-fleet-snapshot.sh" --json) || exit $?
-HEADROOM=$(fm_run_timed "$HEADROOM_TIMEOUT" "$SCRIPT_DIR/fm-usage-wall.sh" headroom 2>/dev/null) \
+HEADROOM_INNER=$((HEADROOM_TIMEOUT * 3 / 4))
+[ "$HEADROOM_INNER" -ge 1 ] || HEADROOM_INNER=1
+HEADROOM=$(FM_USAGE_WALL_QUOTA_TIMEOUT=${FM_USAGE_WALL_QUOTA_TIMEOUT:-$HEADROOM_INNER} \
+  fm_run_timed "$HEADROOM_TIMEOUT" "$SCRIPT_DIR/fm-usage-wall.sh" headroom 2>/dev/null) \
   || HEADROOM="HEADROOM: (all providers) unknown reason=the headroom read did not complete within ${HEADROOM_TIMEOUT}s"
 
 printf '%s\n' "$SNAPSHOT" | jq -r '

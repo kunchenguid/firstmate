@@ -20,24 +20,35 @@
 #     (f) a below-floor quota-axi still yields a reading, labelled as such
 #     (g) credentials are never prompted for: --allow-keychain-prompt is never
 #         passed
-#     (h) one reading costs one --version, so a slow gauge cannot exhaust the
-#         caller's bound and read as unmeasurable when it was readable
+#     (h) one reading costs one --version and one shared budget across both
+#         calls, so a slow gauge cannot exhaust the caller's bound and read as
+#         unmeasurable when it was readable
+#     (i) a build that could not be READ reads `build=unknown`, never
+#         `below-floor`, and the displayed version is the tool's own even when
+#         the banner carries a runtime's
+#     (j) a mixed reading summarizes as `partial` and still carries the
+#         next-step pointer
+#     (k) one declared JSON schema id ships exactly one object shape
 #
 #   diagnose
-#     (h) a vendor limit line in the endpoint output is a `wall`
-#     (i) a vendor limit line in a failed step's log is a `wall`, which is where
+#     (l) a vendor limit line in the endpoint output is a `wall`
+#     (m) a vendor limit line in a failed step's log is a `wall`, which is where
 #         the 2026-08-23 evidence actually was
-#     (j) transient transport wording (HTTP 429, "rate limited") is NOT a wall
-#     (k) a clean read is `no-signature`, an unreadable one is `unknown`, and a
+#     (n) transient transport wording (HTTP 429, "rate limited") is NOT a wall
+#     (o) a clean read is `no-signature`, an unreadable one is `unknown`, and a
 #         cheap endpoint-only scan that finds nothing is `unknown` rather than a
 #         clean bill of health
+#     (p) a step the scan budget never reached is disclosed as `unscanned=`,
+#         separately from a log that failed to read (`unread=`)
+#     (q) a run reachable only through the `runs` table is attributed, and
+#         another branch's run never is
 #
 #   resume
-#     (l) a record is generated from live durable state and is readable back
+#     (r) a record is generated from live durable state and is readable back
 #         from a separate process after the generating one exits
-#     (m) it carries merge posture, branch, head and pipeline custody
-#     (n) two tasks sharing one local copy are named on both rows
-#     (o) a failed generation leaves the previous record intact
+#     (s) it carries merge posture, branch, head and pipeline custody
+#     (t) two tasks sharing one local copy are named on both rows
+#     (u) a failed generation leaves the previous record intact
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -254,7 +265,12 @@ assert_contains "$OUT" 'HEADROOM: claude ok' 'one unmeasurable provider does not
 assert_contains "$OUT" 'verdict=partial measured=1 tight=0 wall=0 unknown=1' \
   'a mixed fleet summarizes as partial, distinguishable from both ok and unknown'
 assert_contains "$OUT" 'UNMEASURED, not healthy' 'a partial fleet still warns that unknown is not healthy'
-pass 'headroom reports auth_required as unknown and names the fix'
+# `partial` is the NORMAL reading on a host with one measurable provider and
+# several unmeasurable ones, so it is the mixed verdict a reader hits most. It
+# must carry the same next-step pointer every other actionable verdict does,
+# rather than being the one common reading with no route out of it.
+assert_contains "$OUT" 'HEADROOM_NEXT' 'a partial reading names the resume record as the next step'
+pass 'headroom reports auth_required as unknown, names the fix, and routes a partial reading'
 
 # --- headroom: never prompts for credentials --------------------------------
 
@@ -314,6 +330,105 @@ assert_contains "$OUT" 'HEADROOM: claude ok pct=84' 'an older but working build 
 assert_contains "$OUT" 'build=below-floor' 'the reading discloses that the build is below the shared floor'
 pass 'headroom reports a below-floor build rather than blanking its reading'
 
+# --- headroom: an UNREAD build is not an OLD build ---------------------------
+#
+# The floor comparator answers "incompatible" for an empty string, so labelling
+# straight off it printed `build=below-floor` whenever `--version` merely failed
+# - a definite claim about a version nobody measured, beside a perfectly healthy
+# reading, in the surface whose whole rule is that an unmeasured read is unknown.
+CASE="$TMP_ROOT/hr-version-unread"; mkdir -p "$CASE/fakebin"
+cat > "$CASE/fakebin/quota-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then exit 7; fi
+cat "$CASE/report"
+SH
+chmod +x "$CASE/fakebin/quota-axi"
+quota_toon healthy > "$CASE/report"
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'HEADROOM: claude ok pct=84' 'an unreadable version does not blank a readable reading'
+assert_contains "$OUT" 'build=unknown' 'a version that could not be read is labelled unknown'
+assert_not_contains "$OUT" 'build=below-floor' \
+  'a version that was never read must never be reported as one read and found old'
+pass 'headroom distinguishes an unread build from a below-floor build'
+
+if command -v jq >/dev/null 2>&1; then
+  OUT=$(run_headroom "$CASE/fakebin" --json)
+  printf '%s' "$OUT" | jq -e '.build == "unknown" and .below_floor == false' >/dev/null \
+    || fail "--json must not claim below_floor for a version it never read: $OUT"
+  pass 'headroom --json keeps an unread build out of the below-floor claim'
+fi
+
+# --- headroom: the displayed version is the tool's own, not the last token ---
+#
+# The greedy form of this extraction returns the LAST version-like token, so a
+# banner that ever grows a runtime suffix would both display and floor-check the
+# runtime's version. bin/fm-quota-axi-lib.sh owns the parse for both uses.
+CASE="$TMP_ROOT/hr-version-banner"; mkdir -p "$CASE/fakebin"
+cat > "$CASE/fakebin/quota-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then printf 'quota-axi 0.1.40 (node 22.14.0)\n'; exit 0; fi
+cat "$CASE/report"
+SH
+chmod +x "$CASE/fakebin/quota-axi"
+quota_toon healthy > "$CASE/report"
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'source=quota-axi/0.1.40' \
+  'a banner carrying a runtime version still displays the tool version'
+assert_not_contains "$OUT" '22.14.0' 'the runtime version is never displayed as the build'
+assert_not_contains "$OUT" 'build=below-floor' 'the floor is compared against the tool version'
+pass 'headroom reads the tool version out of a banner carrying more than one'
+
+# A banner whose FIRST version is below the floor must still read below-floor,
+# so the anchoring did not just move the wrong answer somewhere else.
+CASE="$TMP_ROOT/hr-version-banner-old"; mkdir -p "$CASE/fakebin"
+cat > "$CASE/fakebin/quota-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then printf 'quota-axi 0.1.1 (node 22.14.0)\n'; exit 0; fi
+cat "$CASE/report"
+SH
+chmod +x "$CASE/fakebin/quota-axi"
+quota_toon healthy > "$CASE/report"
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'source=quota-axi/0.1.1' 'the first version token is the tool version'
+assert_contains "$OUT" 'build=below-floor' 'an old tool version is still caught behind a runtime suffix'
+pass 'headroom floor-checks the tool version, not whatever version came last'
+
+# --- headroom: the reading budget is shared, not per call -------------------
+#
+# The two quota-axi calls used to get a full bound EACH, so one reading's worst
+# case was twice the documented bound while both callers bound the whole command
+# at or below it. A gauge answering each call inside its own bound then blew the
+# caller's and was reported unmeasurable when it was readable.
+CASE="$TMP_ROOT/hr-shared-budget"; mkdir -p "$CASE/fakebin"
+cat > "$CASE/fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+sleep 60
+SH
+chmod +x "$CASE/fakebin/quota-axi"
+STARTED=$(date +%s)
+OUT=$( PATH="$CASE/fakebin:$PATH" FM_USAGE_WALL_QUOTA_TIMEOUT=4 "$WALL" headroom 2>&1 )
+ELAPSED=$(( $(date +%s) - STARTED ))
+[ "$ELAPSED" -le 6 ] \
+  || fail "one reading must cost at most its own budget, not one per call (took ${ELAPSED}s of a 4s budget)"
+assert_contains "$OUT" 'verdict=unknown' 'a wholly unreadable gauge is still unknown'
+pass 'one headroom reading costs one shared budget across both quota-axi calls'
+
+# The version call must not be able to starve the reading: it is labelling, the
+# report is the answer, so a slow version still leaves the report readable.
+CASE="$TMP_ROOT/hr-slow-version"; mkdir -p "$CASE/fakebin"
+quota_toon healthy > "$CASE/report"
+cat > "$CASE/fakebin/quota-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then sleep 60; fi
+cat "$CASE/report"
+SH
+chmod +x "$CASE/fakebin/quota-axi"
+OUT=$( PATH="$CASE/fakebin:$PATH" FM_USAGE_WALL_QUOTA_TIMEOUT=8 "$WALL" headroom 2>&1 )
+assert_contains "$OUT" 'HEADROOM: claude ok pct=84' \
+  'a hanging version call must not cost the reading itself'
+assert_contains "$OUT" 'build=unknown' 'the version that could not be read is labelled unknown'
+pass 'a slow version call cannot starve the headroom reading'
+
 # --- headroom --json --------------------------------------------------------
 
 if command -v jq >/dev/null 2>&1; then
@@ -329,6 +444,24 @@ if command -v jq >/dev/null 2>&1; then
   printf '%s' "$OUT" | jq -e '.verdict == "unknown" and .measured == 0' >/dev/null \
     || fail "headroom --json must report an absent gauge as unknown: $OUT"
   pass 'headroom --json carries the same verdicts as the text form'
+
+  # One declared schema id must mean ONE object shape. When the measurable and
+  # unmeasurable paths ship different key sets, a consumer branching on the id
+  # gets null for whichever key its path happened to omit.
+  CASE="$TMP_ROOT/hr-json-shape"; mkdir -p "$CASE"
+  fake_quota "$CASE/fakebin" healthy
+  MEASURED_JSON=$(run_headroom "$CASE/fakebin" --json)
+  mkdir -p "$CASE/empty"
+  ABSENT_JSON=$( PATH="$CASE/empty:/usr/bin:/bin:/usr/sbin:/sbin" "$WALL" headroom --json 2>&1 )
+  MEASURED_KEYS=$(printf '%s' "$MEASURED_JSON" | jq -S -r 'keys | join(",")')
+  ABSENT_KEYS=$(printf '%s' "$ABSENT_JSON" | jq -S -r 'keys | join(",")')
+  [ "$MEASURED_KEYS" = "$ABSENT_KEYS" ] \
+    || fail "one schema id must mean one shape: measured=[$MEASURED_KEYS] unmeasurable=[$ABSENT_KEYS]"
+  printf '%s' "$MEASURED_JSON" | jq -e '.schema == "fm-usage-wall-headroom.v1" and .reason == "" and .build == "ok"' >/dev/null \
+    || fail "a successful reading must carry an empty reason and a build state: $MEASURED_JSON"
+  printf '%s' "$ABSENT_JSON" | jq -e '.schema == "fm-usage-wall-headroom.v1" and (.reason | length) > 0 and .below_floor == false' >/dev/null \
+    || fail "an unmeasurable reading must carry a reason and the same below_floor key: $ABSENT_JSON"
+  pass 'headroom --json ships one object shape for one schema id'
 else
   pass 'headroom --json case skipped (jq unavailable)'
 fi
@@ -448,6 +581,76 @@ if [ "\${1:-}" = axi ] && [ "\${2:-}" = logs ]; then
   cat "$fb/log-\$step"
   exit 0
 fi
+if [ "\${1:-}" = axi ]; then cat "$fb/nm-overview"; exit 0; fi
+exit 0
+SH
+  chmod +x "$fb/no-mistakes"
+}
+
+# fake_nm_perstep_slow <fakebin> <branch> <run-id> <run-status> <steps-blob> <delay>
+# Same as fake_nm_perstep, but every `axi logs` read costs <delay> seconds. That
+# is what makes the scan budget observable through the interface: the steps a
+# budget could not reach are a different fact from the steps whose logs resisted
+# a read, and the verdict has to keep them apart.
+fake_nm_perstep_slow() {
+  local fb=$1 branch=$2 run=$3 status=$4 steps=$5 delay=$6
+  fake_nm_perstep "$fb" "$branch" "$run" "$status" "$steps"
+  cat > "$fb/no-mistakes" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = axi ] && [ "\${2:-}" = logs ]; then
+  step=
+  prev=
+  for a in "\$@"; do
+    if [ "\$prev" = --step ]; then step=\$a; fi
+    prev=\$a
+  done
+  sleep $delay
+  [ -f "$fb/log-\$step" ] || exit 1
+  cat "$fb/log-\$step"
+  exit 0
+fi
+if [ "\${1:-}" = axi ]; then cat "$fb/nm-overview"; exit 0; fi
+exit 0
+SH
+  chmod +x "$fb/no-mistakes"
+}
+
+# fake_nm_runstable <fakebin> <branch> <run-id> <steps-blob> <log-file>
+# An overview whose own `active_run` belongs to ANOTHER branch, plus a `runs`
+# table carrying this branch's run - the shape attributed_run's fallback exists
+# for. No observation of either installed build has shown `axi` printing such a
+# table, so this fixture is what keeps that tolerance from rotting into a
+# fallback nobody knows still works: with it, the fallback is exercised; the
+# happy path fixtures above never enter it.
+fake_nm_runstable() {
+  local fb=$1 branch=$2 run=$3 steps=$4 log=$5
+  cat > "$fb/nm-overview" <<SH
+repo: /fake/repo
+current_branch: $branch
+daemon: running
+active_run:
+  id: "RUNOTHER"
+  branch: fm/some-other-task
+  status: running
+  head: cafebabe
+runs[2]{id,branch,status,head}:
+  RUNOTHER,fm/some-other-task,running,cafebabe
+  $run,$branch,failed,deadbeef
+SH
+  cat > "$fb/nm-run-detail" <<SH
+repo: /fake/repo
+active_run:
+  id: "$run"
+  branch: $branch
+  status: failed
+  head: deadbeef
+  steps[9]{step,status,findings,duration_ms}:
+$steps
+SH
+  cat > "$fb/no-mistakes" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = axi ] && [ "\${2:-}" = logs ]; then cat "$log"; exit 0; fi
+if [ "\${1:-}" = axi ] && [ "\${2:-}" = status ]; then cat "$fb/nm-run-detail"; exit 0; fi
 if [ "\${1:-}" = axi ]; then cat "$fb/nm-overview"; exit 0; fi
 exit 0
 SH
@@ -600,6 +803,81 @@ OUT=$(run_wall "$CASE_HOME" "$CASE_FB" diagnose deepcrew)
 assert_contains "$OUT" 'USAGE_WALL: deepcrew wall source=step-log:test' \
   'the scan reaches the fourth failed step rather than silently stopping at three'
 pass 'diagnose scans every failed step, so a late limit line is still found'
+
+# A step the budget never reached is NOT a step whose log failed to read. Both
+# used to land in one `unread=` list, so the verdict reported a read that never
+# happened as one that resisted - and named `step-log-unreadable`, defined as a
+# log that failed to read, for steps nothing had attempted.
+CASE="$TMP_ROOT/dx-log-budget-mixed"; mkdir -p "$CASE"
+make_task "$CASE" budgetcrew
+printf 'idle shell\n' > "$CASE/capture.txt"
+fake_tmux "$CASE_FB" fm-budgetcrew "$CASE/capture.txt"
+fake_nm_perstep_slow "$CASE_FB" "fm/budgetcrew" RUNBUD failed \
+  '    review,failed,0,120
+    test,failed,0,120' 30
+OUT=$( PATH="$CASE_FB:$PATH" FM_HOME="$CASE_HOME" FM_USAGE_WALL_SCAN_BUDGET=1 \
+  "$WALL" diagnose budgetcrew 2>&1 )
+assert_contains "$OUT" 'unknown reason=step-log-unreadable' \
+  'a log that resisted a read still reports step-log-unreadable'
+assert_contains "$OUT" 'unread: review' 'the log that failed to read is named as unread'
+assert_contains "$OUT" 'unscanned: test' 'the step the budget never reached is named as unscanned'
+assert_not_contains "$OUT" 'unread: review,test' \
+  'a step nothing attempted must not be reported as one whose log failed to read'
+pass 'diagnose separates a step the budget never reached from a log that failed to read'
+
+# The same split on a verdict that DID read something: a readable clean log is
+# still `no-signature`, and the budget-truncated remainder is disclosed as
+# unscanned rather than folded into the clean result.
+CASE="$TMP_ROOT/dx-log-budget-clean"; mkdir -p "$CASE"
+make_task "$CASE" budgetclean
+printf 'idle shell\n' > "$CASE/capture.txt"
+fake_tmux "$CASE_FB" fm-budgetclean "$CASE/capture.txt"
+fake_nm_perstep_slow "$CASE_FB" "fm/budgetclean" RUNBUDC failed \
+  '    review,failed,0,10
+    test,failed,0,10
+    push,failed,0,10' 1.2
+printf 'tests failed: 3 assertions\n' > "$CASE_FB/log-review"
+printf 'tests failed: 3 assertions\n' > "$CASE_FB/log-test"
+printf 'tests failed: 3 assertions\n' > "$CASE_FB/log-push"
+OUT=$( PATH="$CASE_FB:$PATH" FM_HOME="$CASE_HOME" FM_USAGE_WALL_SCAN_BUDGET=2 \
+  FM_USAGE_WALL_NM_TIMEOUT=3 "$WALL" diagnose budgetclean 2>&1 )
+assert_contains "$OUT" 'no-signature' 'a readable clean log still yields no-signature'
+assert_contains "$OUT" 'unscanned=' 'the budget-truncated remainder is disclosed as unscanned'
+assert_not_contains "$OUT" 'reason=step-log-unreadable' \
+  'a scan that read a log cleanly is not reported as an unreadable one'
+pass 'diagnose discloses a budget-truncated remainder as unscanned, not as unread'
+
+# The `runs`-table fallback in attributed_run: no observed build prints such a
+# table, so this is the fixture that keeps the tolerance honest rather than
+# untested. The overview's own active_run belongs to another branch, and the run
+# for THIS branch is reachable only through the table.
+CASE="$TMP_ROOT/dx-runstable"; mkdir -p "$CASE"
+make_task "$CASE" runscrew
+printf 'idle shell\n' > "$CASE/capture.txt"
+fake_tmux "$CASE_FB" fm-runscrew "$CASE/capture.txt"
+printf 'reviewing the diff\n%s\nclaude exited: exit status 1\n' "$WEEKLY_LIMIT_LINE" > "$CASE/review.log"
+fake_nm_runstable "$CASE_FB" "fm/runscrew" RUNTBL \
+  '    review,failed,0,120' "$CASE/review.log"
+OUT=$(run_wall "$CASE_HOME" "$CASE_FB" diagnose runscrew)
+assert_contains "$OUT" 'USAGE_WALL: runscrew wall source=step-log:review' \
+  'a run reachable only through the runs table is still attributed and read'
+assert_contains "$OUT" "$WEEKLY_LIMIT_LINE" 'the fallback verdict quotes the line it matched'
+pass 'diagnose attributes a run through the runs-table fallback when active_run is another branch'
+
+# An overview whose active_run is another branch and which carries NO runs table
+# must fail safe rather than borrowing that other run's evidence.
+CASE="$TMP_ROOT/dx-otherbranch"; mkdir -p "$CASE"
+make_task "$CASE" othercrew
+printf 'idle shell\n' > "$CASE/capture.txt"
+fake_tmux "$CASE_FB" fm-othercrew "$CASE/capture.txt"
+printf 'reviewing the diff\n%s\n' "$WEEKLY_LIMIT_LINE" > "$CASE/review.log"
+fake_nm "$CASE_FB" "fm/some-other-task" RUNELSE failed '    review,failed,0,120' "$CASE/review.log"
+OUT=$(run_wall "$CASE_HOME" "$CASE_FB" diagnose othercrew)
+assert_contains "$OUT" 'unknown reason=no-attributed-run' \
+  'another branch run is never attributed to this task'
+assert_not_contains "$OUT" 'wall source=' \
+  'evidence from another task run must never become this task verdict'
+pass 'diagnose refuses to attribute another branch run to this task'
 
 CASE="$TMP_ROOT/dx-nometa"; mkdir -p "$CASE/home/state"
 OUT=$( FM_HOME="$CASE/home" "$WALL" diagnose ghost 2>&1 )

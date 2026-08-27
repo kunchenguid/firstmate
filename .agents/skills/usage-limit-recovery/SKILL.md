@@ -2,7 +2,7 @@
 name: usage-limit-recovery
 description: >-
   Agent-only procedure for a provider usage limit: the wall that looks exactly like a fleet-wide crash.
-  Use whenever a worker's endpoint is dead or stale and a usage wall has not been ruled out, whenever several workers on one provider stop within minutes of each other, on any USAGE_WALL line in the session-start digest or a diagnose run, and before dispatching when the headroom surface reads tight, wall, or unknown.
+  Use whenever a worker's endpoint is dead or stale and a usage wall has not been ruled out, whenever several workers on one provider stop within minutes of each other, on any USAGE_WALL line in the session-start digest or a diagnose run, and before dispatching when the headroom surface reads tight, wall, partial, or unknown.
   Owns the diagnose-from-the-step-log rule, the settle-custody-first rule, the endpoint-gone relaunch refusal and its safe workaround, and the resume record.
 user-invocable: false
 metadata:
@@ -29,7 +29,10 @@ A provider reporting `auth-required` has never been read at all; approving local
 A summary verdict of `wall` is not a low reading: that provider has already stopped, and every worker on it is down.
 Treat it as the incident, not as a warning about one.
 
-When the reading is tight, wall, or unknown, run `bin/fm-usage-wall.sh resume`.
+`partial` is the mixed reading: some providers measured, others never read at all.
+It is the normal summary on a host where most providers are unmeasurable, so read it as a live reading beside unproven ones rather than as either a clean bill or a total blackout.
+
+When the reading is tight, wall, partial, or unknown, run `bin/fm-usage-wall.sh resume`.
 It regenerates the resume record from live durable state into `state/resume-record.md`: every task's merge posture, local copy, branch, head, uncommitted and unpushed counts, pipeline run and branch custody, PR, open captain calls, and delivered instructions.
 Regenerate it rather than editing it, and regenerate it again after the wall - it is generated from state that does not die with the agents, so it is never stale and never needs to have been written in advance.
 Tell the captain the headroom and the consequence in plain outcome language, not the gauge output.
@@ -39,8 +42,8 @@ Tell the captain the headroom and the consequence in plain outcome language, not
 Run `bin/fm-usage-wall.sh diagnose <task-id>`.
 It reads the endpoint's own output and then the failed pipeline steps' logs, and answers `wall`, `no-signature`, or `unknown`.
 `no-signature` means nothing matched in what was readable, and `unknown` means the evidence could not be read; neither is proof that the work crashed, so do not record a failure on either.
-Read the verdict's own disclosure before trusting a negative: `checked=` names what was actually read, and `unread=` names logs the scan could not reach.
-A verdict carrying `unread=` is a partial scan, so read those logs yourself before concluding anything.
+Read the verdict's own disclosure before trusting a negative: `checked=` names what was actually read, `unread=` names logs that resisted a read, and `unscanned=` names logs the scan's budget never reached.
+A verdict carrying either list is a partial scan, so read those logs yourself before concluding anything.
 
 **Diagnose from the step log, not the run status.**
 A run that died on the wall reports `status: failed`, which reads like a verdict on the code and is not one.

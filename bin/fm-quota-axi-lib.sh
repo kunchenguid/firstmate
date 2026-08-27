@@ -10,24 +10,38 @@
 # MISSING diagnostic, which is what keeps an older build from reaching a
 # dispatch intake at all.
 #
-# Two entry points, because a caller that has already read `quota-axi --version`
+# Three entry points, because a caller that has already read `quota-axi --version`
 # for its own output must not pay for a second invocation to learn whether that
-# same string clears the floor:
+# same string clears the floor, and must not re-implement the parse to display it:
+#   fm_quota_axi_version_string <version-output>    extract the version, no exec.
 #   fm_quota_axi_version_at_least <version-output>  compare a string, no exec.
 #   fm_quota_axi_compatible [timeout]               read the version, then compare.
 
 FM_QUOTA_AXI_MIN=0.1.29
 
+# The dotted version in a `quota-axi --version` banner, or nothing when the
+# string carries none. Pure: it runs nothing.
+#
+# It takes the FIRST version-like token, not the last. The obvious greedy form
+# (`s/.*\(...\).*/\1/`) silently returns the last one, so a banner that ever
+# grows a runtime suffix - `quota-axi 0.1.40 (node 22.14.0)` - would both display
+# and compare `2.14.0`: a wrong build number beside the reading, and a floor
+# check that passes on a version nobody shipped. Anchoring the prefix to
+# non-digits makes the leftmost match the tool's own version.
+fm_quota_axi_version_string() {  # <version-output>
+  printf '%s\n' "${1:-}" |
+    sed -n 's/[^0-9]*\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' |
+    head -1
+}
+
 # 0 when the version in $1 is at or above FM_QUOTA_AXI_MIN. Pure: it runs
 # nothing, so a caller holding a captured `--version` string pays no second
-# invocation, and the parse rule below has exactly one owner.
+# invocation, and the parse rule above has exactly one owner.
 fm_quota_axi_version_at_least() {  # <version-output>
-  local output=${1:-} parts major minor patch extra
+  local output=${1:-} version major minor patch extra
   local min_major min_minor min_patch min_extra
-  parts=$(printf '%s\n' "$output" |
-    sed -n 's/.*\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2 \3/p' |
-    head -1)
-  IFS=' ' read -r major minor patch extra <<< "$parts"
+  version=$(fm_quota_axi_version_string "$output")
+  IFS='.' read -r major minor patch extra <<< "$version"
   # An unparseable version is incompatible, never assumed current, so a
   # development or vendored build cannot pass a floor it was never checked against.
   [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1

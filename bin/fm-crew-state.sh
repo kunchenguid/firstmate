@@ -365,7 +365,11 @@ nm_ci_checks_state() {
 # PRIMARY cause of the 2026-07 herdr false-surface incidents turned out to be
 # a separate bug in bin/fm-watch.sh's stale_is_terminal precedence - see that
 # file's history - but this cross-branch path was independently confirmed
-# dead code and is worth having actually work.)
+# dead code and is worth having actually work.) Re-checked 2026-08-27 against
+# v1.57.0: `axi` has gained `sync`, and still exposes no runs-listing
+# subcommand, so that absence holds across both builds. bin/fm-usage-wall.sh
+# keeps a tolerant parse for such a table and says why on its own attribution
+# helper; every claim on either side now carries the version it was read from.
 #
 # The real run-listing command is the top-level `no-mistakes runs` (verified:
 # `no-mistakes --help` lists it separately from `axi`). It is plain, human-

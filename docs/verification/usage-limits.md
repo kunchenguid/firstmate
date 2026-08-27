@@ -185,8 +185,9 @@ Nothing was edited: a hand-written plan would still have carried the stale pair,
 ## Both scans are bounded by a budget, not by how much is broken
 
 `tests/fm-session-start.test.sh` measures the digest's per-task scan against a wedged backend and six dead endpoints - the post-wall shape - and asserts the shared budget bounds total cost below the per-task cost of the same fixture, that every task still gets a line, and that what the budget could not reach reports `unknown reason=scan-budget-exhausted` while the digest names those tasks as unchecked.
-`tests/fm-fleet-snapshot-view.test.sh` asserts the heartbeat view bounds a gauge that never answers and renders it as unknown rather than healthy or absent.
-`tests/fm-usage-wall.test.sh` asserts a step log that cannot be read reports `unknown reason=step-log-unreadable` rather than `no-signature`, that a partially read scan discloses its `unread=` steps, and that a limit line in a fourth failed step is still found.
+It asserts the same for an endpoint with no window recorded, which is not alive either and draws on the same budget.
+`tests/fm-fleet-snapshot-view.test.sh` asserts the heartbeat view bounds a gauge that never answers and renders it as unknown rather than healthy or absent, and that the view reads the fixture's gauge rather than the host's, so the suite performs no real provider read.
+`tests/fm-usage-wall.test.sh` asserts a step log that cannot be read reports `unknown reason=step-log-unreadable` rather than `no-signature`, that a partially read scan discloses its `unread=` steps separately from the `unscanned=` steps its budget never reached, that a limit line in a fourth failed step is still found, and that one reading spends one cumulative budget across both `quota-axi` calls rather than a bound per call.
 
 ## The endpoint-gone recovery, end to end
 

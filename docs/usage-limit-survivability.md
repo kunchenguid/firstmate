@@ -35,10 +35,15 @@ A gauge that rendered "could not read it" the same way as "plenty left" would be
 So `headroom` has three provider verdicts that mean a reading was taken (`ok`, `tight`, `wall`) and one that means none was (`unknown`), and there is no code path from a failed read to a healthy verdict.
 Absent, erroring, hanging, unparseable, unresolved, and unauthenticated all land on `unknown` with the concrete reason attached, and the one-time operator command is named on the line that needs it.
 
-The aggregate carries the same vocabulary, and `wall` outranks `tight` in it.
-Those are different states rather than degrees of one: `tight` means a dispatch may still land, while `wall` means that provider has already stopped and every worker on it is down.
+The aggregate carries that vocabulary plus one verdict a single provider cannot need, and its precedence is `wall` > `tight` > `partial` > `ok`, with `unknown` reserved for a reading nobody got.
+`wall` outranks `tight` because those are different states rather than degrees of one: `tight` means a dispatch may still land, while `wall` means that provider has already stopped and every worker on it is down.
 Collapsing the second into the first would leave the summary line, and the `.verdict` field a programmatic reader branches on, unable to express the single condition this surface exists to announce.
 An exhausted provider reported as merely tight is a false reading, not a conservative one.
+
+`partial` is that same rule one level up: some providers measured and healthy, others never read at all.
+It is not a hedge and not an edge case - on a host where one provider is measurable and five are not, `partial` is the normal reading whenever the measurable one is healthy, so it is the mixed verdict a reader actually hits.
+Folding it into `ok` would report unread providers as fine and folding it into `unknown` would discard a reading that was taken, so it stands on its own and carries the same `HEADROOM_NEXT` pointer every other actionable verdict does.
+
 The command never passes `--allow-keychain-prompt` itself: it runs inside a session-open hook that blocks the first turn, and a blocking dialog there would cost the whole session.
 `tests/fm-usage-wall.test.sh` pins each of those paths separately, including that the flag is never passed.
 
@@ -50,6 +55,10 @@ Headroom is read out of `quota-axi`'s default TOON rather than its JSON, because
 The TOON block is parsed by field name out of its own declared header, so an upstream provider, window, or field addition shifts nothing; a reordered report is a test case, not a hope.
 A `quota-axi` older than the floor `bin/fm-quota-axi-lib.sh` owns still yields a reading, labelled `build=below-floor`, because blanking a working gauge to `unknown` would be a false negative in exactly the case it exists for.
 `bin/fm-bootstrap.sh` remains the owner of the operator-facing MISSING diagnostic for that build.
+A build whose version could not be read at all is labelled `build=unknown` rather than `build=below-floor`, because the floor comparator treats an unreadable version as incompatible and printing that as a fact would be a definite claim about something never measured.
+
+The whole reading is bounded by one cumulative budget shared across both `quota-axi` calls, and both callers bound the command below their own bound.
+A bound granted per call, under a caller bounding the total, is a false-unmeasurable generator: the caller's kill lands first, and a gauge that was about to answer gets reported as one that could not be read.
 
 ## Why the record is generated, not saved
 
@@ -84,7 +93,7 @@ This surface reports rather than acts, so naming the run and the relationship is
 Knowledge that fires only when recalled is the failure being corrected, so the routing is printed on the observable condition rather than waited for.
 
 - Before the wall, the session-start digest prints the gauge at the top of its live-fleet section, and `bin/fm-fleet-view.sh` prints it in the heartbeat review. Those are the two places a dispatch decision is actually made.
-- At the wall, any endpoint the digest reads as not alive gets the cheap endpoint-only scan, and its verdict is printed beside the endpoint line with one shared pointer to the full diagnose and the skill.
+- At the wall, any endpoint the digest cannot read as alive gets the cheap endpoint-only scan - a dead one and one with no window recorded alike, both drawing on the same shared budget - and its verdict is printed beside the endpoint line with one shared pointer to the full diagnose and the skill.
 - Mid-session, a dead or stale worker already routes through `stuck-crewmate-recovery` by an always-loaded contract, and that playbook's first step is now to rule out the wall.
 
 A cheap scan that finds nothing reports `unknown`, never `no-signature`.
@@ -92,6 +101,7 @@ The 2026-08-23 evidence was in the step logs and not in the terminal, so a termi
 
 The same rule governs evidence that could not be read at all.
 `no-signature` means the evidence was read and nothing matched, so a step log that failed to read reports `unknown reason=step-log-unreadable` instead, and a step nothing looked at is never listed as checked.
+A step the scan budget never reached is a third fact again, disclosed as `unscanned=` rather than as `unread=`, because a read nothing attempted is not a read that failed.
 
 ## Why every bounded scan discloses what it skipped
 
@@ -103,7 +113,7 @@ The digest's per-task scans share one budget across the whole fleet-state sectio
 `bin/fm-fleet-view.sh` bounds its gauge read for the same reason, because the heartbeat review must cost a constant too.
 
 A budget that runs out never buys silence.
-Whatever it could not reach is named as unscanned - `scan-budget-exhausted` in the digest, `unread=` on a `diagnose` verdict - so a partial scan can never be read as a clean one.
+Whatever it could not reach is named as unscanned - `scan-budget-exhausted` in the digest, `unscanned=` on a `diagnose` verdict, separate from the `unread=` list of logs that resisted a read - so a partial scan can never be read as a clean one.
 That is the same rule the gauge follows: unmeasured is unknown, never fine.
 
 The step-log scan is deliberately uncapped by count.

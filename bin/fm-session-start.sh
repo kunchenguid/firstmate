@@ -832,7 +832,15 @@ print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 # account inside the same minute. One bounded local gauge read; the command owns
 # every unmeasurable case and never reports an unread gauge as healthy.
 subsection "Headroom before dispatch"
-if ! fm_run_timed "$SESSION_START_HEADROOM_TIMEOUT" "$SCRIPT_DIR/fm-usage-wall.sh" headroom 2>/dev/null; then
+# The gauge's own reading budget is defaulted strictly BELOW this bound. An inner
+# bound equal to the outer one is a false-unmeasurable generator: this bound
+# lands first, so a gauge that was about to answer gets reported as one that
+# could not be read - in the section built to prevent exactly that. An operator
+# who sets FM_USAGE_WALL_QUOTA_TIMEOUT explicitly still wins.
+HEADROOM_INNER_TIMEOUT=$((SESSION_START_HEADROOM_TIMEOUT * 3 / 4))
+[ "$HEADROOM_INNER_TIMEOUT" -ge 1 ] || HEADROOM_INNER_TIMEOUT=1
+if ! FM_USAGE_WALL_QUOTA_TIMEOUT=${FM_USAGE_WALL_QUOTA_TIMEOUT:-$HEADROOM_INNER_TIMEOUT} \
+  fm_run_timed "$SESSION_START_HEADROOM_TIMEOUT" "$SCRIPT_DIR/fm-usage-wall.sh" headroom 2>/dev/null; then
   printf 'HEADROOM: (all providers) unknown reason=the headroom read did not complete within %ss\n' \
     "$SESSION_START_HEADROOM_TIMEOUT"
   printf 'HEADROOM_NOTE: headroom is UNMEASURED, not healthy - treat every provider as unproven when deciding what to dispatch.\n'
@@ -843,6 +851,34 @@ META_FOUND=0
 NOT_ALIVE_FOUND=0
 WALL_BUDGET_LEFT=$SESSION_START_WALL_BUDGET
 WALL_BUDGET_EXHAUSTED=0
+
+# wall_scan <id>: one bounded first-read of whether this task's stranding is a
+# provider usage wall, drawn from the budget shared by the whole section.
+#
+# A dead endpoint is the observable condition a usage limit produces, and it
+# reads exactly like a crash, so the distinction is printed here rather than
+# left to depend on anyone remembering to look for it. A negative from this
+# cheap scan is deliberately `unknown`: the deciding evidence is in the pipeline
+# step logs, which the full `diagnose` reads. One function for every not-alive
+# branch, so no endpoint state can drift out of the scan by being written up
+# separately.
+wall_scan() {  # <task-id>
+  local scan_id=$1 scan_bound scan_started
+  scan_bound=$SESSION_START_WALL_TIMEOUT
+  [ "$scan_bound" -le "$WALL_BUDGET_LEFT" ] || scan_bound=$WALL_BUDGET_LEFT
+  if [ "$scan_bound" -le 0 ]; then
+    WALL_BUDGET_EXHAUSTED=1
+    printf 'USAGE_WALL: %s unknown reason=scan-budget-exhausted checked=none\n' "$scan_id"
+    return 0
+  fi
+  scan_started=$(date +%s)
+  fm_run_timed "$scan_bound" \
+    "$SCRIPT_DIR/fm-usage-wall.sh" diagnose "$scan_id" --endpoint-only 2>/dev/null |
+    grep '^USAGE_WALL:' ||
+    printf 'USAGE_WALL: %s unknown reason=scan-did-not-complete checked=none\n' "$scan_id"
+  WALL_BUDGET_LEFT=$((WALL_BUDGET_LEFT - ($(date +%s) - scan_started)))
+  [ "$WALL_BUDGET_LEFT" -ge 0 ] || WALL_BUDGET_LEFT=0
+}
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
   META_FOUND=1
@@ -858,29 +894,18 @@ for meta in "$STATE"/*.meta; do
       printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
     else
       printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
-      # A dead endpoint is the observable condition a usage limit produces, and
-      # it reads exactly like a crash. The cheap endpoint-only scan runs here so
-      # the distinction is on the page rather than depending on anyone
-      # remembering to look for it; a negative from it is deliberately
-      # `unknown`, because the deciding evidence is in the pipeline step logs.
       NOT_ALIVE_FOUND=1
-      scan_bound=$SESSION_START_WALL_TIMEOUT
-      [ "$scan_bound" -le "$WALL_BUDGET_LEFT" ] || scan_bound=$WALL_BUDGET_LEFT
-      if [ "$scan_bound" -le 0 ]; then
-        WALL_BUDGET_EXHAUSTED=1
-        printf 'USAGE_WALL: %s unknown reason=scan-budget-exhausted checked=none\n' "$id"
-      else
-        scan_started=$(date +%s)
-        fm_run_timed "$scan_bound" \
-          "$SCRIPT_DIR/fm-usage-wall.sh" diagnose "$id" --endpoint-only 2>/dev/null |
-          grep '^USAGE_WALL:' ||
-          printf 'USAGE_WALL: %s unknown reason=scan-did-not-complete checked=none\n' "$id"
-        WALL_BUDGET_LEFT=$((WALL_BUDGET_LEFT - ($(date +%s) - scan_started)))
-        [ "$WALL_BUDGET_LEFT" -ge 0 ] || WALL_BUDGET_LEFT=0
-      fi
+      wall_scan "$id"
     fi
   else
     printf 'endpoint: unknown (no window recorded)\n'
+    # An endpoint with no recorded window is not alive either, and it is itself a
+    # named recovery trigger, so it gets the same scan from the same budget. Its
+    # honest answer is `unknown` - there is no terminal to read - and that is the
+    # point: the routing text below belongs on every endpoint the digest cannot
+    # read as alive, not only on the ones that record a window it can miss.
+    NOT_ALIVE_FOUND=1
+    wall_scan "$id"
   fi
 
   status="$STATE/$id.status"
