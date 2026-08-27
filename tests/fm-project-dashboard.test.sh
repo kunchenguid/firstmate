@@ -1048,6 +1048,103 @@ test_invalid_main_inventory_is_disclosed() {
   pass "an invalid main backlog inventory is disclosed board-wide"
 }
 
+test_stranded_count_counts_each_row_once() {
+  local home epoch out
+  home=$(make_home stranded-count)
+  write_fleet_fixture "$home"
+  jq '
+    .tasks |= map(select(.kind != "secondmate"))
+    | .secondmate_current.records |= map(
+        if .id == "delta-mate" then
+          .projects = []
+          | .active_children = []
+          | .landed = []
+          | .holds = []
+          | .decisions_open = [{id:"q1",key:"q1",verb:"captain-hold",summary:"Pick a route",
+              reason:"Pick a route",repo:null,source:"backlog"}]
+          | .queued = [{id:"q1",title:"Pick a route",repo:null,captain_actionable:true,
+              hold_reason:"Pick a route",hold_kind:"captain"}]
+        else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "stranded-count snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .disclosures | any(
+      .surface == "secondmate delta-mate has state that reaches no project card: 1 item(s)")
+  ' >/dev/null || fail "one backlog row on two owner surfaces was counted twice: $out"
+  pass "the stranded-item count counts each underlying row once"
+}
+
+test_repo_less_backlog_row_follows_its_task() {
+  local home epoch out
+  home=$(make_home repo-less-backlog)
+  write_fleet_fixture "$home"
+  : > "$home/state/t1.meta"
+  : > "$home/state/t1.status"
+  jq --arg home "$home" '
+    .backlog.records = [
+      {structured:true,id:"t1",repo:null,title:"Ship it",state:"done",hold_kind:null,
+       pr_url:"https://github.com/example/alpha/pull/1",completion:{date:"2026-08-20"}},
+      {structured:true,id:"t2",repo:null,title:"Queued next",state:"queued",since:"2020-01-01",
+       captain_actionable:false,hold_reason:"Waiting on review",unresolved_blocker_ids:[]}]
+    | .tasks = [
+        {id:"t1",kind:"ship",project:"alpha",
+         paths:{meta:{path:($home + "/state/t1.meta"),present:true},
+                status_log:{path:($home + "/state/t1.status"),present:true},
+                worktree:{path:null,present:false},home:{path:null,present:false},report:{path:null,present:false}},
+         secondmate_projects:[],current_state:{state:"done",source:"fixture",detail:"PR opened"},
+         hints:{open_decisions:[]},pr:{url:"https://github.com/example/alpha/pull/1"},
+         backlog:{id:"t1",repo:null,title:"Ship it"}},
+        {id:"t2",kind:"ship",project:"alpha",
+         paths:{meta:{path:($home + "/state/t1.meta"),present:true},
+                status_log:{path:($home + "/state/t1.status"),present:true},
+                worktree:{path:null,present:false},home:{path:null,present:false},report:{path:null,present:false}},
+         secondmate_projects:[],current_state:{state:"paused",source:"fixture",detail:"Waiting on review"},
+         hints:{open_decisions:[]},pr:{url:null},backlog:{id:"t2",repo:null,title:"Queued next"}}]
+    | .secondmate_current.records = []
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "repo-less backlog snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .disclosures == []
+      and (.projects[] | select(.name == "alpha")
+        | (.landed | map(.id)) == ["t1"]
+          and .counts.landed == 1
+          and .finished == []
+          and .counts.finished == 0
+          and (.waiting | map(.id) | index("t2") != null)
+          and .status == "waiting")
+  ' >/dev/null || fail "a repo-less backlog row was dropped and its task mislabelled: $out"
+  pass "a backlog row with no repo metadata follows its task to that project"
+}
+
+test_main_state_reaching_no_registered_project_is_disclosed() {
+  local home epoch out
+  home=$(make_home main-unregistered)
+  write_fleet_fixture "$home"
+  jq '
+    .backlog.records = [
+      {structured:true,id:"g1",repo:"gizmo",title:"Gizmo work",state:"queued",since:"2020-01-01",
+       captain_actionable:false,unresolved_blocker_ids:[]}]
+    | .tasks = [(.tasks[] | select(.id == "alpha-work") | .project = "gizmo" | .backlog.repo = "gizmo")]
+    | .secondmate_current.records = []
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "unregistered-main snapshot failed"
+  printf '%s' "$out" | jq -e '
+    (.disclosures | any(
+       .surface == "main backlog rows that reach no registered project: 1"
+       and .reveal == "register the project in data/projects.md, or add (repo: <project>) to the row"))
+      and (.disclosures | any(
+       .surface == "main tasks that reach no registered project: 1"))
+      and ([.projects[] | select(.status != "idle_queued")] | length) == 0
+  ' >/dev/null || fail "main state outside every registered project vanished silently: $out"
+  pass "main backlog rows and tasks that reach no registered project are disclosed"
+}
+
 extract_payload() {  # <board>
   sed -n '/<script id="project-dashboard-data" type="application\/json">/,/<\/script>/p' "$1" | sed '1d;$d'
 }
@@ -1287,6 +1384,9 @@ test_next_step_names_the_item_that_set_the_status
 test_unattributable_deferred_and_blocked_rows_do_not_paint_cards_red
 test_held_in_flight_backlog_row_reaches_the_card_without_task_metadata
 test_invalid_main_inventory_is_disclosed
+test_stranded_count_counts_each_row_once
+test_repo_less_backlog_row_follows_its_task
+test_main_state_reaching_no_registered_project_is_disclosed
 test_attention_next_step_is_an_action_not_a_bare_title
 test_unattributable_secondmate_state_is_disclosed
 test_registered_secondmate_without_a_task_still_owns_its_projects

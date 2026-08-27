@@ -49,7 +49,7 @@ h1 { margin: 0; color: var(--ink-900); font: 2rem/1.1 var(--font-display); }
 .pd-dot--active { background: var(--sea-500); } .pd-dot--attention { background: var(--rust-600); }
 .pd-dot--waiting { background: var(--ocean-500); } .pd-dot--idle { background: var(--gold-500); }
 .pd-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 18px; align-items: start; }
-.pd-card { position: relative; min-width: 0; min-height: 220px; overflow: hidden; background: var(--white); border: 2px solid var(--ink-900); border-radius: 13px; box-shadow: var(--shadow-hard); transition: transform 140ms ease, box-shadow 140ms ease; }
+.pd-card { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 220px; overflow: hidden; background: var(--white); border: 2px solid var(--ink-900); border-radius: 13px; box-shadow: var(--shadow-hard); transition: transform 140ms ease, box-shadow 140ms ease; }
 .pd-card:hover { transform: translateY(-2px); }
 .pd-card.is-selected { grid-column: 1 / -1; min-height: 360px; transform: none; }
 .pd-card.is-stale { outline: 3px dashed var(--gold-600); outline-offset: 4px; }
@@ -57,7 +57,7 @@ h1 { margin: 0; color: var(--ink-900); font: 2rem/1.1 var(--font-display); }
 .pd-card--active .pd-card__accent { background: var(--sea-500); }
 .pd-card--needs_attention .pd-card__accent { background: var(--rust-600); }
 .pd-card--waiting .pd-card__accent { background: var(--ocean-500); }
-.pd-card__button { width: 100%; padding: 17px 18px 15px; display: flex; flex-direction: column; gap: 12px; color: inherit; text-align: left; background: transparent; border: 0; cursor: pointer; }
+.pd-card__button { width: 100%; flex: 1; padding: 17px 18px 15px; display: flex; flex-direction: column; gap: 12px; color: inherit; text-align: left; background: transparent; border: 0; cursor: pointer; }
 .pd-card__button:focus-visible { outline: 4px solid var(--gold-300); outline-offset: -4px; }
 .pd-card__top { width: 100%; display: flex; align-items: start; justify-content: space-between; gap: 12px; min-width: 0; }
 .pd-card__name { min-width: 0; margin: 0; color: var(--ink-900); font-size: 1.28rem; line-height: 1.1; overflow-wrap: anywhere; }

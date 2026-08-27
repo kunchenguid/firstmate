@@ -27,6 +27,9 @@
 # A held in-flight backlog row reaches the card from the backlog alone, without
 # live task metadata, the way the canonical bearings gate list reads it, and an
 # invalid main backlog inventory is disclosed board-wide.
+# The (repo: ...) metadata on a backlog row is optional, so a row without it
+# follows its task to that task's project; main backlog rows and tasks that
+# reach no registered project at all are disclosed board-wide.
 # A done task whose backlog row is not yet done is disclosed in finished[] with
 # the crew detail repeated verbatim. That detail is the only local record of
 # what done means for the task, so the board never infers a lifecycle stage -
@@ -265,6 +268,15 @@ jq -n \
              active_children:[],decisions_open:[],holds:[],queued:[],landed:[]
            }}) ]) as $mate_owners
   | ($fleet_data.secondmate_current.registry // {}) as $mate_registry
+  | ([ $projects_registry[].name ]) as $registered_names
+  | ([ $fleet_data.tasks[]?
+       | select(.kind != "secondmate")
+       | . as $task
+       | {id:$task.id,repo:($task | task_repo)} ]) as $main_task_repos
+  | ([ $main_task_repos[]
+       | . as $entry
+       | select(($entry.repo // "") != "" and (($registered_names | index($entry.repo)) != null))
+       | .id ]) as $carded_task_ids
   | ([ (if (($fleet_data.secondmate_current.truncated // 0) > 0) then
           {surface:("registered secondmates omitted by the snapshot bound: "
                     + (($fleet_data.secondmate_current.truncated) | tostring)),
@@ -285,7 +297,6 @@ jq -n \
                    elif .surface == "queued" then "raise FM_SNAPSHOT_SECONDMATE_QUEUED"
                    else "raise FM_SNAPSHOT_SECONDMATE_CHILDREN" end)}),
        ($mate_owners[] as $owner
-        | ([ $projects_registry[].name ]) as $registered_names
         | ([ $owner.projects[]
              | . as $project
              | select(($registered_names | index($project)) != null) ] | length) as $registered_projects
@@ -293,7 +304,8 @@ jq -n \
              | . as $item
              | select(if (($item.repo // "") != "")
                       then ($registered_names | index($item.repo)) == null
-                      else $registered_projects == 0 end) ]) as $stranded
+                      else $registered_projects == 0 end) ]
+             | unique_by([.id, (.repo // "")])) as $stranded
         | (($registered_projects > 0)
            or ([ owner_items($owner)[]
                  | . as $item
@@ -307,6 +319,24 @@ jq -n \
                     else ("secondmate " + $owner.id
                           + " state is unavailable and reaches no project card") end),
            reveal:"record its projects in data/secondmates.md, or label the work with a registered repo"}),
+       (([ $fleet_data.backlog.records[]?
+           | select(.structured == true)
+           | . as $row
+           | select(if ($row.repo // "") != ""
+                    then ($registered_names | index($row.repo)) == null
+                    else ($carded_task_ids | index($row.id)) == null end) ] | length) as $n
+        | if $n > 0 then
+            {surface:("main backlog rows that reach no registered project: " + ($n | tostring)),
+             reveal:"register the project in data/projects.md, or add (repo: <project>) to the row"}
+          else empty end),
+       (([ $main_task_repos[]
+           | . as $entry
+           | select(($entry.repo // "") == "" or (($registered_names | index($entry.repo)) == null)) ]
+          | length) as $n
+        | if $n > 0 then
+            {surface:("main tasks that reach no registered project: " + ($n | tostring)),
+             reveal:"register the project in data/projects.md, or correct the task project metadata"}
+          else empty end),
        (if $fleet_data.main_inventory.valid == false then
           {surface:("main backlog inventory is invalid: "
                     + ($fleet_data.main_inventory.reason // "unknown reason")),
@@ -318,8 +348,13 @@ jq -n \
       | $registered.name as $name
       | ([ $fleet_data.tasks[]?
            | select(.kind != "secondmate" and task_repo == $name) ]) as $tasks
+      | ([ $tasks[] | .id ]) as $task_ids
       | ([ $fleet_data.backlog.records[]?
-           | select(.structured == true and .repo == $name) ]) as $backlog
+           | . as $row
+           | select(.structured == true
+                    and ((.repo == $name)
+                         or (((.repo // "") == "")
+                             and (($task_ids | index($row.id)) != null)))) ]) as $backlog
       | ([ $backlog[] | select(.state == "done") | .id ]) as $landed_ids
       | ([ $tasks[] | select(.current_state.state == "working") | .id ]) as $working_ids
       | ([ $mate_owners[]
