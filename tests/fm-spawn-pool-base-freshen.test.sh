@@ -5,7 +5,9 @@
 # advanced after the worktree was allocated.
 # These tests drive the real spawn path with a fake terminal, then prove it
 # starts the worker from the fetched origin/main tip or stops when origin is
-# unreachable.
+# unreachable. Originless cases prove a scout or local-only ship instead
+# starts from the local main or master tip without adding a remote, and that
+# an originless no-mistakes or direct-PR ship is still refused.
 set -u
 
 # shellcheck source=tests/lib.sh
