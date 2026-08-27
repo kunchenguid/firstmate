@@ -487,6 +487,101 @@ test_out_of_band_close_is_recordable() {
   pass "an out-of-band close is recordable with the captain's word and nothing else"
 }
 
+# Answering a captain decision is the whole point of a hold - and once it is
+# answered, tasks-axi's own periodic pruning is free to move the now-done task
+# out of the live backlog into data/done-archive.md. The completion gate and
+# teardown must still recognize that archived, answered call as durable: this
+# reproduces the loss where two real lanes' delivered, recorded-done work sat
+# parked because answering their captain decision was what broke their own
+# cleanup.
+test_answered_hold_survives_archival_and_completes() {
+  local home id
+  home=$(make_home archived-answered-hold)
+  id=sample-parked-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the sample parked lane" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the archival-loss origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample parked review\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold sample-parked-call --title "Choose the sample parked option" \
+    --reason "captain parked choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not register the captain-held task"
+  printf 'Captain chose the parked option.\n' > "$home/parked-decision.txt"
+  run_captain "$home" answer sample-parked-call --decision-file "$home/parked-decision.txt" >/dev/null \
+    || fail "could not record the captain's answer"
+  run_captain "$home" complete "$id" sample-parked-call >/dev/null \
+    || fail "completion failed before archival"
+
+  # Prune the now-answered, closed captain-held task straight into the
+  # archive, exactly what routine backlog hygiene does over time.
+  tasks_in "$home" "done" sample-parked-call --keep 0 >/dev/null \
+    || fail "could not archive the answered captain-held task"
+  if tasks_in "$home" show sample-parked-call --full >/dev/null 2>&1; then
+    fail "setup error: the answered call is still in the live backlog"
+  fi
+  grep -F "sample-parked-call" "$home/data/done-archive.md" >/dev/null \
+    || fail "setup error: the answered call did not reach the archive"
+
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "the completion gate refused an answered, archived captain-held task"
+  run_teardown "$home" "$id" >/dev/null 2> "$home/parked-teardown.err" \
+    || fail "teardown still refused after the answered call was archived: $(cat "$home/parked-teardown.err")"
+
+  # Creating a NEW hold under the same id must not silently resurrect the
+  # archived, already-answered call.
+  if run_captain "$home" hold sample-parked-call --title "Choose the sample parked option" \
+    --reason "captain new parked choice pending" --repo sample \
+    > "$home/resurrect.out" 2> "$home/resurrect.err"; then
+    fail "hold silently resurrected an archived captain-held task"
+  fi
+  assert_grep "already exists in the archive" "$home/resurrect.err" \
+    "the refusal must name the archive, not a generic failure"
+  pass "an answered captain-held task survives archival and still completes and tears down"
+}
+
+# The safety side of the same fix: an archived task that was closed WITHOUT a
+# recorded captain answer (an out-of-band close nobody ever repaired) must
+# still fail the completion gate exactly as an unresolved live task would. The
+# gate's guarantee - no unresolved captain decision can be lost at completion -
+# must be exactly as strong once the loss happens to route through the archive
+# as it is for a live task.
+test_unanswered_hold_still_blocks_completion_once_archived() {
+  local home id
+  home=$(make_home archived-unanswered-hold)
+  id=sample-unrepaired-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the sample unrepaired lane" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the unrepaired origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample unrepaired review\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold sample-unrepaired-call --title "Choose the sample unrepaired option" \
+    --reason "captain unrepaired choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not register the captain-held task"
+
+  # Closed out of band, with no recorded answer, then pruned straight into the
+  # archive before anyone repaired it.
+  tasks_in "$home" "done" sample-unrepaired-call --keep 0 >/dev/null \
+    || fail "could not reproduce the unrepaired archived close"
+  grep -F "sample-unrepaired-call" "$home/data/done-archive.md" >/dev/null \
+    || fail "setup error: the unrepaired call did not reach the archive"
+
+  if run_captain "$home" complete "$id" sample-unrepaired-call \
+    > "$home/unrepaired-complete.out" 2> "$home/unrepaired-complete.err"; then
+    fail "completion accepted an archived captain-held task with no recorded answer"
+  fi
+  assert_grep "archived without a recorded captain answer" "$home/unrepaired-complete.err" \
+    "the refusal must say the archived record has no answer"
+  if run_captain "$home" verify "$id" > "$home/unrepaired-verify.out" 2> "$home/unrepaired-verify.err"; then
+    fail "verify accepted an archived captain-held task with no recorded answer"
+  fi
+  if run_teardown "$home" "$id" > "$home/unrepaired-teardown.out" 2> "$home/unrepaired-teardown.err"; then
+    fail "teardown proceeded while an archived captain call had no recorded answer"
+  fi
+  pass "an archived captain-held task with no recorded answer still blocks completion"
+}
+
 # A post-teardown visual review completes against the surviving report and
 # durable tasks, with no volatile task metadata and no second decision database.
 test_visual_review_uses_shared_completion_owner() {
@@ -1174,6 +1269,8 @@ test_answer_records_and_closes
 test_release_frees_held_work
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
+test_answered_hold_survives_archival_and_completes
+test_unanswered_hold_still_blocks_completion_once_archived
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory

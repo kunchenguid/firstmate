@@ -263,6 +263,63 @@ origin_exists_here() {  # <origin-id>
   task_show "$1" >/dev/null 2>&1
 }
 
+# tasks-axi has no archive-aware lookup: once a task is pruned out of the live
+# backlog into $DATA/done-archive.md, `tasks-axi show` cannot find it at all,
+# even though the archived record is exactly as durable as a live "done" task.
+# Only done tasks are ever archived, so a caller that finds one here already
+# knows its state; the body is the only field worth reconstructing, since that
+# is the only field the callers below actually read off an archived record.
+# Reproducing tasks-axi show --full's full field set was considered and
+# rejected: no call site needs title, repo, dates, or blocked/deps state from
+# an archived entry, and inventing plausible-looking values for fields the
+# archive line does carry (state, hold_kind) would risk them silently drifting
+# from what show_field callers actually expect.
+#
+# Archive shape (one bullet per entry, its body indented two spaces below it,
+# blank body lines left bare):
+#   - [x] <id> - <title> (repo: ...) ... (hold: ...) (hold-kind: ...)
+#     <body line>
+# Later entries are appended after earlier ones, so the LAST matching bullet
+# is authoritative when an id was archived more than once.
+archived_body_for_id() {  # <id>; prints the archived body (possibly empty) or fails if not archived
+  local archive="$DATA/done-archive.md" id=$1
+  [ -f "$archive" ] || return 1
+  awk -v id="$id" '
+    BEGIN { found = 0; active = 0; body = "" }
+    {
+      prefix = "- [x] " id " - "
+      if (substr($0, 1, length(prefix)) == prefix) {
+        found = 1
+        active = 1
+        body = ""
+        next
+      }
+      if (active) {
+        if ($0 == "") {
+          body = body "\n"
+          next
+        }
+        if (substr($0, 1, 2) == "  ") {
+          body = body substr($0, 3) "\n"
+          next
+        }
+        active = 0
+      }
+    }
+    END {
+      if (!found) exit 1
+      sub(/\n$/, "", body)
+      printf "%s", body
+    }
+  ' "$archive"
+}
+
+# True when an id names a task the live backlog or the done archive still
+# carries - the only two places a captain call's identity can survive.
+entry_exists() {  # <id>
+  task_show "$1" >/dev/null 2>&1 || archived_body_for_id "$1" >/dev/null 2>&1
+}
+
 list_has_key() {  # <comma-list> <key>
   case ",$1," in
     *",$2,"*) return 0 ;;
@@ -341,33 +398,52 @@ resolution_block() {  # <mode>
 }
 
 # Durable state of one captain call: an active captain hold (annotations
-# surviving even when a date gate has expired) or a recorded captain answer.
+# surviving even when a date gate has expired), a recorded captain answer, or
+# an archived task whose recorded body still carries that answer. Answering a
+# captain decision is the whole point of a hold, and the resulting "done" task
+# is exactly the kind of row tasks-axi prunes into the archive over time - so
+# this gate must see a resolved, archived hold as durable, or completing the
+# very call it exists to protect would end up blocking the origin forever.
+# Only done tasks are ever archived, so an archived id with no resolution
+# record is genuinely unresolved and must still fail this gate exactly as a
+# live unresolved task would: the guarantee is unchanged, not relaxed.
 verify_hold_durable() {  # <task-id>
   local id=$1 show state hold_kind body
-  show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
-  state=$(show_field "$show" state)
-  hold_kind=$(show_field_value "$show" hold_kind)
-  body=$(show_field "$show" body)
-  if body_has_resolution_record "$body"; then
-    return 0
+  if show=$(task_show "$id"); then
+    state=$(show_field "$show" state)
+    hold_kind=$(show_field_value "$show" hold_kind)
+    body=$(show_field "$show" body)
+    if body_has_resolution_record "$body"; then
+      return 0
+    fi
+    if [ "$state" != "done" ] && [ "$hold_kind" = captain ]; then
+      return 0
+    fi
+    fail "captain-held task $id is neither held for the captain nor closed with a recorded captain answer"
   fi
-  if [ "$state" != "done" ] && [ "$hold_kind" = captain ]; then
-    return 0
+  if body=$(archived_body_for_id "$id"); then
+    if body_has_resolution_record "$body"; then
+      return 0
+    fi
+    fail "captain-held task $id is archived without a recorded captain answer"
   fi
-  fail "captain-held task $id is neither held for the captain nor closed with a recorded captain answer"
+  fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
 }
 
 # Resolve one inventory entry or channel key to the task that carries it: the
-# exact task id when it exists, else the legacy derived identity.
+# exact task id when it exists (live or archived), else the legacy derived
+# identity. Recognizing an archived id here is what lets verify_hold_durable
+# above ever see it: without this, an entry naming an already-answered,
+# already-archived hold fails right here and the gate is never reached.
 resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
   local origin=$1 entry=$2 legacy
-  if task_show "$entry" >/dev/null 2>&1; then
+  if entry_exists "$entry"; then
     printf '%s' "$entry"
     return 0
   fi
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     legacy=$(legacy_hold_id "$origin" "$entry")
-    if task_show "$legacy" >/dev/null 2>&1; then
+    if entry_exists "$legacy"; then
       printf '%s' "$legacy"
       return 0
     fi
@@ -413,6 +489,13 @@ command_hold() {
       [ "$existing_title" = "$title" ] || fail "existing task $id has a different title"
     fi
   else
+    # An archived id is a genuinely closed captain call, not an absent one:
+    # tasks-axi add would happily create a fresh live task under the same id,
+    # silently resurrecting a call the captain already answered. Refuse it the
+    # same way an already-closed live task is refused just above.
+    if archived_body_for_id "$id" >/dev/null 2>&1; then
+      fail "task $id already exists in the archive; a new captain call needs its own task"
+    fi
     [ -n "$title" ] || fail "--title is required to create task $id"
     validate_one_line title "$title"
     if [ -z "$repo" ] && [ -n "$origin" ] && [ -f "$STATE/$origin.meta" ]; then
@@ -475,6 +558,29 @@ close_answered() {  # <task-id> <release-0-or-1>
   fi
 }
 
+# An already-archived task can only be re-answered as an idempotent replay of
+# its own recorded resolution. tasks-axi has no update path for an
+# archived-only id (write_resolution_record's `tasks-axi update` needs the
+# task in the live backlog), so a genuinely unresolved archived hold cannot be
+# repaired here - it must still fail loudly rather than silently invent the
+# missing record, exactly like the live "never held for the captain" refusal
+# below refuses to dress up ordinary finished work as an answered call.
+answer_archived_replay() {  # <task-id> <release-0-or-1> <outcome>
+  local id=$1 release=$2 outcome=$3 body recorded_mode
+  body=$(archived_body_for_id "$id") \
+    || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
+  body_has_resolution_record "$body" \
+    || fail "task $id is archived without a recorded captain answer; it can no longer be repaired"
+  [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
+    || fail "task $id is archived and records a different captain decision"
+  recorded_mode=$(recorded_resolution_mode "$body" || true)
+  case "$recorded_mode" in
+    released) [ "$release" = 1 ] || fail "task $id records this answer as a release; retry with --release" ;;
+    answered) [ "$release" = 0 ] || fail "task $id records this answer as a close; retry without --release" ;;
+  esac
+  printf '%s: %s\n' "$outcome" "$id"
+}
+
 command_answer() {
   local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
@@ -490,11 +596,14 @@ command_answer() {
   validate_slug task-id "$id"
   load_decision "$decision_file"
   require_tasks_axi
-  show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
+  if [ "$release" = 1 ]; then outcome=released; else outcome=answered; fi
+  if ! show=$(task_show "$id"); then
+    answer_archived_replay "$id" "$release" "$outcome"
+    return 0
+  fi
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
-  if [ "$release" = 1 ]; then outcome=released; else outcome=answered; fi
 
   if [ "$state" = "done" ]; then
     if body_has_resolution_record "$body"; then
