@@ -879,31 +879,35 @@ test_bounded_inventory_omissions_are_disclosed() {
 }
 
 test_scan_root_entry_budget_is_enforced() {
-  local home origin repo scan_root out human
+  local home origin repo scan_root_a scan_root_b out human
   home=$(make_home bounded-scan-root)
   origin=$(make_origin bounded-scan-root)
   repo=$home/projects/titan
   clone_origin "$origin" "$repo"
-  scan_root=$home/large-scan
-  python3 - "$scan_root" <<'PY'
+  scan_root_a=$home/large-scan-a
+  scan_root_b=$home/large-scan-b
+  python3 - "$scan_root_a" "$scan_root_b" <<'PY'
 from pathlib import Path
 import sys
 
-root = Path(sys.argv[1])
-for index in range(4200):
-    (root / f"ordinary-{index:04d}").mkdir(parents=True)
+for argument in sys.argv[1:]:
+    root = Path(argument)
+    root.mkdir(parents=True)
+    for index in range(2050):
+        (root / f"ordinary-{index:04d}").touch()
 PY
   out=$(run_triage "$home" bounded-scan-root "$repo" \
-    "Unexplained production failure" --scan-root "$scan_root")
+    "Unexplained production failure" \
+    --scan-root "$scan_root_a" --scan-root "$scan_root_b")
   printf '%s' "$out" | jq -e '
     .repository.inventory.scan_entries.truncated_roots == 1
-      and .repository.inventory.scan_entries.visited < 4200
+      and .repository.inventory.scan_entries.visited == 4096
       and .repository.inventory.copies.complete == false
   ' >/dev/null || fail "scan-root entry bound or truncation disclosure failed: $out"
   human=$(FM_HOME="$home" "$INCIDENT" status --incident bounded-scan-root)
   assert_contains "$human" "Scan roots truncated by entry bound: 1" \
     "human incident status hid scan-root truncation"
-  pass "scan-root traversal stops at its entry budget and reports truncation"
+  pass "scan-root traversal shares one entry budget and reports truncation"
 }
 
 test_worktree_inventory_is_authority_bound_and_enrichment_is_capped() {

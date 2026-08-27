@@ -64,7 +64,7 @@ DEFAULT_STATUS_LIMIT = 20
 MAX_BRANCHES_PER_COPY = 100
 MAX_AGGREGATE_ITEMS = 256
 MAX_SCAN_DEPTH = 3
-MAX_SCAN_ENTRIES = 4096
+MAX_SCAN_ENTRIES_TOTAL = 4096
 GIT_TIMEOUT = 4
 CREW_STATE_TIMEOUT = 12
 STATE_READ_LIMIT = 1024 * 1024
@@ -362,6 +362,7 @@ def registered_paths(state: Path) -> tuple[set[Path], int]:
 
 def scan_for_repos(
     root: Path,
+    entry_budget: int,
     max_depth: int = MAX_SCAN_DEPTH,
 ) -> tuple[list[Path], int, int, bool]:
     if not root.is_dir():
@@ -377,7 +378,7 @@ def scan_for_repos(
         try:
             with os.scandir(current) as entries:
                 for entry in entries:
-                    if entries_visited >= MAX_SCAN_ENTRIES:
+                    if entries_visited >= entry_budget:
                         return repositories, omitted_at_least, entries_visited, True
                     entries_visited += 1
                     try:
@@ -427,13 +428,22 @@ def collect_repositories(repo: Path, state: Path, projects: Path, scan_roots: li
     scan_omitted_at_least = 0
     scan_entries_visited = 0
     scan_truncated_roots = 0
-    for root in scan_roots:
-        scanned, omitted, entries_visited, truncated = scan_for_repos(root)
+    for index, root in enumerate(scan_roots):
+        remaining_entry_budget = MAX_SCAN_ENTRIES_TOTAL - scan_entries_visited
+        if remaining_entry_budget <= 0:
+            scan_truncated_roots += len(scan_roots) - index
+            break
+        scanned, omitted, entries_visited, truncated = scan_for_repos(
+            root,
+            remaining_entry_budget,
+        )
         scan_omitted_at_least += omitted
         scan_entries_visited += entries_visited
-        scan_truncated_roots += int(truncated)
         for candidate in scanned:
             candidates.add(candidate)
+        if truncated:
+            scan_truncated_roots += len(scan_roots) - index
+            break
 
     ordered_candidates = [canonical] + sorted((path for path in candidates if path != canonical), key=str)
     candidate_omitted = max(0, len(ordered_candidates) - MAX_COPIES)
