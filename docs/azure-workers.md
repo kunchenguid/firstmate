@@ -403,6 +403,8 @@ The guest verifies the runtime's exact file inventory, runs the role command wit
 The wrapper verifies the semantic bytes and head binding before writing the controller-facing result; a process exit, missing outcome, malformed outcome, or changed read-only head is a failed result, never `CLEAR` by inference.
 Repair results return one digest-bound single-ref bundle whose head must descend from the requested head, while review and test return no code bundle and must keep the exact requested head.
 The wrapper records a retryable local candidate before cleanup, releases through `service-complete` only after the lifecycle owns the exact execution result, and replays the candidate after a lost response instead of executing the step again.
+Admission, execute recovery, and cleanup use `service-reconcile`, which advances only the caller's exact task generation or replays that task's own pending slot claim rather than converging unrelated fleet work.
+The wrapper preserves first-seen admission, execute, and cleanup start/completion timestamps in the task's `phase-evidence.json`, so retries keep one stable latency record.
 No caller chooses an Azure account, sees a credential, invokes `fm-azure-runner.sh`, or bypasses lifecycle cleanup.
 
 The failed retained proof `azr-763d70ab8206` used the generic Azure runner, reached runtime dependency installation, then exited 125 at `guest bootstrap: isolated executor failed` without any structured result.

@@ -67,10 +67,10 @@ if command == "request":
     assigned.unlink(missing_ok=True)
     release_pending.unlink(missing_ok=True)
     print("queued")
-elif command == "reconcile":
-    if (root / "reconcile-must-not-run").exists():
-        print("fixture reconcile was forbidden", file=sys.stderr)
-        raise SystemExit(86)
+elif command == "service-reconcile":
+    state = json.loads(state_path.read_text())
+    if value("--task") != state["task"] or value("--task-generation") != state["generation"]:
+        raise SystemExit("service reconcile identity differs")
     failures = root / "reconcile-failures"
     if failures.exists():
         remaining = int(failures.read_text().strip())
@@ -83,7 +83,10 @@ elif command == "reconcile":
         complete.touch()
     else:
         assigned.touch()
-    print("converged")
+    print("service converged")
+elif command == "reconcile":
+    print("global reconcile was forbidden", file=sys.stderr)
+    raise SystemExit(86)
 elif command == "status":
     state = json.loads(state_path.read_text())
     placements = [] if complete.exists() else [{
@@ -412,7 +415,7 @@ write_request "$TMP_ROOT/request.json" job-success
   --result "$TMP_ROOT/result.json" --outcome "$TMP_ROOT/outcome.bundle" \
   --step-outcome "$TMP_ROOT/step-outcome.json" \
   || fail "the high-level worker wrapper rejected a complete semantic return"
-python3 - "$TMP_ROOT/result.json" "$TMP_ROOT/step-outcome.json" "$HEAD_SHA" <<'PY' \
+python3 - "$TMP_ROOT/result.json" "$TMP_ROOT/step-outcome.json" "$HEAD_SHA" "$HOME_DIR" <<'PY' \
   || fail "the wrapper did not emit the closed digest-bound success"
 import hashlib, json, pathlib, sys
 result = json.loads(pathlib.Path(sys.argv[1]).read_text())
@@ -424,12 +427,30 @@ assert result["outcome"] == "succeeded" and result["output_head_sha"] == sys.arg
 assert result["step_outcome_sha256"] == hashlib.sha256(step).hexdigest()
 assert "return_ref" not in result and "return_bundle_sha256" not in result
 assert json.loads(step)["review_approved_head_sha"] == sys.argv[3]
+phase_paths = list(pathlib.Path(sys.argv[4]).glob(
+    "state/no-mistakes-workers/*/*/phase-evidence.json"))
+assert len(phase_paths) == 1, phase_paths
+phases = json.loads(phase_paths[0].read_text())
+assert phases["schema"] == "fm.no-mistakes-worker-phases/v1"
+events = phases["events"]
+names = [
+    "admission_started", "admission_completed", "execute_started",
+    "execute_completed", "cleanup_started", "cleanup_completed",
+]
+assert set(events) == set(names), events
+assert [events[name] for name in names] == sorted(events[name] for name in names), events
 PY
 assert_contains "$(cat "$TMP_ROOT/calls.log")" "request --task" "wrapper bypassed lifecycle request"
 assert_contains "$(cat "$TMP_ROOT/calls.log")" "--role no-mistakes" "wrapper did not request the service role"
+assert_contains "$(cat "$TMP_ROOT/calls.log")" "service-reconcile --task" "wrapper bypassed exact service reconciliation"
 assert_contains "$(cat "$TMP_ROOT/calls.log")" "service-complete" "wrapper did not release from execution evidence"
+case "$(cat "$TMP_ROOT/calls.log")" in
+  *$'\nreconcile '*) fail "wrapper invoked fleet-wide reconciliation" ;;
+esac
 pass "wrapper allocates, executes, returns semantic evidence, and cleans through lifecycle"
 
+PHASE_PATH=$(find "$HOME_DIR/state/no-mistakes-workers" -name phase-evidence.json -type f)
+PHASE_SHA=$(shasum -a 256 "$PHASE_PATH" | awk '{print $1}')
 : > "$TMP_ROOT/calls.log"
 touch "$TMP_ROOT/reconcile-must-not-run"
 "$WRAPPER" --config "$TMP_ROOT/config.json" execute \
@@ -448,8 +469,10 @@ assert any(line == "status --json" for line in calls), calls
 assert not any(line.startswith("reconcile ") for line in calls), calls
 assert not any(line.startswith("execute ") for line in calls), calls
 PY
+[ "$PHASE_SHA" = "$(shasum -a 256 "$PHASE_PATH" | awk '{print $1}')" ] \
+  || fail "cached retry rewrote stable phase timestamps"
 rm "$TMP_ROOT/reconcile-must-not-run"
-pass "cached result returns immediately when exact task cleanup is already proven"
+pass "cached result returns immediately with stable phase timestamps when exact cleanup is proven"
 
 printf 'ok\n' > "$TMP_ROOT/mode"
 printf '2\n' > "$TMP_ROOT/reconcile-failures"
@@ -467,10 +490,11 @@ import json, pathlib, sys
 result = json.loads(pathlib.Path(sys.argv[1]).read_text())
 calls = pathlib.Path(sys.argv[2]).read_text().splitlines()
 requests = [line for line in calls if line.startswith("request ")]
-reconciles = [line for line in calls if line.startswith("reconcile ")]
+reconciles = [line for line in calls if line.startswith("service-reconcile ")]
 assert result["outcome"] == "succeeded", result
 assert len(requests) == 1, requests
 assert len(reconciles) >= 3, reconciles
+assert not any(line.startswith("reconcile ") for line in calls), calls
 PY
 pass "wrapper resumes transient reconciliation under one durable Azure task identity"
 
@@ -491,6 +515,7 @@ result = json.loads(pathlib.Path(sys.argv[1]).read_text())
 calls = pathlib.Path(sys.argv[2]).read_text().splitlines()
 requests = [line for line in calls if line.startswith("request ")]
 executes = [line for line in calls if line.startswith("execute ")]
+reconciles = [line for line in calls if line.startswith("service-reconcile ")]
 identities = {
     re.search(r"--task ([^ ]+) --task-generation ([^ ]+)", line).groups()
     for line in requests + executes
@@ -498,7 +523,9 @@ identities = {
 assert result["outcome"] == "succeeded", result
 assert len(requests) == 1, requests
 assert len(executes) == 3, executes
+assert len(reconciles) >= 2, reconciles
 assert len(identities) == 1, identities
+assert not any(line.startswith("reconcile ") for line in calls), calls
 PY
 pass "wrapper resumes transient execution under one assigned Azure task identity"
 
@@ -518,10 +545,11 @@ import json, pathlib, sys
 result = json.loads(pathlib.Path(sys.argv[1]).read_text())
 calls = pathlib.Path(sys.argv[2]).read_text().splitlines()
 requests = [line for line in calls if line.startswith("request ")]
-reconciles = [line for line in calls if line.startswith("reconcile ")]
+reconciles = [line for line in calls if line.startswith("service-reconcile ")]
 assert result["outcome"] == "succeeded", result
 assert len(requests) == 1, requests
 assert len(reconciles) >= 4, reconciles
+assert not any(line.startswith("reconcile ") for line in calls), calls
 PY
 pass "wrapper resumes transient cleanup under the finished Azure task identity"
 

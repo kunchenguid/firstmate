@@ -32,7 +32,150 @@ service_complete_front_door() {
     *--assignment-generation*--confirm-cancel*--confirm-subscription*) ;;
     *) fail "service-cancel help lost its exact assignment binding" ;;
   esac
-  pass "supported lifecycle wrapper exposes service completion and cancellation"
+  help=$(FM_HOME="$tmp/home" "$WRAPPER" service-reconcile --help) \
+    || fail "supported lifecycle wrapper rejected service-reconcile"
+  case "$help" in
+    *--task*--task-generation*--confirm-subscription*) ;;
+    *) fail "service-reconcile help lost its exact task binding" ;;
+  esac
+  pass "supported lifecycle wrapper exposes exact service reconciliation, completion, and cancellation"
+}
+
+service_reconcile_scope_contract() {
+  python3 - "$CONTROLLER" <<'PY' || fail "exact service reconcile scope contract failed"
+import contextlib
+import importlib.util
+import io
+import json
+from types import SimpleNamespace
+import sys
+
+spec = importlib.util.spec_from_file_location("lifecycle", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+env = {
+    "max_workers": 4, "deployment_generation": "dep", "owner": "owner",
+    "subscription": "subscription",
+}
+inventory = {"metrics": {}, "workers": [], "capacity_reservations": [], "conflicts": []}
+module.roll_daily_baseline = lambda *_args, **_kwargs: None
+module.active_count = lambda *_args, **_kwargs: 1
+module.choose_free_slot = lambda *_args, **_kwargs: 2
+admitted = []
+def exact_admission(_env, _state, _inventory, item, slot, now=None):
+    admitted.append((item["task"], item["task_generation"], slot))
+    return {"type": "create", "slot": slot, "request": item}
+module.create_admission_action = exact_admission
+
+# An unrelated slot has a stranded slow mutation and an older queue entry.
+# Exact service admission still chooses the named task and never plans either.
+state = {
+    "queue": {
+        "older@author": {
+            "task": "older", "task_generation": "author", "role": "author",
+            "status": "queued", "eligible": True,
+        },
+        "service@generation": {
+            "task": "service", "task_generation": "generation", "role": "no-mistakes",
+            "status": "queued", "eligible": True,
+        },
+    },
+    "workers": {"1": {"queue_key": "unrelated@generation", "slot": 1}},
+    "pending_actions": {"1": {"type": "delete-compute", "slot": 1}},
+}
+action = module.next_service_reconcile_action(
+    env, state, inventory, "service", "generation"
+)
+assert action["type"] == "create" and admitted == [("service", "generation", 2)], action
+
+def worker(task, generation, slot, status):
+    key = module.request_key(task, generation)
+    item = {
+        "task": task, "task_generation": generation, "role": "no-mistakes",
+        "status": status, "eligible": True, "slot": slot,
+    }
+    record = {
+        "slot": slot, "role": "no-mistakes", "queue_key": key,
+        "assignment_generation": "asg-{:08d}".format(slot),
+        "sku": "sku", "sku_family": "family", "cloud_generation": 1,
+        "bindings": {"task": task, "task_generation": generation},
+        "resources": {}, "cloud_instance_id": "vm-{}".format(slot),
+        "reservation_usd": 1.0, "release_proof": {"proof_digest": "f" * 64},
+    }
+    return key, item, record
+
+# Recovery replays only the target slot. It returns before provider inventory,
+# so the unrelated pending action cannot become synchronous work.
+key, item, target = worker("service", "generation", 2, "assigned")
+state = {
+    "queue": {key: item}, "workers": {
+        "1": {"slot": 1, "queue_key": "unrelated@generation"}, "2": target,
+    },
+    "pending_actions": {
+        "1": {"type": "delete-compute", "slot": 1},
+        "2": {"type": "execute", "slot": 2},
+    },
+}
+module.controller_lock = lambda _env: contextlib.nullcontext()
+module.load_state = lambda _env: state
+module.provider_call = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+    AssertionError("exact replay inventoried unrelated fleet work")
+)
+drained = []
+def exact_drain(_env, slot=None, strict=True):
+    drained.append((slot, strict))
+    return ([slot], [])
+module.drain_pending = exact_drain
+output = io.StringIO()
+with contextlib.redirect_stdout(output):
+    module.command_service_reconcile(env, SimpleNamespace(
+        task="service", task_generation="generation",
+        confirm_subscription="subscription", json=True,
+    ))
+assert drained == [("2", True)], drained
+assert json.loads(output.getvalue())["actions"] == [{"slot": 2, "type": "replay"}]
+
+# Cleanup likewise plans only the named released worker while an unrelated
+# slot retains its own pending action.
+key, item, target = worker("service", "generation", 2, "releasing")
+state = {
+    "queue": {key: item}, "workers": {
+        "1": {"slot": 1, "queue_key": "unrelated@generation"}, "2": target,
+    },
+    "pending_actions": {"1": {"type": "delete-compute", "slot": 1}},
+}
+module.classify_worker = lambda candidate, _cloud, now=None: (
+    ("assigned", "exact target") if candidate.get("queue_key") == key
+    else ("retained-for-investigation", "unrelated")
+)
+action = module.next_service_reconcile_action(
+    env, state, inventory, "service", "generation"
+)
+assert action["type"] == "deallocate" and action["slot"] == 2, action
+
+# The operator's ordinary reconciler keeps its existing fleet-wide policy.
+# It still selects a released ordinary worker before queued admission.
+ordinary = dict(target)
+ordinary.update({
+    "slot": 1, "role": "author", "queue_key": "ordinary@generation",
+    "release_proof": {"proof_digest": "a" * 64},
+})
+ordinary_state = {
+    "queue": {
+        "ordinary@generation": {
+            "task": "ordinary", "task_generation": "generation", "role": "author",
+            "status": "releasing", "eligible": True,
+        },
+        key: item,
+    },
+    "workers": {"1": ordinary}, "pending_actions": {},
+}
+module.classify_worker = lambda *_args, **_kwargs: ("assigned", "released ordinary")
+action = module.next_reconcile_action(env, ordinary_state, inventory)
+assert action["type"] == "deallocate" and action["slot"] == 1, action
+PY
+  pass "exact service admission, recovery, and cleanup ignore unrelated slow fleet work"
 }
 
 service_complete_replay_contract() {
@@ -8959,6 +9102,7 @@ PY
 
 static_contract
 service_complete_front_door
+service_reconcile_scope_contract
 service_complete_replay_contract
 service_cancel_replay_contract
 compartment_payload_contract

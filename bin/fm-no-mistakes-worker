@@ -22,6 +22,12 @@ RESULT_SCHEMA = "no-mistakes.firstmate-worker-result/v1"
 STEP_SCHEMA = "no-mistakes.worker-step-outcome/v1"
 RETURN_SCHEMA = "fm.no-mistakes-worker-return/v1"
 FIRSTMATE_RETURN = "fm.worker-return-contract/v1"
+PHASE_SCHEMA = "fm.no-mistakes-worker-phases/v1"
+PHASE_EVENTS = (
+    "admission_started", "admission_completed",
+    "execute_started", "execute_completed",
+    "cleanup_started", "cleanup_completed",
+)
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 SAFE_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
@@ -214,6 +220,37 @@ def atomic_json(path, value):
     atomic_bytes(path, canonical(value) + b"\n")
 
 
+def record_phase(root, task, generation, event):
+    if event not in PHASE_EVENTS:
+        raise WrapperError("worker phase event is unsupported", "infrastructure", False)
+    path = Path(root) / "phase-evidence.json"
+    if path.exists():
+        value = read_json(
+            path, "worker phase evidence",
+            {"schema", "task", "task_generation", "events"},
+        )
+        if (
+            value.get("schema") != PHASE_SCHEMA
+            or value.get("task") != task
+            or value.get("task_generation") != generation
+            or not isinstance(value.get("events"), dict)
+            or not set(value["events"]) <= set(PHASE_EVENTS)
+            or any(
+                not isinstance(timestamp, int) or isinstance(timestamp, bool) or timestamp < 0
+                for timestamp in value["events"].values()
+            )
+        ):
+            raise WrapperError("worker phase evidence identity differs", "stale_identity", False)
+    else:
+        value = {
+            "schema": PHASE_SCHEMA, "task": task,
+            "task_generation": generation, "events": {},
+        }
+    if event not in value["events"]:
+        value["events"][event] = int(time.time() * 1000)
+        atomic_json(path, value)
+
+
 def run(argv, env, timeout, cwd=None, category="infrastructure"):
     try:
         result = subprocess.run(
@@ -370,7 +407,9 @@ def request_assignment(config, task, generation):
         remaining = deadline - time.monotonic()
         try:
             lifecycle(
-                config, "reconcile", "--apply", "--confirm-subscription", subscription,
+                config, "service-reconcile", "--task", task,
+                "--task-generation", generation,
+                "--confirm-subscription", subscription,
                 timeout=max(1, math.ceil(remaining)),
             )
             last_reconcile_error = None
@@ -428,7 +467,9 @@ def execute_service(config, task, generation, assignment, account_home, staged, 
             break
         try:
             lifecycle(
-                config, "reconcile", "--apply", "--confirm-subscription", subscription,
+                config, "service-reconcile", "--task", task,
+                "--task-generation", generation,
+                "--confirm-subscription", subscription,
                 timeout=max(1, math.ceil(remaining)),
             )
         except WrapperError as error:
@@ -656,7 +697,9 @@ def cleanup_service(config, task, generation, assignment, request_digest):
         remaining = deadline - time.monotonic()
         try:
             lifecycle(
-                config, "reconcile", "--apply", "--confirm-subscription", subscription,
+                config, "service-reconcile", "--task", task,
+                "--task-generation", generation,
+                "--confirm-subscription", subscription,
                 timeout=max(1, math.ceil(remaining)),
             )
             last_reconcile_error = None
@@ -705,13 +748,17 @@ def execute(args):
             request_digest = cached["request_digest"]
             result = cached["result"]
         else:
+            record_phase(root, task, generation, "admission_started")
             assignment, account_home = request_assignment(config, task, generation)
+            record_phase(root, task, generation, "admission_completed")
             outcome_dir = root / "outcome"
             outcome_dir.mkdir(exist_ok=True, mode=0o700)
+            record_phase(root, task, generation, "execute_started")
             output = execute_service(
                 config, task, generation, assignment, account_home, staged, outcome_dir,
                 request["guest_argv"],
             )
+            record_phase(root, task, generation, "execute_completed")
             execution = last_json(output, "worker execution")
             request_digest = execution.get("request_digest")
             if not HEX64.fullmatch(str(request_digest)):
@@ -745,7 +792,9 @@ def execute(args):
                     raise WrapperError("cached repair bundle is absent", "malformed_result", False)
                 shutil.copyfile(cached_outcome, args.outcome)
                 Path(args.outcome).chmod(0o600)
+        record_phase(root, task, generation, "cleanup_started")
         cleanup_service(config, task, generation, assignment, request_digest)
+        record_phase(root, task, generation, "cleanup_completed")
         atomic_json(args.result, result)
 
 

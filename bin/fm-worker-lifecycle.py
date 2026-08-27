@@ -2532,6 +2532,57 @@ def choose_free_slot(env, state, inventory):
     return None
 
 
+def create_admission_action(env, state, inventory, item, slot, now=None):
+    """Plan one exact queued request's admission and mutate only its local record."""
+    now = now or now_utc()
+    bound_refusal, override_day = daily_bound_refusal(
+        env, state, inventory["metrics"].get("actual_usd"), now=now
+    )
+    if bound_refusal is not None:
+        return {
+            "type": "admission-refused", "reason": bound_refusal,
+            "slot": slot, "reservation_usd": 0.0,
+        }
+    admitted, reason, reservation = admission_result(env, state, inventory, slot, item)
+    if not admitted:
+        return {
+            "type": "admission-refused", "reason": reason,
+            "slot": slot, "reservation_usd": reservation,
+        }
+    if override_day is not None:
+        # Recorded only now that admission actually admitted: the override
+        # carried this create past the bound, so its use is an effect, not an
+        # intent.
+        record_daily_override_use(
+            env, state, inventory["metrics"].get("actual_usd"), override_day, now=now
+        )
+    worker = create_worker_record(env, state, slot, item, reservation)
+    state["workers"][str(slot)] = worker
+    item["status"] = "assigning"
+    shared_admission_digest = digest_value({
+        "slot": worker["slot"], "sku": worker["sku"], "sku_family": worker["sku_family"],
+        "assignment_generation": worker["assignment_generation"],
+        "reservation_usd": reservation,
+    })
+    extra = {}
+    if override_day is not None:
+        extra["daily_bound_override"] = override_day
+    return make_action(
+        env, "create", worker=worker, item=item, reuse_retained=False,
+        shared_admission_digest=shared_admission_digest, **extra
+    )
+
+
+def service_worker_for_key(state, key):
+    matches = [
+        (slot, worker) for slot, worker in state["workers"].items()
+        if worker.get("queue_key") == key
+    ]
+    if len(matches) > 1:
+        raise LifecycleError("service request has multiple durable worker owners")
+    return matches[0] if matches else (None, None)
+
+
 def next_reconcile_action(env, state, inventory, now=None):
     now = now or now_utc()
     cloud = inventory_by_slot(inventory)
@@ -2605,41 +2656,76 @@ def next_reconcile_action(env, state, inventory, now=None):
     slot = choose_free_slot(env, state, inventory)
     if slot is None:
         return None
-    item = waiting[0]
-    bound_refusal, override_day = daily_bound_refusal(
-        env, state, inventory["metrics"].get("actual_usd"), now=now
-    )
-    if bound_refusal is not None:
-        return {"type": "admission-refused", "reason": bound_refusal, "slot": slot, "reservation_usd": 0.0}
-    admitted, reason, reservation = admission_result(env, state, inventory, slot, item)
-    if not admitted:
-        return {"type": "admission-refused", "reason": reason, "slot": slot, "reservation_usd": reservation}
-    if override_day is not None:
-        # Recorded only now that admission actually admitted: the override
-        # carried this create past the bound, so its use is an effect, not an
-        # intent.
-        record_daily_override_use(
-            env, state, inventory["metrics"].get("actual_usd"), override_day, now=now
+    return create_admission_action(env, state, inventory, waiting[0], slot, now=now)
+
+
+def next_service_reconcile_action(env, state, inventory, task, generation, now=None):
+    """Plan at most one mutation for one exact No-Mistakes task generation.
+
+    This deliberately does not converge another queue entry or released
+    worker. A service caller may wait for capacity, but an unrelated slow
+    provider action must never become work the caller synchronously owns.
+    """
+    now = now or now_utc()
+    if inventory.get("conflicts"):
+        raise LifecycleError(
+            "provider found same-fleet worker-name conflicts; unrelated resources were not adopted"
         )
-    worker = create_worker_record(env, state, slot, item, reservation)
-    state["workers"][str(slot)] = worker
-    item["status"] = "assigning"
-    shared_admission_digest = digest_value({
-        "slot": worker["slot"], "sku": worker["sku"], "sku_family": worker["sku_family"],
-        "assignment_generation": worker["assignment_generation"],
-        "reservation_usd": reservation,
-    })
-    extra = {}
-    if override_day is not None:
-        # The operator override is never silent: the create action itself
-        # carries the day it was admitted past the bound for, and the durable
-        # daily_bound_override_used record plus status output repeat it.
-        extra["daily_bound_override"] = override_day
-    action = make_action(
-        env, "create", worker=worker, item=item, reuse_retained=False,
-        shared_admission_digest=shared_admission_digest, **extra,
-    )
-    return action
+    roll_daily_baseline(state, inventory["metrics"].get("actual_usd"), now)
+    key = request_key(task, generation)
+    item = state["queue"].get(key)
+    if item is None or item.get("role") != "no-mistakes":
+        raise LifecycleError("service reconcile requires one exact no-mistakes request")
+    status = item.get("status")
+    if status == "complete":
+        return None
+    if status == "queued":
+        if not item.get("eligible"):
+            raise LifecycleError("service reconcile refuses an ineligible request")
+        if active_count(state, inventory) >= env["max_workers"]:
+            return None
+        slot = choose_free_slot(env, state, inventory)
+        if slot is None:
+            return None
+        return create_admission_action(env, state, inventory, item, slot, now=now)
+    if status not in ("assigning", "assigned", "releasing"):
+        raise LifecycleError("service reconcile request status is unsupported: {}".format(status))
+    slot_key, worker = service_worker_for_key(state, key)
+    if worker is None:
+        raise LifecycleError("service reconcile task has no exact durable worker owner")
+    if worker.get("role") != "no-mistakes":
+        raise LifecycleError("service reconcile worker role differs")
+    if slot_key in (state.get("pending_actions") or {}):
+        # The command drains this exact claim before planning. Seeing it here
+        # means another process still owns the slot lease; wait without
+        # touching another slot.
+        return None
+    cloud = inventory_by_slot(inventory).get(worker["slot"])
+    classification, note = classify_worker(worker, cloud, now=now)
+    worker["last_classification"] = classification
+    worker["classification_note"] = note
+    if status == "assigning":
+        raise LifecycleError("service assignment has no durable create claim")
+    if status == "assigned":
+        return None
+    if not worker.get("release_proof"):
+        raise LifecycleError("releasing service worker has no exact release proof")
+    if classification == "assigned":
+        return make_action(env, "deallocate", worker=worker)
+    if classification == "deallocated":
+        worker["cooldown_started_at"] = worker.get("cooldown_started_at") or iso_utc(now)
+        return make_action(
+            env, "delete-compute", worker=worker,
+            release_proof_digest=worker["release_proof"]["proof_digest"],
+        )
+    if classification == "orphaned-safe-to-delete":
+        return make_action(
+            env, "reset", worker=worker,
+            release_proof_digest=worker["release_proof"]["proof_digest"],
+        )
+    if classification == "retained-for-investigation":
+        return None
+    raise LifecycleError("service cleanup classification is unsupported: {}".format(note))
 
 
 def reconcile(env, apply, confirm_subscription):
@@ -3157,6 +3243,15 @@ def parser():
     reconcile_parser.add_argument("--apply", action="store_true")
     reconcile_parser.add_argument("--confirm-subscription")
     reconcile_parser.add_argument("--json", action="store_true")
+
+    service_reconcile = sub.add_parser(
+        "service-reconcile",
+        help="advance only one exact no-mistakes request or its own pending claim",
+    )
+    service_reconcile.add_argument("--task", required=True)
+    service_reconcile.add_argument("--task-generation", required=True)
+    service_reconcile.add_argument("--confirm-subscription", required=True)
+    service_reconcile.add_argument("--json", action="store_true")
 
     proof = sub.add_parser("proof-template", help="print the exact release-receipt skeleton")
     proof.add_argument("--task", required=True)
@@ -3732,6 +3827,111 @@ def public_action(action):
     if isinstance(action.get("bindings"), dict):
         value["assignment_generation"] = action["bindings"]["assignment_generation"]
     return value
+
+
+def service_task_projection(state, task, generation):
+    key = request_key(task, generation)
+    item = state["queue"].get(key)
+    if item is None:
+        raise LifecycleError("service reconcile requires one exact no-mistakes request")
+    slot_key, worker = service_worker_for_key(state, key)
+    return {
+        "task": task,
+        "task_generation": generation,
+        "status": item.get("status"),
+        "slot": int(slot_key) if slot_key is not None else None,
+        "assignment_generation": (
+            worker.get("assignment_generation") if worker is not None
+            else item.get("assignment_generation")
+        ),
+        "pending_action": (
+            ((state.get("pending_actions") or {}).get(slot_key) or {}).get("type")
+            if slot_key is not None else None
+        ),
+    }
+
+
+def command_service_reconcile(env, args):
+    """Advance only one service request, never unrelated fleet convergence."""
+    if args.confirm_subscription != env["subscription"]:
+        raise LifecycleError(
+            "--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
+    task = require_id("task", args.task)
+    generation = require_id("task generation", args.task_generation)
+    key = request_key(task, generation)
+
+    # Replay belongs to the same narrow command, but only for the target's
+    # exact slot. If the original owner is still alive, drain_pending skips it
+    # and this invocation returns without inventorying or touching the fleet.
+    with controller_lock(env):
+        state = load_state(env)
+        item = state["queue"].get(key)
+        if item is None or item.get("role") != "no-mistakes":
+            raise LifecycleError("service reconcile requires one exact no-mistakes request")
+        slot_key, worker = service_worker_for_key(state, key)
+        pending = (
+            (state.get("pending_actions") or {}).get(slot_key)
+            if slot_key is not None else None
+        )
+    if pending is not None:
+        drained, _ = drain_pending(env, slot=slot_key, strict=True)
+        with controller_lock(env):
+            state = load_state(env)
+            projection = service_task_projection(state, task, generation)
+        output = {
+            "actions": ([{"type": "replay", "slot": int(slot_key)}] if drained else []),
+            "task": projection,
+        }
+        if args.json:
+            print(json.dumps(output, sort_keys=True, separators=(",", ":")))
+        elif drained:
+            print("replay: slot={} task={}@{}".format(slot_key, task, generation))
+        else:
+            print("pending: slot={} task={}@{}".format(slot_key, task, generation))
+        return
+
+    inventory = provider_call(env, "inventory")["inventory"]
+    action = None
+    with contextlib.ExitStack() as stack:
+        with controller_lock(env):
+            state = load_state(env)
+            state["last_metrics"] = metrics_from_inventory(inventory)
+            action = next_service_reconcile_action(
+                env, state, inventory, task, generation
+            )
+            if action is None or action.get("type") == "admission-refused":
+                save_state(env, state)
+            else:
+                lease = stack.enter_context(slot_lease(env, action["slot"]))
+                claim_pending(env, state, action)
+        if action is not None and action.get("type") != "admission-refused":
+            try:
+                result = provider_mutate(env, action, lease)
+                with controller_lock(env):
+                    apply_pending(env, action, result)
+            except LifecycleError as exc:
+                with controller_lock(env):
+                    clean = load_state(env)
+                    record_refusal(
+                        clean, clean["workers"].get(str(action.get("slot"))), exc
+                    )
+                    save_state(env, clean)
+                raise
+    with controller_lock(env):
+        state = load_state(env)
+        projection = service_task_projection(state, task, generation)
+    actions = [public_action(action)] if action is not None else []
+    output = {"actions": actions, "task": projection}
+    if args.json:
+        print(json.dumps(output, sort_keys=True, separators=(",", ":")))
+    elif action is None:
+        print("waiting: {}@{} status={}".format(task, generation, projection["status"]))
+    elif action["type"] == "admission-refused":
+        print("admission refused: {}".format(action["reason"]))
+    else:
+        print("{}: slot={} task={}@{}".format(
+            action["type"], action.get("slot"), task, generation
+        ))
 
 
 def command_reconcile(env, args):
@@ -5557,6 +5757,8 @@ def main(argv=None):
         command_authority_receipt(env, args)
     elif args.command == "reconcile":
         command_reconcile(env, args)
+    elif args.command == "service-reconcile":
+        command_service_reconcile(env, args)
     elif args.command == "proof-template":
         command_proof_template(env, args)
     elif args.command == "release":
