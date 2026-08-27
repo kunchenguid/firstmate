@@ -374,6 +374,60 @@ with open(os.path.join(os.environ["HOME_DIR"], "state", task_id + ".meta"), "w",
 PY
 }
 
+set_live_completion_contracts() {
+  local event_id=$1 task_id=$2 pr_url=$3 pr_head=$4 live_url=$5
+  EVENT_FILE="$HOME_DIR/state/pavel-ops/events/$event_id.json" TASK_ID="$task_id" PR_URL="$pr_url" PR_HEAD="$pr_head" LIVE_URL="$live_url" HOME_DIR="$HOME_DIR" python3 - <<'PY'
+import hashlib
+import json
+import os
+
+def canonical(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+path = os.environ["EVENT_FILE"]
+with open(path, encoding="utf-8") as handle:
+    event = json.load(handle)
+classification = event.get("classification") or {}
+source = event.get("source") or {}
+accepted_contract = {
+    "intent": str(classification.get("intent") or ""),
+    "clarification_question": str(event.get("clarification_question") or ""),
+    "pavel_resolution": event.get("pavel_resolution"),
+    "clarifications": event.get("clarifications") or [],
+}
+intent_digest = hashlib.sha256(canonical(accepted_contract).encode()).hexdigest()
+source_digest = event.get("source_digest") or hashlib.sha256(canonical(source).encode()).hexdigest()
+event["delivery_contract"] = {
+    "schema": "fm-pavel-ops-live-contract.v1",
+    "event_id": event["id"],
+    "task_id": os.environ["TASK_ID"],
+    "accepted_intent": accepted_contract["intent"],
+    "accepted_contract": accepted_contract,
+    "intent_digest": intent_digest,
+    "source": source,
+    "source_digest": source_digest,
+    "live_url": os.environ["LIVE_URL"],
+    "pr_url": os.environ["PR_URL"],
+    "pr_head": os.environ["PR_HEAD"],
+    "expected": "",
+    "absent": "",
+}
+event["live_proof"] = {
+    "schema": "fm-pavel-ops-live-proof.v1",
+    "verified": True,
+    "event_id": event["id"],
+    "task_id": os.environ["TASK_ID"],
+    "live_url": os.environ["LIVE_URL"],
+    "intent_digest": intent_digest,
+    "evidence": "fixture live proof",
+}
+event["live_url"] = os.environ["LIVE_URL"]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
+    handle.write("\n")
+PY
+}
+
 # Intake publishes once and a replay neither creates a second event nor a second wake.
 out=$(ingest 100 10 'Поменять цену') || fail "first Pavel intake failed"
 event=$(printf '%s' "$out" | json_field "['event']")
@@ -1026,6 +1080,158 @@ fi
   || fail "task-specific live proof rejection mutated the event"
 pass "live verification is bound to each Pavel event"
 
+direct_send_race=$(ingest 133 43 'Проверить direct send после смены head' | json_field "['event']")
+run_ops classify "$direct_send_race" --as task --title 'Reject direct live send race' --intent 'Notify only the verified head' \
+  --reason 'ordinary delivery' --authority ordinary >/dev/null
+direct_send_race_task=$(run_ops inspect "$direct_send_race" | json_field "['task_id']")
+set_delivery_contracts "$direct_send_race" "$direct_send_race_task" 'https://github.com/o/r/pull/19' 'aa19bb'
+DIRECT_SEND_RACE_FILE="$HOME_DIR/state/pavel-ops/events/$direct_send_race.json" python3 - <<'PY'
+import json
+import os
+import time
+path = os.environ["DIRECT_SEND_RACE_FILE"]
+with open(path, encoding="utf-8") as handle:
+    event = json.load(handle)
+now = int(time.time())
+for state, evidence in [
+    ("dispatched", "Pi worker exists in isolated copy"),
+    ("validating", "no-mistakes run owns current head"),
+    ("delivery_ready", "checks green on exact PR head"),
+    ("merge_queued", "guarded merge accepted by forge"),
+    ("landed", "forge reports PR merged at verified head"),
+    ("live", "live probe passed for https://example.test/product"),
+]:
+    event["transitions"].append({"at": now, "from": event["state"], "to": state, "evidence": evidence})
+    event["state"] = state
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
+    handle.write("\n")
+PY
+set_live_completion_contracts "$direct_send_race" "$direct_send_race_task" 'https://github.com/o/r/pull/19' 'aa19bb' 'https://example.test/product'
+printf 'pr_head=%s\n' 'bb19cc' >> "$HOME_DIR/state/$direct_send_race_task.meta"
+before_direct_send_race=$(grep -c . "$HTTP_LOG")
+if run_ops send "$direct_send_race" --purpose live-completion --text 'Готово: проверено.' >/dev/null 2>&1; then
+  fail "direct live-completion send notified after PR head changed"
+fi
+[ "$(grep -c . "$HTTP_LOG")" -eq "$before_direct_send_race" ] \
+  || fail "direct live-completion race still reached Telegram"
+[ "$(run_ops inspect "$direct_send_race" | json_field "['state']")" = validating ] \
+  || fail "direct live-completion race did not return to validation"
+pass "direct live-completion send validates the frozen head"
+
+retry_send_race=$(ingest 134 44 'Проверить retry send после смены head' | json_field "['event']")
+run_ops classify "$retry_send_race" --as task --title 'Reject retry live send race' --intent 'Retry only the verified head notification' \
+  --reason 'ordinary delivery' --authority ordinary >/dev/null
+retry_send_race_task=$(run_ops inspect "$retry_send_race" | json_field "['task_id']")
+set_delivery_contracts "$retry_send_race" "$retry_send_race_task" 'https://github.com/o/r/pull/20' 'aa20bb'
+RETRY_SEND_RACE_FILE="$HOME_DIR/state/pavel-ops/events/$retry_send_race.json" python3 - <<'PY'
+import hashlib
+import json
+import os
+import time
+path = os.environ["RETRY_SEND_RACE_FILE"]
+with open(path, encoding="utf-8") as handle:
+    event = json.load(handle)
+now = int(time.time())
+event["completion_text"] = "Готово: проверено."
+for state, evidence in [
+    ("dispatched", "Pi worker exists in isolated copy"),
+    ("validating", "no-mistakes run owns current head"),
+    ("delivery_ready", "checks green on exact PR head"),
+    ("merge_queued", "guarded merge accepted by forge"),
+    ("landed", "forge reports PR merged at verified head"),
+    ("live", "live probe passed for https://example.test/product"),
+]:
+    event["transitions"].append({"at": now, "from": event["state"], "to": state, "evidence": evidence})
+    event["state"] = state
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
+    handle.write("\n")
+outbox = os.path.join(os.path.dirname(path), "..", "outbox", event["id"] + "-live-completion.json")
+os.makedirs(os.path.dirname(outbox), exist_ok=True)
+text = event["completion_text"]
+with open(outbox, "w", encoding="utf-8") as handle:
+    json.dump({
+        "schema": "fm-pavel-ops-outbound.v1",
+        "id": event["id"] + "-live-completion",
+        "event_id": event["id"],
+        "purpose": "live-completion",
+        "chat_id": "group",
+        "text": text,
+        "text_digest": hashlib.sha256(text.encode()).hexdigest(),
+        "status": "retryable",
+        "attempts": 1,
+        "created_at": now,
+        "updated_at": now,
+    }, handle)
+PY
+set_live_completion_contracts "$retry_send_race" "$retry_send_race_task" 'https://github.com/o/r/pull/20' 'aa20bb' 'https://example.test/product'
+printf 'pr_head=%s\n' 'bb20cc' >> "$HOME_DIR/state/$retry_send_race_task.meta"
+before_retry_send_race=$(grep -c . "$HTTP_LOG")
+if run_ops send "$retry_send_race" --purpose live-completion --text 'Готово: проверено.' >/dev/null 2>&1; then
+  fail "retry live-completion send notified after PR head changed"
+fi
+[ "$(grep -c . "$HTTP_LOG")" -eq "$before_retry_send_race" ] \
+  || fail "retry live-completion race still reached Telegram"
+[ "$(run_ops inspect "$retry_send_race" | json_field "['state']")" = validating ] \
+  || fail "retry live-completion race did not return to validation"
+pass "retry live-completion send validates the frozen head"
+
+reconcile_send_race=$(ingest 135 45 'Проверить reconcile после смены head' | json_field "['event']")
+run_ops classify "$reconcile_send_race" --as task --title 'Reject reconcile live send race' --intent 'Reconcile only the verified head notification' \
+  --reason 'ordinary delivery' --authority ordinary >/dev/null
+reconcile_send_race_task=$(run_ops inspect "$reconcile_send_race" | json_field "['task_id']")
+set_delivery_contracts "$reconcile_send_race" "$reconcile_send_race_task" 'https://github.com/o/r/pull/21' 'aa21bb'
+RECONCILE_SEND_RACE_FILE="$HOME_DIR/state/pavel-ops/events/$reconcile_send_race.json" python3 - <<'PY'
+import hashlib
+import json
+import os
+import time
+path = os.environ["RECONCILE_SEND_RACE_FILE"]
+with open(path, encoding="utf-8") as handle:
+    event = json.load(handle)
+now = int(time.time())
+event["completion_text"] = "Готово: проверено."
+for state, evidence in [
+    ("dispatched", "Pi worker exists in isolated copy"),
+    ("validating", "no-mistakes run owns current head"),
+    ("delivery_ready", "checks green on exact PR head"),
+    ("merge_queued", "guarded merge accepted by forge"),
+    ("landed", "forge reports PR merged at verified head"),
+    ("live", "live probe passed for https://example.test/product"),
+]:
+    event["transitions"].append({"at": now, "from": event["state"], "to": state, "evidence": evidence})
+    event["state"] = state
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
+    handle.write("\n")
+outbox = os.path.join(os.path.dirname(path), "..", "outbox", event["id"] + "-live-completion.json")
+os.makedirs(os.path.dirname(outbox), exist_ok=True)
+text = event["completion_text"]
+with open(outbox, "w", encoding="utf-8") as handle:
+    json.dump({
+        "schema": "fm-pavel-ops-outbound.v1",
+        "id": event["id"] + "-live-completion",
+        "event_id": event["id"],
+        "purpose": "live-completion",
+        "chat_id": "group",
+        "text": text,
+        "text_digest": hashlib.sha256(text.encode()).hexdigest(),
+        "status": "unknown",
+        "attempts": 1,
+        "created_at": now,
+        "updated_at": now,
+    }, handle)
+PY
+set_live_completion_contracts "$reconcile_send_race" "$reconcile_send_race_task" 'https://github.com/o/r/pull/21' 'aa21bb' 'https://example.test/product'
+printf 'pr_head=%s\n' 'bb21cc' >> "$HOME_DIR/state/$reconcile_send_race_task.meta"
+run_ops reconcile-outbound "$reconcile_send_race-live-completion" --sent-message-id 1001 >/dev/null
+[ "$(run_ops inspect "$reconcile_send_race" | json_field "['state']")" = validating ] \
+  || fail "live-completion reconciliation notified after PR head changed"
+assert_grep '"status": "delivered"' "$HOME_DIR/state/pavel-ops/outbox/$reconcile_send_race-live-completion.json" \
+  "changed-head reconciliation did not retain the delivered receipt"
+pass "live-completion reconciliation validates the frozen head"
+
 live_retry=$(ingest 123 33 'Поменять цену доставки' | json_field "['event']")
 run_ops classify "$live_retry" --as task --title 'Change shipping price' --intent 'Show the requested shipping price' \
   --reason 'ordinary price change' --authority ordinary >/dev/null
@@ -1073,6 +1279,7 @@ with open(outbox, "w", encoding="utf-8") as handle:
         "updated_at": now,
     }, handle)
 PY
+set_live_completion_contracts "$live_retry" "$live_retry_task" 'https://github.com/o/r/pull/123' 'ab123c' 'https://example.test/product'
 before_live_retry=$(grep -c . "$HTTP_LOG")
 run_ops drive "$live_retry" >/dev/null || fail "live retry did not reuse configured completion text"
 [ "$(grep -c . "$HTTP_LOG")" -eq $((before_live_retry + 1)) ] || fail "live retry did not send exactly once"
@@ -1110,6 +1317,7 @@ with open(path, "w", encoding="utf-8") as handle:
     json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
     handle.write("\n")
 PY
+set_live_completion_contracts "$crashed" "$crashed_task" 'https://github.com/o/r/pull/2' 'aa22bb' 'https://example.test/seo'
 CRASHED_EVENT="$crashed" OUTBOX="$HOME_DIR/state/pavel-ops/outbox/$crashed-live-completion.json" python3 - <<'PY'
 import hashlib
 import json

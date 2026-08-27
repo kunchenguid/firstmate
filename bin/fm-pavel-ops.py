@@ -1024,6 +1024,30 @@ def verify_live_check_proof(output: str, contract: dict[str, Any]) -> dict[str, 
     return proof
 
 
+def validate_live_completion_contract(home: Home, event: dict[str, Any]) -> None:
+    merge_contract = merge_contract_for_landing(event)
+    if not meta_matches_merge_contract(home, event, merge_contract):
+        raise OpsError("canonical PR head changed before Pavel notification")
+    delivery_contract = event.get("delivery_contract")
+    if not isinstance(delivery_contract, dict) or delivery_contract.get("schema") != LIVE_CONTRACT_SCHEMA:
+        raise OpsError("Pavel live notification has no retained delivery contract")
+    if delivery_contract.get("pr_url") != merge_contract["pr_url"]:
+        raise OpsError("Pavel live notification PR URL is not the landed PR")
+    if str(delivery_contract.get("pr_head") or "").lower() != str(merge_contract["pr_head"]).lower():
+        raise OpsError("Pavel live notification PR head is not the landed head")
+    proof = event.get("live_proof")
+    if not isinstance(proof, dict) or proof.get("schema") != LIVE_PROOF_SCHEMA or proof.get("verified") is not True:
+        raise OpsError("Pavel live notification has no retained live proof")
+    for key in ("event_id", "task_id", "live_url", "intent_digest"):
+        if proof.get(key) != delivery_contract.get(key):
+            raise OpsError(f"Pavel live notification proof is not bound to {key}")
+
+
+def refuse_live_completion(home: Home, event: dict[str, Any], error: OpsError) -> None:
+    if event.get("state") != "notified":
+        return_to_validation(home, event, str(error))
+
+
 def verify_live(home: Home, event: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
     live_check = os.environ.get("FM_PAVEL_OPS_LIVE_CHECK") or delivery_config(home).get("live_check_command")
     if live_check:
@@ -1506,6 +1530,12 @@ def send_message(home: Home, args: argparse.Namespace) -> dict[str, Any]:
     }
     if event["state"] not in allowed[purpose]:
         raise OpsError(f"cannot send {purpose} while event is {event['state']}")
+    if purpose == "live-completion" and event["state"] == "live":
+        try:
+            validate_live_completion_contract(home, event)
+        except OpsError as exc:
+            refuse_live_completion(home, event, exc)
+            raise
     outbound_id = f"{event['id']}-{purpose}"
     path = outbound_path(home, outbound_id)
     expected = expected_outbound_contract(home, event, purpose, args.text, outbound_id)
@@ -1515,6 +1545,11 @@ def send_message(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         status = outbound.get("status")
         if status == "delivered":
             if purpose == "live-completion" and event["state"] != "notified":
+                try:
+                    validate_live_completion_contract(home, event)
+                except OpsError as exc:
+                    refuse_live_completion(home, event, exc)
+                    return outbound
                 message_id = outbound.get("telegram_message_id")
                 if message_id is None:
                     raise OpsError(f"delivered outbound {outbound_id} lacks a Telegram receipt")
@@ -1577,6 +1612,11 @@ def send_message(home: Home, args: argparse.Namespace) -> dict[str, Any]:
     outbound["updated_at"] = epoch()
     atomic_json(path, outbound)
     if purpose == "live-completion" and event["state"] != "notified":
+        try:
+            validate_live_completion_contract(home, event)
+        except OpsError as exc:
+            refuse_live_completion(home, event, exc)
+            raise
         home.append_transition(event, "notified", f"Telegram message {message_id} confirmed")
         home.save_event(event)
     home.audit("outbound-delivered", event=event["id"], outbound=outbound_id, telegram_message_id=message_id)
@@ -1596,8 +1636,13 @@ def reconcile_outbound(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         outbound["telegram_message_id"] = args.sent_message_id
         outbound["delivered_at"] = epoch()
         if outbound["purpose"] == "live-completion" and event["state"] != "notified":
-            home.append_transition(event, "notified", f"Telegram message {args.sent_message_id} reconciled")
-            home.save_event(event)
+            try:
+                validate_live_completion_contract(home, event)
+            except OpsError as exc:
+                refuse_live_completion(home, event, exc)
+            else:
+                home.append_transition(event, "notified", f"Telegram message {args.sent_message_id} reconciled")
+                home.save_event(event)
     elif args.confirm_not_sent:
         outbound["status"] = "retryable"
         outbound["last_error"] = "operator confirmed interrupted attempt did not send"
