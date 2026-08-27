@@ -434,11 +434,35 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 
 export default function (pi: ExtensionAPI) {
   let sessionstartGeneration: SessionstartGeneration | null = null;
+  let sessionstartExitListenerRegistered = false;
   const cleanupSessionstartOnProcessExit = (): void => {
     const generation = sessionstartGeneration;
-    if (generation?.child) signalSessionstartChild(generation.child, "SIGKILL");
+    if (!generation) return;
+    if (process.platform === "win32") {
+      if (generation.child) signalSessionstartChild(generation.child, "SIGKILL");
+      return;
+    }
+    const processGroupId = generation.processGroupId;
+    if (!processGroupId) {
+      if (generation.child) signalSessionstartChild(generation.child, "SIGKILL");
+      return;
+    }
+    try {
+      process.kill(-processGroupId, "SIGKILL");
+    } catch {
+    }
   };
-  process.once("exit", cleanupSessionstartOnProcessExit);
+  const registerSessionstartExitListener = (): void => {
+    if (sessionstartExitListenerRegistered) return;
+    process.once("exit", cleanupSessionstartOnProcessExit);
+    sessionstartExitListenerRegistered = true;
+  };
+  const removeSessionstartExitListener = (): void => {
+    if (!sessionstartExitListenerRegistered) return;
+    process.removeListener("exit", cleanupSessionstartOnProcessExit);
+    sessionstartExitListenerRegistered = false;
+  };
+  registerSessionstartExitListener();
 
   pi.on?.("session_start", (event, ctx) => {
     const reason = String((event as { reason?: unknown }).reason ?? "");
@@ -447,6 +471,7 @@ export default function (pi: ExtensionAPI) {
       : { new: "clear", resume: "resume", fork: "fork" }[reason];
     markLoaded();
     if (!source) return;
+    registerSessionstartExitListener();
     sessionstartGeneration = createSessionstartGeneration(
       source as SessionstartSource,
       sessionIdFromContext(ctx),
@@ -464,6 +489,7 @@ export default function (pi: ExtensionAPI) {
   // may retry without another before_agent_start, so the event keeps its
   // existing delivery path while sharing generation ownership and cancellation.
   pi.on?.("session_compact", async (_event, ctx) => {
+    registerSessionstartExitListener();
     const generation = createSessionstartGeneration("compact", sessionIdFromContext(ctx));
     sessionstartGeneration = generation;
     const message = await claimSessionstartMessage(generation, ctx);
@@ -481,7 +507,7 @@ export default function (pi: ExtensionAPI) {
       if (generation) await stopSessionstartGeneration(generation);
     } finally {
       if (sessionstartGeneration === generation) sessionstartGeneration = null;
-      process.removeListener("exit", cleanupSessionstartOnProcessExit);
+      removeSessionstartExitListener();
     }
   });
 

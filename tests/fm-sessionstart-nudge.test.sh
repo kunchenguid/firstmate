@@ -731,13 +731,16 @@ state=${FM_HOME:?}/state
 index=$(( $(wc -l < "$state/launches" 2>/dev/null || printf '0') + 1 ))
 printf '%s:%s\n' "$index" "$$" >> "$state/launches"
 (
-  trap '' TERM INT
+  trap '' TERM INT HUP
   while :; do sleep 30; done
 ) </dev/null >/dev/null 2>&1 &
 grandchild=$!
 printf '%s\n' "$grandchild" > "$state/grandchild-$index"
-trap 'exit 143' TERM INT
 : > "$state/started-$index"
+if [ "$index" -eq 3 ]; then
+  exit 0
+fi
+trap 'exit 143' TERM INT
 while :; do sleep 30; done
 SH
   chmod +x "$fixture/bin/"*.sh
@@ -747,6 +750,7 @@ SH
     FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
     node --input-type=module 2>&1 <<'JS'
 import { existsSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 const state = `${process.env.FM_HOME}/state`;
@@ -764,7 +768,9 @@ const waitFor = async (predicate, message) => {
   throw new Error(message);
 };
 const alive = (pid) => {
-  try { process.kill(Number(pid), 0); return true; } catch { return false; }
+  try { process.kill(Number(pid), 0); } catch { return false; }
+  const status = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" });
+  return status.status === 0 && !status.stdout.trim().startsWith("Z");
 };
 const ctx = (sessionId) => ({
   sessionManager: {
@@ -773,46 +779,61 @@ const ctx = (sessionId) => ({
   },
 });
 
-for (let index = 1; index <= 3; index += 1) {
+let launchIndex = 0;
+for (let instance = 1; instance <= 2; instance += 1) {
   const handlers = new Map();
   const pi = {
     on(event, handler) { handlers.set(event, handler); },
     sendMessage() {},
   };
   const extension = await import(
-    `${pathToFileURL(process.env.EXT).href}?reload=${index}-${Date.now()}`
+    `${pathToFileURL(process.env.EXT).href}?reload=${instance}-${Date.now()}`
   );
   extension.default(pi);
   assert(process.listenerCount("exit") === baselineCount + 1,
-    `reload ${index} did not own exactly one exit listener`);
-  const current = ctx(`reload-${index}`);
-  handlers.get("session_start")({ reason: "new" }, current);
-  await waitFor(() => existsSync(`${state}/started-${index}`),
-    `reload ${index} startup generation never started`);
-  const launch = readFileSync(`${state}/launches`, "utf8").trim().split("\n")[index - 1];
-  const child = Number(launch.split(":")[1]);
-  const grandchild = Number(readFileSync(`${state}/grandchild-${index}`, "utf8").trim());
-  if (index === 3) {
-    const ownedListener = process.listeners("exit").find(
-      (listener) => !baselineListeners.includes(listener)
-    );
-    assert(ownedListener, "active reload had no process-exit cleanup listener");
-    ownedListener(0);
-    await waitFor(() => !alive(child) && !alive(grandchild),
-      "active process-exit cleanup left the startup process group alive");
+    `reload ${instance} did not own exactly one exit listener`);
+  const sessionCount = instance === 1 ? 2 : 1;
+  for (let session = 1; session <= sessionCount; session += 1) {
+    launchIndex += 1;
+    const current = ctx(`reload-${instance}-session-${session}`);
+    handlers.get("session_start")({ reason: "new" }, current);
+    assert(process.listenerCount("exit") === baselineCount + 1,
+      `reload ${instance} session ${session} did not own exactly one exit listener`);
+    await waitFor(() => existsSync(`${state}/started-${launchIndex}`),
+      `reload ${instance} session ${session} startup generation never started`);
+    const launch = readFileSync(`${state}/launches`, "utf8").trim().split("\n")[launchIndex - 1];
+    const child = Number(launch.split(":")[1]);
+    const grandchild = Number(readFileSync(`${state}/grandchild-${launchIndex}`, "utf8").trim());
+    if (launchIndex === 3) {
+      await waitFor(() => !alive(child), "leader did not close before process-exit cleanup");
+      assert(alive(grandchild), "TERM-resistant descendant exited with its leader");
+      assert(process.listenerCount("exit") === baselineCount + 1,
+        "leader close removed the active instance exit listener");
+      const ownedListener = process.listeners("exit").find(
+        (listener) => !baselineListeners.includes(listener)
+      );
+      assert(ownedListener, "active reload had no process-exit cleanup listener");
+      ownedListener(0);
+      await waitFor(() => !alive(grandchild),
+        "active process-exit cleanup left the leaderless process group alive");
+    }
+    await handlers.get("session_shutdown")({ reason: "reload" }, current);
+    assert(process.listenerCount("exit") === baselineCount,
+      `reload ${instance} session ${session} retained its exit listener after shutdown`);
+    assert((await handlers.get("before_agent_start")({ prompt: "stale" }, current)) === undefined,
+      `reload ${instance} session ${session} retained model-visible startup context after shutdown`);
+    assert(!alive(child) && !alive(grandchild),
+      `reload ${instance} session ${session} retained its stale startup process group`);
+    if (session < sessionCount) {
+      assert(process.listenerCount("exit") === baselineCount,
+        "same-instance replacement started with a stale exit listener");
+    }
   }
-  await handlers.get("session_shutdown")({ reason: "reload" }, current);
-  assert(process.listenerCount("exit") === baselineCount,
-    `reload ${index} retained its exit listener after shutdown`);
-  assert((await handlers.get("before_agent_start")({ prompt: "stale" }, current)) === undefined,
-    `reload ${index} retained model-visible startup context after shutdown`);
-  assert(!alive(child) && !alive(grandchild),
-    `reload ${index} retained its stale startup process group`);
 }
 JS
   ) || status=$?
-  expect_code 0 "$status" "Pi reload exit-listener ownership"
   [ -z "$out" ] || fail "Pi reload exit-listener ownership printed output: $out"
+  expect_code 0 "$status" "Pi reload exit-listener ownership"
   pass "Pi reload shutdown releases its exit listener and stale startup generation"
 }
 
