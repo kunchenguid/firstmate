@@ -14,12 +14,14 @@
 # when the pull request is merged or in the merge queue. gh's GraphQL API
 # supplies that queue-aware read when gh is on PATH; when gh is absent or its
 # read fails, gh-axi's own view still proves a landed merge, and every outcome
-# it cannot prove refuses, naming both failed reads.
+# it cannot prove refuses, reporting the single failed read when gh is absent
+# and naming both failed reads when gh is present and its own read failed.
 # If the pull request remains open and the base branch has an effective
 # merge_queue rule, the refusal names the queue's configured merge method and
 # the exact -- --auto --<method> retry flags, unless the caller already passed
-# that method with --auto, in which case it reports instead that the accepted
-# request has not entered the queue and the queue state has to be re-checked.
+# that method with --auto to a merge command that returned success, in which
+# case it reports instead that the accepted request has not entered the queue
+# and the queue state has to be re-checked.
 # No method is selected for the caller in any case. A rules response that names
 # no queue rule, one that could not be read, rules that disagree, and a method
 # this script does not recognise are four distinct outcomes and are reported
@@ -500,8 +502,21 @@ record_pr_metadata() {
   }
 }
 
+FM_PR_GITHUB_AUTO_REQUESTED=false
+FM_PR_GITHUB_MERGE_ACCEPTED=false
+FM_PR_GITHUB_CALLER_METHOD=
+
+# The single gate every statement about what the forge accepted, armed, or
+# reported has to pass. A merge command that failed accepted nothing, so no
+# such statement may be made on its path, and routing them all through one
+# predicate keeps a later one from being written without the gate.
+github_merge_command_succeeded() {
+  [ "$FM_PR_GITHUB_MERGE_ACCEPTED" = true ]
+}
+
 github_report_forge_output() {
   local output=$1 line
+  github_merge_command_succeeded || return 0
   [ -n "$output" ] || return 0
   echo "error: the merge command's own output follows, quoted; it is the forge CLI's report, not this script's verdict:" >&2
   while IFS= read -r line; do
@@ -510,10 +525,6 @@ github_report_forge_output() {
 $output
 OUTPUT
 }
-
-FM_PR_GITHUB_AUTO_REQUESTED=false
-FM_PR_GITHUB_MERGE_ACCEPTED=false
-FM_PR_GITHUB_CALLER_METHOD=
 
 github_state_is_open() {
   case "$FM_PR_GITHUB_STATE" in
@@ -543,7 +554,8 @@ github_report_queue_rules() {
         SQUASH) queue_method=squash ;;
         REBASE) queue_method=rebase ;;
       esac
-      if [ "$FM_PR_GITHUB_AUTO_REQUESTED" = true ] \
+      if github_merge_command_succeeded \
+        && [ "$FM_PR_GITHUB_AUTO_REQUESTED" = true ] \
         && github_caller_method_is "$queue_method"; then
         printf 'error: this run refuses even though the request for %s was accepted with the exact flags base branch %s requires (--auto --%s): the pull request has still not entered the merge queue, so no landed or queued outcome is proven; re-check the pull request'"'"'s merge queue state before retrying\n' \
           "$URL" "$FM_PR_GITHUB_BASE" "$queue_method" >&2
@@ -577,7 +589,7 @@ github_report_unmerged_outcome() {
     return 0
   fi
   if [ "$FM_PR_GITHUB_AUTO_REQUESTED" = true ]; then
-    if [ "$FM_PR_GITHUB_MERGE_ACCEPTED" = true ]; then
+    if github_merge_command_succeeded; then
       printf 'error: auto-merge was requested and armed for %s, but nothing is merged or in the merge queue yet, so this run refuses instead of reporting an unproved merge\n' \
         "$URL" >&2
     else

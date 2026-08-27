@@ -681,6 +681,40 @@ test_github_failed_merge_never_claims_armed_auto_merge() {
   pass "fm-pr-merge never reports auto-merge as armed when the merge command failed"
 }
 
+test_github_failed_merge_with_queue_flags_never_claims_acceptance() {
+  local case_dir rc
+  case_dir=$(make_case github-failed-merge-queue-flags)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_merge_fails "$case_dir"
+  write_github_outcome "$case_dir" OPEN false false main
+  printf 'merge_method=MERGE\n' > "$case_dir/github-rules"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/74 -- --auto --merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-failed-merge-queue-flags: the forge failure must still fail the wrapper"
+  assert_grep 'error: pr merge failed' "$case_dir/stderr" \
+    "github-failed-merge-queue-flags: the original forge error was masked"
+  assert_grep 'state=OPEN, merged=false, isInMergeQueue=false' "$case_dir/stderr" \
+    "github-failed-merge-queue-flags: refusal did not name the concrete observed state"
+  assert_no_grep 'was accepted with the exact flags' "$case_dir/stderr" \
+    "github-failed-merge-queue-flags: a failed merge command was reported as an accepted request"
+  assert_no_grep 'armed' "$case_dir/stderr" \
+    "github-failed-merge-queue-flags: a failed merge command was reported as an armed auto-merge"
+  assert_grep 'base branch main requires the merge queue; retry with:' "$case_dir/stderr" \
+    "github-failed-merge-queue-flags: the failed merge command lost its concrete retry guidance"
+  assert_grep 'task-x1 https://github.com/example/repo/pull/74 -- --auto --merge' "$case_dir/stderr" \
+    "github-failed-merge-queue-flags: the retry guidance named no queue flags"
+  assert_no_grep 'verified: ' "$case_dir/stdout" \
+    "github-failed-merge-queue-flags: a failed merge command was reported as verified"
+  pass "fm-pr-merge claims no acceptance for a failed merge command carrying queue flags"
+}
+
 test_github_accepted_queue_flags_do_not_echo_back_the_same_command() {
   local case_dir rc
   case_dir=$(make_case github-accepted-queue-flags)
@@ -2057,6 +2091,7 @@ test_github_no_queue_rule_says_nothing_about_a_queue
 test_github_fallback_view_refusal_says_the_queue_was_unobservable
 test_github_auto_merge_without_queue_refuses_legibly
 test_github_failed_merge_never_claims_armed_auto_merge
+test_github_failed_merge_with_queue_flags_never_claims_acceptance
 test_github_failed_gh_read_falls_back_to_gh_axi
 test_github_failed_merge_names_an_observed_landed_state
 test_github_without_gh_still_uses_gh_axi_merge
