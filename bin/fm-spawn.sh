@@ -13,7 +13,10 @@
 #   instructions and the recorded task delivery cannot drift apart; a brief
 #   scaffolded before that line existed warns once and launches on the flag. When
 #   the explicit mode carries less rigor than the project's standing posture, a
-#   loud one-line deviation notice is printed and the spawn continues.
+#   loud one-line deviation notice is printed and the spawn continues. A codex ship
+#   spawn additionally prints one notice naming what codex's sandbox still denies
+#   (network and the no-mistakes data directory), because that worker can commit but
+#   cannot deliver its own PR; see codex_writable_roots() below.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
@@ -161,6 +164,9 @@
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
+#     __CODEXADDDIRS__ codex-only: one shell-quoted `--add-dir <root>` per writable
+#                  root the crewmate contract needs outside its sandboxed worktree,
+#                  computed by codex_writable_roots() below (empty for every other harness)
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -1096,6 +1102,66 @@ pi_supports_tui_mode() {
   printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--tui-mode([[:space:]=]|$)'
 }
 
+# codex is the only adapter firstmate launches inside a filesystem sandbox
+# (-s workspace-write), which confines every shell command the worker runs to its
+# own worktree plus /tmp and $TMPDIR. Three things the crewmate contract requires
+# live OUTSIDE that worktree, so an ungranted codex worker is structurally unable
+# to finish its brief (observed 2026-08-26: a codex scout produced a complete
+# report it could not deliver, and fm-captain-hold.sh's lock retry recursed on the
+# denial until the filename was too long):
+#   state/  the status appends supervision reads, plus <id>.meta and the
+#           mktemp-named lock owner directories fm-captain-hold.sh's completion
+#           gate creates there (fm_lock_owner_dir in bin/fm-wake-lib.sh).
+#   data/   the scout report at data/<id>/report.md, plus backlog.md and the
+#           backlog.md.lock tasks-axi takes beside it for any backlog mutation.
+#   the task worktree's git COMMON dir, which for a pooled worktree lives inside
+#           the primary checkout: without it `git add` is denied, so a codex ship
+#           task cannot stage or commit anything at all.
+# Two firstmate lock designs, not codex, are what force DIRECTORY roots here:
+# --add-dir accepts a single file, but a mktemp-named owner directory and
+# tasks-axi's sibling backlog.md.lock cannot be named ahead of time. So the grant
+# is those two directories and that one git directory - never $FM_HOME itself,
+# which keeps .env, config/, projects/, and every other home denied.
+# --add-dir is used rather than -c sandbox_workspace_write.writable_roots=[...]
+# because it is additive: the -c form REPLACES an operator's own configured roots.
+# The harness-adapters skill owns what this leaves a codex worker able to finish
+# (network stays denied on every root), and docs/verification/codex-sandbox.md
+# owns the measurements and the command that refreshes them.
+codex_writable_roots() {  # <kind> <worktree>; prints one absolute root per line
+  local kind=$1 worktree=$2 wt_real gitdir
+  printf '%s\n' "$STATE"
+  # A secondmate's own home IS its workspace, so its data/, state/, projects/ and
+  # crewmate spawns are already inside the sandbox. The one path it needs outside
+  # is the status file the PARENT scaffolded in the parent's state dir, which is
+  # how every routed answer returns (bin/fm-brief.sh's charter). It commits
+  # nothing in its home, so it gets no data or git-directory grant.
+  [ "$kind" != secondmate ] || return 0
+  printf '%s\n' "$DATA"
+  wt_real=$(cd "$worktree" 2>/dev/null && pwd -P) || return 0
+  gitdir=$(git -C "$worktree" rev-parse --git-common-dir 2>/dev/null) || return 0
+  [ -n "$gitdir" ] || return 0
+  case "$gitdir" in
+    /*) ;;
+    *) gitdir="$wt_real/$gitdir" ;;
+  esac
+  gitdir=$(cd "$gitdir" 2>/dev/null && pwd -P) || return 0
+  # A git directory already inside the worktree needs no grant; only a linked
+  # worktree's out-of-tree common dir does.
+  case "$gitdir/" in
+    "$wt_real"/*) return 0 ;;
+  esac
+  printf '%s\n' "$gitdir"
+}
+
+codex_add_dir_flags() {  # <kind> <worktree>; prints the shell-quoted --add-dir flags
+  local kind=$1 worktree=$2 root out=''
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    out="$out--add-dir $(shell_quote "$root") "
+  done < <(codex_writable_roots "$kind" "$worktree")
+  printf '%s' "$out"
+}
+
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
@@ -1114,9 +1180,9 @@ launch_template() {
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --permission-mode auto __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__-s workspace-write -a never "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__-s workspace-write __CODEXADDDIRS__-a never "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__-s workspace-write -a never -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__-s workspace-write __CODEXADDDIRS__-a never -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -1377,9 +1443,12 @@ effort_flag_for_harness() {
       esac
       ;;
     codex)
-      # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
+      # The installed codex config schema uses model_reasoning_effort. On
+      # codex-cli 0.150.1 the bundled catalog advertises low|medium|high|xhigh on
+      # every model, and max (plus ultra on two) on SOME models only, so max is
+      # omitted here because it is per-model rather than universal, not because
+      # the vendor lacks it (docs/verification/codex-sandbox.md records the
+      # measurement). Passing it would be a known-bad value on gpt-5.4/5.5.
       case "$effort" in
         low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
       esac
@@ -1674,6 +1743,15 @@ if [ "$KIND" = ship ]; then
   if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] \
      && [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  fi
+  # codex's sandbox denies ALL network access and the no-mistakes data directory,
+  # and no writable root changes either (docs/verification/codex-sandbox.md), so a
+  # codex worker can commit but cannot push, open a PR, or drive the validation
+  # pipeline. Say so at dispatch rather than leaving it to be rediscovered at the
+  # gate; this is a notice, not a refusal, because local-only work and a
+  # firstmate-driven landing are both legitimate.
+  if [ "$HARNESS" = codex ] && [ "$MODE" != local-only ]; then
+    echo "notice: $ID ships mode=$MODE on codex, whose sandbox denies network access and the no-mistakes data directory - the worker can commit but cannot push, open the PR, or run validation itself; expect to land it another way or choose another harness" >&2
   fi
 fi
 
@@ -2725,6 +2803,7 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
+  codex) LAUNCH=${LAUNCH//__CODEXADDDIRS__/"$(codex_add_dir_flags "$KIND" "$WT")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in

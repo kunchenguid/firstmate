@@ -126,7 +126,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | Harness | Model flag | Effort flag | Notes |
 |---|---|---|---|
 | claude | `--model <model>` | `--effort <low\|medium\|high\|xhigh\|max>` | Verified on Claude Code 2.1.196. |
-| codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified on codex-cli 0.142.1. The installed binary schema contains `model_reasoning_effort`, the active config uses it, and the bundled model catalog advertises only low/medium/high/xhigh. `max` is omitted. |
+| codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified on codex-cli 0.150.1 (was 0.142.1). The installed binary schema contains `model_reasoning_effort` and the active config uses it. The bundled catalog advertises low/medium/high/xhigh on every model, and `max` on some models only (`ultra` on two), so `max` is omitted as a per-model rather than universal level - passing it would be a known-bad value on gpt-5.4/5.5. |
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
@@ -231,6 +231,15 @@ The decision persists for the repo, so later worktrees of the same project skip 
 
 Resume after exit with `codex resume <session-id>`.
 The session id is printed on quit.
+
+**Sandbox fact (verified 2026-08-27, codex-cli 0.150.1).**
+codex is the ONLY adapter firstmate launches inside a filesystem sandbox: `-s workspace-write` confines every shell command the worker runs to its own working directory plus `/tmp` and `$TMPDIR`.
+Every firstmate task worktree is a LINKED worktree, so that confinement denied the four things the crewmate contract needs outside it - the scout report, the status appends supervision reads, the captain-hold completion gate's lock, and `git add` itself, whose index lock lives in the primary checkout's git directory.
+`bin/fm-spawn.sh` now grants exactly `state/`, `data/`, and that out-of-tree git common directory with repeatable `--add-dir` roots, and a secondmate gets only the parent's `state/` because its own home is already its workspace.
+The grant stops there: `$FM_HOME` itself, `.env`, `config/`, `projects/`, and every other home stay denied, and the brief's own rule against writing outside the worktree is what still bounds a confused worker inside the granted directories.
+Two limits are unchanged by any writable root, so treat them as adapter facts when choosing codex for a task: the sandbox denies ALL network access, so a codex worker cannot fetch, push, or reach a forge; and `~/.no-mistakes` is denied, so it cannot drive `no-mistakes axi`.
+A codex crewmate or scout can therefore investigate, report, and commit locally, while a codex ship task cannot deliver its own PR or run the validation pipeline.
+[`docs/verification/codex-sandbox.md`](../../../docs/verification/codex-sandbox.md) owns the evidence and the refresh command.
 
 **Primary-session guard fact (verified 2026-07-08, codex-cli 0.142.1).**
 The firstmate PRIMARY's own `.codex/hooks.json` registers a Stop hook that pipes Codex's Stop payload to `bin/fm-turnend-guard.sh`.

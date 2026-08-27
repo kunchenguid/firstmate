@@ -1,0 +1,140 @@
+# Verification: the codex crewmate sandbox and its writable roots
+
+Active empirical evidence for the filesystem sandbox firstmate launches codex crewmates, scouts, and secondmates inside, and for the writable roots `bin/fm-spawn.sh` grants them.
+[`.agents/skills/harness-adapters/SKILL.md`](../../.agents/skills/harness-adapters/SKILL.md) owns the operating facts; `bin/fm-spawn.sh`'s header owns the exact flags; this record owns how the facts were established and what is still unproven.
+
+## Subject
+
+| Field | Value |
+|---|---|
+| Version | `codex-cli 0.150.1` |
+| Verified | 2026-08-27 |
+| Platform | macOS arm64 (Darwin 27.0.0), Apple seatbelt |
+| Refresh command | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-sandbox-grant-live-e2e.test.sh` |
+
+Two earlier codex records in the adapter skill were verified against 0.139.0 and 0.142.1.
+This record supersedes nothing in them; it adds the sandbox axis, which they never covered.
+
+Every measurement below used a scratch git repository with a real linked worktree, plus a scratch firstmate home, both **outside** `/tmp` and `$TMPDIR`.
+That placement is load-bearing: codex's `workspace-write` mode grants `/tmp` and `$TMPDIR` by default, so the same probes run in a temp directory report every write as allowed and prove nothing.
+
+## What `workspace-write` denies
+
+`-s workspace-write` confines every shell command the worker runs to its own working directory.
+A sibling directory in the same tree is denied:
+
+```
+$ codex sandbox -c sandbox_mode='"workspace-write"' -- bash -c "echo one >> $T/home/state/fm-x.status"
+bash: .../home/state/fm-x.status: Operation not permitted
+```
+
+The confinement is by working directory, not by repository: the worktree's own `.git` file is inside it, but a **linked** worktree's git common directory is not, so staging fails before any commit does.
+
+```
+$ cd "$T/wt" && codex sandbox -c sandbox_mode='"workspace-write"' -- "$T/gitprobe.sh" "$T/wt"
+fatal: Unable to create '.../main/.git/worktrees/wt/index.lock': Operation not permitted
+```
+
+That is the whole defect this grant exists for: every firstmate task worktree is a linked worktree, so an ungranted codex worker could neither deliver a report, append the status line supervision reads, pass the captain-hold completion gate, nor stage a single file.
+
+## The grant mechanism
+
+The installed CLI offers two mechanisms, both verified:
+
+| Mechanism | Behavior measured |
+|---|---|
+| `--add-dir <DIR>` | Additive to the primary workspace, repeatable, accepted by both the interactive parser and `codex exec`. |
+| `-c sandbox_workspace_write.writable_roots=[...]` | Sets the same policy, but **replaces** any value the operator's own `~/.codex/config.toml` sets. |
+
+`--add-dir` is what firstmate ships, because additive is both narrower in effect and purpose-built.
+Repeatability and effect were proven together through a real model turn:
+
+```
+$ codex exec -s workspace-write --skip-git-repo-check \
+    --add-dir "$FMH/state" --add-dir "$FMH/data" \
+    "Run exactly these three shell commands ... (1) ... state/p.status (2) ... data/p.md (3) ... config/p.txt"
+1. Succeeded
+2. Succeeded
+3. Denied (`operation not permitted`)
+```
+
+The interactive parser accepts the same repeated flag; only the deliberately invalid argument was rejected:
+
+```
+$ codex -s workspace-write --add-dir /tmp --add-dir /private/tmp -a never --bogus
+error: unexpected argument '--bogus' found
+```
+
+A root that does not exist is tolerated rather than fatal, and does not disturb the other roots in the same list.
+
+## Why the grant names directories
+
+A root may be a single **file**: granting `data/backlog.md` made exactly that file writable while its sibling `data/captain.md` stayed denied.
+Directory roots are nonetheless what firstmate grants, and the reason is firstmate's own lock designs, not a codex limitation:
+
+- `fm_lock_owner_dir` (`bin/fm-wake-lib.sh`) creates its owner directory with `mktemp -d "<lockpath>.owner.XXXXXX"`, so the path cannot be named ahead of time. The captain-hold completion gate takes that lock in `state/`.
+- `tasks-axi` takes `data/backlog.md.lock` beside the backlog, so a file-only grant of `backlog.md` fails any backlog mutation:
+
+```
+$ codex sandbox ... -c "sandbox_workspace_write.writable_roots=[\"$FMH/data/backlog.md\"]" -- tasks-axi hold ...
+error: "EPERM: operation not permitted, open '.../data/backlog.md.lock'"
+```
+
+So the grant is `state/`, `data/`, and the out-of-tree git common directory - never `$FM_HOME` itself, which keeps `.env`, `config/`, `projects/`, and every other home denied.
+
+The captain-hold completion gate needs only the `state/` grant: `fm-captain-hold.sh complete` and `verify` both succeeded with `state/` alone, because their `tasks-axi` reads take no backlog lock.
+The `data/` grant is what a scout report and any crewmate-side backlog mutation need.
+
+## What this grant does not change
+
+**Network access is denied outright and no writable root affects it.**
+
+```
+$ codex sandbox -c sandbox_mode='"workspace-write"' -- curl -sS -m 8 https://api.github.com/
+curl: (6) Could not resolve host: api.github.com
+$ codex sandbox -c sandbox_mode='"workspace-write"' -c 'sandbox_workspace_write.network_access=true' -- curl ...
+200
+```
+
+`sandbox_workspace_write.network_access` would lift it; firstmate does not set it.
+Consequently a codex worker cannot `git fetch`, `git push`, or reach a forge, so a codex ship task can commit but cannot deliver a PR itself.
+
+**The no-mistakes pipeline data directory is denied.**
+
+```
+$ codex sandbox -c sandbox_mode='"workspace-write"' -- bash -c 'touch ~/.no-mistakes/.fm-probe'
+touch: /Users/.../.no-mistakes/.fm-probe: Operation not permitted
+```
+
+`~/.no-mistakes` holds `state.sqlite`, `socket`, `daemon.lock`, and `daemon.pid`, so a sandboxed codex worker cannot drive `no-mistakes axi`.
+Widening the grant to a third-party tool home, its control socket, and the homes of every review agent the pipeline spawns is a different decision from firstmate's own supervision paths, and is deliberately not taken here.
+
+## Other adapters
+
+Only codex is launched inside a filesystem sandbox.
+`claude`, `opencode`, `pi`, `pi-signed`, `grok`, and `kimi` are launched with approval flags and no sandbox flag at all, and `muse`'s `--yolo` explicitly disables its default-on sandbox.
+`cursor` is the one other adapter launched with a sandbox flag (`--sandbox enabled`), and it is measurably not affected: on `cursor-agent 2026.08.25-3e8eec8`, writes to two directories outside the workspace both succeeded.
+
+```
+$ cursor-agent -p --force --sandbox enabled "Run exactly two shell commands ... (1) ... state/cursor-probe.status (2) ... config/cursor-probe.txt"
+both probes succeeded - neither was denied
+```
+
+Cursor's sandbox therefore does not confine writes to the workspace the way codex's does, and firstmate's cursor launch is left untouched.
+
+## Coverage and what is not proven
+
+| Claim | Where it is enforced |
+|---|---|
+| The composed launch grants exactly `state/`, `data/`, and the out-of-tree git common dir for a crewmate or scout, and only the parent `state/` for a secondmate | `tests/fm-codex-sandbox-grant.test.sh` (portable, no codex) |
+| No other adapter's launch acquired a grant | `tests/fm-codex-sandbox-grant.test.sh` |
+| The granted set is sufficient for a real status append, report, captain-hold completion gate, and commit, and each root is load-bearing | `tests/fm-codex-sandbox-grant.test.sh`, by making everything outside the emitted roots unwritable |
+| codex still denies those paths without the grant and allows exactly them with it | `tests/fm-codex-sandbox-grant-live-e2e.test.sh` (opt-in, real binary) |
+| firstmate's own `--add-dir` flags reach that policy through a real model turn | `tests/fm-codex-sandbox-grant-live-e2e.test.sh`, `codex exec` half |
+
+Not proven, stated plainly:
+
+- The **interactive TUI** path was not driven end to end. What is proven is that the interactive parser accepts the exact repeated flag, and that the same flag reaches the sandbox policy in `codex exec`. Both surfaces share one top-level flag parser, but no test drives a real interactive pane through the three writes.
+- A codex worker **completing a no-mistakes ship** is not covered, and by the measurements above cannot work: the pipeline needs network and `~/.no-mistakes`.
+- `bin/fm-captain-hold.sh` **registering** a new captain hold from a crewmate is covered only by the `data/` grant being present; the portable suite exercises `complete` and `verify`, not `hold`.
+- The recursion `fm_lock_try_acquire` performs when `fm_lock_try_create` fails for a **permanent** reason (the observed `.lock.steal.steal...` until `File name too long`) is not fixed here. Removing the denial removes the trigger seen on 2026-08-26, but any other permanent write failure - a full or read-only filesystem - would still recurse.
