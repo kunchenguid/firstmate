@@ -63,17 +63,78 @@ fm_nm_supports_axi_intent() {
   printf '%s\n' "$output" | grep -Eq '^[[:space:]]*--intent([[:space:]]|$)'
 }
 
+_fm_nm_semver_prerelease_ge() {  # <a_prerelease> <b_prerelease>
+  local a=$1 b=$2 a_len b_len i a_tok b_tok
+  [ -z "$a" ] && [ -z "$b" ] && return 0
+  [ -z "$a" ] && return 0
+  [ -z "$b" ] && return 1
+  a_len=${#a}
+  b_len=${#b}
+  i=0
+  while [ "$i" -le "$a_len" ] && [ "$i" -le "$b_len" ]; do
+    a_tok=${a%%.*}
+    b_tok=${b%%.*}
+    [ "$a_tok" = "$a" ] && a= || a=${a#*.}
+    [ "$b_tok" = "$b" ] && b= || b=${b#*.}
+    [ -z "$a_tok" ] && [ -z "$b_tok" ] && break
+    [ -z "$a_tok" ] && return 1
+    [ -z "$b_tok" ] && return 0
+    case "$a_tok$b_tok" in
+      *[!0-9]*)
+        case "$a_tok" in
+          *[!0-9]*)
+            case "$b_tok" in
+              *[!0-9]*) ;;
+              *) return 0 ;;
+            esac ;;
+          *) return 1 ;;
+        esac
+        [[ "$a_tok" < "$b_tok" ]] && return 1
+        [[ "$a_tok" > "$b_tok" ]] && return 0 ;;
+      *)
+        a_tok=$((10#$a_tok))
+        b_tok=$((10#$b_tok))
+        [ "$a_tok" -lt "$b_tok" ] && return 1
+        [ "$a_tok" -gt "$b_tok" ] && return 0 ;;
+    esac
+    i=$((i + 1))
+  done
+  return 0
+}
+
 fm_nm_semver_at_least() {  # <version> <minimum>
-  local version=$1 minimum=$2 major minor patch extra min_major min_minor min_patch min_extra
-  IFS='.' read -r major minor patch extra <<< "$version"
-  IFS='.' read -r min_major min_minor min_patch min_extra <<< "$minimum"
-  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
-  [ -n "$min_major" ] && [ -n "$min_minor" ] && [ -n "$min_patch" ] && [ -z "$min_extra" ] || return 1
+  local version=$1 minimum=$2 core prerelease min_core min_prerelease
+  case "$version" in
+    *+*) core=${version%%+*} ;;
+    *)   core=$version ;;
+  esac
+  case "$core" in
+    *-*) prerelease=${core#*-}; core=${core%%-*} ;;
+    *)   prerelease= ;;
+  esac
+  case "$minimum" in
+    *+*) min_core=${minimum%%+*} ;;
+    *)   min_core=$minimum ;;
+  esac
+  case "$min_core" in
+    *-*) min_prerelease=${min_core#*-}; min_core=${min_core%%-*} ;;
+    *)   min_prerelease= ;;
+  esac
+  local major minor patch min_major min_minor min_patch
+  IFS='.' read -r major minor patch <<< "$core"
+  IFS='.' read -r min_major min_minor min_patch <<< "$min_core"
+  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] || return 1
+  [ -n "$min_major" ] && [ -n "$min_minor" ] && [ -n "$min_patch" ] || return 1
+  case "$major$minor$patch$min_major$min_minor$min_patch" in
+    *[!0-9]*) return 1 ;;
+  esac
   [ "$major" -gt "$min_major" ] && return 0
   [ "$major" -eq "$min_major" ] || return 1
   [ "$minor" -gt "$min_minor" ] && return 0
   [ "$minor" -eq "$min_minor" ] || return 1
-  [ "$patch" -ge "$min_patch" ]
+  [ "$patch" -gt "$min_patch" ] && return 0
+  [ "$patch" -eq "$min_patch" ] || return 1
+  _fm_nm_semver_prerelease_ge "$prerelease" "$min_prerelease"
 }
 
 # fm_nm_bootstrap_compatible <minimum>: classify and verify the installed build.
@@ -81,16 +142,19 @@ fm_nm_semver_at_least() {  # <version> <minimum>
 #   1 = installed but incompatible; fm_nm_incompatible_diagnostic explains why
 #   2 = command absent; the caller's MISSING path owns that diagnostic
 fm_nm_bootstrap_compatible() {
-  local minimum=$1 bin output version_token version hash
+  local minimum=$1 bin output version_token version hash version_failed
   FM_NM_COMPATIBILITY_DETAIL=
   bin=$(fm_nm_bin)
   command -v "$bin" >/dev/null 2>&1 || return 2
-  if ! output=$(fm_nm_help_probe --version); then
-    FM_NM_COMPATIBILITY_DETAIL="no-mistakes is installed but its version probe failed or exceeded the $(fm_nm_probe_timeout)s bound; install or upgrade to a responsive versioned build"
-    return 1
+  version_failed=0
+  if output=$(fm_nm_help_probe --version); then
+    version_token=$(printf '%s\n' "$output" | sed -nE 's/^no-mistakes version ([^[:space:]]+).*/\1/p' | head -n 1)
+    version=$(printf '%s\n' "$version_token" | sed -nE 's/^[vV]?([0-9]+)\.([0-9]+)\.([0-9]+)([-+].*)?$/\1.\2.\3\4/p')
+  else
+    version_failed=1
+    version_token=
+    version=
   fi
-  version_token=$(printf '%s\n' "$output" | sed -nE 's/^no-mistakes version ([^[:space:]]+).*/\1/p' | head -n 1)
-  version=$(printf '%s\n' "$version_token" | sed -nE 's/^[vV]?([0-9]+)\.([0-9]+)\.([0-9]+)([-+].*)?$/\1.\2.\3/p')
   if [ -n "$version" ]; then
     if ! fm_nm_semver_at_least "$version" "$minimum"; then
       FM_NM_COMPATIBILITY_DETAIL="no-mistakes v$version is installed but below required v$minimum; upgrade it before relying on Firstmate's validation contract"
@@ -98,6 +162,21 @@ fm_nm_bootstrap_compatible() {
     fi
     if ! fm_nm_supports_watch; then
       FM_NM_COMPATIBILITY_DETAIL="no-mistakes v$version is installed but required capability watch --pr is unavailable; upgrade it before using direct-PR delivery"
+      return 1
+    fi
+    if ! fm_nm_supports_axi_intent; then
+      FM_NM_COMPATIBILITY_DETAIL="no-mistakes v$version is installed but required capability axi run --intent is unavailable; upgrade it before relying on Firstmate's validation contract"
+      return 1
+    fi
+    return 0
+  fi
+  if [ "$version_failed" -eq 1 ]; then
+    if ! fm_nm_supports_watch; then
+      FM_NM_COMPATIBILITY_DETAIL="no-mistakes is installed but its version probe failed or exceeded the $(fm_nm_probe_timeout)s bound and required capability watch --pr is unavailable; upgrade to a responsive build with direct-PR support"
+      return 1
+    fi
+    if ! fm_nm_supports_axi_intent; then
+      FM_NM_COMPATIBILITY_DETAIL="no-mistakes is installed but its version probe failed or exceeded the $(fm_nm_probe_timeout)s bound and required capability axi run --intent is unavailable; upgrade to a responsive build with intent support"
       return 1
     fi
     return 0
