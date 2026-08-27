@@ -188,7 +188,17 @@ a { color: inherit; text-decoration: none; }
 .bb-call > .bb-decision[hidden] { display: none; }
 .bb-decision { display: flex; flex-direction: column; }
 .bb-decision__pad { padding: 18px 20px 16px; display: flex; flex-direction: column; gap: 12px; flex: 1; }
-.bb-decision__top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.bb-decision__top { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+/* The risk pin is the one badge carrying composed text rather than a one or
+   two word label, so it is the one badge that must survive a long value: an
+   enamel pin with white-space nowrap grew straight out of its card and got
+   cut off mid-sentence. It wraps instead of clipping, because a risk the
+   captain cannot finish reading is the defect, not the cure - and it shrinks
+   below its own text width and breaks an unbreakable token, so no value can
+   push it past the card edge. Every other badge is a genuine short label and
+   keeps the verbatim nowrap contract above. */
+.bb-decision__risk { white-space: normal; overflow-wrap: anywhere; text-align: left;
+  min-width: 0; flex: 0 1 auto; line-height: 1.35; }
 .bb-decision__repo { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); white-space: nowrap; }
 .bb-decision__title { margin: 0; font-size: var(--fs-h4); font-weight: 800; color: var(--text-strong); line-height: 1.25; }
 .bb-decision__detail { margin: 0; font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.45; }
@@ -487,7 +497,9 @@ __FM_BEARINGS_BOARD_DATA__
     var top = el("div", "bb-decision__top");
     if (item.type === "merge") {
       top.appendChild(badge("online", "checks green"));
-      top.appendChild(badge(item.risk === "low" ? "neutral" : "warn", "risk " + item.risk));
+      var riskPin = badge(item.risk === "low" ? "neutral" : "warn", "risk " + item.risk);
+      riskPin.className += " bb-decision__risk";
+      top.appendChild(riskPin);
     } else {
       top.appendChild(badge("solid", "decision"));
       top.appendChild(el("span", "bb-decision__repo", item.repo));
