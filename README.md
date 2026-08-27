@@ -184,6 +184,13 @@ Bearings invocation examples:
 - `/bearings file` replaces today's `data/status-report-<YYYY-MM-DD>.md` from scratch and links it from the four-section chat digest.
 - `/bearings file include PRs` combines the dated report with live PR enrichment.
 
+### Fleet project dashboard
+
+Run `bin/fm-project-dashboard.sh` from a Firstmate home to refresh and open the stable read-only Lavish project dashboard.
+The dashboard shows every project registered in `data/projects.md`, rolls current main-home and attributable secondmate state into project cards, and marks waiting or idle projects as stale-risk only after more than eight days without known activity.
+It refreshes only when invoked and does not bind answers, poll for feedback, dispatch work, merge PRs, or mutate fleet records.
+Use `bin/fm-project-dashboard.sh refresh --select <project>` to refresh with one registered project expanded initially, and `bin/fm-project-dashboard.sh path` to print the stable board path without rebuilding it.
+
 Agent-only reference skills live under `.agents/skills/` and are loaded by firstmate at the trigger points named in [`AGENTS.md`](AGENTS.md).
 
 ### Two-tier skill layout

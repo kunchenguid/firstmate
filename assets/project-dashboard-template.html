@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Fleet projects - Firstmate</title>
+<style>
+@import url("https://fonts.googleapis.com/css2?family=Chango&family=Jost:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap");
+
+:root {
+  --rust-700: #8f2f17; --rust-600: #a93a1f; --rust-500: #c0452a; --rust-050: #fbece3;
+  --navy-700: #1a2238; --navy-500: #2a3656; --navy-100: #d9deea;
+  --gold-600: #b5791c; --gold-500: #e0a52e; --gold-300: #f0d38c; --gold-100: #f8ecc9;
+  --ocean-600: #2f6688; --ocean-500: #3c7ea6; --ocean-050: #e8f1f5;
+  --sea-700: #234e3a; --sea-500: #2f6b4f; --sea-050: #e9f2ec;
+  --paper-000: #fbf4e2; --paper-100: #f6ecd3; --paper-200: #f0e3c4; --paper-300: #e7d6ae;
+  --cream-line: #ddc89c; --ink-900: #241c14; --ink-700: #3f3224;
+  --ink-500: #6f5e46; --ink-300: #9c8a6c; --white: #fffdf7;
+  --font-display: "Chango", "Cooper Black", Rockwell, Georgia, serif;
+  --font-sans: "Jost", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --shadow-hard: 4px 4px 0 var(--ink-900); --shadow-hard-sm: 3px 3px 0 var(--ink-900);
+  --texture-paper: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.045'/%3E%3C/svg%3E");
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; }
+body { color: var(--ink-700); background: var(--paper-100); background-image: var(--texture-paper); font: 1rem/1.5 var(--font-sans); }
+button, a { font: inherit; }
+.pd-nav { position: sticky; top: 0; z-index: 20; border-bottom: 1px solid var(--cream-line); background: rgba(246,236,211,.93); backdrop-filter: blur(10px); }
+.pd-nav__inner { max-width: 1240px; height: 68px; margin: auto; padding: 0 28px; display: flex; align-items: center; justify-content: space-between; gap: 18px; min-width: 0; }
+.pd-brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.pd-brand__disc { width: 36px; height: 36px; display: grid; place-items: center; flex: none; color: var(--paper-000); background: var(--rust-500); border: 2px solid var(--ink-900); border-radius: 50%; box-shadow: var(--shadow-hard-sm); font-weight: 900; }
+.pd-brand__name { color: var(--ink-900); font: 22px/1 var(--font-display); white-space: nowrap; }
+.pd-generated { color: var(--ink-500); font: .7rem/1.3 var(--font-mono); text-align: right; overflow-wrap: anywhere; }
+.pd-main { max-width: 1240px; margin: auto; padding: 28px 28px 72px; }
+.pd-hero { display: flex; align-items: end; justify-content: space-between; gap: 22px; margin-bottom: 20px; }
+.pd-eyebrow { margin: 0 0 5px; color: var(--rust-500); font: 800 .76rem/1 var(--font-sans); letter-spacing: .16em; text-transform: uppercase; }
+h1 { margin: 0; color: var(--ink-900); font: 2rem/1.1 var(--font-display); }
+.pd-hero p { max-width: 660px; margin: 8px 0 0; color: var(--ink-500); }
+.pd-readonly { flex: none; padding: 7px 10px 6px; color: var(--navy-700); background: var(--gold-100); border: 1.5px solid var(--ink-900); border-radius: 7px; box-shadow: 2px 2px 0 var(--ink-900); font: 800 .68rem/1 var(--font-sans); letter-spacing: .08em; text-transform: uppercase; }
+.pd-stats { display: grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap: 10px; margin-bottom: 18px; }
+.pd-stat { min-width: 0; padding: 12px 14px; background: var(--paper-000); border: 1px solid var(--paper-300); border-radius: 11px; }
+.pd-stat strong { display: block; color: var(--ink-900); font: 700 1.25rem/1 var(--font-mono); }
+.pd-stat span { display: block; margin-top: 5px; color: var(--ink-500); font: 700 .65rem/1.2 var(--font-mono); text-transform: uppercase; letter-spacing: .05em; }
+.pd-legend { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-bottom: 20px; color: var(--ink-500); font-size: .79rem; }
+.pd-legend__item { display: inline-flex; align-items: center; gap: 6px; }
+.pd-dot { width: 10px; height: 10px; border-radius: 50%; border: 1px solid var(--ink-900); }
+.pd-dot--active { background: var(--sea-500); } .pd-dot--attention { background: var(--rust-600); }
+.pd-dot--waiting { background: var(--ocean-500); } .pd-dot--idle { background: var(--gold-500); }
+.pd-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 18px; align-items: start; }
+.pd-card { position: relative; min-width: 0; min-height: 220px; overflow: hidden; background: var(--white); border: 2px solid var(--ink-900); border-radius: 13px; box-shadow: var(--shadow-hard); transition: transform 140ms ease, box-shadow 140ms ease; }
+.pd-card:hover { transform: translateY(-2px); }
+.pd-card.is-selected { grid-column: 1 / -1; min-height: 360px; transform: none; }
+.pd-card.is-stale { outline: 3px dashed var(--gold-600); outline-offset: 4px; }
+.pd-card__accent { height: 8px; background: var(--gold-500); }
+.pd-card--active .pd-card__accent { background: var(--sea-500); }
+.pd-card--needs_attention .pd-card__accent { background: var(--rust-600); }
+.pd-card--waiting .pd-card__accent { background: var(--ocean-500); }
+.pd-card__button { width: 100%; padding: 17px 18px 15px; display: flex; flex-direction: column; gap: 12px; color: inherit; text-align: left; background: transparent; border: 0; cursor: pointer; }
+.pd-card__button:focus-visible { outline: 4px solid var(--gold-300); outline-offset: -4px; }
+.pd-card__top { width: 100%; display: flex; align-items: start; justify-content: space-between; gap: 12px; min-width: 0; }
+.pd-card__name { min-width: 0; margin: 0; color: var(--ink-900); font-size: 1.28rem; line-height: 1.1; overflow-wrap: anywhere; }
+.pd-badges { display: flex; flex-wrap: wrap; justify-content: end; gap: 7px; }
+.pd-badge { display: inline-flex; align-items: center; padding: 5px 8px 4px; white-space: nowrap; color: var(--paper-000); background: var(--gold-600); border: 1.5px solid var(--ink-900); border-radius: 6px; box-shadow: 2px 2px 0 var(--ink-900); font: 800 .66rem/1 var(--font-sans); letter-spacing: .06em; text-transform: uppercase; }
+.pd-badge--active { background: var(--sea-500); } .pd-badge--attention { background: var(--rust-600); }
+.pd-badge--waiting { background: var(--ocean-500); } .pd-badge--idle { color: var(--navy-700); background: var(--gold-500); }
+.pd-badge--stale { color: var(--navy-700); background: var(--gold-100); }
+.pd-card__description { min-height: 42px; margin: 0; color: var(--ink-500); font-size: .86rem; }
+.pd-next { margin-top: auto; padding-top: 11px; border-top: 1px solid var(--paper-300); }
+.pd-next__label { display: block; margin-bottom: 4px; color: var(--ink-300); font: 700 .63rem/1 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
+.pd-next__text { display: block; color: var(--ink-900); font-size: .93rem; font-weight: 700; overflow-wrap: anywhere; }
+.pd-expand { color: var(--rust-600); font: 700 .69rem/1 var(--font-mono); }
+.pd-details { display: none; padding: 0 18px 20px; }
+.pd-card.is-selected .pd-details { display: block; }
+.pd-detail-meta { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 16px; padding: 12px 14px; background: var(--paper-000); border: 1px solid var(--paper-300); border-radius: 9px; color: var(--ink-500); font: .72rem/1.4 var(--font-mono); }
+.pd-detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 16px; }
+.pd-panel { min-width: 0; padding: 14px; background: var(--paper-000); border: 1px solid var(--cream-line); border-radius: 10px; }
+.pd-panel h3 { margin: 0 0 10px; color: var(--ink-900); font-size: .75rem; letter-spacing: .11em; text-transform: uppercase; }
+.pd-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.pd-item { min-width: 0; padding-bottom: 8px; border-bottom: 1px solid var(--paper-300); overflow-wrap: anywhere; }
+.pd-item:last-child { padding-bottom: 0; border-bottom: 0; }
+.pd-item strong { display: block; color: var(--ink-900); font-size: .86rem; }
+.pd-item small { display: block; color: var(--ink-500); font-size: .74rem; }
+.pd-empty { color: var(--ink-300); font-size: .8rem; font-style: italic; }
+.pd-link { color: var(--ocean-600); font-weight: 800; text-decoration: underline; text-underline-offset: 2px; }
+.pd-none { padding: 44px; color: var(--ink-500); text-align: center; background: var(--paper-000); border: 2px dashed var(--cream-line); border-radius: 13px; }
+@media (max-width: 900px) { .pd-grid { grid-template-columns: repeat(2, minmax(0,1fr)); } .pd-detail-grid { grid-template-columns: repeat(2, minmax(0,1fr)); } .pd-stats { grid-template-columns: repeat(3, minmax(0,1fr)); } }
+@media (max-width: 620px) { .pd-nav__inner, .pd-main { padding-left: 16px; padding-right: 16px; } .pd-generated { display: none; } .pd-hero { align-items: start; flex-direction: column; } .pd-grid, .pd-detail-grid { grid-template-columns: minmax(0,1fr); } .pd-stats { grid-template-columns: repeat(2, minmax(0,1fr)); } .pd-card.is-selected { grid-column: auto; } }
+</style>
+</head>
+<body>
+<nav class="pd-nav">
+  <div class="pd-nav__inner">
+    <div class="pd-brand"><span class="pd-brand__disc" aria-hidden="true">F</span><span class="pd-brand__name">Firstmate</span></div>
+    <div class="pd-generated" id="generated"></div>
+  </div>
+</nav>
+<main class="pd-main">
+  <header class="pd-hero">
+    <div><p class="pd-eyebrow">Fleet overview</p><h1>Project dashboard</h1><p>Every registered project, rolled up from current fleet state. Select a card to inspect its work and handoffs.</p></div>
+    <span class="pd-readonly">Read only</span>
+  </header>
+  <section class="pd-stats" id="stats" aria-label="Fleet project totals"></section>
+  <div class="pd-legend" aria-label="Status legend">
+    <span class="pd-legend__item"><span class="pd-dot pd-dot--active"></span>Active</span>
+    <span class="pd-legend__item"><span class="pd-dot pd-dot--attention"></span>Needs attention</span>
+    <span class="pd-legend__item"><span class="pd-dot pd-dot--waiting"></span>Waiting</span>
+    <span class="pd-legend__item"><span class="pd-dot pd-dot--idle"></span>Idle / queued</span>
+    <span class="pd-legend__item">Dashed border = stale risk</span>
+  </div>
+  <section class="pd-grid" id="project-grid" aria-label="Registered projects"></section>
+</main>
+<script id="project-dashboard-data" type="application/json">
+__FM_PROJECT_DASHBOARD_DATA__
+</script>
+<script>
+(() => {
+  "use strict";
+  const data = JSON.parse(document.getElementById("project-dashboard-data").textContent);
+  const grid = document.getElementById("project-grid");
+  const node = (tag, className, text) => {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    if (text !== undefined && text !== null) element.textContent = text;
+    return element;
+  };
+  const statusClass = status => status === "needs_attention" ? "attention" : status === "idle_queued" ? "idle" : status;
+  const itemTitle = item => item.title || item.summary || item.id;
+  const itemNote = item => item.detail || item.reason || item.summary || item.completed || "";
+
+  document.getElementById("generated").textContent = `Updated ${data.generated} · stale after ${data.stale_after_days} days`;
+  const statRows = [
+    [data.summary.total, "Registered"], [data.summary.active, "Active"],
+    [data.summary.needs_attention, "Attention"], [data.summary.waiting, "Waiting"],
+    [data.summary.stale_risk, "Stale risk"]
+  ];
+  const stats = document.getElementById("stats");
+  statRows.forEach(([value, label]) => {
+    const box = node("div", "pd-stat"); box.append(node("strong", "", value), node("span", "", label)); stats.append(box);
+  });
+
+  const appendList = (panel, title, items, options = {}) => {
+    const heading = node("h3", "", title); panel.append(heading);
+    if (!items.length) { panel.append(node("div", "pd-empty", options.empty || "None")); return; }
+    const list = node("ul", "pd-list");
+    items.forEach(item => {
+      const row = node("li", "pd-item");
+      if (options.links) {
+        const link = node("a", "pd-link", itemTitle(item));
+        link.href = item.url || item.pr_url; link.target = "_blank"; link.rel = "noopener noreferrer"; row.append(link);
+      } else row.append(node("strong", "", itemTitle(item)));
+      const note = itemNote(item);
+      if (note) row.append(node("small", "", `${note}${item.owner ? ` · ${item.owner}` : ""}`));
+      list.append(row);
+    });
+    panel.append(list);
+  };
+
+  const requestedSelection = data.selected_project || (decodeURIComponent(location.hash.slice(1)) || null);
+  let selected = null;
+  const setSelected = name => {
+    selected = selected === name ? null : name;
+    document.querySelectorAll(".pd-card").forEach(card => {
+      const open = card.dataset.project === selected;
+      card.classList.toggle("is-selected", open);
+      card.querySelector(".pd-card__button").setAttribute("aria-expanded", String(open));
+      card.querySelector(".pd-expand").textContent = open ? "Collapse project" : "Expand project";
+    });
+    history.replaceState(null, "", selected ? `#${encodeURIComponent(selected)}` : location.pathname + location.search);
+  };
+
+  data.projects.forEach(project => {
+    const card = node("article", `pd-card pd-card--${project.status}${project.stale_risk ? " is-stale" : ""}`);
+    card.dataset.project = project.name;
+    card.append(node("div", "pd-card__accent"));
+    const button = node("button", "pd-card__button"); button.type = "button"; button.setAttribute("aria-expanded", "false");
+    const top = node("div", "pd-card__top"); top.append(node("h2", "pd-card__name", project.name));
+    const badges = node("div", "pd-badges"); badges.append(node("span", `pd-badge pd-badge--${statusClass(project.status)}`, project.status_label));
+    if (project.stale_risk) badges.append(node("span", "pd-badge pd-badge--stale", "Stale risk")); top.append(badges); button.append(top);
+    button.append(node("p", "pd-card__description", project.description || "Registered fleet project"));
+    const next = node("div", "pd-next"); next.append(node("span", "pd-next__label", "Next step"), node("span", "pd-next__text", project.next_step)); button.append(next);
+    button.append(node("span", "pd-expand", "Expand project")); button.addEventListener("click", () => setSelected(project.name)); card.append(button);
+
+    const details = node("div", "pd-details");
+    const meta = node("div", "pd-detail-meta");
+    meta.append(node("span", "", `Delivery: ${project.mode}${project.yolo ? " +yolo" : ""}`));
+    meta.append(node("span", "", project.last_activity ? `Last activity: ${project.last_activity.age_days}d ago` : "Last activity: unknown"));
+    if (project.secondmates.length) meta.append(node("span", "", `Secondmate: ${project.secondmates.map(mate => mate.id).join(", ")}`));
+    details.append(meta);
+    const detailGrid = node("div", "pd-detail-grid");
+    const work = node("section", "pd-panel"); appendList(work, "Active work", project.active_work, {empty:"No active work"}); detailGrid.append(work);
+    const calls = node("section", "pd-panel"); appendList(calls, "Decisions / attention", [...project.decisions, ...project.failures], {empty:"No decisions pending"}); detailGrid.append(calls);
+    const waits = node("section", "pd-panel"); appendList(waits, "Waiting", project.waiting, {empty:"No external waits"}); detailGrid.append(waits);
+    const queue = node("section", "pd-panel"); appendList(queue, "Queued next", project.queued, {empty:"Nothing queued"}); detailGrid.append(queue);
+    const landed = node("section", "pd-panel"); appendList(landed, "Recently landed", project.landed, {empty:"No recent landed work"}); detailGrid.append(landed);
+    const prs = node("section", "pd-panel"); appendList(prs, "Pull requests", project.prs, {empty:"No PR links",links:true}); detailGrid.append(prs);
+    details.append(detailGrid); card.append(details); grid.append(card);
+  });
+  if (!data.projects.length) grid.append(node("div", "pd-none", "No projects are registered in data/projects.md."));
+  if (requestedSelection && data.projects.some(project => project.name === requestedSelection)) setSelected(requestedSelection);
+})();
+</script>
+</body>
+</html>
