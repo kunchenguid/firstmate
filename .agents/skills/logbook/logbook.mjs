@@ -54,7 +54,6 @@ const RESOURCE_STATES = new Set(["within-boundary", "near-boundary", "boundary-r
 const BLOCKER_STATES = new Set(["open", "resolved"]);
 const OUTCOMES = new Set(["completed", "stopped", "failed"]);
 const CHECKPOINT_INTERVAL_MS = 6 * 60 * 60 * 1000;
-const LOCK_INITIALIZATION_GRACE_MS = 10 * 1000;
 const MAX_MISSION = 120;
 const MAX_TITLE = 120;
 const MAX_SUMMARY = 600;
@@ -451,6 +450,21 @@ function writePagePayload(file, payload, home, root) {
   writeAtomicContent(file, replacePayloadBlock(content, payloadBlock(payload)), home, root);
 }
 
+function readWriterOwner(file, home, root) {
+  try {
+    const value = readJson(file, "writer owner record", home, root);
+    if (!value || typeof value !== "object" || Array.isArray(value)
+      || !/^[a-f0-9]{32}$/.test(value.token)
+      || !Number.isInteger(value.pid) || value.pid <= 0
+      || !Number.isFinite(Date.parse(value.claimed_at))) {
+      throw new Error("invalid writer owner record");
+    }
+    return value;
+  } catch {
+    fail("writer lock ownership is indeterminate");
+  }
+}
+
 function acquireWriter(layout) {
   ensureDirectory(layout.data, layout.home);
   ensureDirectory(layout.root, layout.home);
@@ -470,18 +484,11 @@ function acquireWriter(layout) {
       const stat = fs.lstatSync(layout.lock);
       if (stat.isSymbolicLink() || !stat.isDirectory()) fail(`unsafe writer lock: ${layout.lock}`);
       if (!fs.existsSync(owner)) {
-        if (Date.now() - stat.mtimeMs < LOCK_INITIALIZATION_GRACE_MS) {
-          fail("another logbook writer is active while claiming its lock");
-        }
+        fail("writer lock ownership is indeterminate");
       } else {
-        const ownerStat = fs.lstatSync(owner);
-        if (ownerStat.isSymbolicLink() || !ownerStat.isFile()) fail(`unsafe writer owner record: ${owner}`);
-        let pid;
-        try { pid = JSON.parse(fs.readFileSync(owner, "utf8")).pid; } catch { pid = undefined; }
+        const { pid } = readWriterOwner(owner, layout.home, layout.root);
         let live = false;
-        if (Number.isInteger(pid) && pid > 0) {
-          try { process.kill(pid, 0); live = true; } catch (probe) { if (probe.code === "EPERM") live = true; }
-        }
+        try { process.kill(pid, 0); live = true; } catch (probe) { if (probe.code === "EPERM") live = true; }
         if (live) fail(`another logbook writer is active (pid ${pid})`);
       }
       const stale = `${layout.lock}.stale.${process.pid}.${crypto.randomBytes(4).toString("hex")}`;

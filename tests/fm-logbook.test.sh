@@ -247,14 +247,23 @@ test_one_live_writer_refuses_a_competing_update() {
   write_stage_update "$update" "Competing stage" "A competing stage finished." active
   lock="$home/data/logbook/.writer.lock"
   mkdir "$lock"
+  touch -t 202001010000 "$lock"
   set +e
   out=$(run_logbook "$home" update --mission "Writer mission" --input "$update" 2>&1)
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "a writer initializing its lock was displaced"
-  assert_contains "$out" "another logbook writer is active" "initializing writer refusal did not name the conflict"
+  assert_contains "$out" "ownership is indeterminate" "initializing writer refusal did not name the conflict"
   [ "$(shasum -a 256 "$page" | awk '{print $1}')" = "$before" ] || fail "initializing writer changed the page"
-  printf '{"pid":%s,"claimed_at":"2026-08-27T00:00:00Z"}\n' "$$" > "$lock/owner.json"
+  printf '{}\n' > "$lock/owner.json"
+  set +e
+  out=$(run_logbook "$home" update --mission "Writer mission" --input "$update" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a writer with an invalid owner record was displaced"
+  assert_contains "$out" "ownership is indeterminate" "invalid owner refusal did not name the conflict"
+  [ "$(shasum -a 256 "$page" | awk '{print $1}')" = "$before" ] || fail "invalid owner record changed the page"
+  printf '{"token":"0123456789abcdef0123456789abcdef","pid":%s,"claimed_at":"2026-08-27T00:00:00Z"}\n' "$$" > "$lock/owner.json"
   set +e
   out=$(run_logbook "$home" update --mission "Writer mission" --input "$update" 2>&1)
   rc=$?
