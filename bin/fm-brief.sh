@@ -45,6 +45,11 @@
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
+# Every scaffold opens with a "What you publish" section, before Task or Charter,
+# that forbids firstmate's internal role vocabulary and nautical flavor in anything
+# the worker publishes outside the fleet (PR title or body, commit message, review
+# comment, issue, committed file) and gives "the repository owner" as the wording to
+# use instead. It governs published text only, not how the brief addresses the worker.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
@@ -173,6 +178,16 @@ BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
 mkdir -p "$DATA/$ID"
 
+# Every generated variant (ship, scout, secondmate charter) carries this section.
+# It governs only what the worker PUBLISHES, never how this brief addresses the
+# worker or how the worker is meant to read this brief; do not rename the
+# in-brief instructional uses of these same words below.
+PUBLISH_SECTION=$(printf '%s\n' \
+'# What you publish' \
+'Never let a pull request title or body, a commit message, a review comment, an issue, or any file committed to the project carry firstmate'\''s internal role vocabulary - captain, first mate, crewmate, crew, scout, second mate - or its nautical flavor.' \
+'Write "the repository owner" or "the owner of the pull request" instead.' \
+'This is about what you publish outside the fleet, not about how this brief addresses you or how you should read it.')
+
 shell_quote() {
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
@@ -218,6 +233,8 @@ else
 fi
 cat > "$BRIEF" <<EOF
 You are a persistent second mate managed by the main firstmate. Work on your own; do not wait for a human.
+
+$PUBLISH_SECTION
 
 # Charter
 $SECONDMATE_CHARTER
@@ -323,6 +340,8 @@ if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
+$PUBLISH_SECTION
+
 # Task
 {TASK}
 
@@ -415,6 +434,7 @@ Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 When starting no-mistakes, make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
+\`--intent\` is published text: the pipeline derives the pull request title, body, and commit text from it, so apply \`# What you publish\` to the intent you compose. Keep every requirement's substance, but rewrite any mention of firstmate's role vocabulary - captain, first mate, crewmate, crew, scout, second mate - and its nautical flavor into \`the repository owner\` or task-specific plain language rather than dropping the requirement.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 Two firstmate-specific rules layer on top of that guidance:
@@ -435,6 +455,8 @@ DOD=${DOD%$'\n'}
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+
+$PUBLISH_SECTION
 
 # Task
 {TASK}

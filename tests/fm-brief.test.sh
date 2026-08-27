@@ -345,6 +345,10 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD must keep direct requirements and exclude generic scaffold boilerplate from --intent"
   assert_grep "exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific" "$brief" \
     "no-mistakes DOD must exclude non-task-specific scaffold boilerplate from --intent"
+  assert_grep "apply \`# What you publish\` to the intent you compose" "$brief" \
+    "no-mistakes DOD must subject the composed --intent to the publish rule"
+  assert_grep "Keep every requirement's substance" "$brief" \
+    "no-mistakes DOD must require rewriting role vocabulary in --intent without dropping requirements"
   # The apostrophe in "firstmate's authority check" is now structurally safe
   # (no `$(...)` wrapper around the heredoc), so it renders verbatim instead of
   # being reworded or escaped away. test_no_heredoc_in_command_substitution
@@ -751,6 +755,41 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+test_publish_rule_covers_all_variants() {
+  local home ship scout charter
+  home="$TMP_ROOT/publish-rule-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-publish-ship firstmate --mode no-mistakes >/dev/null 2>&1
+  ship="$home/data/brief-publish-ship/brief.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-publish-scout firstmate --scout >/dev/null 2>&1
+  scout="$home/data/brief-publish-scout/brief.md"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='sample charter' \
+    "$ROOT/bin/fm-brief.sh" brief-publish-secondmate --secondmate --no-projects >/dev/null 2>&1
+  charter="$home/data/brief-publish-secondmate/brief.md"
+
+  local brief kind heading publish_line heading_line
+  for kind_brief in "ship:$ship:# Task" "scout:$scout:# Task" "secondmate:$charter:# Charter"; do
+    kind=${kind_brief%%:*}
+    brief=${kind_brief#*:}
+    heading=${brief#*:}
+    brief=${brief%%:*}
+    assert_present "$brief" "$kind: brief was not scaffolded"
+    assert_grep "# What you publish" "$brief" \
+      "$kind: brief missing the publish-vocabulary section"
+    assert_grep "captain, first mate, crewmate, crew, scout, second mate" "$brief" \
+      "$kind: brief did not name the covered role vocabulary"
+    assert_grep "the repository owner" "$brief" \
+      "$kind: brief did not give the substitution to use instead"
+    publish_line=$(grep -n '^# What you publish$' "$brief" | head -n 1 | cut -d: -f1)
+    heading_line=$(grep -n "^$heading\$" "$brief" | head -n 1 | cut -d: -f1)
+    [ -n "$publish_line" ] && [ -n "$heading_line" ] \
+      || fail "$kind: could not locate the publish section or the $heading heading"
+    [ "$publish_line" -lt "$heading_line" ] \
+      || fail "$kind: publish section (line $publish_line) must precede $heading (line $heading_line)"
+  done
+  pass "fm-brief.sh: every generated variant forbids publishing firstmate's role vocabulary"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -772,3 +811,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_publish_rule_covers_all_variants
