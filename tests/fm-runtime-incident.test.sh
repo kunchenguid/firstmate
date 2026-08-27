@@ -484,19 +484,74 @@ test_remaining_classifier_categories() {
   pass "deployment, local-service, and unknown incidents stay in their bounded categories"
 }
 
-test_remote_credentials_are_not_recorded() {
-  local home origin repo out
-  home=$(make_home credential-redaction)
-  origin=$(make_origin credential-redaction)
-  repo=$home/projects/titan
-  clone_origin "$origin" "$repo"
-  git -C "$repo" remote set-url origin https://secret-token@example.com/acme/titan.git
-  out=$(run_triage "$home" credential-redaction "$repo" "Unknown production failure")
-  printf '%s' "$out" | jq -e '
-    .repository.canonical_remote == "https://example.com/acme/titan"
+test_repository_identity_normalizes_transports_and_relative_paths() {
+  local home origin ssh_repo https_repo crew_state out expected repo_a repo_b
+  home=$(make_home transport-identity)
+  origin=$(make_origin transport-identity)
+  ssh_repo=$home/projects/titan-ssh
+  https_repo=$home/projects/titan-https
+  clone_origin "$origin" "$ssh_repo"
+  clone_origin "$origin" "$https_repo"
+  git -C "$ssh_repo" remote set-url origin git@example.com:Acme/Titan.git
+  git -C "$https_repo" remote set-url origin https://copy-token@example.com/Acme/Titan.git
+  ssh_repo=$(cd "$ssh_repo" && pwd -P)
+  https_repo=$(cd "$https_repo" && pwd -P)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] transport-worker - Restore repository identity after checkout mismatch (repo: titan) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/transport-worker.meta" \
+    "window=firstmate:fm-transport-worker" \
+    "worktree=$https_repo" \
+    "project=$https_repo" \
+    "harness=codex" \
+    "kind=ship"
+  printf 'state: working · source: pane · restoring repository identity\n' \
+    > "$home/state/transport-worker.current-state"
+  printf '{"production":{"origin":"https://deploy-token@example.com/Acme/Titan.git"}}\n' \
+    > "$home/production.json"
+  crew_state=$(make_crew_state_fake "$home")
+  out=$(FM_CREW_STATE_BIN="$crew_state" run_triage "$home" transport-identity "$ssh_repo" \
+    "Restore repository identity after checkout mismatch" \
+    --evidence "$home/production.json" --scan-root "$home/projects")
+  printf '%s' "$out" | jq -e --arg worker "$https_repo" '
+    .repository.canonical_remote == "forge://example.com/Acme/Titan"
+      and ([.repository.copies[].origin] | unique) == ["forge://example.com/Acme/Titan"]
+      and (.repository.copies | length) == 2
+      and .repository.multiple_copies_same_origin == true
+      and .diagnosis.observations.production.origin == "forge://example.com/Acme/Titan"
+      and .diagnosis.classification == "unknown"
+      and (.workers.registry_entries[] | select(.id == "transport-worker")
+        | .working_directory == $worker
+          and .wrong_worktree == false
+          and .activity_matches_incident == true)
       and ([.repository.copies[] | has("origin_raw")] | any | not)
-  ' >/dev/null || fail "incident record retained remote credentials: $out"
-  pass "repository identity is normalized without persisting remote credentials"
+  ' >/dev/null || fail "transport-independent repository identity diverged: $out"
+
+  home=$(make_home relative-identity)
+  origin=$(make_origin relative-identity)
+  mkdir -p "$home/projects/local-a" "$home/projects/local-b"
+  repo_a=$home/projects/local-a/work
+  repo_b=$home/projects/local-b/work
+  clone_origin "$origin" "$repo_a"
+  clone_origin "$origin" "$repo_b"
+  git -C "$repo_a" remote set-url origin ../origin.git
+  git -C "$repo_b" remote set-url origin ../origin.git
+  repo_a=$(cd "$repo_a" && pwd -P)
+  repo_b=$(cd "$repo_b" && pwd -P)
+  expected=file://$(cd "$home/projects/local-a" && pwd -P)/origin.git
+  out=$(run_triage "$home" relative-identity "$repo_a" \
+    "Unknown production failure" --scan-root "$home/projects")
+  printf '%s' "$out" | jq -e --arg expected "$expected" --arg unrelated "$repo_b" '
+    .repository.canonical_remote == $expected
+      and (.repository.copies | length) == 1
+      and ([.repository.copies[].path] | index($unrelated)) == null
+  ' >/dev/null || fail "relative remotes from unrelated checkouts collapsed to one identity: $out"
+  pass "repository identity unifies transports and separates relative local remotes"
 }
 
 test_bounded_inventory_omissions_are_disclosed() {
@@ -734,7 +789,7 @@ test_stale_remote_never_wins_fallback_authority
 test_proposed_hotfix_already_deployed
 test_proven_application_defect_escalates
 test_remaining_classifier_categories
-test_remote_credentials_are_not_recorded
+test_repository_identity_normalizes_transports_and_relative_paths
 test_bounded_inventory_omissions_are_disclosed
 test_worktree_inventory_is_authority_bound_and_enrichment_is_capped
 test_aggregate_record_bounds_and_atomic_size_refusal

@@ -43,7 +43,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Any, Callable, Iterable
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 
 SCHEMA = "fm-runtime-incident.v1"
@@ -160,25 +160,41 @@ def commit_is_ancestor(repo: Path, ancestor: str | None, descendant: str | None)
     return result.returncode == 0
 
 
-def normalize_origin(value: str | None) -> str | None:
+def forge_origin_key(host: str, path: str) -> str | None:
+    normalized_host = host.lower().strip("[]").rstrip(".")
+    normalized_path = re.sub(r"/+", "/", unquote(path)).strip("/").removesuffix(".git")
+    if not normalized_host or not normalized_path:
+        return None
+    return f"forge://{normalized_host}/{normalized_path}"
+
+
+def normalize_origin(value: str | None, checkout: Path | None = None) -> str | None:
     if not value:
         return None
     value = value.strip()
-    if value.startswith("file://"):
+    if value.lower().startswith("file:"):
         parsed = urlparse(value)
-        return "file://" + str(Path(parsed.path).resolve()).removesuffix(".git")
-    if value.startswith("/"):
-        return "file://" + str(Path(value).resolve()).removesuffix(".git")
+        path_value = unquote(parsed.path)
+        if parsed.netloc and parsed.netloc.lower() != "localhost":
+            path_value = f"//{parsed.netloc}{path_value}"
+        path = Path(path_value).expanduser()
+        if not path.is_absolute():
+            if checkout is None:
+                return None
+            path = checkout / path
+        return "file://" + str(path.resolve())
     if "://" in value:
         parsed = urlparse(value)
-        host = (parsed.hostname or "").lower()
-        port = f":{parsed.port}" if parsed.port else ""
-        path = parsed.path.rstrip("/").removesuffix(".git")
-        return f"{parsed.scheme.lower()}://{host}{port}{path}"
+        return forge_origin_key(parsed.hostname or "", parsed.path)
     match = re.match(r"^(?:(?P<user>[^@/:]+)@)?(?P<host>[^:]+):(?P<path>.+)$", value)
     if match:
-        return f"ssh://{match.group('host').lower()}/{match.group('path').rstrip('/').removesuffix('.git')}"
-    return value.rstrip("/").removesuffix(".git")
+        return forge_origin_key(match.group("host"), match.group("path"))
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        if checkout is None:
+            return None
+        path = checkout / path
+    return "file://" + str(path.resolve())
 
 
 def git_default_branch(repo: Path) -> str | None:
@@ -206,7 +222,7 @@ def repo_record(path: Path, *, include_branches: bool = False) -> dict[str, Any]
         return None
     top = Path(top_value).resolve()
     origin_raw = run_git(top, "remote", "get-url", "origin")
-    origin = normalize_origin(origin_raw)
+    origin = normalize_origin(origin_raw, top)
     branch = run_git(top, "symbolic-ref", "--quiet", "--short", "HEAD")
     head = run_git(top, "rev-parse", "HEAD")
     common_dir_raw = run_git(top, "rev-parse", "--git-common-dir")
