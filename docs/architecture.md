@@ -139,6 +139,7 @@ Every classification returns a verdict of busy, idle, unknown, or dead together 
 Each converted adapter reports its own turn lifecycle through a machine-readable contract the vendor already exposes, rather than through rendered footer text: Pi and pi-signed through the Firstmate-owned extension's `agent_start` and `agent_settled` confirmed by `ctx.isIdle()`, OpenCode through its plugin's semantic `session.status`, Claude through owned `UserPromptSubmit`, `Stop`, `StopFailure`, and `SessionEnd` hooks, Muse through its session log, and Cursor through its conversation transcript.
 Kimi behind Pi inherits Pi's lifecycle.
 Codex and standalone Kimi classify unknown behind explicit probes until a semantic source is live-verified for them, and Grok keeps one clearly isolated rendered-tail fallback that can only ever classify a Grok task.
+agy has no armed busy writer at all: its global Stop hook is a wake notification and does not fire on an Escape interrupt, so a hook-written record would stick busy after a cancel and an agy worker classifies unknown until a semantic source is verified for it.
 
 Missing, malformed, stale, untrusted, or unverified semantic state is unknown, never idle, and unknown is never promoted to busy either.
 Ordinary task-state consumers act only on an exact busy verdict, so an unreadable worker surfaces for a closer look instead of being absorbed as still-working or written off as finished.
@@ -214,7 +215,7 @@ The session-start bootstrap step keeps valid dispatch configuration silent unles
 When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness, so `config/crew-harness` is only automatic when no dispatch profile file is active.
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
-That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse while preserving the requested profile for later audit.
+That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, and cursor, plus the crewmate/scout-only muse and agy adapters, while preserving the requested profile for later audit.
 
 ## Optional secondmates
 

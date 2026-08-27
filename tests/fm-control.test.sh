@@ -35,7 +35,7 @@ mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse"
+VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse agy"
 
 # The expectation table, written out independently of the implementation so a
 # silent change to either side shows up here. The fourth field is the composer
@@ -52,6 +52,7 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
     kimi) printf '/exit\tEscape\t1\t\n' ;;
     cursor) printf '/exit\tEscape\t1\t\n' ;;
     muse) printf '/exit\tEscape\t1\tC-u\n' ;;
+    agy) printf '/exit\tEscape\t1\t\n' ;;
     *) return 1 ;;
   esac
 }
@@ -266,7 +267,8 @@ test_harness_family_resolution() {
   local pair recorded want got
   for pair in claude:claude claude-latest:claude codex:codex codex-cli:codex \
       opencode:opencode grok:grok grok-2:grok kimi:kimi cursor:cursor \
-      cursor-agent:cursor muse:muse muse-bin-0.1.0:muse pi:pi \
+      cursor-agent:cursor muse:muse muse-bin-0.1.0:muse agy:agy \
+      agy-1.1.12:agy pi:pi \
       pi-signed:pi-signed; do
     recorded=${pair%%:*}
     want=${pair#*:}

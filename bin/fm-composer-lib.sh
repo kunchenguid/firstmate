@@ -67,6 +67,17 @@
 #                get`; the tmux foreground-process probe), because a blank
 #                region between two transcript rules is otherwise exactly the
 #                strict rule's unidentifiable blank row.
+#                agy draws the same two rules but with a shell `>` prompt on
+#                the content row (verified 2026-08-14, agy 1.1.12). The glyph
+#                is not a substitute for identity: the shortcut is refused
+#                when identity is unavailable (zellij, cmux, and orca stay
+#                unknown), when it is still unfetched, and when the probe
+#                names pi. After a probe-absent or non-pi identity, empty `>`
+#                is empty and `> hello` is pending. It still buys only the
+#                identity half: the pair must pass the same
+#                FM_COMPOSER_PI_MAX_LINES geometry bound, and `>` is the ONE
+#                shell glyph verified in this shape - `$`, `%`, and `#` are
+#                not. A bare `>` with no rules stays a dead shell.
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
@@ -360,6 +371,10 @@ fm_busy_lines_match() {  # [harness]
 # literal and no entry is ever exposed to pathname expansion.
 FM_COMPOSER_AGENT_PROMPT_GLYPHS=$(printf '%s\n' '❯' '›' '⟩' '→')
 FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
+# The SEPARATED subset: the shell glyphs verified to stand in for a live agent
+# identity between two solid rules. Only agy's `>` is (agy 1.1.12); a lone `$`,
+# `%`, or `#` in that region is unproven and must keep deferring to identity.
+FM_COMPOSER_SEPARATED_PROMPT_GLYPHS=$(printf '%s\n' '>')
 
 # The ONE fleet-wide idle-placeholder set: composer text a harness renders in
 # an EMPTY composer that a plain capture cannot tell from typed text. Grok's
@@ -1243,6 +1258,13 @@ EOF
     if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
        && [ "$cy" -gt "$FM_COMPOSER_SCAN_PI_OPEN" ] \
        && [ "$cy" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; then
+      if _fm_composer_separated_has_shell_prompt "$plain" \
+           "$((FM_COMPOSER_SCAN_PI_OPEN + 1))" "$((FM_COMPOSER_SCAN_PI_CLOSE - 1))" \
+           "$has_identity" "$identity"; then
+        _fm_composer_classify_rows "$screen" "$styled" 0 \
+          "$((FM_COMPOSER_SCAN_PI_OPEN + 1))" "$((FM_COMPOSER_SCAN_PI_CLOSE - 1))"
+        return 0
+      fi
       _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
       return 0
     fi
@@ -1264,7 +1286,14 @@ EOF
   fi
   case "$FM_COMPOSER_SELECTED_KIND" in
     pi)
-      _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
+      if _fm_composer_separated_has_shell_prompt "$plain" \
+           "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST" \
+           "$has_identity" "$identity"; then
+        _fm_composer_classify_rows "$screen" "$styled" 0 \
+          "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST"
+      else
+        _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
+      fi
       ;;
     box)
       _fm_composer_classify_rows "$screen" "$styled" "$FM_COMPOSER_SELECTED_AMBIG" \
@@ -1373,6 +1402,40 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
   else
     _fm_composer_classify_bare_row "$screen" "$styled" "$row"
   fi
+}
+
+# A separated pair whose content row starts with a VERIFIED separated shell
+# glyph can be agy's composer, but the glyph does not stand in for identity.
+# The structure half still has to hold - hence the PAIR_VALID gate, which
+# keeps the region inside FM_COMPOSER_PI_MAX_LINES exactly as
+# _fm_composer_pi_verdict does. The identity half has to hold too: refuse
+# the shortcut when has_identity is not 1 (unknown is the honest verdict on
+# an unverified identityless surface), while identity is still unfetched
+# (fall through so _fm_composer_pi_verdict asks the adapter to probe), or
+# once that probe names pi. A lone `>` inside a live pi pair must never read
+# empty on the strength of a glyph. agy is markerless, so on an
+# identity-capable backend the probe comes back probe-absent (or names the
+# plain shell it is) and the second read takes the shortcut.
+_fm_composer_separated_has_shell_prompt() {  # <plain> <first-content> <last-content> <has-identity> <identity>
+  local plain=$1 first=$2 last=$3 has_identity=${4:-0} identity=${5:-} row line trimmed glyph
+  [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" = 1 ] || return 1
+  [ "$has_identity" = 1 ] || return 1
+  if [ "$identity" != probe-absent ] \
+     && { [ -z "$identity" ] || [ "${identity%%$'\t'*}" = pi ]; }; then
+    return 1
+  fi
+  row=$first
+  while [ "$row" -le "$last" ]; do
+    line=$(_fm_composer_screen_row "$row" "$plain")
+    trimmed=$line
+    fm_composer_normalize_trim_var trimmed
+    if fm_composer_leading_shell_glyph_var glyph "$trimmed" \
+       && _fm_composer_is_prompt_glyph "$glyph" "$FM_COMPOSER_SEPARATED_PROMPT_GLYPHS"; then
+      return 0
+    fi
+    row=$((row + 1))
+  done
+  return 1
 }
 
 # The pi separated-shape verdict: identity + structure conjunction (herdr's

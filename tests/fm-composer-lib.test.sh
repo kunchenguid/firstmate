@@ -324,7 +324,63 @@ test_matrix_pi_separated_needs_identity() {
   assert_screen "lone glyph without identity capability" empty "$CAPS_STYLED_NOID" "$typed"
   assert_screen "lone glyph on plain backend" empty "$CAPS_PLAIN" "$typed"
   assert_screen "lone glyph with non-pi identity" empty "$CAPS_STYLED" "$typed" '' "$none"
+  # A lone `>` is agy's idle composer AND a legal pi draft. The identity wins
+  # over the glyph shortcut at both separated-pair call sites: a live pi draft
+  # must never read empty, the one verdict that authorizes overwriting it.
+  # Identity-capable adapters classify FIRST with the identity unfetched, so
+  # that first read is exactly where a glyph-only empty would escape, and it has
+  # to ask for the probe instead.
+  typed=$'transcript\n────────────────────────\n>\n────────────────────────\n footer'
+  assert_screen "unprobed greater-than pair on tmux" need-identity "$CAPS_TMUX" "$typed" 2
+  assert_screen "unprobed greater-than pair on herdr" need-identity "$CAPS_STYLED" "$typed" ''
+  assert_screen "pi greater-than draft on tmux" pending "$CAPS_TMUX" "$typed" 2 "$pi_idle"
+  assert_screen "pi greater-than draft on herdr" pending "$CAPS_STYLED" "$typed" '' "$pi_idle"
+  assert_screen "working pi greater-than draft on tmux" pending "$CAPS_TMUX" "$typed" 2 "$pi_working"
+  assert_screen "working pi greater-than draft on herdr" pending "$CAPS_STYLED" "$typed" '' "$pi_working"
   pass "matrix: pi's separated composer needs identity + structure; the blank row alone never proves it"
+}
+
+test_matrix_agy_separated_shell_prompt() {
+  # agy 1.1.12 draws two solid `─` rules around a shell `>` prompt. That glyph
+  # is a shape check layered on top of identity, never a substitute for it: the
+  # shortcut runs only once identity has been fetched and came back
+  # `probe-absent` or naming a non-pi harness. Backends that cannot carry
+  # identity at all stay `unknown`, and a bare `>` with no rules stays a dead
+  # shell.
+  local idle pending
+  idle=$'transcript\n────────────────────────────────\n>\n────────────────────────────────\n? for shortcuts'
+  pending=$'transcript\n────────────────────────────────\n> hello pending\n────────────────────────────────\n? for shortcuts'
+  assert_screen "agy idle cursorless" unknown "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "agy pending cursorless" unknown "$CAPS_PLAIN" "$pending"
+  # On an identity-capable backend the shape is worth one lazy probe first,
+  # because the same `>` pair could be a live pi draft. agy publishes no pi
+  # marker, so the probe comes back absent (or names the plain shell it is) and
+  # the second read takes the glyph shortcut to agy's verified verdicts.
+  local none_identity
+  none_identity=$(printf 'zsh\t')
+  assert_screen "unprobed agy pair on tmux" need-identity "$CAPS_TMUX" "$idle" 2
+  assert_screen "unprobed agy pair on herdr" need-identity "$CAPS_STYLED" "$idle" ''
+  assert_screen "agy idle separated shell prompt" empty "$CAPS_TMUX" "$idle" 2 probe-absent
+  assert_screen "agy pending separated shell prompt" pending "$CAPS_TMUX" "$pending" 2 probe-absent
+  assert_screen "agy idle under a non-pi identity" empty "$CAPS_TMUX" "$idle" 2 "$none_identity"
+  assert_screen "agy pending under a non-pi identity" pending "$CAPS_TMUX" "$pending" 2 "$none_identity"
+  assert_screen "agy idle on herdr after the probe" empty "$CAPS_STYLED" "$idle" '' probe-absent
+  assert_screen "agy pending on herdr after the probe" pending "$CAPS_STYLED" "$pending" '' probe-absent
+  assert_screen "bare shell prompt is still a dead shell" unknown "$CAPS_TMUX" $'> ' 0
+  # The glyph never relaxes the structure half of pi's conjunction: a region
+  # taller than FM_COMPOSER_PI_MAX_LINES is not a composer, and only `>` was
+  # ever verified in this shape. Each pair pins the same refusal from both
+  # sides - the identityless row because no identity means no shortcut at all,
+  # and the probe-absent row because geometry and glyph are still checked after
+  # identity clears.
+  local tall dollar
+  tall=$'────────────────────────────────\n\n\n\n\n\n\n\n\n>\n────────────────────────────────'
+  assert_screen "tall separated region is not a proven agy composer" unknown "$CAPS_STYLED_NOID" "$tall"
+  assert_screen "tall separated region under a cursor" unknown "$CAPS_TMUX" "$tall" 9 probe-absent
+  dollar=$'transcript\n────────────────────────────────\n$\n────────────────────────────────\n? for shortcuts'
+  assert_screen "unverified separated dollar prompt" unknown "$CAPS_STYLED_NOID" "$dollar"
+  assert_screen "unverified separated dollar prompt under a cursor" unknown "$CAPS_TMUX" "$dollar" 2 probe-absent
+  pass "matrix: agy's separated greater-than composer classifies only after identity clears; a bare greater-than never does"
 }
 
 test_matrix_opencode_leftbar_signals() {
@@ -618,6 +674,7 @@ test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_pi_separated_needs_identity
+test_matrix_agy_separated_shell_prompt
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box

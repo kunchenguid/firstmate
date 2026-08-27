@@ -42,6 +42,8 @@
 #   endpoint-gone, herdr-native, grok-regex, muse-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
 #   kimi-unverified, codex-unverified, capture-failed, no-target
+# agy (Antigravity CLI) is crewmate/scout only and has no armed busy writer:
+# its Stop hook is a wake notification, and Stop does not fire on Escape.
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:

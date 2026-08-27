@@ -1130,6 +1130,8 @@ kimi model profile is accepted^{"rules":[{"when":"kimi work","use":{"harness":"k
 unsupported kimi effort is flagged^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kimi:high
 cursor model profile is accepted^{"rules":[{"when":"cursor work","use":{"harness":"cursor","model":"cursor-grok-4.5-high"}}]}^empty^
 unsupported cursor effort is flagged^{"rules":[{"when":"cursor work","use":{"harness":"cursor","model":"cursor-grok-4.5-high","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: cursor:high
+agy model profile is accepted^{"rules":[{"when":"agy work","use":{"harness":"agy","model":"gemini-3.1-pro-high"}}]}^empty^
+unsupported agy effort is flagged^{"rules":[{"when":"agy work","use":{"harness":"agy","model":"gemini-3.1-pro-high","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: agy:high
 array use with quota-balanced is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}]}^empty^
 array use without select is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}]}]}^empty^
 one-element array use is accepted^{"rules":[{"when":"focused feature","use":[{"harness":"claude"}]}]}^empty^

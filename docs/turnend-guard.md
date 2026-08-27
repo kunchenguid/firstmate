@@ -154,6 +154,15 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - The hook remains inert unless the payload `cwd` contains a per-task token pointer that resolves through Firstmate's private registry to one `state/<id>.turn-ended` marker.
 - Installation refuses before writing unless `python3` with `tomllib` and `jq` are available.
 - If `jq` is removed after installation, the hook remains silent and exits 0, turn-end wakes stop, and Kimi crews fall back to idle detection.
+- Antigravity CLI (`agy`) 1.1.12 exposes only global hook configuration in `~/.gemini/config/hooks.json`, including a `Stop` event whose payload carries a `workspacePaths` array; a project-local `.agents/hooks.json` loaded zero files.
+- agy has no project-level hook configuration and remains outside the primary guard integrations above.
+- Captain-approved agy crew wake support uses `bin/fm-agy-turnend-hook.sh` to upsert only one surgically named Firstmate key in that global config and install a silent always-zero hook.
+- That hook checks every `workspacePaths` entry rather than only the first, so a multi-root payload still wakes the task whose worktree it lists at any index.
+- Each candidate must still hold a per-task token pointer that resolves through Firstmate's private registry to one `state/<id>.turn-ended` marker, and a payload carrying no such pointer leaves the hook inert.
+- Its installation refuses before writing unless `python3` and `jq` are available, unless `hooks.json` is either absent or a regular non-symlink file holding a JSON object, unless `~/.gemini/config` and the `fm-agy-turn-end.d` token registry are absent or real non-symlink directories, and unless `fm-agy-turn-end.sh` is absent or holds a Firstmate-authored hook.
+- Removal de-registers the key before those file guards run, so an unrecognized hook script is always unwired from agy even when Firstmate refuses to delete it.
+- If `jq` is removed after installation, the agy hook stays silent and exits 0, turn-end wakes stop, and agy crews fall back to idle detection.
+- Teardown retires the agy registry entry, the per-task state token, and the worktree pointer alongside grok's and kimi's.
 - Unreadable hook input remains fail-open.
 - No harness adapter uses a shell ampersand to manufacture supervision.
 
@@ -165,6 +174,7 @@ It also covers true-reason banner wording and reason-keyed episode dedup survivi
 `tests/fm-cursor-primary.test.sh` covers the Cursor park end to end over real processes with no harness installed: each tracked Claude-shaped entrypoint standing down on a Cursor payload, both follow-up sources, the bounded repair nag and its reset, the nested loop bounds, supersession, away-mode and lock-ownership inertness, Pi-host stand-down without Cursor identity and continued parking when `PI_CODING_AGENT` leaks alongside `CURSOR_AGENT` or `CURSOR_INVOKED_AS`, child-worktree exclusion, and that the adapter never exits 2.
 `FM_CURSOR_PRIMARY_LIVE_E2E=1 tests/fm-cursor-primary-live-e2e.test.sh` is the opt-in guard that proves the same behavior against the installed cursor-agent and fails naming the harness and version.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
+`tests/fm-agy-harness.test.sh` covers the separate agy crew hook's surgical install, idempotence, foreign-key preservation, pointer and token gating, single-line, pretty-printed, and multi-root payload framings, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.
 [`verification/supervision.md`](verification/supervision.md#turn-end-guard) records the active cross-harness empirical evidence, including the 2026-07-24 Claude `asyncRewake` revalidation.
