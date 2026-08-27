@@ -765,7 +765,7 @@ def pr_contract_from_meta(home: Home, event: dict[str, Any]) -> dict[str, str]:
     if not PR_URL.fullmatch(pr_url):
         raise OpsError("Pavel PR owner has not recorded a canonical PR URL")
     pr_head = meta.get("pr_head", "")
-    if pr_head and not re.fullmatch(r"[0-9a-fA-F]{6,64}", pr_head):
+    if not re.fullmatch(r"[0-9a-fA-F]{6,64}", pr_head):
         raise OpsError("Pavel PR owner recorded an invalid PR head")
     return {"pr_url": pr_url, "pr_head": pr_head}
 
@@ -785,6 +785,18 @@ def validated_pr_contract(home: Home, event: dict[str, Any], status: dict[str, A
     if pr_head and not re.fullmatch(r"[0-9a-fA-F]{6,64}", pr_head):
         raise OpsError("Pavel status owner recorded an invalid PR head")
     return {"pr_url": pr_url, "pr_head": pr_head}
+
+
+def require_fresh_ready_status(status: dict[str, Any], purpose: str) -> None:
+    if status.get("state") not in {"delivery_ready", "done"}:
+        raise OpsError(f"Pavel checks are no longer ready for {purpose}")
+
+
+def verify_pr_contract_unchanged(before: dict[str, str], after: dict[str, str], purpose: str) -> None:
+    if after["pr_url"] != before["pr_url"]:
+        raise OpsError(f"Pavel PR URL changed during {purpose}")
+    if before["pr_head"] and after["pr_head"] != before["pr_head"]:
+        raise OpsError(f"Pavel PR head changed during {purpose}")
 
 
 def delivery_config(home: Home) -> dict[str, Any]:
@@ -978,7 +990,10 @@ def owner_status(home: Home, event: dict[str, Any]) -> dict[str, Any]:
     try:
         parsed = json.loads(output)
     except json.JSONDecodeError:
-        return {"state": "validating", "evidence": output.strip()[:500]}
+        first = output.strip().splitlines()[0] if output.strip() else ""
+        match = re.fullmatch(r"state:\s*([A-Za-z0-9_-]+)(?:\s+.*)?", first)
+        state = match.group(1) if match else "validating"
+        return {"state": state, "evidence": first[:500], "format": "fm-crew-state-text"}
     if not isinstance(parsed, dict):
         raise OpsError("Pavel delivery status owner returned a non-object")
     return parsed
@@ -1052,20 +1067,20 @@ def drive(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         return driver_transition(home, event, "validating", str(status.get("evidence") or "no-mistakes validation is active"))
     if event["state"] == "validating":
         status = owner_status(home, event)
-        if status.get("state") not in {"delivery_ready", "done"}:
-            raise OpsError("Pavel validation has not reached delivery readiness")
+        require_fresh_ready_status(status, "delivery")
         pr_contract = validated_pr_contract(home, event, status)
         run_checked(home, [command_from_env(home, "FM_PAVEL_OPS_PR_CHECK", "fm-pr-check.sh"), task_id, pr_contract["pr_url"]])
+        verify_pr_contract_unchanged(pr_contract, pr_contract_from_meta(home, event), "delivery readiness")
         return driver_transition(home, event, "delivery_ready", str(status.get("evidence") or "checks green on exact PR head"))
     if event["state"] == "delivery_ready":
         status = owner_status(home, event)
-        if status.get("state") not in {"delivery_ready", "done"}:
-            raise OpsError("Pavel checks are no longer ready for merge")
+        require_fresh_ready_status(status, "merge")
         pr_contract = validated_pr_contract(home, event, status)
         pr_url = str(event.get("pr_url") or pr_contract["pr_url"])
         if pr_url != pr_contract["pr_url"]:
             raise OpsError("Pavel merge queue PR URL does not match the canonical PR owner record")
         run_checked(home, [command_from_env(home, "FM_PAVEL_OPS_PR_CHECK", "fm-pr-check.sh"), task_id, pr_url])
+        verify_pr_contract_unchanged(pr_contract, pr_contract_from_meta(home, event), "merge readiness")
         return driver_transition(home, event, "merge_queued", "guarded merge poll armed", pr_url=pr_url)
     if event["state"] == "merge_queued":
         pr_url = str(event.get("pr_url") or "")

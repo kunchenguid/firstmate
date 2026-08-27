@@ -113,6 +113,9 @@ id=$1
 pr=$2
 printf 'pr-check %s %s\n' "$id" "$pr" >> "$TASK_DB/.owners"
 printf 'pr=%s\n' "$pr" >> "$FM_HOME/state/$id.meta"
+if [ -f "$TASK_DB/.pr-check-head-change" ]; then
+  printf 'pr_head=%s\n' "$(cat "$TASK_DB/.pr-check-head-change")" >> "$FM_HOME/state/$id.meta"
+fi
 SH
 chmod 0755 "$FAKEBIN/fm-pr-check"
 
@@ -659,6 +662,19 @@ fi
   || fail "stale prose PR rejection mutated the event"
 pass "delivery-ready requires structured validation readiness"
 
+text_status=$(ingest 127 37 'Проверить штатный статус' | json_field "['event']")
+run_ops classify "$text_status" --as task --title 'Use crew state status' --intent 'Ship after crew state reports done' \
+  --reason 'ordinary delivery' --authority ordinary >/dev/null
+run_ops drive "$text_status" >/dev/null
+text_status_task=$(run_ops inspect "$text_status" | json_field "['task_id']")
+printf 'pr=%s\npr_head=%s\n' 'https://github.com/o/r/pull/12' 'cc12dd' >> "$HOME_DIR/state/$text_status_task.meta"
+printf 'state: done checks green: PR ready for review\n' > "$PAVEL_STATUS_FILE"
+run_ops drive "$text_status" >/dev/null
+run_ops drive "$text_status" >/dev/null
+[ "$(run_ops inspect "$text_status" | json_field "['state']")" = delivery_ready ] \
+  || fail "fm-crew-state text status did not advance green work"
+pass "delivery-ready accepts bounded crew-state done status"
+
 pr_substitution=$(ingest 125 35 'Проверить подмену PR' | json_field "['event']")
 run_ops classify "$pr_substitution" --as task --title 'Reject PR substitution' --intent 'Ship only the registered PR' \
   --reason 'ordinary delivery' --authority ordinary >/dev/null
@@ -702,6 +718,26 @@ fi
 [ "$(run_ops inspect "$regressed" | json_field "['state']")" = delivery_ready ] \
   || fail "regressed-check rejection mutated the event"
 pass "merge queue requires fresh green validation"
+
+head_race=$(ingest 128 38 'Проверить смену head' | json_field "['event']")
+run_ops classify "$head_race" --as task --title 'Reject PR head race' --intent 'Merge only the freshly verified PR head' \
+  --reason 'ordinary delivery' --authority ordinary >/dev/null
+run_ops drive "$head_race" >/dev/null
+head_race_task=$(run_ops inspect "$head_race" | json_field "['task_id']")
+printf 'pr=%s\npr_head=%s\n' 'https://github.com/o/r/pull/13' 'dd13ee' >> "$HOME_DIR/state/$head_race_task.meta"
+printf '{"state":"done","pr_url":"https://github.com/o/r/pull/13","pr_head":"dd13ee","evidence":"checks green on exact PR head"}\n' > "$PAVEL_STATUS_FILE"
+run_ops drive "$head_race" >/dev/null
+run_ops drive "$head_race" >/dev/null
+[ "$(run_ops inspect "$head_race" | json_field "['state']")" = delivery_ready ] \
+  || fail "head-race setup did not reach delivery_ready"
+printf 'ee14ff\n' > "$TASK_DB/.pr-check-head-change"
+if run_ops drive "$head_race" >/dev/null 2>&1; then
+  fail "delivery_ready merged after PR check changed the head"
+fi
+rm -f "$TASK_DB/.pr-check-head-change"
+[ "$(run_ops inspect "$head_race" | json_field "['state']")" = delivery_ready ] \
+  || fail "head-race rejection mutated the event"
+pass "merge queue rejects PR head changes after check"
 
 set_live_probe "$ambiguous" 'Белый, фото выше' ''
 printf 'Белый, фото выше\n' > "$TASK_DB/live-$ambiguous.expected"
