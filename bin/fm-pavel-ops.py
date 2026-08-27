@@ -1082,7 +1082,9 @@ def validate_dispatched_owner_record(home: Home, event: dict[str, Any]) -> dict[
     if not task_id:
         raise OpsError("ready Pavel work has no backlog task")
     meta = parse_meta(home.state / f"{task_id}.meta")
-    if meta.get("kind", "ship") != "ship":
+    if meta.get("endpoint_task_id") != task_id:
+        raise OpsError("Pavel dispatch metadata is not bound to this task")
+    if meta.get("kind") != "ship":
         raise OpsError("Pavel dispatch did not create a ship worker")
     if meta.get("harness") != "pi":
         raise OpsError("Pavel dispatch did not use the verified Pi adapter")
@@ -1504,33 +1506,40 @@ def telegram_update_to_intake(update: dict[str, Any]) -> dict[str, Any] | None:
 
 def collect_telegram(home: Home, args: argparse.Namespace) -> dict[str, Any]:
     query: dict[str, Any] = {"limit": args.limit, "timeout": args.timeout}
-    offset = load_telegram_offset(home)
+    with home.lock():
+        offset = load_telegram_offset(home)
     if offset is not None:
         query["offset"] = offset
     updates = telegram_request_json(home, "getUpdates", query)["result"]
     handled = 0
     ingested = 0
     duplicates = 0
-    for update in updates:
-        if not isinstance(update, dict):
-            raise OpsError("Telegram update batch contained a non-object update")
-        update_id = update.get("update_id")
-        if isinstance(update_id, bool) or not isinstance(update_id, int):
-            raise OpsError("Telegram update lacks an integer update_id")
-        raw = telegram_update_to_intake(update)
-        if raw is not None:
-            try:
-                event, duplicate = ingest_one(home, raw)
-            except OpsError as exc:
-                if "configured Pavel principal" not in str(exc) and "allowed Pavel operations chat" not in str(exc):
-                    raise
-            else:
-                ingested += 1
-                duplicates += 1 if duplicate else 0
-                home.audit("telegram-collected", event=event["id"], update_id=update_id, duplicate=duplicate)
-        save_telegram_offset(home, update_id + 1)
-        handled += 1
-    return {"handled": handled, "ingested": ingested, "duplicates": duplicates, "next_update_id": load_telegram_offset(home)}
+    with home.lock():
+        current_offset = load_telegram_offset(home)
+        for update in updates:
+            if not isinstance(update, dict):
+                raise OpsError("Telegram update batch contained a non-object update")
+            update_id = update.get("update_id")
+            if isinstance(update_id, bool) or not isinstance(update_id, int):
+                raise OpsError("Telegram update lacks an integer update_id")
+            if current_offset is not None and update_id < current_offset:
+                continue
+            raw = telegram_update_to_intake(update)
+            if raw is not None:
+                try:
+                    event, duplicate = ingest_one(home, raw)
+                except OpsError as exc:
+                    if "configured Pavel principal" not in str(exc) and "allowed Pavel operations chat" not in str(exc):
+                        raise
+                else:
+                    ingested += 1
+                    duplicates += 1 if duplicate else 0
+                    home.audit("telegram-collected", event=event["id"], update_id=update_id, duplicate=duplicate)
+            save_telegram_offset(home, update_id + 1)
+            current_offset = update_id + 1
+            handled += 1
+        next_update_id = load_telegram_offset(home)
+    return {"handled": handled, "ingested": ingested, "duplicates": duplicates, "next_update_id": next_update_id}
 
 
 def expected_outbound_contract(home: Home, event: dict[str, Any], purpose: str, text: str, outbound_id: str) -> dict[str, str]:
@@ -1912,6 +1921,13 @@ def main() -> int:
     args = parser().parse_args()
     try:
         home = Home()
+        if args.command == "collect":
+            if args.limit < 1 or args.limit > 100:
+                raise OpsError("Telegram collect --limit must be 1..100")
+            if args.timeout < 0 or args.timeout > 50:
+                raise OpsError("Telegram collect --timeout must be 0..50")
+            print_json(collect_telegram(home, args))
+            return 0
         with home.lock():
             if args.command == "ingest":
                 if args.file:
@@ -1923,11 +1939,7 @@ def main() -> int:
                 event, duplicate = ingest_one(home, raw)
                 print_json({"event": event["id"], "duplicate": duplicate, "state": event["state"], "wake_pending": event["wake_pending"]})
             elif args.command == "collect":
-                if args.limit < 1 or args.limit > 100:
-                    raise OpsError("Telegram collect --limit must be 1..100")
-                if args.timeout < 0 or args.timeout > 50:
-                    raise OpsError("Telegram collect --timeout must be 0..50")
-                print_json(collect_telegram(home, args))
+                raise OpsError("unexpected locked collect dispatch")
             elif args.command == "arm-collector":
                 print_json(arm_collector(home))
             elif args.command == "inspect":

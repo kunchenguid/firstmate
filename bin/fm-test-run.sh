@@ -1224,7 +1224,8 @@ families_for_changed_path() {
       # lane's contract coverage re-runs.
       printf '%s\n' real-herdr-gated
       ;;
-    bin/fm-pavel-ops.sh|bin/fm-pavel-ops.py)
+    bin/fm-pavel-ops.sh|bin/fm-pavel-ops.py|bin/fm-pavel-status.py|\
+    bin/fm-procevent-pavel-telegram.sh)
       printf '%s\n' pure-contract-unit
       printf '%s\n' session-bootstrap
       ;;

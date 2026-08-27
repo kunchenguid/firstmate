@@ -62,6 +62,17 @@ def worktree_head(meta: dict[str, str]) -> str:
     return result.stdout.strip()
 
 
+def readiness_owner_valid(task_id: str, meta: dict[str, str]) -> bool:
+    return (
+        meta.get("endpoint_task_id") == task_id
+        and meta.get("kind") == "ship"
+        and meta.get("harness") == "pi"
+        and meta.get("mode") == "no-mistakes"
+        and meta.get("yolo") == "on"
+        and bool(meta.get("worktree"))
+    )
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         sys.stderr.write("usage: fm-pavel-status.py <task-id>\n")
@@ -98,6 +109,11 @@ def main() -> int:
         emit(base)
         return 0
     meta = parse_meta(state_dir / f"{task_id}.meta")
+    if not readiness_owner_valid(task_id, meta):
+        base["state"] = "validating"
+        base["evidence"] = "run-step readiness is not from the expected Pavel Pi ship worker"
+        emit(base)
+        return 0
     pr_url = meta.get("pr", "")
     pr_head = meta.get("pr_head", "")
     current_head = worktree_head(meta)

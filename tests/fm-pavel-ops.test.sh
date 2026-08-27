@@ -12,6 +12,7 @@ FAKEBIN="$TMP_ROOT/fakebin"
 TASK_DB="$TMP_ROOT/tasks"
 HTTP_LOG="$TMP_ROOT/http.log"
 UPDATES_FILE="$TMP_ROOT/getUpdates.json"
+HTTP_DELAY_FILE="$TMP_ROOT/http-delay"
 PAVEL_STATUS_FILE="$TMP_ROOT/pavel-status.json"
 HTTP_PID=
 
@@ -95,7 +96,7 @@ id=$1
 project=$2
 [ "$project" = "$FM_HOME/projects/aln" ] || { printf 'wrong project path: %s\n' "$project" >&2; exit 1; }
 mkdir -p "$FM_HOME/state" "$FM_HOME/worktrees/$id"
-printf 'kind=ship\nharness=pi\nmode=no-mistakes\nyolo=on\nworktree=%s\n' "$FM_HOME/worktrees/$id" > "$FM_HOME/state/$id.meta"
+printf 'endpoint_task_id=%s\nkind=ship\nharness=pi\nmode=no-mistakes\nyolo=on\nworktree=%s\n' "$id" "$FM_HOME/worktrees/$id" > "$FM_HOME/state/$id.meta"
 SH
 chmod 0755 "$FAKEBIN/fm-spawn"
 
@@ -230,12 +231,17 @@ chmod 0755 "$FAKEBIN/fm-deploy"
 cat > "$TMP_ROOT/server.py" <<'PY'
 import json
 import os
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         with open(os.environ["HTTP_LOG"], "a", encoding="utf-8") as handle:
             handle.write(self.path + "\n")
+        delay_file = os.environ.get("HTTP_DELAY_FILE")
+        if delay_file and os.path.exists(delay_file):
+            with open(delay_file, encoding="utf-8") as handle:
+                time.sleep(float(handle.read().strip() or "0"))
         with open(os.environ["UPDATES_FILE"], encoding="utf-8") as handle:
             payload = handle.read().encode()
         self.send_response(200)
@@ -268,7 +274,7 @@ s.close()
 PY
 )
 printf '{"ok": true, "result": []}\n' > "$UPDATES_FILE"
-HTTP_LOG="$HTTP_LOG" UPDATES_FILE="$UPDATES_FILE" HTTP_PORT="$HTTP_PORT" python3 "$TMP_ROOT/server.py" &
+HTTP_LOG="$HTTP_LOG" HTTP_DELAY_FILE="$HTTP_DELAY_FILE" UPDATES_FILE="$UPDATES_FILE" HTTP_PORT="$HTTP_PORT" python3 "$TMP_ROOT/server.py" &
 HTTP_PID=$!
 
 cat > "$HOME_DIR/config/pavel-ops.json" <<JSON
@@ -506,6 +512,25 @@ run_ops collect --limit 10 --timeout 0 >/dev/null || fail "empty collector repla
 offset_get=$(grep -F '/bottest-token/getUpdates' "$HTTP_LOG" | tail -1)
 printf '%s' "$offset_get" | grep -F 'offset=203' >/dev/null || fail "collector did not resume from durable offset"
 pass "Telegram getUpdates collector durably bridges Pavel updates"
+
+printf '1.5\n' > "$HTTP_DELAY_FILE"
+before_collect_lines=$(grep -c . "$HTTP_LOG" 2>/dev/null || printf '0')
+run_ops collect --limit 1 --timeout 0 >"$TMP_ROOT/slow-collect.out" 2>"$TMP_ROOT/slow-collect.err" &
+slow_collect_pid=$!
+for _ in $(seq 1 50); do
+  current_lines=$(grep -c . "$HTTP_LOG" 2>/dev/null || printf '0')
+  [ "$current_lines" -gt "$before_collect_lines" ] && break
+  sleep 0.05
+done
+if ! timeout 1 env PATH="$FAKEBIN:$PATH" TASK_DB="$TASK_DB" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+  PAVEL_STATUS_FILE="$PAVEL_STATUS_FILE" FM_PAVEL_OPS_TESTING=1 "$OPS" list >/dev/null; then
+  kill "$slow_collect_pid" 2>/dev/null || true
+  wait "$slow_collect_pid" 2>/dev/null || true
+  fail "Telegram collect held the Pavel state lock during network wait"
+fi
+wait "$slow_collect_pid" || fail "slow Telegram collect failed: $(cat "$TMP_ROOT/slow-collect.err")"
+rm -f "$HTTP_DELAY_FILE"
+pass "Telegram collect waits outside the Pavel state lock"
 
 armed=$(run_ops arm-collector) || fail "Pavel collector arming failed"
 [ "$(printf '%s' "$armed" | json_field "['registered']")" = True ] || fail "collector did not register on first arm"
@@ -915,6 +940,29 @@ fi
 [ "$(run_ops inspect "$metadata_only" | json_field "['state']")" = validating ] \
   || fail "metadata-only readiness mutated past validation"
 pass "default readiness refuses metadata-only head proof"
+
+for metadata_axis in \
+  'endpoint_task_id=other' \
+  'harness=claude' \
+  'mode=local-only' \
+  'yolo=off' \
+  'kind=scout'; do
+  metadata_event=$(ingest "137-${metadata_axis%%=*}" "47-${metadata_axis%%=*}" "Проверить ${metadata_axis}" | json_field "['event']")
+  run_ops classify "$metadata_event" --as task --title "Reject ${metadata_axis}" --intent "Reject invalid Pavel dispatch metadata" \
+    --reason 'ordinary delivery' --authority ordinary >/dev/null
+  run_ops drive "$metadata_event" >/dev/null
+  metadata_task=$(run_ops inspect "$metadata_event" | json_field "['task_id']")
+  metadata_head=$(fixture_git_head "$HOME_DIR/worktrees/$metadata_task")
+  printf 'pr=%s\npr_head=%s\n%s\n' 'https://github.com/o/r/pull/23' "$metadata_head" "$metadata_axis" >> "$HOME_DIR/state/$metadata_task.meta"
+  printf 'state: done · source: run-step · checks green: PR ready for review\n' > "$PAVEL_STATUS_FILE"
+  run_ops_default_status drive "$metadata_event" >/dev/null
+  if run_ops_default_status drive "$metadata_event" >/dev/null 2>&1; then
+    fail "default status helper blessed invalid metadata axis $metadata_axis"
+  fi
+  [ "$(run_ops inspect "$metadata_event" | json_field "['state']")" = validating ] \
+    || fail "invalid metadata axis $metadata_axis mutated past validation"
+done
+pass "default readiness refuses invalid Pavel dispatch metadata"
 
 pr_substitution=$(ingest 125 35 'Проверить подмену PR' | json_field "['event']")
 run_ops classify "$pr_substitution" --as task --title 'Reject PR substitution' --intent 'Ship only the registered PR' \
