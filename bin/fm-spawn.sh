@@ -1846,23 +1846,55 @@ freshen_spawn_worktree_base() {  # <worktree>
 # than inheriting it, so the single call site below sits on the common acquisition
 # gate and covers a newly created slot, a reused slot, and every backend alike.
 # Refreshing on each acquisition also keeps a slot from serving a stale credential
-# copy left behind by an earlier task.
+# copy left behind by an earlier task, including when the captain revoked that
+# credential by deleting the file outright rather than by rewriting it.
 seed_spawn_worktree_local_env() {  # <worktree>
   local worktree=$1 source target tmp
   source="$PROJ_ABS/.env.local"
   target="$worktree/.env.local"
-  [ -f "$source" ] || return 0
-  # Seed only what the project ignores. An unignored .env.local would land as
+  # Nothing to carry in, and no earlier task's copy left to retire.
+  if [ ! -e "$source" ] && [ ! -L "$source" ] && [ ! -e "$target" ] && [ ! -L "$target" ]; then
+    return 0
+  fi
+  # Act only on what the project ignores. An unignored .env.local would land as
   # untracked work, and teardown's uncommitted-work refusal would then strand the
-  # worktree forever. Say so once instead of wedging the task's cleanup later.
+  # worktree forever. Say so once instead of wedging the task's cleanup later, and
+  # for the same reason never remove a copy the project does not ignore: that one
+  # is the task's own work, not this seeding's to retire.
   if ! git -C "$worktree" check-ignore -q .env.local 2>/dev/null; then
     echo "warning: not seeding .env.local into '$worktree' because the project does not ignore it; add it to .gitignore so crew worktrees can carry it" >&2
     return 0
   fi
   if [ -d "$target" ]; then
-    echo "error: cannot seed .env.local because '$target' is a directory" >&2
+    echo "error: refusing to touch .env.local in '$worktree' because '$target' is a directory" >&2
     return 1
   fi
+  if [ ! -e "$source" ] && [ ! -L "$source" ]; then
+    # The captain's copy is gone, so the slot's copy is a revoked credential the
+    # next task must not inherit. Only a positively established deletion may remove
+    # it: an unreadable source is not a deletion, so when the primary checkout
+    # cannot even be searched, absence and failure are indistinguishable and the
+    # copy stays put while the spawn stops.
+    if [ ! -d "$PROJ_ABS" ] || [ ! -x "$PROJ_ABS" ]; then
+      echo "error: cannot tell whether '$source' was deleted or is unreadable because '$PROJ_ABS' is not a searchable directory; leaving '$target' in place" >&2
+      return 1
+    fi
+    if ! rm -f "$target"; then
+      echo "error: could not retire the stale .env.local in '$worktree' after it disappeared from '$PROJ_ABS'" >&2
+      return 1
+    fi
+    return 0
+  fi
+  if [ ! -f "$source" ]; then
+    echo "warning: not seeding .env.local into '$worktree' because '$source' is not a regular file" >&2
+    return 0
+  fi
+  # A copy interrupted between mktemp and the atomic publish leaves a scratch file
+  # behind, and no .env.local ignore rule covers the .fm-env-local.* name. That
+  # leftover is untracked work: it fails the next acquisition's clean check and
+  # blocks teardown from returning the slot, wedging exactly what the ignore gate
+  # above exists to prevent. Sweep our own scratch before creating a new one.
+  rm -f "$worktree"/.fm-env-local.*
   tmp=$(mktemp "$worktree/.fm-env-local.XXXXXX") || {
     echo "error: could not create a private temporary file while seeding .env.local in '$worktree'" >&2
     return 1

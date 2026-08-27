@@ -246,6 +246,52 @@ test_acquired_worktree_refreshes_a_stale_local_env_file() {
   pass "an acquired pooled worktree's stale local environment file is refreshed from the primary checkout"
 }
 
+# Revoking the credential by deleting the captain's copy must not leave the slot
+# serving the revoked one to whoever takes it next. Assert absence only; the
+# fixture carries a synthetic marker and its bytes never reach an assertion.
+test_acquired_worktree_retires_a_local_env_file_the_captain_deleted() {
+  local rec id out status
+  id='pool-env-local-r4'
+  rec=$(make_case env-local-deleted "$id")
+  read_case_record "$rec"
+
+  ignore_local_env_file
+  printf 'FIXTURE_MARKER=revoked-leftover-not-a-real-credential\n' > "$POOL_DIR/.env.local"
+  chmod 0600 "$POOL_DIR/.env.local"
+  [ ! -e "$PROJECT_DIR/.env.local" ] \
+    || fail "the fixture unexpectedly left a source .env.local in the primary checkout"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should reissue a slot whose source .env.local was deleted"
+  [ ! -e "$POOL_DIR/.env.local" ] \
+    || fail "spawn left a revoked .env.local in the reissued pool slot"
+  pass "a local environment file deleted from the primary checkout does not survive in a reissued slot"
+}
+
+# The warn-and-skip branch decides whether an unignored .env.local is copied in.
+# Copying one would land untracked work that teardown refuses, stranding the slot,
+# so spawn must proceed without seeding and say why.
+test_unignored_local_env_file_is_not_seeded() {
+  local rec id out status
+  id='pool-env-local-r5'
+  rec=$(make_case env-local-unignored "$id")
+  read_case_record "$rec"
+
+  # Deliberately no .gitignore publish, so the worktree does not ignore the path.
+  printf 'FIXTURE_MARKER=unignored-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
+  chmod 0600 "$PROJECT_DIR/.env.local"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should still launch when the project does not ignore .env.local"
+  [ ! -e "$POOL_DIR/.env.local" ] \
+    || fail "spawn seeded an unignored .env.local into the acquired pool slot"
+  assert_contains "$out" "because the project does not ignore it" \
+    "spawn did not explain why it skipped seeding an unignored .env.local"
+  pass "an unignored local environment file is never seeded and the skip is explained"
+}
+
 test_direct_pr_and_scout_refresh_before_launch() {
   local rec id out status contract current
   for contract in direct-pr scout; do
@@ -546,6 +592,8 @@ test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
 test_acquired_worktree_is_seeded_with_local_env_file
 test_acquired_worktree_refreshes_a_stale_local_env_file
+test_acquired_worktree_retires_a_local_env_file_the_captain_deleted
+test_unignored_local_env_file_is_not_seeded
 test_stale_submodule_pin_explains_itself
 test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work
