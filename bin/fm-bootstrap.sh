@@ -991,7 +991,9 @@ EOF
 crew_dispatch_validate() {
   local file
   file="$CONFIG/crew-dispatch.json"
-  [ -f "$file" ] || return 0
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    return 0
+  fi
   if ! command -v jq >/dev/null 2>&1; then
     echo "MISSING: jq (install: $(install_cmd jq))"
     return 0
