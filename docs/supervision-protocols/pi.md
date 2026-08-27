@@ -24,7 +24,9 @@ A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=
 A captain-facing outcome instead opens exactly one follow-up turn on this conversation - that turn is the captain-visible result, and no separate note is printed here.
 Before MAIN steers, controls lifecycle, or cleans up a task, claim its lease with `bin/fm-lease.sh claim <task>` and release it afterwards; a refused claim means the branch is acting on that task right now.
 This conversation still receives every other fleet-wide or unresolvable wake, the branch's wakes when it is unavailable or away mode is active, and every watcher-failure alarm regardless, so the arm and repair contract above is unchanged.
-Treat a merged note or an opened captain-facing turn as already handled - do not re-drain or re-handle its event - and read the durable outcome store with the fm_branch_outcomes tool when the captain asks what happened.
+Treat the merged fleet event as already handled for fleet operations: MAIN must not re-drain, re-run, or acknowledge it.
+Separately, MAIN applies judgment about whether and how to surface, summarize, reference, or incorporate a merged sailboat outcome in the captain conversation; event ownership does not decide the conversational treatment.
+Read the durable outcome store with the fm_branch_outcomes tool when the captain asks what happened.
 
 The turn-end guard extension lives at `__FM_PI_TURNEND_EXT__`.
 The watcher extension lives at `__FM_PI_EXT__`.

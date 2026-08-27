@@ -777,18 +777,20 @@ EOF
     *"This is a supervision outcome delivered automatically by the supervision branch."*"It was not typed by the captain."*"task-9: PR https://example.com/pr/9"*) ;;
     *) fail "captain outcome body lost its self-description or the outcome itself: $body" ;;
   esac
-  # Both halves of the delivered instruction matter and they pull against each
-  # other: main must be allowed to stay quiet about an outcome it has already
-  # given the captain, and must still be told to relay everything else instead
-  # of re-emitting its own last answer. An instruction carrying only one half
-  # reintroduces either the duplicate or the silent loss.
+  # Event ownership and conversational judgment are separate contracts. The
+  # delivered instruction forbids reprocessing the fleet event but leaves main
+  # free to decide how the outcome belongs in the captain conversation.
   case "$body" in
-    *"already reported this outcome to the captain"*"do not report it again"*) ;;
-    *) fail "captain outcome body never lets main deduplicate what it already said: $body" ;;
+    *"The fleet event is already handled: do not re-drain, re-run, or acknowledge it."*) ;;
+    *) fail "captain outcome body lost the event-ownership boundary: $body" ;;
   esac
   case "$body" in
-    *"relay only this outcome to the captain now"*"Do not restate or repeat any earlier answer"*) ;;
-    *) fail "captain outcome body never tells main to relay it instead of repeating: $body" ;;
+    *"Use your judgment about whether and how to surface, summarize, reference, or incorporate this outcome in the captain conversation."*) ;;
+    *) fail "captain outcome body imposed a mechanical conversational treatment: $body" ;;
+  esac
+  case "$body" in
+    *"An outcome that directly answers an explicit captain request is captain-facing"*"regardless of whether it is healthy, routine, measured, actionable, or requires a decision."*) ;;
+    *) fail "captain outcome body lost the unconditional explicit-request rule: $body" ;;
   esac
   # The routine note is rendered in the TUI, and its renderer reads the glyph off
   # the front of this same string, so it must stay plain text.
@@ -796,6 +798,88 @@ EOF
     fail "routine note must stay plain rendered text, not typed operational input"
   fi
   pass "a captain outcome reaches main's model as typed, self-describing input while routine notes stay plain"
+}
+
+test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery() {
+  local repo home out status
+  repo="$TMP_ROOT/requested-outcome-root"
+  home="$TMP_ROOT/requested-outcome-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, outcomeScript, home }; })()`);
+const { fire, dispatch, settle, sentToMain, outcomeScript, home } = globalThis.__t;
+import { readFileSync } from "node:fs";
+
+// An equivalent healthy result with no captain request stays an ordinary
+// sailboat note and does not open a main turn.
+const unsolicited = dispatch("signal: healthy resource result");
+if (!unsolicited.accepted) throw new Error("branch did not accept the unsolicited result");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "unsolicited result prompt");
+const report = globalThis.__fmSessions[0].options.customTools.find((tool) => tool.name === "fm_branch_report");
+const routine = await report.execute(
+  "unsolicited-result",
+  { task: "task-resource", verdict: "routine", summary: "healthy resource report: CPU 12%, memory 41%" },
+  undefined,
+  undefined,
+  {},
+);
+if (routine.isError) throw new Error(`unsolicited routine result failed: ${JSON.stringify(routine)}`);
+if (sentToMain.length !== 1 || sentToMain[0].options.triggerTurn) {
+  throw new Error(`unsolicited healthy result opened a main turn: ${JSON.stringify(sentToMain)}`);
+}
+if (sentToMain[0].message.display !== true || !sentToMain[0].message.content.startsWith("⛵ task-resource:")) {
+  throw new Error(`unsolicited healthy result was not a rendered sailboat note: ${JSON.stringify(sentToMain[0])}`);
+}
+
+// Now mirror an explicit captain request, then deliver the same kind of
+// healthy measured result. The branch's captain verdict must open exactly one
+// main turn for this requested answer.
+fire("turn_end", {}, {
+  model: { provider: "anthropic", id: "main-model" },
+  sessionManager: {
+    getSessionFile: () => `${home}/main.jsonl`,
+    getEntries: () => [{
+      type: "message",
+      message: { role: "user", content: "Please give me a fresh mini system-resource report." },
+    }],
+  },
+});
+const requested = dispatch("signal: requested healthy resource result");
+if (!requested.accepted) throw new Error("branch did not accept the requested result");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 2, "requested result prompt");
+const captain = await report.execute(
+  "requested-result",
+  { task: "task-resource", verdict: "captain", summary: "healthy resource report: CPU 12%, memory 41%" },
+  undefined,
+  undefined,
+  {},
+);
+if (captain.isError) throw new Error(`requested captain result failed: ${JSON.stringify(captain)}`);
+const turns = sentToMain.filter((sent) => sent.options.triggerTurn === true);
+if (turns.length !== 1 || turns[0].options.deliverAs !== "followUp") {
+  throw new Error(`requested healthy result did not open exactly one main turn: ${JSON.stringify(sentToMain)}`);
+}
+if (sentToMain.length !== 2) throw new Error(`one result was reprocessed into ${sentToMain.length} main messages`);
+
+// The report boundary owns the event once: both outcomes are durable and
+// acknowledged, while the routine sailboat remains available for main's
+// judgment without another drain, rerun, or acknowledgement.
+const rows = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+if (rows.length !== 2 || rows[0].verdict !== "routine" || rows[1].verdict !== "captain") {
+  throw new Error(`outcomes were not recorded once in order: ${JSON.stringify(rows)}`);
+}
+if (outcomeScript(["unread"]) !== "") throw new Error("handled outcomes remained unread for reprocessing");
+console.log("requested=one-turn unsolicited=routine-sailboat owned=once judgment=free");
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "requested and unsolicited healthy outcomes must follow their distinct public delivery paths: $out"
+  assert_contains "$out" "requested=one-turn unsolicited=routine-sailboat owned=once judgment=free" \
+    "behavioral regression did not exercise the requested, unsolicited, ownership, and judgment cases"
+  pass "a requested healthy result opens one turn, while an unsolicited equivalent stays a sailboat note and is handled once"
 }
 
 test_captain_outcome_encoding_failure_delivers_plain_instruction() {
@@ -834,9 +918,8 @@ if (delivered.options.triggerTurn !== true || delivered.options.deliverAs !== "f
 if (delivered.message.content.includes("FIRSTMATE_OP:")) {
   throw new Error(`fallback unexpectedly carried an envelope: ${delivered.message.content}`);
 }
-if (!delivered.message.content.includes("relay only this outcome to the captain now") ||
-    !delivered.message.content.includes("do not report it again") ||
-    !delivered.message.content.includes("Do not restate or repeat any earlier answer") ||
+if (!delivered.message.content.includes("The fleet event is already handled: do not re-drain, re-run, or acknowledge it.") ||
+    !delivered.message.content.includes("Use your judgment about whether and how to surface, summarize, reference, or incorporate this outcome in the captain conversation.") ||
     !delivered.message.content.includes("task-fallback: PR https://example.com/pr/fallback is ready")) {
   throw new Error(`fallback lost its instruction or outcome: ${delivered.message.content}`);
 }
@@ -2878,6 +2961,7 @@ JS
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract
+test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
 test_captain_outcome_encoding_failure_delivers_plain_instruction
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_cache_key_is_per_home_stable

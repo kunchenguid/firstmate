@@ -130,21 +130,17 @@ const MERGE_NOTE_BOAT = "⛵";
 // Carried inside the captain note's own text because that text is the only
 // part of a custom message Pi gives the model (see mergeIntoMain).
 //
-// The relay order is CONDITIONAL on purpose. This M1 fix is deliberately a
-// model-facing instruction only: mergeIntoMain must keep opening the follow-up
-// turn so a genuinely new outcome cannot be suppressed before main sees it.
-// The note still needs its self-description to stop main from mistaking an
-// incoming outcome for its own earlier answer and silently losing the outcome.
-// But an unconditional relay order is false whenever main was separately woken
-// for the same event, and turns the correct response - saying nothing new -
-// into a mechanical re-report. The conditional wording lets main stay quiet
-// when appropriate; source-level identity suppression is outside this M1 fix.
+// The note still needs to identify itself so main cannot mistake an incoming
+// outcome for its own earlier answer and silently lose the outcome. It must not
+// decide the conversational treatment, though: event ownership forbids a
+// second fleet operation, while main uses judgment about what the captain
+// should see and how to say it.
 const CAPTAIN_OUTCOME_INSTRUCTION =
   "This is a supervision outcome delivered automatically by the supervision branch. " +
   "It was not typed by the captain. " +
-  "If you have already reported this outcome to the captain earlier in this conversation, do not report it again. " +
-  "Otherwise relay only this outcome to the captain now, in one short message, in captain outcome language. " +
-  "Do not restate or repeat any earlier answer.";
+  "The fleet event is already handled: do not re-drain, re-run, or acknowledge it. " +
+  "Use your judgment about whether and how to surface, summarize, reference, or incorporate this outcome in the captain conversation. " +
+  "An outcome that directly answers an explicit captain request is captain-facing, regardless of whether it is healthy, routine, measured, actionable, or requires a decision.";
 type MirrorItem = { tag: "captain" | "main"; text: string };
 type MirrorCursor = { file: string; index: number };
 type Verdict = "routine" | "captain";
@@ -573,10 +569,11 @@ export default function (pi: ExtensionAPI) {
   // therefore has to carry its own identity inside `content`, or main receives
   // an unattributed user message written in main's own captain-facing voice
   // and cannot tell an incoming outcome from its own earlier answer. When that
-  // happens main re-emits its previous answer instead of relaying the outcome,
-  // and the outcome is lost. The typed operational envelope is what makes the
-  // note self-describing; it stays invisible to the captain because the note
-  // is never rendered.
+  // happens main can lose the outcome while deciding how to handle it. The
+  // typed operational envelope is what makes the note self-describing; it stays
+  // invisible to the captain because the note is never rendered. The
+  // instruction preserves the event-ownership boundary without dictating
+  // whether main surfaces the content.
   //
   // Encoding shells out, so it can fail on a broken checkout. This file's
   // failure direction applies: an outcome that cannot be typed is still

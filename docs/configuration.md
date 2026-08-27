@@ -44,6 +44,8 @@ The branch's role stays bounded exactly as the captain-approved architecture set
 Homes on any other primary harness never load this feature and are entirely unaffected.
 `AGENTS.md`'s `state/` inventory routes the branch's runtime files to their format and lifecycle owners.
 A captain-facing (verdict `captain`) branch outcome opens exactly one follow-up turn on main - that turn is the captain-visible result, and Pi never separately prints or renders the merge note itself.
+The branch prompt owns the unconditional explicit-request rule and the distinction between captain-facing, unsolicited routine, and unchanged-review outcomes.
+Main uses judgment about how to handle a merged sailboat outcome without reprocessing its fleet event.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is delivered silently with no rendered note, while every other routine outcome still appends a rendered, sailboat-prefixed note.
 
 ## Pi supervision branch model and effort (config/supervision-branch-model, config/supervision-branch-effort)
