@@ -49,10 +49,16 @@ on run argv
 		if (count of (lists whose name is listName)) is 0 then return ""
 		tell list listName
 			set live to (every reminder whose completed is false)
-			set bodies to body of live
-			set ids to id of live
-			set dues to due date of live
-			set births to creation date of live
+			set bodies to {}
+			set ids to {}
+			set dues to {}
+			set births to {}
+			repeat with r in live
+				set end of bodies to (body of r)
+				set end of ids to (id of r)
+				set end of dues to (due date of r)
+				set end of births to (creation date of r)
+			end repeat
 		end tell
 	end tell
 	set rightNow to current date

@@ -672,3 +672,66 @@ converge_run sync >/dev/null 2>&1
 [ "$(awk -F'\t' 'NR == 1 { print $1 }' "$CONVERGE_STORE")" = 0 ] \
   || fail "convergence ticked off the older entry instead of the accidental copy"
 pass "with no alert to prefer, convergence keeps the older entry and ticks off the copy"
+
+# --- a list read that already holds several open entries in one shot ----------
+#
+# Every scenario above builds the list up one sync call at a time, so a `list`
+# verb that only breaks once several open entries already coexist would never
+# be exercised. Cover the read itself for 0, 1, and many pre-existing open
+# marked entries, as the vendor read step meets them on a real run: before
+# this home has ever synced, not after.
+
+READ_HOME="$TMP_ROOT/read-home"
+mkdir -p "$READ_HOME/data" "$READ_HOME/state" "$READ_HOME/config"
+cp "$ROOT/.tasks.toml" "$READ_HOME/.tasks.toml"
+cat > "$READ_HOME/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+printf '\n' > "$READ_HOME/config/captain-reminders"
+READ_STORE="$TMP_ROOT/read-reminders.tsv"
+
+read_axi() { (cd "$READ_HOME" && tasks-axi "$@" >/dev/null); }
+read_run() {  # <args...>
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$READ_HOME" FM_CONFIG_OVERRIDE="$READ_HOME/config" \
+    FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$READ_STORE" \
+    "$REMINDERS" "$@"
+}
+
+# 0: the list is empty on the very first read this home ever does.
+: > "$READ_STORE"
+OUT=$(read_run status 2>&1)
+assert_contains "$OUT" "already matches the backlog" "an empty list on the first read must plan nothing to add: $OUT"
+pass "a list read starting with zero open entries reports nothing to reconcile"
+
+# 1: exactly one open marked entry already exists before this home's first sync.
+read_axi add read-one "Read one" --repo demo
+read_axi hold read-one --reason "single pre-existing entry" --kind captain
+printf '0\tRead one\t[fm:read-one] single pre-existing entry\t0\n' > "$READ_STORE"
+OUT=$(read_run sync 2>&1)
+[ -z "$OUT" ] || fail "a matching pre-existing single entry must need no change, got: $OUT"
+[ "$(awk 'END { print NR }' "$READ_STORE")" = 1 ] \
+  || fail "a single pre-existing entry must not be duplicated: $(cat "$READ_STORE")"
+pass "a list read starting with exactly one open entry recognizes it without duplicating"
+
+# many: several open marked entries for several different calls already exist
+# before this home's first sync, some still current, one stale.
+read_axi add read-two "Read two" --repo demo
+read_axi hold read-two --reason "second pre-existing entry" --kind captain
+read_axi add read-three "Read three" --repo demo
+{
+  printf '0\tRead one\t[fm:read-one] single pre-existing entry\t0\n'
+  printf '0\tRead two\t[fm:read-two] second pre-existing entry\t0\n'
+  printf '0\tStale one\t[fm:read-three] no longer held\t0\n'
+} > "$READ_STORE"
+OUT=$(read_run sync 2>&1)
+assert_contains "$OUT" "ticked off read-three" \
+  "a many-entry read still ticks off the one call no longer held for the captain"
+assert_not_contains "$OUT" "added read-one" "a many-entry read must not re-add an entry already present"
+assert_not_contains "$OUT" "added read-two" "a many-entry read must not re-add an entry already present"
+[ "$(awk -F'\t' '$1 == "0"' "$READ_STORE" | awk 'END { print NR }')" = 2 ] \
+  || fail "a many-entry read left the wrong number of open entries: $(cat "$READ_STORE")"
+pass "a list read starting with several pre-existing open entries reconciles all of them correctly in one pass"
