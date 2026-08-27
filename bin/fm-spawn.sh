@@ -2444,9 +2444,17 @@ TASK_TMP="/tmp/fm-$ID"
 #
 # The mode comes from `umask` rather than a `chmod` afterwards: it lands with
 # the directory in the same syscall instead of on whatever the path names a
-# moment later, and it makes a root THIS spawn created private under any host
-# umask, so the privacy requirement below can never refuse a spawn over a root
-# of its own making.
+# moment later, and it makes a root created HERE private under any host umask.
+#
+# What that cannot cover is a root created before the privacy requirement
+# existed, or by the fallback `mkdir -p` further down, which creates at the
+# ambient umask: on a umask-002 host - Debian/Ubuntu's user-private-group
+# default - either lands at 0775 and the group-write arm below refuses it. That
+# is the upgrade window, and it is the only way an operator meets a mode
+# refusal over a root nobody but this account can write. It is per task id and
+# clears for good once that root is removed, which is why the refusal says so:
+# a `--relaunch` arrives here with the previous agent already stopped, so that
+# message is the only guidance the operator gets.
 if (umask 077; mkdir "$TASK_TMP" 2>/dev/null); then
   SPAWN_TASK_TMP_CREATED=1
 fi
@@ -2484,11 +2492,17 @@ fi
 # parent adds group bits the same way. Re-pinning this to one number would be a
 # self-inflicted outage, not a tighter defence.
 SPAWN_READY_ROOT_PRIVACY_ISSUE=
+# `mode` means this uid owns the directory and only a write bit disqualifies it,
+# which is the one shape an operator can clear themselves; every other value is
+# a directory whose identity is not this account's to begin with.
+SPAWN_READY_ROOT_PRIVACY_KIND=
 spawn_ready_root_private() {  # <dir> - on false, names the failed condition
   local dir=$1 owner mode perms me
   SPAWN_READY_ROOT_PRIVACY_ISSUE=
+  SPAWN_READY_ROOT_PRIVACY_KIND=
   if [ ! -d "$dir" ] || [ -L "$dir" ]; then
     SPAWN_READY_ROOT_PRIVACY_ISSUE="it is not a plain directory any more - gone, or replaced by a symlink"
+    SPAWN_READY_ROOT_PRIVACY_KIND=identity
     return 1
   fi
   if [ "$(uname)" = Darwin ]; then
@@ -2500,28 +2514,43 @@ spawn_ready_root_private() {  # <dir> - on false, names the failed condition
   fi
   if [ -z "$owner" ] || [ -z "$mode" ]; then
     SPAWN_READY_ROOT_PRIVACY_ISSUE="its owner and permission bits could not be read"
+    SPAWN_READY_ROOT_PRIVACY_KIND=identity
     return 1
   fi
   me=$(id -u)
   if [ "$owner" != "$me" ]; then
     SPAWN_READY_ROOT_PRIVACY_ISSUE="it is owned by uid $owner, not by this account's uid $me"
+    SPAWN_READY_ROOT_PRIVACY_KIND=identity
     return 1
   fi
   while [ "${#mode}" -lt 3 ]; do mode="0$mode"; done
   perms=${mode#"${mode%???}"}
   if [ $(( ${perms:1:1} & 2 )) -ne 0 ]; then
     SPAWN_READY_ROOT_PRIVACY_ISSUE="its group-write bit is set, mode $mode"
+    SPAWN_READY_ROOT_PRIVACY_KIND=mode
     return 1
   fi
   if [ $(( ${perms:2:1} & 2 )) -ne 0 ]; then
     SPAWN_READY_ROOT_PRIVACY_ISSUE="its other-write bit is set, mode $mode"
+    SPAWN_READY_ROOT_PRIVACY_KIND=mode
     return 1
   fi
   return 0
 }
 
+# A mode refusal is the operator's to clear, and often their ONLY notice:
+# `bin/fm-control.sh <id> relaunch` stops the old agent before it calls this
+# script, so a refusal here leaves the task with nothing running and this
+# message as the whole explanation. The root is never chmod-ed to fix it - a
+# path whose identity was never established can become a symlink between the
+# look and the change, and the mode would land on the link's target - so the
+# way out is to remove the root, which is what the remedy names.
 spawn_refuse_unprivate_task_tmp() {
-  echo "error: task $ID's per-task temp root $TASK_TMP is not private: $SPAWN_READY_ROOT_PRIVACY_ISSUE, so another local account could replace the readiness-marker directory this spawn is about to create inside it and no marker there would be proof the endpoint shell ran what was typed into it; refusing to spawn" >&2
+  local remedy=
+  if [ "$SPAWN_READY_ROOT_PRIVACY_KIND" = mode ]; then
+    remedy=". This account owns $TASK_TMP, so the likely cause is a root that predates this requirement: an older fm-spawn created it at the host umask, which leaves 0775 on a umask-002 host such as Debian or Ubuntu with user-private groups. Remove $TASK_TMP - or run bin/fm-teardown.sh for $ID - and spawn again; every root this fm-spawn creates is 0700 under any umask, so it does not come back. A relaunch reaches this point with the task's previous agent already stopped, so nothing is running for $ID until you do"
+  fi
+  echo "error: task $ID's per-task temp root $TASK_TMP is not private: $SPAWN_READY_ROOT_PRIVACY_ISSUE, so another local account could replace the readiness-marker directory this spawn is about to create inside it and no marker there would be proof the endpoint shell ran what was typed into it; refusing to spawn$remedy" >&2
   exit 1
 }
 
@@ -2540,15 +2569,18 @@ if [ "$SPAWN_TASK_TMP_CREATED" != 1 ] && { [ -e "$TASK_TMP" ] || [ -L "$TASK_TMP
 fi
 
 # Guarded, and not left to `set -e`, for the same reason the marker directory
-# above refuses out loud: /tmp is world-writable and a task id is an ordinary
-# predictable slug, so this whole root is a path another local account can
-# pre-create at a mode this one cannot write into. The window already exists by
-# now, so a bare `mkdir: .../gotmp: Permission denied` leaves the operator an
-# orphan pane and a path they have no reason to connect to a spawn - while the
-# adjacent failure of the marker directory inside this root explains itself in
-# full. Both are the same refusal and owe the same explanation.
+# above refuses out loud. What reaches this guard is narrower than the path's
+# name suggests: a root another account owns is refused by the identity check
+# above, at any mode, so what is left here is a root THIS account owns and
+# cannot write into - a stale 0500 left behind, or a mode changed under a live
+# task - and a /tmp that cannot hold the root at all, full or read-only. The
+# window already exists by now, so a bare `mkdir: .../gotmp: Permission denied`
+# would leave the operator an orphan pane and a path they have no reason to
+# connect to a spawn, while the failure of the marker directory inside this
+# root explains itself in full. Both are the same refusal and owe the same
+# explanation.
 mkdir -p "$TASK_TMP/gotmp" || {
-  echo "error: could not create the per-task temp root $TASK_TMP for $ID (its own reason is above); a path under world-writable /tmp named after the task id may already belong to another local account, and the readiness marker that proves the endpoint shell ran what was typed into it lives there; refusing to spawn" >&2
+  echo "error: could not create the per-task temp root $TASK_TMP for $ID (its own reason is above); a root another local account owns is refused by name before this point, so what lands here is a path this account cannot write into or a /tmp that cannot hold it, and the readiness marker that proves the endpoint shell ran what was typed into it lives there; refusing to spawn" >&2
   exit 1
 }
 

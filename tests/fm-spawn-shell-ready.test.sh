@@ -49,7 +49,10 @@
 # second plants a root it cannot privately write and asserts a loud refusal
 # rather than a marker that proves nothing; a third plants one any local account
 # CAN write and asserts the same refusal, because the entry for the marker
-# directory lives in that root and whoever writes the root can replace it; a
+# directory lives in that root and whoever writes the root can replace it, with
+# a companion planting the 0775 an fm-spawn from before this requirement left on
+# a umask-002 host and asserting the refusal names that cause and the way out,
+# because a relaunch reaches it with the task's agent already stopped; a
 # fourth plants it as a SYMLINK elsewhere and asserts the refusal lands before
 # the spawn's own Go build temp is created through it, because `mkdir -p`
 # resolves that link and a root the spawn did not create is one its refusal
@@ -760,13 +763,16 @@ test_temp_root_that_cannot_hold_a_private_marker_refuses_the_spawn() {
 
 # The wider half of the same threat model: a temp root this account cannot write
 # INTO at all, so the spawn's own `mkdir -p <root>/gotmp` is what fails, before
-# any marker directory is attempted. /tmp is world-writable and a task id is an
-# ordinary predictable slug, so this is the shape a foreign-planted root really
-# has. The window already exists by then, so the failure that must not happen is
-# the silent one: `set -e` ending the spawn on a bare `mkdir: .../gotmp:
-# Permission denied`, which leaves the operator an orphan pane and a path with
-# no stated connection to a spawn - while the marker refusal one line later
-# explains itself in full.
+# any marker directory is attempted. This account OWNS the root here, which is
+# what makes the case reach that guard at all - a root belonging to another
+# account is refused earlier, by the identity check, at any mode. The shape
+# that survives to the guard is a root this account cannot write into (planted
+# at 0500 below, as a stale or externally re-moded root would be) or a /tmp
+# that cannot hold it. The window already exists by then, so the failure that
+# must not happen is the silent one: `set -e` ending the spawn on a bare
+# `mkdir: .../gotmp: Permission denied`, which leaves the operator an orphan
+# pane and a path with no stated connection to a spawn - while the marker
+# refusal one line later explains itself in full.
 test_temp_root_the_spawn_cannot_write_into_refuses_by_name() {
   local rec id out status
   id=shell-ready-unwritable-root-ze-$RUN_TAG
@@ -850,9 +856,51 @@ test_group_or_other_writable_temp_root_refuses_the_spawn() {
     "an agent was launched with a readiness marker another account could replace"
   [ ! -e "$TASK_TMP_PATH/gotmp" ] \
     || fail "the spawn created gotmp inside a temp root any local account can write, before establishing that root's identity"
+  assert_contains "$out" "Remove $TASK_TMP_PATH" \
+    "the refusal did not tell the operator how to clear a root only a write bit disqualifies"$'\n'"$out"
+  assert_contains "$out" "previous agent already stopped" \
+    "the refusal did not say a relaunch arrives here with nothing running"$'\n'"$out"
   [ "$(path_mode "$TASK_TMP_PATH")" = 777 ] \
     || fail "the spawn changed the mode of a temp root it did not create (now $(path_mode "$TASK_TMP_PATH"))"
   pass "a group- or other-writable temp root refuses the spawn instead of holding an unprovable marker"
+}
+
+# The one shape of that refusal an operator is expected to meet in practice, and
+# the reason it carries a remedy rather than only a verdict. Roots created before
+# this requirement existed came from a bare `mkdir -p` at the host umask, so a
+# umask-002 host - Debian and Ubuntu's user-private-group default - left them
+# 0775: owned by this account, writable by nobody else in practice, and still
+# disqualified, because the group-write bit is a grant and the check cannot know
+# who is in that group. The refusal must therefore name the CAUSE and the way
+# out, since `bin/fm-control.sh <id> relaunch` stops the old agent before
+# fm-spawn runs and this message is then the operator's only guidance.
+test_group_writable_temp_root_names_its_cause_and_remedy() {
+  local rec id out status
+  id=shell-ready-upgrade-root-zi-$RUN_TAG
+  rec=$(make_shell_case shell-ready-upgrade-root "$id" 0 0)
+  read_shell_record "$rec"
+  use_task_tmp "$id"
+  mkdir -p "$TASK_TMP_PATH/gotmp"
+  chmod 775 "$TASK_TMP_PATH"
+
+  out=$(run_shell_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should refuse a temp root whose group-write bit is set"
+  assert_contains "$out" "its group-write bit is set, mode 775" \
+    "the refusal did not name the bit that disqualified the root"$'\n'"$out"
+  assert_contains "$out" "predates this requirement" \
+    "the refusal did not name the likely cause of a 0775 root this account owns"$'\n'"$out"
+  assert_contains "$out" "Remove $TASK_TMP_PATH" \
+    "the refusal did not tell the operator how to clear the root"$'\n'"$out"
+  assert_contains "$out" "previous agent already stopped" \
+    "the refusal did not say a relaunch arrives here with nothing running"$'\n'"$out"
+  [ "$(path_mode "$TASK_TMP_PATH")" = 775 ] \
+    || fail "the spawn changed the mode of a temp root it did not create (now $(path_mode "$TASK_TMP_PATH"))"
+  assert_absent "$STATE_DIR/lines.log" \
+    "the spawn typed into the pane over a root whose readiness marker another account could replace"
+  assert_absent "$STATE_DIR/launched.log" \
+    "an agent was launched over a group-writable per-task temp root"
+  pass "a group-writable temp root refuses with the cause and the remedy, not just a verdict"
 }
 
 # The same threat model one step earlier, and the reason the root's identity is
@@ -886,6 +934,10 @@ test_symlinked_temp_root_refuses_before_writing_into_it() {
     || fail "the spawn created $target/gotmp through the planted symlink before establishing the root's identity"
   [ -L "$TASK_TMP_PATH" ] \
     || fail "the spawn replaced the planted symlink at $TASK_TMP_PATH instead of leaving it as found"
+  case "$out" in
+    *"predates this requirement"*)
+      fail "the refusal blamed an upgrade-era mode on a root whose identity was never this account's"$'\n'"$out" ;;
+  esac
   assert_absent "$STATE_DIR/lines.log" \
     "the spawn typed into the pane with its readiness marker pointed at another account's directory"
   assert_absent "$STATE_DIR/launched.log" \
@@ -941,6 +993,7 @@ test_planted_temp_root_keeps_its_mode_and_the_marker_stays_private
 test_temp_root_that_cannot_hold_a_private_marker_refuses_the_spawn
 test_temp_root_the_spawn_cannot_write_into_refuses_by_name
 test_group_or_other_writable_temp_root_refuses_the_spawn
+test_group_writable_temp_root_names_its_cause_and_remedy
 test_symlinked_temp_root_refuses_before_writing_into_it
 test_refused_spawn_leaves_another_homes_marker_in_the_shared_temp_root
 test_ready_shell_pays_at_most_one_poll_per_gate
