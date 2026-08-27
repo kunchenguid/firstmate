@@ -12,6 +12,7 @@ TMP_ROOT=$(fm_test_tmproot fm-logbook-render)
 
 command -v node >/dev/null 2>&1 || { echo "skip: node not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
+command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found"; exit 0; }
 
 make_mission() {
   local home="$TMP_ROOT/$1"
@@ -46,12 +47,13 @@ test_page_renders_without_sibling_access() {
 }
 
 test_missing_and_malformed_embedded_data_show_stale_state() {
-  local home page missing malformed semantic out
+  local home page missing malformed semantic reordered out
   home=$(make_mission stale-page)
   page=$(page_for "$home")
   missing="$home/missing.html"
   malformed="$home/malformed.html"
   semantic="$home/semantic-malformed.html"
+  reordered="$home/reordered.html"
   perl -0777 -pe 's|<script id="firstmate-logbook-data" type="application/json">.*?</script>||s' "$page" > "$missing"
   out=$(render "$missing") || fail "missing-data shell did not remain usable"
   printf '%s' "$out" | jq -e '
@@ -78,6 +80,22 @@ NODE
       and (.notice | contains("Progress data is unavailable or stale"))
       and (.notice | contains("invalid completion gates"))
   ' >/dev/null || fail "semantically malformed embedded data did not show the explicit stale state: $out"
+
+  node - "$page" "$reordered" <<'NODE'
+const fs = require("fs");
+const [source, destination] = process.argv.slice(2);
+const html = fs.readFileSync(source, "utf8");
+const match = html.match(/(<script id="firstmate-logbook-data" type="application\/json">\n)([\s\S]*?)(\n<\/script>)/);
+const payload = JSON.parse(match[2]);
+payload.milestones.push({...payload.milestones[0], id: "20200101T000000Z", fingerprint: "a".repeat(64), at: "2020-01-01T00:00:00.000Z"});
+[payload.milestones[0], payload.milestones[1]] = [payload.milestones[1], payload.milestones[0]];
+fs.writeFileSync(destination, `${html.slice(0, match.index)}${match[1]}${JSON.stringify(payload, null, 2)}${match[3]}${html.slice(match.index + match[0].length)}`);
+NODE
+  out=$(render "$reordered") || fail "reordered-data shell did not remain usable"
+  printf '%s' "$out" | jq -e '
+    .status == "Data stale"
+      and (.notice | contains("invalid milestone history"))
+  ' >/dev/null || fail "reordered milestones did not show the explicit stale state: $out"
   pass "missing and malformed embedded data leave a usable shell with a visible stale warning"
 }
 

@@ -700,7 +700,7 @@ write_pi_loaded_markers() {
 # --- context digest: absent vs empty vs present -----------------------------
 
 test_context_digest_absent_empty_present() {
-  local rec root home fakebin out node_bin
+  local rec root home fakebin out node_bin python_bin
   rec=$(new_world context-digest)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -710,6 +710,9 @@ EOF
   node_bin=$(command -v node)
   printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$node_bin" > "$fakebin/node"
   chmod +x "$fakebin/node"
+  python_bin=$(command -v python3)
+  printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$python_bin" > "$fakebin/python3"
+  chmod +x "$fakebin/python3"
 
   printf '%s\n' '- demo [no-mistakes] - a demo project (added 2026-07-01)' > "$home/data/projects.md"
   : > "$home/data/captain.md"

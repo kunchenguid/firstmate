@@ -30,6 +30,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import process from "node:process";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const PAYLOAD_SCHEMA = "firstmate-logbook.v1";
@@ -120,14 +121,8 @@ function assertInside(root, candidate) {
 
 function ensureDirectory(candidate, parentRoot, mode = 0o700) {
   assertInside(parentRoot, candidate);
-  if (fs.existsSync(candidate)) {
-    const stat = fs.lstatSync(candidate);
-    if (stat.isSymbolicLink() || !stat.isDirectory()) fail(`unsafe directory component: ${candidate}`);
-    return;
-  }
-  const parent = path.dirname(candidate);
-  if (parent !== candidate && parent !== parentRoot) ensureDirectory(parent, parentRoot, mode);
-  fs.mkdirSync(candidate, { mode });
+  if (mode !== 0o700) fail("unsupported confined directory mode");
+  confinedFile("mkdir", parentRoot, candidate);
 }
 
 function assertDirectoryChain(candidate, root) {
@@ -340,43 +335,68 @@ function readInput(source, required) {
   }
 }
 
-function readJson(file, label, root) {
+function atomicHelper() {
+  const helper = path.join(path.dirname(fileURLToPath(import.meta.url)), "logbook-atomic.py");
+  if (!fs.existsSync(helper) || fs.lstatSync(helper).isSymbolicLink() || !fs.statSync(helper).isFile()) {
+    fail("confined file helper is missing");
+  }
+  return helper;
+}
+
+function relativePath(home, file) {
+  assertInside(home, file);
+  const relative = path.relative(home, file).split(path.sep).join("/");
+  if (!relative || relative.split("/").some((part) => !part || part === "." || part === "..")) fail("unsafe confined file path");
+  return relative;
+}
+
+function confinedResult(command, home, file, content) {
+  return spawnSync(process.env.FM_LOGBOOK_PYTHON || "python3", [atomicHelper(), command, home, relativePath(home, file)], {
+    input: content,
+    encoding: "buffer",
+    maxBuffer: 2 * 1024 * 1024,
+  });
+}
+
+function confinedFile(command, home, file, content) {
+  const result = confinedResult(command, home, file, content);
+  if (result.error || result.status !== 0) fail("confined file operation failed");
+  return result.stdout;
+}
+
+function claimConfinedDirectory(home, directory) {
+  const result = confinedResult("claim", home, directory);
+  if (result.status === 17) {
+    const error = new Error("writer lock already exists");
+    error.code = "EEXIST";
+    throw error;
+  }
+  if (result.error || result.status !== 0) fail("confined writer lock operation failed");
+}
+
+function readJson(file, label, home, root) {
   assertRegularOrAbsent(file, root);
   let value;
   try {
-    value = JSON.parse(fs.readFileSync(file, "utf8"));
+    value = JSON.parse(confinedFile("read", home, file).toString("utf8"));
   } catch {
     fail(`${label} is not valid JSON: ${file}`);
   }
   return value;
 }
 
-function writeAtomicContent(file, content, root) {
+function writeAtomicContent(file, content, home, root) {
   assertRegularOrAbsent(file, root);
-  const dir = path.dirname(file);
-  const temp = path.join(dir, `.${path.basename(file)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`);
-  assertInside(root, temp);
-  let fd;
-  try {
-    fd = fs.openSync(temp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
-    fs.writeFileSync(fd, content, "utf8");
-    fs.fsyncSync(fd);
-    fs.closeSync(fd);
-    fd = undefined;
-    assertDirectoryChain(dir, root);
-    fs.renameSync(temp, file);
-    const dirFd = fs.openSync(dir, "r");
-    fs.fsyncSync(dirFd);
-    fs.closeSync(dirFd);
-  } catch (error) {
-    if (fd !== undefined) fs.closeSync(fd);
-    try { fs.unlinkSync(temp); } catch {}
-    throw error;
-  }
+  confinedFile("publish", home, file, Buffer.from(content, "utf8"));
 }
 
-function writeAtomicJson(file, value, root) {
-  writeAtomicContent(file, `${JSON.stringify(value, null, 2)}\n`, root);
+function writeAtomicJson(file, value, home, root) {
+  writeAtomicContent(file, `${JSON.stringify(value, null, 2)}\n`, home, root);
+}
+
+function removeConfinedFile(file, home, root) {
+  assertRegularOrAbsent(file, root);
+  confinedFile("remove", home, file);
 }
 
 function countOccurrences(content, needle) {
@@ -406,9 +426,9 @@ function buildPage(template, payload) {
   return source.replace(expected, payloadBlock(payload));
 }
 
-function readEmbeddedPayload(file, root) {
+function readEmbeddedPayload(file, home, root) {
   assertRegularOrAbsent(file, root);
-  const content = fs.readFileSync(file, "utf8");
+  const content = confinedFile("read", home, file).toString("utf8");
   if (countOccurrences(content, PAYLOAD_BEGIN) !== 1 || countOccurrences(content, PAYLOAD_END) !== 1) {
     fail(`page does not contain exactly one delimited payload: ${file}`);
   }
@@ -425,10 +445,10 @@ function readEmbeddedPayload(file, root) {
   }
 }
 
-function writePagePayload(file, payload, root) {
+function writePagePayload(file, payload, home, root) {
   assertRegularOrAbsent(file, root);
-  const { content } = readEmbeddedPayload(file, root);
-  writeAtomicContent(file, replacePayloadBlock(content, payloadBlock(payload)), root);
+  const { content } = readEmbeddedPayload(file, home, root);
+  writeAtomicContent(file, replacePayloadBlock(content, payloadBlock(payload)), home, root);
 }
 
 function acquireWriter(layout) {
@@ -437,8 +457,8 @@ function acquireWriter(layout) {
   const owner = path.join(layout.lock, "owner.json");
   const token = crypto.randomBytes(16).toString("hex");
   const claim = () => {
-    fs.mkdirSync(layout.lock, { mode: 0o700 });
-    fs.writeFileSync(owner, `${JSON.stringify({ token, pid: process.pid, claimed_at: new Date().toISOString() })}\n`, { mode: 0o600, flag: "wx" });
+    claimConfinedDirectory(layout.home, layout.lock);
+    writeAtomicContent(owner, `${JSON.stringify({ token, pid: process.pid, claimed_at: new Date().toISOString() })}\n`, layout.home, layout.root);
   };
   while (true) {
     try {
@@ -480,7 +500,7 @@ function acquireWriter(layout) {
     released = true;
     try {
       assertDirectoryChain(layout.root, layout.home);
-      const value = readJson(owner, "writer owner record", layout.root);
+      const value = readJson(owner, "writer owner record", layout.home, layout.root);
       if (value?.token === token) fs.rmSync(layout.lock, { recursive: true, force: true });
     } catch {}
   };
@@ -509,6 +529,27 @@ function validateMilestone(value, label) {
   return value;
 }
 
+function milestonePrefix(at) {
+  return at.replace(/[-:]/g, "").replace(".000", "");
+}
+
+function validateMilestoneHistory(items) {
+  let previousAt = Infinity;
+  const fingerprints = new Set();
+  items.forEach((item, index) => {
+    const label = `payload.milestones[${index}]`;
+    validateMilestone(item, label);
+    const timestamp = Date.parse(item.at);
+    if (new Date(timestamp).toISOString() !== item.at) fail(`${label}.at is not canonical`);
+    if (timestamp > previousAt) fail("payload milestones are not newest first");
+    previousAt = timestamp;
+    const prefix = milestonePrefix(item.at);
+    if (item.id !== prefix && !new RegExp(`^${prefix}-[0-9]{2,}$`).test(item.id)) fail(`${label}.id is not timestamp-derived`);
+    if (fingerprints.has(item.fingerprint)) fail(`payload repeats milestone fingerprint: ${item.fingerprint}`);
+    fingerprints.add(item.fingerprint);
+  });
+}
+
 function validatePayload(value, expectedMission, expectedId) {
   assertKeys(value, ["schema", "mission", "status", "started_at", "updated_at", "snapshot", "gates", "milestones", "blockers", "resources", "outcome", "final_outcome"], "payload");
   if (value.schema !== PAYLOAD_SCHEMA) fail("payload has the wrong schema");
@@ -519,12 +560,9 @@ function validatePayload(value, expectedMission, expectedId) {
   validateSnapshot(value.snapshot, "payload.snapshot");
   validateGates(value.gates, "payload.gates", { requireOne: true });
   if (!Array.isArray(value.milestones) || value.milestones.length === 0) fail("payload milestones must be non-empty");
-  const ids = new Set();
-  value.milestones.forEach((item, index) => {
-    validateMilestone(item, `payload.milestones[${index}]`);
-    if (ids.has(item.id)) fail(`payload repeats milestone id: ${item.id}`);
-    ids.add(item.id);
-  });
+  const ids = new Set(value.milestones.map((item) => item.id));
+  if (ids.size !== value.milestones.length) fail("payload repeats milestone id");
+  validateMilestoneHistory(value.milestones);
   validateBlockers(value.blockers, "payload.blockers");
   validateResources(value.resources, "payload.resources");
   if (value.status === "closed") {
@@ -554,7 +592,7 @@ function mergeById(current, patches, label, transition) {
 }
 
 function milestoneId(at, milestones) {
-  const base = at.replace(/[-:]/g, "").replace(".000", "");
+  const base = milestonePrefix(at);
   let id = base;
   let suffix = 1;
   const used = new Set(milestones.map((item) => item.id));
@@ -578,7 +616,7 @@ function applyUpdate(payload, update, command) {
   if (payload.status !== "active") fail("the mission is closed and cannot be updated");
   const now = new Date().toISOString();
   const fingerprint = updateFingerprint(update);
-  if (payload.milestones[0]?.fingerprint === fingerprint) fail("duplicate logbook update refused");
+  if (payload.milestones.some((milestone) => milestone.fingerprint === fingerprint)) fail("duplicate logbook update refused");
   if (update.kind === "checkpoint") {
     const previous = Date.parse(payload.milestones[0].at);
     if (Date.now() - previous < CHECKPOINT_INTERVAL_MS) fail("quiet checkpoint refused before a six-hour meaningful interval");
@@ -637,12 +675,12 @@ function loadActive(home, root) {
   const file = path.join(root, "active.json");
   assertRegularOrAbsent(file, root);
   if (!fs.existsSync(file)) return undefined;
-  const registration = validateRegistration(readJson(file, "active registration", root), home);
+  const registration = validateRegistration(readJson(file, "active registration", home, root), home);
   const page = path.resolve(home, registration.page);
   assertInside(root, page);
   assertRegularOrAbsent(page, root);
   if (!fs.existsSync(page)) fail("active registration points to a missing mission page");
-  const embedded = readEmbeddedPayload(page, root);
+  const embedded = readEmbeddedPayload(page, home, root);
   const payload = validatePayload(embedded.payload, registration.mission, registration.mission_id);
   return { registration, page, payload };
 }
@@ -654,7 +692,7 @@ function commandStart(home, mission, input) {
     const active = loadActive(home, files.root);
     if (active) {
       if (active.payload.status === "closed") {
-        fs.unlinkSync(files.registration);
+        removeConfinedFile(files.registration, files.home, files.root);
       } else if (active.registration.mission !== mission) {
         fail(`another mission is active: ${active.registration.mission}`);
       } else {
@@ -692,7 +730,7 @@ function commandStart(home, mission, input) {
     if (!fs.existsSync(template) || fs.lstatSync(template).isSymbolicLink() || !fs.statSync(template).isFile()) fail(`logbook shell is missing: ${template}`);
     assertRegularOrAbsent(files.page, files.root);
     if (fs.existsSync(files.page)) fail(`mission page already exists without an active registration: ${files.page}`);
-    writeAtomicContent(files.page, buildPage(template, payload), files.root);
+    writeAtomicContent(files.page, buildPage(template, payload), files.home, files.root);
     const registration = {
       schema: REGISTRATION_SCHEMA,
       mission_id: files.missionId,
@@ -700,7 +738,7 @@ function commandStart(home, mission, input) {
       page: relativeFromHome(home, files.page),
       started_at: now,
     };
-    writeAtomicJson(files.registration, registration, files.root);
+    writeAtomicJson(files.registration, registration, files.home, files.root);
     process.stdout.write(`created: ${files.page}\nmission-id: ${files.missionId}\n`);
   } finally {
     release();
@@ -716,13 +754,10 @@ function commandMutation(home, mission, input, command) {
     if (active.registration.mission !== mission) fail(`active mission is ${active.registration.mission}`);
     const update = validateUpdate(input, command);
     const next = applyUpdate(active.payload, update, command);
-    writePagePayload(active.page, next, files.root);
+    writePagePayload(active.page, next, files.home, files.root);
     if (command === "close") {
       assertRegularOrAbsent(files.registration, files.root);
-      fs.unlinkSync(files.registration);
-      const dirFd = fs.openSync(files.root, "r");
-      fs.fsyncSync(dirFd);
-      fs.closeSync(dirFd);
+      removeConfinedFile(files.registration, files.home, files.root);
       process.stdout.write(`closed: ${next.milestones[0].id}\npage: ${active.page}\n`);
     } else {
       process.stdout.write(`updated: ${next.milestones[0].id}\npage: ${active.page}\n`);

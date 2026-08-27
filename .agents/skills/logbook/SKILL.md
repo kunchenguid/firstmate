@@ -16,6 +16,7 @@ The logbook reports outcomes from Firstmate's normal task lifecycle and never be
 
 The durable artifact is one self-contained, standards-based HTML file with one uniquely delimited `application/json` payload block.
 The deterministic helper at [`logbook.mjs`](logbook.mjs) validates every mutation, confines every path to this home's private `data/logbook/`, serializes writers, and atomically replaces the page while preserving every shell byte outside that block.
+It requires Node.js and Python 3 for descriptor-relative confined file operations.
 The shipped shell at [`assets/logbook.html`](assets/logbook.html) reads only the embedded payload and the Refresh progress button reloads the same page with a fresh cache-busting query so Luxe shows the newest validated update without reopening its session.
 
 ## Invocation contract

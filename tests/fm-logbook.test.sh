@@ -10,6 +10,7 @@ TMP_ROOT=$(fm_test_tmproot fm-logbook)
 
 command -v node >/dev/null 2>&1 || { echo "skip: node not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
+command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found"; exit 0; }
 
 run_logbook() {  # <home> <args...>
   local home=$1
@@ -247,6 +248,56 @@ test_duplicate_update_is_refused() {
   pass "duplicate qualifying updates are refused before publication"
 }
 
+test_non_immediate_duplicate_update_is_refused() {
+  local home page first second before out rc
+  home=$(make_home non-immediate-duplicate)
+  run_logbook "$home" start --mission "History duplicate mission" >/dev/null || fail "fixture start failed"
+  page=$(page_for "$home")
+  first="$home/first.json"
+  second="$home/second.json"
+  write_stage_update "$first" "First accepted stage" "The first qualifying stage is complete." active
+  write_stage_update "$second" "Second accepted stage" "The second qualifying stage is complete." active
+  run_logbook "$home" update --mission "History duplicate mission" --input "$first" >/dev/null || fail "first update failed"
+  run_logbook "$home" update --mission "History duplicate mission" --input "$second" >/dev/null || fail "second update failed"
+  before=$(shasum -a 256 "$page" | awk '{print $1}')
+  set +e
+  out=$(run_logbook "$home" update --mission "History duplicate mission" --input "$first" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "non-immediate duplicate update was accepted"
+  assert_contains "$out" "duplicate logbook update refused" "history duplicate refusal did not explain the conflict"
+  [ "$(shasum -a 256 "$page" | awk '{print $1}')" = "$before" ] || fail "history duplicate changed the page"
+  pass "retained milestone fingerprints refuse non-immediate duplicates"
+}
+
+test_reordered_milestones_are_refused() {
+  local home page update before out rc
+  home=$(make_home malformed-history)
+  run_logbook "$home" start --mission "History validation mission" >/dev/null || fail "fixture start failed"
+  page=$(page_for "$home")
+  update="$home/update.json"
+  write_stage_update "$update" "Later stage" "The later stage is complete." active
+  run_logbook "$home" update --mission "History validation mission" --input "$update" >/dev/null || fail "fixture update failed"
+  node - "$page" <<'NODE'
+const fs = require("fs");
+const page = process.argv[2];
+const html = fs.readFileSync(page, "utf8");
+const match = html.match(/(<script id="firstmate-logbook-data" type="application\/json">\n)([\s\S]*?)(\n<\/script>)/);
+const payload = JSON.parse(match[2]);
+[payload.milestones[0], payload.milestones[1]] = [payload.milestones[1], payload.milestones[0]];
+fs.writeFileSync(page, `${html.slice(0, match.index)}${match[1]}${JSON.stringify(payload, null, 2)}${match[3]}${html.slice(match.index + match[0].length)}`);
+NODE
+  before=$(shasum -a 256 "$page" | awk '{print $1}')
+  set +e
+  out=$(run_logbook "$home" update --mission "History validation mission" --input "$update" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "reordered milestones were accepted"
+  assert_contains "$out" "not newest first" "reordered milestone refusal did not name the invariant"
+  [ "$(shasum -a 256 "$page" | awk '{print $1}')" = "$before" ] || fail "malformed history was republished"
+  pass "malformed milestone ordering is refused before publication"
+}
+
 test_completed_close_records_outcome_and_preserves_page() {
   local home page input
   home=$(make_home close)
@@ -288,4 +339,6 @@ test_path_like_mission_is_confined
 test_symlinked_mission_directory_is_refused
 test_one_live_writer_refuses_a_competing_update
 test_duplicate_update_is_refused
+test_non_immediate_duplicate_update_is_refused
+test_reordered_milestones_are_refused
 test_completed_close_records_outcome_and_preserves_page
