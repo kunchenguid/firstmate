@@ -127,6 +127,13 @@ const branchCacheKey = `fm-branch-${createHash("sha256").update(fmHome).digest("
 
 const MIRROR_MESSAGE_CAP = 4000;
 const MERGE_NOTE_BOAT = "⛵";
+// Carried inside the captain note's own text because that text is the only
+// part of a custom message Pi gives the model (see mergeIntoMain).
+const CAPTAIN_OUTCOME_INSTRUCTION =
+  "This is a supervision outcome delivered automatically by the supervision branch. " +
+  "It was not typed by the captain and it is not your own earlier output. " +
+  "Relay only this outcome to the captain now, in one short message, in captain outcome language. " +
+  "Do not restate or repeat any earlier answer.";
 type MirrorItem = { tag: "captain" | "main"; text: string };
 type MirrorCursor = { file: string; index: number };
 type Verdict = "routine" | "captain";
@@ -549,6 +556,31 @@ export default function (pi: ExtensionAPI) {
   // Pi; a crash inside Pi's
   // own delivery window leaves the outcome durable in the store, where
   // main's fm_branch_outcomes tool still reads it on demand.
+  //
+  // Pi keeps only `content` when it converts a custom message for the model:
+  // customType, display, and details never reach the provider. A captain note
+  // therefore has to carry its own identity inside `content`, or main receives
+  // an unattributed user message written in main's own captain-facing voice
+  // and cannot tell an incoming outcome from its own earlier answer. When that
+  // happens main re-emits its previous answer instead of relaying the outcome,
+  // and the outcome is lost. The typed operational envelope is what makes the
+  // note self-describing; it stays invisible to the captain because the note
+  // is never rendered.
+  //
+  // Encoding shells out, so it can fail on a broken checkout. This file's
+  // failure direction applies: an outcome that cannot be typed is still
+  // delivered, carrying the same instruction as plain text, because an
+  // untyped outcome main can still read beats an outcome the captain never
+  // sees.
+  function captainOutcomeInput(task: string, summary: string): string {
+    const body = `${CAPTAIN_OUTCOME_INSTRUCTION}\n\n${task}: ${summary}`;
+    try {
+      return encodeFirstmateOperationalInput("branch-outcome", body);
+    } catch {
+      return body;
+    }
+  }
+
   function mergeIntoMain(
     expectedGeneration: number,
     seq: string,
@@ -559,7 +591,11 @@ export default function (pi: ExtensionAPI) {
   ): boolean {
     if (!actingAsOwner(expectedGeneration)) return false;
     if (verdict === "captain") {
-      const message = { customType: "fm-branch-merge", content: `${task}: ${summary}`, display: false };
+      const message = {
+        customType: "fm-branch-merge",
+        content: captainOutcomeInput(task, summary),
+        display: false,
+      };
       pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
     } else {
       const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${task}: ${summary}`, display: !(task === "fleet" && silent) };
