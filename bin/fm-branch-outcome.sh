@@ -65,7 +65,7 @@ CURSOR="$STATE/.branch-outcomes-cursor"
 LOCK="$STATE/.branch-outcomes.lock"
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | list [--recent <n>] | startup-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | get --seq <seq> | unread | mark-read --through <seq> | list [--recent <n>] | startup-replay" >&2
   exit 2
 }
 
@@ -218,6 +218,21 @@ case "$CMD" in
     fi
     fm_lock_release "$LOCK"
     printf '%s\n' "$SEQ"
+    ;;
+  get)
+    [ "${1:-}" = --seq ] || usage
+    GET_SEQ=${2:-}
+    case "$GET_SEQ" in ''|*[!0-9]*) usage ;; esac
+    [ "$#" -eq 2 ] || usage
+    fm_lock_acquire_wait "$LOCK"
+    if [ -s "$STORE" ]; then
+      while IFS= read -r line; do
+        [ "$(record_seq "$line")" = "$GET_SEQ" ] || continue
+        printf '%s\n' "$line"
+        break
+      done < "$STORE"
+    fi
+    fm_lock_release "$LOCK"
     ;;
   unread)
     [ "$#" -eq 0 ] || usage

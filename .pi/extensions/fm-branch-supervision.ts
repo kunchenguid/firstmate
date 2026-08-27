@@ -665,12 +665,11 @@ export default function (pi: ExtensionAPI) {
           };
         }
         let storedSilent = silent;
-        const listed = runOutcomeScript(["list", "--recent", "1"]);
-        if (listed.ok && listed.stdout) {
+        const stored = runOutcomeScript(["get", "--seq", appended.stdout]);
+        if (stored.ok && stored.stdout) {
           try {
-            const lines = listed.stdout.split("\n").filter((line) => line.length > 0);
-            const row = JSON.parse(lines[lines.length - 1] || "null") as { silent?: unknown };
-            if (row && typeof row === "object") {
+            const row = JSON.parse(stored.stdout) as { seq?: unknown; task?: unknown; silent?: unknown };
+            if (row && typeof row === "object" && String(row.seq) === appended.stdout && row.task === task) {
               if (row.silent === true) storedSilent = true;
               else if (row.silent === false) storedSilent = false;
             }

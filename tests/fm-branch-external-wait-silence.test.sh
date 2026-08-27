@@ -23,6 +23,10 @@ row_silent() {
   FM_HOME="$1" "$OUTCOME" list --recent 1 | jq -r '.silent'
 }
 
+row_silent_at() {
+  FM_HOME="$1" "$OUTCOME" get --seq "$2" | jq -r '.silent'
+}
+
 assert_silent() {
   local home=$1 want=$2 msg=$3 got
   got=$(row_silent "$home") || fail "$msg (could not read silent field)"
@@ -64,6 +68,14 @@ append_outcome "$home" pr-1 routine 'still parked on the unavailable runner' "$s
   || fail "unchanged wait append failed"
 assert_silent "$home" true "unchanged wait must be stored silent"
 assert_replay_silent "$home" 'still parked on the unavailable runner' "startup replay replayed an unchanged wait"
+
+# Exact sequence lookup remains bound to the appended outcome after another task appends.
+wait_seq=$(append_outcome "$home" pr-1 routine 'still parked after another inspection' "$stale_wake_480") \
+  || fail "concurrent-handoff wait append failed"
+append_outcome "$home" pr-2 routine 'other task produced a visible transition' 'signal: working' >/dev/null \
+  || fail "interleaved visible append failed"
+[ "$(row_silent_at "$home" "$wait_seq")" = true ] \
+  || fail "exact sequence lookup inherited a later outcome's visibility"
 
 # Another task with the same pause prose is a first notice of its own.
 append_outcome "$home" pr-2 routine 'PR worker still waiting on the self-hosted runner' "$stale_wake_other" >/dev/null \
