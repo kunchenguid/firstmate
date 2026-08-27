@@ -12,6 +12,14 @@ TMP_ROOT=$(fm_test_tmproot fm-project-dashboard)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
+# Portable mtime: GNU `stat -f` means "filesystem status", so a BSD-first
+# fallback chain succeeds on Linux while printing a literal "%m".
+if [ "$(uname 2>/dev/null || true)" = Darwin ]; then
+  fixture_mtime_epoch() { stat -f '%m' "$1"; }
+else
+  fixture_mtime_epoch() { stat -c '%Y' "$1"; }
+fi
+
 make_home() {  # <name>
   local home="$TMP_ROOT/$1"
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects" "$home/fakebin"
@@ -96,7 +104,7 @@ test_aggregation_status_precedence_and_secondmate_join() {
   local home epoch out
   home=$(make_home aggregation)
   write_fleet_fixture "$home"
-  epoch=$(stat -f '%m' "$home/state/beta-wait.status" 2>/dev/null || stat -c '%Y' "$home/state/beta-wait.status")
+  epoch=$(fixture_mtime_epoch "$home/state/beta-wait.status")
   out=$(run_snapshot "$home" "$epoch") || fail "dashboard snapshot failed"
   printf '%s' "$out" | jq -e '
     .schema == "fm-project-dashboard.v1"
@@ -131,7 +139,7 @@ test_stale_risk_is_strictly_older_than_eight_days() {
   local home activity exact later out
   home=$(make_home stale)
   write_fleet_fixture "$home"
-  activity=$(stat -f '%m' "$home/state/beta-wait.status" 2>/dev/null || stat -c '%Y' "$home/state/beta-wait.status")
+  activity=$(fixture_mtime_epoch "$home/state/beta-wait.status")
   exact=$((activity + 8 * 86400))
   later=$((exact + 1))
   out=$(run_snapshot "$home" "$exact") || fail "exact-threshold snapshot failed"
@@ -303,7 +311,7 @@ test_live_secondmate_owner_activity_defeats_stale_risk() {
       else . end)
   ' "$home/fleet.json" > "$home/fleet.tmp"
   mv "$home/fleet.tmp" "$home/fleet.json"
-  activity=$(stat -f '%m' "$home/state/delta-mate.status" 2>/dev/null || stat -c '%Y' "$home/state/delta-mate.status")
+  activity=$(fixture_mtime_epoch "$home/state/delta-mate.status")
   exact=$((activity + 8 * 86400))
   later=$((exact + 1))
   out=$(run_snapshot "$home" "$exact") || fail "secondmate-activity snapshot failed"
