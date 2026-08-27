@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "gates": [
-    {
+  "gates": {
+    "gate-g1-threshold": {
       "id": "gate-g1-threshold",
       "title": "Threshold selection: captain>=185k and crew>=50% selected; sub-threshold not",
       "observable": "fm_ctx_select picks a captain sentinel at total>=185k and a crew sentinel at used_pct>=50, and excludes sub-threshold sentinels",
@@ -18,7 +18,7 @@
       "created": "2026-06-25T00:00:00Z",
       "last_verified": "2026-08-27T05:39:56.326Z"
     },
-    {
+    "gate-g2-busy-guard": {
       "id": "gate-g2-busy-guard",
       "title": "Busy-guard: an over-threshold pane that is busy does NOT fire",
       "observable": "fm_ctx_can_fire returns false for an eligible sentinel whose scratch tmux pane shows a busy footer",
@@ -35,7 +35,7 @@
       "created": "2026-06-25T00:00:00Z",
       "last_verified": "2026-08-27T05:39:56.326Z"
     },
-    {
+    "gate-g3-rehydrate": {
       "id": "gate-g3-rehydrate",
       "title": "Rehydrate: SessionStart with handoff injects+archives it; no-handoff path unchanged",
       "observable": "bootstrap injects handoff additionalContext and archives it; with no handoff a captain pane still gets captain ctx and no rehydrate block",
@@ -52,7 +52,7 @@
       "created": "2026-06-25T00:00:00Z",
       "last_verified": "2026-08-27T05:39:56.326Z"
     },
-    {
+    "gate-g4-e2e": {
       "id": "gate-g4-e2e",
       "title": "E2E on scratch pane: threshold -> checkpoint -> handoff -> /clear -> rehydrate",
       "observable": "fm_ctx_fire_once sends the checkpoint instruction into a scratch pane, waits for the handoff, issues /clear, and the bootstrap rehydrates from it",
@@ -72,7 +72,7 @@
       "created": "2026-06-25T00:00:00Z",
       "last_verified": "2026-08-27T05:39:56.326Z"
     },
-    {
+    "gate-g5-inject-cap": {
       "id": "gate-g5-inject-cap",
       "title": "Inject cap: handoff under 10k injected verbatim, over 10k yields a pointer",
       "observable": "fm_ctx_inject_payload and the bootstrap emit the handoff verbatim under the cap and a short file pointer over it",
@@ -89,7 +89,7 @@
       "created": "2026-06-25T00:00:00Z",
       "last_verified": "2026-08-27T05:39:56.326Z"
     },
-    {
+    "gate-q1-verdict-grammar": {
       "id": "gate-q1-verdict-grammar",
       "title": "Verdict grammar: only approve/reject/escalate/lens lines; last-decision and reject-count read correctly",
       "observable": "fm_verdict_append refuses an invalid kind; fm_verdict_last ignores lens lines; fm_verdict_reject_count counts only reject lines",
@@ -106,7 +106,7 @@
       "created": "2026-07-01T00:00:00Z",
       "last_verified": "2026-08-27T05:39:56.326Z"
     },
-    {
+    "gate-q2-merge-refuses-unverified": {
       "id": "gate-q2-merge-refuses-unverified",
       "title": "fm-merge-local refuses without a trailing approve verdict; approve merges; override is loud",
       "observable": "fm-merge-local exits 1 with the QUARTERDECK banner when state/<id>.verdict is missing or ends in reject, fast-forwards on approve, and honors FM_VERIFY_OVERRIDE=1 with a warning banner",
@@ -125,7 +125,7 @@
       "created": "2026-07-01T00:00:00Z",
       "last_verified": "2026-08-27T05:39:56.326Z"
     },
-    {
+    "gate-q3-prcheck-refuses-unverified": {
       "id": "gate-q3-prcheck-refuses-unverified",
       "title": "fm-pr-check refuses to arm the merge poll without a trailing approve verdict",
       "observable": "fm-pr-check exits 1 with the QUARTERDECK banner and writes no state/<id>.check.sh when the verdict is missing/reject; arms it on approve",
@@ -144,7 +144,7 @@
       "created": "2026-07-01T00:00:00Z",
       "last_verified": "2026-08-27T05:39:56.326Z"
     },
-    {
+    "gate-q4-reject-roundtrip": {
       "id": "gate-q4-reject-roundtrip",
       "title": "fm-verify: approve path records approve; reject relays findings to the crewmate and exits 2; non-ship tasks skip",
       "observable": "with a stubbed verifier and relay, a reject verdict appends 'reject: (attempt 1 of 3)', the relay receives the QUARTERDECK REJECTED message, exit is 2; an approve verdict appends approve and exits 0; kind=scout skips with exit 0",
@@ -163,7 +163,7 @@
       "created": "2026-07-01T00:00:00Z",
       "last_verified": "2026-08-27T05:39:56.326Z"
     },
-    {
+    "gate-q5-attempt-cap": {
       "id": "gate-q5-attempt-cap",
       "title": "Third reject escalates instead of spinning; at-cap tasks escalate without re-running the verifier",
       "observable": "with two prior rejects a rejecting stub yields reject #3 AND an escalate line with exit 3; with three prior rejects fm-verify escalates immediately and the verifier stub is never invoked",
@@ -182,7 +182,7 @@
       "created": "2026-07-01T00:00:00Z",
       "last_verified": "2026-08-27T05:39:56.326Z"
     },
-    {
+    "gate-q6-lens-degrade": {
       "id": "gate-q6-lens-degrade",
       "title": "No Fugu key + no codex -> lens degrades to none loudly; verify still completes",
       "observable": "with FUGU_API_KEY unset, no FM_LENS_CMD, and codex absent from PATH, fm-verify logs a degradation warning, records 'lens: none', and still reaches an approve verdict",
@@ -201,7 +201,7 @@
       "created": "2026-07-01T00:00:00Z",
       "last_verified": "2026-08-27T05:39:56.326Z"
     },
-    {
+    "gate-q7-fail-closed": {
       "id": "gate-q7-fail-closed",
       "title": "Verifier infrastructure failure escalates - never approves",
       "observable": "a verifier command that exits non-zero, or exits 0 with no VERDICT line, yields an escalate verdict and exit 3; the verdict file never gains an approve",
@@ -220,7 +220,7 @@
       "created": "2026-07-01T00:00:00Z",
       "last_verified": "2026-08-27T05:39:56.326Z"
     },
-    {
+    "gate-i1-intake-grammar": {
       "id": "gate-i1-intake-grammar",
       "title": "Intake grammar: only proceed/revise/escalate/panel lines; last-decision ignores panel lines and no-decision files",
       "observable": "fm_intake_append refuses an invalid kind; fm_intake_last ignores panel lines and returns 1 on missing file or decision-free file; fm_intake_revise_count counts only revise lines",
@@ -237,7 +237,7 @@
       "created": "2026-07-03T00:00:00Z",
       "last_verified": "2026-08-27T05:39:56.326Z"
     },
-    {
+    "gate-i2-spawn-refuses-unvetted": {
       "id": "gate-i2-spawn-refuses-unvetted",
       "title": "fm-spawn refuses a ship task without a trailing intake proceed; scout exempt; override loud",
       "observable": "with a brief present, a ship spawn with missing/revise-last intake exits non-zero with the WARDROOM banner before any side effect; proceed-last and --scout pass the gate; FM_INTAKE_OVERRIDE=1 bypasses with a warning banner",
@@ -256,7 +256,7 @@
       "created": "2026-07-03T00:00:00Z",
       "last_verified": "2026-08-27T05:39:56.326Z"
     },
-    {
+    "gate-i3-panel-roundtrip": {
       "id": "gate-i3-panel-roundtrip",
       "title": "fm-intake: both thinkers proceed -> proceed + synthesis; one revise -> revise with count; exit codes 0/2",
       "observable": "with stubbed thinkers and lens, both-proceed appends 'proceed:' and exits 0 with intake-review.md written; a revising thinker appends 'revise: (revise 1 of 2)' and exits 2",
@@ -275,7 +275,7 @@
       "created": "2026-07-03T00:00:00Z",
       "last_verified": "2026-08-27T05:39:56.326Z"
     },
-    {
+    "gate-i4-revise-cap-fail-closed": {
       "id": "gate-i4-revise-cap-fail-closed",
       "title": "Second revise escalates; at-cap intakes escalate without running the panel; a PANEL-less thinker escalates, never proceeds",
       "observable": "with one seeded revise, a revising stub yields revise #2 AND an escalate line with exit 3; with two seeded revises the panel stub is never invoked; a thinker emitting no PANEL line yields escalate with no proceed line",
@@ -294,7 +294,7 @@
       "created": "2026-07-03T00:00:00Z",
       "last_verified": "2026-08-27T05:39:56.326Z"
     },
-    {
+    "gate-i5-intake-lens-degrade": {
       "id": "gate-i5-intake-lens-degrade",
       "title": "Intake with no Fugu key + no codex degrades the lens to none loudly; intake still completes",
       "observable": "under env -i with FUGU_API_KEY stripped and codex absent from PATH, fm-intake logs a degradation warning, records 'panel: lens none', and still reaches a proceed decision from stubbed thinkers",
@@ -313,7 +313,7 @@
       "created": "2026-07-03T00:00:00Z",
       "last_verified": "2026-08-27T05:39:56.326Z"
     },
-    {
+    "gate-l1-drain-instrumented": {
       "id": "gate-l1-drain-instrumented",
       "title": "Wake drain appends a run-log JSON line and stamps STATE.md; FM_LOOP_LOG=0 disables; log failure never breaks the drain",
       "observable": "a drain of a queued record appends a parseable JSON line with items_found to loop-run-log.md and rewrites STATE.md Last run; FM_LOOP_LOG=0 leaves both untouched; an unwritable log target does not change the drain output or exit code",
@@ -330,7 +330,7 @@
       "created": "2026-07-03T00:00:00Z",
       "last_verified": "2026-08-27T05:39:56.326Z"
     },
-    {
+    "gate-l2-loop-audit-level": {
       "id": "gate-l2-loop-audit-level",
       "title": "loop-audit scores the repo at level L2 or better (score >= 58)",
       "observable": "the globally installed loop-audit CLI reports level L2 or L3 with score >= 58 for the repo root; a stripped copy (no STATE.md/LOOP.md) scores lower and fails the same assertion",
@@ -348,6 +348,23 @@
       "regression": false,
       "created": "2026-07-03T00:00:00Z",
       "last_verified": "2026-08-27T05:39:56.326Z"
+    },
+    "g-boot-digest": {
+      "id": "g-boot-digest",
+      "title": "Boot-time reconciliation digest in captain context; fm-watch-arm --status read-only",
+      "observable": "SessionStart captain block carries the reconciliation digest (lock-free wake-queue depth+records with torn-tail rule, verbatim fm-watch-arm --status and fm-lock status relays, in-flight metas with last status, afk flag, exact snapshot disclaimer, ~2000-char cap with explicit +N-more marker); non-captain unchanged; --status is one-line/exit-0 and side-effect-free",
+      "origin_mode": "build",
+      "spec_ref": "docs/specs/2026-07-08-boot-recon-digest.md",
+      "blocked_by": [],
+      "test_ref": "bash tests/fm-captain-bootstrap-digest.test.sh",
+      "baseline_ref": null,
+      "first_observed_red": "2026-07-08T21:00:30.169Z",
+      "mutation_verified": "2026-07-08T21:07:26.313Z",
+      "status": "frozen",
+      "vacuous": false,
+      "regression": false,
+      "created": "2026-07-08T00:00:00Z",
+      "last_verified": "2026-07-08T21:07:14.695Z"
     }
-  ]
+  }
 }

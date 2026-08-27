@@ -29,6 +29,14 @@
 # pid, so it can never touch another home's watcher. NEVER `pkill -f
 # bin/fm-watch.sh`: that pattern matches every firstmate home's watcher
 # (secondmate homes run the same script) and would kill siblings.
+#
+# --status: read-only snapshot (used by the boot-time reconciliation digest in
+# fm-captain-bootstrap.sh). Reuses healthy_watcher() — the same honesty gate —
+# and never arms, restarts, or signals anything, and never creates, modifies,
+# or deletes lock/beacon files. Prints exactly one line and always exits 0:
+#   watcher-status: healthy pid=<pid> beacon-age=<secs>s
+#   watcher-status: stale pid=<pid|none> beacon-age=<secs|none>
+#   watcher-status: none
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -104,8 +112,24 @@ mode=arm
 case "${1:-}" in
   ''|arm|--arm) mode=arm ;;
   --restart) mode=restart ;;
-  *) echo "usage: $(basename "$0") [--restart]" >&2; exit 2 ;;
+  --status) mode=status ;;
+  *) echo "usage: $(basename "$0") [--restart|--status]" >&2; exit 2 ;;
 esac
+
+if [ "$mode" = status ]; then
+  # Read-only: one line, always exit 0 (status reporting is never an error).
+  if healthy_watcher; then
+    echo "watcher-status: healthy pid=$HEALTHY_PID beacon-age=$(fm_path_age "$BEAT")s"
+  elif [ -e "$WATCH_LOCK" ] || [ -L "$WATCH_LOCK" ] || [ -e "$BEAT" ]; then
+    status_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+    status_age=none
+    [ -e "$BEAT" ] && status_age=$(fm_path_age "$BEAT")
+    echo "watcher-status: stale pid=${status_pid:-none} beacon-age=$status_age"
+  else
+    echo "watcher-status: none"
+  fi
+  exit 0
+fi
 
 if [ "$mode" = restart ]; then
   # Home-scoped stop: only the watcher pid recorded in THIS home's lock.

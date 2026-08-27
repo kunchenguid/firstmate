@@ -27,3 +27,4 @@
 | gate-i5-intake-lens-degrade | green | Intake with no Fugu key + no codex degrades the lens to none loudly; intake still completes |
 | gate-l1-drain-instrumented | green | Wake drain appends a run-log JSON line and stamps STATE.md; FM_LOOP_LOG=0 disables; log failure never breaks the drain |
 | gate-l2-loop-audit-level | red | loop-audit scores the repo at level L2 or better (score >= 58) |
+| g-boot-digest | frozen | Boot-time reconciliation digest in captain context; fm-watch-arm --status read-only |

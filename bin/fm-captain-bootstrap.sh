@@ -16,12 +16,16 @@
 # unchanged: a captain pane gets the normal captain context, any other pane gets
 # nothing.
 FM="${FM_HOME:-$HOME/firstmate}"
+# Helper scripts (fm-watch-arm.sh --status, fm-lock.sh status) resolve through
+# this script's own bin dir; FM_BOOTSTRAP_BIN overrides it (the test stub seam).
+FM_BIN="${FM_BOOTSTRAP_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 # Capture the SessionStart hook payload from stdin into an env var: the python
 # program itself arrives on python's stdin via the heredoc, so the program reads
 # the hook JSON from the environment, not sys.stdin.
-FM_HOOK_JSON="$(cat)" FM_BOOTSTRAP_FM="$FM" python3 - <<'PY'
-import os, json, subprocess, time, shutil
+FM_HOOK_JSON="$(cat)" FM_BOOTSTRAP_FM="$FM" FM_BOOTSTRAP_BIN="$FM_BIN" python3 - <<'PY'
+import os, json, glob, subprocess, time, shutil
 fm = os.environ["FM_BOOTSTRAP_FM"]
+bindir = os.environ.get("FM_BOOTSTRAP_BIN", "")
 
 # --- read the SessionStart hook payload (cwd, source, session_id, transcript) ---
 raw = os.environ.get("FM_HOOK_JSON", "")
@@ -128,6 +132,118 @@ if os.path.exists(handoff):
         except Exception:
             pass
 
+# --- Reconciliation digest (boot-time snapshot; captain only) -----------------
+# Section-5 recovery signals visible at boot, so the captain does not burn live
+# bash calls rediscovering them before acting. This is a SNAPSHOT, not
+# reconciliation: it never drains the queue, never touches suppression markers
+# (.seen-*, .stale-*, .last-*), never acquires locks, never archives anything —
+# the captain still runs bin/fm-wake-drain.sh before acting (the disclaimer
+# below is load-bearing). Watcher and lock lines are verbatim relays of the
+# canonical helpers, never re-derived here.
+DIGEST_CAP = 2000
+DISCLAIMER = "Snapshot as of boot — run bin/fm-wake-drain.sh before acting on the fleet."
+
+def wake_queue_snapshot():
+    # Lock-free read: never touch .wake-queue.lock (contending with the live
+    # watcher from inside a 10s hook is worse than a stale read). Torn-tail
+    # rule: a record is valid iff it ends with a newline AND splits into >=5
+    # tab fields (epoch, seq, kind, key, payload); a failing final line is
+    # excluded from depth and display and flagged instead.
+    try:
+        with open(os.path.join(state, ".wake-queue"), "rb") as f:
+            raw = f.read()
+    except Exception:
+        return 0, [], False
+    if not raw:
+        return 0, [], False
+    text = raw.decode("utf-8", "replace")
+    ends_nl = text.endswith("\n")
+    rows = [r for r in text.split("\n") if r != ""]
+    torn = False
+    if rows and (not ends_nl or len(rows[-1].split("\t")) < 5):
+        rows.pop()
+        torn = True
+    valid = [r for r in rows if len(r.split("\t")) >= 5]
+    return len(valid), valid, torn
+
+def helper_relay(script, args):
+    # One sanctioned cheap exec; the helper's line is relayed verbatim.
+    try:
+        env = dict(os.environ)
+        env["FM_HOME"] = fm
+        r = subprocess.run([os.path.join(bindir, script)] + args,
+                           capture_output=True, text=True, timeout=5, env=env)
+        for ln in (r.stdout or "").splitlines():
+            if ln.strip():
+                return ln.strip()
+        return "(%s: no output)" % script
+    except Exception:
+        return "(%s unavailable)" % script
+
+def inflight_lines():
+    out = []
+    try:
+        metas = sorted(glob.glob(os.path.join(state, "*.meta")))
+    except Exception:
+        return out
+    for mp in metas:
+        tid = os.path.basename(mp)[:-len(".meta")]
+        meta = {}
+        for ln in read(mp).splitlines():
+            if "=" in ln:
+                k, _, v = ln.partition("=")
+                meta.setdefault(k.strip(), v.strip())
+        status_lines = [l for l in read(os.path.join(state, tid + ".status")).splitlines() if l.strip()]
+        last = status_lines[-1] if status_lines else "(no status yet)"
+        out.append("- %s window=%s kind=%s mode=%s — %s"
+                   % (tid, meta.get("window", "?"), meta.get("kind", "?"),
+                      meta.get("mode", "?"), last))
+    return out
+
+def build_digest():
+    depth, records, torn = wake_queue_snapshot()
+    queue_items = ["  " + r for r in records[-5:]]
+    tasks = inflight_lines()
+    header    = "## Reconciliation digest (boot-time snapshot)"
+    q_summary = "Wake queue: %s" % ("empty" if depth == 0 else "%d queued (most recent last)" % depth)
+    torn_line = "  (tail possibly torn)" if torn else None
+    watcher   = "Watcher: %s" % helper_relay("fm-watch-arm.sh", ["--status"])
+    lock      = "Session lock: %s" % helper_relay("fm-lock.sh", ["status"])
+    t_summary = "In-flight tasks: %s" % ("none" if not tasks else str(len(tasks)))
+    afk       = "afk: %s" % ("yes" if os.path.exists(os.path.join(state, ".afk")) else "no")
+    fixed = [header, q_summary, watcher, lock, t_summary, afk, DISCLAIMER]
+    if torn_line:
+        fixed.append(torn_line)
+    # Budget the two variable lists inside the cap; anything dropped is counted
+    # in an explicit "… (+N more)" marker, never silently. 64 chars are
+    # reserved for the two potential marker lines.
+    budget = DIGEST_CAP - sum(len(l) + 1 for l in fixed) - 64
+    def take(items):
+        nonlocal budget
+        kept = []
+        for it in items:
+            if budget - (len(it) + 1) < 0:
+                break
+            kept.append(it)
+            budget -= len(it) + 1
+        return kept
+    q_kept = take(queue_items)
+    t_kept = take(tasks)
+    q_hidden = depth - len(q_kept)
+    t_hidden = len(tasks) - len(t_kept)
+    lines = [header, q_summary]
+    lines += q_kept
+    if q_hidden > 0:
+        lines.append("  … (+%d more)" % q_hidden)
+    if torn_line:
+        lines.append(torn_line)
+    lines += [watcher, lock, t_summary]
+    lines += t_kept
+    if t_hidden > 0:
+        lines.append("- … (+%d more)" % t_hidden)
+    lines += [afk, DISCLAIMER]
+    return "\n".join(lines)
+
 # --- CAPTAIN context block (unchanged behavior) ------------------------------
 if role == "captain":
     projects    = read(os.path.join(fm, "data/projects.md")).strip()
@@ -164,6 +280,12 @@ Open 'firstmate' tmux windows:
 Recent backlog:
 {backlog or '(empty)'}
 """
+    # Digest degradation is total-by-design: any unexpected failure drops the
+    # whole section rather than breaking the hook or the captain block.
+    try:
+        ctx += "\n" + build_digest() + "\n"
+    except Exception:
+        pass
     blocks.append(ctx)
 
 # --- emit one combined additionalContext (or nothing) ------------------------
