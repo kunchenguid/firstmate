@@ -47,7 +47,9 @@
 #     within STALE_ESCALATE_SECS + a tick, never lost. A declared wait - either a
 #     paused: external wait or a verified captain-held transfer, per
 #     fm-classify-lib.sh's combined predicate - instead gets its own longer
-#     PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
+#     PAUSE_RESURFACE_SECS recheck, never a wedge escalation, whether its pane
+#     reads idle or busy; only a status append that stops declaring the wait
+#     ends that routing.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
@@ -960,9 +962,9 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
 #  2b) pause re-surface: for each declared-wait marker past PAUSE_RESURFACE_SECS,
-#     re-peek; busy/gone -> clear; still idle + still declaring the wait -> escalate
-#     a recheck digest naming which human the wait is on, and reset the window
-#     (repeating bounded re-surface, never a wedge).
+#     re-peek; gone -> clear; still declaring the wait, on an idle OR a busy pane
+#     -> escalate a recheck digest naming which human the wait is on, and reset
+#     the window (repeating bounded re-surface, never a wedge).
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
@@ -1028,15 +1030,21 @@ housekeeping() {  # <state>
     esac
   done
 
-  # (2b) pause re-surface recheck. A declared wait idles by design (fm-classify-lib.sh's
+  # (2b) pause re-surface recheck. A declared wait is waiting, not wedged (fm-classify-lib.sh's
   # status_is_paused_or_captain_held owns which declarations qualify), so it is
   # rechecked on a much longer cadence than a wedge (PAUSE_RESURFACE_SECS) and never
   # escalated as one - but it MUST re-surface, so neither a forgotten pause nor a
-  # forgotten captain hold can rot invisibly. Past the window: busy (resumed) or gone
-  # -> drop; still idle and still declaring the wait -> escalate a recheck digest and
-  # reset the marker so the window repeats. The digest names WHICH human the wait is
-  # on, because the captain is the one reading it: an external dependency for a
-  # paused: declaration, and the captain themself for a verified hold transfer.
+  # forgotten captain hold can rot invisibly. Past the window: gone -> drop; still
+  # declaring the wait -> escalate a recheck digest and reset the marker so the window
+  # repeats. The digest names WHICH human the wait is on, because the captain is the
+  # one reading it: an external dependency for a paused: declaration, and the captain
+  # themself for a verified hold transfer.
+  # Pane busy state does NOT end the wait. A declared wait can legitimately hold a
+  # pane busy - a worker parked on a long foreground call it keeps live for as long
+  # as the wait lasts - so reading busy as "the crew resumed" retires the window of
+  # exactly the declaration that needs it. The crew's own latest status line is the
+  # authority, and the loop head above already drops the marker the moment that line
+  # stops declaring the wait.
   pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
   for marker in "$state"/.subsuper-paused-*; do
     [ -e "$marker" ] || continue
@@ -1053,9 +1061,14 @@ housekeeping() {  # <state>
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "$pause_secs" ] || continue
+    # Endpoint-readability probe only: exit code 2 means the capture failed, so the
+    # endpoint is gone and there is nothing left to re-surface. The busy/idle verdict
+    # is deliberately discarded here. Do NOT reinstate a `0)` arm dropping the marker
+    # on busy: migrate_watcher_pause_markers recreates it with a fresh timestamp on
+    # the very next tick while the declaration still stands, so the window would
+    # restart forever and the wait would never mature into its one recheck.
     stale_window_is_busy "$win" "$state"
     case "$?" in
-      0) rm -f "$marker" ;;
       2) rm -f "$marker" ;;
       *)
         last=$(last_status_line "$state/$task.status")

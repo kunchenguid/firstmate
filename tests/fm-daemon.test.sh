@@ -392,14 +392,22 @@ test_housekeeping_captain_held_resurfaces_and_resets() {
   pass "housekeeping re-surfaces a forgotten captain hold on the long cadence and resets its window"
 }
 
-# A pause whose pane became busy again (the crew resumed) drops its marker without
-# escalating, exactly like a resumed wedge.
+# A crew that RESUMED - whose latest status line no longer declares the wait - drops
+# its pause tracking without escalating. The dimension pinned here is that pane busy
+# state does not GATE that clear: the status append alone ends the wait, on the
+# reconcile path the loop head runs before the pause recheck ever reads a pane, so a
+# crew that resumed into a genuinely busy pane cannot hold a stale window open. The
+# fixture asserts its own busy verdict first, so it cannot silently decay into an
+# idle-pane case (already covered by test_housekeeping_paused_unpaused_cleared) and
+# keep claiming that dimension. The inverse - a busy pane that is STILL declaring the
+# wait - is test_housekeeping_busy_declared_wait_matures_its_window.
 test_housekeeping_paused_resumed_cleared() {
   local dir state fakebin win pane key
   dir=$(make_supercase paused-resumed)
   state="$dir/state"; fakebin="$dir/fakebin"
   win="sess:fm-held-w12"; pane="$dir/pane.txt"
-  printf 'paused: holding for the upstream tool release\n' > "$state/held-w12.status"
+  printf 'paused: holding for the upstream tool release\nworking: upstream landed, resuming\n' \
+    > "$state/held-w12.status"
   printf 'Working...\n' > "$pane"
   fm_write_meta "$state/held-w12.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
   local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" held-w12)
@@ -408,10 +416,94 @@ test_housekeeping_paused_resumed_cleared() {
   key=$(printf '%s' "held-w12" | tr ':/.' '___')
   echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" stale_window_is_busy "$win" "$state" \
+    || fail "the resumed-pause fixture does not actually read busy, so it pins nothing about busy state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
-  [ -e "$state/.subsuper-paused-$key" ] && fail "resumed (busy) pause marker was not cleared"
+  [ -e "$state/.subsuper-paused-$key" ] && fail "resumed (busy, no longer declaring) pause marker was not cleared"
   [ ! -s "$state/.subsuper-escalations" ] || fail "a resumed pause was escalated"
-  pass "housekeeping clears a paused marker whose pane became busy again, without escalating"
+  pass "a busy pane cannot gate the pause clear once its crew's status no longer declares the wait"
+}
+
+# The inverse of test_housekeeping_paused_resumed_cleared, and the first half of
+# issue #3149. A declared wait can legitimately hold a pane BUSY - a worker parked on
+# a long foreground call it keeps live for as long as the wait lasts - so a busy
+# verdict is not evidence that the crew resumed. Reading it as one dropped the marker
+# un-escalated, and migrate_watcher_pause_markers recreated it with a fresh timestamp
+# on the very next tick, so the window restarted forever and the wait never matured
+# into its one recheck. Away mode makes that terminal: the watcher hands a busy
+# declared wait to the daemon exactly once per declaration (bin/fm-watch.sh's
+# busy_turn_bound_check), so this recheck is the only thing left that can re-surface
+# the pane at all. Both declaration forms take the same 2b arm, so both are pinned.
+test_housekeeping_busy_declared_wait_matures_its_window() {
+  local case_name dir state fakebin task win pane key gen tick age escalations digest
+  for case_name in paused captain-held; do
+    dir=$(make_supercase "busy-declared-wait-$case_name")
+    state="$dir/state"; fakebin="$dir/fakebin"
+    task="held-w12b-$case_name"; win="sess:fm-$task"; pane="$dir/pane.txt"
+    case "$case_name" in
+      paused) printf 'paused: the audit engine is running to completion\n' > "$state/$task.status"
+              digest="awaiting external" ;;
+      captain-held) printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$state/$task.status"
+              digest="awaiting the captain" ;;
+    esac
+    printf 'Working...\n' > "$pane"
+    fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
+    gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$task")
+    "$ROOT/bin/fm-busy-event.sh" apply "$state" "$task" busy --gen "$gen" \
+      --source pi-ext --event agent-start
+    key=$(printf '%s' "$task" | tr ':/.' '___')
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+      FM_STATE_OVERRIDE="$state" stale_window_is_busy "$win" "$state" \
+      || fail "the $case_name fixture does not actually read busy, so it pins nothing about busy state"
+
+    # Immature window: ticks inside PAUSE_RESURFACE_SECS neither escalate nor let the
+    # marker the window ages against be recreated with a fresh timestamp.
+    echo $(( $(date +%s) - 100 )) > "$state/.subsuper-paused-$key"
+    for tick in 1 2 3; do
+      PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+        FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 FM_PAUSE_RESURFACE_SECS=3600 \
+        housekeeping "$state"
+      [ -e "$state/.subsuper-paused-$key" ] \
+        || fail "$case_name busy declared wait lost its marker on tick $tick inside the window"
+      age=$(( $(date +%s) - $(cat "$state/.subsuper-paused-$key" 2>/dev/null || echo 0) ))
+      [ "$age" -ge 100 ] \
+        || fail "$case_name tick $tick restarted the maturing window (age fell to ${age}s)"
+    done
+    [ ! -s "$state/.subsuper-escalations" ] \
+      || fail "$case_name busy declared wait escalated inside its PAUSE_RESURFACE_SECS window"
+
+    # Matured window: exactly one recheck, named for the right human, never a wedge,
+    # and the window reset so the next one repeats rather than firing once.
+    echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+      FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 FM_PAUSE_RESURFACE_SECS=3600 \
+      housekeeping "$state"
+    escalations=0
+    [ -s "$state/.subsuper-escalations" ] \
+      && escalations=$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')
+    [ "$escalations" = 1 ] \
+      || fail "$case_name busy declared wait produced $escalations escalations past its window, expected exactly one"
+    grep -F "$digest" "$state/.subsuper-escalations" >/dev/null \
+      || fail "$case_name busy declared wait was not re-surfaced as a '$digest' recheck: $(cat "$state/.subsuper-escalations")"
+    grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null \
+      && fail "$case_name busy declared wait was mislabeled a possible wedge"
+    [ -e "$state/.subsuper-paused-$key" ] \
+      || fail "$case_name busy declared wait cleared its marker instead of resetting the window"
+    age=$(( $(date +%s) - $(cat "$state/.subsuper-paused-$key" 2>/dev/null || echo 0) ))
+    [ "$age" -lt 60 ] || fail "$case_name busy declared wait did not reset its window to now (age ${age}s)"
+
+    # The next tick, still inside the fresh window, stays silent: one recheck per window.
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+      FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 FM_PAUSE_RESURFACE_SECS=3600 \
+      housekeeping "$state"
+    escalations=0
+    [ -s "$state/.subsuper-escalations" ] \
+      && escalations=$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')
+    [ "$escalations" = 1 ] \
+      || fail "$case_name busy declared wait re-surfaced again inside its reset window ($escalations escalations)"
+  done
+  pass "housekeeping matures a busy pane's declared-wait window into exactly one recheck per window"
 }
 
 # A pane still idle but whose status is no longer a pause (the crew changed state
@@ -1946,6 +2038,7 @@ test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_captain_held_resurfaces_and_resets
 test_housekeeping_paused_resumed_cleared
+test_housekeeping_busy_declared_wait_matures_its_window
 test_housekeeping_paused_unpaused_cleared
 test_housekeeping_captain_held_resolved_cleared
 test_housekeeping_stale_marker_transitions_to_pause
