@@ -272,6 +272,32 @@ fm_route_validate_work_type() {
   [ "${#1}" -le 64 ]
 }
 
+fm_route_validate_claim() {
+  case "$1" in
+    *[!a-f0-9]*) return 1 ;;
+  esac
+  [ "${#1}" -eq 64 ]
+}
+
+fm_route_claim_hash() {
+  local claim=$1 digest
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$claim" | sha256sum) || return 1
+  elif command -v shasum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$claim" | shasum -a 256) || return 1
+  else
+    fm_route_diagnostic 'claim hashing is unavailable'
+    return 1
+  fi
+  digest=${digest%% *}
+  fm_route_validate_claim "$digest" || return 1
+  printf '%s\n' "$digest"
+}
+
+fm_route_public_reservation() {
+  jq -c 'del(.claimHash)' <<<"$1"
+}
+
 fm_route_validate_route_tuple() {
   local task=$1 generation=$2 profile=$3 provider=$4 lane=$5 account=$6 task_class=$7 work_type=$8 risk=$9 mode=${10}
   fm_route_validate_identifier "$task" || { fm_route_diagnostic 'invalid task identifier'; return 1; }
@@ -308,7 +334,7 @@ fm_route_reserve_locked() {
     if jq -e --arg generation "$generation" --arg profile "$profile" --arg provider "$provider" --arg lane "$lane" --arg account "$account" --arg class "$task_class" --arg workType "$work_type" --arg risk "$risk" --arg mode "$mode" --argjson burst "$burst" '
       .generation == $generation and .profile == $profile and .provider == $provider and .lane == $lane and .account == $account and .taskClass == $class and .workType == $workType and .risk == $risk and .mode == $mode and .burst == $burst
     ' <<<"$existing" >/dev/null; then
-      printf '%s\n' "$existing"
+      fm_route_public_reservation "$existing"
       return 0
     fi
     fm_route_diagnostic 'reservation-conflict'
@@ -345,9 +371,9 @@ fm_route_reserve_locked() {
     [ "$account_total" -lt 2 ] || { fm_route_diagnostic 'account-cap:2'; return 1; }
   fi
   updated=$(jq -cn --arg task "$task" --arg generation "$generation" --arg profile "$profile" --arg provider "$provider" --arg lane "$lane" --arg account "$account" --arg class "$task_class" --arg workType "$work_type" --arg risk "$risk" --arg mode "$mode" --argjson burst "$burst" --argjson now "$now" \
-    '{taskId:$task,generation:$generation,profile:$profile,provider:$provider,lane:$lane,account:$account,taskClass:$class,workType:$workType,risk:$risk,mode:$mode,burst:$burst,createdAt:$now,score:null}')
+    '{taskId:$task,generation:$generation,profile:$profile,provider:$provider,lane:$lane,account:$account,taskClass:$class,workType:$workType,risk:$risk,mode:$mode,burst:$burst,createdAt:$now,score:null,admissionState:"reserved"}')
   fm_route_atomic_json_value "$reservation" "$updated" || return 1
-  printf '%s\n' "$updated"
+  fm_route_public_reservation "$updated"
 }
 
 fm_route_verify_locked() {
@@ -356,11 +382,11 @@ fm_route_verify_locked() {
   jq -e --arg generation "$generation" --arg profile "$profile" --arg provider "$provider" --arg lane "$lane" --arg account "$account" --arg class "$task_class" --arg risk "$risk" --arg mode "$mode" '
     .generation == $generation and .profile == $profile and .provider == $provider and .lane == $lane and .account == $account and .taskClass == $class and .risk == $risk and .mode == $mode
   ' "$reservation" >/dev/null 2>&1 || { fm_route_diagnostic 'reservation-mismatch'; return 1; }
-  jq -c . "$reservation"
+  jq -c 'del(.claimHash)' "$reservation"
 }
 
 fm_route_release_locked() {
-  local generation=$2 reservation="$FM_ROUTE_STATE/reservations/$1.json"
+  local generation=$2 claim=${3:-} stale_before=${4:-} reservation="$FM_ROUTE_STATE/reservations/$1.json" current state hash
   if [ ! -e "$reservation" ]; then
     printf '{"released":false,"idempotent":true}\n'
     return 0
@@ -369,8 +395,91 @@ fm_route_release_locked() {
     fm_route_diagnostic 'reservation-generation-mismatch'
     return 1
   }
+  current=$(jq -c . "$reservation" 2>/dev/null) || { fm_route_diagnostic 'invalid routing state'; return 1; }
+  state=$(jq -r '.admissionState // "reserved"' <<<"$current")
+  if [ "$state" = claimed ]; then
+    if [ -n "$claim" ]; then
+      hash=$(fm_route_claim_hash "$claim") || return 1
+      [ "$(jq -r '.claimHash // empty' <<<"$current")" = "$hash" ] || {
+        fm_route_diagnostic 'reservation-claim-mismatch'
+        return 1
+      }
+    elif [ -n "$stale_before" ]; then
+      jq -e --argjson before "$stale_before" '.claimedAt <= $before' <<<"$current" >/dev/null \
+        || { fm_route_diagnostic 'reservation-claim-not-stale'; return 1; }
+    else
+      fm_route_diagnostic 'reservation-claim-required'
+      return 1
+    fi
+  elif [ -n "$claim$stale_before" ]; then
+    if [ -n "$claim" ] && [ "$state" = active ]; then
+      hash=$(fm_route_claim_hash "$claim") || return 1
+      [ "$(jq -r '.claimHash // empty' <<<"$current")" = "$hash" ] || {
+        fm_route_diagnostic 'reservation-claim-mismatch'
+        return 1
+      }
+    else
+      fm_route_diagnostic 'reservation-is-not-claimed'
+      return 1
+    fi
+  fi
   rm -f -- "$reservation"
   printf '{"released":true,"idempotent":false}\n'
+}
+
+fm_route_claim_locked() {
+  local task=$1 generation=$2 profile=$3 provider=$4 lane=$5 account=$6 task_class=$7 risk=$8 mode=$9 claim=${10} now=${11} from_active=${12}
+  local reservation="$FM_ROUTE_STATE/reservations/$1.json" current state hash updated
+  [ -s "$reservation" ] || { fm_route_diagnostic 'reservation-not-found'; return 1; }
+  current=$(jq -c . "$reservation" 2>/dev/null) || { fm_route_diagnostic 'invalid routing state'; return 1; }
+  jq -e --arg generation "$generation" --arg profile "$profile" --arg provider "$provider" --arg lane "$lane" --arg account "$account" --arg class "$task_class" --arg risk "$risk" --arg mode "$mode" '
+    .generation == $generation and .profile == $profile and .provider == $provider and .lane == $lane and .account == $account and .taskClass == $class and .workType == "implementation" and .risk == $risk and .mode == $mode
+  ' <<<"$current" >/dev/null 2>&1 || { fm_route_diagnostic 'reservation-mismatch'; return 1; }
+  hash=$(fm_route_claim_hash "$claim") || return 1
+  state=$(jq -r '.admissionState // "reserved"' <<<"$current")
+  case "$state" in
+    reserved)
+      ;;
+    claimed)
+      if [ "$(jq -r '.claimHash // empty' <<<"$current")" = "$hash" ]; then
+        printf '{"state":"claimed","idempotent":true}\n'
+        return 0
+      fi
+      fm_route_diagnostic 'reservation-claim-conflict'
+      return 1
+      ;;
+    active)
+      if [ "$(jq -r '.claimHash // empty' <<<"$current")" = "$hash" ]; then
+        printf '{"state":"active","idempotent":true}\n'
+        return 0
+      fi
+      [ "$from_active" = true ] || { fm_route_diagnostic 'reservation-active'; return 1; }
+      ;;
+    *) fm_route_diagnostic 'invalid routing state'; return 1 ;;
+  esac
+  updated=$(jq -c --arg hash "$hash" --argjson now "$now" '.admissionState="claimed" | .claimHash=$hash | .claimedAt=$now' <<<"$current")
+  fm_route_atomic_json_value "$reservation" "$updated" || return 1
+  printf '{"state":"claimed","idempotent":false}\n'
+}
+
+fm_route_activate_locked() {
+  local task=$1 generation=$2 claim=$3 reservation="$FM_ROUTE_STATE/reservations/$1.json" current state hash updated
+  [ -s "$reservation" ] || { fm_route_diagnostic 'reservation-not-found'; return 1; }
+  current=$(jq -c . "$reservation" 2>/dev/null) || { fm_route_diagnostic 'invalid routing state'; return 1; }
+  [ "$(jq -r '.generation // empty' <<<"$current")" = "$generation" ] \
+    || { fm_route_diagnostic 'reservation-generation-mismatch'; return 1; }
+  hash=$(fm_route_claim_hash "$claim") || return 1
+  [ "$(jq -r '.claimHash // empty' <<<"$current")" = "$hash" ] \
+    || { fm_route_diagnostic 'reservation-claim-mismatch'; return 1; }
+  state=$(jq -r '.admissionState // "reserved"' <<<"$current")
+  case "$state" in
+    active) printf '{"state":"active","idempotent":true}\n'; return 0 ;;
+    claimed) ;;
+    *) fm_route_diagnostic 'reservation-is-not-claimed'; return 1 ;;
+  esac
+  updated=$(jq -c '.admissionState="active"' <<<"$current")
+  fm_route_atomic_json_value "$reservation" "$updated" || return 1
+  printf '{"state":"active","idempotent":false}\n'
 }
 
 fm_routing_failure_action() {
@@ -476,6 +585,10 @@ fm_route_append_outcome_locked() {
 
 fm_route_finalize_locked() {
   local task=$1 generation=$2 terminal=$3 reservation="$FM_ROUTE_STATE/reservations/$1.json" outcomes existing current score record
+  if [ -s "$reservation" ] && [ "$(jq -r '.admissionState // "reserved"' "$reservation" 2>/dev/null)" = claimed ]; then
+    fm_route_diagnostic 'reservation-claim-required'
+    return 1
+  fi
   outcomes=$(fm_route_read_outcomes) || { fm_route_diagnostic 'invalid routing state'; return 1; }
   existing=$(jq -c --arg task "$task" --arg generation "$generation" '.[] | select(.kind == "terminal" and .taskId == $task and .generation == $generation)' <<<"$outcomes" | head -n 1)
   if [ -n "$existing" ]; then

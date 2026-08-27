@@ -32,7 +32,44 @@ test_valid_native_accounts() {
   "$ACCOUNTS" validate "$ACCOUNTS_FILE"
   [ "$("$ACCOUNTS" env-name codex-secondary "$ACCOUNTS_FILE")" = CODEX_HOME ] || fail "wrong Codex environment name"
   [ "$("$ACCOUNTS" config-dir codex-secondary "$ACCOUNTS_FILE")" = "$LAB/codex-2" ] || fail "wrong Codex configuration directory"
+  "$ACCOUNTS" resolve codex-secondary "$ACCOUNTS_FILE" \
+    | jq -e --arg dir "$LAB/codex-2" '. == {harness:"codex",envName:"CODEX_HOME",configDir:$dir}' >/dev/null \
+    || fail "single-snapshot Codex account resolution returned the wrong tuple"
   pass "account lanes resolve valid native Claude and Codex mappings"
+}
+
+test_concurrent_atomic_replacement_never_mixes_account_tuple() {
+  local writer_pid iteration=0 resolved
+  mkdir -p "$LAB/snapshot-claude" "$LAB/snapshot-codex"
+  jq -n --arg dir "$LAB/snapshot-claude" \
+    '{version:1,accounts:{lane:{harness:"claude",envName:"CLAUDE_CONFIG_DIR",configDir:$dir}}}' \
+    > "$LAB/accounts-a.json"
+  jq -n --arg dir "$LAB/snapshot-codex" \
+    '{version:1,accounts:{lane:{harness:"codex",envName:"CODEX_HOME",configDir:$dir}}}' \
+    > "$LAB/accounts-b.json"
+  cp "$LAB/accounts-a.json" "$ACCOUNTS_FILE"
+  (
+    while [ "$iteration" -lt 100 ]; do
+      cp "$LAB/accounts-a.json" "$LAB/accounts-next.json"
+      mv "$LAB/accounts-next.json" "$ACCOUNTS_FILE"
+      cp "$LAB/accounts-b.json" "$LAB/accounts-next.json"
+      mv "$LAB/accounts-next.json" "$ACCOUNTS_FILE"
+      iteration=$((iteration + 1))
+    done
+  ) &
+  writer_pid=$!
+  iteration=0
+  while [ "$iteration" -lt 100 ]; do
+    resolved=$("$ACCOUNTS" resolve lane "$ACCOUNTS_FILE") \
+      || fail "single-snapshot account resolution failed during atomic replacement"
+    jq -e --arg claude "$LAB/snapshot-claude" --arg codex "$LAB/snapshot-codex" '
+      . == {harness:"claude",envName:"CLAUDE_CONFIG_DIR",configDir:$claude}
+      or . == {harness:"codex",envName:"CODEX_HOME",configDir:$codex}
+    ' <<<"$resolved" >/dev/null || fail "account resolver mixed fields from two snapshots: $resolved"
+    iteration=$((iteration + 1))
+  done
+  wait "$writer_pid" || fail "atomic account-map writer failed"
+  pass "account resolution consumes one internally consistent map snapshot"
 }
 
 test_credential_shaped_account_id_is_allowed() {
@@ -73,6 +110,7 @@ test_selected_account_requires_readable_configuration_directory() {
 }
 
 test_valid_native_accounts
+test_concurrent_atomic_replacement_never_mixes_account_tuple
 test_credential_shaped_account_id_is_allowed
 test_rejects_arbitrary_environment
 test_rejects_credential_material

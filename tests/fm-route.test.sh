@@ -273,6 +273,14 @@ reserve_route() {
     --work-type "$work_type" --risk "$risk" --mode "$mode" --now 1000 "$@"
 }
 
+claim_route() {
+  local task=$1 generation=$2 claim=$3
+  "$ROUTE" claim-reservation --task "$task" --generation "$generation" \
+    --profile profile-1 --provider openai --lane codex-primary \
+    --account codex-primary --class standard --risk medium --mode automatic \
+    --claim "$claim" --now 1001
+}
+
 test_reserve_requires_a_bounded_work_type() {
   reset_route_state
   expect_failure_contains 'work-type is required' "$ROUTE" reserve --task task-1 --generation gen-1 --profile profile-1 --provider openai --lane codex-primary --account codex-primary --class standard --risk low --mode automatic --now 1000
@@ -340,6 +348,86 @@ test_reservation_verification_and_generation_release_are_exact() {
   "$ROUTE" release --task task-1 --generation gen-1 >/dev/null || fail "reservation release failed"
   "$ROUTE" release --task task-1 --generation gen-1 >/dev/null || fail "duplicate release was not idempotent"
   pass "reservation verification and release bind the complete route generation"
+}
+
+test_reservation_claim_blocks_concurrent_lifecycle_until_activation() {
+  local claim_a claim_b claim_out release_pid finalize_pid release_rc finalize_rc
+  claim_a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  claim_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  reset_route_state
+  reserve_route task-1 gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  claim_out=$(claim_route task-1 gen-1 "$claim_a")
+  jq -e '.state == "claimed" and .idempotent == false' <<<"$claim_out" >/dev/null \
+    || fail "initial reservation claim failed"
+  assert_not_contains "$claim_out" "$claim_a" "claim token leaked through command output"
+  ! grep -Fq "$claim_a" "$FM_STATE_OVERRIDE/routing/reservations/task-1.json" \
+    || fail "raw claim token was persisted"
+  claim_route task-1 gen-1 "$claim_a" | jq -e '.state == "claimed" and .idempotent == true' >/dev/null \
+    || fail "same-token reservation claim was not idempotent"
+  expect_failure_contains 'reservation-claim-conflict' claim_route task-1 gen-1 "$claim_b"
+
+  "$ROUTE" release --task task-1 --generation gen-1 >"$LAB/claimed-release.out" 2>&1 &
+  release_pid=$!
+  "$ROUTE" finalize --task task-1 --generation gen-1 --terminal cancelled >"$LAB/claimed-finalize.out" 2>&1 &
+  finalize_pid=$!
+  set +e
+  wait "$release_pid"; release_rc=$?
+  wait "$finalize_pid"; finalize_rc=$?
+  [ "$release_rc" -ne 0 ] \
+    || fail "ordinary release unexpectedly removed a pending admission claim"
+  assert_grep 'reservation-claim-required' "$LAB/claimed-release.out" \
+    "ordinary release did not respect pending admission ownership"
+  [ "$finalize_rc" -ne 0 ] \
+    || fail "ordinary finalize unexpectedly consumed a pending admission claim"
+  assert_grep 'reservation-claim-required' "$LAB/claimed-finalize.out" \
+    "ordinary finalize did not respect pending admission ownership"
+  assert_present "$FM_STATE_OVERRIDE/routing/reservations/task-1.json" \
+    "concurrent lifecycle command stole claimed capacity"
+
+  "$ROUTE" activate-reservation --task task-1 --generation gen-1 --claim "$claim_a" \
+    | jq -e '.state == "active" and .idempotent == false' >/dev/null \
+    || fail "claim activation failed"
+  "$ROUTE" activate-reservation --task task-1 --generation gen-1 --claim "$claim_a" \
+    | jq -e '.state == "active" and .idempotent == true' >/dev/null \
+    || fail "claim activation was not idempotent"
+  expect_failure_contains 'reservation-active' claim_route task-1 gen-1 "$claim_b"
+  "$ROUTE" release --task task-1 --generation gen-1 >/dev/null \
+    || fail "ordinary release did not resume after activation"
+  pass "claimed reservations block concurrent release and finalization until activation"
+}
+
+test_claim_release_is_exact_and_stale_claims_are_recoverable() {
+  local claim_a claim_b reservation
+  claim_a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  claim_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  reset_route_state
+  reserve_route task-1 gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  claim_route task-1 gen-1 "$claim_a" >/dev/null
+  reservation="$FM_STATE_OVERRIDE/routing/reservations/task-1.json"
+  expect_failure_contains 'reservation-claim-mismatch' "$ROUTE" release --task task-1 --generation gen-1 --claim "$claim_b"
+  assert_present "$reservation" "wrong claim released an owned reservation"
+  expect_failure_contains 'reservation-claim-not-stale' "$ROUTE" release --task task-1 --generation gen-1 --stale-before 1000
+  "$ROUTE" release --task task-1 --generation gen-1 --stale-before 1001 >/dev/null \
+    || fail "stale claimed reservation was not recoverable"
+
+  reserve_route task-2 gen-2 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  claim_route task-2 gen-2 "$claim_a" >/dev/null
+  "$ROUTE" release --task task-2 --generation gen-2 --claim "$claim_a" >/dev/null \
+    || fail "exact claim owner could not release its reservation"
+  assert_absent "$FM_STATE_OVERRIDE/routing/reservations/task-2.json" \
+    "exact claim release leaked capacity"
+  expect_failure_contains 'invalid claim token' "$ROUTE" claim-reservation --task task-3 --generation gen-3 --profile profile-1 --provider openai --lane codex-primary --account codex-primary --class standard --risk medium --mode automatic --claim short --now 1001
+  pass "claim release requires exact ownership and stale claims have bounded recovery"
+}
+
+test_spawn_claim_requires_an_implementation_reservation() {
+  local claim
+  claim=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  reset_route_state
+  WORK_TYPE_OVERRIDE=research \
+    reserve_route task-1 gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  expect_failure_contains 'reservation-mismatch' claim_route task-1 gen-1 "$claim"
+  pass "spawn admission cannot claim a non-implementation reservation"
 }
 
 test_failure_policy_and_circuit_breaker_are_bounded() {
@@ -499,6 +587,8 @@ test_every_single_value_option_rejects_duplicates() {
   expect_failure_contains 'usage:' "$ROUTE" select --request "$REQUEST" --request "$REQUEST" --candidates "$CANDIDATES"
   expect_failure_contains 'usage:' "$ROUTE" reserve --task one --task two
   expect_failure_contains 'usage:' "$ROUTE" verify-reservation --profile one --profile two
+  expect_failure_contains 'usage:' "$ROUTE" claim-reservation --claim aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --claim bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  expect_failure_contains 'usage:' "$ROUTE" activate-reservation --task one --task two
   expect_failure_contains 'usage:' "$ROUTE" release --generation one --generation two
   expect_failure_contains 'usage:' "$ROUTE" failure --kind quota --kind auth
   expect_failure_contains 'usage:' "$ROUTE" score --tests pass --tests fail
@@ -525,6 +615,9 @@ test_reserve_requires_a_bounded_work_type
 test_canary_cap_is_atomic_and_duplicate_reserve_is_idempotent
 test_lane_account_and_burst_caps_are_enforced
 test_reservation_verification_and_generation_release_are_exact
+test_reservation_claim_blocks_concurrent_lifecycle_until_activation
+test_claim_release_is_exact_and_stale_claims_are_recoverable
+test_spawn_claim_requires_an_implementation_reservation
 test_failure_policy_and_circuit_breaker_are_bounded
 test_unsafe_failure_always_escalates_without_corrupting_breakers
 test_score_finalize_and_outcome_privacy_are_strict

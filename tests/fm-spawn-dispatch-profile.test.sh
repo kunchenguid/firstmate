@@ -43,7 +43,14 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  has-session|new-session|kill-window) exit 0 ;;
+  new-window)
+    if [ -n "${FM_FAKE_ROUTE_CLAIM_READY:-}" ]; then
+      : > "$FM_FAKE_ROUTE_CLAIM_READY"
+      while [ ! -e "$FM_FAKE_ROUTE_CLAIM_RELEASE" ]; do /bin/sleep 0.01; done
+    fi
+    exit 0
+    ;;
   send-keys)
     [ "${FM_FAKE_TMUX_FAIL:-0}" != 1 ] || exit 1
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
@@ -942,6 +949,53 @@ test_launch_failure_releases_only_the_owned_generation() {
   pass "launch failure releases the exact admitted route generation"
 }
 
+test_claim_ownership_spans_endpoint_setup_through_metadata_publication() {
+  local rec id spawn_pid spawn_rc i reservation release_out release_rc finalize_out finalize_rc
+  id=route-claim-window-z24b
+  rec=$(make_spawn_case route-claim-window pi "$id")
+  read_case_record "$rec"
+  reserve_route "$HOME_DIR" "$id" gen-1 pi-kimi moonshot pi-moonshot-1 none standard medium automatic
+  reservation="$HOME_DIR/state/routing/reservations/$id.json"
+  FM_FAKE_ROUTE_CLAIM_READY="$CASE_DIR/claim-ready" \
+    FM_FAKE_ROUTE_CLAIM_RELEASE="$CASE_DIR/claim-release" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness pi --model cliproxyapi/kimi-k3 \
+      "${ROUTED_ARGS[@]}" >"$CASE_DIR/spawn.out" &
+  spawn_pid=$!
+  i=0
+  while [ ! -e "$CASE_DIR/claim-ready" ] && kill -0 "$spawn_pid" 2>/dev/null; do
+    /bin/sleep 0.01
+    i=$((i + 1))
+    [ "$i" -lt 500 ] || fail "routed spawn did not reach claimed endpoint setup"
+  done
+  assert_present "$CASE_DIR/claim-ready" "routed spawn exited before the claim window"
+  assert_absent "$HOME_DIR/state/$id.meta" "task metadata published before the claimed setup window"
+  set +e
+  release_out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    "$ROOT/bin/fm-route.sh" release --task "$id" --generation gen-1 2>&1)
+  release_rc=$?
+  finalize_out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    "$ROOT/bin/fm-route.sh" finalize --task "$id" --generation gen-1 --terminal cancelled 2>&1)
+  finalize_rc=$?
+  [ "$release_rc" -ne 0 ] \
+    || fail "concurrent release unexpectedly removed a pending spawn claim"
+  assert_contains "$release_out" "reservation-claim-required" \
+    "concurrent release crossed claimed spawn setup"
+  [ "$finalize_rc" -ne 0 ] \
+    || fail "concurrent finalize unexpectedly consumed a pending spawn claim"
+  assert_contains "$finalize_out" "reservation-claim-required" \
+    "concurrent finalize crossed claimed spawn setup"
+  assert_present "$reservation" "concurrent lifecycle stole claimed spawn capacity"
+  : > "$CASE_DIR/claim-release"
+  wait "$spawn_pid"; spawn_rc=$?
+  expect_code 0 "$spawn_rc" "claimed routed spawn should finish after setup release"$'\n'"$(cat "$CASE_DIR/spawn.out")"
+  assert_grep 'route_generation=gen-1' "$HOME_DIR/state/$id.meta" \
+    "claimed spawn did not publish its route"
+  jq -e '.admissionState == "active"' "$reservation" >/dev/null \
+    || fail "published routed spawn did not activate its claim"
+  pass "claim ownership spans endpoint setup through metadata publication"
+}
+
 test_native_routes_bind_only_the_allowlisted_account_environment() {
   local rec id out status launch
   id=route-codex-native-z25
@@ -1016,6 +1070,45 @@ test_route_mode_off_preserves_static_launch_bytes() {
   pass "route mode off remains byte-compatible with static launches"
 }
 
+test_remote_secondmate_refuses_all_route_flags_before_dispatch() {
+  local rec id out status ssh_log
+  id=route-remote-secondmate-z29
+  rec=$(make_spawn_case route-remote-secondmate codex "$id")
+  read_case_record "$rec"
+  ssh_log="$CASE_DIR/ssh.log"
+  printf -- '- %s - remote route test (host: remote-mac; root: /remote/root; home: /remote/home; scope: remote work; projects: none; added 2026-08-27)\n' "$id" \
+    > "$HOME_DIR/data/secondmates.md"
+  cat > "$FAKEBIN_DIR/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+printf 'called\n' >> "$FM_FAKE_SSH_LOG"
+exit 99
+SH
+  chmod +x "$FAKEBIN_DIR/fake-ssh"
+
+  out=$(FM_SSH_BIN="$FAKEBIN_DIR/fake-ssh" FM_FAKE_SSH_LOG="$ssh_log" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" --secondmate --harness codex --route-generation gen-1 \
+      --route-profile codex-sol --route-provider openai --route-lane codex-primary \
+      --route-account codex-primary --route-class standard --route-risk medium \
+      --route-mode automatic)
+  status=$?
+  expect_code 1 "$status" "remote secondmate routed launch must fail"
+  assert_contains "$out" "route flags are unsupported for remote secondmate launches" \
+    "remote routed launch refusal was not diagnosed"
+  assert_absent "$ssh_log" "remote routed refusal crossed the remote dispatch boundary"
+  assert_absent "$HOME_DIR/state/$id.meta" "remote routed refusal published task metadata"
+
+  out=$(FM_SSH_BIN="$FAKEBIN_DIR/fake-ssh" FM_FAKE_SSH_LOG="$ssh_log" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" --secondmate --harness codex --route-mode off)
+  status=$?
+  expect_code 1 "$status" "remote secondmate explicit off flag must fail"
+  assert_contains "$out" "route flags are unsupported for remote secondmate launches" \
+    "remote explicit-off refusal was not diagnosed"
+  assert_absent "$ssh_log" "remote explicit-off refusal crossed the remote dispatch boundary"
+  pass "remote secondmates reject route flags before any remote side effect"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
@@ -1052,8 +1145,10 @@ test_partial_and_duplicate_route_tuples_are_refused
 test_mismatched_and_path_unsafe_routes_do_not_release_an_owned_reservation
 test_routed_spawn_records_the_complete_route
 test_launch_failure_releases_only_the_owned_generation
+test_claim_ownership_spans_endpoint_setup_through_metadata_publication
 test_native_routes_bind_only_the_allowlisted_account_environment
 test_native_harness_mismatch_and_pi_account_binding_are_refused
 test_route_mode_off_preserves_static_launch_bytes
+test_remote_secondmate_refuses_all_route_flags_before_dispatch
 
 echo "# all fm-spawn-dispatch-profile tests passed"

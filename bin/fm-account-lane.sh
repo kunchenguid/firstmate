@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # Resolve declared native subscription account lanes without inspecting credentials.
 # Usage: fm-account-lane.sh validate [FILE]
-#        fm-account-lane.sh harness ACCOUNT_ID [FILE]
-#        fm-account-lane.sh env-name ACCOUNT_ID [FILE]
-#        fm-account-lane.sh config-dir ACCOUNT_ID [FILE]
+#        fm-account-lane.sh resolve|harness|env-name|config-dir ACCOUNT_ID [FILE]
 set -eu
 
 CONFIG=${FM_CONFIG_OVERRIDE:-${FM_HOME:-$(pwd)}/config}
@@ -11,8 +9,15 @@ COMMAND=${1:-}
 ACCOUNT=${2:-}
 FILE=${3:-$CONFIG/crew-accounts.json}
 
-validate() {
-  local reason
+read_snapshot() {
+  SNAPSHOT=$(cat -- "$FILE" 2>/dev/null) || {
+    echo "invalid account-lane schema" >&2
+    return 1
+  }
+}
+
+validate_snapshot() {
+  local snapshot=$1 reason
   if ! reason=$(jq -r '
     def forbidden: ["apiKey","token","secret","password","cookie","authorization"];
     def forbidden_key:
@@ -32,7 +37,7 @@ validate() {
     elif [.accounts[]|select(.harness == "codex" and .envName != "CODEX_HOME")]|length > 0 then "codex accounts require CODEX_HOME"
     elif [.accounts[]|select((.configDir|type) != "string" or (.configDir|startswith("/")|not))]|length > 0 then "configDir must be absolute"
     else empty end
-  ' "$1" 2>/dev/null); then
+  ' <<<"$snapshot" 2>/dev/null); then
     echo "invalid account-lane schema" >&2
     return 1
   fi
@@ -42,9 +47,13 @@ validate() {
   fi
 }
 
+selected_account() {
+  jq -cer --arg id "$ACCOUNT" '.accounts[$id] | {harness,envName,configDir}' <<<"$1" 2>/dev/null
+}
+
 selected_config_dir() {
-  local dir
-  dir=$(jq -er --arg id "$ACCOUNT" '.accounts[$id].configDir' "$FILE")
+  local account=$1 dir
+  dir=$(jq -er '.configDir' <<<"$account" 2>/dev/null) || return 1
   if [ ! -d "$dir" ] || [ ! -r "$dir" ]; then
     echo "configDir must be an existing readable directory" >&2
     exit 1
@@ -53,12 +62,22 @@ selected_config_dir() {
 }
 
 case "$COMMAND" in
-  validate) FILE=${2:-$FILE}; validate "$FILE" ;;
-  harness|env-name|config-dir)
-    validate "$FILE"
-    selected_config_dir >/dev/null
-    KEY=$(case "$COMMAND" in harness) echo harness ;; env-name) echo envName ;; config-dir) echo configDir ;; esac)
-    jq -er --arg id "$ACCOUNT" --arg key "$KEY" '.accounts[$id][$key]' "$FILE"
+  validate)
+    FILE=${2:-$FILE}
+    read_snapshot
+    validate_snapshot "$SNAPSHOT"
     ;;
-  *) echo 'usage: fm-account-lane.sh validate|harness|env-name|config-dir ...' >&2; exit 2 ;;
+  resolve|harness|env-name|config-dir)
+    read_snapshot
+    validate_snapshot "$SNAPSHOT"
+    SELECTED=$(selected_account "$SNAPSHOT") || { echo "account id is not configured" >&2; exit 1; }
+    selected_config_dir "$SELECTED" >/dev/null
+    case "$COMMAND" in
+      resolve) printf '%s\n' "$SELECTED" ;;
+      harness) jq -er '.harness' <<<"$SELECTED" ;;
+      env-name) jq -er '.envName' <<<"$SELECTED" ;;
+      config-dir) jq -er '.configDir' <<<"$SELECTED" ;;
+    esac
+    ;;
+  *) echo 'usage: fm-account-lane.sh validate|resolve|harness|env-name|config-dir ...' >&2; exit 2 ;;
 esac

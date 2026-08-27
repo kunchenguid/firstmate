@@ -300,6 +300,8 @@ ROUTE_ACCOUNT_SET=0
 ROUTE_CLASS_SET=0
 ROUTE_RISK_SET=0
 ROUTE_MODE_SET=0
+ROUTE_FLAGS_PRESENT=0
+ROUTE_OFF_EXPLICIT=0
 RELAUNCH=0
 POS=()
 want_value=
@@ -385,7 +387,14 @@ for route_value in ROUTE_GENERATION ROUTE_PROFILE ROUTE_PROVIDER ROUTE_LANE ROUT
   }
 done
 ROUTE_REQUESTED=0
+if [ "$ROUTE_GENERATION_SET" -eq 1 ] || [ "$ROUTE_PROFILE_SET" -eq 1 ] \
+  || [ "$ROUTE_PROVIDER_SET" -eq 1 ] || [ "$ROUTE_LANE_SET" -eq 1 ] \
+  || [ "$ROUTE_ACCOUNT_SET" -eq 1 ] || [ "$ROUTE_CLASS_SET" -eq 1 ] \
+  || [ "$ROUTE_RISK_SET" -eq 1 ] || [ "$ROUTE_MODE_SET" -eq 1 ]; then
+  ROUTE_FLAGS_PRESENT=1
+fi
 if [ "$ROUTE_MODE_SET" -eq 1 ] && [ "$ROUTE_MODE" = off ]; then
+  ROUTE_OFF_EXPLICIT=1
   ROUTE_GENERATION=''
   ROUTE_PROFILE=''
   ROUTE_PROVIDER=''
@@ -394,10 +403,7 @@ if [ "$ROUTE_MODE_SET" -eq 1 ] && [ "$ROUTE_MODE" = off ]; then
   ROUTE_CLASS=''
   ROUTE_RISK=''
   ROUTE_MODE=''
-elif [ "$ROUTE_GENERATION_SET" -eq 1 ] || [ "$ROUTE_PROFILE_SET" -eq 1 ] \
-  || [ "$ROUTE_PROVIDER_SET" -eq 1 ] || [ "$ROUTE_LANE_SET" -eq 1 ] \
-  || [ "$ROUTE_ACCOUNT_SET" -eq 1 ] || [ "$ROUTE_CLASS_SET" -eq 1 ] \
-  || [ "$ROUTE_RISK_SET" -eq 1 ] || [ "$ROUTE_MODE_SET" -eq 1 ]; then
+elif [ "$ROUTE_FLAGS_PRESENT" = 1 ]; then
   if [ "$ROUTE_GENERATION_SET" -ne 1 ] || [ "$ROUTE_PROFILE_SET" -ne 1 ] \
     || [ "$ROUTE_PROVIDER_SET" -ne 1 ] || [ "$ROUTE_LANE_SET" -ne 1 ] \
     || [ "$ROUTE_ACCOUNT_SET" -ne 1 ] || [ "$ROUTE_CLASS_SET" -ne 1 ] \
@@ -749,6 +755,8 @@ CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 ROUTE_ACTIVE=0
 ROUTE_RESERVATION_OWNED=0
+ROUTE_CLAIM=
+ROUTE_RETIRE_ON_PUBLISH=0
 ROUTE_ACCOUNT_ENV_NAME=
 ROUTE_ACCOUNT_CONFIG_DIR=
 
@@ -769,12 +777,42 @@ parse_orca_worktree_result() {
   fi
 }
 
+spawn_route_claim_token() {
+  local claim
+  claim=$(LC_ALL=C od -An -N32 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
+  case "$claim" in
+    *[!a-f0-9]*) return 1 ;;
+  esac
+  [ "${#claim}" -eq 64 ] || return 1
+  printf '%s\n' "$claim"
+}
+
+spawn_route_claim() {  # <from-active:true|false>
+  local from_active=$1
+  local -a route_claim_args
+  [ -n "$ROUTE_CLAIM" ] || ROUTE_CLAIM=$(spawn_route_claim_token) || {
+    echo "error: could not generate a secure routing admission claim" >&2
+    return 1
+  }
+  route_claim_args=()
+  [ "$from_active" = false ] || route_claim_args+=(--from-active)
+  if ! "$FM_ROOT/bin/fm-route.sh" claim-reservation \
+      --task "$ID" --generation "$ROUTE_GENERATION" --profile "$ROUTE_PROFILE" \
+      --provider "$ROUTE_PROVIDER" --lane "$ROUTE_LANE" --account "$ROUTE_ACCOUNT" \
+      --class "$ROUTE_CLASS" --risk "$ROUTE_RISK" --mode "$ROUTE_MODE" \
+      --claim "$ROUTE_CLAIM" "${route_claim_args[@]}" >/dev/null 2>&1; then
+    echo "error: matching routing reservation is required and must be unclaimed" >&2
+    return 1
+  fi
+  ROUTE_RESERVATION_OWNED=1
+}
+
 spawn_abort_cleanup() {
   local status=$?
   if [ "$status" -ne 0 ] && [ "$ROUTE_RESERVATION_OWNED" = 1 ]; then
     ROUTE_RESERVATION_OWNED=0
     "$FM_ROOT/bin/fm-route.sh" release --task "$ID" \
-      --generation "$ROUTE_GENERATION" >/dev/null 2>&1 || true
+      --generation "$ROUTE_GENERATION" --claim "$ROUTE_CLAIM" >/dev/null 2>&1 || true
   fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
@@ -977,6 +1015,15 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+if [ "$KIND" = secondmate ] && [ "$ROUTE_FLAGS_PRESENT" = 1 ] \
+  && [ "$(secondmate_registry_field "$DATA/secondmates.md" "$ID" remote 2>/dev/null || true)" = 1 ]; then
+  echo "error: route flags are unsupported for remote secondmate launches" >&2
+  exit 1
+fi
+if [ "$RELAUNCH" -eq 0 ] && [ "$ROUTE_REQUESTED" = 1 ]; then
+  ROUTE_ACTIVE=1
+  spawn_route_claim false || exit 1
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
   control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
@@ -1102,24 +1149,53 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
-  if [ "$ROUTE_REQUESTED" = 0 ]; then
-    ROUTE_GENERATION=$(fm_meta_get "$RELAUNCH_META" route_generation)
-    ROUTE_PROFILE=$(fm_meta_get "$RELAUNCH_META" route_profile)
-    ROUTE_PROVIDER=$(fm_meta_get "$RELAUNCH_META" route_provider)
-    ROUTE_LANE=$(fm_meta_get "$RELAUNCH_META" route_lane)
-    ROUTE_ACCOUNT=$(fm_meta_get "$RELAUNCH_META" route_account)
-    ROUTE_CLASS=$(fm_meta_get "$RELAUNCH_META" route_class)
-    ROUTE_RISK=$(fm_meta_get "$RELAUNCH_META" route_risk)
-    ROUTE_MODE=$(fm_meta_get "$RELAUNCH_META" route_mode)
-    if [ -n "$ROUTE_GENERATION$ROUTE_PROFILE$ROUTE_PROVIDER$ROUTE_LANE$ROUTE_ACCOUNT$ROUTE_CLASS$ROUTE_RISK$ROUTE_MODE" ]; then
-      if [ -z "$ROUTE_GENERATION" ] || [ -z "$ROUTE_PROFILE" ] || [ -z "$ROUTE_PROVIDER" ] \
-        || [ -z "$ROUTE_LANE" ] || [ -z "$ROUTE_ACCOUNT" ] || [ -z "$ROUTE_CLASS" ] \
-        || [ -z "$ROUTE_RISK" ] || [ -z "$ROUTE_MODE" ]; then
-        echo "error: routed relaunch requires the complete recorded route metadata tuple" >&2
-        exit 2
-      fi
-      ROUTE_ACTIVE=1
+  RECORDED_ROUTE_GENERATION=$(fm_meta_get "$RELAUNCH_META" route_generation)
+  RECORDED_ROUTE_PROFILE=$(fm_meta_get "$RELAUNCH_META" route_profile)
+  RECORDED_ROUTE_PROVIDER=$(fm_meta_get "$RELAUNCH_META" route_provider)
+  RECORDED_ROUTE_LANE=$(fm_meta_get "$RELAUNCH_META" route_lane)
+  RECORDED_ROUTE_ACCOUNT=$(fm_meta_get "$RELAUNCH_META" route_account)
+  RECORDED_ROUTE_CLASS=$(fm_meta_get "$RELAUNCH_META" route_class)
+  RECORDED_ROUTE_RISK=$(fm_meta_get "$RELAUNCH_META" route_risk)
+  RECORDED_ROUTE_MODE=$(fm_meta_get "$RELAUNCH_META" route_mode)
+  if [ -n "$RECORDED_ROUTE_GENERATION$RECORDED_ROUTE_PROFILE$RECORDED_ROUTE_PROVIDER$RECORDED_ROUTE_LANE$RECORDED_ROUTE_ACCOUNT$RECORDED_ROUTE_CLASS$RECORDED_ROUTE_RISK$RECORDED_ROUTE_MODE" ] \
+    && { [ -z "$RECORDED_ROUTE_GENERATION" ] || [ -z "$RECORDED_ROUTE_PROFILE" ] \
+      || [ -z "$RECORDED_ROUTE_PROVIDER" ] || [ -z "$RECORDED_ROUTE_LANE" ] \
+      || [ -z "$RECORDED_ROUTE_ACCOUNT" ] || [ -z "$RECORDED_ROUTE_CLASS" ] \
+      || [ -z "$RECORDED_ROUTE_RISK" ] || [ -z "$RECORDED_ROUTE_MODE" ]; }; then
+    echo "error: routed relaunch requires the complete recorded route metadata tuple" >&2
+    exit 2
+  fi
+  if [ "$ROUTE_OFF_EXPLICIT" = 1 ]; then
+    if [ -n "$RECORDED_ROUTE_GENERATION" ]; then
+      ROUTE_GENERATION=$RECORDED_ROUTE_GENERATION
+      ROUTE_PROFILE=$RECORDED_ROUTE_PROFILE
+      ROUTE_PROVIDER=$RECORDED_ROUTE_PROVIDER
+      ROUTE_LANE=$RECORDED_ROUTE_LANE
+      ROUTE_ACCOUNT=$RECORDED_ROUTE_ACCOUNT
+      ROUTE_CLASS=$RECORDED_ROUTE_CLASS
+      ROUTE_RISK=$RECORDED_ROUTE_RISK
+      ROUTE_MODE=$RECORDED_ROUTE_MODE
+      ROUTE_RETIRE_ON_PUBLISH=1
+      spawn_route_claim true || exit 1
     fi
+  elif [ "$ROUTE_REQUESTED" = 1 ]; then
+    if [ -n "$RECORDED_ROUTE_GENERATION" ] && [ "$ROUTE_GENERATION" = "$RECORDED_ROUTE_GENERATION" ]; then
+      echo "error: newly reserved route generation must differ from the recorded generation" >&2
+      exit 1
+    fi
+    ROUTE_ACTIVE=1
+    spawn_route_claim false || exit 1
+  elif [ -n "$RECORDED_ROUTE_GENERATION" ]; then
+    ROUTE_GENERATION=$RECORDED_ROUTE_GENERATION
+    ROUTE_PROFILE=$RECORDED_ROUTE_PROFILE
+    ROUTE_PROVIDER=$RECORDED_ROUTE_PROVIDER
+    ROUTE_LANE=$RECORDED_ROUTE_LANE
+    ROUTE_ACCOUNT=$RECORDED_ROUTE_ACCOUNT
+    ROUTE_CLASS=$RECORDED_ROUTE_CLASS
+    ROUTE_RISK=$RECORDED_ROUTE_RISK
+    ROUTE_MODE=$RECORDED_ROUTE_MODE
+    ROUTE_ACTIVE=1
+    spawn_route_claim true || exit 1
   fi
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
@@ -1176,7 +1252,6 @@ else
   ARG3=${POS[2]:-}
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
-[ "$ROUTE_REQUESTED" = 0 ] || ROUTE_ACTIVE=1
 
 shell_quote() {
   printf "'"
@@ -1327,21 +1402,13 @@ case "$ARG3" in
 esac
 
 if [ "$ROUTE_ACTIVE" = 1 ]; then
-  if ! "$FM_ROOT/bin/fm-route.sh" verify-reservation \
-      --task "$ID" --generation "$ROUTE_GENERATION" --profile "$ROUTE_PROFILE" \
-      --provider "$ROUTE_PROVIDER" --lane "$ROUTE_LANE" --account "$ROUTE_ACCOUNT" \
-      --class "$ROUTE_CLASS" --risk "$ROUTE_RISK" --mode "$ROUTE_MODE" \
-      >/dev/null 2>&1; then
-    echo "error: matching routing reservation is required" >&2
-    exit 1
-  fi
-  ROUTE_RESERVATION_OWNED=1
   case "$HARNESS" in
     claude|codex)
       if [ "$ROUTE_ACCOUNT" = none ] \
-        || ! ROUTE_ACCOUNT_HARNESS=$("$FM_ROOT/bin/fm-account-lane.sh" harness "$ROUTE_ACCOUNT" "$CONFIG/crew-accounts.json" 2>/dev/null) \
-        || ! ROUTE_ACCOUNT_ENV_NAME=$("$FM_ROOT/bin/fm-account-lane.sh" env-name "$ROUTE_ACCOUNT" "$CONFIG/crew-accounts.json" 2>/dev/null) \
-        || ! ROUTE_ACCOUNT_CONFIG_DIR=$("$FM_ROOT/bin/fm-account-lane.sh" config-dir "$ROUTE_ACCOUNT" "$CONFIG/crew-accounts.json" 2>/dev/null); then
+        || ! ROUTE_ACCOUNT_RESOLUTION=$("$FM_ROOT/bin/fm-account-lane.sh" resolve "$ROUTE_ACCOUNT" "$CONFIG/crew-accounts.json" 2>/dev/null) \
+        || ! ROUTE_ACCOUNT_HARNESS=$(jq -er '.harness' <<<"$ROUTE_ACCOUNT_RESOLUTION" 2>/dev/null) \
+        || ! ROUTE_ACCOUNT_ENV_NAME=$(jq -er '.envName' <<<"$ROUTE_ACCOUNT_RESOLUTION" 2>/dev/null) \
+        || ! ROUTE_ACCOUNT_CONFIG_DIR=$(jq -er '.configDir' <<<"$ROUTE_ACCOUNT_RESOLUTION" 2>/dev/null); then
         echo "error: route account mapping is invalid or unavailable" >&2
         exit 1
       fi
@@ -2854,6 +2921,20 @@ if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_TMP=
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
+fi
+if [ "$ROUTE_ACTIVE" = 1 ]; then
+  if ! "$FM_ROOT/bin/fm-route.sh" activate-reservation --task "$ID" \
+      --generation "$ROUTE_GENERATION" --claim "$ROUTE_CLAIM" >/dev/null 2>&1; then
+    echo "error: routed launch metadata was published but reservation activation failed" >&2
+    exit 1
+  fi
+elif [ "$ROUTE_RETIRE_ON_PUBLISH" = 1 ]; then
+  if ! "$FM_ROOT/bin/fm-route.sh" release --task "$ID" \
+      --generation "$ROUTE_GENERATION" --claim "$ROUTE_CLAIM" >/dev/null 2>&1; then
+    echo "error: static relaunch metadata was published but prior route retirement failed" >&2
+    exit 1
+  fi
+  ROUTE_RESERVATION_OWNED=0
 fi
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   # The record is published, so this task is now part of the set a teardown

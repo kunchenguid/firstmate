@@ -185,6 +185,37 @@ meta_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.meta" | tail -1 | cut -d= -f2-
 }
 
+activate_test_route() {  # <case-dir> <task> <generation>
+  local dir=$1 task=$2 generation=$3 claim
+  claim=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$ROOT/bin/fm-route.sh" reserve --task "$task" --generation "$generation" \
+      --profile claude-sonnet --provider anthropic --lane claude-primary \
+      --account claude-primary --class standard --work-type implementation \
+      --risk medium --mode automatic --now 1000 >/dev/null
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$ROOT/bin/fm-route.sh" claim-reservation --task "$task" --generation "$generation" \
+      --profile claude-sonnet --provider anthropic --lane claude-primary \
+      --account claude-primary --class standard --risk medium --mode automatic \
+      --claim "$claim" --now 1001 >/dev/null
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$ROOT/bin/fm-route.sh" activate-reservation --task "$task" --generation "$generation" \
+      --claim "$claim" >/dev/null
+}
+
+append_test_route_meta() {  # <meta> <generation>
+  {
+    printf 'route_generation=%s\n' "$2"
+    printf '%s\n' 'route_profile=claude-sonnet'
+    printf '%s\n' 'route_provider=anthropic'
+    printf '%s\n' 'route_lane=claude-primary'
+    printf '%s\n' 'route_account=claude-primary'
+    printf '%s\n' 'route_class=standard'
+    printf '%s\n' 'route_risk=medium'
+    printf '%s\n' 'route_mode=automatic'
+  } >> "$1"
+}
+
 journal_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.control-relaunch" | tail -1 | cut -d= -f2-
 }
@@ -332,6 +363,71 @@ test_relaunch_preserves_and_readmits_the_original_route_generation() {
   assert_grep "CLAUDE_CONFIG_DIR='$dir/claude-primary'" "$dir/fake/literal" \
     "routed relaunch did not restore its native account environment"
   pass "fm-control relaunch: original route generation and account binding survive replacement"
+}
+
+test_explicit_off_relaunch_suppresses_inherited_route_metadata() {
+  local dir out rc reservation
+  dir=$(new_case routed-off rl36)
+  add_ship_task "$dir" rl36 claude
+  mkdir -p "$dir/home/config" "$dir/claude-primary"
+  jq -n --arg config_dir "$dir/claude-primary" \
+    '{version:1,accounts:{"claude-primary":{harness:"claude",envName:"CLAUDE_CONFIG_DIR",configDir:$config_dir}}}' \
+    > "$dir/home/config/crew-accounts.json"
+  activate_test_route "$dir" rl36 gen-old
+  append_test_route_meta "$dir/home/state/rl36.meta" gen-old
+  reservation="$dir/home/state/routing/reservations/rl36.json"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl36 --relaunch --route-mode off); rc=$?
+  expect_code 0 "$rc" "explicit off relaunch should use the static path"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl36 route_generation)" ] \
+    || fail "explicit route-mode off retained the inherited route generation"
+  assert_absent "$reservation" "explicit off relaunch leaked the prior routed capacity"
+  assert_not_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/claude-primary'" \
+    "explicit off relaunch retained native route account binding"
+  pass "fm-spawn relaunch: explicit route-mode off suppresses inherited routing"
+}
+
+test_explicit_reroute_requires_a_distinct_reserved_generation() {
+  local dir out rc reservation
+  dir=$(new_case routed-replacement rl37)
+  add_ship_task "$dir" rl37 claude
+  mkdir -p "$dir/home/config" "$dir/claude-primary"
+  jq -n --arg config_dir "$dir/claude-primary" \
+    '{version:1,accounts:{"claude-primary":{harness:"claude",envName:"CLAUDE_CONFIG_DIR",configDir:$config_dir}}}' \
+    > "$dir/home/config/crew-accounts.json"
+  activate_test_route "$dir" rl37 gen-old
+  append_test_route_meta "$dir/home/state/rl37.meta" gen-old
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl37 --relaunch --harness claude \
+    --route-generation gen-old --route-profile claude-sonnet --route-provider anthropic \
+    --route-lane claude-primary --route-account claude-primary --route-class standard \
+    --route-risk medium --route-mode automatic); rc=$?
+  expect_code 1 "$rc" "same-generation explicit reroute must fail"
+  assert_contains "$out" "newly reserved route generation must differ from the recorded generation" \
+    "same-generation reroute was not diagnosed"
+  [ "$(meta_field "$dir" rl37 route_generation)" = gen-old ] \
+    || fail "same-generation refusal changed recorded routing"
+
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$ROOT/bin/fm-route.sh" release --task rl37 --generation gen-old >/dev/null
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$ROOT/bin/fm-route.sh" reserve --task rl37 --generation gen-new \
+      --profile claude-sonnet --provider anthropic --lane claude-primary \
+      --account claude-primary --class standard --work-type implementation \
+      --risk medium --mode automatic --now 1010 >/dev/null
+  out=$(run_spawn "$dir" rl37 --relaunch --harness claude \
+    --route-generation gen-new --route-profile claude-sonnet --route-provider anthropic \
+    --route-lane claude-primary --route-account claude-primary --route-class standard \
+    --route-risk medium --route-mode automatic); rc=$?
+  expect_code 0 "$rc" "distinct reserved reroute should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl37 route_generation)" = gen-new ] \
+    || fail "distinct reserved reroute did not publish its new generation"
+  reservation="$dir/home/state/routing/reservations/rl37.json"
+  jq -e '.generation == "gen-new" and .admissionState == "active"' "$reservation" >/dev/null \
+    || fail "distinct reserved reroute was not activated"
+  pass "fm-spawn relaunch: explicit reroute requires and activates a distinct generation"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -1352,6 +1448,8 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_preserves_and_readmits_the_original_route_generation
+test_explicit_off_relaunch_suppresses_inherited_route_metadata
+test_explicit_reroute_requires_a_distinct_reserved_generation
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions

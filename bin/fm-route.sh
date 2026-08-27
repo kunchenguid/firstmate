@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-routing-lib.sh
 . "$SCRIPT_DIR/fm-routing-lib.sh"
 
-usage() { fm_route_diagnostic 'usage: fm-route.sh select|reserve|verify-reservation|release|failure|score|finalize|observe|evidence|status|report ...'; exit 2; }
+usage() { fm_route_diagnostic 'usage: fm-route.sh select|reserve|verify-reservation|claim-reservation|activate-reservation|release|failure|score|finalize|observe|evidence|status|report ...'; exit 2; }
 require_value() { [ "$#" -ge 2 ] && [ -n "$2" ] || usage; }
 validate_now() { case "$1" in ''|*[!0-9]*) fm_route_diagnostic 'invalid --now: expected non-negative epoch'; return 1 ;; esac; }
 validate_terminal() { case "$1" in completed|failed_safe|escalated|cancelled|superseded) ;; *) fm_route_diagnostic 'invalid terminal outcome'; return 1 ;; esac; }
@@ -50,12 +50,42 @@ case "$command" in
       fm_routing_with_lock fm_route_verify_locked "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" "$RISK" "$MODE"
     fi
     ;;
-  release)
-    TASK=''; GENERATION=''
-    while [ "$#" -gt 0 ]; do claim_option "$1"; case "$1" in --task) require_value "$@"; TASK=$2; shift 2 ;; --generation) require_value "$@"; GENERATION=$2; shift 2 ;; *) usage ;; esac; done
+  claim-reservation)
+    TASK=''; GENERATION=''; PROFILE=''; PROVIDER=''; LANE=''; ACCOUNT=''; CLASS=''; RISK=''; MODE=''; CLAIM=''; NOW=$(date +%s); FROM_ACTIVE=false
+    while [ "$#" -gt 0 ]; do claim_option "$1"; case "$1" in
+      --task) require_value "$@"; TASK=$2; shift 2 ;; --generation) require_value "$@"; GENERATION=$2; shift 2 ;;
+      --profile) require_value "$@"; PROFILE=$2; shift 2 ;; --provider) require_value "$@"; PROVIDER=$2; shift 2 ;;
+      --lane) require_value "$@"; LANE=$2; shift 2 ;; --account) require_value "$@"; ACCOUNT=$2; shift 2 ;;
+      --class) require_value "$@"; CLASS=$2; shift 2 ;; --risk) require_value "$@"; RISK=$2; shift 2 ;;
+      --mode) require_value "$@"; MODE=$2; shift 2 ;; --claim) require_value "$@"; CLAIM=$2; shift 2 ;;
+      --now) require_value "$@"; NOW=$2; shift 2 ;; --from-active) FROM_ACTIVE=true; shift ;;
+      *) usage ;;
+    esac; done
+    fm_route_validate_route_tuple "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" implementation "$RISK" "$MODE"
+    fm_route_validate_claim "$CLAIM" || { fm_route_diagnostic 'invalid claim token'; exit 1; }
+    validate_now "$NOW"
+    fm_routing_with_lock fm_route_claim_locked "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" "$RISK" "$MODE" "$CLAIM" "$NOW" "$FROM_ACTIVE"
+    ;;
+  activate-reservation)
+    TASK=''; GENERATION=''; CLAIM=''
+    while [ "$#" -gt 0 ]; do claim_option "$1"; case "$1" in
+      --task) require_value "$@"; TASK=$2; shift 2 ;; --generation) require_value "$@"; GENERATION=$2; shift 2 ;;
+      --claim) require_value "$@"; CLAIM=$2; shift 2 ;; *) usage ;;
+    esac; done
     fm_route_validate_identifier "$TASK" || { fm_route_diagnostic 'invalid task identifier'; exit 1; }
     fm_route_validate_identifier "$GENERATION" || { fm_route_diagnostic 'invalid generation identifier'; exit 1; }
-    fm_routing_with_lock fm_route_release_locked "$TASK" "$GENERATION"
+    fm_route_validate_claim "$CLAIM" || { fm_route_diagnostic 'invalid claim token'; exit 1; }
+    fm_routing_with_lock fm_route_activate_locked "$TASK" "$GENERATION" "$CLAIM"
+    ;;
+  release)
+    TASK=''; GENERATION=''; CLAIM=''; STALE_BEFORE=''
+    while [ "$#" -gt 0 ]; do claim_option "$1"; case "$1" in --task) require_value "$@"; TASK=$2; shift 2 ;; --generation) require_value "$@"; GENERATION=$2; shift 2 ;; --claim) require_value "$@"; CLAIM=$2; shift 2 ;; --stale-before) require_value "$@"; STALE_BEFORE=$2; shift 2 ;; *) usage ;; esac; done
+    fm_route_validate_identifier "$TASK" || { fm_route_diagnostic 'invalid task identifier'; exit 1; }
+    fm_route_validate_identifier "$GENERATION" || { fm_route_diagnostic 'invalid generation identifier'; exit 1; }
+    [ -z "$CLAIM" ] || fm_route_validate_claim "$CLAIM" || { fm_route_diagnostic 'invalid claim token'; exit 1; }
+    [ -z "$STALE_BEFORE" ] || validate_now "$STALE_BEFORE"
+    [ -z "$CLAIM" ] || [ -z "$STALE_BEFORE" ] || usage
+    fm_routing_with_lock fm_route_release_locked "$TASK" "$GENERATION" "$CLAIM" "$STALE_BEFORE"
     ;;
   failure)
     TASK=''; GENERATION=''; PROVIDER=''; LANE=''; KIND=''; NOW=$(date +%s)
