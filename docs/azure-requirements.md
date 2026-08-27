@@ -667,10 +667,10 @@ This is deliberately weaker than the original sentence, and it is weaker in the 
 available: the original was never provable, so leaving it in place would have meant marking R6 DONE
 on an assertion.
 
-Making authorship genuinely recordable is the alternative, and it is a real change rather than a
-doc edit: it needs an authorship identity captured at task creation and carried into the ledger,
-which is the same `author_account_identity` field the Azure adapter's same-account refusal is
-already waiting on. Worth doing, out of scope here, and the amendment above does not depend on it.
+Making authorship genuinely recordable was the alternative, and at the time of this amendment it
+was out of scope. Resumed R10 later added a signed pre-agent launch record plus an exact-head
+binding for centrally configured Firstmate tasks. That newer producer does not retroactively make
+the historical R6 declaration runs into authorship evidence.
 
 **Declaring a codex author is the SAFE error; declaring a claude author is the dangerous one.** A
 codex declaration can only narrow eligibility: against a codex-family reviewer it forces the
@@ -965,8 +965,9 @@ An accepted Pi-harness review on the current model image is proven by Azure revi
 The former outstanding dependency is now complete: R4 cell `azv-c1bb1c5ff906` reached `close`
 with its worktree disk released, as recorded in
 [`docs/evidence/azure-r4-live-acceptance-2026-08-23/evidence.json`](evidence/azure-r4-live-acceptance-2026-08-23/evidence.json).
-R6's second declaration leg was already complete, so the tracked evidence now covers every
-non-dropped R1-R10 requirement.
+R6's second declaration leg was already complete, so that tracked evidence closes the previously
+accepted Azure core through R9.
+Resumed R10 has its own Slack activation and live-team acceptance below.
 
 The landing path used to be recorded here as unprovable synthetically, and that was correct
 behavior rather than a gap to route around.
@@ -980,60 +981,42 @@ did.
 
 ## R10. Crosscheck is exposed to team engineers through Slack
 
-Status: DROPPED by the owner, 2026-08-21.
-The build (the Slack lane, `bin/fm-crosscheck-slack.sh`) remains in-tree, inert without its
-tokens; no acceptance is owed.
-Everything below is retained as history of what was built and what turning it on would have
-taken, and none of it is outstanding work.
+Status: DEFERRED 2026-08-21, RESUMED 2026-08-26; implementation complete, central activation and live-team acceptance pending.
 
-Where the lane stood before it was dropped: BUILT, ready-to-flip; awaiting the three owner inputs
-(the Slack app's two tokens, the GitHub read credential, and the metering numbers).
-Directed by the owner 2026-08-19; builds after R6.
-The lane is `bin/fm-crosscheck-slack.sh` and its owning document is `docs/crosscheck-slack.md`; a
-missing token environment variable refuses startup naming the exact variable, so flipping it on is
-supplying tokens, not changing code.
-Live acceptance would still have required those inputs and an engineer other than the owner.
+Historical explanation: the owner dropped R10 from the August 21 critical path only to ship the
+core Crosscheck lane sooner.
+The original listener remained in-tree and inert without credentials.
+That deferral was not a rejection of Slack access, and this resumed work preserves that history.
 
-What DK would have had to click: create a Slack app in the workspace with Socket Mode on;
-mint the app-level token with `connections:write` and the bot token with
-`app_mentions:read`, `chat:write`, `channels:history`, and `reactions:write`;
-subscribe it to the `app_mention` event, install it, and invite the bot to the
-channel(s) going into `channel_allowlist`; mint a read-only GitHub credential
-scoped to the allowlisted repositories; export the three values under the
-environment variable names in `$FM_HOME/config/crosscheck-slack.json`; and
-pick the two metering numbers: `daily_request_cap` (the control that binds
-today, counting each submitter's started reviews per day) and
-`daily_budget_usd` (the USD bound, which binds only once the crosscheck
-ledger records per-review cost; today it does not). Null for either stays
-unmetered pass-through, still ledgered. Details and the run recipe:
-`docs/crosscheck-slack.md`.
+The resumed lane is owned by `docs/crosscheck-slack.md`.
+It keeps outbound-only Slack Socket Mode and the existing direct CLI, while four listener workers
+enter the same central four-lane FIFO allocator as direct requests.
+Exact channel and repository allowlists, durable event dedupe, atomic per-engineer daily caps,
+visible saturation, central reports, and a launchd restart owner remain required.
 
-The owner's former v1 shape: an engineer tags the crosscheck bot in a Slack channel with a pull
-request link; the GLM lane reviews it; the bot posts the findings as a thread reply on the
-engineer's own message. No engineer wires up a harness or touches an endpoint, and the same path
-works for deliberate on-demand use. Cursor Bugbot continues to run for engineers' pull requests
-(it stays disabled on the owner's), so this lane complements rather than replaces it.
+The original build's branch-prefix authorship screen and unconditional `model=human-authored`
+staging are retired as unsafe.
+For managed agent work, the resumed lane requires a signed Firstmate launch attestation created
+before the agent starts and a second signed record that binds the same worktree, harness, exact
+model, model family, account identity, task identity, and generation to the exact PR head.
+Mutable task metadata cannot establish that provenance by itself.
+Slack submitter identity, branch names, and free text carry no authorship authority.
+Missing, conflicting, or unverifiable provenance fails closed in the request thread.
+Human authorship is accepted only from a separate trustworthy exact-head producer; until a
+no-mistakes human producer exists, such requests remain unclassified and fail closed rather than
+being guessed from commit or PR metadata.
 
-Constraints the built lane was intended to honor:
+Activation still requires the Slack app's two credential values, one repository-scoped read-only
+GitHub credential, exact approved channel IDs, exact approved repositories, and a binding daily
+request cap on the coordinator.
+Credential names and locations are recorded in `docs/crosscheck-slack.md`; values never enter this
+document, Slack replies, logs, state, or artifacts.
 
-- The listener uses Slack Socket Mode, so no public inbound endpoint is added to the private
-  lane posture. It is a resident process; where it runs is decided at build time and its
-  standing cost is recorded under C3.
-- v1 accepts pull request links only, and only for repositories in the organization allowlist.
-  The bot's repository read credential must never be pointed at a repository outside that
-  allowlist, because a review pulls untrusted content into a credentialed context.
-- Every thread reply names the lane that produced it (GLM, or the pi-codex fallback), the same
-  visibility R6 requires, so engineers and the owner can always see what is serving.
-- The intended design called for per-submitter metering under a daily cost bound (C3), with a
-  refusal in the thread instead of a silently dropped request. The in-tree build binds the daily
-  request cap, but its USD bound never became effective because the crosscheck ledger records no
-  per-review cost. That unfinished control is retained as history, not work still owed after the
-  drop.
-
-Acceptance, as it stood before the drop and no longer owed: an engineer other than the owner tags
-the bot with a pull request link and receives threaded findings produced by the GLM lane, with the
-lane named in the reply, the request metered, and an out-of-allowlist link refused with a clear
-message.
+Acceptance: an internal engineer other than the owner tags the bot in an approved channel with one
+allowlisted PR URL and receives an admitted exact-head CLEAR or findings reply in the same thread.
+The reply names the reviewed SHA, reviewer lane, task ID, and durable artifact; the meter records
+the engineer; duplicate delivery starts exactly one review; head movement invalidates the verdict;
+out-of-allowlist and unverified-provenance requests refuse; infrastructure failure never reads CLEAR.
 
 ## C1. Crosscheck completes in 20 to 30 minutes
 
@@ -1164,11 +1147,11 @@ The adjacent cooldown gap is also closed: a release-proved worker whose VM was d
 operator-side (surrender's dark-compute gate) now gets `cooldown_started_at` stamped on first
 observation, so `delete-compute` becomes due instead of waiting forever.
 
-Dropped R10's intended metering and standing-cost booking: the inert Slack lane was designed to
-run its listener on the operator Mac, with approximately zero standing Azure cost. Its
-per-submitter daily request ledger remains in-tree under `$FM_HOME/state/crosscheck-slack`;
-`daily_request_cap` is implemented, while `daily_budget_usd` would bind only if that ledger ever
-recorded per-review cost, which it does not. No listener or acceptance is owed after the drop.
+Resumed R10 runs its outbound Socket Mode listener on the coordinator Mac with approximately zero
+standing Azure cost.
+Its per-submitter daily request ledger lives under `$FM_HOME/state/crosscheck-slack`.
+`daily_request_cap` is binding and atomically enforced across concurrent workers.
+`daily_budget_usd` remains optional and binds only when a review exposes compatible cost data.
 
 Acceptance: a day cannot cross the bound without an explicit operator override, and a worker
 whose task ended deallocates unattended.
@@ -1197,7 +1180,8 @@ not a claim of real-time metering.
 7. C1, instrumented 2026-08-20; the measured local-lane runs are above the band rather than
    inside it, and the compartment lane's phases wait on that lane being switched back on.
 8. R9, done 2026-08-23 after R4's final cell close completed the tracked proof set.
-9. R10, the Slack team exposure, dropped by the owner on 2026-08-21 and no longer ordered work.
+9. R10, deferred on 2026-08-21 to ship core Crosscheck sooner and resumed on 2026-08-26 for
+   central Slack activation and live team acceptance.
 
 ## Standing constraints
 

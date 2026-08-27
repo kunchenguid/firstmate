@@ -2,13 +2,15 @@
 # Slack Socket Mode exposure of the crosscheck gate for team engineers (R10).
 #
 # Usage:
-#   fm-crosscheck-slack.sh run [--config <path>]
+#   fm-crosscheck-slack.sh run [--config <path>] [--keychain-only]
+#   fm-crosscheck-slack.sh preflight [--config <path>] [--keychain-only]
 #   fm-crosscheck-slack.sh --selftest [<config-path>]
+#   fm-crosscheck-slack.sh attest-launch <task-id> <generation> <worktree> <harness> <model> [--account-home <path>] [--config <path>]
+#   fm-crosscheck-slack.sh attest-task <task-id> <pr-url> <head-sha> [--config <path>]
 #
-# `run` starts the resident Socket Mode listener; it refuses to start when
-# any token environment variable named by $FM_HOME/config/crosscheck-slack.json
-# is unset, naming the exact variable (the ready-to-flip posture).
-# `--selftest` validates the config shape and exits without touching Slack.
+# Credential sources and service startup requirements are owned by
+# docs/crosscheck-slack.md. `--selftest` validates config and the provenance
+# key; `preflight` also checks credential loading, without remote authentication.
 #
 # The interpreter floor and the reason for it are owned by
 # bin/fm-crosscheck-python-lib.sh: this listener parses hostile JSON (Slack

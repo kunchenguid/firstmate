@@ -621,6 +621,54 @@ PY
   pass "Pi snapshots remain bound without recording or requiring author identity"
 }
 
+test_crosscheck_launch_provenance_uses_the_real_pi_snapshot() {
+  local rec id source out status attest shape leased_worktree exact_head exact_attest
+  id=profile-pi-crosscheck-provenance-z25
+  rec=$(make_spawn_case profile-pi-crosscheck-provenance pi "$id")
+  read_case_record "$rec"
+  source="$CASE_DIR/pi-source"
+  make_pi_account_source "$source" account-crosscheck
+  printf '%s\n' \
+    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' \
+    > "$HOME_DIR/config/crosscheck-slack-provenance.key"
+  chmod 600 "$HOME_DIR/config/crosscheck-slack-provenance.key"
+  cat > "$HOME_DIR/config/crosscheck-slack.json" <<EOF
+{"app_token_env":"FM_UNUSED_APP","bot_token_env":"FM_UNUSED_BOT","channel_allowlist":["C0TEST"],"repo_allowlist":["ruby-labs/firstmate"],"github_token_env":"FM_UNUSED_GITHUB","daily_budget_usd":null,"daily_request_cap":10,"provenance_key_file":"\$FM_HOME/config/crosscheck-slack-provenance.key","state_dir":"\$FM_HOME/state/crosscheck-slack"}
+EOF
+  out=$(PI_CODING_AGENT_DIR="$source" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --model openai-codex-5/gpt-5.6-sol --effort xhigh)
+  status=$?
+  expect_code 0 "$status" "Pi spawn with Crosscheck provenance should succeed: $out"
+  attest=$(find "$HOME_DIR/state/crosscheck-slack/launch-provenance" \
+    -type f -name '*.json' -print)
+  [ "$(printf '%s\n' "$attest" | grep -c .)" = 1 ] \
+    || fail "Pi spawn did not create exactly one launch provenance record"
+  shape=$(python3 -c 'import json, sys
+value=json.load(open(sys.argv[1]))["payload"]
+print(value["issuer"], value["task"]["task_id"], value["author"]["harness"], value["author"]["model_family"], value["launch"]["worktree"])' "$attest")
+  leased_worktree=$(sed -n 's/^worktree=//p' "$HOME_DIR/state/$id.meta")
+  assert_contains "$shape" "firstmate-spawn $id pi openai" \
+    "Pi spawn launch provenance lost its authoritative author identity"
+  assert_contains "$shape" "$leased_worktree" \
+    "Pi spawn launch provenance did not bind the leased task worktree"
+  git -C "$leased_worktree" checkout -qb codex/crosscheck-provenance-fixture
+  printf 'authored after launch\n' > "$leased_worktree/crosscheck-provenance-fixture.txt"
+  git -C "$leased_worktree" add crosscheck-provenance-fixture.txt
+  git -C "$leased_worktree" commit -qm 'test: author after launch'
+  exact_head=$(git -C "$leased_worktree" rev-parse HEAD)
+  printf 'pr=https://github.com/ruby-labs/firstmate/pull/999\npr_head=%s\n' \
+    "$exact_head" >> "$HOME_DIR/state/$id.meta"
+  out=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-crosscheck-slack.sh" attest-task \
+    "$id" https://github.com/ruby-labs/firstmate/pull/999 "$exact_head" \
+    --config "$HOME_DIR/config/crosscheck-slack.json" 2>&1)
+  status=$?
+  expect_code 0 "$status" "exact-head provenance should accept the task's post-launch branch: $out"
+  exact_attest=${out#attested: }
+  [ -f "$exact_attest" ] || fail "exact-head provenance artifact is missing after branch creation"
+  pass "fm-spawn captures signed Pi author and worktree provenance from the real launch snapshot"
+}
+
 test_batch_forwards_shared_profile_flags() {
   local rec id1 id2 out status
   id1=profile-batch-a-z9
@@ -669,6 +717,10 @@ if [ "${FM_TEST_FOCUSED:-}" = pi-author-snapshot ]; then
   test_pi_author_account_snapshot_binds_launch_and_recovery
   exit 0
 fi
+if [ "${FM_TEST_FOCUSED:-}" = crosscheck-author-launch ]; then
+  test_crosscheck_launch_provenance_uses_the_real_pi_snapshot
+  exit 0
+fi
 
 test_no_profile_resolves_claude_model_anchor
 test_active_dispatch_profile_requires_explicit_harness_for_ship
@@ -688,6 +740,7 @@ test_pi_omits_invalid_max_effort
 test_pi_crewmate_carries_autonomy_flags
 test_pi_secondmate_approves_without_excluding_tools
 test_pi_author_account_snapshot_binds_launch_and_recovery
+test_crosscheck_launch_provenance_uses_the_real_pi_snapshot
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
 

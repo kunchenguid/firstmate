@@ -1,30 +1,114 @@
-# Crosscheck over Slack (R10)
+# Crosscheck for Slack
 
-This document owns the Slack team exposure of the crosscheck gate: the
-listener `bin/fm-crosscheck-slack.py` (launched through
-`bin/fm-crosscheck-slack.sh`), its configuration, its metering ledger, and
-the operator recipe. The review itself is owned by `bin/fm-crosscheck.py`
-and `docs/crosscheck.md`; the requirement text is R10 in
-`docs/azure-requirements.md`.
+This is the centrally operated R10 access lane for internal engineers.
 
-## What it does
+An engineer needs only Slack.
+In an approved channel, tag the Crosscheck bot with exactly one GitHub pull request URL.
+The bot acknowledges the exact head it admitted and posts CLEAR, BLOCKING findings, STALE, or TOOL FAILURE in the same thread.
+Every admitted result names the reviewed head SHA, reviewer lane, Crosscheck task ID, and exact durable report path on the coordinator.
 
-An engineer tags the crosscheck bot in an allowlisted Slack channel with a
-GitHub pull-request link. The bot validates the repository against the
-allowlist, checks the submitter's daily meter, acks in thread ("Review
-started"), runs `bin/fm-crosscheck.sh run <task-id> <pr-url>` as a bounded
-subprocess, and posts the findings as a thread reply on the engineer's own
-message, naming the lane that produced the review (the cross-family primary deployment or
-"pi-codex fallback (degraded)"). Tool failures are posted honestly as
-failures, never as verdicts. Cursor Bugbot continues to run for engineers'
-pull requests; this lane complements it.
+The direct command remains supported for Firstmate and operators:
 
-The listener uses Slack Socket Mode over an outbound websocket, so no
-public inbound endpoint is added to the private lane posture. The websocket
-client is a minimal RFC 6455 implementation over the standard library; the
-repo carries no third-party Python dependencies and none was added.
+```sh
+FM_HOME=/Users/dongkeun/firstmate-home bin/fm-crosscheck.sh run <task-id> <full-pr-url>
+```
 
-## Configuration: `$FM_HOME/config/crosscheck-slack.json`
+The Slack lane is an access adapter around that command.
+It does not implement a second reviewer, lane allocator, or evidence policy.
+Do not create a Crosscheck agent skill for this lane.
+
+## Engineer request
+
+In an approved Slack channel:
+
+```text
+@Crosscheck https://github.com/ORG/REPOSITORY/pull/123
+```
+
+Use one pull request URL per mention.
+No Firstmate checkout, `FM_HOME`, Azure configuration, GitHub login, or provider credential is needed on the engineer's machine.
+
+The coordinator owns Slack Socket Mode, the exact channel and repository allowlists, the GitHub read credential, signed authorship provenance, the reviewer roster, Azure access, queueing, metering, reports, and restarts.
+
+## Network and capacity shape
+
+The listener uses Slack Socket Mode over an outbound websocket.
+It opens no public inbound endpoint.
+
+Four listener workers admit requests concurrently.
+Each worker invokes the supported `fm-crosscheck.sh run` wrapper with the same central `FM_HOME` used by direct CLI callers.
+Both entry paths therefore enter Crosscheck's existing four-lane durable FIFO allocator.
+The Slack adapter has a bounded eight-request waiting queue in front of those workers.
+When that queue is full, the bot posts a visible refusal in the request thread.
+
+The listener never translates a queue, GitHub, reviewer, Azure, cleanup, ledger, or Slack delivery failure into CLEAR.
+
+## Authorship provenance
+
+The old R10 build inferred authorship from branch prefixes and staged every request as `model=human-authored`.
+That was unsafe and is retired.
+
+The active Firstmate producer uses two coordinator-signed records.
+`fm-spawn` writes `firstmate.crosscheck-author-launch.v1` before the agent process starts.
+That immutable launch record binds:
+
+- Originating Firstmate task ID and task generation.
+- Exact task worktree, Git directory identity, branch ref, and launch head.
+- Author harness, exact model, model family, and required captured account identity for OpenAI-family agents.
+
+`fm-pr-check` later writes `firstmate.crosscheck-authorship.v2` only when the same worktree and Git identity remain, the current head descends from the launch head, tracked files are clean, and current HEAD equals the live PR head.
+That exact-head record binds:
+
+- Exact repository and pull request number.
+- Exact 40-character head SHA.
+- The complete launch-bound author identity.
+- The SHA-256 digest of the signed launch record.
+
+Both records authenticate their schema and payload with the coordinator provenance key.
+Mutable task metadata can only agree with the signed launch identity; it cannot replace it.
+A head produced in another worktree, a changed branch identity, or uncommitted tracked source is refused.
+
+`bin/fm-spawn.sh` creates the launch record automatically for a managed task when central Slack configuration is installed, and `bin/fm-pr-check.sh` emits the exact-head record after it resolves the live PR head.
+The exact-head command below is a pipeline interface, not a way for a caller to claim a model:
+
+```sh
+bin/fm-crosscheck-slack.sh attest-task <task-id> <pr-url> <head-sha> --config <config-path>
+```
+
+The Slack listener fetches the live PR head with its read-only GitHub credential, verifies the exact-head signature, recomputes the model family through Crosscheck's own classifier, and stages the verified harness and model for the core family-separation screen.
+Both signed attestations are copied into the review's durable artifact directory.
+Agent attestations require a captured author account identity, which also arms the Azure adapter's same-account refusal.
+
+Slack identity, branch names, PR text, and caller-supplied free text carry no authorship authority.
+Missing, malformed, tampered, conflicting, or wrong-head provenance gets a clear threaded refusal and starts no review.
+Firstmate launch records deliberately cannot claim human authorship.
+A human-authored PR may be classified as human only after a separate trusted producer, such as no-mistakes, supplies verifiable exact-head evidence from its own author boundary.
+No such human producer is inferred from commit metadata, Slack identity, an unsigned PR-body marker, or absence of a Firstmate record; without it, the request fails closed as unclassified.
+
+## Exact-head response contract
+
+The listener resolves the current PR head before admission and binds provenance to it.
+After Crosscheck returns, it requires the ledger's reviewed head to equal the admitted head.
+It then fetches the live head again.
+
+If the head moved during review, the bot posts STALE with both SHAs, the lane, task ID, and durable artifact.
+The older verdict does not apply to the new head and the reply never says CLEAR.
+
+An admitted response has this shape:
+
+```text
+Crosscheck CLEAR for https://github.com/ORG/REPOSITORY/pull/123
+Lane: glm-5p2 primary
+Task ID: slack-0123456789ab
+Reviewed head: 0123456789abcdef0123456789abcdef01234567
+Summary: ...
+No active findings for this head.
+Durable artifact: /coordinator/fm-home/data/slack-0123456789ab/crosscheck.md
+```
+
+## Central configuration
+
+The default path is `$FM_HOME/config/crosscheck-slack.json`.
 
 ```json
 {
@@ -33,173 +117,117 @@ repo carries no third-party Python dependencies and none was added.
   "channel_allowlist": ["C0123ABCDEF"],
   "repo_allowlist": ["Ruby-Labs/relvino"],
   "github_token_env": "FM_GITHUB_READ_TOKEN",
+  "keychain_services": {
+    "app_token": "firstmate-crosscheck-slack-app",
+    "bot_token": "firstmate-crosscheck-slack-bot",
+    "github_token": "firstmate-crosscheck-github-read"
+  },
   "daily_budget_usd": null,
-  "daily_request_cap": null,
-  "agent_branch_prefixes": ["fm/"],
+  "daily_request_cap": 10,
+  "provenance_key_file": "$FM_HOME/config/crosscheck-slack-provenance.key",
   "state_dir": "$FM_HOME/state/crosscheck-slack"
 }
 ```
 
-- Tokens come ONLY from the environment variables named here. They are
-  never stored in this file, never written to state, and never logged;
-  every emitted line passes a redactor that knows every resolved secret.
-- A missing token environment variable refuses startup with an exact
-  message naming the variable. That is the ready-to-flip posture: the
-  config and code land first, the owner supplies tokens later, nothing
-  else changes.
-- `repo_allowlist` is exact `owner/name` matching (case-insensitive). The
-  bot's repository read credential is never pointed at a repository outside
-  this list, because a review pulls untrusted content into a credentialed
-  context. Out-of-allowlist links get a threaded refusal naming the
-  repository and the allowlist.
-- `channel_allowlist` bounds where the bot works; mentions elsewhere get a
-  threaded "not enabled" refusal and no review.
-- `daily_request_cap` is the metering control that BINDS TODAY: a
-  per-submitter, per-UTC-day cap on started reviews, needing no cost data.
-  At the cap the bot says so in the thread instead of silently dropping the
-  request. Null = uncapped, still ledgered.
-- `daily_budget_usd` is a forward contract, stated plainly: it binds only
-  once the crosscheck ledger records per-review cost, which today's ledger
-  schema does not, so a submitter's recorded day total stays 0.0 and this
-  bound cannot fire until that lands. When cost data exists, a submitter at
-  the bound gets the same in-thread reply. Null = unmetered pass-through,
-  still ledgered.
-- `agent_branch_prefixes` (optional; default `["fm/"]`) is the
-  human-authorship screen described below. An empty array deliberately
-  disables it; do that only if agent work never reaches the allowlisted
-  repositories.
-- `state_dir` supports a literal leading `$FM_HOME` and nothing else.
+`channel_allowlist` contains exact Slack channel IDs.
+`repo_allowlist` contains exact case-insensitive `owner/name` repositories.
+The GitHub credential is never used before the repository allowlist admits the URL.
 
-## THE AUTHORSHIP ASSERTION (read this before pointing the lane anywhere)
+`daily_request_cap` is a binding per-engineer, per-UTC-day cap on started reviews.
+Admission and ledger append occur under one lock, so concurrent workers cannot overrun it.
+`daily_budget_usd` remains optional and binds only to cost values the Crosscheck ledger actually exposes.
+Null disables that bound without disabling request logging.
 
-This lane stages every review's task metadata as `model=human-authored`,
-which satisfies the crosscheck gate's model-separation screen for EVERY
-reviewer. That is only sound because the lane asserts human authorship:
-submissions come from engineers in Slack, and before any review the bot
-fetches the PR's head branch (with the same read credential, only after
-the repository allowlist admitted the URL) and REFUSES in thread any PR
-whose branch matches an `agent_branch_prefixes` entry, directing it to the
-ordinary crosscheck lane (`bin/fm-crosscheck.sh`), which carries true
-author metadata. A branch-lookup failure also refuses (fail closed). The
-model-separation guarantee for Slack reviews therefore rests on this
-assertion plus the branch screen, not on the gate's own screen; the lane
-must never be pointed at agent-authored pull requests, and an
-agent-authored PR on a non-agent-prefixed branch is outside what this
-screen can catch, which is exactly why the refusal message names the
-ordinary lane.
+The three environment variables remain supported for foreground operation.
+The central macOS service requires all three `keychain_services`; environment-only credentials are supported only for foreground operation.
+Only Keychain service names appear in config or launchd state.
+Credential values never appear there.
 
-`bin/fm-crosscheck-slack.sh --selftest [config-path]` validates the config
-shape (and reports which token variables are set, values never shown) and
-exits without touching Slack.
+The provenance key is a 32-byte random key encoded as 64 lowercase hex characters in an owner-only regular file.
+It must not be a symlink and must have no group or other permission bits.
+The listener logs only its nonsecret key ID.
 
-## The three owner inputs
+## Credentials and app permissions
 
-The lane is built and tested; it goes live when the owner supplies exactly
-these three things.
+The Slack app must have Socket Mode enabled.
+Its app-level token needs `connections:write`.
+Its bot token needs `app_mentions:read`, `chat:write`, `channels:history`, and `reactions:write`.
+Subscribe the app to `app_mention`, install it to the workspace, and invite it only to approved channels.
 
-1. **Slack app (Socket Mode) and its two tokens.** Create a Slack app in
-   the workspace; enable Socket Mode; create an app-level token with the
-   `connections:write` scope (this is `app_token_env`, an `xapp-...`
-   value). Under OAuth, grant the bot token scopes `app_mentions:read`,
-   `chat:write`, `channels:history`, and `reactions:write`; subscribe the
-   app to the `app_mention` bot event; install the app to the workspace
-   (the `xoxb-...` value is `bot_token_env`); invite the bot to each
-   allowlisted channel.
-2. **The GitHub organization read credential**, exported as the variable
-   named by `github_token_env`. A fine-grained PAT with read-only access to
-   exactly the allowlisted repositories is the right shape; the listener
-   hands it to the crosscheck subprocess (also as `GH_TOKEN`) and to
-   nothing else.
-3. **The two metering numbers**, both DK inputs recorded under C3:
-   `daily_request_cap` (the control that binds today; a per-submitter daily
-   count of started reviews) and `daily_budget_usd` (the USD bound, which
-   binds only once the crosscheck ledger records per-review cost). Until
-   they are set the lane runs unmetered pass-through with full ledgering.
+The GitHub credential must be a read-only GitHub App installation token or fine-grained credential limited to the repositories in `repo_allowlist`.
+It needs pull request metadata and repository contents read access.
+It needs no write scope.
 
-## Run recipe
+Slack, GitHub, provider, and Azure credential values stay only on the coordinator host.
+The Crosscheck child receives only the GitHub read credential and required `FM_*` runtime configuration.
+Slack credentials never enter the child environment.
+Every process log and Slack error path passes through the registered secret redactor.
+
+## Durable state and metering
+
+Slack event markers live under `<state_dir>/events`.
+The first process to create an event claim owns it, so concurrent duplicate delivery starts exactly one review.
+The final reply is stored before posting and marked delivered afterward.
+If Slack delivery fails, a redelivery revalidates the stored reviewed head before posting without rerunning the review.
+A moved head produces STALE, and an unavailable head lookup produces a tool failure.
+
+Per-engineer request records live under `<state_dir>/meter/<YYYY-MM-DD>.json`.
+Each record includes the Slack user ID, PR URL, event ID, start and finish times, state, lane, available token data, and available cost data.
+Request records stay bound to the UTC day on which they started, including reviews that cross midnight.
+
+Signed launch records live under `<state_dir>/launch-provenance`, and exact-head records live under `<state_dir>/provenance`.
+Review reports and both copied attestations live under `$FM_HOME/data/<task-id>`.
+
+Event artifacts expire after 14 days and meter files after 90 days.
+Review artifacts follow the central Crosscheck retention owner.
+
+## Install, restart, and inspect
+
+Validate central configuration and the provenance key without contacting Slack:
 
 ```sh
-export FM_SLACK_APP_TOKEN=...   # from owner input 1
-export FM_SLACK_BOT_TOKEN=...   # from owner input 1
-export FM_GITHUB_READ_TOKEN=... # from owner input 2
-bin/fm-crosscheck-slack.sh --selftest        # config shape check
-bin/fm-crosscheck-slack.sh run               # resident listener
+FM_HOME=/Users/dongkeun/firstmate-home \
+  bin/fm-crosscheck-slack.sh --selftest
 ```
 
-Where it runs is an operator decision recorded under C3. The v1
-recommendation is the always-on local mac that already hosts the fleet:
-the listener is a single low-CPU resident process whose standing cost is
-the machine staying awake plus one Socket Mode connection, and colocating
-it with `$FM_HOME` gives it the crosscheck gate, the reviewer roster, and
-the state directory with no new credential distribution. Moving it to a
-cloud VM later changes only where the three environment variables live;
-that standing cost, when chosen, is booked under C3 alongside the
-per-submitter metering this listener already records.
+Check that all three central credentials can be loaded without printing them (this does not authenticate against Slack or GitHub):
 
-Operational bounds: reviews run one at a time off a bounded queue (depth
-8; overflow gets a threaded refusal), each review subprocess has a wall
-clock bound (default 5400 seconds, `FM_CROSSCHECK_SLACK_REVIEW_TIMEOUT_SECONDS`
-to override) and an output ceiling, and the websocket reconnects with
-capped backoff.
+```sh
+FM_HOME=/Users/dongkeun/firstmate-home \
+  bin/fm-crosscheck-slack.sh preflight --keychain-only
+```
 
-## Metering ledger (the C3 hook)
+Install the macOS launch agent without starting an uncredentialed listener:
 
-`<state_dir>/meter/<YYYY-MM-DD>.json` records every request: submitter, PR
-URL, event id, start/finish timestamps, outcome status, the lane that
-served it, token usage when the crosscheck output exposes it, and
-estimated USD when derivable, else null. Writes are atomic under an
-advisory lock. Honest limit, stated plainly: today's crosscheck ledger
-schema does not record token usage or cost, so `estimated_usd` stays null,
-recorded spend stays 0.0, and the USD bound cannot bind until the lane
-records cost; `daily_request_cap` is the binding control today. The
-per-request records are already durable, so C3 can attach a per-review
-price or a usage-derived cost without a schema change here. A request is
-metered against the UTC day it STARTED: the request id encodes the origin
-day and completion finalizes the origin day's file, so a review crossing
-midnight neither orphans its start record nor lands a misattributed
-completion in the next day's ledger.
+```sh
+FM_HOME=/Users/dongkeun/firstmate-home \
+  bin/fm-crosscheck-slack-service.sh install
+```
 
-Event dedupe markers live in `<state_dir>/events/`; a redelivered Slack
-event id never starts a second review. The rendered final reply is stored
-durably BEFORE it is posted and marked delivered after the post succeeds,
-so a redelivery of an event whose verdict was produced but never delivered
-re-posts the stored verdict instead of being silently dropped. Retention:
-a sweep at startup and daily removes event artifacts older than 14 days
-and meter day-files older than 90 days; fresh files are never touched.
+Operate it centrally:
 
-## Lane naming
+```sh
+FM_HOME=/Users/dongkeun/firstmate-home bin/fm-crosscheck-slack-service.sh start
+FM_HOME=/Users/dongkeun/firstmate-home bin/fm-crosscheck-slack-service.sh status
+FM_HOME=/Users/dongkeun/firstmate-home bin/fm-crosscheck-slack-service.sh restart
+FM_HOME=/Users/dongkeun/firstmate-home bin/fm-crosscheck-slack-service.sh stop
+```
 
-Every thread reply names the lane that produced the review, the same
-visibility R6 requires. The bot reads the `reviewer` object of the latest
-ledger run: an explicit `lane` marker (with its `degraded` flag) is passed
-through verbatim when present; when the run predates that marker, the lane
-is derived from the reviewer profile that ran: a GLM model names
-"GLM-5.2 primary" and a pi/codex profile names "pi-codex fallback
-(degraded)". Coupling note: the explicit marker is being added by the R6
-GLM roster work; once that lands, the derived path only serves ledgers
-written before it.
+The launch agent is `~/Library/LaunchAgents/com.firstmate.crosscheck-slack.plist`.
+Logs are `$FM_HOME/logs/crosscheck-slack.log` and `$FM_HOME/logs/crosscheck-slack.error.log`.
+The launch agent contains no credential values.
+The launch agent persists the resolved absolute Python interpreter, executable PATH, HOME, and service configuration.
+Install and start execute selftest and credential preflight with exactly the emitted environment and require Keychain access, ignoring inherited token variables.
+Installation refuses before replacing an existing plist if validation fails.
+The listener also requires Keychain credentials on every launch, including launchd restarts.
+Reinstall the launch agent after moving the interpreter or changing tool locations.
 
-## Prompt-injection posture
+## Activation and live acceptance
 
-Slack text and PR content are data, never instructions. The only value the
-bot extracts from a mention is one pull-request URL, validated against the
-allowlist before any credentialed tool sees it; v1 accepts pull-request
-links only, one per request. Nothing from Slack or from the PR is executed;
-replies render findings as escaped plain text. The crosscheck subprocess
-runs with a scrubbed environment that carries the GitHub read credential
-and the FM_* configuration and never the Slack tokens. Task metadata is
-staged as `harness=slack-team`, `model=human-authored`; that staging is
-sound only under the authorship assertion and branch screen above.
-Replies are posted with Slack `mrkdwn` disabled, so hostile finding text
-cannot render fake emphasis, code spans, or links.
+Before activation, supply the coordinator inputs in [Central configuration](#central-configuration) and satisfy [Credentials and app permissions](#credentials-and-app-permissions).
+Install the central configuration before spawning an agent whose PR must be reviewable, because provenance begins at agent launch and cannot be reconstructed later.
+The launchd credential checks and lifecycle are owned by [Install, restart, and inspect](#install-restart-and-inspect).
 
-## Tests
-
-`tests/fm-crosscheck-slack.test.sh` (hermetic) drives the real
-event-handling core with parsed events and a fixture crosscheck binary:
-link extraction, allowlist refusal text, durable dedupe, meter
-accumulation and the bound-reached reply, lane naming passthrough, the
-missing-token startup refusal, and a whole-artifact grep proving no token
-value reaches any log or ledger. Live Slack is never contacted; live
-acceptance (an engineer other than the owner, per R10) waits on the three
-owner inputs.
+The live acceptance request must come from an internal engineer other than Dongkeun in an approved channel.
+Record the request thread, exact admitted and returned SHA, provenance task, reviewer lane, Slack task ID, durable artifact, meter row, dedupe result, and service status in the R10 evidence directory.
+Never copy credential values into that evidence.

@@ -3,6 +3,9 @@
 # state/<id>.meta when available, then arms the watcher's merge poll by writing
 # state/<id>.check.sh, which prints one line when the PR is merged or its lookup
 # fails (the watcher's check contract: output = wake, silence = keep sleeping).
+# With central Slack config installed, then binds the live PR head to the signed
+# launch record created before the task agent started. Issuance failure exits
+# nonzero after poll setup.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -99,4 +102,12 @@ chmod +x "$CHECK_TMP"
 mv "$CHECK_TMP" "$STATE/$ID.check.sh"
 fm_account_meta_lock_release "$META_LOCK"
 trap - EXIT
+SLACK_CONFIG=${FM_CROSSCHECK_SLACK_CONFIG:-$FM_HOME/config/crosscheck-slack.json}
+if [ -f "$SLACK_CONFIG" ]; then
+  "$FM_ROOT/bin/fm-crosscheck-slack.sh" attest-task \
+    "$ID" "$URL" "$PR_HEAD" --config "$SLACK_CONFIG" || {
+      echo "error: could not issue exact-head Crosscheck authorship provenance for $ID" >&2
+      exit 1
+    }
+fi
 echo "armed: state/$ID.check.sh polls $URL"

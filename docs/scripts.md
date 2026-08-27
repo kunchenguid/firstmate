@@ -103,8 +103,9 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-github-pr.py`        | Adapt observed gh-axi TOON PR reads through a fail-closed read-only CLI               |
 | `fm-crosscheck.sh`       | Run, verify, time, or atomically merge through the durable exact-head PR finding ledger |
 | `fm-crosscheck.py`       | Validate and execute crosscheck reviewer evidence and finding lifecycle transitions  |
-| `fm-crosscheck-slack.sh` | Launch or selftest the Slack Socket Mode crosscheck exposure (docs/crosscheck-slack.md) |
-| `fm-crosscheck-slack.py` | Listen for Slack mentions and run allowlisted, metered, lane-named crosscheck reviews |
+| `fm-crosscheck-slack.sh` | Run, preflight, selftest, or issue exact-head provenance for the Slack Crosscheck lane |
+| `fm-crosscheck-slack.py` | Serve allowlisted, metered, exact-head Slack reviews through the shared core lanes |
+| `fm-crosscheck-slack-service.sh` | Install and operate the credential-free macOS launchd wrapper for the central listener |
 | `fm-pr-check.sh`         | Record `pr=` and `pr_head=` for a PR-ready task, then arm the watcher's merge poll   |
 | `fm-pr-merge.sh`         | Require exact-head crosscheck, record PR metadata, and atomically merge or enqueue the reviewed SHA |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |

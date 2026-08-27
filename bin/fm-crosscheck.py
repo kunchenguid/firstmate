@@ -1577,7 +1577,7 @@ def parse_meta(path: Path) -> dict[str, str] | None:
         if not line or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        if key in {"harness", "model"}:
+        if key in {"harness", "model", "author_account_identity"}:
             require(
                 key not in result,
                 f"task metadata at {path} duplicates {key} at line {line_number}",
@@ -7149,12 +7149,15 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
                             snapshot_value=snapshot_value,
                             ledger=ledger,
                             config=config,
-                            # Task metadata carries no upstream authorship
-                            # account record; reviewer independence stays
-                            # structural (the dedicated Crosscheck account
-                            # pool) and the adapter's same-account refusal
-                            # arms once an authorship identity exists.
-                            author_account_identity="",
+                            # Direct tasks may not carry an upstream author
+                            # account identity. Signed Slack provenance does,
+                            # when Firstmate captured one, which arms the
+                            # Azure adapter's same-account refusal.
+                            author_account_identity=(
+                                meta.get("author_account_identity", "")
+                                if meta is not None
+                                else ""
+                            ),
                             # The compartment lane owns create/stage/boot/
                             # collect; it measures them into this same timer
                             # so one run record carries the whole clock.
