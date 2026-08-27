@@ -725,15 +725,17 @@ pause_state_class() {  # <window> <task>
     crew_absorb_class "$task"
     return
   fi
-  # Read once past the declared-wait gate and reused by both liveness gates below,
-  # so a mate's stale poll costs one metadata scan rather than one per gate, and the
-  # far more common no-declaration path above still costs none.
-  kind=$(window_kind "$win")
+  # Resolved lazily and memoized, so a declared paused: wait - which returns from
+  # either gate below before any liveness read - costs no metadata scan at all,
+  # while a captain-held pane that reaches both gates still scans exactly once.
+  # The far more common no-declaration path above already returned.
+  kind=
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     if status_is_paused "$last"; then
       printf 'paused'
       return
     fi
+    [ -n "$kind" ] || kind=$(window_kind "$win")
     if [ "$kind" != secondmate ]; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
@@ -756,6 +758,7 @@ pause_state_class() {  # <window> <task>
     printf 'paused'
     return
   fi
+  [ -n "$kind" ] || kind=$(window_kind "$win")
   if [ "$kind" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
     if [ "$agent_alive" != dead ]; then

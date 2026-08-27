@@ -1125,7 +1125,16 @@ test_declared_waits_use_bounded_cadence_until_released() {
       FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
     pid=$!
-    if wait_poll_cycle "$state" "$pid"; then reap "$pid"; else wait "$pid" 2>/dev/null || true; fi
+    # A watcher still alive when the cycle budget runs out must be reaped, not
+    # waited on: bare `wait` there would hang this suite instead of failing it.
+    if wait_poll_cycle "$state" "$pid"; then
+      reap "$pid"
+    elif kill -0 "$pid" 2>/dev/null; then
+      reap "$pid"
+      fail "live declared-wait recheck round $round timed out before completing a poll cycle"
+    else
+      wait "$pid" 2>/dev/null || true
+    fi
     grep -F "awaiting external" "$state/.wake-queue" >/dev/null 2>&1 && break
     # A watcher that stood down to re-announce its own recovery never reached the
     # stale scan, so acknowledge that cycle and let the next round poll for real.
