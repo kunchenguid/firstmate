@@ -62,9 +62,10 @@
 #                          tool process.
 #   stale: <window> (endpoint gone: ...)
 #                          the recorded window is absent from a successful backend
-#                          inventory, so the worker's process is gone. Surfaced once
-#                          per window on its own evidence, before and independently
-#                          of any declared wait, and re-armed if the endpoint returns
+#                          inventory on two consecutive polls, so the worker's process
+#                          is gone rather than mid-teardown. Surfaced once per window
+#                          on its own evidence, before and independently of any
+#                          declared wait, and re-armed if the endpoint returns
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
 #                          budget on an idle pane without an acknowledgement
@@ -327,12 +328,11 @@ window_label() {
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .paused-*, .writing-*, .endpoint-gone-), and live homes
-# hold those markers on
-# disk under the current format, so the format lives here alone: a second copy is
-# how a future change to it silently orphans a window's markers instead of clearing
-# them. The helpers below take the derived key rather than re-deriving it, so one
-# poll of one window derives it once.
+# .wedge-escalations-, .paused-*, .writing-*, .endpoint-gone-*), and live homes hold
+# those markers on disk under the current format, so the format lives here alone: a
+# second copy is how a future change to it silently orphans a window's markers
+# instead of clearing them. The helpers below take the derived key rather than
+# re-deriving it, so one poll of one window derives it once.
 window_key() {  # <window>
   local key=${1//:/_}
   key=${key//\//_}
@@ -559,6 +559,16 @@ clear_write_tracking() {  # <window-key>
   rm -f "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key"
 }
 
+# How far past a scheduled next poll a pending confirmation still counts as the
+# IMMEDIATELY preceding poll of this window. The pending record is evidence about
+# one specific poll pair, so it has to expire: nothing clears it for a window that
+# stops being polled at all, which is exactly what teardown does, and a record left
+# behind by a torn-down task would otherwise let a single missing verdict alarm
+# instantly the next time that window name is recorded. Ten intervals is far past a
+# next poll even behind a large fleet's captures, and far short of the gap any
+# respawn leaves, so an expired record simply starts a fresh pair.
+ENDPOINT_GONE_CONFIRM_POLLS=10
+
 # A recorded endpoint whose pane cannot be captured is either GONE or transiently
 # unreadable, and only the backend can tell those apart. Only a `missing` verdict -
 # the window is absent from a SUCCESSFUL backend inventory - is proof the worker's
@@ -572,17 +582,41 @@ clear_write_tracking() {  # <window-key>
 # by its own last words. One marker per window keeps it one wake rather than a flood,
 # and the marker is dropped as soon as the endpoint reads back, so a recovered or
 # relaunched worker re-arms it.
+#
+# The verdict must repeat on TWO CONSECUTIVE polls before it wakes anyone, because a
+# single `missing` poll is also the normal shape of an ordinary teardown:
+# bin/fm-teardown.sh closes the runtime endpoint before it removes the task metadata,
+# and the watcher enumerates windows from that metadata without taking the metadata
+# lock, so a poll landing in that gap sees a window that is genuinely absent and
+# genuinely still recorded. Confirming across a poll interval costs a lost endpoint one FM_POLL of
+# detection latency - irrelevant against a worker that is not coming back - and costs
+# a completing task the false "inspect and recover" wake entirely, since its metadata
+# is gone well before the next poll. Only an unbroken run counts: any other verdict,
+# including the transient `unreadable` a backend hiccup produces, drops the pending
+# confirmation so two hiccups a minute apart can never add up to an alarm.
 endpoint_gone_check() {  # <window>
-  local win=$1 key marker reason
+  local win=$1 key marker pending reason now since
   key=$(window_key "$win")
   marker="$STATE/.endpoint-gone-$key"
+  pending="$STATE/.endpoint-gone-pending-$key"
   [ ! -e "$marker" ] || return 0
-  [ "$(fm_backend_agent_state "$(window_backend "$win")" "$win" 2>/dev/null)" = missing ] || return 0
-  reason="stale: $win (endpoint gone: the recorded window is absent from its backend, so the worker's process is no longer running - a declared wait does not cover this; inspect and recover or clean up)"
+  if [ "$(fm_backend_agent_state "$(window_backend "$win")" "$win" 2>/dev/null)" != missing ]; then
+    rm -f "$pending"
+    return 0
+  fi
+  now=$(date +%s)
+  since=$(cat "$pending" 2>/dev/null || true)
+  case "$since" in ''|*[!0-9]*) since= ;; esac
+  if [ -z "$since" ] || [ "$(( now - since ))" -gt "$(( POLL * ENDPOINT_GONE_CONFIRM_POLLS ))" ]; then
+    printf '%s' "$now" > "$pending"
+    return 0
+  fi
+  reason="stale: $win (endpoint gone: the recorded window is absent from its backend on two consecutive polls, so the worker's process is no longer running - a declared wait does not cover this; inspect and recover or clean up)"
   # Enqueue before suppressing, as everywhere else in this file: a failed append
   # must leave the alarm re-armed rather than silently spent.
   fm_wake_append stale "$win" "$reason" || exit 1
   : > "$marker"
+  rm -f "$pending"
   wake "$reason"
 }
 
@@ -1529,7 +1563,9 @@ EOF
       endpoint_gone_check "$w"
       continue
     fi
-    rm -f "$STATE/.endpoint-gone-$key"
+    # The endpoint reads back, which both re-arms the alarm for a relaunched worker
+    # and breaks any run of `missing` polls short of the two the alarm requires.
+    rm -f "$STATE/.endpoint-gone-$key" "$STATE/.endpoint-gone-pending-$key"
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"

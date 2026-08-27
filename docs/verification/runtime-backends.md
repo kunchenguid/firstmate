@@ -196,7 +196,7 @@ capture rc=1
 ```
 
 A pane capture against an absent target fails rather than returning empty output, which is what lets the watcher separate a lost endpoint from a quiet one.
-The portable regression models that failure through the wake fixtures' opt-in missing-window mode rather than changing every fixture's capture semantics.
+The portable regression models that failure through the wake fixtures' opt-in missing-window flag file rather than changing every fixture's capture semantics, and the flag file is what lets a fixture take an endpoint away and give it back mid-run.
 
 ## Composer classification matrix
 
