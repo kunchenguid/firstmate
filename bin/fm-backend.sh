@@ -383,6 +383,32 @@ fm_backend_endpoint_atom_valid() {  # <value>
   esac
 }
 
+# fm_backend_orca_worktree_id_valid: validate an Orca worktree id without
+# loosening the shared atom validator that terminal and the other backends'
+# fields still depend on. An Orca worktree id is the composite
+# <atom-id>::<absolute-worktree-path> that `orca worktree` emits and consumes
+# verbatim (bin/backends/orca.sh passes it straight to `orca --worktree
+# "id:<value>"`), so the path suffix carries legitimate ':' and '/' the atom
+# validator forbids. Split on the first '::' and validate the id part as an
+# atom and the path part as an absolute path free of control or shell-hazard
+# characters. A bare atom id (no '::' suffix) stays valid so older
+# single-token records keep passing.
+fm_backend_orca_worktree_id_valid() {  # <value>
+  local value=$1 id_part path_part
+  fm_backend_endpoint_atom_valid "$value" && return 0
+  case "$value" in *"::"*) ;; *) return 1 ;; esac
+  id_part=${value%%::*}
+  path_part=${value#*::}
+  fm_backend_endpoint_atom_valid "$id_part" || return 1
+  case "$path_part" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$path_part" in
+    *[!A-Za-z0-9._@%+/\ -]*) return 1 ;;
+  esac
+}
+
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface
@@ -503,7 +529,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       }
       if [ "$window" != "fm-$id" ] \
         || ! fm_backend_endpoint_atom_valid "$terminal" \
-        || ! fm_backend_endpoint_atom_valid "$worktree_id"; then
+        || ! fm_backend_orca_worktree_id_valid "$worktree_id"; then
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi

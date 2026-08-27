@@ -227,6 +227,54 @@ test_supported_backend_endpoint_records_validate() {
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid Orca endpoint refused"
   [ "$FM_BACKEND_VALIDATED_TARGET" = term-7 ] || fail "Orca validation did not select its terminal"
 
+  # Real Orca worktree ids are the composite <uuid>::<absolute-path> that
+  # `orca worktree` emits and consumes verbatim; the path suffix carries ':'
+  # and '/' the shared atom validator forbids, so a healthy landed task must
+  # still validate for teardown to proceed.
+  id=orca-composite-task
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=52e16ca3-3aa2-4dc0-91a1-fd4933bcc6c8::/Users/tainguyen/orca/workspaces/distro/fm-setup-overview-map"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" \
+    || fail "valid composite Orca worktree id refused"
+  [ "$FM_BACKEND_VALIDATED_TARGET" = term-7 ] || fail "Orca composite validation did not select its terminal"
+
+  # A genuinely malformed worktree id (relative path suffix) is still rejected.
+  id=orca-malformed-task
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=52e16ca3::relative/path"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" 2>/dev/null \
+    && fail "malformed Orca worktree id accepted"
+
+  # An injection-shaped worktree id (shell metacharacters in the path) is rejected.
+  id=orca-hazard-task
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=52e16ca3::/tmp/x;rm -rf /"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" 2>/dev/null \
+    && fail "shell-hazard Orca worktree id accepted"
+
+  # A missing orca_worktree_id still refuses (guard preserved).
+  id=orca-missing-wt-task
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" 2>/dev/null \
+    && fail "Orca record with no worktree id accepted"
+
+  # A missing terminal still refuses (guard preserved).
+  id=orca-missing-terminal-task
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=52e16ca3-3aa2-4dc0-91a1-fd4933bcc6c8::/Users/tainguyen/orca/workspaces/distro/fm-setup-overview-map"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" 2>/dev/null \
+    && fail "Orca record with no terminal accepted"
+
   id=cmux-task
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=workspace-1:surface-2" "endpoint_task_id=$id" "worktree=$dir/worktree" "project=$dir/project" \
