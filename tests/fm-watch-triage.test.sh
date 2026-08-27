@@ -441,6 +441,324 @@ test_crew_worktree_written_since_classifier() {
   pass "crew_worktree_written_since: real writes are evidence; no worktree, no anchor, quiet trees, .git churn and a mate's own home are not"
 }
 
+# --- the fourth liveness input: the validation's own activity clock ----------
+# During a no-mistakes fix round the pipeline takes custody of the branch and
+# works in its own gate clone. The crew blocks in one long foreground call, so its
+# pane renders nothing, and the fixes are not written to the crew's worktree, so
+# the write probe finds nothing either - the two liveness inputs that exist go
+# quiet together, for the same single reason, and a crew that is demonstrably
+# progressing looks exactly like a wedged one. Observed 2026-08-23 on
+# hm-reconciler-local-r1: "stale: idle 382s, possible wedge" raised against a crew
+# sitting in a legitimate nine-minute foreground validation run.
+
+# A fake `no-mistakes` serving one canned `axi status` answer from the
+# environment, matching the real command surface crew_run_active_within uses.
+make_fake_no_mistakes() {  # <fakebin-dir>
+  cat > "$1/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  axi) shift; case "${1:-}" in status) printf '%s\n' "${FM_FAKE_AXI_STATUS:-}" ;; esac ;;
+esac
+exit 0
+SH
+  chmod +x "$1/no-mistakes"
+}
+
+# A run object as `axi status` emits it. $1 branch, $2 status, $3 head,
+# $4 the active_steps last_activity cell (empty for a run reporting none).
+fake_run_toon() {  # <branch> <status> <head> <last-activity>
+  printf 'run:\n  id: "01RUN"\n  branch: %s\n  status: %s\n  head: "%s"\n' "$1" "$2" "$3"
+  [ "$2" = completed ] && printf 'outcome: failed\n'
+  printf '  steps[2]{step,status,findings,duration_ms}:\n    intent,completed,0,2\n    review,fixing,5,7972019\n'
+  printf '  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:\n'
+  printf '    review,fixing,2h31m,"%s","1787243",fix 6\n' "$4"
+}
+
+make_probe_repo() {  # <dir> <branch>
+  mkdir -p "$1"
+  git -C "$1" init -q
+  git -C "$1" commit -q --allow-empty -m init
+  git -C "$1" checkout -q -b "$2"
+}
+
+test_crew_run_active_within_classifier() {
+  local dir state fakebin wt other
+  dir=$(make_case classify-run-activity); state="$dir/state"; fakebin="$dir/fakebin"
+  wt="$dir/wt"; other="$dir/other"
+  make_fake_no_mistakes "$fakebin"
+  make_probe_repo "$wt" fm/probe
+  export FM_FAKE_AXI_STATUS=""
+
+  probe() { PATH="$fakebin:$PATH" crew_run_active_within "$@"; }
+
+  # No recorded worktree at all: absence of evidence, never a positive.
+  printf 'window=test:fm-nw\nkind=ship\n' > "$state/nw.meta"
+  ! probe nw "$state" 300 || fail "a task with no recorded worktree reported run activity"
+  # Recorded but torn down.
+  printf 'window=test:fm-gone\nkind=ship\nworktree=%s\n' "$dir/missing" > "$state/gone.meta"
+  ! probe gone "$state" 300 || fail "a torn-down worktree reported run activity"
+
+  printf 'window=test:fm-p\nkind=ship\nworktree=%s\n' "$wt" > "$state/p.meta"
+  # The reproduced case: an active run whose head the pipeline holds (not an
+  # object here at all), reporting activity well inside the idle window.
+  FM_FAKE_AXI_STATUS=$(fake_run_toon fm/probe running ffffff00 "32s ago: log: still working")
+  probe p "$state" 300 \
+    || fail "a custody-held run reporting activity 32s ago was not accepted as progress"
+  # A run that has FROZEN keeps its active step forever, so only a recent
+  # activity age counts - catching that is the whole purpose of the wedge timer.
+  FM_FAKE_AXI_STATUS=$(fake_run_toon fm/probe running ffffff00 "9m50s ago: log: started")
+  ! probe p "$state" 300 \
+    || fail "a run whose last activity predates the idle window was treated as progress"
+  # active_for alone is how long the step has been OPEN - the opposite of evidence.
+  FM_FAKE_AXI_STATUS=$(fake_run_toon fm/probe running ffffff00 "")
+  ! probe p "$state" 300 || fail "a run reporting no activity at all was treated as progress"
+  # Another crew's run must never defer this crew's escalation.
+  FM_FAKE_AXI_STATUS=$(fake_run_toon fm/other-crew running ffffff00 "32s ago: log: still working")
+  ! probe p "$state" 300 || fail "another branch's run was treated as this crew's progress"
+  # A concluded run is not progress however recently it last spoke.
+  FM_FAKE_AXI_STATUS=$(fake_run_toon fm/probe completed ffffff00 "32s ago: log: done")
+  ! probe p "$state" 300 || fail "a concluded run was treated as progress"
+  # Attribution still applies: a resolvable but unrelated tip is not our run.
+  git -C "$wt" checkout -q --orphan probe-orphan
+  git -C "$wt" commit -q --allow-empty -m unrelated
+  local unrelated; unrelated=$(git -C "$wt" rev-parse --short=8 HEAD)
+  git -C "$wt" checkout -q fm/probe
+  FM_FAKE_AXI_STATUS=$(fake_run_toon fm/probe running "$unrelated" "32s ago: log: still working")
+  ! probe p "$state" 300 || fail "a run on an unrelated tip was treated as this crew's progress"
+  # A secondmate records a provisioned home, not a validating code tree.
+  make_probe_repo "$other" fm/probe
+  printf 'window=test:fm-sm\nkind=secondmate\nworktree=%s\n' "$other" > "$state/sm.meta"
+  FM_FAKE_AXI_STATUS=$(fake_run_toon fm/probe running ffffff00 "32s ago: log: still working")
+  ! probe sm "$state" 300 || fail "a secondmate reported crew run activity"
+  # A malformed window is not a comparison anyone can make.
+  ! probe p "$state" "" || fail "an empty window reported run activity"
+
+  unset FM_FAKE_AXI_STATUS
+  pass "crew_run_active_within: a custody-held run's own recent activity is progress; a frozen, foreign, concluded or silent run is not"
+}
+
+# The duration and activity parsers behind that verdict, pinned directly: the
+# smallest active-step age wins, and anything that is not a duration reads as no
+# evidence rather than as zero seconds.
+test_run_activity_parsers() {
+  [ "$(fm_nm_duration_secs 32s)" = 32 ] || fail "32s did not parse as 32 seconds"
+  [ "$(fm_nm_duration_secs 2m39s)" = 159 ] || fail "2m39s did not parse as 159 seconds"
+  [ "$(fm_nm_duration_secs 1h51m)" = 6660 ] || fail "1h51m did not parse as 6660 seconds"
+  [ -z "$(fm_nm_duration_secs 12)" ] || fail "a bare number parsed as a duration"
+  [ -z "$(fm_nm_duration_secs '')" ] || fail "an empty token parsed as a duration"
+  [ -z "$(fm_nm_duration_secs 'fix 6')" ] || fail "a non-duration parsed as a duration"
+  # Zero-padded components are ordinary in these tokens, and bash reads a
+  # zero-prefixed literal as OCTAL: `2m09s` and `08s` aborted the whole expansion
+  # with a diagnostic on stderr and returned nothing, which reads to the caller as
+  # "no usable age" - so the false wedge escalation this clock exists to suppress
+  # fired anyway. `1h05m` parsed, and was right only by the coincidence that octal
+  # and decimal agree below 8.
+  local err
+  [ "$(fm_nm_duration_secs 2m09s)" = 129 ] || fail "2m09s did not parse as 129 seconds"
+  [ "$(fm_nm_duration_secs 08s)" = 8 ] || fail "08s did not parse as 8 seconds"
+  [ "$(fm_nm_duration_secs 1h05m)" = 3900 ] || fail "1h05m did not parse as 3900 seconds"
+  err=$(fm_nm_duration_secs 2m09s 2>&1 >/dev/null)
+  [ -z "$err" ] || fail "a zero-padded duration wrote a diagnostic to stderr: $err"
+  err=$(fm_nm_duration_secs 08s 2>&1 >/dev/null)
+  [ -z "$err" ] || fail "a zero-padded seconds token wrote a diagnostic to stderr: $err"
+  # A component no real duration could carry is refused rather than wrapped around
+  # the arithmetic range, because a wrapped negative age reads as activity from the
+  # future and would suppress a genuine wedge.
+  [ -z "$(fm_nm_duration_secs 99999999999999999999s)" ] \
+    || fail "an out-of-range component was turned into a duration"
+  local two
+  two=$(printf 'run:\n  active_steps[2]{step,status,active_for,last_activity,agent_pid,round}:\n    review,fixing,2h31m,"5m10s ago: log: a","1","fix 6"\n    test,running,44m,"41s ago: log: b","2","fix 1"\n')
+  [ "$(fm_nm_last_activity_secs "$two")" = 41 ] || fail "the most recent of several active steps did not win"
+  [ -z "$(fm_nm_last_activity_secs 'run:
+  status: running
+  active_for: 2h31m')" ] || fail "active_for outside the active_steps table was read as activity"
+  # A scalar AFTER the table is not one of its rows. Because the smallest age wins,
+  # one stray ` ago` token following the table would prove recent liveness for a run
+  # that had said nothing for forty minutes, suppressing a genuine escalation.
+  local trailing
+  trailing=$(printf 'run:\n  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:\n    review,fixing,50m,"40m2s ago: log: applying the fix","1827880",fix 1\nupdated: 3s ago\n')
+  [ "$(fm_nm_last_activity_secs "$trailing")" = 2402 ] \
+    || fail "a scalar after the active_steps table was read as step activity"
+  # last_activity is a truncated, frozen agent log line: a later " ago"-shaped
+  # substring in its own free text (here a retry message quoting "3s ago") must
+  # never win over the row's own leading age, because that text never changes
+  # and a smaller bogus reading would permanently suppress a genuine wedge.
+  local in_row_free_text
+  in_row_free_text=$(printf 'run:\n  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:\n    review,fixing,50m,"40m2s ago: log: gave up after 3s ago retrying","1827880",fix 1\n')
+  [ "$(fm_nm_last_activity_secs "$in_row_free_text")" = 2402 ] \
+    || fail "a smaller ago token in a row's own free text won over the row's own leading age"
+  pass "run-activity parsers: durations, the newest active step, and no-evidence cases"
+}
+
+# The run-activity probe's own wall-clock bound. It runs synchronously in the
+# watcher's poll loop at the exact moment an escalation would otherwise fire, so
+# an unresponsive CLI must cost the escalation the bound and nothing more: an
+# unbounded call stops the watcher updating its beacon and triaging every other
+# window, which is the wedge-the-supervisor failure the bound exists to prevent.
+# A zero or non-numeric FM_RUN_ACTIVITY_TIMEOUT is not a bound at all - `timeout 0`
+# and the perl fallback's `alarm 0` both cancel the deadline - so both must fall
+# back to a usable bound rather than be passed through.
+test_run_activity_probe_is_wall_clock_bounded() {
+  local dir state fakebin slowbin wt started elapsed zero_rc word_rc zero_pid word_pid
+  dir=$(make_case classify-run-probe-bound); state="$dir/state"
+  fakebin="$dir/fakebin"; slowbin="$dir/slowbin"; wt="$dir/wt"
+  mkdir -p "$slowbin"
+  make_fake_no_mistakes "$fakebin"
+  make_probe_repo "$wt" fm/bound
+  printf 'window=test:fm-bound\nkind=ship\nworktree=%s\n' "$wt" > "$state/bound.meta"
+  export FM_FAKE_AXI_STATUS
+  FM_FAKE_AXI_STATUS=$(fake_run_toon fm/bound running ffffff00 "32s ago: log: still working")
+
+  # The same answer, from a CLI that takes far longer than any bound to give it,
+  # so a probe that returns without it is a probe that was actually bounded.
+  cat > "$slowbin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+sleep 30
+case "${1:-}" in
+  axi) shift; case "${1:-}" in status) printf '%s\n' "${FM_FAKE_AXI_STATUS:-}" ;; esac ;;
+esac
+exit 0
+SH
+  chmod +x "$slowbin/no-mistakes"
+
+  # A prompt CLI first, so the bounded assertions below cannot pass merely because
+  # this fixture never reports progress under any circumstances.
+  PATH="$fakebin:$PATH" \
+    bash -c '. "$1"; crew_run_active_within bound "$2" 300' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$state" \
+    || fail "a run answering inside its bound was not read as progress"
+  PATH="$slowbin:$PATH" FM_RUN_ACTIVITY_TIMEOUT=1 \
+    bash -c '. "$1"; crew_run_active_within bound "$2" 300' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$state" \
+    && fail "a run-status call that outlived its bound was reported as progress"
+
+  # The two values that are not bounds. Run concurrently so proving both costs one
+  # fallback bound rather than two.
+  started=$(date +%s)
+  PATH="$slowbin:$PATH" FM_RUN_ACTIVITY_TIMEOUT=0 \
+    bash -c '. "$1"; crew_run_active_within bound "$2" 300' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$state" &
+  zero_pid=$!
+  PATH="$slowbin:$PATH" FM_RUN_ACTIVITY_TIMEOUT=10m \
+    bash -c '. "$1"; crew_run_active_within bound "$2" 300' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$state" &
+  word_pid=$!
+  zero_rc=0; wait "$zero_pid" || zero_rc=$?
+  word_rc=0; wait "$word_pid" || word_rc=$?
+  elapsed=$(( $(date +%s) - started ))
+  [ "$zero_rc" -ne 0 ] \
+    || fail "a zero FM_RUN_ACTIVITY_TIMEOUT let an unanswered call report progress"
+  [ "$word_rc" -ne 0 ] \
+    || fail "a non-numeric FM_RUN_ACTIVITY_TIMEOUT let an unanswered call report progress"
+  [ "$elapsed" -lt 25 ] \
+    || fail "an unusable FM_RUN_ACTIVITY_TIMEOUT was passed through: the probe held its caller for ${elapsed}s"
+  unset FM_FAKE_AXI_STATUS
+  pass "the run-activity probe is wall-clock bounded, and a zero or non-numeric bound falls back instead of disabling the deadline"
+}
+
+# End to end: the same crew the wedge timer would have escalated is SUPPRESSED
+# outright - no wake of any kind - because its own validation reported progress
+# inside the idle window. The regression this pins is seven consecutive false
+# "possible wedge" escalations in one night against crews sitting in legitimate
+# long pipeline calls, and a deferral that still re-surfaced on a cadence would
+# not have fixed it: across a busy fleet that is still a stream of wakes.
+test_nonterminal_stale_run_active_suppressed_not_wedged() {
+  local dir state fakebin out capture_file window key pane_hash sig pid wt
+  dir=$(make_case nonterminal-stale-run-active); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; wt="$dir/wt"
+  window="test:fm-validating"
+  make_fake_no_mistakes "$fakebin"
+  make_probe_repo "$wt" fm/validating
+  printf 'idle foreground validation' > "$capture_file"
+  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/validating.meta"
+  printf 'working: running the validation\n' > "$state/validating.status"
+  sig=$(seen_sig "$state/validating.status"); printf '%s' "$sig" > "$state/.seen-validating_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle foreground validation")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing)'
+  # The pipeline holds the branch, so its head is not an object in this worktree -
+  # and it spoke 32 seconds ago, well inside the idle window.
+  export FM_FAKE_AXI_STATUS
+  FM_FAKE_AXI_STATUS=$(fake_run_toon fm/validating running ffffff00 "32s ago: log: applying the fix")
+
+  # Absorbed on first sight, with the escalation timer already past the threshold.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  # A write-deferral chain left over from an EARLIER quiet stretch, long past the
+  # re-surface cadence. Suppression is a bookkeeping reset like every other one, so
+  # it must drop the chain: carrying it forward would make the next write deferral
+  # measure its age from an abandoned timestamp, waking once immediately and
+  # reporting a writing-for-Ns duration spanning a stretch with no writes in it.
+  echo $(( $(date +%s) - 100000 )) > "$state/.writing-since-$key"
+  echo $(( $(date +%s) - 100000 )) > "$state/.writing-resurfaced-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited instead of suppressing a crew whose validation is reporting progress: $(cat "$out")"
+  fi
+  [ ! -e "$state/.writing-since-$key" ] \
+    || { reap "$pid"; fail "suppression kept a stale write-deferral chain, so the next deferral would resurface from an abandoned timestamp"; }
+  [ ! -e "$state/.writing-resurfaced-$key" ] \
+    || { reap "$pid"; fail "suppression kept a stale write re-surface throttle"; }
+  grep -F "possible wedge" "$out" >/dev/null && { reap "$pid"; fail "a validation reporting progress 32s ago was still called a possible wedge"; }
+  # Suppression, not a longer cadence: no wake reason, and nothing queued.
+  [ ! -s "$out" ] || { reap "$pid"; fail "a suppressed run-active stale printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a suppressed run-active stale enqueued a wake"; }
+  # The idle window restarts from the proof of progress, so the untouched wedge
+  # timer takes over the moment the run stops proving it.
+  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "the idle timer was not restarted from the proof of progress"; }
+  [ "$(cat "$state/.stale-since-$key")" -gt "$(( $(date +%s) - 60 ))" ] \
+    || { reap "$pid"; fail "the idle timer kept its old backdated value instead of restarting"; }
+  # The escalation counter is untouched, so a later genuine escalation keeps any
+  # demand-deep-inspection history it had already earned.
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "suppression advanced the escalation counter"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional watcher stop"
+  unset FM_FAKE_CREW_STATE FM_FAKE_AXI_STATUS
+  pass "a stale pane whose own validation reported progress is suppressed outright, with no wake at all"
+}
+
+# Suppression must not become a hiding place: what earns it is the strength of
+# the evidence, not the existence of a run. A run that still holds an active step
+# but has stopped reporting progress escalates on the unchanged schedule.
+test_nonterminal_stale_frozen_run_still_escalates() {
+  local dir state fakebin out capture_file window key pane_hash sig pid wt
+  dir=$(make_case nonterminal-stale-run-frozen); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; wt="$dir/wt"
+  window="test:fm-frozen"
+  make_fake_no_mistakes "$fakebin"
+  make_probe_repo "$wt" fm/frozen
+  printf 'idle frozen validation' > "$capture_file"
+  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/frozen.meta"
+  printf 'working: running the validation\n' > "$state/frozen.status"
+  sig=$(seen_sig "$state/frozen.status"); printf '%s' "$sig" > "$state/.seen-frozen_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle frozen validation")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing)'
+  export FM_FAKE_AXI_STATUS
+  # The run still has an open active step, but has said nothing for 40 minutes.
+  FM_FAKE_AXI_STATUS=$(fake_run_toon fm/frozen running ffffff00 "40m2s ago: log: applying the fix")
+
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a frozen run did not escalate on the unchanged schedule"
+  grep -F "possible wedge" "$out" >/dev/null || fail "a frozen run's escalation did not flag a possible wedge"
+  unset FM_FAKE_CREW_STATE FM_FAKE_AXI_STATUS
+  pass "a validation that stopped reporting progress still wedge-escalates on the unchanged schedule"
+}
+
 # FM_WORKTREE_WRITE_PRUNE is a skip list, so clearing it skips nothing and is the
 # obvious way to widen the probe to the whole depth-bounded tree. An empty list must
 # therefore widen the walk rather than report no evidence at all, which would
@@ -2877,3 +3195,8 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
+test_crew_run_active_within_classifier
+test_run_activity_parsers
+test_run_activity_probe_is_wall_clock_bounded
+test_nonterminal_stale_run_active_suppressed_not_wedged
+test_nonterminal_stale_frozen_run_still_escalates

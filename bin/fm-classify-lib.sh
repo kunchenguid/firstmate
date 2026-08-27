@@ -24,8 +24,9 @@
 # cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
 # stays bounded by new appends instead of re-reading each task's whole lifetime
 # log every time. crew_worktree_written_since reads the task's meta file and walks
-# a bounded slice of its worktree instead of a status file, so callers run it only
-# at the moment they would otherwise escalate.
+# a bounded slice of its worktree instead of a status file, and
+# crew_run_active_within makes one bounded no-mistakes call, so callers run both
+# only at the moment they would otherwise escalate.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -47,6 +48,12 @@ case $- in *u*) _fm_classify_nounset=on ;; *) _fm_classify_nounset=off ;; esac
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$_FM_CLASSIFY_LIB_DIR/fm-timeout-lib.sh"
+# The run-attribution and run-activity primitives crew_run_active_within reads.
+# bin/fm-nm-run-lib.sh is the one owner of both, so this library never re-derives
+# which run belongs to a crew or how the pipeline reports its own progress.
+# shellcheck source=bin/fm-nm-run-lib.sh
+# shellcheck disable=SC1091
+. "$_FM_CLASSIFY_LIB_DIR/fm-nm-run-lib.sh"
 [ "$_fm_classify_nounset" = on ] || set +u
 unset _fm_classify_nounset
 
@@ -1396,6 +1403,75 @@ crew_worktree_written_since() {  # <id> <state> <anchor-file>
       -type f -newer "$anchor" -print -quit 2>/dev/null || true)
   fi
   [ -n "$hit" ]
+}
+
+# Wall-clock seconds the run-activity probe below allows its one bounded
+# `no-mistakes axi status` call. Like the write probe's walk, that call runs
+# synchronously in the caller's poll loop at the exact moment an escalation would
+# otherwise fire, so an unresponsive CLI must cost the escalation the bound and
+# nothing more. Validated at point of use exactly as the write probe validates
+# its own bound: bin/fm-timeout-lib.sh states that a non-positive bound is not a
+# bound at all (`timeout 0` and the perl fallback's `alarm 0` both cancel the
+# deadline), and a non-integer `timeout` still accepts - `10m` - would hold the
+# poll loop for ten minutes, so a hung CLI would stop the watcher updating its
+# beacon and triaging every other window. That is the wedge-the-supervisor
+# failure this bound exists to prevent, so an unusable value falls back to the
+# default rather than being passed through.
+FM_RUN_ACTIVITY_TIMEOUT=${FM_RUN_ACTIVITY_TIMEOUT:-10}
+
+# 0 when crew <id>'s OWN no-mistakes run reports that it did something within the
+# last <secs> seconds: the fourth liveness input the wedge detector has, after
+# pane quietness, the run step, and worktree writes.
+#
+# It exists because the other three all go quiet together during a no-mistakes fix
+# round, and for the same single reason: the pipeline takes custody of the branch
+# and works in its own gate clone. The crew's pane renders nothing because the
+# crew is blocked in one long foreground call, and its worktree receives no writes
+# because the fixes are not being written there - so a crew that is demonstrably
+# progressing looks exactly like a wedged one. Observed 2026-08-23 on
+# hm-reconciler-local-r1: `stale: idle 382s, possible wedge` raised against a crew
+# sitting in a legitimate nine-minute foreground run.
+#
+# The run's own active_steps activity clock is the signal that survives that,
+# because it is the pipeline reporting on itself rather than anything inferred
+# from a rendered surface. Mere presence of an active step is deliberately NOT
+# enough - a frozen run keeps one forever, and catching that is the whole purpose
+# of the wedge timer - so only a recent activity AGE counts as evidence.
+#
+# 1 for every other outcome, including no meta, no worktree, a non-ship task, a
+# detached HEAD, a run that is not ours, a concluded run, an unresponsive CLI, and
+# a run reporting no activity at all. Absence of evidence therefore always leaves
+# the caller's escalation schedule untouched, exactly as it does for the write
+# probe: a crew whose run says nothing still escalates on the unchanged schedule.
+#
+# Not a pure status-file read (see the header): one bounded no-mistakes call per
+# invocation, so callers must reach it only when they are otherwise about to
+# escalate, never on every poll.
+crew_run_active_within() {  # <id> <state> <secs>
+  local id=$1 state=$2 window=$3 wt kind branch out run_branch run_head status outcome age bound
+  [ -n "$id" ] || return 1
+  case "$window" in ''|*[!0-9]*) return 1 ;; esac
+  command -v no-mistakes >/dev/null 2>&1 || return 1
+  wt=$(grep '^worktree=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  kind=$(grep '^kind=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -z "$kind" ] || [ "$kind" = ship ] || return 1
+  branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+  [ -n "$branch" ] || return 1
+  bound=$FM_RUN_ACTIVITY_TIMEOUT
+  case "$bound" in ''|*[!0-9]*|0) bound=10 ;; esac
+  out=$(fm_nm_run "$wt" "$bound" axi status)
+  [ -n "$out" ] || return 1
+  run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
+  [ -n "$run_branch" ] && [ "$run_branch" = "$branch" ] || return 1
+  status=$(fm_nm_strip_quotes "$(fm_nm_field "$out" status)")
+  outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
+  fm_nm_status_is_terminal "$status" "$outcome" && return 1
+  run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head)")
+  fm_nm_run_attributable "$wt" "$run_head" active || return 1
+  age=$(fm_nm_last_activity_secs "$out")
+  [ -n "$age" ] || return 1
+  [ "$age" -lt "$window" ]
 }
 
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably

@@ -2183,6 +2183,65 @@ test_another_branchs_parked_run_is_never_touched() {
   pass "a parked run on another branch is never aborted by this task's teardown (ownership is precise)"
 }
 
+# --- the head rule teardown now runs on, both directions, one branch ---------
+# task_status_is_own_parked_run passes the `active` phase to the shared policy in
+# bin/fm-nm-run-lib.sh, so a parked run whose recorded head is not an object in
+# this worktree IS attributed. That is the point: while no-mistakes holds custody
+# of the branch it commits in its own gate clone, so the head of a run parked at a
+# gate is routinely absent here, and refusing it left the run parked forever and
+# leaked its fleet slot. It is also the unsafe direction, because a false positive
+# aborts a run this task does not own - so both cases below sit on the SAME branch,
+# where the branch check cannot be what decides them and only the head rule can.
+test_parked_run_at_custody_held_head_is_aborted() {
+  local case_dir rc
+  case_dir=$(make_case parked-run-custody-head)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  rc=0
+  # ffffff00 is well-formed and deliberately not an object in this worktree, the
+  # shape a live gate clone's head takes from out here.
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 ffffff00)" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-custody-head: teardown should still succeed"
+  assert_present "$case_dir/nm-abort.log" \
+    "parked-run-custody-head: a run parked on this branch under pipeline custody was left parked, leaking its fleet slot"
+  assert_grep "abort --run 01RUN" "$case_dir/nm-abort.log" \
+    "parked-run-custody-head: the abort did not target the verified run id"
+  assert_grep "parked at a gate; aborting" "$case_dir/stderr" \
+    "parked-run-custody-head: teardown did not report aborting the parked run"
+  pass "a run parked on this branch at a head held by the pipeline is concluded, not orphaned"
+}
+
+test_parked_run_at_unrelated_head_on_own_branch_is_never_aborted() {
+  local case_dir rc unrelated tree
+  case_dir=$(make_case parked-run-unrelated-head)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  # A parentless commit over this worktree's own tree: resolvable here, and
+  # neither an ancestor nor a descendant of HEAD - a rewritten or diverged tip,
+  # which is precisely what the head rule refuses. Built with commit-tree so the
+  # worktree, its branch, and its landed state are untouched.
+  tree=$(git -C "$case_dir/wt" rev-parse 'HEAD^{tree}')
+  unrelated=$(git -C "$case_dir/wt" -c user.email=t@t -c user.name=t \
+    commit-tree "$tree" -m 'unrelated history')
+  unrelated=$(git -C "$case_dir/wt" rev-parse --short=8 "$unrelated")
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$unrelated")" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-unrelated-head: teardown should still succeed"
+  assert_absent "$case_dir/nm-abort.log" \
+    "parked-run-unrelated-head: teardown aborted a run whose head is a diverged tip it does not own"
+  assert_not_contains "$(cat "$case_dir/stderr")" "aborting" \
+    "parked-run-unrelated-head: teardown reported aborting a run it does not own"
+  pass "a parked run on this branch at a resolvable but unrelated head is still refused (the widening kept its protection)"
+}
+
 test_own_autonomous_run_is_left_alone() {
   local case_dir rc head
   case_dir=$(make_case autonomous-run-left-alone)
@@ -2638,6 +2697,8 @@ test_mismatched_run_after_abort_refuses_unconfirmed
 test_empty_status_after_abort_refuses_unconfirmed
 test_not_found_status_after_abort_confirms_completion
 test_another_branchs_parked_run_is_never_touched
+test_parked_run_at_custody_held_head_is_aborted
+test_parked_run_at_unrelated_head_on_own_branch_is_never_aborted
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped

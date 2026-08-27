@@ -33,13 +33,16 @@
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
-#                          resume. Unless afk is active. A pane whose own task
-#                          worktree was written during the quiet window is
-#                          deferred rather than escalated (wedge_defer_writing),
-#                          because files appearing there are liveness the pane and
-#                          the run step cannot show; that deferral still
-#                          re-surfaces once per PAUSE_RESURFACE_SECS, and a pane
-#                          that writes nothing keeps the unchanged schedule.
+#                          resume. Unless afk is active. A pane whose own
+#                          validation reported progress during the quiet window
+#                          is SUPPRESSED outright with no wake at all
+#                          (wedge_suppress_run_active), because escalating a crew
+#                          the supervisor can prove is working is a
+#                          contradiction; a pane whose own task worktree was
+#                          written during it is deferred and still re-surfaces
+#                          once per PAUSE_RESURFACE_SECS
+#                          (wedge_defer_writing). A pane that proves neither
+#                          keeps the unchanged schedule.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -189,7 +192,23 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
-STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
+# Idle secs before a stale pane escalates as a possible wedge when nothing can
+# prove its crew is alive. Deliberately NOT a knob for quieting long pipeline
+# steps: raising it would buy quiet by slowing detection of a genuinely wedged
+# crew. At the threshold the crew gets one chance to prove PROGRESS, through two
+# probes with deliberately DIFFERENT outcomes:
+#   - its own run's activity clock (crew_run_active_within) SUPPRESSES the
+#     escalation outright, with no wake at all, and restarts this window from the
+#     proof - the pipeline reporting on itself is the strongest evidence there is
+#     (wedge_suppress_run_active).
+#   - writes in its worktree (crew_worktree_written_since) DEFER the escalation
+#     and restart this window, but the deferral chain keeps ageing, so the pane
+#     still re-surfaces once every PAUSE_RESURFACE_SECS for a recheck
+#     (wedge_defer_writing). A churning worktree is evidence of activity, not of
+#     progress, so it buys a longer cadence rather than silence.
+# Neither proven, and the escalation fires on the unchanged schedule, because a
+# frozen run and a working one look identical from outside.
+STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
 # footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
@@ -526,6 +545,49 @@ wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
   triage_log "absorbed $label (worktree written since the idle window opened, idle ${age}s): $win"
 }
 
+# SUPPRESS the wedge escalation for a pane that went quiet while its own
+# no-mistakes run is demonstrably still progressing (crew_run_active_within in
+# fm-classify-lib.sh). Not a deferral and not a longer cadence: no wake at all.
+#
+# Escalating a pane the supervisor can PROVE is working is a contradiction, and
+# it is expensive in the only currency that matters here - seven consecutive
+# false "possible wedge" escalations in one night, every one a crew sitting in a
+# legitimate long pipeline call, because a no-mistakes review step routinely runs
+# 20 to 130 minutes while STALE_ESCALATE_SECS is 240. Raising that threshold
+# would be the wrong trade: it buys quiet by slowing detection of a genuinely
+# wedged crew, which is the failure that actually costs work. So the threshold
+# stays where it is and the timer governs only what it can actually judge - a
+# crew whose liveness nothing can prove.
+#
+# What keeps this from becoming a hiding place is the strength of the evidence,
+# not a re-surface cadence. Suppression requires the run to have reported
+# activity INSIDE this quiet window; the mere existence of an active step is
+# refused, because a frozen run keeps one forever. The idle timer is reset here,
+# so the window is measured from the last proof of progress: the moment the run
+# stops proving it, the untouched wedge timer takes over and escalates on the
+# ordinary schedule. The escalation counter is left alone - neither advanced
+# (this is not an escalation) nor reset (a later genuine escalation must keep the
+# demand-deep-inspection history it had already earned).
+#
+# Residual, accepted deliberately: a pipeline that keeps logging forever without
+# converging is not surfaced by this detector. That case is bounded by
+# no-mistakes' own idle timeout and fix-round caps, and any gate or terminal
+# state it reaches appends status and wakes the supervisor through the ordinary
+# signal path.
+#
+# This is a bookkeeping reset like every other one here, so it drops the write
+# deferral chain too: a .writing-since-<key> left by an earlier deferral would
+# otherwise keep ageing across the whole suppressed stretch, and the next write
+# deferral would measure its re-surface age from that abandoned chain - waking
+# once immediately and reporting a "writing its worktree for Ns" duration that
+# spans a period the crew spent not writing at all.
+wedge_suppress_run_active() {  # <window> <since-file> <triage-label> <idle-age>
+  local win=$1 since_file=$2 label=$3 age=$4
+  date +%s > "$since_file"
+  clear_write_tracking "$(window_key "$win")"
+  triage_log "absorbed $label (validation reported activity inside the idle window, idle ${age}s): $win"
+}
+
 # Drop a window's write-deferral chain wherever its stale bookkeeping resets, so
 # the bounded re-surface cadence is measured from the CURRENT quiet stretch and a
 # long-finished one cannot make the next deferral resurface immediately.
@@ -542,9 +604,12 @@ clear_write_tracking() {  # <window-key>
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
-# The worktree write probe runs ONLY here, inside the at-threshold branch that is
-# about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
-# never per poll.
+# BOTH progress probes run ONLY here, inside the at-threshold branch that is about
+# to escalate: at most one bounded run-status call and one bounded worktree walk
+# per window per STALE_ESCALATE_SECS, never per poll. Their outcomes are not the
+# same and must not be collapsed - run activity SUPPRESSES the escalation with no
+# wake, worktree writes DEFER it on the bounded re-surface cadence, and with
+# neither proven the escalation fires on the unchanged schedule.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
   since=$(cat "$since_file" 2>/dev/null || true)
@@ -559,6 +624,20 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        # Both probes run only here, so each costs at most one bounded call per
+        # window per STALE_ESCALATE_SECS. The run probe goes first because the
+        # case it answers is the one that blinds the other: while the pipeline
+        # holds branch custody the worktree receives no writes at all, so the
+        # walk would come back empty and be pure cost. It skips the bounded
+        # `axi status` call outright only for a missing task id, a bad window,
+        # no no-mistakes binary, a missing or torn-down worktree, a non-ship
+        # crew, or a detached HEAD; for any other stale ship crew on a branch
+        # the call IS made, and a refusal is decided afterward on branch
+        # equality against whatever the call answered.
+        if crew_run_active_within "$task" "$STATE" "$age"; then
+          wedge_suppress_run_active "$win" "$since_file" "$label" "$age"
+          return 0
+        fi
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
           return 0

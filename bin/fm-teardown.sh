@@ -108,7 +108,7 @@
 #     crew's worktree, so they are not orphaned by removing the worktree.
 #     conclude_task_no_mistakes_run attributes the active-or-most-recent run to
 #     THIS task only when its branch AND code identity (bin/fm-nm-run-lib.sh's
-#     fm_nm_head_matches_worktree, the same rule bin/fm-crew-state.sh uses) both
+#     fm_nm_run_attributable, the same rule bin/fm-crew-state.sh uses) both
 #     match this worktree, then runs `no-mistakes axi abort --run <id>` for
 #     that verified run instance. A run already terminal
 #     (an outcome is set) or not parked at a gate is left untouched. Idempotent:
@@ -1457,9 +1457,14 @@ task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
   run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
   [ -n "$run_branch" ] && [ "$run_branch" = "$branch" ] || return 1
   run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head)")
-  fm_nm_head_matches_worktree "$wt" "$run_head" || return 1
   outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
   [ -z "$outcome" ] || return 1
+  # Only ever reached for a run with no recorded outcome, and every accepting
+  # branch below additionally requires a gate, so this is always the active
+  # phase. That is what lets teardown still conclude a run parked at fix_review
+  # while the pipeline holds branch custody and its head is not an object here -
+  # the case the fleet-slot leak in this script's header was written for.
+  fm_nm_run_attributable "$wt" "$run_head" active || return 1
   status=$(fm_nm_strip_quotes "$(fm_nm_field "$out" status)")
   awaiting=$(printf '%s\n' "$out" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
   has_gate=$(printf '%s\n' "$out" | grep -Eq '^[[:space:]]*gate:[[:space:]]*' && echo 1 || echo 0)

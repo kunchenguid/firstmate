@@ -271,6 +271,11 @@ Unlike tmux process-name inspection, native registration can classify Pi without
 The session-start sweep uses this probe.
 Mid-session secondmate agent-process liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
 
+Firstmate reads that registration through `herdr agent get <pane_id>`, never `herdr agent list`.
+Both report an agent as `agent` and its state as `agent_status`; neither exposes a `name` or a `state` field, so an ad-hoc probe reading `.name` and `.state` returns null for every pane and reads as a dead source when the surface is healthy.
+Verified 2026-08-23 on herdr 0.8.2: `herdr agent get <pane_id> | jq -r '.result.agent.agent_status'` returned `working`, while `herdr agent list | jq -r '.result.agents[] | "\(.name) \(.state)"'` returned `null null` for all thirteen live panes.
+A `working` answer is still not the whole busy verdict, because `agent_status` reports generation state rather than turn state: `bin/fm-busy-lib.sh` owns which sources may answer for which harness, and accepts a converted adapter's own lifecycle record ahead of this one.
+
 ## Push events and polling fallback
 
 Protocol 16 can subscribe to `pane.agent_status_changed` over one bounded Unix-socket reader.

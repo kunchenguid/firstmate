@@ -19,6 +19,11 @@
 #   (h) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
 #   (i) kind=scout skips the run lookup                           -> pane/status-log
 #   (j) torn-down worktree / missing meta                         -> unknown/none
+#   (e2) a status or runs-list row naming ANOTHER branch is refused on the branch
+#       check alone, even when its head or sha would satisfy code identity
+#   (k1) branch custody: a live run whose head the pipeline holds is not an
+#       object in the crew worktree, so it must still be attributed while ACTIVE
+#       and must never carry a terminal verdict
 #   (k) crew_is_provably_working end-to-end over the REAL helper (not a canned
 #       fake fm-crew-state.sh verdict): cross-branch attribution via the runs
 #       list -> absorbed; genuinely no run anywhere + idle pane -> surfaced.
@@ -1408,6 +1413,341 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+# --- branch custody: a live run's head is not an object in the crew worktree ---
+# Reproduction of the 2026-08-23 false-failure incident, captured live from a
+# healthy crew mid fix-round. During a fix round no-mistakes takes custody of the
+# branch and commits in its own gate clone, so the run's recorded head is not in
+# the crew worktree's object store at all - `git rev-parse --verify <head>` there
+# fails outright. The old rule collapsed "cannot resolve" into "reject", so the
+# walk skipped the LIVE row and accepted an older cancelled row whose sha still
+# equalled the worktree HEAD, reporting `failed - run cancelled` for a validation
+# that was at that moment running at review/fixing. A false failure is the unsafe
+# direction: it invites tearing down live work and reporting a failure to the
+# captain that did not happen.
+CUSTODY_HEAD=ffffff00   # well-formed, deliberately not an object in the fixtures
+
+test_custody_head_running_row_beats_older_cancelled_row() {
+  reset_fakes
+  local d short out; d=$(new_case custody-coarse)
+  make_repo_on_branch "$d/wt" fm/vault-k2
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/k2.meta" "window=fm:fm-k2" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/k2.status"
+  # The repo-wide answer belongs to another crew, so this crew resolves through
+  # the coarse runs list - newest-first, exactly as the incident was captured.
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/vault-k2 ${CUSTODY_HEAD}  2026-08-22 23:39
+  cancelled  fm/vault-k2 ${short}  2026-08-22 23:17
+  cancelled  fm/vault-k2 25f884a6  2026-08-22 22:52
+EOF
+)"
+  out=$(run_crew_state "$d" k2)
+  assert_contains "$out" "state: working" "a live run under branch custody must read as working"
+  assert_not_contains "$out" "state: failed" "an older cancelled row at the worktree HEAD must not shadow the live run"
+  assert_not_contains "$out" "run cancelled" "the masking cancelled row must not supply the verdict"
+  pass "a running row whose head is held by the pipeline outranks an older cancelled row at the worktree HEAD"
+}
+
+# The precedence half of the same incident: `axi status` names THIS branch, with
+# the run id and the live step, while the coarse table has only a drifting sha.
+# The named live run must win outright and keep its full step detail, never fall
+# through to a coarse terminal word.
+test_custody_head_active_axi_status_dominates_coarse_table() {
+  reset_fakes
+  local d short out; d=$(new_case custody-precedence)
+  make_repo_on_branch "$d/wt" fm/vault-k2p
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/k2p.meta" "window=fm:fm-k2p" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/k2p.status"
+  FM_FAKE_RUN_HEAD="$CUSTODY_HEAD"
+  FM_FAKE_AXI_STATUS="$(run_fixing fm/vault-k2p)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/vault-k2p ${CUSTODY_HEAD}  2026-08-22 23:39
+  cancelled  fm/vault-k2p ${short}  2026-08-22 23:17
+EOF
+)"
+  out=$(run_crew_state "$d" k2p)
+  assert_contains "$out" "state: working" "a named live run on this branch reads as working"
+  assert_contains "$out" "source: run-step" "the named run supplies the verdict"
+  assert_contains "$out" "validating (fixing)" "the named run keeps its live step detail rather than a coarse word"
+  pass "an active axi-status run for this branch dominates the coarse runs table"
+}
+
+# The safety half: the same unverifiable head must NOT carry a terminal verdict.
+# A concluded run whose head this worktree cannot place could be describing any
+# history at all, and done/failed is the direction that costs live work.
+test_custody_head_terminal_run_is_not_attributed() {
+  reset_fakes
+  local d out; d=$(new_case custody-terminal)
+  make_repo_on_branch "$d/wt" fm/vault-k2t
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/k2t.meta" "window=fm:fm-k2t" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/k2t.status"
+  FM_FAKE_RUN_HEAD="$CUSTODY_HEAD"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/vault-k2t)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" k2t
+  out=$(run_crew_state "$d" k2t)
+  assert_not_contains "$out" "source: run-step" "an unplaceable head must not yield a terminal run-step verdict"
+  assert_not_contains "$out" "state: failed" "a concluded run at an unplaceable head must not report failed"
+  assert_contains "$out" "source: status-log" "falls back to the current-state sources instead"
+  pass "a terminal run whose head cannot be placed is not attributed"
+}
+
+# The narrow exception to the same rule: a ci-green override may still promote
+# an ACTIVE, unverifiable run to done, because that promotion is reached through
+# the active-phase exception in fm_nm_run_attributable, not through a terminal
+# run-step word or a coarse terminal row - both of which the test above pins as
+# still refused at the same unplaceable head. A wrong done from a genuinely
+# green CI signal is recoverable, unlike a wrong failed.
+test_custody_head_ci_green_override_is_attributed_despite_unverifiable_head() {
+  reset_fakes
+  local d out; d=$(new_case custody-cigreen)
+  make_repo_on_branch "$d/wt" fm/vault-k2cig
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/k2cig.meta" "window=fm:fm-k2cig" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/k2cig.status"
+  FM_FAKE_RUN_HEAD="$CUSTODY_HEAD"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/vault-k2cig)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  out=$(run_crew_state "$d" k2cig)
+  assert_contains "$out" "state: done" "a green ci-monitor run at an unverifiable head is still promoted to done"
+  assert_contains "$out" "source: run-step" "the ci-green override supplies the verdict"
+  assert_contains "$out" "checks green" "the ci-green override keeps its detail"
+  pass "the ci-green override attributes done at an unverifiable head, unlike every other terminal verdict"
+}
+
+# The protection the identity rule exists for is unchanged: a sha that DOES
+# resolve here and is neither ancestor nor descendant is a rewritten or diverged
+# tip, and stays rejected even for a running row.
+test_coarse_unrelated_sha_still_rejected() {
+  reset_fakes
+  local d unrelated out; d=$(new_case custody-unrelated)
+  make_repo_on_branch "$d/wt" fm/vault-k2u
+  # A commit with its own root: resolvable here, related to nothing.
+  git -C "$d/wt" checkout -q --orphan detached-root
+  git -C "$d/wt" commit -q --allow-empty -m 'unrelated history'
+  unrelated=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  git -C "$d/wt" checkout -q fm/vault-k2u
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/k2u.meta" "window=fm:fm-k2u" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/k2u.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/vault-k2u ${unrelated}  2026-08-22 23:39
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" k2u
+  out=$(run_crew_state "$d" k2u)
+  assert_not_contains "$out" "source: run-step" "a resolvable but unrelated sha must not be attributed"
+  assert_contains "$out" "source: status-log" "falls back after rejecting an unrelated tip"
+  pass "a running row on a genuinely unrelated sha is still rejected"
+}
+
+# Precedence guard, independent of the head rule: while `axi status` reports an
+# unconcluded run for THIS branch, no terminal word from the coarse table may
+# outrank it. The coarse table cannot see the run id or the step, and its sha is
+# guaranteed to drift during exactly this situation.
+test_coarse_terminal_row_never_outranks_active_named_run() {
+  reset_fakes
+  local d short unrelated out; d=$(new_case custody-guard)
+  make_repo_on_branch "$d/wt" fm/vault-k2g
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  git -C "$d/wt" checkout -q --orphan detached-root-g
+  git -C "$d/wt" commit -q --allow-empty -m 'diverged tip'
+  unrelated=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  git -C "$d/wt" checkout -q fm/vault-k2g
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/k2g.meta" "window=fm:fm-k2g" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/k2g.status"
+  # Named, unconcluded, on our branch - but at a head we reject as diverged.
+  FM_FAKE_RUN_HEAD="$unrelated"
+  FM_FAKE_AXI_STATUS="$(run_running fm/vault-k2g)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  cancelled  fm/vault-k2g ${short}  2026-08-22 23:17
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" k2g
+  out=$(run_crew_state "$d" k2g)
+  assert_not_contains "$out" "state: failed" "a coarse cancelled row must not outrank an unconcluded named run"
+  assert_not_contains "$out" "run cancelled" "the coarse terminal word must be dropped, not reported"
+  pass "a coarse terminal row never outranks an unconcluded named run for the same branch"
+}
+
+# `unknown - source: none` (the vib-strong-overcall-l1 reading): every source
+# declined at once. The run was live but its head was held by the pipeline, the
+# pane was legitimately idle because the crew was waiting on that run, and the
+# last status line was a `resolved:` event, which is deliberately never a state.
+# Attributing the live run is what closes it.
+test_custody_run_closes_unknown_none_after_resolved_event() {
+  reset_fakes
+  local d out; d=$(new_case custody-resolved)
+  make_repo_on_branch "$d/wt" fm/overcall-l1
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/l1.meta" "window=fm:fm-l1" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: [key=gate] two ask-user findings\n' > "$d/state/l1.status"
+  printf 'resolved [key=gate]: answered: take option (a)\n' >> "$d/state/l1.status"
+  FM_FAKE_RUN_HEAD="$CUSTODY_HEAD"
+  FM_FAKE_AXI_STATUS="$(run_fixing fm/overcall-l1)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" l1
+  out=$(run_crew_state "$d" l1)
+  assert_not_contains "$out" "source: none" "a live run must answer instead of leaving every source silent"
+  assert_contains "$out" "state: working" "the crew is working: its validation is running"
+  assert_contains "$out" "source: run-step" "the live run supplies the verdict"
+  pass "an active custody-held run closes the unknown/none reading left by a resolved: event"
+}
+
+# --- the other source of a confident wrong verdict: a foreign branch ---------
+# Bare `no-mistakes axi status` reports the active-or-most-recent run for the
+# CURRENT branch when one exists, and otherwise falls back to some other branch's
+# run purely as informational display (the fallback this file's
+# nm_runs_status_for_branch header documents). A crew whose branch has no run yet
+# therefore gets a complete, entirely legitimate-looking answer - run id, status,
+# outcome, step table - about work that is not its own, with nothing in it saying
+# so. Observed 2026-08-23: a sweep of bare `axi status` per worktree reported a
+# healthy task on fm/fm-crewstate-abort-c2 as `fm/fm-selffix-i1, cancelled, ci
+# failed`, an unrelated dead run, and it briefly read as that task having failed
+# CI.
+#
+# The branch equality check is what refuses it, and these cases pin that it is
+# the branch - not some other check happening to catch it. Both runs below are
+# given the worktree's REAL head, so head identity would accept them: only the
+# branch mismatch can produce the refusal.
+test_other_branch_terminal_run_never_reports_failed() {
+  reset_fakes
+  local d out; d=$(new_case foreign-branch-terminal)
+  make_repo_on_branch "$d/wt" fm/mine-noruns
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/mine.meta" "window=fm:fm-mine" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing, not validating yet\n' > "$d/state/mine.status"
+  # FM_FAKE_RUN_HEAD is this worktree's real HEAD (make_repo_on_branch set it),
+  # so the head check would pass; the run simply is not ours.
+  FM_FAKE_AXI_STATUS="$(run_failed fm/some-other-crew)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" mine
+  out=$(run_crew_state "$d" mine)
+  assert_not_contains "$out" "source: run-step" "a status naming another branch must never supply a run-step verdict"
+  assert_not_contains "$out" "state: failed" "another branch's failed run must not be reported as this crew's failure"
+  assert_contains "$out" "source: status-log" "falls back to this crew's own current-state sources"
+  assert_contains "$out" "state: working" "the crew's own log remains current"
+  pass "a terminal run on a foreign branch is refused, even at this worktree's own head"
+}
+
+# --- what a coarse row is allowed to MEAN -----------------------------------
+# The runs list carries one status word and nothing else, so the mapping from that
+# word to a state is the whole of what such a row can say. Every word no-mistakes
+# emits today maps; anything else must not, because NOT KNOWING MUST NEVER BE
+# ASSERTED AS KNOWLEDGE. Claiming a run-step verdict of `unknown` for a word this
+# reader does not understand is a confident finding about the run, and it silences
+# the pane and status-log sources that could have answered - which is how a plainly
+# running crew reads as `unknown - source: run-step` instead of working.
+#
+# Deliberately fed a word no-mistakes does not emit today: what is pinned is the
+# behaviour of the CATCH-ALL, not the vocabulary, so a sixth word added upstream
+# degrades to the fallbacks instead of reintroducing this.
+test_unrecognised_coarse_status_falls_through_to_pane() {
+  reset_fakes
+  local d out; d=$(new_case coarse-unknown-word-pane)
+  make_repo_on_branch "$d/wt" fm/coarse-newword
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/nw.meta" "window=fm:fm-nw" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/nw.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  reticulating  fm/coarse-newword ${FM_FAKE_RUN_HEAD}  2026-08-23 01:10
+EOF
+)"
+  FM_FAKE_BUSY=1
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" nw)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" nw busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  out=$(run_crew_state "$d" nw)
+  assert_not_contains "$out" "source: run-step" "an unrecognised coarse word must not supply a run-step verdict"
+  assert_not_contains "$out" "state: unknown" "an unrecognised coarse word must not be reported as an unknown run state"
+  assert_not_contains "$out" "reticulating" "an unrecognised coarse word must not be echoed as a verdict detail"
+  assert_contains "$out" "source: pane" "the pane fallback must still run"
+  assert_contains "$out" "state: working" "a busy pane still reports the crew as working"
+  pass "an unrecognised coarse status word falls through to the pane instead of asserting an unknown run state"
+}
+
+test_unrecognised_coarse_status_falls_through_to_status_log() {
+  reset_fakes
+  local d out; d=$(new_case coarse-unknown-word-log)
+  make_repo_on_branch "$d/wt" fm/coarse-newword2
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/nw2.meta" "window=fm:fm-nw2" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: [key=gate] which option\n' > "$d/state/nw2.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  reticulating  fm/coarse-newword2 ${FM_FAKE_RUN_HEAD}  2026-08-23 01:10
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" nw2
+  out=$(run_crew_state "$d" nw2)
+  assert_not_contains "$out" "source: run-step" "an unrecognised coarse word must not supply a run-step verdict"
+  assert_not_contains "$out" "state: unknown" "an unrecognised coarse word must not be reported as an unknown run state"
+  assert_contains "$out" "source: status-log" "the status-log fallback must still run"
+  pass "an unrecognised coarse status word leaves the status log free to answer"
+}
+
+# The recognised non-terminal words the coarse walk can now attribute: a fix round
+# and a gate both have a word here, and neither is terminal, so neither may be
+# dropped into the catch-all.
+test_coarse_gate_word_reports_parked() {
+  reset_fakes
+  local d out; d=$(new_case coarse-gate-word)
+  make_repo_on_branch "$d/wt" fm/coarse-gate
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/cg.meta" "window=fm:fm-cg" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/cg.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  fix_review  fm/coarse-gate ${CUSTODY_HEAD}  2026-08-23 01:10
+EOF
+)"
+  out=$(run_crew_state "$d" cg)
+  assert_contains "$out" "state: parked" "a coarse fix_review row is a run parked at a gate"
+  assert_contains "$out" "source: run-step" "the attributed coarse row supplies the verdict"
+  pass "a coarse gate word reports parked rather than falling into the catch-all"
+}
+
+# The same guard, one layer down: every coarse runs-list row is matched on branch
+# before its sha is considered, so a foreign row sitting at this worktree's exact
+# HEAD is still refused.
+test_coarse_foreign_branch_row_at_our_head_refused() {
+  reset_fakes
+  local d short out; d=$(new_case foreign-branch-coarse)
+  make_repo_on_branch "$d/wt" fm/mine-coarse
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/minec.meta" "window=fm:fm-minec" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing, not validating yet\n' > "$d/state/minec.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/some-other-crew)"
+  # Every row is a foreign branch, and the cancelled one sits at OUR head sha.
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  cancelled  fm/some-other-crew ${short}  2026-08-23 01:10
+  running    fm/a-third-crew aaaaaaa  2026-08-23 01:05
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" minec
+  out=$(run_crew_state "$d" minec)
+  assert_not_contains "$out" "source: run-step" "a foreign runs-list row must not be attributed on a matching sha"
+  assert_not_contains "$out" "state: failed" "a foreign cancelled row at our head must not report failed"
+  assert_contains "$out" "source: status-log" "falls back to this crew's own current-state sources"
+  pass "a foreign runs-list row is refused even when its sha equals this worktree's HEAD"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1461,5 +1801,17 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_custody_head_running_row_beats_older_cancelled_row
+test_custody_head_active_axi_status_dominates_coarse_table
+test_custody_head_terminal_run_is_not_attributed
+test_custody_head_ci_green_override_is_attributed_despite_unverifiable_head
+test_coarse_unrelated_sha_still_rejected
+test_coarse_terminal_row_never_outranks_active_named_run
+test_custody_run_closes_unknown_none_after_resolved_event
+test_other_branch_terminal_run_never_reports_failed
+test_unrecognised_coarse_status_falls_through_to_pane
+test_unrecognised_coarse_status_falls_through_to_status_log
+test_coarse_gate_word_reports_parked
+test_coarse_foreign_branch_row_at_our_head_refused
 
 echo "all fm-crew-state tests passed"

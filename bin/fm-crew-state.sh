@@ -30,11 +30,20 @@
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
-#      branch whose head was rewritten or diverged must not be attributed.
-#      A run matches when its head equals the worktree HEAD, or the worktree HEAD
-#      is an ancestor of the run head (pipeline fix commits advanced the run on
-#      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      branch whose head was rewritten or diverged must not be attributed. Where
+#      the run's head sits relative to the worktree HEAD, and what that permits
+#      for an active versus a concluded run, is owned by fm_nm_run_attributable
+#      in bin/fm-nm-run-lib.sh; the rule that must survive with nothing loaded is
+#      that a head this worktree cannot place never yields a terminal verdict
+#      FROM THE RUN-STEP MAPPING OR THE COARSE TABLE, because a false `failed`
+#      invites tearing down live work. The one narrow exception is the ci-green
+#      override immediately below: it may still promote an active, unverifiable
+#      run to `done`, because a wrong `done` from a genuinely green CI signal is
+#      recoverable in a way a wrong `failed` is not.
+#      `axi status` outranks the coarse runs list whenever it names this crew's
+#      own branch with a run that has not concluded: it knows the run id and the
+#      live step, while the coarse table knows only a sha that a fix round is
+#      guaranteed to move.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -384,7 +393,7 @@ nm_ci_checks_state() {
 # matching row's status word (running/completed/cancelled/failed), or empty
 # when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
 nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha
+  local branch=$1 out row st rest br sha phase
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -398,9 +407,21 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
+      # Same attribution policy as the axi-status path, phased by THIS row's own
+      # status word. The runs list carries no outcome, so fm_nm_status_is_terminal
+      # judges the word alone and only completed/failed/cancelled are terminal:
+      # every other word - running, fixing, ci, awaiting_approval, fix_review, and
+      # any word this reader does not recognise - takes the ACTIVE phase. That
+      # phasing is what stops the walk from doing the exact inversion this
+      # fallback was reported for - skipping a live row whose head it cannot
+      # place, then accepting an older cancelled row that still sits at the
+      # worktree HEAD and calling a healthy validation failed. What an
+      # unrecognised word is then allowed to MEAN is coarse_run_state_for's
+      # business, not this walk's: attribution decides whose run a row describes,
+      # never what state it reports.
+      phase=terminal
+      fm_nm_status_is_terminal "$st" "" || phase=active
+      if ! nm_coarse_head_attributable "$sha" "$phase"; then
         continue
       fi
       printf '%s' "$st"
@@ -414,20 +435,61 @@ nm_runs_status_for_branch() {  # <branch>
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
-# 0 if the active axi-status run's head field matches this worktree's code
-# identity. Branch match is a precondition (caller). Rule owned by
-# fm_nm_head_matches_worktree in bin/fm-nm-run-lib.sh.
-nm_run_head_matches_worktree() {
-  local run_head
+# 0 if the axi-status run in $RUN_OUT may be attributed to this worktree. Branch
+# match is a precondition (caller). Phase and policy are owned by
+# fm_nm_status_is_terminal and fm_nm_run_attributable in bin/fm-nm-run-lib.sh.
+nm_run_attributable() {
+  local run_head phase=terminal
   run_head=$(strip_quotes "$(nm_field head)")
-  fm_nm_head_matches_worktree "$WT" "$run_head"
+  nm_run_is_terminal || phase=active
+  fm_nm_run_attributable "$WT" "$run_head" "$phase"
 }
 
-# Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
-# sha for this branch row matches the worktree head under the same rules as
-# nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
-nm_coarse_head_matches_worktree() {  # <short-sha>
-  fm_nm_head_matches_worktree "$WT" "$1"
+# 0 if the axi-status run in $RUN_OUT has concluded.
+nm_run_is_terminal() {
+  fm_nm_status_is_terminal "$(strip_quotes "$(nm_field status)")" \
+    "$(strip_quotes "$(nm_field outcome)")"
+}
+
+# Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if that row's
+# short sha may be attributed to this worktree in phase $2, under the one policy
+# above.
+nm_coarse_head_attributable() {  # <short-sha> <active|terminal>
+  fm_nm_run_attributable "$WT" "$1" "$2"
+}
+
+# The coarse runs list carries ONE status word per row and nothing else - no
+# outcome, no step, no gate - so this mapping is the entirety of what such a row
+# can say. Sets COARSE_RUN_STATE/COARSE_RUN_DETAIL and returns 0 for a word this
+# reader understands; returns 1 for every other word, and that 1 means the row
+# supplies no verdict at all.
+#
+# NOT KNOWING MUST NEVER BE ASSERTED AS KNOWLEDGE. The catch-all is therefore
+# silent by construction rather than by enumeration. A status word no-mistakes
+# adds later lands in it, and the honest answer to "what state is that" is to say
+# nothing and let the pane and status-log sources answer - not to emit `unknown`
+# sourced to the run step, which reads as a confident finding ABOUT the run and
+# suppresses every other source that could have answered. Listing today's
+# vocabulary and nothing else would reintroduce exactly that the moment a sixth
+# word ships, so the caller keys HAVE_RUN off this return value rather than off
+# the presence of a word.
+COARSE_RUN_STATE=""
+COARSE_RUN_DETAIL=""
+coarse_run_state_for() {  # <status-word>
+  COARSE_RUN_STATE=""
+  COARSE_RUN_DETAIL=""
+  case "$1" in
+    running)   COARSE_RUN_STATE=working; COARSE_RUN_DETAIL="validating (background run)" ;;
+    fixing)    COARSE_RUN_STATE=working; COARSE_RUN_DETAIL="validating (fixing, background run)" ;;
+    ci)        COARSE_RUN_STATE=working; COARSE_RUN_DETAIL="ci running (background run)" ;;
+    awaiting_approval|fix_review)
+               COARSE_RUN_STATE=parked;  COARSE_RUN_DETAIL="parked at $1 (background run)" ;;
+    completed) COARSE_RUN_STATE="done";  COARSE_RUN_DETAIL="run completed" ;;
+    failed)    COARSE_RUN_STATE=failed;  COARSE_RUN_DETAIL="run failed" ;;
+    cancelled) COARSE_RUN_STATE=failed;  COARSE_RUN_DETAIL="run cancelled" ;;
+    *)         return 1 ;;
+  esac
+  return 0
 }
 
 HAVE_RUN=0
@@ -443,20 +505,41 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
+    OWN_BRANCH_RUN=0
+    OWN_ACTIVE_RUN=0
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ]; then
+      OWN_BRANCH_RUN=1
+      nm_run_is_terminal || OWN_ACTIVE_RUN=1
+    fi
+    if [ "$OWN_BRANCH_RUN" = 1 ] && nm_run_attributable; then
       HAVE_RUN=1
     else
-      # The active-or-most-recent run is for another branch, or same branch with
-      # a rewritten/diverged head (the CLI is alive and answered; only the
-      # attribution missed) - try the coarse fallback.
+      # The active-or-most-recent run is for another branch, or is our own branch
+      # with a head this worktree cannot accept for that run's phase (the CLI is
+      # alive and answered; only the attribution missed) - try the coarse fallback.
       # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
       # for no better answer.
       COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
       if [ -n "$COARSE_STATUS" ]; then
-        HAVE_RUN=1
-        RUN_SOURCE=coarse
+        if [ "$OWN_ACTIVE_RUN" = 1 ] && fm_nm_status_is_terminal "$COARSE_STATUS" ""; then
+          # PRECEDENCE (2026-08-23 false-failure incident). `axi status` has just
+          # named THIS branch with a run that has not concluded; it knows the run
+          # id and the live step. The coarse table knows only a short sha, and
+          # that sha is guaranteed to drift in exactly this situation, because a
+          # fix round commits onto the branch the pipeline owns. A terminal word
+          # from the coarse table therefore cannot outrank a live named run for
+          # the same branch - it can only be an older row for work already
+          # superseded. Drop it rather than report `failed` over a running
+          # validation; the pane and status-log sources below still answer, and
+          # a wrong `working` would be recoverable where a wrong `failed` invites
+          # tearing the crew down.
+          COARSE_STATUS=""
+        elif coarse_run_state_for "$COARSE_STATUS"; then
+          HAVE_RUN=1
+          RUN_SOURCE=coarse
+        fi
       fi
     fi
   fi
@@ -471,20 +554,18 @@ if [ "$HAVE_RUN" = 1 ]; then
   CI_LOG_STATE=""
   RUN_STATUS=""
   if [ "$RUN_SOURCE" = coarse ]; then
-    # No step/gate detail is available from the plain runs list - only ever
-    # true/working, done, or failed. A crew genuinely parked at a gate still
-    # gets full detail once `axi status` reports its own branch again (e.g.
-    # once its own step is the most-recently-touched one), and its own
-    # needs-decision/blocked status-log append (a captain-relevant VERB) is
-    # surfaced through signal_reason_is_actionable regardless of this
-    # coarse-vs-full distinction, so a real gate is never silently missed.
-    case "$COARSE_STATUS" in
-      running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
-      completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
-      failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-      cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
-      *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
-    esac
+    # No step/gate detail is available from the plain runs list - only the one
+    # word coarse_run_state_for already mapped, which is why the mapping and the
+    # HAVE_RUN decision above are the same call: a row this reader cannot map
+    # never reaches here at all, it falls through to the pane and status-log
+    # sources instead. A crew genuinely parked at a gate still gets full detail
+    # once `axi status` reports its own branch again (e.g. once its own step is
+    # the most-recently-touched one), and its own needs-decision/blocked
+    # status-log append (a captain-relevant VERB) is surfaced through
+    # signal_reason_is_actionable regardless of this coarse-vs-full distinction,
+    # so a real gate is never silently missed.
+    RUN_STATE=$COARSE_RUN_STATE
+    RUN_DETAIL=$COARSE_RUN_DETAIL
   else
     status=$(strip_quotes "$(nm_field status)")
     RUN_STATUS=$status
@@ -533,6 +614,13 @@ if [ "$HAVE_RUN" = 1 ]; then
           running)
             CI_LOG_STATE=$(nm_ci_checks_state)
             if [ "$CI_LOG_STATE" = green ]; then
+              # Deliberately allowed to fire at an unverifiable head: this is
+              # the one place a terminal verdict may come from an active run
+              # this worktree cannot place. A wrong `done` here only means the
+              # captain is told a PR is ready when checks are in fact green -
+              # recoverable - whereas a wrong `failed` from the same head would
+              # invite tearing down live work, the incident this file exists to
+              # prevent.
               RUN_STATE="done"
               RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
             fi
