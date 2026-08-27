@@ -694,6 +694,28 @@ test_handled_inbox_corruption_is_inconclusive() {
   pass "corrupt handled inbox evidence remains inconclusive"
 }
 
+test_unrelated_inbox_corruption_preserves_missed_handoff() {
+  local home fakebin out rc=0
+  home=$(make_home unrelated-inbox-corruption)
+  write_live_ship "$home" stale-task
+  write_live_ship "$home" corrupt-task
+  printf 'done: ready for the next step\n' > "$home/state/stale-task.status"
+  touch -t 202001011200 "$home/state/stale-task.status"
+  mkdir -p "$home/state/corrupt-task.inbox/handled"
+  printf 'not a task inbox record\n' > "$home/state/corrupt-task.inbox/handled/001.msg"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm \
+    FM_FLEET_HEALTH_HANDOFF_STALE_SECS=60 "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "unrelated inbox corruption should preserve actionable and inconclusive findings"
+  printf '%s' "$out" | jq -e '
+    any(.findings[]; .kind == "steering-inbox-inconclusive")
+      and any(.findings[]; .kind == "missed-handoff" and .subject == "stale-task")
+      and (any(.findings[]; .kind == "missed-handoff-inconclusive" and .subject == "stale-task") | not)
+  ' >/dev/null || fail "unrelated inbox corruption suppressed a proven missed handoff: $out"
+  pass "unrelated inbox corruption does not suppress proven handoffs"
+}
+
 test_unreadable_local_endpoint_is_inconclusive() {
   local home fakebin out rc=0
   home=$(make_home unreadable-local-endpoint)
@@ -1592,6 +1614,7 @@ test_recent_done_signal_is_not_missed_handoff
 test_missed_handoff_after_contracted_step_complete_signal
 test_captain_decision_wait_is_not_missed_handoff
 test_handled_inbox_corruption_is_inconclusive
+test_unrelated_inbox_corruption_preserves_missed_handoff
 test_unreadable_local_endpoint_is_inconclusive
 test_terminal_unreadable_endpoint_is_inconclusive
 test_historical_status_pr_does_not_require_listener

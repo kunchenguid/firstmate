@@ -527,92 +527,118 @@ fm_task_inbox_unhandled_json() {  # <state-dir>
 # Does not ring, escalate, or rewrite ladder bookkeeping.
 fm_task_inbox_latest_activity_json() {  # <state-dir>
   local state=$1 dir handled task rec mtime latest available=true classification
+  local task_available task_invalid task_unreadable
   local invalid_count=0 unreadable_count=0 records='[]' row
   if [ ! -d "$state" ] && [ ! -L "$state" ]; then
     classification=$(fm_evidence_classify true true)
     jq -n --argjson available "$( [ "$classification" = available ] && printf true || printf false )" \
-      '{available:$available,invalid_count:0,unreadable_count:0,records:[]}'
+      '{available:$available,root_available:$available,invalid_count:0,unreadable_count:0,records:[]}'
     return 0
   fi
   if [ -L "$state" ] && [ ! -e "$state" ]; then
     classification=$(fm_evidence_classify false false)
     jq -n --argjson available "$( [ "$classification" = available ] && printf true || printf false )" \
-      '{available:$available,invalid_count:0,unreadable_count:0,records:[]}'
+      '{available:$available,root_available:$available,invalid_count:0,unreadable_count:0,records:[]}'
     return 0
   fi
   if [ ! -r "$state" ] || [ ! -x "$state" ]; then
     classification=$(fm_evidence_classify false false)
     jq -n --argjson available "$( [ "$classification" = available ] && printf true || printf false )" \
-      '{available:$available,invalid_count:0,unreadable_count:0,records:[]}'
+      '{available:$available,root_available:$available,invalid_count:0,unreadable_count:0,records:[]}'
     return 0
   fi
   for dir in "$state"/*.inbox; do
     [ -e "$dir" ] || [ -L "$dir" ] || continue
-    if [ ! -d "$dir" ] || { [ -L "$dir" ] && [ ! -e "$dir" ]; }; then
-      invalid_count=$((invalid_count + 1))
-      available=false
-      continue
-    fi
-    if [ ! -r "$dir" ] || [ ! -x "$dir" ]; then
-      classification=$(fm_evidence_classify false false)
-      available=false
-      continue
-    fi
-    handled="$dir/handled"
-    if [ ! -d "$handled" ] || { [ -L "$handled" ] && [ ! -e "$handled" ]; }; then
-      classification=$(fm_evidence_classify false false)
-      invalid_count=$((invalid_count + 1))
-      available=false
-      continue
-    fi
-    if [ ! -r "$handled" ] || [ ! -x "$handled" ]; then
-      classification=$(fm_evidence_classify false false)
-      available=false
-      continue
-    fi
     task=$(basename "$dir" .inbox)
     latest=
-    for rec in "$dir"/*.msg "$handled"/*.msg; do
-      [ -e "$rec" ] || [ -L "$rec" ] || continue
-      if fm_task_inbox_record_valid "$rec"; then
-        classification=$(fm_evidence_classify true true)
-      else
-        classification=$(fm_evidence_classify true false)
-        [ -e "$rec" ] || [ -L "$rec" ] || continue
-        case "$FM_TASK_INBOX_RECORD_FAILURE" in
-          unreadable) unreadable_count=$((unreadable_count + 1)) ;;
-          *) invalid_count=$((invalid_count + 1)) ;;
-        esac
+    task_available=true
+    task_invalid=0
+    task_unreadable=0
+    if [ ! -d "$dir" ] || { [ -L "$dir" ] && [ ! -e "$dir" ]; }; then
+      invalid_count=$((invalid_count + 1))
+      task_invalid=$((task_invalid + 1))
+      task_available=false
+      available=false
+    elif [ ! -r "$dir" ] || [ ! -x "$dir" ]; then
+      classification=$(fm_evidence_classify false false)
+      unreadable_count=$((unreadable_count + 1))
+      task_unreadable=$((task_unreadable + 1))
+      task_available=false
+      available=false
+    else
+      handled="$dir/handled"
+      if [ ! -d "$handled" ] || { [ -L "$handled" ] && [ ! -e "$handled" ]; }; then
+        classification=$(fm_evidence_classify false false)
+        invalid_count=$((invalid_count + 1))
+        task_invalid=$((task_invalid + 1))
+        task_available=false
         available=false
-        continue
-      fi
-      mtime=$(fm_path_mtime "$rec") || {
-        [ -e "$rec" ] || [ -L "$rec" ] || continue
+      elif [ ! -r "$handled" ] || [ ! -x "$handled" ]; then
         classification=$(fm_evidence_classify false false)
         unreadable_count=$((unreadable_count + 1))
+        task_unreadable=$((task_unreadable + 1))
+        task_available=false
         available=false
-        continue
-      }
-      case "$mtime" in
-        ''|*[!0-9]*)
-          classification=$(fm_evidence_classify false false)
-          unreadable_count=$((unreadable_count + 1))
-          available=false
-          continue
-          ;;
-      esac
-      if [ -z "$latest" ] || [ "$mtime" -gt "$latest" ]; then
-        latest=$mtime
+      else
+        for rec in "$dir"/*.msg "$handled"/*.msg; do
+          [ -e "$rec" ] || [ -L "$rec" ] || continue
+          if fm_task_inbox_record_valid "$rec"; then
+            classification=$(fm_evidence_classify true true)
+          else
+            classification=$(fm_evidence_classify true false)
+            [ -e "$rec" ] || [ -L "$rec" ] || continue
+            case "$FM_TASK_INBOX_RECORD_FAILURE" in
+              unreadable)
+                unreadable_count=$((unreadable_count + 1))
+                task_unreadable=$((task_unreadable + 1))
+                ;;
+              *)
+                invalid_count=$((invalid_count + 1))
+                task_invalid=$((task_invalid + 1))
+                ;;
+            esac
+            task_available=false
+            available=false
+            continue
+          fi
+          mtime=$(fm_path_mtime "$rec") || {
+            [ -e "$rec" ] || [ -L "$rec" ] || continue
+            classification=$(fm_evidence_classify false false)
+            unreadable_count=$((unreadable_count + 1))
+            task_unreadable=$((task_unreadable + 1))
+            task_available=false
+            available=false
+            continue
+          }
+          case "$mtime" in
+            ''|*[!0-9]*)
+              classification=$(fm_evidence_classify false false)
+              unreadable_count=$((unreadable_count + 1))
+              task_unreadable=$((task_unreadable + 1))
+              task_available=false
+              available=false
+              continue
+              ;;
+          esac
+          if [ -z "$latest" ] || [ "$mtime" -gt "$latest" ]; then
+            latest=$mtime
+          fi
+        done
       fi
-    done
-    [ -n "$latest" ] || continue
+    fi
+    classification=$(fm_evidence_classify "$task_available" true)
+    case "$latest" in
+      '') latest=null ;;
+    esac
     row=$(jq -n --arg task "$task" --argjson latest "$latest" \
-      '{task_id:$task,last_epoch:$latest}') || return 1
+      --argjson available "$( [ "$classification" = available ] && printf true || printf false )" \
+      --argjson invalid "$task_invalid" --argjson unreadable "$task_unreadable" \
+      '{task_id:$task,available:$available,invalid_count:$invalid,unreadable_count:$unreadable,last_epoch:$latest}') || return 1
     records=$(jq -n --argjson records "$records" --argjson row "$row" \
       '$records + [$row]') || return 1
   done
   classification=$(fm_evidence_classify "$available" true)
   jq -n --argjson available "$( [ "$classification" = available ] && printf true || printf false )" --argjson invalid "$invalid_count" \
     --argjson unreadable "$unreadable_count" --argjson records "$records" \
-    '{available:$available,invalid_count:$invalid,unreadable_count:$unreadable,records:$records}'
+    '{available:$available,root_available:true,invalid_count:$invalid,unreadable_count:$unreadable,records:$records}'
 }

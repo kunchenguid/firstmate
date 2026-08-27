@@ -333,7 +333,7 @@ case "$HANDOFF_STALE" in
     ;;
 esac
 INBOX_ACTIVITY_JSON=$(fm_task_inbox_latest_activity_json "$STATE") \
-  || INBOX_ACTIVITY_JSON='{"available":false,"records":[]}'
+  || INBOX_ACTIVITY_JSON='{"available":false,"root_available":false,"records":[]}'
 NOW_EPOCH=$(date +%s)
 case "$NOW_EPOCH" in
   ''|*[!0-9]*) NOW_EPOCH=0 ;;
@@ -378,6 +378,9 @@ EVALUATED=$(jq -n \
   def inbox_last($id):
     ([ $inbox_activity.records[]? | select(.task_id == $id) | .last_epoch ]
      | if length == 0 then null else max end);
+  def inbox_activity_available($id):
+    ([ $inbox_activity.records[]? | select(.task_id == $id) | .available ]
+     | if length == 0 then ($inbox_activity.root_available // false) else all end);
   ($pending.now_epoch // 0) as $now
   | [
       (if $pending.available == false then
@@ -620,9 +623,7 @@ EVALUATED=$(jq -n \
                     "done-signal age could not be established";"mtime-unavailable";1)
           elif ($now_epoch - $mtime) < $handoff_stale then
             empty
-          elif $inbox_activity.available == false
-               or ($inbox_activity.invalid_count // 0) > 0
-               or ($inbox_activity.unreadable_count // 0) > 0 then
+          elif inbox_activity_available($t.id) == false then
             finding("missed-handoff-inconclusive";$t.id;"notice";"inconclusive";
                     "steering-inbox activity after the handoff signal could not be established";
                     "inbox-activity-unavailable";1)
