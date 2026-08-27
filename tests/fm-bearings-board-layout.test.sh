@@ -113,7 +113,8 @@ const probe = String.raw`<script>
     subtitleLines: lineCount(subtitle),
     riskPinInsideCard: within(riskPin, firstCard),
     scrollWidth: document.documentElement.scrollWidth,
-    viewportWidth: window.innerWidth
+    viewportWidth: document.documentElement.clientWidth,
+    windowWidth: window.innerWidth
   };
   document.getElementById("bb-stack-next").click();
   var secondCard = document.querySelector("#bb-call .bb-decision:not([hidden])");
@@ -177,8 +178,8 @@ if (!(result.riskValueLines > 1.5)) failures.push(`risk detail lines=${result.ri
 if (result.riskValueScrollWidth > result.riskValueClientWidth + 1) {
   failures.push(`risk detail scroll=${result.riskValueScrollWidth}, client=${result.riskValueClientWidth}`);
 }
-if (result.scrollWidth !== result.viewportWidth || result.viewportWidth !== width) {
-  failures.push(`document=${result.scrollWidth}, viewport=${result.viewportWidth}, requested=${width}`);
+if (result.scrollWidth !== result.viewportWidth || result.windowWidth !== width) {
+  failures.push(`document=${result.scrollWidth}, viewport=${result.viewportWidth}, window=${result.windowWidth}, requested=${width}`);
 }
 if (failures.length) throw new Error(failures.join("; "));
 if (!close(result.titleLines, 3)) throw new Error(`long title did not reach its three-line clamp: ${result.titleLines}`);
