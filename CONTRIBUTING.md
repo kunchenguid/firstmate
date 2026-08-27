@@ -86,6 +86,7 @@ bin/fm-test-run.sh --lane portable-serial   # portable serial remainder (watcher
 bin/fm-test-run.sh --list-lanes   # discover exact lane names, including the current CI serial shards
 bin/fm-test-run.sh --check-coverage   # prove portable shards + serial + serial shards + Herdr equal the full inventory
 bin/fm-test-run.sh --all   # deliberate complete regression (optional local full walk; not no-mistakes Test)
+bin/fm-test-run.sh --compare-commits <base> <head> --output-dir /tmp/fm-test-partition   # bounded detached base/head inventories and failure partition
 bin/fm-test-isolation-proof.sh --list   # proven parallel candidate set (Phase 2 owner)
 bin/fm-test-isolation-proof.sh --jobs 4 --json /tmp/fm-isolation-proof.json   # re-run concurrent isolation proof only
 [ ! -L CLAUDE.md ] && cmp -s CLAUDE.md - <<'EOF'
@@ -98,6 +99,7 @@ tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVE
 
 `bin/fm-test-run.sh` is the single owner of behavior-suite selection, portable CI lane composition, optional local `--jobs` for the proven-isolated set only, per-script timing markers, family totals, the coverage guard, and the optional JSON timing artifact.
 Its header and `--help` own the flags, family labels, lanes, and changed-file map; this section only documents the entry points.
+Its commit-comparison mode gives independent gates per-script hard bounds, detached local copies, independently reconciled inventories, honest measured-outcome coverage, and retry-confirmed transition buckets for inherited failures, timeouts, regressions, genuine fixes, coverage erosion, and flakes.
 `bin/fm-test-isolation-proof.sh` remains the single owner of the Phase 2 concurrent isolation proof and the exact proven candidate set; see `docs/fm-test-isolation-proof.md`.
 Portable shard balance evidence lives in `docs/fm-test-portable-shards.md`.
 Local no-mistakes Test stays intent-targeted and must not wire `commands.test` to `--all` or a `tests/*.test.sh` walk.

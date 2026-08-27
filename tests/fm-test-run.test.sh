@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Contract tests for bin/fm-test-run.sh - the single owner of behavior suite
 # selection, portable lane composition, proven-isolated --jobs, timing markers,
-# JSON artifacts, coverage guard, and aggregate exit status.
+# JSON artifacts, coverage guard, aggregate exit status, and bounded detached
+# base/head failure partitioning.
 #
 # These tests intentionally exercise the runner with fixtures, --list, and
 # focused scheduler checks, not the complete Firstmate suite.
@@ -703,6 +704,675 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+init_compare_fixture_repo() {
+  local repo=$1
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cat >"$repo/tests/aa-pass.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - pass"
+SH
+  cat >"$repo/tests/ab-inherited.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "not ok - inherited"
+exit 1
+SH
+  cat >"$repo/tests/ac-fixed.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "not ok - base failure"
+exit 1
+SH
+  cat >"$repo/tests/ad-introduced.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - base pass"
+SH
+  cat >"$repo/tests/ae-skip.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "skip: optional fixture unavailable"
+SH
+  cat >"$repo/tests/af-hang.test.sh" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+sleep 30
+SH
+  chmod +x "$repo"/tests/*.test.sh
+  git -C "$repo" init -q
+  git -C "$repo" add bin tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm base
+}
+
+test_compare_commits_partitions_and_bounds_every_script() {
+  local tmp repo base head rc out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-compare.XXXXXX")
+  repo="$tmp/repo"
+  init_compare_fixture_repo "$repo"
+  base=$(git -C "$repo" rev-parse HEAD)
+  cat >"$repo/tests/ac-fixed.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - fixed"
+SH
+  cat >"$repo/tests/ad-introduced.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "not ok - introduced"
+exit 1
+SH
+  chmod +x "$repo/tests/ac-fixed.test.sh" "$repo/tests/ad-introduced.test.sh"
+  git -C "$repo" add tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm head
+  head=$(git -C "$repo" rev-parse HEAD)
+
+  set +e
+  out=$(cd "$repo" && bin/fm-test-run.sh --compare-commits "$base" "$head" \
+    --script-timeout 1 --output-dir "$tmp/result" 2>"$tmp/err")
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || { rm -rf "$tmp"; fail "introduced failure must make compare exit 1 (got $rc): $(cat "$tmp/err")"; }
+  assert_contains "$out" "FM_TEST_COMPARE_INVENTORY side=base" "base terminal inventory marker"
+  assert_contains "$out" "FM_TEST_COMPARE_INVENTORY side=head" "head terminal inventory marker"
+  assert_contains "$out" "FM_TEST_COMPARE_PARTITION inherited=1 inherited_timeouts=1 head_introduced=0 regressed=1 fixed=1" \
+    "outcome-transition partition"
+  if ! python3 - "$tmp/result/base.json" "$tmp/result/head.json" "$tmp/result/partition.json" <<'PY'
+import json, sys
+base, head, partition = (json.load(open(path, encoding="utf-8")) for path in sys.argv[1:])
+assert base["reconciliation"]["accounted"] is True, base
+assert head["reconciliation"]["accounted"] is True, head
+assert base["checkout"]["invariant_ok"] is True, base
+assert head["checkout"]["invariant_ok"] is True, head
+assert base["summary"] == {"errored": 0, "failed": 2, "passed": 2, "running": 0, "skipped": 1, "timed_out": 1, "total": 6}, base
+assert head["summary"] == {"errored": 0, "failed": 2, "passed": 2, "running": 0, "skipped": 1, "timed_out": 1, "total": 6}, head
+base_rows = {row["path"]: row["outcome"] for row in base["scripts"]}
+head_rows = {row["path"]: row["outcome"] for row in head["scripts"]}
+assert base_rows["tests/af-hang.test.sh"] == "timed_out", base_rows
+assert head_rows["tests/af-hang.test.sh"] == "timed_out", head_rows
+assert [row["path"] for row in partition["inherited_failures"]] == [
+    "tests/ab-inherited.test.sh"
+], partition
+assert [row["path"] for row in partition["inherited_timeouts"]] == ["tests/af-hang.test.sh"], partition
+assert partition["head_introduced_failures"] == [], partition
+assert [row["path"] for row in partition["regressed"]] == ["tests/ad-introduced.test.sh"], partition
+assert [row["path"] for row in partition["fixed"]] == ["tests/ac-fixed.test.sh"], partition
+assert partition["summary"]["coverage"] == "4/6", partition
+PY
+  then
+    rm -rf "$tmp"
+    fail "compare JSON inventories or partition are wrong"
+  fi
+  rm -rf "$tmp"
+  pass "commit comparison bounds a deliberate hang and emits complete diffable inventories"
+}
+
+test_compare_commits_accounts_for_script_lost_after_discovery() {
+  local tmp repo commit rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-compare-missing.XXXXXX")
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cat >"$repo/tests/aa-delete-next.test.sh" <<'SH'
+#!/usr/bin/env bash
+rm tests/zz-victim.test.sh
+SH
+  cat >"$repo/tests/zz-victim.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - should never run from a corrupted checkout"
+SH
+  chmod +x "$repo"/tests/*.test.sh
+  git -C "$repo" init -q
+  git -C "$repo" add bin tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm fixture
+  commit=$(git -C "$repo" rev-parse HEAD)
+
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --compare-commits "$commit" "$commit" \
+    --script-timeout 1 --output-dir "$tmp/result" >"$tmp/out" 2>"$tmp/err")
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || { rm -rf "$tmp"; fail "checkout corruption must make compare exit 1 (got $rc)"; }
+  if ! python3 - "$tmp/result/base.json" "$tmp/result/head.json" "$tmp/result/partition.json" <<'PY'
+import json, sys
+base, head, partition = (json.load(open(path, encoding="utf-8")) for path in sys.argv[1:])
+for doc in (base, head):
+    assert doc["discovered_scripts"] == ["tests/aa-delete-next.test.sh", "tests/zz-victim.test.sh"], doc
+    assert [row["path"] for row in doc["scripts"]] == doc["discovered_scripts"], doc
+    assert doc["reconciliation"] == {
+        "accounted": True, "discovered_count": 2, "duplicates": [],
+        "expected_count": 2, "extra": [], "extra_in_discovery": [],
+        "inventory_count": 2, "missing": [], "missing_from_discovery": []
+    }, doc
+    assert all(row["outcome"] == "errored" for row in doc["scripts"]), doc
+    assert doc["checkout"]["invariant_ok"] is False, doc
+assert partition["inventory_reconciled"] is True, partition
+assert partition["checkout_invariants_ok"] is False, partition
+PY
+  then
+    rm -rf "$tmp"
+    fail "lost-script accounting did not fail closed"
+  fi
+  rm -rf "$tmp"
+  pass "a script lost after discovery remains inventoried as errored and checkout drift fails loudly"
+}
+
+test_compare_commits_rechecks_a_first_only_failure() {
+  local tmp repo marker base head rc fail_detail
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-compare-flake.XXXXXX")
+  repo="$tmp/repo"
+  marker="$tmp/head-failed-once"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cat >"$repo/tests/aa-flaky.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - stable base"
+SH
+  chmod +x "$repo/tests/aa-flaky.test.sh"
+  git -C "$repo" init -q
+  git -C "$repo" add bin tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm base
+  base=$(git -C "$repo" rev-parse HEAD)
+  cat >"$repo/tests/aa-flaky.test.sh" <<SH
+#!/usr/bin/env bash
+if [ ! -e "$marker" ]; then
+  : >"$marker"
+  echo "not ok - first-only environmental failure"
+  exit 1
+fi
+echo "ok - retry passes"
+SH
+  chmod +x "$repo/tests/aa-flaky.test.sh"
+  git -C "$repo" add tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm head
+  head=$(git -C "$repo" rev-parse HEAD)
+
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --compare-commits "$base" "$head" \
+    --script-timeout 1 --output-dir "$tmp/result" >"$tmp/out" 2>"$tmp/err")
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || {
+    fail_detail=$(cat "$tmp/err" 2>/dev/null || true)
+    rm -rf "$tmp"
+    fail "a first-only failure must not be a regression (got $rc): $fail_detail"
+  }
+  python3 - "$tmp/result/partition.json" <<'PY' || {
+import json, sys
+partition = json.load(open(sys.argv[1], encoding="utf-8"))
+assert partition["head_introduced_failures"] == [], partition
+assert partition["regressed"] == [], partition
+assert [row["path"] for row in partition["flaky_transitions"]] == ["tests/aa-flaky.test.sh"], partition
+row = partition["flaky_transitions"][0]
+assert row["base_observations"] == ["passed", "passed"], row
+assert row["head_observations"] == ["failed", "passed"], row
+PY
+    rm -rf "$tmp"
+    fail "first-only failure was not recorded as flaky"
+  }
+  rm -rf "$tmp"
+  pass "a first-only failure is rechecked and recorded as flaky, not introduced"
+}
+
+test_compare_commits_refuses_an_inconclusive_retry() {
+  local tmp repo marker base head rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-compare-inconclusive.XXXXXX")
+  repo="$tmp/repo"
+  marker="$tmp/head-failed-once"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cat >"$repo/tests/aa-inconclusive.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - stable base"
+SH
+  chmod +x "$repo/tests/aa-inconclusive.test.sh"
+  git -C "$repo" init -q
+  git -C "$repo" add bin tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm base
+  base=$(git -C "$repo" rev-parse HEAD)
+  cat >"$repo/tests/aa-inconclusive.test.sh" <<SH
+#!/usr/bin/env bash
+if [ ! -e "$marker" ]; then
+  : >"$marker"
+  echo "not ok - first head failure"
+  exit 1
+fi
+trap '' TERM
+sleep 30
+SH
+  chmod +x "$repo/tests/aa-inconclusive.test.sh"
+  git -C "$repo" add tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm head
+  head=$(git -C "$repo" rev-parse HEAD)
+
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --compare-commits "$base" "$head" \
+    --script-timeout 1 --output-dir "$tmp/result" >"$tmp/out" 2>"$tmp/err")
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || { rm -rf "$tmp"; fail "inconclusive retry must exit 1 (got $rc)"; }
+  python3 - "$tmp/result/partition.json" <<'PY' || {
+import json, sys
+partition = json.load(open(sys.argv[1], encoding="utf-8"))
+assert partition["head_introduced_failures"] == [], partition
+assert partition["flaky_transitions"] == [], partition
+assert partition["regressed"] == [{
+    "base_observations": ["passed", "passed"],
+    "base_outcome": "passed",
+    "head_observations": ["failed", "timed_out"],
+    "head_outcome": "failed",
+    "path": "tests/aa-inconclusive.test.sh",
+}], partition
+PY
+    rm -rf "$tmp"
+    fail "inconclusive retry was not retained as a refusing regression"
+  }
+  rm -rf "$tmp"
+  pass "an inconclusive retry remains a regression"
+}
+
+test_compare_commits_reports_timeout_to_failure_as_regressed() {
+  local tmp repo base head rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-compare-regressed.XXXXXX")
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cat >"$repo/tests/aa-transition.test.sh" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+sleep 30
+SH
+  chmod +x "$repo/tests/aa-transition.test.sh"
+  git -C "$repo" init -q
+  git -C "$repo" add bin tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm base
+  base=$(git -C "$repo" rev-parse HEAD)
+  cat >"$repo/tests/aa-transition.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "not ok - assertion now reaches a real failure"
+exit 1
+SH
+  git -C "$repo" add tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm head
+  head=$(git -C "$repo" rev-parse HEAD)
+
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --compare-commits "$base" "$head" \
+    --script-timeout 1 --output-dir "$tmp/result" >"$tmp/out" 2>"$tmp/err")
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || { rm -rf "$tmp"; fail "timeout-to-failure regression must exit 1 (got $rc)"; }
+  assert_contains "$(cat "$tmp/out")" "regressed=1" "timeout-to-failure regression headline"
+  python3 - "$tmp/result/partition.json" <<'PY' || {
+import json, sys
+partition = json.load(open(sys.argv[1], encoding="utf-8"))
+assert partition["inherited_failures"] == [], partition
+assert partition["regressed"] == [{
+    "base_observations": ["timed_out", "timed_out"],
+    "base_outcome": "timed_out",
+    "head_observations": ["failed", "failed"],
+    "head_outcome": "failed",
+    "path": "tests/aa-transition.test.sh",
+}], partition
+PY
+    rm -rf "$tmp"
+    fail "timeout-to-failure transition was not classified as regressed"
+  }
+  rm -rf "$tmp"
+  pass "timeout-to-failure is a confirmed regression and exits non-zero"
+}
+
+test_compare_commits_never_calls_deleted_or_skipped_tests_fixed() {
+  local tmp repo base head rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-compare-erosion.XXXXXX")
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  for script in aa-deleted bb-skipped cc-fixed; do
+    cat >"$repo/tests/$script.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "not ok - base failure"
+exit 1
+SH
+  done
+  chmod +x "$repo"/tests/*.test.sh
+  git -C "$repo" init -q
+  git -C "$repo" add bin tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm base
+  base=$(git -C "$repo" rev-parse HEAD)
+  git -C "$repo" rm -q tests/aa-deleted.test.sh
+  cat >"$repo/tests/bb-skipped.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "skip: head no longer measures this test"
+SH
+  cat >"$repo/tests/cc-fixed.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - genuinely fixed"
+SH
+  git -C "$repo" add tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm head
+  head=$(git -C "$repo" rev-parse HEAD)
+
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --compare-commits "$base" "$head" \
+    --script-timeout 1 --output-dir "$tmp/result" >"$tmp/out" 2>"$tmp/err")
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || { rm -rf "$tmp"; fail "deleted or skipped coverage must exit 1 (got $rc)"; }
+  python3 - "$tmp/result/partition.json" <<'PY' || {
+import json, sys
+partition = json.load(open(sys.argv[1], encoding="utf-8"))
+assert [row["path"] for row in partition["fixed"]] == ["tests/cc-fixed.test.sh"], partition
+assert [row["path"] for row in partition["no_longer_measured"]] == [
+    "tests/aa-deleted.test.sh", "tests/bb-skipped.test.sh",
+], partition
+assert partition["summary"]["fixed"] == 1, partition
+assert partition["summary"]["no_longer_measured"] == 2, partition
+PY
+    rm -rf "$tmp"
+    fail "deleted or skipped tests were confused with genuine fixes"
+  }
+  rm -rf "$tmp"
+  pass "only failure-to-pass is fixed; deletion and skip are coverage erosion"
+}
+
+test_compare_commits_refuses_an_independent_enumeration_mismatch() {
+  local tmp repo commit rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-compare-enumeration.XXXXXX")
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cat >"$repo/tests/aa-real.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - real test"
+SH
+  chmod +x "$repo/tests/aa-real.test.sh"
+  ln -s ./nowhere-nothing "$repo/tests/zz-ghost.test.sh"
+  git -C "$repo" init -q
+  git -C "$repo" add bin tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm fixture
+  commit=$(git -C "$repo" rev-parse HEAD)
+
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --compare-commits "$commit" "$commit" \
+    --script-timeout 1 --output-dir "$tmp/result" >"$tmp/out" 2>"$tmp/err")
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || { rm -rf "$tmp"; fail "enumeration mismatch must exit 1 (got $rc)"; }
+  assert_contains "$(cat "$tmp/out")" "accounted=false" "enumeration mismatch inventory marker"
+  python3 - "$tmp/result/base.json" "$tmp/result/head.json" "$tmp/result/partition.json" <<'PY' || {
+import json, sys
+base, head, partition = (json.load(open(path, encoding="utf-8")) for path in sys.argv[1:])
+for doc in (base, head):
+    assert doc["expected_scripts"] == ["tests/aa-real.test.sh", "tests/zz-ghost.test.sh"], doc
+    assert doc["discovered_scripts"] == ["tests/aa-real.test.sh"], doc
+    assert doc["reconciliation"]["accounted"] is False, doc
+    assert doc["reconciliation"]["missing_from_discovery"] == ["tests/zz-ghost.test.sh"], doc
+    rows = {row["path"]: row for row in doc["scripts"]}
+    assert rows["tests/zz-ghost.test.sh"]["outcome"] == "errored", rows
+    assert rows["tests/zz-ghost.test.sh"]["detail"] == "not_run: tracked test path is not a regular file", rows
+assert partition["inventory_reconciled"] is False, partition
+PY
+    rm -rf "$tmp"
+    fail "independent enumeration mismatch did not fail closed"
+  }
+  rm -rf "$tmp"
+  pass "tracked test paths missing from discovery make accounted refuse"
+}
+
+test_compare_commits_headline_exposes_measured_coverage() {
+  local tmp repo commit rc out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-compare-coverage.XXXXXX")
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cat >"$repo/tests/aa-pass.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - measured"
+SH
+  for script in bb-timeout cc-timeout; do
+    cat >"$repo/tests/$script.test.sh" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+sleep 30
+SH
+  done
+  chmod +x "$repo"/tests/*.test.sh
+  git -C "$repo" init -q
+  git -C "$repo" add bin tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm fixture
+  commit=$(git -C "$repo" rev-parse HEAD)
+
+  set +e
+  out=$(cd "$repo" && bin/fm-test-run.sh --compare-commits "$commit" "$commit" \
+    --script-timeout 1 --output-dir "$tmp/result" 2>"$tmp/err")
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { rm -rf "$tmp"; fail "inherited timeouts alone must remain inspectable (got $rc)"; }
+  assert_contains "$out" "inherited_timeouts=2" "timeout-specific inherited count"
+  assert_contains "$out" "compared_outcomes=1 coverage=1/3" "honest compared-outcome coverage"
+  rm -rf "$tmp"
+  pass "headline distinguishes timeouts from one genuinely compared outcome"
+}
+
+test_compare_commits_preflight_errors_exit_two_without_tracebacks() {
+  local tmp repo commit rc err
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-compare-preflight.XXXXXX")
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cat >"$repo/tests/aa-pass.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - pass"
+SH
+  chmod +x "$repo/tests/aa-pass.test.sh"
+  git -C "$repo" init -q
+  git -C "$repo" add bin tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm fixture
+  commit=$(git -C "$repo" rev-parse HEAD)
+
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --compare-commits definitely-missing "$commit" \
+    --script-timeout 1 --output-dir "$tmp/bad-ref" >"$tmp/out" 2>"$tmp/err")
+  rc=$?
+  set -e
+  err=$(cat "$tmp/err")
+  [ "$rc" -eq 2 ] || { rm -rf "$tmp"; fail "bad ref must exit 2 (got $rc)"; }
+  assert_contains "$err" "fm-test-run: compare failed: commit not found: definitely-missing" "bad-ref reason"
+  case "$err" in *Traceback*) rm -rf "$tmp"; fail "bad ref must not emit a traceback" ;; esac
+
+  : >"$tmp/not-a-directory"
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --compare-commits "$commit" "$commit" \
+    --script-timeout 1 --output-dir "$tmp/not-a-directory" >"$tmp/out2" 2>"$tmp/err2")
+  rc=$?
+  set -e
+  err=$(cat "$tmp/err2")
+  [ "$rc" -eq 2 ] || { rm -rf "$tmp"; fail "non-directory output path must exit 2 (got $rc)"; }
+  assert_contains "$err" "fm-test-run: compare failed: --output-dir must be a directory" "output-dir reason"
+  case "$err" in *Traceback*) rm -rf "$tmp"; fail "bad output dir must not emit a traceback" ;; esac
+  rm -rf "$tmp"
+  pass "bad refs and output paths are infrastructure errors with exact reasons"
+}
+
+test_compare_commits_signal_records_inflight_and_cleans_clones() {
+  local tmp repo commit run_dir runner_pid python_pid rc clone_path signal_name expected_rc i
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-compare-signal.XXXXXX")
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cat >"$repo/tests/aa-slow.test.sh" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+sleep 30
+SH
+  chmod +x "$repo/tests/aa-slow.test.sh"
+  git -C "$repo" init -q
+  git -C "$repo" add bin tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm fixture
+  commit=$(git -C "$repo" rev-parse HEAD)
+
+  for signal_name in TERM INT; do
+    run_dir="$tmp/result-$signal_name"
+    (cd "$repo" && exec bin/fm-test-run.sh --compare-commits "$commit" "$commit" \
+      --script-timeout 60 --output-dir "$run_dir" >"$tmp/out-$signal_name" 2>"$tmp/err-$signal_name") &
+    runner_pid=$!
+    clone_path=
+    i=0
+    while [ "$i" -lt 100 ]; do
+      i=$((i + 1))
+      if [ -f "$run_dir/base.json" ]; then
+        clone_path=$(python3 - "$run_dir/base.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+row = doc["scripts"][0]
+if row["outcome"] == "running" and row["detail"] == "in flight":
+    print(doc["checkout"]["path"])
+PY
+)
+        [ -n "$clone_path" ] && break
+      fi
+      sleep 0.05
+    done
+    [ -n "$clone_path" ] || {
+      kill -TERM "$runner_pid" 2>/dev/null || true
+      wait "$runner_pid" 2>/dev/null || true
+      rm -rf "$tmp"
+      fail "$signal_name fixture never recorded its in-flight script"
+    }
+    python_pid=$(ps -axo pid=,ppid=,command= | awk -v result="$run_dir" \
+      'index($0, result) && $0 ~ /[Pp]ython/ { print $1; exit }')
+    # Bash may exec its final foreground command, in which case the recorded
+    # runner PID is already the Python compare worker.
+    [ -n "$python_pid" ] || python_pid=$runner_pid
+    kill -"$signal_name" "$python_pid"
+    set +e
+    wait "$runner_pid"
+    rc=$?
+    set -e
+    case "$signal_name" in
+      TERM) expected_rc=143 ;;
+      INT) expected_rc=130 ;;
+    esac
+    [ "$rc" -eq "$expected_rc" ] || { rm -rf "$tmp"; fail "$signal_name must exit $expected_rc (got $rc)"; }
+    python3 - "$run_dir/base.json" "$run_dir/partition.json" "$signal_name" "$expected_rc" <<'PY' || {
+import json, sys
+base = json.load(open(sys.argv[1], encoding="utf-8"))
+partition = json.load(open(sys.argv[2], encoding="utf-8"))
+row = base["scripts"][0]
+assert row["outcome"] == "running", row
+assert row["detail"] == "in flight", row
+assert partition["termination"] == {
+    "complete": False, "exit_code": int(sys.argv[4]), "signal": f"SIG{sys.argv[3]}"
+}, partition
+PY
+      rm -rf "$tmp"
+      fail "$signal_name artifacts did not preserve in-flight and termination evidence"
+    }
+    [ ! -e "$(dirname "$clone_path")" ] || { rm -rf "$tmp"; fail "$signal_name leaked isolated clones at $(dirname "$clone_path")"; }
+  done
+  rm -rf "$tmp"
+  pass "SIGTERM and SIGINT preserve partial evidence and remove isolated clones"
+}
+
+test_compare_commits_signal_records_inflight_confirmation() {
+  local tmp repo marker base head run_dir runner_pid python_pid rc clone_root i
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-compare-confirmation-signal.XXXXXX")
+  repo="$tmp/repo"
+  marker="$tmp/base-confirmation-started"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cat >"$repo/tests/aa-transition.test.sh" <<SH
+#!/usr/bin/env bash
+if [ -e "$marker" ]; then
+  trap '' TERM
+  sleep 30
+fi
+: >"$marker"
+echo "ok - initial base run"
+SH
+  chmod +x "$repo/tests/aa-transition.test.sh"
+  git -C "$repo" init -q
+  git -C "$repo" add bin tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm base
+  base=$(git -C "$repo" rev-parse HEAD)
+  cat >"$repo/tests/aa-transition.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "not ok - head regression"
+exit 1
+SH
+  chmod +x "$repo/tests/aa-transition.test.sh"
+  git -C "$repo" add tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm head
+  head=$(git -C "$repo" rev-parse HEAD)
+  run_dir="$tmp/result"
+  (cd "$repo" && exec bin/fm-test-run.sh --compare-commits "$base" "$head" \
+    --script-timeout 60 --output-dir "$run_dir" >"$tmp/out" 2>"$tmp/err") &
+  runner_pid=$!
+  clone_root=
+  i=0
+  while [ "$i" -lt 100 ]; do
+    i=$((i + 1))
+    if [ -f "$run_dir/partition.json" ]; then
+      clone_root=$(python3 - "$run_dir/base.json" "$run_dir/partition.json" <<'PY'
+import json, sys
+base = json.load(open(sys.argv[1], encoding="utf-8"))
+partition = json.load(open(sys.argv[2], encoding="utf-8"))
+rows = partition.get("regressed", [])
+if rows and rows[0].get("base_observations") == ["passed", "running"] and rows[0].get("head_observations") == ["failed"]:
+    print(__import__("pathlib").Path(base["checkout"]["path"]).parent)
+PY
+)
+        [ -n "$clone_root" ] && break
+    fi
+    sleep 0.05
+  done
+  [ -n "$clone_root" ] || {
+    kill -TERM "$runner_pid" 2>/dev/null || true
+    wait "$runner_pid" 2>/dev/null || true
+    rm -rf "$tmp"
+    fail "confirmation fixture never recorded its running observation"
+  }
+  python_pid=$(ps -axo pid=,ppid=,command= | awk -v result="$run_dir" \
+    'index($0, result) && $0 ~ /[Pp]ython/ { print $1; exit }')
+  [ -n "$python_pid" ] || python_pid=$runner_pid
+  kill -TERM "$python_pid"
+  set +e
+  wait "$runner_pid"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { rm -rf "$tmp"; fail "SIGTERM during confirmation must exit 143 (got $rc)"; }
+  python3 - "$run_dir/partition.json" <<'PY' || {
+import json, sys
+partition = json.load(open(sys.argv[1], encoding="utf-8"))
+assert partition["termination"] == {"complete": False, "exit_code": 143, "signal": "SIGTERM"}, partition
+rows = partition["regressed"]
+assert rows == [{
+    "base_observations": ["passed", "running"],
+    "base_outcome": "passed",
+    "head_observations": ["failed"],
+    "head_outcome": "failed",
+    "path": "tests/aa-transition.test.sh",
+}], partition
+PY
+    rm -rf "$tmp"
+    fail "SIGTERM artifacts did not preserve the in-flight confirmation"
+  }
+  [ ! -e "$clone_root" ] || { rm -rf "$tmp"; fail "SIGTERM leaked isolated clones at $clone_root"; }
+  rm -rf "$tmp"
+  pass "SIGTERM during confirmation preserves a running observation"
+}
+
+if [ -n "${FM_TEST_RUN_ONLY:-}" ]; then
+  "$FM_TEST_RUN_ONLY"
+  exit $?
+fi
+
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
@@ -721,3 +1391,14 @@ test_jobs_requires_proven_isolated
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
+test_compare_commits_partitions_and_bounds_every_script
+test_compare_commits_accounts_for_script_lost_after_discovery
+test_compare_commits_rechecks_a_first_only_failure
+test_compare_commits_refuses_an_inconclusive_retry
+test_compare_commits_reports_timeout_to_failure_as_regressed
+test_compare_commits_never_calls_deleted_or_skipped_tests_fixed
+test_compare_commits_refuses_an_independent_enumeration_mismatch
+test_compare_commits_headline_exposes_measured_coverage
+test_compare_commits_preflight_errors_exit_two_without_tracebacks
+test_compare_commits_signal_records_inflight_and_cleans_clones
+test_compare_commits_signal_records_inflight_confirmation
