@@ -2548,7 +2548,7 @@ spawn_ready_root_private() {  # <dir> - on false, names the failed condition
 spawn_refuse_unprivate_task_tmp() {
   local remedy=
   if [ "$SPAWN_READY_ROOT_PRIVACY_KIND" = mode ]; then
-    remedy=". This account owns $TASK_TMP, so the likely cause is a root that predates this requirement: an older fm-spawn created it at the host umask, which leaves 0775 on a umask-002 host such as Debian or Ubuntu with user-private groups. Remove $TASK_TMP - or run bin/fm-teardown.sh for $ID - and spawn again; every root this fm-spawn creates is 0700 under any umask, so it does not come back. A relaunch reaches this point with the task's previous agent already stopped, so nothing is running for $ID until you do"
+    remedy=". This account owns $TASK_TMP, so it is a stale root of firstmate's own rather than another account's: it either predates this requirement, or was created at the host umask by the fallback mkdir that runs when the umask-scoped one could not create it - which leaves 0775 on a umask-002 host such as Debian or Ubuntu with user-private groups. Remove $TASK_TMP and spawn again. A relaunch reaches this point with the task's previous agent already stopped, so nothing is running for $ID until you do"
   fi
   echo "error: task $ID's per-task temp root $TASK_TMP is not private: $SPAWN_READY_ROOT_PRIVACY_ISSUE, so another local account could replace the readiness-marker directory this spawn is about to create inside it and no marker there would be proof the endpoint shell ran what was typed into it; refusing to spawn$remedy" >&2
   exit 1

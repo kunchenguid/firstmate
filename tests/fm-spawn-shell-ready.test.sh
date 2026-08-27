@@ -873,7 +873,12 @@ test_group_or_other_writable_temp_root_refuses_the_spawn() {
 # disqualified, because the group-write bit is a grant and the check cannot know
 # who is in that group. The refusal must therefore name the CAUSE and the way
 # out, since `bin/fm-control.sh <id> relaunch` stops the old agent before
-# fm-spawn runs and this message is then the operator's only guidance.
+# fm-spawn runs and this message is then the operator's only guidance. Removing
+# the root is the whole remedy, and it has to be the ONLY one offered: teardown
+# would also clear the root, but it is the task's end-of-life path - it kills
+# the endpoint and hard-resets or removes the worktree - so naming it to an
+# operator who has just lost their agent invites them to destroy the task they
+# were relaunching.
 test_group_writable_temp_root_names_its_cause_and_remedy() {
   local rec id out status
   id=shell-ready-upgrade-root-zi-$RUN_TAG
@@ -894,6 +899,10 @@ test_group_writable_temp_root_names_its_cause_and_remedy() {
     "the refusal did not tell the operator how to clear the root"$'\n'"$out"
   assert_contains "$out" "previous agent already stopped" \
     "the refusal did not say a relaunch arrives here with nothing running"$'\n'"$out"
+  case "$out" in
+    *teardown*)
+      fail "the refusal pointed the operator at teardown, which ends the task, to clear a temp root"$'\n'"$out" ;;
+  esac
   [ "$(path_mode "$TASK_TMP_PATH")" = 775 ] \
     || fail "the spawn changed the mode of a temp root it did not create (now $(path_mode "$TASK_TMP_PATH"))"
   assert_absent "$STATE_DIR/lines.log" \
