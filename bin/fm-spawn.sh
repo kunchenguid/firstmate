@@ -1893,23 +1893,26 @@ spawn_path_device() {  # <path>
 # git check-ignore does NOT answer the tracked question. It consults the index, so
 # a tracked path whose .gitignore rule matches still reports exit 1, not-ignored,
 # and the unignored branches below would then take repository content for this
-# seeding's own artifact. `git ls-files` answers it directly, and exits 0 whether or
-# not the path is in the index, so a non-zero exit means git could not answer at
-# all. That is treated as tracked: a state that cannot be positively established is
-# never the permissive one, exactly as the ignore, deletion and cross-device checks
-# already are.
+# seeding's own artifact. `git ls-files --error-unmatch` answers it directly, in the
+# same 0-or-1 shape the ignore check uses: 0 (tracked), 1 (not in the index), and
+# anything else is git failing to answer at all. That last case is treated as
+# tracked, because a state that cannot be positively established is never the
+# permissive one, exactly as the ignore, deletion and cross-device checks already
+# are. Git's own message is carried into the warning, since an operator reading a
+# bare exit code cannot tell an unreadable index from a missing repository.
 spawn_worktree_local_env_is_tracked() {  # <worktree> <pre-refresh|post-refresh>
-  local worktree=$1 phase=$2 listed status=0
-  listed=$(git -C "$worktree" ls-files --cached -- .env.local 2>/dev/null) || status=$?
+  local worktree=$1 phase=$2 tracked=0 track_err
+  track_err=$(git -C "$worktree" ls-files --error-unmatch -- .env.local 2>&1 >/dev/null) || tracked=$?
   # Announced once per acquisition. Both phases ask, and repeating the line for a
   # project that simply commits the file would read as two separate problems.
-  if [ "$status" -ne 0 ]; then
+  if [ "$tracked" -gt 1 ]; then
     if [ "$phase" = post-refresh ]; then
-      echo "warning: could not determine whether '$worktree' tracks .env.local; git ls-files exited $status, so it is treated as tracked and left untouched" >&2
+      echo "warning: could not determine whether '$worktree' tracks .env.local; git ls-files exited $tracked${track_err:+: $track_err}" >&2
+      echo "warning: .env.local is treated as tracked there and left untouched while that check is unresolved" >&2
     fi
     return 0
   fi
-  [ -n "$listed" ] || return 1
+  [ "$tracked" -eq 0 ] || return 1
   if [ "$phase" = post-refresh ]; then
     echo "warning: not seeding or retiring .env.local in '$worktree' because the project tracks that file; it is version-controlled content this seeding never touches" >&2
   fi

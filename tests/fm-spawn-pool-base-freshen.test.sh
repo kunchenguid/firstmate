@@ -14,6 +14,21 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-pool-base-freshen)
 
+# git consults core.excludesFile for every ignore decision, so a machine whose
+# global gitignore lists .env.local (or .env*) would silently flip the unignored
+# cases into ignored ones and flatly refuse `git add .env.local` in the tracked
+# fixture: the suite would then pass or fail per machine. Emptying the global and
+# system config files is NOT enough, because that leaves core.excludesFile unset and
+# git falls back to its built-in default path, $XDG_CONFIG_HOME/git/ignore or else
+# $HOME/.config/git/ignore. Set the setting explicitly to an empty file instead, and
+# export it for the whole file so fixtures and spawns alike are isolated and no
+# later case can inherit the dependency again.
+: > "$TMP_ROOT/empty-gitignore"
+: > "$TMP_ROOT/empty-gitconfig"
+printf '[core]\n\texcludesFile = %s\n' "$TMP_ROOT/empty-gitignore" > "$TMP_ROOT/isolated-gitconfig"
+export GIT_CONFIG_GLOBAL="$TMP_ROOT/isolated-gitconfig"
+export GIT_CONFIG_SYSTEM="$TMP_ROOT/empty-gitconfig"
+
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -73,17 +88,10 @@ $1
 EOF
 }
 
-# git check-ignore consults core.excludesFile, so a machine whose global gitignore
-# lists .env.local would silently flip the unignored cases into ignored ones and the
-# suite would pass or fail per machine. Point every spawn's git at empty global and
-# system configs so only the fixture's own .gitignore decides.
 run_spawn() {
   local id=$1
   shift
-  local empty="$TMP_ROOT/empty-gitconfig"
-  [ -f "$empty" ] || : > "$empty"
-  GIT_CONFIG_GLOBAL="$empty" GIT_CONFIG_SYSTEM="$empty" \
-    FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$POOL_DIR" \
