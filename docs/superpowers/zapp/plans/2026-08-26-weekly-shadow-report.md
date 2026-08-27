@@ -19,7 +19,7 @@ It does **not** require Spec G or H to be merged. Sections that depend on their 
 ## Global Constraints
 
 - **The Lambda is untouched.** `src/index.ts` still routes exactly two ways. If this implementation edits the dispatch or the function timeout, it took the wrong path — see "Not in the Lambda" in the spec.
-- **The OIDC role is read-only.** `dynamodb:Query`/`Scan` on the evaluations table, `ssm:GetParameter` + `kms:Decrypt` for the Slack token, and `s3:PutObject` on the archive prefix. Nothing that can deploy, write to the ledger, or change the service.
+- **The OIDC role is read-only.** `dynamodb:Query`/`Scan` on the evaluations table, `secretsmanager:GetSecretValue` on one secret ARN, and `s3:PutObject` on the archive prefix. Nothing that can deploy, write to the ledger, or change the service. **No KMS statement** — Secrets Manager's AWS-managed key authorises same-account callers through the service, and needing one would be a sign the credential ended up in the wrong store.
 - **Absent is never zero.** A field a later spec added, missing from an older record, renders "not recorded". Rendering it as `0` or `false` would make a recorder that never ran look like one that ran and found nothing.
 - **A missing or unreadable Slack token fails the run.** Never skip the post silently — a report that quietly stops being delivered is the exact failure this whole spec exists to catch.
 - **The Slack token is never logged, printed, or echoed.** It is read from SSM at runtime and passed straight to `chat.postMessage`. It is somebody else's credential.
@@ -29,45 +29,50 @@ It does **not** require Spec G or H to be merged. Sections that depend on their 
 - **Post-merge failures are shown separately from reverts,** never summed into one "things went wrong" number, with the attribution rule stated beside the count.
 - **The headline counts live records only.** Backfilled merges (Spec H) were never evaluated, so they can neither corroborate nor refute a verdict that does not exist.
 
-## Slack delivery: Conductor's bot token, not a new webhook
+## Slack delivery: zapp's own app, one scope
 
-The report posts to **`#bankrate-platform-notifications`** (`C081N1H2P5K`), a **private** channel.
+The report posts to **`#bankrate-platform-notifications`** (`C081N1H2P5K`), a **private** channel, using `chat.postMessage` with a bot token.
 
-An earlier draft of this plan called for a new incoming webhook and a repository secret. **That is not needed.** Three facts, each verified on 2026-08-27:
+Two earlier drafts of this plan took worse routes, and the reasoning is worth keeping because both are tempting.
 
-1. **Conductor Bot is already in the channel.** Confirmed in Slack's mention autocomplete — every other app in the list shows "Not in channel"; Conductor Bot does not.
-2. **Its token lives in SSM in the same AWS account zapp deploys to.** `conductor-api` stores it at `/{environment}/conductor-api/slack_bot_user_oauth_token`, and conductor's `development`/`production` account map (`194918977890` / `835272777014`) is identical to zapp's `qa`/`prod`. No cross-account role.
-3. **zapp already reads SSM.** Spec G added `@aws-sdk/client-ssm` and the `/zapp/freeze` read, so the client and the IAM pattern are in place.
+**Not an incoming webhook.** A webhook URL is bound to one channel at creation, so a second channel later means a second secret. A bot token posts anywhere the app has been invited.
 
-So delivery is `chat.postMessage` with a bot token, not a webhook POST. A bot token is also the better primitive regardless: a webhook is bound to one channel at creation, while a token posts to any channel the app is in — adding a second channel later is an invite rather than a new secret.
+**Not conductor-api's token.** `conductor-api` has a working Slack app whose token sits in SSM in the same AWS account, and Conductor Bot is already a member of the target channel — so borrowing it was tempting and would have worked. It was rejected because that token is a chamber-encrypted SecureString under `alias/parameter_store_key`, the **account-wide** chamber key. Reading it means granting the report role `kms:Decrypt` on the key that encrypts every chamber parameter in the account — Auth0 client secrets, Terraform tokens, Wiz credentials. That grant alone does not expose them (each still needs its own `ssm:GetParameter`), but it leaves a latent over-grant on a role that exists to post one message a week, and any future SSM read on that role silently inherits it. Not worth it.
 
-**The token is chamber-encrypted.** It is a SecureString under `alias/parameter_store_key`, so the report role needs `kms:Decrypt` on that key as well as `ssm:GetParameter`. Task 5 grants both.
+`platform-agent` was also considered and cannot help: its `/platform-agent/slack` `bot_token` is still the placeholder `xoxb-fake-for-testing`, and its own Terraform README lists "Create the Slack app (manifest TBD)" as an unfinished prerequisite. It needs an app for the same reason.
 
-### The one cost, and how it is paid
+### What exists as of 2026-08-27
 
-The token belongs to conductor. If that team rotates it or narrows its scopes, nothing tells them zapp broke — zapp becomes an invisible consumer, and that is the failure mode that surfaces six months later as a mystery.
+- **The `zapp` Slack app is created and its workspace install is approved** in Red Ventures.
+- Its manifest is **one scope, no endpoint**: `chat:write`, no event subscriptions, no slash commands, no interactivity, no signing secret. Task 8 checks that manifest into the repo.
+- The bot token (`xoxb-…`) is generated by installing the app, from **OAuth & Permissions → OAuth Tokens for Your Workspace**. Scopes must be correct *before* installing; adding one later requires a reinstall.
 
-Two mitigations, both required:
+### Where the token lives
 
-- **Task 8 files a one-line PR against `bankrate/conductor-api`** naming zapp as a reader of that parameter. Cheap, and it is the whole difference between a documented dependency and a trap.
-- **The parameter path is a Terraform variable, not a literal.** Swapping to a zapp-owned token later is then a config change rather than a code change.
+**Secrets Manager, not SSM.** zapp already draws this line: credentials in Secrets Manager (`/zapp/github`, `/zapp/webhook`), configuration in SSM (`/zapp/freeze`, added by Spec G). A bot token is a credential.
 
-Rotation breaking the report is survivable because Task 3 makes it a **red workflow run**, not a silent skip.
+This is also what removes the KMS problem entirely. Secrets Manager's AWS-managed key authorises same-account callers through the service, so the report role needs **`secretsmanager:GetSecretValue` on one ARN and no KMS statement at all**.
 
-### Verify before Task 6
+`/zapp/slack`, shaped `{ "bot_token": "xoxb-…" }` — matching platform-agent's convention for the same field.
 
-The report runs against qa (`EVALUATIONS_TABLE=zapp-evaluations-qa`), so it reads `/qa/conductor-api/slack_bot_user_oauth_token`. That only works if conductor is deployed to qa **with a real token there**, not just prod:
+### If the secret already exists when you get here
+
+The container is created by Terraform in Task 5, and the value is populated by hand afterwards — the same split `secrets.tf` already uses for the other two.
+
+**If somebody already ran `aws secretsmanager create-secret /zapp/slack` to park the token early**, Terraform will fail its first apply with `ResourceExistsException`. Import it instead of deleting and recreating:
 
 ```bash
-aws sso login --profile bankrate-qa
-aws ssm describe-parameters --profile bankrate-qa \
-  --parameter-filters 'Key=Name,Option=Contains,Values=slack_bot_user_oauth_token' \
-  --query 'Parameters[].Name' --output text
+terraform import aws_secretsmanager_secret.slack /zapp/slack
 ```
 
-Expected: `/qa/conductor-api/slack_bot_user_oauth_token`. If it is absent, point the report at the prod parameter via the Terraform variable and say so in the PR — do not copy the token into a second parameter.
+Check before you apply:
 
-`describe-parameters` returns names only. **Do not run `get-parameter --with-decryption` to "check" it** — the value would land in your shell history and the transcript. The workflow reads it at runtime; you never need to see it.
+```bash
+aws secretsmanager list-secrets --profile bankrate-qa --region us-east-1 \
+  --query 'SecretList[?Name==`/zapp/slack`].Name' --output text
+```
+
+Empty output means Terraform creates it; `/zapp/slack` means import first.
 
 ---
 
@@ -699,7 +704,7 @@ import { main } from '../src/report/index.js';
 const env = {
   EVALUATIONS_TABLE: 'zapp-evaluations-test',
   REPORT_BUCKET: 'zapp-reports-test',
-  SLACK_TOKEN_PARAMETER: '/qa/conductor-api/slack_bot_user_oauth_token',
+  SLACK_SECRET_NAME: '/zapp/slack',
   SLACK_CHANNEL: 'C081N1H2P5K',
 };
 
@@ -721,21 +726,21 @@ function deps(over: Partial<any> = {}) {
   };
 }
 
-test('a missing channel or parameter name fails the run rather than posting nowhere', async () => {
+test('a missing channel or secret name fails the run rather than posting nowhere', async () => {
   const { deps: d } = deps();
   await assert.rejects(() => main({ ...env, SLACK_CHANNEL: undefined } as any, d), /SLACK_CHANNEL/);
   await assert.rejects(
-    () => main({ ...env, SLACK_TOKEN_PARAMETER: undefined } as any, d), /SLACK_TOKEN_PARAMETER/);
+    () => main({ ...env, SLACK_SECRET_NAME: undefined } as any, d), /SLACK_SECRET_NAME/);
 });
 
 test('an unreadable token fails the run rather than skipping the post', async () => {
   // A report that silently stops being delivered is the exact failure this
-  // whole thing exists to catch. The token belongs to conductor-api, so a
-  // rotation or a narrowed scope lands here — and it must land LOUDLY.
+  // whole thing exists to catch. A rotated token, a revoked install, or a
+  // secret nobody populated all land here — and they must land LOUDLY.
   const { deps: d } = deps({
-    readSlackToken: async () => { throw new Error('AccessDeniedException'); },
+    readSlackToken: async () => { throw new Error('ResourceNotFoundException'); },
   });
-  await assert.rejects(() => main(env as any, d), /AccessDeniedException/);
+  await assert.rejects(() => main(env as any, d), /ResourceNotFoundException/);
 });
 
 test('the token never appears in an error message', async () => {
@@ -808,15 +813,14 @@ test('an empty week still posts', async () => {
 // report's own failures in the Actions tab where somebody already looks.
 import { DynamoDBClient, ScanCommand } from '@aws-sdk/client-dynamodb';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
-import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { aggregate, fetchWeek, weekStart } from './query.js';
 import { renderSlack, renderJson } from './render.js';
 
 export interface ReportDeps {
   fetchWeek: (table: string, since: Date) => Promise<Record<string, any>[]>;
   putObject: (key: string, body: string) => Promise<void>;
-  /** Read the bot token from SSM. Borrowed from conductor-api — see the plan header. */
-  readSlackToken: (parameterName: string) => Promise<string>;
+  /** Read zapp's own bot token from Secrets Manager. */
+  readSlackToken: (secretName: string) => Promise<string>;
   postSlack: (token: string, channel: string, body: unknown) => Promise<void>;
   now: () => Date;
 }
@@ -827,19 +831,19 @@ export async function main(
 ): Promise<void> {
   const table = env.EVALUATIONS_TABLE;
   const bucket = env.REPORT_BUCKET;
-  const tokenParameter = env.SLACK_TOKEN_PARAMETER;
+  const secretName = env.SLACK_SECRET_NAME;
   const channel = env.SLACK_CHANNEL;
 
   // Checked FIRST and hard. A run that quietly produces no post is
   // indistinguishable from a healthy week, which is the failure mode this
   // report exists to make impossible.
-  if (!tokenParameter) throw new Error('SLACK_TOKEN_PARAMETER is not set — refusing to run and post nothing');
+  if (!secretName) throw new Error('SLACK_SECRET_NAME is not set — refusing to run and post nothing');
   if (!channel) throw new Error('SLACK_CHANNEL is not set — refusing to run and post nothing');
   if (!table) throw new Error('EVALUATIONS_TABLE is not set');
 
   // Read before the query, so a credential problem fails in two seconds rather
   // than after a full table scan.
-  const token = await deps.readSlackToken(tokenParameter);
+  const token = await deps.readSlackToken(secretName);
 
   const since = weekStart(deps.now());
   const records = await deps.fetchWeek(table, since);
@@ -869,24 +873,27 @@ above enforce:
 
 ```ts
 /**
- * Read the Slack bot token.
+ * Read zapp's Slack bot token.
  *
- * BORROWED FROM conductor-api, which owns it. It is a chamber-encrypted
- * SecureString, so this needs kms:Decrypt on alias/parameter_store_key as well
- * as ssm:GetParameter — see infrastructure/terraform/report.tf.
+ * SECRETS MANAGER, not SSM. zapp already draws this line — credentials in
+ * Secrets Manager (/zapp/github, /zapp/webhook), configuration in SSM
+ * (/zapp/freeze). It also means no KMS grant: Secrets Manager's AWS-managed key
+ * authorises same-account callers through the service.
+ *
+ * Reuses src/secrets.ts's cached JSON reader rather than a second client.
  *
  * Never logged. If this throws, the message is the AWS error and never the
- * value; workflow logs are broadly readable and this is somebody else's
- * credential.
+ * value — workflow logs are broadly readable.
  */
-async function readSlackToken(parameterName: string): Promise<string> {
-  const ssm = new SSMClient({});
-  const res = await ssm.send(new GetParameterCommand({
-    Name: parameterName, WithDecryption: true,
-  }));
-  const token = res.Parameter?.Value;
-  if (!token) throw new Error(`${parameterName} is empty or absent`);
-  return token;
+async function readSlackToken(secretName: string): Promise<string> {
+  const { bot_token } = await getSecret<{ bot_token?: string }>(secretName);
+  if (!bot_token) {
+    // Distinguish "container exists, nobody populated it" from "no container",
+    // because the fixes are different: one is a put-secret-value, the other a
+    // terraform apply.
+    throw new Error(`${secretName} exists but has no bot_token field`);
+  }
+  return bot_token;
 }
 
 /**
@@ -911,13 +918,15 @@ async function postSlack(token: string, channel: string, body: unknown): Promise
 
   const payload = (await res.json()) as { ok?: boolean; error?: string };
   if (payload.ok !== true) {
-    // The error string, never the token. `not_in_channel` here means the
-    // Conductor app was removed from the channel; `invalid_auth` means the
-    // token was rotated — both are things somebody has to know about.
+    // The error string, never the token. `not_in_channel` means somebody
+    // removed the app from the channel; `invalid_auth` means the token was
+    // rotated or the install revoked — both are things somebody has to know.
     throw new Error(`chat.postMessage failed: ${payload.error ?? 'unknown error'}`);
   }
 }
 ```
+
+**One small change in `src/secrets.ts`:** `getSecret<T>` is currently module-private (`async function getSecret<T>(…)`, no `export`). Export it so the report can reuse the cached reader instead of standing up a second Secrets Manager client. Nothing else in that file changes, and the existing tests keep passing.
 
 The archive key is the **week start**, not the run time, so re-running via
 `workflow_dispatch` overwrites that week rather than piling up near-duplicates.
@@ -983,24 +992,30 @@ git commit -m "test: assert the weekly report stayed out of the Lambda dispatch"
 - Create: `infrastructure/terraform/report.tf`
 - Modify: `infrastructure/terraform/vars.tf`
 
-- [ ] **Step 0: Add the two variables**
+- [ ] **Step 0: Add the secret container and the channel variable**
 
-The parameter path is a variable, not a literal, so swapping to a zapp-owned
-token later is a config change rather than a code change — and so the qa/prod
-difference is expressible without an `if` in the policy.
+In `infrastructure/terraform/init.tf`, beside the two existing secret-name
+locals:
 
 ```hcl
-variable "slack_token_parameter" {
-  description = <<-EOT
-    SSM parameter holding the Slack bot token the weekly report posts with.
-    Owned by conductor-api, borrowed here because Conductor Bot is already a
-    member of the target channel. Set to a zapp-owned parameter if that
-    dependency is ever unwound.
-  EOT
-  type        = string
-  default     = "/qa/conductor-api/slack_bot_user_oauth_token"
-}
+  slack_secret_name = "/${local.name}/slack"
+```
 
+In `infrastructure/terraform/secrets.tf`, matching the two resources already
+there — **container only, no value**. Terraform never holds the credential:
+
+```hcl
+# zapp's own Slack app (one scope: chat:write). Value populated by hand, same
+# as github and webhook above — see infrastructure/terraform/README.md.
+# Shape: { "bot_token": "xoxb-..." }
+resource "aws_secretsmanager_secret" "slack" {
+  name = local.slack_secret_name
+}
+```
+
+In `infrastructure/terraform/vars.tf`:
+
+```hcl
 variable "slack_channel" {
   description = "Channel ID the weekly report posts to (#bankrate-platform-notifications)"
   type        = string
@@ -1008,9 +1023,33 @@ variable "slack_channel" {
 }
 ```
 
-The `default` is the **qa** path because that is where the report runs. If the
-verification at the top of this plan showed no qa parameter, override it per
-workspace to the `/production/...` path rather than copying the token.
+**`/zapp/slack` ALREADY EXISTS — you must import it, not create it.** It was
+created by hand on 2026-08-27 (`arn:…:secret:/zapp/slack-xYsNCP`) and populated
+with a `bot_token`. A plain apply will fail with `ResourceExistsException`.
+
+```bash
+terraform import aws_secretsmanager_secret.slack /zapp/slack
+```
+
+Confirm first, in case that changed:
+
+```bash
+aws secretsmanager list-secrets --profile bankrate-qa --region us-east-1 \
+  --query 'SecretList[?Name==`/zapp/slack`].Name' --output text
+```
+
+Empty output means a plain apply is fine; `/zapp/slack` means import first.
+
+Do **not** delete and recreate as a shortcut. A deleted Secrets Manager secret
+enters a 7-to-30-day recovery window with its name reserved, so the recreate
+fails and you are stuck waiting or force-deleting.
+
+**The import is against a VCS-driven TFC workspace**, so it cannot be run from a
+laptop against the workspace state casually — run it through the workspace, or
+have somebody with TFC access run it before the Plan I PR merges. If that is
+awkward, the alternative is to delete the hand-made secret with
+`--force-delete-without-recovery` **before** the first apply, then re-populate
+after — but only if the token is somewhere you can re-paste it from.
 
 - [ ] **Step 1: Write it**
 
@@ -1073,34 +1112,22 @@ module "gha_report_role" {
           Action   = ["s3:PutObject"]
           Resource = "${aws_s3_bucket.reports.arn}/weekly/*"
         },
-        # BORROWED CREDENTIAL. conductor-api owns this parameter; zapp reads it
-        # so the weekly report can post as Conductor Bot, which is already in
-        # #bankrate-platform-notifications. Scoped to the one exact name — not
-        # the /qa/conductor-api/* prefix, which would hand a reporting job
-        # conductor's Auth0, Terraform and Wiz credentials as well.
+        # zapp's OWN Slack token, scoped to this one secret. No KMS statement:
+        # Secrets Manager's AWS-managed key authorises same-account callers
+        # through the service. If you find yourself needing a kms:Decrypt here,
+        # the credential ended up in the wrong store.
         {
           Effect   = "Allow"
-          Action   = ["ssm:GetParameter"]
-          Resource = "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${var.slack_token_parameter}"
-        },
-        # Chamber-encrypted SecureString, so GetParameter alone is not enough.
-        {
-          Effect   = "Allow"
-          Action   = ["kms:Decrypt"]
-          Resource = data.aws_kms_key.chamber.arn
+          Action   = ["secretsmanager:GetSecretValue"]
+          Resource = "${aws_secretsmanager_secret.slack.arn}*"
         },
       ]
     })
   }
 }
 
-# The same key conductor-api writes its parameters under (chamber's default).
-data "aws_kms_key" "chamber" {
-  key_id = "alias/parameter_store_key"
-}
-
 output "report_slack_channel" {
-  description = "#bankrate-platform-notifications — Conductor Bot is already a member."
+  description = "#bankrate-platform-notifications — invite @zapp before the first run."
   value       = var.slack_channel
 }
 
@@ -1190,11 +1217,11 @@ jobs:
         env:
           EVALUATIONS_TABLE: ${{ vars.EVALUATIONS_TABLE }}
           REPORT_BUCKET: ${{ vars.REPORT_BUCKET }}
-          # NO SLACK SECRET HERE. The bot token is read from SSM at runtime
-          # under the read-only role above — it belongs to conductor-api, and
-          # copying it into a GitHub secret would create a second thing to
-          # rotate that nobody would remember to rotate.
-          SLACK_TOKEN_PARAMETER: ${{ vars.SLACK_TOKEN_PARAMETER }}
+          # NO SLACK SECRET HERE. The bot token is read from Secrets Manager at
+          # runtime under the read-only role above. Copying it into a GitHub
+          # secret would create a second copy to rotate, and nobody rotates the
+          # second copy.
+          SLACK_SECRET_NAME: ${{ vars.SLACK_SECRET_NAME }}
           SLACK_CHANNEL: ${{ vars.SLACK_CHANNEL }}
         run: pnpm exec tsx src/report/index.ts
 ```
@@ -1211,16 +1238,16 @@ belongs in the workflow's header comment.
 gh variable set REPORT_ROLE_ARN --repo bankrate/zapp --body '<from terraform output>'
 gh variable set EVALUATIONS_TABLE --repo bankrate/zapp --body 'zapp-evaluations-qa'
 gh variable set REPORT_BUCKET --repo bankrate/zapp --body 'zapp-qa-reports'
-gh variable set SLACK_TOKEN_PARAMETER --repo bankrate/zapp --body '/qa/conductor-api/slack_bot_user_oauth_token'
+gh variable set SLACK_SECRET_NAME --repo bankrate/zapp --body '/zapp/slack'
 gh variable set SLACK_CHANNEL --repo bankrate/zapp --body 'C081N1H2P5K'
 ```
 
 Take the ARN, table and bucket from `terraform output` after the apply, not from
 this plan — `local.name` composition is the source of truth.
 
-**Variables, not secrets, for all five.** None is sensitive: a parameter *name*,
-a channel id, a role ARN and two resource names. The token itself never leaves
-AWS. Storing a parameter name as a secret would just make it harder to see what
+**Variables, not secrets, for all five.** None is sensitive: a secret *name*, a
+channel id, a role ARN and two resource names. The token itself never leaves
+AWS. Storing a secret's name as a secret would only make it harder to see what
 the workflow reads.
 
 - [ ] **Step 3: Commit**
@@ -1236,20 +1263,40 @@ git commit -m "feat(report): scheduled workflow, regenerable on demand"
 
 **Files:** none.
 
-- [ ] **Step 1: Confirm the token is readable by the role, without reading it**
+- [ ] **Step 1: Confirm the pieces are in place, without reading the token**
 
 ```bash
-gh variable list --repo bankrate/zapp | grep -E 'SLACK_TOKEN_PARAMETER|SLACK_CHANNEL'
-aws ssm describe-parameters --profile bankrate-qa \
-  --parameter-filters 'Key=Name,Option=Equals,Values=/qa/conductor-api/slack_bot_user_oauth_token' \
-  --query 'Parameters[].{name:Name,type:Type}' --output table
+gh variable list --repo bankrate/zapp | grep -E 'SLACK_SECRET_NAME|SLACK_CHANNEL'
+aws secretsmanager describe-secret --profile bankrate-qa --region us-east-1 \
+  --secret-id /zapp/slack --query '{name:Name,kms:KmsKeyId}' --output json
 ```
 
-Expected: both variables set, and one parameter of type `SecureString`.
+Expected: both variables set; `kms` is `null`, confirming the AWS-managed key
+and therefore that no KMS grant is required.
 
-If the parameter does not exist in qa, go back to Task 5 Step 0 and point the
-variable at the prod path. **Do not create a copy of conductor's token** — a
-second copy is a second thing to rotate and nobody will.
+To check the JSON *shape* without exposing the value — worth doing, because a
+field named `token` instead of `bot_token` fails at report time with a confusing
+error:
+
+```bash
+aws secretsmanager get-secret-value --profile bankrate-qa --region us-east-1 \
+  --secret-id /zapp/slack --query 'SecretString' --output text | jq -r 'keys | join(", ")'
+```
+
+Expected: `bot_token`. **Never print the value itself** — not to check it, not
+to "make sure it copied". It ends up in shell history, terminal scrollback and
+any transcript.
+
+- [ ] **Step 1b: Confirm the app is in the channel**
+
+The app must be a member before it can post; `chat:write` alone is not enough
+for a private channel.
+
+In `#bankrate-platform-notifications`: `/invite @zapp`
+
+If it is already there, Slack says so and nothing breaks. Skipping this produces
+`not_in_channel` on the first run, which Task 3's `ok` check surfaces correctly
+but which is trivially avoidable.
 
 - [ ] **Step 2: Trigger it by hand**
 
@@ -1261,7 +1308,7 @@ gh run watch --repo bankrate/zapp
 - [ ] **Step 3: Confirm five things**
 
 1. The post arrives in **`#bankrate-platform-notifications`**, authored by
-   **Conductor Bot**.
+   **zapp**.
 2. It **leads** with the revert question and its answer.
 3. The recorder-health section shows fractions — including `0 of N` for fields
    whose spec has not landed yet, rendered as not-recorded rather than as zero.
@@ -1278,9 +1325,11 @@ aws s3 ls s3://<bucket>/weekly/
 gh run view --repo bankrate/zapp --log | grep -c 'xoxb' || echo 'clean'
 ```
 
-Expected: `clean`. A hit is a stop-everything result — rotate conductor's token
-and tell that team, because a leaked credential in a workflow log is theirs, not
-ours.
+Expected: `clean`. A hit means rotate immediately: **api.slack.com/apps → zapp →
+OAuth & Permissions → Revoke All OAuth Tokens**, reinstall to mint a new token,
+and `put-secret-value` the replacement. The app is already workspace-approved, so
+a rotation costs no review — which is the point of owning the app rather than
+borrowing one.
 
 - [ ] **Step 4: Prove the failure path**
 
@@ -1303,50 +1352,117 @@ being collected.
 
 ---
 
-## Task 8: Record the borrowed credential in conductor-api
+## Task 8: Check the Slack app manifest into the repo
 
-**Files:** one comment in a **different repository**.
+**Files:**
+- Create: `slack-app-manifest.yml`
+- Modify: `infrastructure/terraform/README.md`, `README.md`
 
-This is the mitigation that keeps a convenient shortcut from becoming a trap. Without it, conductor's team rotates or re-scopes that token one day and nothing tells them zapp's report died.
+The app was created through Slack's UI. Nothing in the repo records what it is or what it can do, which means the next person to touch it has to log into Slack to find out — and a scope added by hand later leaves no trace at all.
 
-- [ ] **Step 1: Open a one-line PR against `bankrate/conductor-api`**
+- [ ] **Step 1: Write the manifest**
 
-In `infrastructure/terraform/env.tf`, above the `SLACK_BOT_USER_OAUTH_TOKEN`
-entry (around line 221):
-
-```hcl
-    # NOTE: /{env}/conductor-api/slack_bot_user_oauth_token is also read by
-    # bankrate/zapp's weekly-report workflow, which posts to
-    # #bankrate-platform-notifications as Conductor Bot (zapp's report role has
-    # ssm:GetParameter on this exact name). Rotating or re-scoping this token
-    # breaks that report — it will fail loudly in zapp's Actions tab, but the
-    # owner is here.
+```yaml
+# The zapp Slack app, as installed in the Red Ventures workspace.
+#
+# NOT read by any code — Slack apps are not provisioned from a repo. This is
+# here so the app's capabilities are reviewable in a pull request instead of
+# only visible to somebody logged into api.slack.com, and so a scope added by
+# hand shows up as a diff against this file.
+#
+# ONE SCOPE, NO ENDPOINT. zapp posts and does nothing else: no event
+# subscriptions, no slash commands, no interactivity, and therefore no signing
+# secret and no request URL to keep reachable. That absence is deliberate — it
+# is what makes this app safe to hold a long-lived token for.
+#
+# Deliberately NOT requested, and why:
+#   chat:write.public    - posts to public channels without joining. The target
+#                          is private, so an invite is required regardless.
+#   chat:write.customize - per-message username/icon overrides. The app's own
+#                          name and icon are what we want.
+#   groups:read          - listing private channels. We post to a known channel
+#                          ID, so there is nothing to look up.
+#
+# To reproduce: api.slack.com/apps -> Create New App -> From an app manifest.
+display_information:
+  name: zapp
+  description: Merge-policy shadow-mode reporting
+  background_color: "#2c2d30"
+features:
+  bot_user:
+    display_name: zapp
+    always_online: false
+oauth_config:
+  scopes:
+    bot:
+      - chat:write
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false
 ```
 
-- [ ] **Step 2: Say so where zapp's own readers will look**
+`token_rotation_enabled: false` is a real choice, not a default worth ignoring.
+Slack's rotating tokens expire every 12 hours and require a refresh flow; a
+weekly job would spend most of its complexity on refresh logic for a credential
+that lives in Secrets Manager under a read-only role. Revisit it if this app
+ever gains write scopes beyond posting.
 
-Add the same fact to zapp's `README.md` under Operations, from the other
-direction: the report posts with a token zapp does not own, and here is the
-parameter and the owning repository.
+- [ ] **Step 2: Document the one-time steps that Terraform cannot do**
 
-Two comments in two repositories is the cheapest possible version of this, and
-it is the difference between a documented dependency and the kind of coupling
-that surfaces six months later as a mystery.
+Add to `infrastructure/terraform/README.md`, in the same "one-time manual
+prerequisites" spirit as `platform-agent`'s:
+
+```markdown
+## One-time manual prerequisites
+
+1. **The Slack app.** Created from `slack-app-manifest.yml` (repo root) and
+   installed to the Red Ventures workspace — installation needed workspace
+   approval, granted 2026-08-27. The bot token comes from **OAuth & Permissions
+   → OAuth Tokens for Your Workspace** *after* installing; scopes must be right
+   before you install, because adding one later requires a reinstall.
+2. **Invite the app to the channel.** `/invite @zapp` in
+   `#bankrate-platform-notifications`. `chat:write` does not grant access to a
+   private channel it is not a member of.
+3. **Populate `/zapp/slack`.** Terraform creates the container; the value is set
+   by hand, same as `/zapp/github` and `/zapp/webhook`:
+
+   ```bash
+   read -rs 'T?xoxb token: ' && aws secretsmanager put-secret-value \
+     --profile bankrate-qa --region us-east-1 --secret-id /zapp/slack \
+     --secret-string "$(jq -n --arg t "$T" '{bot_token:$t}')" && unset T
+   ```
+
+   `read -rs 'VAR?prompt'` is the zsh form — bash's `read -rsp` fails in zsh
+   with `no coprocess`. Either way the token stays out of shell history.
+
+   To rotate: **OAuth & Permissions → Revoke All OAuth Tokens**, reinstall,
+   re-run the command above. The app is already approved, so rotation needs no
+   review.
+```
+
+- [ ] **Step 3: Say it once where a reader of the report will look**
+
+One line in the root `README.md` under Operations: the weekly report posts to
+`#bankrate-platform-notifications` as the `zapp` Slack app, whose token lives in
+`/zapp/slack` and whose capabilities are declared in `slack-app-manifest.yml`.
 
 ---
 
 ## Definition of done
 
-- [ ] A scheduled workflow run produces a Slack post in `#bankrate-platform-notifications`, authored by Conductor Bot *(Tasks 6, 7)*
+- [ ] A scheduled workflow run produces a Slack post in `#bankrate-platform-notifications`, authored by **zapp** *(Tasks 6, 7)*
 - [ ] `workflow_dispatch` regenerates it on demand *(Tasks 6, 7)*
 - [ ] The OIDC role is read-only — it cannot deploy, write to the ledger, or change the service *(Task 5)*
-- [ ] The `ssm:GetParameter` grant names the one exact parameter, not conductor's whole prefix *(Task 5)*
+- [ ] The Slack grant is `secretsmanager:GetSecretValue` on one ARN, with **no KMS statement** *(Task 5)*
 - [ ] Whether the role separation is policy-enforced or convention-only is stated explicitly, not assumed *(Task 5)*
-- [ ] No Slack credential is stored as a GitHub secret; the token is read from SSM at runtime *(Tasks 3, 6)*
+- [ ] `aws_secretsmanager_secret.slack` is **imported**, not created — `/zapp/slack` already exists *(Task 5)*
+- [ ] No Slack credential is stored as a GitHub secret; the token is read from Secrets Manager at runtime *(Tasks 3, 6)*
 - [ ] An unreadable token or a missing channel fails the run rather than skipping the post *(Tasks 3, 7)*
+- [ ] A populated container with the wrong field name fails with a message naming the field *(Task 3)*
 - [ ] `chat.postMessage` returning `ok: false` on an HTTP 200 fails the run, proven by a real run against a bad channel id *(Tasks 3, 7)*
 - [ ] The token appears nowhere in the workflow log, checked on a real run *(Task 7)*
-- [ ] The borrowed credential is documented in **both** repositories *(Task 8)*
+- [ ] `slack-app-manifest.yml` records the app's one scope, and the manual steps are documented *(Task 8)*
 - [ ] `src/index.ts` and the Lambda's timeout are unchanged, asserted by a test *(Task 4)*
 - [ ] The post leads with whether any would-have-approved pull request was reverted *(Tasks 1, 2)*
 - [ ] A revert of a non-candidate does not trip the headline *(Task 1)*
