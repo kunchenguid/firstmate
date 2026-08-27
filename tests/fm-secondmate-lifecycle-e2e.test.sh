@@ -23,6 +23,7 @@
 #   - recovery respawns from the durable registry + persistent home
 #   - teardown removes meta and the registry route only after removing the home
 set -u
+export FM_SKIP_SHELL_READY=1  # readiness gate: this suite tests spawn machinery over a fake tmux, not launch delivery (see fm-spawn-shell-ready.test.sh)
 
 # shellcheck source=tests/secondmate-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"

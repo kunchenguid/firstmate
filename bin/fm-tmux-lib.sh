@@ -172,6 +172,57 @@ fm_pane_is_busy() {  # <target>
 #     not be mistaken for a delivered escalation).
 #   - fm-send fails only on "pending" (lenient: a positively-confirmed swallow),
 #     so an unreadable pane never turns a normal steer into a false error.
+# fm_tmux_wait_shell_ready <target> [timeout-seconds] -> 0 ready, 1 not ready
+#
+# Proves the pane's SHELL is accepting command lines before anything important
+# is typed into it.
+#
+# fm-spawn used to infer readiness from pane_current_path changing, which only
+# proves `treehouse get` chdir'd - it says nothing about whether the shell has
+# returned to a prompt. When it had not, the whole launch string was typed into
+# a mid-command shell as raw text. Observed 2026-08-26: the cellarsky-sm and
+# hermes-jarvis-sm secondmates were both found as bare zsh prompts, their
+# `claude --dangerously-skip-permissions "<charter>"` line having died on
+# `zsh: parse error near \`do'`. They had never started.
+#
+# The probe is a bounded echo round-trip: send a unique marker through the
+# shell and wait to see it rendered back on a line of its own. Seeing it is
+# positive proof the shell read a command line, ran it, and printed a result -
+# an acknowledgment channel that bare `send-keys` does not have. A probe that
+# lands in a busy shell is a harmless short printf, unlike a multi-KB launch
+# string. Only the OUTPUT line matches (-x, whole line); the echoed command
+# line containing the marker does not.
+fm_tmux_wait_shell_ready() {  # <target> [timeout]
+  local target=$1 timeout=${2:-${FM_SHELL_READY_TIMEOUT:-20}}
+  local poll=${FM_SHELL_READY_POLL:-0.2} marker deadline now waited
+  marker="fmready$$$(od -An -N3 -tu4 /dev/urandom 2>/dev/null | tr -cd '0-9')"
+  now=$(date +%s); deadline=$((now + timeout))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    tmux send-keys -t "$target" -l "printf '%s\\n' $marker" 2>/dev/null || return 1
+    tmux send-keys -t "$target" Enter 2>/dev/null || return 1
+    waited=0
+    while [ "$waited" -lt 10 ]; do
+      sleep "$poll"
+      waited=$((waited + 1))
+      if tmux capture-pane -p -t "$target" 2>/dev/null | grep -qx "$marker"; then
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
+# fm_tmux_launch_failed <target> -> 0 if the pane shows a shell error
+#
+# Post-launch verification. If the launch string reached the shell as text
+# instead of starting the agent, the shell says so - and firstmate should fail
+# loudly rather than record a meta for a pane that holds nothing.
+fm_tmux_launch_failed() {  # <target>
+  local target=$1 tail
+  tail=$(tmux capture-pane -p -t "$target" -S -15 2>/dev/null) || return 1
+  printf '%s' "$tail" | grep -qiE 'parse error|command not found|syntax error near|no such file or directory'
+}
+
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
   local target=$1 retries=$2 sleep_s=$3 i=0 state
   while :; do

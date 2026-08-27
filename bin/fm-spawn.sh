@@ -41,6 +41,8 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$SCRIPT_DIR/fm-tmux-lib.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -512,9 +514,25 @@ else
   sq_home=$(shell_quote "$FM_HOME")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
+# Never type a launch command into a shell that has not proven it is ready.
+# Inferring readiness from a cwd change is what left two secondmates as dead
+# bare shells on 2026-08-26 (see fm_tmux_wait_shell_ready).
+if [ "${FM_SKIP_SHELL_READY:-0}" != 1 ] && ! fm_tmux_wait_shell_ready "$T"; then
+  echo "error: pane $T never reached a ready shell prompt; refusing to launch" >&2
+  echo "  typing the launch command into a busy shell is what leaves a dead, un-launched pane" >&2
+  exit 1
+fi
 tmux send-keys -t "$T" -l "$LAUNCH"
 sleep 0.3
 tmux send-keys -t "$T" Enter
+
+# The launch either started an agent or landed in the shell as text. Say which.
+sleep "${FM_LAUNCH_VERIFY_SLEEP:-1.5}"
+if fm_tmux_launch_failed "$T"; then
+  echo "error: launch did not start an agent in $T - the pane shows a shell error" >&2
+  echo "  the command was typed as text instead of starting the harness; pane left for inspection" >&2
+  exit 1
+fi
 
 # A secondmate watches its OWN tree's context: start a context-watch scoped to its
 # home as a presence-gated background child. fm-context-watch --scope self-singletons

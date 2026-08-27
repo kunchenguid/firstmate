@@ -15,6 +15,7 @@
 # abort - all hermetic over temp git repos and fakebins.
 set -u
 export FM_INTAKE_OVERRIDE=1  # wardroom: this suite tests spawn machinery, not intake
+export FM_SKIP_SHELL_READY=1  # readiness gate: this suite tests spawn machinery over a fake tmux, not launch delivery (see fm-spawn-shell-ready.test.sh)
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"

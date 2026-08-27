@@ -55,6 +55,11 @@ fm_test_cleanup() {
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
+  # The loop's last test is falsy when the array expands to one empty element,
+  # which would make cleanup return 1. The header above tells suites to call
+  # this from their own EXIT trap, so a nonzero return here fails a suite whose
+  # every test passed. Cleanup succeeding is not a test result.
+  return 0
 }
 
 fm_test_tmproot() {

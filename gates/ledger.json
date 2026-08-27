@@ -16,7 +16,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-08-07T03:40:06.006Z"
+      "last_verified": "2026-08-27T05:39:56.326Z"
     },
     {
       "id": "gate-g2-busy-guard",
@@ -33,7 +33,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-08-07T03:40:06.006Z"
+      "last_verified": "2026-08-27T05:39:56.326Z"
     },
     {
       "id": "gate-g3-rehydrate",
@@ -50,7 +50,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-08-07T03:40:06.006Z"
+      "last_verified": "2026-08-27T05:39:56.326Z"
     },
     {
       "id": "gate-g4-e2e",
@@ -70,7 +70,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-08-07T03:40:06.006Z"
+      "last_verified": "2026-08-27T05:39:56.326Z"
     },
     {
       "id": "gate-g5-inject-cap",
@@ -87,7 +87,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-08-07T03:40:06.006Z"
+      "last_verified": "2026-08-27T05:39:56.326Z"
     },
     {
       "id": "gate-q1-verdict-grammar",
@@ -104,7 +104,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-01T00:00:00Z",
-      "last_verified": "2026-08-07T03:40:06.006Z"
+      "last_verified": "2026-08-27T05:39:56.326Z"
     },
     {
       "id": "gate-q2-merge-refuses-unverified",
@@ -123,7 +123,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-01T00:00:00Z",
-      "last_verified": "2026-08-07T03:40:06.006Z"
+      "last_verified": "2026-08-27T05:39:56.326Z"
     },
     {
       "id": "gate-q3-prcheck-refuses-unverified",
@@ -142,7 +142,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-01T00:00:00Z",
-      "last_verified": "2026-08-07T03:40:06.006Z"
+      "last_verified": "2026-08-27T05:39:56.326Z"
     },
     {
       "id": "gate-q4-reject-roundtrip",
@@ -161,7 +161,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-01T00:00:00Z",
-      "last_verified": "2026-08-07T03:40:06.006Z"
+      "last_verified": "2026-08-27T05:39:56.326Z"
     },
     {
       "id": "gate-q5-attempt-cap",
@@ -180,7 +180,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-01T00:00:00Z",
-      "last_verified": "2026-08-07T03:40:06.006Z"
+      "last_verified": "2026-08-27T05:39:56.326Z"
     },
     {
       "id": "gate-q6-lens-degrade",
@@ -199,7 +199,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-01T00:00:00Z",
-      "last_verified": "2026-08-07T03:40:06.006Z"
+      "last_verified": "2026-08-27T05:39:56.326Z"
     },
     {
       "id": "gate-q7-fail-closed",
@@ -218,7 +218,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-01T00:00:00Z",
-      "last_verified": "2026-08-07T03:40:06.006Z"
+      "last_verified": "2026-08-27T05:39:56.326Z"
     },
     {
       "id": "gate-i1-intake-grammar",
@@ -235,7 +235,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-03T00:00:00Z",
-      "last_verified": "2026-08-07T03:40:06.006Z"
+      "last_verified": "2026-08-27T05:39:56.326Z"
     },
     {
       "id": "gate-i2-spawn-refuses-unvetted",
@@ -254,7 +254,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-03T00:00:00Z",
-      "last_verified": "2026-08-07T03:40:06.006Z"
+      "last_verified": "2026-08-27T05:39:56.326Z"
     },
     {
       "id": "gate-i3-panel-roundtrip",
@@ -273,7 +273,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-03T00:00:00Z",
-      "last_verified": "2026-08-07T03:40:06.006Z"
+      "last_verified": "2026-08-27T05:39:56.326Z"
     },
     {
       "id": "gate-i4-revise-cap-fail-closed",
@@ -292,7 +292,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-03T00:00:00Z",
-      "last_verified": "2026-08-07T03:40:06.006Z"
+      "last_verified": "2026-08-27T05:39:56.326Z"
     },
     {
       "id": "gate-i5-intake-lens-degrade",
@@ -311,7 +311,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-03T00:00:00Z",
-      "last_verified": "2026-08-07T03:40:06.006Z"
+      "last_verified": "2026-08-27T05:39:56.326Z"
     },
     {
       "id": "gate-l1-drain-instrumented",
@@ -328,7 +328,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-03T00:00:00Z",
-      "last_verified": "2026-08-07T03:40:06.006Z"
+      "last_verified": "2026-08-27T05:39:56.326Z"
     },
     {
       "id": "gate-l2-loop-audit-level",
@@ -347,7 +347,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-03T00:00:00Z",
-      "last_verified": "2026-08-07T03:40:06.006Z"
+      "last_verified": "2026-08-27T05:39:56.326Z"
     }
   ]
 }
