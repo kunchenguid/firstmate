@@ -1928,6 +1928,89 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
 }
 
+# The re-surface throttle belongs to the declaration, not to any one absorb. A
+# paused crew that completes a short turn without appending a status line (a
+# reply to a steer, a harness whose poll is itself a turn) flips its pane busy
+# for a poll, which clears the stale pause bookkeeping, then settles idle on a
+# new hash. That idle poll must NOT re-surface the still-current pause merely
+# because the busy poll ran: the recent throttle keeps it on the long
+# FM_PAUSE_RESURFACE_SECS cadence, and the recheck still fires once the throttle
+# itself ages past the cadence, so the kept throttle bounds rather than silences.
+test_paused_busy_flicker_keeps_resurface_cadence() {
+  local dir state fakebin out capture_file window key statusf sig pid back
+  dir=$(make_case paused-busy-flicker); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-paused-flicker"
+  statusf="$state/paused-flicker.status"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/paused-flicker.meta"
+  printf 'paused: holding for the upstream tool release\n' > "$statusf"
+  back=$(( $(date +%s) - 500 ))
+  set_mtime "$back" "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-paused-flicker_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # The pause was absorbed on an idle hash and re-surfaced for a recheck moments ago.
+  printf '%s' "$(hash_text "idle, holding for upstream")" > "$state/.hash-$key"
+  printf '%s' "$(hash_text "idle, holding for upstream")" > "$state/.stale-$key"
+  printf '2\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  date +%s > "$state/.paused-rechecked-$key"
+  date +%s > "$state/.paused-resurfaced-$key"
+  # A short turn just completed: the pane reads busy with a fresh completed-turn
+  # marker, well inside the busy-turn bound, and no new status line.
+  record_pi_busy "$state" paused-flicker
+  touch "$state/paused-flicker.turn-ended"
+  prime_turnend_seen "$state/paused-flicker.turn-ended"
+  printf 'Working... (2.1s)' > "$capture_file"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream tool release'
+
+  # Phase A: the busy poll clears the stale pause bookkeeping and wakes nothing.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "a paused crew's short busy turn surfaced a wake: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "a paused crew's short busy turn printed a wake reason: $(cat "$out")"
+  [ ! -e "$state/.paused-$key" ] || fail "a busy pane left the stale pause bookkeeping in place"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "a busy pane erased the declared pause's re-surface throttle"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional busy-flicker phase-A stop"
+
+  # Phase B: the turn is over and the pane settles idle on a new hash while the
+  # pause is still current and already past the cadence. The recent throttle
+  # holds: absorbed again on the cadence, no wake, no wedge timer.
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" paused-flicker idle --current-gen \
+    --source pi-ext --event agent-end || fail "could not settle the fake pi pane idle"
+  printf 'idle again, holding for upstream' > "$capture_file"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "a still-current pause re-surfaced right after a busy flicker instead of on its cadence: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "a busy flicker printed an off-cadence pause recheck: $(cat "$out")"
+  [ -e "$state/.paused-$key" ] || fail "the settled pane did not re-enter the pause cadence"
+  [ ! -e "$state/.stale-since-$key" ] || fail "the settled pane started a wedge timer under a declared pause"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional busy-flicker phase-B stop"
+
+  # Phase C: once the kept throttle itself ages past the cadence, the pause still
+  # rechecks - bounded, never silenced, never a wedge.
+  set_mtime "$back" "$state/.paused-resurfaced-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "the kept throttle silenced the declared pause's bounded recheck"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the bounded recheck did not print a stale wake: $(cat "$out")"
+  grep -F "awaiting external" "$out" >/dev/null || fail "the bounded recheck was not labeled a paused/awaiting-external recheck: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a declared pause was mislabeled a possible wedge after a busy flicker: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a paused crew's short busy turn keeps the bounded re-surface cadence instead of an immediate recheck"
+}
+
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
@@ -4053,6 +4136,7 @@ test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_paused_busy_flicker_keeps_resurface_cadence
 test_declared_pause_and_exited_captain_hold_are_bounded
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
 test_live_declared_wait_churn_honors_the_resurface_throttle
