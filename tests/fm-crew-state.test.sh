@@ -1389,15 +1389,12 @@ test_local_advanced_past_run_head_invalidates() {
   pass "local work advanced past run head invalidates attribution"
 }
 
-# --- F10 run-attribution precedence (pipeline-owned lane heads) --------------
+# --- Run-attribution precedence for pipeline-owned lane heads ----------------
 # A live run whose pipeline OWNS the branch (branch_sync.state=pipeline_owned)
-# routinely reports a lane head that is NOT a git object in the task worktree
-# (rebase/fix commits never pushed back). The observed incident: head-equality
-# rejection of the live run let the coarse runs-list fallback bind a superseded
-# FAILED row whose head equalled the stale worktree HEAD. The fixture mirrors
-# the real `axi status` shape captured live (top-level branch_sync block with
-# nested sub-blocks), with every head deliberately unresolvable so only the
-# pipeline-owned exemption - never an accidental field grab - can attribute.
+# can report a lane head that is not a git object in the task worktree.
+# Every fixture head is deliberately unresolvable so only the top-level
+# branch_sync exemption - never an accidental nested-field match - attributes
+# the run.
 run_running_pipeline_owned() {  # <branch> <head> [<sync-state>]
   cat <<EOF
 run:

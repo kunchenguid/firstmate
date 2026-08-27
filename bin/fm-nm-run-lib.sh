@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Shared no-mistakes axi run attribution primitives.
 #
-# ONE owner for the branch+code-identity matching rule that decides whether a
-# no-mistakes run belongs to a given worktree, used by fm-crew-state.sh
-# (read-only current-state reporting) and fm-teardown.sh (pre-teardown run
-# abort, see its "Fix 1" header comment). Getting this wrong in either
+# ONE owner for the no-mistakes run-attribution primitives used by
+# fm-crew-state.sh (read-only current-state reporting) and fm-teardown.sh
+# (pre-teardown run abort, see its "Fix 1" header comment). Teardown uses only
+# strict branch-and-head identity; crew-state additionally permits the active
+# pipeline-owned exemption defined below. Getting this wrong in either
 # direction is unsafe: a false negative hides a genuinely parked run, and a
 # false positive lets teardown act on a run it does not own.
 #
@@ -79,8 +80,7 @@ fm_nm_head_matches_worktree() {  # <worktree> <run_head>
 # diverged head fm_nm_head_matches_worktree correctly rejects) from UNKNOWN
 # attribution (unresolvable: e.g. a pipeline-owned lane head that never
 # reached this worktree). A caller scanning run rows newest-first must stop on
-# unknown attribution rather than fall through to an older row, or a
-# superseded terminal run surfaces over the live one (the F10 incident).
+# unknown attribution rather than surface an older, superseded run.
 fm_nm_head_resolvable() {  # <worktree> <head>
   [ -n "$2" ] || return 1
   git -C "$1" rev-parse --verify --quiet "$2^{commit}" >/dev/null 2>&1
@@ -109,9 +109,9 @@ fm_nm_run_is_active() {  # <toon-output>
   case "$status" in completed|failed|cancelled) return 1 ;; esac
 }
 
-# The one exemption to the head rule above (the F10 run-attribution hotfix):
-# while the pipeline OWNS the branch (branch_sync.state=pipeline_owned), the
-# daemon's own branch attribution IS the attribution for an ACTIVE run, and
+# The one exemption to the head rule above: while the pipeline OWNS the branch
+# (branch_sync.state=pipeline_owned), the daemon's own branch attribution IS
+# the attribution for an ACTIVE run, and
 # head equality must not be required - the pipeline's lane head is routinely
 # not a git object in the task worktree (rebase and fix commits that were
 # never pushed back), so the head rule rejects exactly the run that is most
