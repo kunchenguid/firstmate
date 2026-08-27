@@ -247,14 +247,11 @@ test_one_live_writer_refuses_a_competing_update() {
   write_stage_update "$update" "Competing stage" "A competing stage finished." active
   lock="$home/data/logbook/.writer.lock"
   mkdir "$lock"
-  touch -t 202001010000 "$lock"
-  set +e
-  out=$(run_logbook "$home" update --mission "Writer mission" --input "$update" 2>&1)
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "a writer initializing its lock was displaced"
-  assert_contains "$out" "ownership is indeterminate" "initializing writer refusal did not name the conflict"
-  [ "$(shasum -a 256 "$page" | awk '{print $1}')" = "$before" ] || fail "initializing writer changed the page"
+  run_logbook "$home" update --mission "Writer mission" --input "$update" >/dev/null \
+    || fail "an ownerless interrupted lock was not recovered"
+  [ ! -e "$lock" ] || fail "recovered ownerless lock was not released"
+  before=$(shasum -a 256 "$page" | awk '{print $1}')
+  mkdir "$lock"
   printf '{}\n' > "$lock/owner.json"
   set +e
   out=$(run_logbook "$home" update --mission "Writer mission" --input "$update" 2>&1)
@@ -272,7 +269,37 @@ test_one_live_writer_refuses_a_competing_update() {
   assert_contains "$out" "another logbook writer is active" "writer refusal did not name the conflict"
   [ "$(shasum -a 256 "$page" | awk '{print $1}')" = "$before" ] || fail "competing writer changed the page"
   rm -rf "$lock"
-  pass "one live writer owns each mutation"
+  pass "ownerless interrupted locks recover while live writers retain ownership"
+}
+
+test_start_recovers_an_unregistered_active_page() {
+  local home helper out page registration
+  home=$(make_home start-recovery)
+  helper="$home/fail-active-publication.sh"
+  cat > "$helper" <<'SH'
+#!/usr/bin/env bash
+if [ "$2" = publish ] && [ "$4" = data/logbook/active.json ]; then
+  exit 1
+fi
+exec python3 "$@"
+SH
+  chmod 700 "$helper"
+  set +e
+  out=$(FM_LOGBOOK_PYTHON="$helper" run_logbook "$home" start --mission "Interrupted start mission" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "fixture start unexpectedly published its registration"
+  page=$(page_for "$home")
+  registration="$home/data/logbook/active.json"
+  assert_present "$page" "interrupted start did not publish its page"
+  assert_absent "$registration" "interrupted start unexpectedly left a registration"
+  out=$(run_logbook "$home" start --mission "Interrupted start mission") || fail "retry did not recover the unregistered active page"
+  assert_contains "$out" "resumed: " "recovered start did not report the existing page"
+  assert_present "$registration" "recovered start did not restore the active registration"
+  jq -e --arg page "${page#"$home/"}" '.page == $page' "$registration" >/dev/null \
+    || fail "recovered start registered a different page"
+  run_logbook "$home" active | grep -q '^active: Interrupted start mission$' || fail "recovered start did not restore an active mission"
+  pass "start retries register an already-published active page"
 }
 
 test_vanished_writer_lock_retries_claim() {
@@ -452,6 +479,7 @@ test_large_retained_history_remains_readable_and_mutable
 test_path_like_mission_is_confined
 test_symlinked_mission_directory_is_refused
 test_one_live_writer_refuses_a_competing_update
+test_start_recovers_an_unregistered_active_page
 test_vanished_writer_lock_retries_claim
 test_duplicate_update_is_refused
 test_non_immediate_duplicate_update_is_refused

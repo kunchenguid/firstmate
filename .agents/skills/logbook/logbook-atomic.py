@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import errno
 import os
 import stat
 import sys
@@ -112,12 +113,49 @@ def create_directory(home, relative):
 
 def claim_directory(home, relative):
     parent, name = parent_and_name(home, relative)
+    temporary = f".{name}.{os.getpid()}.{os.urandom(8).hex()}.tmp"
+    lock_fd = None
+    owner_fd = None
     try:
+        os.mkdir(temporary, 0o700, dir_fd=parent)
+        lock_fd = os.open(temporary, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+        owner_fd = os.open("owner.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=lock_fd)
+        while chunk := sys.stdin.buffer.read(65536):
+            offset = 0
+            while offset < len(chunk):
+                offset += os.write(owner_fd, chunk[offset:])
+        os.fsync(owner_fd)
+        os.close(owner_fd)
+        owner_fd = None
+        os.fsync(lock_fd)
+        os.close(lock_fd)
+        lock_fd = None
         try:
-            os.mkdir(name, 0o700, dir_fd=parent)
-        except FileExistsError as error:
-            raise Exists() from error
+            os.rename(temporary, name, src_dir_fd=parent, dst_dir_fd=parent)
+        except OSError as error:
+            if error.errno in (errno.EEXIST, errno.ENOTEMPTY):
+                raise Exists() from error
+            raise
         os.fsync(parent)
+    except BaseException:
+        if owner_fd is not None:
+            os.close(owner_fd)
+        if lock_fd is not None:
+            os.close(lock_fd)
+        temporary_fd = None
+        try:
+            temporary_fd = os.open(temporary, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            os.unlink("owner.json", dir_fd=temporary_fd)
+        except OSError:
+            pass
+        finally:
+            if temporary_fd is not None:
+                os.close(temporary_fd)
+        try:
+            os.rmdir(temporary, dir_fd=parent)
+        except OSError:
+            pass
+        raise
     finally:
         os.close(parent)
 

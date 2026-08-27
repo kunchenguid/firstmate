@@ -352,7 +352,7 @@ function relativePath(home, file) {
 function confinedResult(command, home, file, content) {
   return spawnSync(process.env.FM_LOGBOOK_PYTHON || "python3", [atomicHelper(), command, home, relativePath(home, file)], {
     input: content,
-    encoding: "buffer",
+    encoding: null,
     maxBuffer: Infinity,
   });
 }
@@ -364,13 +364,19 @@ function confinedFile(command, home, file, content) {
 }
 
 function claimConfinedDirectory(home, directory) {
-  const result = confinedResult("claim", home, directory);
+  const claim = `${JSON.stringify({
+    token: crypto.randomBytes(16).toString("hex"),
+    pid: process.pid,
+    claimed_at: new Date().toISOString(),
+  })}\n`;
+  const result = confinedResult("claim", home, directory, claim);
   if (result.status === 17) {
     const error = new Error("writer lock already exists");
     error.code = "EEXIST";
     throw error;
   }
   if (result.error || result.status !== 0) fail("confined writer lock operation failed");
+  return JSON.parse(claim).token;
 }
 
 function readJson(file, label, home, root) {
@@ -479,10 +485,9 @@ function acquireWriter(layout) {
   ensureDirectory(layout.data, layout.home);
   ensureDirectory(layout.root, layout.home);
   const owner = path.join(layout.lock, "owner.json");
-  const token = crypto.randomBytes(16).toString("hex");
+  let token;
   const claim = () => {
-    claimConfinedDirectory(layout.home, layout.lock);
-    writeAtomicContent(owner, `${JSON.stringify({ token, pid: process.pid, claimed_at: new Date().toISOString() })}\n`, layout.home, layout.root);
+    token = claimConfinedDirectory(layout.home, layout.lock);
   };
   while (true) {
     try {
@@ -501,7 +506,15 @@ function acquireWriter(layout) {
       if (stat.isSymbolicLink() || !stat.isDirectory()) fail(`unsafe writer lock: ${layout.lock}`);
       if (!fs.existsSync(owner)) {
         if (writerLockVanished(layout.lock)) continue;
-        fail("writer lock ownership is indeterminate");
+        const stale = `${layout.lock}.stale.${process.pid}.${crypto.randomBytes(4).toString("hex")}`;
+        try {
+          fs.renameSync(layout.lock, stale);
+        } catch (renameError) {
+          if (renameError.code === "ENOENT") continue;
+          throw renameError;
+        }
+        try { fs.rmSync(stale, { recursive: true, force: true }); } catch {}
+        continue;
       } else {
         const ownerValue = readWriterOwner(owner, layout.home, layout.root);
         if (!ownerValue) {
@@ -758,7 +771,19 @@ function commandStart(home, mission, input) {
     const template = process.env.FM_LOGBOOK_TEMPLATE || path.join(path.dirname(fileURLToPath(import.meta.url)), "assets", "logbook.html");
     if (!fs.existsSync(template) || fs.lstatSync(template).isSymbolicLink() || !fs.statSync(template).isFile()) fail(`logbook shell is missing: ${template}`);
     assertRegularOrAbsent(files.page, files.root);
-    if (fs.existsSync(files.page)) fail(`mission page already exists without an active registration: ${files.page}`);
+    if (fs.existsSync(files.page)) {
+      const payload = validatePayload(readEmbeddedPayload(files.page, files.home, files.root).payload, mission, files.missionId);
+      if (payload.status !== "active") fail(`mission page already exists without an active registration: ${files.page}`);
+      writeAtomicJson(files.registration, {
+        schema: REGISTRATION_SCHEMA,
+        mission_id: files.missionId,
+        mission,
+        page: relativeFromHome(home, files.page),
+        started_at: payload.started_at,
+      }, files.home, files.root);
+      process.stdout.write(`resumed: ${files.page}\nmission-id: ${files.missionId}\n`);
+      return;
+    }
     writeAtomicContent(files.page, buildPage(template, payload), files.home, files.root);
     const registration = {
       schema: REGISTRATION_SCHEMA,
