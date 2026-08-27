@@ -170,6 +170,7 @@ __FM_PROJECT_DASHBOARD_DATA__
       } else row.append(node("strong", "", itemTitle(item)));
       const note = itemNote(item);
       if (note) row.append(node("small", "", `${note}${item.owner ? ` · ${item.owner}` : ""}`));
+      else if (item.owner) row.append(node("small", "", item.owner));
       list.append(row);
     });
     panel.append(list);

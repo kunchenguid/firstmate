@@ -28,8 +28,10 @@
 # live task metadata, the way the canonical bearings gate list reads it, and an
 # invalid main backlog inventory is disclosed board-wide.
 # The (repo: ...) metadata on a backlog row is optional, so a row without it
-# follows its task to that task's project; main backlog rows and tasks that
-# reach no registered project at all are disclosed board-wide.
+# follows its task to that task's project; open main backlog rows and tasks that
+# reach no registered project at all are disclosed board-wide. A done row whose
+# task has been torn down carries no signal linking it to a project, so it is
+# left to the bounded landed history rather than reported as fleet incompleteness.
 # A done task whose backlog row is not yet done is disclosed in finished[] with
 # the crew detail repeated verbatim. That detail is the only local record of
 # what done means for the task, so the board never infers a lifecycle stage -
@@ -294,7 +296,7 @@ jq -n \
                     + " omitted by the bounded home read: " + (.count | tostring)),
            reveal:(if .surface == "landed" then "raise FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME"
                    elif .surface == "decisions_open" then "raise FM_SNAPSHOT_SECONDMATE_DECISIONS"
-                   elif .surface == "queued" then "raise FM_SNAPSHOT_SECONDMATE_QUEUED"
+                   elif .surface == "queued" or .surface == "holds" then "raise FM_SNAPSHOT_SECONDMATE_QUEUED"
                    else "raise FM_SNAPSHOT_SECONDMATE_CHILDREN" end)}),
        ($mate_owners[] as $owner
         | ([ $owner.projects[]
@@ -320,7 +322,7 @@ jq -n \
                           + " state is unavailable and reaches no project card") end),
            reveal:"record its projects in data/secondmates.md, or label the work with a registered repo"}),
        (([ $fleet_data.backlog.records[]?
-           | select(.structured == true)
+           | select(.structured == true and .state != "done")
            | . as $row
            | select(if ($row.repo // "") != ""
                     then ($registered_names | index($row.repo)) == null

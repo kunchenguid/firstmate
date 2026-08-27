@@ -1145,6 +1145,92 @@ test_main_state_reaching_no_registered_project_is_disclosed() {
   pass "main backlog rows and tasks that reach no registered project are disclosed"
 }
 
+test_secondmate_holds_truncation_is_disclosed() {
+  local home epoch out
+  home=$(make_home holds-truncation)
+  write_fleet_fixture "$home"
+  jq '
+    .secondmate_current.records |= map(
+      if .id == "delta-mate" then
+        .holds = [range(0;20) as $i | {id:("h" + ($i|tostring)),title:("Hold " + ($i|tostring)),
+          repo:"delta",reason:"Waiting on vendor"}]
+        | .counts = {active_children:1,decisions_open:0,holds:25,queued:0,landed:1,endpoints:1}
+        | .omitted = [{surface:"holds",count:5}]
+      else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "holds-truncation snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .disclosures | any(
+      .surface == "secondmate delta-mate holds omitted by the bounded home read: 5"
+      and .reveal == "raise FM_SNAPSHOT_SECONDMATE_QUEUED")
+  ' >/dev/null || fail "a truncated secondmate holds list was not disclosed: $out"
+  pass "a bounded secondmate holds read is disclosed with the bound that caused it"
+}
+
+test_home_summary_discloses_its_own_holds_truncation() {
+  local home summary
+  home="$TMP_ROOT/holds-producer"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  {
+    printf '# Backlog\n\n## In flight\n\n## Queued\n'
+    for i in $(seq 1 25); do
+      printf -- '- [ ] q%02d - Held item %02d (repo: alpha) (kind: ship) (hold: waiting on vendor) (hold-kind: external)\n' "$i" "$i"
+    done
+    printf '\n## Done\n'
+  } > "$home/data/backlog.md"
+  summary=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_SNAPSHOT_NOW=2026-08-26T00:00:00Z FM_SNAPSHOT_NOW_EPOCH=1787000000 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) \
+    || fail "secondmate home summary failed"
+  printf '%s' "$summary" | jq -e '
+    (.holds | length) == 20
+      and .counts.holds == 25
+      and (.omitted | any(.surface == "holds" and .count == 5))
+  ' >/dev/null || fail "the home summary truncated holds without disclosing the drop: $summary"
+  pass "the secondmate home summary discloses its own holds truncation"
+}
+
+test_torn_down_done_rows_do_not_raise_the_incomplete_banner() {
+  local home epoch out
+  home=$(make_home done-history)
+  write_fleet_fixture "$home"
+  : > "$home/state/a-now.meta"
+  : > "$home/state/a-now.status"
+  jq --arg home "$home" '
+    .backlog.records = [
+      {structured:true,id:"old1",repo:null,title:"Shipped last month",state:"done",hold_kind:null,
+       pr_url:"https://github.com/example/alpha/pull/9",completion:{date:"2026-08-20"}},
+      {structured:true,id:"a-now",repo:"alpha",title:"Current work",state:"in_flight",
+       since:"2020-01-01",captain_actionable:false,unresolved_blocker_ids:[]}]
+    | .tasks = [
+        {id:"a-now",kind:"ship",project:"alpha",
+         paths:{meta:{path:($home + "/state/a-now.meta"),present:true},
+                status_log:{path:($home + "/state/a-now.status"),present:true},
+                worktree:{path:null,present:false},home:{path:null,present:false},report:{path:null,present:false}},
+         secondmate_projects:[],current_state:{state:"working",source:"fixture",detail:"Building"},
+         hints:{open_decisions:[]},pr:{url:null},backlog:{id:"a-now",repo:"alpha",title:"Current work"}}]
+    | .secondmate_current.records = []
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "done-history snapshot failed"
+  printf '%s' "$out" | jq -e '.disclosures == []' >/dev/null \
+    || fail "torn-down done history raised the fleet-incomplete banner: $out"
+
+  jq '.backlog.records |= map(if .id == "old1" then .state = "queued" | .since = "2020-01-01"
+        | .captain_actionable = false | .unresolved_blocker_ids = [] else . end)' \
+    "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  out=$(run_snapshot "$home" "$epoch") || fail "open-row snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .disclosures | any(.surface == "main backlog rows that reach no registered project: 1")
+  ' >/dev/null || fail "an open unreachable backlog row stopped being disclosed: $out"
+  pass "only open backlog rows a reader can act on raise the incomplete banner"
+}
+
 extract_payload() {  # <board>
   sed -n '/<script id="project-dashboard-data" type="application\/json">/,/<\/script>/p' "$1" | sed '1d;$d'
 }
@@ -1224,7 +1310,11 @@ const result = {
     project: c.dataset.project,
     meta: (c.querySelector(".pd-detail-meta") || { text: () => "" }).text(),
     warn: c.querySelectorAll(".pd-meta-warn").map(w => w.text()),
-    panels: c.querySelectorAll(".pd-panel").map(panel => (panel.children[0] || { textContent: "" }).textContent)
+    panels: c.querySelectorAll(".pd-panel").map(panel => (panel.children[0] || { textContent: "" }).textContent),
+    items: c.querySelectorAll(".pd-panel").map(panel => ({
+      title: (panel.children[0] || { textContent: "" }).textContent,
+      rows: panel.querySelectorAll(".pd-item").map(r => r.text().trim())
+    }))
   }))
 };
 if (wantSelected !== undefined && JSON.stringify(selected) !== JSON.stringify(wantSelected === "" ? [] : [wantSelected])) {
@@ -1277,6 +1367,11 @@ test_board_renders_every_card_and_its_disclosures() {
 
   out=$(node "$driver" "$board" "#delta" "delta") \
     || fail "the board did not expand the requested project: $out"
+  printf '%s' "$out" | jq -e '
+    .meta[] | select(.project == "alpha") | .items[]
+    | select(.title == "Pull requests") | .rows
+    | any(contains("Alpha shipped") and contains("main"))
+  ' >/dev/null || fail "a note-less item lost its owner attribution: $out"
   pass "the board renders every card, its disclosures, and survives a malformed fragment"
 }
 
@@ -1387,6 +1482,9 @@ test_invalid_main_inventory_is_disclosed
 test_stranded_count_counts_each_row_once
 test_repo_less_backlog_row_follows_its_task
 test_main_state_reaching_no_registered_project_is_disclosed
+test_secondmate_holds_truncation_is_disclosed
+test_home_summary_discloses_its_own_holds_truncation
+test_torn_down_done_rows_do_not_raise_the_incomplete_banner
 test_attention_next_step_is_an_action_not_a_bare_title
 test_unattributable_secondmate_state_is_disclosed
 test_registered_secondmate_without_a_task_still_owns_its_projects
