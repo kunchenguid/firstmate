@@ -47,7 +47,8 @@
 #     within STALE_ESCALATE_SECS + a tick, never lost. A declared wait - either a
 #     paused: external wait or a verified captain-held transfer, per
 #     fm-classify-lib.sh's combined predicate - instead gets its own longer
-#     PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
+#     PAUSE_RESURFACE_SECS recheck, never a wedge escalation, on the same
+#     backing-off cadence the attended watcher uses (fm-classify-lib.sh owns it).
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
@@ -93,7 +94,14 @@
 #                                   as a possible wedge (default 240)
 #          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared wait (external
 #                                   or captain-held) re-surfaces as a recheck
-#                                   (default 3600)
+#                                   (default 3600); each recheck that finds the
+#                                   wait unchanged doubles the next window, and
+#                                   any change in its evidence resets it
+#          FM_PAUSE_RESURFACE_MAX_SECS
+#                                   cap on that widening recheck window (default
+#                                   43200). The per-wait backoff record is
+#                                   state/.subsuper-pause-backoff-<key>, retired
+#                                   with its pause marker.
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
 #          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan
@@ -163,6 +171,11 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # Canonical construction and parsing for every Firstmate operational input.
 # shellcheck source=bin/fm-operational-input.sh
 . "$FM_DAEMON_DIR/fm-operational-input.sh"
+
+# Shared wake queue and portable lock helpers used by the publication owner in
+# the classifier below as well as the executed daemon loop.
+# shellcheck source=bin/fm-wake-lib.sh
+. "$FM_DAEMON_DIR/fm-wake-lib.sh"
 
 # Shared wake classifier (last_status_line, status_is_captain_relevant,
 # window_to_task, scan_captain_relevant_statuses). The SAME library backs the
@@ -452,8 +465,11 @@ stale_marker_remove() {  # <window> <state>
 
 # Pause marker: state/.subsuper-paused-<key> holds the epoch a declared wait (a
 # paused: external wait or a verified captain-held transfer) was first observed
-# idle. Housekeeping ages it against PAUSE_RESURFACE_SECS (much longer than a
-# wedge) and re-surfaces the wait once per window. Recording is create-if-absent
+# idle. Housekeeping ages it against the wait's current recheck window
+# (PAUSE_RESURFACE_SECS, backed off per consecutive unchanged recheck through the
+# shared cadence owner and recorded in state/.subsuper-pause-backoff-<key>, which
+# is retired with this marker) and re-surfaces the wait once per window.
+# Recording is create-if-absent
 # so the timestamp is stable across a churny idle pane (many
 # distinct stale hashes map to one marker), keeping the cadence hash-immune.
 pause_marker_record() {  # <window> <state> - create if absent
@@ -466,7 +482,18 @@ pause_marker_record() {  # <window> <state> - create if absent
 pause_marker_remove() {  # <window> <state>
   local win=$1 state=$2 key
   key=$(_stale_key "$(window_to_task "$win" "$state")")
-  rm -f "$state/.subsuper-paused-$key"
+  rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-pause-backoff-$key"
+}
+
+# The monitored evidence one declared wait's recheck is measured against. Any
+# change resets its backoff to the base cadence, exactly as in the attended
+# watcher: the recheck the captain would read is no longer the one already sent.
+pause_backoff_signature() {  # <state> <task>
+  local state=$1 task=$2
+  fm_pause_recheck_signature "$(printf '%s|%s|%s|%s' "$task" \
+    "$(last_status_line "$state/$task.status")" \
+    "$(_stat_file_mtime "$state/$task.status")" \
+    "$(_stat_file_mtime "$state/$task.meta")")"
 }
 
 clear_pause_tracking() {  # <window> <state>
@@ -474,7 +501,7 @@ clear_pause_tracking() {  # <window> <state>
   task=$(window_to_task "$win" "$state")
   key=$(_stale_key "$task")
   watcher_key=$(_stale_key "$win")
-  rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-stale-$key" \
+  rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-pause-backoff-$key" "$state/.subsuper-stale-$key" \
     "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key" \
     "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key" \
     "$state/.writing-since-$watcher_key" "$state/.writing-resurfaced-$watcher_key"
@@ -622,20 +649,23 @@ task_window_harness() {  # <window> <state>
   grep '^harness=' "$meta" 2>/dev/null | cut -d= -f2- || true
 }
 
-# stale_window_is_busy: 0 when the task is PROVABLY working through the
-# semantic busy-state contract (bin/fm-busy-lib.sh), 1 when it is not, and 2
-# when the endpoint could not be read at all. Only an exact busy verdict is
-# working: unknown semantic state never becomes busy and never becomes a
-# silent idle, so a stale pane whose state cannot be proven surfaces.
+# stale_window_is_busy: 0 when the task is provably busy, 1 when it is
+# provably idle or dead, 2 when the endpoint cannot be read, and 3 when the
+# semantic classifier cannot decide.
 stale_window_is_busy() {  # <window> <state>
-  local win=$1 state=$2 backend harness label task tail40 verdict
+  local win=$1 state=$2 backend harness label task tail40 verdict state_word
   backend=$(task_window_backend "$win" "$state")
   harness=$(task_window_harness "$win" "$state")
   task=$(window_to_task "$win" "$state")
   label="fm-$task"
   tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
   verdict=$(fm_busy_classify "$backend" "$win" "$harness" "$task" "$state" "$tail40")
-  [ "${verdict%% *}" = busy ]
+  state_word=${verdict%% *}
+  case "$state_word" in
+    busy) return 0 ;;
+    idle|dead) return 1 ;;
+    *) return 3 ;;
+  esac
 }
 
 escalate_add() {  # <state> <distilled-item>
@@ -959,16 +989,20 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     Never silently defer forever.
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
-#  2b) pause re-surface: for each declared-wait marker past PAUSE_RESURFACE_SECS,
-#     re-peek; busy/gone -> clear; still idle + still declaring the wait -> escalate
-#     a recheck digest naming which human the wait is on, and reset the window
-#     (repeating bounded re-surface, never a wedge).
+#  2b) pause re-surface: for each declared-wait marker past its current recheck
+#     window (PAUSE_RESURFACE_SECS, doubled per consecutive unchanged recheck up to
+#     FM_PAUSE_RESURFACE_MAX_SECS), re-peek; busy/gone -> clear; still idle + still
+#     declaring the wait -> escalate a recheck digest naming which human the wait is
+#     on, and reset the window (repeating bounded re-surface, never a wedge).
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
   local state=$1 now due f key task win marker age last max_defer oldest pause_secs
+  local pause_max backoff_file backoff_sig backoff_streak recheck_window worker_status worker_condition
+  local pause_items='' pause_records='' pause_item
   now=$(_now)
   migrate_watcher_pause_markers "$state"
+  fm_pause_publish_recover "$state" || return 1
 
   # (1) batch flush
   if [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ]; then
@@ -1037,13 +1071,17 @@ housekeeping() {  # <state>
   # reset the marker so the window repeats. The digest names WHICH human the wait is
   # on, because the captain is the one reading it: an external dependency for a
   # paused: declaration, and the captain themself for a verified hold transfer.
+  # Consecutive rechecks that find one wait unchanged back off through the shared
+  # cadence owner (fm-classify-lib.sh), and the daemon's own escalation buffer
+  # already collapses every wait that comes due in the same tick into one digest.
   pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+  pause_max=${FM_PAUSE_RESURFACE_MAX_SECS:-$FM_PAUSE_RESURFACE_MAX_SECS_DEFAULT}
   for marker in "$state"/.subsuper-paused-*; do
     [ -e "$marker" ] || continue
     key="${marker##*.subsuper-paused-}"
     win=$(window_for_task "$key" "$state" 2>/dev/null || true)
     if [ -z "$win" ]; then
-      rm -f "$marker"; continue
+      rm -f "$marker" "$state/.subsuper-pause-backoff-$key"; continue
     fi
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
@@ -1053,24 +1091,42 @@ housekeeping() {  # <state>
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "$pause_secs" ] || continue
+    backoff_file="$state/.subsuper-pause-backoff-$key"
+    backoff_sig=$(pause_backoff_signature "$state" "$task")
     stale_window_is_busy "$win" "$state"
-    case "$?" in
-      0) rm -f "$marker" ;;
-      2) rm -f "$marker" ;;
+    worker_status=$?
+    case "$worker_status" in
+      0) worker_condition=busy ;;
+      1) worker_condition=idle ;;
+      *) worker_condition=unknown ;;
+    esac
+    worker_condition=$(fm_pause_recheck_condition "$backoff_file" "$worker_condition")
+    backoff_streak=$(fm_pause_recheck_streak "$backoff_file" "$backoff_sig" "$worker_condition")
+    recheck_window=$(fm_pause_recheck_interval "$backoff_streak" "$pause_secs" "$pause_max")
+    [ "$age" -ge "$recheck_window" ] || continue
+    case "$worker_status" in
+      0) rm -f "$marker" "$backoff_file" ;;
       *)
         last=$(last_status_line "$state/$task.status")
         if [ -n "$last" ] && status_is_captain_held "$last"; then
-          escalate_add "$state" "captain-held ${age}s (awaiting the captain, answer the held decision or release the hold): $win"
-          _now > "$marker"
+          pause_item="captain-held ${age}s (awaiting the captain, answer the held decision or release the hold): $win"
+          pause_items="$pause_items$pause_item"$'\n'
+          printf -v pause_records '%sR\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$pause_records" "$backoff_file" "$(( backoff_streak + 1 ))" "$backoff_sig" \
+            "$worker_condition" "$marker" "$now"
         elif [ -n "$last" ] && status_is_paused "$last"; then
-          escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
-          _now > "$marker"
+          pause_item="paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
+          pause_items="$pause_items$pause_item"$'\n'
+          printf -v pause_records '%sR\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$pause_records" "$backoff_file" "$(( backoff_streak + 1 ))" "$backoff_sig" \
+            "$worker_condition" "$marker" "$now"
         else
-          rm -f "$marker"
+          rm -f "$marker" "$backoff_file"
         fi
         ;;
     esac
   done
+  fm_pause_publish_buffer "$state" "$pause_items" "$pause_records" || return 1
 
   # (3) heartbeat scan (catch-all for a captain-relevant status the per-wake
   #     classifier may have missed). Cheap: status files only, no tmux. The
@@ -1349,11 +1405,6 @@ fm_super_main() {
   local STATE
   STATE="$(_state_root)"
   mkdir -p "$STATE"
-
-  # Source the portable lock helpers (works on macOS where flock is absent).
-  # Export FM_STATE_OVERRIDE so the lib resolves the same state dir.
-  # shellcheck source=bin/fm-wake-lib.sh
-  FM_STATE_OVERRIDE="$STATE" . "$FM_DAEMON_DIR/fm-wake-lib.sh"
 
   local WATCH="$FM_DAEMON_DIR/fm-watch.sh"
   local LOG="$STATE/.supervise-daemon.log"

@@ -20,6 +20,8 @@ set -u
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 # shellcheck source=/dev/null
+. "$ROOT/bin/fm-wake-lib.sh"
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
@@ -991,6 +993,381 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the paused re-surface failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "paused re-surface was not queued"
   pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
+}
+
+# --- declared-wait recheck cadence: capped backoff, batching, and publication --
+# The live 2026-08-24/26 case: three superseded crews each declared the SAME
+# bounded external wait while their replacement PRs sat awaiting a merge decision.
+# Every window re-surfaced independently once an hour forever, and because each
+# wake ends the supervision cycle the successor immediately delivered the next
+# overdue sibling - a three-turn burst every hour, around the clock, each turn
+# carrying no new information. The recheck itself must stay (a forgotten wait
+# cannot rot invisibly), so the fix is cadence, not removal: consecutive unchanged
+# rechecks back off to a bounded maximum, and siblings that come due together are
+# delivered as one wake and one turn.
+
+# Seed one declared-wait task: meta, a status line whose write time is <age>
+# seconds old (the pause anchor), its .seen-* suppressor primed so the signal scan
+# stays out of the stale path, and the stale bookkeeping one poll short of stable.
+seed_declared_wait() {  # <state> <task> <window> <status-line> <status-age-secs> <pane-text>
+  local state=$1 task=$2 window=$3 line=$4 age=$5 pane=$6 key statusf
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/$task.meta"
+  statusf="$state/$task.status"
+  printf '%s\n' "$line" > "$statusf"
+  set_mtime "$(( $(date +%s) - age ))" "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-${task}_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text "$pane")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+}
+
+# Run one watcher over a declared-wait fixture and report what it did:
+# 0 when it delivered a wake (the process exited), 1 when it absorbed the poll.
+# The caller's extra settings run through `env`, because an assignment that
+# arrives through "$@" is a command word rather than a shell assignment.
+run_pause_watcher() {  # <state> <fakebin> <window> <capture> <out> [env assignments...]
+  local state=$1 fakebin=$2 window=$3 capture=$4 out=$5 pid rc
+  shift 5
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    env "$@" "$WATCH" > "$out" &
+  pid=$!
+  if wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"
+    rc=1
+  else
+    wait "$pid" 2>/dev/null || true
+    rc=0
+  fi
+  ack_stopped_cycle "$state" || fail "could not acknowledge the watcher cycle for $window"
+  return "$rc"
+}
+
+# The cadence contract itself, through the shared owner both supervision paths
+# read (fm-classify-lib.sh): the first recheck lands on the base window, each
+# consecutive unchanged recheck doubles it, and the cap bounds a mature wait.
+test_pause_recheck_cadence_contract() {
+  local sig other f cap
+  [ "$(fm_pause_recheck_interval 0 3600 43200)" = 3600 ] || fail "the first recheck window is not the base cadence"
+  [ "$(fm_pause_recheck_interval 1 3600 43200)" = 7200 ] || fail "the second recheck window did not double"
+  [ "$(fm_pause_recheck_interval 2 3600 43200)" = 14400 ] || fail "the third recheck window did not double"
+  [ "$(fm_pause_recheck_interval 3 3600 43200)" = 28800 ] || fail "the fourth recheck window did not double"
+  [ "$(fm_pause_recheck_interval 4 3600 43200)" = 43200 ] || fail "the fifth recheck window did not reach the cap"
+  [ "$(fm_pause_recheck_interval 9 3600 43200)" = 43200 ] || fail "a mature wait exceeded the cap"
+  [ "$(fm_pause_recheck_interval 60 3600 43200)" = 43200 ] || fail "an extreme streak overflowed past the cap"
+  # The shipped default keeps a mature unchanged wait at no more than two
+  # rechecks a day while the first one still lands on the base cadence.
+  cap=$(fm_pause_recheck_interval 99 "$FM_PAUSE_RESURFACE_SECS_DEFAULT" "$FM_PAUSE_RESURFACE_MAX_SECS_DEFAULT")
+  [ "$(( 86400 / cap ))" -le 2 ] || fail "the default cap allows more than two rechecks a day for a mature wait"
+  [ "$(fm_pause_recheck_interval 0 "$FM_PAUSE_RESURFACE_SECS_DEFAULT" "$FM_PAUSE_RESURFACE_MAX_SECS_DEFAULT")" = 3600 ] \
+    || fail "the default first recheck is no longer the one-hour check"
+  # Malformed or inverted configuration degrades to a usable window, never to 0
+  # (which would recheck every poll) or to a silent wait.
+  [ "$(fm_pause_recheck_interval x 3600 43200)" = 3600 ] || fail "a malformed streak did not fall back to the base window"
+  [ "$(fm_pause_recheck_interval 3 240 120)" = 240 ] || fail "a cap below the base did not clamp to the base"
+  [ "$(fm_pause_recheck_interval 1 '' '')" = 7200 ] || fail "blank cadence settings did not fall back to the defaults"
+
+  f=$(mktemp "$TMP_ROOT/pause-record.XXXXXX")
+  sig=$(fm_pause_recheck_signature 'paused, awaiting external|held.status|1700000000')
+  other=$(fm_pause_recheck_signature 'paused, awaiting external|held.status|1700009999')
+  [ -n "$sig" ] || fail "an evidence signature was empty"
+  [ "$sig" = "$(fm_pause_recheck_signature 'paused, awaiting external|held.status|1700000000')" ] \
+    || fail "the same evidence produced two different signatures"
+  [ "$sig" != "$other" ] || fail "changed evidence produced the same signature"
+  [ "$(fm_pause_recheck_streak "$f" "$sig")" = 0 ] || fail "an empty record did not read as no rechecks yet"
+  fm_pause_recheck_record 4 "$sig" busy > "$f"
+  [ "$(fm_pause_recheck_streak "$f" "$sig" busy)" = 4 ] || fail "a published record did not read its own streak back"
+  [ "$(fm_pause_recheck_streak "$f" "$sig" idle)" = 0 ] || fail "a changed worker condition did not reset the streak"
+  [ "$(fm_pause_recheck_condition "$f" unknown)" = busy ] || fail "an unknown worker read did not retain the last known condition"
+  [ "$(fm_pause_recheck_streak "$f" "$sig" "$(fm_pause_recheck_condition "$f" unknown)")" = 4 ] \
+    || fail "an unknown worker read reset an unchanged wait"
+  [ "$(fm_pause_recheck_streak "$f" "$other" busy)" = 0 ] || fail "changed evidence did not reset the streak"
+  date +%s > "$f"
+  [ "$(fm_pause_recheck_streak "$f" "$sig")" = 0 ] || fail "a legacy epoch marker was read as a backoff streak"
+  [ "$(fm_pause_recheck_streak "$TMP_ROOT/absent-record" "$sig")" = 0 ] || fail "an absent record did not read as no rechecks yet"
+  rm -f "$f"
+  pass "the shared recheck cadence doubles per unchanged recheck, caps, and resets on changed evidence"
+}
+
+# End to end: an unchanged wait is rechecked on a widening window (240s, 480s,
+# 960s, then the 960s cap), never on the base cadence forever.
+test_pause_recheck_backs_off_and_caps() {
+  local dir state fakebin out capture window key now
+  dir=$(make_case pause-recheck-backoff); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"
+  window="test:fm-backoff"
+  printf 'idle, awaiting the merge decision' > "$capture"
+  seed_declared_wait "$state" backoff "$window" \
+    'paused: superseded by the replacement PR; no worker action until it lands' 100000 \
+    'idle, awaiting the merge decision'
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the replacement PR'
+
+  run_pause_watcher "$state" "$fakebin" "$window" "$capture" "$out" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_RESURFACE_MAX_SECS=960 \
+    || fail "the first recheck did not land on the base cadence: $(cat "$out")"
+  grep -F "awaiting external" "$out" >/dev/null || fail "the first recheck was not a declared-wait recheck: $(cat "$out")"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the first recheck published no backoff record"
+
+  # 300s later: past the base window, inside the doubled one - stays quiet.
+  now=$(date +%s)
+  set_mtime "$(( now - 300 ))" "$state/.paused-resurfaced-$key"
+  run_pause_watcher "$state" "$fakebin" "$window" "$capture" "$out" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_RESURFACE_MAX_SECS=960 \
+    && fail "an unchanged wait was rechecked again on the base cadence instead of backing off: $(cat "$out")"
+
+  # 500s later: past the doubled window - one recheck.
+  now=$(date +%s)
+  set_mtime "$(( now - 500 ))" "$state/.paused-resurfaced-$key"
+  run_pause_watcher "$state" "$fakebin" "$window" "$capture" "$out" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_RESURFACE_MAX_SECS=960 \
+    || fail "the doubled recheck window never came due: $(cat "$out")"
+  grep -F "awaiting external" "$out" >/dev/null || fail "the second recheck was not a declared-wait recheck: $(cat "$out")"
+
+  # 800s later: inside the twice-doubled window - still quiet.
+  now=$(date +%s)
+  set_mtime "$(( now - 800 ))" "$state/.paused-resurfaced-$key"
+  run_pause_watcher "$state" "$fakebin" "$window" "$capture" "$out" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_RESURFACE_MAX_SECS=960 \
+    && fail "the recheck window stopped widening after one doubling: $(cat "$out")"
+
+  # 1000s later: past the 960s cap - one recheck.
+  now=$(date +%s)
+  set_mtime "$(( now - 1000 ))" "$state/.paused-resurfaced-$key"
+  run_pause_watcher "$state" "$fakebin" "$window" "$capture" "$out" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_RESURFACE_MAX_SECS=960 \
+    || fail "the capped recheck window never came due: $(cat "$out")"
+
+  # The next window would be 1920s uncapped; at 1000s past it must still fire,
+  # which is what proves the cap bounds the backoff instead of doubling forever.
+  now=$(date +%s)
+  set_mtime "$(( now - 1000 ))" "$state/.paused-resurfaced-$key"
+  run_pause_watcher "$state" "$fakebin" "$window" "$capture" "$out" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_RESURFACE_MAX_SECS=960 \
+    || fail "the backoff kept doubling past its cap: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a backed-off recheck was mislabeled a possible wedge"
+  unset FM_FAKE_CREW_STATE
+  pass "consecutive unchanged declared-wait rechecks back off to the configured cap instead of repeating on the base cadence"
+}
+
+# A wait whose monitored evidence changes is a different question for the captain,
+# so its backoff resets to the base cadence at once; a wait the crew leaves retires
+# its cadence state entirely.
+test_pause_recheck_resets_and_retires() {
+  local dir state fakebin out capture window key now statusf
+  dir=$(make_case pause-recheck-reset); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"
+  window="test:fm-reset"
+  statusf="$state/reset.status"
+  printf 'idle, awaiting the merge decision' > "$capture"
+  seed_declared_wait "$state" reset "$window" \
+    'paused: awaiting the upstream release' 100000 'idle, awaiting the merge decision'
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
+
+  run_pause_watcher "$state" "$fakebin" "$window" "$capture" "$out" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_RESURFACE_MAX_SECS=960 \
+    || fail "the first recheck of a fresh wait never fired: $(cat "$out")"
+
+  now=$(date +%s)
+  set_mtime "$(( now - 300 ))" "$state/.paused-resurfaced-$key"
+  run_pause_watcher "$state" "$fakebin" "$window" "$capture" "$out" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_RESURFACE_MAX_SECS=960 \
+    && fail "the unchanged wait did not back off before the reset case: $(cat "$out")"
+
+  # Same 300s-old throttle, but the wait now says something different: the
+  # captain-facing question changed, so the base cadence applies again.
+  printf 'paused: now awaiting the vendor rate-limit reset\n' > "$statusf"
+  set_mtime "$(( now - 90000 ))" "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-reset_status"
+  set_mtime "$(( now - 300 ))" "$state/.paused-resurfaced-$key"
+  run_pause_watcher "$state" "$fakebin" "$window" "$capture" "$out" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_RESURFACE_MAX_SECS=960 \
+    || fail "a changed wait reason did not reset the backoff to the base cadence: $(cat "$out")"
+  grep -F "awaiting external" "$out" >/dev/null || fail "the reset recheck was not a declared-wait recheck: $(cat "$out")"
+
+  # The crew leaves the wait: the cadence state is retired with the rest of the
+  # pause bookkeeping, so a later wait starts from a clean base cadence.
+  printf 'working: the upstream landed, resuming\n' > "$statusf"
+  set_mtime "$(( now - 90000 ))" "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-reset_status"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  run_pause_watcher "$state" "$fakebin" "$window" "$capture" "$out" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_RESURFACE_MAX_SECS=960 || true
+  [ ! -e "$state/.paused-resurfaced-$key" ] || fail "cadence state survived the end of the wait"
+  [ ! -e "$state/.paused-$key" ] || fail "pause tracking survived the end of the wait"
+  unset FM_FAKE_CREW_STATE
+  pass "a changed wait resets the recheck cadence immediately and a finished wait retires its cadence state"
+}
+
+# Three crews blocked on the same merge decision cost ONE notification and one
+# model turn, naming every wait, instead of one wake each.
+test_sibling_pause_rechecks_batch_into_one_wake() {
+  local dir state fakebin out drain_out capture w1 w2 w3 k1 k2 k3 staleq pid
+  dir=$(make_case pause-recheck-batch); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture="$dir/pane.txt"
+  w1="test:fm-sib1"; w2="test:fm-sib2"; w3="test:fm-sib3"
+  printf 'idle, awaiting the merge decision' > "$capture"
+  seed_declared_wait "$state" sib1 "$w1" 'paused: superseded by the backend replacement PR' 100000 'idle, awaiting the merge decision'
+  seed_declared_wait "$state" sib2 "$w2" 'paused: superseded by the crm replacement PR' 100000 'idle, awaiting the merge decision'
+  seed_declared_wait "$state" sib3 "$w3" 'captain-held [key=merge]: tracked by task-merge-decision' 100000 'idle, awaiting the merge decision'
+  k1=$(printf '%s' "$w1" | tr ':/.' '___')
+  k2=$(printf '%s' "$w2" | tr ':/.' '___')
+  k3=$(printf '%s' "$w3" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the merge decision'
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$w1" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_RESURFACE_MAX_SECS=960 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "sibling declared waits never came due"; }
+  [ "$(grep -c '' "$out")" -eq 1 ] || fail "sibling rechecks printed more than one wake reason: $(cat "$out")"
+  grep -F "$w1" "$out" >/dev/null || fail "the batched recheck did not name the first wait: $(cat "$out")"
+  grep -F "$w2" "$out" >/dev/null || fail "the batched recheck did not name the second wait: $(cat "$out")"
+  grep -F "$w3" "$out" >/dev/null || fail "the batched recheck did not name the third wait: $(cat "$out")"
+  grep -F "awaiting external" "$out" >/dev/null || fail "the batched recheck lost the external-wait wording: $(cat "$out")"
+  grep -F "awaiting the captain" "$out" >/dev/null || fail "the batched recheck lost the captain-held wording: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a batched recheck was mislabeled a possible wedge"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the batched recheck failed"
+  staleq=$(grep -c "$(printf '\tstale\t')" "$drain_out" || true)
+  [ "$staleq" -eq 1 ] || fail "three sibling waits queued $staleq wakes instead of one"
+  [ -e "$state/.paused-resurfaced-$k1" ] || fail "the first sibling's cadence record was not published"
+  [ -e "$state/.paused-resurfaced-$k2" ] || fail "the second sibling's cadence record was not published"
+  [ -e "$state/.paused-resurfaced-$k3" ] || fail "the third sibling's cadence record was not published"
+  [ ! -e "$state/.paused-recheck-publish" ] || fail "the batched publication journal was left behind"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the batched recheck"
+
+  # Every sibling advanced together, so the immediate next pass is silent - the
+  # old behavior delivered the next overdue sibling right after the first wake.
+  run_pause_watcher "$state" "$fakebin" "$w1" "$capture" "$out" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_RESURFACE_MAX_SECS=960 \
+    && fail "a sibling wait was delivered again right after the batch: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "sibling declared waits that come due together are batched into one wake naming each of them"
+}
+
+# Batching a declared wait must never hold back a genuinely actionable condition,
+# and an interrupted pass must not half-publish the batch it was collecting.
+test_unrelated_stale_is_not_delayed_by_a_due_recheck() {
+  local dir state fakebin out capture wpause wstop kpause pid
+  dir=$(make_case pause-recheck-unrelated); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"
+  wpause="test:fm-await"; wstop="test:fm-stopped"
+  printf 'idle prompt, finished' > "$capture"
+  # The declared wait's task record sorts BEFORE the stopped crew's, so the
+  # watcher registers the due recheck first and must still deliver the stopped
+  # crew's wake in that same pass rather than holding it for the batch.
+  seed_declared_wait "$state" await1 "$wpause" 'paused: awaiting the merge decision' 100000 'idle prompt, finished'
+  seed_declared_wait "$state" stopped1 "$wstop" 'working: implementing' 100000 'idle prompt, finished'
+  kpause=$(printf '%s' "$wpause" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE_await1='state: paused · source: status-log · awaiting the merge decision'
+  export FM_FAKE_CREW_STATE_stopped1='state: unknown · source: none · no current-state source available'
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$wpause" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_RESURFACE_MAX_SECS=960 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a stopped crew was delayed behind a due declared-wait recheck"; }
+  grep -F "stale: $wstop" "$out" >/dev/null || fail "the stopped crew was not surfaced immediately: $(cat "$out")"
+  [ ! -e "$state/.paused-recheck-publish" ] || fail "an interrupted pass left a publication journal behind"
+  [ ! -e "$state/.paused-resurfaced-$kpause" ] || fail "an undelivered recheck advanced its cadence record anyway"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the immediate stopped-crew wake"
+
+  # The recheck was neither delivered nor consumed, so the next pass still owes it.
+  run_pause_watcher "$state" "$fakebin" "$wpause" "$capture" "$out" \
+    FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_RESURFACE_MAX_SECS=960 \
+    || fail "the declared-wait recheck was lost after an unrelated wake took the cycle: $(cat "$out")"
+  grep -F "awaiting external" "$out" >/dev/null || fail "the deferred recheck lost its declared-wait wording: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE_await1 FM_FAKE_CREW_STATE_stopped1
+  pass "an unrelated stopped crew wakes immediately while a due recheck waits for the next pass, with nothing half-published"
+}
+
+# A watcher interrupted between committing a batch's publication and writing its
+# records finishes that one publication on restart: applied exactly once, never
+# re-delivered, and never left half-advanced.
+test_interrupted_recheck_publication_is_repaired_on_restart() {
+  local dir state fakebin out capture window key sig record now target
+  dir=$(make_case pause-recheck-replay); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"
+  window="test:fm-replay"
+  printf 'idle, awaiting the merge decision' > "$capture"
+  seed_declared_wait "$state" replay "$window" 'paused: awaiting the merge decision' 100000 'idle, awaiting the merge decision'
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the merge decision'
+
+  sig=$(fm_pause_recheck_signature 'interrupted-publication-evidence')
+  record=$(fm_pause_recheck_record 3 "$sig" idle)
+  target=$(( $(cat "$state/.wake-queue.seq" 2>/dev/null || echo 0) + 1 ))
+  printf 'pause-publish-v2\ttest-replay\nQ\t%s\tstale\t%s\t%s\nR\t%s\t3\t%s\tidle\t-\t-\n' \
+    "$target" "$window" "stale: $window (awaiting external, recheck whether the wait still holds)" \
+    "$state/.paused-resurfaced-$key" "$sig" > "$state/.paused-recheck-publish"
+
+  run_pause_watcher "$state" "$fakebin" "$window" "$capture" "$out" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_RESURFACE_MAX_SECS=960 \
+    || fail "a prepared recheck publication was not completed on restart: $(cat "$out")"
+  [ "$(cat "$state/.wake-queue.seq")" = "$target" ] \
+    || fail "the recovered publication did not append exactly one stable queue delivery"
+  [ ! -e "$state/.paused-recheck-publish" ] || fail "the committed publication journal was not consumed"
+  [ "$(cat "$state/.paused-resurfaced-$key")" = "$record" ] || fail "the interrupted publication was not finished on restart"
+  run_pause_watcher "$state" "$fakebin" "$window" "$capture" "$out" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_RESURFACE_MAX_SECS=960 \
+    && fail "an acknowledged recovered publication was delivered again: $(cat "$out")"
+
+  # Repaired, not silenced: the wait still comes due on its own window.
+  now=$(date +%s)
+  set_mtime "$(( now - 300 ))" "$state/.paused-resurfaced-$key"
+  run_pause_watcher "$state" "$fakebin" "$window" "$capture" "$out" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_RESURFACE_MAX_SECS=960 \
+    || fail "a repaired wait never came due again: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "an interrupted recheck publication is finished exactly once on restart, without re-delivering or losing the wait"
+}
+
+test_acknowledged_recheck_publication_is_not_reenqueued() {
+  local dir state fakebin out capture window key sig reason target record
+  dir=$(make_case pause-recheck-acknowledged); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-acked"
+  printf 'idle, awaiting the merge decision' > "$capture"
+  seed_declared_wait "$state" acked "$window" 'paused: awaiting the merge decision' 100000 'idle, awaiting the merge decision'
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  sig=$(fm_pause_recheck_signature acknowledged-evidence)
+  reason="stale: $window (paused, awaiting external)"
+  target=1
+  printf 'pause-publish-v2\ttest-acknowledged\nQ\t%s\tstale\t%s\t%s\nR\t%s\t2\t%s\tidle\t-\t-\n' \
+    "$target" "$window" "$reason" "$state/.paused-resurfaced-$key" "$sig" > "$state/.paused-recheck-publish"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_append stale "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$window" "$reason" || fail "could not seed the delivered recheck"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the delivered recheck"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the merge decision'
+  run_pause_watcher "$state" "$fakebin" "$window" "$capture" "$out" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_RESURFACE_MAX_SECS=960 \
+    && fail "an already handled publication was enqueued again: $(cat "$out")"
+  record=$(fm_pause_recheck_record 2 "$sig" idle)
+  [ "$(cat "$state/.paused-resurfaced-$key")" = "$record" ] || fail "acknowledged publication did not finish its record"
+  [ "$(cat "$state/.wake-queue.seq")" = "$target" ] || fail "acknowledged publication allocated a second sequence"
+  [ ! -e "$state/.paused-recheck-publish" ] || fail "acknowledged publication journal was not retired"
+  unset FM_FAKE_CREW_STATE
+  pass "an acknowledged recheck publication advances records without re-enqueueing"
+}
+
+test_failed_recheck_record_application_retains_journal() {
+  local dir state
+  dir=$(make_case pause-recheck-record-failure); state="$dir/state"
+  printf 'pause-publish-v2\ttest-write-failure\nI\ttest buffered recheck\nR\t%s\t2\ttest-sig\tidle\t-\t-\n' \
+    "$state/.paused-resurfaced-missing/record" > "$state/.paused-recheck-publish"
+  FM_STATE_OVERRIDE="$state" fm_pause_publish_recover "$state" 2>/dev/null \
+    && fail "publication succeeded despite an unwritable record path"
+  [ -e "$state/.paused-recheck-publish" ] || fail "failed record application discarded its recovery journal"
+  pass "a failed recheck record application retains the publication journal"
 }
 
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
@@ -2635,6 +3012,14 @@ test_busy_pane_default_turn_age_bound_is_3600s
 test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_pause_recheck_cadence_contract
+test_pause_recheck_backs_off_and_caps
+test_pause_recheck_resets_and_retires
+test_sibling_pause_rechecks_batch_into_one_wake
+test_unrelated_stale_is_not_delayed_by_a_due_recheck
+test_interrupted_recheck_publication_is_repaired_on_restart
+test_acknowledged_recheck_publication_is_not_reenqueued
+test_failed_recheck_record_application_retains_journal
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode

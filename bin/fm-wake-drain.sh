@@ -5,7 +5,10 @@
 # divergence, then assert liveness.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
-# retirement; docs/watcher-continuity.md owns the recovery contract.
+# retirement; docs/watcher-continuity.md owns the recovery contract. Before
+# removing rows, acknowledgement persists their sequence identities in
+# state/.wake-queue.acknowledged so an interrupted pause publication can prove
+# that its exact queue delivery was handled.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -280,6 +283,7 @@ trap 'exit 143' TERM
 
 fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=true
+fm_pause_ack_prune "$STATE" "$FM_WAKE_QUEUE" || exit 1
 
 if [ -n "$ACK_THROUGH" ]; then
   ACK_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-outcome:') || exit 1
@@ -316,6 +320,10 @@ if [ -n "$ACK_THROUGH" ]; then
       RECOVERY_ACK_MOVED=true
     fi
   fi
+  fm_pause_ack_write "$STATE" "$ACK_THROUGH" "$FM_WAKE_QUEUE" || {
+    echo "wake drain: acknowledgement receipt could not be recorded safely" >&2
+    exit 1
+  }
   if ! _fm_atomic_replace "$DRAIN_TMP" "$FM_WAKE_QUEUE"; then
     echo "wake drain: acknowledged wakes could not be consumed safely" >&2
     exit 1

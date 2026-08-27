@@ -79,11 +79,300 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # Bounded re-surface cadence for a declared pause or a verified captain hold.
 # Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it
 # avoids nagging a deliberate wait while ensuring a forgotten hold cannot rot
-# invisibly - it re-surfaces once for a recheck every window. One hour by default;
-# both consumers read FM_PAUSE_RESURFACE_SECS with this default so the cadence has
-# one owner.
+# invisibly - it re-surfaces once for a recheck every window. One hour by default,
+# which is the window until the FIRST recheck and the floor every later window is
+# derived from; both consumers read FM_PAUSE_RESURFACE_SECS with this default so
+# the cadence has one owner.
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
+
+# Capped exponential backoff for CONSECUTIVE UNCHANGED rechecks of the SAME wait,
+# the same shape the watcher's heartbeat already uses (FM_HEARTBEAT/FM_HEARTBEAT_MAX):
+# the first recheck still lands on the base cadence above, and each recheck that
+# finds the monitored evidence unchanged doubles the next window until this cap.
+# At the defaults the windows run 1h, 2h, 4h, 8h, then 12h forever, so a mature
+# unchanged wait costs about two rechecks a day instead of twenty-four while a
+# forgotten wait still cannot rot invisibly. Both consumers read
+# FM_PAUSE_RESURFACE_MAX_SECS with this default, so the cadence keeps ONE owner.
+# shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
+FM_PAUSE_RESURFACE_MAX_SECS_DEFAULT=43200
+
+# Tag of the one-line backoff record both consumers publish beside their own
+# recheck marker: "<tag>\t<consecutive-unchanged-rechecks>\t<evidence-signature>".
+# Any other content (a legacy epoch marker, a truncated write) reads as no record
+# at all, which resets the backoff rather than inflating it.
+FM_PAUSE_RECHECK_RECORD_TAG='pause-recheck-v1'
+
+# Seconds until the next recheck of a wait that has already been rechecked
+# <streak> times with no change in its monitored evidence.
+fm_pause_recheck_interval() {  # <streak> <base-secs> <cap-secs>
+  local streak=$1 base=$2 cap=$3 interval
+  case "$streak" in ''|*[!0-9]*) streak=0 ;; esac
+  case "$base" in ''|*[!0-9]*|0) base=$FM_PAUSE_RESURFACE_SECS_DEFAULT ;; esac
+  case "$cap" in ''|*[!0-9]*|0) cap=$FM_PAUSE_RESURFACE_MAX_SECS_DEFAULT ;; esac
+  [ "$cap" -ge "$base" ] || cap=$base
+  [ "$streak" -le 30 ] || streak=30
+  interval=$(( base * (1 << streak) ))
+  [ "$interval" -gt 0 ] || interval=$cap
+  [ "$interval" -le "$cap" ] || interval=$cap
+  printf '%s' "$interval"
+}
+
+# Stable short signature of the evidence a wait is being rechecked against. The
+# caller decides WHICH evidence counts (the wait's own reason line, the status
+# file's mtime, the task incarnation, ...); this only turns it into a comparable
+# token that carries no tab or newline.
+fm_pause_recheck_signature() {  # <evidence-text>
+  printf '%s' "$1" | cksum | awk '{ printf "%s_%s", $1, $2 }'
+}
+
+# Consecutive unchanged rechecks already delivered for THIS evidence. Zero when
+# no record exists, the record is foreign or malformed, or the recorded evidence
+# differs - which is how a changed wait reason, status line, worker condition, or
+# task incarnation resets the backoff to the base cadence.
+fm_pause_recheck_condition() {  # <record-file> <current-condition>
+  local file=$1 current=$2 line tag streak recorded previous
+  case "$current" in busy|idle) printf '%s' "$current"; return 0 ;; esac
+  line=$(head -n 1 "$file" 2>/dev/null || true)
+  tag=; streak=; recorded=; previous=
+  IFS=$(printf '\t') read -r tag streak recorded previous <<EOF
+$line
+EOF
+  if [ "$tag" = "$FM_PAUSE_RECHECK_RECORD_TAG" ]; then
+    case "$previous" in busy|idle) printf '%s' "$previous"; return 0 ;; esac
+  fi
+  printf 'unknown'
+}
+
+fm_pause_recheck_streak() {  # <record-file> <evidence-signature> [<worker-condition>]
+  local file=$1 sig=$2 current=${3:-unknown} line tag streak recorded previous
+  line=$(head -n 1 "$file" 2>/dev/null || true)
+  tag=; streak=; recorded=; previous=
+  IFS=$(printf '\t') read -r tag streak recorded previous <<EOF
+$line
+EOF
+  if [ "$tag" != "$FM_PAUSE_RECHECK_RECORD_TAG" ] || [ "$recorded" != "$sig" ]; then
+    printf '0'
+    return 0
+  fi
+  if [ "$current" != unknown ] && [ "$previous" != "$current" ]; then
+    printf '0'
+    return 0
+  fi
+  case "$streak" in ''|*[!0-9]*) streak=0 ;; esac
+  printf '%s' "$streak"
+}
+
+# The one-line record a consumer publishes after delivering a recheck.
+fm_pause_recheck_record() {  # <streak> <evidence-signature> [<worker-condition>]
+  printf '%s\t%s\t%s\t%s\n' "$FM_PAUSE_RECHECK_RECORD_TAG" "$1" "$2" "${3:-unknown}"
+}
+
+# The wake drain advances this monotonic receipt before removing acknowledged
+# queue rows. A publication whose row has already been handled can therefore
+# distinguish that fact from a row that was never appended.
+fm_pause_ack_contains() {  # <state> <sequence>
+  grep -Fqx "$2" "$1/.wake-queue.acknowledged" 2>/dev/null
+}
+
+fm_pause_ack_write() {  # <state> <sequence> <queue>
+  local state=$1 sequence=$2 queue=$3 receipt journal target tmp
+  receipt="$state/.wake-queue.acknowledged"
+  journal="$state/.paused-recheck-publish"
+  [ -s "$journal" ] || return 0
+  target=$(awk -F '\t' '$1 == "Q" && $2 ~ /^[0-9]+$/ { print $2; exit }' "$journal")
+  [ -n "$target" ] && [ "$target" -le "$sequence" ] || return 0
+  awk -F '\t' -v target="$target" 'NF >= 5 && $2 == target { found=1 } END { exit !found }' "$queue" || return 0
+  tmp="$receipt.tmp.$$"
+  printf '%s\n' "$target" > "$tmp" && mv -f "$tmp" "$receipt"
+}
+
+# Remove rows whose acknowledgement receipt survived an interrupted drain.
+# The caller holds the wake-queue lock.
+fm_pause_ack_prune() {  # <state> <queue>
+  local state=$1 queue=$2 receipt tmp
+  receipt="$state/.wake-queue.acknowledged"
+  [ -s "$receipt" ] || return 0
+  tmp="$queue.ack-prune.$$"
+  awk -F '\t' 'NR == FNR { ack[$1]=1; next } NF < 5 || !($2 in ack) { print }' \
+    "$receipt" "$queue" > "$tmp" && mv -f "$tmp" "$queue"
+}
+
+_fm_pause_atomic_record() {  # <file> <streak> <signature> <condition>
+  local file=$1 streak=$2 sig=$3 condition=$4 tmp
+  tmp="$file.tmp.$$"
+  fm_pause_recheck_record "$streak" "$sig" "$condition" > "$tmp" \
+    && mv -f "$tmp" "$file"
+}
+
+# One bounded publication journal is shared by attended and away supervision.
+# Its rows are Q (wake queue delivery), I (away digest-buffer item), and R
+# (backoff record plus an optional away pause marker). Recovery establishes every
+# delivery before applying any records and retires the journal only after every
+# write succeeds.
+_fm_pause_publish_recover() {  # <state>
+  local state=$1 journal header tag batch row type target kind key reason queue lock seq epoch status=0
+  local item file streak sig condition marker marker_epoch tmp delivered
+  journal="$state/.paused-recheck-publish"
+  [ -s "$journal" ] || { rm -f "$journal" 2>/dev/null || true; return 0; }
+  IFS= read -r header < "$journal" || return 1
+  IFS=$(printf '\t') read -r tag batch <<EOF
+$header
+EOF
+  [ "$tag" = pause-publish-v2 ] && [ -n "$batch" ] || return 1
+  queue="$state/.wake-queue"
+  lock="$state/.wake-queue.lock"
+
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    type=${row%%"$(printf '\t')"*}
+    case "$type" in
+      Q)
+        IFS=$(printf '\t') read -r type target kind key reason <<EOF
+$row
+EOF
+        case "$target" in ''|*[!0-9]*) return 1 ;; esac
+        fm_lock_acquire_wait "$lock" || return 1
+        delivered=false
+        if awk -F '\t' -v s="$target" -v k="$kind" -v key="$key" -v p="$reason" \
+            'NF >= 5 && $2 == s && $3 == k && $4 == key && $5 == p { found=1 } END { exit !found }' \
+            "$queue" 2>/dev/null; then
+          delivered=true
+        elif fm_pause_ack_contains "$state" "$target"; then
+          delivered=true
+        fi
+        if [ "$delivered" = false ]; then
+          seq=$(cat "$state/.wake-queue.seq" 2>/dev/null || echo 0)
+          case "$seq" in ''|*[!0-9]*) seq=0 ;; esac
+          if [ "$seq" -lt "$target" ]; then
+            tmp="$state/.wake-queue.seq.tmp.$$"
+            printf '%s\n' "$target" > "$tmp" && mv -f "$tmp" "$state/.wake-queue.seq" || status=$?
+          fi
+          [ "$status" -ne 0 ] || _fm_recovery_marker_publish "$state/.watcher-down" downtime || status=$?
+          if [ "$status" -eq 0 ]; then
+            epoch=$(date +%s)
+            printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$target" "$kind" "$key" "$reason" >> "$queue" || status=$?
+            # shellcheck disable=SC2034 # Consumed by fm-watch.sh after recovery.
+            [ "$status" -ne 0 ] || FM_PAUSE_PUBLISH_RECOVERED_REASON=$reason
+          fi
+        fi
+        fm_lock_release "$lock"
+        [ "$status" -eq 0 ] || return "$status"
+        ;;
+      I)
+        item=${row#*"$(printf '\t')"}
+        [ -n "$item" ] || return 1
+        if ! grep -Fqx "$item" "$state/.subsuper-escalations" 2>/dev/null; then
+          [ -s "$state/.subsuper-escalations" ] || date +%s > "$state/.subsuper-escalations.since" || return 1
+          printf '%s\n' "$item" >> "$state/.subsuper-escalations" || return 1
+        fi
+        ;;
+      R) ;;
+      *) return 1 ;;
+    esac
+  done < <(tail -n +2 "$journal")
+
+  while IFS= read -r row; do
+    [ "${row%%"$(printf '\t')"*}" = R ] || continue
+    IFS=$(printf '\t') read -r type file streak sig condition marker marker_epoch <<EOF
+$row
+EOF
+    case "$file" in
+      "$state"/.paused-resurfaced-*|"$state"/.writing-resurfaced-*|"$state"/.subsuper-pause-backoff-*) ;;
+      *) return 1 ;;
+    esac
+    case "${file#"$state"/}" in */*) return 1 ;; esac
+    case "$streak" in ''|*[!0-9]*) return 1 ;; esac
+    case "$condition" in busy|idle|unknown) ;; *) return 1 ;; esac
+    _fm_pause_atomic_record "$file" "$streak" "$sig" "$condition" || return 1
+    if [ -n "$marker" ] && [ "$marker" != - ]; then
+      case "$marker" in "$state"/.subsuper-paused-*) ;; *) return 1 ;; esac
+      case "${marker#"$state"/}" in */*) return 1 ;; esac
+      tmp="$marker.tmp.$$"
+      if ! printf '%s\n' "$marker_epoch" > "$tmp" || ! mv -f "$tmp" "$marker"; then
+        rm -f "$tmp"
+        return 1
+      fi
+    fi
+  done < <(tail -n +2 "$journal")
+  rm -f "$journal"
+}
+
+fm_pause_publish_recover() {  # <state>
+  local state=$1 publish_lock status=0
+  publish_lock="$state/.paused-recheck-publish.lock"
+  fm_lock_acquire_wait "$publish_lock" || return 1
+  _fm_pause_publish_recover "$state" || status=$?
+  fm_lock_release "$publish_lock"
+  return "$status"
+}
+
+fm_pause_publish_queue() {  # <state> <kind> <key> <reason> <record-rows>
+  local state=$1 kind=$2 key=$3 reason=$4 records=$5 journal lock publish_lock seq target tmp batch status=0
+  journal="$state/.paused-recheck-publish"
+  publish_lock="$state/.paused-recheck-publish.lock"
+  fm_lock_acquire_wait "$publish_lock" || return 1
+  if ! _fm_pause_publish_recover "$state"; then
+    fm_lock_release "$publish_lock"
+    return 1
+  fi
+  lock="$state/.wake-queue.lock"
+  if ! fm_lock_acquire_wait "$lock"; then
+    fm_lock_release "$publish_lock"
+    return 1
+  fi
+  seq=$(cat "$state/.wake-queue.seq" 2>/dev/null || echo 0)
+  case "$seq" in ''|*[!0-9]*) seq=0 ;; esac
+  target=$(( seq + 1 ))
+  batch="queue.$target.$$.${RANDOM:-0}"
+  tmp="$journal.tmp.$$"
+  if ! { printf 'pause-publish-v2\t%s\nQ\t%s\t%s\t%s\t%s\n' "$batch" "$target" "$kind" "$key" "$reason"; [ -z "$records" ] || printf '%s\n' "$records"; } > "$tmp" \
+      || ! mv -f "$tmp" "$journal"; then
+    fm_lock_release "$lock"
+    fm_lock_release "$publish_lock"
+    rm -f "$tmp"
+    return 1
+  fi
+  tmp="$state/.wake-queue.seq.tmp.$$"
+  if ! printf '%s\n' "$target" > "$tmp" || ! mv -f "$tmp" "$state/.wake-queue.seq"; then
+    fm_lock_release "$lock"
+    fm_lock_release "$publish_lock"
+    rm -f "$tmp"
+    return 1
+  fi
+  fm_lock_release "$lock"
+  _fm_pause_publish_recover "$state" || status=$?
+  fm_lock_release "$publish_lock"
+  return "$status"
+}
+
+fm_pause_publish_buffer() {  # <state> <items> <record-rows>
+  local state=$1 items=$2 records=$3 journal tmp batch item publish_lock status=0
+  [ -n "$items" ] || return 0
+  journal="$state/.paused-recheck-publish"
+  publish_lock="$state/.paused-recheck-publish.lock"
+  fm_lock_acquire_wait "$publish_lock" || return 1
+  if ! _fm_pause_publish_recover "$state"; then
+    fm_lock_release "$publish_lock"
+    return 1
+  fi
+  batch="buffer.$(date +%s).$$.${RANDOM:-0}"
+  tmp="$journal.tmp.$$"
+  if ! {
+    printf 'pause-publish-v2\t%s\n' "$batch"
+    while IFS= read -r item; do [ -z "$item" ] || printf 'I\t%s\n' "$item"; done <<EOF
+$items
+EOF
+    [ -z "$records" ] || printf '%s\n' "$records"
+  } > "$tmp" || ! mv -f "$tmp" "$journal"; then
+    rm -f "$tmp"
+    fm_lock_release "$publish_lock"
+    return 1
+  fi
+  _fm_pause_publish_recover "$state" || status=$?
+  fm_lock_release "$publish_lock"
+  return "$status"
+}
 
 # The resolution verb and durable-backlog-transfer verb that CLOSE a keyed
 # status decision opened by needs-decision or blocked. See status_open_decisions

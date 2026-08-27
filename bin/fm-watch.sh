@@ -8,7 +8,10 @@
 # otherwise, so a crew that finishes (or stops and waits) without a current
 # working signal is never silently swallowed. A declared wait, either a paused:
 # external wait or a verified captain-held transfer, is the separate idle absorb
-# case and re-surfaces only on its long bounded cadence, although its initial
+# case and re-surfaces only on its long bounded, backing-off cadence
+# (FM_PAUSE_RESURFACE_SECS, FM_PAUSE_RESURFACE_MAX_SECS; waits that come due in
+# the same poll are batched into one wake and their backoff records published
+# through state/.paused-recheck-publish), although its initial
 # no-verb status signal still surfaces in normal mode.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
@@ -23,7 +26,12 @@
 #                          external-wait pause or verified captain-held transfer is
 #                          absorbed instead with its own long re-surface cadence,
 #                          never as a wedge, and that recheck reason names which
-#                          human the wait is on. Only when neither absorb class
+#                          human the wait is on. That cadence backs off: each recheck
+#                          that finds the wait's evidence unchanged doubles the next
+#                          window up to FM_PAUSE_RESURFACE_MAX_SECS, any change in
+#                          the evidence resets it, and every wait that comes due in
+#                          the same poll is delivered as ONE wake naming each of
+#                          them. Only when neither absorb class
 #                          applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
@@ -37,9 +45,9 @@
 #                          worktree was written during the quiet window is
 #                          deferred rather than escalated (wedge_defer_writing),
 #                          because files appearing there are liveness the pane and
-#                          the run step cannot show; that deferral still
-#                          re-surfaces once per PAUSE_RESURFACE_SECS, and a pane
-#                          that writes nothing keeps the unchanged schedule.
+#                          the run step cannot show; that deferral re-surfaces on
+#                          the shared capped backoff cadence, and a pane that
+#                          writes nothing keeps the unchanged schedule.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -182,7 +190,12 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # liveness is deliberately never read (pause_state_class owns that split).
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
+# Each recheck that finds the wait's monitored evidence unchanged doubles the next
+# window up to PAUSE_RESURFACE_MAX_SECS, and any change in that evidence drops the
+# window back to the base cadence (fm-classify-lib.sh owns that cadence contract for
+# this watcher and the away-mode daemon alike).
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+PAUSE_RESURFACE_MAX_SECS=${FM_PAUSE_RESURFACE_MAX_SECS:-$FM_PAUSE_RESURFACE_MAX_SECS_DEFAULT}
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
 # connect/subscribe failure) before the push fast-path is disabled for the rest
 # of this watcher process and the loop reverts to pure polling (report section
@@ -308,18 +321,125 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 
 # One bounded re-surface for a pane the watcher is deliberately absorbing, so no
 # absorb can rot invisibly. <age> is how long the current absorb has held and
-# <throttle> is the per-window marker whose mtime records the last re-surface, so
-# once past PAUSE_RESURFACE_SECS the pane wakes once per window rather than every
+# <throttle> is the per-window marker whose mtime records the last re-surface and
+# whose content carries that wait's backoff record, so once past
+# PAUSE_RESURFACE_SECS the pane wakes once per (backed-off) window rather than every
 # poll. Shared by the declared-pause absorb and the worktree-write deferral so the
-# two cadences cannot drift apart; each caller owns its own marker and reason.
+# two cadences cannot drift apart; each caller owns its own marker, detail wording,
+# and evidence signature.
 # Returns without waking while either the absorb or the throttle is inside the
-# window; wake() itself exits the cycle, exactly as it does inline.
-resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
-  local win=$1 throttle=$2 age=$3 reason=$4
+# window; a due recheck is REGISTERED for this poll's single batched wake rather
+# than waking on the spot, so sibling waits that come due together cost one wake
+# and one model turn instead of one each (pause_recheck_flush below).
+# <signature-command> is run only once the absorb itself is old enough to be
+# rechecked, so an ordinary absorbed poll never pays for reading the evidence.
+resurface_absorbed() {  # <window> <throttle-marker> <age> <detail> <signature-command> [args...]
+  local win=$1 throttle=$2 age=$3 detail=$4 evidence sig condition streak interval
+  shift 4
   [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] || return 0
-  [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
-  fm_wake_append stale "$win" "$reason" || exit 1
-  date +%s > "$throttle"
+  evidence=$("$@")
+  IFS=$(printf '\t') read -r sig condition <<EOF
+$evidence
+EOF
+  condition=$(fm_pause_recheck_condition "$throttle" "${condition:-unknown}")
+  streak=$(fm_pause_recheck_streak "$throttle" "$sig" "$condition")
+  interval=$(fm_pause_recheck_interval "$streak" "$PAUSE_RESURFACE_SECS" "$PAUSE_RESURFACE_MAX_SECS")
+  [ "$(age_of "$throttle")" -ge "$interval" ] || return 0   # 999999 when no prior re-surface
+  pause_recheck_register "$win" "$throttle" "$detail" "$sig" "$streak" "$condition"
+}
+
+# The monitored evidence a task's bounded recheck is measured against: the wait's
+# own wording, its current status line and that line's write time, and the task
+# incarnation behind it. Any change here resets the backoff to the base cadence,
+# because the recheck the captain would read is no longer the one already answered.
+task_wait_signature() {  # <task> <detail>
+  local task=$1 detail=$2 meta win backend label tail40 verdict state_word condition=unknown kind
+  meta="$STATE/$task.meta"
+  kind=$(grep '^kind=' "$meta" 2>/dev/null | cut -d= -f2- || true)
+  win=$(fm_backend_target_of_meta "$meta" 2>/dev/null || true)
+  if [ "$kind" != secondmate ] && [ -n "$win" ]; then
+    backend=$(fm_backend_of_meta "$meta")
+    label="fm-$task"
+    if tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null); then
+      verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40")
+      state_word=${verdict%% *}
+      case "$state_word" in
+        busy) condition=busy ;;
+        idle|dead) condition=idle ;;
+      esac
+    fi
+  fi
+  printf '%s\t%s' "$(fm_pause_recheck_signature "$(printf '%s|%s|%s|%s|%s' "$task" "$detail" \
+    "$(last_status_line "$STATE/$task.status")" \
+    "$(stat_mtime "$STATE/$task.status")" \
+    "$(stat_mtime "$STATE/$task.meta")")")" "$condition"
+}
+
+# The same evidence for a worktree-write deferral, plus the anchor of the quiet
+# stretch being deferred, so a new deferral chain never inherits an old backoff.
+write_deferral_signature() {  # <task> <writing-since-file>
+  task_wait_signature "$1" "writing:$(cat "$2" 2>/dev/null || true)"
+}
+
+# --- batched bounded rechecks ----------------------------------------------
+# When no unrelated actionable wake ends the poll first, every bounded recheck
+# collected in that poll is delivered as ONE wake naming every affected window, so
+# three sibling waits blocked on the same thing cost one model turn instead of three
+# (each wake() exits the cycle, so before
+# batching the successor watcher immediately delivered the next overdue sibling).
+# Nothing else is batched: an unrelated failure, decision, check result, or
+# stopped worker still wakes immediately through its own path.
+FM_PAUSE_PUBLISH_RECOVERED_REASON=
+pause_recheck_windows=
+pause_recheck_details=
+pause_recheck_records=
+
+pause_recheck_reset() {
+  pause_recheck_windows=
+  pause_recheck_details=
+  pause_recheck_records=
+}
+
+pause_recheck_register() {  # <window> <throttle-marker> <detail> <signature> <streak> <condition>
+  local win=$1 throttle=$2 detail=$3 sig=$4 streak=$5 condition=$6
+  case "$pause_recheck_windows" in
+    *"|$win|"*) return 0 ;;
+  esac
+  pause_recheck_windows="$pause_recheck_windows|$win|"
+  pause_recheck_details="$pause_recheck_details$win$(printf '\t')$detail"$'\n'
+  pause_recheck_records="$pause_recheck_records$throttle$(printf '\t')$(( streak + 1 ))$(printf '\t')$sig$(printf '\t')$condition"$'\n'
+}
+
+# Deliver this poll's due rechecks as one wake. A stable batch and reserved queue
+# identity are committed before delivery, then every affected backoff record is
+# advanced only after recovery establishes that delivery. The shared publication
+# owner finishes either supervision path before another batch can start.
+pause_recheck_flush() {
+  local count reason key win detail clean_key clean_reason records
+  [ -n "$pause_recheck_details" ] || return 0
+  count=$(printf '%s' "$pause_recheck_details" | grep -c '')
+  if [ "$count" -eq 1 ]; then
+    IFS=$(printf '\t') read -r win detail <<EOF
+$pause_recheck_details
+EOF
+    key=$win
+    reason="stale: $win ($detail)"
+  else
+    key=$(printf '%s' "$pause_recheck_details" | cut -f1 | paste -sd, -)
+    reason="stale: $count declared waits came due for a recheck together, batched into one wake, none a wedge:"
+    while IFS=$(printf '\t') read -r win detail; do
+      [ -n "$win" ] || continue
+      reason="$reason $win ($detail);"
+    done <<EOF
+$pause_recheck_details
+EOF
+    reason="${reason%;}"
+  fi
+  clean_key=$(printf '%s' "$key" | fm_wake_clean_field)
+  clean_reason=$(printf '%s' "$reason" | fm_wake_clean_field)
+  records=$(printf '%s' "$pause_recheck_records" | awk -F '\t' 'NF { printf "R\t%s\t%s\t%s\t%s\t-\t-\n", $1, $2, $3, $4 }')
+  fm_pause_publish_queue "$STATE" stale "$clean_key" "$clean_reason" "$records" || exit 1
+  pause_recheck_reset
   wake "$reason"
 }
 
@@ -330,22 +450,24 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
 # fake, so the escalation is deferred rather than fired. Deliberately a DEFERRAL,
 # not a cancellation: the idle timer restarts, so the next window probes again,
 # and a .writing-since-<key> marker ages the whole deferral chain so the pane
-# still re-surfaces once every PAUSE_RESURFACE_SECS through the shared
-# resurface_absorbed above - literally the same bounded cadence a declared pause
-# uses, throttled by its own .writing-resurfaced-<key> marker - and a crew whose
+# still re-surfaces through the shared capped backoff in resurface_absorbed above
+# - literally the same bounded cadence a declared pause uses, throttled by its own
+# .writing-resurfaced-<key> marker - and a crew whose
 # worktree churns without real progress cannot stay invisible. The escalation
 # counter is left alone: it is neither advanced (this is not an escalation) nor
 # reset (a later genuine escalation must still carry the demand-deep-inspection
 # history it had already earned).
 wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
-  local win=$1 since_file=$2 label=$3 age=$4 key wsf wage
+  local win=$1 since_file=$2 label=$3 age=$4 key wsf wage task
   key=$(window_key "$win")
   wsf="$STATE/.writing-since-$key"
   [ -e "$wsf" ] || date +%s > "$wsf"
   wage=$(age_of "$wsf")
   date +%s > "$since_file"
+  task=$(window_to_task "$win" "$STATE")
   resurface_absorbed "$win" "$STATE/.writing-resurfaced-$key" "$wage" \
-    "stale: $win (idle ${age}s, writing its worktree for ${wage}s, rechecked on a long cadence not a wedge; confirm the writes are real progress)"
+    "idle ${age}s, writing its worktree for ${wage}s, rechecked on a long cadence not a wedge; confirm the writes are real progress" \
+    write_deferral_signature "$task" "$wsf"
   triage_log "absorbed $label (worktree written since the idle window opened, idle ${age}s): $win"
 }
 
@@ -413,8 +535,8 @@ busy_turn_over_age() {  # <task>
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
-# dead-agent captain-held transfer, and re-surface it once every
-# PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
+# dead-agent captain-held transfer, and re-surface it on the capped pause recheck
+# cadence so it cannot rot invisibly. Called on any
 # stale poll once pause_state_class permits the bounded cadence, so it must be
 # cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
 # status file mtime, not a per-hash marker, so a churny idle pane (a ticking
@@ -446,7 +568,8 @@ handle_paused_stale() {  # <window> <task> <hash>
     detail="paused, awaiting external"
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
   fi
-  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)"
+  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "$reason" \
+    task_wait_signature "$task" "$detail"
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
 
@@ -461,7 +584,7 @@ handle_paused_stale() {  # <window> <task> <hash>
 # the expected external wait. The caller has already confirmed liveness through
 # the busy verdict, so this exception does not suppress undeclared wedges or
 # alter the separate non-busy classification. handle_paused_stale keeps the
-# exception bounded by re-surfacing it once per PAUSE_RESURFACE_SECS. Away mode
+# exception bounded by re-surfacing it on the capped pause cadence. Away mode
 # remains daemon-owned and receives the undecorated wake identity for its own
 # classification.
 busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-file>
@@ -558,7 +681,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   if status_is_paused_or_captain_held "$last"; then
     : > "$STATE/.paused-$key"
     date +%s > "$STATE/.paused-rechecked-$key"
-    date +%s > "$STATE/.paused-resurfaced-$key"
+    fm_pause_recheck_record 0 '' > "$STATE/.paused-resurfaced-$key"
   else
     rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
   fi
@@ -923,6 +1046,13 @@ printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
+# A previous cycle may have been interrupted between committing its batched
+# recheck publication and writing the records it names. Finish that one
+# publication before this cycle decides what is due, so the interrupted batch
+# neither re-delivers nor half-advances.
+fm_pause_publish_recover "$STATE" || exit 1
+[ -z "$FM_PAUSE_PUBLISH_RECOVERED_REASON" ] || wake "$FM_PAUSE_PUBLISH_RECOVERED_REASON"
+
 # A merged poll may have queued its terminal wake and then lost the process
 # between receipt publication and fixed-path removal.
 # Finish only identity-bound retirement receipts before any check can run.
@@ -1127,7 +1257,10 @@ EOF
   # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
-  # remembers the hash already classified).
+  # remembers the hash already classified). Bounded absorbed rechecks that come due
+  # in this pass are collected rather than delivered inline, and flushed as one wake
+  # below; every other actionable classification still wakes on the spot.
+  pause_recheck_reset
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
@@ -1308,6 +1441,9 @@ EOF
       fi
     fi
   done < <(recorded_windows)
+
+  # One wake for every bounded recheck this pass found due, naming each window.
+  pause_recheck_flush
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive

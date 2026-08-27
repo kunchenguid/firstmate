@@ -365,6 +365,118 @@ test_housekeeping_paused_resurfaces_and_resets() {
   pass "housekeeping re-surfaces a stale declared pause on the long cadence and resets its window"
 }
 
+# Away mode reads the same cadence owner as the attended watcher: a wait whose
+# evidence has not changed since the last recheck is asked about on a widening
+# window, so a captain walking away does not collect an hourly digest about the
+# same unchanged wait forever. The daemon's own escalation buffer already
+# collapses everything due in one tick into a single digest.
+test_housekeeping_pause_recheck_backs_off_when_unchanged() {
+  local dir state fakebin win pane key now
+  dir=$(make_supercase paused-backoff)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-held-w11b"; pane="$dir/pane.txt"
+  printf 'paused: superseded by the replacement PR; awaiting the merge decision\n' > "$state/held-w11b.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "held-w11b" | tr ':/.' '___')
+  now=$(date +%s)
+  echo $(( now - 5000 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_RESURFACE_MAX_SECS=960 housekeeping "$state"
+  grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the first recheck of a declared wait did not land on the base cadence"
+
+  # 300s later: past the base window, inside the doubled one - no second digest.
+  : > "$state/.subsuper-escalations"
+  now=$(date +%s)
+  echo $(( now - 300 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_RESURFACE_MAX_SECS=960 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "an unchanged declared wait was re-surfaced on the base cadence instead of backing off: $(cat "$state/.subsuper-escalations")"
+
+  # 500s later: past the doubled window - one recheck, still never a wedge.
+  now=$(date +%s)
+  echo $(( now - 500 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_RESURFACE_MAX_SECS=960 housekeeping "$state"
+  grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the doubled recheck window never came due in away mode"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    && fail "a backed-off recheck was mislabeled a possible wedge"
+  [ -e "$state/.subsuper-paused-$key" ] || fail "the pause marker was cleared instead of reset for the next window"
+  pass "away-mode rechecks of an unchanged declared wait back off on the same shared cadence"
+}
+
+test_housekeeping_pause_probe_is_lazy() {
+  local dir state fakebin win pane key log
+  dir=$(make_supercase paused-probe-lazy)
+  state="$dir/state"; fakebin="$dir/fakebin"; win="sess:fm-lazy"; pane="$dir/pane.txt"; log="$dir/captures"
+  printf 'paused: awaiting the scheduled window\n' > "$state/lazy.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' lazy | tr ':/.' '___')
+  echo $(( $(date +%s) - 30 )) > "$state/.subsuper-paused-$key"
+  mv "$fakebin/tmux" "$fakebin/tmux-real"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" != capture-pane ] || printf 'capture\n' >> "$FM_CAPTURE_LOG"
+exec "$(dirname "$0")/tmux-real" "$@"
+SH
+  chmod +x "$fakebin/tmux"
+  PATH="$fakebin:$PATH" FM_CAPTURE_LOG="$log" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  [ ! -e "$log" ] || fail "a fresh declared wait probed its backend before the base cadence"
+  pass "away-mode worker condition is read only after the base recheck cadence"
+}
+
+test_housekeeping_unreadable_pause_still_resurfaces() {
+  local dir state fakebin win key age
+  dir=$(make_supercase paused-unreadable)
+  state="$dir/state"; fakebin="$dir/fakebin"; win="sess:fm-unreadable"
+  printf 'paused: awaiting an external service\n' > "$state/unreadable.status"
+  key=$(printf '%s' unreadable | tr ':/.' '___')
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+  mv "$fakebin/tmux" "$fakebin/tmux-real"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" != capture-pane ] || exit 1
+exec "$(dirname "$0")/tmux-real" "$@"
+SH
+  chmod +x "$fakebin/tmux"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_STATE_OVERRIDE="$state" \
+    FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+
+  grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "an unreadable declared wait remained overdue instead of re-surfacing"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    && fail "an unreadable declared wait was mislabeled a possible wedge"
+  age=$(( $(date +%s) - $(cat "$state/.subsuper-paused-$key" 2>/dev/null || echo 0) ))
+  [ "$age" -lt 60 ] || fail "an unreadable declared wait did not advance its bounded recheck cadence"
+  pass "away-mode rechecks remain bounded when worker state is unreadable"
+}
+
+test_housekeeping_recovers_pause_batch_atomically() {
+  local dir state now sig1 sig2
+  dir=$(make_supercase paused-publication-recovery)
+  state="$dir/state"
+  now=$(date +%s)
+  sig1=$(fm_pause_recheck_signature wait-one)
+  sig2=$(fm_pause_recheck_signature wait-two)
+  printf 'pause-publish-v2\ttest-daemon-recovery\nI\tpaused 500s (awaiting external, recheck whether the wait still holds): sess:fm-one\nI\tpaused 500s (awaiting external, recheck whether the wait still holds): sess:fm-two\nR\t%s\t2\t%s\tidle\t%s\t%s\nR\t%s\t4\t%s\tidle\t%s\t%s\n' \
+    "$state/.subsuper-pause-backoff-one" "$sig1" "$state/.subsuper-paused-one" "$now" \
+    "$state/.subsuper-pause-backoff-two" "$sig2" "$state/.subsuper-paused-two" "$now" \
+    > "$state/.paused-recheck-publish"
+  FM_STATE_OVERRIDE="$state" fm_pause_publish_recover "$state"
+  [ "$(grep -c 'awaiting external' "$state/.subsuper-escalations")" -eq 2 ] \
+    || fail "away-mode recovery did not restore both sibling rechecks exactly once"
+  [ "$(fm_pause_recheck_streak "$state/.subsuper-pause-backoff-one" "$sig1" idle)" = 2 ] \
+    || fail "away-mode recovery did not advance the first sibling"
+  [ "$(fm_pause_recheck_streak "$state/.subsuper-pause-backoff-two" "$sig2" idle)" = 4 ] \
+    || fail "away-mode recovery did not advance the second sibling"
+  [ ! -e "$state/.paused-recheck-publish" ] || fail "away-mode recovery left its publication journal behind"
+  pass "away-mode recovery publishes one buffered sibling batch and advances every record together"
+}
+
 # The other half of quieting a captain-held task: it must NOT be silenced outright.
 # fm-classify-lib.sh's cadence comment is explicit that a forgotten hold cannot rot
 # invisibly, so a held task re-surfaces on the same bounded window as a pause, with
@@ -1944,6 +2056,10 @@ test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
+test_housekeeping_pause_recheck_backs_off_when_unchanged
+test_housekeeping_pause_probe_is_lazy
+test_housekeeping_unreadable_pause_still_resurfaces
+test_housekeeping_recovers_pause_batch_atomically
 test_housekeeping_captain_held_resurfaces_and_resets
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_paused_unpaused_cleared

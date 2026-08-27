@@ -147,6 +147,7 @@ Classify each wake this way:
   Other signals with no captain-relevant status -> self-handle.
 - `signal` or `stale` for a declared wait, either a `paused:` external wait or a verified `captain-held` transfer -> self-handle and track the pause rather than a wedge.
   If it remains declared and idle past `FM_PAUSE_RESURFACE_SECS` (default 3600s), housekeeping sends one recheck and resets the pause window.
+  Each recheck that finds the wait unchanged widens the next window up to `FM_PAUSE_RESURFACE_MAX_SECS` (default 43200s), and any change in the wait returns it to the base cadence.
   That recheck names which human the wait is on: the external dependency for `paused:`, and the captain themself for a `captain-held` transfer, who can answer the held decision or release the hold.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
 - `stale` with a terminal status or bare legacy captain-relevant line -> escalate.
