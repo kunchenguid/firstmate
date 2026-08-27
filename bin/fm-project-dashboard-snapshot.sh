@@ -42,9 +42,10 @@
 # decisions. A row held for the captain that is still in flight keeps its PR
 # link.
 # A captain decision that is due now appears only under decisions[], even when
-# its own task has parked awaiting the answer. A decision deferred to a future
-# hold-until date is not yet actionable, so it appears only under waiting[]
-# until that date arrives.
+# its own task has parked awaiting the answer. Only a live, answer-ready
+# decision withholds an item from waiting[]: a decision deferred to a future
+# hold-until date, or set aside by a SUPERSEDED/DEFERRED marker, is not awaiting
+# an answer, so its parked work still reports itself under waiting[].
 # Work already shown as waiting is not repeated under queued[]: each item has
 # exactly one lifecycle place, and it returns to queued[] only once its blocker
 # or hold clears.
@@ -439,9 +440,9 @@ jq -n \
                 summary:((.reason | present) // (.summary | present) // ""),
                 deferred:(.deferred_marker == true),owner:$owner.id} ]
         | dedupe_first([.owner,.id,.key])) as $decisions_all
-      | ([ $decisions_all[] | (.owner + "\u001f" + .id) ]) as $decision_keys
       | ([ $decisions_all[] | select(.deferred | not) ]) as $decisions
       | ([ $decisions_all[] | select(.deferred) ]) as $deferred_decisions
+      | ([ $decisions[] | (.owner + "\u001f" + .id) ]) as $decision_keys
       | ([ $tasks[]
            | select(.current_state.state == "failed" or .current_state.state == "blocked")
            | {id,title:(.backlog.title // .id),state:.current_state.state,

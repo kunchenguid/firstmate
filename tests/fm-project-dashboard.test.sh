@@ -1487,6 +1487,55 @@ test_date_deferred_decision_waits_until_it_is_due() {
   pass "a date-deferred decision waits until due, then appears only under decisions"
 }
 
+test_deferred_hold_leaves_its_parked_task_under_waiting() {
+  local home epoch out
+  home=$(make_home deferred-parked)
+  write_fleet_fixture "$home"
+  : > "$home/state/x.meta"
+  : > "$home/state/x.status"
+  jq --arg home "$home" '
+    .backlog.records = [
+      {structured:true,id:"x",repo:"alpha",title:"Old plan",state:"queued",since:"2020-01-01",
+       hold_kind:"captain",hold_reason:"DEFERRED - superseded by new plan",
+       captain_actionable:true,deferred_marker:true,unresolved_blocker_ids:[]}]
+    | .tasks = [
+        {id:"x",kind:"ship",project:"alpha",
+         paths:{meta:{path:($home + "/state/x.meta"),present:true},
+                status_log:{path:($home + "/state/x.status"),present:true},
+                worktree:{path:null,present:false},home:{path:null,present:false},report:{path:null,present:false}},
+         secondmate_projects:[],
+         current_state:{state:"parked",source:"fixture",detail:"Parked awaiting the captain"},
+         hints:{open_decisions:[]},pr:{url:null},backlog:{id:"x",repo:"alpha",title:"Old plan"}}]
+    | .secondmate_current.records = []
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "deferred-parked snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "alpha")
+    | .status == "waiting"
+      and (.waiting | map(.id)) == ["x"]
+      and .counts.waiting == 1
+      and .next_step == "Parked awaiting the captain"
+      and (.deferred_decisions | map(.id)) == ["x"]
+      and .decisions == []
+  ' >/dev/null || fail "a deferred captain hold erased its parked task from waiting: $out"
+
+  jq '.backlog.records |= map(if .id == "x" then
+        .hold_reason = "Choose the rollout window" | .deferred_marker = false else . end)' \
+    "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  out=$(run_snapshot "$home" "$epoch") || fail "live-decision snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "alpha")
+    | .status == "needs_attention"
+      and (.decisions | map(.id)) == ["x"]
+      and .waiting == []
+      and .deferred_decisions == []
+  ' >/dev/null || fail "a live captain decision was also listed under waiting: $out"
+  pass "only a live answer-ready decision withholds its work from waiting"
+}
+
 extract_payload() {  # <board>
   sed -n '/<script id="project-dashboard-data" type="application\/json">/,/<\/script>/p' "$1" | sed '1d;$d'
 }
@@ -1755,6 +1804,7 @@ test_captain_decision_is_not_also_queued_work
 test_captain_held_done_row_is_neither_landed_nor_a_pr_link
 test_captain_held_in_flight_row_keeps_its_pr_link
 test_date_deferred_decision_waits_until_it_is_due
+test_deferred_hold_leaves_its_parked_task_under_waiting
 test_waiting_work_is_not_repeated_under_queued_next
 test_attention_next_step_is_an_action_not_a_bare_title
 test_unattributable_secondmate_state_is_disclosed
