@@ -4,8 +4,8 @@
 # A treehouse pool can return a clean detached worktree whose origin/main was
 # advanced after the worktree was allocated.
 # These tests drive the real spawn path with a fake terminal, then prove it
-# starts the worker from the fetched origin/main tip or stops when origin is
-# unreachable.
+# starts remote-backed work from the fetched origin tip, starts eligible
+# remote-less work from the current local default branch, or refuses safely.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -50,6 +50,34 @@ read_case_record() {
   IFS='|' read -r CASE_DIR HOME_DIR PROJECT_DIR POOL_DIR FAKEBIN_DIR INITIAL_SHA DEFAULT_BRANCH <<EOF
 $1
 EOF
+}
+
+make_remoteless_case() {
+  local name=$1 id=$2 posture=$3 case_dir home project pool fakebin initial
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  pool="$case_dir/pool"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  printf -- '- project [%s] - test project (added 2026-08-08)\n' "$posture" > "$home/data/projects.md"
+  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  initial=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" worktree add --quiet --detach "$pool" "$initial"
+
+  printf 'must survive a newly spawned local branch\n' > "$project/advanced-local.txt"
+  git -C "$project" add advanced-local.txt
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-local
+
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|main"
 }
 
 run_spawn() {
@@ -156,6 +184,98 @@ test_direct_pr_and_scout_refresh_before_launch() {
     fi
   done
   pass "direct-PR ships and scouts both refresh stale pooled worktrees before launch"
+}
+
+test_registered_remoteless_project_spawns_scout_and_local_ship() {
+  local rec id out status current
+  id='pool-remoteless-scout-r12'
+  rec=$(make_remoteless_case remoteless-success "$id" local-only)
+  read_case_record "$rec"
+  [ -z "$(git -C "$PROJECT_DIR" remote)" ] || fail "remote-less fixture unexpectedly has a configured remote"
+  current=$(git -C "$PROJECT_DIR" rev-parse refs/heads/main)
+  [ "$current" != "$INITIAL_SHA" ] || fail "remote-less fixture did not advance its local default branch"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "a registered local-only project should spawn a scout without origin"
+  assert_contains "$out" "spawned $id" "remote-less scout did not report success"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$current" ] \
+    || fail "remote-less scout did not refresh to the current local default branch"
+  assert_grep 'must survive a newly spawned local branch' "$POOL_DIR/advanced-local.txt" \
+    "remote-less scout omitted current local-default content"
+
+  id='pool-remoteless-ship-r12'
+  mkdir -p "$HOME_DIR/data/$id"
+  printf 'Delivery contract: mode=local-only\n' > "$HOME_DIR/data/$id/brief.md"
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "a registered local-only project should spawn a local-only ship without origin"
+  assert_contains "$out" "spawned $id" "remote-less local-only ship did not report success"
+  assert_grep 'mode=local-only' "$HOME_DIR/state/$id.meta" \
+    "remote-less ship did not record its local-only delivery contract"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$current" ] \
+    || fail "remote-less local-only ship did not stay on the current local default branch"
+  pass "registered remote-less projects refresh locally for scouts and local-only ships"
+}
+
+test_remote_backed_postures_refuse_missing_origin() {
+  local posture slug rec id out status before
+  for posture in no-mistakes direct-PR no-mistakes-prod-only; do
+    case "$posture" in
+      no-mistakes) slug=no-mistakes ;;
+      direct-PR) slug=direct-pr ;;
+      no-mistakes-prod-only) slug=prod-only ;;
+    esac
+    id="pool-missing-origin-${slug}-r13"
+    rec=$(make_remoteless_case "missing-origin-$slug" "$id" "$posture")
+    read_case_record "$rec"
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+    out=$(run_spawn "$id" --scout)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$posture scout spawned without its required origin"
+    assert_contains "$out" "has no origin remote" \
+      "$posture missing-origin refusal did not name the project contract violation"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+      || fail "$posture missing-origin refusal moved the pooled worktree"
+  done
+  pass "every remote-backed project posture still requires origin for scouts"
+}
+
+test_remoteless_project_refuses_pr_ship_mode() {
+  local rec id out status before
+  id='pool-remoteless-pr-ship-r14'
+  rec=$(make_remoteless_case remoteless-pr-ship "$id" local-only)
+  read_case_record "$rec"
+  printf 'Delivery contract: mode=direct-PR\n' > "$HOME_DIR/data/$id/brief.md"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a PR-backed ship spawned without origin from a local-only project"
+  assert_contains "$out" "has no origin remote" \
+    "PR-backed ship missing-origin refusal did not name the required origin"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "PR-backed ship missing-origin refusal moved the pooled worktree"
+  pass "a local-only project does not make a PR-backed ship eligible for a remote-less base"
+}
+
+test_configured_failing_origin_never_falls_back_to_local_base() {
+  local rec id out status before
+  id='pool-local-failing-origin-r15'
+  rec=$(make_remoteless_case local-failing-origin "$id" local-only)
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" remote add origin "file://$CASE_DIR/missing-origin.git"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a configured but failing origin fell back to the local default branch"
+  assert_contains "$out" "could not fetch origin" \
+    "configured failing origin was not kept on the origin freshness guard"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "failing-origin refusal moved the pooled worktree"
+  pass "a configured failing origin never degrades into remote-less local refresh"
 }
 
 test_dirty_pool_refuses_without_discarding_work() {
@@ -428,6 +548,10 @@ test_stale_pin_beside_other_dirt_reports_one_verdict() {
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
+test_registered_remoteless_project_spawns_scout_and_local_ship
+test_remote_backed_postures_refuse_missing_origin
+test_remoteless_project_refuses_pr_ship_mode
+test_configured_failing_origin_never_falls_back_to_local_base
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
