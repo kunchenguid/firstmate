@@ -454,7 +454,10 @@ case "$behavior" in
     : > "$state/completed-$count"
     ;;
   slow|timeout)
-    sleep 30 &
+    (
+      trap '' TERM INT
+      while :; do sleep 30; done
+    ) </dev/null >/dev/null 2>&1 &
     grandchild=$!
     printf '%s\n' "$grandchild" > "$state/grandchild-$count"
     trap 'printf "term:'"$count"'\n" >> "$state/events"; exit 143' TERM INT
@@ -466,7 +469,7 @@ case "$behavior" in
       printf 'GENERATION_DIGEST_%s source=%s\n' "$count" "$source_name"
     fi
     : > "$state/completed-$count"
-    kill "$grandchild" 2>/dev/null || true
+    kill -KILL "$grandchild" 2>/dev/null || true
     wait "$grandchild" 2>/dev/null || true
     ;;
   stale)

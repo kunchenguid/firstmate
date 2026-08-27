@@ -124,6 +124,7 @@ type SessionstartGeneration = {
   stopping: boolean;
   delivered: boolean;
   child: ChildProcess | null;
+  processGroupId: number | null;
   childClosed: boolean;
   childClose: Promise<void> | null;
   stopPromise: Promise<void> | null;
@@ -164,6 +165,32 @@ function signalSessionstartChild(child: ChildProcess, signal: NodeJS.Signals): v
   }
 }
 
+function sessionstartProcessGroupAlive(processGroupId: number): boolean {
+  try {
+    process.kill(-processGroupId, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function waitForSessionstartProcessGroupExit(
+  processGroupId: number,
+  timeoutMs: number,
+): Promise<void> {
+  return new Promise((resolveWait) => {
+    const startedAt = Date.now();
+    const poll = (): void => {
+      if (!sessionstartProcessGroupAlive(processGroupId) || Date.now() - startedAt >= timeoutMs) {
+        resolveWait();
+        return;
+      }
+      setTimeout(poll, 10);
+    };
+    poll();
+  });
+}
+
 function waitForSessionstartClose(generation: SessionstartGeneration, timeoutMs: number): Promise<void> {
   if (generation.childClosed || !generation.childClose) return Promise.resolve();
   return new Promise((resolveWait) => {
@@ -180,15 +207,35 @@ function stopSessionstartGeneration(generation: SessionstartGeneration): Promise
   generation.stopping = true;
   generation.stopPromise = (async () => {
     const child = generation.child;
-    if (!child || generation.childClosed) {
+    if (process.platform === "win32") {
+      if (!child || generation.childClosed) {
+        await generation.result;
+        return;
+      }
+      signalSessionstartChild(child, "SIGTERM");
+      await waitForSessionstartClose(generation, sessionstartRetireTimeoutMs);
+      if (!generation.childClosed) {
+        signalSessionstartChild(child, "SIGKILL");
+        await waitForSessionstartClose(generation, sessionstartRetireTimeoutMs);
+      }
+      return;
+    }
+    const processGroupId = generation.processGroupId;
+    if (!processGroupId) {
       await generation.result;
       return;
     }
-    signalSessionstartChild(child, "SIGTERM");
-    await waitForSessionstartClose(generation, sessionstartRetireTimeoutMs);
-    if (!generation.childClosed) {
-      signalSessionstartChild(child, "SIGKILL");
-      await waitForSessionstartClose(generation, sessionstartRetireTimeoutMs);
+    try {
+      process.kill(-processGroupId, "SIGTERM");
+    } catch {
+    }
+    await waitForSessionstartProcessGroupExit(processGroupId, sessionstartRetireTimeoutMs);
+    if (sessionstartProcessGroupAlive(processGroupId)) {
+      try {
+        process.kill(-processGroupId, "SIGKILL");
+      } catch {
+      }
+      await waitForSessionstartProcessGroupExit(processGroupId, sessionstartRetireTimeoutMs);
     }
   })();
   return generation.stopPromise;
@@ -218,6 +265,7 @@ function runSessionstartHook(generation: SessionstartGeneration): Promise<Sessio
       return;
     }
     generation.child = child;
+    generation.processGroupId = child.pid ?? null;
     generation.childClose = new Promise<void>((resolveClose) => {
       closeChild = resolveClose;
     });
@@ -284,6 +332,7 @@ function createSessionstartGeneration(
     stopping: false,
     delivered: false,
     child: null,
+    processGroupId: null,
     childClosed: false,
     childClose: null,
     stopPromise: null,
