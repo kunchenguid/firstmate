@@ -133,9 +133,37 @@ chmod 0755 "$FAKEBIN/fm-pr-merge"
 cat > "$FAKEBIN/fm-live-check" <<'SH'
 #!/usr/bin/env bash
 set -eu
-[ "${2:-}" = "139000" ] || { printf 'missing expected text\n' >&2; exit 1; }
-[ -z "${3:-}" ] || [ "$3" = "old-price" ] || { printf 'unexpected absent text\n' >&2; exit 1; }
-printf 'live-check %s %s %s\n' "$1" "${2:-}" "${3:-}" >> "$TASK_DB/.owners"
+payload=$1
+python3 - "$payload" "$TASK_DB" <<'PY'
+import json
+import os
+import sys
+
+payload_path, task_db = sys.argv[1:3]
+with open(payload_path, encoding="utf-8") as handle:
+    contract = json.load(handle)
+for key in ("schema", "event_id", "task_id", "accepted_intent", "source", "pr_url", "live_url", "intent_digest"):
+    if not contract.get(key):
+        raise SystemExit(f"missing {key}")
+expected_path = os.path.join(task_db, f"live-{contract['event_id']}.expected")
+with open(expected_path, encoding="utf-8") as handle:
+    actual_expected = handle.read().strip()
+if contract.get("expected") != actual_expected:
+    raise SystemExit("event-specific live expectation did not match")
+if contract.get("absent") not in ("", "old-price"):
+    raise SystemExit("unexpected absent text")
+with open(os.path.join(task_db, ".owners"), "a", encoding="utf-8") as handle:
+    handle.write(f"live-check {contract['event_id']} {contract['task_id']} {contract['expected']}\n")
+print(json.dumps({
+    "schema": "fm-pavel-ops-live-proof.v1",
+    "verified": True,
+    "event_id": contract["event_id"],
+    "task_id": contract["task_id"],
+    "live_url": contract["live_url"],
+    "intent_digest": contract["intent_digest"],
+    "evidence": "task-bound live proof",
+}))
+PY
 SH
 chmod 0755 "$FAKEBIN/fm-live-check"
 
@@ -236,6 +264,21 @@ ingest() {
 json_field() {
   local field=$1
   python3 -c "import json,sys; print(json.load(sys.stdin)$field)"
+}
+
+set_live_probe() {
+  local event_id=$1 expected=$2 absent=${3:-}
+  EVENT_FILE="$HOME_DIR/state/pavel-ops/events/$event_id.json" EXPECTED="$expected" ABSENT="$absent" python3 - <<'PY'
+import json
+import os
+path = os.environ["EVENT_FILE"]
+with open(path, encoding="utf-8") as handle:
+    event = json.load(handle)
+event["live_probe"] = {"expected": os.environ["EXPECTED"], "absent": os.environ["ABSENT"]}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
+    handle.write("\n")
+PY
 }
 
 # Intake publishes once and a replay neither creates a second event nor a second wake.
@@ -550,6 +593,8 @@ fi
 if run_ops transition "$event" dispatched --evidence 'caller supplied evidence' >/dev/null 2>&1; then
   fail "direct caller could advance autonomous delivery"
 fi
+set_live_probe "$event" '139000' 'old-price'
+printf '139000\n' > "$TASK_DB/live-$event.expected"
 run_ops drive "$event" >/dev/null
 task_meta="$HOME_DIR/state/$task_id.meta"
 printf 'pr=%s\npr_head=%s\n' 'https://github.com/o/r/pull/1' 'abc123' >> "$task_meta"
@@ -582,22 +627,66 @@ assert_grep 'message' "$HOME_DIR/state/pavel-ops/outbox/$event-live-completion.j
 assert_grep 'pr-check' "$TASK_DB/.owners" "driver did not compose the PR registration owner"
 assert_grep 'pr-merge' "$TASK_DB/.owners" "driver did not compose the PR merge owner"
 assert_grep 'deploy '"$task_id" "$TASK_DB/.owners" "driver did not compose the deploy owner"
-assert_grep 'live-check https://example.test/product 139000 old-price' "$TASK_DB/.owners" "driver did not compose the live verification owner"
+assert_grep 'live-check '"$event"' '"$task_id"' 139000' "$TASK_DB/.owners" "driver did not compose the live verification owner"
 pass "validated delivery is driver-owned and Pavel is notified after live proof"
 
 stale_prose=$(ingest 122 32 'Проверить PR' | json_field "['event']")
 run_ops classify "$stale_prose" --as task --title 'Check stale PR' --intent 'Ship via recorded PR only' \
   --reason 'ordinary delivery' --authority ordinary >/dev/null
 run_ops drive "$stale_prose" >/dev/null
+stale_task=$(run_ops inspect "$stale_prose" | json_field "['task_id']")
 printf '{"state":"validating","evidence":"no-mistakes validation is active"}\n' > "$PAVEL_STATUS_FILE"
 run_ops drive "$stale_prose" >/dev/null
+printf 'pr=%s\npr_head=%s\n' 'https://github.com/o/r/pull/405' 'abc124' >> "$HOME_DIR/state/$stale_task.meta"
+if run_ops drive "$stale_prose" >/dev/null 2>&1; then
+  fail "driver accepted a canonical PR URL while validation was still active"
+fi
 printf 'state: done; checks green for https://github.com/o/r/pull/404\n' > "$PAVEL_STATUS_FILE"
 if run_ops drive "$stale_prose" >/dev/null 2>&1; then
   fail "driver accepted a PR URL scraped from non-JSON status prose"
 fi
 [ "$(run_ops inspect "$stale_prose" | json_field "['state']")" = validating ] \
   || fail "stale prose PR rejection mutated the event"
-pass "delivery-ready ignores PR URLs in status prose"
+pass "delivery-ready requires structured validation readiness"
+
+wrong_live=$(ingest 124 34 'Поменять заголовок SEO' | json_field "['event']")
+run_ops classify "$wrong_live" --as task --title 'Change SEO title' --intent 'Show the requested SEO title' \
+  --reason 'ordinary SEO update' --authority ordinary >/dev/null
+wrong_live_task=$(run_ops inspect "$wrong_live" | json_field "['task_id']")
+set_live_probe "$wrong_live" 'new seo title' ''
+printf '139000\n' > "$TASK_DB/live-$wrong_live.expected"
+WRONG_LIVE_FILE="$HOME_DIR/state/pavel-ops/events/$wrong_live.json" WRONG_LIVE_TASK="$wrong_live_task" HOME_DIR="$HOME_DIR" python3 - <<'PY'
+import json
+import os
+import time
+path = os.environ["WRONG_LIVE_FILE"]
+with open(path, encoding="utf-8") as handle:
+    event = json.load(handle)
+now = int(time.time())
+for state, evidence in [
+    ("dispatched", "Pi worker exists in isolated copy"),
+    ("validating", "no-mistakes run owns current head"),
+    ("delivery_ready", "checks green on exact PR head"),
+    ("merge_queued", "guarded merge accepted by forge"),
+    ("landed", "forge reports PR merged at verified head"),
+]:
+    event["transitions"].append({"at": now, "from": event["state"], "to": state, "evidence": evidence})
+    event["state"] = state
+event["pr_url"] = "https://github.com/o/r/pull/124"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
+    handle.write("\n")
+with open(os.path.join(os.environ["HOME_DIR"], "state", os.environ["WRONG_LIVE_TASK"] + ".meta"), "w", encoding="utf-8") as handle:
+    handle.write("kind=ship\nharness=pi\nmode=no-mistakes\nyolo=on\n")
+    handle.write(f"worktree={os.environ['HOME_DIR']}/worktrees/{os.environ['WRONG_LIVE_TASK']}\n")
+    handle.write("pr=https://github.com/o/r/pull/124\npr_head=def456\n")
+PY
+if run_ops drive "$wrong_live" >/dev/null 2>&1; then
+  fail "global live expectation satisfied a different Pavel task"
+fi
+[ "$(run_ops inspect "$wrong_live" | json_field "['state']")" = landed ] \
+  || fail "task-specific live proof rejection mutated the event"
+pass "live verification is bound to each Pavel event"
 
 live_retry=$(ingest 123 33 'Поменять цену доставки' | json_field "['event']")
 run_ops classify "$live_retry" --as task --title 'Change shipping price' --intent 'Show the requested shipping price' \

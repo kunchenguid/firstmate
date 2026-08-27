@@ -134,8 +134,6 @@ A present file must be a single-linked regular JSON file with this schema:
   },
   "delivery": {
     "live_url": "https://aln.example/product",
-    "expected_text": "new visible text or price",
-    "absent_text": "old text that must be gone",
     "deploy_command": "/absolute/path/to/deploy-wrapper",
     "live_check_command": "/absolute/path/to/live-check-wrapper",
     "completion_text": "Готово: изменение уже на сайте."
@@ -156,7 +154,9 @@ When `project_path` is absent, the driver resolves `project` as `projects/<proje
 The optional `budget` object records non-negative bounded spending authority in operator-chosen fields such as `per_action_rub` and `per_day_rub`.
 An absent or zero bound grants no spending authority, and spending outside every applicable positive bound remains a captain-only decision.
 The optional `delivery` object records the concrete post-merge deploy and customer-surface verification contract.
-When present, `deploy_command` is run with the task id after a confirmed merge, and `live_check_command` is run with the live URL, expected text, and absent text; without a live-check command, `expected_text` must be non-empty and is fetched directly from `live_url`, while `absent_text` must not appear.
+When present, `deploy_command` is run with the task id after a confirmed merge, and `live_check_command` is run with a path to a bounded JSON payload containing the Pavel event id, task id, accepted intent, source digest, PR URL/head, and candidate live URL.
+The live-check owner must return a JSON `fm-pavel-ops-live-proof.v1` object with `verified: true` and the same event id, task id, live URL, and intent digest.
+Without a live-check command, the event must carry its own `live_probe.expected` text contract; global expected or absent text alone is not delivery authority.
 The driver never accepts a precomputed `state=live` claim as proof.
 The Telegram credential file must be an absolute, single-linked regular file containing the configured token key in `KEY=value` form.
 The production API endpoint is fixed to `https://api.telegram.org`; `telegram.api_base` is accepted only when `FM_PAVEL_OPS_TESTING=1` so tests can use a local fake without allowing a production config to redirect the token.

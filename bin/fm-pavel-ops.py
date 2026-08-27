@@ -29,6 +29,8 @@ SCHEMA = "fm-pavel-ops.v1"
 EVENT_SCHEMA = "fm-pavel-ops-event.v1"
 OUTBOUND_SCHEMA = "fm-pavel-ops-outbound.v1"
 TELEGRAM_OFFSET_SCHEMA = "fm-pavel-ops-telegram-offset.v1"
+LIVE_CONTRACT_SCHEMA = "fm-pavel-ops-live-contract.v1"
+LIVE_PROOF_SCHEMA = "fm-pavel-ops-live-proof.v1"
 SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 PR_URL = re.compile(r"^https://[^\s]+$")
 _DRIVER_CAPABILITY = object()
@@ -124,10 +126,11 @@ class Home:
         self.ops = self.state / "pavel-ops"
         self.events = self.ops / "events"
         self.outbox = self.ops / "outbox"
+        self.live_probes = self.ops / "live-probes"
         self.telegram_offset_path = self.ops / "telegram-offset.json"
         self.lock_path = self.ops / ".lock"
         self.audit_path = self.ops / "audit.jsonl"
-        for directory in (self.ops, self.events, self.outbox):
+        for directory in (self.ops, self.events, self.outbox, self.live_probes):
             if directory.exists() or directory.is_symlink():
                 if directory.is_symlink() or not directory.is_dir():
                     raise OpsError(f"Pavel operations state directory is unsafe: {directory}")
@@ -756,6 +759,34 @@ def pr_url_from_meta(home: Home, event: dict[str, Any]) -> str:
     return pr_url
 
 
+def pr_contract_from_meta(home: Home, event: dict[str, Any]) -> dict[str, str]:
+    meta = task_meta(home, event)
+    pr_url = meta.get("pr", "")
+    if not PR_URL.fullmatch(pr_url):
+        raise OpsError("Pavel PR owner has not recorded a canonical PR URL")
+    pr_head = meta.get("pr_head", "")
+    if pr_head and not re.fullmatch(r"[0-9a-fA-F]{6,64}", pr_head):
+        raise OpsError("Pavel PR owner recorded an invalid PR head")
+    return {"pr_url": pr_url, "pr_head": pr_head}
+
+
+def validated_pr_contract(home: Home, event: dict[str, Any], status: dict[str, Any]) -> dict[str, str]:
+    meta_contract = pr_contract_from_meta(home, event)
+    status_url = str(status.get("pr_url") or "")
+    status_head = str(status.get("pr_head") or "")
+    pr_url = status_url or meta_contract["pr_url"]
+    pr_head = status_head or meta_contract["pr_head"]
+    if not PR_URL.fullmatch(pr_url):
+        raise OpsError("Pavel delivery is not ready with a verified PR URL")
+    if status_url and status_url != meta_contract["pr_url"]:
+        raise OpsError("Pavel status PR URL does not match the canonical PR owner record")
+    if status_head and meta_contract["pr_head"] and status_head != meta_contract["pr_head"]:
+        raise OpsError("Pavel status PR head does not match the canonical PR owner record")
+    if pr_head and not re.fullmatch(r"[0-9a-fA-F]{6,64}", pr_head):
+        raise OpsError("Pavel status owner recorded an invalid PR head")
+    return {"pr_url": pr_url, "pr_head": pr_head}
+
+
 def delivery_config(home: Home) -> dict[str, Any]:
     delivery = home.config.get("delivery", {})
     if not isinstance(delivery, dict):
@@ -772,6 +803,111 @@ def completion_text_for(home: Home, event: dict[str, Any]) -> str:
         return configured
     live_url = str(event.get("live_url") or delivery.get("live_url") or "")
     return f"Готово: результат уже на сайте {live_url}"
+
+
+def base_delivery_contract(event: dict[str, Any]) -> dict[str, Any]:
+    classification = event.get("classification") or {}
+    accepted_intent = str(classification.get("intent") or "")
+    source = event.get("source") or {}
+    return {
+        "schema": LIVE_CONTRACT_SCHEMA,
+        "event_id": event["id"],
+        "task_id": str(event.get("task_id") or ""),
+        "accepted_intent": accepted_intent,
+        "intent_digest": sha(accepted_intent),
+        "source": source,
+        "source_digest": event.get("source_digest") or sha(canonical(source)),
+    }
+
+
+def persist_base_delivery_contract(home: Home, event: dict[str, Any]) -> dict[str, Any]:
+    existing = event.get("delivery_contract")
+    base = base_delivery_contract(event)
+    if existing is None:
+        event["delivery_contract"] = base
+        home.save_event(event)
+        return base
+    if not isinstance(existing, dict):
+        raise OpsError("Pavel event has an invalid delivery contract")
+    for key in ("schema", "event_id", "task_id", "accepted_intent", "intent_digest", "source_digest"):
+        if existing.get(key) != base.get(key):
+            raise OpsError("Pavel event delivery contract changed across retries")
+    return existing
+
+
+def live_contract_for(
+    home: Home,
+    event: dict[str, Any],
+    live_url: str,
+    pr_url: str,
+    pr_head: str,
+) -> dict[str, Any]:
+    contract = dict(persist_base_delivery_contract(home, event))
+    probe = event.get("live_probe") or contract.get("live_probe") or {}
+    if not isinstance(probe, dict):
+        raise OpsError("Pavel live probe contract must be an object")
+    expected = str(probe.get("expected") or contract.get("expected") or "").strip()
+    absent = str(probe.get("absent") or contract.get("absent") or "").strip()
+    contract.update(
+        {
+            "live_url": live_url,
+            "pr_url": pr_url,
+            "pr_head": pr_head,
+            "expected": expected,
+            "absent": absent,
+        }
+    )
+    event["delivery_contract"] = contract
+    home.save_event(event)
+    return contract
+
+
+def live_probe_payload_path(home: Home, event: dict[str, Any]) -> Path:
+    return home.live_probes / f"{event['id']}.json"
+
+
+def verify_live_check_proof(output: str, contract: dict[str, Any]) -> dict[str, Any]:
+    try:
+        proof = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise OpsError("Pavel live verification owner must return a JSON proof") from exc
+    if not isinstance(proof, dict):
+        raise OpsError("Pavel live verification proof must be an object")
+    if proof.get("schema") != LIVE_PROOF_SCHEMA or proof.get("verified") is not True:
+        raise OpsError("Pavel live verification owner did not prove the requested behavior")
+    for key in ("event_id", "task_id", "live_url", "intent_digest"):
+        if proof.get(key) != contract.get(key):
+            raise OpsError(f"Pavel live verification proof is not bound to the event {key}")
+    return proof
+
+
+def verify_live(home: Home, event: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
+    live_check = os.environ.get("FM_PAVEL_OPS_LIVE_CHECK") or delivery_config(home).get("live_check_command")
+    if live_check:
+        payload_path = live_probe_payload_path(home, event)
+        atomic_json(payload_path, contract)
+        proof = verify_live_check_proof(run_checked(home, [str(live_check), str(payload_path)]), contract)
+        atomic_json(payload_path.with_suffix(".proof.json"), proof)
+        return proof
+    expected = str(contract.get("expected") or "")
+    absent = str(contract.get("absent") or "")
+    if not expected:
+        raise OpsError("Pavel live verification requires an event-specific expected behavior or live_check_command")
+    with urllib.request.urlopen(str(contract["live_url"]), timeout=30) as response:
+        body = response.read().decode("utf-8", "replace")
+    if expected not in body:
+        raise OpsError("Pavel live probe did not find the requested behavior")
+    if absent and absent in body:
+        raise OpsError("Pavel live probe found forbidden old behavior")
+    return {
+        "schema": LIVE_PROOF_SCHEMA,
+        "verified": True,
+        "event_id": contract["event_id"],
+        "task_id": contract["task_id"],
+        "live_url": contract["live_url"],
+        "intent_digest": contract["intent_digest"],
+        "evidence": "event-specific text probe passed",
+    }
 
 
 def validate_dispatched_owner_record(home: Home, event: dict[str, Any]) -> dict[str, str]:
@@ -860,6 +996,7 @@ def drive(home: Home, args: argparse.Namespace) -> dict[str, Any]:
     if event["state"] == "ready":
         brief = home.home / "data" / task_id / "brief.md"
         project_ref = project_path(home)
+        persist_base_delivery_contract(home, event)
         if not brief.exists():
             run_checked(
                 home,
@@ -891,13 +1028,10 @@ def drive(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         return driver_transition(home, event, "validating", str(status.get("evidence") or "no-mistakes validation is active"))
     if event["state"] == "validating":
         status = owner_status(home, event)
-        pr_url = str(status.get("pr_url") or "")
-        if not pr_url:
-            pr_url = pr_url_from_meta(home, event)
-        if status.get("state") != "delivery_ready" or not PR_URL.fullmatch(pr_url):
-            if not PR_URL.fullmatch(pr_url):
-                raise OpsError("Pavel delivery is not ready with a verified PR URL")
-        run_checked(home, [command_from_env(home, "FM_PAVEL_OPS_PR_CHECK", "fm-pr-check.sh"), task_id, pr_url])
+        if status.get("state") not in {"delivery_ready", "done"}:
+            raise OpsError("Pavel validation has not reached delivery readiness")
+        pr_contract = validated_pr_contract(home, event, status)
+        run_checked(home, [command_from_env(home, "FM_PAVEL_OPS_PR_CHECK", "fm-pr-check.sh"), task_id, pr_contract["pr_url"]])
         return driver_transition(home, event, "delivery_ready", str(status.get("evidence") or "checks green on exact PR head"))
     if event["state"] == "delivery_ready":
         pr_url = str(event.get("pr_url") or "")
@@ -926,21 +1060,14 @@ def drive(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         live_url = str(delivery.get("live_url") or "")
         if not PR_URL.fullmatch(live_url):
             raise OpsError("Pavel live verification requires delivery.live_url")
-        expected = str(event.get("live_probe", {}).get("expected") or delivery.get("expected_text") or "").strip()
-        absent = str(event.get("live_probe", {}).get("absent") or delivery.get("absent_text") or "").strip()
-        live_check = os.environ.get("FM_PAVEL_OPS_LIVE_CHECK") or delivery.get("live_check_command")
-        if live_check:
-            run_checked(home, [str(live_check), live_url, expected, absent])
-        else:
-            if not expected:
-                raise OpsError("Pavel live verification requires expected text or a live_check_command")
-            with urllib.request.urlopen(live_url, timeout=30) as response:
-                body = response.read().decode("utf-8", "replace")
-            if expected not in body:
-                raise OpsError("Pavel live probe did not find the requested behavior")
-            if absent and absent in body:
-                raise OpsError("Pavel live probe found forbidden old behavior")
+        pr_contract = pr_contract_from_meta(home, event)
+        pr_url = str(event.get("pr_url") or pr_contract["pr_url"])
+        if pr_url != pr_contract["pr_url"]:
+            raise OpsError("Pavel landed event PR URL does not match the canonical PR owner record")
+        contract = live_contract_for(home, event, live_url, pr_url, pr_contract["pr_head"])
+        proof = verify_live(home, event, contract)
         evidence = f"live probe passed for {live_url}"
+        event["live_proof"] = proof
         event["completion_text"] = completion_text_for(home, {**event, "live_url": live_url})
         home.save_event(event)
         event = driver_transition(home, event, "live", evidence, live_url=live_url)
