@@ -192,6 +192,7 @@ test_session_log_selects_newest_incarnation() {
     *) fail "session_log picked '$log', expected the newest incarnation" ;;
   esac
   # The newest log is a fresh user turn, so the task classifies busy.
+  # shellcheck disable=SC2030,SC2031 # $state/$id read outside the earlier sourcing subshell; no leak.
   [ "$(classify_omp "$state" "$id")" = "busy omp-session-log" ] \
     || fail "classify did not fold the newest incarnation as busy"
   pass "the newest session log is the live incarnation and drives classification"
