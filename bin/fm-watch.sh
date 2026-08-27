@@ -872,10 +872,10 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
       # Away mode is daemon-owned, so this bound hands off the PLAIN wake identity
       # and lets the daemon classify the declaration itself - the undecorated
       # identity the rest of this function's contract promises. Running the wedge
-      # timer here instead would decorate the wake as a possible wedge, and that
-      # decoration overrides the daemon's own pause verdict for the pane: the
-      # ladder then climbs on every re-arm, escalating a crew that declared the
-      # wait itself once per FM_STALE_ESCALATE_SECS for as long as the wait lasts.
+      # timer here instead would decorate the wake as a possible wedge and climb
+      # the ladder on every re-arm, waking the daemon once per
+      # FM_STALE_ESCALATE_SECS for as long as the wait lasts only for it to
+      # re-absorb the declaration it already tracks on the pause cadence.
       # The one-shot is keyed on the DECLARATION (the status log's signature),
       # never on the pane hash: a busy pane's harness footer ticks on every
       # capture, so a hash-keyed one-shot would re-fire on every poll and the
@@ -906,6 +906,11 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
   return 1
 }
 
+# Keep .paused-resurfaced-<key> here: the re-surface throttle belongs to the
+# declaration, not to one absorb, so a pane that flickers busy mid-wait (a short
+# turn that appends no status line) re-enters the cadence without an off-schedule
+# recheck. The main loop drops the throttle once the latest status stops
+# declaring a wait (tests/fm-watch-triage.test.sh pins the flicker case).
 clear_pause_state() {  # <window-key>
   local key=$1
   rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key"
