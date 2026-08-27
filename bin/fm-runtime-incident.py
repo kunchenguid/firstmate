@@ -770,19 +770,42 @@ def collect_workers(
 
         registered_copy = copy_by_path.get(str(cwd)) if cwd and not remote_host else None
         stale_path = bool(registered_copy and registered_copy["stale_remote"])
-        if cwd_record and not remote_host and registered_copy is None:
+        if (
+            cwd_record
+            and not remote_host
+            and registered_copy is None
+            and cwd_record["origin"] == repo_info["canonical_remote"]
+        ):
             worker_remote_head = cwd_record.get("remote_default_head")
+            worker_head = cwd_record.get("head")
             authoritative_remote_head = repo_info.get("authoritative_remote_head")
-            if worker_remote_head and authoritative_remote_head:
-                stale_path = bool(
-                    worker_remote_head != authoritative_remote_head
+            if authoritative_remote_head:
+                stale_remote = bool(
+                    worker_remote_head
+                    and worker_remote_head != authoritative_remote_head
                     and commit_is_ancestor(
                         Path(repo_info["authoritative_repository"]),
                         worker_remote_head,
                         authoritative_remote_head,
                     )
                 )
-                if not stale_path and worker_remote_head != authoritative_remote_head:
+                stale_checkout = bool(
+                    worker_head
+                    and worker_head != authoritative_remote_head
+                    and commit_is_ancestor(
+                        Path(repo_info["authoritative_repository"]),
+                        worker_head,
+                        authoritative_remote_head,
+                    )
+                )
+                stale_path = stale_remote or stale_checkout
+                current_main_checkout = bool(
+                    worker_remote_head == authoritative_remote_head
+                    and worker_head == authoritative_remote_head
+                    and cwd_record.get("branch") == cwd_record.get("default_branch")
+                    and not cwd_record.get("detached")
+                )
+                if not stale_path and not current_main_checkout:
                     wrong_worktree = None
             else:
                 wrong_worktree = None

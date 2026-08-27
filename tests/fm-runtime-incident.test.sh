@@ -227,15 +227,25 @@ EOF
 }
 
 test_worker_omitted_by_candidate_cap_is_still_reconciled() {
-  local home origin seed stale current crew_state out i
+  local home origin seed stale stale_head current crew_state out i
   home=$(make_home omitted-worker)
   origin=$(make_origin omitted-worker)
   seed=$TMP_ROOT/omitted-worker-seed
   stale=$home/z-stale
   clone_origin "$origin" "$stale"
+  stale_head=$(git -C "$stale" rev-parse HEAD)
   advance_origin "$seed" "current incident baseline" 2026-08-22T12:00:00Z
+  git -C "$stale" fetch --quiet origin
+  git -C "$stale" checkout --quiet --detach "$stale_head"
   current=$home/projects/titan-current
   clone_origin "$origin" "$current"
+  [ "$(git -C "$stale" rev-parse refs/remotes/origin/main)" = \
+    "$(git -C "$current" rev-parse HEAD)" ] || fail "stale worker remote was not current"
+  [ "$(git -C "$stale" rev-parse HEAD)" = "$stale_head" ] || \
+    fail "stale worker checkout did not remain on the old commit"
+  if git -C "$stale" symbolic-ref --quiet HEAD >/dev/null; then
+    fail "stale worker checkout was not detached"
+  fi
   stale=$(cd "$stale" && pwd -P)
   current=$(cd "$current" && pwd -P)
   for i in $(seq -w 1 63); do
