@@ -237,8 +237,9 @@ FILE=${3:-$CONFIG/crew-accounts.json}
 validate() {
   jq -e '
     def forbidden: ["apiKey","token","secret","password","cookie","authorization"];
+    def forbidden_key: [paths(scalars) as $p | ($p[-1]|tostring) as $key | select(forbidden|index($key)) | $key][0] // null;
     if type != "object" or .version != 1 or (.accounts|type) != "object" then error("invalid account-lane schema")
-    elif [paths(scalars) as $p | select(($p[-1]|tostring) as $key | forbidden|index($key))] | length > 0 then error("forbidden credential field")
+    elif forbidden_key != null then error("forbidden credential field: \(forbidden_key)")
     elif [.accounts|to_entries[]|select(.key|test("^[a-z0-9][a-z0-9-]*$")|not)]|length > 0 then error("invalid account id")
     elif [.accounts[]|select(.harness != "claude" and .harness != "codex")]|length > 0 then error("account harness must be claude or codex")
     elif [.accounts[]|select(.harness == "claude" and .envName != "CLAUDE_CONFIG_DIR")]|length > 0 then error("claude accounts require CLAUDE_CONFIG_DIR")
@@ -345,6 +346,11 @@ fm_route_select() {
   jq -n --slurpfile req "$request" --slurpfile pool "$candidates" '
     def reason_rank: {basic:1,standard:2,strong:3,maximum:4}[.] // 0;
     def primary_key: [.fitTier, (.spendPriority // -1e100), (-.activeLane)];
+    def uncertainty:
+      [if .authState == "unknown" then "auth" else empty end,
+       if .spendPriority == null then "quota" else empty end,
+       if .runwaySeconds == null then "runway" else empty end]
+      | if length == 0 then empty else "\(.profile):\(join(","))" end;
     ($req[0]) as $r
     | ($pool[0]
        | map(. + {reasonRank:(.reasoningClass|reason_rank)})
@@ -364,8 +370,8 @@ fm_route_select() {
             | $history|map(select(.costTier == $cost))
           else $history end) as $finalists
       | if ($finalists|length) != 1
-          then {action:"escalate",reason:"evidence-tie",selected:null,ranked:$eligible,rejected:[],uncertainty:[]}
-        else {action:"selected",reason:"lexicographic-policy",selected:$finalists[0],ranked:$eligible,rejected:[],uncertainty:[]}
+          then {action:"escalate",reason:"evidence-tie",selected:null,ranked:$eligible,rejected:[],uncertainty:[$eligible[]|uncertainty]}
+        else {action:"selected",reason:"lexicographic-policy",selected:$finalists[0],ranked:$eligible,rejected:[],uncertainty:[$eligible[]|uncertainty]}
         end
       end
   '
@@ -722,6 +728,8 @@ Expected: FAIL because the new skill and trigger do not exist.
 11. In canary or automatic mode, reserve each approved independent slot before calling `fm-spawn.sh` with the complete route tuple.
 12. Retry one proven transient once, fall back on quota, authentication, or model unavailability, and stop immediately on unsafe or uncertain writes.
 13. Stop spawning when acceptance criteria are covered or remaining work is dependent, redundant, quota-bound, or host-bound.
+
+The normalized routing files and ledger must never include prompts, source code, credentials, cookies, token values, or raw tool output.
 ```
 
 Move conditional routing detail out of `AGENTS.md` and leave only the trigger plus unconditional safety facts.
