@@ -998,22 +998,20 @@ def confirmed_merge_record(home: Home, event: dict[str, Any]) -> bool:
     pr_url = str(event.get("pr_url") or "")
     task_id = str(event.get("task_id") or "")
     marker = home.state / f"{task_id}.pr-poll-merge-notified"
-    if marker.exists():
-        identity = pr_identity(pr_url)
-        if identity is None:
-            return False
-        try:
-            regular_private_file(marker, "merge outcome marker")
-            lines = marker.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            return False
-        return lines == ["fm-pr-poll-merge-notified-v1", *identity]
-    status = owner_status(home, event)
-    return (
-        status.get("state") == "landed"
-        and str(status.get("pr_url") or pr_url) == pr_url
-        and bool(status.get("merged"))
-    )
+    if not marker.exists():
+        return False
+    identity = pr_identity(pr_url)
+    if identity is None:
+        return False
+    try:
+        regular_private_file(marker, "merge outcome marker")
+        lines = marker.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    if lines != ["fm-pr-poll-merge-notified-v1", *identity]:
+        return False
+    pr_contract_from_meta(home, event)
+    return True
 
 
 def drive(home: Home, args: argparse.Namespace) -> dict[str, Any]:
@@ -1061,6 +1059,8 @@ def drive(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         return driver_transition(home, event, "delivery_ready", str(status.get("evidence") or "checks green on exact PR head"))
     if event["state"] == "delivery_ready":
         status = owner_status(home, event)
+        if status.get("state") not in {"delivery_ready", "done"}:
+            raise OpsError("Pavel checks are no longer ready for merge")
         pr_contract = validated_pr_contract(home, event, status)
         pr_url = str(event.get("pr_url") or pr_contract["pr_url"])
         if pr_url != pr_contract["pr_url"]:

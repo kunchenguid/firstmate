@@ -171,7 +171,7 @@ Session start runs `bin/fm-pavel-ops.sh arm-collector` and `recover --startup` b
 Arming registers one home-identity-bound process-event source; watcher reconciliation starts or recovers the long-polling collector child later, keeping Telegram network I/O off the blocking session-start path and preserving one `getUpdates` owner.
 That local recovery republishes captured, orphaned active-delivery, landed, and live-but-unnotified work and surfaces retryable or delivery-unknown Telegram sends without network access.
 The Pi primary and its tracked supervision extensions then handle each `pavel-ops-...` check wake under the `pavel-ops` skill by calling `bin/fm-pavel-ops.sh drive <event-id>`.
-The driver composes the existing Firstmate brief, Pi spawn, worker-state, task metadata PR record, PR registration, guarded merge, confirmed merge-outcome marker, deploy command, and live-verification owner before recording delivery progress; direct lifecycle transition input is not authority for dispatch, merge, landed, or live facts.
+The driver composes the existing Firstmate brief, Pi spawn, worker-state, task metadata PR record, PR registration, guarded merge, confirmed merge-outcome marker, deploy command, and live-verification owner before recording delivery progress; immediately before merge it requires fresh structured delivery-ready or done status for the same canonical PR/head, and landed is recorded only from the merge owner's durable outcome marker.
 
 Before replacing a legacy Pavel watcher or stale tgsync route, run `bin/fm-pavel-ops.sh migration-audit` with the legacy pending queue and project clone paths.
 Use `adopt-task` to link existing paused Pavel backlog rows at their already-proved lifecycle fact without recreating or closing them.

@@ -614,10 +614,12 @@ if FM_PAVEL_OPS_DRIVER=1 run_ops transition "$event" landed --evidence 'forged l
   fail "exported driver marker could forge delivery authority"
 fi
 touch "$TASK_DB/.merge-unconfirmed"
+printf '{"state":"landed","pr_url":"https://github.com/o/r/pull/1","merged":true,"evidence":"stale task status"}\n' > "$PAVEL_STATUS_FILE"
 run_ops drive "$event" >/dev/null
 [ "$(run_ops inspect "$event" | json_field "['state']")" = merge_queued ] \
-  || fail "unconfirmed merge advanced past merge_queued"
+  || fail "stale landed status without merge marker advanced past merge_queued"
 rm -f "$TASK_DB/.merge-unconfirmed"
+printf '{"state":"done","evidence":"checks green on exact PR head"}\n' > "$PAVEL_STATUS_FILE"
 run_ops drive "$event" >/dev/null
 if run_ops transition "$event" live --evidence 'deploy succeeded' >/dev/null 2>&1; then
   fail "live transition accepted no customer URL"
@@ -678,6 +680,28 @@ fi
 [ "$(run_ops inspect "$pr_substitution" | json_field "['state']")" = delivery_ready ] \
   || fail "PR substitution rejection mutated the event"
 pass "delivery-ready preserves the canonical PR identity"
+
+regressed=$(ingest 126 36 'Проверить регресс CI' | json_field "['event']")
+run_ops classify "$regressed" --as task --title 'Reject regressed checks' --intent 'Merge only while checks are green' \
+  --reason 'ordinary delivery' --authority ordinary >/dev/null
+run_ops drive "$regressed" >/dev/null
+regressed_task=$(run_ops inspect "$regressed" | json_field "['task_id']")
+printf 'pr=%s\npr_head=%s\n' 'https://github.com/o/r/pull/11' 'bb11cc' >> "$HOME_DIR/state/$regressed_task.meta"
+printf '{"state":"done","pr_url":"https://github.com/o/r/pull/11","pr_head":"bb11cc","evidence":"checks green on exact PR head"}\n' > "$PAVEL_STATUS_FILE"
+run_ops drive "$regressed" >/dev/null
+run_ops drive "$regressed" >/dev/null
+[ "$(run_ops inspect "$regressed" | json_field "['state']")" = delivery_ready ] \
+  || fail "regressed-check setup did not reach delivery_ready"
+owners_before_regressed=$(grep -c . "$TASK_DB/.owners")
+printf '{"state":"validating","pr_url":"https://github.com/o/r/pull/11","pr_head":"bb11cc","evidence":"checks running again"}\n' > "$PAVEL_STATUS_FILE"
+if run_ops drive "$regressed" >/dev/null 2>&1; then
+  fail "delivery_ready merged after checks regressed"
+fi
+[ "$(grep -c . "$TASK_DB/.owners")" -eq "$owners_before_regressed" ] \
+  || fail "regressed checks still invoked a delivery owner"
+[ "$(run_ops inspect "$regressed" | json_field "['state']")" = delivery_ready ] \
+  || fail "regressed-check rejection mutated the event"
+pass "merge queue requires fresh green validation"
 
 set_live_probe "$ambiguous" 'Белый, фото выше' ''
 printf 'Белый, фото выше\n' > "$TASK_DB/live-$ambiguous.expected"
