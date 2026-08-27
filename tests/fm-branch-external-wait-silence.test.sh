@@ -64,13 +64,13 @@ assert_silent "$home" false "first wait notice must stay visible"
 assert_replay_has "$home" 'PR worker still waiting on the self-hosted runner' "startup replay hid the first wait notice"
 
 # Unchanged wait: different age in the wake and different summary prose, same paused line.
-append_outcome "$home" pr-1 routine 'still parked on the unavailable runner' "$stale_wake_480" >/dev/null \
+append_outcome "$home" pr-1 routine 'still parked on the unavailable runner' "$stale_wake_480" true >/dev/null \
   || fail "unchanged wait append failed"
 assert_silent "$home" true "unchanged wait must be stored silent"
 assert_replay_silent "$home" 'still parked on the unavailable runner' "startup replay replayed an unchanged wait"
 
 # Exact sequence lookup remains bound to the appended outcome after another task appends.
-wait_seq=$(append_outcome "$home" pr-1 routine 'still parked after another inspection' "$stale_wake_480") \
+wait_seq=$(append_outcome "$home" pr-1 routine 'still parked after another inspection' "$stale_wake_480" true) \
   || fail "concurrent-handoff wait append failed"
 append_outcome "$home" pr-2 routine 'other task produced a visible transition' 'signal: working' >/dev/null \
   || fail "interleaved visible append failed"
@@ -97,9 +97,17 @@ assert_silent "$home" false "a changed wait must stay visible"
 assert_replay_has "$home" 'now waiting on a rate-limit reset' "startup replay hid a changed wait"
 
 # A later identical recheck of the new wait goes silent again.
-append_outcome "$home" pr-1 routine 'still waiting on that rate-limit reset' "$stale_wake_480" >/dev/null \
+append_outcome "$home" pr-1 routine 'still waiting on that rate-limit reset' "$stale_wake_480" true >/dev/null \
   || fail "second unchanged wait append failed"
 assert_silent "$home" true "the new wait's unchanged recheck must be silent"
+
+append_outcome "$home" pr-1 routine 'repaired watcher state while the wait continues' "$stale_wake_480" false >/dev/null \
+  || fail "changed-consequence append failed"
+assert_silent "$home" false "a changed consequence on the same wait must stay visible"
+
+append_outcome "$home" pr-1 routine 'wait unchanged after watcher repair' "$stale_wake_480" true >/dev/null \
+  || fail "post-action unchanged append failed"
+assert_silent "$home" true "a confirmed unchanged wait after an action must be silent"
 
 # Decision / blocker, validation failure, recovery, green PR, merge, and a
 # replacement task must all remain visible. These are not paused+stale matches.
@@ -154,7 +162,7 @@ printf '%s\n' 'paused: upstream release not shipped' > "$home/state/pr-3.status"
 append_outcome "$home" pr-3 captain 'first notice of the upstream wait' "$stale_wake_240" >/dev/null \
   || fail "captain first-wait append failed"
 assert_silent "$home" false "a captain wait notice must stay visible"
-append_outcome "$home" pr-3 routine 'upstream wait unchanged' "$stale_wake_480" >/dev/null \
+append_outcome "$home" pr-3 routine 'upstream wait unchanged' "$stale_wake_480" true >/dev/null \
   || fail "routine recheck after captain notice failed"
 assert_silent "$home" true "routine recheck after a captain first notice must be silent"
 

@@ -16,13 +16,14 @@
 #   - Declared-external-wait silence: when a routine append names a `stale:`
 #     wake for a task whose current status line is a `paused:` wait, append
 #     stores that exact status line as `identity` and compares it to the most
-#     recent outcome for the same task. A matching identity forces `silent`
-#     true so an unchanged wait is recorded but not replayed; a first notice,
-#     a different status line, a different task, or a non-wait outcome stays
-#     visible. Captain verdicts are never auto-silenced. The identity is the
-#     paused status line itself, never summary text, so similar prose on
-#     another task or a changed wait cannot collapse together. This guard is
-#     Pi-branch-only: homes that never call this script are untouched.
+#     recent outcome for the same task. A matching identity permits a caller's
+#     explicit `silent=true`; `silent=false` stays visible for a changed
+#     consequence or required action. A first notice, a different status line,
+#     a different task, or a non-wait outcome stays visible. Captain verdicts
+#     are never auto-silenced. The identity is the paused status line itself,
+#     never summary text, so similar prose on another task or a changed wait
+#     cannot collapse together. This guard is Pi-branch-only: homes that never
+#     call this script are untouched.
 #   - Cursor: $STATE/.branch-outcomes-cursor holds the highest seq handed to
 #     Pi as an append-only merge note, emitted by the locked session-start
 #     replay, or silently consumed there because `silent` is true. Records
@@ -200,9 +201,7 @@ case "$CMD" in
     if [ -n "$WAIT_IDENTITY" ] && [ "$VERDICT" = routine ]; then
       PREV_IDENTITY=$(most_recent_wait_identity "$TASK" || true)
       PREV_IDENTITY=${PREV_IDENTITY%$'\n'}
-      if [ "$PREV_IDENTITY" = "$WAIT_IDENTITY" ]; then
-        SILENT=true
-      else
+      if [ "$PREV_IDENTITY" != "$WAIT_IDENTITY" ]; then
         SILENT=false
       fi
     fi
