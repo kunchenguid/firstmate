@@ -891,10 +891,16 @@ trap spawn_abort_cleanup EXIT
 # The 5s bound stays short deliberately, even though a projected spawn now holds
 # this lock across the shell-readiness gates below and can therefore hold it for
 # minutes: on the fresh-projection path presentation is best-effort, so a
-# contending spawn that warns and takes the flat layout is a far better outcome
-# than one blocking for minutes behind another task's slow-starting shell -
-# fm-bootstrap runs a spawn synchronously per secondmate, with no timeout around
-# it. A presentation RECOVERY is the one caller that cannot degrade: a task whose
+# contending spawn taking the flat layout is a far better outcome than one
+# blocking for minutes behind another task's slow-starting shell - fm-bootstrap
+# runs a spawn synchronously per secondmate, with no timeout around it. That
+# fallback is SILENT as the code stands: of the projection site's four arms, two
+# announce their degradation (a session server that cannot be ensured, and a
+# parent workspace that is absent or ambiguous, each with its own warning) while
+# a lost acquire falls out of the elif chain with nothing printed, the way the
+# preference/support arm deliberately does - so an operator sees a flat pane and
+# not the reason for it. A presentation RECOVERY is the one caller that cannot
+# degrade: a task whose
 # journal already claims a projected pane refuses the resume outright rather than
 # reclaiming that pane concurrently, so there this bound decides how long a
 # resume waits before failing, not whether it falls back.
@@ -2538,6 +2544,23 @@ spawn_ready_root_private() {  # <dir> - on false, names the failed condition
   return 0
 }
 
+# Every refusal below fires with the task's endpoint ALREADY created: a fresh
+# spawn makes it at the backend dispatch far above, and the temp root is only
+# established here. That endpoint is deliberately left standing so the shell it
+# names can be inspected - but on a fresh spawn it is also what the operator's
+# next attempt collides with, since tmux, zellij, cmux and herdr all refuse a
+# duplicate endpoint name, so a remedy that names only the temp root does not
+# describe a spawnable state. Two cases owe nothing extra and say so by
+# omission: a relaunch adopts the recorded endpoint rather than creating one,
+# and the abort trap reclaims the two endpoint kinds it can prove this spawn
+# made, an orca terminal and a herdr projection.
+spawn_task_tmp_endpoint_note() {
+  if [ "$RELAUNCH" -eq 1 ] || [ "$ORCA_ABORT_CLEANUP" = 1 ]      || [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
+    return 0
+  fi
+  printf '%s' ". Task $ID's endpoint $T already exists - this spawn created it before reaching this check, and a refusal leaves it standing so that shell can be inspected - so it has to be gone before another spawn of $ID can create its own"
+}
+
 # A mode refusal is the operator's to clear, and often their ONLY notice:
 # `bin/fm-control.sh <id> relaunch` stops the old agent before it calls this
 # script, so a refusal here leaves the task with nothing running and this
@@ -2550,7 +2573,7 @@ spawn_refuse_unprivate_task_tmp() {
   if [ "$SPAWN_READY_ROOT_PRIVACY_KIND" = mode ]; then
     remedy=". This account owns $TASK_TMP, so it is a stale root of firstmate's own rather than another account's: it either predates this requirement, or was created at the host umask by the fallback mkdir that runs when the umask-scoped one could not create it - which leaves 0775 on a umask-002 host such as Debian or Ubuntu with user-private groups. Remove $TASK_TMP and spawn again. A relaunch reaches this point with the task's previous agent already stopped, so nothing is running for $ID until you do"
   fi
-  echo "error: task $ID's per-task temp root $TASK_TMP is not private: $SPAWN_READY_ROOT_PRIVACY_ISSUE, so another local account could replace the readiness-marker directory this spawn is about to create inside it and no marker there would be proof the endpoint shell ran what was typed into it; refusing to spawn$remedy" >&2
+  echo "error: task $ID's per-task temp root $TASK_TMP is not private: $SPAWN_READY_ROOT_PRIVACY_ISSUE, so another local account could replace the readiness-marker directory this spawn is about to create inside it and no marker there would be proof the endpoint shell ran what was typed into it; refusing to spawn$remedy$(spawn_task_tmp_endpoint_note)" >&2
   exit 1
 }
 
@@ -2580,7 +2603,7 @@ fi
 # root explains itself in full. Both are the same refusal and owe the same
 # explanation.
 mkdir -p "$TASK_TMP/gotmp" || {
-  echo "error: could not create the per-task temp root $TASK_TMP for $ID (its own reason is above); a root another local account owns is refused by name before this point, so what lands here is a path this account cannot write into or a /tmp that cannot hold it, and the readiness marker that proves the endpoint shell ran what was typed into it lives there; refusing to spawn" >&2
+  echo "error: could not create the per-task temp root $TASK_TMP for $ID (its own reason is above); a root another local account owns is refused by name before this point, so what lands here is a path this account cannot write into or a /tmp that cannot hold it, and the readiness marker that proves the endpoint shell ran what was typed into it lives there; refusing to spawn$(spawn_task_tmp_endpoint_note)" >&2
   exit 1
 }
 
@@ -2612,7 +2635,7 @@ else
   SPAWN_READY_ROOT_ISSUE="$SPAWN_READY_ROOT is not private: $SPAWN_READY_ROOT_PRIVACY_ISSUE"
 fi
 if [ -n "$SPAWN_READY_ROOT_ISSUE" ]; then
-  echo "error: could not create a private readiness-marker directory under $TASK_TMP for $ID ($SPAWN_READY_ROOT_ISSUE), so no marker there would be proof the endpoint shell ran what was typed into it; refusing to spawn rather than trusting a marker another local account could write" >&2
+  echo "error: could not create a private readiness-marker directory under $TASK_TMP for $ID ($SPAWN_READY_ROOT_ISSUE), so no marker there would be proof the endpoint shell ran what was typed into it; refusing to spawn rather than trusting a marker another local account could write$(spawn_task_tmp_endpoint_note)" >&2
   exit 1
 fi
 

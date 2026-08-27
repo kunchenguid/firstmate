@@ -754,6 +754,8 @@ test_temp_root_that_cannot_hold_a_private_marker_refuses_the_spawn() {
   [ "$status" -ne 0 ] || fail "spawn should refuse when it cannot create a private marker directory"
   assert_contains "$out" "could not create a private readiness-marker directory" \
     "the refusal did not name the marker directory it could not create"
+  assert_contains "$out" "endpoint firstmate:fm-$id already exists" \
+    "the refusal did not name the endpoint this spawn had already created, so the remedy does not describe a spawnable state"$'\n'"$out"
   assert_absent "$STATE_DIR/launched.log" \
     "an agent was launched without a private readiness-marker directory"
   assert_absent "$STATE_DIR/lines.log" \
@@ -790,6 +792,8 @@ test_temp_root_the_spawn_cannot_write_into_refuses_by_name() {
     "the refusal did not name the temp root it could not create, so the operator gets a bare mkdir error"$'\n'"$out"
   assert_contains "$out" "refusing to spawn" \
     "the refusal did not say the spawn was refused"$'\n'"$out"
+  assert_contains "$out" "endpoint firstmate:fm-$id already exists" \
+    "the refusal did not name the endpoint this spawn had already created, so the remedy does not describe a spawnable state"$'\n'"$out"
   assert_absent "$STATE_DIR/lines.log" \
     "the spawn typed into the pane before it had a temp root to hold its readiness marker"
   assert_absent "$STATE_DIR/launched.log" \
@@ -873,7 +877,10 @@ test_group_or_other_writable_temp_root_refuses_the_spawn() {
 # disqualified, because the group-write bit is a grant and the check cannot know
 # who is in that group. The refusal must therefore name the CAUSE and the way
 # out, since `bin/fm-control.sh <id> relaunch` stops the old agent before
-# fm-spawn runs and this message is then the operator's only guidance. Removing
+# fm-spawn runs and this message is then the operator's only guidance. That
+# remedy has to cover the endpoint too: every refusal in this class fires after
+# a fresh spawn has already created the window, which is left standing for
+# inspection and is exactly what the operator's next attempt collides with. Removing
 # the root is the whole remedy, and it has to be the ONLY one offered: teardown
 # would also clear the root, but it is the task's end-of-life path - it kills
 # the endpoint and hard-resets or removes the worktree - so naming it to an
@@ -903,6 +910,10 @@ test_group_writable_temp_root_names_its_cause_and_remedy() {
     *teardown*)
       fail "the refusal pointed the operator at teardown, which ends the task, to clear a temp root"$'\n'"$out" ;;
   esac
+  assert_contains "$out" "endpoint firstmate:fm-$id already exists" \
+    "the refusal did not name the endpoint this spawn had already created, so the remedy does not describe a spawnable state"$'\n'"$out"
+  assert_contains "$out" "before another spawn of $id can create its own" \
+    "the refusal did not say the endpoint it left standing blocks the next spawn"$'\n'"$out"
   [ "$(path_mode "$TASK_TMP_PATH")" = 775 ] \
     || fail "the spawn changed the mode of a temp root it did not create (now $(path_mode "$TASK_TMP_PATH"))"
   assert_absent "$STATE_DIR/lines.log" \
