@@ -395,6 +395,70 @@ test_interrupted_seed_scratch_does_not_outlive_revocation() {
   pass "an interrupted seed's staged scratch does not outlive the credential's revocation"
 }
 
+# The mirror of ignore_local_env_file: a task whose brief is to stop ignoring the
+# path publishes that away, and the slot's checkout carries the rule's absence just
+# as a real reissued slot does.
+unignore_local_env_file() {
+  git -C "$PROJECT_DIR" fetch --quiet origin
+  git -C "$PROJECT_DIR" reset --quiet --hard "origin/$DEFAULT_BRANCH"
+  git -C "$PROJECT_DIR" rm --quiet .gitignore
+  git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' \
+    -c user.email='tests@example.invalid' commit -qm unignore-local-env
+  git -C "$PROJECT_DIR" push --quiet origin "HEAD:$DEFAULT_BRANCH"
+  git -C "$POOL_DIR" fetch --quiet origin
+  git -C "$POOL_DIR" checkout --quiet --detach "origin/$DEFAULT_BRANCH"
+}
+
+# The sweep has to run on every path through the seeding, including the ones that
+# never reach the base refresh. An unignored copy the seeding cannot prove is its
+# own refuses the slot in the pre-refresh phase, so a sweep placed after that phase
+# never runs again for this slot and the scratch holding the captain's credential
+# bytes stays readable through the slot's git directory for as long as the wedge
+# lasts. Count the leftovers; never read them.
+test_scratch_is_swept_even_when_the_pre_refresh_phase_refuses() {
+  local rec id retry out status before after
+  id='pool-env-local-r10'
+  rec=$(make_case env-local-scratch-refused "$id")
+  read_case_record "$rec"
+
+  ignore_local_env_file
+  : > "$PROJECT_DIR/.env.local"
+  chmod 0640 "$PROJECT_DIR/.env.local"
+  interrupt_local_env_seed_copy
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off) || true
+  [ -e "$CASE_DIR/seed-interrupted" ] \
+    || fail "the fixture never reached the staged copy, so nothing was interrupted"
+  [ "$(staged_scratch_count)" != 0 ] \
+    || fail "the fixture left no staged scratch, so the entry sweep cannot be observed"
+
+  # The rule the seeding depends on is gone, and the slot holds a copy that differs
+  # from the source, so the next acquisition refuses inside the pre-refresh phase
+  # and never reaches the base refresh or the phase after it.
+  unignore_local_env_file
+  printf 'FIXTURE_MARKER=the-task-own-work-not-a-real-credential\n' > "$POOL_DIR/.env.local"
+  chmod 0600 "$POOL_DIR/.env.local"
+  before=$(cksum < "$POOL_DIR/.env.local")
+
+  retry='pool-env-local-r10-retry'
+  mkdir -p "$HOME_DIR/data/$retry"
+  printf 'brief for %s\n' "$retry" > "$HOME_DIR/data/$retry/brief.md"
+  out=$(run_spawn "$retry" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "spawn launched from a slot wedged by an unignored copy it could not prove was its own"
+  assert_contains "$out" "remove it by hand" \
+    "the pre-refresh refusal did not tell the operator how to clear the slot"
+  [ "$(staged_scratch_count)" = 0 ] \
+    || fail "a staged credential scratch survived an acquisition that refused before the base refresh"
+  [ -f "$POOL_DIR/.env.local" ] \
+    || fail "the refused acquisition deleted the task's own unignored file"
+  after=$(cksum < "$POOL_DIR/.env.local")
+  [ "$after" = "$before" ] \
+    || fail "the refused acquisition modified the task's own unignored file"
+  pass "a staged scratch is swept even when the acquisition refuses before the base refresh"
+}
+
 # Seeding asks stat which filesystem a path is on. The shim answers that
 # one question so a cross-filesystem layout can be exercised without a real mount,
 # and delegates every other stat call untouched.
@@ -902,6 +966,7 @@ test_acquired_worktree_refreshes_a_stale_local_env_file
 test_acquired_worktree_retires_a_local_env_file_the_captain_deleted
 test_interrupted_local_env_seed_leaves_the_slot_acquirable
 test_interrupted_seed_scratch_does_not_outlive_revocation
+test_scratch_is_swept_even_when_the_pre_refresh_phase_refuses
 test_cross_filesystem_layout_degrades_to_a_loud_skip
 test_unanswerable_filesystem_question_still_refuses
 test_unignored_local_env_file_is_not_seeded
