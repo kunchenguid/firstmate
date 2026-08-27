@@ -7,6 +7,7 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "WRONG_PROGRAM: <tool> - <path> is <known-wrong program>, not the '<tool>' CLI this home needs (install: <command>)",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
@@ -859,6 +860,73 @@ missing_tool_diagnostic() {
   echo "MISSING: $tool (install: $(install_cmd "$tool"))"
 }
 
+# Presence by name alone is not identity: a distribution can occupy a short
+# generic name with an unrelated program - on Linux /usr/bin/orca is GNOME's
+# screen reader, not the Orca terminal runtime this home dispatches into.
+# Bootstrap keeps the plain presence check as the default and never guesses a
+# binary is the intended program from unverified help output: the real Orca
+# runtime CLI is not installed on this machine, so its help text is unknown.
+# WRONG_PROGRAM is reported only when a present binary positively identifies as
+# a KNOWN-WRONG program, using a marker verified on this machine (2026-08-01).
+# Any other outcome - the real CLI's help, unknown help, no help, a crash, a
+# timeout - keeps the presence result rather than inventing a rejection.
+known_wrong_program_spec() {  # <tool> -> prints '<marker>\t<program-description>', or returns 1 when unverified
+  case "$1" in
+    # GNOME's screen reader occupies /usr/bin/orca on Linux. Its --help output
+    # (verified on this machine, 2026-08-01: GNOME Orca 46.1) advertises a
+    # --speech-system option, which no terminal runtime CLI has. The marker must
+    # be an option string, not a usage or help-text line: Python argparse
+    # rewraps usage and help text to the terminal width (verified at COLUMNS
+    # 40/60/80/120/200) and gettext translates the prose, while an option string
+    # is never wrapped mid-token and never localized.
+    orca) printf '%s\t%s\n' '--speech-system' "GNOME's screen reader" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Run '<tool> --help' bounded by TOOL_IDENTITY_TIMEOUT_SECS so a squatting or
+# broken program cannot hang startup. Same timeout/gtimeout/perl ladder as the
+# watcher's check runner (bin/fm-watch.sh). Echoes combined output. stdin is
+# closed on every rung, the same way bin/fm-quota-axi-lib.sh's ladder closes it:
+# session start captures bootstrap in a command substitution, so the probe would
+# otherwise inherit the captain's live terminal and a squatting program that
+# reads stdin instead of honoring --help - exactly the case this check exists
+# for - would swallow keystrokes until the timeout fires.
+TOOL_IDENTITY_TIMEOUT_SECS=5
+tool_help_with_timeout() {  # <tool>
+  local tool=$1
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --kill-after=1 "$TOOL_IDENTITY_TIMEOUT_SECS" "$tool" --help 2>&1 </dev/null
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout --kill-after=1 "$TOOL_IDENTITY_TIMEOUT_SECS" "$tool" --help 2>&1 </dev/null
+  else
+    # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } my $stop = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; local $SIG{TERM} = $stop; local $SIG{INT} = $stop; local $SIG{HUP} = $stop; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$TOOL_IDENTITY_TIMEOUT_SECS" "$tool" --help 2>&1 </dev/null
+  fi
+}
+
+# required_tool_known_wrong_verify <tool>: report WRONG_PROGRAM only when a
+# present binary of <tool> positively identifies as a known-wrong program. The
+# caller establishes presence first, so an absent tool never runs a subprocess;
+# a tool with no verified known-wrong signature is silent; and output that does
+# not match the verified wrong-program marker keeps the presence result rather
+# than inventing a rejection.
+required_tool_known_wrong_verify() {  # <tool>
+  local tool=$1 spec marker desc path output rc
+  spec=$(known_wrong_program_spec "$tool") || return 0
+  marker=${spec%%$'\t'*}
+  desc=${spec#*$'\t'}
+  command -v "$tool" >/dev/null 2>&1 || return 0
+  path=$(command -v "$tool")
+  output=$(tool_help_with_timeout "$tool"); rc=$?
+  [ "$rc" -eq 0 ] || return 0
+  case "$output" in
+    *"$marker"*)
+      echo "WRONG_PROGRAM: $tool - $path is $desc, not the '$tool' CLI this home needs (install: $(install_cmd "$tool"))"
+      ;;
+  esac
+}
+
 # Required-tool detection follows the RESOLVED backend, not a one-size default:
 # a universal toolchain every home needs plus the backend-specific delta owned by
 # fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
@@ -1210,11 +1278,18 @@ detect_local_tools() {
     echo "BACKEND_INVALID: $BACKEND (known: $FM_BACKEND_KNOWN)"
   fi
   for t in $BACKEND_TOOLS; do
-    fm_backend_required_tool_available "$BACKEND" "$t" \
-      || missing_tool_diagnostic "$t"
+    if fm_backend_required_tool_available "$BACKEND" "$t"; then
+      required_tool_known_wrong_verify "$t"
+    else
+      missing_tool_diagnostic "$t"
+    fi
   done
   for t in $COMMON_TOOLS; do
-    command -v "$t" >/dev/null || missing_tool_diagnostic "$t"
+    if command -v "$t" >/dev/null; then
+      required_tool_known_wrong_verify "$t"
+    else
+      missing_tool_diagnostic "$t"
+    fi
   done
   # The treehouse lease-support upgrade check is only relevant when the resolved
   # backend actually requires treehouse (every backend except orca, which owns its
@@ -1239,6 +1314,7 @@ detect_local_tools() {
     echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
   fi
 }
+
 
 detect_local_config() {
   # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its

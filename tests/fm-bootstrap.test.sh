@@ -140,6 +140,67 @@ SH
   chmod +x "$fakebin/jq"
 }
 
+# Drop a fake 'orca' CLI with a deterministic --help identity probe, so the
+# known-wrong check runs against a controlled binary instead of whatever the
+# host happens to have installed as 'orca' (e.g. GNOME's screen reader in
+# /usr/bin). mode=wrong prints the GNOME screen-reader help, which bootstrap
+# positively identifies as the known-wrong program (marker verified on this
+# machine, 2026-08-01); mode=genuine prints the stablyai Orca CLI's command-
+# dispatch help, which is unverified and therefore treated as present;
+# mode=unknown prints a plainly unrelated help, also treated as present.
+# mode=wrong-narrow is the same screen reader with its Python-argparse usage
+# rewrapped to a narrow terminal and its help prose localized - the two things
+# that vary per install - so the identification is pinned to the option string
+# that survives both, not to a width- or locale-dependent line.
+add_fake_orca() {  # <fakebin> <genuine|wrong|wrong-narrow|unknown>
+  local fakebin=$1 mode=$2 help
+  if [ "$mode" = wrong ]; then
+    help='Usage: orca [-h] [-v] [-r] [-s] [-l] [-e OPTION] [-d OPTION] [-p NAME]
+            [-u DIR] [--speech-system NAME] [--debug-file FILE] [--debug]
+
+Optional arguments:
+  -h, --help                   Show this help message and exit
+  -v, --version                Version of this application
+  -r, --replace                Replace a currently running instance of this
+                               screen reader'
+  elif [ "$mode" = wrong-narrow ]; then
+    help='Uso: orca [-h] [-v] [-r] [-s] [-l]
+          [-e OPTION] [-d OPTION]
+          [-p NAME] [-u DIR]
+          [--speech-system NAME]
+          [--debug-file FILE] [--debug]
+
+Argomenti opzionali:
+  -h, --help
+        Mostra questo messaggio
+  -r, --replace
+        Sostituisci una istanza
+  --speech-system NAME
+        Sistema di sintesi vocale'
+  elif [ "$mode" = unknown ]; then
+    help='zap version 9.3
+Usage: zap [options] <file>
+  --sparkle        enable sparkle mode
+  -f, --frobnicate target'
+  else
+    help='orca
+
+Usage: orca <command> [options]
+
+Startup:
+  status                    Show app/runtime/graph readiness'
+  fi
+  cat > "$fakebin/orca" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --help ]; then
+  printf '%s\n' '$help'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/orca"
+}
+
 make_fake_fleet_sync_root() {
   local dir=$1 fake_root
   fake_root="$dir/fake-root"
@@ -511,7 +572,7 @@ SH
 }
 
 test_orca_backend_gates_orca_tool_only_when_selected() {
-  local case_dir fakebin out missing_orca
+  local case_dir fakebin out missing_orca bash_env
   missing_orca="MISSING: orca (install: brew install orca  # or the platform's package manager)"
 
   case_dir="$TMP_ROOT/orca-backend-selected"
@@ -519,7 +580,23 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf '%s\n' orca > "$case_dir/home/config/backend"
   fakebin=$(make_fake_toolchain "$case_dir")
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  # Mask any ambient 'orca' on the base PATH (e.g. GNOME's screen reader in
+  # /usr/bin) so this case deterministically exercises the missing-tool report
+  # rather than whatever program the host happens to ship under that name - the
+  # same command()/tool() masking the git and jq cases use.
+  bash_env="$case_dir/no-orca.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = orca ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+orca() {
+  return 127
+}
+SH
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ "$out" = "$missing_orca" ] || fail "backend=orca should require only the Orca-specific missing tool, got: $out"
 
@@ -531,6 +608,107 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_not_contains "$out" "MISSING: orca" "bootstrap should not require orca unless backend=orca is selected"
   pass "bootstrap: backend=orca gates the Orca CLI without requiring it on the default backend"
+}
+
+test_orca_wrong_program_reports_distinct_diagnostic() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/orca-wrong-program"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' orca > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  # A binary that prints the GNOME screen-reader help positively matches the
+  # known-wrong signature (verified on this machine, 2026-08-01) and must be
+  # called out, never accepted silently.
+  add_fake_orca "$fakebin" wrong
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -n "$out" ] || fail "a known-wrong orca must not pass the check silently"
+  assert_contains "$out" "WRONG_PROGRAM: orca - $fakebin/orca" \
+    "the wrong-program diagnostic must name the squatting binary's path"
+  assert_contains "$out" "is GNOME's screen reader" \
+    "the wrong-program diagnostic must name the verified known-wrong program"
+  assert_not_contains "$out" "MISSING: orca" \
+    "a known-wrong program must not be reported as a plain missing tool"
+  pass "bootstrap: a known-wrong orca is reported as WRONG_PROGRAM with its path, never silent or MISSING"
+}
+
+test_orca_wrong_program_survives_rewrapped_and_localized_help() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/orca-wrong-program-narrow"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' orca > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  # The same screen reader, rewrapped to a narrow terminal and localized: the
+  # identification must not depend on terminal width or the captain's locale,
+  # or the check silently degrades to the plain presence result it exists to
+  # improve on.
+  add_fake_orca "$fakebin" wrong-narrow
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "WRONG_PROGRAM: orca - $fakebin/orca" \
+    "rewrapped, localized screen-reader help must still be identified as the known-wrong program"
+  pass "bootstrap: the known-wrong identification survives terminal rewrapping and localization"
+}
+
+test_orca_identity_genuine_fake_passes() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/orca-genuine"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' orca > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  # A plausible orca CLI help that is NOT the verified known-wrong signature is
+  # unverified, so bootstrap must keep the presence result, never reject it.
+  add_fake_orca "$fakebin" genuine
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "an unverified orca help must be treated as present, got: $out"
+  pass "bootstrap: an orca help that is not the known-wrong program passes"
+}
+
+test_orca_unrecognised_help_is_treated_as_present() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/orca-unrecognised"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' orca > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  # A present binary whose help matches neither the known-wrong signature nor
+  # anything else recognizable must keep the presence result: not WRONG_PROGRAM,
+  # not MISSING, no rejection invented from unrecognized output.
+  add_fake_orca "$fakebin" unknown
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "unrecognised help must not be rejected, got: $out"
+  assert_not_contains "$out" "WRONG_PROGRAM" \
+    "unrecognised help must never be labeled a known-wrong program"
+  pass "bootstrap: an unrecognised orca help is treated as present, never WRONG_PROGRAM"
+}
+
+test_tool_without_identity_signal_is_not_probed() {
+  local case_dir fakebin out log
+  case_dir="$TMP_ROOT/no-identity-tool"
+  log="$case_dir/node-log"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  # node has no verifiable identity signal: bootstrap must keep the plain
+  # presence check for it - no --help subprocess and no rejection, even when a
+  # present binary would print garbage for --help.
+  cat > "$fakebin/node" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$log'
+printf '%s\n' 'garbage --help output for a tool with no identity signal'
+exit 0
+SH
+  chmod +x "$fakebin/node"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "a present tool with no identity signal must not be rejected, got: $out"
+  [ ! -s "$log" ] || fail "bootstrap must not probe --help for a tool with no identity signal"
+  pass "bootstrap: tools without an identity signal keep the presence check and run no subprocess"
 }
 
 # Build a fake toolchain with tmux REMOVED and the named backend session CLI(s)
@@ -694,7 +872,7 @@ test_treehouse_lease_check_follows_resolved_backend() {
   printf '%s\n' orca > "$case_dir/home/config/backend"
   fakebin=$(make_fake_toolchain "$case_dir")
   rm -f "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" orca
+  add_fake_orca "$fakebin" genuine
   # FM_FAKE_TREEHOUSE_LEASE_HELP unset: the fake treehouse advertises NO --lease.
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     "$ROOT/bin/fm-bootstrap.sh")
@@ -1156,6 +1334,11 @@ test_tasks_axi_min_version
 test_quota_axi_min_version
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected
+test_orca_wrong_program_reports_distinct_diagnostic
+test_orca_wrong_program_survives_rewrapped_and_localized_help
+test_orca_identity_genuine_fake_passes
+test_orca_unrecognised_help_is_treated_as_present
+test_tool_without_identity_signal_is_not_probed
 test_session_provider_backends_do_not_require_tmux
 test_session_provider_backends_gate_own_cli_not_tmux
 test_herdr_install_requires_manual_action
