@@ -20,13 +20,16 @@ FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0
 ok - start creates one private page and update atomically changes only its delimited payload
 ok - malformed JSON and fake progress claims refuse without touching the page
 ok - meaningful updates retain all embedded milestone history newest first
+ok - retained history larger than two MiB remains readable and mutable
 ok - mission text cannot escape the private logbook path
 ok - intermediate symlinks cannot escape the logbook root
 ok - one live writer owns each mutation
+ok - a vanished writer lock retries the atomic claim
 ok - duplicate qualifying updates are refused before publication
 ok - retained milestone fingerprints refuse non-immediate duplicates
 ok - malformed milestone ordering is refused before publication
 ok - close records the final outcome, preserves the page, and retires active registration
+ok - close retries retire a stale registration after page publication
 ok - Luxe-like opaque rendering succeeds without any sibling-resource request
 ok - missing and malformed embedded data leave a usable shell with a visible stale warning
 ok - manual refresh reloads the existing page and shows the atomically embedded update
