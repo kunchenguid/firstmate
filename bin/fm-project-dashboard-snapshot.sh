@@ -223,9 +223,11 @@ jq -n \
     (.repo == $name)
     or (((.repo // "") == "") and (($owner.projects | length) == 1) and $owner.projects[0] == $name);
   def dedupe_first(keyf):
-    reduce .[] as $item ([];
-      ($item | keyf) as $key
-      | if any(.[]; keyf == $key) then . else . + [$item] end);
+    . as $in
+    | reduce range(0; ($in | length)) as $i ({seen:{},out:[]};
+        ($in[$i] | keyf | tojson) as $key
+        | if .seen[$key] then . else (.seen[$key] = true | .out += [$in[$i]]) end)
+    | .out;
   def https_url:
     (type == "string") and
     test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$");
