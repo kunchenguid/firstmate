@@ -120,6 +120,7 @@ A present file must be a single-linked regular JSON file with this schema:
   "enabled": true,
   "principal": "Pavel",
   "project": "aln",
+  "project_path": "projects/aln",
   "sender_ids": ["2087379565"],
   "chat_ids": ["-5550358141"],
   "worker": {
@@ -143,6 +144,7 @@ A present file must be a single-linked regular JSON file with this schema:
 When present, `telegram.outbound_chat_id` must name one of those allowed chats.
 The worker tuple is intentionally fixed to the verified Pi adapter, no-mistakes delivery, and standing autonomous merge authority for this delegated scope.
 Any other tuple is rejected instead of falling back to Claude or returning routine Pavel PRs to per-PR captain approval.
+When `project_path` is absent, the driver resolves `project` as `projects/<project>` under the Firstmate home; an explicit `project_path` may be absolute or home-relative, but it must resolve to a dedicated git checkout.
 The optional `budget` object records non-negative bounded spending authority in operator-chosen fields such as `per_action_rub` and `per_day_rub`.
 An absent or zero bound grants no spending authority, and spending outside every applicable positive bound remains a captain-only decision.
 The Telegram credential file must be an absolute, single-linked regular file containing the configured token key in `KEY=value` form.

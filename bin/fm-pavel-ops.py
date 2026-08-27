@@ -31,6 +31,7 @@ OUTBOUND_SCHEMA = "fm-pavel-ops-outbound.v1"
 TELEGRAM_OFFSET_SCHEMA = "fm-pavel-ops-telegram-offset.v1"
 SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 PR_URL = re.compile(r"^https://[^\s]+$")
+_DRIVER_CAPABILITY = object()
 LIFECYCLE_NEXT = {
     "ready": "dispatched",
     "dispatched": "validating",
@@ -145,6 +146,8 @@ class Home:
         for key in ("project", "principal"):
             if not isinstance(cfg.get(key), str) or not cfg[key].strip():
                 raise OpsError(f"pavel-ops config requires a non-empty {key}")
+        if "project_path" in cfg and (not isinstance(cfg.get("project_path"), str) or not cfg["project_path"].strip()):
+            raise OpsError("pavel-ops config project_path must be a non-empty string when present")
         for key in ("sender_ids", "chat_ids"):
             values = cfg.get(key)
             if not isinstance(values, list) or not values or any(not str(v).strip() for v in values):
@@ -642,8 +645,7 @@ def transition(home: Home, args: argparse.Namespace) -> dict[str, Any]:
     event = home.load_event(args.event)
     if (
         args.state in set(LIFECYCLE_NEXT.values())
-        and not getattr(args, "driver_authorized", False)
-        and os.environ.get("FM_PAVEL_OPS_DRIVER") != "1"
+        and getattr(args, "driver_authorized", None) is not _DRIVER_CAPABILITY
     ):
         raise OpsError("delivery transitions must be driven by fm-pavel-ops drive")
     current = event["state"]
@@ -677,6 +679,26 @@ def transition(home: Home, args: argparse.Namespace) -> dict[str, Any]:
 
 def command_from_env(home: Home, env_key: str, default_name: str) -> str:
     return os.environ.get(env_key, str(home.root / "bin" / default_name))
+
+
+def project_path(home: Home) -> str:
+    configured = str(home.config.get("project_path") or "").strip()
+    if configured:
+        path = Path(configured).expanduser()
+        if not path.is_absolute():
+            path = home.home / path
+    else:
+        project = str(home.config["project"])
+        path = home.home / "projects" / project
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise OpsError(f"Pavel project clone is unavailable: {path}") from exc
+    if resolved == home.home or resolved == home.root:
+        raise OpsError("Pavel project path must be a dedicated project clone")
+    if not (resolved / ".git").exists():
+        raise OpsError(f"Pavel project path is not a git checkout: {resolved}")
+    return str(resolved)
 
 
 def parse_meta(path: Path) -> dict[str, str]:
@@ -722,7 +744,7 @@ def driver_transition(
         evidence=evidence,
         pr_url=pr_url,
         live_url=live_url,
-        driver_authorized=True,
+        driver_authorized=_DRIVER_CAPABILITY,
     )
     return transition(home, args)
 
@@ -741,12 +763,44 @@ def owner_status(home: Home, event: dict[str, Any]) -> dict[str, Any]:
     return parsed
 
 
+def pr_identity(pr_url: str) -> tuple[str, str, str, str] | None:
+    github = re.fullmatch(r"https://github\.com/([^/\s]+)/([^/\s]+)/pull/([0-9]+)", pr_url)
+    if github:
+        return ("github", "github.com", f"{github.group(1)}/{github.group(2)}", github.group(3))
+    gitlab = re.fullmatch(r"https://([^/\s]+)/(.+)/-/merge_requests/([0-9]+)", pr_url)
+    if gitlab:
+        return ("gitlab", gitlab.group(1), gitlab.group(2), gitlab.group(3))
+    return None
+
+
+def confirmed_merge_record(home: Home, event: dict[str, Any]) -> bool:
+    pr_url = str(event.get("pr_url") or "")
+    task_id = str(event.get("task_id") or "")
+    marker = home.state / f"{task_id}.pr-poll-merge-notified"
+    if marker.exists():
+        identity = pr_identity(pr_url)
+        if identity is None:
+            return False
+        try:
+            regular_private_file(marker, "merge outcome marker")
+            lines = marker.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return False
+        return lines == ["fm-pr-poll-merge-notified-v1", *identity]
+    status = owner_status(home, event)
+    return (
+        status.get("state") == "landed"
+        and str(status.get("pr_url") or pr_url) == pr_url
+        and bool(status.get("merged"))
+    )
+
+
 def drive(home: Home, args: argparse.Namespace) -> dict[str, Any]:
     event = home.load_event(args.event)
     task_id = str(event.get("task_id") or "")
     if event["state"] == "ready":
         brief = home.home / "data" / task_id / "brief.md"
-        project_ref = str(home.config.get("project_path") or home.config["project"])
+        project_ref = project_path(home)
         if not brief.exists():
             run_checked(
                 home,
@@ -796,6 +850,9 @@ def drive(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         if not PR_URL.fullmatch(pr_url):
             raise OpsError("Pavel landed verification requires the recorded PR URL")
         output = run_checked(home, [command_from_env(home, "FM_PAVEL_OPS_PR_MERGE", "fm-pr-merge.sh"), task_id, pr_url])
+        if not confirmed_merge_record(home, event):
+            home.audit("merge-unconfirmed", event=event["id"], pr_url=pr_url, output=output.strip()[:500])
+            return event
         return driver_transition(home, event, "landed", (output.strip() or "forge reports PR merged at verified head")[:500])
     if event["state"] == "landed":
         status = owner_status(home, event)

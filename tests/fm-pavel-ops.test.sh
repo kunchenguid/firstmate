@@ -24,7 +24,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-mkdir -p "$HOME_DIR/config" "$HOME_DIR/state" "$HOME_DIR/data" "$FAKEBIN" "$TASK_DB"
+mkdir -p "$HOME_DIR/config" "$HOME_DIR/state" "$HOME_DIR/data" "$HOME_DIR/projects/aln/.git" "$FAKEBIN" "$TASK_DB"
 printf 'TERENTYEV_BOT_TOKEN=test-token\n' > "$HOME_DIR/telegram.env"
 
 cat > "$FAKEBIN/tasks-axi" <<'SH'
@@ -80,6 +80,9 @@ cat > "$FAKEBIN/fm-brief" <<'SH'
 #!/usr/bin/env bash
 set -eu
 id=$1
+project=$2
+[ "$project" = "$FM_HOME/projects/aln" ] || { printf 'wrong project path: %s\n' "$project" >&2; exit 1; }
+printf 'brief %s %s\n' "$id" "$project" >> "$TASK_DB/.owners"
 mkdir -p "$FM_HOME/data/$id"
 printf 'Delivery contract: mode=no-mistakes\nPavel autonomous brief\n' > "$FM_HOME/data/$id/brief.md"
 SH
@@ -89,6 +92,8 @@ cat > "$FAKEBIN/fm-spawn" <<'SH'
 #!/usr/bin/env bash
 set -eu
 id=$1
+project=$2
+[ "$project" = "$FM_HOME/projects/aln" ] || { printf 'wrong project path: %s\n' "$project" >&2; exit 1; }
 mkdir -p "$FM_HOME/state" "$FM_HOME/worktrees/$id"
 printf 'kind=ship\nharness=pi\nmode=no-mistakes\nyolo=on\nworktree=%s\n' "$FM_HOME/worktrees/$id" > "$FM_HOME/state/$id.meta"
 SH
@@ -117,6 +122,10 @@ set -eu
 id=$1
 pr=$2
 printf 'pr-merge %s %s\n' "$id" "$pr" >> "$TASK_DB/.owners"
+if [ ! -f "$TASK_DB/.merge-unconfirmed" ]; then
+  printf 'fm-pr-poll-merge-notified-v1\ngithub\ngithub.com\no/r\n%s\n' "${pr##*/}" > "$FM_HOME/state/$id.pr-poll-merge-notified"
+  chmod 0600 "$FM_HOME/state/$id.pr-poll-merge-notified"
+fi
 printf 'forge reports PR merged at verified head\n'
 SH
 chmod 0755 "$FAKEBIN/fm-pr-merge"
@@ -198,17 +207,7 @@ run_ops() {
     FM_PAVEL_OPS_BRIEF="$FAKEBIN/fm-brief" FM_PAVEL_OPS_SPAWN="$FAKEBIN/fm-spawn" \
     FM_PAVEL_OPS_STATUS="$FAKEBIN/fm-status" FM_PAVEL_OPS_PR_CHECK="$FAKEBIN/fm-pr-check" \
     FM_PAVEL_OPS_PR_MERGE="$FAKEBIN/fm-pr-merge" FM_PAVEL_OPS_LIVE_CHECK="$FAKEBIN/fm-live-check" \
-    FM_PAVEL_OPS_DRIVER="${FM_PAVEL_OPS_DRIVER:-}" \
     FM_PAVEL_OPS_TESTING=1 "$OPS" "$@"
-}
-
-transition_driver() {
-  local old_driver=${FM_PAVEL_OPS_DRIVER-}
-  FM_PAVEL_OPS_DRIVER=1
-  run_ops transition "$@"
-  local rc=$?
-  FM_PAVEL_OPS_DRIVER=$old_driver
-  return "$rc"
 }
 
 ingest() {
@@ -531,18 +530,16 @@ printf '{"state":"delivery_ready","evidence":"checks green on exact PR head","pr
 run_ops drive "$event" >/dev/null
 run_ops drive "$event" >/dev/null
 run_ops drive "$event" >/dev/null
-transition_driver "$event" merge_queued --evidence 'guarded merge poll armed' --pr-url 'https://github.com/o/r/pull/1' >/dev/null
-if transition_driver "$event" merge_queued --evidence 'guarded merge poll armed' --pr-url 'https://github.com/o/r/pull/99' >/dev/null 2>&1; then
-  fail "merge_queued replay accepted a changed PR URL"
+if FM_PAVEL_OPS_DRIVER=1 run_ops transition "$event" landed --evidence 'forged landed evidence' >/dev/null 2>&1; then
+  fail "exported driver marker could forge delivery authority"
 fi
-if transition_driver "$event" merge_queued --evidence 'different merge evidence' --pr-url 'https://github.com/o/r/pull/1' >/dev/null 2>&1; then
-  fail "merge_queued replay accepted changed evidence"
-fi
-if transition_driver "$event" merge_queued --evidence 'guarded merge poll armed' --pr-url 'https://github.com/o/r/pull/1' --live-url 'https://example.test/product' >/dev/null 2>&1; then
-  fail "merge_queued replay accepted an unrelated live URL"
-fi
+touch "$TASK_DB/.merge-unconfirmed"
 run_ops drive "$event" >/dev/null
-if transition_driver "$event" live --evidence 'deploy succeeded' >/dev/null 2>&1; then
+[ "$(run_ops inspect "$event" | json_field "['state']")" = merge_queued ] \
+  || fail "unconfirmed merge advanced past merge_queued"
+rm -f "$TASK_DB/.merge-unconfirmed"
+run_ops drive "$event" >/dev/null
+if run_ops transition "$event" live --evidence 'deploy succeeded' >/dev/null 2>&1; then
   fail "live transition accepted no customer URL"
 fi
 printf '{"state":"live","evidence":"requested price is visible on the customer page","live_url":"https://example.test/product","completion_text":"Готово: цена уже на сайте."}\n' > "$PAVEL_STATUS_FILE"
@@ -565,12 +562,30 @@ pass "validated delivery is driver-owned and Pavel is notified after live proof"
 crashed=$(ingest 108 18 'Поменять SEO заголовок' | json_field "['event']")
 run_ops classify "$crashed" --as task --title 'Change SEO title' --intent 'Set the requested SEO title' \
   --reason 'ordinary SEO change' --authority ordinary >/dev/null
-transition_driver "$crashed" dispatched --evidence 'Pi worker exists in isolated copy' >/dev/null
-transition_driver "$crashed" validating --evidence 'no-mistakes run owns current head' >/dev/null
-transition_driver "$crashed" delivery_ready --evidence 'checks green on exact PR head' >/dev/null
-transition_driver "$crashed" merge_queued --evidence 'guarded merge accepted by forge' --pr-url 'https://github.com/o/r/pull/2' >/dev/null
-transition_driver "$crashed" landed --evidence 'forge reports PR merged at verified head' >/dev/null
-transition_driver "$crashed" live --evidence 'requested SEO title is visible on the customer page' --live-url 'https://example.test/seo' >/dev/null
+CRASHED_EVENT_FILE="$HOME_DIR/state/pavel-ops/events/$crashed.json" python3 - <<'PY'
+import json
+import os
+import time
+path = os.environ["CRASHED_EVENT_FILE"]
+with open(path, encoding="utf-8") as handle:
+    event = json.load(handle)
+now = int(time.time())
+for state, evidence in [
+    ("dispatched", "Pi worker exists in isolated copy"),
+    ("validating", "no-mistakes run owns current head"),
+    ("delivery_ready", "checks green on exact PR head"),
+    ("merge_queued", "guarded merge accepted by forge"),
+    ("landed", "forge reports PR merged at verified head"),
+    ("live", "requested SEO title is visible on the customer page"),
+]:
+    event["transitions"].append({"at": now, "from": event["state"], "to": state, "evidence": evidence})
+    event["state"] = state
+event["pr_url"] = "https://github.com/o/r/pull/2"
+event["live_url"] = "https://example.test/seo"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
+    handle.write("\n")
+PY
 CRASHED_EVENT="$crashed" OUTBOX="$HOME_DIR/state/pavel-ops/outbox/$crashed-live-completion.json" python3 - <<'PY'
 import hashlib
 import json
@@ -643,7 +658,19 @@ pass "interrupted Telegram sends stop for visible reconciliation instead of dupl
 failed=$(ingest 113 23 'Проверить доставку' | json_field "['event']")
 run_ops classify "$failed" --as task --title 'Check delivery' --intent 'Check Pavel requested delivery behavior' \
   --reason 'ordinary site behavior change' --authority ordinary >/dev/null
-transition_driver "$failed" dispatched --evidence 'Pi worker exists in isolated copy' >/dev/null
+FAILED_EVENT_FILE="$HOME_DIR/state/pavel-ops/events/$failed.json" python3 - <<'PY'
+import json
+import os
+import time
+path = os.environ["FAILED_EVENT_FILE"]
+with open(path, encoding="utf-8") as handle:
+    event = json.load(handle)
+event["transitions"].append({"at": int(time.time()), "from": event["state"], "to": "dispatched", "evidence": "Pi worker exists in isolated copy"})
+event["state"] = "dispatched"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
+    handle.write("\n")
+PY
 failed_task=$(run_ops inspect "$failed" | json_field "['task_id']")
 printf 'harness=pi\n' > "$HOME_DIR/state/$failed_task.meta"
 FAILED_FILE="$HOME_DIR/state/pavel-ops/events/$failed.json" python3 - <<'PY'
