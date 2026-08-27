@@ -43,6 +43,6 @@ if grep -Eq '\{[A-Z][A-Z_]*\}|TODO|TBD' "$SKILL"; then
   fail 'skill contains unfinished placeholders'
 fi
 words=$(wc -w < "$SKILL" | tr -d ' ')
-[ "$words" -le 500 ] || fail "skill exceeds 500-word discipline: $words"
+[ "$words" -lt 500 ] || fail "skill must stay below 500 words: $words"
 
 pass 'automatic dispatch procedure preserves routing and safety ownership'

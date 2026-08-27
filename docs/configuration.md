@@ -250,9 +250,9 @@ For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected exec
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
-The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
+For schema version 1, the shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its inline profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
 When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
-Batch spawns satisfy the same requirement with a shared `--harness`.
+Version 1 batch spawns satisfy the same requirement with a shared `--harness`.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
 This section is the single owner of the canonical schema and its per-field semantics.
 `AGENTS.md` section 4 owns the always-loaded dispatch intake boundary, and `quota-array-dispatch` owns the completion-aware profile-array selection procedure.
@@ -288,6 +288,11 @@ An omitted model or effort uses the selected harness default for that axis.
 Native Claude and Codex profiles require a lowercase symbolic `account` identifier.
 Pi and pi-signed profiles must omit `account`; their normalized routing candidate uses the literal account `none` because Pi provider capacity is represented by `lane`, not a native account store.
 The example uses current intended work types such as `mechanical`, `implementation`, `architecture`, `debugging`, `security`, and `review`; routing requests independently validate their bounded work type.
+
+A selected version 2 launch carries the nine routing fields `generation`, `profile`, `provider`, `lane`, `account`, `class`, `work-type`, `risk`, and `mode` into the existing spawn lifecycle.
+Immediately before a native launch, the symbolic account resolves through this home's declared account map and binds only its allowed harness environment name to the declared readable configuration directory.
+Spawn admission authenticates the exact reserved task generation through a protected capability; relaunch preserves that route, and guarded cleanup releases only the matching generation.
+The [`automatic-dispatch` skill](../.agents/skills/automatic-dispatch/SKILL.md) owns selection, reserve-before-spawn ordering, and fallback, while `fm-spawn.sh`, `fm-control.sh`, and `fm-teardown.sh` own the exact capability and lifecycle mechanics.
 
 Each `rules` entry requires a non-empty natural-language `when` and a non-empty `use` array of profile identifiers.
 The optional `default` is a non-empty array of profile identifiers.

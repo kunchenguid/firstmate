@@ -7,7 +7,7 @@ metadata:
 
 # automatic-dispatch
 
-[`configuration`](../../../docs/configuration.md#crew-dispatch-profiles-configcrew-dispatchjson) owns schema and account lanes; `quota-array-dispatch` owns quota; `harness-adapters` owns catalogs and spawning.
+[`configuration`](../../../docs/configuration.md#crew-dispatch-profiles-configcrew-dispatchjson) owns schema/accounts; `quota-array-dispatch` owns quota; `harness-adapters` owns catalogs/spawning.
 
 ## Intake sequence
 
@@ -38,4 +38,4 @@ metadata:
 11. After re-evaluation, retry one proven transient once, fall back on unavailable quota, authentication, or models, and stop immediately on unsafe or uncertain writes.
 12. Stop when criteria are covered or work is dependent, redundant, quota-bound, or host-bound.
 
-The normalized routing files and ledger must never include prompts, source code, credentials, cookies, token values, proprietary payloads, or raw tool output.
+Routing files and ledger must never include prompts, source code, credentials, cookies, token values, proprietary payloads, or raw tool output.
