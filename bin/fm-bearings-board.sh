@@ -36,6 +36,17 @@
 # the template may display the routing id. Anything else refuses before the
 # existing board is touched.
 #
+# A merge item's `risk` is one display string with one parsing rule: trimmed
+# text before the first period is the level shown on the pin, and trimmed text
+# after it is the justification shown in the card body. With no period, the
+# whole value is a bare level and no justification row is rendered. A
+# whitespace-only level renders no pin, even though the field itself must be a
+# non-empty string. Only the trimmed, lower-cased levels `low` and `faible`
+# receive the neutral tone; every unrecognized level stays alert. The renderer
+# wraps either part, including an unbroken token, so neither can escape its
+# card. The body placement keeps the justification available on touch and in
+# print instead of hiding it behind hover.
+#
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation rebuilds the same file in place, which keeps the same Lavish
 # session URL and the same canonical process-event source id. Injection escapes

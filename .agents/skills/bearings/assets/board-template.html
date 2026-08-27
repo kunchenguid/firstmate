@@ -189,16 +189,8 @@ a { color: inherit; text-decoration: none; }
 .bb-decision { display: flex; flex-direction: column; }
 .bb-decision__pad { padding: 18px 20px 16px; display: flex; flex-direction: column; gap: 12px; flex: 1; }
 .bb-decision__top { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
-/* Safety net, not the normal treatment: the pin now carries only the risk
-   level because splitRisk sends the justification down into the card body, so
-   in the ordinary case this rule changes nothing.
-   It stays because the pin is still the one badge fed a composed value, and a
-   value that never reaches a period - an absurd one, or a single unbroken
-   token - would otherwise grow straight out of its card and be cut off
-   mid-sentence, as the reported one was. It wraps rather than clips, may
-   shrink below its own text width, and breaks an unbreakable token, so no
-   value can push it past the card edge. Every other badge is a genuine short
-   label and keeps the verbatim nowrap contract above. */
+/* Safety net for the risk-value contract owned by fm-bearings-board.sh: unlike
+   every other badge, this pin may still receive a long bare level. */
 .bb-decision__risk { white-space: normal; overflow-wrap: anywhere; text-align: left;
   min-width: 0; flex: 0 1 auto; line-height: 1.35; }
 .bb-decision__repo { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); white-space: nowrap; }
@@ -488,17 +480,8 @@ __FM_BEARINGS_BOARD_DATA__
 
   /* Captain's Call deck: every item renders as the same full card */
   var deck = document.getElementById("bb-call");
-  /* The pin carries the risk level and nothing else. The captain reads these
-     cards to decide, so a justification he has to go hunting for is one he
-     will not read: it belongs in the card body, next to the about and decide
-     rows that are already built for prose.
-     The cut is the value's first period, which is the shape the value is
-     written in - "faible. Une vue derivee..." leaves "faible" on the pin and
-     sends the rest below. One stated rule beats a finer guess at where a
-     sentence ends.
-     A value with no period is already a bare level: it stays whole on the pin
-     and adds no row at all, because an empty row or an orphan label reads as a
-     missing justification rather than an absent one. */
+  /* Implements the fm-bearings-board.v1 risk contract documented in the
+     builder header. */
   function splitRisk(value) {
     var text = String(value == null ? "" : value).trim();
     var cut = text.indexOf(".");
@@ -506,14 +489,8 @@ __FM_BEARINGS_BOARD_DATA__
     return { level: text.slice(0, cut).trim(), detail: text.slice(cut + 1).trim() };
   }
 
-  /* A short, explicit list rather than broad detection. The board is written
-     in the captain's language, so "Faible" has to read as low just as "low"
-     does, and a level is compared trimmed and lower-cased.
-     Anything unrecognised stays on the alert tone on purpose: erring toward
-     caution is acceptable here and the reverse is not, since a low-risk pin
-     worn by a high risk tells the reader the opposite of the truth.
-     Extend this list when a language actually arrives - guessing at low-ness
-     from a substring would eventually match a word that means the opposite. */
+  /* Do not broaden this to substring matching; see the builder header's
+     fail-cautious tone contract. */
   var LOW_RISK_LEVELS = ["low", "faible"];
   function isLowRisk(level) {
     return LOW_RISK_LEVELS.indexOf(String(level == null ? "" : level).trim().toLowerCase()) >= 0;
@@ -534,9 +511,8 @@ __FM_BEARINGS_BOARD_DATA__
     var top = el("div", "bb-decision__top");
     if (item.type === "merge") {
       top.appendChild(badge("online", "checks green"));
-      /* No level, no pin: a bare "risk" wearing an alert tone would announce a
-         risk the record never stated. Any justification carried by the value
-         still reaches the card body below. */
+      /* Preserve the builder header's empty-level rule: never announce a bare,
+         alert-colored "risk" badge. */
       if (risk.level) {
         var riskPin = badge(isLowRisk(risk.level) ? "neutral" : "warn", "risk " + risk.level);
         riskPin.className += " bb-decision__risk";
