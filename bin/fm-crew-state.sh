@@ -31,10 +31,8 @@
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
 #      branch whose head was rewritten or diverged must not be attributed.
-#      A run matches when its head equals the worktree HEAD, or the worktree HEAD
-#      is an ancestor of the run head (pipeline fix commits advanced the run on
-#      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      bin/fm-nm-run-lib.sh owns which runs bind to this worktree's code
+#      identity, and which binding run wins when more than one of them does.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -380,11 +378,19 @@ nm_ci_checks_state() {
 # "<status> <branch> <short-sha> <date> [<pr-url>]" separated by runs of
 # spaces (verified: no quoting, so splitting on the first two whitespace runs
 # is exact) - but branch + coarse status is exactly what this predicate needs:
-# is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
-nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha
+# is a run for THIS branch active right now. Echoes the selected matching row's
+# status word (running/completed/cancelled/failed), or empty when the branch has
+# no matching row within FM_CREW_STATE_RUNS_LIMIT rows.
+# Selection follows the live-over-terminal rule owned by bin/fm-nm-run-lib.sh: a
+# live row wins over any terminal one, and rows of the same class keep the
+# listing's newest-first order. A status word that rule cannot classify keeps
+# this listing's own newest-first precedence, so it is answered straight away
+# instead of being held for a live row to displace.
+# With $2 = live-only, neither a terminal nor an unclassifiable row is ever
+# selected, so a caller already holding a terminal answer can ask whether a live
+# sibling exists without that question handing back a second non-live one.
+nm_runs_status_for_branch() {  # <branch> [live-only]
+  local branch=$1 live_only=${2:-} out row st rest br sha class first_terminal=""
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -397,16 +403,24 @@ nm_runs_status_for_branch() {  # <branch>
     rest=${rest#* }
     rest=$(trim "$rest")
     sha=${rest%% *}
-    if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
-      fi
+    [ "$br" = "$branch" ] || continue
+    # Same code-identity rule as axi status: skip a same-branch row whose
+    # short-sha does not match this worktree (rewritten or advanced tip).
+    nm_coarse_head_matches_worktree "$sha" || continue
+    class=$(fm_nm_run_status_class "$st")
+    if [ "$class" = live ]; then
       printf '%s' "$st"
       return 0
     fi
+    if [ "$class" = unknown ] && [ "$live_only" != live-only ]; then
+      printf '%s' "$st"
+      return 0
+    fi
+    # Hold the newest terminal row and keep scanning: an older live row for the
+    # same worktree outranks it, and only the absence of one makes it the answer.
+    [ -n "$first_terminal" ] || first_terminal=$st
   done <<< "$out"
+  [ "$live_only" = live-only ] || printf '%s' "$first_terminal"
   return 0
 }
 
@@ -421,6 +435,16 @@ nm_run_head_matches_worktree() {
   local run_head
   run_head=$(strip_quotes "$(nm_field head)")
   fm_nm_head_matches_worktree "$WT" "$run_head"
+}
+
+# 0 when the `axi status` run object in $RUN_OUT has reached a terminal result:
+# it carries an outcome, or its own status word classifies terminal. A run
+# parked at a gate or between steps is not terminal, and a status word
+# fm_nm_run_status_class cannot classify is left to the run-step mapping below
+# rather than being treated as either.
+nm_run_is_terminal() {
+  [ -n "$(strip_quotes "$(nm_field outcome)")" ] && return 0
+  [ "$(fm_nm_run_status_class "$(strip_quotes "$(nm_field status)")")" = terminal ]
 }
 
 # Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
@@ -445,6 +469,19 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     run_branch=$(strip_quotes "$(nm_field branch)")
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
       HAVE_RUN=1
+      # Live-over-terminal (bin/fm-nm-run-lib.sh): bare `axi status` answers
+      # with the most-recently-touched run, which after a pipeline crash is the
+      # dead run sitting at this worktree's exact commit while the live run that
+      # replaced it validates a descendant commit on the same branch. Both bind,
+      # so a terminal answer here is provisional until the runs list has been
+      # asked whether this worktree also has a live run.
+      if nm_run_is_terminal; then
+        live_status=$(nm_runs_status_for_branch "$CREW_BRANCH" live-only)
+        if [ -n "$live_status" ]; then
+          COARSE_STATUS=$live_status
+          RUN_SOURCE=coarse
+        fi
+      fi
     else
       # The active-or-most-recent run is for another branch, or same branch with
       # a rewritten/diverged head (the CLI is alive and answered; only the
