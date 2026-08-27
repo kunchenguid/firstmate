@@ -461,7 +461,17 @@ function readWriterOwner(file, home, root) {
     }
     return value;
   } catch {
-    fail("writer lock ownership is indeterminate");
+    return undefined;
+  }
+}
+
+function writerLockVanished(lock) {
+  try {
+    fs.lstatSync(lock);
+    return false;
+  } catch (error) {
+    if (error.code === "ENOENT") return true;
+    throw error;
   }
 }
 
@@ -481,12 +491,24 @@ function acquireWriter(layout) {
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
       assertDirectoryChain(layout.root, layout.home);
-      const stat = fs.lstatSync(layout.lock);
+      let stat;
+      try {
+        stat = fs.lstatSync(layout.lock);
+      } catch (inspectError) {
+        if (inspectError.code === "ENOENT") continue;
+        throw inspectError;
+      }
       if (stat.isSymbolicLink() || !stat.isDirectory()) fail(`unsafe writer lock: ${layout.lock}`);
       if (!fs.existsSync(owner)) {
+        if (writerLockVanished(layout.lock)) continue;
         fail("writer lock ownership is indeterminate");
       } else {
-        const { pid } = readWriterOwner(owner, layout.home, layout.root);
+        const ownerValue = readWriterOwner(owner, layout.home, layout.root);
+        if (!ownerValue) {
+          if (writerLockVanished(layout.lock)) continue;
+          fail("writer lock ownership is indeterminate");
+        }
+        const { pid } = ownerValue;
         let live = false;
         try { process.kill(pid, 0); live = true; } catch (probe) { if (probe.code === "EPERM") live = true; }
         if (live) fail(`another logbook writer is active (pid ${pid})`);

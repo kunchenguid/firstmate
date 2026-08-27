@@ -275,6 +275,26 @@ test_one_live_writer_refuses_a_competing_update() {
   pass "one live writer owns each mutation"
 }
 
+test_vanished_writer_lock_retries_claim() {
+  local home helper page
+  home=$(make_home vanished-writer)
+  helper="$home/vanish-first-claim.sh"
+  cat > "$helper" <<'SH'
+#!/usr/bin/env bash
+if [ "$2" = claim ] && [ ! -e "$3/claim-was-contended" ]; then
+  touch "$3/claim-was-contended"
+  exit 17
+fi
+exec python3 "$@"
+SH
+  chmod 700 "$helper"
+  FM_LOGBOOK_PYTHON="$helper" run_logbook "$home" start --mission "Vanished writer mission" >/dev/null \
+    || fail "start did not retry a vanished writer lock"
+  page=$(page_for "$home")
+  assert_present "$page" "retried writer claim did not create its mission page"
+  pass "a vanished writer lock retries the atomic claim"
+}
+
 test_duplicate_update_is_refused() {
   local home page update before out rc
   home=$(make_home duplicate)
@@ -432,6 +452,7 @@ test_large_retained_history_remains_readable_and_mutable
 test_path_like_mission_is_confined
 test_symlinked_mission_directory_is_refused
 test_one_live_writer_refuses_a_competing_update
+test_vanished_writer_lock_retries_claim
 test_duplicate_update_is_refused
 test_non_immediate_duplicate_update_is_refused
 test_reordered_milestones_are_refused
