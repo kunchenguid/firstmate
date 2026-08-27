@@ -39,6 +39,10 @@
 #   3. inactive outcomes + wake-drain - runs the local bounded inactive-outcome
 #                       reconciliation before presenting durable wakes and advancing
 #                       recovery handling state, so both only run when locked.
+#                       It closes by restating this home's captain calls into the
+#                       captain's Reminders list when that projection is switched
+#                       on (bin/fm-captain-reminders.sh), bounded so it can never
+#                       delay the digest and never able to fail the startup.
 #   4. supervision-instructions - the one emitted operating block for the
 #                       detected primary harness.
 #   5. read-once contract - the do-not-re-read contract covering every source
@@ -349,6 +353,8 @@ STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
 QUEUED_LIMIT=${FM_SESSION_START_QUEUED_LIMIT:-20}
 case "$QUEUED_LIMIT" in ''|*[!0-9]*|0) QUEUED_LIMIT=20 ;; esac
+REMINDERS_BUDGET=${FM_SESSION_START_REMINDERS_TIMEOUT:-20}
+case "$REMINDERS_BUDGET" in ''|*[!0-9]*|0) REMINDERS_BUDGET=20 ;; esac
 BACKLOG_FIELDS=blocked_by,hold_kind,hold_reason
 
 RULE='================================================================================'
@@ -732,6 +738,16 @@ else
   else
     printf '(no queued wakes)\n'
   fi
+  # Restate what is waiting on the captain onto the surface he actually carries.
+  # It belongs beside the open-decision reconciliation above: a call raised in an
+  # earlier session is exactly what sinks out of view, and this is the moment the
+  # fleet's own view of it is being rebuilt. Off unless this home opted in, in
+  # which case bin/fm-captain-reminders.sh owns everything about it and bounds
+  # each of its own steps; the outer bound here is only a backstop, so the digest
+  # cannot be delayed by a Reminders prompt no matter what that script does.
+  REMINDERS_OUT=$(fm_run_timed "$REMINDERS_BUDGET" \
+    "$SCRIPT_DIR/fm-captain-reminders.sh" sync 2>&1) || true
+  [ -z "$REMINDERS_OUT" ] || printf '%s\n' "$REMINDERS_OUT"
 fi
 
 # --- 4. supervision operating instructions ----------------------------------
