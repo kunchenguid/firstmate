@@ -63,6 +63,7 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   def incident_inventory_omitted($r):
     (($r.inventory.workers.omitted // 0)
      + ($r.inventory.repository.registered_worker_metadata.omitted // 0)
+     + ($r.inventory.repository.candidate_worktrees.omitted // 0)
      + ($r.inventory.repository.worktrees.omitted // 0)
      + ($r.inventory.repository.project_directories.omitted // 0)
      + ($r.inventory.repository.scan_repositories.omitted_at_least // 0)

@@ -92,6 +92,7 @@ test_repository_and_worker_reconciliation() {
 ## In flight
 - [ ] quota-worker - Restore Titan companion after quota incident (repo: titan) (kind: ship)
 - [ ] semantic-worker - Restore Redis provider limits (repo: titan) (kind: ship)
+- [ ] historical-worker - Tune Redis provider capacity (repo: titan) (kind: ship)
 - [ ] finished-worker - Completed unrelated maintenance (repo: titan) (kind: ship)
 
 ## Queued
@@ -113,8 +114,16 @@ EOF
     "project=$current" \
     "harness=codex" \
     "kind=ship"
-  printf 'working: coordinating provider capacity\n' > "$home/state/semantic-worker.status"
-  printf 'state: working · source: pane · coordinating provider capacity\n' > "$home/state/semantic-worker.current-state"
+  printf 'working: coordinating unrelated provider capacity\n' > "$home/state/semantic-worker.status"
+  printf 'state: working · source: pane · repairing Upstash quota exhaustion\n' > "$home/state/semantic-worker.current-state"
+  fm_write_meta "$home/state/historical-worker.meta" \
+    "window=firstmate:fm-historical-worker" \
+    "worktree=$current" \
+    "project=$current" \
+    "harness=codex" \
+    "kind=ship"
+  printf 'working: repairing Upstash quota exhaustion\n' > "$home/state/historical-worker.status"
+  printf 'state: working · source: pane · coordinating provider capacity\n' > "$home/state/historical-worker.current-state"
   fm_write_meta "$home/state/finished-worker.meta" \
     "window=firstmate:fm-finished-worker" \
     "worktree=$current" \
@@ -135,6 +144,8 @@ EOF
       and (.repository.canonical_remote | startswith("file://"))
       and ([.repository.branches[].name] | index("main")) != null
       and (.repository.superseded_continuations | index($stale)) != null
+      and .repository.worktrees[0].path == $current
+      and .repository.inventory.worktrees.repository == $current
       and ([.workers.registry_entries[].id] | index("quota-worker")) != null
       and ([.workers.stale_registry_entries[].id] | index("quota-worker")) != null
       and ([.workers.wrong_worktree[].id] | index("quota-worker")) != null
@@ -150,9 +161,15 @@ EOF
           and .activity_matches_incident == false)
       and (.workers.registry_entries[] | select(.id == "semantic-worker")
         | .active == true
+          and .activity_matches_incident == true
+          and (.match_reason | contains("upstash")))
+      and ([.workers.scope_drifted[].id] | index("semantic-worker")) == null
+      and (.workers.registry_entries[] | select(.id == "historical-worker")
+        | .active == true
+          and .latest_reported_event.historical == true
           and .activity_matches_incident == null
           and .match_reason == "no lexical overlap; semantic relevance is unknown")
-      and ([.workers.scope_drifted[].id] | index("semantic-worker")) == null
+      and ([.workers.scope_drifted[].id] | index("historical-worker")) == null
       and (.workers.registry_entries[] | select(.id == "finished-worker")
         | .active == false
           and .current_state.state == "done"
@@ -308,6 +325,16 @@ EOF
       and .repository.authoritative_worktree != null
       and .approval.required == false
   ' >/dev/null || fail "proven application defect did not escalate cleanly: $out"
+  if run_triage "$home" code-defect "$repo" \
+    "Status endpoint failure needs another look" >/dev/null 2>&1; then
+    fail "retriage erased a proven code escalation"
+  fi
+  out=$(FM_HOME="$home" "$INCIDENT" status --incident code-defect --json)
+  printf '%s' "$out" | jq -e '
+    .diagnosis.code_change_required == "yes"
+      and .outcome == "escalate_to_code_change"
+      and .guardrails.new_worktree_allowed == true
+  ' >/dev/null || fail "proven code escalation was not monotonic: $out"
   pass "runtime evidence proving an application defect escalates to one current-main code workflow"
 }
 
@@ -418,6 +445,61 @@ test_bounded_inventory_omissions_are_disclosed() {
   pass "bounded worker, repository, branch, and incident omissions stay visible"
 }
 
+test_worktree_inventory_is_authority_bound_and_enrichment_is_capped() {
+  local home origin repo fakebin fixture marker omitted real_git head out i suffix
+  home=$(make_home worktree-bound)
+  origin=$(make_origin worktree-bound)
+  repo=$home/projects/titan
+  clone_origin "$origin" "$repo"
+  repo=$(cd "$repo" && pwd -P)
+  fakebin=$home/fakebin
+  fixture=$home/worktrees.porcelain
+  marker=$home/omitted-probed
+  real_git=$(command -v git)
+  head=$(git -C "$repo" rev-parse HEAD)
+  mkdir -p "$fakebin"
+  {
+    printf 'worktree %s\nHEAD %s\nbranch refs/heads/main\n\n' "$repo" "$head"
+    for i in $(seq 1 65); do
+      printf -v suffix '%03d' "$i"
+      mkdir -p "$home/linked-$suffix"
+      printf 'worktree %s\nHEAD %s\nbranch refs/heads/linked-%s\n\n' \
+        "$home/linked-$suffix" "$head" "$suffix"
+    done
+  } > "$fixture"
+  omitted=$(cd "$home/linked-065" && pwd -P)
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -C ] && [ "${2:-}" = "$FM_FAKE_WORKTREE_REPO" ] &&
+  [ "${3:-}" = worktree ] && [ "${4:-}" = list ]; then
+  cat "$FM_FAKE_WORKTREE_FIXTURE"
+  exit 0
+fi
+if [ "${1:-}" = -C ] && [ "${2:-}" = "$FM_FAKE_WORKTREE_OMITTED" ]; then
+  : > "$FM_FAKE_WORKTREE_MARKER"
+  exit 1
+fi
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$fakebin/git"
+  out=$(
+    export PATH="$fakebin:$PATH"
+    export FM_REAL_GIT="$real_git"
+    export FM_FAKE_WORKTREE_REPO="$repo"
+    export FM_FAKE_WORKTREE_FIXTURE="$fixture"
+    export FM_FAKE_WORKTREE_OMITTED="$omitted"
+    export FM_FAKE_WORKTREE_MARKER="$marker"
+    run_triage "$home" worktree-bound "$repo" "Unexplained production failure"
+  )
+  [ ! -e "$marker" ] || fail "worktree enrichment probed beyond its disclosed cap"
+  printf '%s' "$out" | jq -e --arg repo "$repo" '
+    (.repository.worktrees | length) == 64
+      and .repository.inventory.candidate_worktrees == {repository:$repo,shown:64,omitted:2}
+      and .repository.inventory.worktrees == {repository:$repo,shown:64,omitted:2}
+  ' >/dev/null || fail "worktree authority or omission accounting was incorrect: $out"
+  pass "worktree inventory follows selected authority and caps per-copy enrichment"
+}
+
 test_repository_and_worker_reconciliation
 test_external_quota_no_code_lifecycle_and_status
 test_proposed_hotfix_already_deployed
@@ -425,3 +507,4 @@ test_proven_application_defect_escalates
 test_remaining_classifier_categories
 test_remote_credentials_are_not_recorded
 test_bounded_inventory_omissions_are_disclosed
+test_worktree_inventory_is_authority_bound_and_enrichment_is_capped

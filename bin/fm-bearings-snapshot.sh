@@ -502,6 +502,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         ($snap.runtime_incidents.records[]?
          | (((.inventory.workers.omitted // 0)
              + (.inventory.repository.registered_worker_metadata.omitted // 0)
+             + (.inventory.repository.candidate_worktrees.omitted // 0)
              + (.inventory.repository.worktrees.omitted // 0)
              + (.inventory.repository.project_directories.omitted // 0)
              + (.inventory.repository.scan_repositories.omitted_at_least // 0)

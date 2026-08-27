@@ -250,7 +250,7 @@ def repo_record(path: Path, *, include_branches: bool = False) -> dict[str, Any]
     }
 
 
-def parse_worktrees(repo: Path) -> list[dict[str, Any]]:
+def parse_worktree_rows(repo: Path) -> list[dict[str, Any]]:
     value = run_git(repo, "worktree", "list", "--porcelain") or ""
     rows: list[dict[str, Any]] = []
     current: dict[str, Any] = {}
@@ -258,14 +258,12 @@ def parse_worktrees(repo: Path) -> list[dict[str, Any]]:
         if not line:
             if current:
                 path = Path(current["path"])
-                record = repo_record(path)
                 rows.append({
                     "path": str(path.resolve()),
                     "head": current.get("head"),
                     "branch": current.get("branch"),
                     "detached": current.get("detached", False),
                     "present": path.exists(),
-                    "clean": record.get("clean") if record else None,
                 })
                 current = {}
             continue
@@ -279,6 +277,18 @@ def parse_worktrees(repo: Path) -> list[dict[str, Any]]:
         elif key == "detached":
             current["detached"] = True
     return rows
+
+
+def bounded_worktrees(
+    repo: Path,
+    rows: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    parsed = rows if rows is not None else parse_worktree_rows(repo)
+    shown: list[dict[str, Any]] = []
+    for row in parsed[:MAX_COPIES]:
+        record = repo_record(Path(row["path"])) if row["present"] else None
+        shown.append({**row, "clean": record.get("clean") if record else None})
+    return shown, max(0, len(parsed) - MAX_COPIES)
 
 
 def meta_values(path: Path) -> dict[str, str]:
@@ -333,10 +343,10 @@ def collect_repositories(repo: Path, state: Path, projects: Path, scan_roots: li
     candidates: set[Path] = {canonical}
     registered, registered_omitted = registered_paths(state)
     candidates.update(registered)
-    worktrees = parse_worktrees(canonical)
-    worktrees_shown = worktrees[:MAX_COPIES]
-    worktrees_omitted = max(0, len(worktrees) - MAX_COPIES)
-    candidates.update(Path(row["path"]) for row in worktrees_shown)
+    candidate_worktree_rows = parse_worktree_rows(canonical)
+    candidate_worktrees_shown = candidate_worktree_rows[:MAX_COPIES]
+    candidate_worktrees_omitted = max(0, len(candidate_worktree_rows) - MAX_COPIES)
+    candidates.update(Path(row["path"]) for row in candidate_worktrees_shown)
     project_paths: list[Path] = []
     project_omitted = 0
     if projects.is_dir():
@@ -412,6 +422,14 @@ def collect_repositories(repo: Path, state: Path, projects: Path, scan_roots: li
         authoritative = next((row for row in records if row["path"] == str(canonical)), records[0])
         authoritative_worktree = None
 
+    authority_path = Path(authoritative["path"])
+    authority_worktree_rows = (
+        candidate_worktree_rows
+        if authority_path == canonical
+        else parse_worktree_rows(authority_path)
+    )
+    worktrees_shown, worktrees_omitted = bounded_worktrees(authority_path, authority_worktree_rows)
+
     common_dirs = {row["common_dir"] for row in records if row["common_dir"]}
     detached = [row["path"] for row in records if row["detached"]]
     superseded = [row["path"] for row in records if row["stale_remote"]]
@@ -441,7 +459,16 @@ def collect_repositories(repo: Path, state: Path, projects: Path, scan_roots: li
                 "shown": min(MAX_COPIES, len(list(state.glob("*.meta")))) if state.is_dir() else 0,
                 "omitted": registered_omitted,
             },
-            "worktrees": {"shown": len(worktrees_shown), "omitted": worktrees_omitted},
+            "candidate_worktrees": {
+                "repository": str(canonical),
+                "shown": len(candidate_worktrees_shown),
+                "omitted": candidate_worktrees_omitted,
+            },
+            "worktrees": {
+                "repository": authoritative["path"],
+                "shown": len(worktrees_shown),
+                "omitted": worktrees_omitted,
+            },
             "project_directories": {
                 "shown": min(MAX_COPIES, len(project_paths)) if projects.is_dir() else 0,
                 "omitted": project_omitted,
@@ -451,7 +478,14 @@ def collect_repositories(repo: Path, state: Path, projects: Path, scan_roots: li
             "copies": {
                 "shown": len(records),
                 "complete": not any(
-                    (candidate_omitted, registered_omitted, worktrees_omitted, project_omitted, scan_omitted_at_least)
+                    (
+                        candidate_omitted,
+                        candidate_worktrees_omitted,
+                        registered_omitted,
+                        worktrees_omitted,
+                        project_omitted,
+                        scan_omitted_at_least,
+                    )
                 ),
             },
             "branches": {"shown": len(all_branches), "omitted_at_least": branch_omitted_at_least},
@@ -587,7 +621,7 @@ def collect_workers(
         current_state = current_worker_state(state, task_id)
         is_active = current_state["state"] in {"working", "parked", "blocked", "paused"}
         active_value: bool | None = None if current_state["state"] == "unknown" else is_active
-        objective_terms = terms(objective + " " + (reported_event["line"] or ""))
+        objective_terms = terms(objective + " " + (current_state["detail"] or ""))
         match_value: bool | None
         match_reason: str
         wrong_worktree = False
@@ -949,6 +983,7 @@ def atomic_write(path: Path, value: dict[str, Any]) -> None:
 def lifecycle_advanced(record: dict[str, Any]) -> bool:
     return bool(
         record.get("phase") in {"repair", "verification"}
+        or record.get("diagnosis", {}).get("code_change_required") == "yes"
         or record.get("approval", {}).get("status") == "approved"
         or record.get("repair", {}).get("status") != "pending"
         or record.get("verification", {}).get("status") != "pending"
@@ -972,7 +1007,7 @@ def write_triage(path: Path, record: dict[str, Any]) -> None:
                 raise IncidentError(f"existing incident record has the wrong schema or id: {record['id']}")
             if lifecycle_advanced(existing):
                 raise IncidentError(
-                    "incident lifecycle has advanced; retriage would regress recorded approval, repair, or verification"
+                    "incident lifecycle has advanced; retriage would regress recorded escalation, approval, repair, or verification"
                 )
             record["created_at"] = existing.get("created_at", record["created_at"])
         write_json(path, record)
@@ -996,6 +1031,8 @@ def output_record(record: dict[str, Any], as_json: bool) -> None:
     inventory = record["repository"].get("inventory", {})
     registered_omitted = inventory.get("registered_worker_metadata", {}).get("omitted", 0)
     print(f"Registered worker metadata omitted by repository scan: {registered_omitted}")
+    candidate_worktrees_omitted = inventory.get("candidate_worktrees", {}).get("omitted", 0)
+    print(f"Candidate worktrees omitted by repository scan: {candidate_worktrees_omitted}")
     print(f"Worktrees omitted by repository scan: {inventory.get('worktrees', {}).get('omitted', 0)}")
     project_omitted = inventory.get("project_directories", {}).get("omitted", 0)
     print(f"Project directories omitted by repository scan: {project_omitted}")
