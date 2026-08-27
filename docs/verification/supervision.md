@@ -914,6 +914,56 @@ ok - status selectors preserve configurable state and relevance vocabularies
 exit=0
 ```
 
+### Case-insensitive POSIX ERE red/green record
+
+This case ran on 2026-08-27 on the same platform and Bash version recorded above.
+The unfixed revision was `724cec6465626c1be049108f3047bf5433aef221`, and the fixed version was its review working tree with the source and test changes recorded in this section.
+The case was RED before and GREEN after, so it demonstrates the fix through both the signal classifier and heartbeat watcher paths.
+
+The exact unfixed command was:
+
+```sh
+printf 'CASE revision=724cec6-review12-unfixed test=test_posix_class_captain_regex_surfaces_signal_and_heartbeat\n'
+bash -c '
+  . tests/wake-helpers.sh
+  eval "$(awk '\''$0 == "test_signal_reason_is_actionable_classifier" { exit } substr($0, 1, 1) == "." && index($0, "BASH_SOURCE") { next } { print }'\'' tests/fm-watch-triage.test.sh)"
+  test_posix_class_captain_regex_surfaces_signal_and_heartbeat
+'
+rc=$?
+printf 'exit=%s\n' "$rc"
+exit 0
+```
+
+Full unfixed output:
+
+```text
+CASE revision=724cec6-review12-unfixed test=test_posix_class_captain_regex_surfaces_signal_and_heartbeat
+not ok - POSIX-class captain regex was lost: signal=0 heartbeat=0
+exit=1
+```
+
+The exact fixed command was:
+
+```sh
+printf 'CASE revision=review-fixed test=test_posix_class_captain_regex_surfaces_signal_and_heartbeat\n'
+bash -c '
+  . tests/wake-helpers.sh
+  eval "$(awk '\''$0 == "test_signal_reason_is_actionable_classifier" { exit } substr($0, 1, 1) == "." && index($0, "BASH_SOURCE") { next } { print }'\'' tests/fm-watch-triage.test.sh)"
+  test_posix_class_captain_regex_surfaces_signal_and_heartbeat
+'
+rc=$?
+printf 'exit=%s\n' "$rc"
+exit "$rc"
+```
+
+Full fixed output:
+
+```text
+CASE revision=review-fixed test=test_posix_class_captain_regex_surfaces_signal_and_heartbeat
+ok - case-insensitive POSIX-class captain regex surfaces signal and heartbeat paths
+exit=0
+```
+
 ## Turn-end guard
 
 The blocking and bounded-follow-up mechanisms were validated across six harnesses on 2026-07-08 through 2026-08-13, with Cursor's stop-hook park validated on 2026-08-13 and Claude's replacement Stop-owned path revalidated on 2026-08-14.

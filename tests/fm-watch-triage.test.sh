@@ -196,6 +196,33 @@ test_legacy_free_text_after_working_is_actionable_classifier() {
   pass "legacy captain-relevant free text after working remains actionable"
 }
 
+test_posix_class_captain_regex_surfaces_signal_and_heartbeat() {
+  local dir state fakebin out drain_out status_file sig pid
+  local signal_seen=0 heartbeat_seen=0
+  dir=$(make_case classify-posix-captain-regex); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; status_file="$state/miss.status"
+  printf 'working: monitoring\nABC READY\n' > "$status_file"
+  FM_CAPTAIN_RE='[[:upper:]]+ READY' signal_reason_is_actionable "$status_file" \
+    && signal_seen=1
+
+  sig=$(seen_sig "$status_file"); printf '%s' "$sig" > "$state/.seen-miss_status"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CAPTAIN_RE='[[:upper:]]+ READY' FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 \
+    "$WATCH" > "$out" &
+  pid=$!
+  if wait_for_exit "$pid" 50 \
+      && grep -Fx 'heartbeat' "$out" >/dev/null \
+      && [ "$(cat "$state/.hb-surfaced-miss" 2>/dev/null || true)" = 'ABC READY' ] \
+      && FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+      && grep "$(printf '\theartbeat\t')" "$drain_out" >/dev/null; then
+    heartbeat_seen=1
+  fi
+
+  [ "$signal_seen" -eq 1 ] && [ "$heartbeat_seen" -eq 1 ] \
+    || fail "POSIX-class captain regex was lost: signal=$signal_seen heartbeat=$heartbeat_seen"
+  pass "case-insensitive POSIX-class captain regex surfaces signal and heartbeat paths"
+}
+
 test_status_selectors_bound_process_cost_across_history() {
   local dir state fakebin real_awk real_grep variant i
   local short_shell long_shell short_scans long_scans
@@ -2747,6 +2774,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
 
 test_signal_reason_is_actionable_classifier
 test_legacy_free_text_after_working_is_actionable_classifier
+test_posix_class_captain_regex_surfaces_signal_and_heartbeat
 test_status_selectors_bound_process_cost_across_history
 test_status_selectors_preserve_configurable_vocabulary
 test_stale_is_terminal_classifier
