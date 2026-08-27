@@ -27,6 +27,7 @@ install_pi_branch_extension_fixture() {
     "$repo/node_modules/typebox"
   cp "$EXT" "$repo/.pi/extensions/fm-branch-supervision.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
   mkdir -p "$repo/bin"
@@ -47,6 +48,16 @@ export function getMarkdownTheme() {
 }
 
 export class UserMessageComponent {}
+
+export class DynamicBorder {
+  constructor(color) {
+    this.color = color;
+  }
+  invalidate() {}
+  render() {
+    return ["--"];
+  }
+}
 
 export class ModelRuntime {
   constructor() {
@@ -228,6 +239,64 @@ export class Box extends Container {
     this.bgFn = bgFn;
   }
 }
+
+export class Input {
+  constructor() {
+    this.value = "";
+    this.focused = false;
+  }
+  getValue() {
+    return this.value;
+  }
+  setValue(value) {
+    this.value = value;
+  }
+  handleInput(data) {
+    this.value = data === "\u007f" ? this.value.slice(0, -1) : this.value + data;
+  }
+  invalidate() {}
+  render() {
+    return [this.value];
+  }
+}
+
+// Records every construction so a driver can assert the rows and the visible
+// bound the extension asked Pi's real SelectList for. Navigation keys arrive
+// as their keybinding ids because the driver's fake keybindings manager
+// matches an id against the raw key data.
+export class SelectList {
+  constructor(items, maxVisible, theme) {
+    this.items = items;
+    this.maxVisible = maxVisible;
+    this.theme = theme;
+    this.selectedIndex = 0;
+    (globalThis.__fmPickerLists ??= []).push({ items: items.map((item) => ({ ...item })), maxVisible });
+  }
+  handleInput(data) {
+    if (data === "tui.select.down") {
+      this.selectedIndex = Math.min(this.selectedIndex + 1, this.items.length - 1);
+    } else if (data === "tui.select.up") {
+      this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+    } else if (data === "tui.select.confirm") {
+      const item = this.items[this.selectedIndex];
+      if (item) this.onSelect?.(item);
+    } else if (data === "tui.select.cancel") {
+      this.onCancel?.();
+    }
+  }
+  getSelectedItem() {
+    return this.items[this.selectedIndex] ?? null;
+  }
+  invalidate() {}
+  render() {
+    return this.items.slice(0, this.maxVisible).map((item) => item.label);
+  }
+}
+
+export function fuzzyFilter(items, query, getText) {
+  const needle = query.toLowerCase();
+  return items.filter((item) => getText(item).toLowerCase().includes(needle));
+}
 JS
   cat > "$repo/node_modules/typebox/package.json" <<'JSON'
 {"name":"typebox","type":"module","exports":"./index.js"}
@@ -262,7 +331,8 @@ JS
 # Shared driver preamble: a fake main-session ExtensionAPI with a synchronous
 # event bus (mirrors pi's EventEmitter-backed bus), captured handlers, and
 # captured main-bound messages.
-DRIVER_PRELUDE=$(cat <<'JS'
+DRIVER_PRELUDE_FILE="$TMP_ROOT/driver-prelude.js"
+cat > "$DRIVER_PRELUDE_FILE" <<'JS'
 const { spawnSync } = await import("node:child_process");
 const { mkdirSync, writeFileSync } = await import("node:fs");
 const { pathToFileURL } = await import("node:url");
@@ -323,6 +393,60 @@ function makeCtx(extra) {
       },
     },
     ...(extra ?? {}),
+  };
+}
+
+// A TUI-mode context whose ui.custom runs the extension's real picker
+// component headlessly: the factory receives a fake renderer, a pass-through
+// theme, and a keybindings manager that matches a keybinding id against the
+// raw key data, and then the next queued keystroke script is fed to the
+// component's own handleInput. Keystrokes are either a keybinding id
+// (navigation) or literal characters (search). mainModelWrites records every
+// attempt to move the captain's own model, which pinning the branch must
+// never do.
+const uiKeystrokes = [];
+const mainModelWrites = [];
+function makeTuiCtx(extra) {
+  const base = makeCtx(extra);
+  return {
+    ...base,
+    get model() {
+      return mainModel;
+    },
+    mode: "tui",
+    settingsManager: {
+      setDefaultModelAndProvider(provider, id) {
+        mainModelWrites.push({ provider, id });
+      },
+    },
+    setModel(provider, id) {
+      mainModelWrites.push({ provider, id });
+    },
+    ui: {
+      ...base.ui,
+      async custom(factory) {
+        let result;
+        let settled = false;
+        const component = await factory(
+          {
+            requestRender() {},
+          },
+          { fg: (_color, text) => text, bold: (text) => text },
+          { matches: (data, id) => data === id },
+          (value) => {
+            result = value;
+            settled = true;
+          },
+        );
+        component.render(80);
+        for (const key of uiKeystrokes.shift() ?? ["tui.select.confirm"]) {
+          if (settled) break;
+          component.handleInput(key);
+        }
+        if (!settled) throw new Error("the picker script ended without a selection or a cancellation");
+        return result;
+      },
+    },
   };
 }
 
@@ -411,7 +535,7 @@ function outcomeScript(args) {
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 JS
-)
+DRIVER_PRELUDE=$(cat "$DRIVER_PRELUDE_FILE")
 
 test_branch_dispatch_two_stage_filter_and_prefix_contract() {
   local repo home out status
@@ -521,6 +645,18 @@ if (!sentToMain[2].message.content.includes("task-9: PR https://example.com/pr/9
 if (/branch merged|\[routine\]|\[captain\]/.test(sentToMain[2].message.content)) {
   throw new Error(`captain note still has boilerplate: ${sentToMain[2].message.content}`);
 }
+// What main's model actually receives. Pi keeps only `content` when it turns a
+// custom message into a provider message - customType, display, and details are
+// all dropped - so `content` IS the delivered payload, and these two files are
+// the exact bytes main's model would read. The bash side classifies them with
+// the REAL bin/fm-operational-input.sh so the protocol's own executable, not a
+// pattern in this test, decides what was delivered. Pi's half of that contract
+// is proven separately against the real SDK in fm-pi-branch-live-e2e.test.sh.
+writeFileSync(`${home}/state/delivered-captain-note`, sentToMain[2].message.content);
+writeFileSync(`${home}/state/delivered-routine-note`, sentToMain[0].message.content);
+if (sentToMain.filter((sent) => sent.options.triggerTurn).length !== 1) {
+  throw new Error("one captain outcome must open exactly one turn on main");
+}
 
 // The store (the owned durable contract) holds all three outcomes in order,
 // and each merged note advanced the read cursor.
@@ -623,6 +759,83 @@ EOF
     *) fail "cache key line missing from driver output: $out" ;;
   esac
   pass "branch owns accepted wakes with a stable prefix contract and verdict-driven merge delivery"
+
+  # The delivered captain payload must identify itself to main's model. When it
+  # did not, main could not tell an incoming outcome from its own earlier answer
+  # and re-emitted that answer instead of relaying the outcome, silently losing
+  # it. The real protocol executable is the oracle here: it decides the kind and
+  # extracts the body, so this asserts delivered behavior rather than a shape
+  # this test already knows.
+  local kind body
+  kind=$(./bin/fm-operational-input.sh kind < "$home/state/delivered-captain-note") \
+    || fail "captain outcome reaches main's model as unattributed text the model cannot tell from its own answer"
+  [ "$kind" = branch-outcome ] \
+    || fail "captain outcome delivered as kind '$kind', not branch-outcome"
+  body=$(./bin/fm-operational-input.sh body < "$home/state/delivered-captain-note") \
+    || fail "captain outcome envelope carries no readable body"
+  case "$body" in
+    *"task-9: PR https://example.com/pr/9"*) ;;
+    *) fail "captain outcome body lost the outcome itself: $body" ;;
+  esac
+  case "$body" in
+    *"Relay only this outcome"*"Do not restate or repeat any earlier answer"*) ;;
+    *) fail "captain outcome body never tells main to relay it instead of repeating: $body" ;;
+  esac
+  # The routine note is rendered in the TUI, and its renderer reads the glyph off
+  # the front of this same string, so it must stay plain text.
+  if ./bin/fm-operational-input.sh kind < "$home/state/delivered-routine-note" >/dev/null 2>&1; then
+    fail "routine note must stay plain rendered text, not typed operational input"
+  fi
+  pass "a captain outcome reaches main's model as typed, self-describing input while routine notes stay plain"
+}
+
+test_captain_outcome_encoding_failure_delivers_plain_instruction() {
+  local repo home out status
+  repo="$TMP_ROOT/encoding-fallback-root"
+  home="$TMP_ROOT/encoding-fallback-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_OPERATIONAL_INPUT_SCRIPT="$repo/bin/missing-operational-input" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle, sentToMain }; })()`);
+const { dispatch, settle, sentToMain } = globalThis.__t;
+
+if (!dispatch("signal: encoding fallback probe").accepted) {
+  throw new Error("branch did not accept the encoding-fallback wake");
+}
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "encoding-fallback branch prompt");
+const session = globalThis.__fmSessions[0];
+const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+const result = await report.execute(
+  "encoding-fallback",
+  { task: "task-fallback", verdict: "captain", summary: "PR https://example.com/pr/fallback is ready" },
+  undefined,
+  undefined,
+  {},
+);
+if (result.isError) throw new Error(`fallback report failed: ${JSON.stringify(result)}`);
+if (sentToMain.length !== 1) throw new Error(`fallback delivered ${sentToMain.length} notes instead of one`);
+const delivered = sentToMain[0];
+if (delivered.message.display !== false) throw new Error("fallback captain note became visible");
+if (delivered.options.triggerTurn !== true || delivered.options.deliverAs !== "followUp") {
+  throw new Error(`fallback changed turn delivery: ${JSON.stringify(delivered.options)}`);
+}
+if (delivered.message.content.includes("FIRSTMATE_OP:")) {
+  throw new Error(`fallback unexpectedly carried an envelope: ${delivered.message.content}`);
+}
+if (!delivered.message.content.includes("Relay only this outcome") ||
+    !delivered.message.content.includes("Do not restate or repeat any earlier answer") ||
+    !delivered.message.content.includes("task-fallback: PR https://example.com/pr/fallback is ready")) {
+  throw new Error(`fallback lost its instruction or outcome: ${delivered.message.content}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "captain outcome encoding failure must degrade to plain instructed delivery: $out"
+  pass "a broken operational encoder still delivers one invisible instructed captain outcome as a follow-up"
 }
 
 test_branch_cache_key_is_per_home_stable() {
@@ -1646,6 +1859,135 @@ EOF
   pass "unpinned branches follow main effort changes live while pinned branches stay fixed"
 }
 
+test_supervision_model_picker_is_bounded_searchable_and_branch_only() {
+  local repo home out status
+  repo="$TMP_ROOT/pickerux-root"
+  home="$TMP_ROOT/pickerux-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, makeCtx, makeTuiCtx, commands, registryModels, uiSelections, uiKeystrokes, mainModelWrites, home }; })()`);
+const { fire, makeCtx, makeTuiCtx, commands, registryModels, uiSelections, uiKeystrokes, mainModelWrites, home } = globalThis.__t;
+import { readFileSync } from "node:fs";
+
+// A catalog long enough that rendering it whole would run off a terminal,
+// plus one distinctively named model to search for and one model the
+// isolated branch runtime cannot run.
+registryModels.push({ provider: "anthropic", id: "main-model" });
+for (let i = 1; i <= 30; i += 1) registryModels.push({ provider: "anthropic", id: `bulk-model-${i}` });
+registryModels.push({ provider: "openai-codex", id: "cheap-oauth", authKind: "oauth" });
+registryModels.push({ provider: "dynamic", id: "extension-only", branchAvailable: false });
+
+const command = commands.get("supervision-model");
+if (!command) throw new Error("the supervision-model command was not registered");
+fire("session_start", {}, makeCtx());
+
+// The captain types a search query and confirms the one row it leaves.
+globalThis.__fmPickerLists = [];
+uiKeystrokes.push(["c", "h", "e", "a", "p", "tui.select.confirm"]);
+uiSelections.push(undefined); // the effort step is cancelled, leaving that choice alone
+await command.handler("", makeTuiCtx());
+
+const lists = globalThis.__fmPickerLists;
+if (lists.length < 2) throw new Error(`typing a query must rebuild the list: ${JSON.stringify(lists.map((l) => l.items.length))}`);
+const opened = lists[0];
+if (opened.maxVisible !== 10) {
+  throw new Error(`the model list must stay bounded rather than rendering every row: maxVisible=${opened.maxVisible}`);
+}
+if (opened.items[0].label !== "Follow main (anthropic/main-model)") {
+  throw new Error(`following main must be the first row: ${JSON.stringify(opened.items.slice(0, 2))}`);
+}
+if (opened.items.length !== 33) {
+  throw new Error(`the opened list must offer following main plus every branch-runnable model: ${opened.items.length}`);
+}
+if (opened.items.some((item) => item.label.includes("extension-only"))) {
+  throw new Error("the picker widened past the branch runtime's eligibility filter");
+}
+const filtered = lists[lists.length - 1];
+if (filtered.items.length !== 1 || filtered.items[0].value !== "openai-codex/cheap-oauth") {
+  throw new Error(`the search query did not narrow the list: ${JSON.stringify(filtered.items)}`);
+}
+
+// The pick lands on the supervision branch alone.
+if (readFileSync(`${home}/config/supervision-branch-model`, "utf8") !== "openai-codex/cheap-oauth\n") {
+  throw new Error("the searched-for pick was not persisted as the supervision branch model");
+}
+if (mainModelWrites.length !== 0) {
+  throw new Error(`pinning the branch moved the captain's own model: ${JSON.stringify(mainModelWrites)}`);
+}
+if (makeCtx().model.id !== "main-model") throw new Error("the captain's own conversation model changed");
+
+// A query that matches following main keeps that row first, and escape
+// leaves every choice standing.
+globalThis.__fmPickerLists = [];
+uiKeystrokes.push(["m", "a", "i", "n", "tui.select.cancel"]);
+await command.handler("", makeTuiCtx());
+const mainQuery = globalThis.__fmPickerLists[globalThis.__fmPickerLists.length - 1];
+if (mainQuery.items[0].label !== "Follow main (anthropic/main-model)") {
+  throw new Error(`a matching query must keep following main first: ${JSON.stringify(mainQuery.items.slice(0, 2))}`);
+}
+if (mainQuery.items.length < 2) throw new Error("a matching query dropped the models it also matched");
+if (readFileSync(`${home}/config/supervision-branch-model`, "utf8") !== "openai-codex/cheap-oauth\n") {
+  throw new Error("cancelling the picker changed the standing pin");
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "the model picker must be bounded, searchable, and branch-only: $out"
+  pass "supervision-model opens a bounded searchable list, follow main first, and pins the branch alone"
+}
+
+test_branch_model_picker_keeps_follow_main_first_under_ranking() {
+  local repo out status
+  repo="$TMP_ROOT/pickerlib-root"
+  mkdir -p "$repo/.pi/extensions/lib"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
+  LIB="$repo/.pi/extensions/lib/fm-branch-model-picker.ts" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const { buildBranchModelItems, filterBranchPickerItems, BRANCH_PICKER_MAX_VISIBLE, FOLLOW_MAIN_VALUE } = await import(
+  pathToFileURL(process.env.LIB).href
+);
+
+const items = buildBranchModelItems("Follow main (anthropic/main-model)", ["anthropic/main-model", "openai/mainly-cheap"], null);
+if (items[0].value !== FOLLOW_MAIN_VALUE) throw new Error("following main must be built as the first row");
+if (items[0].description !== "current") throw new Error("an absent pin must mark following main as the current choice");
+if (items[2].description !== undefined) throw new Error("a model that is not pinned must not be marked current");
+
+const pinned = buildBranchModelItems("Follow main (anthropic/main-model)", ["anthropic/main-model"], "anthropic/main-model");
+if (pinned[0].description !== undefined) throw new Error("a pinned branch must not mark following main as current");
+if (pinned[1].description !== "current") throw new Error("the pinned model must be marked as the current choice");
+
+// A ranking filter is free to sort a better match ahead of following main;
+// the picker must still show following main first whenever it matches.
+const rankReversing = (list, query, getText) =>
+  list.filter((item) => getText(item).toLowerCase().includes(query.toLowerCase())).reverse();
+const matched = filterBranchPickerItems(items, "main", rankReversing);
+if (matched[0].value !== FOLLOW_MAIN_VALUE) {
+  throw new Error(`ranking moved following main out of first place: ${JSON.stringify(matched)}`);
+}
+if (matched.length !== 3) throw new Error(`a matching query dropped rows it should keep: ${JSON.stringify(matched)}`);
+
+const narrowed = filterBranchPickerItems(items, "openai", rankReversing);
+if (narrowed.length !== 1 || narrowed[0].value !== "openai/mainly-cheap") {
+  throw new Error(`a query that excludes following main must drop it: ${JSON.stringify(narrowed)}`);
+}
+const unfiltered = filterBranchPickerItems(items, "   ", rankReversing);
+if (unfiltered.length !== items.length || unfiltered[0].value !== FOLLOW_MAIN_VALUE) {
+  throw new Error("an empty query must keep the built order");
+}
+if (BRANCH_PICKER_MAX_VISIBLE !== 10) throw new Error("the picker must keep a bounded visible row count");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "the picker's ordering and filtering must hold: $out"
+  pass "branch model picker keeps follow main first and filters the eligible catalog"
+}
+
 test_supervision_model_command_picks_effort_after_the_model() {
   local repo home out status
   repo="$TMP_ROOT/effortcmd-root"
@@ -2180,6 +2522,7 @@ test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot(
   home="$TMP_ROOT/dispatch-classify-home"
   mkdir -p "$repo/.pi/extensions/lib" "$home/state" "$home/projects/approved"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
   printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
   LIB="$repo/.pi/extensions/lib/fm-branch-dispatch.ts" FM_HOME="$home" GRANT="$ROOT/bin/fm-wake-grant.sh" \
     node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -2323,6 +2666,98 @@ EOF
   pass "scopeForUnreadWake excludes every main-only class without vetoing eligible task-local rows, and writes the eligible snapshot"
 }
 
+# The model picker's bounded scrolling and its search ranking are Pi's own
+# SelectList and fuzzyFilter, so the guarantee only holds while the installed
+# Pi still exports them and still bounds what it renders. Stubs cannot answer
+# that, so this runs against the real package and skips when it is absent.
+test_real_pi_picker_primitives_stay_bounded_and_searchable() {
+  if ! command -v node >/dev/null 2>&1; then
+    echo "skip: node not found for the Pi picker primitives test"
+    return
+  fi
+  local package_dir fixture original_dir out status
+  package_dir=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
+  if [ ! -f "$package_dir/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return
+  fi
+  fixture="$TMP_ROOT/real-picker-primitives"
+  mkdir -p "$fixture/lib" "$fixture/node_modules/@earendil-works"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$fixture/lib/fm-branch-model-picker.ts"
+  ln -s "$package_dir" "$fixture/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$package_dir/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+  original_dir=$PWD
+  cd "$fixture" || fail "could not enter the Pi picker primitives fixture"
+  LIB="$fixture/lib/fm-branch-model-picker.ts" PI_VERSION_FILE="$package_dir/package.json" \
+    node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+import { readFileSync } from "node:fs";
+
+const version = JSON.parse(readFileSync(process.env.PI_VERSION_FILE, "utf8")).version;
+const { Input, SelectList, fuzzyFilter } = await import("@earendil-works/pi-tui");
+const { DynamicBorder } = await import("@earendil-works/pi-coding-agent");
+for (const [name, value] of [
+  ["Input", Input],
+  ["SelectList", SelectList],
+  ["fuzzyFilter", fuzzyFilter],
+  ["DynamicBorder", DynamicBorder],
+]) {
+  if (typeof value !== "function") {
+    throw new Error(`installed pi ${version} no longer exports ${name}, which the supervision model picker renders through`);
+  }
+}
+
+const { buildBranchModelItems, filterBranchPickerItems, BRANCH_PICKER_MAX_VISIBLE } = await import(
+  pathToFileURL(process.env.LIB).href
+);
+const labels = Array.from({ length: 40 }, (_, i) => `anthropic/bulk-model-${i + 1}`);
+labels.push("openai-codex/cheap-oauth");
+const items = buildBranchModelItems("Follow main (anthropic/main-model)", labels, null);
+
+// Pi's own list renders a bounded window plus at most one scroll indicator,
+// which is what keeps a long catalog inside the dialog.
+const passthrough = (text) => text;
+const list = new SelectList(items, BRANCH_PICKER_MAX_VISIBLE, {
+  selectedPrefix: passthrough,
+  selectedText: passthrough,
+  description: passthrough,
+  scrollInfo: passthrough,
+  noMatch: passthrough,
+});
+const lines = list.render(80);
+if (lines.length > BRANCH_PICKER_MAX_VISIBLE + 1) {
+  throw new Error(`installed pi ${version} rendered ${lines.length} rows for ${items.length} models instead of a bounded window`);
+}
+if (!lines[0].includes("Follow main")) {
+  throw new Error(`installed pi ${version} did not render the first row the picker opens on`);
+}
+
+// Pi's own fuzzy ranking drives the search box, and following main stays first.
+const searched = filterBranchPickerItems(items, "cheap", fuzzyFilter);
+if (searched.length !== 1 || searched[0].value !== "openai-codex/cheap-oauth") {
+  throw new Error(`installed pi ${version} fuzzy search did not narrow the catalog: ${JSON.stringify(searched)}`);
+}
+const mainSearch = filterBranchPickerItems(items, "main", fuzzyFilter);
+if (mainSearch.length === 0 || mainSearch[0].label !== "Follow main (anthropic/main-model)") {
+  throw new Error(`installed pi ${version} fuzzy ranking moved following main out of first place`);
+}
+
+// The search box is Pi's own single-line input.
+const input = new Input();
+input.handleInput("c");
+input.handleInput("h");
+if (input.getValue() !== "ch") {
+  throw new Error(`installed pi ${version} Input no longer accumulates typed characters for the picker's search box`);
+}
+JS
+  status=$?
+  cd "$original_dir" || fail "could not leave the Pi picker primitives fixture"
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "the installed Pi must still provide the picker's bounded searchable primitives: $out"
+  [ -z "$out" ] || fail "Pi picker primitives test printed output: $out"
+  pass "the installed Pi still bounds the picker's list and ranks its search"
+}
+
 test_outcomes_tool_uses_stock_execution_and_export_consumers() {
   if ! command -v node >/dev/null 2>&1; then
     echo "skip: node not found for Pi outcomes rendering test"
@@ -2338,6 +2773,7 @@ test_outcomes_tool_uses_stock_execution_and_export_consumers() {
   mkdir -p "$fixture/.pi/extensions/lib" "$fixture/node_modules/@earendil-works"
   cp "$EXT" "$fixture/.pi/extensions/fm-branch-supervision.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$fixture/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$fixture/.pi/extensions/lib/fm-branch-model-picker.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$fixture/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$package_dir" "$fixture/node_modules/@earendil-works/pi-coding-agent"
@@ -2430,7 +2866,9 @@ JS
 }
 
 test_outcomes_tool_uses_stock_execution_and_export_consumers
+test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract
+test_captain_outcome_encoding_failure_delivers_plain_instruction
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
@@ -2444,6 +2882,8 @@ test_branch_session_persists_across_process_restarts
 test_branch_model_pin_applies_and_absent_pin_keeps_the_default
 test_unpinned_branch_follows_main_model_changes_live
 test_supervision_model_command_persists_and_rebinds_the_live_branch
+test_supervision_model_picker_is_bounded_searchable_and_branch_only
+test_branch_model_picker_keeps_follow_main_first_under_ranking
 test_branch_effort_pin_applies_and_absent_pin_follows_main
 test_unpinned_branch_follows_main_effort_changes_live
 test_supervision_model_command_picks_effort_after_the_model

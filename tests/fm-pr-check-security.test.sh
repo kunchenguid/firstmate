@@ -92,6 +92,12 @@ SH
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+case "${1:-} ${2:-}" in
+  "pr view")
+    [ "$#" -eq 5 ] && [ "${4:-}" = --repo ] || exit 2
+    printf 'pull_request:\n  number: %s\n  state: %s\n' "$3" "${FM_TEST_GH_MERGE_STATE:-merged}"
+    ;;
+esac
 exit "${FM_TEST_GH_AXI_RC:-0}"
 SH
   # Plain glab, reproducing the real CLI's contract: its field output on stdout
@@ -567,12 +573,23 @@ test_valid_recording_and_merge_derivation() {
     >/dev/null 2>/dev/null || fail "valid merge wrapper failed"
   grep -qxF 'pr merge 37 --repo my-org/repo_name.with-dots --merge' "$dir/gh-axi.log" \
     || fail "merge wrapper did not preserve repository derivation and method"
+  # A merge this home performed leaves its own durable outcome, so the poll's
+  # confirmation is no longer the first the captain hears of it. Acknowledge that
+  # record before the watcher cycle below, which is what still retires the poll.
+  assert_grep 'https://github.com/my-org/repo_name.with-dots/pull/37' "$dir/home/state/.wake-queue" \
+    "a merge this home performed left no durable outcome"
+  ack_watcher_cycle "$dir/home/state" || fail "merge outcome acknowledgement failed"
+  # With the merge already reported, the poll's own detection is a duplicate the
+  # watcher absorbs, so this cycle needs its own reason to end.
+  add_stop_custom_check "$dir"
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/merged-watch.out" 2> "$dir/merged-watch.err"
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "guarded merge poll retirement failed: $(cat "$dir/merged-watch.err")"
   assert_poll_absent "$dir/home/state" task-a
+  assert_no_grep "merged-task-a" "$dir/home/state/.wake-queue" \
+    "the drained self-merge outcome was republished by its poll"
   grep -qxF 'pr=https://github.com/my-org/repo_name.with-dots/pull/37' "$dir/home/state/task-a.meta" \
     || fail "guarded merge retirement removed pr metadata"
   grep -qxF "pr_head=$expected" "$dir/home/state/task-a.meta" \
@@ -3048,6 +3065,189 @@ test_merged_poll_reregistration_after_notification_is_absorbed() {
   pass "a repeat identical merged poll for an already-notified task is absorbed, never queued as a main-blocking row"
 }
 
+# The captain merging a PR himself on the forge is the same outcome as a merge
+# this home performed: bin/fm-merge-outcome-lib.sh carries both to the parent on
+# the one reply channel, so no second watch path exists for the captain's case.
+# The poll's own durable row still lands here, because the mate that owns the
+# task still has to act on it.
+seed_secondmate_home() {  # <dir> [<route>]
+  local dir=$1 route=${2:-remote}
+  printf '%s\n' mate-x > "$dir/home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=%s\n' "$route" \
+    > "$dir/home/.fm-secondmate-parent"
+}
+
+test_merged_poll_retries_a_failed_upward_report() {
+  local dir state rc replies url
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case merged-poll-upward-retry)
+  state="$dir/home/state"
+  replies="$state/parent-replies.status"
+  printf '%s\n' mate-x > "$dir/home/.fm-secondmate-home"
+  write_poll_meta "$state" task-a "$url"
+  seed_canonical_poll "$dir" task-a "$url"
+  add_stop_custom_check "$dir"
+
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch-1.out" 2> "$dir/watch-1.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "merged-poll-upward-retry: failed report did not keep the watcher loud"
+  [ -f "$state/task-a.check.sh" ] \
+    || fail "merged-poll-upward-retry: failed report retired its retry poll"
+  [ ! -e "$state/task-a.pr-poll-merge-notified" ] \
+    || fail "merged-poll-upward-retry: failed report was marked notified"
+  [ ! -e "$replies" ] \
+    || fail "merged-poll-upward-retry: failed report wrote a parent reply"
+
+  printf 'schema=fm-secondmate-parent.v1\nroute=remote\n' \
+    > "$dir/home/.fm-secondmate-parent"
+  rm -f "$state/.last-check"
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch-2.out" 2> "$dir/watch-2.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "merged-poll-upward-retry: retry failed: $(cat "$dir/watch-2.err")"
+  if [ ! -e "$replies" ]; then
+    ack_watcher_cycle "$state" \
+      || fail "merged-poll-upward-retry: recovery acknowledgement failed"
+    rm -f "$state/.last-check"
+    set +e
+    FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+      > "$dir/watch-3.out" 2> "$dir/watch-3.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || fail "merged-poll-upward-retry: post-recovery retry failed: $(cat "$dir/watch-3.err")"
+  fi
+  assert_grep "done [key=merged-task-a]: merged task-a $url" "$replies" \
+    "merged-poll-upward-retry: repaired binding did not receive the retry"
+  assert_poll_absent "$state" task-a
+  pass "a failed upward merge report keeps its poll armed for repair and retry"
+}
+
+test_self_merge_and_poll_publish_one_outcome() {
+  local dir state replies url rc
+  url=https://github.com/o/r/pull/1
+
+  # Interleaving one: self publication commits before the poll observes the
+  # merge, so the poll absorbs the committed identity without reporting again.
+  dir=$(make_case merge-outcome-committed)
+  state="$dir/home/state"
+  replies="$state/parent-replies.status"
+  seed_secondmate_home "$dir"
+  write_task_meta "$dir" task-a
+  run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/seed.err" \
+    || fail "merge-outcome-committed: could not arm merge poll"
+  run_merge_entry "$dir" task-a "$url" >"$dir/merge.out" 2>"$dir/merge.err" \
+    || fail "merge-outcome-committed: merge entrypoint failed: $(cat "$dir/merge.err")"
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    >"$dir/watch.out" 2>"$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "merge-outcome-committed: watcher failed: $(cat "$dir/watch.err")"
+  [ "$(grep -c -F "$url" "$replies")" -eq 1 ] \
+    || fail "merge-outcome-committed: self and poll reports produced duplicate outcomes"
+  assert_no_grep "check: $state/task-a.check.sh: merged" "$state/.wake-queue" \
+    "merge-outcome-committed: absorbed poll published a second outcome"
+  assert_poll_absent "$state" task-a
+
+  # Interleaving two: self publication lands but its marker commit fails. After
+  # that outcome is drained, the still-armed poll must publish it again rather
+  # than treating the interrupted attempt as complete and going silent.
+  dir=$(make_case merge-outcome-uncommitted)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/seed.err" \
+    || fail "merge-outcome-uncommitted: could not arm merge poll"
+  cat >"$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *pr-poll-merge-notified*) exit 1 ;;
+esac
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+  set +e
+  FM_TEST_REAL_MV="$REAL_MV" run_merge_entry "$dir" task-a "$url" \
+    >"$dir/merge.out" 2>"$dir/merge.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "merge-outcome-uncommitted: landed merge was reported as failed"
+  assert_grep "$url" "$state/.wake-queue" \
+    "merge-outcome-uncommitted: interrupted publication emitted no outcome"
+  [ ! -e "$state/task-a.pr-poll-merge-notified" ] \
+    || fail "merge-outcome-uncommitted: failed marker commit was treated as complete"
+  ack_watcher_cycle "$state" \
+    || fail "merge-outcome-uncommitted: could not drain the first outcome"
+  assert_no_grep "$url" "$state/.wake-queue" \
+    "merge-outcome-uncommitted: first outcome remained queued after its drain"
+  rm -f "$dir/fakebin/mv" "$state/.last-check"
+
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    >"$dir/watch.out" 2>"$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "merge-outcome-uncommitted: poll retry failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in
+    check:*task-a.check.sh:*merged) ;;
+    *) fail "merge-outcome-uncommitted: poll retry did not re-emit the outcome" ;;
+  esac
+  assert_grep "$url" "$state/.wake-queue" \
+    "merge-outcome-uncommitted: drained outcome was not durably re-emitted"
+  fm_pr_poll_merge_already_notified "$state" task-a github github.com o/r 1 \
+    || fail "merge-outcome-uncommitted: successful retry did not commit the marker"
+  assert_poll_absent "$state" task-a
+  pass "staged self-merge and poll interleavings are never silent"
+}
+
+test_merged_poll_reports_upward_from_a_secondmate_home_once() {
+  local dir state rc replies url
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case merged-poll-upward)
+  state="$dir/home/state"
+  replies="$state/parent-replies.status"
+  seed_secondmate_home "$dir"
+  write_poll_meta "$state" task-a "$url"
+  seed_canonical_poll "$dir" task-a "$url"
+  add_stop_custom_check "$dir"
+
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "merged-poll-upward: watcher failed: $(cat "$dir/watch-1.err")"
+  case "$(cat "$dir/watch-1.out")" in
+    check:*task-a.check.sh:*merged) ;;
+    *) fail "merged-poll-upward: the poll's own row was lost: $(cat "$dir/watch-1.out")" ;;
+  esac
+  assert_grep "done [key=merged-task-a]: merged task-a $url" "$replies" \
+    "merged-poll-upward: a merge this home did not perform was never reported upward"
+  [ "$(grep -c -F "$url" "$replies")" -eq 1 ] \
+    || fail "merged-poll-upward: one detected merge produced more than one upward line"
+  ack_watcher_cycle "$state" || fail "merged-poll-upward: acknowledgement failed"
+
+  # Re-registered for the same, already-reported merge: the absorbed duplicate
+  # must not tell the parent a second time either.
+  seed_canonical_poll "$dir" task-a "$url"
+  rm -f "$state/.last-check"
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "merged-poll-upward: second watcher cycle failed: $(cat "$dir/watch-2.err")"
+  [ "$(grep -c -F "$url" "$replies")" -eq 1 ] \
+    || fail "merged-poll-upward: an absorbed duplicate detection reported the merge again"
+  pass "a merge detected by the poll is reported upward from a secondmate home exactly once"
+}
+
 test_different_merged_pr_for_same_task_is_not_absorbed() {
   local dir state rc
   dir=$(make_case different-merged-pr-not-absorbed)
@@ -3080,7 +3280,8 @@ test_different_merged_pr_for_same_task_is_not_absorbed() {
     check:*task-a.check.sh:*merged) ;;
     *) fail "a different PR merge was absorbed: $(cat "$dir/watch-2.out")" ;;
   esac
-  grep -F "$(printf '\tcheck\t%s/task-a.check.sh\t' "$state")" "$state/.wake-queue" >/dev/null 2>&1 \
+  grep -F "$(printf '\tcheck\tmerged-task-a-https://github.com/o/r/pull/2\t')" \
+    "$state/.wake-queue" >/dev/null 2>&1 \
     || fail "the different PR merge did not create a main-blocking wake row"
   fm_pr_poll_merge_already_notified "$state" task-a github github.com o/r 2 \
     || fail "the marker was not advanced to the different PR identity"
@@ -3149,10 +3350,12 @@ test_retirement_crash_recovery() {
   set -e
   [ "$rc" -eq 0 ] || fail "post-queue retry watcher failed: $(cat "$dir/watch.err")"
   assert_poll_absent "$state" task-a
-  raw_count=$(grep -c $'\tcheck\t.*task-a.check.sh\t' "$state/.wake-queue")
+  raw_count=$(grep -cF "$(printf '\tcheck\tmerged-task-a-https://github.com/o/r/pull/3\t')" \
+    "$state/.wake-queue" || true)
   [ "$raw_count" -eq 1 ] || fail "post-queue retry did not publish exactly one new terminal row"
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-wake-drain.sh" > "$dir/drain.out" 2>/dev/null
-  drain_count=$(grep -c $'\tcheck\t.*task-a.check.sh\t' "$dir/drain.out")
+  drain_count=$(grep -cF "$(printf '\tcheck\tmerged-task-a-https://github.com/o/r/pull/3\t')" \
+    "$dir/drain.out" || true)
   [ "$drain_count" -eq 1 ] || fail "same-key crash retry rows did not deduplicate at drain"
 
   dir=$(make_case retirement-after-receipt)
@@ -3467,6 +3670,9 @@ test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
+test_merged_poll_retries_a_failed_upward_report
+test_self_merge_and_poll_publish_one_outcome
+test_merged_poll_reports_upward_from_a_secondmate_home_once
 test_different_merged_pr_for_same_task_is_not_absorbed
 test_persistent_secondmate_retirement_is_poll_only
 test_retirement_crash_recovery

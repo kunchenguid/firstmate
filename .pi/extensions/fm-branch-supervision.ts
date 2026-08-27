@@ -63,14 +63,16 @@ import {
   createAgentSession,
   createBashToolDefinition,
   DefaultResourceLoader,
+  DynamicBorder,
   getAgentDir,
   ModelRuntime,
   SessionManager,
   type AgentSession,
   type ExtensionAPI,
+  type ExtensionCommandContext,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { Box, Container, Text } from "@earendil-works/pi-tui";
+import { Box, Container, fuzzyFilter, Input, SelectList, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
   type CalmPresentationState,
@@ -86,6 +88,13 @@ import {
   writeEligibleRowsSnapshot,
   type BranchDispatchOffer,
 } from "./lib/fm-branch-dispatch.ts";
+import {
+  BRANCH_PICKER_MAX_VISIBLE,
+  buildBranchModelItems,
+  filterBranchPickerItems,
+  FOLLOW_MAIN_VALUE,
+  type BranchPickerItem,
+} from "./lib/fm-branch-model-picker.ts";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
 
 const extensionFile = fileURLToPath(import.meta.url);
@@ -118,6 +127,13 @@ const branchCacheKey = `fm-branch-${createHash("sha256").update(fmHome).digest("
 
 const MIRROR_MESSAGE_CAP = 4000;
 const MERGE_NOTE_BOAT = "⛵";
+// Carried inside the captain note's own text because that text is the only
+// part of a custom message Pi gives the model (see mergeIntoMain).
+const CAPTAIN_OUTCOME_INSTRUCTION =
+  "This is a supervision outcome delivered automatically by the supervision branch. " +
+  "It was not typed by the captain and it is not your own earlier output. " +
+  "Relay only this outcome to the captain now, in one short message, in captain outcome language. " +
+  "Do not restate or repeat any earlier answer.";
 type MirrorItem = { tag: "captain" | "main"; text: string };
 type MirrorCursor = { file: string; index: number };
 type Verdict = "routine" | "captain";
@@ -540,6 +556,31 @@ export default function (pi: ExtensionAPI) {
   // Pi; a crash inside Pi's
   // own delivery window leaves the outcome durable in the store, where
   // main's fm_branch_outcomes tool still reads it on demand.
+  //
+  // Pi keeps only `content` when it converts a custom message for the model:
+  // customType, display, and details never reach the provider. A captain note
+  // therefore has to carry its own identity inside `content`, or main receives
+  // an unattributed user message written in main's own captain-facing voice
+  // and cannot tell an incoming outcome from its own earlier answer. When that
+  // happens main re-emits its previous answer instead of relaying the outcome,
+  // and the outcome is lost. The typed operational envelope is what makes the
+  // note self-describing; it stays invisible to the captain because the note
+  // is never rendered.
+  //
+  // Encoding shells out, so it can fail on a broken checkout. This file's
+  // failure direction applies: an outcome that cannot be typed is still
+  // delivered, carrying the same instruction as plain text, because an
+  // untyped outcome main can still read beats an outcome the captain never
+  // sees.
+  function captainOutcomeInput(task: string, summary: string): string {
+    const body = `${CAPTAIN_OUTCOME_INSTRUCTION}\n\n${task}: ${summary}`;
+    try {
+      return encodeFirstmateOperationalInput("branch-outcome", body);
+    } catch {
+      return body;
+    }
+  }
+
   function mergeIntoMain(
     expectedGeneration: number,
     seq: string,
@@ -550,7 +591,11 @@ export default function (pi: ExtensionAPI) {
   ): boolean {
     if (!actingAsOwner(expectedGeneration)) return false;
     if (verdict === "captain") {
-      const message = { customType: "fm-branch-merge", content: `${task}: ${summary}`, display: false };
+      const message = {
+        customType: "fm-branch-merge",
+        content: captainOutcomeInput(task, summary),
+        display: false,
+      };
       pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
     } else {
       const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${task}: ${summary}`, display: !(task === "fleet" && silent) };
@@ -1001,9 +1046,12 @@ ${context.command}
   // conversation and exposes no hook an extension can use to open either
   // picker, so this is the smallest supported equivalent: Pi's own catalog
   // intersected with the isolated branch runtime, then Pi's own supported
-  // thinking levels for the model just chosen, both through Pi's own selector
-  // dialog and with no parallel Firstmate model or effort list. The effort
-  // step follows the model step because the model decides which levels exist.
+  // thinking levels for the model just chosen, with no parallel Firstmate
+  // model or effort list. The model step shows that catalog through the same
+  // bounded, searchable SelectList primitive Pi's own /model dialog scrolls
+  // (pickBranchModel below); the effort step's menu is a handful of levels
+  // and stays on Pi's generic selector dialog. The effort step follows the
+  // model step because the model decides which levels exist.
   pi.registerCommand?.("supervision-model", {
     description: "Pick the model and reasoning effort Firstmate's Pi supervision branch uses, or follow main's.",
     handler: async (_args, ctx) => {
@@ -1025,14 +1073,18 @@ ${context.command}
         );
         return;
       }
-      const picked = await ctx.ui.select(`Supervision branch model (now: ${current})`, [followMain, ...available]);
+      const picked = await pickBranchModel(
+        ctx,
+        `Supervision branch model (now: ${current})`,
+        buildBranchModelItems(followMain, available, pin ? `${pin.provider}/${pin.modelId}` : null),
+      );
       if (picked === undefined) return; // cancelled: the current choice stands
       // Whatever the model step resolves is also the model the effort step
       // builds its menu from, so it is captured here rather than resolved a
       // second time through another isolated runtime.
       let branchModel: BranchModel | undefined;
       try {
-        if (picked === followMain) {
+        if (picked === FOLLOW_MAIN_VALUE) {
           clearPinFile(modelPinFile);
         } else {
           const separator = picked.indexOf("/");
@@ -1052,7 +1104,7 @@ ${context.command}
       // The model choice is persisted; report it exactly, then run the effort
       // step on the model the branch will actually use.
       let modelReport: { message: string; warning: boolean };
-      if (picked !== followMain) {
+      if (picked !== FOLLOW_MAIN_VALUE) {
         modelReport = { message: `Supervision branch model: ${picked}.`, warning: false };
       } else {
         // Clearing the pin only follows main if main's model can actually be
@@ -1098,6 +1150,83 @@ ${context.command}
       );
     },
   });
+
+  // Step one of /supervision-model's dialog. Pi's generic extension selector
+  // renders every option at once with no search box, so a real eligible
+  // catalog ran off the top of the terminal; this shows the same rows through
+  // Pi's own SelectList - the bounded, scrolling primitive behind Pi's /model
+  // picker - with Pi's own Input and fuzzy filter above it for search.
+  // Pi's ModelSelectorComponent is deliberately NOT reused: its own selection
+  // handler writes the captain's default model through Pi's settings manager,
+  // which would move main's conversation as a side effect of pinning the
+  // branch, and it has no room for the "follow main" row or for Firstmate's
+  // branch-runtime eligibility filter. Ordering and filtering live in
+  // lib/fm-branch-model-picker.ts; everything here is Pi's own rendering.
+  // Returns the chosen item's value, or undefined when the captain cancels.
+  // Non-TUI modes have no custom component surface, so they keep Pi's generic
+  // selector: overflow is a terminal-rendering problem those modes do not have.
+  async function pickBranchModel(
+    ctx: ExtensionCommandContext,
+    title: string,
+    items: BranchPickerItem[],
+  ): Promise<string | undefined> {
+    if (ctx.mode !== "tui" || typeof ctx.ui.custom !== "function") {
+      const picked = await ctx.ui.select(
+        title,
+        items.map((item) => item.label),
+      );
+      if (picked === undefined) return undefined;
+      return items.find((item) => item.label === picked)?.value;
+    }
+    const picked = await ctx.ui.custom<string | null>((tui, theme, keybindings, done) => {
+      const accent = (text: string) => theme.fg("accent", text);
+      const muted = (text: string) => theme.fg("muted", text);
+      const container = new Container();
+      container.addChild(new DynamicBorder(accent));
+      container.addChild(new Text(accent(theme.bold(title)), 1, 0));
+      const search = new Input();
+      search.focused = true;
+      container.addChild(search);
+      const listContainer = new Container();
+      container.addChild(listContainer);
+      container.addChild(new Text(muted("type to search - up/down navigate - enter select - esc cancel"), 1, 0));
+      container.addChild(new DynamicBorder(accent));
+
+      // SelectList takes its rows at construction, so a new query builds a new
+      // list into the same container rather than mutating the old one.
+      let list = buildList("");
+      function buildList(query: string): SelectList {
+        const rebuilt = new SelectList(filterBranchPickerItems(items, query, fuzzyFilter), BRANCH_PICKER_MAX_VISIBLE, {
+          selectedPrefix: accent,
+          selectedText: accent,
+          description: muted,
+          scrollInfo: muted,
+          noMatch: muted,
+        });
+        rebuilt.onSelect = (item) => done(item.value);
+        rebuilt.onCancel = () => done(null);
+        listContainer.clear();
+        listContainer.addChild(rebuilt);
+        return rebuilt;
+      }
+
+      const navigationKeys = ["tui.select.up", "tui.select.down", "tui.select.confirm", "tui.select.cancel"] as const;
+      return {
+        render: (width: number) => container.render(width),
+        invalidate: () => container.invalidate(),
+        handleInput: (data: string) => {
+          if (navigationKeys.some((key) => keybindings.matches(data, key))) {
+            list.handleInput(data);
+          } else {
+            search.handleInput(data);
+            list = buildList(search.getValue());
+          }
+          tui.requestRender();
+        },
+      };
+    });
+    return picked === null ? undefined : picked;
+  }
 
   // Step two of /supervision-model, shown after the model pick and driven by
   // Pi's own supported-level list for the model the branch will now use, so

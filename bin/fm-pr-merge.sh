@@ -27,6 +27,13 @@
 # Extra args must not include --repo or -R in any form, including a bundled
 # short-option cluster such as -yR, because the repository comes only from the
 # URL, nor --sha on GitLab because the head comes only from the live read.
+#
+# After the forge command, this script confirms the PR is actually merged before
+# reporting it; an auto-merge-queued or unconfirmed request leaves the poll armed
+# and records no landed outcome. bin/fm-merge-outcome-lib.sh owns a confirmed
+# merge's destination, normal-case deduplication, and at-least-once recovery.
+# A landed merge whose outcome cannot be written is reported loudly rather than
+# misreported as a failed merge.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra forge merge args>]
 set -eu
 
@@ -37,6 +44,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-merge-outcome-lib.sh
+. "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
 # Role partition: merging is MAIN-owned; the Pi supervision branch reports the
 # green PR and never merges (contract: bin/fm-lease-lib.sh; no-op in homes
 # without a branch actor).
@@ -245,6 +254,42 @@ FIELDS
   FM_PR_MERGE_HEAD=$live_head
 }
 
+github_confirm_merged() {
+  local output state
+  if ! output=$(gh-axi pr view "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" 2>/dev/null); then
+    printf 'actionable: GitHub accepted the merge request for %s but its landed state could not be confirmed; the merge poll remains armed\n' \
+      "$URL" >&2
+    return 2
+  fi
+  if ! state=$(printf '%s\n' "$output" | awk '
+    $1 == "state:" { count++; value=$2 }
+    END { if (count == 1 && value != "") print value; else exit 1 }
+  '); then
+    printf 'actionable: GitHub accepted the merge request for %s but its landed state could not be confirmed; the merge poll remains armed\n' \
+      "$URL" >&2
+    return 2
+  fi
+  [ "$state" = merged ]
+}
+
+gitlab_confirm_merged() {
+  local json state
+  if ! json=$(GITLAB_HOST="$FM_PR_HOST" glab mr view "$PR_NUMBER" \
+    -R "$PROJECT_URL" -F json 2>/dev/null) || [ -z "$json" ]; then
+    printf 'actionable: GitLab accepted the merge request for %s but its landed state could not be confirmed; the merge poll remains armed\n' \
+      "$URL" >&2
+    return 2
+  fi
+  if ! state=$(printf '%s' "$json" | jq -r \
+    'if type == "object" and (.state | type == "string") then .state else error("invalid state") end' \
+    2>/dev/null); then
+    printf 'actionable: GitLab accepted the merge request for %s but its landed state could not be confirmed; the merge poll remains armed\n' \
+      "$URL" >&2
+    return 2
+  fi
+  [ "$state" = merged ]
+}
+
 case "$PROVIDER" in
   github)
     merge_args=()
@@ -252,6 +297,9 @@ case "$PROVIDER" in
       merge_args=(--squash)
     fi
     gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+    github_confirm_rc=0
+    github_confirm_merged || github_confirm_rc=$?
+    [ "$github_confirm_rc" -eq 0 ] || exit 0
     ;;
   gitlab)
     gitlab_verify_mergeable || exit 1
@@ -261,9 +309,28 @@ case "$PROVIDER" in
     # the conditions above are what authorize the merge.
     GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
       --sha "$FM_PR_MERGE_HEAD" --yes "$@"
+    gitlab_confirm_rc=0
+    gitlab_confirm_merged || gitlab_confirm_rc=$?
+    [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
     ;;
   *)
     echo "error: invalid PR merge request" >&2
     exit 2
+    ;;
+esac
+
+# Reached only after the forge confirmed the merge landed: set -e exits on a
+# refused or failed merge above, and a queued forge merge exits without an
+# outcome while its existing poll remains armed.
+outcome_rc=0
+fm_merge_outcome_report "$FM_HOME" "$STATE" "$ID" "$URL" self || outcome_rc=$?
+case "$outcome_rc" in
+  0) ;;
+  3)
+    printf 'actionable: merged %s but could not report it upward: this home has no readable secondmate identity or parent binding (.fm-secondmate-home, .fm-secondmate-parent)\n' \
+      "$URL" >&2
+    ;;
+  *)
+    printf 'actionable: merged %s but could not record the outcome for supervision\n' "$URL" >&2
     ;;
 esac

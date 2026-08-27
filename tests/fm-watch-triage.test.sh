@@ -1771,6 +1771,208 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated() {
   pass "a busy pane under a declared pause is rechecked on the long cadence, and lifting the pause restores the wedge escalation"
 }
 
+# --- declared pause + busy pane + AWAY MODE: the bound must hand off, not decorate
+# Away mode is daemon-owned: the watcher reverts to one-shot and lets the daemon
+# classify. The busy-turn bound used to be the one stale path that ignored that,
+# running the wedge timer under afk and handing the daemon a wake already decorated
+# as a possible wedge. That decoration outranks the daemon's own pause verdict, so a
+# crew that declared the wait itself was wedge-escalated once per
+# FM_STALE_ESCALATE_SECS for as long as the wait lasted, with the escalation count
+# climbing into demand-deep-inspection on a pane nobody needed to inspect.
+# Phase A pins the handoff: the plain window identity, no wedge timer, no escalation
+# counter, and no normal-mode pause bookkeeping (the daemon owns that in away mode).
+# Phase B re-arms on the same unchanged pane and pins the one-shot: a second wake
+# here is what the climbing ladder looked like. Phase C drives the discriminator
+# apart on the SAME afk, busy, over-age pane - lifting the declaration restores the
+# wedge escalation, so this is the worker's declaration being honored rather than
+# away mode silencing the escalator.
+test_afk_busy_declared_pause_hands_off_plain_stale() {
+  local dir state fakebin out capture_file window key sig pid statusf
+  dir=$(make_case afk-busy-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-afk-review-scout"
+  statusf="$state/afk-review-scout.status"
+  printf 'Working... (7200.4s) lavish-axi poll' > "$capture_file"
+  printf 'window=%s\nkind=scout\nharness=pi\n' "$window" > "$state/afk-review-scout.meta"
+  record_pi_busy "$state" afk-review-scout
+  printf 'paused: hosting the Lavish review, awaiting captain feedback\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-afk-review-scout_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  touch -t 200001010000 "$state/afk-review-scout.meta"
+  date '+%s' > "$state/.afk"
+
+  # Phase A: past the bound, with the wedge threshold as low as it goes, the
+  # declaration is handed to the daemon undecorated instead of being wedge-timed.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy (pi-ext)' \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 150 || { reap "$pid"; fail "the away-mode busy-turn bound never handed the declared pause to the daemon"; }
+  grep -Fx "stale: $window" "$out" >/dev/null \
+    || fail "the away-mode busy-turn bound did not hand off the plain window identity: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null \
+    && fail "away mode decorated a declared pause as a possible wedge: $(cat "$out")"
+  [ ! -e "$state/.stale-since-$key" ] \
+    || fail "the away-mode handoff started the wedge timer on a declared pause"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "the away-mode handoff incremented the wedge escalation count on a declared pause"
+  [ ! -e "$state/.paused-$key" ] \
+    || fail "the away-mode handoff recorded normal-mode pause tracking instead of leaving it to the daemon"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the away-mode declared-pause handoff"
+
+  # Phase B: re-arm on the same unchanged pane. The bound has already handed this
+  # stale hash off, so it must stay silent rather than re-waking the daemon - a
+  # second wake here is the escalation ladder the wedge timer used to climb.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy (pi-ext)' \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the away-mode bound re-woke on an already-handed-off declared pause: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "the away-mode bound re-surfaced an already-handed-off declared pause: $(cat "$out")"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "re-arming on an unchanged declared pause started a wedge escalation ladder"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional away-mode re-arm stop"
+
+  # Phase C: lift the declaration on the SAME afk, busy, over-age pane. Nothing else
+  # changes, so a wedge escalation here proves the declaration was the discriminator.
+  printf 'working: resumed the review write-up\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-afk-review-scout_status"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy (pi-ext)' \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 150 || { reap "$pid"; fail "a lifted pause on an away-mode over-age busy pane no longer wedge-escalates"; }
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "the restored away-mode busy-turn escalation did not flag a possible wedge: $(cat "$out")"
+  pass "away mode hands a busy declared pause to the daemon as a plain stale, and lifting the declaration restores the wedge escalation"
+}
+
+# --- declared pause + busy pane + AWAY MODE + a TICKING footer: one wake per declaration
+# The static-pane case above cannot tell a hash-keyed one-shot from a
+# declaration-keyed one, because its capture never changes between polls. The
+# incident pane's harness footer ticks on every capture, so a one-shot keyed on the
+# pane hash re-fires on every poll, and the daemon, which relaunches the watcher
+# after each handled wake, is woken in a loop for the whole declared wait. This
+# fixture's fake tmux renders a fresh footer on EVERY capture-pane and asserts that
+# divergence outright on every re-arm (.hash-<key> moves, .count-<key> never
+# climbs), so the one-wake assertion across five silent re-arms cannot pass
+# vacuously on a pane that happened to sit still. Round 1 also starts from an
+# undeclared wedge timer and escalation count, which the handoff must clear the
+# way the normal-mode absorber does, so lifting the declaration later starts the
+# wedge path from a fresh timer rather than resuming a stale count.
+test_afk_busy_declared_pause_ticking_pane_hands_off_once() {
+  local dir state fakebin out drain_out window key sig pid statusf ticks round prev_hash cur_hash prev_ticks
+  dir=$(make_case afk-busy-declared-pause-ticking); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; window="test:fm-afk-ticking-scout"
+  statusf="$state/afk-ticking-scout.status"; ticks="$dir/ticks"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows)
+    [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "${FM_FAKE_TMUX_WINDOW#*:}"
+    exit 0 ;;
+  capture-pane)
+    n=$(( $(cat "$FM_FAKE_TMUX_TICKS" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$FM_FAKE_TMUX_TICKS"
+    printf 'Working... (%d.%ds) lavish-axi poll' "$(( 7200 + n ))" "$(( n % 10 ))"
+    exit 0 ;;
+  display-message)
+    case "$*" in
+      *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;;
+    esac ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  printf 'window=%s\nkind=scout\nharness=pi\n' "$window" > "$state/afk-ticking-scout.meta"
+  record_pi_busy "$state" afk-ticking-scout
+  printf 'paused: hosting the Lavish review, awaiting captain feedback\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-afk-ticking-scout_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  touch -t 200001010000 "$state/afk-ticking-scout.meta"
+  date '+%s' > "$state/.afk"
+  # An undeclared busy phase already ran the wedge timer and escalated twice
+  # before the crew declared the wait.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  printf '2\n' > "$state/.wedge-escalations-$key"
+  date +%s > "$state/.writing-since-$key"
+
+  # Round 1: the declaration is handed off once, undecorated, and the undeclared
+  # phase's wedge bookkeeping is cleared with it.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_TICKS="$ticks" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy (pi-ext)' \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 150 || { reap "$pid"; fail "the away-mode busy-turn bound never handed a ticking declared pause to the daemon"; }
+  grep -Fx "stale: $window" "$out" >/dev/null \
+    || fail "the away-mode busy-turn bound did not hand off the plain window identity for a ticking pane: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null \
+    && fail "away mode decorated a ticking declared pause as a possible wedge: $(cat "$out")"
+  [ ! -e "$state/.stale-since-$key" ] \
+    || fail "the away-mode handoff left the undeclared phase's wedge timer in place"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "the away-mode handoff left the undeclared phase's escalation count in place"
+  [ ! -e "$state/.writing-since-$key" ] \
+    || fail "the away-mode handoff left the undeclared phase's write-deferral chain in place"
+  [ ! -e "$state/.paused-$key" ] \
+    || fail "the away-mode handoff recorded normal-mode pause tracking on a ticking pane"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the ticking declared-pause handoff"
+
+  # Rounds 2-6: five consecutive re-arms on the same standing declaration. Every
+  # capture renders a new footer, so every poll lands on the changed-hash branch -
+  # the exact shape a hash-keyed one-shot re-fires on. Each round proves the pane
+  # really moved before it asserts silence, so the case cannot go vacuous.
+  round=2
+  while [ "$round" -le 6 ]; do
+    prev_hash=$(cat "$state/.hash-$key" 2>/dev/null || true)
+    prev_ticks=$(cat "$ticks" 2>/dev/null || echo 0)
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_TICKS="$ticks" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_FAKE_CREW_STATE='state: working · source: pane · harness busy (pi-ext)' \
+      FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999 \
+      FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "re-arm $round on a ticking declared pause re-woke the daemon: $(cat "$out")"; }
+    reap "$pid"
+    cur_hash=$(cat "$state/.hash-$key" 2>/dev/null || true)
+    [ "$(cat "$ticks" 2>/dev/null || echo 0)" -gt "$prev_ticks" ] \
+      || fail "re-arm $round never captured the pane, so its silence proves nothing"
+    [ -n "$cur_hash" ] && [ "$cur_hash" != "$prev_hash" ] \
+      || fail "re-arm $round saw the same pane hash as the round before, so it cannot tell a hash-keyed one-shot from a declaration-keyed one"
+    [ "$(cat "$state/.count-$key" 2>/dev/null || echo missing)" = 0 ] \
+      || fail "re-arm $round settled on a stable hash instead of ticking on every poll"
+    [ ! -s "$out" ] || fail "re-arm $round re-surfaced a standing declared pause on a ticking pane: $(cat "$out")"
+    [ ! -e "$state/.stale-since-$key" ] \
+      || fail "re-arm $round started the wedge timer on a standing declared pause"
+    [ ! -e "$state/.wedge-escalations-$key" ] \
+      || fail "re-arm $round climbed the wedge escalation ladder on a standing declared pause"
+    ack_stopped_cycle "$state" || fail "could not acknowledge the intentional re-arm $round stop"
+    round=$((round + 1))
+  done
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || true
+  grep "$(printf '\tstale\t')" "$drain_out" >/dev/null \
+    && fail "the silent re-arms still queued a stale row for the standing declaration: $(cat "$drain_out")"
+  pass "away mode wakes the daemon once per declaration for a busy pane whose footer ticks on every capture"
+}
+
 # Behavioral proof that the production default (no FM_BUSY_TURN_MAX_SECS override
 # anywhere in this env) is 3600s: a completed turn 5 minutes old must not start a
 # wedge timer, while one 66 minutes old must - bracketing the default around 3600
@@ -2645,6 +2847,8 @@ test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_busy_declared_pause_is_rechecked_not_wedge_escalated
+test_afk_busy_declared_pause_hands_off_plain_stale
+test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
