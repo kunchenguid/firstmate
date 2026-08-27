@@ -188,6 +188,7 @@ Bearings invocation examples:
 
 Run `bin/fm-project-dashboard.sh` from a Firstmate home to refresh and open the stable read-only Lavish project dashboard.
 The dashboard shows every project registered in `data/projects.md`, rolls current main-home and attributable secondmate state into project cards, and marks waiting or idle projects as stale-risk only after more than eight days without known activity.
+Secondmate state that carries no repository and whose owner covers several projects is never guessed at: the card discloses it as unattributable and asks for attention instead.
 It refreshes only when invoked and does not bind answers, poll for feedback, dispatch work, merge PRs, or mutate fleet records.
 Use `bin/fm-project-dashboard.sh refresh --select <project>` to refresh with one registered project expanded initially, and `bin/fm-project-dashboard.sh path` to print the stable board path without rebuilding it.
 

@@ -22,6 +22,8 @@ make_home() {  # <name>
 - beta [no-mistakes] - Beta product (added 2020-01-01)
 - gamma [local-only] - Gamma product (added 2020-01-01)
 - delta [no-mistakes +yolo] - Delta product (added 2020-01-01)
+- epsilon [direct-PR]
+- zeta
 EOF
   printf '%s\n' "$home"
 }
@@ -98,8 +100,12 @@ test_aggregation_status_precedence_and_secondmate_join() {
   out=$(run_snapshot "$home" "$epoch") || fail "dashboard snapshot failed"
   printf '%s' "$out" | jq -e '
     .schema == "fm-project-dashboard.v1"
-      and (.projects | map(.name)) == ["alpha","bravo","beta","gamma","delta"]
-      and .summary.total == 5
+      and (.projects | map(.name)) == ["alpha","bravo","beta","gamma","delta","epsilon","zeta"]
+      and .summary.total == 7
+      and (.projects[] | select(.name == "epsilon")
+        | .description == "" and .mode == "direct-PR" and .added == null and .status == "idle_queued")
+      and (.projects[] | select(.name == "zeta")
+        | .description == "" and .mode == "no-mistakes" and .yolo == false)
       and (.projects[] | select(.name == "alpha")
         | .status == "needs_attention"
           and .counts.active == 1
@@ -175,6 +181,168 @@ test_bounded_secondmate_state_keeps_registered_ownership_visible() {
   pass "bounded secondmate state keeps ownership visible as explicit attention"
 }
 
+test_distinct_unkeyed_decisions_are_all_surfaced() {
+  local home epoch out
+  home=$(make_home unkeyed-decisions)
+  write_fleet_fixture "$home"
+  jq '
+    .backlog.records += [{structured:true,id:"bravo-choice",repo:"bravo",title:"Bravo choice",
+      state:"in_flight",since:"2020-01-01",captain_actionable:false,unresolved_blocker_ids:[]}]
+    | .tasks |= map(
+        if .id == "bravo-work" then
+          .hints.open_decisions = [{key:"default",verb:"needs-decision",summary:"pick a rollout window"}]
+        else . end)
+    | .tasks += [(.tasks[] | select(.id == "bravo-work")
+        | .id = "bravo-choice" | .backlog.id = "bravo-choice" | .backlog.title = "Bravo choice"
+        | .paths.meta.path = (.paths.meta.path | sub("bravo-work"; "bravo-choice"))
+        | .paths.status_log.path = (.paths.status_log.path | sub("bravo-work"; "bravo-choice"))
+        | .hints.open_decisions = [{key:"default",verb:"needs-decision",summary:"approve the vendor contract"}])]
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "unkeyed-decision snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "bravo")
+    | .status == "needs_attention"
+      and .counts.decisions == 2
+      and (.decisions | map(.summary) | sort) == ["approve the vendor contract","pick a rollout window"]
+  ' >/dev/null || fail "distinct unkeyed captain decisions collapsed into one: $out"
+  pass "distinct captain decisions sharing the default key stay visible"
+}
+
+test_attention_next_step_is_an_action_not_a_bare_title() {
+  local home epoch out
+  home=$(make_home attention-next-step)
+  write_fleet_fixture "$home"
+  jq '
+    .tasks |= map(
+      if .id == "bravo-work" then .current_state = {state:"failed",source:"fixture",detail:"gate rejected the push"}
+      elif .id == "beta-wait" then .current_state = {state:"done",source:"fixture",detail:""} | .pr.url = "https://github.com/example/beta/pull/3"
+      else . end)
+    | .backlog.records |= map(if .id == "beta-wait" then .state = "in_flight" else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "attention next-step snapshot failed"
+  printf '%s' "$out" | jq -e '
+    (.projects[] | select(.name == "bravo")
+      | .status == "needs_attention" and .next_step == "failed: gate rejected the push")
+      and (.projects[] | select(.name == "beta")
+        | .status == "needs_attention" and .next_step == "PR awaiting review: beta-wait")
+  ' >/dev/null || fail "attention next step was a bare task title: $out"
+  pass "failure and review-PR next steps read as actions"
+}
+
+test_unattributable_secondmate_state_is_disclosed() {
+  local home epoch out
+  home=$(make_home unattributable)
+  write_fleet_fixture "$home"
+  jq '
+    .tasks |= map(if .id == "delta-mate" then .secondmate_projects = ["delta","gamma"] else . end)
+    | .secondmate_current.records |= map(
+        if .id == "delta-mate" then
+          .projects = ["delta","gamma"]
+          | .active_children = [{id:"loose-child",title:"Unlabelled rollout",repo:null,state:"working",doing:"Working"}]
+          | .landed = []
+        else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "unattributable-state snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .summary.unattributed == 2
+      and ([.projects[] | select(.name == "delta" or .name == "gamma")]
+           | all(.status == "needs_attention"
+                 and .active_work == []
+                 and .counts.unattributed == 1
+                 and (.unattributed[0] | .id == "loose-child" and .kind == "active_work" and .owner == "delta-mate")
+                 and (.next_step | startswith("Secondmate work is not attributable to one project"))))
+  ' >/dev/null || fail "unattributable secondmate work was silently dropped: $out"
+  pass "secondmate work that no project can claim is disclosed, not dropped"
+}
+
+test_registered_secondmate_without_a_task_still_owns_its_projects() {
+  local home epoch out
+  home=$(make_home registry-only-secondmate)
+  write_fleet_fixture "$home"
+  jq '
+    .tasks |= map(select(.id != "delta-mate"))
+    | .secondmate_current.records |= map(
+        if .id == "delta-mate" then
+          .projects = ["delta"]
+          | .decisions_open = [{id:"delta-call",key:"default",verb:"needs-decision",
+              summary:"Approve the delta rollout",reason:null,repo:"delta"}]
+        else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "registry-only secondmate snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "delta")
+    | .status == "needs_attention"
+      and (.secondmates | map(.id)) == ["delta-mate"]
+      and .counts.decisions == 1
+      and .next_step == "Approve the delta rollout"
+  ' >/dev/null || fail "a registered secondmate with no parent task lost its project state: $out"
+  pass "registered secondmate ownership survives a missing parent task"
+}
+
+test_live_secondmate_owner_activity_defeats_stale_risk() {
+  local home activity exact later out
+  home=$(make_home secondmate-activity)
+  write_fleet_fixture "$home"
+  jq '
+    .secondmate_current.records |= map(
+      if .id == "delta-mate" then
+        .current = {state:"externally_held",reason:null}
+        | .active_children = []
+        | .landed = []
+        | .holds = [{id:"delta-hold",title:"Delta hold",repo:"delta",reason:"Waiting on vendor"}]
+      else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  activity=$(stat -f '%m' "$home/state/delta-mate.status" 2>/dev/null || stat -c '%Y' "$home/state/delta-mate.status")
+  exact=$((activity + 8 * 86400))
+  later=$((exact + 1))
+  out=$(run_snapshot "$home" "$exact") || fail "secondmate-activity snapshot failed"
+  printf '%s' "$out" | jq -e --argjson activity "$activity" '
+    .projects[] | select(.name == "delta")
+    | .status == "waiting" and .stale_risk == false
+      and .last_activity.age_seconds == 8 * 86400
+      and .last_activity.at == ($activity | strftime("%Y-%m-%dT%H:%M:%SZ"))
+  ' >/dev/null || fail "owning secondmate activity was ignored by the stale overlay: $out"
+  out=$(run_snapshot "$home" "$later") || fail "aged secondmate-activity snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "delta") | .status == "waiting" and .stale_risk == true
+  ' >/dev/null || fail "stale overlay never fires for a secondmate-owned project: $out"
+  pass "an owning secondmate's own activity counts toward the stale overlay"
+}
+
+test_non_https_pr_link_discloses_itself_without_failing_the_board() {
+  local home epoch payload out board
+  home=$(make_home http-pr)
+  write_fleet_fixture "$home"
+  jq '.backlog.records |= map(if .id == "alpha-landed" then .pr_url = "http://git.internal/example/alpha/pull/7" else . end)'     "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  payload="$home/dashboard.json"
+  run_snapshot "$home" "$epoch" > "$payload" || fail "non-https PR link failed the aggregation"
+  jq -e '
+    .projects[] | select(.name == "alpha") | .prs
+    | any(.url == "http://git.internal/example/alpha/pull/7" and .linkable == false)
+  ' "$payload" >/dev/null || fail "non-https PR link was dropped instead of disclosed: $(cat "$payload")"
+  cat > "$home/fakebin/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s
+' "$*" >> "$LAVISH_CALL_LOG"
+SH
+  chmod +x "$home/fakebin/lavish-axi"
+  board="$home/.lavish/project-dashboard.html"
+  out=$(PATH="$home/fakebin:$PATH" LAVISH_CALL_LOG="$home/lavish.log" FM_HOME="$home" "$BOARD" build "$payload")     || fail "one non-https PR link took the whole board down: $out"
+  assert_contains "$out" "board: $board" "board was not published despite a valid payload"
+  pass "a non-https PR link is disclosed instead of failing every project"
+}
+
 extract_payload() {  # <board>
   sed -n '/<script id="project-dashboard-data" type="application\/json">/,/<\/script>/p' "$1" | sed '1d;$d'
 }
@@ -213,6 +381,12 @@ SH
 }
 
 test_aggregation_status_precedence_and_secondmate_join
+test_distinct_unkeyed_decisions_are_all_surfaced
+test_attention_next_step_is_an_action_not_a_bare_title
+test_unattributable_secondmate_state_is_disclosed
+test_registered_secondmate_without_a_task_still_owns_its_projects
+test_live_secondmate_owner_activity_defeats_stale_risk
+test_non_https_pr_link_discloses_itself_without_failing_the_board
 test_stale_risk_is_strictly_older_than_eight_days
 test_selected_project_payload_is_validated
 test_bounded_secondmate_state_keeps_registered_ownership_visible

@@ -75,14 +75,17 @@ validate_payload() {  # <data.json>
       and (.queued | type == "array")
       and (.landed | type == "array")
       and (.prs | type == "array")
+      and (.unattributed | type == "array")
       and (.secondmates | type == "array")
       and (.counts | type == "object")
       and (.last_activity == null or
            ((.last_activity.at | nonempty_string) and
             (.last_activity.age_days | type == "number") and
             (.last_activity.age_seconds | type == "number")))
-      and ([.active_work[],.decisions[],.failures[],.waiting[],.queued[],.landed[] | owner_item] | all)
-      and ([.prs[] | type == "object" and (.url | optional_https_url) and (.url != null)] | all)
+      and ([.active_work[],.decisions[],.failures[],.waiting[],.queued[],.landed[],.unattributed[] | owner_item] | all)
+      and ([.prs[]
+            | type == "object" and (.url | nonempty_string) and (.linkable | type == "boolean")
+              and (.linkable == false or (.url | optional_https_url))] | all)
       and ([.secondmates[] | type == "object" and (.id | nonempty_string)] | all);
     type == "object"
     and (.schema == $schema)

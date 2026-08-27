@@ -8,6 +8,14 @@
 # Every data/projects.md row appears exactly once, even when it has no task.
 # Current state comes only from fm-fleet-snapshot.sh and its structured
 # secondmate-home summaries.
+# Secondmate owners come from secondmate_current.records, which carry registered
+# project ownership; a task-only secondmate the bounded read omitted is kept as
+# an explicit unavailable owner instead of disappearing.
+# Secondmate state that carries no repo and whose owner covers several projects
+# is not guessed at: it is disclosed per owned project in unattributed[] and
+# raises that project to needs_attention when it could have changed the status.
+# PR links that are not https stay in prs[] with linkable=false so one odd link
+# discloses itself instead of failing the whole board.
 # This script reads task metadata/status mtimes only as activity timestamps;
 # it never parses status-log text as current state.
 #
@@ -84,14 +92,16 @@ if [ -f "$REGISTRY" ]; then
   jq -R -s '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     split("\n")
-    | map(select(test("^- [^[:space:]]+")))
+    | map(select(test("^-[[:space:]]+[^[:space:]]")))
     | map(
-        capture("^- (?<name>[^[:space:]]+)(?: \\[(?<policy>[^]]+)\\])? - (?<tail>.*)$") as $row
-        | (($row.policy // "") | split(" ") | map(select(length > 0))) as $policy
+        capture("^-[[:space:]]+(?<name>[^[:space:]]+)(?<rest>.*)$") as $row
+        | (($row.rest | capture("^[[:space:]]+\\[(?<policy>[^]]*)\\](?<after>.*)$")) // {policy:null,after:$row.rest}) as $split
+        | (($split.policy // "") | split(" ") | map(select(length > 0))) as $policy
+        | ($split.after | sub("^[[:space:]]*-[[:space:]]+"; "") | trim) as $tail
         | {
             name:$row.name,
-            description:($row.tail | sub("[[:space:]]+\\(added [0-9]{4}-[0-9]{2}-[0-9]{2}\\)[[:space:]]*$"; "") | trim),
-            added:(try ($row.tail | capture("\\(added (?<date>[0-9]{4}-[0-9]{2}-[0-9]{2})\\)[[:space:]]*$").date) catch null),
+            description:($tail | sub("[[:space:]]+\\(added [0-9]{4}-[0-9]{2}-[0-9]{2}\\)[[:space:]]*$"; "") | trim),
+            added:((($tail | capture("\\(added (?<date>[0-9]{4}-[0-9]{2}-[0-9]{2})\\)[[:space:]]*$")) // {date:null}).date),
             mode:(($policy | map(select(startswith("+") | not)) | .[0]) // "no-mistakes"),
             yolo:($policy | index("+yolo") != null)
           })
@@ -155,10 +165,14 @@ jq -n \
       (if (.project // "") == "" then null
        elif (.project | contains("/")) then (.project | split("/") | map(select(length > 0)) | last)
        else .project end));
-  def owner_item($owner): . + {owner:$owner};
+  def unattributable($owner):
+    ((.repo // "") == "") and (($owner.projects | length) != 1);
   def matches_project($owner; $name):
     (.repo == $name)
     or (((.repo // "") == "") and (($owner.projects | length) == 1) and $owner.projects[0] == $name);
+  def https_url:
+    (type == "string") and
+    test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$");
   def status_label($status):
     if $status == "needs_attention" then "Needs attention"
     elif $status == "active" then "Active"
@@ -171,15 +185,26 @@ jq -n \
   $registry[0] as $projects_registry
   | $fleet[0] as $fleet_data
   | $activity[0] as $task_activity
-  | ([ $fleet_data.tasks[]?
-       | select(.kind == "secondmate")
-       | . as $task
-       | (([ $fleet_data.secondmate_current.records[]? | select(.id == $task.id) ][0]) // {
-           id:$task.id,home:$task.paths.home.path,remote:($task.remote != null),
-           current:{state:"unknown",reason:"Secondmate state unavailable from the bounded fleet snapshot"},
-           active_children:[],decisions_open:[],holds:[],queued:[],landed:[]
-         }) as $record
-       | {id:$task.id,projects:($task.secondmate_projects // []),record:$record} ]) as $mate_owners
+  | ([ $fleet_data.secondmate_current.records[]? | .id ]) as $mate_record_ids
+  | ([ ($fleet_data.secondmate_current.records[]?
+        | . as $record
+        | (([ $fleet_data.tasks[]? | select(.id == $record.id) ][0]) // null) as $task
+        | {id:$record.id,
+           projects:((($record.projects // []) + ($task.secondmate_projects // [])) | unique),
+           activity:($task_activity[$record.id] // 0),
+           record:$record}),
+       ($fleet_data.tasks[]?
+        | select(.kind == "secondmate")
+        | . as $task
+        | select(($mate_record_ids | index($task.id)) == null)
+        | {id:$task.id,
+           projects:($task.secondmate_projects // []),
+           activity:($task_activity[$task.id] // 0),
+           record:{
+             id:$task.id,home:$task.paths.home.path,remote:($task.remote != null),projects:($task.secondmate_projects // []),
+             current:{state:"unknown",reason:"Secondmate state unavailable from the bounded fleet snapshot"},
+             active_children:[],decisions_open:[],holds:[],queued:[],landed:[]
+           }}) ]) as $mate_owners
   | [ $projects_registry[] as $registered
       | $registered.name as $name
       | ([ $fleet_data.tasks[]?
@@ -206,7 +231,7 @@ jq -n \
              | select(matches_project($owner; $name))
              | {id,key:(.key // .id),title:(.summary // "Captain decision"),
                 summary:(.reason // .summary // ""),owner:$owner.id} ]
-        | unique_by([.owner,.key])) as $decisions
+        | unique_by([.owner,.id,.key])) as $decisions
       | ([ $tasks[]
            | select(.current_state.state == "failed" or .current_state.state == "blocked")
            | {id,title:(.backlog.title // .id),state:.current_state.state,
@@ -255,11 +280,26 @@ jq -n \
              | $owner.record.landed[]?
              | select(matches_project($owner; $name) and .pr_url != null)
              | {id,title,url:.pr_url,owner:$owner.id} ]
-        | unique_by(.url)) as $prs
+        | unique_by(.url)
+        | map(. + {linkable:(.url | https_url)})) as $prs
       | ([ $owners[] | select(.record.current.state == "unknown")
            | {id:.id,reason:(.record.current.reason // "Secondmate state unavailable")} ]) as $unavailable_owners
+      | ([ $owners[] as $owner
+           | ($owner.record.active_children[]? | select(unattributable($owner))
+              | {kind:"active_work",id,title:(.title // .id),owner:$owner.id}),
+             ($owner.record.decisions_open[]? | select(unattributable($owner))
+              | {kind:"decision",id,title:(.summary // .id),owner:$owner.id}),
+             ($owner.record.holds[]? | select(unattributable($owner))
+              | {kind:"waiting",id,title:(.title // .id),owner:$owner.id}),
+             ($owner.record.queued[]? | select(unattributable($owner))
+              | {kind:"queued",id,title:(.title // .id),owner:$owner.id}),
+             ($owner.record.landed[]? | select(unattributable($owner))
+              | {kind:"landed",id,title:(.title // .id),owner:$owner.id}) ]
+         | unique_by([.owner,.kind,.id])) as $unattributed
+      | ([ $unattributed[] | select(.kind != "landed") ]) as $unattributed_live
       | (if ($decisions | length) > 0 or ($failures | length) > 0 or
-             ($review_prs | length) > 0 or ($unavailable_owners | length) > 0 then "needs_attention"
+             ($review_prs | length) > 0 or ($unavailable_owners | length) > 0 or
+             ($unattributed_live | length) > 0 then "needs_attention"
          elif ($active | length) > 0 then "active"
          elif ($waiting | length) > 0 then "waiting"
          else "idle_queued" end) as $status
@@ -268,6 +308,7 @@ jq -n \
              | (.completion.date // .merged // .reported // .done // .since)
              | date_epoch ]
          + [ $tasks[] | $task_activity[.id] // 0 | select(. > 0) ]
+         + [ $owners[] | .activity | select(. > 0) ]
          + [ $owners[] as $owner
              | $owner.record.queued[]?
              | select(matches_project($owner; $name))
@@ -279,7 +320,14 @@ jq -n \
       | (($activity_candidates | max) // null) as $last_epoch
       | (if $last_epoch == null then null else ($now_epoch - $last_epoch | if . < 0 then 0 else . end) end) as $age_seconds
       | (if ($status == "needs_attention") then
-           concise(($decisions[0].title // $failures[0].title // $review_prs[0].title // $unavailable_owners[0].reason); "Review project state")
+           concise((if ($decisions | length) > 0 then $decisions[0].title
+                    elif ($failures | length) > 0 then
+                      ($failures[0].state + ": " +
+                       (if ($failures[0].detail // "") == "" then $failures[0].title else $failures[0].detail end))
+                    elif ($review_prs | length) > 0 then ("PR awaiting review: " + $review_prs[0].title)
+                    elif ($unattributed_live | length) > 0 then
+                      ("Secondmate work is not attributable to one project: " + $unattributed_live[0].title)
+                    else $unavailable_owners[0].reason end); "Review project state")
          elif $status == "active" then
            concise((if ($active[0].detail // "") == "" then $active[0].title else $active[0].detail end); "Work is under way")
          elif $status == "waiting" then
@@ -304,12 +352,14 @@ jq -n \
           queued:$queued,
           landed:($landed_all[:5]),
           prs:$prs,
+          unattributed:$unattributed,
           secondmates:([ $owners[] | {
             id,home:.record.home,remote:.record.remote,state:.record.current.state,
             unavailable:(.record.current.state == "unknown")
           } ]),
           counts:{active:($active | length),decisions:($decisions | length),
-            waiting:($waiting | length),queued:($queued | length),landed:($landed_all | length),prs:($prs | length)}
+            waiting:($waiting | length),queued:($queued | length),landed:($landed_all | length),
+            prs:($prs | length),unattributed:($unattributed | length)}
         }
     ] as $projects
   | {
@@ -325,7 +375,8 @@ jq -n \
         needs_attention:([$projects[] | select(.status == "needs_attention")] | length),
         waiting:([$projects[] | select(.status == "waiting")] | length),
         idle_queued:([$projects[] | select(.status == "idle_queued")] | length),
-        stale_risk:([$projects[] | select(.stale_risk)] | length)
+        stale_risk:([$projects[] | select(.stale_risk)] | length),
+        unattributed:([$projects[] | select((.unattributed | length) > 0)] | length)
       }
     }
 ' > "$tmpdir/dashboard.json" || fail "project aggregation failed"

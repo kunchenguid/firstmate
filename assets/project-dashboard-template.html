@@ -83,6 +83,7 @@ h1 { margin: 0; color: var(--ink-900); font: 2rem/1.1 var(--font-display); }
 .pd-item strong { display: block; color: var(--ink-900); font-size: .86rem; }
 .pd-item small { display: block; color: var(--ink-500); font-size: .74rem; }
 .pd-empty { color: var(--ink-300); font-size: .8rem; font-style: italic; }
+.pd-unlinked { color: var(--ink-300); font-family: var(--font-mono); font-size: .68rem; }
 .pd-link { color: var(--ocean-600); font-weight: 800; text-decoration: underline; text-underline-offset: 2px; }
 .pd-none { padding: 44px; color: var(--ink-500); text-align: center; background: var(--paper-000); border: 2px dashed var(--cream-line); border-radius: 13px; }
 @media (max-width: 900px) { .pd-grid { grid-template-columns: repeat(2, minmax(0,1fr)); } .pd-detail-grid { grid-template-columns: repeat(2, minmax(0,1fr)); } .pd-stats { grid-template-columns: repeat(3, minmax(0,1fr)); } }
@@ -146,9 +147,11 @@ __FM_PROJECT_DASHBOARD_DATA__
     const list = node("ul", "pd-list");
     items.forEach(item => {
       const row = node("li", "pd-item");
-      if (options.links) {
+      if (options.links && item.linkable) {
         const link = node("a", "pd-link", itemTitle(item));
-        link.href = item.url || item.pr_url; link.target = "_blank"; link.rel = "noopener noreferrer"; row.append(link);
+        link.href = item.url; link.target = "_blank"; link.rel = "noopener noreferrer"; row.append(link);
+      } else if (options.links) {
+        row.append(node("strong", "", itemTitle(item)), node("small", "pd-unlinked", `${item.url} · not an https link`));
       } else row.append(node("strong", "", itemTitle(item)));
       const note = itemNote(item);
       if (note) row.append(node("small", "", `${note}${item.owner ? ` · ${item.owner}` : ""}`));
@@ -191,6 +194,11 @@ __FM_PROJECT_DASHBOARD_DATA__
     const detailGrid = node("div", "pd-detail-grid");
     const work = node("section", "pd-panel"); appendList(work, "Active work", project.active_work, {empty:"No active work"}); detailGrid.append(work);
     const calls = node("section", "pd-panel"); appendList(calls, "Decisions / attention", [...project.decisions, ...project.failures], {empty:"No decisions pending"}); detailGrid.append(calls);
+    if (project.unattributed.length) {
+      const unattributed = node("section", "pd-panel");
+      appendList(unattributed, "Not attributable", project.unattributed.map(item => ({...item, reason: `${item.kind} · owner covers several projects`})), {});
+      detailGrid.append(unattributed);
+    }
     const waits = node("section", "pd-panel"); appendList(waits, "Waiting", project.waiting, {empty:"No external waits"}); detailGrid.append(waits);
     const queue = node("section", "pd-panel"); appendList(queue, "Queued next", project.queued, {empty:"Nothing queued"}); detailGrid.append(queue);
     const landed = node("section", "pd-panel"); appendList(landed, "Recently landed", project.landed, {empty:"No recent landed work"}); detailGrid.append(landed);
