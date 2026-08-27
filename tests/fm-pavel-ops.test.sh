@@ -159,13 +159,19 @@ set -eu
 printf 'gh-axi %s\n' "$*" >> "$TASK_DB/.owners"
 [ "$1" = api ] || { printf 'expected gh-axi api\n' >&2; exit 2; }
 path=$2
+[ "$3" = --jq ] || { printf 'expected gh-axi api --jq projection\n' >&2; exit 2; }
+[ "$4" = '[.html_url,.state,.merged_at,.head.sha] | @tsv' ] || { printf 'unexpected gh-axi jq projection: %s\n' "$4" >&2; exit 2; }
 case "$path" in
   /repos/o/r/pulls/*) number=${path##*/} ;;
   *) printf 'unexpected gh-axi api path: %s\n' "$path" >&2; exit 2 ;;
 esac
+if [ -f "$TASK_DB/.gh-api-malformed-$number" ]; then
+  cat "$TASK_DB/.gh-api-malformed-$number"
+  exit 0
+fi
 head_path="$TASK_DB/.gh-api-head-$number"
 head=$(cat "$head_path" 2>/dev/null || printf 'aa%sbb' "$number")
-printf '{"html_url":"https://github.com/o/r/pull/%s","state":"closed","merged":true,"merged_at":"2026-01-01T00:00:00Z","head":{"sha":"%s"}}\n' "$number" "$head"
+printf 'https://github.com/o/r/pull/%s\tclosed\t2026-01-01T00:00:00Z\t%s\n' "$number" "$head"
 SH
 chmod 0755 "$FAKEBIN/gh-axi"
 
@@ -1078,7 +1084,7 @@ run_ops drive "$default_github_confirm" >/dev/null
 run_ops_default_merge_confirm drive "$default_github_confirm" >/dev/null
 [ "$(run_ops inspect "$default_github_confirm" | json_field "['state']")" = landed ] \
   || fail "default GitHub API merge proof did not record landed"
-grep -q '^gh-axi api /repos/o/r/pulls/22$' "$TASK_DB/.owners" \
+grep -Fq 'gh-axi api /repos/o/r/pulls/22 --jq [.html_url,.state,.merged_at,.head.sha] | @tsv' "$TASK_DB/.owners" \
   || fail "default GitHub merge proof did not use gh-axi api pull endpoint"
 
 mismatched_github_confirm=$(ingest 139 49 'Проверить mismatch GitHub merge proof' | json_field "['event']")
@@ -1097,6 +1103,25 @@ printf 'bb23cc\n' > "$TASK_DB/.gh-api-head-23"
 run_ops_default_merge_confirm drive "$mismatched_github_confirm" >/dev/null
 [ "$(run_ops inspect "$mismatched_github_confirm" | json_field "['state']")" = merge_queued ] \
   || fail "mismatched GitHub API merge proof advanced to landed"
+
+malformed_github_confirm=$(ingest 140 50 'Проверить malformed GitHub merge proof' | json_field "['event']")
+run_ops classify "$malformed_github_confirm" --as task --title 'Reject malformed GitHub merge proof' --intent 'Reject truncated GitHub proof' \
+  --reason 'ordinary delivery' --authority ordinary >/dev/null
+run_ops drive "$malformed_github_confirm" >/dev/null
+malformed_github_confirm_task=$(run_ops inspect "$malformed_github_confirm" | json_field "['task_id']")
+printf 'pr=%s\npr_head=%s\n' 'https://github.com/o/r/pull/24' 'aa24bb' >> "$HOME_DIR/state/$malformed_github_confirm_task.meta"
+printf '{"state":"done","pr_url":"https://github.com/o/r/pull/24","pr_head":"aa24bb","evidence":"checks green on exact PR head"}\n' > "$PAVEL_STATUS_FILE"
+run_ops drive "$malformed_github_confirm" >/dev/null
+run_ops drive "$malformed_github_confirm" >/dev/null
+run_ops drive "$malformed_github_confirm" >/dev/null
+[ "$(run_ops inspect "$malformed_github_confirm" | json_field "['state']")" = merge_queued ] \
+  || fail "malformed GitHub confirmation setup did not reach merge_queued"
+printf 'https://github.com/o/r/pull/24\tclosed\taa24bb\n' > "$TASK_DB/.gh-api-malformed-24"
+if run_ops_default_merge_confirm drive "$malformed_github_confirm" >/dev/null 2>&1; then
+  fail "truncated GitHub API merge proof was accepted"
+fi
+[ "$(run_ops inspect "$malformed_github_confirm" | json_field "['state']")" = merge_queued ] \
+  || fail "truncated GitHub API merge proof mutated merge_queued state"
 pass "default GitHub merge proof uses API and exact head"
 
 set_live_probe "$ambiguous" 'Белый, фото выше' ''

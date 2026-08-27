@@ -1167,7 +1167,20 @@ def parse_merge_confirmation(output: str) -> dict[str, Any]:
     try:
         parsed = json.loads(output)
     except json.JSONDecodeError as exc:
-        raise OpsError("Pavel merge confirmation owner must return JSON") from exc
+        lines = output.splitlines()
+        if len(lines) != 1:
+            raise OpsError("Pavel merge confirmation owner must return JSON or one TSV line") from exc
+        fields = lines[0].split("\t")
+        if len(fields) != 4 or any(len(field) > 2048 for field in fields):
+            raise OpsError("Pavel merge confirmation TSV must contain exactly four bounded fields") from exc
+        html_url, state, merged_at, head_sha = fields
+        return {
+            "format": "github-api-tsv",
+            "html_url": html_url,
+            "state": state,
+            "merged_at": merged_at,
+            "head": {"sha": head_sha},
+        }
     if not isinstance(parsed, dict):
         raise OpsError("Pavel merge confirmation owner returned a non-object")
     return parsed
@@ -1176,7 +1189,7 @@ def parse_merge_confirmation(output: str) -> dict[str, Any]:
 def merge_confirmation_command(identity: tuple[str, str, str, str]) -> list[str]:
     provider, _host, repo, number = identity
     if provider == "github":
-        return ["gh-axi", "api", f"/repos/{repo}/pulls/{number}"]
+        return ["gh-axi", "api", f"/repos/{repo}/pulls/{number}", "--jq", "[.html_url,.state,.merged_at,.head.sha] | @tsv"]
     if provider == "gitlab":
         return ["glab", "mr", "view", number, "--repo", repo, "--output", "json"]
     raise OpsError("Pavel merge confirmation does not support this PR provider")
@@ -1197,11 +1210,14 @@ def merge_confirmation_head(proof: dict[str, Any]) -> str:
 
 
 def merge_confirmation_is_merged(proof: dict[str, Any]) -> bool:
+    state = str(proof.get("state") or "").lower()
     if proof.get("merged") is True:
         if "merged_at" in proof:
             return bool(proof.get("merged_at"))
         return True
-    return str(proof.get("state") or "").lower() == "merged"
+    if "merged_at" in proof:
+        return state in {"closed", "merged"} and bool(proof.get("merged_at"))
+    return state == "merged"
 
 
 def merge_confirmation_url(proof: dict[str, Any]) -> str:
