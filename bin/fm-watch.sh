@@ -705,8 +705,10 @@ clear_pause_tracking() {  # <window-key>
 # waiting on an external condition, so endpoint liveness alone must not downgrade
 # that declaration to `none`. `none` sends the caller's first sight of each new
 # pane hash through surface_nonterminal_stale, and a live harness footer mints a
-# new hash on every capture, so the declared wait enqueued a bare stale wake - one
-# handling turn - per tick, while the polls in between logged it as absorbed.
+# new hash on every tick, after which the pane restabilises and the stale path
+# surfaces that hash's first sight - so the declared wait enqueued a bare stale
+# wake, one handling turn, per footer tick, while the stable-hash polls in
+# between logged the very same pane as absorbed.
 # Absorbing it here is bounded, not silent: handle_paused_stale still re-surfaces
 # the pane once per PAUSE_RESURFACE_SECS naming the wait's age, the recheck window
 # below still lapses into the authoritative read where a working verdict outranks

@@ -999,8 +999,10 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
 # bounded pause handling.
 # Endpoint liveness says the agent exists, not that the declared wait ended, so a
 # still-live agent under its own `paused:` declaration stays on the bounded cadence
-# until the pause is lifted. A live `captain-held` transfer is the disconfirming
-# case that keeps the stricter gate: it must still surface once.
+# until the pause is lifted - including across the new pane hash a ticking harness
+# footer mints, which is where the durable row used to be appended once per tick.
+# A live `captain-held` transfer is the disconfirming case that keeps the stricter
+# gate: it must still surface once.
 test_declared_waits_use_bounded_cadence_until_released() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back round wakes bare
   dir=$(make_case exited-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1154,6 +1156,84 @@ test_declared_waits_use_bounded_cadence_until_released() {
   [ "$bare" -eq 0 ] || fail "the live declared wait's recheck arrived as $bare bare stale wakes"
   ack_stopped_cycle "$state" || fail "could not acknowledge the live declared wait's recheck"
 
+  # The churning-pane half of the same seam, on the SAME live declaration whose
+  # recheck was just acknowledged, so its re-surface throttle is armed and the
+  # declaration is already older than the cadence: from here on the throttle is
+  # the ONLY thing standing between this pane and another durable row. A ticking
+  # harness footer mints a new pane hash, and that changed-hash poll reconciles
+  # the declaration again; a verdict that discarded the live `paused:` line there
+  # would clear the pane's whole pause tracking - the throttle included - and the
+  # first sight of the restabilised hash two polls later would append one more
+  # durable row: one burned handling turn per footer tick, which is the symptom
+  # this change exists to remove.
+  #
+  # Lapse the pause recheck window first - it lapses on its own every
+  # FM_STALE_ESCALATE_SECS while a wait holds - so the first poll below re-reads
+  # authoritative crew state and re-arms that window from a known point. Without
+  # that the churn poll's verdict would be reached through whichever window state
+  # the recheck above happened to leave, rather than the live one this covers.
+  set_mtime $(( $(date +%s) - 500 )) "$state/.paused-rechecked-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" \
+    || { reap "$pid"; fail "the live declared wait did not re-arm its recheck window quietly: $(cat "$out")"; }
+  # Now tick the footer under the running watcher.
+  printf 'idle external-decision gate (footer tick 2)\n' > "$capture_file"
+  # Four more cycles carry the pane through the changed-hash poll, the restabilising
+  # poll that only advances the count, and the first sight of the new hash after it -
+  # the exact poll that used to append the extra row.
+  round=1
+  while [ "$round" -le 4 ]; do
+    if wait_poll_cycle "$state" "$pid"; then
+      round=$((round + 1))
+      continue
+    fi
+    if kill -0 "$pid" 2>/dev/null; then
+      reap "$pid"
+      fail "the churning live declared wait timed out before completing poll cycle $round"
+    fi
+    reap "$pid"
+    fail "a new pane hash under a live declared wait re-surfaced it off the bounded cadence: $(cat "$out")"
+  done
+  [ "$(cat "$state/.hash-$key" 2>/dev/null || true)" = "$(hash_text "idle external-decision gate (footer tick 2)")" ] \
+    || { reap "$pid"; fail "the churning pane's new hash never reached the watcher, so the changed-hash path went untested"; }
+  [ -e "$state/.paused-$key" ] \
+    || { reap "$pid"; fail "a churning live declared wait lost its pause cadence marker"; }
+  [ -e "$state/.paused-resurfaced-$key" ] \
+    || { reap "$pid"; fail "a churning live declared wait lost the re-surface throttle its recheck had armed"; }
+  [ ! -e "$state/.stale-since-$key" ] \
+    || { reap "$pid"; fail "a churning live declared wait started the wedge timer instead of holding the pause cadence"; }
+  reap "$pid"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 0 ] || fail "a new pane hash under a live declared wait queued $wakes more stale wakes on the acknowledged cadence"
+  [ "$bare" -eq 0 ] || fail "a new pane hash under a live declared wait appended $bare bare stale wakes to the durable queue"
+
+  # An absorbing watcher only ever leaves by being reaped, and that leaves
+  # recovery evidence the NEXT arm re-announces before it reaches the stale scan
+  # at all. Burn that round here - the sub-case below arms exactly once, so it
+  # would otherwise read the recovery stand-down as a suppressed stale wake. The
+  # re-surface threshold is held above the declaration's age so this round cannot
+  # queue anything of its own; a round that polls instead of standing down is
+  # therefore inert, and reaping it arms the same evidence for the next try.
+  round=1
+  while [ "$round" -le 3 ]; do
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >/dev/null 2>&1 &
+    pid=$!
+    wait_for_exit "$pid" 100 && break
+    reap "$pid"
+    round=$((round + 1))
+  done
+  [ "$round" -le 3 ] || fail "the watcher never stood down to re-announce its recovery after the churning-pane round"
+  ack_stopped_cycle "$state" >/dev/null 2>&1 || true
+
   # Lift only the declaration on the same idle pane. The ordinary stale path
   # must immediately enqueue and wake, proving this change did not suppress a
   # genuine stale or alter any task that is not in a declared external wait.
@@ -1234,7 +1314,7 @@ test_declared_waits_use_bounded_cadence_until_released() {
   [ "$wakes" -eq 0 ] || fail "the acknowledged live captain-held surface queued $wakes more stale wakes on the pause cadence"
   [ "$bare" -eq 0 ] || fail "the live captain-held fallback appended $bare more bare stale wakes to the durable queue"
 
-  pass "declared waits use the bounded cadence for live or exited endpoints, a live captain hold surfaces once then falls back to that cadence, and lifting the pause restores genuine stale delivery"
+  pass "declared waits use the bounded cadence for live or exited endpoints and across a churning pane hash, a live captain hold surfaces once then falls back to that cadence, and lifting the pause restores genuine stale delivery"
 }
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
