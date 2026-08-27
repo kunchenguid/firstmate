@@ -67,6 +67,7 @@
 50266	tests/fm-fleet-sync.test.sh
 8940	tests/fm-gate-refuse.test.sh
 4809	tests/fm-github-pr.test.sh
+24000	tests/fm-handoff.test.sh
 25	tests/fm-gotmp.test.sh
 3459	tests/fm-grok-harness.test.sh
 6995	tests/fm-herdr-lab.test.sh

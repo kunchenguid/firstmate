@@ -84,6 +84,8 @@ Quota trouble must trigger a safe alternate eligible profile or a narrow blocker
 
 ## 5. Recovery and live ownership
 
+Before presenting any task checkpoint, handoff, or takeover artifact to a successor, run `bin/fm-handoff.sh <id> [artifact]` and present only its stdout; the script's header owns the final-refresh mutation-custody contract.
+
 Reconcile reality from the session-start digest before taking new work.
 Treat each recorded direct report as owned until its deliverable is complete, failed with evidence, or safely landed and cleaned up.
 Never infer completion from endpoint presence, a remembered status, or an old `done:` event.

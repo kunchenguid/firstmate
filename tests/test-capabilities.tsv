@@ -60,6 +60,7 @@ fm-fleet-snapshot-view.test.sh	hermetic
 fm-fleet-sync.test.sh	hermetic
 fm-gate-refuse.test.sh	hermetic
 fm-github-pr.test.sh	hermetic
+fm-handoff.test.sh	hermetic
 fm-gotmp.test.sh	hermetic
 fm-grok-harness.test.sh	hermetic
 fm-herdr-lab.test.sh	hermetic

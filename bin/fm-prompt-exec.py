@@ -12,7 +12,8 @@ def fail(message):
 
 
 cleanup_only = len(sys.argv) == 5 and sys.argv[1] == "--cleanup"
-if (cleanup_only and len(sys.argv) != 5) or (not cleanup_only and len(sys.argv) != 6):
+wait_successor = len(sys.argv) == 7 and sys.argv[6] == "--wait-successor"
+if (cleanup_only and len(sys.argv) != 5) or (not cleanup_only and len(sys.argv) != 6 and not wait_successor):
     fail("expected a prompt file, parent identity, file identity, content identity, and launch command")
 
 prompt_path = os.path.abspath(sys.argv[2] if cleanup_only else sys.argv[1])
@@ -71,6 +72,28 @@ try:
             if time.monotonic() >= deadline:
                 fail("prompt launch test gate timed out")
             time.sleep(0.01)
+    if wait_successor:
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                successor_fd = os.open("successor", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                break
+            except FileNotFoundError:
+                if time.monotonic() >= deadline:
+                    fail("successor endpoint verification timed out; rerun continuation")
+                time.sleep(0.05)
+        with os.fdopen(successor_fd) as receipt:
+            if not stat.S_ISREG(os.fstat(receipt.fileno()).st_mode):
+                fail("successor receipt is not a regular file")
+            successor = receipt.read(4096).strip()
+        if not successor or "\n" in successor:
+            fail("invalid successor endpoint")
+        os.environ["FM_HANDOFF_SUCCESSOR_BACKEND"] = "herdr"
+        os.environ["FM_HANDOFF_SUCCESSOR_TARGET"] = successor
+        os.unlink("successor", dir_fd=parent)
+    else:
+        os.environ.pop("FM_HANDOFF_SUCCESSOR_BACKEND", None)
+        os.environ.pop("FM_HANDOFF_SUCCESSOR_TARGET", None)
     os.unlink(name, dir_fd=parent)
 finally:
     if descriptor is not None:

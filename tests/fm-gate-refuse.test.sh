@@ -51,6 +51,7 @@ UPDATE="$ROOT/bin/fm-update.sh"
 CONFIG_PUSH="$ROOT/bin/fm-config-push.sh"
 ACCOUNT_SESSION_SYNC="$ROOT/bin/fm-account-session-sync.sh"
 ACCOUNT_CONTINUATION="$ROOT/bin/fm-account-continuation.sh"
+HANDOFF="$ROOT/bin/fm-handoff.sh"
 FLEET_SYNC="$ROOT/bin/fm-fleet-sync.sh"
 X_REPLY="$ROOT/bin/fm-x-reply.sh"
 X_DISMISS="$ROOT/bin/fm-x-dismiss.sh"
@@ -638,6 +639,10 @@ run_primary_mutator_guarded() {
       ( cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
           "FM_ROOT_OVERRIDE=$ROOT" "FM_HOME=$home" "$@" "$(guarded_script "$cwd" "$ACCOUNT_CONTINUATION")" task-x1 attempt-x2 ) 2>&1
       ;;
+    handoff)
+      ( cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
+          "FM_ROOT_OVERRIDE=$ROOT" "FM_HOME=$home" "$@" "$(guarded_script "$cwd" "$HANDOFF")" task-x1 ) 2>&1
+      ;;
   esac
 }
 
@@ -648,7 +653,7 @@ test_primary_mutators_refuse_gate_contexts() {
   printf '# Backlog\n\n## In flight\n## Queued\n- [ ] queued-x - queued\n## Done\n' > "$home/data/backlog.md"
   fm_write_meta "$home/state/task-x1.meta" "window=fm-task-x1" "kind=ship"
 
-  for name in session-start home-seed backlog-handoff pr-check afk-launch afk-start bootstrap update config-push account-session-sync account-continuation; do
+  for name in session-start home-seed backlog-handoff pr-check afk-launch afk-start bootstrap update config-push account-session-sync account-continuation handoff; do
     out=$(run_primary_mutator_guarded "$name" "$NORMAL_CWD" "$home" NO_MISTAKES_GATE=1); rc=$?
     expect_code 3 "$rc" "$name: NO_MISTAKES_GATE must refuse"
     assert_contains "$out" "$ENV_MSG" "$name: env-marker refusal message"
@@ -664,6 +669,7 @@ test_primary_mutators_refuse_gate_contexts() {
   assert_absent "$home/state/.account-meta-task-x1.lock" "refused session sync acquired the metadata lock"
   assert_absent "$home/data/secondmates.md" "refused home seed changed the secondmate registry"
   assert_absent "$home/state/task-x1.check.sh" "refused PR check armed a merge poll"
+  assert_absent "$home/data/task-x1/handoff.md" "refused handoff presentation mutated task data"
   if grep -q '^pr=' "$home/state/task-x1.meta"; then
     fail "refused PR check changed task metadata"
   fi

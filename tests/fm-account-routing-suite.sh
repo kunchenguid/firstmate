@@ -18,6 +18,7 @@ SEND="$ROOT/bin/fm-send.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 SESSION_SYNC="$ROOT/bin/fm-account-session-sync.sh"
 CONTINUATION="$ROOT/bin/fm-account-continuation.sh"
+export FM_BACKEND_HERDR_TEST_LAB=firstmate-herdr-test-lab-v1
 fm_test_tmproot_into TMP_ROOT fm-account-routing-tests
 
 assert_not_grep() {
@@ -3203,17 +3204,21 @@ test_enforced_orca_is_rejected_before_owned_resource_creation() {
 }
 
 test_cross_profile_continuation_for_harness() {
-  local harness=$1 old_profile=$2 new_profile=$3 provider=$4 id rec old_task new_task new_attempt packet canonical out status launch source_model
+  local harness=$1 old_profile=$2 new_profile=$3 provider=$4 backend=${5:-tmux} id rec old_task new_task new_attempt packet canonical out status launch source_model
   id="account-continue-$harness-z21"
-  rec=$(make_case "continue-$harness" "$harness" "$id")
+  rec=$(make_case "continue-$harness${FM_TEST_CONTINUATION_CASE_SUFFIX:-}" "$harness" "$id")
   read_case "$rec"
+  if [ "$backend" = herdr ]; then
+    printf '#!/usr/bin/env bash\nexec python3 %q "$@"\n' "$ROOT/tests/herdr-custody-fixture.py" > "$FAKEBIN_DIR/herdr"
+    chmod +x "$FAKEBIN_DIR/herdr"
+  fi
   if [ "$harness" = claude ]; then
     source_model=claude-opus-5
   else
     source_model="$harness-source-model"
   fi
   out=$(FM_FAKE_AF_PROVIDER="$provider" FM_FAKE_AF_PROFILE="$old_profile" FM_FAKE_AF_POOL="$harness-crew" \
-    run_spawn "$id" "$PROJ_DIR" --account-pool "$harness-crew" --model "$source_model" --effort high)
+    run_spawn "$id" "$PROJ_DIR" --backend "$backend" --account-pool "$harness-crew" --model "$source_model" --effort high)
   status=$?
   [ "$status" -eq 0 ] || fail "$harness initial managed spawn failed: $out"
   old_task=$(meta_account_task "$id")
@@ -3308,6 +3313,89 @@ PY
   assert_grep "session remove --task $old_task" "$AF_LOG" "$harness continuation did not remove its predecessor mapping"
   assert_grep "agent_fleet_task=$new_task" "$HOME_DIR/data/$id/account-attempts.md" "$harness continuation lineage lost the new attempt"
   pass "$harness can continue safely under a different account profile"
+}
+
+test_continuation_delivery_refreshes_custody() {
+  local harness=$1 mode=${2:-no-mistakes} id launch delivered
+  local FM_TEST_CONTINUATION_CASE_SUFFIX="-delivery-$mode"
+  test_cross_profile_continuation_for_harness "$harness" "$harness-2" "$harness-3" "$harness"
+  id="account-continue-$harness-z21"
+  printf 'mode=%s\n' "$mode" >> "$HOME_DIR/state/$id.meta"
+  git -C "$WT_DIR" checkout -qb "fm/delivery-$harness"
+  delivered="$CASE_DIR/delivered-prompt"
+  launch=$(cat "$LAUNCH_LOG")
+  cat > "$FAKEBIN_DIR/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+case "$1:$2" in
+  axi:status)
+    printf 'run:\n  id: run-delivery\n  branch: %s\n  status: running\n  head: %s\n  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:\n    fix,fixing,1s,now,321,1\n' \
+      "$(git -C "$FM_DELIVERY_WORKTREE" branch --show-current)" "$(git -C "$FM_DELIVERY_WORKTREE" rev-parse HEAD)"
+    ;;
+  runs:--limit) printf 'running %s %s\n' "$(git -C "$FM_DELIVERY_WORKTREE" branch --show-current)" "$(git -C "$FM_DELIVERY_WORKTREE" rev-parse HEAD)" ;;
+  *) exit 2 ;;
+esac
+SH
+  cat > "$FAKEBIN_DIR/agent-fleet" <<'SH'
+#!/usr/bin/env bash
+printf '%s' "${!#}" > "$FM_DELIVERY_PROMPT"
+SH
+  chmod +x "$FAKEBIN_DIR/no-mistakes" "$FAKEBIN_DIR/agent-fleet"
+  FM_DELIVERY_WORKTREE="$WT_DIR" FM_DELIVERY_PROMPT="$delivered" \
+    FM_HOME="$HOME_DIR" FM_FAKE_ENDPOINT_FILE="$CASE_DIR/endpoint-live" \
+    PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" || fail "$harness delayed continuation launch failed"
+  assert_grep 'run-delivery' "$delivered" "$harness delivery omitted the newly active pipeline"
+  # Match literal Markdown backticks.
+  # shellcheck disable=SC2016
+  assert_grep '`may mutate now`: **no**' "$delivered" "$harness delivery granted mutation"
+  # Match literal Markdown backticks.
+  # shellcheck disable=SC2016
+  assert_grep '`supervise only`: **yes**' "$delivered" "$harness delivery omitted supervised custody"
+  assert_grep 'done: external side effect alpha; do not rerun' "$delivered" "$harness delivery lost captured resumability context"
+  assert_not_grep 'replacement launch generation' "$delivered" "$harness delivery reread the replaced snapshot"
+  pass "$harness executable continuation refreshes custody after capture and before provider delivery"
+}
+
+test_herdr_continuation_successor_delivery() {
+  local harness=$1 owner=$2 id delivered launch
+  local FM_TEST_CONTINUATION_CASE_SUFFIX="-herdr-$2"
+  test_cross_profile_continuation_for_harness "$harness" "$harness-2" "$harness-3" "$harness" herdr
+  id="account-continue-$harness-z21"
+  git -C "$WT_DIR" checkout -qb "fm/herdr-delivery-$harness"
+  delivered="$CASE_DIR/herdr-delivered"
+  launch=$(cat "$LAUNCH_LOG")
+  cat > "$FAKEBIN_DIR/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+case "$1:$2" in
+  axi:status) exit 1 ;;
+  runs:--limit)
+    if [ "$FM_DELIVERY_OWNER" = pipeline ]; then
+      printf 'running %s %s\n' "$(git -C "$FM_DELIVERY_WORKTREE" branch --show-current)" "$(git -C "$FM_DELIVERY_WORKTREE" rev-parse HEAD)"
+    fi
+    ;;
+  *) exit 2 ;;
+esac
+SH
+  cat > "$FAKEBIN_DIR/agent-fleet" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_HANDOFF_SUCCESSOR_TARGET:-}" ] || exit 71
+printf '%s' "${!#}" > "$FM_DELIVERY_PROMPT"
+SH
+  chmod +x "$FAKEBIN_DIR/no-mistakes" "$FAKEBIN_DIR/agent-fleet"
+  FM_DELIVERY_OWNER="$owner" FM_DELIVERY_WORKTREE="$WT_DIR" FM_DELIVERY_PROMPT="$delivered" \
+    FM_HOME="$HOME_DIR" FM_FAKE_ENDPOINT_FILE="$CASE_DIR/endpoint-live" \
+    FM_FAKE_TMUX_LABEL_FILE="$CASE_DIR/tmux-label" PATH="$FAKEBIN_DIR:$PATH" \
+    bash -c "$launch" || fail "$harness Herdr provider delivery failed"
+  if [ "$owner" = none ]; then
+    # Match literal Markdown backticks.
+    # shellcheck disable=SC2016
+    assert_grep '`may mutate now`: **yes**' "$delivered" "$harness successor was mistaken for predecessor"
+  else
+    # Match literal Markdown backticks.
+    # shellcheck disable=SC2016
+    assert_grep '`supervise only`: **yes**' "$delivered" "$harness newly active pipeline was ignored"
+  fi
+  assert_grep 'done: external side effect alpha; do not rerun' "$delivered" "$harness Herdr delivery lost resumability"
+  pass "$harness Herdr continuation delivers refreshed custody with owner=$owner"
 }
 
 test_cross_provider_continuation_uses_target_default_pool() {
@@ -6547,6 +6635,22 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-15 ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = handoff-delivery-mode ]; then
+  run_isolated_test test_continuation_delivery_refreshes_custody claude local-only
+  run_isolated_test test_continuation_delivery_refreshes_custody codex local-only
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = handoff-custody ]; then
+  run_isolated_test test_herdr_continuation_successor_delivery claude none
+  run_isolated_test test_herdr_continuation_successor_delivery codex none
+  run_isolated_test test_herdr_continuation_successor_delivery claude pipeline
+  run_isolated_test test_herdr_continuation_successor_delivery codex pipeline
+  run_isolated_test test_continuation_delivery_refreshes_custody claude
+  run_isolated_test test_continuation_delivery_refreshes_custody codex
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = review-round-16 ]; then
   run_isolated_test test_managed_recovery_accepts_inherited_lifecycle_lock
   run_isolated_test test_inherited_lifecycle_handoff_releases_on_child_abort
@@ -6869,6 +6973,8 @@ run_isolated_test test_explicit_secondmate_profile_ignores_configured_pool
 run_isolated_test test_enforced_orca_is_rejected_before_owned_resource_creation
 run_isolated_test test_cross_profile_continuation_for_harness claude claude-2 claude-3 claude
 run_isolated_test test_cross_profile_continuation_for_harness codex codex-2 codex-3 codex
+run_isolated_test test_continuation_delivery_refreshes_custody claude
+run_isolated_test test_continuation_delivery_refreshes_custody codex
 run_isolated_test test_cross_provider_continuation_uses_target_default_pool claude codex
 run_isolated_test test_cross_provider_continuation_uses_target_default_pool codex claude
 run_isolated_test test_continuation_refuses_unknown_endpoint_state

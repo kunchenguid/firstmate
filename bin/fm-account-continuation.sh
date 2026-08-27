@@ -2,8 +2,8 @@
 # Build one provider-neutral continuation packet for a managed task.
 # Usage: fm-account-continuation.sh <task-id> <new-attempt-id>
 #
-# The packet is task-owned state under data/<id>/ and is the only prompt used
-# for a fresh cross-profile continuation.
+# The packet is task-owned state under data/<id>/ and supplies historical context
+# for a fresh cross-profile continuation; fm-handoff.sh owns live custody at delivery.
 # It requires a dead recorded endpoint, an inspectable original worktree/home,
 # a non-empty original brief or charter, and a verified repository snapshot.
 # It carries available task-owned status, reports, decisions, steering,

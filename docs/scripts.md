@@ -43,6 +43,7 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-account-routing-lib.sh` | Own routing mode plus legacy Agent Fleet lease, exec, resume, and release recovery |
 | `fm-account-session-sync.sh` | Reconcile real Agent Fleet provider-session mappings into managed task metadata       |
 | `fm-account-continuation.sh` | Build a verified task-owned packet for fresh cross-profile continuation             |
+| `fm-handoff.sh`          | Refresh and present a task-owned handoff with live mutation custody                   |
 | `fm-treehouse-lib.sh`    | Prove Treehouse task lease presence or absence and resolve one unique leased worktree |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |

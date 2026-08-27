@@ -4233,8 +4233,14 @@ if [ "$KIND" = secondmate ]; then
   LAUNCH="env -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE -u FM_PROJECTS_OVERRIDE -u FM_CONFIG_OVERRIDE FM_HOME=$sq_home $LAUNCH"
 fi
 if [ "$CONTINUE_ACCOUNT" = 1 ]; then
-  continuation_launch_command=$LAUNCH
+  continuation_handoff_command="env FM_HOME=$(shell_quote "$FM_HOME") FM_STATE_OVERRIDE=$(shell_quote "$STATE") FM_DATA_OVERRIDE=$(shell_quote "$DATA") $(shell_quote "$SCRIPT_DIR/fm-handoff.sh") $(shell_quote "$ID")"
+  # Expansion is deferred until the continuation command executes.
+  # shellcheck disable=SC2016
+  printf -v continuation_launch_command 'handoff=$(%s) || exit $?; unset FM_HANDOFF_SUCCESSOR_BACKEND FM_HANDOFF_SUCCESSOR_TARGET; set -- "$handoff\n\n## Historical continuation context (live custody above takes precedence)\n\n$1"; %s' "$continuation_handoff_command" "$LAUNCH"
   LAUNCH="$(shell_quote python3) $(shell_quote "$SCRIPT_DIR/fm-prompt-exec.py") $(shell_quote "$CONTINUATION_PROMPT_FILE") $(shell_quote "$CONTINUATION_PROMPT_DIR_ID") $(shell_quote "$CONTINUATION_PROMPT_FILE_ID") $(shell_quote "$CONTINUATION_PROMPT_CONTENT_ID") $(shell_quote "$continuation_launch_command")"
+  if [ "$BACKEND" = herdr ]; then
+    LAUNCH="$LAUNCH --wait-successor"
+  fi
 fi
 }
 
@@ -5203,6 +5209,14 @@ META_WRITE_LOCK=
 
 if [ "$BACKEND" != herdr ]; then
   build_launch_command
+fi
+if [ "$CONTINUE_ACCOUNT" = 1 ] && [ "$BACKEND" = herdr ]; then
+  [ "$(spawn_managed_endpoint_state "$BACKEND" "$T" "fm-$ID" "$KIND" "$PROJ_ABS" "$META_WINDOW" 2>/dev/null)" = present ] || {
+    echo "error: continuation successor identity is not verified for $ID" >&2
+    exit 1
+  }
+  printf '%s\n' "$T" > "$CONTINUATION_LAUNCH_DIR/successor.tmp" || exit 1
+  mv "$CONTINUATION_LAUNCH_DIR/successor.tmp" "$CONTINUATION_LAUNCH_DIR/successor" || exit 1
 fi
 # Export the crewmate PATH and GOTMPDIR into the crewmate's pane shell so the agent and
 # every child process (go build, go test, ...) inherit them. Sent before the launch
