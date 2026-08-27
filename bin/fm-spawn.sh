@@ -1748,15 +1748,18 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 # Resolve the default branch of a primary checkout that has no origin remote.
 # fm-ff-lib's default_branch only knows origin/HEAD and a local main/master, so
 # a registered local-only project on any other default name (e.g. trunk) needs
-# the primary checkout's own signals. Explicit configuration outranks every
-# guess: a configured init.defaultBranch naming an existing local branch wins
-# first, so neither a retained stale main/master ref nor whatever branch
-# happens to be checked out can hijack the base. Then the main/master helper,
-# then the branch the primary has checked out. Echoes the name, or returns 1
-# when no signal resolves an existing branch.
+# the primary checkout's own signals. Explicit per-repo configuration outranks
+# every guess: a repo-local init.defaultBranch naming an existing local branch
+# wins first, so neither a retained stale main/master ref nor whatever branch
+# happens to be checked out can hijack the base. Only repo-local config counts:
+# a user-global or system init.defaultBranch is a naming preference for newly
+# created repos, not a statement about this repo, and must not outrank the
+# main/master helper. Then the main/master helper, then the branch the primary
+# has checked out. Echoes the name, or returns 1 when no signal resolves an
+# existing branch.
 remoteless_default_branch() {  # <primary-checkout>
   local primary=$1 branch
-  branch=$(git -C "$primary" config --get init.defaultBranch 2>/dev/null || true)
+  branch=$(git -C "$primary" config --local --get init.defaultBranch 2>/dev/null || true)
   if [ -n "$branch" ] && git -C "$primary" show-ref --verify --quiet "refs/heads/$branch"; then
     printf '%s\n' "$branch"
     return 0
@@ -1802,10 +1805,10 @@ freshen_spawn_worktree_base() {  # <worktree> <primary-checkout>
     # shares the primary checkout's object store and refs, so the primary's
     # own default-branch tip IS the freshest possible base; there is nothing
     # external to fetch. The default branch can carry any name here, so
-    # remoteless_default_branch consults a configured init.defaultBranch
-    # naming an existing local branch first, then the main/master helper,
-    # then the primary's own checked-out branch. Refuse rather than guess
-    # when no signal resolves an existing branch.
+    # remoteless_default_branch consults a repo-locally configured
+    # init.defaultBranch naming an existing local branch first, then the
+    # main/master helper, then the primary's own checked-out branch. Refuse
+    # rather than guess when no signal resolves an existing branch.
     default=$(remoteless_default_branch "$primary") || {
       echo "error: could not determine the default branch of remoteless primary checkout '$primary' for pooled worktree '$worktree'; refusing to launch from a guessed base" >&2
       return 1

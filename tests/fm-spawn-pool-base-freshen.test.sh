@@ -397,6 +397,31 @@ test_remoteless_configured_default_beats_stale_main_ref() {
   pass "a configured init.defaultBranch outranks a retained stale main ref when refreshing the pool"
 }
 
+test_remoteless_global_init_default_does_not_outrank_main_helper() {
+  local rec id out status main_tip stale_develop branch_head global_config
+  id='pool-remoteless-global-config-r13'
+  rec=$(make_remoteless_case remoteless-global-config "$id")
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" branch develop "$INITIAL_SHA"
+  global_config="$CASE_DIR/global-gitconfig"
+  printf '[init]\n\tdefaultBranch = develop\n' > "$global_config"
+
+  out=$(GIT_CONFIG_GLOBAL="$global_config" run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should refresh from the main/master helper despite a user-global init.defaultBranch"
+  main_tip=$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$DEFAULT_BRANCH")
+  stale_develop=$(git -C "$PROJECT_DIR" rev-parse refs/heads/develop)
+  branch_head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$branch_head" = "$main_tip" ] || fail "spawn did not refresh to the main/master helper's branch tip"
+  [ "$branch_head" != "$stale_develop" ] || fail "spawn let a user-global init.defaultBranch base the pool on a stale ref"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed global-config spawn: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+    printf '# observed global-config base: HEAD=%s main=%s stale-develop=%s\n' \
+      "$branch_head" "$main_tip" "$stale_develop"
+  fi
+  pass "a user-global init.defaultBranch does not outrank the main/master helper when refreshing a remoteless pool"
+}
+
 test_remoteless_unresolvable_default_refuses_pool() {
   local rec id out status before
   id='pool-remoteless-nodefault-r10'
@@ -431,6 +456,7 @@ test_remoteless_non_main_default_refreshes_to_primary_tip
 test_remoteless_detached_primary_uses_configured_default
 test_remoteless_configured_default_beats_checked_out_feature_branch
 test_remoteless_configured_default_beats_stale_main_ref
+test_remoteless_global_init_default_does_not_outrank_main_helper
 test_remoteless_unresolvable_default_refuses_pool
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
