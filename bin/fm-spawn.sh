@@ -81,8 +81,9 @@
 #   authority, and every ambiguous recovery stays on the flat fallback after
 #   duplicate-agent risk is independently absent. Treehouse allocation and task
 #   metadata are unchanged except on native Windows Herdr, where Firstmate
-#   acquires a durable Treehouse lease and moves the owning PowerShell into the
-#   known path because Herdr cannot observe Treehouse's nested cmd.exe cwd.
+#   acquires a durable Treehouse lease, moves the owning PowerShell into the
+#   known path, and bridges the POSIX worker launch through the same Git Bash
+#   because Herdr cannot observe Treehouse's nested cmd.exe cwd.
 #   A clean projected create or exact resume makes one bounded attempt to hold
 #   the one session-scoped presentation-order lock (keyed by named session plus
 #   canonical socket, outside any home's state/) through launch handoff. Lock
@@ -2186,6 +2187,11 @@ fi
 # WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
 # worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
 : "${WT_TARGET:=$T}"
+WINDOWS_HERDR_POWERSHELL=0
+if [ "$BACKEND" = herdr ] \
+   && [ "$(fm_backend_herdr_treehouse_acquisition_mode)" = lease ]; then
+  WINDOWS_HERDR_POWERSHELL=1
+fi
 spawn_send_text_line() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
@@ -2299,8 +2305,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   treehouse_mode=interactive
-  if [ "$BACKEND" = herdr ]; then
-    treehouse_mode=$(fm_backend_herdr_treehouse_acquisition_mode)
+  if [ "$WINDOWS_HERDR_POWERSHELL" = 1 ]; then
+    treehouse_mode=lease
   fi
   if [ "$treehouse_mode" = lease ]; then
     leased_wt=$(fm_backend_herdr_acquire_treehouse_lease "$PROJ_ABS_REAL" "$ID") || {
@@ -2949,15 +2955,31 @@ spawn_record_traceparent() {
   return "$status"
 }
 
-# Export GOTMPDIR into the crewmate's pane shell so the agent and every child
-# process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# Set GOTMPDIR in the crewmate's pane shell so the agent and every child
+# process (go build, go test, ...) inherit it. Native Windows Herdr panes run
+# PowerShell; every other supported pane runs a POSIX shell.
+GOTMPDIR_COMMAND="export GOTMPDIR=$TASK_TMP/gotmp"
+if [ "$WINDOWS_HERDR_POWERSHELL" = 1 ]; then
+  GOTMPDIR_COMMAND=$(fm_backend_herdr_windows_set_environment_command \
+    GOTMPDIR "$TASK_TMP/gotmp") || {
+    echo "error: could not compose the native Windows GOTMPDIR assignment for $ID" >&2
+    exit 1
+  }
+fi
+spawn_send_text_line "$T" "$GOTMPDIR_COMMAND"
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.
 if [ -n "$SPAWN_TRACEPARENT" ]; then
-  if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
+  TRACEPARENT_COMMAND="export TRACEPARENT=$SPAWN_TRACEPARENT"
+  if [ "$WINDOWS_HERDR_POWERSHELL" = 1 ]; then
+    TRACEPARENT_COMMAND=$(fm_backend_herdr_windows_set_environment_command \
+      TRACEPARENT "$SPAWN_TRACEPARENT") || {
+      echo "error: could not compose the native Windows TRACEPARENT assignment for $ID" >&2
+      exit 1
+    }
+  fi
+  if spawn_send_text_line "$T" "$TRACEPARENT_COMMAND"; then
     if ! spawn_record_traceparent; then
       LAUNCH="unset TRACEPARENT; $LAUNCH"
     fi
@@ -2969,6 +2991,21 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
     fi
     LAUNCH="unset TRACEPARENT; $LAUNCH"
   fi
+fi
+if [ "$WINDOWS_HERDR_POWERSHELL" = 1 ]; then
+  LAUNCH_SCRIPT="$TASK_TMP/launch.sh"
+  LAUNCH_SCRIPT_TMP="$LAUNCH_SCRIPT.tmp.${BASHPID:-$$}"
+  if ! (umask 077; printf '#!/usr/bin/env bash\n%s\n' "$LAUNCH" > "$LAUNCH_SCRIPT_TMP") \
+     || ! chmod 700 "$LAUNCH_SCRIPT_TMP" \
+     || ! mv -f "$LAUNCH_SCRIPT_TMP" "$LAUNCH_SCRIPT"; then
+    rm -f "$LAUNCH_SCRIPT_TMP" 2>/dev/null || true
+    echo "error: could not publish the native Windows Herdr launch script for $ID" >&2
+    exit 1
+  fi
+  LAUNCH=$(fm_backend_herdr_windows_bash_script_command "$LAUNCH_SCRIPT") || {
+    echo "error: could not resolve Git Bash for native Windows Herdr launch $ID" >&2
+    exit 1
+  }
 fi
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"

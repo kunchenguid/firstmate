@@ -430,7 +430,7 @@ teardown=pass
 ### Windows Treehouse task acquisition
 
 The full native Windows spawn path was verified on 2026-08-26 against Herdr 0.8.2 and Treehouse 2.1.1 under Git for Windows.
-The opt-in test creates a temporary local project and isolated named Herdr lab, drives `bin/fm-spawn.sh`, proves the recorded copy equals the exact foreground PowerShell leader cwd, then stops the lab and returns the clean lease.
+The opt-in test creates a temporary local project and isolated named Herdr lab, drives `bin/fm-spawn.sh`, proves a POSIX-only launch runs through Git Bash with its task environment, proves the recorded copy equals the exact foreground PowerShell leader cwd, then stops the lab and returns the clean lease.
 
 ```sh
 FM_HERDR_WINDOWS_TREEHOUSE_LIVE=1 \
@@ -441,11 +441,12 @@ FM_HERDR_WINDOWS_TREEHOUSE_LIVE=1 \
 herdr_version=herdr 0.8.2
 treehouse_version=v2.1.1
 treehouse_mode=lease
-target=fm-lab-windows-treehous-948-32034:w1:p2
-worktree=/c/Users/v-tibarreto/.treehouse/project-49e284/1/project
-adapter_path=C:\Users\v-tibarreto\.treehouse\project-49e284\1\project\
+launch_proof=bridge-ok|/tmp/fm-windows-treehouse-live/gotmp
+target=fm-lab-windows-treehous-1913-894:w1:p2
+worktree=/c/Users/v-tibarreto/.treehouse/project-5272b4/1/project
+adapter_path=C:\Users\v-tibarreto\.treehouse\project-5272b4\1\project\
 leader_name=powershell.exe
-leader_cwd=C:\Users\v-tibarreto\.treehouse\project-49e284\1\project\
+leader_cwd=C:\Users\v-tibarreto\.treehouse\project-5272b4\1\project\
 cleanup=guarded-lab-and-treehouse-return
 result=pass
 ```

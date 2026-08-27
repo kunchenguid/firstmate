@@ -2536,10 +2536,40 @@ fm_backend_herdr_treehouse_acquisition_mode() {  # [uname]
   esac
 }
 
+fm_backend_herdr_windows_powershell_quote() {  # <value>
+  printf "'"
+  printf '%s' "$1" | sed "s/'/''/g"
+  printf "'"
+}
+
 fm_backend_herdr_windows_enter_worktree_command() {  # <native-windows-path>
-  local path=$1
-  path=$(printf '%s' "$path" | sed "s/'/''/g")
-  printf "Set-Location -LiteralPath '%s'\n" "$path"
+  printf 'Set-Location -LiteralPath %s\n' \
+    "$(fm_backend_herdr_windows_powershell_quote "$1")"
+}
+
+fm_backend_herdr_windows_set_environment_command() {  # <name> <value>
+  case "$1" in
+    ''|*[!A-Za-z0-9_]*) return 1 ;;
+  esac
+  printf '%s:%s = %s\n' "\$env" "$1" \
+    "$(fm_backend_herdr_windows_powershell_quote "$2")"
+}
+
+fm_backend_herdr_windows_bash_native_path() {
+  local path
+  command -v cygpath >/dev/null 2>&1 || return 1
+  path=$(command -v bash 2>/dev/null) || return 1
+  cygpath -w "$path"
+}
+
+fm_backend_herdr_windows_bash_script_command() {  # <posix-script> [<native-bash-path>]
+  local script=$1 bash_path=${2:-}
+  [ -n "$bash_path" ] \
+    || bash_path=$(fm_backend_herdr_windows_bash_native_path) \
+    || return 1
+  printf '& %s --login %s\n' \
+    "$(fm_backend_herdr_windows_powershell_quote "$bash_path")" \
+    "$(fm_backend_herdr_windows_powershell_quote "$script")"
 }
 
 fm_backend_herdr_acquire_treehouse_lease() {  # <project> <lease-holder>

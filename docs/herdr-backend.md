@@ -53,6 +53,7 @@ On Windows, Herdr supplies `HERDR_SOCKET_PATH` as a native drive path, which Fir
 On Unix-like hosts, task-copy discovery prefers `pane get`'s live `foreground_cwd` and otherwise accepts only the exact foreground group leader's cwd from `pane process-info`.
 Native Windows uses a different acquisition path because interactive `treehouse get` keeps PowerShell in the project and opens a nested `cmd.exe` in the task copy, while Herdr reports only the parent PowerShell.
 Firstmate instead acquires `treehouse get --lease --lease-holder <task-id>` itself, sends `Set-Location -LiteralPath` with the returned native path safely quoted, and requires two matching reads proving the owning PowerShell reached that exact leased copy.
+It sets task environment values in that PowerShell, then passes the complete existing POSIX worker command to the same Git Bash installation that is running Firstmate, so every supported worker keeps one launch contract across platforms.
 If launch stops before task metadata is published, Firstmate closes its new endpoint and returns that unpublished lease, retaining recovery metadata for guarded cleanup if the return fails.
 After publication, ordinary task cleanup owns the lease.
 The pane's creation-time `cwd` and cwd values from processes outside the foreground group leader are never accepted as the task copy.

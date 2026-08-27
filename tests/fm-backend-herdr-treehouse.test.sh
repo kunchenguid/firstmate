@@ -45,6 +45,28 @@ test_enter_worktree_command_quotes_literal_path() {
   pass "the PowerShell worktree command quotes a literal native path"
 }
 
+test_environment_command_quotes_literal_value() {
+  local command
+  command=$(fm_backend_herdr_windows_set_environment_command \
+    GOTMPDIR "/tmp/Crew O'Brien/gotmp")
+  [ "$command" = "\$env:GOTMPDIR = '/tmp/Crew O''Brien/gotmp'" ] \
+    || fail "Windows environment command did not PowerShell-quote the literal value: $command"
+  if fm_backend_herdr_windows_set_environment_command 'BAD-NAME' value >/dev/null; then
+    fail "Windows environment command accepted an unsafe variable name"
+  fi
+  pass "the PowerShell environment command validates its name and quotes its value"
+}
+
+test_bash_script_command_quotes_literal_paths() {
+  local command expected
+  expected="& 'C:\Program Files\Git\bin\bash.exe' --login '/tmp/Crew O''Brien/launch.sh'"
+  command=$(fm_backend_herdr_windows_bash_script_command \
+    "/tmp/Crew O'Brien/launch.sh" 'C:\Program Files\Git\bin\bash.exe')
+  [ "$command" = "$expected" ] \
+    || fail "Windows Bash script command did not quote its literal paths: $command"
+  pass "the PowerShell launch bridge invokes a POSIX script through literal paths"
+}
+
 test_acquire_lease_uses_project_and_holder() {
   local project worktree expected
   project="$TMP_ROOT/project"
@@ -90,6 +112,8 @@ test_unpublished_lease_return_failure_is_visible() {
 
 test_acquisition_mode_leases_only_on_native_windows
 test_enter_worktree_command_quotes_literal_path
+test_environment_command_quotes_literal_value
+test_bash_script_command_quotes_literal_paths
 test_acquire_lease_uses_project_and_holder
 test_unpublished_lease_closes_endpoint_before_return
 test_unpublished_lease_return_failure_is_visible

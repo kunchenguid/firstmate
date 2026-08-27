@@ -25,6 +25,7 @@ TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-win-treehouse-live.XXXXXX")
 HOME_DIR="$TMP_ROOT/home"
 PROJECT="$TMP_ROOT/project"
 META="$HOME_DIR/state/$ID.meta"
+LAUNCH_PROOF="$TMP_ROOT/launch-proof"
 LAB=
 WORKTREE=
 
@@ -61,11 +62,23 @@ git -C "$PROJECT" -c user.name='Firstmate Tests' -c user.email='tests@example.in
 git clone --quiet --bare "$PROJECT" "$TMP_ROOT/origin.git"
 git -C "$PROJECT" remote add origin "file://$TMP_ROOT/origin.git"
 
+LAUNCH_COMMAND="FM_LAUNCH_VALUE=bridge-ok sh -c 'printf \"%s|%s\" \"\$FM_LAUNCH_VALUE\" \"\$GOTMPDIR\" > \"$LAUNCH_PROOF\"; sleep 120'"
 FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
   HERDR_SESSION="$LAB" "$ROOT/bin/fm-spawn.sh" "$ID" "$PROJECT" \
-  "sh -c 'sleep 120'" --mode no-mistakes --yolo off --backend herdr
+  "$LAUNCH_COMMAND" --mode no-mistakes --yolo off --backend herdr
 
 [ -f "$META" ]
+for _ in $(seq 1 100); do
+  [ -s "$LAUNCH_PROOF" ] && break
+  sleep 0.1
+done
+LAUNCH_RESULT=$(cat "$LAUNCH_PROOF" 2>/dev/null || true)
+if [ "$LAUNCH_RESULT" != "bridge-ok|/tmp/fm-$ID/gotmp" ]; then
+  PANE=$(grep '^herdr_pane_id=' "$META" | cut -d= -f2-)
+  echo "launch proof mismatch: got '$LAUNCH_RESULT'" >&2
+  "$HELPER" run "$LAB" pane read "$PANE" --source recent --lines 80 >&2 || true
+  exit 1
+fi
 TARGET=$(grep '^window=' "$META" | cut -d= -f2-)
 WORKTREE=$(grep '^worktree=' "$META" | cut -d= -f2-)
 PANE=$(grep '^herdr_pane_id=' "$META" | cut -d= -f2-)
@@ -98,6 +111,7 @@ WORKTREE=
 printf 'herdr_version=%s\n' "$(herdr --version)"
 printf 'treehouse_version=%s\n' "$(treehouse --version)"
 printf 'treehouse_mode=%s\n' "$(fm_backend_herdr_treehouse_acquisition_mode)"
+printf 'launch_proof=%s\n' "$LAUNCH_RESULT"
 printf 'target=%s\n' "$TARGET"
 printf 'worktree=%s\n' "$VERIFIED_WORKTREE"
 printf 'adapter_path=%s\n' "$CURRENT"
