@@ -60,6 +60,14 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
     "| \($r.id // "-") | \(dash($r.title // $r.raw)) | \(dash($r.repo)) | \(dash($r.kind)) | \(blocker($r)) | \(dash($r.pr_url // $r.report_path // $r.local_note)) |";
   def incident_row($r):
     "| \($r.id) | \($r.phase) | \($r.diagnosis.classification) | \($r.diagnosis.code_change_required) | \($r.approval.status) | \($r.safest_next_action) |";
+  def incident_inventory_omitted($r):
+    (($r.inventory.workers.omitted // 0)
+     + ($r.inventory.repository.registered_worker_metadata.omitted // 0)
+     + ($r.inventory.repository.worktrees.omitted // 0)
+     + ($r.inventory.repository.project_directories.omitted // 0)
+     + ($r.inventory.repository.scan_repositories.omitted_at_least // 0)
+     + ($r.inventory.repository.candidate_paths.omitted // 0)
+     + ($r.inventory.repository.branches.omitted_at_least // 0));
 
   "# Fleet View",
   "",
@@ -81,6 +89,12 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   (if (.runtime_incidents.truncated // 0) > 0 then
     "Warning: \(.runtime_incidents.truncated) older incident record(s) are omitted from this bounded view."
    else empty end),
+  (if (.runtime_incidents.input.omitted // 0) > 0 then
+    "Warning: \(.runtime_incidents.input.omitted) incident record(s) are omitted by the input bound."
+   else empty end),
+  (.runtime_incidents.records[]
+   | select(incident_inventory_omitted(.) > 0)
+   | "Warning: incident \(.id) has bounded triage inventory omissions; inspect its full status."),
   "",
   "## Under Way",
   (if (.tasks | length) == 0 then

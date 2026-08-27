@@ -456,6 +456,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         | {id,phase,classification:.diagnosis.classification,
            code_change_required:.diagnosis.code_change_required,
            approval:.approval.status,
+           inventory:.inventory,
            safest_next_action:(.safest_next_action | trunc(160)),
            flow:"triage → diagnosis → approval → repair → verification"} ],
       in_flight: (if $all_in_flight == 1 then $in_flight_all else $in_flight_all[:$in_flight_n] end),
@@ -497,6 +498,16 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $all_secondmates == 0 and ($secondmates_all | length) > $secondmates_n then {surface:("secondmates showing \($secondmates_n) of \($secondmates_all | length)"), reveal:"--all-secondmates"} else empty end),
         (if (($snap.secondmate_current.truncated // 0) > 0) then {surface:("registered secondmates omitted by snapshot bound: \($snap.secondmate_current.truncated)"), reveal:"raise FM_SNAPSHOT_SECONDMATES"} else empty end),
         (if (($snap.runtime_incidents.truncated // 0) > 0) then {surface:("older runtime incidents omitted by snapshot bound: \($snap.runtime_incidents.truncated)"), reveal:"bin/fm-runtime-incident.py status"} else empty end),
+        (if (($snap.runtime_incidents.input.omitted // 0) > 0) then {surface:("runtime incident records omitted by input bound: \($snap.runtime_incidents.input.omitted)"), reveal:"bin/fm-runtime-incident.py status --json"} else empty end),
+        ($snap.runtime_incidents.records[]?
+         | (((.inventory.workers.omitted // 0)
+             + (.inventory.repository.registered_worker_metadata.omitted // 0)
+             + (.inventory.repository.worktrees.omitted // 0)
+             + (.inventory.repository.project_directories.omitted // 0)
+             + (.inventory.repository.scan_repositories.omitted_at_least // 0)
+             + (.inventory.repository.candidate_paths.omitted // 0)
+             + (.inventory.repository.branches.omitted_at_least // 0))) as $n
+         | if $n > 0 then {surface:("runtime incident \(.id) has bounded triage inventory omissions"), reveal:("bin/fm-runtime-incident.py status --incident \(.id) --json")} else empty end),
         (if (($snap.runtime_incidents.invalid // []) | length) > 0 then {surface:("runtime incident record(s) unreadable: \(($snap.runtime_incidents.invalid // []) | length)"), reveal:"bin/fm-runtime-incident.py status --json"} else empty end),
         (if $snap.secondmate_current.registry.input_truncated == true then {surface:"secondmate registry input truncated by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_LINES or FM_SNAPSHOT_REGISTRY_BYTES"} else empty end),
         (if $snap.secondmate_current.registry.records_truncated == true then {surface:"secondmate registry records omitted by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_RECORDS"} else empty end),

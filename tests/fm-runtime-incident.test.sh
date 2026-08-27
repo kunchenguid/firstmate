@@ -61,8 +61,23 @@ run_triage() {  # <home> <id> <repo> <summary> [extra args...]
     "$INCIDENT" triage --incident "$id" --repo "$repo" --summary "$summary" --json "$@"
 }
 
+make_crew_state_fake() {  # <home>
+  local home=$1 fake=$home/fm-crew-state.sh
+  cat > "$fake" <<'SH'
+#!/usr/bin/env bash
+state_file=${FM_STATE_OVERRIDE:?}/${1:?}.current-state
+if [ -f "$state_file" ]; then
+  cat "$state_file"
+else
+  printf 'state: unknown · source: none · no current-state fixture\n'
+fi
+SH
+  chmod +x "$fake"
+  printf '%s\n' "$fake"
+}
+
 test_repository_and_worker_reconciliation() {
-  local home origin seed stale current out before after
+  local home origin seed stale current out before after crew_state
   home=$(make_home reconcile)
   origin=$(make_origin reconcile)
   seed=$TMP_ROOT/reconcile-seed
@@ -76,6 +91,8 @@ test_repository_and_worker_reconciliation() {
   cat > "$home/data/backlog.md" <<EOF
 ## In flight
 - [ ] quota-worker - Restore Titan companion after quota incident (repo: titan) (kind: ship)
+- [ ] semantic-worker - Restore Redis provider limits (repo: titan) (kind: ship)
+- [ ] finished-worker - Completed unrelated maintenance (repo: titan) (kind: ship)
 
 ## Queued
 
@@ -89,8 +106,25 @@ EOF
     "kind=ship" \
     "spawn_gen=s1787770800.1.1"
   printf 'working: building unrelated pilot fallback architecture\n' > "$home/state/quota-worker.status"
+  printf 'state: working · source: run-step · validating the quota repair\n' > "$home/state/quota-worker.current-state"
+  fm_write_meta "$home/state/semantic-worker.meta" \
+    "window=firstmate:fm-semantic-worker" \
+    "worktree=$current" \
+    "project=$current" \
+    "harness=codex" \
+    "kind=ship"
+  printf 'working: coordinating provider capacity\n' > "$home/state/semantic-worker.status"
+  printf 'state: working · source: pane · coordinating provider capacity\n' > "$home/state/semantic-worker.current-state"
+  fm_write_meta "$home/state/finished-worker.meta" \
+    "window=firstmate:fm-finished-worker" \
+    "worktree=$current" \
+    "project=$current" \
+    "harness=codex" \
+    "kind=ship"
+  printf 'state: done · source: run-step · validation complete\n' > "$home/state/finished-worker.current-state"
+  crew_state=$(make_crew_state_fake "$home")
   before=$(git -C "$current" worktree list --porcelain | rg -c '^worktree ')
-  out=$(run_triage "$home" quota-exhaustion "$current" \
+  out=$(FM_CREW_STATE_BIN="$crew_state" run_triage "$home" quota-exhaustion "$current" \
     "Titan companion unavailable after Upstash quota exhaustion" \
     --evidence "$QUOTA_FIXTURE" --scan-root "$home/projects")
   after=$(git -C "$current" worktree list --porcelain | rg -c '^worktree ')
@@ -109,7 +143,21 @@ EOF
         | .working_directory == $stale
           and .objective == "Restore Titan companion after quota incident"
           and (.age_seconds | type) == "number"
+          and .current_state.state == "working"
+          and .current_state.source == "run-step"
+          and .latest_reported_event.historical == true
+          and .latest_reported_event.line == "working: building unrelated pilot fallback architecture"
           and .activity_matches_incident == false)
+      and (.workers.registry_entries[] | select(.id == "semantic-worker")
+        | .active == true
+          and .activity_matches_incident == null
+          and .match_reason == "no lexical overlap; semantic relevance is unknown")
+      and ([.workers.scope_drifted[].id] | index("semantic-worker")) == null
+      and (.workers.registry_entries[] | select(.id == "finished-worker")
+        | .active == false
+          and .current_state.state == "done"
+          and .latest_reported_event.available == false)
+      and ([.workers.active[].id] | index("finished-worker")) == null
   ' >/dev/null || fail "repository or worker reconciliation was incomplete: $out"
   pass "triage detects stale registry paths, duplicate clones, wrong working copies, and scope drift"
 }
@@ -163,9 +211,16 @@ test_external_quota_no_code_lifecycle_and_status() {
 EOF
   FM_HOME="$home" FM_INCIDENT_NOW=2026-08-26T20:07:00Z \
     "$INCIDENT" verify --incident quota-lifecycle --evidence "$home/verified.json" >/dev/null
+  if run_triage "$home" quota-lifecycle "$repo" \
+    "Titan companion cannot read state again" --evidence "$QUOTA_FIXTURE" >/dev/null 2>&1; then
+    fail "retriage regressed an advanced incident lifecycle"
+  fi
   out=$(FM_HOME="$home" "$INCIDENT" status --incident quota-lifecycle --json)
   printf '%s' "$out" | jq -e '
     .verification.status == "complete"
+      and .repair.status == "complete"
+      and .approval.status == "approved"
+      and .updated_at == "2026-08-26T20:07:00Z"
       and ([.flow[].status] | all(. == "complete" or . == "not_required"))
   ' >/dev/null || fail "quota repair lifecycle did not finish verification: $out"
   view=$(FM_HOME="$home" "$VIEW")
@@ -306,9 +361,67 @@ test_remote_credentials_are_not_recorded() {
   pass "repository identity is normalized without persisting remote credentials"
 }
 
+test_bounded_inventory_omissions_are_disclosed() {
+  local home origin repo crew_state out human view bearings id i
+  home=$(make_home bounded-omissions)
+  origin=$(make_origin bounded-omissions)
+  repo=$home/projects/titan
+  clone_origin "$origin" "$repo"
+  for i in $(seq 1 100); do
+    git -C "$repo" branch "inventory-$i"
+  done
+  crew_state=$(make_crew_state_fake "$home")
+  for i in $(seq -w 1 65); do
+    mkdir -p "$home/registered-$i"
+    fm_write_meta "$home/state/worker-$i.meta" \
+      "window=firstmate:fm-worker-$i" \
+      "worktree=$home/registered-$i" \
+      "project=$home/registered-$i" \
+      "harness=codex" \
+      "kind=ship"
+  done
+  out=$(FM_CREW_STATE_BIN="$crew_state" run_triage "$home" bounded-base "$repo" \
+    "Unexplained production failure")
+  printf '%s' "$out" | jq -e '
+    .workers.inventory == {shown:64,omitted:1}
+      and .repository.inventory.registered_worker_metadata == {shown:64,omitted:1}
+      and .repository.inventory.candidate_paths.omitted >= 1
+      and .repository.inventory.branches.omitted_at_least >= 1
+  ' >/dev/null || fail "bounded triage inventories hid omissions: $out"
+  human=$(FM_HOME="$home" "$INCIDENT" status --incident bounded-base)
+  assert_contains "$human" "Workers omitted by bound: 1" "human incident status hid worker omissions"
+  assert_contains "$human" "Repository candidates omitted by bound: 1" "human incident status hid repository omissions"
+  assert_contains "$human" "Branches omitted by bound: at least 1" "human incident status hid branch omissions"
+
+  rm -f "$home/state"/*.meta
+  for i in $(seq -w 1 64); do
+    id=bounded-copy-$i
+    jq --arg id "$id" '.id=$id | .summary=$id' \
+      "$home/state/incidents/bounded-base.json" > "$home/state/incidents/$id.json"
+  done
+  out=$(FM_HOME="$home" FM_INCIDENT_STATUS_LIMIT=100 "$INCIDENT" status --json --compact)
+  printf '%s' "$out" | jq -e '
+    .input == {shown:64,omitted:1}
+      and (.records | length) == 64
+      and .truncated == 0
+  ' >/dev/null || fail "incident input bound hid omitted records: $out"
+  human=$(FM_HOME="$home" FM_INCIDENT_STATUS_LIMIT=100 "$INCIDENT" status)
+  assert_contains "$human" "Warning: 1 incident record(s) omitted by the input bound." \
+    "human incident list hid input omissions"
+  view=$(FM_HOME="$home" "$VIEW")
+  assert_contains "$view" "Warning: 1 incident record(s) are omitted by the input bound." \
+    "fleet view hid incident input omissions"
+  bearings=$(FM_HOME="$home" "$BEARINGS" --json)
+  printf '%s' "$bearings" | jq -e '
+    .omitted | any(.surface == "runtime incident records omitted by input bound: 1")
+  ' >/dev/null || fail "Bearings hid incident input omissions: $bearings"
+  pass "bounded worker, repository, branch, and incident omissions stay visible"
+}
+
 test_repository_and_worker_reconciliation
 test_external_quota_no_code_lifecycle_and_status
 test_proposed_hotfix_already_deployed
 test_proven_application_defect_escalates
 test_remaining_classifier_categories
 test_remote_credentials_are_not_recorded
+test_bounded_inventory_omissions_are_disclosed

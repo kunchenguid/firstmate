@@ -56,6 +56,7 @@ DEFAULT_STATUS_LIMIT = 20
 MAX_BRANCHES_PER_COPY = 100
 MAX_SCAN_DEPTH = 3
 GIT_TIMEOUT = 4
+CREW_STATE_TIMEOUT = 12
 STATE_READ_LIMIT = 1024 * 1024
 TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{2,}")
 STOP_WORDS = {
@@ -198,7 +199,7 @@ def commit_epoch(repo: Path, ref: str | None) -> int | None:
     return None
 
 
-def repo_record(path: Path) -> dict[str, Any] | None:
+def repo_record(path: Path, *, include_branches: bool = False) -> dict[str, Any] | None:
     top_value = run_git(path, "rev-parse", "--show-toplevel")
     if not top_value:
         return None
@@ -216,15 +217,19 @@ def repo_record(path: Path) -> dict[str, Any] | None:
     remote_ref = f"refs/remotes/origin/{default_branch}" if default_branch else None
     remote_head = run_git(top, "rev-parse", remote_ref) if remote_ref else None
     status = run_git(top, "status", "--porcelain", "--untracked-files=normal")
-    branches_value = run_git(
-        top,
-        "for-each-ref",
-        f"--count={MAX_BRANCHES_PER_COPY}",
-        "--format=%(refname:short)\t%(objectname)",
-        "refs/heads",
-    )
+    branches_value = None
+    if include_branches:
+        branches_value = run_git(
+            top,
+            "for-each-ref",
+            f"--count={MAX_BRANCHES_PER_COPY + 1}",
+            "--format=%(refname:short)\t%(objectname)",
+            "refs/heads",
+        )
     branches: list[dict[str, str]] = []
-    for line in (branches_value or "").splitlines():
+    branch_lines = (branches_value or "").splitlines()
+    branches_omitted_at_least = max(0, len(branch_lines) - MAX_BRANCHES_PER_COPY)
+    for line in branch_lines[:MAX_BRANCHES_PER_COPY]:
         name, _, sha = line.partition("\t")
         if name and sha:
             branches.append({"name": name, "commit": sha})
@@ -241,6 +246,7 @@ def repo_record(path: Path) -> dict[str, Any] | None:
         "remote_default_epoch": commit_epoch(top, remote_head),
         "clean": status == "",
         "branches": branches,
+        "branches_omitted_at_least": branches_omitted_at_least,
     }
 
 
@@ -289,17 +295,18 @@ def meta_values(path: Path) -> dict[str, str]:
     return values
 
 
-def registered_paths(state: Path) -> set[Path]:
+def registered_paths(state: Path) -> tuple[set[Path], int]:
     result: set[Path] = set()
     if not state.is_dir():
-        return result
-    for meta in sorted(state.glob("*.meta"))[:MAX_COPIES]:
+        return result, 0
+    meta_paths = sorted(state.glob("*.meta"))
+    for meta in meta_paths[:MAX_COPIES]:
         values = meta_values(meta)
         for key in ("worktree", "project", "home"):
             value = values.get(key)
             if value and value.startswith("/"):
                 result.add(Path(value))
-    return result
+    return result, max(0, len(meta_paths) - MAX_COPIES)
 
 
 def scan_for_repos(root: Path, max_depth: int = MAX_SCAN_DEPTH) -> Iterable[Path]:
@@ -320,33 +327,45 @@ def scan_for_repos(root: Path, max_depth: int = MAX_SCAN_DEPTH) -> Iterable[Path
 
 def collect_repositories(repo: Path, state: Path, projects: Path, scan_roots: list[Path]) -> dict[str, Any]:
     canonical = canonical_repo(repo)
-    primary = repo_record(canonical)
+    primary = repo_record(canonical, include_branches=True)
     if not primary or not primary["origin"]:
         raise IncidentError(f"canonical repository has no readable origin remote: {canonical}")
     candidates: set[Path] = {canonical}
-    candidates.update(registered_paths(state))
-    candidates.update(Path(row["path"]) for row in parse_worktrees(canonical))
+    registered, registered_omitted = registered_paths(state)
+    candidates.update(registered)
+    worktrees = parse_worktrees(canonical)
+    worktrees_shown = worktrees[:MAX_COPIES]
+    worktrees_omitted = max(0, len(worktrees) - MAX_COPIES)
+    candidates.update(Path(row["path"]) for row in worktrees_shown)
+    project_paths: list[Path] = []
+    project_omitted = 0
     if projects.is_dir():
-        candidates.update(path for path in projects.iterdir() if path.is_dir())
+        project_paths = sorted((path for path in projects.iterdir() if path.is_dir()), key=str)
+        candidates.update(project_paths[:MAX_COPIES])
+        project_omitted = max(0, len(project_paths) - MAX_COPIES)
+    scan_omitted_at_least = 0
     for root in scan_roots:
+        scanned = 0
         for candidate in scan_for_repos(root):
-            candidates.add(candidate)
-            if len(candidates) >= MAX_COPIES:
+            scanned += 1
+            if scanned > MAX_COPIES:
+                scan_omitted_at_least += 1
                 break
-        if len(candidates) >= MAX_COPIES:
-            break
+            candidates.add(candidate)
+
+    ordered_candidates = [canonical] + sorted((path for path in candidates if path != canonical), key=str)
+    candidate_omitted = max(0, len(ordered_candidates) - MAX_COPIES)
+    ordered_candidates = ordered_candidates[:MAX_COPIES]
 
     records: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for candidate in sorted(candidates, key=lambda p: str(p)):
-        record = repo_record(candidate)
+    for candidate in ordered_candidates:
+        record = repo_record(candidate, include_branches=True)
         if not record or record["path"] in seen:
             continue
         seen.add(record["path"])
         if record["origin"] == primary["origin"]:
             records.append(record)
-        if len(records) >= MAX_COPIES:
-            break
 
     if not records:
         records = [primary]
@@ -401,6 +420,7 @@ def collect_repositories(repo: Path, state: Path, projects: Path, scan_roots: li
         for row in records
         for branch in row["branches"]
     ]
+    branch_omitted_at_least = sum(row["branches_omitted_at_least"] for row in records)
     return {
         "canonical_repository": str(canonical),
         "canonical_remote": primary["origin"],
@@ -411,11 +431,31 @@ def collect_repositories(repo: Path, state: Path, projects: Path, scan_roots: li
         "remote_default_candidates": surviving_heads,
         "remote_default_conflict": remote_default_conflict,
         "copies": records,
-        "worktrees": parse_worktrees(Path(authoritative["path"])),
+        "worktrees": worktrees_shown,
         "branches": all_branches,
         "multiple_copies_same_origin": len(common_dirs) > 1,
         "detached_checkouts": detached,
         "superseded_continuations": superseded,
+        "inventory": {
+            "registered_worker_metadata": {
+                "shown": min(MAX_COPIES, len(list(state.glob("*.meta")))) if state.is_dir() else 0,
+                "omitted": registered_omitted,
+            },
+            "worktrees": {"shown": len(worktrees_shown), "omitted": worktrees_omitted},
+            "project_directories": {
+                "shown": min(MAX_COPIES, len(project_paths)) if projects.is_dir() else 0,
+                "omitted": project_omitted,
+            },
+            "scan_repositories": {"omitted_at_least": scan_omitted_at_least},
+            "candidate_paths": {"shown": len(ordered_candidates), "omitted": candidate_omitted},
+            "copies": {
+                "shown": len(records),
+                "complete": not any(
+                    (candidate_omitted, registered_omitted, worktrees_omitted, project_omitted, scan_omitted_at_least)
+                ),
+            },
+            "branches": {"shown": len(all_branches), "omitted_at_least": branch_omitted_at_least},
+        },
     }
 
 
@@ -454,19 +494,40 @@ def brief_objective(data: Path, task_id: str) -> str | None:
     return None
 
 
-def latest_activity(state: Path, task_id: str) -> tuple[str, bool]:
+def latest_reported_event(state: Path, task_id: str) -> dict[str, Any]:
     path = state / f"{task_id}.status"
     try:
         if path.stat().st_size > STATE_READ_LIMIT:
-            return "status record too large", True
+            return {"line": None, "historical": True, "available": False, "reason": "status record too large"}
         lines = [line.strip() for line in path.read_text(errors="replace").splitlines() if line.strip()]
     except OSError:
-        return "no status event", True
+        return {"line": None, "historical": True, "available": False, "reason": "no status event"}
     if not lines:
-        return "no status event", True
-    line = lines[-1][:240]
-    verb = line.split(":", 1)[0].strip().lower()
-    return line, verb not in {"done", "failed"}
+        return {"line": None, "historical": True, "available": False, "reason": "no status event"}
+    return {"line": lines[-1][:240], "historical": True, "available": True, "reason": None}
+
+
+def current_worker_state(state: Path, task_id: str) -> dict[str, Any]:
+    executable = os.environ.get("FM_CREW_STATE_BIN") or str(Path(__file__).with_name("fm-crew-state.sh"))
+    env = os.environ.copy()
+    env["FM_STATE_OVERRIDE"] = str(state)
+    try:
+        result = subprocess.run(
+            [executable, task_id],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=CREW_STATE_TIMEOUT,
+            check=False,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {"state": "unknown", "source": "none", "detail": "current-state authority unavailable"}
+    line = result.stdout.splitlines()[0] if result.stdout.splitlines() else ""
+    match = re.fullmatch(r"state: ([a-z-]+) · source: ([a-z-]+)(?: · (.*))?", line)
+    if result.returncode != 0 or not match:
+        return {"state": "unknown", "source": "none", "detail": "current-state authority unreadable"}
+    return {"state": match.group(1), "source": match.group(2), "detail": match.group(3) or None}
 
 
 def terms(value: str) -> set[str]:
@@ -511,17 +572,22 @@ def collect_workers(
         return {
             "registry_entries": [], "active": [], "stale_registry_entries": [],
             "wrong_worktree": [], "scope_drifted": [],
+            "inventory": {"shown": 0, "omitted": 0},
         }
 
-    for meta in sorted(state.glob("*.meta"))[:MAX_COPIES]:
+    meta_paths = sorted(state.glob("*.meta"))
+    for meta in meta_paths[:MAX_COPIES]:
         task_id = meta.stem
         values = meta_values(meta)
         cwd_value = values.get("worktree") or values.get("home") or values.get("project")
         cwd = Path(cwd_value).resolve() if cwd_value and cwd_value.startswith("/") else None
         cwd_record = repo_record(cwd) if cwd and cwd.exists() else None
         objective = objectives.get(task_id) or brief_objective(data, task_id) or "objective unavailable"
-        activity, is_active = latest_activity(state, task_id)
-        objective_terms = terms(objective + " " + activity)
+        reported_event = latest_reported_event(state, task_id)
+        current_state = current_worker_state(state, task_id)
+        is_active = current_state["state"] in {"working", "parked", "blocked", "paused"}
+        active_value: bool | None = None if current_state["state"] == "unknown" else is_active
+        objective_terms = terms(objective + " " + (reported_event["line"] or ""))
         match_value: bool | None
         match_reason: str
         wrong_worktree = False
@@ -535,8 +601,12 @@ def collect_workers(
             wrong_worktree = True
         elif incident_terms and objective_terms:
             overlap = sorted(incident_terms & objective_terms)
-            match_value = bool(overlap)
-            match_reason = f"matching terms: {', '.join(overlap)}" if overlap else "objective/activity does not match incident terms"
+            match_value = True if overlap else None
+            match_reason = (
+                f"matching terms: {', '.join(overlap)}"
+                if overlap
+                else "no lexical overlap; semantic relevance is unknown"
+            )
         else:
             match_value = None
             match_reason = "insufficient objective terms to prove relevance"
@@ -551,9 +621,10 @@ def collect_workers(
             "id": task_id,
             "working_directory": str(cwd) if cwd else cwd_value,
             "objective": objective,
-            "activity": activity,
+            "current_state": current_state,
+            "latest_reported_event": reported_event,
             "age_seconds": worker_age(meta, values, now),
-            "active": is_active,
+            "active": active_value,
             "activity_matches_incident": match_value,
             "match_reason": match_reason,
             "wrong_worktree": wrong_worktree,
@@ -571,13 +642,17 @@ def collect_workers(
         if is_active and wrong_worktree:
             wrong.append({"id": task_id, "path": str(cwd) if cwd else cwd_value or "", "reason": match_reason})
         if is_active and match_value is False:
-            drifted.append({"id": task_id, "activity": activity, "reason": match_reason})
+            drifted.append({"id": task_id, "activity": current_state["state"], "reason": match_reason})
     return {
         "registry_entries": registry,
         "active": active,
         "stale_registry_entries": stale,
         "wrong_worktree": wrong,
         "scope_drifted": drifted,
+        "inventory": {
+            "shown": min(len(meta_paths), MAX_COPIES),
+            "omitted": max(0, len(meta_paths) - MAX_COPIES),
+        },
     }
 
 
@@ -850,22 +925,57 @@ def read_incident(base: dict[str, Path], incident_id: str) -> dict[str, Any]:
     return value
 
 
+def write_json(path: Path, value: dict[str, Any]) -> None:
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(value, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
 def atomic_write(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = path.with_suffix(".lock")
-    with lock_path.open("a+") as lock:
+    with path.with_suffix(".lock").open("a+") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-        try:
-            with os.fdopen(fd, "w") as handle:
-                json.dump(value, handle, indent=2, sort_keys=True)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(name, path)
-        finally:
-            if os.path.exists(name):
-                os.unlink(name)
+        write_json(path, value)
+
+
+def lifecycle_advanced(record: dict[str, Any]) -> bool:
+    return bool(
+        record.get("phase") in {"repair", "verification"}
+        or record.get("approval", {}).get("status") == "approved"
+        or record.get("repair", {}).get("status") != "pending"
+        or record.get("verification", {}).get("status") != "pending"
+    )
+
+
+def write_triage(path: Path, record: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.with_suffix(".lock").open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                raise IncidentError(f"existing incident record is unreadable: {record['id']}") from exc
+            if (
+                not isinstance(existing, dict)
+                or existing.get("schema") != SCHEMA
+                or existing.get("id") != record["id"]
+            ):
+                raise IncidentError(f"existing incident record has the wrong schema or id: {record['id']}")
+            if lifecycle_advanced(existing):
+                raise IncidentError(
+                    "incident lifecycle has advanced; retriage would regress recorded approval, repair, or verification"
+                )
+            record["created_at"] = existing.get("created_at", record["created_at"])
+        write_json(path, record)
 
 
 def output_record(record: dict[str, Any], as_json: bool) -> None:
@@ -882,6 +992,17 @@ def output_record(record: dict[str, Any], as_json: bool) -> None:
     print(f"Authoritative working copy: {worktree}")
     print(f"Code change required: {record['diagnosis']['code_change_required']}")
     print(f"Unrelated or scope-drifted workers: {len(record['workers']['scope_drifted'])}")
+    print(f"Workers omitted by bound: {record['workers'].get('inventory', {}).get('omitted', 0)}")
+    inventory = record["repository"].get("inventory", {})
+    registered_omitted = inventory.get("registered_worker_metadata", {}).get("omitted", 0)
+    print(f"Registered worker metadata omitted by repository scan: {registered_omitted}")
+    print(f"Worktrees omitted by repository scan: {inventory.get('worktrees', {}).get('omitted', 0)}")
+    project_omitted = inventory.get("project_directories", {}).get("omitted", 0)
+    print(f"Project directories omitted by repository scan: {project_omitted}")
+    scanned_omitted = inventory.get("scan_repositories", {}).get("omitted_at_least", 0)
+    print(f"Scanned repositories omitted: at least {scanned_omitted}")
+    print(f"Repository candidates omitted by bound: {inventory.get('candidate_paths', {}).get('omitted', 0)}")
+    print(f"Branches omitted by bound: at least {inventory.get('branches', {}).get('omitted_at_least', 0)}")
     print(f"Safest next action: {record['safest_next_action']}")
     approval = record["approval"]
     print(f"Approval required: {approval['kind'] if approval['required'] else 'no'}")
@@ -906,6 +1027,10 @@ def status_projection(record: dict[str, Any]) -> dict[str, Any]:
         "approval": {
             key: record["approval"].get(key)
             for key in ("required", "kind", "request", "status")
+        },
+        "inventory": {
+            "workers": record.get("workers", {}).get("inventory", {"shown": 0, "omitted": 0}),
+            "repository": record.get("repository", {}).get("inventory", {}),
         },
         "safest_next_action": record["safest_next_action"],
     }
@@ -939,18 +1064,12 @@ def triage(args: argparse.Namespace) -> int:
     else:
         phase = "diagnosis"
         outcome = "more_evidence_required"
-    existing_created = now
     path = incident_path(base, incident_id)
-    if path.exists():
-        try:
-            existing_created = read_incident(base, incident_id).get("created_at", now)
-        except IncidentError:
-            existing_created = now
     record = {
         "schema": SCHEMA,
         "id": incident_id,
         "summary": compact(args.summary, 300),
-        "created_at": existing_created,
+        "created_at": now,
         "updated_at": now,
         "phase": phase,
         "flow": flow_state(
@@ -980,7 +1099,7 @@ def triage(args: argparse.Namespace) -> int:
             "other_worker_mutation_authorized": False,
         },
     }
-    atomic_write(path, record)
+    write_triage(path, record)
     output_record(record, args.json)
     return 0
 
@@ -1086,8 +1205,10 @@ def status(args: argparse.Namespace) -> int:
     incident_dir = base["state"] / "incidents"
     records: list[dict[str, Any]] = []
     invalid: list[dict[str, str]] = []
+    incident_paths: list[Path] = []
     if incident_dir.is_dir():
-        for path in sorted(incident_dir.glob("*.json"))[:MAX_COPIES]:
+        incident_paths = sorted(incident_dir.glob("*.json"))
+        for path in incident_paths[:MAX_COPIES]:
             try:
                 record = read_incident(base, path.stem)
             except IncidentError as exc:
@@ -1103,16 +1224,32 @@ def status(args: argparse.Namespace) -> int:
     records = records[:limit]
     if args.compact:
         records = [status_projection(record) for record in records]
-    result = {"schema": STATUS_SCHEMA, "records": records, "invalid": invalid, "truncated": truncated}
+    input_inventory = {
+        "shown": min(len(incident_paths), MAX_COPIES),
+        "omitted": max(0, len(incident_paths) - MAX_COPIES),
+    }
+    result = {
+        "schema": STATUS_SCHEMA,
+        "records": records,
+        "invalid": invalid,
+        "truncated": truncated,
+        "input": input_inventory,
+    }
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
-    elif not records:
-        print("No runtime incidents recorded.")
     else:
-        for index, record in enumerate(records):
-            if index:
-                print()
-            output_record(record, False)
+        if not records:
+            print("No runtime incidents recorded.")
+        else:
+            for index, record in enumerate(records):
+                if index:
+                    print()
+                output_record(record, False)
+        if input_inventory["omitted"]:
+            print()
+            print(f"Warning: {input_inventory['omitted']} incident record(s) omitted by the input bound.")
+        if truncated:
+            print(f"Warning: {truncated} readable incident record(s) omitted by the display limit.")
     return 0
 
 

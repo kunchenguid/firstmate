@@ -1402,13 +1402,13 @@ scout_report_lines() {
 
 runtime_incidents_json() {
   if ! command -v python3 >/dev/null 2>&1; then
-    jq -n '{schema:"fm-runtime-incidents.v1",records:[],invalid:[{path:null,reason:"python3 unavailable"}],truncated:0}'
+    jq -n '{schema:"fm-runtime-incidents.v1",records:[],invalid:[{path:null,reason:"python3 unavailable"}],truncated:0,input:{shown:0,omitted:0}}'
     return 0
   fi
   if out=$("$SCRIPT_DIR/fm-runtime-incident.py" status --json --compact 2>/dev/null); then
     printf '%s\n' "$out"
   else
-    jq -n '{schema:"fm-runtime-incidents.v1",records:[],invalid:[{path:null,reason:"incident ledger unavailable"}],truncated:0}'
+    jq -n '{schema:"fm-runtime-incidents.v1",records:[],invalid:[{path:null,reason:"incident ledger unavailable"}],truncated:0,input:{shown:0,omitted:0}}'
   fi
 }
 
