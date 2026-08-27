@@ -339,6 +339,10 @@ test_fork_pr_rule_in_pr_opening_dods() {
       "$id ($mode): brief lost the fork-PR target rule"
     assert_grep "the configured merge authority is unchanged" "$brief" \
       "$id ($mode): fork-PR rule must reassure that merge authority is unchanged"
+    assert_grep "gh-axi api /user --jq .login" "$brief" \
+      "$id ($mode): brief did not make the captain's fork owner resolvable"
+    assert_grep "report blocked instead of using upstream" "$brief" \
+      "$id ($mode): missing captain fork must fail closed instead of falling back upstream"
   done
   # local-only ships no PR, so the fork-PR target line must not appear there.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forkpr-c3 some-proj --mode local-only >/dev/null 2>&1
