@@ -543,36 +543,15 @@ name_gate() {
 }
 
 retail_price() {
-  python3 - "$1" <<'PY'
-import json
-import sys
-import urllib.parse
-import urllib.request
-
-sku = sys.argv[1]
-query = urllib.parse.urlencode({
-    "$filter": f"armRegionName eq 'eastus' and armSkuName eq '{sku}' and priceType eq 'Consumption'"
-})
-with urllib.request.urlopen("https://prices.azure.com/api/retail/prices?" + query, timeout=20) as response:
-    data = json.load(response)
-prices = [
-    float(item["retailPrice"])
-    for item in data.get("Items", [])
-    if item.get("type") == "Consumption"
-    and item.get("unitOfMeasure") == "1 Hour"
-    and "windows" not in item.get("productName", "").lower()
-    and "spot" not in item.get("meterName", "").lower()
-    and "low priority" not in item.get("skuName", "").lower()
-]
-if not prices:
-    raise SystemExit("retail rate unavailable")
-print(min(prices))
-PY
+  FM_HOME=${FM_HOME:-$ROOT} python3 "$SCRIPT_DIR/fm-azure-worker-provider.py" retail-rate "$1"
 }
 
 cost_gate() {
   local supervisor_rate sku rate rates result
-  supervisor_rate=$(retail_price "$SUPERVISOR_SKU") || refuse "supervisor retail rate is unreadable"
+  supervisor_rate=0
+  if [ "$CAPACITY_PROFILE" != foundation ]; then
+    supervisor_rate=$(retail_price "$SUPERVISOR_SKU") || refuse "supervisor retail rate is unreadable"
+  fi
   rates='{}'
   while IFS= read -r sku; do
     [ -n "$sku" ] || continue

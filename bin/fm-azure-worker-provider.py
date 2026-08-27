@@ -820,14 +820,20 @@ def retail_rate(sku):
             cache = {}
     entry = cache.get(sku)
     cached_rate = None
+    now = time.time()
     if (
         isinstance(entry, dict)
+        and not isinstance(entry.get("rate"), bool)
         and isinstance(entry.get("rate"), (int, float))
+        and math.isfinite(entry["rate"])
         and entry["rate"] > 0
+        and not isinstance(entry.get("fetched_at"), bool)
         and isinstance(entry.get("fetched_at"), (int, float))
+        and math.isfinite(entry["fetched_at"])
+        and 0 <= entry["fetched_at"] <= now
     ):
         cached_rate = float(entry["rate"])
-        if time.time() - entry["fetched_at"] < RETAIL_RATE_CACHE_FRESH_SECONDS:
+        if now - entry["fetched_at"] < RETAIL_RATE_CACHE_FRESH_SECONDS:
             return cached_rate
     rate = retail_rate_live(sku)
     if rate is None:
@@ -842,6 +848,16 @@ def retail_rate(sku):
         except OSError:
             pass
     return rate
+
+
+def retail_rate_command(args):
+    """Serve the pilot's internal exact-meter price lookup."""
+    if len(args) != 1:
+        raise ProviderError("retail-rate requires exactly one reviewed SKU")
+    rate = retail_rate(args[0])
+    if rate is None or not math.isfinite(rate) or rate <= 0:
+        raise ProviderError("exact Linux on-demand consumption retail rate is unreadable")
+    print(format(rate, ".12g"))
 
 
 def retail_rate_live(sku):
@@ -3478,7 +3494,10 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        if sys.argv[1:2] == ["retail-rate"]:
+            retail_rate_command(sys.argv[2:])
+        else:
+            main()
     except ProviderIdentityRefusal as exc:
         print("AZURE WORKER PROVIDER REFUSED-IDENTITY: {}".format(exc), file=sys.stderr)
         raise SystemExit(3)

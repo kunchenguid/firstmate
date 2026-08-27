@@ -1827,6 +1827,192 @@ PROVIDERBOUND
   pass "the provider subprocess bound covers the action it runs"
 }
 
+run_retail_rate_cache_check() {
+  local tmp sourceable cache hook calls output status
+  fm_test_tmproot_into tmp fm-azure-pilot-retail-rate
+  sourceable="$tmp/sourceable.sh"
+  cache="$tmp/home/state/azure-runner/retail-rate-cache.json"
+  hook="$tmp/hook"
+  calls="$tmp/price-api-calls"
+  mkdir -p "$(dirname "$cache")" "$hook"
+  write_sourceable_script "$sourceable"
+  python3 - "$hook/sitecustomize.py" <<'PY'
+from pathlib import Path
+import io
+import json
+import os
+import urllib.error
+import urllib.request
+import sys
+
+path = Path(sys.argv[1])
+path.write_text(r'''
+from pathlib import Path
+import io
+import json
+import os
+import urllib.error
+import urllib.request
+
+def meter(price=0.25):
+    return {
+        "armRegionName": "eastus", "armSkuName": "Standard_D4as_v6",
+        "serviceName": "Virtual Machines", "serviceFamily": "Compute",
+        "type": "Consumption", "unitOfMeasure": "1 Hour", "currencyCode": "USD",
+        "productName": "Virtual Machines Dasv6 Series", "skuName": "D4as v6",
+        "meterName": "D4as v6", "isPrimaryMeterRegion": True,
+        "retailPrice": price, "unitPrice": price, "tierMinimumUnits": 0,
+    }
+
+class Reply(io.BytesIO):
+    def __enter__(self): return self
+    def __exit__(self, *_args): return False
+
+def urlopen(request, timeout=20):
+    with open(os.environ["FM_PRICE_TEST_CALLS"], "a", encoding="utf-8") as handle:
+        handle.write("call\n")
+    mode = os.environ["FM_PRICE_TEST_MODE"]
+    if mode == "throttle":
+        raise urllib.error.HTTPError(request.full_url, 429, "Too Many Requests", {}, None)
+    items = [meter()]
+    if mode == "ambiguous":
+        items.append(meter(0.30))
+    return Reply(json.dumps({"Items": items}).encode("utf-8"))
+
+urllib.request.urlopen = urlopen
+''', encoding="utf-8")
+PY
+
+  python3 - "$cache" <<'PY'
+import json
+from pathlib import Path
+import time
+import sys
+Path(sys.argv[1]).write_text(json.dumps({
+    "Standard_D4as_v6": {"rate": 0.25, "fetched_at": time.time()},
+}) + "\n", encoding="utf-8")
+PY
+  output=$(
+    (
+      set --
+      # shellcheck source=bin/fm-azure-pilot.sh
+      . "$sourceable"
+      SCRIPT_DIR=$(dirname "$SCRIPT")
+      export FM_HOME="$tmp/home" PYTHONPATH="$hook"
+      export FM_PRICE_TEST_CALLS="$calls" FM_PRICE_TEST_MODE=throttle
+      retail_price Standard_D4as_v6
+    )
+  ) || fail "a fresh cached retail rate was refused: $output"
+  [ "$output" = 0.25 ] || fail "the fresh cached retail rate changed: $output"
+  [ ! -e "$calls" ] || fail "a fresh retail-rate cache entry still called prices.azure.com"
+
+  python3 - "$cache" <<'PY'
+import json
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_text(json.dumps({
+    "Standard_D4as_v6": {"rate": 0.25, "fetched_at": 0},
+}) + "\n", encoding="utf-8")
+PY
+  output=$(
+    (
+      set --
+      # shellcheck source=bin/fm-azure-pilot.sh
+      . "$sourceable"
+      SCRIPT_DIR=$(dirname "$SCRIPT")
+      export FM_HOME="$tmp/home" PYTHONPATH="$hook"
+      export FM_PRICE_TEST_CALLS="$calls" FM_PRICE_TEST_MODE=throttle
+      retail_price Standard_D4as_v6
+    )
+  ) || fail "a throttled live lookup did not fall back to the stale validated rate: $output"
+  [ "$output" = 0.25 ] || fail "the stale fallback retail rate changed: $output"
+  [ "$(wc -l <"$calls" | tr -d ' ')" = 1 ] || fail "the stale rate did not make exactly one live refresh attempt"
+
+  rm -f "$cache" "$calls"
+  set +e
+  output=$(
+    (
+      set --
+      # shellcheck source=bin/fm-azure-pilot.sh
+      . "$sourceable"
+      SCRIPT_DIR=$(dirname "$SCRIPT")
+      export FM_HOME="$tmp/home" PYTHONPATH="$hook"
+      export FM_PRICE_TEST_CALLS="$calls" FM_PRICE_TEST_MODE=throttle
+      CAPACITY_PROFILE=full
+      SUPERVISOR_SKU=Standard_D2as_v6
+      WORKER_SKUS_JSON='[]'
+      COMMISSIONING_BUDGET_CEILING_USD=1500
+      WORKER_HOUR_PLANNING_THRESHOLD=3500
+      AUTHOR_CAPACITY_MODE=mixed-current
+      cost_gate
+    ) 2>&1
+  )
+  status=$?
+  set -e
+  expect_code 2 "$status" "a missing cache plus throttled live rate must refuse admission: $output"
+  assert_contains "$output" "REFUSED: supervisor retail rate is unreadable" \
+    "the no-cache live failure did not fail closed at the pilot cost gate"
+
+  python3 - "$cache" <<'PY'
+import json
+from pathlib import Path
+import time
+import sys
+Path(sys.argv[1]).write_text(json.dumps({
+    "Standard_D4as_v6": {"rate": True, "fetched_at": time.time()},
+}) + "\n", encoding="utf-8")
+PY
+  rm -f "$calls"
+  set +e
+  output=$(
+    (
+      set --
+      # shellcheck source=bin/fm-azure-pilot.sh
+      . "$sourceable"
+      SCRIPT_DIR=$(dirname "$SCRIPT")
+      export FM_HOME="$tmp/home" PYTHONPATH="$hook"
+      export FM_PRICE_TEST_CALLS="$calls" FM_PRICE_TEST_MODE=throttle
+      retail_price Standard_D4as_v6
+    ) 2>&1
+  )
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "a malformed cached retail rate bypassed the failed live lookup: $output"
+
+  rm -f "$cache" "$calls"
+  output=$(
+    (
+      set --
+      # shellcheck source=bin/fm-azure-pilot.sh
+      . "$sourceable"
+      SCRIPT_DIR=$(dirname "$SCRIPT")
+      export FM_HOME="$tmp/home" PYTHONPATH="$hook"
+      export FM_PRICE_TEST_CALLS="$calls" FM_PRICE_TEST_MODE=exact
+      retail_price Standard_D4as_v6
+    )
+  ) || fail "the exact Linux on-demand primary meter was refused: $output"
+  [ "$output" = 0.25 ] || fail "the exact live meter returned an unexpected rate: $output"
+
+  rm -f "$cache" "$calls"
+  set +e
+  output=$(
+    (
+      set --
+      # shellcheck source=bin/fm-azure-pilot.sh
+      . "$sourceable"
+      SCRIPT_DIR=$(dirname "$SCRIPT")
+      export FM_HOME="$tmp/home" PYTHONPATH="$hook"
+      export FM_PRICE_TEST_CALLS="$calls" FM_PRICE_TEST_MODE=ambiguous
+      retail_price Standard_D4as_v6
+    ) 2>&1
+  )
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "ambiguous eligible on-demand meters were accepted: $output"
+  pass "pilot retail admission reuses fresh and stale exact-meter cache entries and fails closed without one"
+}
+
+run_retail_rate_cache_check
 run_create_replay_idempotence_check
 run_provider_action_bound_check
 run_worker_power_gate_check
