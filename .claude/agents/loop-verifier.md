@@ -1,1 +1,1 @@
-../../../stone-skills/agents/loop-verifier/AGENT.md
+/Users/stoneevenson/stone-skills/agents/loop-verifier/AGENT.md
