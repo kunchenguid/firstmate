@@ -135,3 +135,4 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-voice-client.py`     | The laptop end of the spoken interface: capture, playback, and turn timing over SSH; audio devices unverified |
 | `fm_voice_frame.py`      | The wire format both machines share, copied to the laptop beside the client          |
 | `fm_voice_records.py`    | What a spoken answer may read, and the handover that queues real work                |
+| `fm-usage-by-model.sh`   | Aggregate per-model token usage from opencode SQLite and Claude Code JSONL into day-bucketed JSON/CSV, noting Pi has no local artifact |
