@@ -1848,13 +1848,6 @@ freshen_spawn_worktree_base() {  # <worktree>
 # Refreshing on each acquisition also keeps a slot from serving a stale credential
 # copy left behind by an earlier task, including when the captain revoked that
 # credential by deleting the file outright rather than by rewriting it.
-spawn_path_device() {  # <path>
-  if [ "$(uname)" = Darwin ]; then
-    stat -f %d "$1" 2>/dev/null
-  else
-    stat -c %d "$1" 2>/dev/null
-  fi
-}
 
 # Firstmate authors a file inside a worktree it does not own, so every edge of that
 # ownership is settled deliberately here rather than falling out of branch order.
@@ -1919,6 +1912,28 @@ spawn_worktree_local_env_is_tracked() {  # <worktree> <pre-refresh|post-refresh>
   return 0
 }
 
+# The one owner of the ignore verdict, which gates the delete decision below. Both
+# phases ask git the identical question and differ only in the action their refusal
+# names, so how an unresolvable answer is classified is spelled out once: a second
+# copy is how one phase ends up refusing the slot before the base refresh while the
+# other still refuses after it.
+#
+# check-ignore answers 0 (ignored) or 1 (not ignored); anything else is git failing
+# to answer at all, reported here as 2. Reporting that as a missing ignore rule
+# would send an operator to edit a .gitignore that already carries the rule while
+# the task runs without credentials, which is the exact false blocker this seeding
+# exists to remove. A state that cannot be established is never the benign one.
+spawn_worktree_ignores_local_env() {  # <worktree> <target> <refused-action>
+  local worktree=$1 target=$2 refused=$3 ignored=0 check_err
+  check_err=$(git -C "$worktree" check-ignore -q .env.local 2>&1) || ignored=$?
+  if [ "$ignored" -gt 1 ]; then
+    echo "error: could not determine whether '$worktree' ignores .env.local; git check-ignore exited $ignored${check_err:+: $check_err}" >&2
+    echo "error: refusing to $refused '$target' while that check is unresolved" >&2
+    return 2
+  fi
+  return "$ignored"
+}
+
 # The one owner of the decision to delete an unignored copy. Both phases reach the
 # identical decision and differ only in which step would refuse the slot next, so
 # the decision is spelled out once: a second copy of a credential deletion is how a
@@ -1964,7 +1979,7 @@ retire_unignored_spawn_local_env() {  # <worktree> <source> <target> <refusing-s
 }
 
 seed_spawn_worktree_local_env() {  # <worktree> <pre-refresh|post-refresh>
-  local worktree=$1 phase=$2 source target tmp ignored check_err gitdir stage_device tree_device
+  local worktree=$1 phase=$2 source target tmp ignored gitdir stage_device tree_device
   source="$PROJ_ABS/.env.local"
   target="$worktree/.env.local"
   # Clear the staging area on the way in, before any branch below can return. A
@@ -1991,12 +2006,8 @@ seed_spawn_worktree_local_env() {  # <worktree> <pre-refresh|post-refresh>
   if [ "$phase" = pre-refresh ]; then
     { [ -e "$target" ] || [ -L "$target" ]; } || return 0
     ignored=0
-    check_err=$(git -C "$worktree" check-ignore -q .env.local 2>&1) || ignored=$?
-    if [ "$ignored" -gt 1 ]; then
-      echo "error: could not determine whether '$worktree' ignores .env.local; git check-ignore exited $ignored${check_err:+: $check_err}" >&2
-      echo "error: refusing to retire '$target' while that check is unresolved" >&2
-      return 1
-    fi
+    spawn_worktree_ignores_local_env "$worktree" "$target" retire || ignored=$?
+    [ "$ignored" -ne 2 ] || return 1
     [ "$ignored" -eq 1 ] || return 0
     retire_unignored_spawn_local_env "$worktree" "$source" "$target" "the base refresh of '$worktree'" || return 1
     return 0
@@ -2005,32 +2016,26 @@ seed_spawn_worktree_local_env() {  # <worktree> <pre-refresh|post-refresh>
   if [ ! -e "$source" ] && [ ! -L "$source" ] && [ ! -e "$target" ] && [ ! -L "$target" ]; then
     return 0
   fi
-  # Act only on what the project ignores. An unignored .env.local would land as
-  # untracked work, and teardown's uncommitted-work refusal would then strand the
-  # worktree forever. Say so once instead of wedging the task's cleanup later.
-  #
-  # check-ignore answers 0 (ignored) or 1 (not ignored); anything else is git
-  # failing to answer at all. Reporting that as a missing ignore rule would send an
-  # operator to edit a .gitignore that already carries the rule while the task runs
-  # without credentials, which is the exact false blocker this seeding exists to
-  # remove. A state that cannot be established is never the benign one.
+  # Act only on what the project ignores: seeding applies while, and only while, the
+  # project ignores .env.local. An unignored .env.local would land as untracked
+  # work, and teardown's uncommitted-work refusal would then strand the worktree
+  # forever. Say so once instead of wedging the task's cleanup later.
   ignored=0
-  check_err=$(git -C "$worktree" check-ignore -q .env.local 2>&1) || ignored=$?
-  if [ "$ignored" -gt 1 ]; then
-    echo "error: could not determine whether '$worktree' ignores .env.local; git check-ignore exited $ignored${check_err:+: $check_err}" >&2
-    echo "error: refusing to seed or retire '$target' while that check is unresolved" >&2
-    return 1
-  fi
+  spawn_worktree_ignores_local_env "$worktree" "$target" "seed or retire" || ignored=$?
+  [ "$ignored" -ne 2 ] || return 1
   if [ "$ignored" -eq 1 ]; then
     if [ ! -e "$target" ] && [ ! -L "$target" ]; then
       echo "warning: not seeding .env.local into '$worktree' because the project does not ignore it; add it to .gitignore so crew worktrees can carry it" >&2
       return 0
     fi
     # Reachable only when the ignore rule changed between the two phases. An
-    # unignored copy already sitting here is untracked work, so the next
-    # acquisition's clean check refuses the slot before this seeding runs again and
-    # nothing can free it. Firstmate authors this file now, so refusing to retire
-    # its own artifact would leave it wedging the slot for good.
+    # unignored copy already sitting here is untracked work, and teardown refuses
+    # that before the next acquisition's clean check ever runs this seeding again,
+    # so nothing automatic can free the slot afterwards. Firstmate authors this file
+    # now, so retiring its own artifact here is the single chance to clear the wedge
+    # unattended; whenever the rule disappears over a copy that cannot be proven to
+    # be this seeding's own, the slot needs human attention, which is what every
+    # refusal below asks for by name.
     retire_unignored_spawn_local_env "$worktree" "$source" "$target" "the next acquisition of '$worktree'" || return 1
     return 0
   fi
@@ -2085,8 +2090,8 @@ seed_spawn_worktree_local_env() {  # <worktree> <pre-refresh|post-refresh>
     echo "error: could not resolve a writable git directory for '$worktree'; refusing to stage .env.local through the working tree where an interrupted copy would strand the worktree" >&2
     return 1
   fi
-  stage_device=$(spawn_path_device "$gitdir") || stage_device=""
-  tree_device=$(spawn_path_device "$worktree") || tree_device=""
+  stage_device=$(fm_inherit_file_device "$gitdir") || stage_device=""
+  tree_device=$(fm_inherit_file_device "$worktree") || tree_device=""
   if [ -z "$stage_device" ] || [ -z "$tree_device" ]; then
     echo "error: could not read which filesystem '$gitdir' and '$worktree' are on, so .env.local cannot be published atomically; refusing rather than guessing" >&2
     return 1

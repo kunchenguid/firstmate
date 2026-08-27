@@ -395,7 +395,7 @@ test_interrupted_seed_scratch_does_not_outlive_revocation() {
   pass "an interrupted seed's staged scratch does not outlive the credential's revocation"
 }
 
-# spawn_path_device asks stat which filesystem a path is on. The shim answers that
+# Seeding asks stat which filesystem a path is on. The shim answers that
 # one question so a cross-filesystem layout can be exercised without a real mount,
 # and delegates every other stat call untouched.
 fake_device_answer() {
