@@ -133,7 +133,9 @@
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
-#   git worktree root distinct from the primary project checkout.
+#   git worktree root distinct from the primary project checkout. An ordinary
+#   task worktree carrying a secondmate-home marker is also refused without
+#   mutation, so a reused copy cannot inject that home's charter or fleet state.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -1725,7 +1727,7 @@ real_path_or_raw() {  # <path>
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real marker marker_id
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
@@ -1738,6 +1740,27 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
   if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+
+  # Treehouse and Orca may reuse a linked copy whose ignored files survived an
+  # earlier lease. A secondmate marker would make tracked session-start hooks
+  # classify this ordinary worker/scout as that persistent home and inject its
+  # charter and fleet state before the agent's first turn. The spawn knows the
+  # requested role authoritatively, so refuse at this boundary before launch.
+  # Never remove the marker or foreign state here: the pooled path may still be
+  # a legitimate persistent secondmate home that was leased by mistake, and
+  # preserving it is safer than converting or resetting that home in place.
+  marker="$WT/$SUB_HOME_MARKER"
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    marker_id=unsafe
+    if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+      IFS= read -r marker_id < "$marker" 2>/dev/null || marker_id=unreadable
+      case "$marker_id" in
+        ''|*[!A-Za-z0-9._-]*) marker_id=unsafe ;;
+      esac
+    fi
+    echo "error: $source yielded an ordinary task worktree that carries secondmate identity '$marker_id'; refusing to launch or mutate the possible persistent secondmate home. Inspect target $inspect_target" >&2
     exit 1
   fi
 }
