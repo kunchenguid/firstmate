@@ -279,7 +279,13 @@ case "${1:-} ${2:-}" in
     ;;
   "tab list")
     if [ "$created" = 1 ]; then
-      printf '{"result":{"tabs":[{"tab_id":"%s","label":"fm-%s","workspace_id":"w1"}]}}\n' w1:t3 "$FM_FAKE_TASK"
+      if [ -n "${FM_FAKE_CREATE_CONTRADICTORY:-}" ]; then
+        printf '{"result":{"tabs":[{"tab_id":"w1:t9","label":"other-task","workspace_id":"w1"},{"tab_id":"%s","label":"fm-%s","workspace_id":"w1"}]}}\n' w1:t3 "$FM_FAKE_TASK"
+      else
+        printf '{"result":{"tabs":[{"tab_id":"%s","label":"fm-%s","workspace_id":"w1"}]}}\n' w1:t3 "$FM_FAKE_TASK"
+      fi
+    elif [ -n "${FM_FAKE_CREATE_CONTRADICTORY:-}" ]; then
+      printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t9","label":"other-task","workspace_id":"w1"}]}}'
     elif [ "${FM_FAKE_SEPARATE_LIVE:-}" = 1 ]; then
       printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t9","label":"other-task","workspace_id":"w1"}]}}'
     elif [ "${FM_FAKE_OLD_LIVE:-}" = 1 ] || [ "${FM_FAKE_OLD_DEAD:-}" = 1 ] || [ "${FM_FAKE_OLD_AMBIG:-}" = 1 ]; then
@@ -290,7 +296,13 @@ case "${1:-} ${2:-}" in
     ;;
   "pane list")
     if [ "$created" = 1 ]; then
-      printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}'
+      if [ -n "${FM_FAKE_CREATE_CONTRADICTORY:-}" ]; then
+        printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p9","tab_id":"w1:t9"},{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}'
+      else
+        printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}'
+      fi
+    elif [ -n "${FM_FAKE_CREATE_CONTRADICTORY:-}" ]; then
+      printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p9","tab_id":"w1:t9"}]}}'
     elif [ "${FM_FAKE_SEPARATE_LIVE:-}" = 1 ]; then
       printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p9","tab_id":"w1:t9"}]}}'
     else
@@ -312,6 +324,8 @@ case "${1:-} ${2:-}" in
       tab=w1:t2
       [ "$pane" = w1:p3 ] && tab=w1:t3
       printf '{"result":{"pane":{"pane_id":"%s","tab_id":"%s","workspace_id":"w1","foreground_cwd":"%s"}}}\n' "$pane" "$tab" "$cwd"
+    elif [ "$pane" = w1:p9 ] && [ -n "${FM_FAKE_CREATE_CONTRADICTORY:-}" ]; then
+      printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p9","tab_id":"w1:t9","workspace_id":"w1","foreground_cwd":"/"}}}'
     elif [ "$pane" = w1:p9 ] && [ "${FM_FAKE_SEPARATE_LIVE:-}" = 1 ]; then
       cwd=$(cat "$D/cwd")
       printf '{"result":{"pane":{"pane_id":"w1:p9","tab_id":"w1:t9","workspace_id":"w1","foreground_cwd":"%s"}}}\n' "$cwd"
@@ -338,6 +352,8 @@ case "${1:-} ${2:-}" in
     : > "$D/created"
     if [ -n "${FM_FAKE_CREATE_INCOMPLETE:-}" ]; then
       printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t3"}}}'
+    elif [ -n "${FM_FAKE_CREATE_CONTRADICTORY:-}" ]; then
+      printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t9"},"root_pane":{"pane_id":"w1:p9"}}}'
     else
       printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}'
     fi
@@ -402,7 +418,7 @@ run_herdr_control() {  # <case-dir> <args...>
     FM_FAKE_OLD_LIVE="${FM_FAKE_OLD_LIVE:-}" FM_FAKE_OLD_DEAD="${FM_FAKE_OLD_DEAD:-}" \
     FM_FAKE_OLD_AMBIG="${FM_FAKE_OLD_AMBIG:-}" FM_FAKE_SEPARATE_LIVE="${FM_FAKE_SEPARATE_LIVE:-}" \
     FM_FAKE_CREATE_FAIL="${FM_FAKE_CREATE_FAIL:-}" FM_FAKE_LAUNCH_FAIL="${FM_FAKE_LAUNCH_FAIL:-}" \
-    FM_FAKE_CREATE_INCOMPLETE="${FM_FAKE_CREATE_INCOMPLETE:-}" \
+    FM_FAKE_CREATE_INCOMPLETE="${FM_FAKE_CREATE_INCOMPLETE:-}" FM_FAKE_CREATE_CONTRADICTORY="${FM_FAKE_CREATE_CONTRADICTORY:-}" \
     FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_POST_PUBLISH_SIGNAL="${FM_FAKE_POST_PUBLISH_SIGNAL:-}" \
     FM_SPAWN_NO_GUARD=1 FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 \
     FM_CONTROL_LAUNCH_WAIT=0.05 FM_CONTROL_RECOVER_MISSING_LAUNCH_WAIT=0.05 \
@@ -1584,6 +1600,25 @@ test_missing_herdr_recovery_reconciles_incomplete_create_response() {
   pass "missing Herdr recovery: incomplete create responses reconcile durably"
 }
 
+test_missing_herdr_recovery_refuses_contradictory_create_identity_without_cleanup() {
+  local dir out rc attempt
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case contradictory-create mr16)
+  FM_FAKE_CREATE_CONTRADICTORY=1 \
+    out=$(run_herdr_control "$dir" mr16 recover-missing --captain-authorized --note 'refuse contradictory create identity'); rc=$?
+  expect_code 1 "$rc" "recovery must refuse a create response naming an unrelated endpoint"$'\n'"$out"
+  assert_contains "$out" "recovery evidence was retained" "contradictory create identity should retain recovery evidence"
+  attempt=$(find "$dir/home/state" -maxdepth 1 -type f -name 'mr16.recover-missing.*.attempt' -print -quit)
+  [ -n "$attempt" ] || fail "contradictory create identity must retain attempt evidence"
+  assert_grep "phase=allocation-failed" "$attempt" "contradictory create identity should record allocation failure"
+  assert_grep "raw_tab=w1:t9" "$attempt" "attempt evidence should retain the unverified raw tab id"
+  assert_grep "raw_pane=w1:p9" "$attempt" "attempt evidence should retain the unverified raw pane id"
+  assert_no_grep 'pane close w1:p9' "$dir/fake/herdr.log" \
+    "an unverified response-derived pane must never receive cleanup authority"
+  unset FM_FAKE_CREATE_CONTRADICTORY
+  pass "missing Herdr recovery: contradictory create identity cannot authorize cleanup"
+}
+
 test_missing_herdr_recovery_keeps_published_replacement_on_interrupt() {
   local dir out rc meta settings
   unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
@@ -1833,6 +1868,7 @@ test_missing_herdr_recovery_requires_captain_authorization
 test_missing_herdr_recovery_reuses_dirty_copy_and_publishes_a_fresh_endpoint
 test_missing_herdr_recovery_preserves_claude_worktree_settings
 test_missing_herdr_recovery_reconciles_incomplete_create_response
+test_missing_herdr_recovery_refuses_contradictory_create_identity_without_cleanup
 test_missing_herdr_recovery_keeps_published_replacement_on_interrupt
 test_missing_herdr_recovery_preserves_opencode_worktree_plugin
 test_missing_herdr_recovery_refuses_unrelated_live_copy_ownership

@@ -766,11 +766,7 @@ recovery_cleanup_exact() {
 
 recovery_replacement_record_created() {
   local raw_tmp phase
-  HERDR_TAB_ID=$FM_BACKEND_HERDR_CREATED_TAB_ID
-  HERDR_PANE_ID=$FM_BACKEND_HERDR_CREATED_PANE_ID
   RECOVERY_REPLACEMENT_SESSION=$HERDR_SES
-  RECOVERY_REPLACEMENT_TAB=$HERDR_TAB_ID
-  RECOVERY_REPLACEMENT_PANE=$HERDR_PANE_ID
   RECOVERY_CREATE_RESPONSE_FILE="$RECOVERY_ATTEMPT_FILE.create-response"
   raw_tmp="$RECOVERY_CREATE_RESPONSE_FILE.tmp.${BASHPID:-$$}"
   if ! printf '%s' "$FM_BACKEND_HERDR_CREATED_RAW_RESPONSE" > "$raw_tmp" \
@@ -779,13 +775,20 @@ recovery_replacement_record_created() {
     rm -f "$raw_tmp" 2>/dev/null || true
     return 1
   fi
-  phase=created-unresolved
-  if [ -n "$HERDR_TAB_ID" ] && [ -n "$HERDR_PANE_ID" ]; then
+  phase=created-unverified
+  if [ "$FM_BACKEND_HERDR_CREATED_VERIFIED" = 1 ]; then
+    HERDR_TAB_ID=$FM_BACKEND_HERDR_CREATED_TAB_ID
+    HERDR_PANE_ID=$FM_BACKEND_HERDR_CREATED_PANE_ID
+    RECOVERY_REPLACEMENT_TAB=$HERDR_TAB_ID
+    RECOVERY_REPLACEMENT_PANE=$HERDR_PANE_ID
     RECOVERY_REPLACEMENT_TARGET="$HERDR_SES:$HERDR_PANE_ID"
     RECOVERY_REPLACEMENT_PENDING=1
     phase=created
   fi
-  recovery_attempt_write "$phase" "create_response=$RECOVERY_CREATE_RESPONSE_FILE"
+  recovery_attempt_write "$phase" \
+    "raw_tab=$FM_BACKEND_HERDR_CREATED_RAW_TAB_ID" \
+    "raw_pane=$FM_BACKEND_HERDR_CREATED_RAW_PANE_ID" \
+    "create_response=$RECOVERY_CREATE_RESPONSE_FILE"
 }
 
 parse_orca_worktree_result() {
@@ -2171,6 +2174,8 @@ elif [ "$RECOVER_MISSING" -eq 1 ]; then
     "$HERDR_SES:$HERDR_WORKSPACE_ID" "$W" "$PROJ_ABS" "" \
     recovery_replacement_record_created >/dev/null; then
     recovery_attempt_write allocation-failed \
+      "raw_tab=$FM_BACKEND_HERDR_CREATED_RAW_TAB_ID" \
+      "raw_pane=$FM_BACKEND_HERDR_CREATED_RAW_PANE_ID" \
       "create_response=$RECOVERY_CREATE_RESPONSE_FILE" || true
     echo "error: could not allocate a fresh Herdr endpoint for missing-endpoint recovery of $ID; recovery evidence was retained" >&2
     exit 1

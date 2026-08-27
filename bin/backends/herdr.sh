@@ -2165,16 +2165,19 @@ fm_backend_herdr_agent_alive() {  # <target>
 # fm_backend_herdr_workspace_prune_seeded_default_tab for the incident and
 # the safety argument). An ADOPTED workspace's caller always passes an empty
 # 4th arg, so this function never even queries for a prune candidate in that
-# case. An optional 5th-argument callback receives the raw create response and
-# partial IDs immediately, then receives reconciled exact IDs when necessary.
+# case. An optional 5th-argument callback first receives raw unverified create
+# evidence, then receives the verified exact IDs after inventory reconciliation.
 # Echoes "<tab_id> <pane_id>" on success.
 fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id> [created_callback]
   local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} created_callback=${5:-}
-  local session wsid list before_tab_ids dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id
+  local session wsid list before_tab_ids dup_tabs dup dup_pane dup_tab_ids out raw_tab_id raw_pane_id tab_id pane_id
   local callback_status=0 reconcile_list reconcile_tabs reconcile_tab reconcile_panes remaining_dup_tabs
   FM_BACKEND_HERDR_CREATED_TAB_ID=
   FM_BACKEND_HERDR_CREATED_PANE_ID=
   FM_BACKEND_HERDR_CREATED_RAW_RESPONSE=
+  FM_BACKEND_HERDR_CREATED_RAW_TAB_ID=
+  FM_BACKEND_HERDR_CREATED_RAW_PANE_ID=
+  FM_BACKEND_HERDR_CREATED_VERIFIED=0
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
@@ -2209,71 +2212,77 @@ EOF
   out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
   # shellcheck disable=SC2034
   FM_BACKEND_HERDR_CREATED_RAW_RESPONSE=$out
-  tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null) || tab_id=
-  pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null) || pane_id=
+  raw_tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null) || raw_tab_id=
+  raw_pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null) || raw_pane_id=
+  # shellcheck disable=SC2034
+  FM_BACKEND_HERDR_CREATED_RAW_TAB_ID=$raw_tab_id
+  # shellcheck disable=SC2034
+  FM_BACKEND_HERDR_CREATED_RAW_PANE_ID=$raw_pane_id
+  if [ -n "$created_callback" ] && ! "$created_callback"; then
+    callback_status=1
+  fi
+  reconcile_list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
+    echo "error: could not reconcile tab identity after herdr tab create" >&2
+    return 1
+  }
+  if ! printf '%s' "$reconcile_list" | jq -e '
+    (.result.tabs | type) == "array"
+    and all(.result.tabs[];
+      ((.tab_id | type) == "string")
+      and ((.tab_id | length) > 0)
+      and ((.label | type) == "string")
+      and ((.workspace_id | type) == "string")
+      and ((.workspace_id | length) > 0))
+  ' >/dev/null 2>&1; then
+    echo "error: could not reconcile tab identity after herdr tab create" >&2
+    return 1
+  fi
+  reconcile_tabs=
+  while IFS=$'\t' read -r reconcile_tab dup workspace_id; do
+    [ "$dup" = "$label" ] && [ "$workspace_id" = "$wsid" ] || continue
+    printf '%s\n' "$before_tab_ids" | grep -Fqx "$reconcile_tab" && continue
+    reconcile_tabs="${reconcile_tabs}${reconcile_tab}"$'\n'
+  done < <(printf '%s' "$reconcile_list" | jq -r '.result.tabs[] | [.tab_id, .label, .workspace_id] | @tsv' 2>/dev/null)
+  reconcile_tabs=${reconcile_tabs%$'\n'}
+  [ -n "$reconcile_tabs" ] && [ "${reconcile_tabs#*$'\n'}" = "$reconcile_tabs" ] || {
+    echo "error: could not reconcile one exact tab identity after herdr tab create" >&2
+    return 1
+  }
+  tab_id=$reconcile_tabs
+  reconcile_panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || {
+    echo "error: could not reconcile pane identity after herdr tab create" >&2
+    return 1
+  }
+  if ! printf '%s' "$reconcile_panes" | jq -e '
+    (.result.panes | type) == "array"
+    and all(.result.panes[];
+      ((.pane_id | type) == "string")
+      and ((.pane_id | length) > 0)
+      and ((.tab_id | type) == "string")
+      and ((.tab_id | length) > 0))
+  ' >/dev/null 2>&1; then
+    echo "error: could not reconcile pane identity after herdr tab create" >&2
+    return 1
+  fi
+  pane_id=$(printf '%s' "$reconcile_panes" | jq -r --arg tab "$tab_id" \
+    '.result.panes[] | select(.tab_id == $tab) | .pane_id' 2>/dev/null) || pane_id=
+  [ -n "$pane_id" ] && [ "${pane_id#*$'\n'}" = "$pane_id" ] || {
+    echo "error: could not reconcile one exact pane identity after herdr tab create" >&2
+    return 1
+  }
+  if { [ -n "$raw_tab_id" ] && [ "$raw_tab_id" != "$tab_id" ]; } \
+     || { [ -n "$raw_pane_id" ] && [ "$raw_pane_id" != "$pane_id" ]; }; then
+    echo "error: herdr tab create response identity contradicts post-create inventory" >&2
+    return 1
+  fi
   # shellcheck disable=SC2034
   FM_BACKEND_HERDR_CREATED_TAB_ID=$tab_id
   # shellcheck disable=SC2034
   FM_BACKEND_HERDR_CREATED_PANE_ID=$pane_id
+  # shellcheck disable=SC2034
+  FM_BACKEND_HERDR_CREATED_VERIFIED=1
   if [ -n "$created_callback" ] && ! "$created_callback"; then
     callback_status=1
-  fi
-  if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
-    reconcile_list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
-      echo "error: could not reconcile tab identity after herdr tab create" >&2
-      return 1
-    }
-    if ! printf '%s' "$reconcile_list" | jq -e '
-      (.result.tabs | type) == "array"
-      and all(.result.tabs[];
-        ((.tab_id | type) == "string")
-        and ((.tab_id | length) > 0)
-        and ((.label | type) == "string")
-        and ((.workspace_id | type) == "string"))
-    ' >/dev/null 2>&1; then
-      echo "error: could not reconcile tab identity after herdr tab create" >&2
-      return 1
-    fi
-    reconcile_tabs=
-    while IFS=$'\t' read -r reconcile_tab dup workspace_id; do
-      [ "$dup" = "$label" ] && [ "$workspace_id" = "$wsid" ] || continue
-      printf '%s\n' "$before_tab_ids" | grep -Fqx "$reconcile_tab" && continue
-      reconcile_tabs="${reconcile_tabs}${reconcile_tab}"$'\n'
-    done < <(printf '%s' "$reconcile_list" | jq -r '.result.tabs[] | [.tab_id, .label, .workspace_id] | @tsv' 2>/dev/null)
-    reconcile_tabs=${reconcile_tabs%$'\n'}
-    [ -n "$reconcile_tabs" ] && [ "${reconcile_tabs#*$'\n'}" = "$reconcile_tabs" ] || {
-      echo "error: could not reconcile one exact tab identity after herdr tab create" >&2
-      return 1
-    }
-    tab_id=$reconcile_tabs
-    reconcile_panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || {
-      echo "error: could not reconcile pane identity after herdr tab create" >&2
-      return 1
-    }
-    if ! printf '%s' "$reconcile_panes" | jq -e '
-      (.result.panes | type) == "array"
-      and all(.result.panes[];
-        ((.pane_id | type) == "string")
-        and ((.pane_id | length) > 0)
-        and ((.tab_id | type) == "string")
-        and ((.tab_id | length) > 0))
-    ' >/dev/null 2>&1; then
-      echo "error: could not reconcile pane identity after herdr tab create" >&2
-      return 1
-    fi
-    pane_id=$(printf '%s' "$reconcile_panes" | jq -r --arg tab "$tab_id" \
-      '.result.panes[] | select(.tab_id == $tab) | .pane_id' 2>/dev/null) || pane_id=
-    [ -n "$pane_id" ] && [ "${pane_id#*$'\n'}" = "$pane_id" ] || {
-      echo "error: could not reconcile one exact pane identity after herdr tab create" >&2
-      return 1
-    }
-    # shellcheck disable=SC2034
-    FM_BACKEND_HERDR_CREATED_TAB_ID=$tab_id
-    # shellcheck disable=SC2034
-    FM_BACKEND_HERDR_CREATED_PANE_ID=$pane_id
-    if [ -n "$created_callback" ] && ! "$created_callback"; then
-      callback_status=1
-    fi
   fi
   [ "$callback_status" = 0 ] || return 1
   [ -z "$seeded_tab_id" ] || fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded_tab_id"
