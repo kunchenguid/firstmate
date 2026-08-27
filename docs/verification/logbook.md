@@ -21,12 +21,17 @@ ok - start creates one private page and update atomically changes only its delim
 ok - malformed JSON and fake progress claims refuse without touching the page
 ok - meaningful updates retain all embedded milestone history newest first
 ok - mission text cannot escape the private logbook path
+ok - intermediate symlinks cannot escape the logbook root
 ok - one live writer owns each mutation
+ok - duplicate qualifying updates are refused before publication
+ok - retained milestone fingerprints refuse non-immediate duplicates
+ok - malformed milestone ordering is refused before publication
 ok - close records the final outcome, preserves the page, and retires active registration
 ok - Luxe-like opaque rendering succeeds without any sibling-resource request
 ok - missing and malformed embedded data leave a usable shell with a visible stale warning
 ok - manual refresh reloads the existing page and shows the atomically embedded update
 ok - embedded captain values render as text rather than browser markup
+ok - retained milestone history is not capped by boundary item limits
 ```
 
 The renderer regression deliberately gives the page an opaque Luxe-like origin and a `fetch` implementation that always throws.
