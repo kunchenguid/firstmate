@@ -61,6 +61,7 @@ Main independently applies judgment about whether and how to surface, summarize,
 If envelope encoding fails, the note degrades to the same judgment-and-ownership instruction as plain text rather than losing the outcome or opening another turn.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is also delivered silently with no rendered note, while every other `routine` outcome stays rendered with its sailboat prefix.
 The branch prompt owns the verdict criteria, including its unconditional explicit-request rule; unsolicited routine outcomes remain routine sailboat notes, unchanged fleet reviews remain silent, and doubt escalates.
+The extension refreshes the main-dialog mirror synchronously before accepting each branch wake, so a request from the current in-flight main turn reaches the branch before that wake's prompt rather than waiting for `turn_end`.
 Main can read the durable outcome store on demand through its `fm_branch_outcomes` tool.
 
 ## Heartbeat routing

@@ -146,6 +146,7 @@ export async function createAgentSession(options) {
       }
       session.ops.push({ kind: "prompt", text });
       (globalThis.__fmPrompts ??= []).push(text);
+      await globalThis.__fmOnBranchPrompt?.({ session, text });
     },
     async sendCustomMessage(message, opts) {
       if (globalThis.__fmMirrorGate) {
@@ -809,77 +810,132 @@ test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, outcomeScript, home }; })()`);
-const { fire, dispatch, settle, sentToMain, outcomeScript, home } = globalThis.__t;
-import { readFileSync } from "node:fs";
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, outcomeScript, home, realRoot }; })()`);
+const { fire, dispatch, settle, sentToMain, outcomeScript, home, realRoot } = globalThis.__t;
+import { existsSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
-// An equivalent healthy result with no captain request stays an ordinary
-// sailboat note and does not open a main turn.
+const fleetOperations = [];
+function runFleetCommand(kind, args) {
+  fleetOperations.push({ kind, args: [...args], actor: "branch" });
+  const result = spawnSync("bash", [`${realRoot}/bin/fm-wake-drain.sh`, ...args], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      FM_HOME: home,
+      FM_STATE_OVERRIDE: `${home}/state`,
+      FM_SUPERVISION_ACTOR: "branch",
+      FM_LEASE_HOLDER_PID: String(process.pid),
+    },
+  });
+  if (result.status !== 0) {
+    throw new Error(`${kind} failed (${result.status}): ${result.stdout}\n${result.stderr}`);
+  }
+  return result;
+}
+
+// The stubbed provider executes the same public branch turn contract as a real
+// provider: consume its delivered mirror context, drain the owned wake, choose
+// a verdict, report through the registered tool, and acknowledge that drain.
+globalThis.__fmOnBranchPrompt = async ({ session }) => {
+  const mirror = session.ops
+    .filter((op) => op.kind === "custom" && op.message.customType === "fm-main-mirror")
+    .map((op) => op.message.content);
+  const directlyRequested = mirror.some((text) =>
+    text === "[captain] Please give me a fresh mini system-resource report."
+  );
+  const drained = runFleetCommand("drain", []);
+  const ack = drained.stderr.match(/--ack-through ([0-9]+) --recovery-generation ([A-Za-z0-9._-]+)/);
+  if (!ack) throw new Error(`drain did not return its acknowledgement command: ${drained.stderr}`);
+  const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+  const result = await report.execute(
+    `resource-result-${fleetOperations.length}`,
+    {
+      task: "task-resource",
+      verdict: directlyRequested ? "captain" : "routine",
+      summary: "healthy resource report: CPU 12%, memory 41%",
+      wake: "signal: healthy resource result",
+    },
+    undefined,
+    undefined,
+    {},
+  );
+  if (result.isError) throw new Error(`branch report failed: ${JSON.stringify(result)}`);
+  runFleetCommand("ack", ["--ack-through", ack[1], "--recovery-generation", ack[2]]);
+};
+
+// With no captain request, the healthy result remains a rendered sailboat and
+// the scripted branch turn does not open main.
 const unsolicited = dispatch("signal: healthy resource result");
 if (!unsolicited.accepted) throw new Error("branch did not accept the unsolicited result");
-await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "unsolicited result prompt");
-const report = globalThis.__fmSessions[0].options.customTools.find((tool) => tool.name === "fm_branch_report");
-const routine = await report.execute(
-  "unsolicited-result",
-  { task: "task-resource", verdict: "routine", summary: "healthy resource report: CPU 12%, memory 41%" },
-  undefined,
-  undefined,
-  {},
-);
-if (routine.isError) throw new Error(`unsolicited routine result failed: ${JSON.stringify(routine)}`);
+await settle(() => fleetOperations.length === 2, "unsolicited result acknowledgement");
 if (sentToMain.length !== 1 || sentToMain[0].options.triggerTurn) {
   throw new Error(`unsolicited healthy result opened a main turn: ${JSON.stringify(sentToMain)}`);
 }
-if (sentToMain[0].message.display !== true || !sentToMain[0].message.content.startsWith("⛵ task-resource:")) {
-  throw new Error(`unsolicited healthy result was not a rendered sailboat note: ${JSON.stringify(sentToMain[0])}`);
+const sailboat = sentToMain[0];
+if (sailboat.message.display !== true || !sailboat.message.content.startsWith("⛵ task-resource:")) {
+  throw new Error(`unsolicited healthy result was not a rendered sailboat note: ${JSON.stringify(sailboat)}`);
 }
 
-// Now mirror an explicit captain request, then deliver the same kind of
-// healthy measured result. The branch's captain verdict must open exactly one
-// main turn for this requested answer.
-fire("turn_end", {}, {
+// MAIN's next conversational turn can use the merged note as content without
+// taking fleet ownership. This provider adapter chooses to summarize it; the
+// operation ledger below proves that choice did not drain, rerun, or ack.
+function runMainConversationTurn(messages) {
+  const note = messages.find((sent) => sent.message.content.startsWith("⛵ task-resource:"));
+  if (!note) throw new Error("main could not see the sailboat outcome");
+  return `The latest ${note.message.content.slice(2)}`;
+}
+const mainReply = runMainConversationTurn(sentToMain);
+if (!mainReply.includes("healthy resource report: CPU 12%, memory 41%")) {
+  throw new Error(`main did not exercise judgment over the sailboat content: ${mainReply}`);
+}
+if (fleetOperations.length !== 2) throw new Error("main conversation reprocessed the fleet event");
+
+// Start a real main turn whose user entry is already in the session, then let
+// the result arrive before turn_end. The dispatch boundary must mirror that
+// current request before the branch provider classifies the equivalent result.
+const entries = [{
+  type: "message",
+  message: { role: "user", content: "Please give me a fresh mini system-resource report." },
+}];
+const mainCtx = {
   model: { provider: "anthropic", id: "main-model" },
   sessionManager: {
     getSessionFile: () => `${home}/main.jsonl`,
-    getEntries: () => [{
-      type: "message",
-      message: { role: "user", content: "Please give me a fresh mini system-resource report." },
-    }],
+    getEntries: () => entries,
   },
-});
-const requested = dispatch("signal: requested healthy resource result");
+};
+fire("before_agent_start", { prompt: entries[0].message.content }, mainCtx);
+fire("agent_start", {}, mainCtx);
+const requested = dispatch("signal: healthy resource result");
 if (!requested.accepted) throw new Error("branch did not accept the requested result");
-await settle(() => (globalThis.__fmPrompts ?? []).length === 2, "requested result prompt");
-const captain = await report.execute(
-  "requested-result",
-  { task: "task-resource", verdict: "captain", summary: "healthy resource report: CPU 12%, memory 41%" },
-  undefined,
-  undefined,
-  {},
-);
-if (captain.isError) throw new Error(`requested captain result failed: ${JSON.stringify(captain)}`);
+await settle(() => fleetOperations.length === 4, "requested result acknowledgement");
+if ((globalThis.__fmPrompts ?? []).length !== 2) throw new Error("a handled fleet wake was rerun");
 const turns = sentToMain.filter((sent) => sent.options.triggerTurn === true);
 if (turns.length !== 1 || turns[0].options.deliverAs !== "followUp") {
-  throw new Error(`requested healthy result did not open exactly one main turn: ${JSON.stringify(sentToMain)}`);
+  throw new Error(`pre-turn-end requested result did not open exactly one main turn: ${JSON.stringify(sentToMain)}`);
 }
 if (sentToMain.length !== 2) throw new Error(`one result was reprocessed into ${sentToMain.length} main messages`);
-
-// The report boundary owns the event once: both outcomes are durable and
-// acknowledged, while the routine sailboat remains available for main's
-// judgment without another drain, rerun, or acknowledgement.
+if (fleetOperations.map((operation) => operation.kind).join(",") !== "drain,ack,drain,ack") {
+  throw new Error(`fleet event ownership repeated or reordered work: ${JSON.stringify(fleetOperations)}`);
+}
+if (fleetOperations.some((operation) => operation.actor !== "branch")) {
+  throw new Error(`main took fleet-event ownership: ${JSON.stringify(fleetOperations)}`);
+}
+if (existsSync(`${home}/state/.wake-queue`) && readFileSync(`${home}/state/.wake-queue`, "utf8") !== "") {
+  throw new Error("acknowledged fleet wake remained queued for another owner");
+}
 const rows = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line));
 if (rows.length !== 2 || rows[0].verdict !== "routine" || rows[1].verdict !== "captain") {
-  throw new Error(`outcomes were not recorded once in order: ${JSON.stringify(rows)}`);
+  throw new Error(`provider classifications were not recorded once in order: ${JSON.stringify(rows)}`);
 }
-if (outcomeScript(["unread"]) !== "") throw new Error("handled outcomes remained unread for reprocessing");
-console.log("requested=one-turn unsolicited=routine-sailboat owned=once judgment=free");
+if (outcomeScript(["unread"]) !== "") throw new Error("merged outcomes remained unread for redelivery");
+process.exit(0);
 EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "requested and unsolicited healthy outcomes must follow their distinct public delivery paths: $out"
-  assert_contains "$out" "requested=one-turn unsolicited=routine-sailboat owned=once judgment=free" \
-    "behavioral regression did not exercise the requested, unsolicited, ownership, and judgment cases"
-  pass "a requested healthy result opens one turn, while an unsolicited equivalent stays a sailboat note and is handled once"
+  pass "requested and unsolicited healthy outcomes keep distinct delivery and event ownership"
 }
 
 test_captain_outcome_encoding_failure_delivers_plain_instruction() {

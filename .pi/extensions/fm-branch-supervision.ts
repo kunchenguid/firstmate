@@ -6,8 +6,9 @@
 // real tools and reports through the fm_branch_report custom tool, which
 // writes the durable outcome store FIRST (bin/fm-branch-outcome.sh) and then
 // merges an append-only note to main's tail. Main's captain/assistant dialog
-// is mirrored into the branch as read-only fm-main-mirror context at main's
-// turn_end. Pi-only by construction: this file lives in .pi/extensions, so no
+// is mirrored into the branch as read-only fm-main-mirror context at the
+// pre-dispatch boundary and at main's turn_end. Pi-only by construction: this
+// file lives in .pi/extensions, so no
 // other harness ever loads it. Supervision is default-on for every task once
 // this Pi session owns the fleet lock: no captain grant file is required.
 // Away mode (or a broken branch) keeps today's wake-to-main behavior
@@ -383,6 +384,7 @@ export default function (pi: ExtensionAPI) {
   let branchChain: Promise<void> = Promise.resolve();
   const pendingMirror: MirrorItem[] = [];
   const mirrorCollection: MirrorCollectionState = { collectAnchor: null, pendingCursor: null };
+  let currentMainSession: ReadonlyEntries | null = null;
   // One revision for BOTH selections: a model or effort change invalidates an
   // in-flight branch build exactly the same way.
   let branchSelectionRevision = 0;
@@ -938,6 +940,16 @@ ${context.command}
       });
   }
 
+  function collectCurrentMainDialog(): boolean {
+    if (!currentMainSession) return true;
+    try {
+      pendingMirror.push(...collectMainDialog(currentMainSession, mirrorCollection));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function enqueueMirrorFlush(): void {
     if (!branch || pendingMirror.length === 0) return;
     const flushGeneration = generation;
@@ -963,8 +975,14 @@ ${context.command}
     if (!actingAsOwner()) return; // cold start pre-lock, secondary session, or shutdown
     if (afkActive()) return; // the away daemon owns supervision while afk
     if (branchBroken) return; // fail back to today's wake-to-main path
+    if (!collectCurrentMainDialog()) return;
     offer.accept();
     enqueueWake(offer.message, generation);
+  });
+
+  pi.on?.("before_agent_start", (_event, ctx) => {
+    rememberMainModel(ctx);
+    currentMainSession = ctx?.sessionManager ?? null;
   });
 
   pi.on?.("agent_start", () => {
@@ -977,18 +995,15 @@ ${context.command}
     mainStreaming = false;
   });
 
-  // Mirror at main's turn_end: collect the new captain/assistant dialog into
-  // the volatile queue, then deliver it through the serialized chain so it
-  // lands before any later wake. The durable cursor advances only in
+  // The dispatch handler collects from the live main session immediately
+  // before accepting a wake, so dialog from the current in-flight turn joins
+  // the serialized chain before that wake's branch prompt. turn_end remains
+  // the idle-path mirror flush. The durable cursor advances only in
   // flushMirror after the complete pending batch reaches the branch.
   pi.on?.("turn_end", (_event, ctx) => {
     rememberMainModel(ctx);
-    if (!actingAsOwner()) return;
-    try {
-      pendingMirror.push(...collectMainDialog(ctx.sessionManager, mirrorCollection));
-    } catch {
-      return;
-    }
+    currentMainSession = ctx.sessionManager;
+    if (!actingAsOwner() || !collectCurrentMainDialog()) return;
     enqueueMirrorFlush();
   });
 
@@ -1001,6 +1016,7 @@ ${context.command}
   // recorded pointer. Terminal quit simply never fires another session_start.
   pi.on?.("session_start", (_event, ctx) => {
     rememberMainModel(ctx);
+    currentMainSession = ctx?.sessionManager ?? null;
     shuttingDown = false;
     branchBroken = "";
     generation += 1;
@@ -1038,6 +1054,7 @@ ${context.command}
     shuttingDown = true;
     generation += 1;
     pendingMirror.length = 0;
+    currentMainSession = null;
     mirrorCollection.collectAnchor = null;
     mirrorCollection.pendingCursor = null;
     if (branch) {
