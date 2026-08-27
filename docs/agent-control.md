@@ -97,6 +97,8 @@ The durable transaction is recorded at `state/<id>.control-recover-missing` and 
 The prior metadata remains authoritative while the new pane is created, moved into the existing copy, wired to the recorded harness, and positively classified as alive.
 Only then does the launch owner atomically publish a replacement metadata file carrying the same task id, project, worktree, kind, and a fresh Herdr endpoint.
 A launch or publication failure never claims recovery, keeps the prior record when it was not published, and retains the attempt evidence for reconciliation.
+Starting the operation again while a prior recovery journal exists is refused unless that journal is conclusively `complete` for this exact task and published endpoint, in which case it is retired automatically and a new transaction is permitted; unresolved or malformed prior evidence still blocks a new attempt.
+An ordinary `relaunch` preserves the completed transaction's binding in the task's metadata so this reconciliation still works after a later harness switch.
 When a launch failure retires the fresh replacement wiring before publication, the rollback also restores the saved brief from its preserved copy and records in the transaction journal whether that restoration succeeded, so the prior record is never left pointing at a brief still carrying the failed replacement's appended recovery instructions.
 A replacement record that was published before a later failure is kept rather than rewritten to the disappeared endpoint.
 

@@ -312,7 +312,7 @@ Observed guarantee: a restored no-agent tab was replaced create-before-close, wh
 
 ### Explicit missing-endpoint recovery
 
-The guarded recovery contract was verified on 2026-08-26 with the portable Herdr fake and real Git worktree fixtures.
+The guarded recovery contract was verified on 2026-08-27 with the portable Herdr fake and real Git worktree fixtures.
 The exact regression command was:
 
 ```sh
@@ -324,8 +324,11 @@ Observed recovery output:
 ```text
 ok - missing Herdr recovery: explicit captain authorization is mandatory
 ok - missing Herdr recovery: dirty existing copy is preserved and a fresh endpoint is published atomically
+ok - missing Herdr recovery: completed evidence permits a later authorized recovery
+ok - ordinary relaunch preserves completed recovery authority for a later missing endpoint
 ok - missing Herdr recovery: Claude worktree settings are merged, not overwritten
 ok - missing Herdr recovery: incomplete create responses reconcile durably
+ok - missing Herdr recovery: contradictory create identity cannot authorize cleanup
 ok - missing Herdr recovery: publication is the irreversible cleanup boundary
 ok - missing Herdr recovery: OpenCode project plugins are preserved
 ok - missing Herdr recovery: an unrelated live agent in the recorded copy is refused
@@ -349,7 +352,7 @@ The dirty-copy regression proved that uncommitted files, branch identity, task i
 The publication regression proved that the prior metadata remains authoritative until the new pane enters the existing worktree and reads alive, after which a same-directory atomic replacement publishes the new endpoint.
 The allocation- and launch-failure regressions proved that partial recovery evidence remains available, the prior metadata remains in place when no replacement was published, and an exact replacement endpoint is cleaned when its state is unambiguous.
 When a launch failure retires the fresh harness wiring before publication, the rollback also restores the saved brief from its preserved copy and records in the transaction journal whether that restoration succeeded (`rollback=prior-record-kept-instructions-restored` or `-instructions-restore-failed`), so a prior record is never left pointing at a brief still carrying the failed replacement's appended recovery instructions.
-The operation refuses remote and secondmate records and does not change normal relaunch, automatic recovery, watcher, teardown, or discard behavior.
+The operation refuses remote and secondmate records and does not change normal relaunch, automatic recovery, watcher, or discard behavior; `bin/fm-teardown.sh` was extended to retire this operation's own artifact family (`tests/fm-teardown.test.sh`, `teardown retires the complete missing-endpoint recovery artifact family`), and ordinary `relaunch` was extended to keep the completed-transaction binding so a later missing-endpoint recovery can still reconcile it (`ordinary relaunch preserves completed recovery authority for a later missing endpoint`).
 
 The real lifecycle opt-in for this path must use the named non-default Herdr lab helper and its default-session tripwire:
 
