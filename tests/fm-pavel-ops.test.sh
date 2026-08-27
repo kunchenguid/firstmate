@@ -96,7 +96,13 @@ id=$1
 project=$2
 [ "$project" = "$FM_HOME/projects/aln" ] || { printf 'wrong project path: %s\n' "$project" >&2; exit 1; }
 mkdir -p "$FM_HOME/state" "$FM_HOME/worktrees/$id"
-printf 'endpoint_task_id=%s\nkind=ship\nharness=pi\nmode=no-mistakes\nyolo=on\nworktree=%s\n' "$id" "$FM_HOME/worktrees/$id" > "$FM_HOME/state/$id.meta"
+git -C "$FM_HOME/worktrees/$id" init -q
+git -C "$FM_HOME/worktrees/$id" config user.email pavel-tests@example.invalid
+git -C "$FM_HOME/worktrees/$id" config user.name "Pavel Tests"
+printf 'spawned\n' > "$FM_HOME/worktrees/$id/spawned.txt"
+git -C "$FM_HOME/worktrees/$id" add spawned.txt
+git -C "$FM_HOME/worktrees/$id" commit -q -m spawned
+printf 'endpoint_task_id=%s\nkind=ship\nharness=pi\nmode=no-mistakes\nyolo=on\nproject=%s\nworktree=%s\n' "$id" "$project" "$FM_HOME/worktrees/$id" > "$FM_HOME/state/$id.meta"
 SH
 chmod 0755 "$FAKEBIN/fm-spawn"
 
@@ -423,7 +429,8 @@ with open(path, "w", encoding="utf-8") as handle:
     json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
     handle.write("\n")
 with open(os.path.join(os.environ["HOME_DIR"], "state", task_id + ".meta"), "w", encoding="utf-8") as handle:
-    handle.write("kind=ship\nharness=pi\nmode=no-mistakes\nyolo=on\n")
+    handle.write(f"endpoint_task_id={task_id}\nkind=ship\nharness=pi\nmode=no-mistakes\nyolo=on\n")
+    handle.write(f"project={os.environ['HOME_DIR']}/projects/aln\n")
     handle.write(f"worktree={os.environ['HOME_DIR']}/worktrees/{task_id}\n")
     handle.write(f"pr={pr_url}\npr_head={pr_head}\n")
 PY
@@ -984,23 +991,36 @@ for metadata_axis in \
 done
 pass "default readiness refuses invalid Pavel dispatch metadata"
 
-wrong_worktree=$(ingest 143 53 'Проверить чужой worktree' | json_field "['event']")
-run_ops classify "$wrong_worktree" --as task --title 'Reject wrong worktree' --intent 'Reject readiness from a different checkout' \
+alternate_worktree=$(ingest 143 53 'Проверить treehouse worktree' | json_field "['event']")
+run_ops classify "$alternate_worktree" --as task --title 'Accept treehouse worktree' --intent 'Accept the recorded isolated worker checkout' \
   --reason 'ordinary delivery' --authority ordinary >/dev/null
-run_ops drive "$wrong_worktree" >/dev/null
-wrong_worktree_task=$(run_ops inspect "$wrong_worktree" | json_field "['task_id']")
-wrong_worktree_head=$(fixture_git_head "$HOME_DIR/worktrees/$wrong_worktree_task")
-wrong_worktree_other="$TMP_ROOT/wrong-worktree-$wrong_worktree_task"
-git clone -q "$HOME_DIR/worktrees/$wrong_worktree_task" "$wrong_worktree_other"
-printf 'pr=%s\npr_head=%s\nworktree=%s\n' 'https://github.com/o/r/pull/24' "$wrong_worktree_head" "$wrong_worktree_other" >> "$HOME_DIR/state/$wrong_worktree_task.meta"
+run_ops drive "$alternate_worktree" >/dev/null
+alternate_worktree_task=$(run_ops inspect "$alternate_worktree" | json_field "['task_id']")
+alternate_worktree_dir="$TMP_ROOT/treehouse-$alternate_worktree_task"
+alternate_worktree_head=$(fixture_git_head "$alternate_worktree_dir")
+printf 'pr=%s\npr_head=%s\nworktree=%s\n' 'https://github.com/o/r/pull/24' "$alternate_worktree_head" "$alternate_worktree_dir" >> "$HOME_DIR/state/$alternate_worktree_task.meta"
 printf 'state: done · source: run-step · checks green: PR ready for review\n' > "$PAVEL_STATUS_FILE"
-run_ops_default_status drive "$wrong_worktree" >/dev/null
-if run_ops_default_status drive "$wrong_worktree" >/dev/null 2>&1; then
-  fail "default status helper blessed a non-task worktree"
+run_ops_default_status drive "$alternate_worktree" >/dev/null
+run_ops_default_status drive "$alternate_worktree" >/dev/null
+[ "$(run_ops inspect "$alternate_worktree" | json_field "['state']")" = delivery_ready ] \
+  || fail "default readiness rejected a recorded isolated worktree"
+pass "default readiness accepts recorded isolated worktrees"
+
+project_worktree=$(ingest 144 54 'Проверить project worktree' | json_field "['event']")
+run_ops classify "$project_worktree" --as task --title 'Reject project worktree' --intent 'Reject readiness from the project checkout' \
+  --reason 'ordinary delivery' --authority ordinary >/dev/null
+run_ops drive "$project_worktree" >/dev/null
+project_worktree_task=$(run_ops inspect "$project_worktree" | json_field "['task_id']")
+project_worktree_head=$(fixture_git_head "$HOME_DIR/projects/aln")
+printf 'pr=%s\npr_head=%s\nworktree=%s\n' 'https://github.com/o/r/pull/25' "$project_worktree_head" "$HOME_DIR/projects/aln" >> "$HOME_DIR/state/$project_worktree_task.meta"
+printf 'state: done · source: run-step · checks green: PR ready for review\n' > "$PAVEL_STATUS_FILE"
+run_ops_default_status drive "$project_worktree" >/dev/null
+if run_ops_default_status drive "$project_worktree" >/dev/null 2>&1; then
+  fail "default status helper blessed the project checkout"
 fi
-[ "$(run_ops inspect "$wrong_worktree" | json_field "['state']")" = validating ] \
-  || fail "wrong worktree readiness mutated past validation"
-pass "default readiness requires the task worktree"
+[ "$(run_ops inspect "$project_worktree" | json_field "['state']")" = validating ] \
+  || fail "project worktree readiness mutated past validation"
+pass "default readiness rejects the project checkout"
 
 pr_substitution=$(ingest 125 35 'Проверить подмену PR' | json_field "['event']")
 run_ops classify "$pr_substitution" --as task --title 'Reject PR substitution' --intent 'Ship only the registered PR' \

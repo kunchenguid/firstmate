@@ -1090,11 +1090,33 @@ def validate_dispatched_owner_record(home: Home, event: dict[str, Any]) -> dict[
         raise OpsError("Pavel dispatch did not use the verified Pi adapter")
     if meta.get("mode") != "no-mistakes" or meta.get("yolo") != "on":
         raise OpsError("Pavel dispatch did not retain no-mistakes yolo delivery")
+    recorded_project_raw = str(meta.get("project") or "")
+    if not recorded_project_raw:
+        raise OpsError("Pavel dispatch did not record the configured project")
+    try:
+        configured_project = Path(project_path(home)).resolve(strict=True)
+        recorded_project = Path(recorded_project_raw).resolve(strict=True)
+    except OSError as exc:
+        raise OpsError("Pavel dispatch did not record the configured project") from exc
+    if recorded_project != configured_project:
+        raise OpsError("Pavel dispatch project is not the configured Pavel project")
     worktree = meta.get("worktree")
-    if not worktree or Path(worktree).resolve() in {home.home, home.root}:
+    if not worktree:
         raise OpsError("Pavel dispatch did not record an isolated task worktree")
-    if Path(worktree).resolve() != (home.home / "worktrees" / task_id).resolve():
-        raise OpsError("Pavel dispatch did not record this task's isolated worktree")
+    try:
+        worktree_path = Path(worktree).resolve(strict=True)
+    except OSError as exc:
+        raise OpsError("Pavel dispatch did not record an isolated task worktree") from exc
+    if worktree_path in {home.home, home.root, configured_project}:
+        raise OpsError("Pavel dispatch did not record an isolated task worktree")
+    result = subprocess.run(
+        ["git", "-C", str(worktree_path), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0 or Path(result.stdout.strip()).resolve() != worktree_path:
+        raise OpsError("Pavel dispatch worktree is not a live isolated git checkout")
     return meta
 
 

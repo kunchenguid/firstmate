@@ -62,16 +62,47 @@ def worktree_head(meta: dict[str, str]) -> str:
     return result.stdout.strip()
 
 
-def readiness_owner_valid(home: Path, task_id: str, meta: dict[str, str]) -> bool:
+def configured_project(home: Path) -> str:
+    config_input = os.environ.get("FM_PAVEL_OPS_CONFIG", str(home / "config" / "pavel-ops.json"))
+    try:
+        with Path(config_input).expanduser().open(encoding="utf-8") as handle:
+            config = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return ""
+    project_path = str(config.get("project_path") or "").strip()
+    if project_path:
+        path = Path(project_path).expanduser()
+        if not path.is_absolute():
+            path = home / path
+    else:
+        project = str(config.get("project") or "").strip()
+        if not project:
+            return ""
+        path = home / "projects" / project
+    try:
+        return str(path.resolve(strict=True))
+    except OSError:
+        return ""
+
+
+def readiness_owner_valid(home: Path, task_id: str, meta: dict[str, str], project: str) -> bool:
     worktree = meta.get("worktree", "")
+    recorded_project_raw = str(meta.get("project") or "")
+    if not worktree or not recorded_project_raw or not project:
+        return False
+    try:
+        worktree_path = Path(worktree).resolve(strict=True)
+        recorded_project = Path(recorded_project_raw).resolve(strict=True)
+    except OSError:
+        return False
     return (
         meta.get("endpoint_task_id") == task_id
         and meta.get("kind") == "ship"
         and meta.get("harness") == "pi"
         and meta.get("mode") == "no-mistakes"
         and meta.get("yolo") == "on"
-        and bool(worktree)
-        and Path(worktree).resolve() == (home / "worktrees" / task_id).resolve()
+        and str(recorded_project) == project
+        and worktree_path not in {home, Path(project)}
     )
 
 
@@ -111,7 +142,7 @@ def main() -> int:
         emit(base)
         return 0
     meta = parse_meta(state_dir / f"{task_id}.meta")
-    if not readiness_owner_valid(home, task_id, meta):
+    if not readiness_owner_valid(home, task_id, meta, configured_project(home)):
         base["state"] = "validating"
         base["evidence"] = "run-step readiness is not from the expected Pavel Pi ship worker"
         emit(base)
