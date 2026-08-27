@@ -206,6 +206,238 @@ tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
 ```
 
+### Secondmate stall and Codex-on-Herdr red/green record
+
+The six new behavioral cases were run individually on 2026-08-27 with GNU Bash 3.2.57 on macOS 26.5.1.
+The unfixed revision was `2e2907964a974cac6bbd884f9d98307faf023148`, and the fixed revision was `d6a6d5f7b634581426a67a844439160a51888952`.
+The same fixed-revision test definitions were copied into the unfixed tree so each pair exercised an identical assertion against the two production implementations.
+Two cases were RED before and GREEN after, so they demonstrate the fix.
+The other four were GREEN before and GREEN after, so they are regression guards and are not evidence that the fix changed behavior.
+
+The exact preparation and single-case runner were:
+
+```sh
+fixed_root=$PWD
+unfixed_root=$PWD/.verification-unfixed
+[ ! -e "$unfixed_root" ] || exit 73
+mkdir "$unfixed_root"
+git archive 2e2907964a974cac6bbd884f9d98307faf023148 | tar -x -C "$unfixed_root"
+cp tests/fm-busy-state.test.sh tests/fm-wake-queue.test.sh "$unfixed_root/tests/"
+
+run_test() {
+  local suite=$1 first_call=$2 test_name=$3
+  bash -c '
+    case "$1" in
+      *fm-busy-state.test.sh) . tests/lib.sh ;;
+      *fm-wake-queue.test.sh) . tests/wake-helpers.sh ;;
+      *) exit 64 ;;
+    esac
+    eval "$(awk -v first="$2" '\''$0 == first { exit } /^\\. .*BASH_SOURCE/ { next } { print }'\'' "$1")"
+    "$3"
+  ' _ "$suite" "$first_call" "$test_name"
+}
+
+run_case() {
+  local revision=$1 root=$2 suite=$3 first_call=$4 test_name=$5 rc
+  printf 'CASE revision=%s test=%s\n' "$revision" "$test_name"
+  (cd "$root" && run_test "$suite" "$first_call" "$test_name")
+  rc=$?
+  printf 'exit=%s\n' "$rc"
+}
+```
+
+#### Fix demonstration: Codex on Herdr native busy
+
+This proves that independent Herdr-native `busy` remains reachable even though Codex-owned semantic sources are unverified.
+
+Unfixed command:
+
+```sh
+run_case unfixed "$unfixed_root" tests/fm-busy-state.test.sh test_arm_seeds_busy_spawn test_codex_herdr_native_busy_is_independent_proof
+```
+
+Full unfixed output:
+
+```text
+CASE revision=unfixed test=test_codex_herdr_native_busy_is_independent_proof
+not ok - Herdr-native busy must remain reachable when Codex's own sources are unverified, got 'unknown codex-unverified'
+exit=1
+```
+
+Fixed command:
+
+```sh
+run_case fixed "$fixed_root" tests/fm-busy-state.test.sh test_arm_seeds_busy_spawn test_codex_herdr_native_busy_is_independent_proof
+```
+
+Full fixed output:
+
+```text
+CASE revision=fixed test=test_codex_herdr_native_busy_is_independent_proof
+ok - Herdr-native busy independently proves a Codex turn is active
+exit=0
+```
+
+#### Regression guard: Codex on Herdr native idle
+
+This proves that Herdr-native `idle` remains inconclusive and leaves Codex explicitly `unknown codex-unverified`.
+
+Unfixed command:
+
+```sh
+run_case unfixed "$unfixed_root" tests/fm-busy-state.test.sh test_arm_seeds_busy_spawn test_codex_herdr_native_idle_stays_unknown
+```
+
+Full unfixed output:
+
+```text
+CASE revision=unfixed test=test_codex_herdr_native_idle_stays_unknown
+ok - Herdr-native idle remains inconclusive for Codex
+exit=0
+```
+
+Fixed command:
+
+```sh
+run_case fixed "$fixed_root" tests/fm-busy-state.test.sh test_arm_seeds_busy_spawn test_codex_herdr_native_idle_stays_unknown
+```
+
+Full fixed output:
+
+```text
+CASE revision=fixed test=test_codex_herdr_native_idle_stays_unknown
+ok - Herdr-native idle remains inconclusive for Codex
+exit=0
+```
+
+#### Fix demonstration: aged busy secondmate queue
+
+This proves that an aged foreign queue stays quiet when semantic liveness positively proves the secondmate busy.
+
+Unfixed command:
+
+```sh
+run_case unfixed "$unfixed_root" tests/fm-wake-queue.test.sh test_self_held_lock_reclaims_instead_of_deadlocking test_secondmate_busy_aged_queue_stays_quiet
+```
+
+Full unfixed output:
+
+```text
+CASE revision=unfixed test=test_secondmate_busy_aged_queue_stays_quiet
+not ok - busy woke for an aged foreign row: check: secondmate wake-loop stalled: mate=mate row=7 age=10s
+exit=1
+```
+
+Fixed command:
+
+```sh
+run_case fixed "$fixed_root" tests/fm-wake-queue.test.sh test_self_held_lock_reclaims_instead_of_deadlocking test_secondmate_busy_aged_queue_stays_quiet
+```
+
+Full fixed output:
+
+```text
+CASE revision=fixed test=test_secondmate_busy_aged_queue_stays_quiet
+ok - a provably busy secondmate with an aged queue row stays quiet
+exit=0
+```
+
+#### Regression guard: aged latest-blocked secondmate queue
+
+This proves that a latest `blocked:` status wakes above the unchanged age floor even when busy evidence exists.
+
+Unfixed command:
+
+```sh
+run_case unfixed "$unfixed_root" tests/fm-wake-queue.test.sh test_self_held_lock_reclaims_instead_of_deadlocking test_secondmate_blocked_aged_queue_wakes
+```
+
+Full unfixed output:
+
+```text
+CASE revision=unfixed test=test_secondmate_blocked_aged_queue_wakes
+ok - a secondmate whose latest status is blocked wakes despite busy evidence
+exit=0
+```
+
+Fixed command:
+
+```sh
+run_case fixed "$fixed_root" tests/fm-wake-queue.test.sh test_self_held_lock_reclaims_instead_of_deadlocking test_secondmate_blocked_aged_queue_wakes
+```
+
+Full fixed output:
+
+```text
+CASE revision=fixed test=test_secondmate_blocked_aged_queue_wakes
+ok - a secondmate whose latest status is blocked wakes despite busy evidence
+exit=0
+```
+
+#### Regression guard: aged idle secondmate queue
+
+This proves that idle-but-not-blocked liveness wakes conservatively above the unchanged age floor.
+
+Unfixed command:
+
+```sh
+run_case unfixed "$unfixed_root" tests/fm-wake-queue.test.sh test_self_held_lock_reclaims_instead_of_deadlocking test_secondmate_idle_aged_queue_wakes
+```
+
+Full unfixed output:
+
+```text
+CASE revision=unfixed test=test_secondmate_idle_aged_queue_wakes
+ok - an idle non-blocked secondmate with an aged queue row wakes
+exit=0
+```
+
+Fixed command:
+
+```sh
+run_case fixed "$fixed_root" tests/fm-wake-queue.test.sh test_self_held_lock_reclaims_instead_of_deadlocking test_secondmate_idle_aged_queue_wakes
+```
+
+Full fixed output:
+
+```text
+CASE revision=fixed test=test_secondmate_idle_aged_queue_wakes
+ok - an idle non-blocked secondmate with an aged queue row wakes
+exit=0
+```
+
+#### Regression guard: aged unknown-liveness secondmate queue
+
+This proves that unknown liveness wakes conservatively above the unchanged age floor.
+
+Unfixed command:
+
+```sh
+run_case unfixed "$unfixed_root" tests/fm-wake-queue.test.sh test_self_held_lock_reclaims_instead_of_deadlocking test_secondmate_unknown_liveness_aged_queue_wakes
+```
+
+Full unfixed output:
+
+```text
+CASE revision=unfixed test=test_secondmate_unknown_liveness_aged_queue_wakes
+ok - unknown secondmate liveness fails toward waking the primary
+exit=0
+```
+
+Fixed command:
+
+```sh
+run_case fixed "$fixed_root" tests/fm-wake-queue.test.sh test_self_held_lock_reclaims_instead_of_deadlocking test_secondmate_unknown_liveness_aged_queue_wakes
+```
+
+Full fixed output:
+
+```text
+CASE revision=fixed test=test_secondmate_unknown_liveness_aged_queue_wakes
+ok - unknown secondmate liveness fails toward waking the primary
+exit=0
+```
+
 ## Turn-end guard
 
 The blocking and bounded-follow-up mechanisms were validated across six harnesses on 2026-07-08 through 2026-08-13, with Cursor's stop-hook park validated on 2026-08-13 and Claude's replacement Stop-owned path revalidated on 2026-08-14.
