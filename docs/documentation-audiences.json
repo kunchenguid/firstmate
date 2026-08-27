@@ -289,6 +289,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/model-write-attribution.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/orca-backend.md",
       "audience": "operator-current"
     },
