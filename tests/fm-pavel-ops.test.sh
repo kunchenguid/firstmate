@@ -351,6 +351,21 @@ json_field() {
   python3 -c "import json,sys; print(json.load(sys.stdin)$field)"
 }
 
+live_completion_outbound_id() {
+  local event_id=$1 pr_url=$2 pr_head=$3
+  EVENT_ID="$event_id" PR_URL="$pr_url" PR_HEAD="$pr_head" python3 - <<'PY'
+import hashlib
+import os
+suffix = hashlib.sha256(f"{os.environ['PR_URL']}\n{os.environ['PR_HEAD']}".encode()).hexdigest()[:12]
+print(f"{os.environ['EVENT_ID']}-live-completion-{suffix}")
+PY
+}
+
+live_completion_outbox() {
+  local event_id=$1 pr_url=$2 pr_head=$3
+  printf '%s/state/pavel-ops/outbox/%s.json\n' "$HOME_DIR" "$(live_completion_outbound_id "$event_id" "$pr_url" "$pr_head")"
+}
+
 set_live_probe() {
   local event_id=$1 expected=$2 absent=${3:-}
   EVENT_FILE="$HOME_DIR/state/pavel-ops/events/$event_id.json" EXPECTED="$expected" ABSENT="$absent" python3 - <<'PY'
@@ -843,10 +858,11 @@ fi
 [ "$(grep -c . "$HTTP_LOG")" -eq $((before_completion_sends + 1)) ] || fail "driver did not send exactly one completion"
 [ "$(run_ops inspect "$event" | json_field "['state']")" = notified ] || fail "confirmed Telegram receipt did not complete notification"
 assert_grep 'chat_id=group' "$HTTP_LOG" "Telegram completion used the wrong chat"
-assert_grep 'message' "$HOME_DIR/state/pavel-ops/outbox/$event-live-completion.json" "completion receipt was not retained"
-[ "$(json_field "['pr_url']" < "$HOME_DIR/state/pavel-ops/outbox/$event-live-completion.json")" = "https://github.com/o/r/pull/1" ] \
+completion_outbox=$(live_completion_outbox "$event" 'https://github.com/o/r/pull/1' 'abc123')
+assert_grep 'message' "$completion_outbox" "completion receipt was not retained"
+[ "$(json_field "['pr_url']" < "$completion_outbox")" = "https://github.com/o/r/pull/1" ] \
   || fail "completion receipt did not retain the PR URL"
-[ "$(json_field "['pr_head']" < "$HOME_DIR/state/pavel-ops/outbox/$event-live-completion.json")" = "abc123" ] \
+[ "$(json_field "['pr_head']" < "$completion_outbox")" = "abc123" ] \
   || fail "completion receipt did not retain the PR head"
 assert_grep 'pr-check' "$TASK_DB/.owners" "driver did not compose the PR registration owner"
 assert_grep 'pr-merge' "$TASK_DB/.owners" "driver did not compose the PR merge owner"
@@ -967,6 +983,24 @@ for metadata_axis in \
     || fail "invalid metadata axis $metadata_axis mutated past validation"
 done
 pass "default readiness refuses invalid Pavel dispatch metadata"
+
+wrong_worktree=$(ingest 143 53 'Проверить чужой worktree' | json_field "['event']")
+run_ops classify "$wrong_worktree" --as task --title 'Reject wrong worktree' --intent 'Reject readiness from a different checkout' \
+  --reason 'ordinary delivery' --authority ordinary >/dev/null
+run_ops drive "$wrong_worktree" >/dev/null
+wrong_worktree_task=$(run_ops inspect "$wrong_worktree" | json_field "['task_id']")
+wrong_worktree_head=$(fixture_git_head "$HOME_DIR/worktrees/$wrong_worktree_task")
+wrong_worktree_other="$TMP_ROOT/wrong-worktree-$wrong_worktree_task"
+git clone -q "$HOME_DIR/worktrees/$wrong_worktree_task" "$wrong_worktree_other"
+printf 'pr=%s\npr_head=%s\nworktree=%s\n' 'https://github.com/o/r/pull/24' "$wrong_worktree_head" "$wrong_worktree_other" >> "$HOME_DIR/state/$wrong_worktree_task.meta"
+printf 'state: done · source: run-step · checks green: PR ready for review\n' > "$PAVEL_STATUS_FILE"
+run_ops_default_status drive "$wrong_worktree" >/dev/null
+if run_ops_default_status drive "$wrong_worktree" >/dev/null 2>&1; then
+  fail "default status helper blessed a non-task worktree"
+fi
+[ "$(run_ops inspect "$wrong_worktree" | json_field "['state']")" = validating ] \
+  || fail "wrong worktree readiness mutated past validation"
+pass "default readiness requires the task worktree"
 
 pr_substitution=$(ingest 125 35 'Проверить подмену PR' | json_field "['event']")
 run_ops classify "$pr_substitution" --as task --title 'Reject PR substitution' --intent 'Ship only the registered PR' \
@@ -1297,7 +1331,9 @@ run_ops classify "$retry_send_race" --as task --title 'Reject retry live send ra
   --reason 'ordinary delivery' --authority ordinary >/dev/null
 retry_send_race_task=$(run_ops inspect "$retry_send_race" | json_field "['task_id']")
 set_delivery_contracts "$retry_send_race" "$retry_send_race_task" 'https://github.com/o/r/pull/20' 'aa20bb'
-RETRY_SEND_RACE_FILE="$HOME_DIR/state/pavel-ops/events/$retry_send_race.json" python3 - <<'PY'
+retry_send_race_outbound_id=$(live_completion_outbound_id "$retry_send_race" 'https://github.com/o/r/pull/20' 'aa20bb')
+retry_send_race_outbox=$(live_completion_outbox "$retry_send_race" 'https://github.com/o/r/pull/20' 'aa20bb')
+RETRY_SEND_RACE_FILE="$HOME_DIR/state/pavel-ops/events/$retry_send_race.json" OUTBOX_ID="$retry_send_race_outbound_id" OUTBOX="$retry_send_race_outbox" python3 - <<'PY'
 import hashlib
 import json
 import os
@@ -1320,13 +1356,13 @@ for state, evidence in [
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
     handle.write("\n")
-outbox = os.path.join(os.path.dirname(path), "..", "outbox", event["id"] + "-live-completion.json")
+outbox = os.environ["OUTBOX"]
 os.makedirs(os.path.dirname(outbox), exist_ok=True)
 text = event["completion_text"]
 with open(outbox, "w", encoding="utf-8") as handle:
     json.dump({
         "schema": "fm-pavel-ops-outbound.v1",
-        "id": event["id"] + "-live-completion",
+        "id": os.environ["OUTBOX_ID"],
         "event_id": event["id"],
         "purpose": "live-completion",
         "chat_id": "group",
@@ -1357,7 +1393,9 @@ run_ops classify "$reconcile_send_race" --as task --title 'Reject reconcile live
   --reason 'ordinary delivery' --authority ordinary >/dev/null
 reconcile_send_race_task=$(run_ops inspect "$reconcile_send_race" | json_field "['task_id']")
 set_delivery_contracts "$reconcile_send_race" "$reconcile_send_race_task" 'https://github.com/o/r/pull/21' 'aa21bb'
-RECONCILE_SEND_RACE_FILE="$HOME_DIR/state/pavel-ops/events/$reconcile_send_race.json" python3 - <<'PY'
+reconcile_send_race_outbound_id=$(live_completion_outbound_id "$reconcile_send_race" 'https://github.com/o/r/pull/21' 'aa21bb')
+reconcile_send_race_outbox=$(live_completion_outbox "$reconcile_send_race" 'https://github.com/o/r/pull/21' 'aa21bb')
+RECONCILE_SEND_RACE_FILE="$HOME_DIR/state/pavel-ops/events/$reconcile_send_race.json" OUTBOX_ID="$reconcile_send_race_outbound_id" OUTBOX="$reconcile_send_race_outbox" python3 - <<'PY'
 import hashlib
 import json
 import os
@@ -1380,13 +1418,13 @@ for state, evidence in [
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
     handle.write("\n")
-outbox = os.path.join(os.path.dirname(path), "..", "outbox", event["id"] + "-live-completion.json")
+outbox = os.environ["OUTBOX"]
 os.makedirs(os.path.dirname(outbox), exist_ok=True)
 text = event["completion_text"]
 with open(outbox, "w", encoding="utf-8") as handle:
     json.dump({
         "schema": "fm-pavel-ops-outbound.v1",
-        "id": event["id"] + "-live-completion",
+        "id": os.environ["OUTBOX_ID"],
         "event_id": event["id"],
         "purpose": "live-completion",
         "chat_id": "group",
@@ -1402,10 +1440,10 @@ with open(outbox, "w", encoding="utf-8") as handle:
 PY
 set_live_completion_contracts "$reconcile_send_race" "$reconcile_send_race_task" 'https://github.com/o/r/pull/21' 'aa21bb' 'https://example.test/product'
 printf 'pr_head=%s\n' 'bb21cc' >> "$HOME_DIR/state/$reconcile_send_race_task.meta"
-run_ops reconcile-outbound "$reconcile_send_race-live-completion" --sent-message-id 1001 >/dev/null
+run_ops reconcile-outbound "$reconcile_send_race_outbound_id" --sent-message-id 1001 >/dev/null
 [ "$(run_ops inspect "$reconcile_send_race" | json_field "['state']")" = validating ] \
   || fail "live-completion reconciliation notified after PR head changed"
-assert_grep '"status": "unknown"' "$HOME_DIR/state/pavel-ops/outbox/$reconcile_send_race-live-completion.json" \
+assert_grep '"status": "unknown"' "$reconcile_send_race_outbox" \
   "changed-head reconciliation marked a stale receipt delivered"
 pass "live-completion reconciliation validates the frozen head"
 
@@ -1414,7 +1452,9 @@ run_ops classify "$live_retry" --as task --title 'Change shipping price' --inten
   --reason 'ordinary price change' --authority ordinary >/dev/null
 live_retry_task=$(run_ops inspect "$live_retry" | json_field "['task_id']")
 set_delivery_contracts "$live_retry" "$live_retry_task" 'https://github.com/o/r/pull/123' 'ab123c'
-LIVE_RETRY_FILE="$HOME_DIR/state/pavel-ops/events/$live_retry.json" python3 - <<'PY'
+live_retry_outbound_id=$(live_completion_outbound_id "$live_retry" 'https://github.com/o/r/pull/123' 'ab123c')
+live_retry_outbox=$(live_completion_outbox "$live_retry" 'https://github.com/o/r/pull/123' 'ab123c')
+LIVE_RETRY_FILE="$HOME_DIR/state/pavel-ops/events/$live_retry.json" OUTBOX_ID="$live_retry_outbound_id" OUTBOX="$live_retry_outbox" python3 - <<'PY'
 import hashlib
 import json
 import os
@@ -1438,13 +1478,13 @@ for state, evidence in [
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
     handle.write("\n")
-outbox = os.path.join(os.path.dirname(path), "..", "outbox", event["id"] + "-live-completion.json")
+outbox = os.environ["OUTBOX"]
 os.makedirs(os.path.dirname(outbox), exist_ok=True)
 text = event["completion_text"]
 with open(outbox, "w", encoding="utf-8") as handle:
     json.dump({
         "schema": "fm-pavel-ops-outbound.v1",
-        "id": event["id"] + "-live-completion",
+        "id": os.environ["OUTBOX_ID"],
         "event_id": event["id"],
         "purpose": "live-completion",
         "chat_id": "group",
@@ -1520,14 +1560,16 @@ PY
 set_delivery_contracts "$stale_receipt" "$stale_receipt_task" 'https://github.com/o/r/pull/139' 'bb139b'
 set_live_completion_contracts "$stale_receipt" "$stale_receipt_task" 'https://github.com/o/r/pull/139' 'bb139b' 'https://example.test/product'
 before_stale_receipt_sends=$(grep -c . "$HTTP_LOG")
-if run_ops send "$stale_receipt" --purpose live-completion --text 'Готово: проверено.' >/dev/null 2>&1; then
-  fail "delivered live-completion receipt for an old head notified a newer head"
-fi
-[ "$(grep -c . "$HTTP_LOG")" -eq "$before_stale_receipt_sends" ] \
-  || fail "stale delivered live-completion receipt sent again"
-[ "$(run_ops inspect "$stale_receipt" | json_field "['state']")" = live ] \
-  || fail "stale delivered live-completion receipt mutated the live event"
-pass "delivered live-completion receipts are bound to PR head"
+run_ops send "$stale_receipt" --purpose live-completion --text 'Готово: проверено.' >/dev/null \
+  || fail "stale delivered live-completion receipt blocked a newer head"
+[ "$(grep -c . "$HTTP_LOG")" -eq $((before_stale_receipt_sends + 1)) ] \
+  || fail "newer-head live-completion receipt was not sent"
+[ "$(run_ops inspect "$stale_receipt" | json_field "['state']")" = notified ] \
+  || fail "newer-head live-completion receipt did not notify"
+stale_receipt_new_outbox=$(live_completion_outbox "$stale_receipt" 'https://github.com/o/r/pull/139' 'bb139b')
+[ "$(json_field "['pr_head']" < "$stale_receipt_new_outbox")" = "bb139b" ] \
+  || fail "newer-head live-completion receipt did not retain its head"
+pass "stale completion receipts do not block newer heads"
 
 stale_unknown_receipt=$(ingest 142 52 'Проверить старый unknown receipt после нового head' | json_field "['event']")
 run_ops classify "$stale_unknown_receipt" --as task --title 'Reject stale unknown receipt' --intent 'Reconcile only the current PR head' \
@@ -1620,7 +1662,9 @@ with open(path, "w", encoding="utf-8") as handle:
     handle.write("\n")
 PY
 set_live_completion_contracts "$crashed" "$crashed_task" 'https://github.com/o/r/pull/2' 'aa22bb' 'https://example.test/seo'
-CRASHED_EVENT="$crashed" OUTBOX="$HOME_DIR/state/pavel-ops/outbox/$crashed-live-completion.json" python3 - <<'PY'
+crashed_outbound_id=$(live_completion_outbound_id "$crashed" 'https://github.com/o/r/pull/2' 'aa22bb')
+crashed_outbox=$(live_completion_outbox "$crashed" 'https://github.com/o/r/pull/2' 'aa22bb')
+CRASHED_EVENT="$crashed" OUTBOX_ID="$crashed_outbound_id" OUTBOX="$crashed_outbox" python3 - <<'PY'
 import hashlib
 import json
 import os
@@ -1628,7 +1672,7 @@ text = "Готово: SEO заголовок уже на сайте."
 with open(os.environ["OUTBOX"], "w", encoding="utf-8") as handle:
     json.dump({
         "schema": "fm-pavel-ops-outbound.v1",
-        "id": os.environ["CRASHED_EVENT"] + "-live-completion",
+        "id": os.environ["OUTBOX_ID"],
         "event_id": os.environ["CRASHED_EVENT"],
         "purpose": "live-completion",
         "chat_id": "group",

@@ -1093,6 +1093,8 @@ def validate_dispatched_owner_record(home: Home, event: dict[str, Any]) -> dict[
     worktree = meta.get("worktree")
     if not worktree or Path(worktree).resolve() in {home.home, home.root}:
         raise OpsError("Pavel dispatch did not record an isolated task worktree")
+    if Path(worktree).resolve() != (home.home / "worktrees" / task_id).resolve():
+        raise OpsError("Pavel dispatch did not record this task's isolated worktree")
     return meta
 
 
@@ -1542,6 +1544,25 @@ def collect_telegram(home: Home, args: argparse.Namespace) -> dict[str, Any]:
     return {"handled": handled, "ingested": ingested, "duplicates": duplicates, "next_update_id": next_update_id}
 
 
+def live_completion_pr_identity(event: dict[str, Any]) -> tuple[str, str]:
+    delivery_contract = event.get("delivery_contract")
+    if not isinstance(delivery_contract, dict) or delivery_contract.get("schema") != LIVE_CONTRACT_SCHEMA:
+        raise OpsError("Pavel live notification has no retained delivery contract")
+    pr_url = str(delivery_contract.get("pr_url") or "")
+    pr_head = str(delivery_contract.get("pr_head") or "")
+    if not pr_url or not pr_head:
+        raise OpsError("Pavel live notification has no retained PR identity")
+    return pr_url, pr_head
+
+
+def outbound_id_for_event(event: dict[str, Any], purpose: str) -> str:
+    if purpose == "live-completion":
+        pr_url, pr_head = live_completion_pr_identity(event)
+        suffix = sha(f"{pr_url}\n{pr_head}")[:12]
+        return f"{event['id']}-{purpose}-{suffix}"
+    return f"{event['id']}-{purpose}"
+
+
 def expected_outbound_contract(home: Home, event: dict[str, Any], purpose: str, text: str, outbound_id: str) -> dict[str, str]:
     expected = {
         "schema": OUTBOUND_SCHEMA,
@@ -1552,13 +1573,7 @@ def expected_outbound_contract(home: Home, event: dict[str, Any], purpose: str, 
         "text_digest": sha(text),
     }
     if purpose == "live-completion":
-        delivery_contract = event.get("delivery_contract")
-        if not isinstance(delivery_contract, dict) or delivery_contract.get("schema") != LIVE_CONTRACT_SCHEMA:
-            raise OpsError("Pavel live notification has no retained delivery contract")
-        expected["pr_url"] = str(delivery_contract.get("pr_url") or "")
-        expected["pr_head"] = str(delivery_contract.get("pr_head") or "")
-        if not expected["pr_url"] or not expected["pr_head"]:
-            raise OpsError("Pavel live notification has no retained PR identity")
+        expected["pr_url"], expected["pr_head"] = live_completion_pr_identity(event)
     return expected
 
 
@@ -1585,7 +1600,7 @@ def send_message(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         except OpsError as exc:
             refuse_live_completion(home, event, exc)
             raise
-    outbound_id = f"{event['id']}-{purpose}"
+    outbound_id = outbound_id_for_event(event, purpose)
     path = outbound_path(home, outbound_id)
     expected = expected_outbound_contract(home, event, purpose, args.text, outbound_id)
     if path.exists():

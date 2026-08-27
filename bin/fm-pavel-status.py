@@ -62,14 +62,16 @@ def worktree_head(meta: dict[str, str]) -> str:
     return result.stdout.strip()
 
 
-def readiness_owner_valid(task_id: str, meta: dict[str, str]) -> bool:
+def readiness_owner_valid(home: Path, task_id: str, meta: dict[str, str]) -> bool:
+    worktree = meta.get("worktree", "")
     return (
         meta.get("endpoint_task_id") == task_id
         and meta.get("kind") == "ship"
         and meta.get("harness") == "pi"
         and meta.get("mode") == "no-mistakes"
         and meta.get("yolo") == "on"
-        and bool(meta.get("worktree"))
+        and bool(worktree)
+        and Path(worktree).resolve() == (home / "worktrees" / task_id).resolve()
     )
 
 
@@ -109,7 +111,7 @@ def main() -> int:
         emit(base)
         return 0
     meta = parse_meta(state_dir / f"{task_id}.meta")
-    if not readiness_owner_valid(task_id, meta):
+    if not readiness_owner_valid(home, task_id, meta):
         base["state"] = "validating"
         base["evidence"] = "run-step readiness is not from the expected Pavel Pi ship worker"
         emit(base)
