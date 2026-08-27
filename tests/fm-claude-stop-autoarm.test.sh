@@ -443,6 +443,34 @@ test_failed_cycles_notify_once_and_keep_retrying() {
   pass "auto-arm: consecutive failures keep Stop-owned retry without repeating notice"
 }
 
+test_failure_notice_marker_write_refuses_delivery_and_retries() {
+  local dir marker out1 out2 out3 status1 status2 status3 gen1 delivered
+  dir=$(make_primary_dir "$TMP_ROOT/failed-marker-refusal")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" failed
+  marker="$dir/state/.claude-autoarm-failure-notified"
+  ln -s "$dir/state/missing/notice" "$marker"
+
+  out1=$(run_autoarm "$dir" 2>/dev/null); status1=$?
+  expect_code 0 "$status1" "an unrecordable failure notice must refuse delivery"
+  [ -L "$marker" ] || fail "the failed marker write unexpectedly replaced its dangling symlink"
+  [ "$(epoch_outcome "$dir")" = failed ] || fail "the refused generation must leave its terminal ledger outcome"
+  gen1=$(epoch_field "$dir" epoch)
+
+  rm -f "$marker"
+  out2=$(run_autoarm "$dir" 2>/dev/null); status2=$?
+  out3=$(run_autoarm "$dir" 2>/dev/null); status3=$?
+  expect_code 2 "$status2" "a successor must retry and deliver after the marker path is restored"
+  expect_code 2 "$status3" "a later failure must retain the Stop-owned retry"
+  [ "$(epoch_field "$dir" epoch)" -gt "$gen1" ] || fail "the successor did not supersede the refused terminal entry"
+  assert_present "$marker" "the successful successor did not record the failure notice"
+  assert_contains "$out2" "automatic supervision mechanism is broken" "the successful successor did not deliver the failure notice"
+  [ -z "$out3" ] || fail "the firing after the successful marker commit repeated the notice: $out3"
+  delivered=$(printf '%s\n%s\n' "$out2" "$out3" | grep -c 'automatic supervision mechanism is broken' || true)
+  [ "$delivered" -eq 1 ] || fail "the restored episode delivered $delivered failure notices instead of one"
+  pass "auto-arm: marker-write refusal defers delivery until one successor commits the notice"
+}
+
 test_unverified_clean_close_exhausts_retries() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/clean")
@@ -1083,6 +1111,7 @@ test_actionable_close_rewakes_with_reason
 test_actionable_close_with_live_successor_rewakes_once
 test_failed_close_rewakes_with_failure_banner
 test_failed_cycles_notify_once_and_keep_retrying
+test_failure_notice_marker_write_refuses_delivery_and_retries
 test_unverified_clean_close_exhausts_retries
 test_post_alarm_actionable_close_is_suppressed
 test_benign_cycle_end_with_live_watcher_is_silent

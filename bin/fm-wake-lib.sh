@@ -1194,8 +1194,9 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file]
     fm_lock_release "$lock"
     return 1
   fi
-  if [ -n "$marker" ]; then
-    : > "$marker" 2>/dev/null || true
+  if [ -n "$marker" ] && ! : > "$marker" 2>/dev/null; then
+    fm_lock_release "$lock"
+    return 2
   fi
   fm_lock_release "$lock"
   return 0
