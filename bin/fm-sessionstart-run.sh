@@ -6,9 +6,10 @@
 #
 # Why running beats nudging: bin/fm-sessionstart-nudge.sh can only ASK the agent
 # to take the helm, and an agent can defer that, including when a first-command
-# skill has its own read-only path. When the harness injects hook stdout into
-# model context, running the digest here removes that discretion - the helm is
-# taken before the model's first turn, whatever the first turn is.
+# skill has its own read-only path. When the native adapter injects this
+# command's stdout into model context, running the digest here removes that
+# discretion - the helm is taken before the model's first turn, whatever the
+# first turn is.
 #
 # Usage: fm-sessionstart-run.sh [--source <source>] [--pi-prerequisite]
 #   --source  The harness's own session-open source. When omitted, the source is

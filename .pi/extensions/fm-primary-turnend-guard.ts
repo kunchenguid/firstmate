@@ -59,7 +59,7 @@ function markLoaded(): void {
 }
 
 // Pi's session_start reasons are startup | reload | new | resume | fork, and a
-// separate session_compact event fires after a compaction. "new" is Pi's /clear
+// separate session_compact event fires after a compaction. "new" is Pi's /new
 // while reload, resume, and fork all keep prior context.
 const sessionstartDeliveryBytes = 512 * 1024;
 

@@ -7,13 +7,13 @@ Firstmate ships two session-open tiers, and the tier is a property of the harnes
 
 | Tier | What the adapter does | Used by |
 | --- | --- | --- |
-| Run | Executes `bin/fm-session-start.sh` in the hook and lets its ordered digest land in model context before the first turn. | Claude, `codex exec`, Pi / pi-signed, Cursor |
+| Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, Pi / pi-signed, Cursor |
 | Nudge | Asks the agent to run the digest through the native adapter or the tracked session-start instruction. | Grok, OpenCode, and run-tier sources routed to the nudge |
 
 Codex's interactive TUI has no tracked session-open, compaction, or re-emit channel and is not covered by either tier.
 The run tier exists because the nudge can only ask.
 An agent can defer an instruction, including when a first-command skill has its own read-only path.
-Running the digest inside the hook removes that discretion, so even a session whose first command is a skill has already taken the helm.
+Running the digest through the native adapter removes that discretion, so even a session whose first command is a skill has already taken the helm.
 The nudge tier remains the floor for harnesses that cannot carry hook stdout into model context, and it is never a second contract: both tiers end in the same `bin/fm-session-start.sh`.
 
 ## Source routing
@@ -44,7 +44,7 @@ The run tier blocks either hook-driven session initialization or Pi's first prov
 The digest makes no external-network call at all: every one it owes runs off the blocking path in the separately bounded deferred stage owned by `bin/fm-startup-network.sh`, so an unreachable host can no longer consume this budget.
 What remains is still not individually bounded - tool version probes, the backlog listing, and the per-task endpoint reads are all local but unbounded subprocesses - so the whole digest runs as one bounded child, default 120s via `FM_SESSION_START_TIMEOUT`.
 The shared timeout owner falls back to a pure-Bash process-group watchdog when timeout, gtimeout, and perl are unavailable, so no supported host runs the digest unbounded.
-Because the child writes straight to the hook's stdout, everything emitted before the bound was hit is already delivered; the parent then prints a `STARTUP TRUNCATED` banner naming the stage that did not finish and the stages that were therefore never emitted, and still exits 0.
+Because the child streams into the native transport as it runs, everything emitted before the bound was hit is retained for delivery; the parent then prints a `STARTUP TRUNCATED` banner naming the stage that did not finish and the stages that were therefore never emitted, and still exits 0.
 The registered hook timeouts sit above that budget so the harness never preempts the banner.
 The deferred network stage deliberately runs in its own process group under its own deadline, so a truncated digest neither kills work it was not waiting for nor orphans unbounded network work.
 
@@ -71,7 +71,7 @@ A lock another session holds and a truncated digest therefore surface as digest 
 | Claude | Run | `.claude/settings.json` registers one unmatched `SessionStart` hook, invoked through `CLAUDE_PROJECT_DIR` with a 180s timeout; the wrapper reads `source` from the hook payload. | Native stdout context injection is supported. |
 | Codex exec | Run | `.codex/hooks.json` anchors to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and pipes the hook payload into the wrapper with a 180s timeout. | Native stdout context injection is supported under `codex exec`. |
 | Codex interactive TUI | Uncovered | None. | Codex 0.146.0 does not fire the tracked project `SessionStart` hook in its interactive TUI; Firstmate ships no global hook, has no tracked compaction or re-emit channel, and does not claim instruction-refresh delivery for this surface. |
-| Pi / pi-signed | Run | `.pi/extensions/fm-primary-turnend-guard.ts` maps `session_start` reasons `startup`, `new`, `resume`, and `fork` onto wrapper sources, refines a Pi-reported `startup` to `resume` only when a continuation, resume-selection, or explicit-session flag accompanies a session header older than the current process, maps a fork flag to `fork`, and handles `session_compact` as the compaction equivalent; setup-created entries such as `--name` are not restoration evidence. | Each session generation starts one native prerequisite, and `before_agent_start` awaits its matching result and returns one persistent context message before the first provider call; Pi's `reload` reason is deliberately unmapped, as it always was. |
+| Pi / pi-signed | Run | `.pi/extensions/fm-primary-turnend-guard.ts` maps `session_start` reasons `startup`, `new`, `resume`, and `fork` onto wrapper sources, refines a Pi-reported `startup` to `resume` only when a continuation, resume-selection, or explicit-session flag accompanies a session header older than the current process, maps a fork flag to `fork`, and handles `session_compact` as the compaction equivalent; setup-created entries such as `--name` are not restoration evidence. | Each mapped session generation starts one native prerequisite, and `before_agent_start` awaits its matching result and returns one persistent context message before the first provider call; Pi's `reload` reason is deliberately unmapped, as it always was. |
 | OpenCode | Nudge | `.opencode/plugins/fm-primary-sessionstart-nudge.js` listens for `session.created`, runs once per session id, and calls `client.session.promptAsync` only when the wrapper prints a nudge. | Interactive TUI delivery is supported; headless `opencode run` is intentionally fail-open because the process can exit before the queued turn. That early exit is also why OpenCode cannot use the run tier. |
 | Grok | Nudge | `.grok/hooks/fm-primary-sessionstart-nudge.json` registers a project `SessionStart` hook and invokes the wrapper through inline-defaulted `${GROK_WORKSPACE_ROOT:-}`. | The project hook runs when the checkout is trusted, but Grok currently discards hook stdout from model context, so this path is intentionally fail-open and cannot use the run tier. |
 | Cursor | Run | `.cursor/hooks.json` registers `sessionStart`, anchored through `$CURSOR_PROJECT_DIR` with a 180s timeout, invoking `bin/fm-sessionstart-cursor.sh`. | Cursor's payload has no `source` field, so the registration supplies `--source` itself, and the adapter returns the digest as `additional_context`. Project hooks load only when the workspace is launched with `--trust`. |
