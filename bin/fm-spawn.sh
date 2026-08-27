@@ -1839,15 +1839,26 @@ freshen_spawn_worktree_base() {  # <worktree>
   fi
 }
 
-# Seed the one checkout-local credential file from the captain's primary
-# checkout on every fresh Treehouse acquisition. Treehouse's reset/reissue path
-# does not restore ignored files, so this one owner deliberately handles both a
-# newly created slot and a reused slot after their common acquisition gate.
+# Seed the one checkout-local credential file from the captain's primary checkout
+# into every worktree spawn acquires. No worktree provider seeds git-ignored files:
+# treehouse creates and reissues a pooled slot without one, and orca creates its
+# worktree with --setup skip. Firstmate therefore owns this seeding outright rather
+# than inheriting it, so the single call site below sits on the common acquisition
+# gate and covers a newly created slot, a reused slot, and every backend alike.
+# Refreshing on each acquisition also keeps a slot from serving a stale credential
+# copy left behind by an earlier task.
 seed_spawn_worktree_local_env() {  # <worktree>
   local worktree=$1 source target tmp
   source="$PROJ_ABS/.env.local"
   target="$worktree/.env.local"
   [ -f "$source" ] || return 0
+  # Seed only what the project ignores. An unignored .env.local would land as
+  # untracked work, and teardown's uncommitted-work refusal would then strand the
+  # worktree forever. Say so once instead of wedging the task's cleanup later.
+  if ! git -C "$worktree" check-ignore -q .env.local 2>/dev/null; then
+    echo "warning: not seeding .env.local into '$worktree' because the project does not ignore it; add it to .gitignore so crew worktrees can carry it" >&2
+    return 0
+  fi
   if [ -d "$target" ]; then
     echo "error: cannot seed .env.local because '$target' is a directory" >&2
     return 1
@@ -2361,9 +2372,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
-  if [ "$BACKEND" != orca ]; then
-    seed_spawn_worktree_local_env "$WT" || exit 1
-  fi
+  seed_spawn_worktree_local_env "$WT" || exit 1
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
