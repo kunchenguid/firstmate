@@ -862,8 +862,13 @@ test_pi_recovery_adopts_legacy_local_task_identity() {
   record=$(make_spawn_case pi-legacy-recovery pi "$id")
   read_spawn_case "$record"
   source_home="$SPAWN_HOME/pi-source"
-  mkdir -p "$source_home"
+  mkdir -p "$source_home/npm/node_modules/.bin" \
+    "$source_home/npm/node_modules/pi-agent-browser-native/bin"
   printf '{"fixture":true}\n' > "$source_home/auth.json"
+  printf 'export default {};\n' \
+    > "$source_home/npm/node_modules/pi-agent-browser-native/bin/config.js"
+  ln -s ../pi-agent-browser-native/bin/config.js \
+    "$source_home/npm/node_modules/.bin/pi-agent-browser-config"
 
   PI_CODING_AGENT_DIR="$source_home" \
     run_direct_spawn "$SPAWN_HOME" "$SPAWN_WORKTREE" "$SPAWN_LAUNCH_LOG" \
@@ -873,6 +878,11 @@ test_pi_recovery_adopts_legacy_local_task_identity() {
   assert_no_grep 'account_home=' "$meta" "legacy local Pi metadata unexpectedly recorded account routing"
   assert_no_grep 'worktree_git_dir=' "$meta" "legacy local Pi metadata unexpectedly recorded direct-routing identity"
   assert_present "$tasktmp/pi-author-agent/auth.json" "initial Pi launch did not create its task-private author snapshot"
+  [ -L "$tasktmp/pi-author-agent/npm/node_modules/.bin/pi-agent-browser-config" ] \
+    || fail "initial Pi launch did not preserve its safe package shim"
+  [ "$(readlink "$tasktmp/pi-author-agent/npm/node_modules/.bin/pi-agent-browser-config")" \
+      = ../pi-agent-browser-native/bin/config.js ] \
+    || fail "initial Pi author snapshot changed its package shim target"
   git -C "$SPAWN_WORKTREE" switch --quiet -c "fm/$id"
   rm -f "$SPAWN_HOME/state/.fake-endpoint"
 

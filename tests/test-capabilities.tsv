@@ -72,6 +72,7 @@ fm-no-mistakes-reattach.test.sh	hermetic
 fm-no-mistakes-runtime.test.sh	hermetic
 fm-no-mistakes-worker.test.sh	hermetic
 fm-pi-account-home.test.sh	hermetic
+fm-pi-author-snapshot.test.sh	hermetic
 fm-pi-direct-continuity.test.sh	hermetic
 fm-pi-direct-continuity-types.test.sh	hermetic
 fm-pi-exact-delivery-association.test.sh	hermetic

@@ -79,6 +79,7 @@
 2770	tests/fm-no-mistakes-runtime.test.sh
 7260	tests/fm-no-mistakes-worker.test.sh
 2000	tests/fm-pi-account-home.test.sh
+2500	tests/fm-pi-author-snapshot.test.sh
 4500	tests/fm-pi-direct-continuity-types.test.sh
 4250	tests/fm-pi-direct-continuity.test.sh
 5300	tests/fm-pi-exact-delivery-association.test.sh

@@ -25,6 +25,51 @@ SERVICE_SH="$ROOT/bin/fm-crosscheck-slack-service.sh"
 
 fm_test_tmproot_into TMP_ROOT fm-crosscheck-slack-tests
 
+# Model the macOS plist editing interface for service fixtures on every host.
+# Parse and serialize actual plists so the service's consumer validates output.
+PLIST_BIN=$(fm_fakebin "$TMP_ROOT/plist-tools")
+printf '#!%s\n' "$("$PYTHON" -c 'import sys; print(sys.executable)')" > "$PLIST_BIN/plutil"
+cat >> "$PLIST_BIN/plutil" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+path = Path(args[-1])
+if args[:-1] == ["-create", "xml1"]:
+    value = {}
+else:
+    if args[0] != "-insert":
+        raise SystemExit("unsupported fixture plutil operation")
+    value = plistlib.loads(path.read_bytes())
+    kind = args[2]
+    if kind == "-array" and len(args) == 4:
+        item = []
+    elif kind == "-dictionary" and len(args) == 4:
+        item = {}
+    elif kind == "-string" and len(args) == 5:
+        item = args[3]
+    elif kind == "-integer" and len(args) == 5:
+        item = int(args[3])
+    elif kind == "-bool" and len(args) == 5 and args[3] in ("true", "false"):
+        item = args[3] == "true"
+    else:
+        raise SystemExit("unsupported fixture plutil value")
+    keys = args[1].split(".")
+    parent = value
+    for key in keys[:-1]:
+        parent = parent[int(key)] if isinstance(parent, list) else parent[key]
+    if isinstance(parent, list):
+        parent.insert(int(keys[-1]), item)
+    else:
+        if keys[-1] in parent:
+            raise SystemExit("duplicate fixture plist key")
+        parent[keys[-1]] = item
+path.write_bytes(plistlib.dumps(value))
+PY
+chmod +x "$PLIST_BIN/plutil"
+export PATH="$PLIST_BIN:$PATH"
+
 HOMEDIR="$TMP_ROOT/home"
 OUTDIR="$TMP_ROOT/out"
 POSTS="$TMP_ROOT/posts.jsonl"

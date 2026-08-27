@@ -12,6 +12,9 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# Later commits in leased fixture worktrees must not depend on host Git config.
+fm_git_identity
+
 SPAWN="$ROOT/bin/fm-spawn.sh"
 fm_test_tmproot_into TMP_ROOT fm-spawn-dispatch-profile
 
@@ -204,12 +207,17 @@ assert_meta_profile() {
 
 make_pi_account_source() {
   local source=$1 account_id=$2
-  mkdir -p "$source/extensions"
+  mkdir -p "$source/extensions" "$source/npm/node_modules/.bin" \
+    "$source/npm/node_modules/pi-agent-browser-native/bin"
   printf '%s\n' \
     "{\"openai-codex-5\":{\"type\":\"oauth\",\"access\":\"a\",\"refresh\":\"r\",\"expires\":4102444800000,\"accountId\":\"$account_id\"}}" \
     > "$source/auth.json"
   printf '%s\n' '{"defaultProvider":"openai-codex-5"}' > "$source/settings.json"
   printf '%s\n' 'export default {};' > "$source/extensions/provider.ts"
+  printf '%s\n' 'export default {};' \
+    > "$source/npm/node_modules/pi-agent-browser-native/bin/config.js"
+  ln -snf ../pi-agent-browser-native/bin/config.js \
+    "$source/npm/node_modules/.bin/pi-agent-browser-config"
 }
 
 test_no_profile_resolves_claude_model_anchor() {
@@ -561,6 +569,7 @@ test_pi_author_account_snapshot_binds_launch_and_recovery() {
   python3 - "$private" account-A <<'PY' \
     || fail "Pi task-private snapshot contents or permissions are invalid"
 import json
+import os
 from pathlib import Path
 import stat
 import sys
@@ -572,6 +581,10 @@ assert stat.S_IMODE(auth.stat().st_mode) == 0o600
 value = json.loads(auth.read_text(encoding="utf-8"))
 assert value["openai-codex-5"]["accountId"] == sys.argv[2]
 assert (root / "extensions" / "provider.ts").is_file()
+shim = root / "npm/node_modules/.bin/pi-agent-browser-config"
+assert shim.is_symlink()
+assert os.readlink(shim) == "../pi-agent-browser-native/bin/config.js"
+assert shim.resolve().is_file()
 assert (root / "sessions").is_dir()
 PY
 
