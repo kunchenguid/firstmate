@@ -725,24 +725,16 @@ pause_state_class() {  # <window> <task>
     crew_absorb_class "$task"
     return
   fi
-  # Resolved lazily and memoized, so a declared paused: wait - which returns from
-  # either gate below before any liveness read - costs no metadata scan at all,
-  # while a captain-held pane that reaches both gates still scans exactly once.
-  # The far more common no-declaration path above already returned.
-  # Kept as a local resolution rather than a third parameter, and not for speed:
-  # the stale loop already computes kind unconditionally for every window on every
-  # poll, so this memoization saves nothing measurable today. Its value is
-  # self-containment. A classifier that decides whether work keeps getting
-  # supervised has to derive its own input, because a future caller handing in a
-  # stale or wrong kind would silently flip the secondmate carve-out below with
-  # nothing failing loudly.
-  kind=
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     if status_is_paused "$last"; then
       printf 'paused'
       return
     fi
-    [ -n "$kind" ] || kind=$(window_kind "$win")
+    # Resolved here rather than taken as a parameter: a classifier that decides
+    # whether work keeps getting supervised has to derive its own input, because a
+    # caller handing in a stale or wrong kind would silently flip the secondmate
+    # carve-out below with nothing failing loudly.
+    kind=$(window_kind "$win")
     if [ "$kind" != secondmate ]; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
@@ -765,7 +757,7 @@ pause_state_class() {  # <window> <task>
     printf 'paused'
     return
   fi
-  [ -n "$kind" ] || kind=$(window_kind "$win")
+  kind=$(window_kind "$win")
   if [ "$kind" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
     if [ "$agent_alive" != dead ]; then
