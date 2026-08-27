@@ -54,6 +54,9 @@
 # (checkout command, push-rule text, local-only done line) with that name.
 # The name must pass `git check-ref-format --branch`. When omitted, scaffolds
 # still use `fm/<task-id>` exactly as today. --secondmate refuses the flag.
+# --branch-name and --base-branch cannot name the same branch: the scaffold
+# checks out the base, so an identical crew branch would make `git checkout -b`
+# fail on the worker's first action.
 # A custom name is recorded as `Crew branch: branch=<name>` on ship briefs.
 # bin/fm-merge-local.sh reads that recorded line and falls back to `fm/<id>`
 # only when it is absent. Other scripts that still reconstruct `fm/<id>`:
@@ -208,6 +211,10 @@ if [ "$BRANCH_NAME_SET" -eq 1 ]; then
     echo "error: --branch-name is not a usable git branch name: $BRANCH_NAME" >&2
     exit 1
   }
+fi
+if [ "$BASE_BRANCH_SET" -eq 1 ] && [ "$BRANCH_NAME_SET" -eq 1 ] && [ "$BASE_BRANCH" = "$BRANCH_NAME" ]; then
+  echo "error: --branch-name and --base-branch cannot name the same branch ($BRANCH_NAME): the scaffold checks out the base, so the worker cannot create a crew branch with the same name" >&2
+  exit 1
 fi
 ID=${POS[0]}
 CREW_BRANCH="fm/$ID"
