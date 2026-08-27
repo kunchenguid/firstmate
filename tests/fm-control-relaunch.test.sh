@@ -1543,6 +1543,44 @@ test_missing_herdr_recovery_reuses_dirty_copy_and_publishes_a_fresh_endpoint() {
   pass "missing Herdr recovery: dirty existing copy is preserved and a fresh endpoint is published atomically"
 }
 
+test_missing_herdr_recovery_retires_a_completed_prior_transaction() {
+  local dir out rc state attempt
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case completed-prior mr17)
+  state="$dir/home/state"
+  attempt="$state/mr17.recover-missing.previous.1.attempt"
+  printf '%s\n' \
+    'v1' \
+    'task=mr17' \
+    'tx=previous.1' \
+    'phase=published' \
+    'new_endpoint=lab:w1:p2' > "$attempt"
+  printf '%s\n' \
+    'v1' \
+    'task=mr17' \
+    'phase=complete' \
+    'new_endpoint=lab:w1:p2' \
+    "attempt=$attempt" > "$state/mr17.control-recover-missing"
+  printf '%s\n' prior > "$state/mr17.control-recover-missing.meta-prior"
+  printf '%s\n' prior > "$state/mr17.control-recover-missing.brief-prior"
+  printf '%s\n' prior > "$state/mr17.control-recover-missing.note"
+  printf '%s\n' raw > "$attempt.create-response"
+  mkdir "$attempt.wiring"
+  printf 'control_recover_missing_tx=previous.1\n' >> "$state/mr17.meta"
+
+  out=$(run_herdr_control "$dir" mr17 recover-missing --captain-authorized --note 'recover the replacement endpoint again'); rc=$?
+  expect_code 0 "$rc" "a conclusively completed prior recovery must permit a later recovery"$'\n'"$out"
+  assert_contains "$out" "recovered mr17" "the later recovery should publish a replacement"
+  [ ! -e "$attempt" ] || fail "the completed prior attempt should be retired before the new transaction"
+  [ ! -e "$attempt.create-response" ] || fail "the completed prior raw response should be retired"
+  [ ! -e "$attempt.wiring" ] || fail "the completed prior wiring backup should be retired"
+  [ "$(meta_field "$dir" mr17 control_recover_missing_tx)" != previous.1 ] \
+    || fail "the replacement metadata should carry the new recovery transaction"
+  assert_grep 'phase=complete' "$state/mr17.control-recover-missing" \
+    "the later recovery should leave its own completed journal"
+  pass "missing Herdr recovery: completed evidence permits a later authorized recovery"
+}
+
 test_missing_herdr_recovery_preserves_claude_worktree_settings() {
   local dir out rc settings state
   unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
@@ -1746,6 +1784,11 @@ test_missing_herdr_recovery_rolls_back_after_launch_failure() {
   assert_grep "rollback=prior-record-kept-instructions-restored" "$dir/home/state/mr4.control-recover-missing" \
     "the transaction should record that the saved instructions were restored"
   assert_grep "phase=failed:launching" "$dir/home/state/mr4.control-recover-missing" "the transaction should retain its failed phase"
+  unset FM_FAKE_LAUNCH_FAIL
+  out=$(run_herdr_control "$dir" mr4 recover-missing --captain-authorized --note 'do not discard unresolved evidence'); rc=$?
+  expect_code 1 "$rc" "an unresolved failed recovery must still refuse a later attempt"
+  assert_contains "$out" "unresolved or malformed missing-endpoint recovery evidence" \
+    "the refusal should preserve unresolved recovery evidence"
   pass "missing Herdr recovery: launch failure rolls back without changing the recorded task identity or instructions"
 }
 
@@ -1866,6 +1909,7 @@ test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_missing_herdr_recovery_requires_captain_authorization
 test_missing_herdr_recovery_reuses_dirty_copy_and_publishes_a_fresh_endpoint
+test_missing_herdr_recovery_retires_a_completed_prior_transaction
 test_missing_herdr_recovery_preserves_claude_worktree_settings
 test_missing_herdr_recovery_reconciles_incomplete_create_response
 test_missing_herdr_recovery_refuses_contradictory_create_identity_without_cleanup

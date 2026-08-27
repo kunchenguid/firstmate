@@ -997,6 +997,20 @@ remove_pr_poll_artifacts() {
   fi
 }
 
+remove_recovery_artifacts() {
+  local state_dir=$1 id=$2 artifact
+  rm -f -- "$state_dir/$id.control-recover-missing" \
+    "$state_dir/$id.control-recover-missing.meta-prior" \
+    "$state_dir/$id.control-recover-missing.brief-prior" \
+    "$state_dir/$id.control-recover-missing.note" || return 1
+  for artifact in "$state_dir/$id.recover-missing."*.attempt \
+    "$state_dir/$id.recover-missing."*.attempt.create-response \
+    "$state_dir/$id.recover-missing."*.attempt.wiring; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    rm -rf -- "$artifact" || return 1
+  done
+}
+
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
 # single match and returns 0; returns non-zero on no match or any lookup failure,
 # so the caller treats it as "no PR found" (fail-safe).
@@ -2811,6 +2825,7 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+remove_recovery_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \

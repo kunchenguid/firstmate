@@ -594,6 +594,56 @@ recovery_journal_write() {  # <phase> [extra-line]...
   RECOVERY_PHASE=$phase
 }
 
+transaction_field_exact() {  # <path> <key>
+  local path=$1 key=$2 count
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  count=$(grep -c "^${key}=" "$path" 2>/dev/null || true)
+  [ "$count" = 1 ] || return 1
+  grep "^${key}=" "$path" 2>/dev/null | cut -d= -f2-
+}
+
+recovery_retire_completed_transaction() {
+  local task phase attempt attempt_dir attempt_base tx
+  local attempt_task attempt_tx attempt_phase journal_endpoint attempt_endpoint meta_tx
+  if [ ! -e "$RECOVERY_JOURNAL" ] && [ ! -L "$RECOVERY_JOURNAL" ]; then
+    return 0
+  fi
+  [ -f "$RECOVERY_JOURNAL" ] && [ ! -L "$RECOVERY_JOURNAL" ] || return 1
+  [ "$(sed -n '1p' "$RECOVERY_JOURNAL")" = v1 ] || return 1
+  task=$(transaction_field_exact "$RECOVERY_JOURNAL" task) || return 1
+  phase=$(transaction_field_exact "$RECOVERY_JOURNAL" phase) || return 1
+  attempt=$(transaction_field_exact "$RECOVERY_JOURNAL" attempt) || return 1
+  journal_endpoint=$(transaction_field_exact "$RECOVERY_JOURNAL" new_endpoint) || return 1
+  [ "$task" = "$ID" ] && [ "$phase" = complete ] && [ "$journal_endpoint" = "$T" ] || return 1
+  attempt_dir=${attempt%/*}
+  attempt_base=${attempt##*/}
+  [ "$attempt_dir" = "$STATE" ] || return 1
+  case "$attempt_base" in
+    "$ID.recover-missing."*.attempt) ;;
+    *) return 1 ;;
+  esac
+  tx=${attempt_base#"$ID.recover-missing."}
+  tx=${tx%.attempt}
+  [ -n "$tx" ] || return 1
+  case "$tx" in
+    *[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  [ -f "$attempt" ] && [ ! -L "$attempt" ] || return 1
+  [ "$(sed -n '1p' "$attempt")" = v1 ] || return 1
+  attempt_task=$(transaction_field_exact "$attempt" task) || return 1
+  attempt_tx=$(transaction_field_exact "$attempt" tx) || return 1
+  attempt_phase=$(transaction_field_exact "$attempt" phase) || return 1
+  attempt_endpoint=$(transaction_field_exact "$attempt" new_endpoint) || return 1
+  meta_tx=$(transaction_field_exact "$META" control_recover_missing_tx) || return 1
+  [ "$attempt_task" = "$ID" ] && [ "$attempt_tx" = "$tx" ] \
+    && [ "$attempt_phase" = published ] && [ "$attempt_endpoint" = "$T" ] \
+    && [ "$meta_tx" = "$tx" ] || return 1
+  rm -f -- "$RECOVERY_META_PRIOR" "$RECOVERY_BRIEF_PRIOR" "$RECOVERY_NOTE_FILE" \
+    "$attempt" "$attempt.create-response" || return 1
+  rm -rf -- "$attempt.wiring" || return 1
+  rm -f -- "$RECOVERY_JOURNAL"
+}
+
 relaunch_rollback() {
   local state
   [ "$RELAUNCH_ACTIVE" = 1 ] || return 0
@@ -955,8 +1005,8 @@ do_recover_missing() {
     herdr "$(fm_meta_get "$META" herdr_session)" "$ID" "$WT")
   [ "$ownership" = clear ] \
     || die "recover-missing ownership proof reads '$ownership'; refusing to launch while task or copy ownership is not unambiguous"
-  [ ! -e "$RECOVERY_JOURNAL" ] && [ ! -L "$RECOVERY_JOURNAL" ] \
-    || die "task $ID has prior missing-endpoint recovery evidence at $RECOVERY_JOURNAL; reconcile it before starting another attempt"
+  recovery_retire_completed_transaction \
+    || die "task $ID has unresolved or malformed missing-endpoint recovery evidence at $RECOVERY_JOURNAL; reconcile it before starting another attempt"
 
   old_target=$T
   RECOVERY_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
