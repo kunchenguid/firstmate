@@ -861,6 +861,12 @@ globalThis.__fmOnBranchPrompt = async ({ session }) => {
   const ack = drained.stderr.match(/--ack-through ([0-9]+) --recovery-generation ([A-Za-z0-9._-]+)/);
   if (!ack) throw new Error(`drain did not return its acknowledgement command: ${drained.stderr}`);
   const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+  const verdictDescription = report.parameters.properties.verdict.description;
+  if (!verdictDescription.includes("unconditionally") ||
+      !verdictDescription.includes("directly answers an explicit captain request") ||
+      !verdictDescription.includes("regardless of whether it is healthy, routine, measured, actionable, or requires a decision")) {
+    throw new Error(`branch provider received conflicting verdict semantics: ${verdictDescription}`);
+  }
   const result = await report.execute(
     `resource-result-${fleetOperations.length}`,
     {
@@ -902,9 +908,10 @@ if (fleetOperations.length !== 2) throw new Error("main's outcome read reprocess
 // Start a real main turn whose user entry is already in the session, then let
 // the result arrive before turn_end. The dispatch boundary must mirror that
 // current request before the branch provider classifies the equivalent result.
+const explicitRequest = "Please give me a fresh mini system-resource report.";
 const entries = [{
   type: "message",
-  message: { role: "user", content: "Please give me a fresh mini system-resource report." },
+  message: { role: "user", content: `${"background context ".repeat(300)}${explicitRequest}` },
 }];
 const mainCtx = {
   model: { provider: "anthropic", id: "main-model" },
@@ -918,6 +925,15 @@ fire("agent_start", {}, mainCtx);
 const requested = dispatch("signal: healthy resource result");
 if (!requested.accepted) throw new Error("branch did not accept the requested result");
 await settle(() => fleetOperations.length === 4, "requested result acknowledgement");
+const deliveredRequestMirror = globalThis.__fmSessions[0].ops
+  .filter((op) => op.kind === "custom" && op.message.customType === "fm-main-mirror")
+  .at(-1)?.message.content;
+if (!deliveredRequestMirror?.endsWith(explicitRequest)) {
+  throw new Error(`pre-turn-end mirror dropped the captain request tail: ${deliveredRequestMirror}`);
+}
+if (!deliveredRequestMirror.includes("[mirror truncated:")) {
+  throw new Error("long captain request did not exercise the bounded mirror path");
+}
 if ((globalThis.__fmPrompts ?? []).length !== 2) throw new Error("a handled fleet wake was rerun");
 const turns = sentToMain.filter((sent) => sent.options.triggerTurn === true);
 if (turns.length !== 1 || turns[0].options.deliverAs !== "followUp") {
@@ -1430,7 +1446,7 @@ const entries = [
   { type: "message", message: { role: "toolResult", content: "tool output stays in main" } },
   { type: "custom", message: { role: "custom", customType: "fm-branch-merge", content: "merged note" } },
   { type: "compaction", summary: "compacted" },
-  { type: "message", message: { role: "user", content: `pad ${"x".repeat(5000)}` } },
+  { type: "message", message: { role: "user", content: `pad ${"x".repeat(5000)}\ntail: retain this request` } },
 ];
 const ctx = {
   sessionManager: {
@@ -1455,7 +1471,9 @@ if (mirrored.some((m) => m.customType !== "fm-main-mirror")) throw new Error("mi
 if (mirrored.some((m) => m.display !== false)) throw new Error("mirrored context must be silent");
 if (mirrored[0].content !== "[captain] never merge task-7 without my word") throw new Error(`bad captain mirror: ${mirrored[0].content}`);
 if (mirrored[1].content !== "[main] aye, holding task-7") throw new Error(`bad main mirror: ${mirrored[1].content}`);
-if (!mirrored[2].content.includes("[mirror truncated at 4000 characters]")) throw new Error("long dialog was not capped");
+if (!mirrored[2].content.includes("[mirror truncated:") || !mirrored[2].content.endsWith("tail: retain this request")) {
+  throw new Error(`long dialog did not preserve its bounded head and tail: ${mirrored[2].content}`);
+}
 if (mirrored.some((m) => m.content.includes("operational injection") || m.content.includes("tool output") || m.content.includes("merged note"))) {
   throw new Error("mirror leaked operational, tool, or merge-note traffic");
 }

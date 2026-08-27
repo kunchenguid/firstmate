@@ -310,7 +310,10 @@ function isOperationalUserText(text: string): boolean {
 
 function capMirrorText(text: string): string {
   if (text.length <= MIRROR_MESSAGE_CAP) return text;
-  return `${text.slice(0, MIRROR_MESSAGE_CAP)}\n[mirror truncated at ${MIRROR_MESSAGE_CAP} characters]`;
+  const headLength = Math.ceil(MIRROR_MESSAGE_CAP / 2);
+  const tailLength = MIRROR_MESSAGE_CAP - headLength;
+  const omitted = text.length - MIRROR_MESSAGE_CAP;
+  return `${text.slice(0, headLength)}\n[mirror truncated: ${omitted} characters omitted]\n${text.slice(-tailLength)}`;
 }
 
 function readMirrorCursor(): MirrorCursor {
@@ -631,7 +634,8 @@ export default function (pi: ExtensionAPI) {
       parameters: Type.Object({
         task: Type.String({ description: "The task id the event belongs to (or 'fleet' for fleet-wide events)" }),
         verdict: Type.Union([Type.Literal("routine"), Type.Literal("captain")], {
-          description: "captain only for what a human must see; routine otherwise",
+          description:
+            "Use captain unconditionally for an outcome that directly answers an explicit captain request, regardless of whether it is healthy, routine, measured, actionable, or requires a decision. Also use captain for work ready for review, captain-only decisions, blockers or failures after recovery is exhausted, needed credentials, and destructive, irreversible, or security-sensitive actions; use routine otherwise.",
         }),
         summary: Type.String({
           description:
