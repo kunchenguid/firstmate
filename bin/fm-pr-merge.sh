@@ -12,8 +12,9 @@
 # follows it never becomes a prerequisite for reaching that abstraction. After
 # gh-axi returns success, GitHub's live state is read back and accepted only
 # when the pull request is merged or in the merge queue. gh's GraphQL API
-# supplies that queue-aware read when gh is on PATH; without gh, gh-axi's own
-# view still proves a landed merge, and every outcome it cannot prove refuses.
+# supplies that queue-aware read when gh is on PATH; when gh is absent or its
+# read fails, gh-axi's own view still proves a landed merge, and every outcome
+# it cannot prove refuses, naming both failed reads.
 # If the pull request remains open and the base branch has an effective
 # merge_queue rule, the refusal names the queue's configured merge method and
 # the exact -- --auto --<method> retry flags. No method is selected for the
@@ -38,10 +39,10 @@
 # short-option cluster such as -yR, because the repository comes only from the
 # URL, nor --sha on GitLab because the head comes only from the live read.
 #
-# After the forge command, this script confirms the PR is actually merged before
-# reporting it; an auto-merge-queued or unconfirmed request leaves the poll armed
-# and records no landed outcome. bin/fm-merge-outcome-lib.sh owns a confirmed
-# merge's destination, normal-case deduplication, and at-least-once recovery.
+# On GitLab, this script confirms the MR is actually merged before reporting it;
+# an auto-merge-queued or unconfirmed request leaves the poll armed and records
+# no landed outcome. bin/fm-merge-outcome-lib.sh owns a confirmed merge's
+# destination, normal-case deduplication, and at-least-once recovery.
 # A landed merge whose outcome cannot be written is reported loudly rather than
 # misreported as a failed merge.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra forge merge args>]
@@ -333,14 +334,21 @@ github_read_outcome_with_gh_axi() {
 }
 
 github_read_outcome() {
-  if command -v gh >/dev/null 2>&1; then
-    github_read_outcome_with_gh
-  else
-    github_read_outcome_with_gh_axi
-  fi || {
+  if ! command -v gh >/dev/null 2>&1; then
+    github_read_outcome_with_gh_axi && return 0
     echo "error: could not read the GitHub pull request outcome after the merge attempt; PR metadata and merge poll remain recorded" >&2
     return 1
-  }
+  fi
+  # Only a failed gh read falls back. A gh read that completes and reports the
+  # pull request as neither merged nor queued is a concrete outcome, not a
+  # missing one, so it keeps its own refusal. The gh-axi view cannot observe the
+  # merge queue, so it can only turn this into a proved merge or into a refusal.
+  github_read_outcome_with_gh && return 0
+  if github_read_outcome_with_gh_axi && [ "$FM_PR_GITHUB_MERGED" = true ]; then
+    return 0
+  fi
+  echo "error: could not read the GitHub pull request outcome after the merge attempt: the gh read failed and the gh-axi view could not prove the outcome either; PR metadata and merge poll remain recorded" >&2
+  return 1
 }
 
 github_urlencode_path_segment() {
@@ -397,7 +405,7 @@ github_read_queue_method() {
           FM_PR_GITHUB_QUEUE_AMBIGUOUS=true
           case ",$FM_PR_GITHUB_QUEUE_METHODS," in
             *",$candidate,"*) ;;
-            *) FM_PR_GITHUB_QUEUE_METHODS="$FM_PR_GITHUB_QUEUE_METHODS, $candidate" ;;
+            *) FM_PR_GITHUB_QUEUE_METHODS="$FM_PR_GITHUB_QUEUE_METHODS,$candidate" ;;
           esac
         fi
         ;;
@@ -439,7 +447,7 @@ github_report_unmerged_outcome() {
       "$FM_PR_GITHUB_BASE" "$0" "$ID" "$URL" "$queue_method" >&2
   elif [ "$FM_PR_GITHUB_QUEUE_AMBIGUOUS" = true ]; then
     printf 'error: base branch %s has conflicting merge queue methods (%s); exact retry flags are ambiguous\n' \
-      "$FM_PR_GITHUB_BASE" "$FM_PR_GITHUB_QUEUE_METHODS" >&2
+      "$FM_PR_GITHUB_BASE" "${FM_PR_GITHUB_QUEUE_METHODS//,/, }" >&2
   fi
 }
 
@@ -482,6 +490,9 @@ case "$PROVIDER" in
       if github_read_outcome; then
         if [ "$FM_PR_GITHUB_MERGED" != true ] && [ "$FM_PR_GITHUB_QUEUED" != true ]; then
           github_report_unmerged_outcome
+        else
+          printf 'actionable: the merge command for %s failed, but the pull request reads back as state=%s, merged=%s, isInMergeQueue=%s\n' \
+            "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED" >&2
         fi
       fi
       exit "$merge_status"

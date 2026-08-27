@@ -275,7 +275,9 @@ The helper requires a full canonical URL and rejects malformed URLs or repo over
 A `https://github.com/<owner>/<repo>/pull/<n>` URL invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, and preserves explicit merge-method flags.
 A `https://<host>/<path>/-/merge_requests/<n>` URL (see [docs/gitlab-merge-watch.md](gitlab-merge-watch.md)) invokes `glab mr merge <n> -R https://<host>/<path>`, so the instance comes from the URL, and adds no merge-method flag because the project's own merge method applies.
 That path merges only after one live read of the merge request confirms it is open, mergeable, conflict-free, with blocking discussions resolved and a successful pipeline at the current head, and it binds the merge to that verified head; recorded metadata is never the authority for those conditions because a rebase leaves it stale.
-After either forge command returns, the script confirms the PR or MR is actually merged; an auto-merge-queued or unconfirmed request records no landed outcome and leaves its poll armed.
+After either forge command returns, the script confirms the PR or MR actually landed.
+On GitLab an auto-merge-queued or unconfirmed request records no landed outcome and leaves its poll armed.
+On GitHub an outcome that is neither merged nor queued is refused loudly and non-zero, naming the observed state, and a base branch that requires the merge queue is refused with the exact retry flags rather than having a merge method chosen on the caller's behalf.
 A confirmed merge leaves a durable role-routed outcome instead of living only in the merging agent's memory, and [`bin/fm-merge-outcome-lib.sh`](../bin/fm-merge-outcome-lib.sh)'s header owns its destination, shape, identity, normal-case deduplication, and at-least-once recovery.
 The same emitter handles a merge firstmate performed and one its poll detected, while the watcher immediately delivers the emitter's local actionable poll row.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.

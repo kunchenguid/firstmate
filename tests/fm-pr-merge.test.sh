@@ -48,6 +48,9 @@
 #   (ai) an uncommitted marker retry never loses the durable outcome
 #   (aj) distinct merged PRs for a reused task each survive queue deduplication
 #   (ak) pr= is already recorded when the forge call that can land the merge runs
+#   (al) a failed gh read falls back to the gh-axi view, which can prove a merge
+#   (am) a failed merge command still names an outcome read that proves a landed
+#       or queued pull request, without masking the forge failure
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -187,6 +190,22 @@ esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/gh"
+}
+
+# gh-axi mock that merges but cannot answer its own view, so a case can prove
+# what happens when neither reader can establish the outcome. Args: case_dir
+add_gh_axi_mock_view_fails() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+case "${1:-} ${2:-}" in
+  "pr merge") printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;
+  "pr view") exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
 }
 
 add_failing_poll_publish_mv() {
@@ -466,7 +485,7 @@ test_github_verified_merge_requires_poll_recording() {
   expect_code 1 "$rc" "github-poll-recording-fails: poll setup failure should fail the merge wrapper"
   assert_grep 'error: could not publish PR poll' "$case_dir/stderr" \
     "github-poll-recording-fails: poll setup failure was not reported"
-  assert_no_grep 'verified: .* is merged' "$case_dir/stdout" \
+  assert_no_grep 'verified: ' "$case_dir/stdout" \
     "github-poll-recording-fails: failed poll setup was reported as a verified merge"
   assert_grep 'pr=https://github.com/example/repo/pull/55' "$case_dir/state/task-x1.meta" \
     "github-poll-recording-fails: metadata was not retained for the attempted merge"
@@ -506,6 +525,7 @@ test_github_unreadable_outcome_keeps_pr_bookkeeping() {
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 3131313131313131313131313131313131313131
   add_gh_mock_outcome_read_fails "$case_dir" 3131313131313131313131313131313131313131
+  add_gh_axi_mock_view_fails "$case_dir"
   : > "$case_dir/gh-axi.log"
   : > "$case_dir/gh.log"
 
@@ -518,6 +538,8 @@ test_github_unreadable_outcome_keeps_pr_bookkeeping() {
   expect_code 1 "$rc" "github-outcome-read-fails: an unreadable outcome must fail"
   assert_grep 'could not read the GitHub pull request outcome after the merge attempt' \
     "$case_dir/stderr" "github-outcome-read-fails: the unreadable outcome was not reported"
+  assert_grep 'the gh read failed and the gh-axi view could not prove the outcome either' \
+    "$case_dir/stderr" "github-outcome-read-fails: the refusal did not name both failed reads"
   assert_no_grep 'verified: ' "$case_dir/stdout" \
     "github-outcome-read-fails: an unproved merge was reported as verified"
   # The merge call itself returned success, so the pull request may well have
@@ -528,6 +550,58 @@ test_github_unreadable_outcome_keeps_pr_bookkeeping() {
   assert_present "$case_dir/state/task-x1.check.sh" \
     "github-outcome-read-fails: no merge poll was armed for a merge that may have landed"
   pass "fm-pr-merge keeps PR bookkeeping when it cannot read a successful merge call's outcome"
+}
+
+test_github_failed_gh_read_falls_back_to_gh_axi() {
+  local case_dir rc
+  case_dir=$(make_case github-gh-read-falls-back)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 5151515151515151515151515151515151515151
+  add_gh_mock_outcome_read_fails "$case_dir" 5151515151515151515151515151515151515151
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/63 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "github-gh-read-falls-back: a merge the gh-axi view proves must succeed"
+  assert_grep 'pr view 63 --repo example/repo' "$case_dir/gh-axi.log" \
+    "github-gh-read-falls-back: the gh-axi view was never consulted after gh's read failed"
+  assert_grep 'verified: https://github.com/example/repo/pull/63 is merged' \
+    "$case_dir/stdout" "github-gh-read-falls-back: the proven merge was not reported"
+  assert_grep 'pr=https://github.com/example/repo/pull/63' "$case_dir/state/task-x1.meta" \
+    "github-gh-read-falls-back: the merged PR was not recorded for teardown"
+  pass "fm-pr-merge falls back to the gh-axi view when gh's read fails"
+}
+
+test_github_failed_merge_names_an_observed_landed_state() {
+  local case_dir rc
+  case_dir=$(make_case github-failed-merge-actually-landed)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_merge_fails "$case_dir"
+  write_github_outcome "$case_dir" MERGED true false main
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/64 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-failed-merge-actually-landed: the forge failure must still fail the wrapper"
+  assert_grep 'error: pr merge failed' "$case_dir/stderr" \
+    "github-failed-merge-actually-landed: the original forge error was masked"
+  assert_grep 'state=MERGED, merged=true, isInMergeQueue=false' "$case_dir/stderr" \
+    "github-failed-merge-actually-landed: the observed landed state was never named"
+  assert_no_grep 'verified: ' "$case_dir/stdout" \
+    "github-failed-merge-actually-landed: a failed merge command was reported as verified"
+  assert_grep 'pr=https://github.com/example/repo/pull/64' "$case_dir/state/task-x1.meta" \
+    "github-failed-merge-actually-landed: the landed PR lost its reference"
+  pass "fm-pr-merge names a landed state hiding behind a failed GitHub merge command"
 }
 
 test_github_without_gh_still_uses_gh_axi_merge() {
@@ -680,7 +754,7 @@ test_github_queued_outcome_is_verified() {
   expect_code 0 "$rc" "github-verified-queued: a queued PR should succeed"
   assert_grep 'verified: https://github.com/example/repo/pull/53 is queued' \
     "$case_dir/stdout" "github-verified-queued: success was not reported as queued"
-  assert_no_grep '^merged:' "$case_dir/stdout" \
+  assert_no_grep 'merged:' "$case_dir/stdout" \
     "github-verified-queued: the forge CLI's unverified merged report leaked through"
   assert_grep 'pr=https://github.com/example/repo/pull/53' "$case_dir/state/task-x1.meta" \
     "github-verified-queued: the queued PR was not recorded for teardown"
@@ -749,7 +823,8 @@ test_github_conflicting_queue_rules_report_ambiguity() {
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 2525252525252525252525252525252525252525
   write_github_outcome "$case_dir" OPEN false false main
-  printf 'merge_method=MERGE\nmerge_method=SQUASH\n' > "$case_dir/github-rules"
+  printf 'merge_method=MERGE\nmerge_method=SQUASH\nmerge_method=SQUASH\n' \
+    > "$case_dir/github-rules"
   : > "$case_dir/gh-axi.log"
   : > "$case_dir/gh.log"
 
@@ -767,6 +842,8 @@ test_github_conflicting_queue_rules_report_ambiguity() {
     "github-conflicting-queue-rules: an exact retry method was guessed"
   assert_no_grep '-- --auto --squash' "$case_dir/stderr" \
     "github-conflicting-queue-rules: an exact retry method was guessed"
+  assert_no_grep 'SQUASH, SQUASH' "$case_dir/stderr" \
+    "github-conflicting-queue-rules: a repeated queue method was named twice"
   pass "fm-pr-merge reports ambiguity for conflicting merge-queue rules"
 }
 
@@ -1607,6 +1684,8 @@ test_pr_metadata_is_recorded_before_the_forge_call
 test_merge_failure_propagates_after_recording
 test_github_open_unqueued_outcome_refuses
 test_github_unreadable_outcome_keeps_pr_bookkeeping
+test_github_failed_gh_read_falls_back_to_gh_axi
+test_github_failed_merge_names_an_observed_landed_state
 test_github_without_gh_still_uses_gh_axi_merge
 test_github_without_gh_failed_read_keeps_bookkeeping
 test_github_merged_outcome_is_verified
