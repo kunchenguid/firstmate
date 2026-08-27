@@ -62,7 +62,8 @@ run_triage() {  # <home> <id> <repo> <summary> [extra args...]
 }
 
 make_crew_state_fake() {  # <home>
-  local home=$1 fake=$home/fm-crew-state.sh
+  local home=$1 fake
+  fake=$home/fm-crew-state.sh
   cat > "$fake" <<'SH'
 #!/usr/bin/env bash
 state_file=${FM_STATE_OVERRIDE:?}/${1:?}.current-state
