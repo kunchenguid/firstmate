@@ -47,9 +47,13 @@
 # becomes retryable and may be retried safely.
 #
 # Session start calls `recover --startup` only when the opt-in config exists.
-# Recovery re-publishes missing intake, orphaned active-delivery, landed, and
-# live-but-unnotified wakes, and surfaces unknown or retryable outbound delivery
-# without touching project branches, PRs, or supervised tasks.
+# It also calls `arm-collector`, which registers one home-identity-bound
+# process-event source for Telegram collection; watcher reconciliation owns
+# starting or recovering the long-polling child, so session start does not block
+# on Telegram network I/O. Recovery re-publishes missing intake, orphaned
+# active-delivery, landed, and live-but-unnotified wakes, and surfaces unknown or
+# retryable outbound delivery without touching project branches, PRs, or
+# supervised tasks.
 #
 # Migration is non-destructive. `migration-audit` reads a legacy pending queue,
 # held Pavel backlog rows, and an optional project clone, then reports how to
@@ -61,6 +65,7 @@
 # Usage:
 #   fm-pavel-ops.sh ingest [--file <event.json>]
 #   fm-pavel-ops.sh collect [--limit <1-100>] [--timeout <seconds>]
+#   fm-pavel-ops.sh arm-collector
 #   fm-pavel-ops.sh inspect <event-id>
 #   fm-pavel-ops.sh list
 #   fm-pavel-ops.sh classify <event-id> --as task --title <title> --intent <intent> \

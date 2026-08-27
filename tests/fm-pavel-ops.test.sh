@@ -133,9 +133,18 @@ chmod 0755 "$FAKEBIN/fm-pr-merge"
 cat > "$FAKEBIN/fm-live-check" <<'SH'
 #!/usr/bin/env bash
 set -eu
-printf 'live-check %s %s\n' "$1" "${2:-}" >> "$TASK_DB/.owners"
+[ "${2:-}" = "139000" ] || { printf 'missing expected text\n' >&2; exit 1; }
+[ -z "${3:-}" ] || [ "$3" = "old-price" ] || { printf 'unexpected absent text\n' >&2; exit 1; }
+printf 'live-check %s %s %s\n' "$1" "${2:-}" "${3:-}" >> "$TASK_DB/.owners"
 SH
 chmod 0755 "$FAKEBIN/fm-live-check"
+
+cat > "$FAKEBIN/fm-deploy" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf 'deploy %s\n' "$1" >> "$TASK_DB/.owners"
+SH
+chmod 0755 "$FAKEBIN/fm-deploy"
 
 cat > "$TMP_ROOT/server.py" <<'PY'
 import json
@@ -191,6 +200,14 @@ cat > "$HOME_DIR/config/pavel-ops.json" <<JSON
   "chat_ids": ["group"],
   "worker": {"harness": "pi", "mode": "no-mistakes", "yolo": "on"},
   "budget": {"per_action_rub": 0, "per_day_rub": 0},
+  "delivery": {
+    "live_url": "https://example.test/product",
+    "expected_text": "139000",
+    "absent_text": "old-price",
+    "deploy_command": "$FAKEBIN/fm-deploy",
+    "live_check_command": "$FAKEBIN/fm-live-check",
+    "completion_text": "Готово: цена уже на сайте."
+  },
   "telegram": {
     "env_file": "$HOME_DIR/telegram.env",
     "token_key": "TERENTYEV_BOT_TOKEN",
@@ -253,6 +270,14 @@ run_ops collect --limit 10 --timeout 0 >/dev/null || fail "empty collector repla
 offset_get=$(grep -F '/bottest-token/getUpdates' "$HTTP_LOG" | tail -1)
 printf '%s' "$offset_get" | grep -F 'offset=203' >/dev/null || fail "collector did not resume from durable offset"
 pass "Telegram getUpdates collector durably bridges Pavel updates"
+
+armed=$(run_ops arm-collector) || fail "Pavel collector arming failed"
+[ "$(printf '%s' "$armed" | json_field "['registered']")" = True ] || fail "collector did not register on first arm"
+armed_again=$(run_ops arm-collector) || fail "Pavel collector rearming failed"
+[ "$(printf '%s' "$armed_again" | json_field "['registered']")" = False ] || fail "collector arming was not idempotent"
+source_id=$(printf '%s' "$armed" | json_field "['source']")
+[ -f "$HOME_DIR/state/procevent/$source_id.source" ] || fail "collector was not registered with process-event owner"
+pass "Pavel Telegram collector is armed through process-event"
 
 # Ordinary work enters tasks-axi exactly once and becomes dispatchable.
 run_ops classify "$event" --as task --title 'Change price' --intent 'Set the requested catalog price' \
@@ -526,7 +551,9 @@ if run_ops transition "$event" dispatched --evidence 'caller supplied evidence' 
   fail "direct caller could advance autonomous delivery"
 fi
 run_ops drive "$event" >/dev/null
-printf '{"state":"delivery_ready","evidence":"checks green on exact PR head","pr_url":"https://github.com/o/r/pull/1"}\n' > "$PAVEL_STATUS_FILE"
+task_meta="$HOME_DIR/state/$task_id.meta"
+printf 'pr=%s\npr_head=%s\n' 'https://github.com/o/r/pull/1' 'abc123' >> "$task_meta"
+printf '{"state":"done","evidence":"checks green on exact PR head"}\n' > "$PAVEL_STATUS_FILE"
 run_ops drive "$event" >/dev/null
 run_ops drive "$event" >/dev/null
 run_ops drive "$event" >/dev/null
@@ -542,7 +569,6 @@ run_ops drive "$event" >/dev/null
 if run_ops transition "$event" live --evidence 'deploy succeeded' >/dev/null 2>&1; then
   fail "live transition accepted no customer URL"
 fi
-printf '{"state":"live","evidence":"requested price is visible on the customer page","live_url":"https://example.test/product","completion_text":"Готово: цена уже на сайте."}\n' > "$PAVEL_STATUS_FILE"
 before_completion_sends=$(grep -c . "$HTTP_LOG")
 run_ops drive "$event" >/dev/null
 run_ops send "$event" --purpose live-completion --text 'Готово: цена уже на сайте.' >/dev/null || fail "completion notification replay failed"
@@ -555,7 +581,8 @@ assert_grep 'chat_id=group' "$HTTP_LOG" "Telegram completion used the wrong chat
 assert_grep 'message' "$HOME_DIR/state/pavel-ops/outbox/$event-live-completion.json" "completion receipt was not retained"
 assert_grep 'pr-check' "$TASK_DB/.owners" "driver did not compose the PR registration owner"
 assert_grep 'pr-merge' "$TASK_DB/.owners" "driver did not compose the PR merge owner"
-assert_grep 'live-check https://example.test/product' "$TASK_DB/.owners" "driver did not compose the live verification owner"
+assert_grep 'deploy '"$task_id" "$TASK_DB/.owners" "driver did not compose the deploy owner"
+assert_grep 'live-check https://example.test/product 139000 old-price' "$TASK_DB/.owners" "driver did not compose the live verification owner"
 pass "validated delivery is driver-owned and Pavel is notified after live proof"
 
 # A delivered completion receipt after a crash reconciles the event without sending again.

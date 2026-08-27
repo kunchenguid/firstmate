@@ -132,6 +132,14 @@ A present file must be a single-linked regular JSON file with this schema:
     "per_action_rub": 0,
     "per_day_rub": 0
   },
+  "delivery": {
+    "live_url": "https://aln.example/product",
+    "expected_text": "new visible text or price",
+    "absent_text": "old text that must be gone",
+    "deploy_command": "/absolute/path/to/deploy-wrapper",
+    "live_check_command": "/absolute/path/to/live-check-wrapper",
+    "completion_text": "Готово: изменение уже на сайте."
+  },
   "telegram": {
     "env_file": "/absolute/private/path/to/telegram.env",
     "token_key": "TERENTYEV_BOT_TOKEN",
@@ -147,6 +155,9 @@ Any other tuple is rejected instead of falling back to Claude or returning routi
 When `project_path` is absent, the driver resolves `project` as `projects/<project>` under the Firstmate home; an explicit `project_path` may be absolute or home-relative, but it must resolve to a dedicated git checkout.
 The optional `budget` object records non-negative bounded spending authority in operator-chosen fields such as `per_action_rub` and `per_day_rub`.
 An absent or zero bound grants no spending authority, and spending outside every applicable positive bound remains a captain-only decision.
+The optional `delivery` object records the concrete post-merge deploy and customer-surface verification contract.
+When present, `deploy_command` is run with the task id after a confirmed merge, and `live_check_command` is run with the live URL, expected text, and absent text; without a live-check command, `expected_text` must be non-empty and is fetched directly from `live_url`, while `absent_text` must not appear.
+The driver never accepts a precomputed `state=live` claim as proof.
 The Telegram credential file must be an absolute, single-linked regular file containing the configured token key in `KEY=value` form.
 The production API endpoint is fixed to `https://api.telegram.org`; `telegram.api_base` is accepted only when `FM_PAVEL_OPS_TESTING=1` so tests can use a local fake without allowing a production config to redirect the token.
 
@@ -156,10 +167,11 @@ The immutable identity is the Telegram chat plus `update_id`, so a collector ret
 The collector no longer invokes a separate Claude autoresponder or writes a second task store.
 Outbound acknowledgement, clarification, answer, and live-completion messages use the configured Telegram Bot API through `bin/fm-pavel-ops.sh send`, which keeps their delivery receipts beside the event lifecycle.
 
-Session start runs `bin/fm-pavel-ops.sh recover --startup` before wake presentation when this config exists and the session owns the home.
+Session start runs `bin/fm-pavel-ops.sh arm-collector` and `recover --startup` before wake presentation when this config exists and the session owns the home.
+Arming registers one home-identity-bound process-event source; watcher reconciliation starts or recovers the long-polling collector child later, keeping Telegram network I/O off the blocking session-start path and preserving one `getUpdates` owner.
 That local recovery republishes captured, orphaned active-delivery, landed, and live-but-unnotified work and surfaces retryable or delivery-unknown Telegram sends without network access.
 The Pi primary and its tracked supervision extensions then handle each `pavel-ops-...` check wake under the `pavel-ops` skill by calling `bin/fm-pavel-ops.sh drive <event-id>`.
-The driver composes the existing Firstmate brief, Pi spawn, worker-state, PR registration, guarded merge, and live-verification owners before recording delivery progress; direct lifecycle transition input is not authority for dispatch, merge, landed, or live facts.
+The driver composes the existing Firstmate brief, Pi spawn, worker-state, task metadata PR record, PR registration, guarded merge, confirmed merge-outcome marker, deploy command, and live-verification owner before recording delivery progress; direct lifecycle transition input is not authority for dispatch, merge, landed, or live facts.
 
 Before replacing a legacy Pavel watcher or stale tgsync route, run `bin/fm-pavel-ops.sh migration-audit` with the legacy pending queue and project clone paths.
 Use `adopt-task` to link existing paused Pavel backlog rows at their already-proved lifecycle fact without recreating or closing them.

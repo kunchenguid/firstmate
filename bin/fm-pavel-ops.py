@@ -681,6 +681,31 @@ def command_from_env(home: Home, env_key: str, default_name: str) -> str:
     return os.environ.get(env_key, str(home.root / "bin" / default_name))
 
 
+def collector_source_id(home: Home) -> str:
+    return f"pavel-telegram-{sha(str(home.home))[:16]}"
+
+
+def arm_collector(home: Home) -> dict[str, Any]:
+    source_id = collector_source_id(home)
+    source_file = home.state / "procevent" / f"{source_id}.source"
+    if source_file.exists():
+        return {"source": source_id, "registered": False}
+    run_checked(
+        home,
+        [
+            str(home.root / "bin" / "fm-procevent.sh"),
+            "register",
+            "pavel-telegram",
+            source_id,
+            "--",
+            str(home.root / "bin" / "fm-procevent-pavel-telegram.sh"),
+            "run",
+            source_id,
+        ],
+    )
+    return {"source": source_id, "registered": True}
+
+
 def project_path(home: Home) -> str:
     configured = str(home.config.get("project_path") or "").strip()
     if configured:
@@ -711,6 +736,20 @@ def parse_meta(path: Path) -> dict[str, str]:
                 key, value = line.split("=", 1)
                 fields[key] = value
     return fields
+
+
+def task_meta(home: Home, event: dict[str, Any]) -> dict[str, str]:
+    task_id = str(event.get("task_id") or "")
+    if not task_id:
+        raise OpsError("Pavel work has no backlog task")
+    return parse_meta(home.state / f"{task_id}.meta")
+
+
+def pr_url_from_meta(home: Home, event: dict[str, Any]) -> str:
+    pr_url = task_meta(home, event).get("pr", "")
+    if not PR_URL.fullmatch(pr_url):
+        raise OpsError("Pavel PR owner has not recorded a canonical PR URL")
+    return pr_url
 
 
 def validate_dispatched_owner_record(home: Home, event: dict[str, Any]) -> dict[str, str]:
@@ -827,20 +866,25 @@ def drive(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         return driver_transition(home, event, "dispatched", "Pi worker metadata verified in isolated project copy")
     if event["state"] == "dispatched":
         status = owner_status(home, event)
-        if status.get("state") not in {"validating", "delivery_ready"}:
+        if status.get("state") not in {"validating", "delivery_ready", "done"}:
             raise OpsError("Pavel worker has not reached validation")
         return driver_transition(home, event, "validating", str(status.get("evidence") or "no-mistakes validation is active"))
     if event["state"] == "validating":
         status = owner_status(home, event)
         pr_url = str(status.get("pr_url") or "")
+        if not pr_url and status.get("state") in {"done", "delivery_ready"}:
+            pr_url = pr_url_from_meta(home, event)
         if status.get("state") != "delivery_ready" or not PR_URL.fullmatch(pr_url):
-            raise OpsError("Pavel delivery is not ready with a verified PR URL")
+            if status.get("state") != "done" or not PR_URL.fullmatch(pr_url):
+                raise OpsError("Pavel delivery is not ready with a verified PR URL")
         run_checked(home, [command_from_env(home, "FM_PAVEL_OPS_PR_CHECK", "fm-pr-check.sh"), task_id, pr_url])
         return driver_transition(home, event, "delivery_ready", str(status.get("evidence") or "checks green on exact PR head"))
     if event["state"] == "delivery_ready":
         pr_url = str(event.get("pr_url") or "")
         status = owner_status(home, event)
         pr_url = str(status.get("pr_url") or pr_url)
+        if not pr_url:
+            pr_url = pr_url_from_meta(home, event)
         if not PR_URL.fullmatch(pr_url):
             raise OpsError("Pavel merge queue requires a verified PR URL")
         run_checked(home, [command_from_env(home, "FM_PAVEL_OPS_PR_CHECK", "fm-pr-check.sh"), task_id, pr_url])
@@ -855,20 +899,32 @@ def drive(home: Home, args: argparse.Namespace) -> dict[str, Any]:
             return event
         return driver_transition(home, event, "landed", (output.strip() or "forge reports PR merged at verified head")[:500])
     if event["state"] == "landed":
-        status = owner_status(home, event)
-        live_url = str(status.get("live_url") or "")
-        if status.get("state") != "live" or not PR_URL.fullmatch(live_url):
-            raise OpsError("Pavel live verification requires a customer URL")
-        live_check = os.environ.get("FM_PAVEL_OPS_LIVE_CHECK")
+        delivery = home.config.get("delivery", {})
+        if not isinstance(delivery, dict):
+            raise OpsError("pavel-ops delivery config must be an object")
+        deploy_cmd = os.environ.get("FM_PAVEL_OPS_DEPLOY") or delivery.get("deploy_command")
+        if deploy_cmd:
+            run_checked(home, [str(deploy_cmd), task_id])
+        live_url = str(delivery.get("live_url") or "")
+        if not PR_URL.fullmatch(live_url):
+            raise OpsError("Pavel live verification requires delivery.live_url")
+        expected = str(event.get("live_probe", {}).get("expected") or delivery.get("expected_text") or "").strip()
+        absent = str(event.get("live_probe", {}).get("absent") or delivery.get("absent_text") or "").strip()
+        live_check = os.environ.get("FM_PAVEL_OPS_LIVE_CHECK") or delivery.get("live_check_command")
         if live_check:
-            run_checked(home, [live_check, live_url, str(status.get("contains") or "")])
-        elif status.get("contains"):
+            run_checked(home, [str(live_check), live_url, expected, absent])
+        else:
+            if not expected:
+                raise OpsError("Pavel live verification requires expected text or a live_check_command")
             with urllib.request.urlopen(live_url, timeout=30) as response:
                 body = response.read().decode("utf-8", "replace")
-            if str(status["contains"]) not in body:
+            if expected not in body:
                 raise OpsError("Pavel live probe did not find the requested behavior")
-        event = driver_transition(home, event, "live", str(status.get("evidence") or "requested behavior verified live"), live_url=live_url)
-        completion = str(status.get("completion_text") or f"Готово: результат уже на сайте {live_url}")
+            if absent and absent in body:
+                raise OpsError("Pavel live probe found forbidden old behavior")
+        evidence = f"live probe passed for {live_url}"
+        event = driver_transition(home, event, "live", evidence, live_url=live_url)
+        completion = str(delivery.get("completion_text") or f"Готово: результат уже на сайте {live_url}")
         send_args = argparse.Namespace(event=event["id"], purpose="live-completion", text=completion)
         send_message(home, send_args)
         return home.load_event(event["id"])
@@ -1355,6 +1411,8 @@ def parser() -> argparse.ArgumentParser:
     collect.add_argument("--limit", type=int, default=100)
     collect.add_argument("--timeout", type=int, default=0)
 
+    sub.add_parser("arm-collector")
+
     inspect = sub.add_parser("inspect")
     inspect.add_argument("event")
 
@@ -1437,6 +1495,8 @@ def main() -> int:
                 if args.timeout < 0 or args.timeout > 50:
                     raise OpsError("Telegram collect --timeout must be 0..50")
                 print_json(collect_telegram(home, args))
+            elif args.command == "arm-collector":
+                print_json(arm_collector(home))
             elif args.command == "inspect":
                 print_json(home.load_event(args.event))
             elif args.command == "list":

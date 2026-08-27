@@ -726,6 +726,11 @@ else
     printf 'inactive outcome reconciliation: %s\n' "$INACTIVE_OUT"
   fi
   if [ -f "$CONFIG/pavel-ops.json" ]; then
+    PAVEL_ARM_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-pavel-ops.sh" arm-collector 2>&1) || true
+    if [ -n "$PAVEL_ARM_OUT" ]; then
+      printf '%s\n' "$PAVEL_ARM_OUT"
+    fi
     PAVEL_RECOVERY_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
       "$SCRIPT_DIR/fm-pavel-ops.sh" recover --startup 2>&1) || true
     if [ -n "$PAVEL_RECOVERY_OUT" ]; then
