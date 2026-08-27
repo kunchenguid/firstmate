@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 # GitHub concurrency groups retain at most one pending run, replacing older
 # pending runs even when cancel-in-progress is false. Give body-bearing events
@@ -26,5 +27,33 @@ jobs:
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
+      # Base-branch checkout on purpose. The gate judges a PR without ever
+      # running code from its head, so this brings in only the settle script as
+      # the branch being merged into has it, never as the PR rewrote it.
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          persist-credentials: false
+      # GitHub snapshots the PR body into the event payload when the event
+      # fires. no-mistakes pushes the branch first and rewrites the body with
+      # the attestation for the new head a couple of minutes later, so the
+      # synchronize payload always still names the previous head and the gate
+      # failed on every no-mistakes push before the following `edited` run
+      # passed. Judge the live body instead, once it binds to the pushed head.
+      # A push that no-mistakes never attested never binds and still fails.
+      - name: Settle the PR body against the pushed head
+        id: pr-body
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          bin/fm-attestation-settle.sh \
+            --repo "$GITHUB_REPOSITORY" \
+            --pr "$PR_NUMBER" \
+            --head "$PR_HEAD_SHA" >/dev/null
       - name: Verify no-mistakes signature and pipeline attestation
         uses: kunchenguid/no-mistakes/.github/actions/require-no-mistakes@32d396ac0f29135daf7fcb9964aba9d5f4e796d6 # post-v1.57.1, untagged (action added in #819)
+        with:
+          pr-body: ${{ steps.pr-body.outputs.body }}
