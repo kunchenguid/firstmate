@@ -20,8 +20,15 @@ Evidence is a JSON object.  Supported observations are:
             defect_evidence:[...], reproduction, proven_path}
   external_providers: [{name,status,code}]
   local_services: [{name,status}]
+  diagnosis: {classification, probable_root_cause, supporting_evidence,
+              code_change_required}
   approval: {kind,request}
   verification: {runtime_path_ok, checks:[{name,status,evidence}]}
+
+The diagnosis is agent-adjudicated input, not a script inference from raw
+observations.  Omit it, or use unknown/not yet proven, while evidence remains
+ambiguous.  The script validates that an actionable diagnosis has the exact
+proof, authority, and approval mechanics required by its selected workflow.
 
 The command never executes a repair.  After the exact approval has been
 obtained, perform the narrow provider or service operation with its supported
@@ -67,14 +74,14 @@ STOP_WORDS = {
     "that", "their", "then", "there", "these", "this", "through", "using",
     "when", "where", "which", "with", "worker", "worktree",
 }
-EXTERNAL_FAILURES = {
-    "quota", "quota_exhausted", "command_quota_exceeded", "rate_limit",
-    "rate_limited", "billing", "billing_required", "payment_required",
-    "credential", "credentials", "credential_invalid", "unauthorized",
-    "configuration", "configuration_invalid", "config_invalid",
-}
-LOCAL_FAILURES = {"down", "failed", "stopped", "unhealthy", "unavailable"}
 VERIFICATION_PASS = {"healthy", "ok", "pass", "passing"}
+DIAGNOSIS_CODE_REQUIREMENT = {
+    "application code defect": "yes",
+    "deployment/routing defect": "no",
+    "external dependency, quota, billing, credential, or configuration failure": "no",
+    "local background-service failure": "no",
+    "unknown": "not yet proven",
+}
 
 
 class IncidentError(RuntimeError):
@@ -793,10 +800,6 @@ def compact(value: Any, maximum: int = 160) -> str:
     return text[:maximum]
 
 
-def signal_value(value: Any) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", compact(value).lower()).strip("_")
-
-
 def unique_strings(values: Iterable[str]) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
@@ -807,61 +810,16 @@ def unique_strings(values: Iterable[str]) -> list[str]:
     return result
 
 
-def classify(evidence: dict[str, Any], repo_info: dict[str, Any]) -> dict[str, Any]:
+def record_agent_diagnosis(evidence: dict[str, Any], repo_info: dict[str, Any]) -> dict[str, Any]:
     production = evidence.get("production") if isinstance(evidence.get("production"), dict) else {}
     runtime = evidence.get("runtime") if isinstance(evidence.get("runtime"), dict) else {}
     runtime_errors = list_of_objects(runtime.get("errors"))
     providers = list_of_objects(evidence.get("external_providers"))
     services = list_of_objects(evidence.get("local_services"))
+    diagnosis_input = evidence.get("diagnosis") if isinstance(evidence.get("diagnosis"), dict) else None
     approval_input = evidence.get("approval") if isinstance(evidence.get("approval"), dict) else {}
 
-    supporting: list[str] = []
-    external_rows: list[dict[str, Any]] = []
-    for row in runtime_errors:
-        signals = {signal_value(row.get(key, "")) for key in ("kind", "status", "code")}
-        if signals & EXTERNAL_FAILURES:
-            external_rows.append(row)
-            supporting.append(
-                "external provider "
-                + compact(row.get("source") or row.get("name") or "unknown")
-                + " reported "
-                + compact(row.get("code") or row.get("status") or row.get("kind") or "failure")
-            )
-    for row in providers:
-        signals = {signal_value(row.get(key, "")) for key in ("status", "code")}
-        if signals & EXTERNAL_FAILURES:
-            external_rows.append(row)
-            supporting.append(
-                "external provider "
-                + compact(row.get("name") or "unknown")
-                + " reported "
-                + compact(row.get("code") or row.get("status") or "failure")
-            )
-
     production_origin = normalize_origin(production.get("origin")) if isinstance(production.get("origin"), str) else None
-    production_origin_mismatch = bool(production_origin and production_origin != repo_info["canonical_remote"])
-    deployment_signal = bool(
-        production.get("routing_mismatch") is True
-        or production.get("deployment_failed") is True
-        or production_origin_mismatch
-    )
-    if production.get("routing_mismatch") is True:
-        supporting.append("production routing identity does not match the expected route")
-    if production.get("deployment_failed") is True:
-        supporting.append("the production deployment is reported failed")
-    if production_origin_mismatch:
-        supporting.append("production identifies a different repository origin than the canonical incident repository")
-
-    failed_services = [row for row in services if compact(row.get("status", "")).lower() in LOCAL_FAILURES]
-    for row in failed_services:
-        supporting.append(
-            "local service " + compact(row.get("name", "unknown")) + " is " + compact(row.get("status", "unknown"))
-        )
-
-    defect_proven = runtime.get("defect_proven") is True
-    defect_evidence = [compact(item) for item in runtime.get("defect_evidence", []) if isinstance(item, str)]
-    if defect_proven:
-        supporting.extend(defect_evidence or ["runtime evidence explicitly proves an application defect"])
 
     deployed = production.get("commit") if isinstance(production.get("commit"), str) else None
     proposed = production.get("proposed_hotfix_commit") if isinstance(production.get("proposed_hotfix_commit"), str) else None
@@ -870,77 +828,74 @@ def classify(evidence: dict[str, Any], repo_info: dict[str, Any]) -> dict[str, A
         production.get("proposed_hotfix_present") is True
         or commit_is_ancestor(authoritative, proposed, deployed)
     )
-    if hotfix_already_deployed:
-        supporting.append("production already contains the proposed hotfix commit")
 
-    category_signals = sum(bool(value) for value in (external_rows, deployment_signal, failed_services, defect_proven))
-    if category_signals > 1:
+    if diagnosis_input is None:
         category = "unknown"
         code_required = "not yet proven"
-        probable = "conflicting runtime signals require a narrower counterfactual before any repair"
-    elif defect_proven:
-        category = "application code defect"
-        code_required = "yes"
-        probable = defect_evidence[0] if defect_evidence else "runtime evidence proves an application code defect"
-    elif external_rows:
-        category = "external dependency, quota, billing, credential, or configuration failure"
-        code_required = "no"
-        first = external_rows[0]
-        probable = (
-            compact(first.get("source") or first.get("name") or "external provider")
-            + " "
-            + compact(first.get("code") or first.get("status") or first.get("kind") or "failure")
-        )
-    elif deployment_signal:
-        category = "deployment/routing defect"
-        code_required = "no"
-        probable = "production deployment or routing identity does not match the expected release"
-    elif failed_services:
-        category = "local background-service failure"
-        code_required = "no"
-        probable = f"local service {compact(failed_services[0].get('name', 'unknown'))} is not healthy"
-    elif hotfix_already_deployed:
-        category = "unknown"
-        code_required = "no"
-        probable = "the proposed hotfix is already present in production, so repeating that code change cannot repair the incident"
+        probable = "agent diagnosis is pending; raw observations do not authorize a workflow"
+        supporting_values = ["raw observations were recorded for agent adjudication"]
     else:
-        category = "unknown"
-        code_required = "not yet proven"
-        probable = "available evidence does not yet prove a code, deployment, provider, or local-service cause"
+        category_input = diagnosis_input.get("classification")
+        probable_input = diagnosis_input.get("probable_root_cause")
+        code_required_input = diagnosis_input.get("code_change_required")
+        supporting_input = diagnosis_input.get("supporting_evidence")
+        if not isinstance(category_input, str) or category_input not in DIAGNOSIS_CODE_REQUIREMENT:
+            raise IncidentError("diagnosis.classification must be one supported incident category")
+        if not isinstance(probable_input, str) or not probable_input.strip():
+            raise IncidentError("diagnosis.probable_root_cause must be a non-empty string")
+        if not isinstance(supporting_input, list) or not supporting_input:
+            raise IncidentError("diagnosis.supporting_evidence must be a non-empty list of strings")
+        if any(not isinstance(item, str) or not item.strip() for item in supporting_input):
+            raise IncidentError("diagnosis.supporting_evidence must contain only non-empty strings")
+        category = category_input
+        code_required = DIAGNOSIS_CODE_REQUIREMENT[category]
+        if code_required_input != code_required:
+            raise IncidentError(
+                f"diagnosis.code_change_required must be {code_required!r} for {category!r}"
+            )
+        probable = compact(probable_input, 300)
+        supporting_values = unique_strings(compact(item, 300) for item in supporting_input)
 
-    default_approvals = {
-        "external dependency, quota, billing, credential, or configuration failure": (
-            "operational_provider_change",
-            "Approve only the provider plan, credential, or production configuration change named by the diagnosis.",
-        ),
-        "deployment/routing defect": (
-            "production_routing_or_deployment_change",
-            "Approve only the production routing or deployment correction named by the diagnosis.",
-        ),
-        "local background-service failure": (
-            "service_restart",
-            "Approve only the named managed-service restart.",
-        ),
-    }
-    default_kind, default_request = default_approvals.get(category, ("none", "No operational approval is currently identified."))
+    if code_required == "yes":
+        defect_evidence = [item for item in runtime.get("defect_evidence", []) if isinstance(item, str) and item.strip()]
+        proof_complete = bool(
+            runtime.get("defect_proven") is True
+            and defect_evidence
+            and isinstance(runtime.get("reproduction"), str)
+            and runtime["reproduction"].strip()
+            and isinstance(runtime.get("proven_path"), str)
+            and runtime["proven_path"].strip()
+        )
+        if not proof_complete:
+            raise IncidentError(
+                "application code diagnosis requires defect_proven, defect_evidence, reproduction, and proven_path"
+            )
+        if hotfix_already_deployed:
+            raise IncidentError(
+                "application code diagnosis conflicts with an already-deployed proposed hotfix; continue agent diagnosis"
+            )
+        if repo_info.get("remote_default_conflict") or not repo_info.get("authoritative_remote_head"):
+            raise IncidentError("application code diagnosis requires one verified authoritative remote default head")
+
     operational_repair_ready = code_required == "no" and category != "unknown"
     approval_required = operational_repair_ready
-    approval_kind_input = approval_input.get("kind", default_kind)
-    approval_request_input = approval_input.get("request", default_request)
-    if not isinstance(approval_kind_input, str) or not approval_kind_input.strip():
-        raise IncidentError("approval.kind must be a non-empty string")
-    if not isinstance(approval_request_input, str) or not approval_request_input.strip():
-        raise IncidentError("approval.request must be a non-empty string")
-    approval_kind = compact(approval_kind_input, 80)
-    approval_request = compact(approval_request_input, 300)
-    if not operational_repair_ready:
+    if operational_repair_ready:
+        approval_kind_input = approval_input.get("kind")
+        approval_request_input = approval_input.get("request")
+        if not isinstance(approval_kind_input, str) or not approval_kind_input.strip():
+            raise IncidentError("an operational diagnosis requires a non-empty approval.kind")
+        if not isinstance(approval_request_input, str) or not approval_request_input.strip():
+            raise IncidentError("an operational diagnosis requires a non-empty approval.request")
+        approval_kind = compact(approval_kind_input, 80)
+        approval_request = compact(approval_request_input, 300)
+    else:
         approval_required = False
         approval_kind = "none"
         approval_request = "No operational mutation is authorized by the current diagnosis."
 
     if code_required == "yes":
         next_action = "Start one current-main continuation and transfer only incident-related changes through the repository's normal validation and release process."
-    elif code_required == "no" and not operational_repair_ready:
+    elif hotfix_already_deployed:
         next_action = "Continue runtime diagnosis; production already contains the proposed hotfix, so do not repeat that code change."
     elif code_required == "no" and approval_required:
         next_action = approval_request
@@ -949,7 +904,6 @@ def classify(evidence: dict[str, Any], repo_info: dict[str, Any]) -> dict[str, A
     else:
         next_action = "Gather the missing runtime or provider evidence; do not create a code branch or run validation yet."
 
-    supporting_values = unique_strings(supporting) or ["no decisive runtime evidence was supplied"]
     supporting_shown, supporting_omitted = bounded_items(supporting_values)
     runtime_observations, runtime_omitted = bounded_items([
         {
@@ -1416,7 +1370,7 @@ def triage(args: argparse.Namespace) -> int:
     )
     evidence = load_evidence(Path(args.evidence).resolve() if args.evidence else None)
     workers = collect_workers(base["state"], base["data"], repo_info, args.summary, args.term)
-    diagnosis = classify(evidence, repo_info)
+    diagnosis = record_agent_diagnosis(evidence, repo_info)
     if diagnosis["code_change_required"] == "yes":
         phase = "diagnosis"
         outcome = "escalate_to_code_change"
@@ -1674,7 +1628,10 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description="Bounded FirstMate runtime-incident fast path")
     sub = root.add_subparsers(dest="command", required=True)
 
-    triage_parser = sub.add_parser("triage", help="collect read-only evidence, classify, and record the diagnosis")
+    triage_parser = sub.add_parser(
+        "triage",
+        help="collect read-only inventory and record an agent-adjudicated diagnosis",
+    )
     triage_parser.add_argument("--incident", required=True)
     triage_parser.add_argument("--repo", required=True)
     triage_parser.add_argument("--summary", required=True)

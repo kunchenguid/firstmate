@@ -20,10 +20,12 @@ Do not create a branch, clone, working copy, brief, implementation plan, validat
 Resolve the canonical repository and its origin, then use the current locally verified origin default branch as the policy and workflow authority.
 Gather available production identity, runtime logs, service health, provider codes and quota state, deployment or routing identity, and local managed-service status through read-only provider or operator surfaces.
 Never place a credential, token, secret, billing identifier, or raw customer data in the evidence document or incident record.
+Interpret those observations under `diagnostic-reasoning`, then add an agent-adjudicated `diagnosis` object containing the supported classification, probable root cause, supporting evidence, and whether code is required.
+Use `unknown` and `not yet proven` when the evidence is ambiguous; never ask the script to infer incident meaning or authority from raw observations.
 
 Run `bin/fm-runtime-incident.py triage` with the incident id, canonical repository, concise observed symptom, a temporary structured evidence document when runtime evidence is available, and bounded `--scan-root` paths only when relevant copies may live outside the registered project directory.
 The script header and `--help` own the exact commands, evidence fields, bounds, state format, and lifecycle transitions.
-The command reads repositories, registered workers, and supplied runtime evidence without changing any of them, and its only triage write is the local incident ledger used by status views.
+The command reads repositories, registered workers, and supplied runtime evidence without changing any of them, validates the deterministic lifecycle mechanics for the agent's diagnosis, and writes only the local incident ledger used by status views.
 
 Read the complete triage result before choosing an action.
 It must name the probable cause and evidence, authoritative repository and current-main working copy when one exists, whether code is required, stale or superseded copies, every active worker's exact directory, objective, age, current activity, incident relevance, unrelated or scope-drifted workers, safest next action, and exact approval required.

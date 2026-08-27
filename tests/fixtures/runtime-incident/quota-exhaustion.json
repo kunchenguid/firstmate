@@ -18,6 +18,14 @@
       "code": "command_quota_exceeded"
     }
   ],
+  "diagnosis": {
+    "classification": "external dependency, quota, billing, credential, or configuration failure",
+    "probable_root_cause": "Upstash command quota exhaustion is rejecting the companion status path.",
+    "supporting_evidence": [
+      "Upstash returned command_quota_exceeded while production remained deployed and degraded."
+    ],
+    "code_change_required": "no"
+  },
   "approval": {
     "required": true,
     "kind": "paid_plan_change",

@@ -513,7 +513,7 @@ test_proposed_hotfix_already_deployed() {
   [ "$before" = "$after" ] || fail "already-deployed diagnosis created a duplicate worktree"
   printf '%s' "$out" | jq -e '
     .diagnosis.hotfix_already_deployed == true
-      and .diagnosis.code_change_required == "no"
+      and .diagnosis.code_change_required == "not yet proven"
       and .diagnosis.classification == "unknown"
       and .diagnosis.operational_repair_ready == false
       and .phase == "diagnosis"
@@ -542,6 +542,14 @@ test_proven_application_defect_escalates() {
     ],
     "reproduction": "status request returns 500",
     "proven_path": "same request succeeds with a valid cache key"
+  },
+  "diagnosis": {
+    "classification": "application code defect",
+    "probable_root_cause": "The invalid cache-key branch rejects a valid account request.",
+    "supporting_evidence": [
+      "The production and local reproductions diverge from the proven valid-cache-key path at the same branch."
+    ],
+    "code_change_required": "yes"
   }
 }
 EOF
@@ -569,26 +577,94 @@ EOF
   pass "runtime evidence proving an application defect escalates to one current-main code workflow"
 }
 
-test_remaining_classifier_categories() {
+test_raw_evidence_requires_agent_judgment() {
+  local home origin repo out
+  home=$(make_home agent-judgment)
+  origin=$(make_origin agent-judgment)
+  repo=$home/projects/titan
+  clone_origin "$origin" "$repo"
+
+  cat > "$home/raw-unadjudicated.json" <<'EOF'
+{
+  "runtime": {
+    "errors": [
+      {"source": "upstash", "kind": "quota", "code": "command_quota_exceeded"}
+    ]
+  },
+  "external_providers": [
+    {"name": "upstash", "status": "quota_exhausted", "code": "command_quota_exceeded"}
+  ],
+  "approval": {
+    "kind": "paid_plan_change",
+    "request": "Approve the Upstash plan upgrade only."
+  }
+}
+EOF
+  out=$(run_triage "$home" raw-unadjudicated "$repo" \
+    "Status fails after an Upstash quota report" \
+    --evidence "$home/raw-unadjudicated.json")
+  printf '%s' "$out" | jq -e '
+    .phase == "diagnosis"
+      and .outcome == "more_evidence_required"
+      and .diagnosis.classification == "unknown"
+      and .diagnosis.code_change_required == "not yet proven"
+      and .diagnosis.probable_root_cause == "agent diagnosis is pending; raw observations do not authorize a workflow"
+      and .approval.required == false
+      and .approval.status == "not_required"
+      and .guardrails.new_worktree_allowed == false
+      and .guardrails.code_validation_allowed == false
+  ' >/dev/null || fail "raw evidence selected an authority-sensitive workflow without agent judgment: $out"
+  pass "raw runtime evidence cannot replace agent diagnosis or authorize a workflow"
+}
+
+test_agent_adjudicated_categories() {
   local home origin repo out
   home=$(make_home categories)
   origin=$(make_origin categories)
   repo=$home/projects/titan
   clone_origin "$origin" "$repo"
 
-  printf '{"production":{"routing_mismatch":true}}\n' > "$home/deployment.json"
+  cat > "$home/deployment.json" <<'EOF'
+{
+  "production": {"routing_mismatch": true},
+  "diagnosis": {
+    "classification": "deployment/routing defect",
+    "probable_root_cause": "Production routes requests to the wrong release.",
+    "supporting_evidence": ["The production route identity differs from the expected release."],
+    "code_change_required": "no"
+  },
+  "approval": {
+    "kind": "production_route_change",
+    "request": "Approve only the production route correction."
+  }
+}
+EOF
   out=$(run_triage "$home" deployment "$repo" "Wrong production route" --evidence "$home/deployment.json")
   printf '%s' "$out" | jq -e '
     .diagnosis.classification == "deployment/routing defect"
       and .diagnosis.code_change_required == "no"
-  ' >/dev/null || fail "deployment classifier failed: $out"
+  ' >/dev/null || fail "agent-adjudicated deployment diagnosis failed: $out"
 
-  printf '{"local_services":[{"name":"companion-relay","status":"stopped"}]}\n' > "$home/service.json"
+  cat > "$home/service.json" <<'EOF'
+{
+  "local_services": [{"name": "companion-relay", "status": "stopped"}],
+  "diagnosis": {
+    "classification": "local background-service failure",
+    "probable_root_cause": "The local companion relay is stopped.",
+    "supporting_evidence": ["The managed-service status reports the companion relay stopped."],
+    "code_change_required": "no"
+  },
+  "approval": {
+    "kind": "service_restart",
+    "request": "Approve only the companion-relay restart."
+  }
+}
+EOF
   out=$(run_triage "$home" service "$repo" "Local companion relay is unavailable" --evidence "$home/service.json")
   printf '%s' "$out" | jq -e '
     .diagnosis.classification == "local background-service failure"
       and .diagnosis.code_change_required == "no"
-  ' >/dev/null || fail "local-service classifier failed: $out"
+  ' >/dev/null || fail "agent-adjudicated local-service diagnosis failed: $out"
 
   printf '{"external_providers":[{"name":"upstash","status":"quota_available"}]}\n' > "$home/unknown.json"
   out=$(run_triage "$home" unknown "$repo" "Intermittent unexplained failure" --evidence "$home/unknown.json")
@@ -596,12 +672,12 @@ test_remaining_classifier_categories() {
     .diagnosis.classification == "unknown"
       and .diagnosis.code_change_required == "not yet proven"
       and .guardrails.new_worktree_allowed == false
-  ' >/dev/null || fail "unknown classifier failed closed: $out"
+  ' >/dev/null || fail "unadjudicated observations did not fail closed: $out"
   out=$(FM_HOME="$home" FM_INCIDENT_STATUS_LIMIT=2 "$INCIDENT" status --json --compact)
   printf '%s' "$out" | jq -e '
     (.records | length) == 2 and .truncated == 1
   ' >/dev/null || fail "bounded incident status did not disclose truncation: $out"
-  pass "deployment, local-service, and unknown incidents stay in their bounded categories"
+  pass "agent-adjudicated deployment and service diagnoses retain a fail-closed unknown path"
 }
 
 test_repository_identity_normalizes_transports_and_relative_paths() {
@@ -859,7 +935,20 @@ providers = [
     {"name": f"provider-{index:05d}", "status": "quota_exhausted", "code": "quota_exhausted"}
     for index in range(7000)
 ]
-Path(sys.argv[1]).write_text(json.dumps({"external_providers": providers}, separators=(",", ":")))
+evidence = {
+    "external_providers": providers,
+    "diagnosis": {
+        "classification": "external dependency, quota, billing, credential, or configuration failure",
+        "probable_root_cause": "The selected provider exhausted its command quota.",
+        "supporting_evidence": ["The provider status reports quota exhaustion."],
+        "code_change_required": "no",
+    },
+    "approval": {
+        "kind": "operational_provider_change",
+        "request": "Approve only the diagnosed provider quota change.",
+    },
+}
+Path(sys.argv[1]).write_text(json.dumps(evidence, separators=(",", ":")))
 PY
   out=$(run_triage "$home" aggregate-record "$repo" \
     "Provider quota exhaustion" --evidence "$home/large-evidence.json" \
@@ -869,9 +958,9 @@ PY
       and ([.repository.copies[].branches[]] | length) == 256
       and .repository.inventory.branches.shown == 256
       and .repository.inventory.branches.omitted_at_least >= 47
-      and (.diagnosis.supporting_evidence | length) == 256
+      and (.diagnosis.supporting_evidence | length) == 1
       and (.diagnosis.observations.external_providers | length) == 256
-      and .diagnosis.observations.inventory.supporting_evidence == {shown:256,omitted:6744}
+      and .diagnosis.observations.inventory.supporting_evidence == {shown:1,omitted:0}
       and .diagnosis.observations.inventory.external_providers == {shown:256,omitted:6744}
   ' >/dev/null || fail "aggregate record bounds or omission metadata were incomplete: $out"
   record=$home/state/incidents/aggregate-record.json
@@ -959,7 +1048,8 @@ test_lifecycle_transitions_read_and_write_under_one_lock
 test_stale_remote_never_wins_fallback_authority
 test_proposed_hotfix_already_deployed
 test_proven_application_defect_escalates
-test_remaining_classifier_categories
+test_raw_evidence_requires_agent_judgment
+test_agent_adjudicated_categories
 test_repository_identity_normalizes_transports_and_relative_paths
 test_bounded_inventory_omissions_are_disclosed
 test_worktree_inventory_is_authority_bound_and_enrichment_is_capped
