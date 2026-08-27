@@ -729,6 +729,13 @@ pause_state_class() {  # <window> <task>
   # either gate below before any liveness read - costs no metadata scan at all,
   # while a captain-held pane that reaches both gates still scans exactly once.
   # The far more common no-declaration path above already returned.
+  # Kept as a local resolution rather than a third parameter, and not for speed:
+  # the stale loop already computes kind unconditionally for every window on every
+  # poll, so this memoization saves nothing measurable today. Its value is
+  # self-containment. A classifier that decides whether work keeps getting
+  # supervised has to derive its own input, because a future caller handing in a
+  # stale or wrong kind would silently flip the secondmate carve-out below with
+  # nothing failing loudly.
   kind=
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     if status_is_paused "$last"; then

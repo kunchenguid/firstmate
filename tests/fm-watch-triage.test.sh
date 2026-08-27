@@ -1096,7 +1096,14 @@ test_declared_waits_use_bounded_cadence_until_released() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
+  # wait_poll_cycle gives up both when the watcher exits and when its budget
+  # lapses with the process still alive; only the first is the regression this
+  # sub-case is looking for, so report the second as the timeout it is.
   if ! wait_poll_cycle "$state" "$pid"; then
+    if kill -0 "$pid" 2>/dev/null; then
+      reap "$pid"
+      fail "the live declared external wait timed out before completing a poll cycle"
+    fi
     reap "$pid"
     fail "live declared external wait produced a bare stale wake: $(cat "$out")"
   fi
@@ -1189,8 +1196,45 @@ test_declared_waits_use_bounded_cadence_until_released() {
     || fail "the live captain-held pane did not surface its stale wake: $(cat "$out")"
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
   [ "$wakes" -eq 1 ] || fail "the live captain-held pane queued $wakes stale wakes instead of one"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the immediate live captain-held surface"
 
-  pass "declared waits use the bounded cadence for live or exited endpoints, a live captain hold still surfaces at once, and lifting the pause restores genuine stale delivery"
+  # The unchanged-hash fallback AFTER that immediate surface, which only this
+  # pane reaches: it is the one case that surfaces once and must then hand the
+  # very next poll to the bounded pause cadence. Re-arm on the same pane hash
+  # under the same hold with a residual wedge timer already past
+  # FM_STALE_ESCALATE_SECS, and the hold must absorb it - keeping the pause
+  # marker, discarding the residual timer and its escalation count - rather than
+  # wedge-escalating or appending a second bare stale row to the durable queue.
+  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    if kill -0 "$pid" 2>/dev/null; then
+      reap "$pid"
+      fail "the live captain-held recheck timed out before completing a poll cycle"
+    fi
+    reap "$pid"
+    fail "the live captain-held pane woke again on the wedge timer after its immediate surface: $(cat "$out")"
+  fi
+  [ -e "$state/.paused-$key" ] \
+    || { reap "$pid"; fail "the live captain-held pane lost its pause cadence marker on the unchanged-hash fallback"; }
+  [ ! -e "$state/.stale-since-$key" ] \
+    || { reap "$pid"; fail "the live captain-held pane kept the residual wedge timer instead of moving onto the pause cadence"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || { reap "$pid"; fail "the live captain-held pane climbed the wedge escalation ladder after its immediate surface"; }
+  reap "$pid"
+  grep -F "possible wedge" "$out" >/dev/null \
+    && fail "the live captain-held pane's unchanged-hash fallback was decorated as a possible wedge: $(cat "$out")"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 0 ] || fail "the acknowledged live captain-held surface queued $wakes more stale wakes on the pause cadence"
+  [ "$bare" -eq 0 ] || fail "the live captain-held fallback appended $bare more bare stale wakes to the durable queue"
+
+  pass "declared waits use the bounded cadence for live or exited endpoints, a live captain hold surfaces once then falls back to that cadence, and lifting the pause restores genuine stale delivery"
 }
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
