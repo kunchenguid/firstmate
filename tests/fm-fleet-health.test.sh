@@ -134,9 +134,16 @@ SH
   printf '%s\n' "$root"
 }
 
-write_pending() {  # <home> <corr> <task> <phase> [completed_epoch] [grace] [sender-pid] [sender-identity]
+write_pending() {  # <home> <corr> <task> <phase> [completed_epoch] [grace] [sender-pid] [sender-identity] [recovery-outcome]
   local home=$1 corr=$2 task=$3 phase=$4 completed=${5-} grace=${6:-120}
-  local sender_pid=${7-} sender_identity=${8-}
+  local sender_pid=${7-} sender_identity=${8-} recovery_outcome=${9-}
+  if [ -z "$recovery_outcome" ]; then
+    case "$phase" in
+      recovery_sent) recovery_outcome=confirmed ;;
+      recovery_failed) recovery_outcome=failed ;;
+      recovery_unknown) recovery_outcome=unknown ;;
+    esac
+  fi
   mkdir -p "$home/state/pending-replies"
   cat > "$home/state/pending-replies/$corr" <<EOF
 schema=fm-pending-reply.v1
@@ -155,7 +162,7 @@ recovery_attempted_epoch=
 recovery_sender_pid=$sender_pid
 recovery_sender_identity=$sender_identity
 recovery_sent_epoch=
-recovery_delivery_outcome=
+recovery_delivery_outcome=$recovery_outcome
 recovery_turn_seen_busy=0
 recovery_turn_completed_epoch=
 escalated_epoch=
@@ -261,7 +268,7 @@ test_snapshot_task_evidence_requires_keys_and_known_states() {
   local home fixture out rc=0 mutation snapshot
   home=$(make_home malformed-task-evidence)
   fixture=$(make_health_fixture_root malformed-task-evidence)
-  snapshot='{"schema":"fm-fleet-snapshot.v1","generated":"2026-01-01T00:00:00Z","fm_home":"/tmp/home","roots":{"fm_root":"/tmp/root","state":"/tmp/state","data":"/tmp/data","config":"/tmp/config","projects":"/tmp/projects"},"backlog":{"path":"/tmp/backlog.md","present":false,"records":[]},"tasks":[{"id":"task","kind":"ship","remote":null,"current_state":{"state":"working"},"endpoint":{"agent_state":"alive","agent_alive":"alive","probe":"local","codex_session":{"resume_banner":null}},"paths":{"status_log":{"last_event":{"state":"working","handoff_required":false,"mtime_epoch":null}}},"pr":{"url":null,"source":"absent"}}],"scout_reports":[],"collection":{"state":{"present":true,"available":true,"invalid_metadata_count":0,"invalid_metadata":[]}},"main_inventory":{"valid":true,"reason":null},"secondmate_current":{"records":[],"truncated":0,"registry":{"available":true,"complete":true,"input_truncated":false,"records_truncated":false}},"secondmate_landed":{"records":[],"truncated":[],"unreadable":[],"partial":[]},"secondmate_guidance":{"note":"fixture"}}'
+  snapshot='{"schema":"fm-fleet-snapshot.v1","generated":"2026-01-01T00:00:00Z","fm_home":"/tmp/home","roots":{"fm_root":"/tmp/root","state":"/tmp/state","data":"/tmp/data","config":"/tmp/config","projects":"/tmp/projects"},"backlog":{"path":"/tmp/backlog.md","present":false,"records":[]},"tasks":[{"id":"task","kind":"ship","remote":null,"current_state":{"state":"working"},"endpoint":{"agent_state":"alive","agent_alive":"alive","probe":"local","codex_session":{"collected":true,"reason":null,"resume_banner":null}},"paths":{"status_log":{"last_event":{"state":"working","handoff_required":false,"mtime_epoch":null}}},"pr":{"url":null,"source":"absent"}}],"scout_reports":[],"collection":{"state":{"present":true,"available":true,"invalid_metadata_count":0,"invalid_metadata":[]}},"main_inventory":{"valid":true,"reason":null},"secondmate_current":{"records":[],"truncated":0,"registry":{"available":true,"complete":true,"input_truncated":false,"records_truncated":false}},"secondmate_landed":{"records":[],"truncated":[],"unreadable":[],"partial":[]},"secondmate_guidance":{"note":"fixture"}}'
   for mutation in omit-endpoint-exists invalid-state invalid-agent-state invalid-agent-alive invalid-probe; do
     if [ "$mutation" = omit-endpoint-exists ]; then
       snapshot=$(printf '%s' "$snapshot" | jq 'del(.tasks[0].endpoint.exists)')
@@ -448,6 +455,84 @@ test_codex_resume_banner_is_dead_session() {
       and (any(.findings[]; .kind == "dead-direct-report" and .subject == "codex-resume-task") | not)
   ' >/dev/null || fail "Codex resume banner was missed or duplicated: $out"
   pass "Codex resume banner is a high-confidence dead-session finding"
+}
+
+test_unverified_backend_codex_banner_is_dead_session() {
+  local home fakebin out rc=0
+  home=$(make_home codex-unverified-banner)
+  mkdir -p "$home/projects/codex-unverified-wt"
+  fm_write_meta "$home/state/codex-unverified.meta" \
+    "window=firstmate:7" \
+    "endpoint_task_id=codex-unverified" \
+    "backend=zellij" \
+    "zellij_session=firstmate" \
+    "zellij_tab_id=3" \
+    "zellij_pane_id=7" \
+    "worktree=$home/projects/codex-unverified-wt" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship" \
+    "yolo=off"
+  printf 'working: still in flight\n' > "$home/state/codex-unverified.status"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/zellij" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "list-sessions --short --no-formatting") printf 'firstmate\n' ;;
+  *"action list-panes --json"*) printf '[{"id":7,"tab_id":3,"is_plugin":false}]\n' ;;
+  *"action list-tabs --json"*) printf '[{"tab_id":3,"name":"fm-codex-unverified"}]\n' ;;
+  *"action dump-screen --pane-id 7"*) printf 'session ended\nTo continue this session, run codex resume\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/zellij"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
+  expect_code 1 "$rc" "Codex resume banner should override unverified backend liveness"
+  printf '%s' "$out" | jq -e '
+    .status == "actionable"
+      and any(.findings[]; .kind == "dead-codex-session" and .subject == "codex-unverified"
+              and .confidence == "high")
+      and (any(.findings[]; .kind == "endpoint-inconclusive" and .subject == "codex-unverified") | not)
+  ' >/dev/null || fail "unverified backend hid a captured Codex resume banner: $out"
+  pass "captured Codex banner overrides unverified backend liveness"
+}
+
+test_failed_codex_capture_is_inconclusive() {
+  local home fakebin out rc=0
+  home=$(make_home codex-capture-failed)
+  mkdir -p "$home/projects/codex-capture-failed-wt"
+  fm_write_meta "$home/state/codex-capture-failed.meta" \
+    "window=firstmate:fm-codex-capture-failed" \
+    "worktree=$home/projects/codex-capture-failed-wt" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship" \
+    "yolo=off"
+  printf 'working: still in flight\n' > "$home/state/codex-capture-failed.status"
+  fresh_autoarm_supervision "$home"
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf 'fm-codex-capture-failed\n' ;;
+  display-message)
+    case "$*" in *pane_current_command*) printf 'codex\n' ;; *) printf '%%1\n' ;; esac
+    ;;
+  capture-pane) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "failed Codex pane capture should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "endpoint-inconclusive" and .subject == "codex-capture-failed")
+      and (any(.findings[]; .kind == "dead-codex-session" and .subject == "codex-capture-failed") | not)
+  ' >/dev/null || fail "failed Codex pane capture did not remain inconclusive: $out"
+  pass "failed Codex pane capture remains inconclusive"
 }
 
 test_codex_bare_shell_is_dead_session() {
@@ -890,6 +975,23 @@ SH
               and .subject == "unreadable-recovery")
   ' >/dev/null || fail "recovery_sending ownership evidence was hidden: $out"
   pass "recovery sender ownership distinguishes orphaned and unreadable"
+}
+
+test_inconsistent_recovery_outcome_is_inconclusive() {
+  local home fakebin out rc=0
+  home=$(make_home inconsistent-recovery-outcome)
+  write_pending "$home" 3333333333333333 half-written recovery_sending "" 120 "$$" sender confirmed
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "half-written recovery outcome should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "pending-reply-inconclusive"
+              and .subject == "pending-replies"
+              and .evidence == "1 pending-reply record(s) are invalid")
+      and (any(.findings[]; .kind == "pending-reply-broken" and .subject == "half-written") | not)
+  ' >/dev/null || fail "half-written recovery outcome did not remain inconclusive: $out"
+  pass "half-written recovery outcomes remain inconclusive"
 }
 
 test_inconclusive_secondmate_summary_not_broken() {
@@ -1461,6 +1563,8 @@ test_unsearchable_nested_inventories_are_inconclusive
 test_actionable_dead_direct_report
 test_dead_agent_with_live_endpoint
 test_codex_resume_banner_is_dead_session
+test_unverified_backend_codex_banner_is_dead_session
+test_failed_codex_capture_is_inconclusive
 test_codex_bare_shell_is_dead_session
 test_live_codex_without_banner_is_not_dead_session
 test_missed_handoff_after_done_signal
@@ -1479,6 +1583,7 @@ test_unknown_worker_state_is_inconclusive
 test_registry_only_remote_evidence_is_inconclusive
 test_pending_reply_broken_and_historical_noise_omitted
 test_recovery_sending_owner_verdicts
+test_inconsistent_recovery_outcome_is_inconclusive
 test_inconclusive_secondmate_summary_not_broken
 test_invalid_secondmate_summary_uses_normalized_kind
 test_truncated_secondmate_inventory_is_inconclusive

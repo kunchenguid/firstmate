@@ -178,7 +178,7 @@ fm_pending_reply_get() {  # <record-path> <key>
 }
 
 fm_pending_reply_record_valid() {  # <record-path>
-  local rec=$1 base schema corr task phase key count value
+  local rec=$1 base schema corr task phase outcome key count value
   [ -f "$rec" ] && [ ! -L "$rec" ] || return 1
   for key in schema corr_id task_id parent_home parent_status parent_status_scan_signature request_summary \
     created_epoch delivered_epoch phase turn_seen_busy request_turn_completed_epoch \
@@ -222,8 +222,14 @@ fm_pending_reply_record_valid() {  # <record-path>
     value=$(fm_pending_reply_get "$rec" "$key")
     case "$value" in 0|1) ;; *) return 1 ;; esac
   done
-  value=$(fm_pending_reply_get "$rec" recovery_delivery_outcome)
-  case "$value" in ''|confirmed|failed|unknown) ;; *) return 1 ;; esac
+  outcome=$(fm_pending_reply_get "$rec" recovery_delivery_outcome)
+  case "$outcome" in ''|confirmed|failed|unknown) ;; *) return 1 ;; esac
+  case "$phase:$outcome" in
+    awaiting_report:|delivery_unknown:|recovery_sending:|recovery_sent:confirmed|recovery_failed:failed|recovery_unknown:unknown) ;;
+    escalated:|escalated:confirmed|escalated:failed|escalated:unknown) ;;
+    resolved:|resolved:confirmed|resolved:failed|resolved:unknown) ;;
+    *) return 1 ;;
+  esac
   value=$(fm_pending_reply_get "$rec" resolved_via)
   case "$value" in ''|status|document|helper) ;; *) return 1 ;; esac
 }

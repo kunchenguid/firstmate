@@ -364,11 +364,6 @@ codex_session_evidence_json() {  # <harness> <remote-host> <backend> <target> <i
       jq -n '{collected:false,reason:"foreground already proved agent-free",resume_banner:null}'
       return 0
       ;;
-    unreadable|not_checked|not_collected|unverified)
-      # Banner capture is only the extra signal for a still-classified-live pane.
-      jq -n --arg reason "$agent_state" '{collected:false,reason:$reason,resume_banner:null}'
-      return 0
-      ;;
   esac
   if [ -z "$target" ] || [ "$exists" = false ]; then
     [ "$exists" = false ] && reason="recorded endpoint is absent" || reason="no recorded endpoint"

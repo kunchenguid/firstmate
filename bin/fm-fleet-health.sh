@@ -180,6 +180,8 @@ snapshot_shape_valid() {
       and (.endpoint.probe | type) == "string"
       and (.endpoint.probe | endpoint_probe_valid)
       and (.endpoint.codex_session | type) == "object"
+      and (.endpoint.codex_session.collected | type) == "boolean"
+      and (.endpoint.codex_session | nullable_key("reason"; "string"))
       and (.endpoint.codex_session | nullable_key("resume_banner"; "boolean"))
       and (.paths | type) == "object"
       and (.paths.status_log | type) == "object"
@@ -366,6 +368,12 @@ EVALUATED=$(jq -n \
   def terminal_state($s): ($s == "done" or $s == "failed");
   def codex_harness($t): (($t.harness // "") | startswith("codex"));
   def resume_banner($t): ($t.endpoint.codex_session.resume_banner == true);
+  def codex_capture_inconclusive($t):
+    (codex_harness($t)
+     and exists($t) == true
+     and (terminal_state($t.current_state.state) | not)
+     and ((agent_state($t) == "dead" or agent_state($t) == "missing") | not)
+     and $t.endpoint.codex_session.collected == false);
   def inbox_last($id):
     ([ $inbox_activity.records[]? | select(.task_id == $id) | .last_epoch ]
      | if length == 0 then null else max end);
@@ -479,7 +487,9 @@ EVALUATED=$(jq -n \
         | select(remote(.) | not)
         | select(.kind != "secondmate")
         | select(agent_state(.) == "ambiguous" or agent_state(.) == "unreadable"
-                 or agent_state(.) == "unverified" or agent_state(.) == "not_checked")
+                 or agent_state(.) == "unverified" or agent_state(.) == "not_checked"
+                 or codex_capture_inconclusive(.))
+        | select(resume_banner(.) | not)
         | finding("endpoint-inconclusive";.id;"notice";"inconclusive";
                   "agent or endpoint liveness could not be established";agent_state(.);1)),
       ($snapshot.tasks[]?

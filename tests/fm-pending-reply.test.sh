@@ -50,6 +50,28 @@ test_created_pending_reply_is_valid() {
   pass "created pending-reply records satisfy the validator"
 }
 
+test_recovery_phase_requires_matching_outcome() {
+  local home state corr rec
+  home="$TMP_ROOT/recovery-phase-outcome"
+  state="$home/state"
+  mkdir -p "$state"
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "recovery invariant") \
+    || fail "pending-reply creation failed"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$rec" recovery_attempted_epoch 1000 || fail "recovery attempt setup failed"
+  fm_pending_reply_set "$rec" recovery_sender_pid "$$" || fail "recovery sender setup failed"
+  fm_pending_reply_set "$rec" recovery_sender_identity sender || fail "recovery identity setup failed"
+  fm_pending_reply_set "$rec" phase recovery_sending || fail "recovery phase setup failed"
+  fm_pending_reply_set "$rec" recovery_delivery_outcome confirmed || fail "recovery outcome setup failed"
+  if fm_pending_reply_record_valid "$rec"; then
+    fail "recovery_sending with a committed outcome must be invalid"
+  fi
+  fm_pending_reply_set "$rec" phase recovery_sent || fail "recovery sent setup failed"
+  fm_pending_reply_record_valid "$rec" \
+    || fail "recovery_sent with confirmed outcome should be valid"
+  pass "recovery phases require matching delivery outcomes"
+}
+
 # --- fixtures ---------------------------------------------------------------
 
 make_stubs() {  # <dir> -> fakebin
@@ -1266,6 +1288,7 @@ test_failed_send_discards_undelivered_expectation() {
 # --- run --------------------------------------------------------------------
 
 test_created_pending_reply_is_valid
+test_recovery_phase_requires_matching_outcome
 test_normal_correlated_reply_resolves_once
 test_completed_turn_no_report_triggers_one_recovery
 test_recovery_attempt_is_never_reinjected
