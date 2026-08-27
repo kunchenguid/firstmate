@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Regression tests for fm-spawn's pooled-worktree base refresh.
 #
-# A treehouse pool can return a clean detached worktree whose origin/main was
-# advanced after the worktree was allocated.
+# A treehouse pool can return a clean detached worktree whose default branch
+# was advanced after the worktree was allocated.
 # These tests drive the real spawn path with a fake terminal, then prove it
-# starts the worker from the fetched origin/main tip or stops when origin is
-# unreachable.
+# starts the worker from the fetched tip of origin's default branch - or from
+# the primary checkout's own default-branch tip when the repo has no origin
+# remote (resolution order owned by remoteless_default_branch in
+# bin/fm-spawn.sh) - and refuses a stale, dirty, or unresolvable base.
 set -u
 
 # shellcheck source=tests/lib.sh
