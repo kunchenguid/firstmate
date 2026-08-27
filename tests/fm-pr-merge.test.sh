@@ -55,6 +55,8 @@
 #       apart from the wrapper's verdict and never leaked to stdout
 #   (ao) a caller-requested auto-merge on a queue-less base refuses and says
 #       auto-merge is armed with nothing merged or queued yet
+#   (ap) a caller-requested auto-merge whose merge command failed refuses
+#       without ever claiming auto-merge was armed
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -635,6 +637,37 @@ test_github_auto_merge_without_queue_refuses_legibly() {
       "github-auto-no-queue: the attempted merge did not leave its poll armed"
   done
   pass "fm-pr-merge explains an armed auto-merge that landed nothing on a queue-less base"
+}
+
+test_github_failed_merge_never_claims_armed_auto_merge() {
+  local case_dir rc
+  case_dir=$(make_case github-auto-merge-command-fails)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_merge_fails "$case_dir"
+  write_github_outcome "$case_dir" OPEN false false main
+  : > "$case_dir/github-rules"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/67 -- --auto --merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-auto-merge-command-fails: the forge failure must still fail the wrapper"
+  assert_grep 'error: pr merge failed' "$case_dir/stderr" \
+    "github-auto-merge-command-fails: the original forge error was masked"
+  assert_grep 'state=OPEN, merged=false, isInMergeQueue=false' "$case_dir/stderr" \
+    "github-auto-merge-command-fails: refusal did not name the concrete observed state"
+  assert_no_grep 'armed' "$case_dir/stderr" \
+    "github-auto-merge-command-fails: a failed merge command was reported as an armed auto-merge"
+  assert_grep 'auto-merge was requested for https://github.com/example/repo/pull/67' \
+    "$case_dir/stderr" \
+    "github-auto-merge-command-fails: the refusal never said auto-merge had only been requested"
+  assert_no_grep 'verified: ' "$case_dir/stdout" \
+    "github-auto-merge-command-fails: a failed merge command was reported as verified"
+  pass "fm-pr-merge never reports auto-merge as armed when the merge command failed"
 }
 
 test_github_failed_gh_read_falls_back_to_gh_axi() {
@@ -1771,6 +1804,7 @@ test_github_open_unqueued_outcome_refuses
 test_github_unreadable_outcome_keeps_pr_bookkeeping
 test_github_refusal_quotes_the_forge_output
 test_github_auto_merge_without_queue_refuses_legibly
+test_github_failed_merge_never_claims_armed_auto_merge
 test_github_failed_gh_read_falls_back_to_gh_axi
 test_github_failed_merge_names_an_observed_landed_state
 test_github_without_gh_still_uses_gh_axi_merge

@@ -20,9 +20,12 @@
 # the exact -- --auto --<method> retry flags. No method is selected for the
 # caller. A caller-requested --auto that leaves the pull request neither merged
 # nor queued is refused the same way and says auto-merge was armed with nothing
-# landed or queued yet, read from the caller's own arguments rather than from
-# the forge's prose. Every refusal quotes the forge command's own output,
-# marked as the forge's text and kept apart from this script's verdict.
+# landed or queued yet, or, when the merge command itself failed, that auto-merge
+# was only requested; both are read from the caller's own arguments rather than
+# from the forge's prose. A refusal that follows a merge command which returned
+# success quotes that command's own output, marked as the forge's text and kept
+# apart from this script's verdict, while a merge command that failed keeps its
+# original error surfaced raw and first.
 # GitLab adds no method flag at all: its merge method is the project's own
 # setting, which the merge API applies, and imposing squash there would override
 # that convention rather than mirror the GitHub default.
@@ -466,6 +469,7 @@ OUTPUT
 }
 
 FM_PR_GITHUB_AUTO_REQUESTED=false
+FM_PR_GITHUB_MERGE_ACCEPTED=false
 github_report_unmerged_outcome() {
   printf 'error: GitHub merge outcome was not successful: state=%s, merged=%s, isInMergeQueue=%s\n' \
     "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED" >&2
@@ -474,8 +478,13 @@ github_report_unmerged_outcome() {
     return 0
   fi
   if [ "$FM_PR_GITHUB_AUTO_REQUESTED" = true ]; then
-    printf 'error: auto-merge was requested and armed for %s, but nothing is merged or in the merge queue yet, so this run refuses instead of reporting an unproved merge\n' \
-      "$URL" >&2
+    if [ "$FM_PR_GITHUB_MERGE_ACCEPTED" = true ]; then
+      printf 'error: auto-merge was requested and armed for %s, but nothing is merged or in the merge queue yet, so this run refuses instead of reporting an unproved merge\n' \
+        "$URL" >&2
+    else
+      printf 'error: auto-merge was requested for %s, but the merge command itself failed, so nothing was enabled, merged or queued\n' \
+        "$URL" >&2
+    fi
   fi
   if github_read_queue_method; then
     case "$FM_PR_GITHUB_QUEUE_METHOD" in
@@ -526,7 +535,7 @@ case "$PROVIDER" in
     fi
     if merge_output=$(gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1); then
-      :
+      FM_PR_GITHUB_MERGE_ACCEPTED=true
     else
       merge_status=$?
       [ -z "$merge_output" ] || printf '%s\n' "$merge_output" >&2
