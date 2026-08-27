@@ -1272,7 +1272,10 @@ test_pull_request_list_is_bounded_like_landed() {
     .backlog.records = [range(0;40) as $i | {structured:true,id:("done-" + ($i|tostring)),repo:"alpha",
       title:("Landed " + ($i|tostring)),state:"done",hold_kind:null,
       pr_url:("https://github.com/example/alpha/pull/" + (($i + 1)|tostring)),
-      completion:{date:"2026-08-20"}}]
+      completion:{date:("2026-07-" + (if $i < 9 then "0" else "" end) + (($i + 1)|tostring))}}]
+    | .backlog.records += [{structured:true,id:"open-now",repo:"alpha",title:"Open work",
+        state:"in_flight",since:"2020-01-01",captain_actionable:false,unresolved_blocker_ids:[],
+        pr_url:"https://github.com/example/alpha/pull/999"}]
     | .tasks = []
     | .secondmate_current.records = []
   ' "$home/fleet.json" > "$home/fleet.tmp"
@@ -1282,9 +1285,11 @@ test_pull_request_list_is_bounded_like_landed() {
   printf '%s' "$out" | jq -e '
     .projects[] | select(.name == "alpha")
     | (.landed | length) == 5 and .counts.landed == 40
-      and (.prs | length) == 5 and .counts.prs == 40
-  ' >/dev/null || fail "the PR list grew with the whole done history: $out"
-  pass "the pull-request list is bounded like the landed list"
+      and (.landed | map(.id)) == ["done-39","done-38","done-37","done-36","done-35"]
+      and (.prs | length) == 5 and .counts.prs == 41
+      and (.prs | map(.id)) == ["open-now","done-39","done-38","done-37","done-36"]
+  ' >/dev/null || fail "the PR list is unbounded, misordered, or buries current work: $out"
+  pass "the pull-request list keeps current work and the newest landings"
 }
 
 extract_payload() {  # <board>
@@ -1468,6 +1473,12 @@ SH
   printf '%s' "$out" | jq -e '
     (.meta[] | select(.project == "alpha") | .panels | any(startswith("Recently landed (5 of 8)")))
       and (.meta[] | select(.project == "alpha") | .panels | any(startswith("Pull requests (5 of 8)")))
+      and ((.meta[] | select(.project == "alpha") | .items[]
+            | select(.title | startswith("Recently landed")) | .rows
+            | map(sub(" [0-9]{4}-[0-9]{2}-[0-9]{2} . main$"; ""))) as $landed_titles
+           | (.meta[] | select(.project == "alpha") | .items[]
+              | select(.title | startswith("Pull requests")) | .rows
+              | map(sub(" main$"; ""))) == $landed_titles)
   ' >/dev/null || fail "the landed list was capped without saying so: $out"
   printf '%s' "$out" | jq -e '
     (.meta[] | select(.project == "gamma")

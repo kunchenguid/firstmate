@@ -34,7 +34,8 @@
 # no label and whose task has been torn down has no signal linking it to any
 # project, so it is dropped rather than reported as fleet incompleteness.
 # landed[] and prs[] are the two surfaces fed by the append-only Done section;
-# both publish at most five rows and carry the true total in counts.
+# both publish at most five rows, newest completion first, and carry the true
+# total in counts. prs[] lists current work ahead of completed work.
 # A done task whose backlog row is not yet done is disclosed in finished[] with
 # the crew detail repeated verbatim. That detail is the only local record of
 # what done means for the task, so the board never infers a lifecycle stage -
@@ -476,15 +477,23 @@ jq -n \
         | dedupe_first([.owner,.id])
         | sort_by([(.completed // ""),.id]) | reverse) as $landed_all
       | ([ $tasks[] | select(.pr.url != null)
-           | {id,title:(.backlog.title // .id),url:.pr.url,owner:"main"} ]
+           | {id,title:(.backlog.title // .id),url:.pr.url,owner:"main",current:true,completed:null} ]
          + [ $backlog[] | select(.pr_url != null)
-             | {id,title,url:.pr_url,owner:"main"} ]
+             | {id,title,url:.pr_url,owner:"main",
+                current:(.state != "done"),
+                completed:(if .state == "done"
+                           then (.completion.date // .merged // .reported // .done)
+                           else null end)} ]
          + [ $owners[] as $owner
              | $owner.record.landed[]?
              | select(matches_project($owner; $name) and .pr_url != null)
-             | {id,title,url:.pr_url,owner:$owner.id} ]
-        | dedupe_first(.url)
-        | map(. + {linkable:(.url | https_url)})) as $prs_all
+             | {id,title,url:.pr_url,owner:$owner.id,current:false,
+                completed:(.completion.date // null)} ]
+        | dedupe_first(.url)) as $prs_seen
+      | (([ $prs_seen[] | select(.current) ]
+          + ([ $prs_seen[] | select(.current | not) ]
+             | sort_by([(.completed // ""),.id]) | reverse))
+         | map(del(.current) | del(.completed) | . + {linkable:(.url | https_url)})) as $prs_all
       | ([ $owners[] | select(.record.current.state == "unknown")
            | {id:.id,reason:(.record.current.reason // "Secondmate state unavailable")} ]) as $unavailable_owners
       | ([ $registered_owners[] as $owner
