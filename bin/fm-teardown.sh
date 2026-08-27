@@ -1120,13 +1120,38 @@ pr_is_merged() {
 # default branch, so it went unnoticed until one that did not target it was
 # checked here. Returns non-zero when inconclusive (no such ref, or a merge
 # conflict), so the caller refuses rather than guesses.
+#
+# Trusting "origin" at all requires it to survive fm_pr_git_origin_matches_repo
+# (bin/fm-pr-lib.sh) first: a false "landed" here does not cost a spurious
+# wake like it would in bin/fm-pr-poll.sh, it discards genuinely unlanded
+# commits at the REFUSED guard below, so a repointed "origin" (a corporate
+# insteadOf rewrite, a redirected multi-valued url, or a sibling task's own
+# git config - a linked worktree's remote config is the project clone's
+# shared config) must never read as landed evidence just because a remote
+# called "origin" resolves to SOMETHING. When a pull request is recorded
+# (PR_URL), that check also binds origin to the pull request's own
+# destination repository, so a same-named branch in an unrelated project or a
+# fork cannot read as landed either. With no recorded PR_URL there is no
+# destination to bind against, so origin is trusted on transport safety alone
+# - matching prior behavior for that case (bin/fm-teardown.sh's own tests
+# cover a genuine no-PR content-landed scenario). The worktree's own local
+# branch is a fallback only in local-only mode, where "landed" already means
+# "merged into local $DEFAULT_BRANCH" rather than "merged upstream" - never in
+# a mode where landing means the pull request merged on the forge.
 content_in_branch() {
-  local name=$1 ref default_tree merged_tree
+  local name=$1 ref default_tree merged_tree host path
   [ -n "$name" ] || name=$(default_branch) || return 1
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+  host=
+  path=
+  if [ -n "$PR_URL" ] && fm_pr_url_parse "$PR_URL"; then
+    host=$FM_PR_HOST
+    path=$FM_PR_PATH
+  fi
+  if fm_pr_git_origin_matches_repo "$WT" "$host" "$path"; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
-  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+  elif [ "$MODE" = local-only ] \
+    && git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"
   else
     return 1

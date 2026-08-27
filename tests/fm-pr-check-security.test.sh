@@ -3693,15 +3693,35 @@ test_gitlab_merged_poll_retires() {
 # header owns why), so bin/fm-pr-poll.sh's git-based test - not any forge API -
 # must be what actually detects a Bitbucket merge. These tests build a real,
 # small git repository because that git test is the only thing under test.
+#
+# <wt>'s origin is set directly to the literal ssh://bitbucket.org/team/app
+# identity these tests validate against - never rewritten with a local
+# `url.insteadOf` trick, because bin/fm-pr-poll.sh's origin-identity check now
+# refuses exactly that kind of label/transport mismatch (Finding 1 of the
+# adversarial review that reworked this fixture), so a fixture that relied on
+# it would no longer even reach the code paths under test. Instead, GIT_SSH
+# (a real git feature for substituting the ssh transport) is pointed at
+# GIT_FAKE_SSH, a wrapper that ignores the requested host and connection
+# details entirely and serves whichever local bare repository run_poll_git
+# names, so `git config --get remote.origin.url` and `git remote get-url
+# origin` agree - exactly like a real firstmate worktree cloned straight from
+# a real forge - while no real network connection or SSH server is ever used.
+GIT_FAKE_SSH="$TMP_ROOT/fake-ssh"
+mkdir -p "$TMP_ROOT"
+cat > "$GIT_FAKE_SSH" <<'SH'
+#!/usr/bin/env bash
+last=${*: -1}
+case "$last" in
+  git-upload-pack\ *) exec git-upload-pack "$FM_TEST_SSH_TARGET" ;;
+  git-receive-pack\ *) exit 1 ;;
+  *) exit 0 ;;
+esac
+SH
+chmod +x "$GIT_FAKE_SSH"
 
 # A minimal real git fixture: <dir>/origin.git (bare, default branch main) and
 # <dir>/wt (a worktree of a fresh task branch off main, with one unpushed
-# commit so the content test has something meaningful to compare). <wt>'s
-# origin is configured to the literal https://bitbucket.org/team/app identity
-# these tests validate against, with a local url.insteadOf rewrite so fetches
-# actually reach the local bare repo - real firstmate worktrees clone the real
-# forge URL directly, so this mirrors that shape rather than testing a URL
-# nothing in production would ever see.
+# commit so the content test has something meaningful to compare).
 make_git_fixture() {
   local dir=$1
   mkdir -p "$dir"
@@ -3713,11 +3733,20 @@ make_git_fixture() {
   rm -rf "$dir/_seed"
   git clone -q "$dir/origin.git" "$dir/project"
   git -C "$dir/project" worktree add -q -b task-branch "$dir/wt" main
-  git -C "$dir/wt" remote set-url origin https://bitbucket.org/team/app
-  git -C "$dir/wt" config "url.$dir/origin.git.insteadOf" https://bitbucket.org/team/app
+  git -C "$dir/wt" remote set-url origin ssh://bitbucket.org/team/app
   printf 'hello\n' > "$dir/wt/feature.txt"
   git -C "$dir/wt" add -- feature.txt
   git -C "$dir/wt" -c user.email=t@t -c user.name=t commit -q -m "add feature"
+}
+
+# A second bare repository seeded with the exact same baseline commit as
+# <from>, so content later landed on it with land_on_branch is genuinely
+# equivalent rather than merely present in an otherwise-empty repository -
+# the distinction Finding 2 of the adversarial review turned on.
+seed_fork() {
+  local from=$1 to=$2
+  mkdir -p "$(dirname "$to")"
+  git clone -q --bare "$from" "$to" 2>/dev/null
 }
 
 # Push <file>=<content> as one new commit directly to origin's <branch>
@@ -3742,6 +3771,16 @@ land_on_branch() {
 # git, never gh or glab.
 run_poll_validated() {
   PATH="$BASE_PATH" "$POLL" --validated "$@"
+}
+
+# run_poll_validated, with git's ssh transport redirected through
+# GIT_FAKE_SSH to <target> (a local bare repo) regardless of what host or
+# path the fixture's origin URL names, so a validated PR identity is checked
+# against a real ssh:// origin with no real network connection.
+run_poll_git() {  # <target-bare-repo> <provider> <url> <host> <path> <number> <wt> <dest> <cache>
+  local target=$1
+  shift
+  GIT_SSH="$GIT_FAKE_SSH" FM_TEST_SSH_TARGET="$target" run_poll_validated "$@"
 }
 
 test_bitbucket_url_parses_and_arms() {
@@ -3793,6 +3832,47 @@ test_pr_dest_explicit_argument_recorded() {
   pass "an explicit destination argument is recorded, and a malformed one is rejected"
 }
 
+test_pr_dest_carry_over_on_rearm() {
+  local dir
+  dir=$(make_case bitbucket-dest-carryover)
+  write_task_meta "$dir"
+
+  # Arm once with an explicit destination.
+  run_check_entry "$dir" task-a https://bitbucket.org/team/app/pull-requests/7 stage-v2 \
+    > "$dir/stdout1" 2> "$dir/stderr1" \
+    || fail "dest-carryover: initial arm with an explicit destination failed: $(cat "$dir/stderr1")"
+  grep -qxF 'pr_dest=stage-v2' "$dir/home/state/task-a.meta" \
+    || fail "dest-carryover: initial pr_dest= was not recorded"
+
+  # Re-arm the SAME URL with no destination argument: the previous
+  # destination must survive, since nothing about the pull request's
+  # destination changed.
+  run_check_entry "$dir" task-a https://bitbucket.org/team/app/pull-requests/7 \
+    > "$dir/stdout2" 2> "$dir/stderr2" \
+    || fail "dest-carryover: same-URL rearm with no destination failed: $(cat "$dir/stderr2")"
+  grep -qxF 'pr_dest=stage-v2' "$dir/home/state/task-a.meta" \
+    || fail "dest-carryover: same-URL rearm dropped the previously recorded destination"
+  [ "$(grep -c '^pr_dest=' "$dir/home/state/task-a.meta")" = 1 ] \
+    || fail "dest-carryover: same-URL rearm duplicated pr_dest="
+
+  # Re-arm a DIFFERENT URL with no destination argument: the previous
+  # destination must NOT carry over, since it belonged to a different pull
+  # request.
+  run_check_entry "$dir" task-a https://bitbucket.org/team/app/pull-requests/8 \
+    > "$dir/stdout3" 2> "$dir/stderr3" \
+    || fail "dest-carryover: different-URL rearm failed: $(cat "$dir/stderr3")"
+  ! grep -q '^pr_dest=' "$dir/home/state/task-a.meta" \
+    || fail "dest-carryover: a different pull request inherited the previous one's destination"
+
+  # An explicit destination argument still wins over any carried-over value.
+  run_check_entry "$dir" task-a https://bitbucket.org/team/app/pull-requests/8 main \
+    > "$dir/stdout4" 2> "$dir/stderr4" \
+    || fail "dest-carryover: explicit destination on rearm failed: $(cat "$dir/stderr4")"
+  grep -qxF 'pr_dest=main' "$dir/home/state/task-a.meta" \
+    || fail "dest-carryover: an explicit destination argument was not recorded"
+  pass "pr_dest carries over only across a same-URL rearm, never onto a different pull request"
+}
+
 test_pr_dest_auto_derived_for_github() {
   local dir
   dir=$(make_case github-dest-auto)
@@ -3813,7 +3893,7 @@ test_git_primary_detector_finds_bitbucket_merge() {
   cache="$dir/repo/tip-cache"
 
   # The destination does not exist on origin yet: inconclusive, so silent.
-  out=$(run_poll_validated bitbucket \
+  out=$(run_poll_git "$dir/repo/origin.git" bitbucket \
     https://bitbucket.org/team/app/pull-requests/1 bitbucket.org team/app 1 \
     "$dir/repo/wt" release "$cache")
   [ -z "$out" ] || fail "bitbucket-git-primary: poll reported merged before the destination even existed"
@@ -3823,7 +3903,7 @@ test_git_primary_detector_finds_bitbucket_merge() {
   # shape), never touching the task worktree itself.
   land_on_branch "$dir/repo" release feature.txt hello
 
-  out=$(run_poll_validated bitbucket \
+  out=$(run_poll_git "$dir/repo/origin.git" bitbucket \
     https://bitbucket.org/team/app/pull-requests/1 bitbucket.org team/app 1 \
     "$dir/repo/wt" release "$cache")
   [ "$out" = merged ] || fail "bitbucket-git-primary: git-based detector did not find the landed merge (out='$out')"
@@ -3837,7 +3917,7 @@ test_git_primary_detector_finds_bitbucket_merge() {
   # was never cached, this must detect the SAME merge again - a duplicate
   # report costs one supervision turn, but a cached tip here would have
   # suppressed this merge forever.
-  out=$(run_poll_validated bitbucket \
+  out=$(run_poll_git "$dir/repo/origin.git" bitbucket \
     https://bitbucket.org/team/app/pull-requests/1 bitbucket.org team/app 1 \
     "$dir/repo/wt" release "$cache")
   [ "$out" = merged ] \
@@ -3857,17 +3937,74 @@ test_git_primary_detector_caches_not_landed_tip() {
   # optimize, unlike the landed case above.
   land_on_branch "$dir/repo" release other.txt unrelated
 
-  out=$(run_poll_validated bitbucket \
+  out=$(run_poll_git "$dir/repo/origin.git" bitbucket \
     https://bitbucket.org/team/app/pull-requests/1 bitbucket.org team/app 1 \
     "$dir/repo/wt" release "$cache")
   [ -z "$out" ] || fail "bitbucket-git-not-landed: unrelated destination content was misread as landed"
   [ -s "$cache" ] || fail "bitbucket-git-not-landed: a conclusive not-landed evaluation must cache the destination tip"
 
-  out=$(run_poll_validated bitbucket \
+  out=$(run_poll_git "$dir/repo/origin.git" bitbucket \
     https://bitbucket.org/team/app/pull-requests/1 bitbucket.org team/app 1 \
     "$dir/repo/wt" release "$cache")
   [ -z "$out" ] || fail "bitbucket-git-not-landed: an unchanged not-landed tip must stay silent on repeat"
   pass "a conclusive not-landed evaluation still caches its tip to skip an unchanged repeat"
+}
+
+test_git_primary_detector_cache_is_head_sensitive() {
+  local dir out cache
+  dir=$(make_case bitbucket-git-head-sensitive)
+  make_git_fixture "$dir/repo"
+  cache="$dir/repo/tip-cache"
+
+  # Land the SAME content the worktree will eventually carry, so a HEAD that
+  # matches it is genuinely landed - but the worktree currently has an extra
+  # WIP commit on top, so this first evaluation is a real, conclusive
+  # negative that the cache is entitled to store.
+  land_on_branch "$dir/repo" release feature.txt hello
+  printf 'wip\n' > "$dir/repo/wt/wip.txt"
+  git -C "$dir/repo/wt" add -- wip.txt
+  git -C "$dir/repo/wt" -c user.email=t@t -c user.name=t commit -q -m "wip, not part of the PR"
+
+  out=$(run_poll_git "$dir/repo/origin.git" bitbucket \
+    https://bitbucket.org/team/app/pull-requests/1 bitbucket.org team/app 1 \
+    "$dir/repo/wt" release "$cache")
+  [ -z "$out" ] || fail "bitbucket-git-head-sensitive: a WIP commit on top of landed content was misread as landed"
+  [ -s "$cache" ] || fail "bitbucket-git-head-sensitive: the conclusive negative did not cache"
+
+  # Drop the WIP commit: HEAD is now exactly the already-landed content, but
+  # the destination tip has not moved at all. A cache keyed on the
+  # destination tip alone would replay the stale negative and suppress this
+  # merge forever, since a merged branch's tip stops moving.
+  git -C "$dir/repo/wt" reset -q --hard HEAD~1
+
+  out=$(run_poll_git "$dir/repo/origin.git" bitbucket \
+    https://bitbucket.org/team/app/pull-requests/1 bitbucket.org team/app 1 \
+    "$dir/repo/wt" release "$cache")
+  [ "$out" = merged ] \
+    || fail "bitbucket-git-head-sensitive: dropping the WIP commit must re-detect the merge, not stay silently cached"
+  pass "the not-landed cache is keyed on HEAD as well as the destination tip, so a later-matching HEAD is still detected"
+}
+
+test_git_primary_detector_does_not_cache_a_merge_conflict() {
+  local dir out cache
+  dir=$(make_case bitbucket-git-conflict)
+  make_git_fixture "$dir/repo"
+  cache="$dir/repo/tip-cache"
+
+  # Land DIFFERENT content under the same new filename the worktree's own
+  # commit adds: a genuine three-way merge conflict, not a real "not landed"
+  # the cache is entitled to remember - the same shape a squash-merged PR
+  # followed by an unrelated conflicting commit on the destination would
+  # take (Finding 3's second failure scenario).
+  land_on_branch "$dir/repo" release feature.txt conflicting
+
+  out=$(run_poll_git "$dir/repo/origin.git" bitbucket \
+    https://bitbucket.org/team/app/pull-requests/1 bitbucket.org team/app 1 \
+    "$dir/repo/wt" release "$cache")
+  [ -z "$out" ] || fail "bitbucket-git-conflict: a merge conflict was misread as landed (out='$out')"
+  [ ! -e "$cache" ] \
+    || fail "bitbucket-git-conflict: an inconclusive merge conflict must not be cached as a real negative"
+  pass "a merge-tree conflict is treated as inconclusive, not cached as a real not-landed negative"
 }
 
 test_git_primary_detector_refuses_unrelated_origin_repository() {
@@ -3876,25 +4013,23 @@ test_git_primary_detector_refuses_unrelated_origin_repository() {
   make_git_fixture "$dir/repo"
   cache="$dir/repo/tip-cache"
 
-  # Point the task worktree's origin at a DIFFERENT repository that shares
-  # nothing with the validated PR identity below, and land matching content
-  # on a same-named "release" branch there - exactly the hazard a reviewer
-  # flagged: a same-named branch in an unrelated repository must never read
-  # as "landed" just because a remote happens to be called "origin".
-  mkdir -p "$dir/other"
-  git init -q --bare "$dir/other/origin.git"
-  git -C "$dir/other/origin.git" symbolic-ref HEAD refs/heads/main
-  git -C "$dir/repo/wt" remote set-url origin "$dir/other/origin.git"
-  git -C "$dir/repo/wt" config --unset "url.$dir/repo/origin.git.insteadOf" 2>/dev/null || true
-  land_on_branch "$dir/other" release feature.txt hello
+  # Point the task worktree's origin at a DIFFERENT, still well-formed,
+  # repository identity - a fork under the same host - and land genuinely
+  # EQUIVALENT content there, seeded from the same baseline so it is not an
+  # empty repository. Nothing except the identity comparison itself can be
+  # the reason this is refused: the URL parses, and the content would match
+  # if it were ever fetched.
+  seed_fork "$dir/repo/origin.git" "$dir/fork/origin.git"
+  land_on_branch "$dir/fork" release feature.txt hello
+  git -C "$dir/repo/wt" remote set-url origin ssh://bitbucket.org/attacker/app
 
-  out=$(run_poll_validated bitbucket \
+  out=$(run_poll_git "$dir/fork/origin.git" bitbucket \
     https://bitbucket.org/team/app/pull-requests/1 bitbucket.org team/app 1 \
     "$dir/repo/wt" release "$cache")
   [ -z "$out" ] \
-    || fail "bitbucket-git-wrong-origin: an unrelated repository's same-named branch was accepted as landed evidence"
+    || fail "bitbucket-git-wrong-origin: an unrelated repository's equivalent content was accepted as landed evidence"
   [ ! -e "$cache" ] || fail "bitbucket-git-wrong-origin: an unusable origin identity must not write the tip cache"
-  pass "a same-named destination branch in an unrelated origin repository is refused, not read as landed"
+  pass "a same-content destination in an unrelated repository is refused by identity, not read as landed"
 }
 
 test_git_primary_detector_refuses_matching_host_wrong_path() {
@@ -3907,12 +4042,83 @@ test_git_primary_detector_refuses_matching_host_wrong_path() {
   # <wt>'s origin is bitbucket.org/team/app (make_git_fixture); pass a
   # DIFFERENT path under the same host as the validated PR identity, the
   # shape a same-host different-repository confusion would take.
-  out=$(run_poll_validated bitbucket \
+  out=$(run_poll_git "$dir/repo/origin.git" bitbucket \
     https://bitbucket.org/other/repo/pull-requests/1 bitbucket.org other/repo 1 \
     "$dir/repo/wt" release "$dir/repo/tip-cache")
   [ -z "$out" ] \
     || fail "bitbucket-git-wrong-path: a same-host but different-path identity was accepted as a match"
   pass "a matching host with a different repository path is refused, not read as landed"
+}
+
+test_git_primary_detector_refuses_matching_path_wrong_host() {
+  local dir out
+  dir=$(make_case bitbucket-git-wrong-host)
+  make_git_fixture "$dir/repo"
+
+  land_on_branch "$dir/repo" release feature.txt hello
+
+  # <wt>'s origin is bitbucket.org/team/app (make_git_fixture); pass the SAME
+  # path under a DIFFERENT host as the validated PR identity - the mirror
+  # image of the wrong-path case above, and the direction a same-path
+  # confusion across forges (or a typosquatted mirror) would take.
+  out=$(run_poll_git "$dir/repo/origin.git" bitbucket \
+    https://gitlab.example.com/team/app/pull-requests/1 gitlab.example.com team/app 1 \
+    "$dir/repo/wt" release "$dir/repo/tip-cache")
+  [ -z "$out" ] \
+    || fail "bitbucket-git-wrong-host: a matching path under a different host was accepted as a match"
+  pass "a matching repository path under a different host is refused, not read as landed"
+}
+
+test_git_primary_detector_refuses_insteadof_rewrite() {
+  local dir out cache
+  dir=$(make_case bitbucket-git-insteadof)
+  make_git_fixture "$dir/repo"
+  cache="$dir/repo/tip-cache"
+  seed_fork "$dir/repo/origin.git" "$dir/evil/origin.git"
+  land_on_branch "$dir/evil" release feature.txt hello
+
+  # An `insteadOf` rewrite changes where a fetch actually goes without
+  # changing the raw configured URL at all: `git config --get` still reports
+  # the pull request's real destination, but `git remote get-url` - and
+  # every real git network operation - resolves to the rewritten target
+  # instead. Trusting the configured value alone, as bin/fm-pr-poll.sh did
+  # before this fix, would trust this worktree's origin purely because the
+  # label still names the pull request's real repository.
+  git -C "$dir/repo/wt" config "url.ssh://bitbucket.org/evil/rewritten.insteadOf" \
+    ssh://bitbucket.org/team/app
+
+  out=$(run_poll_git "$dir/evil/origin.git" bitbucket \
+    https://bitbucket.org/team/app/pull-requests/1 bitbucket.org team/app 1 \
+    "$dir/repo/wt" release "$cache")
+  [ -z "$out" ] \
+    || fail "bitbucket-git-insteadof: an insteadOf-rewritten origin was trusted because its label still matched"
+  [ ! -e "$cache" ] || fail "bitbucket-git-insteadof: an unusable origin identity must not write the tip cache"
+  pass "an insteadOf rewrite that redirects the real fetch target is refused, not trusted by label alone"
+}
+
+test_git_primary_detector_refuses_multivalued_url_mismatch() {
+  local dir out cache
+  dir=$(make_case bitbucket-git-multivalue)
+  make_git_fixture "$dir/repo"
+  cache="$dir/repo/tip-cache"
+  seed_fork "$dir/repo/origin.git" "$dir/evil/origin.git"
+  land_on_branch "$dir/evil" release feature.txt hello
+
+  # `git config --get` returns the LAST of several `url =` values for one
+  # remote; a real fetch (and `git remote get-url`) uses the FIRST. Putting
+  # the pull request's real identity last and an attacker-chosen URL first
+  # makes the configured label agree with the validated identity while every
+  # actual fetch goes to the attacker's URL - no insteadOf rule needed.
+  git -C "$dir/repo/wt" remote set-url origin ssh://bitbucket.org/evil/app
+  git -C "$dir/repo/wt" config --add remote.origin.url ssh://bitbucket.org/team/app
+
+  out=$(run_poll_git "$dir/evil/origin.git" bitbucket \
+    https://bitbucket.org/team/app/pull-requests/1 bitbucket.org team/app 1 \
+    "$dir/repo/wt" release "$cache")
+  [ -z "$out" ] \
+    || fail "bitbucket-git-multivalue: a multi-valued origin was trusted because the LAST value matched the label"
+  [ ! -e "$cache" ] || fail "bitbucket-git-multivalue: an unusable origin identity must not write the tip cache"
+  pass "a multi-valued origin whose fetched URL disagrees with its configured label is refused"
 }
 
 test_git_primary_detector_defaults_to_default_branch() {
@@ -3924,7 +4130,7 @@ test_git_primary_detector_defaults_to_default_branch() {
 
   # Empty destination (never recorded): falls back to the repository's
   # default branch exactly like bin/fm-teardown.sh's content_in_branch does.
-  out=$(run_poll_validated bitbucket \
+  out=$(run_poll_git "$dir/repo/origin.git" bitbucket \
     https://bitbucket.org/team/app/pull-requests/1 bitbucket.org team/app 1 \
     "$dir/repo/wt" "" "$dir/repo/tip-cache")
   [ "$out" = merged ] || fail "bitbucket-git-default-branch: an empty destination did not fall back to the default branch"
@@ -3947,12 +4153,18 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_bitbucket_url_parses_and_arms
 test_pr_dest_explicit_argument_recorded
+test_pr_dest_carry_over_on_rearm
 test_pr_dest_auto_derived_for_github
 test_git_primary_detector_finds_bitbucket_merge
 test_git_primary_detector_defaults_to_default_branch
 test_git_primary_detector_caches_not_landed_tip
+test_git_primary_detector_cache_is_head_sensitive
+test_git_primary_detector_does_not_cache_a_merge_conflict
 test_git_primary_detector_refuses_unrelated_origin_repository
 test_git_primary_detector_refuses_matching_host_wrong_path
+test_git_primary_detector_refuses_matching_path_wrong_host
+test_git_primary_detector_refuses_insteadof_rewrite
+test_git_primary_detector_refuses_multivalued_url_mismatch
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert

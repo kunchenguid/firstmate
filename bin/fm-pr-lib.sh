@@ -247,6 +247,65 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+# Is <wt>'s "origin" remote safe to trust, and - when <host>/<path> are given -
+# does it address the exact same forge repository? bin/fm-pr-poll.sh's
+# git_origin_matches_repo owns an independent copy of this exact logic for its
+# own hash-registered bytes (its header owns why); this copy is for every
+# other caller that already sources this library, currently
+# bin/fm-teardown.sh's content_in_branch. Always requires the EFFECTIVE URL
+# (`git remote get-url origin`, which resolves any local `insteadOf` rewrite
+# and picks the first value of a multi-valued `remote.origin.url`) to be
+# byte-identical to the CONFIGURED URL (`git config --get remote.origin.url`,
+# which does neither) and to parse as one of: https(s)://[user[:token]@]host
+# [:port]/path(.git)?/?, ssh://[user@]host[:port]/path(.git)?/? (also spelled
+# git+ssh:// or ssh+git://), and the [user@]host:path(.git)?/? scp-like form
+# (recognized, like git itself, only when the colon precedes any slash). Any
+# other shape, a configured/effective mismatch, or no origin remote at all, is
+# unusable regardless of <host>/<path>. With <host> empty (no recorded pull
+# request to bind against - bin/fm-teardown.sh's content_in_branch takes this
+# path when no pr= was ever recorded, matching prior behavior for that case),
+# a well-formed, transport-safe origin is itself the match; with <host> set,
+# it must additionally equal <host>/<path>.
+fm_pr_git_origin_matches_repo() {
+  local wt=$1 host=${2-} path=${3-} url effective rest host_part path_part before_colon
+  url=$(git -C "$wt" config --get remote.origin.url 2>/dev/null) || return 1
+  [ -n "$url" ] || return 1
+  effective=$(git -C "$wt" remote get-url origin 2>/dev/null) || return 1
+  [ "$url" = "$effective" ] || return 1
+  case "$url" in
+    *://*)
+      case "$url" in
+        https://*|http://*|ssh://*|git+ssh://*|ssh+git://*) ;;
+        *) return 1 ;;
+      esac
+      rest=${url#*://}
+      rest=${rest#*@}
+      host_part=${rest%%/*}
+      path_part=${rest#*/}
+      ;;
+    *:*)
+      before_colon=${url%%:*}
+      case "$before_colon" in
+        */*) return 1 ;;
+      esac
+      rest=${url#*@}
+      host_part=${rest%%:*}
+      path_part=${rest#*:}
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  host_part=${host_part%%:*}
+  path_part=${path_part%/}
+  path_part=${path_part%.git}
+  path_part=${path_part%/}
+  [ -n "$host_part" ] && [ -n "$path_part" ] || return 1
+  [ -n "$host" ] || return 0
+  host_part=$(printf '%s' "$host_part" | tr '[:upper:]' '[:lower:]')
+  [ "$host_part" = "$host" ] && [ "$path_part" = "$path" ]
+}
+
 fm_pr_file_mode() {
   if [ "$(uname)" = Darwin ]; then
     stat -f %Lp "$1" 2>/dev/null

@@ -41,6 +41,8 @@
 #   (z1) content landed on a non-default branch, no pr_dest=    -> REFUSE (wrong-branch defect)
 #   (z2) content landed on a non-default branch, pr_dest= set   -> ALLOW  (recorded destination)
 #   (z3) pr_dest= set to a non-default branch, content on main  -> REFUSE (destination narrows)
+#   (z4) no-mistakes + origin removed, merged to local main only -> REFUSE (origin-identity binding)
+#   (z5) no-mistakes + origin's label disagrees with its effective URL -> REFUSE (origin-identity binding)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -67,6 +69,40 @@ REAL_PS_FOR_TEST=$(command -v ps)
 export REAL_PS_FOR_TEST
 REAL_LSOF_FOR_TEST=$(command -v lsof)
 export REAL_LSOF_FOR_TEST
+
+# Every case's worktree origin is set to this literal ssh:// URL rather than a
+# raw local path, because bin/fm-teardown.sh's content_in_branch now requires
+# origin to parse as a real forge-shaped URL before trusting it (Finding 1/6
+# of the adversarial review that added that binding) - a bare local path is
+# deliberately unusable, matching bin/fm-pr-poll.sh's identical rule. Every
+# fixture's `pr=` line already names this exact host/path
+# (https://github.com/example/repo/pull/7), so the identity binding matches
+# real recorded metadata without changing any individual test's assertions.
+# GIT_SSH redirects the ssh transport to GIT_FAKE_SSH, which ignores the
+# requested host and connection details and serves whichever local bare
+# repository make_case most recently named in GIT_FAKE_SSH_TARGET_FILE, so
+# `git config --get remote.origin.url` and `git remote get-url origin` agree
+# - exactly like a real worktree cloned straight from a real forge - with no
+# real network connection or SSH server ever used. A file, not an exported
+# variable, carries the current target: make_case runs inside the command
+# substitution's subshell (`case_dir=$(make_case ...)`), so anything it
+# exports is lost the instant that subshell exits, while a file write
+# persists for every command the caller runs afterward. Tests run
+# sequentially, one case at a time, so one shared file is enough.
+GIT_FAKE_SSH="$TMP_ROOT/fake-ssh"
+GIT_FAKE_SSH_TARGET_FILE="$TMP_ROOT/.current-ssh-target"
+cat > "$GIT_FAKE_SSH" <<'SH'
+#!/usr/bin/env bash
+target=$(cat "$(dirname "$0")/.current-ssh-target" 2>/dev/null)
+last=${*: -1}
+case "$last" in
+  git-upload-pack\ *) exec git-upload-pack "$target" ;;
+  git-receive-pack\ *) exec git-receive-pack "$target" ;;
+  *) exit 0 ;;
+esac
+SH
+chmod +x "$GIT_FAKE_SSH"
+export GIT_SSH="$GIT_FAKE_SSH"
 
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
@@ -169,11 +205,18 @@ SH
   # Clone as the project; give it a `main` branch and an origin/HEAD.
   git clone -q "$case_dir/origin.git" "$case_dir/project"
   git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
+  git -C "$case_dir/project" remote set-url origin ssh://github.com/example/repo
   # Add a worktree on a fresh task branch; that branch is where the crewmate commits.
   git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
 
   # Fresh watcher beacon so fm-guard stays quiet.
   touch "$case_dir/state/.last-watcher-beat"
+
+  # Recorded in the shared target file (see GIT_FAKE_SSH_TARGET_FILE above)
+  # because several tests push or fetch "origin" directly from the worktree,
+  # outside run_teardown, to set up their fixture - those calls need the same
+  # redirect too.
+  printf '%s\n' "$case_dir/origin.git" > "$GIT_FAKE_SSH_TARGET_FILE"
 
   printf '%s\n' "$case_dir"
 }
@@ -988,6 +1031,60 @@ test_content_in_recorded_destination_does_not_fall_back_to_default() {
   expect_code 1 "$rc" "content-recorded-dest-mismatch: teardown should refuse when content landed on main but the recorded destination is release"
   grep -q REFUSED "$case_dir/stderr" || fail "content-recorded-dest-mismatch: no REFUSED line in stderr"
   pass "a recorded destination is not satisfied by content that only landed on the default branch"
+}
+
+# Reproduces the adversarial review's Finding 6 (T1): with origin removed
+# entirely, the pre-fix fallback trusted ANY local branch matching <name> -
+# including a purely local merge that was never pushed anywhere - even in a
+# mode where "landed" must mean "merged upstream", not "merged locally".
+test_origin_removed_local_main_refuses_in_no_mistakes_mode() {
+  local case_dir rc
+  case_dir=$(make_case origin-removed-local-main)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  # "main" is already checked out in $case_dir/project (a linked worktree can
+  # never check out a branch that is checked out elsewhere), so merge it from
+  # there instead - the worktree's own HEAD stays on fm/task-x1, exactly like
+  # a real crewmate's task branch, while the shared refs/heads/main it can
+  # still see now carries the same tree.
+  git -C "$case_dir/project" merge -q --no-ff -m "local merge" fm/task-x1
+  git -C "$case_dir/project" remote remove origin
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "origin-removed-local-main: teardown should refuse when origin is gone and mode is not local-only"
+  grep -q REFUSED "$case_dir/stderr" || fail "origin-removed-local-main: no REFUSED line in stderr"
+  pass "a no-mistakes worktree with origin removed does not fall back to trusting a local merge"
+}
+
+# Reproduces the adversarial review's Finding 6 (T2): a multi-valued
+# remote.origin.url whose configured label (what `git config --get` reports,
+# and what a recorded pr= is checked against) disagrees with its effective
+# value (what a real fetch, and `git remote get-url`, actually use). Content
+# genuinely landed on the label's real repository below, but the mismatch
+# alone must still refuse - trusting the label here is exactly what let a
+# redirected fetch pass as "landed" before this fix.
+test_multivalued_origin_mismatch_refuses_content_fallback() {
+  local case_dir rc
+  case_dir=$(make_case origin-multivalue-mismatch)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  git -C "$case_dir/project" remote set-url origin ssh://github.com/evil/app
+  git -C "$case_dir/project" config --add remote.origin.url ssh://github.com/example/repo
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "origin-multivalue-mismatch: teardown should refuse when origin's configured label disagrees with its effective fetch URL"
+  grep -q REFUSED "$case_dir/stderr" || fail "origin-multivalue-mismatch: no REFUSED line in stderr"
+  pass "a multi-valued origin whose fetched URL disagrees with its configured label refuses the content fallback"
 }
 
 test_dirty_worktree_refuses() {
@@ -2707,6 +2804,8 @@ test_content_fallback_refreshes_stale_origin_ref
 test_content_in_default_wrong_branch_refuses_without_recorded_dest
 test_content_in_recorded_destination_allows
 test_content_in_recorded_destination_does_not_fall_back_to_default
+test_origin_removed_local_main_refuses_in_no_mistakes_mode
+test_multivalued_origin_mismatch_refuses_content_fallback
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
