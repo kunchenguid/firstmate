@@ -428,6 +428,18 @@ with open(path, "w", encoding="utf-8") as handle:
 PY
 }
 
+fixture_git_head() {
+  local dir=$1
+  mkdir -p "$dir"
+  git -C "$dir" init -q
+  git -C "$dir" config user.email pavel-tests@example.invalid
+  git -C "$dir" config user.name "Pavel Tests"
+  printf 'fixture\n' > "$dir/file.txt"
+  git -C "$dir" add file.txt
+  git -C "$dir" commit -q -m fixture
+  git -C "$dir" rev-parse HEAD
+}
+
 # Intake publishes once and a replay neither creates a second event nor a second wake.
 out=$(ingest 100 10 'Поменять цену') || fail "first Pavel intake failed"
 event=$(printf '%s' "$out" | json_field "['event']")
@@ -827,7 +839,8 @@ run_ops classify "$text_status" --as task --title 'Use crew state status' --inte
   --reason 'ordinary delivery' --authority ordinary >/dev/null
 run_ops drive "$text_status" >/dev/null
 text_status_task=$(run_ops inspect "$text_status" | json_field "['task_id']")
-printf 'pr=%s\npr_head=%s\nworktree_head=%s\n' 'https://github.com/o/r/pull/12' 'cc12dd' 'cc12dd' >> "$HOME_DIR/state/$text_status_task.meta"
+text_status_head=$(fixture_git_head "$HOME_DIR/worktrees/$text_status_task")
+printf 'pr=%s\npr_head=%s\n' 'https://github.com/o/r/pull/12' "$text_status_head" >> "$HOME_DIR/state/$text_status_task.meta"
 printf 'state: done · source: run-step · checks green: PR ready for review\n' > "$PAVEL_STATUS_FILE"
 run_ops_default_status drive "$text_status" >/dev/null
 run_ops_default_status drive "$text_status" >/dev/null
@@ -840,7 +853,8 @@ run_ops classify "$mismatched_run" --as task --title 'Reject unbound run head' -
   --reason 'ordinary delivery' --authority ordinary >/dev/null
 run_ops drive "$mismatched_run" >/dev/null
 mismatched_run_task=$(run_ops inspect "$mismatched_run" | json_field "['task_id']")
-printf 'pr=%s\npr_head=%s\nworktree_head=%s\n' 'https://github.com/o/r/pull/15' 'bb15cc' 'aa15bb' >> "$HOME_DIR/state/$mismatched_run_task.meta"
+mismatched_run_head=$(fixture_git_head "$HOME_DIR/worktrees/$mismatched_run_task")
+printf 'pr=%s\npr_head=%s\n' 'https://github.com/o/r/pull/15' 'bb15cc' >> "$HOME_DIR/state/$mismatched_run_task.meta"
 printf 'state: done · source: run-step · checks green: PR ready for review\n' > "$PAVEL_STATUS_FILE"
 run_ops_default_status drive "$mismatched_run" >/dev/null
 if run_ops_default_status drive "$mismatched_run" >/dev/null 2>&1; then
@@ -848,7 +862,25 @@ if run_ops_default_status drive "$mismatched_run" >/dev/null 2>&1; then
 fi
 [ "$(run_ops inspect "$mismatched_run" | json_field "['state']")" = validating ] \
   || fail "mismatched default readiness mutated past validation"
+case "$mismatched_run_head" in
+  bb15cc) fail "mismatched fixture head accidentally matched PR head" ;;
+esac
 pass "default readiness requires matching current head"
+
+metadata_only=$(ingest 136 46 'Проверить metadata-only head' | json_field "['event']")
+run_ops classify "$metadata_only" --as task --title 'Reject metadata-only readiness' --intent 'Require live checkout readiness proof' \
+  --reason 'ordinary delivery' --authority ordinary >/dev/null
+run_ops drive "$metadata_only" >/dev/null
+metadata_only_task=$(run_ops inspect "$metadata_only" | json_field "['task_id']")
+printf 'pr=%s\npr_head=%s\nworktree_head=%s\n' 'https://github.com/o/r/pull/22' 'aa22cc' 'aa22cc' >> "$HOME_DIR/state/$metadata_only_task.meta"
+printf 'state: done · source: run-step · checks green: PR ready for review\n' > "$PAVEL_STATUS_FILE"
+run_ops_default_status drive "$metadata_only" >/dev/null
+if run_ops_default_status drive "$metadata_only" >/dev/null 2>&1; then
+  fail "metadata-only worktree head authorized readiness"
+fi
+[ "$(run_ops inspect "$metadata_only" | json_field "['state']")" = validating ] \
+  || fail "metadata-only readiness mutated past validation"
+pass "default readiness refuses metadata-only head proof"
 
 pr_substitution=$(ingest 125 35 'Проверить подмену PR' | json_field "['event']")
 run_ops classify "$pr_substitution" --as task --title 'Reject PR substitution' --intent 'Ship only the registered PR' \

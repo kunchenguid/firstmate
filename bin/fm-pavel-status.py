@@ -41,23 +41,25 @@ def parse_crew_state(output: str) -> tuple[str, str, str]:
 
 def worktree_head(meta: dict[str, str]) -> str:
     worktree = meta.get("worktree", "")
-    if worktree:
-        top = subprocess.run(
-            ["git", "-C", worktree, "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if top.returncode == 0 and Path(top.stdout.strip()).resolve() == Path(worktree).resolve():
-            result = subprocess.run(
-                ["git", "-C", worktree, "rev-parse", "HEAD"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.returncode == 0:
-                return result.stdout.strip()
-    return meta.get("worktree_head") or meta.get("head") or ""
+    if not worktree:
+        return ""
+    top = subprocess.run(
+        ["git", "-C", worktree, "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if top.returncode != 0 or Path(top.stdout.strip()).resolve() != Path(worktree).resolve():
+        return ""
+    result = subprocess.run(
+        ["git", "-C", worktree, "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
 
 
 def main() -> int:
