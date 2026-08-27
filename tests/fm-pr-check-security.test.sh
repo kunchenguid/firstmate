@@ -2647,6 +2647,41 @@ SH
   pass "returned custom check descendants are drained on installed and fallback timeout paths"
 }
 
+# Head comparison was once a gate here, and it could brick delivery: a missing
+# validated-head snapshot made fm-pr-check.sh refuse, and because
+# bin/fm-pr-merge.sh routes through it the request became permanently
+# unmergeable with no recovery path, since snapshots are never back-filled. The
+# gate was withdrawn; this pins that neither script can block on it again. It
+# asserts the structural facts rather than reconstructing the old precondition:
+# intake emits no comparison verdict, the merge path carries no comparison
+# residue at all, and the merge actually reaches the forge.
+test_head_comparison_never_blocks_a_merge() {
+  local dir state
+  dir=$(make_case head-comparison-never-blocks)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_GUARD_LOG="$dir/guard.log" \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" \
+    FM_TEST_GLAB_LOG="$dir/glab.log" PATH="$dir/fakebin:$BASE_PATH" \
+    "$PR_CHECK" task-a https://github.com/o/r/pull/11 > "$dir/check.out" 2>&1 \
+    || fail "intake refused with no snapshot: $(cat "$dir/check.out")"
+  assert_present "$state/task-a.check.sh" 'intake must still arm its merge watch'
+
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_GUARD_LOG="$dir/guard.log" \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" \
+    FM_TEST_GLAB_LOG="$dir/glab.log" PATH="$dir/fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-pr-merge.sh" task-a https://github.com/o/r/pull/11 > "$dir/merge.out" 2>&1 \
+    || fail "merge was blocked with no snapshot: $(cat "$dir/merge.out")"
+  assert_grep 'pr merge' "$dir/gh-axi.log" 'the merge must actually reach the forge'
+
+  assert_no_grep 'REBASE-EQUIVALENCE' "$dir/check.out" \
+    'intake must not emit a comparison verdict at all'
+  grep -q 'candidate' "$ROOT/bin/fm-pr-merge.sh" \
+    && fail 'the merge path must carry no head-comparison residue'
+  pass 'head comparison never blocks a merge'
+}
+
 test_teardown_removes_poll_artifacts() {
   local dir fakebin kind artifact counterpart rc
   dir=$(make_case teardown-cleanup)
@@ -3717,3 +3752,4 @@ test_bootstrap_isolates_incomplete_poll_migration
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
+test_head_comparison_never_blocks_a_merge

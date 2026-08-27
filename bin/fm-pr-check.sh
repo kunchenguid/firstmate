@@ -82,6 +82,18 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
   fi
 fi
 
+# Head comparison deliberately does NOT run here, and must not be reintroduced.
+# An automatic gate on it was built and withdrawn on evidence: it could only
+# refuse, brick, or lie. The validated head is destroyed at push - the pipeline
+# overwrites its pre-push head in 68 of 68 pushed runs - so every attempt to
+# recover it afterwards failed differently. A stale snapshot refuses a good push
+# with a false accusation indistinguishable from a true one; a missing snapshot
+# refused intake, and because bin/fm-pr-merge.sh routes through this script that
+# made the request permanently unmergeable with no recovery path. Comparison is
+# available as a firstmate-invoked diagnostic (bin/fm-rebase-equivalence.sh)
+# which reports and never gates. docs/verification/rebase-equivalence.md records
+# the underlying defect as still OPEN.
+
 META_TMP=
 META_LOCK=
 META_LOCK_HELD=0

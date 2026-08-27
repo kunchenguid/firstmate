@@ -369,6 +369,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/rebase-equivalence.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/runtime-backends.md",
       "audience": "maintainer-verification"
     },
