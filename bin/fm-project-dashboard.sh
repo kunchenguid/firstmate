@@ -72,7 +72,7 @@ validate_payload() {  # <data.json>
       and (.decisions | type == "array")
       and (.failures | type == "array")
       and (.unreadable | type == "array")
-      and (.awaiting_teardown | type == "array")
+      and (.finished | type == "array")
       and (.waiting | type == "array")
       and (.queued | type == "array")
       and (.landed | type == "array")
@@ -85,9 +85,9 @@ validate_payload() {  # <data.json>
            ((.last_activity.at | nonempty_string) and
             (.last_activity.age_days | type == "number") and
             (.last_activity.age_seconds | type == "number")))
-      and ([.active_work[],.decisions[],.failures[],.unreadable[],.awaiting_teardown[],
+      and ([.active_work[],.decisions[],.failures[],.unreadable[],.finished[],
             .waiting[],.queued[],.landed[],.unattributed[],.deferred_decisions[] | owner_item] | all)
-      and ([.awaiting_teardown[] | .url == null or (.url | optional_https_url)] | all)
+      and ([.finished[] | .url == null or (.url | optional_https_url)] | all)
       and ([.prs[]
             | type == "object" and (.url | nonempty_string) and (.linkable | type == "boolean")
               and (.linkable == false or (.url | optional_https_url))] | all)

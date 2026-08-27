@@ -190,7 +190,7 @@ Run `bin/fm-project-dashboard.sh` from a Firstmate home to refresh and open the 
 The dashboard shows every project registered in `data/projects.md`, rolls current main-home and attributable secondmate state into project cards, and marks waiting or idle projects as stale-risk only after more than eight days without known activity.
 Secondmate state that carries no repository and whose owner covers several projects is never guessed at: the card discloses it as unattributable and asks for attention instead, and a bounded-read drop in the canonical snapshot is disclosed board-wide rather than quietly shrinking a card.
 Deferred or superseded captain holds are listed on the card without painting it red, matching the default Bearings view, and a task whose crew state reads back as unknown is disclosed rather than leaving the card reading idle.
-Nothing readable locally tells a merged pull request apart from one awaiting review, so the board never claims either: a finished task that has not been torn down is listed as awaiting teardown and its pull request stays an ordinary link.
+Nothing readable locally tells a merged pull request apart from one awaiting review, so the board never claims either: a task whose crew state reports done is listed as finished work with that crew detail repeated verbatim, and its pull request stays an ordinary link.
 It refreshes only when invoked and does not bind answers, poll for feedback, dispatch work, merge PRs, or mutate fleet records.
 Use `bin/fm-project-dashboard.sh refresh --select <project>` to refresh with one registered project expanded initially, and `bin/fm-project-dashboard.sh path` to print the stable board path without rebuilding it.
 

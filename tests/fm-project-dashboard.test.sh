@@ -230,7 +230,7 @@ test_attention_next_step_is_an_action_not_a_bare_title() {
       | .status == "needs_attention" and .next_step == "failed: gate rejected the push")
       and (.projects[] | select(.name == "beta")
         | .status != "needs_attention"
-          and .next_step == "Finished; awaiting teardown and completion record: beta-wait")
+          and .next_step == "Finished - beta-wait")
   ' >/dev/null || fail "attention next step was a bare task title: $out"
   pass "failure and finished-work next steps read as actions"
 }
@@ -499,7 +499,7 @@ test_bounded_snapshot_drops_are_disclosed_board_wide() {
   pass "bounded snapshot and registry drops surface as board-level disclosures"
 }
 
-test_finished_task_awaiting_teardown_is_never_called_a_review_queue() {
+test_finished_task_is_reported_verbatim_never_interpreted() {
   local home epoch out
   home=$(make_home merged-pr)
   write_fleet_fixture "$home"
@@ -523,15 +523,16 @@ test_finished_task_awaiting_teardown_is_never_called_a_review_queue() {
   epoch=$(date +%s)
   out=$(run_snapshot "$home" "$epoch") || fail "awaiting-teardown snapshot failed"
   printf '%s' "$out" | jq -e '
-    .summary.awaiting_teardown == 1
+    .summary.finished == 1
       and (.projects[] | select(.name == "alpha")
         | .status == "active"
-          and .counts.awaiting_teardown == 1
-          and (.awaiting_teardown[0] | .id == "alpha-ship" and .owner == "main"
+          and .counts.finished == 1
+          and (.finished[0] | .id == "alpha-ship" and .owner == "main"
                and .url == "https://github.com/example/alpha/pull/9")
           and ([.decisions[],.failures[],.unreadable[]] | length) == 0
           and (.prs | any(.url == "https://github.com/example/alpha/pull/9"))
-          and (.next_step | contains("awaiting review") | not))
+          and .finished[0].detail == "run passed: PR merged/closed"
+          and (.next_step | test("teardown|awaiting review") | not))
   ' >/dev/null || fail "a finished task in the merge-to-teardown window was misread: $out"
 
   jq '
@@ -543,9 +544,23 @@ test_finished_task_awaiting_teardown_is_never_called_a_review_queue() {
   printf '%s' "$out" | jq -e '
     .projects[] | select(.name == "alpha")
     | .status != "needs_attention"
-      and .next_step == "Finished; awaiting teardown and completion record: Ship alpha"
+      and .next_step == "Finished - Ship alpha: run passed: PR merged/closed"
   ' >/dev/null || fail "finished work still painted the project red: $out"
-  pass "a finished task awaiting teardown is disclosed, never called a review queue"
+
+  jq '
+    .tasks |= map(if .id == "alpha-ship" then
+        .current_state.detail = "checks green: PR ready for review (still monitoring for merge/close)"
+      else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  out=$(run_snapshot "$home" "$epoch") || fail "checks-green snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "alpha")
+    | .next_step == "Finished - Ship alpha: checks green: PR ready for review (still monitoring for merge/close)"
+      and (.next_step | test("teardown|awaiting review") | not)
+      and .finished[0].detail == "checks green: PR ready for review (still monitoring for merge/close)"
+  ' >/dev/null || fail "a checks-green PR was told to tear down: $out"
+  pass "a finished task repeats its crew detail verbatim and infers no lifecycle stage"
 }
 
 test_unreadable_task_state_is_disclosed_not_idle() {
@@ -594,9 +609,11 @@ test_a_hold_never_hides_another_open_decision() {
   out=$(run_snapshot "$home" "$epoch") || fail "hold-vs-folds snapshot failed"
   printf '%s' "$out" | jq -e '
     .projects[] | select(.name == "alpha")
-    | ([.decisions[] | select(.id == "alpha-work") | .key] | sort) == ["alpha-work","budget","route"]
+    | ([.decisions[] | select(.id == "alpha-work") | .key] | sort) == ["alpha-work","route"]
+      and ([.decisions[] | select(.id == "alpha-work") | .summary] | sort)
+          == ["Approve the alpha budget","Choose alpha route"]
       and (.deferred_decisions | length) == 0
-  ' >/dev/null || fail "a captain hold hid the other open decisions on its task: $out"
+  ' >/dev/null || fail "a captain hold hid or duplicated an open decision on its task: $out"
 
   jq '
     .backlog.records |= map(if .id == "alpha-work" then
@@ -633,7 +650,8 @@ test_blank_detail_never_renders_a_blank_next_step() {
         | .status == "waiting" and .next_step == "paused" and .waiting[0].reason == "paused")
       and (.projects[] | select(.name == "bravo")
         | .status == "needs_attention"
-          and .next_step == "Task state could not be read: bravo-work - Task state could not be read")
+          and .next_step == "Task state could not be read: bravo-work"
+          and .unreadable[0].reason == "Task state could not be read")
   ' >/dev/null || fail "a blank detail produced a blank next step: $out"
   pass "an empty detail never renders as a blank next step"
 }
@@ -651,6 +669,39 @@ test_one_captain_hold_is_one_decision() {
       and .decisions[0].summary == "Choose release route"
   ' >/dev/null || fail "one captain hold was counted as two decisions: $out"
   pass "a hold recorded in both the backlog and the status fold is one decision"
+}
+
+test_per_home_bounded_drops_are_disclosed() {
+  local home epoch out
+  home=$(make_home per-home-omitted)
+  write_fleet_fixture "$home"
+  jq '
+    .secondmate_current.records |= map(
+      if .id == "delta-mate" then
+        .counts = {active_children:1,decisions_open:0,holds:0,queued:0,landed:15,endpoints:1}
+        | .omitted = [{surface:"landed",count:5},{surface:"decisions_open",count:2}]
+      else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "per-home omitted snapshot failed"
+  printf '%s' "$out" | jq -e '
+    (.disclosures | length) == 2
+      and (.disclosures | any(
+            .surface == "secondmate delta-mate landed omitted by the bounded home read: 5"
+            and .reveal == "raise FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME"))
+      and (.disclosures | any(
+            .surface == "secondmate delta-mate decisions_open omitted by the bounded home read: 2"
+            and .reveal == "raise FM_SNAPSHOT_SECONDMATE_DECISIONS"))
+  ' >/dev/null || fail "a bounded per-home read was never disclosed: $out"
+
+  jq '.secondmate_current.records |= map(if .id == "delta-mate" then .omitted = [] else . end)' \
+    "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  out=$(run_snapshot "$home" "$epoch") || fail "complete per-home snapshot failed"
+  printf '%s' "$out" | jq -e '.disclosures == []' >/dev/null \
+    || fail "a complete home read still reported a drop: $out"
+  pass "per-home bounded read drops reach the board disclosures"
 }
 
 extract_payload() {  # <board>
@@ -871,7 +922,7 @@ SH
 
 test_aggregation_status_precedence_and_secondmate_join
 test_distinct_unkeyed_decisions_are_all_surfaced
-test_finished_task_awaiting_teardown_is_never_called_a_review_queue
+test_finished_task_is_reported_verbatim_never_interpreted
 test_unreadable_task_state_is_disclosed_not_idle
 test_a_hold_never_hides_another_open_decision
 test_blank_detail_never_renders_a_blank_next_step
@@ -882,6 +933,7 @@ test_deferred_captain_hold_is_disclosed_not_escalated
 test_captain_hold_next_step_keeps_the_question
 test_repo_labelled_secondmate_work_attributes_to_that_project
 test_bounded_snapshot_drops_are_disclosed_board_wide
+test_per_home_bounded_drops_are_disclosed
 test_attention_next_step_is_an_action_not_a_bare_title
 test_unattributable_secondmate_state_is_disclosed
 test_registered_secondmate_without_a_task_still_owns_its_projects

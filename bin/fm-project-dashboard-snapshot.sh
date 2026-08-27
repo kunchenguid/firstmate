@@ -20,19 +20,21 @@
 # A main-home task whose crew state reads back as unknown is disclosed in
 # unreadable[] and raises the project to needs_attention rather than letting the
 # card read idle.
-# A done task whose backlog row is not yet done is finished work awaiting
-# teardown, disclosed in awaiting_teardown[]. Nothing local distinguishes a
-# merged PR from one awaiting review, so the board never claims either.
-# A captain hold and a status fold collapse to one decision only when the
-# pairing is unambiguous: one live hold and exactly one open needs-decision
-# fold on the same task. A deferred hold never suppresses a live fold, and a
-# task with several keyed folds keeps every one of them.
+# A done task whose backlog row is not yet done is disclosed in finished[] with
+# the crew detail repeated verbatim. That detail is the only local record of
+# what done means for the task, so the board never infers a lifecycle stage -
+# merged, awaiting review, or awaiting teardown - from it.
+# A captain hold and a status fold collapse to one decision when the pairing is
+# unambiguous: a live hold with exactly one open needs-decision fold on the
+# task, or a live hold whose reason restates one fold's question. A deferred
+# hold never suppresses a live fold, and every unpaired fold survives.
 # An empty-string detail is treated as an absent value everywhere, so no card
 # renders a blank next step.
 # Only needs-decision folds and non-deferred captain holds count as decisions;
 # deferred or superseded holds are disclosed in deferred_decisions[] instead of
 # painting the card red, matching the canonical bearings default view.
-# Bounded-read drops in the canonical snapshot surface board-wide in
+# Bounded-read drops in the canonical snapshot, including each secondmate
+# record's per-home omitted[] surfaces, are reported board-wide in
 # disclosures[] rather than silently shrinking a project card.
 # PR links that are not https stay in prs[] with linkable=false so one odd link
 # discloses itself instead of failing the whole board.
@@ -189,6 +191,13 @@ jq -n \
     if . == null then null
     elif (type == "string") and ((gsub("[[:space:]]"; "")) == "") then null
     else . end;
+  def norm_text:
+    ((. // "") | tostring | ascii_downcase | gsub("\u2026"; "")
+     | gsub("[[:space:]]+"; " ") | gsub("^ | $"; ""));
+  def same_question($a; $b):
+    ($a | norm_text) as $x
+    | ($b | norm_text) as $y
+    | ($x != "") and ($y != "") and (($x | startswith($y)) or ($y | startswith($x)));
   def owner_items($owner):
     (($owner.record.active_children // []) + ($owner.record.decisions_open // [])
      + ($owner.record.holds // []) + ($owner.record.queued // []) + ($owner.record.landed // []));
@@ -247,6 +256,15 @@ jq -n \
        (if $mate_registry.records_truncated == true then
           {surface:"secondmate registry records omitted by the bounded read",
            reveal:"raise FM_SNAPSHOT_REGISTRY_RECORDS"} else empty end),
+       ($fleet_data.secondmate_current.records[]? as $record
+        | $record.omitted[]?
+        | select((.count // 0) > 0)
+        | {surface:("secondmate " + $record.id + " " + .surface
+                    + " omitted by the bounded home read: " + (.count | tostring)),
+           reveal:(if .surface == "landed" then "raise FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME"
+                   elif .surface == "decisions_open" then "raise FM_SNAPSHOT_SECONDMATE_DECISIONS"
+                   elif .surface == "queued" then "raise FM_SNAPSHOT_SECONDMATE_QUEUED"
+                   else "raise FM_SNAPSHOT_SECONDMATE_CHILDREN" end)}),
        (if $mate_registry.input_truncated == true then
           {surface:"secondmate registry input truncated by the bounded read",
            reveal:"raise FM_SNAPSHOT_REGISTRY_LINES or FM_SNAPSHOT_REGISTRY_BYTES"} else empty end) ]) as $disclosures
@@ -274,8 +292,14 @@ jq -n \
              | {id,title:(.title // .id),state,detail:((.doing | present) // ""),owner:$owner.id,pr_url:null} ]) as $active
       | ([ $tasks[] as $task
            | ([ ($task.hints.open_decisions // [])[] | select(.verb == "needs-decision") ]) as $folds
-           | select((($live_hold_ids | index($task.id)) == null) or (($folds | length) != 1))
+           | ([ $backlog[]
+                | select(.id == $task.id and .captain_actionable == true and .deferred_marker != true)
+                | (.hold_reason // .title) ]) as $live_hold_reasons
            | $folds[]
+           | . as $fold
+           | select(($live_hold_ids | index($task.id)) == null
+                    or (($folds | length) != 1
+                        and ([ $live_hold_reasons[] | select(same_question(.; $fold.summary)) ] | length) == 0))
            | {id:$task.id,key,title:((.summary | present) // "Captain decision"),
               summary:((.summary | present) // ""),
               deferred:false,owner:"main"} ]
@@ -291,9 +315,14 @@ jq -n \
              | $owner.record.decisions_open[]?
              | . as $entry
              | select(.verb != "blocked")
+             | ([ $owner.record.decisions_open[]?
+                  | select(.source == "backlog" and .deferred_marker != true and .id == $entry.id)
+                  | (.reason // .summary) ]) as $owner_live_hold_reasons
              | select(.source != "status"
                       or (($owner_live_hold_ids | index($entry.id)) == null)
-                      or (([ $owner_folds[] | select(.id == $entry.id) ] | length) != 1))
+                      or ((([ $owner_folds[] | select(.id == $entry.id) ] | length) != 1)
+                          and ([ $owner_live_hold_reasons[]
+                                 | select(same_question(.; $entry.summary)) ] | length) == 0))
              | select(matches_project($owner; $name))
              | {id,key:(.key // .id),title:((.summary | present) // "Captain decision"),
                 summary:((.reason | present) // (.summary | present) // ""),
@@ -309,10 +338,11 @@ jq -n \
            | select($task.current_state.state == "done")
            | select(($landed_ids | index($task.id)) == null)
            | {id:$task.id,title:($task.backlog.title // $task.id),url:$task.pr.url,
-              detail:(($task.current_state.detail | present) // ""),owner:"main"} ]) as $awaiting_teardown
+              detail:(($task.current_state.detail | present) // ""),owner:"main"} ]) as $finished
       | ([ $tasks[]
            | select(.current_state.state == "unknown")
            | {id,title:(.backlog.title // .id),state:.current_state.state,
+              detail:((.current_state.detail | present) // null),
               reason:((.current_state.detail | present) // "Task state could not be read"),owner:"main"} ]) as $unreadable
       | ([ $tasks[]
            | select(.current_state.state == "parked" or .current_state.state == "paused")
@@ -405,7 +435,8 @@ jq -n \
                       ($failures[0].state + ": " +
                        (if ($failures[0].detail // "") == "" then $failures[0].title else $failures[0].detail end))
                     elif ($unreadable | length) > 0 then
-                      ("Task state could not be read: " + $unreadable[0].id + " - " + $unreadable[0].reason)
+                      ("Task state could not be read: " + $unreadable[0].id
+                       + (if $unreadable[0].detail == null then "" else " - " + $unreadable[0].detail end))
                     elif ($unattributed_live | length) > 0 then
                       ("Secondmate work is not attributable to one project: " + $unattributed_live[0].title)
                     else $unavailable_owners[0].reason end); "Review project state")
@@ -414,9 +445,11 @@ jq -n \
          elif $status == "waiting" then
            concise((($waiting[0].reason | present) // $waiting[0].title); "Waiting on an external dependency")
          elif ($queued | length) > 0 then concise($queued[0].title; "Queued work")
-         elif ($awaiting_teardown | length) > 0 then
-           concise(("Finished; awaiting teardown and completion record: " + $awaiting_teardown[0].title);
-                   "Finished work awaiting teardown")
+         elif ($finished | length) > 0 then
+           concise(("Finished - " + $finished[0].title +
+                    (if ($finished[0].detail | present) == null then ""
+                     else ": " + $finished[0].detail end));
+                   "Finished work")
          else "No work queued" end) as $next_step
       | $registered + {
           status:$status,
@@ -433,7 +466,7 @@ jq -n \
           decisions:$decisions,
           failures:$failures,
           unreadable:$unreadable,
-          awaiting_teardown:$awaiting_teardown,
+          finished:$finished,
           waiting:$waiting,
           queued:$queued,
           landed:($landed_all[:5]),
@@ -447,7 +480,7 @@ jq -n \
           } ]),
           counts:{active:($active | length),decisions:($decisions | length),
             unreadable:($unreadable | length),
-            awaiting_teardown:($awaiting_teardown | length),
+            finished:($finished | length),
             waiting:($waiting | length),queued:($queued | length),landed:($landed_all | length),
             prs:($prs | length),unattributed:($unattributed | length),
             deferred_decisions:($deferred_decisions | length)}
@@ -471,7 +504,7 @@ jq -n \
         unattributed:([$projects[] | select((.unattributed | length) > 0)] | length),
         deferred_decisions:([$projects[].deferred_decisions[]] | length),
         unreadable:([$projects[].unreadable[]] | length),
-        awaiting_teardown:([$projects[].awaiting_teardown[]] | length)
+        finished:([$projects[].finished[]] | length)
       }
     }
 ' > "$tmpdir/dashboard.json" || fail "project aggregation failed"
