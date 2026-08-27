@@ -64,6 +64,7 @@ DEFAULT_STATUS_LIMIT = 20
 MAX_BRANCHES_PER_COPY = 100
 MAX_AGGREGATE_ITEMS = 256
 MAX_SCAN_DEPTH = 3
+MAX_SCAN_ENTRIES = 4096
 GIT_TIMEOUT = 4
 CREW_STATE_TIMEOUT = 12
 STATE_READ_LIMIT = 1024 * 1024
@@ -359,20 +360,50 @@ def registered_paths(state: Path) -> tuple[set[Path], int]:
     return result, max(0, len(meta_paths) - MAX_COPIES)
 
 
-def scan_for_repos(root: Path, max_depth: int = MAX_SCAN_DEPTH) -> Iterable[Path]:
+def scan_for_repos(
+    root: Path,
+    max_depth: int = MAX_SCAN_DEPTH,
+) -> tuple[list[Path], int, int, bool]:
     if not root.is_dir():
-        return
-    base_depth = len(root.parts)
-    for current, dirs, files in os.walk(root):
-        path = Path(current)
-        depth = len(path.parts) - base_depth
-        dirs[:] = [d for d in dirs if d not in {".git", ".cache", "node_modules", "vendor"}]
-        if ".git" in files or (path / ".git").is_dir():
-            yield path
-            dirs.clear()
+        return [], 0, 0, False
+    repositories: list[Path] = []
+    omitted_at_least = 0
+    entries_visited = 0
+    stack: list[tuple[Path, int]] = [(root, 0)]
+    while stack:
+        current, depth = stack.pop()
+        children: list[Path] = []
+        is_repository = False
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    if entries_visited >= MAX_SCAN_ENTRIES:
+                        return repositories, omitted_at_least, entries_visited, True
+                    entries_visited += 1
+                    try:
+                        if entry.name == ".git" and (
+                            entry.is_file(follow_symlinks=False)
+                            or entry.is_dir(follow_symlinks=False)
+                        ):
+                            is_repository = True
+                        elif (
+                            depth < max_depth
+                            and entry.name not in {".cache", "node_modules", "vendor"}
+                            and entry.is_dir(follow_symlinks=False)
+                        ):
+                            children.append(Path(entry.path))
+                    except OSError:
+                        continue
+        except OSError:
             continue
-        if depth >= max_depth:
-            dirs.clear()
+        if is_repository:
+            if len(repositories) >= MAX_COPIES:
+                omitted_at_least += 1
+                return repositories, omitted_at_least, entries_visited, False
+            repositories.append(current)
+            continue
+        stack.extend((child, depth + 1) for child in reversed(sorted(children, key=str)))
+    return repositories, omitted_at_least, entries_visited, False
 
 
 def collect_repositories(repo: Path, state: Path, projects: Path, scan_roots: list[Path]) -> dict[str, Any]:
@@ -394,13 +425,14 @@ def collect_repositories(repo: Path, state: Path, projects: Path, scan_roots: li
         candidates.update(project_paths[:MAX_COPIES])
         project_omitted = max(0, len(project_paths) - MAX_COPIES)
     scan_omitted_at_least = 0
+    scan_entries_visited = 0
+    scan_truncated_roots = 0
     for root in scan_roots:
-        scanned = 0
-        for candidate in scan_for_repos(root):
-            scanned += 1
-            if scanned > MAX_COPIES:
-                scan_omitted_at_least += 1
-                break
+        scanned, omitted, entries_visited, truncated = scan_for_repos(root)
+        scan_omitted_at_least += omitted
+        scan_entries_visited += entries_visited
+        scan_truncated_roots += int(truncated)
+        for candidate in scanned:
             candidates.add(candidate)
 
     ordered_candidates = [canonical] + sorted((path for path in candidates if path != canonical), key=str)
@@ -525,6 +557,10 @@ def collect_repositories(repo: Path, state: Path, projects: Path, scan_roots: li
                 "omitted": project_omitted,
             },
             "scan_repositories": {"omitted_at_least": scan_omitted_at_least},
+            "scan_entries": {
+                "visited": scan_entries_visited,
+                "truncated_roots": scan_truncated_roots,
+            },
             "candidate_paths": {"shown": len(ordered_candidates), "omitted": candidate_omitted},
             "copies": {
                 "shown": len(records),
@@ -536,6 +572,7 @@ def collect_repositories(repo: Path, state: Path, projects: Path, scan_roots: li
                         worktrees_omitted,
                         project_omitted,
                         scan_omitted_at_least,
+                        scan_truncated_roots,
                     )
                 ),
             },
@@ -1117,6 +1154,9 @@ def output_record(record: dict[str, Any], as_json: bool) -> None:
     print(f"Project directories omitted by repository scan: {project_omitted}")
     scanned_omitted = inventory.get("scan_repositories", {}).get("omitted_at_least", 0)
     print(f"Scanned repositories omitted: at least {scanned_omitted}")
+    scan_entries = inventory.get("scan_entries", {})
+    print(f"Scan entries visited: {scan_entries.get('visited', 0)}")
+    print(f"Scan roots truncated by entry bound: {scan_entries.get('truncated_roots', 0)}")
     print(f"Repository candidates omitted by bound: {inventory.get('candidate_paths', {}).get('omitted', 0)}")
     print(f"Branches omitted by bound: at least {inventory.get('branches', {}).get('omitted_at_least', 0)}")
     evidence_inventory = record["diagnosis"].get("observations", {}).get("inventory", {})
@@ -1240,7 +1280,8 @@ def validate_compact_status(record: dict[str, Any]) -> None:
         "inventory.repository",
         {
             "registered_worker_metadata", "candidate_worktrees", "worktrees",
-            "project_directories", "scan_repositories", "candidate_paths", "copies", "branches",
+            "project_directories", "scan_repositories", "scan_entries",
+            "candidate_paths", "copies", "branches",
         },
     )
     compact_status_count_pair(
@@ -1277,6 +1318,22 @@ def validate_compact_status(record: dict[str, Any]) -> None:
         scan_repositories["omitted_at_least"],
         incident_id,
         "inventory.repository.scan_repositories.omitted_at_least",
+    )
+    scan_entries = compact_status_mapping(
+        repository["scan_entries"],
+        incident_id,
+        "inventory.repository.scan_entries",
+        {"visited", "truncated_roots"},
+    )
+    compact_status_count(
+        scan_entries["visited"],
+        incident_id,
+        "inventory.repository.scan_entries.visited",
+    )
+    compact_status_count(
+        scan_entries["truncated_roots"],
+        incident_id,
+        "inventory.repository.scan_entries.truncated_roots",
     )
     compact_status_count_pair(
         repository["candidate_paths"],

@@ -506,6 +506,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
              + (.inventory.repository.worktrees.omitted // 0)
              + (.inventory.repository.project_directories.omitted // 0)
              + (.inventory.repository.scan_repositories.omitted_at_least // 0)
+             + (.inventory.repository.scan_entries.truncated_roots // 0)
              + (.inventory.repository.candidate_paths.omitted // 0)
              + (.inventory.repository.branches.omitted_at_least // 0)
              + (([.inventory.evidence[]?.omitted // 0] | add) // 0)

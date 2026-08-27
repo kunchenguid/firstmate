@@ -878,6 +878,34 @@ test_bounded_inventory_omissions_are_disclosed() {
   pass "bounded worker, repository, branch, and incident omissions stay visible"
 }
 
+test_scan_root_entry_budget_is_enforced() {
+  local home origin repo scan_root out human
+  home=$(make_home bounded-scan-root)
+  origin=$(make_origin bounded-scan-root)
+  repo=$home/projects/titan
+  clone_origin "$origin" "$repo"
+  scan_root=$home/large-scan
+  python3 - "$scan_root" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+for index in range(4200):
+    (root / f"ordinary-{index:04d}").mkdir(parents=True)
+PY
+  out=$(run_triage "$home" bounded-scan-root "$repo" \
+    "Unexplained production failure" --scan-root "$scan_root")
+  printf '%s' "$out" | jq -e '
+    .repository.inventory.scan_entries.truncated_roots == 1
+      and .repository.inventory.scan_entries.visited < 4200
+      and .repository.inventory.copies.complete == false
+  ' >/dev/null || fail "scan-root entry bound or truncation disclosure failed: $out"
+  human=$(FM_HOME="$home" "$INCIDENT" status --incident bounded-scan-root)
+  assert_contains "$human" "Scan roots truncated by entry bound: 1" \
+    "human incident status hid scan-root truncation"
+  pass "scan-root traversal stops at its entry budget and reports truncation"
+}
+
 test_worktree_inventory_is_authority_bound_and_enrichment_is_capped() {
   local home origin repo fakebin fixture marker omitted real_git head out i suffix
   home=$(make_home worktree-bound)
@@ -1087,5 +1115,6 @@ test_raw_evidence_requires_agent_judgment
 test_agent_adjudicated_categories
 test_repository_identity_normalizes_transports_and_relative_paths
 test_bounded_inventory_omissions_are_disclosed
+test_scan_root_entry_budget_is_enforced
 test_worktree_inventory_is_authority_bound_and_enrichment_is_capped
 test_aggregate_record_bounds_and_atomic_size_refusal
