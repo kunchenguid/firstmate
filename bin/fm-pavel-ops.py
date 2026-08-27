@@ -543,6 +543,8 @@ def classify(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         target = "ready"
         evidence = "ordinary reversible work inside accepted Pavel intent"
     elif args.authority == "business-ambiguity":
+        event["clarification_outbound_id"] = f"{event['id']}-clarification"
+        event["clarification_question"] = args.question
         hold_external(home, task_id, f"Pavel clarification pending: {args.question}")
         target = "awaiting_pavel"
         evidence = args.question
@@ -572,7 +574,7 @@ def resolve_pavel(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         raise OpsError("Pavel clarification was already resolved with different details")
     if event["state"] != "awaiting_pavel":
         raise OpsError("only an event awaiting Pavel can be resolved by Pavel")
-    if reply["state"] not in {"captured", "reply", "conversation"}:
+    if reply["state"] not in {"captured", "reply"}:
         raise OpsError("the Pavel answer event is not available for clarification resolution")
     if reply["state"] != "captured" and reply.get("related_task") != task_id:
         raise OpsError("the classified Pavel answer belongs to another task")
@@ -858,6 +860,26 @@ def recover(home: Home, startup: bool = False) -> list[str]:
                 needs_wake = True
         if event.get("state") in {"landed", "live"}:
             needs_wake = True
+        if event.get("state") == "awaiting_pavel":
+            clarification_id = str(event.get("clarification_outbound_id") or f"{event['id']}-clarification")
+            clarification_path = outbound_path(home, clarification_id)
+            clarification_question = str(event.get("clarification_question") or last_transition_evidence(event, "awaiting_pavel"))
+            if not clarification_path.exists():
+                needs_wake = True
+            else:
+                try:
+                    clarification = read_json(clarification_path)
+                except OpsError:
+                    needs_wake = True
+                else:
+                    expected = expected_outbound_contract(home, event, "clarification", clarification_question, clarification_id)
+                    try:
+                        validate_outbound_contract(clarification_id, clarification, expected)
+                    except OpsError as exc:
+                        actions.append(str(exc))
+                        needs_wake = True
+                    if clarification.get("status") not in {"delivered", "sending", "unknown"}:
+                        needs_wake = True
         if needs_wake:
             if ensure_wake(home, event, f"Pavel operations recovery for {event['id']} at {event.get('state')}"):
                 event["wake_pending"] = False

@@ -273,6 +273,14 @@ if run_ops classify "$ambiguous" --as task --title 'Add colour' --intent 'Add Pa
 fi
 ambiguous_task=$(run_ops inspect "$ambiguous" | json_field "['task_id']")
 assert_grep '--kind external' "$TASK_DB/$ambiguous_task.holds" "business ambiguity did not wait externally on Pavel"
+clarification_recovery=$(run_ops recover --startup) || fail "Pavel clarification recovery failed"
+printf '%s' "$clarification_recovery" | grep -F "re-woke $ambiguous at awaiting_pavel" >/dev/null \
+  || fail "unsent Pavel clarification was not surfaced during recovery"
+run_ops send "$ambiguous" --purpose clarification --text 'Какой цвет и фото использовать?' >/dev/null \
+  || fail "Pavel clarification notification failed"
+after_clarification_recovery=$(run_ops recover --startup) || fail "Pavel clarification delivered recovery failed"
+printf '%s' "$after_clarification_recovery" | grep -F "re-woke $ambiguous at awaiting_pavel" >/dev/null \
+  && fail "delivered Pavel clarification kept surfacing as unsent"
 answer_event=$(ingest 104 14 'Белый, фото выше' | json_field "['event']")
 run_ops resolve-pavel "$ambiguous" --reply-event "$answer_event" --answer 'Белый, фото выше' >/dev/null
 run_ops resolve-pavel "$ambiguous" --reply-event "$answer_event" --answer 'Белый, фото выше' >/dev/null
@@ -282,6 +290,53 @@ fi
 [ "$(run_ops inspect "$ambiguous" | json_field "['state']")" = ready ] || fail "Pavel answer did not resume the original task"
 assert_grep 'unheld' "$TASK_DB/$ambiguous_task.holds" "Pavel answer did not lift the external wait"
 pass "genuine business ambiguity routes to Pavel and resumes automatically"
+
+conversation_answer_task=$(ingest 117 27 'Уточнить текст' | json_field "['event']")
+run_ops classify "$conversation_answer_task" --as task --title 'Clarify copy' --intent 'Set Pavel requested copy' \
+  --reason 'copy choice changes the customer result' --authority business-ambiguity \
+  --question 'Какой текст использовать?' >/dev/null
+conversation_answer_task_id=$(run_ops inspect "$conversation_answer_task" | json_field "['task_id']")
+conversation_answer=$(ingest 118 28 'Когда будет готово?' | json_field "['event']")
+run_ops classify "$conversation_answer" --as conversation --related-task "$conversation_answer_task_id" \
+  --reason 'status question only' >/dev/null
+if run_ops resolve-pavel "$conversation_answer_task" --reply-event "$conversation_answer" \
+  --answer 'Когда будет готово?' >/dev/null 2>&1; then
+  fail "conversation event resolved a Pavel clarification"
+fi
+[ "$(run_ops inspect "$conversation_answer_task" | json_field "['state']")" = awaiting_pavel ] \
+  || fail "conversation resolution rejection mutated the waiting task"
+pass "Pavel clarification resolution rejects conversations"
+
+unknown_clarification=$(ingest 119 29 'Уточнить фото' | json_field "['event']")
+run_ops classify "$unknown_clarification" --as task --title 'Clarify photo' --intent 'Set Pavel requested photo' \
+  --reason 'photo choice changes the customer result' --authority business-ambiguity \
+  --question 'Какое фото использовать?' >/dev/null
+UNKNOWN_CLARIFICATION="$unknown_clarification" OUTBOX="$HOME_DIR/state/pavel-ops/outbox/$unknown_clarification-clarification.json" python3 - <<'PY'
+import hashlib
+import json
+import os
+text = "Какое фото использовать?"
+with open(os.environ["OUTBOX"], "w", encoding="utf-8") as handle:
+    json.dump({
+        "schema": "fm-pavel-ops-outbound.v1",
+        "id": os.environ["UNKNOWN_CLARIFICATION"] + "-clarification",
+        "event_id": os.environ["UNKNOWN_CLARIFICATION"],
+        "purpose": "clarification",
+        "chat_id": "group",
+        "text": text,
+        "text_digest": hashlib.sha256(text.encode()).hexdigest(),
+        "status": "unknown",
+        "attempts": 1,
+        "created_at": 1,
+        "updated_at": 1,
+    }, handle)
+PY
+unknown_clarification_recovery=$(run_ops recover --startup) || fail "unknown clarification recovery failed"
+printf '%s' "$unknown_clarification_recovery" | grep -F "unknown outbound $unknown_clarification-clarification surfaced" >/dev/null \
+  || fail "unknown Pavel clarification was not surfaced for reconciliation"
+printf '%s' "$unknown_clarification_recovery" | grep -F "re-woke $unknown_clarification at awaiting_pavel" >/dev/null \
+  && fail "unknown Pavel clarification was treated as unsent"
+pass "unknown Pavel clarification sends require reconciliation"
 
 partial_ambiguity=$(ingest 111 21 'Уточнить баннер' | json_field "['event']")
 run_ops classify "$partial_ambiguity" --as task --title 'Clarify banner' --intent 'Set Pavel requested banner' \
@@ -373,12 +428,13 @@ fi
 if run_ops transition "$event" live --evidence 'different live evidence' --live-url 'https://example.test/product' >/dev/null 2>&1; then
   fail "live replay accepted changed evidence"
 fi
+before_completion_sends=$(grep -c . "$HTTP_LOG")
 run_ops send "$event" --purpose live-completion --text 'Готово: цена уже на сайте.' >/dev/null || fail "live completion notification failed"
 run_ops send "$event" --purpose live-completion --text 'Готово: цена уже на сайте.' >/dev/null || fail "completion notification replay failed"
 if run_ops send "$event" --purpose live-completion --text 'Готово: другой текст.' >/dev/null 2>&1; then
   fail "delivered completion replay accepted changed text"
 fi
-[ "$(grep -c . "$HTTP_LOG")" -eq 1 ] || fail "completion notification replay sent twice"
+[ "$(grep -c . "$HTTP_LOG")" -eq $((before_completion_sends + 1)) ] || fail "completion notification replay sent twice"
 [ "$(run_ops inspect "$event" | json_field "['state']")" = notified ] || fail "confirmed Telegram receipt did not complete notification"
 assert_grep 'chat_id=group' "$HTTP_LOG" "Telegram completion used the wrong chat"
 assert_grep 'message' "$HOME_DIR/state/pavel-ops/outbox/$event-live-completion.json" "completion receipt was not retained"
@@ -453,7 +509,7 @@ fi
 if run_ops send "$unknown" --purpose qa --text 'Другой статус.' >/dev/null 2>&1; then
   fail "unknown outbound replay accepted changed text"
 fi
-[ "$(grep -c . "$HTTP_LOG")" -eq 1 ] || fail "unknown Telegram delivery reached the API again"
+[ "$(grep -c . "$HTTP_LOG")" -eq $((before_completion_sends + 1)) ] || fail "unknown Telegram delivery reached the API again"
 recovery=$(run_ops recover --startup) || fail "Pavel startup recovery failed"
 printf '%s' "$recovery" | grep -F "unknown outbound $unknown-qa surfaced" >/dev/null \
   || fail "unknown Telegram delivery was not made visible during recovery"
