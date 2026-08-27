@@ -169,6 +169,36 @@ test_outcome_store_initializes_fresh_home_before_locking() {
   pass "branch outcome commands initialize fresh homes before locking"
 }
 
+test_outcome_store_rejects_symlinked_state_before_access() {
+  local home target command rc
+  home="$TMP_ROOT/symlink-state-home"
+  target="$TMP_ROOT/symlink-state-target"
+  mkdir -p "$home" "$target"
+  ln -s "$target" "$home/state"
+
+  for command in append unread mark-read startup-replay; do
+    rc=0
+    case "$command" in
+      append)
+        FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+          --task task-1 --verdict routine --summary ready >/dev/null 2>&1 || rc=$?
+        ;;
+      mark-read)
+        FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 1 \
+          >/dev/null 2>&1 || rc=$?
+        ;;
+      *)
+        FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" "$command" \
+          >/dev/null 2>&1 || rc=$?
+        ;;
+    esac
+    [ "$rc" -ne 0 ] || fail "$command accepted a symlinked state directory"
+  done
+  [ -z "$(find "$target" -mindepth 1 -print -quit)" ] \
+    || fail "a rejected branch outcome command wrote through the state symlink"
+  pass "branch outcome commands fail closed on symlinked state"
+}
+
 # --- lease contract -----------------------------------------------------------
 
 test_lease_exclusivity_release_stale_and_sweep() {
@@ -565,6 +595,7 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_startup_replay_preserves_silence
 test_outcome_store_initializes_fresh_home_before_locking
+test_outcome_store_rejects_symlinked_state_before_access
 test_lease_exclusivity_release_stale_and_sweep
 test_mutating_scripts_refuse_the_other_actors_lease
 test_main_owned_actions_refuse_the_branch_actor

@@ -152,7 +152,7 @@ case "$CMD" in
     [ -n "$SUMMARY" ] || usage
     case "$VERDICT" in routine|captain) ;; *) usage ;; esac
     case "$SILENT" in true|false) ;; *) usage ;; esac
-    lock_store
+    lock_store || exit 1
     if ! LAST_SEQ=$(last_seq); then
       fm_lock_release "$LOCK"
       echo "error: refusing append because the outcome store has a malformed final record" >&2
@@ -167,7 +167,7 @@ case "$CMD" in
     ;;
   unread)
     [ "$#" -eq 0 ] || usage
-    lock_store
+    lock_store || exit 1
     print_unread
     fm_lock_release "$LOCK"
     ;;
@@ -176,7 +176,7 @@ case "$CMD" in
     THROUGH=${2:-}
     case "$THROUGH" in ''|*[!0-9]*) usage ;; esac
     [ "$#" -eq 2 ] || usage
-    lock_store
+    lock_store || exit 1
     advance_cursor "$THROUGH"
     fm_lock_release "$LOCK"
     ;;
@@ -193,7 +193,7 @@ case "$CMD" in
     ;;
   startup-replay)
     [ "$#" -eq 0 ] || usage
-    lock_store
+    lock_store || exit 1
     UNREAD=$(print_unread)
     if [ -n "$UNREAD" ]; then
       VISIBLE=$(printf '%s\n' "$UNREAD" | jq -c 'select(.silent != true)')
