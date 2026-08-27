@@ -357,8 +357,15 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
 # stderr because this command's stdout is the task id its caller reads. It
 # projects the WHOLE current set every time, so a run lost to any of that is
 # repaired by the next hold, answer, or session start rather than leaving a gap.
+#
+# Because it projects the whole set, a BATCH of answers needs exactly one run at
+# the end, not one per answer. `answers` closes each key by re-entering this
+# script's own `answer` command, so it sets FM_CAPTAIN_HOLD_DEFER_REMINDERS for
+# those children and refreshes once itself. Without that, a wedged Reminders app
+# would cost the batch its per-run bound once per key, on a supervision path.
 project_reminders() {  # <task-id to alert on, or empty>
   local script="$SCRIPT_DIR/fm-captain-reminders.sh"
+  [ "${FM_CAPTAIN_HOLD_DEFER_REMINDERS:-0}" != 1 ] || return 0
   [ -x "$script" ] || return 0
   if [ -n "$1" ]; then
     "$script" sync --notify "$1" >&2 || true
@@ -746,7 +753,8 @@ command_answers() {
       continue
     fi
     # shellcheck disable=SC2086  # release_flag is empty or a single literal flag.
-    if "$0" answer "$id" --decision-file "$tmp" $release_flag </dev/null >/dev/null 2>"$err"; then
+    if FM_CAPTAIN_HOLD_DEFER_REMINDERS=1 \
+      "$0" answer "$id" --decision-file "$tmp" $release_flag </dev/null >/dev/null 2>"$err"; then
       printf 'closed: %s\n' "$id"
       closed=$((closed + 1))
     else
@@ -756,6 +764,8 @@ command_answers() {
     fi
   done
   rm -f -- "$tmp" "$err"
+  # One projection for the whole batch, now that every key has settled.
+  [ "$closed" -eq 0 ] || project_reminders ''
   printf 'answers: closed=%s skipped=%s\n' "$closed" "$skipped"
   [ "$skipped" -eq 0 ]
 }

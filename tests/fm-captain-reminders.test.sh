@@ -228,6 +228,52 @@ FM_LOCK_STALE_AFTER=0 FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
 [ "$(awk 'END { print NR }' "$CONCURRENT_STORE")" = 1 ] \
   || fail "stale-lock recovery duplicated the entry: $(cat "$CONCURRENT_STORE")"
 pass "a projection reclaims a lock whose owner process died"
+
+# --- a named push never stands down on lock contention ------------------------
+#
+# An ordinary projection may skip, because the lock holder is deriving the same
+# set. A --notify projection may not: the holder's snapshot predates this call,
+# so skipping would drop the one alert the caller authorized, silently.
+
+: > "$CONCURRENT_STORE"
+: > "$CONCURRENT_LOG"
+rm -f "$CONCURRENT_GATE.entered" "$CONCURRENT_GATE.release"
+FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+  FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$CONCURRENT_STORE" \
+  FAKE_REMINDERS_LOG="$CONCURRENT_LOG" FAKE_REMINDERS_GATE="$CONCURRENT_GATE" \
+  "$REMINDERS" sync >"$FIRST_OUT" 2>&1 &
+FIRST_PID=$!
+attempt=0
+while [ ! -e "$CONCURRENT_GATE.entered" ] && kill -0 "$FIRST_PID" 2>/dev/null \
+  && [ "$attempt" -lt 100 ]; do
+  sleep 0.05
+  attempt=$((attempt + 1))
+done
+if [ ! -e "$CONCURRENT_GATE.entered" ]; then
+  : > "$CONCURRENT_GATE.release"
+  wait "$FIRST_PID" 2>/dev/null || true
+  fail "the lock-owning projection never reached its create boundary"
+fi
+NOTIFY_START=$(date +%s)
+NOTIFY_OUT=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+  FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$CONCURRENT_STORE" \
+  FAKE_REMINDERS_LOG="$CONCURRENT_LOG" FM_REMINDERS_TIMEOUT_SECS=2 \
+  "$REMINDERS" sync --notify call-a 2>&1)
+NOTIFY_RC=$?
+NOTIFY_ELAPSED=$(( $(date +%s) - NOTIFY_START ))
+: > "$CONCURRENT_GATE.release"
+wait "$FIRST_PID" 2>/dev/null || true
+[ "$NOTIFY_RC" -ne 0 ] \
+  || fail "a named push that never reached the list must not report success"
+assert_contains "$NOTIFY_OUT" "NOT delivered" \
+  "a named push that ran out of time says the alert was not delivered"
+assert_contains "$NOTIFY_OUT" "call-a" "the undelivered alert names the call it was for"
+[ "$NOTIFY_ELAPSED" -ge 1 ] \
+  || fail "a named push must wait for the lock, not stand down immediately (${NOTIFY_ELAPSED}s)"
+[ "$NOTIFY_ELAPSED" -lt 30 ] \
+  || fail "a named push must stop waiting at its own deadline (${NOTIFY_ELAPSED}s)"
+pass "a named push waits for the lock and reports an undelivered alert rather than exiting clean"
+
 # --- a call that is not held for the captain is not projected ------------------
 
 axi add ordinary-b "Ordinary work" --repo demo
@@ -497,3 +543,64 @@ RC=$?
 HELD=$( (cd "$HOME_DIR" && tasks-axi show call-g --full) | sed -n 's/^  hold_kind: //p')
 [ "$HELD" = captain ] || fail "the captain hold itself must still be recorded, got: $HELD"
 pass "a failing projection leaves the captain hold intact and its output clean"
+
+# --- a batch of answers projects once, not once per answer ---------------------
+#
+# `answers` closes each key by re-entering `answer`, so an unsuppressed
+# projection would cost the batch its whole per-run bound once per key - on the
+# supervision path, with a wedged Reminders app.
+
+BATCH_LOG="$TMP_ROOT/batch-reminders.log"
+: > "$BATCH_LOG"
+for id in batch-a batch-b batch-c; do
+  hold_cmd hold "$id" --title "Batch call $id" --repo demo \
+    --reason "batched captain call $id" >/dev/null 2>&1
+done
+: > "$BATCH_LOG"
+BATCH_OUT=$(printf 'batch-a\tyes\t\nbatch-b\tyes\t\nbatch-c\tyes\t\n' |
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+  FM_DATA_OVERRIDE="$HOME_DIR/data" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+  FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$STORE" FAKE_REMINDERS_LOG="$BATCH_LOG" \
+  "$HOLD" answers --any-origin --source "test batch" 2>&1)
+assert_contains "$BATCH_OUT" "closed=3" "the batch closed every captain call it was given"
+[ "$(grep -c '^list$' "$BATCH_LOG")" = 1 ] \
+  || fail "a batch of 3 answers ran $(grep -c '^list$' "$BATCH_LOG") projections instead of 1"
+for id in batch-a batch-b batch-c; do
+  case "$(row_for "$id")" in
+    1$'\t'*) ;;
+    *) fail "the single batch projection did not tick off $id, got: $(row_for "$id")" ;;
+  esac
+done
+pass "a batch of answers projects exactly once and still ticks off every entry"
+
+# --- an unreadable switch is not an empty one ----------------------------------
+
+if [ "$(id -u)" -eq 0 ]; then
+  echo "skip: running as root, an unreadable file cannot be simulated"
+else
+  UNREADABLE_LOG="$TMP_ROOT/unreadable-reminders.log"
+  : > "$UNREADABLE_LOG"
+  printf 'Captain Calls\n' > "$HOME_DIR/config/captain-reminders"
+  chmod 000 "$HOME_DIR/config/captain-reminders"
+  if head -1 "$HOME_DIR/config/captain-reminders" >/dev/null 2>&1; then
+    echo "skip: this filesystem ignores the unreadable mode"
+  else
+    OUT=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+      FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$STORE" \
+      FAKE_REMINDERS_LOG="$UNREADABLE_LOG" "$REMINDERS" sync 2>&1)
+    RC=$?
+    [ "$RC" -ne 0 ] || fail "an unreadable switch must not report a successful projection"
+    assert_contains "$OUT" "could not be read" "an unreadable switch says so"
+    assert_not_contains "$OUT" "added " "an unreadable switch projects nothing"
+    [ ! -s "$UNREADABLE_LOG" ] \
+      || fail "an unreadable switch reached Reminders: $(cat "$UNREADABLE_LOG")"
+    pass "an unreadable switch fails before touching Reminders instead of taking the default list"
+  fi
+  chmod 644 "$HOME_DIR/config/captain-reminders"
+fi
+printf '\n' > "$HOME_DIR/config/captain-reminders"
+: > "$STORE"
+run sync >/dev/null 2>&1
+[ "$(rows)" -gt 0 ] || fail "an empty switch file must still select the default list"
+pass "an empty switch file still selects the default list"
+

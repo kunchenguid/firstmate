@@ -50,7 +50,17 @@
 # SWITCH. Entirely inert until this home opts in with `config/captain-reminders`
 # (local, gitignored). Absent: every command is a silent no-op that exits 0.
 # Present: its first line, trimmed, is the target list name, and an empty file
-# means `Firstmate`. The list is created on first use.
+# means `Firstmate`. The list is created on first use. Present but unreadable is
+# neither of those and is reported rather than defaulted, because filing the
+# captain's calls into a list he did not choose hides them on a synced account.
+#
+# CONCURRENCY. One projection lock under `state/` makes "never creates a
+# duplicate" hold when several callers fire at once. An ordinary projection that
+# loses the lock stands down and exits 0 - the holder is deriving the same full
+# set and will write the same entries. A projection carrying `--notify` does NOT
+# stand down: the holder's snapshot predates that call, so nobody else will ever
+# raise it. It waits inside its own deadline and, if that runs out, says the
+# alert was not delivered rather than exiting as though it had been.
 #
 # DEGRADING. Never a hard failure for the caller, which is always some other
 # piece of work that must not be held up by a reminder.
@@ -154,7 +164,17 @@ run_projection() {  # <dry-run 0|1> <notify-ids newline-separated>
   local id title body due outcome now rc desired_count stale_count total remaining
   local failures=0 acted=0 processed=0
 
-  list_name=$(fm_reminders_list_name "$CONFIG") || return 0
+  list_name=$(fm_reminders_list_name "$CONFIG")
+  rc=$?
+  case "$rc" in
+    0) ;;
+    1) return 0 ;;
+    *)
+      note "config/captain-reminders exists but could not be read; nothing was projected."
+      note "fix its permissions, or remove it to turn the projection off - defaulting the list name here would file the captain's calls somewhere he is not looking."
+      return 1
+      ;;
+  esac
   if [ -z "$REMINDERS_EXEC" ]; then
     if [ "$(uname)" != Darwin ] || ! command -v osascript >/dev/null 2>&1; then
       note "skipped - the Reminders projection needs macOS with osascript."
@@ -172,7 +192,30 @@ run_projection() {  # <dry-run 0|1> <notify-ids newline-separated>
   # shellcheck disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   PROJECTION_LOCK="$STATE/.captain-reminders.lock"
-  fm_lock_try_acquire "$PROJECTION_LOCK" || return 0
+  # Lock contention means one thing for an ordinary projection and the opposite
+  # for a named push.
+  #
+  # An ordinary projection has an exact peer: the holder is deriving the same
+  # full set from the same backlog and will write the same entries, so standing
+  # down is the correct result rather than a failure, and it keeps a projection
+  # from ever waiting on the deadline.
+  #
+  # A named push has no such peer. The holder's snapshot was taken before this
+  # call existed, so it cannot create this entry and will never set its due time
+  # - and a later ordinary sync would then create it with no alert at all. The
+  # one push the caller explicitly authorized would be lost silently, which is
+  # exactly the failure this whole capability exists to prevent. So a named push
+  # waits, inside the deadline it already has, and says so plainly if it runs out.
+  if ! fm_lock_try_acquire "$PROJECTION_LOCK"; then
+    [ -n "$notify" ] || return 0
+    until fm_lock_try_acquire "$PROJECTION_LOCK"; do
+      if ! projection_budget; then
+        note "another projection held the list for the whole ${TIMEOUT_SECS}s deadline; the alert for $(printf '%s' "$notify" | tr '\n' ' ') was NOT delivered."
+        return 1
+      fi
+      sleep 0.1
+    done
+  fi
   PROJECTION_LOCK_HELD=1
 
   WORK_DIR=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-captain-reminders.XXXXXX") || {

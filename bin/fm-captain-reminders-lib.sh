@@ -31,12 +31,21 @@ fm_reminders_one_line() {  # <text>
   printf '%s' "$1" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177'
 }
 
-# The configured target list, or nonzero when this home has not opted in.
-# Presence of the file IS the switch; its content, trimmed, is the list name.
+# The configured target list. Presence of the file IS the switch; its content,
+# trimmed, is the list name, and an empty file selects the default.
+#
+# Three outcomes, deliberately distinct:
+#   0  the list name, on stdout
+#   1  no such file - this home never opted in
+#   2  the file exists but could not be read
+# An unreadable file is not an empty one. Collapsing the two would silently file
+# the captain's hold reasons into the default list instead of the one he chose,
+# which on a synced account means publishing them somewhere he is not looking.
 fm_reminders_list_name() {  # <config-dir>
   local file=$1/captain-reminders name
   [ -f "$file" ] || return 1
-  name=$(fm_reminders_one_line "$(head -1 "$file" 2>/dev/null || true)")
+  name=$(head -1 "$file" 2>/dev/null) || return 2
+  name=$(fm_reminders_one_line "$name")
   name=${name#"${name%%[![:space:]]*}"}
   name=${name%"${name##*[![:space:]]}"}
   [ -n "$name" ] || name=$FM_REMINDERS_DEFAULT_LIST
