@@ -393,14 +393,14 @@ fm_route_failure_locked() {
     return 0
   fi
   if jq -e --arg lane "$lane" --argjson now "$now" '.lanes[$lane].openUntil? > $now' <<<"$circuits" >/dev/null; then
-    action=circuit-open
+    if [ "$kind" = unsafe ]; then action=escalate; else action=circuit-open; fi
     open_until=$(jq -r --arg lane "$lane" '.lanes[$lane].openUntil' <<<"$circuits")
   else
     prior_transients=$(jq --arg task "$task" '[.events[] | select(.taskId == $task and .kind == "transient")] | length' <<<"$circuits")
     action=$(fm_routing_failure_action "$kind" "$prior_transients")
     failures=$(jq -c --arg lane "$lane" --argjson cutoff "$((now - 900))" '[.events[] | select(.lane == $lane and .timestamp >= $cutoff)]' <<<"$circuits")
     if [ "$(jq 'length' <<<"$failures")" -ge 2 ]; then
-      action=circuit-open
+      [ "$kind" = unsafe ] || action=circuit-open
       open_until=$((now + 1800))
     else
       open_until=null
@@ -464,6 +464,7 @@ fm_routing_rotate_ledger() {
 
 fm_route_append_outcome_locked() {
   local record=$1 file="$FM_ROUTE_STATE/outcomes.jsonl" directory temporary
+  fm_route_read_outcomes >/dev/null || { fm_route_diagnostic 'invalid routing state'; return 1; }
   directory=$(dirname "$file")
   mkdir -p "$directory"
   temporary=$(mktemp "$directory/.routing-ledger.XXXXXX") || return 1

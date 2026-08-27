@@ -428,19 +428,19 @@ test_canary_cap_is_atomic() {
   reserve_ok task-1 codex-1
   reserve_ok task-2 claude-1
   reserve_ok task-3 pi-google-1
-  expect_failure_contains 'global-cap:3' "$ROUTE" reserve --task task-4 --generation gen-4 --profile pi-glm --provider zai --lane pi-zai-1 --account none --class decomposable --risk low --mode canary
+  expect_failure_contains 'global-cap:3' "$ROUTE" reserve --task task-4 --generation gen-4 --profile pi-glm --provider zai --lane pi-zai-1 --account none --class decomposable --work-type implementation --risk low --mode canary
 }
 
 test_lane_cap_is_two() {
   reserve_ok task-1 pi-xai-1
   reserve_ok task-2 pi-xai-1
-  expect_failure_contains 'lane-cap:2' "$ROUTE" reserve --task task-3 --generation gen-3 --profile pi-grok --provider xai --lane pi-xai-1 --account none --class standard --risk low --mode automatic
+  expect_failure_contains 'lane-cap:2' "$ROUTE" reserve --task task-3 --generation gen-3 --profile pi-grok --provider xai --lane pi-xai-1 --account none --class standard --work-type implementation --risk low --mode automatic
 }
 
 test_third_failure_opens_breaker() {
   for task in fail-1 fail-2; do record_failure "$task" quota 1000; done
   "$ROUTE" failure --task fail-3 --generation gen-3 --provider xai --lane pi-xai-1 --kind quota --now 1000 | jq -e '.action == "circuit-open" and .until == 2800'
-  expect_failure_contains 'circuit-open' "$ROUTE" reserve --task task-4 --generation gen-4 --profile pi-grok --provider xai --lane pi-xai-1 --account none --class standard --risk low --mode automatic --now 1001
+  expect_failure_contains 'circuit-open' "$ROUTE" reserve --task task-4 --generation gen-4 --profile pi-grok --provider xai --lane pi-xai-1 --account none --class standard --work-type implementation --risk low --mode automatic --now 1001
 }
 
 test_ledger_rejects_private_payload_fields() {

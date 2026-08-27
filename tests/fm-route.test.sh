@@ -372,6 +372,28 @@ test_failure_policy_and_circuit_breaker_are_bounded() {
   pass "failure actions retry once, open deterministic circuits, and escalate unsafe work"
 }
 
+test_unsafe_failure_always_escalates_without_corrupting_breakers() {
+  local out replay
+  reset_route_state
+  "$ROUTE" failure --task quota-1 --generation gen-1 --provider xai --lane unsafe-third --kind quota --now 1000 >/dev/null
+  "$ROUTE" failure --task quota-2 --generation gen-2 --provider xai --lane unsafe-third --kind quota --now 1000 >/dev/null
+  out=$("$ROUTE" failure --task unsafe-3 --generation gen-3 --provider xai --lane unsafe-third --kind unsafe --now 1000) || fail "unsafe third failure command failed"
+  jq -e '.action == "escalate" and .until == 2800' <<<"$out" >/dev/null || fail "unsafe third failure lost escalation precedence or breaker deadline"
+  jq -e '.lanes["unsafe-third"].openUntil == 2800' "$FM_STATE_OVERRIDE/routing/circuits.json" >/dev/null || fail "unsafe third failure did not preserve the opened breaker"
+  replay=$("$ROUTE" failure --task unsafe-3 --generation gen-3 --provider xai --lane unsafe-third --kind unsafe --now 4000) || fail "unsafe third failure replay failed"
+  [ "$replay" = "$out" ] || fail "unsafe third failure replay changed after cooldown"
+
+  "$ROUTE" failure --task quota-a --generation gen-a --provider moonshot --lane already-open --kind quota --now 1100 >/dev/null
+  "$ROUTE" failure --task quota-b --generation gen-b --provider moonshot --lane already-open --kind quota --now 1100 >/dev/null
+  "$ROUTE" failure --task quota-c --generation gen-c --provider moonshot --lane already-open --kind quota --now 1100 >/dev/null
+  out=$("$ROUTE" failure --task unsafe-open --generation gen-open --provider moonshot --lane already-open --kind unsafe --now 1200) || fail "unsafe open-circuit failure command failed"
+  jq -e '.action == "escalate" and .until == 2900' <<<"$out" >/dev/null || fail "open circuit masked unsafe escalation"
+  jq -e '.lanes["already-open"].openUntil == 2900' "$FM_STATE_OVERRIDE/routing/circuits.json" >/dev/null || fail "unsafe open-circuit failure changed the breaker deadline"
+  replay=$("$ROUTE" failure --task unsafe-open --generation gen-open --provider moonshot --lane already-open --kind unsafe --now 5000) || fail "unsafe open-circuit replay failed"
+  [ "$replay" = "$out" ] || fail "unsafe open-circuit replay changed after cooldown"
+  pass "unsafe failures escalate durably while breaker timing remains authoritative"
+}
+
 test_score_finalize_and_outcome_privacy_are_strict() {
   local outcome
   reset_route_state
@@ -439,7 +461,7 @@ test_finalize_recovers_between_ledger_publish_and_reservation_delete() {
 }
 
 test_observe_and_ledger_schemas_are_exact_and_sanitized() {
-  local decision
+  local decision before after
   reset_route_state
   write_request standard implementation low false 1 strong 120
   write_candidates "[$(candidate observed lane-1 3 1 0 0 0 null)]"
@@ -453,6 +475,11 @@ test_observe_and_ledger_schemas_are_exact_and_sanitized() {
   mkdir -p "$FM_STATE_OVERRIDE/routing"
   printf '%s\n' '{"prompt":"secret"}' >"$FM_STATE_OVERRIDE/routing/outcomes.jsonl"
   expect_failure_contains 'invalid routing state' "$ROUTE" evidence --work-type implementation
+  printf '%s\n' "$decision" >"$LAB/decision-valid.json"
+  before=$(od -An -v -tx1 "$FM_STATE_OVERRIDE/routing/outcomes.jsonl")
+  expect_failure_contains 'invalid routing state' "$ROUTE" observe --request "$REQUEST" --decision "$LAB/decision-valid.json" --now 1000
+  after=$(od -An -v -tx1 "$FM_STATE_OVERRIDE/routing/outcomes.jsonl")
+  [ "$after" = "$before" ] || fail "failed observation mutated the invalid ledger"
   pass "observe and persisted ledger reads reject unbounded or private state"
 }
 
@@ -499,6 +526,7 @@ test_canary_cap_is_atomic_and_duplicate_reserve_is_idempotent
 test_lane_account_and_burst_caps_are_enforced
 test_reservation_verification_and_generation_release_are_exact
 test_failure_policy_and_circuit_breaker_are_bounded
+test_unsafe_failure_always_escalates_without_corrupting_breakers
 test_score_finalize_and_outcome_privacy_are_strict
 test_observation_evidence_status_and_report_are_non_mutating
 test_finalize_recovers_between_ledger_publish_and_reservation_delete
