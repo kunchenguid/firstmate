@@ -1392,6 +1392,21 @@ model_flag_for_harness() {
   esac
 }
 
+codex_supports_max_effort() {
+  local output version major minor patch extra
+  output=$(codex --version 2>/dev/null) || return 1
+  version=${output#codex-cli }
+  [ "$version" != "$output" ] || return 1
+  IFS='.' read -r major minor patch extra <<< "$version"
+  case "$major.$minor.$patch" in *[!0-9.]*) return 1 ;; esac
+  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
+  [ "$major" -gt 0 ] && return 0
+  [ "$major" -eq 0 ] || return 1
+  [ "$minor" -gt 149 ] && return 0
+  [ "$minor" -eq 149 ] || return 1
+  [ "$patch" -ge 1 ]
+}
+
 effort_flag_for_harness() {
   local harness=$1 effort=$2
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
@@ -1402,10 +1417,15 @@ effort_flag_for_harness() {
       esac
       ;;
     codex)
-      # Codex's model_reasoning_effort config accepts the shared levels through
-      # max. Ultra remains outside firstmate's shared effort vocabulary.
       case "$effort" in
-        low|medium|high|xhigh|max) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+        max)
+          if codex_supports_max_effort; then
+            printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')"
+          else
+            echo "warning: Codex max effort requires codex-cli 0.149.1 or newer; omitting it for this launch" >&2
+          fi
+          ;;
       esac
       ;;
     grok)
