@@ -28,6 +28,7 @@ from typing import Any
 SCHEMA = "fm-pavel-ops.v1"
 EVENT_SCHEMA = "fm-pavel-ops-event.v1"
 OUTBOUND_SCHEMA = "fm-pavel-ops-outbound.v1"
+TELEGRAM_OFFSET_SCHEMA = "fm-pavel-ops-telegram-offset.v1"
 SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 PR_URL = re.compile(r"^https://[^\s]+$")
 LIFECYCLE_NEXT = {
@@ -122,6 +123,7 @@ class Home:
         self.ops = self.state / "pavel-ops"
         self.events = self.ops / "events"
         self.outbox = self.ops / "outbox"
+        self.telegram_offset_path = self.ops / "telegram-offset.json"
         self.lock_path = self.ops / ".lock"
         self.audit_path = self.ops / "audit.jsonl"
         for directory in (self.ops, self.events, self.outbox):
@@ -638,6 +640,12 @@ def validate_transition_replay(event: dict[str, Any], args: argparse.Namespace) 
 
 def transition(home: Home, args: argparse.Namespace) -> dict[str, Any]:
     event = home.load_event(args.event)
+    if (
+        args.state in set(LIFECYCLE_NEXT.values())
+        and not getattr(args, "driver_authorized", False)
+        and os.environ.get("FM_PAVEL_OPS_DRIVER") != "1"
+    ):
+        raise OpsError("delivery transitions must be driven by fm-pavel-ops drive")
     current = event["state"]
     expected = LIFECYCLE_NEXT.get(current)
     if current == args.state:
@@ -665,6 +673,155 @@ def transition(home: Home, args: argparse.Namespace) -> dict[str, Any]:
     home.save_event(event)
     home.audit("transition", event=event["id"], state=args.state, task=event.get("task_id"))
     return event
+
+
+def command_from_env(home: Home, env_key: str, default_name: str) -> str:
+    return os.environ.get(env_key, str(home.root / "bin" / default_name))
+
+
+def parse_meta(path: Path) -> dict[str, str]:
+    regular_private_file(path, "task metadata")
+    fields: dict[str, str] = {}
+    with path.open(encoding="utf-8") as handle:
+        for raw in handle:
+            line = raw.rstrip("\n")
+            if "=" in line:
+                key, value = line.split("=", 1)
+                fields[key] = value
+    return fields
+
+
+def validate_dispatched_owner_record(home: Home, event: dict[str, Any]) -> dict[str, str]:
+    task_id = str(event.get("task_id") or "")
+    if not task_id:
+        raise OpsError("ready Pavel work has no backlog task")
+    meta = parse_meta(home.state / f"{task_id}.meta")
+    if meta.get("kind", "ship") != "ship":
+        raise OpsError("Pavel dispatch did not create a ship worker")
+    if meta.get("harness") != "pi":
+        raise OpsError("Pavel dispatch did not use the verified Pi adapter")
+    if meta.get("mode") != "no-mistakes" or meta.get("yolo") != "on":
+        raise OpsError("Pavel dispatch did not retain no-mistakes yolo delivery")
+    worktree = meta.get("worktree")
+    if not worktree or Path(worktree).resolve() in {home.home, home.root}:
+        raise OpsError("Pavel dispatch did not record an isolated task worktree")
+    return meta
+
+
+def driver_transition(
+    home: Home,
+    event: dict[str, Any],
+    state: str,
+    evidence: str,
+    pr_url: str | None = None,
+    live_url: str | None = None,
+) -> dict[str, Any]:
+    args = argparse.Namespace(
+        event=event["id"],
+        state=state,
+        evidence=evidence,
+        pr_url=pr_url,
+        live_url=live_url,
+        driver_authorized=True,
+    )
+    return transition(home, args)
+
+
+def owner_status(home: Home, event: dict[str, Any]) -> dict[str, Any]:
+    command = command_from_env(home, "FM_PAVEL_OPS_STATUS", "fm-crew-state.sh")
+    output = run_checked(home, [command, str(event.get("task_id") or event["id"])])
+    try:
+        parsed = json.loads(output)
+    except json.JSONDecodeError:
+        urls = re.findall(r"https://[^\s)>\"]+", output)
+        state = "delivery_ready" if urls else "validating"
+        return {"state": state, "evidence": output.strip()[:500], "pr_url": urls[0] if urls else ""}
+    if not isinstance(parsed, dict):
+        raise OpsError("Pavel delivery status owner returned a non-object")
+    return parsed
+
+
+def drive(home: Home, args: argparse.Namespace) -> dict[str, Any]:
+    event = home.load_event(args.event)
+    task_id = str(event.get("task_id") or "")
+    if event["state"] == "ready":
+        brief = home.home / "data" / task_id / "brief.md"
+        project_ref = str(home.config.get("project_path") or home.config["project"])
+        if not brief.exists():
+            run_checked(
+                home,
+                [command_from_env(home, "FM_PAVEL_OPS_BRIEF", "fm-brief.sh"), task_id, project_ref, "--mode", "no-mistakes"],
+            )
+        meta = home.state / f"{task_id}.meta"
+        if not meta.exists():
+            worker = home.config["worker"]
+            run_checked(
+                home,
+                [
+                    command_from_env(home, "FM_PAVEL_OPS_SPAWN", "fm-spawn.sh"),
+                    task_id,
+                    project_ref,
+                    "--mode",
+                    "no-mistakes",
+                    "--yolo",
+                    "on",
+                    "--harness",
+                    str(worker["harness"]),
+                ],
+            )
+        validate_dispatched_owner_record(home, event)
+        return driver_transition(home, event, "dispatched", "Pi worker metadata verified in isolated project copy")
+    if event["state"] == "dispatched":
+        status = owner_status(home, event)
+        if status.get("state") not in {"validating", "delivery_ready"}:
+            raise OpsError("Pavel worker has not reached validation")
+        return driver_transition(home, event, "validating", str(status.get("evidence") or "no-mistakes validation is active"))
+    if event["state"] == "validating":
+        status = owner_status(home, event)
+        pr_url = str(status.get("pr_url") or "")
+        if status.get("state") != "delivery_ready" or not PR_URL.fullmatch(pr_url):
+            raise OpsError("Pavel delivery is not ready with a verified PR URL")
+        run_checked(home, [command_from_env(home, "FM_PAVEL_OPS_PR_CHECK", "fm-pr-check.sh"), task_id, pr_url])
+        return driver_transition(home, event, "delivery_ready", str(status.get("evidence") or "checks green on exact PR head"))
+    if event["state"] == "delivery_ready":
+        pr_url = str(event.get("pr_url") or "")
+        status = owner_status(home, event)
+        pr_url = str(status.get("pr_url") or pr_url)
+        if not PR_URL.fullmatch(pr_url):
+            raise OpsError("Pavel merge queue requires a verified PR URL")
+        run_checked(home, [command_from_env(home, "FM_PAVEL_OPS_PR_CHECK", "fm-pr-check.sh"), task_id, pr_url])
+        return driver_transition(home, event, "merge_queued", "guarded merge poll armed", pr_url=pr_url)
+    if event["state"] == "merge_queued":
+        pr_url = str(event.get("pr_url") or "")
+        if not PR_URL.fullmatch(pr_url):
+            raise OpsError("Pavel landed verification requires the recorded PR URL")
+        output = run_checked(home, [command_from_env(home, "FM_PAVEL_OPS_PR_MERGE", "fm-pr-merge.sh"), task_id, pr_url])
+        return driver_transition(home, event, "landed", (output.strip() or "forge reports PR merged at verified head")[:500])
+    if event["state"] == "landed":
+        status = owner_status(home, event)
+        live_url = str(status.get("live_url") or "")
+        if status.get("state") != "live" or not PR_URL.fullmatch(live_url):
+            raise OpsError("Pavel live verification requires a customer URL")
+        live_check = os.environ.get("FM_PAVEL_OPS_LIVE_CHECK")
+        if live_check:
+            run_checked(home, [live_check, live_url, str(status.get("contains") or "")])
+        elif status.get("contains"):
+            with urllib.request.urlopen(live_url, timeout=30) as response:
+                body = response.read().decode("utf-8", "replace")
+            if str(status["contains"]) not in body:
+                raise OpsError("Pavel live probe did not find the requested behavior")
+        event = driver_transition(home, event, "live", str(status.get("evidence") or "requested behavior verified live"), live_url=live_url)
+        completion = str(status.get("completion_text") or f"Готово: результат уже на сайте {live_url}")
+        send_args = argparse.Namespace(event=event["id"], purpose="live-completion", text=completion)
+        send_message(home, send_args)
+        return home.load_event(event["id"])
+    if event["state"] == "live":
+        status = owner_status(home, event)
+        completion = str(status.get("completion_text") or f"Готово: результат уже на сайте {event.get('live_url')}")
+        send_args = argparse.Namespace(event=event["id"], purpose="live-completion", text=completion)
+        send_message(home, send_args)
+        return home.load_event(event["id"])
+    raise OpsError(f"Pavel driver cannot advance event at {event['state']}")
 
 
 def record_failure(home: Home, args: argparse.Namespace) -> dict[str, Any]:
@@ -714,6 +871,141 @@ def telegram_send(home: Home, chat_id: str, text: str) -> str:
     if message_id is None:
         raise UnknownSendError("Telegram accepted send without a message_id receipt")
     return str(message_id)
+
+
+def telegram_token(home: Home) -> str:
+    telegram = home.config["telegram"]
+    env_values = parse_env_file(Path(telegram["env_file"]))
+    token = env_values.get(telegram["token_key"])
+    if not token:
+        raise OpsError(f"Telegram credential file lacks {telegram['token_key']}")
+    return token
+
+
+def telegram_request_json(home: Home, method: str, query: dict[str, Any]) -> dict[str, Any]:
+    telegram = home.config["telegram"]
+    token = telegram_token(home)
+    url = f"{telegram['api_base']}/bot{token}/{method}"
+    if query:
+        url = f"{url}?{urllib.parse.urlencode(query)}"
+    request = urllib.request.Request(url, headers={"User-Agent": "firstmate-pavel-ops/1"})
+    try:
+        with urllib.request.urlopen(request, timeout=max(35, int(query.get("timeout", 0)) + 5)) as response:
+            result = json.load(response)
+    except (OSError, urllib.error.URLError, ValueError, json.JSONDecodeError) as exc:
+        raise OpsError(f"Telegram {method} failed without a durable offset advance: {exc}") from exc
+    if not isinstance(result, dict) or result.get("ok") is not True or not isinstance(result.get("result"), list):
+        raise OpsError(f"Telegram {method} returned an unreadable update batch")
+    return result
+
+
+def load_telegram_offset(home: Home) -> int | None:
+    if not home.telegram_offset_path.exists():
+        return None
+    record = read_json(home.telegram_offset_path)
+    if not isinstance(record, dict) or record.get("schema") != TELEGRAM_OFFSET_SCHEMA:
+        raise OpsError("invalid Pavel Telegram offset record")
+    offset = record.get("next_update_id")
+    if offset is None:
+        return None
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise OpsError("invalid Pavel Telegram next update id")
+    return offset
+
+
+def save_telegram_offset(home: Home, next_update_id: int) -> None:
+    atomic_json(
+        home.telegram_offset_path,
+        {"schema": TELEGRAM_OFFSET_SCHEMA, "next_update_id": next_update_id, "updated_at": epoch()},
+    )
+
+
+def attachment_metadata(message: dict[str, Any]) -> list[dict[str, Any]]:
+    attachments: list[dict[str, Any]] = []
+    for key in ("photo", "document", "video", "audio", "voice", "animation", "sticker"):
+        if key not in message:
+            continue
+        value = message[key]
+        if key == "photo" and isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    meta = {k: item[k] for k in ("file_id", "file_unique_id", "file_size", "width", "height") if k in item}
+                    meta["kind"] = key
+                    attachments.append(meta)
+            continue
+        if isinstance(value, dict):
+            fields = ("file_id", "file_unique_id", "file_name", "mime_type", "file_size", "width", "height", "duration")
+            meta = {k: value[k] for k in fields if k in value}
+            meta["kind"] = key
+            attachments.append(meta)
+    return attachments
+
+
+def telegram_update_to_intake(update: dict[str, Any]) -> dict[str, Any] | None:
+    update_id = update.get("update_id")
+    if isinstance(update_id, bool) or not isinstance(update_id, int):
+        raise OpsError("Telegram update lacks an integer update_id")
+    message = None
+    edited = False
+    for key in ("message", "edited_message"):
+        if isinstance(update.get(key), dict):
+            message = update[key]
+            edited = key.startswith("edited")
+            break
+    if message is None:
+        return None
+    chat = message.get("chat") if isinstance(message.get("chat"), dict) else {}
+    sender = message.get("from") if isinstance(message.get("from"), dict) else {}
+    sender_chat = message.get("sender_chat") if isinstance(message.get("sender_chat"), dict) else {}
+    sender_id = sender.get("id") or sender_chat.get("id")
+    if chat.get("id") is None or sender_id is None:
+        return None
+    text = str(message.get("text") or message.get("caption") or "")
+    attachments = attachment_metadata(message)
+    reply = message.get("reply_to_message") if isinstance(message.get("reply_to_message"), dict) else {}
+    return {
+        "transport": "telegram",
+        "chat_id": str(chat["id"]),
+        "update_id": str(update_id),
+        "message_id": str(message.get("message_id", "")),
+        "sender_id": str(sender_id),
+        "date": message.get("edit_date") if edited else message.get("date"),
+        "text": text,
+        "attachments": attachments,
+        "reply_to_message_id": str(reply.get("message_id", "")),
+        "edited": edited,
+    }
+
+
+def collect_telegram(home: Home, args: argparse.Namespace) -> dict[str, Any]:
+    query: dict[str, Any] = {"limit": args.limit, "timeout": args.timeout}
+    offset = load_telegram_offset(home)
+    if offset is not None:
+        query["offset"] = offset
+    updates = telegram_request_json(home, "getUpdates", query)["result"]
+    handled = 0
+    ingested = 0
+    duplicates = 0
+    for update in updates:
+        if not isinstance(update, dict):
+            raise OpsError("Telegram update batch contained a non-object update")
+        update_id = update.get("update_id")
+        if isinstance(update_id, bool) or not isinstance(update_id, int):
+            raise OpsError("Telegram update lacks an integer update_id")
+        raw = telegram_update_to_intake(update)
+        if raw is not None:
+            try:
+                event, duplicate = ingest_one(home, raw)
+            except OpsError as exc:
+                if "configured Pavel principal" not in str(exc) and "allowed Pavel operations chat" not in str(exc):
+                    raise
+            else:
+                ingested += 1
+                duplicates += 1 if duplicate else 0
+                home.audit("telegram-collected", event=event["id"], update_id=update_id, duplicate=duplicate)
+        save_telegram_offset(home, update_id + 1)
+        handled += 1
+    return {"handled": handled, "ingested": ingested, "duplicates": duplicates, "next_update_id": load_telegram_offset(home)}
 
 
 def expected_outbound_contract(home: Home, event: dict[str, Any], purpose: str, text: str, outbound_id: str) -> dict[str, str]:
@@ -1002,6 +1294,10 @@ def parser() -> argparse.ArgumentParser:
     ingest = sub.add_parser("ingest")
     ingest.add_argument("--file")
 
+    collect = sub.add_parser("collect")
+    collect.add_argument("--limit", type=int, default=100)
+    collect.add_argument("--timeout", type=int, default=0)
+
     inspect = sub.add_parser("inspect")
     inspect.add_argument("event")
 
@@ -1041,6 +1337,9 @@ def parser() -> argparse.ArgumentParser:
     send.add_argument("--purpose", choices=("qa", "ack", "clarification", "live-completion"), required=True)
     send.add_argument("--text", required=True)
 
+    drive_p = sub.add_parser("drive")
+    drive_p.add_argument("event")
+
     reconcile = sub.add_parser("reconcile-outbound")
     reconcile.add_argument("outbound")
     reconcile.add_argument("--sent-message-id")
@@ -1075,6 +1374,12 @@ def main() -> int:
                     raise OpsError("intake payload must be one JSON object")
                 event, duplicate = ingest_one(home, raw)
                 print_json({"event": event["id"], "duplicate": duplicate, "state": event["state"], "wake_pending": event["wake_pending"]})
+            elif args.command == "collect":
+                if args.limit < 1 or args.limit > 100:
+                    raise OpsError("Telegram collect --limit must be 1..100")
+                if args.timeout < 0 or args.timeout > 50:
+                    raise OpsError("Telegram collect --timeout must be 0..50")
+                print_json(collect_telegram(home, args))
             elif args.command == "inspect":
                 print_json(home.load_event(args.event))
             elif args.command == "list":
@@ -1090,6 +1395,8 @@ def main() -> int:
                 print_json(record_failure(home, args))
             elif args.command == "send":
                 print_json(send_message(home, args))
+            elif args.command == "drive":
+                print_json(drive(home, args))
             elif args.command == "reconcile-outbound":
                 print_json(reconcile_outbound(home, args))
             elif args.command == "recover":

@@ -8,9 +8,12 @@
 # yolo=on for the delegated scope, so enabling this flow cannot silently fall
 # back to Claude or return green Pavel PRs to per-PR captain approval.
 #
-# Intake is one JSON object on stdin (or --file) with transport=telegram,
+# Intake is either one JSON object on stdin (or --file) with transport=telegram,
 # chat_id, update_id, message_id, sender_id, date, text, optional attachments,
-# and optional reply_to_message_id. The immutable identity is
+# and optional reply_to_message_id, or `collect`, which owns Telegram getUpdates
+# after cutover. The collector converts Pavel messages, edits, captions, replies,
+# and attachment metadata into that same immutable intake contract, then advances
+# its durable offset only after each update is handled. The immutable identity is
 # transport+chat_id+update_id. The event record is published before its durable
 # check wake; replaying identical input is a no-op apart from repairing a missing
 # wake, while conflicting bytes under one identity are refused and audited.
@@ -29,15 +32,19 @@
 # pavel-ops skill owns the semantic classification procedure; this script owns
 # deterministic persistence and refuses every unrecognized route.
 #
-# Delivery state is linear and evidence-bearing:
+# Delivery state is linear, driver-owned, and evidence-bearing:
 #   ready -> dispatched -> validating -> delivery_ready -> merge_queued
 #   -> landed -> live -> notified
-# `merge_queued` requires a full PR URL and the configured standing autonomy;
-# `live` requires a full live URL. `notified` is written only after Telegram
-# returns a concrete message_id for a live-completion send. An interrupted send
-# stays `sending`, is surfaced by recover, and is never retried until explicitly
-# reconciled, preferring visible uncertainty over a duplicate Pavel message.
-# A confirmed Telegram API rejection becomes retryable and may be retried safely.
+# `drive` composes the existing brief, Pi spawn, PR registration, merge, and live
+# verification owners before recording each delivery fact. Direct `transition`
+# input is reserved for that owner boundary, so a caller cannot declare a Pavel
+# result live with unaudited evidence. `merge_queued` requires a full PR URL and
+# the configured standing autonomy; `live` requires a full live URL. `notified`
+# is written only after Telegram returns a concrete message_id for a
+# live-completion send. An interrupted send stays `sending`, is surfaced by
+# recover, and is never retried until explicitly reconciled, preferring visible
+# uncertainty over a duplicate Pavel message. A confirmed Telegram API rejection
+# becomes retryable and may be retried safely.
 #
 # Session start calls `recover --startup` only when the opt-in config exists.
 # Recovery re-publishes missing intake, orphaned active-delivery, landed, and
@@ -53,6 +60,7 @@
 #
 # Usage:
 #   fm-pavel-ops.sh ingest [--file <event.json>]
+#   fm-pavel-ops.sh collect [--limit <1-100>] [--timeout <seconds>]
 #   fm-pavel-ops.sh inspect <event-id>
 #   fm-pavel-ops.sh list
 #   fm-pavel-ops.sh classify <event-id> --as task --title <title> --intent <intent> \
@@ -61,8 +69,9 @@
 #   fm-pavel-ops.sh classify <event-id> --as conversation --reason <reason>
 #   fm-pavel-ops.sh classify <event-id> --as reply --related-task <id> --reason <reason>
 #   fm-pavel-ops.sh resolve-pavel <event-id> --reply-event <event-id> --answer <answer>
+#   fm-pavel-ops.sh drive <event-id>
 #   fm-pavel-ops.sh transition <event-id> <state> --evidence <evidence> \
-#     [--pr-url <url>] [--live-url <url>]
+#     [--pr-url <url>] [--live-url <url>]  # internal owner boundary
 #   fm-pavel-ops.sh failure <event-id> --stage <stage> --error <error>
 #   fm-pavel-ops.sh send <event-id> --purpose qa|ack|clarification|live-completion --text <text>
 #   fm-pavel-ops.sh reconcile-outbound <outbound-id> \

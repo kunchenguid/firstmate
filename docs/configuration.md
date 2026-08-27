@@ -148,16 +148,16 @@ An absent or zero bound grants no spending authority, and spending outside every
 The Telegram credential file must be an absolute, single-linked regular file containing the configured token key in `KEY=value` form.
 The production API endpoint is fixed to `https://api.telegram.org`; `telegram.api_base` is accepted only when `FM_PAVEL_OPS_TESTING=1` so tests can use a local fake without allowing a production config to redirect the token.
 
-The existing Telegram collector remains the one `getUpdates` owner during cutover.
-For each Pavel message, including replies, acknowledgements, edited-message events, captions, and attachment metadata, it passes one JSON object to `bin/fm-pavel-ops.sh ingest` and advances its Telegram update offset only after that command succeeds.
+`bin/fm-pavel-ops.sh collect` is the post-cutover Telegram `getUpdates` owner.
+For each Pavel message, including replies, acknowledgements, edited-message events, captions, and attachment metadata, it converts the update into the same immutable `ingest` JSON contract and advances its Telegram update offset only after that update is durably handled.
 The immutable identity is the Telegram chat plus `update_id`, so a collector retry is harmless and an edit remains a distinct auditable event.
 The collector no longer invokes a separate Claude autoresponder or writes a second task store.
 Outbound acknowledgement, clarification, answer, and live-completion messages use the configured Telegram Bot API through `bin/fm-pavel-ops.sh send`, which keeps their delivery receipts beside the event lifecycle.
 
 Session start runs `bin/fm-pavel-ops.sh recover --startup` before wake presentation when this config exists and the session owns the home.
 That local recovery republishes captured, orphaned active-delivery, landed, and live-but-unnotified work and surfaces retryable or delivery-unknown Telegram sends without network access.
-The Pi primary and its tracked supervision extensions then handle each `pavel-ops-...` check wake under the `pavel-ops` skill.
-The existing Firstmate worker supervision, no-mistakes validation, PR merge polling, guarded merge, deployment verification, and landed-work cleanup remain their own authoritative owners.
+The Pi primary and its tracked supervision extensions then handle each `pavel-ops-...` check wake under the `pavel-ops` skill by calling `bin/fm-pavel-ops.sh drive <event-id>`.
+The driver composes the existing Firstmate brief, Pi spawn, worker-state, PR registration, guarded merge, and live-verification owners before recording delivery progress; direct lifecycle transition input is not authority for dispatch, merge, landed, or live facts.
 
 Before replacing a legacy Pavel watcher or stale tgsync route, run `bin/fm-pavel-ops.sh migration-audit` with the legacy pending queue and project clone paths.
 Use `adopt-task` to link existing paused Pavel backlog rows at their already-proved lifecycle fact without recreating or closing them.

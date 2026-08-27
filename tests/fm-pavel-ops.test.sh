@@ -11,6 +11,8 @@ HOME_DIR="$TMP_ROOT/home"
 FAKEBIN="$TMP_ROOT/fakebin"
 TASK_DB="$TMP_ROOT/tasks"
 HTTP_LOG="$TMP_ROOT/http.log"
+UPDATES_FILE="$TMP_ROOT/getUpdates.json"
+PAVEL_STATUS_FILE="$TMP_ROOT/pavel-status.json"
 HTTP_PID=
 
 cleanup() {
@@ -74,12 +76,74 @@ printf '%s\n' "$*" >> "$TASK_DB/.captain-holds"
 SH
 chmod 0755 "$FAKEBIN/captain-hold"
 
+cat > "$FAKEBIN/fm-brief" <<'SH'
+#!/usr/bin/env bash
+set -eu
+id=$1
+mkdir -p "$FM_HOME/data/$id"
+printf 'Delivery contract: mode=no-mistakes\nPavel autonomous brief\n' > "$FM_HOME/data/$id/brief.md"
+SH
+chmod 0755 "$FAKEBIN/fm-brief"
+
+cat > "$FAKEBIN/fm-spawn" <<'SH'
+#!/usr/bin/env bash
+set -eu
+id=$1
+mkdir -p "$FM_HOME/state" "$FM_HOME/worktrees/$id"
+printf 'kind=ship\nharness=pi\nmode=no-mistakes\nyolo=on\nworktree=%s\n' "$FM_HOME/worktrees/$id" > "$FM_HOME/state/$id.meta"
+SH
+chmod 0755 "$FAKEBIN/fm-spawn"
+
+cat > "$FAKEBIN/fm-status" <<'SH'
+#!/usr/bin/env bash
+set -eu
+cat "$PAVEL_STATUS_FILE"
+SH
+chmod 0755 "$FAKEBIN/fm-status"
+
+cat > "$FAKEBIN/fm-pr-check" <<'SH'
+#!/usr/bin/env bash
+set -eu
+id=$1
+pr=$2
+printf 'pr-check %s %s\n' "$id" "$pr" >> "$TASK_DB/.owners"
+printf 'pr=%s\n' "$pr" >> "$FM_HOME/state/$id.meta"
+SH
+chmod 0755 "$FAKEBIN/fm-pr-check"
+
+cat > "$FAKEBIN/fm-pr-merge" <<'SH'
+#!/usr/bin/env bash
+set -eu
+id=$1
+pr=$2
+printf 'pr-merge %s %s\n' "$id" "$pr" >> "$TASK_DB/.owners"
+printf 'forge reports PR merged at verified head\n'
+SH
+chmod 0755 "$FAKEBIN/fm-pr-merge"
+
+cat > "$FAKEBIN/fm-live-check" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf 'live-check %s %s\n' "$1" "${2:-}" >> "$TASK_DB/.owners"
+SH
+chmod 0755 "$FAKEBIN/fm-live-check"
+
 cat > "$TMP_ROOT/server.py" <<'PY'
 import json
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        with open(os.environ["HTTP_LOG"], "a", encoding="utf-8") as handle:
+            handle.write(self.path + "\n")
+        with open(os.environ["UPDATES_FILE"], encoding="utf-8") as handle:
+            payload = handle.read().encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
     def do_POST(self):
         length = int(self.headers.get("content-length", "0"))
         body = self.rfile.read(length).decode("utf-8", "replace")
@@ -104,7 +168,8 @@ print(s.getsockname()[1])
 s.close()
 PY
 )
-HTTP_LOG="$HTTP_LOG" HTTP_PORT="$HTTP_PORT" python3 "$TMP_ROOT/server.py" &
+printf '{"ok": true, "result": []}\n' > "$UPDATES_FILE"
+HTTP_LOG="$HTTP_LOG" UPDATES_FILE="$UPDATES_FILE" HTTP_PORT="$HTTP_PORT" python3 "$TMP_ROOT/server.py" &
 HTTP_PID=$!
 
 cat > "$HOME_DIR/config/pavel-ops.json" <<JSON
@@ -128,7 +193,22 @@ JSON
 
 run_ops() {
   PATH="$FAKEBIN:$PATH" TASK_DB="$TASK_DB" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_PAVEL_CAPTAIN_HOLD="$FAKEBIN/captain-hold" FM_PAVEL_OPS_TESTING=1 "$OPS" "$@"
+    PAVEL_STATUS_FILE="$PAVEL_STATUS_FILE" \
+    FM_PAVEL_CAPTAIN_HOLD="$FAKEBIN/captain-hold" \
+    FM_PAVEL_OPS_BRIEF="$FAKEBIN/fm-brief" FM_PAVEL_OPS_SPAWN="$FAKEBIN/fm-spawn" \
+    FM_PAVEL_OPS_STATUS="$FAKEBIN/fm-status" FM_PAVEL_OPS_PR_CHECK="$FAKEBIN/fm-pr-check" \
+    FM_PAVEL_OPS_PR_MERGE="$FAKEBIN/fm-pr-merge" FM_PAVEL_OPS_LIVE_CHECK="$FAKEBIN/fm-live-check" \
+    FM_PAVEL_OPS_DRIVER="${FM_PAVEL_OPS_DRIVER:-}" \
+    FM_PAVEL_OPS_TESTING=1 "$OPS" "$@"
+}
+
+transition_driver() {
+  local old_driver=${FM_PAVEL_OPS_DRIVER-}
+  FM_PAVEL_OPS_DRIVER=1
+  run_ops transition "$@"
+  local rc=$?
+  FM_PAVEL_OPS_DRIVER=$old_driver
+  return "$rc"
 }
 
 ingest() {
@@ -151,6 +231,29 @@ out=$(ingest 100 10 'Поменять цену') || fail "duplicate Pavel intake
 [ "$(find "$HOME_DIR/state/pavel-ops/events" -name '*.json' | wc -l | tr -d ' ')" -eq 1 ] || fail "duplicate intake created another event"
 [ "$(grep -c . "$HOME_DIR/state/.wake-queue")" -eq 1 ] || fail "duplicate intake published another wake"
 pass "Pavel Telegram intake is durable and deduplicated"
+
+cat > "$UPDATES_FILE" <<'JSON'
+{"ok": true, "result": [
+  {"update_id": 201, "message": {"message_id": 41, "date": 1, "chat": {"id": "group"}, "from": {"id": "pavel"}, "text": "Добавить фото", "reply_to_message": {"message_id": 10}}},
+  {"update_id": 202, "edited_message": {"message_id": 41, "edit_date": 2, "chat": {"id": "group"}, "from": {"id": "pavel"}, "caption": "Новое фото", "photo": [{"file_id": "f1", "file_unique_id": "u1", "width": 640, "height": 480}]}}
+]}
+JSON
+collected=$(run_ops collect --limit 10 --timeout 0) || fail "Telegram collector failed"
+[ "$(printf '%s' "$collected" | json_field "['ingested']")" -eq 2 ] || fail "collector did not ingest Pavel updates"
+[ "$(printf '%s' "$collected" | json_field "['next_update_id']")" -eq 203 ] || fail "collector did not persist the next offset"
+last_get=$(grep -F '/bottest-token/getUpdates' "$HTTP_LOG" | tail -1)
+printf '%s' "$last_get" | grep -F 'limit=10' >/dev/null || fail "collector did not call Telegram getUpdates"
+collected_reply_event=$(run_ops list | python3 -c "import json,sys; rows=json.load(sys.stdin); print([r for r in rows if r['source'].get('update_id')=='201'][0]['source']['reply_to_message_id'])")
+[ "$collected_reply_event" = 10 ] || fail "collector did not retain reply metadata"
+collected_edit_attachments=$(run_ops list | python3 -c "import json,sys; rows=json.load(sys.stdin); print(len([r for r in rows if r['source'].get('update_id')=='202'][0]['source']['attachments']))")
+[ "$collected_edit_attachments" -eq 1 ] || fail "collector did not retain edited caption attachment metadata"
+cat > "$UPDATES_FILE" <<'JSON'
+{"ok": true, "result": []}
+JSON
+run_ops collect --limit 10 --timeout 0 >/dev/null || fail "empty collector replay failed"
+offset_get=$(grep -F '/bottest-token/getUpdates' "$HTTP_LOG" | tail -1)
+printf '%s' "$offset_get" | grep -F 'offset=203' >/dev/null || fail "collector did not resume from durable offset"
+pass "Telegram getUpdates collector durably bridges Pavel updates"
 
 # Ordinary work enters tasks-axi exactly once and becomes dispatchable.
 run_ops classify "$event" --as task --title 'Change price' --intent 'Set the requested catalog price' \
@@ -420,54 +523,54 @@ fi
 if run_ops send "$event" --purpose live-completion --text 'Готово' >/dev/null 2>&1; then
   fail "completion notification was allowed before live proof"
 fi
-run_ops transition "$event" dispatched --evidence 'Pi worker exists in isolated copy' >/dev/null
-run_ops transition "$event" validating --evidence 'no-mistakes run owns current head' >/dev/null
-run_ops transition "$event" delivery_ready --evidence 'checks green on exact PR head' >/dev/null
-run_ops transition "$event" merge_queued --evidence 'guarded merge accepted by forge' --pr-url 'https://github.com/o/r/pull/1' >/dev/null
-run_ops transition "$event" merge_queued --evidence 'guarded merge accepted by forge' --pr-url 'https://github.com/o/r/pull/1' >/dev/null
-if run_ops transition "$event" merge_queued --evidence 'guarded merge accepted by forge' --pr-url 'https://github.com/o/r/pull/99' >/dev/null 2>&1; then
+if run_ops transition "$event" dispatched --evidence 'caller supplied evidence' >/dev/null 2>&1; then
+  fail "direct caller could advance autonomous delivery"
+fi
+run_ops drive "$event" >/dev/null
+printf '{"state":"delivery_ready","evidence":"checks green on exact PR head","pr_url":"https://github.com/o/r/pull/1"}\n' > "$PAVEL_STATUS_FILE"
+run_ops drive "$event" >/dev/null
+run_ops drive "$event" >/dev/null
+run_ops drive "$event" >/dev/null
+transition_driver "$event" merge_queued --evidence 'guarded merge poll armed' --pr-url 'https://github.com/o/r/pull/1' >/dev/null
+if transition_driver "$event" merge_queued --evidence 'guarded merge poll armed' --pr-url 'https://github.com/o/r/pull/99' >/dev/null 2>&1; then
   fail "merge_queued replay accepted a changed PR URL"
 fi
-if run_ops transition "$event" merge_queued --evidence 'different merge evidence' --pr-url 'https://github.com/o/r/pull/1' >/dev/null 2>&1; then
+if transition_driver "$event" merge_queued --evidence 'different merge evidence' --pr-url 'https://github.com/o/r/pull/1' >/dev/null 2>&1; then
   fail "merge_queued replay accepted changed evidence"
 fi
-if run_ops transition "$event" merge_queued --evidence 'guarded merge accepted by forge' --pr-url 'https://github.com/o/r/pull/1' --live-url 'https://example.test/product' >/dev/null 2>&1; then
+if transition_driver "$event" merge_queued --evidence 'guarded merge poll armed' --pr-url 'https://github.com/o/r/pull/1' --live-url 'https://example.test/product' >/dev/null 2>&1; then
   fail "merge_queued replay accepted an unrelated live URL"
 fi
-run_ops transition "$event" landed --evidence 'forge reports PR merged at verified head' >/dev/null
-if run_ops transition "$event" live --evidence 'deploy succeeded' >/dev/null 2>&1; then
+run_ops drive "$event" >/dev/null
+if transition_driver "$event" live --evidence 'deploy succeeded' >/dev/null 2>&1; then
   fail "live transition accepted no customer URL"
 fi
-run_ops transition "$event" live --evidence 'requested price is visible on the customer page' --live-url 'https://example.test/product' >/dev/null
-run_ops transition "$event" live --evidence 'requested price is visible on the customer page' --live-url 'https://example.test/product' >/dev/null
-if run_ops transition "$event" live --evidence 'requested price is visible on the customer page' --live-url 'https://example.test/other' >/dev/null 2>&1; then
-  fail "live replay accepted a changed live URL"
-fi
-if run_ops transition "$event" live --evidence 'different live evidence' --live-url 'https://example.test/product' >/dev/null 2>&1; then
-  fail "live replay accepted changed evidence"
-fi
+printf '{"state":"live","evidence":"requested price is visible on the customer page","live_url":"https://example.test/product","completion_text":"Готово: цена уже на сайте."}\n' > "$PAVEL_STATUS_FILE"
 before_completion_sends=$(grep -c . "$HTTP_LOG")
-run_ops send "$event" --purpose live-completion --text 'Готово: цена уже на сайте.' >/dev/null || fail "live completion notification failed"
+run_ops drive "$event" >/dev/null
 run_ops send "$event" --purpose live-completion --text 'Готово: цена уже на сайте.' >/dev/null || fail "completion notification replay failed"
 if run_ops send "$event" --purpose live-completion --text 'Готово: другой текст.' >/dev/null 2>&1; then
   fail "delivered completion replay accepted changed text"
 fi
-[ "$(grep -c . "$HTTP_LOG")" -eq $((before_completion_sends + 1)) ] || fail "completion notification replay sent twice"
+[ "$(grep -c . "$HTTP_LOG")" -eq $((before_completion_sends + 1)) ] || fail "driver did not send exactly one completion"
 [ "$(run_ops inspect "$event" | json_field "['state']")" = notified ] || fail "confirmed Telegram receipt did not complete notification"
 assert_grep 'chat_id=group' "$HTTP_LOG" "Telegram completion used the wrong chat"
 assert_grep 'message' "$HOME_DIR/state/pavel-ops/outbox/$event-live-completion.json" "completion receipt was not retained"
-pass "validated delivery stays linear and Pavel is notified exactly once after live proof"
+assert_grep 'pr-check' "$TASK_DB/.owners" "driver did not compose the PR registration owner"
+assert_grep 'pr-merge' "$TASK_DB/.owners" "driver did not compose the PR merge owner"
+assert_grep 'live-check https://example.test/product' "$TASK_DB/.owners" "driver did not compose the live verification owner"
+pass "validated delivery is driver-owned and Pavel is notified after live proof"
 
 # A delivered completion receipt after a crash reconciles the event without sending again.
 crashed=$(ingest 108 18 'Поменять SEO заголовок' | json_field "['event']")
 run_ops classify "$crashed" --as task --title 'Change SEO title' --intent 'Set the requested SEO title' \
   --reason 'ordinary SEO change' --authority ordinary >/dev/null
-run_ops transition "$crashed" dispatched --evidence 'Pi worker exists in isolated copy' >/dev/null
-run_ops transition "$crashed" validating --evidence 'no-mistakes run owns current head' >/dev/null
-run_ops transition "$crashed" delivery_ready --evidence 'checks green on exact PR head' >/dev/null
-run_ops transition "$crashed" merge_queued --evidence 'guarded merge accepted by forge' --pr-url 'https://github.com/o/r/pull/2' >/dev/null
-run_ops transition "$crashed" landed --evidence 'forge reports PR merged at verified head' >/dev/null
-run_ops transition "$crashed" live --evidence 'requested SEO title is visible on the customer page' --live-url 'https://example.test/seo' >/dev/null
+transition_driver "$crashed" dispatched --evidence 'Pi worker exists in isolated copy' >/dev/null
+transition_driver "$crashed" validating --evidence 'no-mistakes run owns current head' >/dev/null
+transition_driver "$crashed" delivery_ready --evidence 'checks green on exact PR head' >/dev/null
+transition_driver "$crashed" merge_queued --evidence 'guarded merge accepted by forge' --pr-url 'https://github.com/o/r/pull/2' >/dev/null
+transition_driver "$crashed" landed --evidence 'forge reports PR merged at verified head' >/dev/null
+transition_driver "$crashed" live --evidence 'requested SEO title is visible on the customer page' --live-url 'https://example.test/seo' >/dev/null
 CRASHED_EVENT="$crashed" OUTBOX="$HOME_DIR/state/pavel-ops/outbox/$crashed-live-completion.json" python3 - <<'PY'
 import hashlib
 import json
@@ -540,7 +643,7 @@ pass "interrupted Telegram sends stop for visible reconciliation instead of dupl
 failed=$(ingest 113 23 'Проверить доставку' | json_field "['event']")
 run_ops classify "$failed" --as task --title 'Check delivery' --intent 'Check Pavel requested delivery behavior' \
   --reason 'ordinary site behavior change' --authority ordinary >/dev/null
-run_ops transition "$failed" dispatched --evidence 'Pi worker exists in isolated copy' >/dev/null
+transition_driver "$failed" dispatched --evidence 'Pi worker exists in isolated copy' >/dev/null
 failed_task=$(run_ops inspect "$failed" | json_field "['task_id']")
 printf 'harness=pi\n' > "$HOME_DIR/state/$failed_task.meta"
 FAILED_FILE="$HOME_DIR/state/pavel-ops/events/$failed.json" python3 - <<'PY'
