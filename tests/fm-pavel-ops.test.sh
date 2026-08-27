@@ -152,6 +152,14 @@ if contract.get("expected") != actual_expected:
     raise SystemExit("event-specific live expectation did not match")
 if contract.get("absent") not in ("", "old-price"):
     raise SystemExit("unexpected absent text")
+requires_answer = os.path.join(task_db, f"live-{contract['event_id']}.requires-answer")
+if os.path.exists(requires_answer):
+    with open(requires_answer, encoding="utf-8") as handle:
+        answer = handle.read().strip()
+    accepted = contract.get("accepted_contract") or {}
+    clarifications = accepted.get("clarifications") or []
+    if not any(item.get("answer") == answer and (item.get("reply_source") or {}).get("text") == answer for item in clarifications):
+        raise SystemExit("clarification answer missing from live payload")
 with open(os.path.join(task_db, ".owners"), "a", encoding="utf-8") as handle:
     handle.write(f"live-check {contract['event_id']} {contract['task_id']} {contract['expected']}\n")
 print(json.dumps({
@@ -648,6 +656,64 @@ fi
 [ "$(run_ops inspect "$stale_prose" | json_field "['state']")" = validating ] \
   || fail "stale prose PR rejection mutated the event"
 pass "delivery-ready requires structured validation readiness"
+
+pr_substitution=$(ingest 125 35 'Проверить подмену PR' | json_field "['event']")
+run_ops classify "$pr_substitution" --as task --title 'Reject PR substitution' --intent 'Ship only the registered PR' \
+  --reason 'ordinary delivery' --authority ordinary >/dev/null
+run_ops drive "$pr_substitution" >/dev/null
+pr_substitution_task=$(run_ops inspect "$pr_substitution" | json_field "['task_id']")
+printf 'pr=%s\npr_head=%s\n' 'https://github.com/o/r/pull/10' 'aa10bb' >> "$HOME_DIR/state/$pr_substitution_task.meta"
+printf '{"state":"done","pr_url":"https://github.com/o/r/pull/10","pr_head":"aa10bb","evidence":"checks green on exact PR head"}\n' > "$PAVEL_STATUS_FILE"
+run_ops drive "$pr_substitution" >/dev/null
+run_ops drive "$pr_substitution" >/dev/null
+[ "$(run_ops inspect "$pr_substitution" | json_field "['state']")" = delivery_ready ] \
+  || fail "PR substitution setup did not reach delivery_ready"
+printf '{"state":"done","pr_url":"https://github.com/o/r/pull/999","pr_head":"aa10bb","evidence":"stale status"}\n' > "$PAVEL_STATUS_FILE"
+if run_ops drive "$pr_substitution" >/dev/null 2>&1; then
+  fail "delivery_ready accepted a substituted status PR"
+fi
+if grep -F 'pull/999' "$TASK_DB/.owners" >/dev/null 2>&1; then
+  fail "substituted PR reached the PR registration owner"
+fi
+[ "$(run_ops inspect "$pr_substitution" | json_field "['state']")" = delivery_ready ] \
+  || fail "PR substitution rejection mutated the event"
+pass "delivery-ready preserves the canonical PR identity"
+
+set_live_probe "$ambiguous" 'Белый, фото выше' ''
+printf 'Белый, фото выше\n' > "$TASK_DB/live-$ambiguous.expected"
+printf 'Белый, фото выше\n' > "$TASK_DB/live-$ambiguous.requires-answer"
+AMBIGUOUS_FILE="$HOME_DIR/state/pavel-ops/events/$ambiguous.json" AMBIGUOUS_TASK="$ambiguous_task" HOME_DIR="$HOME_DIR" python3 - <<'PY'
+import json
+import os
+import time
+path = os.environ["AMBIGUOUS_FILE"]
+with open(path, encoding="utf-8") as handle:
+    event = json.load(handle)
+now = int(time.time())
+for state, evidence in [
+    ("dispatched", "Pi worker exists in isolated copy"),
+    ("validating", "no-mistakes run owns current head"),
+    ("delivery_ready", "checks green on exact PR head"),
+    ("merge_queued", "guarded merge accepted by forge"),
+    ("landed", "forge reports PR merged at verified head"),
+]:
+    event["transitions"].append({"at": now, "from": event["state"], "to": state, "evidence": evidence})
+    event["state"] = state
+event["pr_url"] = "https://github.com/o/r/pull/126"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(event, handle, ensure_ascii=False, sort_keys=True, indent=2)
+    handle.write("\n")
+with open(os.path.join(os.environ["HOME_DIR"], "state", os.environ["AMBIGUOUS_TASK"] + ".meta"), "w", encoding="utf-8") as handle:
+    handle.write("kind=ship\nharness=pi\nmode=no-mistakes\nyolo=on\n")
+    handle.write(f"worktree={os.environ['HOME_DIR']}/worktrees/{os.environ['AMBIGUOUS_TASK']}\n")
+    handle.write("pr=https://github.com/o/r/pull/126\npr_head=ab126c\n")
+PY
+run_ops drive "$ambiguous" >/dev/null || fail "resolved clarification did not reach live proof"
+[ "$(run_ops inspect "$ambiguous" | json_field "['state']")" = notified ] \
+  || fail "resolved clarification was not notified after live proof"
+assert_grep 'live-check '"$ambiguous"' '"$ambiguous_task"' Белый, фото выше' "$TASK_DB/.owners" \
+  "live verifier did not receive the clarified Pavel contract"
+pass "live payload includes Pavel clarification answers"
 
 wrong_live=$(ingest 124 34 'Поменять заголовок SEO' | json_field "['event']")
 run_ops classify "$wrong_live" --as task --title 'Change SEO title' --intent 'Show the requested SEO title' \

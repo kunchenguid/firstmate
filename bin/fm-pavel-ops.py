@@ -805,16 +805,42 @@ def completion_text_for(home: Home, event: dict[str, Any]) -> str:
     return f"Готово: результат уже на сайте {live_url}"
 
 
-def base_delivery_contract(event: dict[str, Any]) -> dict[str, Any]:
+def clarification_contract(home: Home, event: dict[str, Any]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for item in event.get("clarifications") or []:
+        if not isinstance(item, dict):
+            raise OpsError("Pavel clarification contract must contain objects")
+        reply_event = str(item.get("reply_event") or "")
+        record: dict[str, Any] = {
+            "reply_event": reply_event,
+            "answer": str(item.get("answer") or ""),
+        }
+        if reply_event:
+            reply = home.load_event(reply_event)
+            record["reply_source"] = reply.get("source") or {}
+            record["reply_source_digest"] = reply.get("source_digest") or sha(canonical(reply.get("source") or {}))
+        records.append(record)
+    return records
+
+
+def base_delivery_contract(home: Home, event: dict[str, Any]) -> dict[str, Any]:
     classification = event.get("classification") or {}
     accepted_intent = str(classification.get("intent") or "")
     source = event.get("source") or {}
+    clarifications = clarification_contract(home, event)
+    accepted_contract = {
+        "intent": accepted_intent,
+        "clarification_question": str(event.get("clarification_question") or ""),
+        "pavel_resolution": event.get("pavel_resolution"),
+        "clarifications": clarifications,
+    }
     return {
         "schema": LIVE_CONTRACT_SCHEMA,
         "event_id": event["id"],
         "task_id": str(event.get("task_id") or ""),
         "accepted_intent": accepted_intent,
-        "intent_digest": sha(accepted_intent),
+        "accepted_contract": accepted_contract,
+        "intent_digest": sha(canonical(accepted_contract)),
         "source": source,
         "source_digest": event.get("source_digest") or sha(canonical(source)),
     }
@@ -822,14 +848,14 @@ def base_delivery_contract(event: dict[str, Any]) -> dict[str, Any]:
 
 def persist_base_delivery_contract(home: Home, event: dict[str, Any]) -> dict[str, Any]:
     existing = event.get("delivery_contract")
-    base = base_delivery_contract(event)
+    base = base_delivery_contract(home, event)
     if existing is None:
         event["delivery_contract"] = base
         home.save_event(event)
         return base
     if not isinstance(existing, dict):
         raise OpsError("Pavel event has an invalid delivery contract")
-    for key in ("schema", "event_id", "task_id", "accepted_intent", "intent_digest", "source_digest"):
+    for key in ("schema", "event_id", "task_id", "accepted_intent", "accepted_contract", "intent_digest", "source_digest"):
         if existing.get(key) != base.get(key):
             raise OpsError("Pavel event delivery contract changed across retries")
     return existing
@@ -1034,13 +1060,11 @@ def drive(home: Home, args: argparse.Namespace) -> dict[str, Any]:
         run_checked(home, [command_from_env(home, "FM_PAVEL_OPS_PR_CHECK", "fm-pr-check.sh"), task_id, pr_contract["pr_url"]])
         return driver_transition(home, event, "delivery_ready", str(status.get("evidence") or "checks green on exact PR head"))
     if event["state"] == "delivery_ready":
-        pr_url = str(event.get("pr_url") or "")
         status = owner_status(home, event)
-        pr_url = str(status.get("pr_url") or pr_url)
-        if not pr_url:
-            pr_url = pr_url_from_meta(home, event)
-        if not PR_URL.fullmatch(pr_url):
-            raise OpsError("Pavel merge queue requires a verified PR URL")
+        pr_contract = validated_pr_contract(home, event, status)
+        pr_url = str(event.get("pr_url") or pr_contract["pr_url"])
+        if pr_url != pr_contract["pr_url"]:
+            raise OpsError("Pavel merge queue PR URL does not match the canonical PR owner record")
         run_checked(home, [command_from_env(home, "FM_PAVEL_OPS_PR_CHECK", "fm-pr-check.sh"), task_id, pr_url])
         return driver_transition(home, event, "merge_queued", "guarded merge poll armed", pr_url=pr_url)
     if event["state"] == "merge_queued":

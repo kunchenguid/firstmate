@@ -154,7 +154,7 @@ When `project_path` is absent, the driver resolves `project` as `projects/<proje
 The optional `budget` object records non-negative bounded spending authority in operator-chosen fields such as `per_action_rub` and `per_day_rub`.
 An absent or zero bound grants no spending authority, and spending outside every applicable positive bound remains a captain-only decision.
 The optional `delivery` object records the concrete post-merge deploy and customer-surface verification contract.
-When present, `deploy_command` is run with the task id after a confirmed merge, and `live_check_command` is run with a path to a bounded JSON payload containing the Pavel event id, task id, accepted intent, source digest, PR URL/head, and candidate live URL.
+When present, `deploy_command` is run with the task id after a confirmed merge, and `live_check_command` is run with a path to a bounded JSON payload containing the Pavel event id, task id, accepted intent, original source digest, durable Pavel clarification/resolution evidence, PR URL/head, and candidate live URL.
 The live-check owner must return a JSON `fm-pavel-ops-live-proof.v1` object with `verified: true` and the same event id, task id, live URL, and intent digest.
 Without a live-check command, the event must carry its own `live_probe.expected` text contract; global expected or absent text alone is not delivery authority.
 The driver never accepts a precomputed `state=live` claim as proof.
