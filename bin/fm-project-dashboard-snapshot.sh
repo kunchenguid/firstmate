@@ -39,16 +39,20 @@
 # A Done row still held for the captain is a resolved decision, not shipped
 # work: it is absent from landed[] and prs[] whichever record supplied the link,
 # and appears instead in the bounded resolved_decisions[] surface under
-# decisions. A row held for the captain that is still in flight keeps its PR
-# link.
+# decisions, which carries the row's own PR link as a labelled reference rather
+# than joining ordinary PR or landed history. A row held for the captain that is
+# still in flight keeps its PR link.
+# resolved_decisions[] is main-home only in v1: the canonical home summary omits
+# a secondmate's completed captain-held rows, and this board does not widen that
+# contract, so a project owned by a secondmate says so on the card instead.
 # A captain decision that is due now appears only under decisions[], even when
 # its own task has parked awaiting the answer. Only a live, answer-ready
 # decision withholds an item from waiting[]: a decision deferred to a future
 # hold-until date, or set aside by a SUPERSEDED/DEFERRED marker, is not awaiting
 # an answer, so its parked work still reports itself under waiting[].
-# Work already shown as waiting is not repeated under queued[]: each item has
-# exactly one lifecycle place, and it returns to queued[] only once its blocker
-# or hold clears.
+# Work already shown as a live decision or as waiting is not repeated under
+# queued[]: each item has exactly one lifecycle place, and it returns to
+# queued[] only once its answer, blocker, or hold clears.
 # landed[] and prs[] are the two surfaces fed by the append-only Done section;
 # both publish at most five rows, newest completion first, and carry the true
 # total in counts. prs[] lists current work ahead of completed work, and a task
@@ -479,7 +483,7 @@ jq -n \
         | dedupe_first([.owner,.id])
         | map(. as $row
               | select(($decision_keys | index($row.owner + "\u001f" + $row.id)) == null))) as $waiting
-      | ([ $waiting[] | (.owner + "\u001f" + .id) ]) as $waiting_keys
+      | (([ $waiting[] | (.owner + "\u001f" + .id) ]) + $decision_keys) as $placed_keys
       | ([ $backlog[]
            | select(.state == "queued" and .captain_actionable != true)
            | {id,title,reason:(.hold_reason // .blocked_reason // ""),since,owner:"main"} ]
@@ -490,7 +494,7 @@ jq -n \
                 owner:$owner.id} ]
         | dedupe_first([.owner,.id])
         | map(. as $row
-              | select(($waiting_keys | index($row.owner + "\u001f" + $row.id)) == null))) as $queued
+              | select(($placed_keys | index($row.owner + "\u001f" + $row.id)) == null))) as $queued
       | ([ $backlog[]
            | select(.state == "done" and .hold_kind != "captain")
            | {id,title,completed:(.completion.date // .merged // .reported // .done),
@@ -504,7 +508,8 @@ jq -n \
       | ([ $backlog[]
            | select(.state == "done" and .hold_kind == "captain")
            | {id,title,summary:((.hold_reason | present) // .title),
-              completed:(.completion.date // .merged // .reported // .done),owner:"main"} ]
+              completed:(.completion.date // .merged // .reported // .done),
+              url:.pr_url,linkable:(.pr_url | https_url),owner:"main"} ]
         | dedupe_first([.owner,.id])
         | sort_by([(.completed // ""),.id]) | reverse) as $resolved_all
       | ([ $tasks[] as $task

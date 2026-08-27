@@ -1373,6 +1373,8 @@ test_captain_held_done_row_is_neither_landed_nor_a_pr_link() {
       and (.resolved_decisions | map(.id)) == ["cap"]
       and .counts.resolved_decisions == 1
       and .resolved_decisions[0].summary == "handed to the captain"
+      and .resolved_decisions[0].url == "https://github.com/example/alpha/pull/1"
+      and .resolved_decisions[0].linkable == true
   ' >/dev/null || fail "a captain-held done row reached the wrong surface, or vanished: $out"
   pass "a resolved captain decision surfaces under decisions, not landed work or PR history"
 }
@@ -1536,6 +1538,55 @@ test_deferred_hold_leaves_its_parked_task_under_waiting() {
   pass "only a live answer-ready decision withholds its work from waiting"
 }
 
+test_a_live_decision_is_never_queued_work() {
+  local home epoch out
+  home=$(make_home live-decision-queued)
+  write_fleet_fixture "$home"
+  : > "$home/state/x.meta"
+  : > "$home/state/x.status"
+  jq --arg home "$home" '
+    .backlog.records = [
+      {structured:true,id:"x",repo:"alpha",title:"Pick the region",state:"queued",
+       since:"2020-01-01",captain_actionable:false,unresolved_blocker_ids:[]},
+      {structured:true,id:"y",repo:"alpha",title:"Real queued work",state:"queued",
+       since:"2020-01-01",captain_actionable:false,unresolved_blocker_ids:[]}]
+    | .tasks = [
+        {id:"x",kind:"ship",project:"alpha",
+         paths:{meta:{path:($home + "/state/x.meta"),present:true},
+                status_log:{path:($home + "/state/x.status"),present:true},
+                worktree:{path:null,present:false},home:{path:null,present:false},report:{path:null,present:false}},
+         secondmate_projects:[],
+         current_state:{state:"parked",source:"fixture",detail:"Parked for the region call"},
+         hints:{open_decisions:[{key:"k1",verb:"needs-decision",summary:"Which region?"}]},
+         pr:{url:null},backlog:{id:"x",repo:"alpha",title:"Pick the region"}}]
+    | .secondmate_current.records = []
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "live-decision-queued snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "alpha")
+    | (.decisions | map(.id)) == ["x"]
+      and .waiting == []
+      and (.queued | map(.id)) == ["y"]
+      and .counts.queued == 1
+  ' >/dev/null || fail "a live decision was also listed under queued next: $out"
+
+  jq '.backlog.records |= map(if .id == "x" then
+        .hold_kind = "captain" | .hold_reason = "Revisit after the vendor ships"
+        | .hold_until = "2099-01-01" else . end)' \
+    "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  out=$(run_snapshot "$home" "$epoch") || fail "date-deferred-with-fold snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "alpha")
+    | (.decisions | map(.id)) == ["x"]
+      and (.queued | map(.id)) == ["y"]
+      and (.queued | any(.id == "x") | not)
+  ' >/dev/null || fail "a date-deferred row with a live fold reappeared under queued next: $out"
+  pass "a live decision is never also listed as queued next work"
+}
+
 extract_payload() {  # <board>
   sed -n '/<script id="project-dashboard-data" type="application\/json">/,/<\/script>/p' "$1" | sed '1d;$d'
 }
@@ -1618,7 +1669,8 @@ const result = {
     panels: c.querySelectorAll(".pd-panel").map(panel => (panel.children[0] || { textContent: "" }).textContent),
     items: c.querySelectorAll(".pd-panel").map(panel => ({
       title: (panel.children[0] || { textContent: "" }).textContent,
-      rows: panel.querySelectorAll(".pd-item").map(r => r.text().trim())
+      rows: panel.querySelectorAll(".pd-item").map(r => r.text().trim()),
+      scopeNotes: panel.querySelectorAll(".pd-scope-note").map(n => n.text().trim())
     }))
   }))
 };
@@ -1654,6 +1706,10 @@ test_board_renders_every_card_and_its_disclosures() {
     | .secondmate_current.registry = {available:true,complete:false,records_truncated:false,
         input_truncated:false,reason:null}
     | .secondmate_current.records = []
+    | .backlog.records += [{structured:true,id:"delta-call",repo:"delta",
+        title:"Delta rollout question",state:"done",hold_kind:"captain",
+        hold_reason:"answered: ship behind a flag",
+        pr_url:"https://github.com/example/delta/pull/12",completion:{date:"2026-08-22"}}]
   ' "$home/fleet.json" > "$home/fleet.tmp"
   mv "$home/fleet.tmp" "$home/fleet.json"
   board=$(build_board_for_render "$home") || fail "board build for rendering failed"
@@ -1677,6 +1733,12 @@ test_board_renders_every_card_and_its_disclosures() {
     | select(.title == "Pull requests") | .rows
     | any(contains("Alpha shipped") and contains("main"))
   ' >/dev/null || fail "a note-less item lost its owner attribution: $out"
+  printf '%s' "$out" | jq -e '
+    .meta[] | select(.project == "delta") | .items[]
+    | select(.title | startswith("Decisions recently resolved")) | .scopeNotes
+    | any(contains("Main-home decisions only")
+          and contains("v1 does not cover decisions resolved inside a secondmate home"))
+  ' >/dev/null || fail "the recently-resolved panel did not disclose its main-home-only scope: $out"
   pass "the board renders every card, its disclosures, and survives a malformed fragment"
 }
 
@@ -1805,6 +1867,7 @@ test_captain_held_done_row_is_neither_landed_nor_a_pr_link
 test_captain_held_in_flight_row_keeps_its_pr_link
 test_date_deferred_decision_waits_until_it_is_due
 test_deferred_hold_leaves_its_parked_task_under_waiting
+test_a_live_decision_is_never_queued_work
 test_waiting_work_is_not_repeated_under_queued_next
 test_attention_next_step_is_an_action_not_a_bare_title
 test_unattributable_secondmate_state_is_disclosed

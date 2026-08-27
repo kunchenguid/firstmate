@@ -87,6 +87,7 @@ h1 { margin: 0; color: var(--ink-900); font: 2rem/1.1 var(--font-display); }
 .pd-disclosures { margin-bottom: 18px; padding: 14px 16px; background: var(--gold-100); border: 2px solid var(--ink-900); border-radius: 11px; box-shadow: var(--shadow-hard-sm); }
 .pd-disclosures > strong { display: block; margin-bottom: 8px; color: var(--ink-900); font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; }
 .pd-unlinked { color: var(--ink-300); font-family: var(--font-mono); font-size: .68rem; }
+.pd-scope-note { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--paper-300); color: var(--ink-300); font-size: .72rem; font-style: italic; }
 .pd-link { color: var(--ocean-600); font-weight: 800; text-decoration: underline; text-underline-offset: 2px; }
 .pd-none { padding: 44px; color: var(--ink-500); text-align: center; background: var(--paper-000); border: 2px dashed var(--cream-line); border-radius: 13px; }
 @media (max-width: 900px) { .pd-grid { grid-template-columns: repeat(2, minmax(0,1fr)); } .pd-detail-grid { grid-template-columns: repeat(2, minmax(0,1fr)); } .pd-stats { grid-template-columns: repeat(3, minmax(0,1fr)); } }
@@ -162,7 +163,16 @@ __FM_PROJECT_DASHBOARD_DATA__
     const list = node("ul", "pd-list");
     items.forEach(item => {
       const row = node("li", "pd-item");
-      if (options.links && item.linkable) {
+      if (options.links && options.linkLabel) {
+        row.append(node("strong", "", itemTitle(item)));
+        if (item.linkable) {
+          const link = node("a", "pd-link", options.linkLabel);
+          link.href = item.url; link.target = "_blank"; link.rel = "noopener noreferrer";
+          row.append(link);
+        } else if (item.url) {
+          row.append(node("small", "pd-unlinked", `${options.linkLabel}: ${item.url} · not an https link`));
+        }
+      } else if (options.links && item.linkable) {
         const link = node("a", "pd-link", itemTitle(item));
         link.href = item.url; link.target = "_blank"; link.rel = "noopener noreferrer"; row.append(link);
       } else if (options.links) {
@@ -237,7 +247,12 @@ __FM_PROJECT_DASHBOARD_DATA__
         ? `Decisions recently resolved (${project.resolved_decisions.length} of ${project.counts.resolved_decisions})`
         : "Decisions recently resolved";
       appendList(resolved, resolvedTitle,
-        project.resolved_decisions.map(item => ({...item, reason: item.summary || item.completed || "Resolved"})), {});
+        project.resolved_decisions.map(item => ({...item, reason: item.summary || item.completed || "Resolved"})),
+        {links:true, linkLabel:"Decision PR"});
+      if (project.secondmates.length) {
+        resolved.append(node("div", "pd-scope-note",
+          "Main-home decisions only - v1 does not cover decisions resolved inside a secondmate home."));
+      }
       detailGrid.append(resolved);
     }
     if (project.deferred_decisions.length) {

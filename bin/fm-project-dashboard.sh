@@ -77,6 +77,9 @@ validate_payload() {  # <data.json>
       and (.queued | type == "array")
       and (.landed | type == "array")
       and (.resolved_decisions | type == "array")
+      and ([.resolved_decisions[]
+            | (.linkable | type == "boolean")
+              and (.linkable == false or .url == null or (.url | optional_https_url))] | all)
       and (.prs | type == "array")
       and (.unattributed | type == "array")
       and (.deferred_decisions | type == "array")
