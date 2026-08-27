@@ -87,7 +87,9 @@ validate_payload() {  # <data.json>
             (.last_activity.age_seconds | type == "number")))
       and ([.active_work[],.decisions[],.failures[],.unreadable[],.finished[],
             .waiting[],.queued[],.landed[],.unattributed[],.deferred_decisions[] | owner_item] | all)
-      and ([.finished[] | .url == null or (.url | optional_https_url)] | all)
+      and ([.finished[]
+            | (.linkable | type == "boolean")
+              and (.linkable == false or .url == null or (.url | optional_https_url))] | all)
       and ([.prs[]
             | type == "object" and (.url | nonempty_string) and (.linkable | type == "boolean")
               and (.linkable == false or (.url | optional_https_url))] | all)

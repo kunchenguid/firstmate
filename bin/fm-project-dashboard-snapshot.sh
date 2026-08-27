@@ -16,7 +16,10 @@
 # non-exclusive; secondmates[].in_clone_list records that without judging it.
 # Secondmate state that carries no repo and whose owner covers several projects
 # is not guessed at: it is disclosed per owned project in unattributed[] and
-# raises that project to needs_attention when it could have changed the status.
+# raises that project only to the status its own kind would have produced, so an
+# unattributable queued or landed row never repaints a card.
+# A secondmate whose state can reach no registered project card at all is
+# disclosed board-wide in disclosures[].
 # A main-home task whose crew state reads back as unknown is disclosed in
 # unreadable[] and raises the project to needs_attention rather than letting the
 # card read idle.
@@ -26,8 +29,9 @@
 # merged, awaiting review, or awaiting teardown - from it.
 # A captain hold and a status fold collapse to one decision when the pairing is
 # unambiguous: a live hold with exactly one open needs-decision fold on the
-# task, or a live hold whose reason restates one fold's question. A deferred
-# hold never suppresses a live fold, and every unpaired fold survives.
+# task, or a live hold whose reason restates exactly one fold's question. Each
+# hold absorbs at most one fold, a deferred hold never suppresses a live fold,
+# and every unpaired fold survives.
 # An empty-string detail is treated as an absent value everywhere, so no card
 # renders a blank next step.
 # Only needs-decision folds and non-deferred captain holds count as decisions;
@@ -145,16 +149,11 @@ FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_NOW_EPOCH="$NOW_EPOCH" \
 jq -e '.schema == "fm-fleet-snapshot.v1"' "$tmpdir/fleet.json" >/dev/null \
   || fail "canonical fleet snapshot returned an unsupported schema"
 
-file_mtime_epoch() {
-  if [ ! -e "$1" ]; then
-    return 0
-  fi
-  if [ "$(uname -s)" = Darwin ]; then
-    stat -f '%m' "$1" 2>/dev/null || true
-  else
-    stat -c '%Y' "$1" 2>/dev/null || true
-  fi
-}
+if [ "$(uname 2>/dev/null || true)" = Darwin ]; then
+  file_mtime_epoch() { [ -e "$1" ] || return 0; stat -f '%m' "$1" 2>/dev/null || true; }
+else
+  file_mtime_epoch() { [ -e "$1" ] || return 0; stat -c '%Y' "$1" 2>/dev/null || true; }
+fi
 
 while IFS=$'\t' read -r id meta_path status_path; do
   [ -n "$id" ] || continue
@@ -166,9 +165,11 @@ while IFS=$'\t' read -r id meta_path status_path; do
     ''|*[!0-9]*) : ;;
     *) [ "$status_epoch" -gt "$latest" ] && latest=$status_epoch ;;
   esac
-  jq -n --arg id "$id" --argjson epoch "$latest" '{key:$id,value:$epoch}'
+  printf '%s\t%s\n' "$id" "$latest"
 done < <(jq -r '.tasks[] | [.id, (.paths.meta.path // ""), (.paths.status_log.path // "")] | @tsv' "$tmpdir/fleet.json") \
-  | jq -s 'from_entries' > "$tmpdir/activity.json"
+  | jq -R -s 'split("\n")
+      | map(select(length > 0) | split("\t") | {key:.[0], value:(.[1] | tonumber)})
+      | from_entries' > "$tmpdir/activity.json"
 
 jq -n \
   --arg generated "$NOW" \
@@ -213,6 +214,21 @@ jq -n \
   def https_url:
     (type == "string") and
     test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$");
+  def status_rank($status):
+    if $status == "needs_attention" then 3
+    elif $status == "active" then 2
+    elif $status == "waiting" then 1
+    else 0 end;
+  def rank_status($rank):
+    if $rank >= 3 then "needs_attention"
+    elif $rank == 2 then "active"
+    elif $rank == 1 then "waiting"
+    else "idle_queued" end;
+  def kind_rank:
+    if .kind == "decision" then 3
+    elif .kind == "active_work" then 2
+    elif .kind == "waiting" then 1
+    else 0 end;
   def status_label($status):
     if $status == "needs_attention" then "Needs attention"
     elif $status == "active" then "Active"
@@ -265,6 +281,18 @@ jq -n \
                    elif .surface == "decisions_open" then "raise FM_SNAPSHOT_SECONDMATE_DECISIONS"
                    elif .surface == "queued" then "raise FM_SNAPSHOT_SECONDMATE_QUEUED"
                    else "raise FM_SNAPSHOT_SECONDMATE_CHILDREN" end)}),
+       ($mate_owners[] as $owner
+        | select(($owner.projects | length) == 0)
+        | ([ $projects_registry[].name ]) as $registered_names
+        | ([ owner_items($owner)[]
+             | . as $item
+             | select((($item.repo // "") == "")
+                      or (($registered_names | index($item.repo)) == null)) ]) as $stranded
+        | select((($stranded | length) > 0) or ($owner.record.current.state == "unknown"))
+        | {surface:("secondmate " + $owner.id
+                    + " has no registered project, so its state reaches no project card: "
+                    + (($stranded | length) | tostring) + " item(s)"),
+           reveal:"record its projects in data/secondmates.md"}),
        (if $mate_registry.input_truncated == true then
           {surface:"secondmate registry input truncated by the bounded read",
            reveal:"raise FM_SNAPSHOT_REGISTRY_LINES or FM_SNAPSHOT_REGISTRY_BYTES"} else empty end) ]) as $disclosures
@@ -295,11 +323,16 @@ jq -n \
            | ([ $backlog[]
                 | select(.id == $task.id and .captain_actionable == true and .deferred_marker != true)
                 | (.hold_reason // .title) ]) as $live_hold_reasons
+           | ([ if (($live_hold_reasons | length) > 0) and (($folds | length) == 1)
+                then $folds[0].key
+                else empty end,
+                ($live_hold_reasons[] as $reason
+                 | ([ $folds[] | select(same_question($reason; .summary)) ]) as $matched
+                 | if ($matched | length) == 1 then $matched[0].key else empty end) ]
+              | unique) as $paired_keys
            | $folds[]
            | . as $fold
-           | select(($live_hold_ids | index($task.id)) == null
-                    or (($folds | length) != 1
-                        and ([ $live_hold_reasons[] | select(same_question(.; $fold.summary)) ] | length) == 0))
+           | select(($paired_keys | index($fold.key)) == null)
            | {id:$task.id,key,title:((.summary | present) // "Captain decision"),
               summary:((.summary | present) // ""),
               deferred:false,owner:"main"} ]
@@ -309,20 +342,22 @@ jq -n \
                 deferred:(.deferred_marker == true),owner:"main"} ]
          + [ $owners[] as $owner
              | ([ $owner.record.decisions_open[]?
-                  | select(.source == "backlog" and .deferred_marker != true) | .id ]) as $owner_live_hold_ids
-             | ([ $owner.record.decisions_open[]?
                   | select(.source == "status" and .verb != "blocked") ]) as $owner_folds
+             | ([ $owner.record.decisions_open[]?
+                  | select(.source == "backlog" and .deferred_marker != true) as $hold
+                  | ([ $owner_folds[] | select(.id == $hold.id) ]) as $sibs
+                  | (if ($sibs | length) == 1 then $sibs[0]
+                     else ([ $sibs[] | select(same_question(($hold.reason // $hold.summary); .summary)) ]) as $matched
+                          | if ($matched | length) == 1 then $matched[0] else empty end
+                     end)
+                  | (.id + "\u001f" + ((.key // "") | tostring)) ]
+                | unique) as $owner_paired
              | $owner.record.decisions_open[]?
              | . as $entry
              | select(.verb != "blocked")
-             | ([ $owner.record.decisions_open[]?
-                  | select(.source == "backlog" and .deferred_marker != true and .id == $entry.id)
-                  | (.reason // .summary) ]) as $owner_live_hold_reasons
              | select(.source != "status"
-                      or (($owner_live_hold_ids | index($entry.id)) == null)
-                      or ((([ $owner_folds[] | select(.id == $entry.id) ] | length) != 1)
-                          and ([ $owner_live_hold_reasons[]
-                                 | select(same_question(.; $entry.summary)) ] | length) == 0))
+                      or (($owner_paired
+                           | index($entry.id + "\u001f" + (($entry.key // "") | tostring))) == null))
              | select(matches_project($owner; $name))
              | {id,key:(.key // .id),title:((.summary | present) // "Captain decision"),
                 summary:((.reason | present) // (.summary | present) // ""),
@@ -338,6 +373,7 @@ jq -n \
            | select($task.current_state.state == "done")
            | select(($landed_ids | index($task.id)) == null)
            | {id:$task.id,title:($task.backlog.title // $task.id),url:$task.pr.url,
+              linkable:($task.pr.url | https_url),
               detail:(($task.current_state.detail | present) // ""),owner:"main"} ]) as $finished
       | ([ $tasks[]
            | select(.current_state.state == "unknown")
@@ -402,13 +438,15 @@ jq -n \
              ($owner.record.landed[]? | select(unattributable($owner))
               | {kind:"landed",id,title:(.title // .id),owner:$owner.id}) ]
          | dedupe_first([.owner,.kind,.id])) as $unattributed
-      | ([ $unattributed[] | select(.kind != "landed") ]) as $unattributed_live
       | (if ($decisions | length) > 0 or ($failures | length) > 0 or
-             ($unreadable | length) > 0 or ($unavailable_owners | length) > 0 or
-             ($unattributed_live | length) > 0 then "needs_attention"
+             ($unreadable | length) > 0 or ($unavailable_owners | length) > 0 then "needs_attention"
          elif ($active | length) > 0 then "active"
          elif ($waiting | length) > 0 then "waiting"
-         else "idle_queued" end) as $status
+         else "idle_queued" end) as $base_status
+      | (status_rank($base_status)) as $base_rank
+      | ([ $unattributed[] | select(kind_rank > $base_rank) ]) as $unattributed_escalating
+      | (([ $base_rank ] + [ $unattributed_escalating[] | kind_rank ]) | max) as $rank
+      | rank_status($rank) as $status
       | ([ $registered.added | date_epoch ]
          + [ $backlog[]
              | (.completion.date // .merged // .reported // .done // .since)
@@ -437,13 +475,18 @@ jq -n \
                     elif ($unreadable | length) > 0 then
                       ("Task state could not be read: " + $unreadable[0].id
                        + (if $unreadable[0].detail == null then "" else " - " + $unreadable[0].detail end))
-                    elif ($unattributed_live | length) > 0 then
-                      ("Secondmate work is not attributable to one project: " + $unattributed_live[0].title)
+                    elif ($unattributed_escalating | length) > 0 then
+                      ("Secondmate work is not attributable to one project: " + $unattributed_escalating[0].title)
                     else $unavailable_owners[0].reason end); "Review project state")
          elif $status == "active" then
-           concise((if ($active[0].detail // "") == "" then $active[0].title else $active[0].detail end); "Work is under way")
+           concise((if ($active | length) > 0 then
+                      (if ($active[0].detail | present) == null then $active[0].title else $active[0].detail end)
+                    else ("Secondmate work is not attributable to one project: "
+                          + $unattributed_escalating[0].title) end); "Work is under way")
          elif $status == "waiting" then
-           concise((($waiting[0].reason | present) // $waiting[0].title); "Waiting on an external dependency")
+           concise((if ($waiting | length) > 0 then (($waiting[0].reason | present) // $waiting[0].title)
+                    else ("Secondmate work is not attributable to one project: "
+                          + $unattributed_escalating[0].title) end); "Waiting on an external dependency")
          elif ($queued | length) > 0 then concise($queued[0].title; "Queued work")
          elif ($finished | length) > 0 then
            concise(("Finished - " + $finished[0].title +

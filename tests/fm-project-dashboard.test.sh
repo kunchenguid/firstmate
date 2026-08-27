@@ -254,7 +254,7 @@ test_unattributable_secondmate_state_is_disclosed() {
   printf '%s' "$out" | jq -e '
     .summary.unattributed == 2
       and ([.projects[] | select(.name == "delta" or .name == "gamma")]
-           | all(.status == "needs_attention"
+           | all(.status == "active"
                  and .active_work == []
                  and .counts.unattributed == 1
                  and (.unattributed[0] | .id == "loose-child" and .kind == "active_work" and .owner == "delta-mate")
@@ -704,6 +704,164 @@ test_per_home_bounded_drops_are_disclosed() {
   pass "per-home bounded read drops reach the board disclosures"
 }
 
+test_one_hold_reason_absorbs_at_most_one_fold() {
+  local home epoch out
+  home=$(make_home generic-hold)
+  write_fleet_fixture "$home"
+  jq '
+    .backlog.records |= map(
+      if .id == "alpha-work" then .captain_actionable = true | .hold_kind = "captain"
+        | .hold_reason = "Captain decision"
+      else . end)
+    | .tasks |= map(
+        if .id == "alpha-work" then
+          .hints.open_decisions = [
+            {key:"route",verb:"needs-decision",summary:"Captain decision on the alpha route"},
+            {key:"budget",verb:"needs-decision",summary:"Captain decision on the alpha budget"}]
+        else . end)
+    | .secondmate_current.records |= map(
+        if .id == "delta-mate" then
+          .decisions_open = [
+            {id:"c1",key:"c1",verb:"captain-hold",summary:"Captain decision",reason:"Captain decision",
+             repo:"delta",source:"backlog"},
+            {id:"c1",key:"route",verb:"needs-decision",summary:"Captain decision on the delta route",
+             reason:null,repo:"delta",source:"status"},
+            {id:"c1",key:"budget",verb:"needs-decision",summary:"Captain decision on the delta budget",
+             reason:null,repo:"delta",source:"status"}]
+        else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "generic-hold snapshot failed"
+  printf '%s' "$out" | jq -e '
+    (.projects[] | select(.name == "alpha")
+      | ([.decisions[] | select(.id == "alpha-work") | .key] | sort) == ["alpha-work","budget","route"])
+      and (.projects[] | select(.name == "delta")
+        | ([.decisions[] | select(.id == "c1") | .key] | sort) == ["budget","c1","route"])
+  ' >/dev/null || fail "one generic hold reason erased several open decisions: $out"
+  pass "a captain hold absorbs at most one fold and never an ambiguous match"
+}
+
+test_finished_non_https_pr_link_does_not_fail_the_board() {
+  local home epoch payload board out
+  home=$(make_home finished-http-pr)
+  write_fleet_fixture "$home"
+  : > "$home/state/alpha-ship.meta"
+  : > "$home/state/alpha-ship.status"
+  jq --arg home "$home" '
+    .backlog.records += [{structured:true,id:"alpha-ship",repo:"alpha",title:"Ship alpha",
+        state:"in_flight",since:"2020-01-01",captain_actionable:false,unresolved_blocker_ids:[]}]
+    | .tasks += [
+        {id:"alpha-ship",kind:"ship",project:"alpha",
+         paths:{meta:{path:($home + "/state/alpha-ship.meta"),present:true},
+                status_log:{path:($home + "/state/alpha-ship.status"),present:true},
+                worktree:{path:null,present:false},home:{path:null,present:false},report:{path:null,present:false}},
+         secondmate_projects:[],current_state:{state:"done",source:"fixture",detail:"checks green: PR ready for review"},
+         hints:{open_decisions:[]},pr:{url:"http://github.example/x/pull/1"},
+         backlog:{id:"alpha-ship",repo:"alpha",title:"Ship alpha"}}]
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  payload="$home/dashboard.json"
+  run_snapshot "$home" "$epoch" > "$payload" || fail "finished http PR snapshot failed"
+  jq -e '
+    .projects[] | select(.name == "alpha") | .finished[]
+    | select(.id == "alpha-ship")
+    | .url == "http://github.example/x/pull/1" and .linkable == false
+  ' "$payload" >/dev/null || fail "a non-https finished PR link was dropped instead of disclosed: $(cat "$payload")"
+  cat > "$home/fakebin/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$home/fakebin/lavish-axi"
+  board="$home/.lavish/project-dashboard.html"
+  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" "$BOARD" build "$payload") \
+    || fail "one non-https finished PR link took the whole board down: $out"
+  assert_contains "$out" "board: $board" "board was not published despite a valid payload"
+  pass "a non-https PR link on finished work never fails the board"
+}
+
+test_unattributable_item_escalates_only_to_its_own_kind() {
+  local home epoch out
+  home=$(make_home unattributed-rank)
+  write_fleet_fixture "$home"
+  jq '
+    .tasks |= map(if .id == "delta-mate" then .secondmate_projects = ["delta","gamma"] else . end)
+    | .secondmate_current.records |= map(
+        if .id == "delta-mate" then
+          .projects = ["delta","gamma"]
+          | .current = {state:"no_active_work",reason:null}
+          | .active_children = []
+          | .landed = []
+          | .queued = [{id:"q1",title:"Tidy docs later",repo:null}]
+        else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "unattributed-queued snapshot failed"
+  printf '%s' "$out" | jq -e '
+    [.projects[] | select(.name == "delta" or .name == "gamma")]
+    | all(.status == "idle_queued"
+          and .counts.unattributed == 1
+          and (.unattributed[0].kind == "queued")
+          and (.next_step | startswith("Secondmate work is not attributable") | not))
+  ' >/dev/null || fail "an unattributable queued row repainted the card: $out"
+
+  jq '
+    .secondmate_current.records |= map(
+      if .id == "delta-mate" then
+        .queued = []
+        | .decisions_open = [{id:"d1",key:"d1",verb:"needs-decision",summary:"Approve the rollout",
+            reason:null,repo:null,source:"status"}]
+      else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  out=$(run_snapshot "$home" "$epoch") || fail "unattributed-decision snapshot failed"
+  printf '%s' "$out" | jq -e '
+    [.projects[] | select(.name == "delta" or .name == "gamma")]
+    | all(.status == "needs_attention"
+          and (.unattributed[0].kind == "decision")
+          and (.next_step | startswith("Secondmate work is not attributable to one project")))
+  ' >/dev/null || fail "an unattributable decision failed to raise attention: $out"
+  pass "an unattributable item escalates only to the status its own kind would produce"
+}
+
+test_secondmate_reaching_no_project_is_disclosed() {
+  local home epoch out
+  home=$(make_home orphan-mate)
+  write_fleet_fixture "$home"
+  jq '
+    .tasks |= map(if .id == "delta-mate" then .secondmate_projects = [] else . end)
+    | .secondmate_current.records |= map(
+        if .id == "delta-mate" then
+          .projects = []
+          | .current = {state:"captain_decision",reason:null}
+          | .active_children = []
+          | .landed = []
+          | .decisions_open = [{id:"d1",key:"d1",verb:"needs-decision",
+              summary:"Approve the orphan rollout",reason:null,repo:null,source:"status"}]
+        else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "orphan-mate snapshot failed"
+  printf '%s' "$out" | jq -e '
+    (.disclosures | any(
+        (.surface | startswith("secondmate delta-mate has no registered project"))
+        and .reveal == "record its projects in data/secondmates.md"))
+      and ([.projects[] | select(.secondmates | length > 0)] | length) == 0
+  ' >/dev/null || fail "a secondmate reaching no project card vanished silently: $out"
+
+  jq '.secondmate_current.records |= map(if .id == "delta-mate" then .projects = ["delta"] else . end)
+      | .tasks |= map(if .id == "delta-mate" then .secondmate_projects = ["delta"] else . end)' \
+    "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  out=$(run_snapshot "$home" "$epoch") || fail "attributable-mate snapshot failed"
+  printf '%s' "$out" | jq -e '.disclosures == []' >/dev/null \
+    || fail "an attributable secondmate still reported as unreachable: $out"
+  pass "a secondmate whose state reaches no project card is disclosed board-wide"
+}
+
 extract_payload() {  # <board>
   sed -n '/<script id="project-dashboard-data" type="application\/json">/,/<\/script>/p' "$1" | sed '1d;$d'
 }
@@ -934,6 +1092,10 @@ test_captain_hold_next_step_keeps_the_question
 test_repo_labelled_secondmate_work_attributes_to_that_project
 test_bounded_snapshot_drops_are_disclosed_board_wide
 test_per_home_bounded_drops_are_disclosed
+test_one_hold_reason_absorbs_at_most_one_fold
+test_finished_non_https_pr_link_does_not_fail_the_board
+test_unattributable_item_escalates_only_to_its_own_kind
+test_secondmate_reaching_no_project_is_disclosed
 test_attention_next_step_is_an_action_not_a_bare_title
 test_unattributable_secondmate_state_is_disclosed
 test_registered_secondmate_without_a_task_still_owns_its_projects
