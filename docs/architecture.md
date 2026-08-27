@@ -61,8 +61,8 @@ Decision-only events such as `resolved` never become current state or leak their
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.
 The semantic branch reports working only on an exact busy verdict and names the source that produced it; an unknown verdict never becomes working, never permits the status-log fallback, and never becomes a silent idle.
 For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, current crew state, endpoint probes, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, and secondmate return-channel guidance.
-`bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
-The script header owns the exact JSON schema.
+`bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, and `bin/fm-project-dashboard-snapshot.sh` aggregates it into one row per project registered in `data/projects.md` for the read-only project dashboard, so every view consumes one structured contract instead of reparsing raw fleet files.
+Each of those script headers owns its own exact JSON schema.
 
 On a Pi primary, supervision is default-on: the watcher extension hands each wholly in-scope ordinary actionable wake, plus each bare fleet-wide `heartbeat` emitted after the cheap bash-level scan flags a possibly captain-relevant finding, to a persistent in-process supervision conversation instead of the captain's, which handles it, stores the outcome durably, and merges an append-only note back.
 A captain-facing outcome instead opens exactly one follow-up turn on the captain's conversation without printing or rendering a separate note - that turn is the captain-visible result.

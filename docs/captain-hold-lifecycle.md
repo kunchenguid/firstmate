@@ -55,6 +55,9 @@ A date-deferred captain hold renders as a gate with its `until <date>:` reason; 
 Recently Landed excludes a record that closed while still held for the captain (surviving `hold-kind: captain` on a Done row), so answered questions do not masquerade as shipped work; a work item released before completion keeps no hold annotations and lands normally.
 The projection remains read-only and does not inspect historical prose beyond the canonical snapshot's marker.
 
+`bin/fm-project-dashboard-snapshot.sh` reads the same canonical fields for the read-only project dashboard, where an actionable captain hold is a decision rather than queued work, a Done row still held for the captain is a resolved decision rather than landed or pull-request history, and a deferred or superseded hold is listed without raising the project to needs-attention.
+Its header owns that projection, and `tests/fm-project-dashboard.test.sh` pins it.
+
 ## Record divergence
 
 A captain call can have two records, and closing one does not close the other.
