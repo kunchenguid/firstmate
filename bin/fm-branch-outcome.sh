@@ -5,13 +5,25 @@
 # CONTRACT (this header is the one owner of the store's format).
 #   - Store: $STATE/branch-outcomes.jsonl, strictly APPEND-ONLY. One JSON
 #     object per line: {"seq":N,"epoch":N,"task":"...","wake":"...",
-#     "verdict":"routine"|"captain","summary":"...","silent":true|false}.
+#     "verdict":"routine"|"captain","summary":"...","silent":true|false}
+#     with an optional "identity" string on declared-external-wait rows.
 #     Legacy rows without `silent` remain valid and are treated as visible.
 #     Existing lines are never rewritten, reordered, or deleted by any
 #     subcommand; the read state lives
 #     entirely in the cursor sidecar so marking outcomes read cannot disturb
 #     the log. Retention: the log is small (one line per handled fleet event)
 #     and truncation, if ever needed, is a captain-approved manual act.
+#   - Declared-external-wait silence: when a routine append names a `stale:`
+#     wake for a task whose current status line is a `paused:` wait, append
+#     stores that exact status line as `identity` and compares it to the most
+#     recent outcome for the same task. A matching identity permits a caller's
+#     explicit `silent=true`; `silent=false` stays visible for a changed
+#     consequence or required action. A first notice, a different status line,
+#     a different task, or a non-wait outcome stays visible. Captain verdicts
+#     are never auto-silenced. The identity is the paused status line itself,
+#     never summary text, so similar prose on another task or a changed wait
+#     cannot collapse together. This guard is Pi-branch-only: homes that never
+#     call this script are untouched.
 #   - Cursor: $STATE/.branch-outcomes-cursor holds the highest seq handed to
 #     Pi as an append-only merge note, emitted by the locked session-start
 #     replay, or silently consumed there because `silent` is true. Records
@@ -46,13 +58,15 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 STORE="$STATE/branch-outcomes.jsonl"
 CURSOR="$STATE/.branch-outcomes-cursor"
 LOCK="$STATE/.branch-outcomes.lock"
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | list [--recent <n>] | startup-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | get --seq <seq> | unread | mark-read --through <seq> | list [--recent <n>] | startup-replay" >&2
   exit 2
 }
 
@@ -86,6 +100,7 @@ last_seq() {
     | select(
         keys == ["epoch", "seq", "summary", "task", "verdict", "wake"]
         or (keys == ["epoch", "seq", "silent", "summary", "task", "verdict", "wake"] and (.silent | type) == "boolean")
+        or (keys == ["epoch", "identity", "seq", "silent", "summary", "task", "verdict", "wake"] and (.silent | type) == "boolean" and (.identity | type) == "string" and .identity != "")
       )
     | select((.seq | type) == "number" and .seq >= 1 and .seq == (.seq | floor))
     | select((.epoch | type) == "number" and .epoch >= 0 and .epoch == (.epoch | floor))
@@ -98,6 +113,36 @@ last_seq() {
 
 record_seq() { # <jsonl-line>
   printf '%s\n' "$1" | sed -n 's/^{"seq":\([0-9]*\),.*/\1/p'
+}
+
+# Most recent stored wait identity for <task>, or empty when that task has no
+# identity-bearing row yet. Streams the log so a long home does not load every
+# outcome into one array. A jq failure stays empty: the first-notice path
+# remains visible rather than hiding an unreadable wait.
+most_recent_wait_identity() {  # <task>
+  local task=$1
+  [ -s "$STORE" ] || { printf '\n'; return 0; }
+  jq -n -r --arg task "$task" '
+    reduce inputs as $row (null;
+      if ($row | type) == "object" and ($row.task | type) == "string" and $row.task == $task
+      then $row
+      else .
+      end
+    ) | if . == null then empty else (.identity // empty) end
+  ' "$STORE" 2>/dev/null || true
+}
+
+# Exact paused status line that identifies this declared external wait, or
+# empty when this append is not a wait recheck. Requires a stale wake and a
+# current paused: line so a blocker, failure, recovery, or green PR cannot
+# inherit a wait identity from leftover prose.
+wait_identity_for_append() {  # <task> <wake>
+  local task=$1 wake=$2 line
+  case "$task" in ''|fleet) return 0 ;; esac
+  case "$wake" in stale:*) ;; *) return 0 ;; esac
+  line=$(last_status_line "$STATE/$task.status")
+  status_is_paused "$line" || return 0
+  printf '%s\n' "$line"
 }
 
 print_unread() {
@@ -151,12 +196,42 @@ case "$CMD" in
       echo "error: refusing append because the outcome store has a malformed final record" >&2
       exit 1
     fi
+    WAIT_IDENTITY=$(wait_identity_for_append "$TASK" "$WAKE" || true)
+    WAIT_IDENTITY=${WAIT_IDENTITY%$'\n'}
+    if [ -n "$WAIT_IDENTITY" ] && [ "$VERDICT" = routine ]; then
+      PREV_IDENTITY=$(most_recent_wait_identity "$TASK" || true)
+      PREV_IDENTITY=${PREV_IDENTITY%$'\n'}
+      if [ "$PREV_IDENTITY" != "$WAIT_IDENTITY" ]; then
+        SILENT=false
+      fi
+    fi
     SEQ=$(( LAST_SEQ + 1 ))
-    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s}\n' \
-      "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
-      "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" >> "$STORE"
+    if [ -n "$WAIT_IDENTITY" ]; then
+      printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"identity":"%s"}\n' \
+        "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
+        "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$(json_escape "$WAIT_IDENTITY")" >> "$STORE"
+    else
+      printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s}\n' \
+        "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
+        "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" >> "$STORE"
+    fi
     fm_lock_release "$LOCK"
     printf '%s\n' "$SEQ"
+    ;;
+  get)
+    [ "${1:-}" = --seq ] || usage
+    GET_SEQ=${2:-}
+    case "$GET_SEQ" in ''|*[!0-9]*) usage ;; esac
+    [ "$#" -eq 2 ] || usage
+    fm_lock_acquire_wait "$LOCK"
+    if [ -s "$STORE" ]; then
+      while IFS= read -r line; do
+        [ "$(record_seq "$line")" = "$GET_SEQ" ] || continue
+        printf '%s\n' "$line"
+        break
+      done < "$STORE"
+    fi
+    fm_lock_release "$LOCK"
     ;;
   unread)
     [ "$#" -eq 0 ] || usage
