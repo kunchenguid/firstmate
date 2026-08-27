@@ -124,7 +124,12 @@ export function createBashToolDefinition(cwd, options) {
     parameters: { type: "object" },
     __cwd: cwd,
     __options: options,
-    execute: async () => ({ content: [], details: undefined }),
+    execute: async (_toolCallId, params) => {
+      if (!globalThis.__fmExecuteBranchBash) return { content: [], details: undefined };
+      const initial = { command: String(params.command ?? ""), cwd, env: { ...process.env } };
+      const context = options.spawnHook ? options.spawnHook(initial) : initial;
+      return globalThis.__fmExecuteBranchBash(context);
+    },
   };
 }
 
@@ -810,28 +815,38 @@ test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, outcomeScript, home, realRoot }; })()`);
-const { fire, dispatch, settle, sentToMain, outcomeScript, home, realRoot } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, outcomeScript, mainTools, home, realRoot }; })()`);
+const { fire, dispatch, settle, sentToMain, outcomeScript, mainTools, home, realRoot } = globalThis.__t;
 import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
 const fleetOperations = [];
-function runFleetCommand(kind, args) {
-  fleetOperations.push({ kind, args: [...args], actor: "branch" });
-  const result = spawnSync("bash", [`${realRoot}/bin/fm-wake-drain.sh`, ...args], {
+globalThis.__fmExecuteBranchBash = async (context) => {
+  const actor = spawnSync(
+    "bash",
+    ["-c", '. "$1"; fm_lease_actor', "_", `${realRoot}/bin/fm-lease-lib.sh`],
+    { encoding: "utf8", cwd: context.cwd, env: context.env },
+  );
+  if (actor.status !== 0) throw new Error(`branch bash actor resolution failed: ${actor.stderr}`);
+  const result = spawnSync("bash", ["-c", context.command], {
     encoding: "utf8",
-    env: {
-      ...process.env,
-      FM_HOME: home,
-      FM_STATE_OVERRIDE: `${home}/state`,
-      FM_SUPERVISION_ACTOR: "branch",
-      FM_LEASE_HOLDER_PID: String(process.pid),
-    },
+    cwd: context.cwd,
+    env: context.env,
   });
-  if (result.status !== 0) {
-    throw new Error(`${kind} failed (${result.status}): ${result.stdout}\n${result.stderr}`);
-  }
-  return result;
+  fleetOperations.push({ command: context.command, actor: actor.stdout.trim(), status: result.status });
+  return {
+    content: [{ type: "text", text: `${result.stdout}${result.stderr}` }],
+    details: { stdout: result.stdout, stderr: result.stderr, exitCode: result.status, actor: actor.stdout.trim() },
+    isError: result.status !== 0,
+  };
+};
+
+async function runFleetCommand(session, args) {
+  const bash = session.options.customTools.find((tool) => tool.name === "bash");
+  const command = ["bin/fm-wake-drain.sh", ...args].join(" ");
+  const result = await bash.execute(`fleet-${fleetOperations.length}`, { command }, undefined, undefined, {});
+  if (result.isError) throw new Error(`fleet command failed: ${JSON.stringify(result)}`);
+  return result.details;
 }
 
 // The stubbed provider executes the same public branch turn contract as a real
@@ -841,10 +856,8 @@ globalThis.__fmOnBranchPrompt = async ({ session }) => {
   const mirror = session.ops
     .filter((op) => op.kind === "custom" && op.message.customType === "fm-main-mirror")
     .map((op) => op.message.content);
-  const directlyRequested = mirror.some((text) =>
-    text === "[captain] Please give me a fresh mini system-resource report."
-  );
-  const drained = runFleetCommand("drain", []);
+  const directlyRequested = mirror.length > 0;
+  const drained = await runFleetCommand(session, []);
   const ack = drained.stderr.match(/--ack-through ([0-9]+) --recovery-generation ([A-Za-z0-9._-]+)/);
   if (!ack) throw new Error(`drain did not return its acknowledgement command: ${drained.stderr}`);
   const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
@@ -861,7 +874,7 @@ globalThis.__fmOnBranchPrompt = async ({ session }) => {
     {},
   );
   if (result.isError) throw new Error(`branch report failed: ${JSON.stringify(result)}`);
-  runFleetCommand("ack", ["--ack-through", ack[1], "--recovery-generation", ack[2]]);
+  await runFleetCommand(session, ["--ack-through", ack[1], "--recovery-generation", ack[2]]);
 };
 
 // With no captain request, the healthy result remains a rendered sailboat and
@@ -877,19 +890,14 @@ if (sailboat.message.display !== true || !sailboat.message.content.startsWith("â
   throw new Error(`unsolicited healthy result was not a rendered sailboat note: ${JSON.stringify(sailboat)}`);
 }
 
-// MAIN's next conversational turn can use the merged note as content without
-// taking fleet ownership. This provider adapter chooses to summarize it; the
-// operation ledger below proves that choice did not drain, rerun, or ack.
-function runMainConversationTurn(messages) {
-  const note = messages.find((sent) => sent.message.content.startsWith("â›µ task-resource:"));
-  if (!note) throw new Error("main could not see the sailboat outcome");
-  return `The latest ${note.message.content.slice(2)}`;
+const outcomes = mainTools.find((tool) => tool.name === "fm_branch_outcomes");
+if (!outcomes) throw new Error("main did not receive its outcome-reading permission surface");
+const visibleToMain = await outcomes.execute("main-reads-sailboat", { recent: 1 }, undefined, undefined, {});
+const mainOutcomeText = visibleToMain.content.map((item) => item.text ?? "").join("\n");
+if (visibleToMain.isError || !mainOutcomeText.includes("healthy resource report: CPU 12%, memory 41%")) {
+  throw new Error(`main could not use the sailboat content through its existing permission path: ${JSON.stringify(visibleToMain)}`);
 }
-const mainReply = runMainConversationTurn(sentToMain);
-if (!mainReply.includes("healthy resource report: CPU 12%, memory 41%")) {
-  throw new Error(`main did not exercise judgment over the sailboat content: ${mainReply}`);
-}
-if (fleetOperations.length !== 2) throw new Error("main conversation reprocessed the fleet event");
+if (fleetOperations.length !== 2) throw new Error("main's outcome read reprocessed the fleet event");
 
 // Start a real main turn whose user entry is already in the session, then let
 // the result arrive before turn_end. The dispatch boundary must mirror that
@@ -916,8 +924,8 @@ if (turns.length !== 1 || turns[0].options.deliverAs !== "followUp") {
   throw new Error(`pre-turn-end requested result did not open exactly one main turn: ${JSON.stringify(sentToMain)}`);
 }
 if (sentToMain.length !== 2) throw new Error(`one result was reprocessed into ${sentToMain.length} main messages`);
-if (fleetOperations.map((operation) => operation.kind).join(",") !== "drain,ack,drain,ack") {
-  throw new Error(`fleet event ownership repeated or reordered work: ${JSON.stringify(fleetOperations)}`);
+if (fleetOperations.length !== 4 || fleetOperations.some((operation) => operation.status !== 0)) {
+  throw new Error(`fleet event ownership repeated or failed work: ${JSON.stringify(fleetOperations)}`);
 }
 if (fleetOperations.some((operation) => operation.actor !== "branch")) {
   throw new Error(`main took fleet-event ownership: ${JSON.stringify(fleetOperations)}`);
