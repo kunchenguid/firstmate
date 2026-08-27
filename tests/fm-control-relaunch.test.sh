@@ -17,6 +17,12 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. A missing endpoint reported by a runtime that ANSWERED is recreated in
+#      the recorded worktree; a missing verdict from an UNREACHABLE runtime
+#      surfaces a decision that changes nothing until it is confirmed, and that
+#      confirmation never reaches a live endpoint; ambiguous agent state refuses
+#      unchanged, a secondmate recovers into its own validated home, and repeat
+#      recovery never creates a duplicate endpoint.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -96,8 +102,13 @@ case "${1:-}" in
     fi
     exit 0 ;;
   display-message)
+    if [ -f "$D/unreachable" ]; then
+      printf 'no server running on %s\n' "$(cat "$D/socket")" >&2
+      exit 1
+    fi
     for a in "$@"; do
       case "$a" in
+        *socket_path*) cat "$D/socket"; exit 0 ;;
         *cursor_y*) printf '1\n'; exit 0 ;;
         *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
         *pane_current_path*)
@@ -110,7 +121,54 @@ case "${1:-}" in
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
-  list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+  list-windows)
+    # $D/unreachable models a tmux server this process cannot reach at all -
+    # the socket is not there, so tmux answers about the SOCKET, never about
+    # the window. Creating a session below starts a server again.
+    if [ -f "$D/unreachable" ]; then
+      printf 'no server running on %s\n' "$(cat "$D/socket")" >&2
+      exit 1
+    fi
+    [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+  has-session)
+    [ ! -f "$D/unreachable" ] || exit 1
+    [ -s "$D/sessions" ]; exit $? ;;
+  new-session)
+    rm -f "$D/unreachable"
+    printf 'new-session\n' >> "$D/lifecycle"
+    session=
+    window=
+    start_dir=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -s) shift; session=$1 ;;
+        -n) shift; window=$1 ;;
+        -c) shift; start_dir=$1 ;;
+      esac
+      shift
+    done
+    printf '%s\n' "$session" > "$D/sessions"
+    printf '%s\n' "$window" > "$D/windows"
+    # -c is where the endpoint's shell actually opens, so it becomes the pane's
+    # reported cwd from here on.
+    if [ -n "$start_dir" ]; then
+      printf '%s' "$start_dir" > "$D/created-cwd"
+      printf '%s' "$start_dir" > "$D/cwd"
+    fi
+    printf '@replacement\n'
+    exit 0 ;;
+  set-window-option) exit 0 ;;
+  new-window)
+    printf 'new-window\n' >> "$D/lifecycle"
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -n) shift; printf '%s\n' "$1" > "$D/windows" ;;
+        -c) shift; printf '%s' "$1" > "$D/created-cwd"; printf '%s' "$1" > "$D/cwd" ;;
+      esac
+      shift
+    done
+    printf '@replacement\n'
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -128,6 +186,10 @@ new_case() {
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/fake"
   : > "$dir/fake/literal"
   : > "$dir/fake/keys"
+  : > "$dir/fake/lifecycle"
+  : > "$dir/fake/sessions"
+  : > "$dir/fake/created-cwd"
+  printf '/tmp/fm-fake-tmux/default\n' > "$dir/fake/socket"
   printf 'claude' > "$dir/fake/command"
   printf 'claude' > "$dir/fake/becomes"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
@@ -1312,6 +1374,253 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding the work"
 }
 
+test_missing_endpoint_relaunch_creates_a_fresh_endpoint_without_touching_work() {
+  local dir out rc before_status before_diff
+  dir=$(new_case missing-endpoint rl36)
+  add_ship_task "$dir" rl36 claude
+  printf 'tracked work in progress\n' >> "$dir/wt/README.md"
+  printf 'preserve exactly\n' > "$dir/wt/uncommitted.txt"
+  before_status=$(git -C "$dir/wt" status --porcelain=v1 --untracked-files=all)
+  before_diff=$(git -C "$dir/wt" diff --binary)
+  : > "$dir/fake/windows"
+
+  out=$(run_control "$dir" rl36 relaunch --note "runtime wiped the endpoint"); rc=$?
+
+  expect_code 0 "$rc" "an authoritatively missing endpoint should be recreated"$'\n'"$out"
+  assert_contains "$out" "previous-endpoint=fmses:fm-rl36" \
+    "the outcome should distinguish the replaced missing endpoint"
+  [ "$(meta_field "$dir" rl36 window)" = "fmses:fm-rl36" ] \
+    || fail "the durable record should name the fresh endpoint"
+  [ "$(git -C "$dir/wt" status --porcelain=v1 --untracked-files=all)" = "$before_status" ] \
+    || fail "relaunch must preserve the worktree status exactly"
+  [ "$(git -C "$dir/wt" diff --binary)" = "$before_diff" ] \
+    || fail "relaunch must preserve tracked changes exactly"
+  [ "$(cat "$dir/wt/uncommitted.txt")" = "preserve exactly" ] \
+    || fail "relaunch must preserve untracked file contents exactly"
+  [ "$(cat "$dir/fake/created-cwd")" = "$dir/wt" ] \
+    || fail "the fresh endpoint must open in the recorded worktree, got '$(cat "$dir/fake/created-cwd")'"
+  pass "fm-control relaunch: a missing endpoint is recreated without touching work"
+}
+
+# A secondmate's worktree is its own firstmate home, and that home is resolved
+# and validated on its own - the same validation a fresh secondmate spawn uses -
+# rather than adopted verbatim from the recorded worktree= value. Recreation
+# must honor that carve-out, so the recorded path here reaches the home through
+# a symlink: the raw value must reach neither the endpoint the replacement opens
+# in nor the record the recovery publishes.
+test_secondmate_missing_endpoint_recreation_uses_its_validated_home() {
+  local dir home out rc validated_home
+  dir=$(new_case sm-missing-endpoint sm8)
+  home="$dir/home"
+  mkdir -p "$home/config"
+  printf 'claude\n' > "$home/config/secondmate-harness"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'sm8\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# charter\n' > "$dir/smhome/data/charter.md"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  printf 'uncommitted secondmate work\n' > "$dir/smhome/in-progress.txt"
+  ln -s "$dir/smhome" "$dir/smlink"
+  validated_home=$(cd "$dir/smhome" && pwd -P)
+  {
+    echo "window=fmses:fm-sm8"
+    echo "endpoint_task_id=sm8"
+    echo "worktree=$dir/smlink"
+    echo "project=$dir/smlink"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smlink"
+    echo "projects="
+  } > "$home/state/sm8.meta"
+  # An empty window inventory from a runtime that answered: the endpoint is
+  # authoritatively gone, so recovery recreates it.
+  : > "$dir/fake/windows"
+  printf '%s' "$dir/smlink" > "$dir/fake/cwd"
+
+  out=$(run_control "$dir" sm8 relaunch); rc=$?
+
+  expect_code 0 "$rc" "a secondmate's missing endpoint should be recreated"$'\n'"$out"
+  assert_contains "$out" "endpoint-recreated previous-endpoint=fmses:fm-sm8" \
+    "the outcome should distinguish the recreated secondmate endpoint"
+  [ "$(cat "$dir/fake/created-cwd")" = "$validated_home" ] \
+    || fail "the recreated endpoint must open in the validated secondmate home, got '$(cat "$dir/fake/created-cwd")'"
+  [ "$(meta_field "$dir" sm8 worktree)" = "$validated_home" ] \
+    || fail "the published record must name the validated home, got '$(meta_field "$dir" sm8 worktree)'"
+  [ "$(cat "$dir/smhome/in-progress.txt")" = "uncommitted secondmate work" ] \
+    || fail "recovery must preserve the secondmate home's uncommitted work exactly"
+  [ "$(cat "$dir/smhome/data/charter.md")" = "# charter" ] \
+    || fail "recovery must never rewrite a secondmate's standing charter"
+  pass "fm-control relaunch: recreating a secondmate's endpoint honors its validated home over the raw recorded worktree"
+}
+
+test_spawn_recreate_endpoint_requires_the_control_transaction() {
+  local dir out rc
+  dir=$(new_case direct-missing-endpoint rl39)
+  add_ship_task "$dir" rl39 claude
+  : > "$dir/fake/windows"
+
+  out=$(run_spawn "$dir" rl39 --relaunch --recreate-endpoint --harness claude); rc=$?
+
+  expect_code 1 "$rc" "direct spawn must not acquire missing-endpoint recreation authority"
+  assert_contains "$out" "authorized only by bin/fm-control.sh" \
+    "the refusal should name the control transaction that owns recreation"
+  [ -z "$(cat "$dir/fake/lifecycle")" ] \
+    || fail "a direct spawn must not create a missing endpoint"
+  pass "fm-spawn --relaunch: only fm-control's locked transaction may recreate an endpoint"
+}
+
+test_ambiguous_endpoint_state_refuses_without_changing_the_record() {
+  local dir out rc before_meta before_brief
+  dir=$(new_case ambiguous-endpoint rl37)
+  add_ship_task "$dir" rl37 claude
+  printf 'node' > "$dir/fake/command"
+  before_meta=$(cat "$dir/home/state/rl37.meta")
+  before_brief=$(cat "$dir/home/data/rl37/brief.md")
+
+  out=$(run_control "$dir" rl37 relaunch --note "must not land"); rc=$?
+
+  expect_code 1 "$rc" "an ambiguous endpoint must fail closed"
+  assert_contains "$out" "ambiguous" "the refusal should distinguish ambiguity from a missing endpoint"
+  [ "$(cat "$dir/home/state/rl37.meta")" = "$before_meta" ] \
+    || fail "an ambiguous endpoint must preserve the durable record byte-for-byte"
+  [ "$(cat "$dir/home/data/rl37/brief.md")" = "$before_brief" ] \
+    || fail "an ambiguous endpoint must preserve the instructions byte-for-byte"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "an ambiguous endpoint must receive no lifecycle input"
+  [ -z "$(cat "$dir/fake/lifecycle")" ] \
+    || fail "an ambiguous endpoint must not create a replacement endpoint"
+  pass "fm-control relaunch: ambiguous endpoint state fails closed without changing the task"
+}
+
+# A `missing` verdict that came from an UNREACHABLE runtime proves only that
+# this process cannot see a server on that socket. Recreating on that evidence
+# would put a second agent into a worktree the first one may still be working
+# in, so it is a decision for a human rather than an automatic recovery - and
+# equally, not a dead end, because a wiped runtime is exactly what needs
+# recovering. These three pin both halves of that, plus the guarantee that the
+# confirmation can never reach a live endpoint.
+test_unreachable_runtime_surfaces_a_decision_instead_of_recreating() {
+  local dir out rc before_meta before_brief before_status
+  dir=$(new_case unreachable-endpoint rl40)
+  add_ship_task "$dir" rl40 claude
+  printf 'uncommitted work\n' > "$dir/wt/in-progress.txt"
+  : > "$dir/fake/unreachable"
+  before_meta=$(cat "$dir/home/state/rl40.meta")
+  before_brief=$(cat "$dir/home/data/rl40/brief.md")
+  before_status=$(git -C "$dir/wt" status --porcelain=v1 --untracked-files=all)
+
+  out=$(run_control "$dir" rl40 relaunch --note "the runtime host rebooted"); rc=$?
+
+  expect_code 1 "$rc" "an unreachable runtime must not recreate the endpoint on its own"$'\n'"$out"
+  assert_contains "$out" "/tmp/fm-fake-tmux/default" \
+    "the decision should name the exact socket that was consulted"
+  assert_contains "$out" "no server running on" \
+    "the decision should quote the backend's own response"
+  assert_contains "$out" "--confirm-endpoint-gone" \
+    "the decision should name the explicit human-confirmed continuation"
+  [ "$(cat "$dir/home/state/rl40.meta")" = "$before_meta" ] \
+    || fail "the decision must preserve the durable record byte-for-byte"
+  [ "$(cat "$dir/home/data/rl40/brief.md")" = "$before_brief" ] \
+    || fail "the decision must preserve the instructions byte-for-byte"
+  [ "$(git -C "$dir/wt" status --porcelain=v1 --untracked-files=all)" = "$before_status" ] \
+    || fail "the decision must preserve the worktree exactly"
+  [ -z "$(cat "$dir/fake/lifecycle")" ] \
+    || fail "no endpoint may be created before the decision is made"
+  [ -z "$(cat "$dir/fake/literal")" ] && [ -z "$(cat "$dir/fake/keys")" ] \
+    || fail "no lifecycle input may be delivered before the decision is made"
+  [ ! -e "$dir/home/state/rl40.control-relaunch" ] \
+    || fail "an undecided relaunch must not open a durable transaction journal"
+  pass "fm-control relaunch: an unreachable runtime surfaces a decision that recreates nothing and changes nothing"
+}
+
+test_confirmed_unreachable_runtime_recovers_the_same_task() {
+  local dir out rc before_status before_diff
+  dir=$(new_case confirm-unreachable rl41)
+  add_ship_task "$dir" rl41 claude
+  printf 'tracked work in progress\n' >> "$dir/wt/README.md"
+  printf 'preserve exactly\n' > "$dir/wt/uncommitted.txt"
+  before_status=$(git -C "$dir/wt" status --porcelain=v1 --untracked-files=all)
+  before_diff=$(git -C "$dir/wt" diff --binary)
+  : > "$dir/fake/unreachable"
+
+  out=$(run_control "$dir" rl41 relaunch --note "runtime is gone"); rc=$?
+  expect_code 1 "$rc" "the undecided run should stop for a decision"$'\n'"$out"
+  [ -z "$(cat "$dir/fake/lifecycle")" ] || fail "the undecided run must create nothing"
+
+  # Nothing was reconciled in between: the same command, plus the confirmation,
+  # is the whole continuation. That is what makes the refusal a decision rather
+  # than a terminal state.
+  out=$(run_control "$dir" rl41 relaunch --note "runtime is gone" --confirm-endpoint-gone); rc=$?
+
+  expect_code 0 "$rc" "a confirmed unreachable runtime should recover the task"$'\n'"$out"
+  assert_contains "$out" "endpoint-recreated previous-endpoint=fmses:fm-rl41" \
+    "the outcome should distinguish the recreated endpoint"
+  [ "$(cat "$dir/fake/lifecycle")" = "new-session" ] \
+    || fail "confirmed recovery should create exactly one fresh endpoint"
+  [ "$(meta_field "$dir" rl41 window)" = "fmses:fm-rl41" ] \
+    || fail "the durable record should name the recovered endpoint"
+  [ "$(git -C "$dir/wt" status --porcelain=v1 --untracked-files=all)" = "$before_status" ] \
+    || fail "confirmed recovery must preserve the worktree status exactly"
+  [ "$(git -C "$dir/wt" diff --binary)" = "$before_diff" ] \
+    || fail "confirmed recovery must preserve tracked changes exactly"
+  [ "$(cat "$dir/wt/uncommitted.txt")" = "preserve exactly" ] \
+    || fail "confirmed recovery must preserve untracked file contents exactly"
+  pass "fm-control relaunch: confirming a gone runtime recovers the task without touching its work"
+}
+
+test_confirmation_never_recreates_an_endpoint_that_reads_alive() {
+  local dir out rc
+  dir=$(new_case confirm-alive rl42)
+  add_ship_task "$dir" rl42 claude
+
+  out=$(run_control "$dir" rl42 relaunch --note "carry on" --confirm-endpoint-gone); rc=$?
+
+  expect_code 0 "$rc" "an alive endpoint should still relaunch in place"$'\n'"$out"
+  assert_contains "$out" "not applied" \
+    "the confirmation should be reported as not applied at a live endpoint"
+  assert_not_contains "$out" "endpoint-recreated" \
+    "a live endpoint must never be reported as recreated"
+  [ -z "$(cat "$dir/fake/lifecycle")" ] \
+    || fail "a confirmation must never create an endpoint beside a live agent"
+  [ "$(meta_field "$dir" rl42 window)" = "fmses:fm-rl42" ] \
+    || fail "the live endpoint must be reused, not replaced"
+  assert_grep "/exit" "$dir/fake/literal" \
+    "the live agent must still be stopped by the ordinary relaunch path"
+  pass "fm-control relaunch: a human confirmation cannot recreate an endpoint that reads alive"
+}
+
+test_missing_endpoint_relaunch_is_repeat_safe() {
+  local dir first second rc
+  dir=$(new_case repeat-missing-endpoint rl38)
+  add_ship_task "$dir" rl38 claude
+  : > "$dir/fake/windows"
+
+  first=$(run_control "$dir" rl38 relaunch --note "first recovery"); rc=$?
+  expect_code 0 "$rc" "the first recovery should recreate the missing endpoint"$'\n'"$first"
+  second=$(run_control "$dir" rl38 relaunch --note "repeat recovery"); rc=$?
+  expect_code 0 "$rc" "a repeated relaunch should replace the running worker without duplicating it"$'\n'"$second"
+
+  [ "$(cat "$dir/fake/windows")" = "fm-rl38" ] \
+    || fail "repeat relaunch must leave exactly one endpoint for the task"
+  [ "$(cat "$dir/fake/lifecycle")" = "new-session" ] \
+    || fail "repeat relaunch must create a fresh endpoint only for the missing incarnation"
+  [ "$(meta_field "$dir" rl38 window)" = "fmses:fm-rl38" ] \
+    || fail "repeat relaunch must retain the replacement endpoint identity"
+  pass "fm-control relaunch: repeating recovery never creates a duplicate worker endpoint"
+}
+
+test_ambiguous_endpoint_state_refuses_without_changing_the_record
+test_spawn_recreate_endpoint_requires_the_control_transaction
+test_missing_endpoint_relaunch_creates_a_fresh_endpoint_without_touching_work
+test_secondmate_missing_endpoint_recreation_uses_its_validated_home
+test_unreachable_runtime_surfaces_a_decision_instead_of_recreating
+test_confirmed_unreachable_runtime_recovers_the_same_task
+test_confirmation_never_recreates_an_endpoint_that_reads_alive
+test_missing_endpoint_relaunch_is_repeat_safe
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication

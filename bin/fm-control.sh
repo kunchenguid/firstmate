@@ -6,6 +6,7 @@
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
+#                                         [--confirm-endpoint-gone]
 #                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
@@ -32,8 +33,8 @@
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent).
 #   relaunch   Transactionally replace the running agent with a new one, in the
-#              SAME endpoint and SAME worktree, on the same or a newly chosen
-#              harness/model/effort - so switching harness is one ordinary use
+#              SAME worktree and normally the same endpoint, on the same or a
+#              newly chosen harness/model/effort - so switching harness is one ordinary use
 #              of this verb. With no explicit axis, a secondmate re-resolves its
 #              durable config/secondmate-harness pin (harness plus its optional
 #              model and effort tokens) exactly as any other respawn does, while
@@ -44,10 +45,21 @@
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
-#              Records a durable checkpoint and that note, exits the old agent,
-#              then delegates the launch to its single owner,
-#              bin/fm-spawn.sh --relaunch. A failure before publication keeps
-#              the prior durable record in place and reports the concrete
+#              Records a durable checkpoint and that note, exits the old agent
+#              when one exists, then delegates the launch to its single owner,
+#              bin/fm-spawn.sh --relaunch. When the backend reports the
+#              recorded endpoint missing from a RUNTIME IT REACHED, the launch
+#              owner rechecks that verdict and creates a fresh endpoint in the
+#              same worktree. When the runtime itself could not be reached, the
+#              missing verdict is ambiguous: relaunch stops with the socket it
+#              consulted and the answer it got, changes nothing, and names
+#              --confirm-endpoint-gone as the continuation once a human has
+#              confirmed the runtime is genuinely gone. Confirmation only
+#              licenses endpoint creation while the endpoint still classifies
+#              missing; a live agent or any contradicting recheck still
+#              refuses. Ambiguous and unreadable agent states refuse before the
+#              note or durable record changes. A failure before publication
+#              keeps the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
 #
@@ -82,6 +94,9 @@
 #     than reported as successful blind.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
+#   - Creating a replacement endpoint requires a missing verdict from a runtime
+#     that ANSWERED. An unreachable runtime cannot prove no agent holds the
+#     worktree, so it is a human decision rather than an automatic recovery.
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
@@ -150,6 +165,8 @@ CONTROL_LOCK=
 CONTROL_LOCK_HELD=0
 RELAUNCH_ACTIVE=0
 RELAUNCH_PHASE=start
+RELAUNCH_RECREATE_ENDPOINT=0
+RELAUNCH_PRIOR_TARGET=
 
 control_cleanup() {
   local status=$?
@@ -195,6 +212,7 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
+CONFIRM_ENDPOINT_GONE=0
 want_value=
 for a in "$@"; do
   if [ -n "$want_value" ]; then
@@ -224,6 +242,7 @@ for a in "$@"; do
     --effort=*) NEW_EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --note) want_value=note ;;
     --note=*) NOTE=${a#--note=}; NOTE_SET=1 ;;
+    --confirm-endpoint-gone) CONFIRM_ENDPOINT_GONE=1 ;;
     --note-file) want_value=note-file ;;
     --note-file=*)
       [ -f "${a#--note-file=}" ] || die "--note-file '${a#--note-file=}' is not a readable file"
@@ -237,7 +256,8 @@ done
 
 if [ "$VERB" != relaunch ]; then
   [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+    && [ "$CONFIRM_ENDPOINT_GONE" = 0 ] \
+    || die "--harness, --model, --effort, --note, and --confirm-endpoint-gone apply to 'relaunch' only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
@@ -577,6 +597,10 @@ relaunch_rollback() {
           journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept-agent-dead" || true
           echo "error: $ID's agent stopped but relaunch did not reach replacement launch; no agent is running, and its work plus progress note are preserved at $WT" >&2
           ;;
+        missing)
+          journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept-endpoint-missing" || true
+          echo "error: $ID's endpoint is still missing and relaunch did not reach replacement launch; its durable record, work, and progress note are preserved" >&2
+          ;;
         *)
           journal_write "failed:$RELAUNCH_PHASE" "rollback=none-agent-state-$state" || true
           echo "error: relaunch of $ID failed while stopping the old agent and its state is '$state'; the durable record and progress note were retained for recovery" >&2
@@ -599,7 +623,11 @@ relaunch_rollback() {
         echo "error: $ID was relaunched on $TARGET_HARNESS but no running agent could be confirmed; its work is preserved at $WT" >&2
       else
         journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept" || true
-        echo "error: $ID's agent was stopped but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at $WT" >&2
+        if [ "$RELAUNCH_RECREATE_ENDPOINT" = 1 ]; then
+          echo "error: $ID's missing endpoint could not be recreated; its prior durable record, work, and progress note are preserved at $WT" >&2
+        else
+          echo "error: $ID's agent was stopped but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at $WT" >&2
+        fi
       fi
       ;;
   esac
@@ -778,12 +806,65 @@ record_note() {
   esac
 }
 
+# classify_missing_endpoint: decide whether a `missing` verdict may create a
+# replacement endpoint. `missing` is not one observation but two, and only one
+# of them proves that no agent can still be holding the worktree:
+#
+#   strong     a runtime ANSWERED and the endpoint is not in it. Nothing runs
+#             there; recreate automatically, exactly as a wiped runtime needs.
+#   ambiguous  the runtime could not be reached at all. Its silence is equally
+#              consistent with "the endpoint is gone" and "this process is
+#              looking at the wrong socket", and the second reading would put a
+#              second agent on a worktree the first one is still working in.
+#
+# Ambiguity is not a dead end here - a wiped runtime is exactly the case that
+# needs recovery, and it is a human who can walk over and see whether anything
+# is still running. So it stops with the concrete address consulted and the
+# answer it gave, changes nothing, and names the continuation. The confirmation
+# grants no standing authority: it is consumed here, only while the endpoint is
+# still classified missing, and every downstream recheck (fm-spawn's own state
+# read and the backend's create-time recheck, both under the lifecycle locks)
+# still runs and still refuses a contradicting verdict.
+classify_missing_endpoint() {
+  local socket detail
+  fm_backend_missing_grade "$BACKEND" "$T"
+  socket=${FM_BACKEND_MISSING_SOCKET:-unknown}
+  detail=${FM_BACKEND_MISSING_RESPONSE:-no response recorded}
+  if [ "$FM_BACKEND_MISSING_GRADE" = strong ]; then
+    RELAUNCH_RECREATE_ENDPOINT=1
+    return 0
+  fi
+  if [ "$CONFIRM_ENDPOINT_GONE" = 1 ]; then
+    echo "notice: recreating $ID's endpoint $T on confirmation that its runtime is gone ($BACKEND at $socket answered: $detail); the replacement launch rechecks that verdict under the lifecycle locks and still refuses if anything contradicts it" >&2
+    RELAUNCH_RECREATE_ENDPOINT=1
+    return 0
+  fi
+  {
+    echo "error: task $ID's endpoint $T reads missing, but only because its $BACKEND runtime could not be reached: $socket answered '$detail'. That cannot tell a wiped runtime apart from a runtime this process is not looking at, and recreating the endpoint on the second reading would put a second agent into $WT while the first one is still working there."
+    echo "Nothing was changed: $ID's durable record, its progress note, and every uncommitted change in $WT are exactly as they were, and no endpoint was created."
+    echo "To continue, confirm the runtime is genuinely gone - no $BACKEND runtime anywhere holds $T, and no agent is still working in $WT - then re-run this command with --confirm-endpoint-gone. That confirmation only applies while the endpoint still classifies missing; a live agent, or any recheck that contradicts it under the lifecycle locks, still refuses."
+  } >&2
+  exit 1
+}
+
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line outcome_suffix
   local -a spawn_args
 
   require_state_verified_backend relaunch
   resolve_relaunch_profile
+  RELAUNCH_PRIOR_TARGET=$T
+  state=$(agent_state)
+  case "$state" in
+    alive|dead)
+      [ "$CONFIRM_ENDPOINT_GONE" = 0 ] \
+        || echo "notice: --confirm-endpoint-gone is not applied: task $ID's endpoint $T reads '$state', so this relaunch replaces the agent in the endpoint it already has" >&2
+      ;;
+    missing) classify_missing_endpoint ;;
+    *)
+      die "task $ID's endpoint reads '$state', not alive, dead, or authoritatively missing; refusing to relaunch from an ambiguous endpoint state or change its durable record"
+      ;;
+  esac
 
   case "$KIND" in
     ship|scout)
@@ -816,8 +897,12 @@ do_relaunch() {
   record_note
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
-  journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
-  exit_result=$(do_exit)
+  if [ "$RELAUNCH_RECREATE_ENDPOINT" = 1 ]; then
+    exit_result='endpoint-missing'
+  else
+    journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
+    exit_result=$(do_exit)
+  fi
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
@@ -825,6 +910,7 @@ do_relaunch() {
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
   journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
+  [ "$RELAUNCH_RECREATE_ENDPOINT" = 0 ] || spawn_args+=(--recreate-endpoint)
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
@@ -836,14 +922,25 @@ do_relaunch() {
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
   fi
 
+  fm_backend_validate_task_endpoint "$META" "$ID" \
+    || die "the replacement for $ID published endpoint metadata that cannot be validated"
+  [ "$FM_BACKEND_VALIDATED_BACKEND" = "$BACKEND" ] \
+    || die "the replacement for $ID changed backend from $BACKEND to $FM_BACKEND_VALIDATED_BACKEND during relaunch"
+  T=$FM_BACKEND_VALIDATED_TARGET
+
   state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
     die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
   }
   RELAUNCH_AGENT_CONFIRMED=1
 
-  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" \
+    "exit_result=$exit_result" "previous_endpoint=$RELAUNCH_PRIOR_TARGET"
   RELAUNCH_ACTIVE=0
-  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+  outcome_suffix=
+  if [ "$RELAUNCH_RECREATE_ENDPOINT" = 1 ]; then
+    outcome_suffix=" endpoint-recreated previous-endpoint=$RELAUNCH_PRIOR_TARGET"
+  fi
+  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT$outcome_suffix"
 }
 
 # --- verbs ------------------------------------------------------------------

@@ -169,5 +169,153 @@ state=$(fm_backend_agent_state tmux "$TARGET")
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
 pass "real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing"
 
+# --- how much that missing verdict actually proves --------------------------
+#
+# The same `missing` word covers a reachable server that answered and an
+# unreachable socket that could not. Only the first proves nothing is running
+# at the address, and only the first may recreate the endpoint automatically.
+
+fm_backend_tmux_missing_grade "$TARGET"
+[ "$FM_BACKEND_TMUX_MISSING_GRADE" = strong ] \
+  || fail "a missing window in a REACHABLE session should grade strong, got '$FM_BACKEND_TMUX_MISSING_GRADE'"
+[ -n "$FM_BACKEND_TMUX_MISSING_SOCKET" ] \
+  || fail "a strong missing grade should still name the socket it consulted"
+
+# A private TMUX_TMPDIR with no server on it is the real unreachable case: tmux
+# answers about the socket, never about the window.
+unreachable_tmpdir=$(mktemp -d) || fail "could not stage an empty tmux socket dir"
+# tmux reports the physically resolved socket path, and the OS temp dir reaches
+# it through a symlink on macOS.
+unreachable_real=$(cd "$unreachable_tmpdir" && pwd -P)
+(
+  export TMUX_TMPDIR="$unreachable_tmpdir"
+  unset TMUX
+  fm_backend_tmux_missing_grade "$TARGET"
+  [ "$FM_BACKEND_TMUX_MISSING_GRADE" = ambiguous ] \
+    || fail "an unreachable tmux socket should grade ambiguous, got '$FM_BACKEND_TMUX_MISSING_GRADE'"
+  case "$FM_BACKEND_TMUX_MISSING_SOCKET" in
+    "$unreachable_real"/*) : ;;
+    *) fail "the ambiguous grade should name the exact socket consulted, got '$FM_BACKEND_TMUX_MISSING_SOCKET'" ;;
+  esac
+  [ -n "$FM_BACKEND_TMUX_MISSING_RESPONSE" ] \
+    || fail "the ambiguous grade should carry the backend's own response"
+  state=$(fm_backend_agent_state tmux "$TARGET")
+  [ "$state" = missing ] \
+    || fail "an unreachable socket still classifies missing (that is what the grade exists to qualify), got '$state'"
+) || exit 1
+rm -rf "$unreachable_tmpdir"
+pass "real tmux: a missing verdict grades strong only when a reachable server answered, and ambiguous when the socket could not be reached"
+
+# --- recreate the exact missing endpoint ------------------------------------
+
+recreated_id=$(fm_backend_tmux_recreate_task "$TARGET" "$HOME") \
+  || fail "fm_backend_tmux_recreate_task failed to restore the missing task window"
+[ -n "$recreated_id" ] || fail "fm_backend_tmux_recreate_task returned no stable window id"
+tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$WINDOW" \
+  || fail "the recreated task window is not visible at its recorded address"
+[ "$(tmux display-message -p -t "$recreated_id" '#{pane_current_path}')" = "$HOME" ] \
+  || fail "the recreated endpoint did not start in the requested existing worktree"
+state=$(fm_backend_agent_state tmux "$TARGET")
+[ "$state" = dead ] \
+  || fail "the recreated shell endpoint should classify as agent-free, got '$state'"
+if fm_backend_tmux_recreate_task "$TARGET" "$HOME" 2>/dev/null; then
+  fail "fm_backend_tmux_recreate_task should refuse while the endpoint already exists"
+fi
+pass "real tmux: a missing task endpoint is recreated once at its recorded address and worktree"
+
+# --- a read that merely SUCCEEDED never grades strong ------------------------
+#
+# The liveness verdict and the grade are two separate tmux reads, so the window
+# can come back between them (an operator restoring it by hand). The grade must
+# account for the exact window in the inventory it read, not treat a successful
+# read as proof of absence - otherwise it hands a human an authoritative quote
+# about a window that is sitting right there.
+
+fm_backend_tmux_missing_grade "$TARGET"
+[ "$FM_BACKEND_TMUX_MISSING_GRADE" != strong ] \
+  || fail "an inventory that LISTS the recorded window must never grade strong"
+case "$FM_BACKEND_TMUX_MISSING_RESPONSE" in
+  *"does not list"*)
+    fail "the grade quotes tmux as not listing a window the same inventory does list: $FM_BACKEND_TMUX_MISSING_RESPONSE"
+    ;;
+esac
+[ -n "$FM_BACKEND_TMUX_MISSING_RESPONSE" ] \
+  || fail "a non-strong grade should still carry the response it read"
+pass "real tmux: a successful inventory that lists the recorded window is not strong evidence of its absence"
+
+# --- a recorded session name is never resolved to a look-alike ---------------
+#
+# tmux resolves a bare `-t <session>` by exact match, then prefix, then fnmatch.
+# "smok" is a prefix of the live "smoke" session, so a bare lookup would report
+# smoke's inventory as if it were smok's and graft the replacement window into
+# smoke - recovering the task into a session that was never its address.
+
+PREFIX_SESSION="smok"
+PREFIX_WINDOW="fm-smoke2"
+PREFIX_TARGET="$PREFIX_SESSION:$PREFIX_WINDOW"
+
+tmux has-session -t "=$PREFIX_SESSION" 2>/dev/null \
+  && fail "the look-alike fixture requires '$PREFIX_SESSION' to be absent"
+
+state=$(fm_backend_agent_state tmux "$PREFIX_TARGET")
+[ "$state" = missing ] \
+  || fail "an absent session with a live prefix-sibling should classify missing, got '$state'"
+fm_backend_tmux_missing_grade "$PREFIX_TARGET"
+case "$FM_BACKEND_TMUX_MISSING_RESPONSE" in
+  *"does not list"*)
+    fail "the missing evidence claims a session inventory that only the look-alike '$SESSION' could have answered: $FM_BACKEND_TMUX_MISSING_RESPONSE"
+    ;;
+esac
+# A live server that reports the recorded session gone is the ordinary
+# killed-session recovery, and the contract recreates it without asking a human.
+[ "$FM_BACKEND_TMUX_MISSING_GRADE" = strong ] \
+  || fail "a live server reporting the recorded session absent should grade strong, got '$FM_BACKEND_TMUX_MISSING_GRADE'"
+[ -n "$FM_BACKEND_TMUX_MISSING_SOCKET" ] \
+  || fail "a strong grade from a live server should name the socket it consulted"
+
+recreated_id=$(fm_backend_tmux_recreate_task "$PREFIX_TARGET" "$HOME") \
+  || fail "fm_backend_tmux_recreate_task failed for a session that no longer exists"
+tmux has-session -t "=$PREFIX_SESSION" 2>/dev/null \
+  || fail "recreating an endpoint whose session is gone should start a session named exactly '$PREFIX_SESSION'"
+tmux list-windows -t "=$PREFIX_SESSION" -F '#{window_name}' | grep -qx "$PREFIX_WINDOW" \
+  || fail "the replacement window is not in its recorded session"
+if tmux list-windows -t "=$SESSION" -F '#{window_name}' | grep -qx "$PREFIX_WINDOW"; then
+  fail "the replacement window was grafted into the look-alike session '$SESSION'"
+fi
+[ "$(tmux display-message -p -t "$recreated_id" '#{pane_current_path}')" = "$HOME" ] \
+  || fail "the replacement endpoint did not start in the requested worktree"
+tmux kill-session -t "=$PREFIX_SESSION" >/dev/null 2>&1 || true
+pass "real tmux: a recorded session is matched exactly, so a prefix look-alike never answers for it or absorbs its endpoint"
+
+# --- the container probe and the windows created in it agree ----------------
+#
+# Whatever fm_backend_tmux_container_ensure hands back is immediately targeted
+# exactly by fm_backend_tmux_create_task, so its own existence probe has to be
+# exact too. A live "firstmate-lab" that merely prefix-matches must not be
+# mistaken for the dedicated session: the name would then address nothing and
+# every spawn into it would fail.
+
+tmux new-session -d -s firstmate-lab || fail "could not stage the look-alike container session"
+tmux has-session -t "=firstmate" 2>/dev/null \
+  && fail "the container fixture requires no session named exactly 'firstmate'"
+(
+  # container-ensure only reaches the dedicated-session branch outside tmux.
+  unset TMUX
+  container=$(fm_backend_tmux_container_ensure) \
+    || fail "fm_backend_tmux_container_ensure failed while a look-alike session was live"
+  [ "$container" = firstmate ] \
+    || fail "fm_backend_tmux_container_ensure resolved '$container', expected the dedicated 'firstmate'"
+  tmux has-session -t "=$container" 2>/dev/null \
+    || fail "fm_backend_tmux_container_ensure returned '$container' without ensuring that session exists"
+  fm_backend_tmux_create_task "$container" fm-container1 "$HOME" >/dev/null \
+    || fail "a task window could not be created in the container container-ensure resolved"
+  tmux list-windows -t "=firstmate" -F '#{window_name}' | grep -qx fm-container1 \
+    || fail "the task window is not in the dedicated container session"
+  if tmux list-windows -t "=firstmate-lab" -F '#{window_name}' | grep -qx fm-container1; then
+    fail "the task window was created in the look-alike session 'firstmate-lab'"
+  fi
+) || exit 1
+pass "real tmux: container-ensure creates and returns the dedicated session a live look-alike would otherwise stand in for"
+
 cleanup_all
 trap - EXIT

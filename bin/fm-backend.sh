@@ -879,9 +879,11 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 #   ambiguous  - the endpoint exists but its process cannot be attributed.
 #   unreadable - a target or inventory read failed or contradicted itself.
 #   unverified - this backend has no recovery classifier.
-# Only `dead` and `missing` license recovery. The tmux adapter requires a
-# successful session inventory and returns `missing` only when it omits the
-# exact window; the Herdr adapter reuses its husk
+# Only `dead` and `missing` license recovery. The tmux adapter returns `missing`
+# when a reachable server's inventory omits the exact window, when it reports the
+# session gone, and when its socket cannot be reached at all - see
+# fm_backend_missing_grade below for which of those may create an endpoint; the
+# Herdr adapter reuses its husk
 # classifier. Zellij remains unverified because its secondmate ghost-tab and
 # agent-process recovery path has not been empirically validated. Orca and cmux
 # do not support secondmate spawns.
@@ -893,6 +895,56 @@ fm_backend_agent_state() {  # <backend> <target>
     herdr) fm_backend_herdr_agent_state "$target" ;;
     *) printf 'unverified' ;;
   esac
+}
+
+# fm_backend_missing_grade: how much a `missing` verdict proves, for the one
+# caller that acts on it destructively enough to need the distinction - creating
+# a replacement endpoint. `missing` means "the recorded endpoint is not there",
+# which comes from two observations of very different strength:
+#   strong     a reachable runtime answered and the endpoint is absent from it,
+#              so nothing can still be running at that address.
+#   ambiguous  the runtime itself could not be reached, so its silence cannot
+#              distinguish a wiped endpoint from one this process cannot see.
+# Only `strong` licenses creating an endpoint without a human decision. Sets
+# FM_BACKEND_MISSING_GRADE plus FM_BACKEND_MISSING_SOCKET and
+# FM_BACKEND_MISSING_RESPONSE - the concrete address consulted and the answer it
+# gave - so the caller can hand a human the evidence rather than a verdict. It
+# sets variables instead of printing because command substitution would discard
+# them. An unrecognized backend grades ambiguous: never having asked is the
+# weakest evidence of all.
+FM_BACKEND_MISSING_GRADE=
+FM_BACKEND_MISSING_SOCKET=
+FM_BACKEND_MISSING_RESPONSE=
+# shellcheck disable=SC2034 # Read by callers after fm_backend_missing_grade returns.
+fm_backend_missing_grade() {  # <backend> <target>
+  local backend=$1 target=$2
+  FM_BACKEND_MISSING_GRADE=ambiguous
+  FM_BACKEND_MISSING_SOCKET=
+  FM_BACKEND_MISSING_RESPONSE=
+  fm_backend_source "$backend" || {
+    FM_BACKEND_MISSING_RESPONSE="backend '$backend' could not be loaded"
+    return 0
+  }
+  case "$backend" in
+    tmux)
+      fm_backend_tmux_missing_grade "$target"
+      FM_BACKEND_MISSING_GRADE=$FM_BACKEND_TMUX_MISSING_GRADE
+      FM_BACKEND_MISSING_SOCKET=$FM_BACKEND_TMUX_MISSING_SOCKET
+      FM_BACKEND_MISSING_RESPONSE=$FM_BACKEND_TMUX_MISSING_RESPONSE
+      ;;
+    herdr)
+      # Herdr reaches `missing` only from a SUCCESSFUL pane read that reported a
+      # structurally gone pane; every failed or unexpected API read already
+      # classifies `unreadable`, so a missing verdict here is always strong.
+      FM_BACKEND_MISSING_GRADE=strong
+      FM_BACKEND_MISSING_SOCKET=$target
+      FM_BACKEND_MISSING_RESPONSE="pane read succeeded and reported the pane structurally gone"
+      ;;
+    *)
+      FM_BACKEND_MISSING_RESPONSE="backend '$backend' has no recovery-grade classifier"
+      ;;
+  esac
+  return 0
 }
 
 # Backward-compatible three-state view for existing callers. An
