@@ -486,7 +486,7 @@ fm_control_claude_settings_clear() {
   [ -e "$record_path" ] || return 0
   cmds=$(_fm_control_claude_settings_recorded_commands "$record_path") || return 1
   if [ ! -e "$path" ]; then
-    rm -f -- "$record_path"
+    rm -f -- "$record_path" || return 1
     return 0
   fi
   if ! stripped=$(jq -c --argjson rec "$cmds" "$_FM_CONTROL_CLAUDE_SETTINGS_STRIP_ONLY_JQ" "$path" 2>/dev/null); then
@@ -496,13 +496,13 @@ fm_control_claude_settings_clear() {
   if jq -e '.preexisted == false' "$record_path" >/dev/null 2>&1 \
       && [ "$(printf '%s' "$stripped" | jq -S -c "$_FM_CONTROL_CLAUDE_SETTINGS_NORM_JQ")" = '{}' ]; then
     rm -f -- "$path" || return 1
-    rm -f -- "$record_path"
+    rm -f -- "$record_path" || return 1
     return 0
   fi
   if [ "$stripped" = "$(jq -c . "$path")" ]; then
     # Nothing of firstmate's is in the file; skip the rewrite so a project
     # file's own formatting stays byte-untouched.
-    rm -f -- "$record_path"
+    rm -f -- "$record_path" || return 1
     return 0
   fi
   tmp="$path.tmp.$$"

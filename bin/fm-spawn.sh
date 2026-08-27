@@ -2466,6 +2466,10 @@ if [ "$KIND" != secondmate ]; then
       # file fails the spawn loudly instead of being overwritten.
       if ! fm_control_claude_settings_install "$WT/.claude/settings.local.json" \
           "$claude_hooks_json" "$STATE_REAL/$ID.claude-settings-owned"; then
+        if ! "$FM_ROOT/bin/fm-busy-event.sh" retire \
+            "$STATE_REAL" "$ID" --gen "$BUSY_GEN"; then
+          echo "warning: could not retire busy generation after refused claude settings install for $ID" >&2
+        fi
         echo "error: could not arm claude busy hooks for $ID without risking the project's own settings; nothing was overwritten" >&2
         exit 1
       fi
