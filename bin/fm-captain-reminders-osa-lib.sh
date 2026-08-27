@@ -81,12 +81,11 @@ on run argv
 		tell list listName
 			set matches to (every reminder whose completed is false and body begins with pfx)
 			if (count of matches) is 0 then
-				set r to make new reminder with properties {name:nm, body:bd}
 				if wantDue then
-					set due date of r to (current date)
-					try
-						set remind me date of r to (current date)
-					end try
+					set alertTime to current date
+					set r to make new reminder with properties {name:nm, body:bd, due date:alertTime, remind me date:alertTime}
+				else
+					set r to make new reminder with properties {name:nm, body:bd}
 				end if
 				set outcome to "created"
 			else

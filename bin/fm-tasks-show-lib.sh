@@ -15,8 +15,20 @@
 # each see their own backlog rather than whichever one the caller happened to
 # be standing in.
 
-# The backlog CLI, always against this home.
+# The backlog CLI, always against this home and optionally bounded by an absolute
+# deadline supplied by callers that cannot block on a backlog read.
 fm_tasks_axi() {
+  local now remaining
+  if [ -n "${FM_TASKS_AXI_DEADLINE:-}" ]; then
+    case "$FM_TASKS_AXI_DEADLINE" in ''|*[!0-9]*) return 1 ;; esac
+    now=$(date +%s) || return 1
+    case "$now" in ''|*[!0-9]*) return 1 ;; esac
+    remaining=$((FM_TASKS_AXI_DEADLINE - now))
+    [ "$remaining" -gt 0 ] || return 124
+    declare -F fm_run_timed >/dev/null 2>&1 || return 1
+    (cd "${FM_HOME:-.}" && fm_run_timed "$remaining" tasks-axi "$@")
+    return
+  fi
   (cd "${FM_HOME:-.}" && tasks-axi "$@")
 }
 
@@ -58,8 +70,8 @@ fm_show_field_value() {  # <show-output> <field>
 # row must agree before any ids are emitted, so a failed or malformed listing can
 # never masquerade as an empty backlog.
 fm_open_task_ids() {  # [<tasks-axi list flags>...]
-  local output
-  output=$(fm_tasks_axi list "$@" 2>/dev/null) || return 1
+  local output rc
+  output=$(fm_tasks_axi list "$@" 2>/dev/null) || { rc=$?; return "$rc"; }
   printf '%s\n' "$output" | awk -F, '
     /^count: [0-9]+($| of [0-9]+ total$| \(showing first [0-9]+\)$)/ {
       value = $0

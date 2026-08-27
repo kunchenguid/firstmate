@@ -55,8 +55,8 @@
 # DEGRADING. Never a hard failure for the caller, which is always some other
 # piece of work that must not be held up by a reminder.
 #   - Not macOS, or no `osascript`: one diagnostic line, exit 0.
-#   - The whole projection and every individual Reminders call share the
-#     FM_REMINDERS_TIMEOUT_SECS deadline (default 10) through
+#   - The backlog snapshot, the whole projection, and every individual Reminders
+#     call share the FM_REMINDERS_TIMEOUT_SECS deadline (default 10) through
 #     bin/fm-timeout-lib.sh, which kills the whole process group. A first-run
 #     automation prompt only the captain can answer would otherwise hang this
 #     indefinitely, and this runs on the supervision path.
@@ -91,7 +91,12 @@ TIMEOUT_SECS=${FM_REMINDERS_TIMEOUT_SECS:-10}
 case "$TIMEOUT_SECS" in ''|*[!0-9]*|0) TIMEOUT_SECS=10 ;; esac
 
 WORK_DIR=
-cleanup() { [ -z "$WORK_DIR" ] || rm -rf -- "$WORK_DIR"; }
+PROJECTION_LOCK=
+PROJECTION_LOCK_HELD=0
+cleanup() {
+  [ -z "$WORK_DIR" ] || rm -rf -- "$WORK_DIR"
+  [ "$PROJECTION_LOCK_HELD" -eq 0 ] || fm_lock_release "$PROJECTION_LOCK"
+}
 trap cleanup EXIT
 
 usage() {
@@ -119,19 +124,24 @@ list_contains() {  # <newline-separated-list> <value>
 }
 
 PROJECTION_DEADLINE=0
+PROJECTION_REMAINING=0
 PROJECTION_TIMED_OUT=0
 
-projection_osa() {  # <verb> <args...>
-  local now remaining
+projection_budget() {
+  local now
   now=$(date +%s) || { PROJECTION_TIMED_OUT=1; return 1; }
   case "$now" in ''|*[!0-9]*) PROJECTION_TIMED_OUT=1; return 1 ;; esac
-  remaining=$((PROJECTION_DEADLINE - now))
-  if [ "$remaining" -le 0 ]; then
+  PROJECTION_REMAINING=$((PROJECTION_DEADLINE - now))
+  if [ "$PROJECTION_REMAINING" -le 0 ]; then
     PROJECTION_TIMED_OUT=1
     return 1
   fi
+}
+
+projection_osa() {  # <verb> <args...>
+  projection_budget || return 1
   OSA_TIMEOUT_SECS=$TIMEOUT_SECS
-  [ "$remaining" -ge "$OSA_TIMEOUT_SECS" ] || OSA_TIMEOUT_SECS=$remaining
+  [ "$PROJECTION_REMAINING" -ge "$OSA_TIMEOUT_SECS" ] || OSA_TIMEOUT_SECS=$PROJECTION_REMAINING
   if osa "$@"; then
     return 0
   fi
@@ -141,7 +151,7 @@ projection_osa() {  # <verb> <args...>
 
 run_projection() {  # <dry-run 0|1> <notify-ids newline-separated>
   local dry=$1 notify=$2 list_name desired desired_ids projected stale_ids=''
-  local id title body due outcome now desired_count stale_count total remaining
+  local id title body due outcome now rc desired_count stale_count total remaining
   local failures=0 acted=0 processed=0
 
   list_name=$(fm_reminders_list_name "$CONFIG") || return 0
@@ -152,21 +162,42 @@ run_projection() {  # <dry-run 0|1> <notify-ids newline-separated>
     fi
   fi
 
+  now=$(date +%s) || { note "could not start the Reminders deadline; nothing was projected."; return 1; }
+  case "$now" in ''|*[!0-9]*) note "could not start the Reminders deadline; nothing was projected."; return 1 ;; esac
+  PROJECTION_DEADLINE=$((now + TIMEOUT_SECS))
+  PROJECTION_TIMED_OUT=0
+  FM_TASKS_AXI_DEADLINE=$PROJECTION_DEADLINE
+
+  # shellcheck source=bin/fm-wake-lib.sh
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  PROJECTION_LOCK="$STATE/.captain-reminders.lock"
+  fm_lock_try_acquire "$PROJECTION_LOCK" || return 0
+  PROJECTION_LOCK_HELD=1
+
   WORK_DIR=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-captain-reminders.XXXXXX") || {
     note "could not stage a working directory; nothing was projected."
     return 1
   }
 
-  if ! desired=$(fm_reminders_desired); then
-    note "could not read or parse the captain backlog snapshot; nothing was projected."
+  if desired=$(fm_reminders_desired); then
+    :
+  else
+    rc=$?
+    if [ "$rc" -eq 124 ]; then
+      PROJECTION_TIMED_OUT=1
+      note "projection did not finish before the ${TIMEOUT_SECS}s deadline; the captain backlog snapshot was left incomplete and no reminders were touched."
+    else
+      note "could not read or parse the captain backlog snapshot; nothing was projected."
+    fi
+    return 1
+  fi
+  if ! projection_budget; then
+    note "projection did not finish before the ${TIMEOUT_SECS}s deadline; the captain backlog snapshot was read but no reminders were touched."
     return 1
   fi
   desired_ids=$(printf '%s\n' "$desired" | cut -f1)
   desired_count=$(printf '%s\n' "$desired" | awk 'NF { n++ } END { print n + 0 }')
-  now=$(date +%s) || { note "could not start the Reminders deadline; nothing was projected."; return 1; }
-  case "$now" in ''|*[!0-9]*) note "could not start the Reminders deadline; nothing was projected."; return 1 ;; esac
-  PROJECTION_DEADLINE=$((now + TIMEOUT_SECS))
-  PROJECTION_TIMED_OUT=0
   if ! projection_osa list "$list_name"; then
     if [ "$PROJECTION_TIMED_OUT" -eq 1 ]; then
       note "projection did not finish before the ${TIMEOUT_SECS}s deadline; $desired_count backlog entries were left unprocessed and existing list entries were not inspected."

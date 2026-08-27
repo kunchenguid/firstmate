@@ -78,13 +78,13 @@ fm_reminders_marker_id() {  # <note>
 # gate, so a future hold_until defers the entry and the live held bit is not the
 # ownership test.
 fm_reminders_desired() {
-  local ids id show state hold_kind hold_until title reason today raw
-  ids=$(fm_open_task_ids) || return 1
+  local ids id show state hold_kind hold_until title reason today raw rc
+  ids=$(fm_open_task_ids) || { rc=$?; return "$rc"; }
   today=$(date +%F) || return 1
   case "$today" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) return 1 ;; esac
   while IFS= read -r id; do
     [ -n "$id" ] || continue
-    show=$(fm_task_show "$id") || return 1
+    show=$(fm_task_show "$id") || { rc=$?; return "$rc"; }
     state=$(fm_show_field "$show" state)
     case "$state" in queued|in_flight) ;; done) continue ;; *) return 1 ;; esac
     raw=$(fm_show_field "$show" hold_kind)

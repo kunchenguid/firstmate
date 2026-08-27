@@ -58,8 +58,16 @@ case "$verb" in
     name=$3
     body=$4
     due=$5
+    exists=0
     if awk -F'\t' -v p="$prefix" 'BEGIN { n = length(p) }
       $1 == "0" && substr($3, 1, n) == p { found = 1 } END { exit !found }' "$store"; then
+      exists=1
+    fi
+    if [ -n "${FAKE_REMINDERS_GATE:-}" ]; then
+      : > "$FAKE_REMINDERS_GATE.entered"
+      while [ ! -e "$FAKE_REMINDERS_GATE.release" ]; do sleep 0.05; done
+    fi
+    if [ "$exists" -eq 1 ]; then
       before=$(cat "$store")
       awk -F'\t' -v OFS='\t' -v p="$prefix" -v n="$name" -v b="$body" '
         BEGIN { len = length(p) }
@@ -163,6 +171,60 @@ assert_contains "$OUT" "only if its title or reason changed" "status limits refr
 assert_not_contains "$OUT" "would refresh call-a" "status does not claim an unchanged entry will be rewritten"
 pass "status reports a conditional check rather than an unconditional refresh"
 
+
+# --- concurrent projections serialize without waiting -------------------------
+
+CONCURRENT_STORE="$TMP_ROOT/concurrent-reminders.tsv"
+CONCURRENT_LOG="$TMP_ROOT/concurrent-reminders.log"
+CONCURRENT_GATE="$TMP_ROOT/concurrent-gate"
+FIRST_OUT="$TMP_ROOT/concurrent-first.out"
+: > "$CONCURRENT_STORE"
+: > "$CONCURRENT_LOG"
+FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+  FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$CONCURRENT_STORE" \
+  FAKE_REMINDERS_LOG="$CONCURRENT_LOG" FAKE_REMINDERS_GATE="$CONCURRENT_GATE" \
+  "$REMINDERS" sync >"$FIRST_OUT" 2>&1 &
+FIRST_PID=$!
+attempt=0
+while [ ! -e "$CONCURRENT_GATE.entered" ] && kill -0 "$FIRST_PID" 2>/dev/null \
+  && [ "$attempt" -lt 100 ]; do
+  sleep 0.05
+  attempt=$((attempt + 1))
+done
+if [ ! -e "$CONCURRENT_GATE.entered" ]; then
+  : > "$CONCURRENT_GATE.release"
+  wait "$FIRST_PID" 2>/dev/null || true
+  fail "the first concurrent projection never reached its create boundary"
+fi
+SECOND_OUT=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+  FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$CONCURRENT_STORE" \
+  FAKE_REMINDERS_LOG="$CONCURRENT_LOG" "$REMINDERS" sync 2>&1)
+SECOND_RC=$?
+: > "$CONCURRENT_GATE.release"
+wait "$FIRST_PID" || fail "the lock-owning projection failed: $(cat "$FIRST_OUT")"
+[ "$SECOND_RC" -eq 0 ] || fail "a concurrent projection must skip with exit 0, got $SECOND_RC"
+[ -z "$SECOND_OUT" ] || fail "a concurrent projection must skip silently, got: $SECOND_OUT"
+[ "$(awk 'END { print NR }' "$CONCURRENT_STORE")" = 1 ] \
+  || fail "concurrent projections created duplicates: $(cat "$CONCURRENT_STORE")"
+[ "$(grep -c '^list$' "$CONCURRENT_LOG")" = 1 ] \
+  || fail "the skipped projection reached Reminders: $(cat "$CONCURRENT_LOG")"
+pass "a concurrent projection skips silently and cannot duplicate an entry"
+
+STALE_LOCK="$HOME_DIR/state/.captain-reminders.lock"
+: > "$CONCURRENT_LOG"
+FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+  bash -c '. "$1/bin/fm-wake-lib.sh"; fm_lock_try_acquire "$STATE/.captain-reminders.lock" || exit 1; kill -9 "$$"' \
+  _ "$ROOT" >/dev/null 2>&1 || true
+[ -L "$STALE_LOCK" ] || fail "the stale-lock fixture did not leave the helper-owned lock"
+FM_LOCK_STALE_AFTER=0 FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_REMINDERS_EXEC="$FAKE" \
+  FAKE_REMINDERS_STORE="$CONCURRENT_STORE" FAKE_REMINDERS_LOG="$CONCURRENT_LOG" \
+  "$REMINDERS" sync >/dev/null 2>&1
+[ "$(grep -c '^list$' "$CONCURRENT_LOG")" = 1 ] \
+  || fail "a dead lock owner blocked the next projection: $(cat "$CONCURRENT_LOG")"
+[ "$(awk 'END { print NR }' "$CONCURRENT_STORE")" = 1 ] \
+  || fail "stale-lock recovery duplicated the entry: $(cat "$CONCURRENT_STORE")"
+pass "a projection reclaims a lock whose owner process died"
 # --- a call that is not held for the captain is not projected ------------------
 
 axi add ordinary-b "Ordinary work" --repo demo
@@ -303,6 +365,7 @@ case "${FAKE_TASKS_AXI_MODE:-}:${1:-}" in
     exit 0
     ;;
   fail-show:show) exit 9 ;;
+  hang-list:list|hang-show:show) sleep 60; exit 0 ;;
 esac
 exec "${REAL_TASKS_AXI:?}" "$@"
 BROKEN_EOF
@@ -311,6 +374,26 @@ chmod +x "$BROKEN_BIN/tasks-axi"
 FAILURE_STORE="$TMP_ROOT/failure-reminders.tsv"
 FAILURE_LOG="$TMP_ROOT/failure-reminders.log"
 printf '0\tStale read\t[fm:stale-read] old reason\t0\n' > "$FAILURE_STORE"
+for mode in hang-list hang-show; do
+  BEFORE=$(cat "$FAILURE_STORE")
+  : > "$FAILURE_LOG"
+  START=$(date +%s)
+  OUT=$(PATH="$BROKEN_BIN:$PATH" REAL_TASKS_AXI="$REAL_TASKS_AXI" FAKE_TASKS_AXI_MODE="$mode" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$FAILURE_STORE" \
+    FAKE_REMINDERS_LOG="$FAILURE_LOG" FM_REMINDERS_TIMEOUT_SECS=2 \
+    "$REMINDERS" sync 2>&1)
+  RC=$?
+  ELAPSED=$(( $(date +%s) - START ))
+  [ "$ELAPSED" -lt 10 ] || fail "$mode backlog read held the caller for ${ELAPSED}s"
+  [ "$RC" -ne 0 ] || fail "$mode backlog timeout reported success"
+  assert_contains "$OUT" "backlog snapshot was left incomplete" \
+    "$mode timeout names the incomplete snapshot"
+  [ "$BEFORE" = "$(cat "$FAILURE_STORE")" ] || fail "$mode backlog timeout changed reminders"
+  [ ! -s "$FAILURE_LOG" ] || fail "$mode backlog timeout reached Reminders: $(cat "$FAILURE_LOG")"
+done
+pass "list and show reads share the whole projection deadline"
+
 for mode in malformed-list fail-show; do
   BEFORE=$(cat "$FAILURE_STORE")
   : > "$FAILURE_LOG"
