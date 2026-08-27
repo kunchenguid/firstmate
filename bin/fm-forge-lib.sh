@@ -19,7 +19,7 @@ set -u
 fm_forge_normalize_host() {
   printf '%s' "${1:-}" \
     | tr '[:upper:]' '[:lower:]' \
-    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/\.$//'
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/\.*$//'
 }
 
 # fm_forge_detect_provider <path-to-checkout>
