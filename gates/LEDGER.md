@@ -1,7 +1,8 @@
 # Gate Ledger
 
-## Drain list (0)
+## Drain list (1)
 
+- [ ] gate-l2-loop-audit-level — loop-audit scores the repo at level L2 or better (score >= 58) (red) **ready**
 
 ## All gates
 
@@ -25,4 +26,4 @@
 | gate-i4-revise-cap-fail-closed | green | Second revise escalates; at-cap intakes escalate without running the panel; a PANEL-less thinker escalates, never proceeds |
 | gate-i5-intake-lens-degrade | green | Intake with no Fugu key + no codex degrades the lens to none loudly; intake still completes |
 | gate-l1-drain-instrumented | green | Wake drain appends a run-log JSON line and stamps STATE.md; FM_LOOP_LOG=0 disables; log failure never breaks the drain |
-| gate-l2-loop-audit-level | green | loop-audit scores the repo at level L2 or better (score >= 58) |
+| gate-l2-loop-audit-level | red | loop-audit scores the repo at level L2 or better (score >= 58) |
