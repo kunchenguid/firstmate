@@ -6,6 +6,12 @@
 # registered custom checks remain armed, and every other task poll is
 # quarantined for private review. A current X-mode shim is preserved by exact
 # content, while the recognized older byte-static shim is refreshed in place.
+#
+# Private artifacts are expected at mode 0600 and the quarantine directory at
+# 0700, but some filesystems cannot enforce POSIX permission bits (a WSL2 v9fs
+# or DrvFs mount of a Windows drive reads every file back as 0777). There the
+# exact-mode assertions are skipped through fm_pr_mode_matches while every other
+# protection stays in force; bin/fm-pr-lib.sh owns that mode-inert accommodation.
 # Usage: fm-pr-check-migrate.sh [--checks-safe]
 set -u
 
@@ -97,7 +103,7 @@ private_migration_boundaries_valid() {
   fi
   if [ -e "$QUARANTINE" ] || [ -L "$QUARANTINE" ]; then
     [ -d "$QUARANTINE" ] && [ ! -L "$QUARANTINE" ] || return 1
-    [ "$(fm_pr_file_mode "$QUARANTINE")" = 700 ] || return 1
+    fm_pr_mode_matches "$QUARANTINE" 700 || return 1
     [ "$(fm_pr_file_device "$QUARANTINE")" = "$state_device" ] || return 1
     for artifact in "$QUARANTINE"/* "$QUARANTINE"/.[!.]* "$QUARANTINE"/..?*; do
       [ -e "$artifact" ] || [ -L "$artifact" ] || continue
@@ -472,7 +478,7 @@ publish_scan_marker() {
 
 quarantine_dir_valid() {
   [ -d "$QUARANTINE" ] && [ ! -L "$QUARANTINE" ] || return 1
-  [ "$(fm_pr_file_mode "$QUARANTINE")" = 700 ] || return 1
+  fm_pr_mode_matches "$QUARANTINE" 700 || return 1
   [ "$(fm_pr_file_device "$QUARANTINE")" = "$STATE_DEVICE" ]
 }
 
@@ -497,7 +503,7 @@ quarantine_tree_repair_and_validate() {
     [ "$(fm_pr_file_device "$artifact")" = "$STATE_DEVICE" ] || return 1
     [ "$(fm_pr_file_link_count "$artifact")" = 1 ] || return 1
     chmod 0600 "$artifact" || return 1
-    [ "$(fm_pr_file_mode "$artifact")" = 600 ] || return 1
+    fm_pr_mode_matches "$artifact" 600 || return 1
     [ "$(fm_pr_file_device "$artifact")" = "$STATE_DEVICE" ] || return 1
     [ "$(fm_pr_file_link_count "$artifact")" = 1 ] || return 1
   done
@@ -546,7 +552,7 @@ quarantine_artifact() {
   [ "$(fm_pr_file_link_count "$destination")" = 1 ] || return 1
   chmod 0600 "$destination" || return 1
   [ -f "$destination" ] && [ ! -L "$destination" ] || return 1
-  [ "$(fm_pr_file_mode "$destination")" = 600 ] || return 1
+  fm_pr_mode_matches "$destination" 600 || return 1
   [ "$(fm_pr_file_device "$destination")" = "$STATE_DEVICE" ] || return 1
   [ "$(fm_pr_file_link_count "$destination")" = 1 ] || return 1
   [ ! -e "$source" ] && [ ! -L "$source" ]

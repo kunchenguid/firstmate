@@ -263,10 +263,61 @@ fm_pr_sha256() {
   fi
 }
 
+# Some filesystems cannot enforce POSIX permission bits. A WSL2 v9fs or DrvFs
+# mount of a Windows drive, and some network mounts, report every file as 0777
+# no matter what chmod requested, so an exact-mode equality assertion can never
+# be satisfied there. This probe decides whether the filesystem holding <dir>
+# enforces chmod: it creates a private temp file, requests mode 0600, and reads
+# the mode back. The verdict is cached per device so the probe runs at most once
+# per filesystem. When the probe cannot run for any reason the verdict defaults
+# to enforced, so a real POSIX filesystem is never weakened by a failed probe.
+# Returns 0 when modes are enforced (strict assertions apply) and 1 when the
+# filesystem is mode-inert. The verdict is cached against the last probed device;
+# the state directory and its quarantine share one device, so one probe answers
+# every call in a run.
+FM_PR_MODE_PROBE_DEVICE=
+FM_PR_MODE_PROBE_VERDICT=
+
+fm_pr_fs_enforces_mode() {
+  local dir=$1 device probe verdict mode
+  device=$(fm_pr_file_device "$dir" 2>/dev/null) || device=
+  if [ -n "$device" ] && [ "$device" = "$FM_PR_MODE_PROBE_DEVICE" ]; then
+    return "$FM_PR_MODE_PROBE_VERDICT"
+  fi
+  verdict=0
+  probe=$(mktemp "$dir/.fm-mode-probe.XXXXXX" 2>/dev/null) || probe=
+  if [ -n "$probe" ]; then
+    if chmod 0600 "$probe" 2>/dev/null; then
+      mode=$(fm_pr_file_mode "$probe")
+      [ -n "$mode" ] && [ "$mode" != 600 ] && verdict=1
+    fi
+    rm -f -- "$probe"
+  fi
+  if [ -n "$device" ]; then
+    FM_PR_MODE_PROBE_DEVICE=$device
+    FM_PR_MODE_PROBE_VERDICT=$verdict
+  fi
+  return "$verdict"
+}
+
+# Assert <path> has exactly <mode>, unless the filesystem holding it cannot
+# enforce chmod (see fm_pr_fs_enforces_mode), in which case the permission bits
+# carry no meaning and the equality check is skipped. Every other protection at
+# the call site (regular file, single link, expected device, content) stays in
+# force; on a mode-inert filesystem privacy comes from the OS or mount, for
+# example Windows ACLs, rather than the POSIX bits.
+fm_pr_mode_matches() {
+  local path=$1 mode=$2 dir
+  dir=${path%/*}
+  [ "$dir" != "$path" ] || dir=.
+  fm_pr_fs_enforces_mode "$dir" || return 0
+  [ "$(fm_pr_file_mode "$path")" = "$mode" ]
+}
+
 fm_pr_private_file_valid() {
   local path=$1 mode=$2 device=$3
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
+  fm_pr_mode_matches "$path" "$mode" || return 1
   [ "$(fm_pr_file_device "$path")" = "$device" ] || return 1
   [ "$(fm_pr_file_link_count "$path")" = 1 ]
 }

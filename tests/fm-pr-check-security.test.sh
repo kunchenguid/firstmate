@@ -953,6 +953,118 @@ test_migration_initializes_fresh_state() {
   pass "migration creates and validates private state before watcher exclusion"
 }
 
+# Some filesystems cannot enforce POSIX permission bits (a WSL2 v9fs or DrvFs
+# mount of a Windows drive reads every file back as 0777). fm_pr_private_file_valid
+# must skip the exact-mode equality there while keeping every other protection,
+# and must still reject a wrong-mode private file on a mode-enforcing filesystem.
+test_private_file_mode_validation_accommodates_mode_inert_fs() {
+  local dir device file
+  dir="$TMP_ROOT/mode-inert-private-file"
+  mkdir -p "$dir"
+  device=$(fm_pr_file_device "$dir") || fail "could not read fixture device"
+  file="$dir/marker"
+  printf 'x\n' > "$file"
+
+  # The temp filesystem enforces modes, so the probe must report enforcement and
+  # the validator must reject a world-readable private file but accept 0600.
+  fm_pr_fs_enforces_mode "$dir" \
+    || fail "probe reported a mode-enforcing filesystem as mode-inert"
+  chmod 0644 "$file"
+  ! fm_pr_private_file_valid "$file" 600 "$device" \
+    || fail "mode-enforcing filesystem accepted a world-readable private marker"
+  chmod 0600 "$file"
+  fm_pr_private_file_valid "$file" 600 "$device" \
+    || fail "mode-enforcing filesystem rejected a correct 0600 private marker"
+
+  # Simulate a mode-inert filesystem by stubbing the probe to report no
+  # enforcement. The exact-mode check is skipped, but the regular-file, single-
+  # link, and device protections stay in force.
+  local real_probe
+  real_probe=$(declare -f fm_pr_fs_enforces_mode)
+  fm_pr_fs_enforces_mode() { return 1; }
+  chmod 0644 "$file"
+  fm_pr_private_file_valid "$file" 600 "$device" \
+    || fail "mode-inert filesystem rejected a private marker on its permission bits"
+  ln -s "$file" "$dir/link"
+  ! fm_pr_private_file_valid "$dir/link" 600 "$device" \
+    || fail "mode-inert filesystem accepted a symlinked private marker"
+  ! fm_pr_private_file_valid "$file" 600 999999 \
+    || fail "mode-inert filesystem accepted a private marker on the wrong device"
+  eval "$real_probe"
+  pass "private-file validation skips only exact mode on a mode-inert filesystem"
+}
+
+# The non-executing migration arms the watcher's PR checks. On a mode-inert
+# state filesystem its 0600/0700 assertions can never be satisfied, so before
+# this accommodation the migration failed permanently and the watcher refused to
+# run. A stat shim reproduces that filesystem by reporting every mode as 0777
+# while device, inode, and link count stay real; the migration must complete and
+# --checks-safe must exit 0 so the watcher can arm.
+test_migration_completes_on_mode_inert_fs() {
+  local dir state fakebin rc
+  dir="$TMP_ROOT/migration-mode-inert"
+  state="$dir/home/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$dir/home" "$fakebin"
+  cat > "$fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+# Mode-inert filesystem simulation: permission bits always read back as 0777
+# while device, inode, and link count pass through to the real stat.
+for arg in "$@"; do
+  case "$arg" in
+    '%a'|'%Lp') printf '%s\n' 777; exit 0 ;;
+  esac
+done
+exec "${FM_TEST_REAL_STAT:?}" "$@"
+SH
+  chmod +x "$fakebin/stat"
+
+  # Confirm the shim actually reports an inert mode, so a passing migration below
+  # is proof of the accommodation rather than a vacuous run.
+  printf 'x\n' > "$dir/probe"
+  chmod 0600 "$dir/probe"
+  [ "$(FM_TEST_REAL_STAT="$REAL_STAT" PATH="$fakebin:$BASE_PATH" stat -c %a "$dir/probe")" = 777 ] \
+    || fail "mode-inert stat shim did not report inert permission bits"
+
+  set +e
+  FM_TEST_REAL_STAT="$REAL_STAT" FM_HOME="$dir/home" PATH="$fakebin:$BASE_PATH" \
+    "$MIGRATE" --checks-safe > "$dir/migrate-safe.out" 2> "$dir/migrate-safe.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "mode-inert --checks-safe migration failed so the watcher cannot arm: $(cat "$dir/migrate-safe.err")"
+  [ -f "$state/.pr-check-migration-scan-v1" ] && [ ! -L "$state/.pr-check-migration-scan-v1" ] \
+    || fail "mode-inert --checks-safe migration did not publish a scan marker"
+  grep -qxF fm-pr-check-migration-scan-v1 "$state/.pr-check-migration-scan-v1" \
+    || fail "mode-inert scan marker bytes were not exact"
+
+  set +e
+  FM_TEST_REAL_STAT="$REAL_STAT" FM_HOME="$dir/home" PATH="$fakebin:$BASE_PATH" \
+    "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "mode-inert full migration failed: $(cat "$dir/migrate.err")"
+  [ -f "$state/.pr-check-migration-v1" ] && [ ! -L "$state/.pr-check-migration-v1" ] \
+    || fail "mode-inert migration did not publish a completion marker"
+  grep -qxF fm-pr-check-migration-v1 "$state/.pr-check-migration-v1" \
+    || fail "mode-inert migration marker bytes were not exact"
+
+  # Regression guard: on the mode-enforcing temp filesystem (no shim) the same
+  # migration still completes and still writes strict 0600 private markers.
+  dir="$TMP_ROOT/migration-mode-enforcing"
+  state="$dir/home/state"
+  mkdir -p "$dir/home"
+  set +e
+  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" --checks-safe \
+    > "$dir/migrate.out" 2> "$dir/migrate.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "mode-enforcing migration failed: $(cat "$dir/migrate.err")"
+  assert_valid_scan_marker "$state/.pr-check-migration-scan-v1"
+  assert_valid_migration_marker "$state/.pr-check-migration-v1"
+  pass "migration arms the watcher on a mode-inert filesystem and stays strict on a mode-enforcing one"
+}
+
 test_private_artifact_paths_refuse_symlinks_and_directories() {
   local artifact kind dir state destination rc
   for artifact in task-a.pr-poll task-a.pr-poll-registration task-a.check.sh; do
@@ -3698,6 +3810,8 @@ test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_postrename_poll_validation_revokes_and_retries
 test_migration_initializes_fresh_state
+test_private_file_mode_validation_accommodates_mode_inert_fs
+test_migration_completes_on_mode_inert_fs
 test_migration_excludes_older_watcher_before_scan
 test_private_artifact_paths_refuse_symlinks_and_directories
 test_marker_and_diagnostic_rename_fail_closed
