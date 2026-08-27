@@ -35,9 +35,12 @@
 # optional --origin records provenance in the new task's body and supplies the
 # default repo from that origin's metadata). Prefer holding the work item the
 # question gates over minting a new row. Repeating `hold` with the same id is
-# idempotent; a task already closed is refused rather than reopened. `--until`
-# records the captain's own deferral date through `tasks-axi hold --until`, so
-# a "revisit later" answer is stored as a date instead of a live card.
+# idempotent; a task already closed is refused rather than reopened, and an id
+# tasks-axi has already pruned into the done archive is refused the same way:
+# it names a genuinely closed call, and creating under it would silently
+# resurrect an answered decision. `--until` records the captain's own deferral
+# date through `tasks-axi hold --until`, so a "revisit later" answer is stored
+# as a date instead of a live card.
 #
 # `answer` records the captain's exact words and closes the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes,
@@ -51,9 +54,13 @@
 # `answer` records the missing resolution block (the old `repair` path) only
 # when the task still carries the captain-hold provenance tasks-axi preserves
 # through a close, so an ordinary finished task cannot be dressed up as an
-# answered captain call. A hold that expired by date (`--until` in the past) is
-# still answerable: the surviving hold annotations, not tasks-axi's live
-# `held:` bit, prove the captain owned it.
+# answered captain call. A task already pruned into the done archive has no
+# live update path, so re-answering it is only an idempotent replay of its own
+# recorded resolution: the decision digest and close mode must both match, and
+# an archived call with no recorded answer fails rather than being repaired.
+# A hold that expired by date (`--until` in the past) is still answerable: the
+# surviving hold annotations, not tasks-axi's live `held:` bit, prove the
+# captain owned it.
 #
 # ONE KEYED-ANSWER INTAKE, FED BY EVERY CHANNEL.
 # "A keyed answer closes its matching captain-held task" is a single
@@ -100,20 +107,24 @@
 # `--none` is an explicit semantic attestation that the just-reviewed surface
 # has no unresolved captain call, and is refused while the origin still has an
 # open keyed status decision. With a non-empty inventory, every listed task is
-# verified durable (actively captain-held, or closed with a recorded answer),
-# the inventory is unioned idempotently into the metadata, and every still-open
+# verified durable (actively captain-held, closed with a recorded answer, or
+# carrying that answer in the done archive), the inventory is unioned
+# idempotently into the metadata, and every still-open
 # keyed status decision is transferred to its durable owner with a
 # `captain-held [key=...]` status close naming the inventory. Later review
 # passes may add ids. A post-teardown visual review can complete against the
 # surviving report and tasks without recreating task state.
 # `verify` is read-only and is called by scout teardown, so teardown cannot
 # erase a source before this gate has succeeded: every recorded inventory
-# entry must still be durable and no keyed status decision may be open.
+# entry must still be durable - live or archived - and no keyed status
+# decision may be open. An archived id with no recorded answer still fails
+# this gate exactly as an unresolved live task would.
 # Metadata compatibility: the attestation keeps the historical
 # `decisions_reviewed=1` and `decision_keys=` keys, and an inventory entry that
 # names no existing task resolves through the legacy `<origin>-decision-<entry>`
 # identity, so pre-collapse metadata written by fm-decision-hold.sh verifies
-# unchanged. An entry that exists as a task id is always that task.
+# unchanged. An entry that exists as a task id (live or archived) is always
+# that task.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
