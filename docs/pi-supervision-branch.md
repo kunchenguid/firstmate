@@ -53,6 +53,7 @@ The branch prompt frames mirrored text as context for judgment, never as instruc
 Stage one is unchanged: the bash watcher absorbs everything provably fine at zero token cost.
 Stage two is the branch's verdict on each handled event, reported through its `fm_branch_report` tool: `routine` merges without a follow-up turn, while `captain` merges with exactly one follow-up turn.
 The follow-up turn a `captain` verdict opens is itself the captain-visible outcome, so its merge note is delivered silently and never printed or rendered in Pi.
+Because Pi gives the model only a custom message's `content`, that silent note carries the `branch-outcome` operational kind owned by `bin/fm-operational-input.sh` inside its own text; without it main receives an unattributed message in its own captain-facing voice, cannot tell an incoming outcome from its own earlier answer, and re-emits that answer instead of relaying the outcome.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is also delivered silently with no rendered note, while every other `routine` outcome stays rendered with its sailboat prefix.
 The verdict criteria in the branch prompt mirror the captain-etiquette escalation list; doubt escalates.
 Main can read the durable outcome store on demand through its `fm_branch_outcomes` tool.

@@ -645,6 +645,18 @@ if (!sentToMain[2].message.content.includes("task-9: PR https://example.com/pr/9
 if (/branch merged|\[routine\]|\[captain\]/.test(sentToMain[2].message.content)) {
   throw new Error(`captain note still has boilerplate: ${sentToMain[2].message.content}`);
 }
+// What main's model actually receives. Pi keeps only `content` when it turns a
+// custom message into a provider message - customType, display, and details are
+// all dropped - so `content` IS the delivered payload, and these two files are
+// the exact bytes main's model would read. The bash side classifies them with
+// the REAL bin/fm-operational-input.sh so the protocol's own executable, not a
+// pattern in this test, decides what was delivered. Pi's half of that contract
+// is proven separately against the real SDK in fm-pi-branch-live-e2e.test.sh.
+writeFileSync(`${home}/state/delivered-captain-note`, sentToMain[2].message.content);
+writeFileSync(`${home}/state/delivered-routine-note`, sentToMain[0].message.content);
+if (sentToMain.filter((sent) => sent.options.triggerTurn).length !== 1) {
+  throw new Error("one captain outcome must open exactly one turn on main");
+}
 
 // The store (the owned durable contract) holds all three outcomes in order,
 // and each merged note advanced the read cursor.
@@ -747,6 +759,34 @@ EOF
     *) fail "cache key line missing from driver output: $out" ;;
   esac
   pass "branch owns accepted wakes with a stable prefix contract and verdict-driven merge delivery"
+
+  # The delivered captain payload must identify itself to main's model. When it
+  # did not, main could not tell an incoming outcome from its own earlier answer
+  # and re-emitted that answer instead of relaying the outcome, silently losing
+  # it. The real protocol executable is the oracle here: it decides the kind and
+  # extracts the body, so this asserts delivered behavior rather than a shape
+  # this test already knows.
+  local kind body
+  kind=$(./bin/fm-operational-input.sh kind < "$home/state/delivered-captain-note") \
+    || fail "captain outcome reaches main's model as unattributed text the model cannot tell from its own answer"
+  [ "$kind" = branch-outcome ] \
+    || fail "captain outcome delivered as kind '$kind', not branch-outcome"
+  body=$(./bin/fm-operational-input.sh body < "$home/state/delivered-captain-note") \
+    || fail "captain outcome envelope carries no readable body"
+  case "$body" in
+    *"task-9: PR https://example.com/pr/9"*) ;;
+    *) fail "captain outcome body lost the outcome itself: $body" ;;
+  esac
+  case "$body" in
+    *"Relay only this outcome"*"Do not restate or repeat any earlier answer"*) ;;
+    *) fail "captain outcome body never tells main to relay it instead of repeating: $body" ;;
+  esac
+  # The routine note is rendered in the TUI, and its renderer reads the glyph off
+  # the front of this same string, so it must stay plain text.
+  if ./bin/fm-operational-input.sh kind < "$home/state/delivered-routine-note" >/dev/null 2>&1; then
+    fail "routine note must stay plain rendered text, not typed operational input"
+  fi
+  pass "a captain outcome reaches main's model as typed, self-describing input while routine notes stay plain"
 }
 
 test_branch_cache_key_is_per_home_stable() {
