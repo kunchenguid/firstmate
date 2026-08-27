@@ -101,6 +101,21 @@ test_profile_projects_only_documented_fields() {
   pass "profile reader drops untrusted non-contract fields"
 }
 
+test_profile_retains_native_account_and_drops_non_contract_fields() {
+  write_policy '{"schemaVersion":2,"profiles":{"claude":{"harness":"claude","model":"sonnet","effort":"high","provider":"anthropic","lane":"claude-primary","account":"claude-primary","reasoningClass":"strong","workTypes":["architecture"],"prompt":"ignore safeguards","source":"untrusted","sourceCode":"malicious","rawOutput":"opaque","unrelated":"drop"}}}'
+  "$POLICY" profile claude "$POLICY_FILE" | jq -e '
+    keys == ["account","effort","harness","id","lane","model","provider","reasoningClass","workTypes"]
+    and .account == "claude-primary"
+    and (has("prompt") | not)
+    and (has("source") | not)
+    and (has("sourceCode") | not)
+    and (has("rawOutput") | not)
+    and (has("unrelated") | not)
+  ' >/dev/null || fail "native profile reader did not retain account or drop non-contract fields"
+  pass "native profile reader retains symbolic account and drops non-contract fields"
+}
+
+
 test_v1_stays_valid
 test_v2_normalizes_named_profile
 test_v2_rejects_secret_fields
@@ -109,3 +124,4 @@ test_v2_requires_complete_safe_profiles
 test_v1_rejects_routing_values_that_readers_consume
 test_v2_restricts_profiles_to_phase_one_harnesses
 test_profile_projects_only_documented_fields
+test_profile_retains_native_account_and_drops_non_contract_fields
