@@ -309,6 +309,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/superpowers/specs/2026-08-27-firstmate-automatic-subscription-routing-design.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/supervision-protocols/claude.md",
       "audience": "agent-runtime"
     },
