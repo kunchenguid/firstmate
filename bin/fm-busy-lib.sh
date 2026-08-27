@@ -991,18 +991,6 @@ fm_busy_classify_meta() {  # <meta-file> <id> <state-dir> [tail40]
   fm_busy_classify "$backend" "$target" "$harness" "$id" "$state" "$tail40"
 }
 
-# fm_busy_classify_meta_live: the metadata-resolving form of
-# fm_busy_classify_live. A cached semantic record can classify busy only while
-# the recorded endpoint still exists; an absent or unreadable endpoint is dead.
-fm_busy_classify_meta_live() {  # <meta-file> <id> <state-dir>
-  local meta=$1 id=$2 state=$3 backend target harness
-  [ -f "$meta" ] || { printf 'unknown missing'; return 0; }
-  backend=$(fm_backend_of_meta "$meta")
-  target=$(fm_backend_target_of_meta "$meta")
-  harness=$(fm_meta_get "$meta" harness)
-  fm_busy_classify_live "$backend" "$target" "$harness" "$id" "$state"
-}
-
 # fm_busy_is_busy: boolean view for callers that only gate on provable
 # activity. 0 iff the classification verdict is exactly busy; idle, unknown,
 # and dead all return 1, so an unknown can never be silently promoted to
