@@ -34,7 +34,11 @@
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
 #      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      diverged from it, invalidates attribution. One exemption: an ACTIVE run
+#      whose pipeline owns the branch (branch_sync.state=pipeline_owned) binds
+#      without head equality, and in the coarse runs scan an unresolvable head
+#      is unknown attribution that stops the scan instead of falling through to
+#      an older row (both rules owned by bin/fm-nm-run-lib.sh).
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -401,6 +405,13 @@ nm_runs_status_for_branch() {  # <branch>
       # Same code-identity rule as axi status: skip a same-branch row whose
       # short-sha does not match this worktree (rewritten or advanced tip).
       if ! nm_coarse_head_matches_worktree "$sha"; then
+        # An UNRESOLVABLE head is unknown attribution, not a proven
+        # mismatch: the row may be the live run on a pipeline-owned lane
+        # head that never reached this worktree. Falling through to an
+        # OLDER row here is the F10 inversion (a superseded failed row
+        # surfacing over the live run) - stop the scan and let the
+        # caller's pane/log fallback answer instead.
+        fm_nm_head_resolvable "$WT" "$sha" || return 0
         continue
       fi
       printf '%s' "$st"
@@ -443,7 +454,12 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
+    # Head equality, or the pipeline-owned-active exemption: while the
+    # pipeline owns this branch, the daemon's own branch attribution is
+    # authoritative and the lane head need not be a git object here
+    # (fm_nm_run_is_pipeline_owned_active in bin/fm-nm-run-lib.sh).
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
+      && { nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT"; }; then
       HAVE_RUN=1
     else
       # The active-or-most-recent run is for another branch, or same branch with

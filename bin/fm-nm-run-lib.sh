@@ -63,6 +63,8 @@ fm_nm_field() {  # <toon-output> <key>
 #     the same history advanced the run tip past local HEAD)
 #   - run head is a strict ancestor of worktree HEAD, or diverged: no match
 #     (local work advanced outside the run, or the branch tip was rewritten)
+# fm_nm_run_is_pipeline_owned_active below carries the one exemption: a live
+# run whose pipeline currently owns the branch binds without head equality.
 fm_nm_head_matches_worktree() {  # <worktree> <run_head>
   local wt=$1 run_head=$2 local_full run_full
   [ -n "$run_head" ] || return 1
@@ -70,4 +72,53 @@ fm_nm_head_matches_worktree() {  # <worktree> <run_head>
   run_full=$(git -C "$wt" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
   [ "$run_full" = "$local_full" ] && return 0
   git -C "$wt" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
+}
+
+# 0 if head $2 resolves to a commit object in worktree $1 at all. This
+# distinguishes a PROVEN mismatch (resolvable but not current: a historical or
+# diverged head fm_nm_head_matches_worktree correctly rejects) from UNKNOWN
+# attribution (unresolvable: e.g. a pipeline-owned lane head that never
+# reached this worktree). A caller scanning run rows newest-first must stop on
+# unknown attribution rather than fall through to an older row, or a
+# superseded terminal run surfaces over the live one (the F10 incident).
+fm_nm_head_resolvable() {  # <worktree> <head>
+  [ -n "$2" ] || return 1
+  git -C "$1" rev-parse --verify --quiet "$2^{commit}" >/dev/null 2>&1
+}
+
+# branch_sync.state from captured `axi status` TOON $1: the scalar directly
+# under the top-level `branch_sync:` block. The first `state:` inside the
+# block is the direct child (the nested local/pipeline/target/remote
+# sub-blocks carry no `state:` key). Empty when the block is absent: no run
+# on the current branch, another branch's run, or a CLI without branch sync.
+fm_nm_branch_sync_state() {  # <toon-output>
+  local s
+  s=$(printf '%s\n' "$1" \
+    | sed -n '/^[[:space:]]*branch_sync:[[:space:]]*$/,/^[^[:space:]][^:]*:/s/^[[:space:]]\{1,\}state:[[:space:]]*\(.*\)/\1/p' \
+    | head -1)
+  fm_nm_strip_quotes "$s"
+}
+
+# 0 if the run in captured `axi status` TOON $1 is still in flight: no
+# terminal outcome and no terminal status.
+fm_nm_run_is_active() {  # <toon-output>
+  local status outcome
+  status=$(fm_nm_strip_quotes "$(fm_nm_field "$1" status)")
+  outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$1" outcome)")
+  [ -z "$outcome" ] || return 1
+  case "$status" in completed|failed|cancelled) return 1 ;; esac
+}
+
+# The one exemption to the head rule above (the F10 run-attribution hotfix):
+# while the pipeline OWNS the branch (branch_sync.state=pipeline_owned), the
+# daemon's own branch attribution IS the attribution for an ACTIVE run, and
+# head equality must not be required - the pipeline's lane head is routinely
+# not a git object in the task worktree (rebase and fix commits that were
+# never pushed back), so the head rule rejects exactly the run that is most
+# current. The exemption never applies to a terminal run: a terminal run has
+# released the branch, and binding one by branch name alone is the historical
+# reused-branch misattribution the head rule exists to prevent.
+fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
+  [ "$(fm_nm_branch_sync_state "$1")" = pipeline_owned ] || return 1
+  fm_nm_run_is_active "$1"
 }
