@@ -57,7 +57,7 @@ Because Pi gives the model only a custom message's `content`, that silent note n
 This self-description lets main distinguish a new supervision outcome from its own earlier captain-facing answer; without it, main can mistake the outcome for that answer and re-emit the stale answer instead of relaying the outcome.
 If envelope encoding fails, the note degrades to the same relay instruction as plain text rather than losing the outcome or opening another turn.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is also delivered silently with no rendered note, while every other `routine` outcome stays rendered with its sailboat prefix.
-A later recheck of a declared `paused:` external wait whose stored wait identity is unchanged is recorded the same way: the first notice renders, then identical waits stay silent across restarts, while a changed wait, recovery, decision, blocker, validation failure, green PR, merge, or different task stays visible.
+A later recheck of a declared `paused:` external wait is explicitly recorded silent only when its stored wait identity, consequence, and required action are unchanged: the first notice renders, then confirmed unchanged waits stay silent across restarts, while a changed wait, consequence, required action, recovery, decision, blocker, validation failure, green PR, merge, or different task stays visible.
 The verdict criteria in the branch prompt mirror the captain-etiquette escalation list; doubt escalates.
 Main can read the durable outcome store on demand through its `fm_branch_outcomes` tool.
 
