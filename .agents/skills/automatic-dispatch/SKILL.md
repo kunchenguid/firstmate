@@ -7,8 +7,7 @@ metadata:
 
 # automatic-dispatch
 
-This skill owns routing.
-`quota-array-dispatch` alone interprets quota; `harness-adapters` owns catalogs and spawning.
+[`configuration`](../../../docs/configuration.md#crew-dispatch-profiles-configcrew-dispatchjson) owns schema and account lanes; `quota-array-dispatch` owns quota; `harness-adapters` owns catalogs and spawning.
 
 ## Intake sequence
 

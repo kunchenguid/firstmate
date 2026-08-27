@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # fm-dispatch-policy.sh - validates and reads the versioned crew dispatch policy.
+# Operator schema: docs/configuration.md "Crew dispatch profiles".
 set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

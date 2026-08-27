@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "accounts": {
+    "claude-primary": {"harness": "claude", "envName": "CLAUDE_CONFIG_DIR", "configDir": "/home/yaro/.claude"},
+    "codex-primary": {"harness": "codex", "envName": "CODEX_HOME", "configDir": "/home/yaro/.codex"},
+    "codex-secondary": {"harness": "codex", "envName": "CODEX_HOME", "configDir": "/home/yaro/.codex2"}
+  }
+}

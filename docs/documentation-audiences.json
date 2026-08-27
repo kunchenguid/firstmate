@@ -109,6 +109,10 @@
   ],
   "surfaces": [
     {
+      "path": ".agents/skills/automatic-dispatch/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/afk/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -261,6 +265,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/examples/crew-accounts.json",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/crew-dispatch.json",
       "audience": "operator-example"
     },
@@ -309,7 +317,23 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/superpowers/plans/2026-08-20-paperclip-firstmate-integration.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-08-21-canonical-development-repositories-implementation.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/superpowers/plans/2026-08-27-firstmate-automatic-subscription-routing-implementation.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-08-20-paperclip-firstmate-integration-design.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-08-21-canonical-development-repositories-design.md",
       "audience": "maintainer-architecture"
     },
     {
@@ -355,6 +379,10 @@
     {
       "path": "docs/turnend-guard.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/verification/automatic-dispatch.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "docs/verification/dispatch-auth.md",

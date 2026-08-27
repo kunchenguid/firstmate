@@ -7,6 +7,10 @@ set -u
 
 CHECK="$ROOT/bin/fm-doc-audience-check.sh"
 INVENTORY="$ROOT/docs/documentation-audiences.json"
+POLICY="$ROOT/bin/fm-dispatch-policy.sh"
+ACCOUNTS="$ROOT/bin/fm-account-lane.sh"
+POLICY_EXAMPLE="$ROOT/docs/examples/crew-dispatch.json"
+ACCOUNTS_EXAMPLE="$ROOT/docs/examples/crew-accounts.json"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-doc-audiences.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
@@ -135,7 +139,65 @@ MD
   pass "local links resolve while dates, versions, commands, and incident prose remain semantically reviewed"
 }
 
+test_subscription_examples_match_executable_schemas() {
+  "$POLICY" validate "$POLICY_EXAMPLE" \
+    || fail "version 2 crew-dispatch example is rejected by the policy validator"
+  "$ACCOUNTS" validate "$ACCOUNTS_EXAMPLE" \
+    || fail "crew-accounts example is rejected by the account-lane validator"
+
+  jq -e '
+    .schemaVersion == 2
+    and .routing.mode == "simulate"
+    and .routing.limits == {canary:3, automatic:6, burst:8, perLane:2, perAccount:2}
+    and .routing.circuitBreaker == {failures:3, windowSeconds:900, cooldownSeconds:1800}
+    and .routing.transientRetries == 1
+    and ([.profiles[] | keys_unsorted - ["harness", "model", "effort", "provider", "lane", "account", "reasoningClass", "workTypes"]] | all(length == 0))
+    and ([.profiles[] | has("harness") and has("provider") and has("lane") and has("reasoningClass") and has("workTypes")] | all)
+    and ([.profiles[] | select(.harness == "claude" or .harness == "codex") | has("account")] | all)
+    and ([.profiles[] | select(.harness == "pi" or .harness == "pi-signed") | has("account") | not] | all)
+    and ([.profiles[] | .workTypes[]] | index("review") != null)
+    and ([.rules[].use[], .default[]] - (.profiles | keys) | length == 0)
+  ' "$POLICY_EXAMPLE" >/dev/null \
+    || fail "version 2 example does not expose the executable routing contract"
+
+  jq -e '
+    .version == 1
+    and (.accounts | type) == "object"
+    and ([.accounts[] | keys | sort] | all(. == ["configDir", "envName", "harness"]))
+    and ([.accounts[] | .configDir | startswith("/")] | all)
+    and ([paths as $path | ($path[-1] | tostring) | select(IN("apiKey", "token", "secret", "password", "cookie", "authorization"))] | length == 0)
+  ' "$ACCOUNTS_EXAMPLE" >/dev/null \
+    || fail "crew-accounts example contains more than symbolic lanes and local paths"
+
+  local pi_profile
+  pi_profile=$($POLICY profile pi-grok "$POLICY_EXAMPLE") \
+    || fail "Pi example profile did not normalize"
+  jq -e 'has("account") | not' <<<"$pi_profile" >/dev/null \
+    || fail "Pi account semantics were not preserved by normalization"
+  pass "subscription examples match executable policy and account-lane schemas"
+}
+
+test_subscription_surfaces_have_owned_audiences() {
+  jq -e '
+    (.surfaces | map(select(.path == ".agents/skills/automatic-dispatch/SKILL.md" and .audience == "agent-runtime")) | length) == 1
+    and (.surfaces | map(select(.path == "docs/verification/automatic-dispatch.md" and .audience == "maintainer-verification")) | length) == 1
+    and ([
+      "docs/superpowers/plans/2026-08-20-paperclip-firstmate-integration.md",
+      "docs/superpowers/plans/2026-08-21-canonical-development-repositories-implementation.md",
+      "docs/superpowers/plans/2026-08-27-firstmate-automatic-subscription-routing-implementation.md",
+      "docs/superpowers/specs/2026-08-20-paperclip-firstmate-integration-design.md",
+      "docs/superpowers/specs/2026-08-21-canonical-development-repositories-design.md",
+      "docs/superpowers/specs/2026-08-27-firstmate-automatic-subscription-routing-design.md"
+    ] as $owned
+    | ([.surfaces[] | select(.audience == "maintainer-architecture") | .path] | contains($owned)))
+  ' "$INVENTORY" >/dev/null \
+    || fail "automatic dispatch and historical design surfaces do not have their owned audiences"
+  pass "automatic dispatch and historical design surfaces have explicit audiences"
+}
+
 test_repository_inventory_passes
 test_duplicate_and_setup_classification_fail
 test_required_pointer_fails
 test_local_links_and_no_keyword_heuristic
+test_subscription_examples_match_executable_schemas
+test_subscription_surfaces_have_owned_audiences

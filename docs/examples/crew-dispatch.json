@@ -1,26 +1,26 @@
 {
+  "schemaVersion": 2,
+  "routing": {
+    "mode": "simulate",
+    "limits": {"canary": 3, "automatic": 6, "burst": 8, "perLane": 2, "perAccount": 2},
+    "circuitBreaker": {"failures": 3, "windowSeconds": 900, "cooldownSeconds": 1800},
+    "transientRetries": 1
+  },
+  "profiles": {
+    "codex-sol": {"harness": "codex", "model": "gpt-5.6-sol", "effort": "high", "provider": "openai", "lane": "codex-primary", "account": "codex-primary", "reasoningClass": "strong", "workTypes": ["implementation", "architecture", "debugging", "security", "review"]},
+    "codex-sol-secondary": {"harness": "codex", "model": "gpt-5.6-sol", "effort": "high", "provider": "openai", "lane": "codex-secondary", "account": "codex-secondary", "reasoningClass": "strong", "workTypes": ["implementation", "architecture", "debugging", "security", "review"]},
+    "codex-luna": {"harness": "codex", "model": "gpt-5.6-luna", "effort": "low", "provider": "openai", "lane": "codex-primary", "account": "codex-primary", "reasoningClass": "standard", "workTypes": ["mechanical", "implementation"]},
+    "claude-strong": {"harness": "claude", "model": "sonnet", "effort": "high", "provider": "anthropic", "lane": "claude-primary", "account": "claude-primary", "reasoningClass": "strong", "workTypes": ["implementation", "architecture", "debugging", "security", "review"]},
+    "pi-gemini-fast": {"harness": "pi", "model": "cliproxyapi/gemini-3.7-flash-high", "effort": "low", "provider": "google", "lane": "pi-google", "reasoningClass": "standard", "workTypes": ["mechanical", "implementation"]},
+    "pi-glm": {"harness": "pi", "model": "zai/glm-5.3", "effort": "medium", "provider": "zai", "lane": "pi-zai", "reasoningClass": "strong", "workTypes": ["mechanical", "implementation", "debugging", "review"]},
+    "pi-kimi": {"harness": "pi", "model": "cliproxyapi/kimi-k3", "effort": "high", "provider": "moonshot", "lane": "pi-moonshot", "reasoningClass": "strong", "workTypes": ["implementation", "architecture", "debugging", "review"]},
+    "pi-grok": {"harness": "pi", "model": "cliproxyapi/grok-4.6", "effort": "high", "provider": "xai", "lane": "pi-xai", "reasoningClass": "strong", "workTypes": ["architecture", "debugging", "security", "review"]}
+  },
   "rules": [
-    {
-      "when": "The task depends on fresh news, current events, live public facts, or recent market and product changes.",
-      "use": { "harness": "grok" },
-      "why": "Grok is the preferred dispatch when current web-connected context is central to the work."
-    },
-    {
-      "when": "The task is a trivial mechanical edit such as a rote rename, formatting sweep, targeted typo fix, or simple file gathering.",
-      "use": { "harness": "claude", "model": "haiku", "effort": "low" },
-      "why": "Use the cheapest fast profile when the task is narrow and low ambiguity."
-    },
-    {
-      "when": "The task is a big or ambiguous multi-file feature, a risky refactor, or work that requires holding many moving parts in mind.",
-      "use": [
-        { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },
-        { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
-      ],
-      "why": "Use a strong coding profile for big, ambiguous work; resolve the alternatives through quota-array-dispatch."
-    }
+    {"when": "trivial mechanical work", "use": ["pi-gemini-fast", "pi-glm", "codex-luna"]},
+    {"when": "general implementation", "use": ["codex-sol", "codex-sol-secondary", "pi-kimi", "pi-glm", "claude-strong"]},
+    {"when": "architecture, difficult debugging, or independent review", "use": ["claude-strong", "codex-sol", "codex-sol-secondary", "pi-grok", "pi-kimi"]},
+    {"when": "security or production work", "use": ["claude-strong", "codex-sol", "codex-sol-secondary", "pi-grok"]}
   ],
-  "default": [
-    { "harness": "codex", "model": "gpt-5.5", "effort": "medium" },
-    { "harness": "pi", "model": "anthropic/claude-sonnet-5", "effort": "medium" }
-  ]
+  "default": ["codex-sol", "codex-sol-secondary", "pi-kimi", "pi-glm", "claude-strong"]
 }

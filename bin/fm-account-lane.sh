@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Resolve declared native subscription account lanes without inspecting credentials.
+# Operator schema: docs/configuration.md "Native account lanes".
 # Usage: fm-account-lane.sh validate [FILE]
 #        fm-account-lane.sh resolve|harness|env-name|config-dir ACCOUNT_ID [FILE]
 set -eu

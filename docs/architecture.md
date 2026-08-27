@@ -191,14 +191,15 @@ The intake and authority contract in `AGENTS.md` owns when separate scout resear
 
 ## Dispatch profiles
 
-Crewmate and scout dispatch can stay on the static crewmate harness resolved by `config/crew-harness`, or it can use local dispatch profiles in `config/crew-dispatch.json`.
-The dispatch file is intentionally judgment-based: firstmate reads the natural-language rules at intake, chooses the best matching rule, resolves profile arrays itself from current quota output under the `AGENTS.md` section 4 intake boundary and the `quota-array-dispatch` selection procedure, and passes only concrete `--harness`, `--model`, and `--effort` axes to `fm-spawn.sh`.
-The shell scripts validate the JSON shape and verified harness/effort combinations, but they do not parse task intent, match natural-language rules, or own array selection.
+Crewmate and scout dispatch can stay on the static crewmate harness resolved by `config/crew-harness`, use legacy version 1 dispatch profiles, or use version 2 subscription routing.
+[`configuration.md`](configuration.md#crew-dispatch-profiles-configcrew-dispatchjson) owns both operator schemas, native account-lane configuration, fixed capacity controls, staged modes, and immediate rollback.
+For version 2, `automatic-dispatch` classifies authorized work, checks the current catalogs and quota evidence, selects one normalized route per independent subtask, and uses the existing launcher and worktree lifecycle for admission.
+The shell scripts validate policy and routing records and enforce capacity, circuit, privacy, and transactional lifecycle boundaries, but they do not parse task intent or expand task authority.
 The session-start bootstrap step keeps valid dispatch configuration silent unless verbose facts are enabled and surfaces a concise invalid-config line when validation fails.
 When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness, so `config/crew-harness` is only automatic when no dispatch profile file is active.
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
-That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse while preserving the requested profile for later audit.
+That keeps legacy spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse while version 2 remains limited to native Claude, native Codex, Pi, and pi-signed profiles.
 
 ## Optional secondmates
 
