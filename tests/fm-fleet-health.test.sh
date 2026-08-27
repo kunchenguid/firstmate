@@ -201,6 +201,16 @@ test_usage_exit() {
   pass "usage errors exit 2"
 }
 
+test_invalid_handoff_threshold_is_usage_error() {
+  local home fakebin rc=0
+  home=$(make_home invalid-handoff-threshold)
+  fakebin=$(make_fakebin "$home")
+  FM_HOME="$home" PATH="$fakebin:$PATH" \
+    FM_FLEET_HEALTH_HANDOFF_STALE_SECS=not-a-number "$HEALTH" --json >/dev/null 2>&1 || rc=$?
+  expect_code 2 "$rc" "invalid handoff threshold should be a usage error"
+  pass "invalid handoff threshold retains usage-error semantics"
+}
+
 test_healthy_empty_fleet() {
   local home fakebin out rc=0
   home=$(make_home healthy)
@@ -543,7 +553,7 @@ test_recent_done_signal_is_not_missed_handoff() {
   pass "a fresh done signal is inside the handoff stale window"
 }
 
-test_missed_handoff_after_step_complete_signal() {
+test_unsupported_step_complete_signal_is_not_missed_handoff() {
   local home fakebin out rc=0
   home=$(make_home step-complete-handoff)
   write_live_ship "$home" step-idle
@@ -553,12 +563,11 @@ test_missed_handoff_after_step_complete_signal() {
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=autoarm \
     FM_FLEET_HEALTH_HANDOFF_STALE_SECS=60 "$HEALTH" --json) || rc=$?
-  expect_code 3 "$rc" "stale step-complete signal should remain inconclusive when lifecycle state is unknown"
+  expect_code 3 "$rc" "unsupported step-complete signal should not change health status"
   printf '%s' "$out" | jq -e '
-    any(.findings[]; .kind == "missed-handoff" and .subject == "step-idle"
-        and .confidence == "high")
-  ' >/dev/null || fail "step-complete missed handoff was not reported: $out"
-  pass "stale step-complete signal is a missed handoff"
+    (any(.findings[]; .kind == "missed-handoff" and .subject == "step-idle") | not)
+  ' >/dev/null || fail "unsupported step-complete signal became a missed handoff: $out"
+  pass "unsupported step-complete signal is not a missed handoff"
 }
 
 test_handled_inbox_corruption_is_inconclusive() {
@@ -1337,6 +1346,25 @@ test_malformed_supervision_pid_is_inconclusive() {
   pass "malformed watcher-lock PID remains unavailable"
 }
 
+test_unreadable_supervision_beacon_is_inconclusive() {
+  local home fakebin out rc=0
+  home=$(make_home unreadable-supervision-beacon)
+  write_live_ship "$home" supervised-worker
+  fresh_autoarm_supervision "$home"
+  rm "$home/state/.last-watcher-beat"
+  ln -s "$home/state/missing-beacon" "$home/state/.last-watcher-beat"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_MODEL=persistent \
+    "$HEALTH" --json) || rc=$?
+  expect_code 3 "$rc" "unreadable watcher beacon should be inconclusive"
+  printf '%s' "$out" | jq -e '
+    .status == "inconclusive"
+      and any(.findings[]; .kind == "supervision-inconclusive")
+      and (any(.findings[]; .kind == "supervision-unhealthy") | not)
+  ' >/dev/null || fail "unreadable supervision beacon became actionable: $out"
+  pass "unreadable watcher beacon remains inconclusive"
+}
+
 test_incomplete_supervision_lock_is_inconclusive() {
   local home fakebin out rc=0 watcher_pid identity
   home=$(make_home incomplete-supervision-lock)
@@ -1420,6 +1448,7 @@ test_human_view_and_incomplete_exit() {
 }
 
 test_usage_exit
+test_invalid_handoff_threshold_is_usage_error
 test_healthy_empty_fleet
 test_missing_state_home_remains_unmodified
 test_malformed_snapshot_is_incomplete
@@ -1437,7 +1466,7 @@ test_live_codex_without_banner_is_not_dead_session
 test_missed_handoff_after_done_signal
 test_later_inbox_clears_missed_handoff
 test_recent_done_signal_is_not_missed_handoff
-test_missed_handoff_after_step_complete_signal
+test_unsupported_step_complete_signal_is_not_missed_handoff
 test_handled_inbox_corruption_is_inconclusive
 test_unreadable_local_endpoint_is_inconclusive
 test_terminal_unreadable_endpoint_is_inconclusive
@@ -1470,6 +1499,7 @@ test_matching_retired_pr_listener_is_not_missing
 test_inconclusive_dominates_actionable_status
 test_unreadable_supervision_lock_is_inconclusive
 test_malformed_supervision_pid_is_inconclusive
+test_unreadable_supervision_beacon_is_inconclusive
 test_incomplete_supervision_lock_is_inconclusive
 test_internal_worker_failure_returns_json
 test_complete_timeout_covers_fingerprinting

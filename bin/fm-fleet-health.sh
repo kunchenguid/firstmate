@@ -15,8 +15,7 @@
 #
 # Findings are mechanically provable Firstmate operational failures: dead or
 # missing local agents, a Codex worker whose pane shows the exact resume banner
-# or a bare shell while the task is still in flight, a worker `done:` or
-# canonical `step-complete:` signal
+# or a bare shell while the task is still in flight, a worker `done:` signal
 # with no later status append or steering inbox activity for
 # FM_FLEET_HEALTH_HANDOFF_STALE_SECS (default 1800), unavailable or invalid
 # secondmate summaries, broken or overdue reply delivery, aged unacknowledged
@@ -79,8 +78,8 @@ JSON is the stable machine-readable output contract.
 
 The checker consumes fm-fleet-snapshot.sh --json once, with remote SSH probes
 disabled by default, and never mutates fleet state.
-FM_FLEET_HEALTH_HANDOFF_STALE_SECS (default 1800) is the age after a terminal
-handoff signal with no later status append or steering-inbox activity that
+FM_FLEET_HEALTH_HANDOFF_STALE_SECS (default 1800) is the age after a `done:`
+status line with no later status append or steering-inbox activity that
 becomes a missed-handoff finding.
 EOF
 }
@@ -117,6 +116,9 @@ if [ "${FM_FLEET_HEALTH_TIMED_WORKER:-0}" != 1 ]; then
       printf '# Fleet Health\nStatus: incomplete\nHome: %s\nfleet health check timed out\n' "$FM_HOME"
     fi
     exit 3
+  fi
+  if [ "$WRAPPED_RC" -eq 2 ]; then
+    exit 2
   fi
   if [ "$OUTPUT_MODE" = json ] \
     && ! printf '%s' "$WRAPPED_OUTPUT" | jq -e '.schema == "fm-fleet-health.v1"' >/dev/null 2>&1; then
@@ -183,7 +185,6 @@ snapshot_shape_valid() {
       and (.paths.status_log | type) == "object"
       and (.paths.status_log.last_event | type) == "object"
       and (.paths.status_log.last_event.state | type) == "string"
-      and (.paths.status_log.last_event.handoff_required | type) == "boolean"
       and (.paths.status_log.last_event | nullable_key("mtime_epoch"; "number"))
       and (.pr | type) == "object"
       and (.pr | nullable_key("url"; "string"))
@@ -600,8 +601,7 @@ EVALUATED=$(jq -n \
                   "aged";$n)),
       ($snapshot.tasks[]?
         | select(.kind != "secondmate")
-        | select((.paths.status_log.last_event.state // "") == "done"
-                 or (.paths.status_log.last_event.handoff_required // false) == true)
+        | select((.paths.status_log.last_event.state // "") == "done")
         | . as $t
         | ($t.paths.status_log.last_event.mtime_epoch) as $mtime
         | if ($mtime == null or $now_epoch == 0) then

@@ -38,6 +38,18 @@ TMP_ROOT=$(fm_test_tmproot fm-pending-reply)
 export FM_PENDING_REPLY_GRACE_SECS=0
 export FM_SEND_SETTLE=0
 
+test_created_pending_reply_is_valid() {
+  local home state corr
+  home="$TMP_ROOT/pending-reply-created"
+  state="$home/state"
+  mkdir -p "$state"
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "created record") \
+    || fail "pending-reply creation failed"
+  fm_pending_reply_record_valid "$state/pending-replies/$corr" \
+    || fail "pending-reply create emitted a record rejected by its validator"
+  pass "created pending-reply records satisfy the validator"
+}
+
 # --- fixtures ---------------------------------------------------------------
 
 make_stubs() {  # <dir> -> fakebin
@@ -1253,6 +1265,7 @@ test_failed_send_discards_undelivered_expectation() {
 
 # --- run --------------------------------------------------------------------
 
+test_created_pending_reply_is_valid
 test_normal_correlated_reply_resolves_once
 test_completed_turn_no_report_triggers_one_recovery
 test_recovery_attempt_is_never_reinjected

@@ -339,6 +339,7 @@ recovery_delivery_outcome=
 recovery_turn_seen_busy=0
 recovery_turn_completed_epoch=
 escalated_epoch=
+escalation_closed_epoch=
 resolved_epoch=
 resolved_via=
 wrong_home_hits=0

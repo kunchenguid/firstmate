@@ -314,12 +314,30 @@ FM_WATCHER_VERDICT_REASON=stale-beacon
 fm_watcher_supervision_verdict() {
   local state=$1 watch=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME}
   local root=${5:-$FM_ROOT}
-  local beat age fresh=false model
+  local beat age fresh=false model beacon_exists=false beacon_readable=false beacon_valid=false beacon_mtime classification
   FM_WATCHER_VERDICT_OK=false
   FM_WATCHER_VERDICT_AVAILABLE=true
   FM_WATCHER_VERDICT_REASON=stale-beacon
   beat="$state/.last-watcher-beat"
-  age=$(fm_path_age "$beat")
+  if [ -e "$beat" ] || [ -L "$beat" ]; then
+    beacon_exists=true
+  fi
+  if [ -f "$beat" ] && [ ! -L "$beat" ] && [ -r "$beat" ]; then
+    beacon_readable=true
+    beacon_mtime=$(fm_path_mtime "$beat") || beacon_readable=false
+  fi
+  [ "$beacon_readable" = true ] && beacon_valid=true
+  classification=$(fm_evidence_classify "$beacon_readable" "$beacon_valid")
+  if [ "$beacon_exists" = true ] && [ "$classification" != available ]; then
+    FM_WATCHER_VERDICT_AVAILABLE=false
+    FM_WATCHER_VERDICT_REASON=unreadable-beacon
+    return 0
+  fi
+  if [ "$classification" = available ]; then
+    age=$(( $(date +%s) - beacon_mtime ))
+  else
+    age=999999
+  fi
   case "$age" in
     ''|*[!0-9]*) ;;
     *) [ "$age" -lt "$grace" ] && fresh=true ;;
