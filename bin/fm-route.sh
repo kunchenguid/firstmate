@@ -10,6 +10,11 @@ usage() { fm_route_diagnostic 'usage: fm-route.sh select|reserve|verify-reservat
 require_value() { [ "$#" -ge 2 ] && [ -n "$2" ] || usage; }
 validate_now() { case "$1" in ''|*[!0-9]*) fm_route_diagnostic 'invalid --now: expected non-negative epoch'; return 1 ;; esac; }
 validate_terminal() { case "$1" in completed|failed_safe|escalated|cancelled|superseded) ;; *) fm_route_diagnostic 'invalid terminal outcome'; return 1 ;; esac; }
+SEEN_OPTIONS=''
+claim_option() {
+  case " $SEEN_OPTIONS " in *" $1 "*) usage ;; esac
+  SEEN_OPTIONS="$SEEN_OPTIONS $1"
+}
 
 command=${1:-}
 [ -n "$command" ] || usage
@@ -17,7 +22,7 @@ shift
 case "$command" in
   select)
     REQUEST=''; CANDIDATES=''; NOW=$(date +%s)
-    while [ "$#" -gt 0 ]; do case "$1" in
+    while [ "$#" -gt 0 ]; do claim_option "$1"; case "$1" in
       --request) require_value "$@"; [ -z "$REQUEST" ] || usage; REQUEST=$2; shift 2 ;;
       --candidates) require_value "$@"; [ -z "$CANDIDATES" ] || usage; CANDIDATES=$2; shift 2 ;;
       --now) require_value "$@"; NOW=$2; shift 2 ;; *) usage ;; esac; done
@@ -26,31 +31,35 @@ case "$command" in
     validate_now "$NOW"; fm_route_validate_request "$REQUEST"; fm_route_validate_candidates "$CANDIDATES"; fm_route_select "$REQUEST" "$CANDIDATES"
     ;;
   reserve|verify-reservation)
-    TASK=''; GENERATION=''; PROFILE=''; PROVIDER=''; LANE=''; ACCOUNT=''; CLASS=''; RISK=''; MODE=''; NOW=$(date +%s); BURST=false
-    while [ "$#" -gt 0 ]; do case "$1" in
+    TASK=''; GENERATION=''; PROFILE=''; PROVIDER=''; LANE=''; ACCOUNT=''; CLASS=''; WORK_TYPE=''; RISK=''; MODE=''; NOW=$(date +%s); BURST=false
+    while [ "$#" -gt 0 ]; do claim_option "$1"; case "$1" in
       --task) require_value "$@"; TASK=$2; shift 2 ;; --generation) require_value "$@"; GENERATION=$2; shift 2 ;;
       --profile) require_value "$@"; PROFILE=$2; shift 2 ;; --provider) require_value "$@"; PROVIDER=$2; shift 2 ;;
       --lane) require_value "$@"; LANE=$2; shift 2 ;; --account) require_value "$@"; ACCOUNT=$2; shift 2 ;;
-      --class) require_value "$@"; CLASS=$2; shift 2 ;; --risk) require_value "$@"; RISK=$2; shift 2 ;;
+      --class) require_value "$@"; CLASS=$2; shift 2 ;; --work-type) [ "$command" = reserve ] || usage; require_value "$@"; WORK_TYPE=$2; shift 2 ;; --risk) require_value "$@"; RISK=$2; shift 2 ;;
       --mode) require_value "$@"; MODE=$2; shift 2 ;; --now) require_value "$@"; NOW=$2; shift 2 ;;
       --burst) [ "$command" = reserve ] || usage; BURST=true; shift ;; *) usage ;; esac; done
-    fm_route_validate_route_tuple "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" "$RISK" "$MODE"; validate_now "$NOW"
     if [ "$command" = reserve ]; then
-      fm_routing_with_lock fm_route_reserve_locked "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" "$RISK" "$MODE" "$BURST" "$NOW"
+      [ -n "$WORK_TYPE" ] || { fm_route_diagnostic 'work-type is required'; exit 1; }
+      fm_route_validate_route_tuple "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" "$WORK_TYPE" "$RISK" "$MODE"
+      validate_now "$NOW"
+      fm_routing_with_lock fm_route_reserve_locked "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" "$WORK_TYPE" "$RISK" "$MODE" "$BURST" "$NOW"
     else
+      fm_route_validate_route_tuple "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" implementation "$RISK" "$MODE"
+      validate_now "$NOW"
       fm_routing_with_lock fm_route_verify_locked "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" "$RISK" "$MODE"
     fi
     ;;
   release)
     TASK=''; GENERATION=''
-    while [ "$#" -gt 0 ]; do case "$1" in --task) require_value "$@"; TASK=$2; shift 2 ;; --generation) require_value "$@"; GENERATION=$2; shift 2 ;; *) usage ;; esac; done
+    while [ "$#" -gt 0 ]; do claim_option "$1"; case "$1" in --task) require_value "$@"; TASK=$2; shift 2 ;; --generation) require_value "$@"; GENERATION=$2; shift 2 ;; *) usage ;; esac; done
     fm_route_validate_identifier "$TASK" || { fm_route_diagnostic 'invalid task identifier'; exit 1; }
     fm_route_validate_identifier "$GENERATION" || { fm_route_diagnostic 'invalid generation identifier'; exit 1; }
     fm_routing_with_lock fm_route_release_locked "$TASK" "$GENERATION"
     ;;
   failure)
     TASK=''; GENERATION=''; PROVIDER=''; LANE=''; KIND=''; NOW=$(date +%s)
-    while [ "$#" -gt 0 ]; do case "$1" in
+    while [ "$#" -gt 0 ]; do claim_option "$1"; case "$1" in
       --task) require_value "$@"; TASK=$2; shift 2 ;; --generation) require_value "$@"; GENERATION=$2; shift 2 ;;
       --provider) require_value "$@"; PROVIDER=$2; shift 2 ;; --lane) require_value "$@"; LANE=$2; shift 2 ;;
       --kind) require_value "$@"; KIND=$2; shift 2 ;; --now) require_value "$@"; NOW=$2; shift 2 ;; *) usage ;; esac; done
@@ -62,7 +71,7 @@ case "$command" in
     ;;
   score)
     TASK=''; GENERATION=''; TERMINAL=''; TESTS=''; REVIEW=''; REDUNDANT=''; NOW=$(date +%s); EXTRA='{}'
-    while [ "$#" -gt 0 ]; do case "$1" in
+    while [ "$#" -gt 0 ]; do claim_option "$1"; case "$1" in
       --task) require_value "$@"; TASK=$2; shift 2 ;; --generation) require_value "$@"; GENERATION=$2; shift 2 ;;
       --terminal) require_value "$@"; TERMINAL=$2; shift 2 ;; --tests) require_value "$@"; TESTS=$2; shift 2 ;;
       --review) require_value "$@"; REVIEW=$2; shift 2 ;; --redundant) require_value "$@"; REDUNDANT=$2; shift 2 ;;
@@ -76,30 +85,30 @@ case "$command" in
     ;;
   finalize)
     TASK=''; GENERATION=''; TERMINAL=''
-    while [ "$#" -gt 0 ]; do case "$1" in --task) require_value "$@"; TASK=$2; shift 2 ;; --generation) require_value "$@"; GENERATION=$2; shift 2 ;; --terminal) require_value "$@"; TERMINAL=$2; shift 2 ;; *) usage ;; esac; done
+    while [ "$#" -gt 0 ]; do claim_option "$1"; case "$1" in --task) require_value "$@"; TASK=$2; shift 2 ;; --generation) require_value "$@"; GENERATION=$2; shift 2 ;; --terminal) require_value "$@"; TERMINAL=$2; shift 2 ;; *) usage ;; esac; done
     if ! fm_route_validate_identifier "$TASK" || ! fm_route_validate_identifier "$GENERATION"; then fm_route_diagnostic 'invalid finalize identifier'; exit 1; fi
     validate_terminal "$TERMINAL"; fm_routing_with_lock fm_route_finalize_locked "$TASK" "$GENERATION" "$TERMINAL"
     ;;
   observe)
     REQUEST=''; DECISION=''; NOW=$(date +%s)
-    while [ "$#" -gt 0 ]; do case "$1" in --request) require_value "$@"; REQUEST=$2; shift 2 ;; --decision) require_value "$@"; DECISION=$2; shift 2 ;; --now) require_value "$@"; NOW=$2; shift 2 ;; *) usage ;; esac; done
+    while [ "$#" -gt 0 ]; do claim_option "$1"; case "$1" in --request) require_value "$@"; REQUEST=$2; shift 2 ;; --decision) require_value "$@"; DECISION=$2; shift 2 ;; --now) require_value "$@"; NOW=$2; shift 2 ;; *) usage ;; esac; done
     [ -r "$REQUEST" ] || { fm_route_diagnostic 'request file is required and must be readable'; exit 1; }
     [ -r "$DECISION" ] || { fm_route_diagnostic 'decision file is required and must be readable'; exit 1; }
     validate_now "$NOW"; fm_route_validate_request "$REQUEST"; fm_routing_with_lock fm_route_observe_locked "$REQUEST" "$DECISION" "$NOW"
     ;;
   evidence)
     WORK_TYPE=
-    while [ "$#" -gt 0 ]; do case "$1" in --work-type) require_value "$@"; WORK_TYPE=$2; shift 2 ;; *) usage ;; esac; done
-    [ -n "$WORK_TYPE" ] || usage; fm_routing_with_lock fm_route_evidence_locked "$WORK_TYPE"
+    while [ "$#" -gt 0 ]; do claim_option "$1"; case "$1" in --work-type) require_value "$@"; WORK_TYPE=$2; shift 2 ;; *) usage ;; esac; done
+    [ -n "$WORK_TYPE" ] || usage; fm_route_validate_work_type "$WORK_TYPE" || { fm_route_diagnostic 'invalid work type'; exit 1; }; fm_routing_with_lock fm_route_evidence_locked "$WORK_TYPE"
     ;;
   status)
     NOW=$(date +%s)
-    while [ "$#" -gt 0 ]; do case "$1" in --now) require_value "$@"; NOW=$2; shift 2 ;; *) usage ;; esac; done
+    while [ "$#" -gt 0 ]; do claim_option "$1"; case "$1" in --now) require_value "$@"; NOW=$2; shift 2 ;; *) usage ;; esac; done
     validate_now "$NOW"; fm_routing_with_lock fm_route_status_locked "$NOW"
     ;;
   report)
     STAGE=''; MINIMUM=''
-    while [ "$#" -gt 0 ]; do case "$1" in --stage) require_value "$@"; STAGE=$2; shift 2 ;; --minimum) require_value "$@"; MINIMUM=$2; shift 2 ;; *) usage ;; esac; done
+    while [ "$#" -gt 0 ]; do claim_option "$1"; case "$1" in --stage) require_value "$@"; STAGE=$2; shift 2 ;; --minimum) require_value "$@"; MINIMUM=$2; shift 2 ;; *) usage ;; esac; done
     case "$STAGE" in simulation|canary) ;; *) fm_route_diagnostic 'invalid report stage'; exit 1 ;; esac
     case "$MINIMUM" in ''|*[!0-9]*) fm_route_diagnostic 'invalid report minimum'; exit 1 ;; esac
     fm_routing_with_lock fm_route_report_locked "$STAGE" "$MINIMUM"

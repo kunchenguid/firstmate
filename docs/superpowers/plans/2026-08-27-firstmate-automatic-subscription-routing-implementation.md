@@ -407,7 +407,7 @@ git commit -m "feat: select subscription routing profiles"
 
 **Interfaces:**
 
-- Produces: `fm-route.sh reserve --task ID --generation GENERATION --profile ID --provider NAME --lane NAME --account ACCOUNT_ID|none --class CLASS --risk RISK --mode MODE [--burst]`.
+- Produces: `fm-route.sh reserve --task ID --generation GENERATION --profile ID --provider NAME --lane NAME --account ACCOUNT_ID|none --class CLASS --work-type TYPE --risk RISK --mode MODE [--burst]`.
 - Produces: `fm-route.sh verify-reservation --task ID --generation GENERATION --profile ID --provider NAME --lane NAME --account ACCOUNT_ID|none --class CLASS --risk RISK --mode MODE`.
 - Produces: `fm-route.sh release --task ID --generation GENERATION`.
 - Produces: `fm-route.sh failure --task ID --generation GENERATION --provider NAME --lane NAME --kind transient|quota|auth|model|unsafe --now EPOCH`.

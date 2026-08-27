@@ -30,9 +30,9 @@ fm_route_validate_request() {
     if type != "object" then "top-level value must be an object"
     elif (missing | length) > 0 then "missing \(missing[0])"
     elif (unexpected | length) > 0 then "unexpected field \(unexpected[0])"
-    elif (.taskId | type) != "string" or (.taskId | length) == 0 then "taskId"
+    elif (.taskId | type) != "string" or (.taskId | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$") | not) then "taskId"
     elif (.taskClass | IN("trivial","standard","decomposable","ambiguous","high_risk") | not) then "taskClass"
-    elif (.workType | type) != "string" or (.workType | length) == 0 then "workType"
+    elif (.workType | type) != "string" or (.workType | test("^[a-z0-9][a-z0-9._-]{0,63}$") | not) then "workType"
     elif (.risk | IN("low","medium","high") | not) then "risk"
     elif (.independent | type) != "boolean" then "independent"
     elif (.requestedWorkers | type) != "number" or (.requestedWorkers | floor) != .requestedWorkers or .requestedWorkers < 1 or .requestedWorkers > 8 then "requestedWorkers"
@@ -64,12 +64,12 @@ fm_route_validate_candidates() {
       | ([$candidate | keys_unsorted[] | select(. as $k | expected | index($k) | not)]) as $unexpected
       | if ($missing | length) > 0 then "missing \($missing[0])"
         elif ($unexpected | length) > 0 then "unexpected field \($unexpected[0])"
-        elif (.profile | type) != "string" or (.profile | length) == 0 then "profile"
+        elif (.profile | type) != "string" or (.profile | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$") | not) then "profile"
         elif (.harness | IN("claude","codex","pi","pi-signed") | not) then "harness"
-        elif (.model | type) != "string" or (.model | length) == 0 then "model"
-        elif (.provider | type) != "string" or (.provider | length) == 0 then "provider"
-        elif (.lane | type) != "string" or (.lane | length) == 0 then "lane"
-        elif (.account | type) != "string" or (.account | test("^(none|[a-z0-9][a-z0-9-]*)$") | not) then "account"
+        elif (.model | type) != "string" or (.model | test("^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$") | not) then "model"
+        elif (.provider | type) != "string" or (.provider | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$") | not) then "provider"
+        elif (.lane | type) != "string" or (.lane | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$") | not) then "lane"
+        elif (.account | type) != "string" or (.account | test("^(none|[a-z0-9][a-z0-9-]{0,127})$") | not) then "account"
         elif ((.harness == "pi" or .harness == "pi-signed") and .account != "none") then "account"
         elif ((.harness == "claude" or .harness == "codex") and .account == "none") then "account"
         elif (.fitTier | type) != "number" or (.fitTier | floor) != .fitTier or .fitTier < 0 then "fitTier"
@@ -132,7 +132,30 @@ fm_route_read_outcomes() {
     printf '[]\n'
     return 0
   fi
-  jq -s 'if all(type == "object") then . else error("invalid") end' "$file" 2>/dev/null
+  jq -s '
+    def exact($keys): (keys_unsorted | sort) == ($keys | sort);
+    def identifier: type == "string" and length <= 128 and test("^[A-Za-z0-9][A-Za-z0-9._-]*$");
+    def work_type: type == "string" and test("^[a-z0-9][a-z0-9._-]{0,63}$");
+    def common:
+      (.timestamp | type) == "number" and .timestamp >= 0
+      and (.taskId | identifier) and (.profile | identifier) and (.provider | identifier)
+      and (.lane | identifier) and (.account | identifier)
+      and (.taskClass | IN("trivial","standard","decomposable","ambiguous","high_risk"))
+      and (.workType | work_type) and (.risk | IN("low","medium","high"))
+      and (.elapsedSeconds | type) == "number" and .elapsedSeconds >= 0;
+    def valid:
+      if .kind == "simulation" then
+        exact(["kind","timestamp","taskId","taskClass","workType","risk","profile","provider","lane","account","elapsedSeconds","terminal"])
+        and common and .terminal == "observed"
+      elif .kind == "terminal" then
+        exact(["kind","timestamp","taskId","generation","profile","provider","lane","account","taskClass","workType","risk","mode","elapsedSeconds","tests","review","redundant","terminal"])
+        and common and (.generation | identifier) and (.mode | IN("canary","automatic"))
+        and (.tests | IN("pass","fail","unknown")) and (.review | IN("pass","fail","unknown"))
+        and (.redundant | IN("yes","no"))
+        and (.terminal | IN("completed","failed_safe","escalated","cancelled","superseded"))
+      else false end;
+    if all(type == "object" and valid) then . else error("invalid") end
+  ' "$file" 2>/dev/null
 }
 
 fm_route_select_ranked() {
@@ -163,8 +186,8 @@ fm_route_select_ranked() {
       | ($pool[0] | map(
           . as $candidate
           | .activeLane = ([$reservations[] | select(.lane? == $candidate.lane)] | length)
-          | .historyAttempts = ([$outcomes[] | select(.profile? == $candidate.profile and .workType? == $request.workType)] | length)
-          | .historySuccesses = ([$outcomes[] | select(.profile? == $candidate.profile and .workType? == $request.workType and .terminal? == "completed")] | length)
+          | .historyAttempts = ([$outcomes[] | select(.kind? == "terminal" and .profile? == $candidate.profile and .workType? == $request.workType)] | length)
+          | .historySuccesses = ([$outcomes[] | select(.kind? == "terminal" and .profile? == $candidate.profile and .workType? == $request.workType and .terminal? == "completed")] | length)
         )) as $hydrated
       | ([$hydrated[] | select((reasons($request) | length) == 0)] | sort_by(rank_key)) as $eligible
       | ([$hydrated[] | (reasons($request)) as $why | select(($why | length) > 0) | {profile:.profile,reasons:$why}]) as $rejected
@@ -238,12 +261,19 @@ fm_route_atomic_json_value() {
 fm_route_validate_identifier() {
   case "$1" in
     ''|*[!A-Za-z0-9._-]*) return 1 ;;
-    *) return 0 ;;
+    *) [ "${#1}" -le 128 ] ;;
   esac
 }
 
+fm_route_validate_work_type() {
+  case "$1" in
+    ''|*[!a-z0-9._-]*|[!a-z0-9]*) return 1 ;;
+  esac
+  [ "${#1}" -le 64 ]
+}
+
 fm_route_validate_route_tuple() {
-  local task=$1 generation=$2 profile=$3 provider=$4 lane=$5 account=$6 task_class=$7 risk=$8 mode=$9
+  local task=$1 generation=$2 profile=$3 provider=$4 lane=$5 account=$6 task_class=$7 work_type=$8 risk=$9 mode=${10}
   fm_route_validate_identifier "$task" || { fm_route_diagnostic 'invalid task identifier'; return 1; }
   fm_route_validate_identifier "$generation" || { fm_route_diagnostic 'invalid generation identifier'; return 1; }
   fm_route_validate_identifier "$profile" || { fm_route_diagnostic 'invalid profile identifier'; return 1; }
@@ -251,6 +281,7 @@ fm_route_validate_route_tuple() {
   fm_route_validate_identifier "$lane" || { fm_route_diagnostic 'invalid lane identifier'; return 1; }
   fm_route_validate_identifier "$account" || { fm_route_diagnostic 'invalid account identifier'; return 1; }
   case "$task_class" in trivial|standard|decomposable|ambiguous|high_risk) ;; *) fm_route_diagnostic 'invalid task class'; return 1 ;; esac
+  fm_route_validate_work_type "$work_type" || { fm_route_diagnostic 'invalid work type'; return 1; }
   case "$risk" in low|medium|high) ;; *) fm_route_diagnostic 'invalid risk'; return 1 ;; esac
   case "$mode" in off|simulate|canary|automatic) ;; *) fm_route_diagnostic 'invalid routing mode'; return 1 ;; esac
 }
@@ -258,10 +289,10 @@ fm_route_validate_route_tuple() {
 fm_route_read_circuits() {
   local file="$FM_ROUTE_STATE/circuits.json"
   if [ ! -s "$file" ]; then
-    printf '{"lanes":{}}\n'
+    printf '{"lanes":{},"events":{}}\n'
     return 0
   fi
-  jq -ce 'select(type == "object" and (.lanes | type) == "object")' "$file" 2>/dev/null
+  jq -ce 'select(type == "object" and (.lanes | type) == "object" and ((.events // {}) | type) == "object") | .events = (.events // {})' "$file" 2>/dev/null
 }
 
 fm_route_write_circuits() {
@@ -269,13 +300,13 @@ fm_route_write_circuits() {
 }
 
 fm_route_reserve_locked() {
-  local task=$1 generation=$2 profile=$3 provider=$4 lane=$5 account=$6 task_class=$7 risk=$8 mode=$9 burst=${10} now=${11}
+  local task=$1 generation=$2 profile=$3 provider=$4 lane=$5 account=$6 task_class=$7 work_type=$8 risk=$9 mode=${10} burst=${11} now=${12}
   local reservation="$FM_ROUTE_STATE/reservations/$task.json" reservations circuits existing total lane_total account_total cap updated
   mkdir -p "$FM_ROUTE_STATE/reservations"
   if [ -e "$reservation" ]; then
     existing=$(jq -c . "$reservation" 2>/dev/null) || { fm_route_diagnostic 'invalid routing state'; return 1; }
-    if jq -e --arg generation "$generation" --arg profile "$profile" --arg provider "$provider" --arg lane "$lane" --arg account "$account" --arg class "$task_class" --arg risk "$risk" --arg mode "$mode" --argjson burst "$burst" '
-      .generation == $generation and .profile == $profile and .provider == $provider and .lane == $lane and .account == $account and .taskClass == $class and .risk == $risk and .mode == $mode and .burst == $burst
+    if jq -e --arg generation "$generation" --arg profile "$profile" --arg provider "$provider" --arg lane "$lane" --arg account "$account" --arg class "$task_class" --arg workType "$work_type" --arg risk "$risk" --arg mode "$mode" --argjson burst "$burst" '
+      .generation == $generation and .profile == $profile and .provider == $provider and .lane == $lane and .account == $account and .taskClass == $class and .workType == $workType and .risk == $risk and .mode == $mode and .burst == $burst
     ' <<<"$existing" >/dev/null; then
       printf '%s\n' "$existing"
       return 0
@@ -313,8 +344,8 @@ fm_route_reserve_locked() {
     account_total=$(jq --arg account "$account" '[.[] | select(.account == $account)] | length' <<<"$reservations")
     [ "$account_total" -lt 2 ] || { fm_route_diagnostic 'account-cap:2'; return 1; }
   fi
-  updated=$(jq -cn --arg task "$task" --arg generation "$generation" --arg profile "$profile" --arg provider "$provider" --arg lane "$lane" --arg account "$account" --arg class "$task_class" --arg risk "$risk" --arg mode "$mode" --argjson burst "$burst" --argjson now "$now" \
-    '{taskId:$task,generation:$generation,profile:$profile,provider:$provider,lane:$lane,account:$account,taskClass:$class,risk:$risk,mode:$mode,burst:$burst,createdAt:$now,score:null}')
+  updated=$(jq -cn --arg task "$task" --arg generation "$generation" --arg profile "$profile" --arg provider "$provider" --arg lane "$lane" --arg account "$account" --arg class "$task_class" --arg workType "$work_type" --arg risk "$risk" --arg mode "$mode" --argjson burst "$burst" --argjson now "$now" \
+    '{taskId:$task,generation:$generation,profile:$profile,provider:$provider,lane:$lane,account:$account,taskClass:$class,workType:$workType,risk:$risk,mode:$mode,burst:$burst,createdAt:$now,score:null}')
   fm_route_atomic_json_value "$reservation" "$updated" || return 1
   printf '%s\n' "$updated"
 }
@@ -351,28 +382,35 @@ fm_routing_failure_action() {
 }
 
 fm_route_failure_locked() {
-  local task=$1 generation=$2 provider=$3 lane=$4 kind=$5 now=$6 circuits existing prior_transients action failures open_until updated
+  local task=$1 generation=$2 provider=$3 lane=$4 kind=$5 now=$6 circuits event_key existing prior_transients action failures open_until updated event
   circuits=$(fm_route_read_circuits) || { fm_route_diagnostic 'invalid routing state'; return 1; }
-  existing=$(jq -c --arg lane "$lane" --arg task "$task" --arg generation "$generation" '.lanes[$lane].failures // [] | map(select(.taskId == $task and .generation == $generation)) | first // empty' <<<"$circuits")
+  event_key="$task|$generation"
+  existing=$(jq -c --arg key "$event_key" '.events[$key] // empty' <<<"$circuits")
   if [ -n "$existing" ]; then
+    jq -e --arg provider "$provider" --arg lane "$lane" --arg kind "$kind" '.provider == $provider and .lane == $lane and .kind == $kind' <<<"$existing" >/dev/null \
+      || { fm_route_diagnostic 'failure-conflict'; return 1; }
     jq -cn --arg action "$(jq -r .action <<<"$existing")" --argjson until "$(jq -r '.until // null' <<<"$existing")" '{action:$action} + (if $until == null then {} else {until:$until} end)'
     return 0
   fi
   if jq -e --arg lane "$lane" --argjson now "$now" '.lanes[$lane].openUntil? > $now' <<<"$circuits" >/dev/null; then
-    jq -cn --argjson until "$(jq -r --arg lane "$lane" '.lanes[$lane].openUntil' <<<"$circuits")" '{action:"circuit-open",until:$until}'
-    return 0
-  fi
-  prior_transients=$(jq --arg lane "$lane" --arg task "$task" '[.lanes[$lane].failures[]? | select(.taskId == $task and .kind == "transient")] | length' <<<"$circuits")
-  action=$(fm_routing_failure_action "$kind" "$prior_transients")
-  failures=$(jq -c --arg lane "$lane" --argjson cutoff "$((now - 900))" '[.lanes[$lane].failures[]? | select(.timestamp >= $cutoff)]' <<<"$circuits")
-  if [ "$(jq 'length' <<<"$failures")" -ge 2 ]; then
     action=circuit-open
-    open_until=$((now + 1800))
+    open_until=$(jq -r --arg lane "$lane" '.lanes[$lane].openUntil' <<<"$circuits")
   else
-    open_until=null
+    prior_transients=$(jq --arg task "$task" '[.events[] | select(.taskId == $task and .kind == "transient")] | length' <<<"$circuits")
+    action=$(fm_routing_failure_action "$kind" "$prior_transients")
+    failures=$(jq -c --arg lane "$lane" --argjson cutoff "$((now - 900))" '[.events[] | select(.lane == $lane and .timestamp >= $cutoff)]' <<<"$circuits")
+    if [ "$(jq 'length' <<<"$failures")" -ge 2 ]; then
+      action=circuit-open
+      open_until=$((now + 1800))
+    else
+      open_until=null
+    fi
   fi
-  updated=$(jq -c --arg lane "$lane" --arg provider "$provider" --arg task "$task" --arg generation "$generation" --arg kind "$kind" --arg action "$action" --argjson now "$now" --argjson until "$open_until" --argjson failures "$failures" '
-    .lanes[$lane] = {provider:$provider,failures:($failures + [{taskId:$task,generation:$generation,kind:$kind,timestamp:$now,action:$action,until:$until}]),openUntil:$until}
+  event=$(jq -cn --arg task "$task" --arg generation "$generation" --arg provider "$provider" --arg lane "$lane" --arg kind "$kind" --arg action "$action" --argjson now "$now" --argjson until "$open_until" \
+    '{taskId:$task,generation:$generation,provider:$provider,lane:$lane,kind:$kind,timestamp:$now,action:$action,until:$until}')
+  updated=$(jq -c --arg key "$event_key" --arg lane "$lane" --arg provider "$provider" --argjson event "$event" --argjson until "$open_until" '
+    .events[$key] = $event
+    | .lanes[$lane] = {provider:$provider,openUntil:$until}
   ' <<<"$circuits")
   fm_route_write_circuits "$updated" || return 1
   jq -cn --arg action "$action" --argjson until "$open_until" '{action:$action} + (if $until == null then {} else {until:$until} end)'
@@ -436,10 +474,22 @@ fm_route_append_outcome_locked() {
 }
 
 fm_route_finalize_locked() {
-  local task=$1 generation=$2 terminal=$3 reservation="$FM_ROUTE_STATE/reservations/$1.json" outcomes current score record
+  local task=$1 generation=$2 terminal=$3 reservation="$FM_ROUTE_STATE/reservations/$1.json" outcomes existing current score record
   outcomes=$(fm_route_read_outcomes) || { fm_route_diagnostic 'invalid routing state'; return 1; }
-  if jq -e --arg task "$task" --arg generation "$generation" 'any(.taskId == $task and .generation == $generation)' <<<"$outcomes" >/dev/null; then
-    jq -c --arg task "$task" --arg generation "$generation" '.[] | select(.taskId == $task and .generation == $generation)' <<<"$outcomes" | head -n 1
+  existing=$(jq -c --arg task "$task" --arg generation "$generation" '.[] | select(.kind == "terminal" and .taskId == $task and .generation == $generation)' <<<"$outcomes" | head -n 1)
+  if [ -n "$existing" ]; then
+    [ "$(jq -r .terminal <<<"$existing")" = "$terminal" ] || { fm_route_diagnostic 'terminal-outcome-conflict'; return 1; }
+    if [ -e "$reservation" ]; then
+      current=$(jq -c . "$reservation" 2>/dev/null) || { fm_route_diagnostic 'invalid routing state'; return 1; }
+      jq -e --argjson outcome "$existing" '
+        .taskId == $outcome.taskId and .generation == $outcome.generation and .profile == $outcome.profile
+        and .provider == $outcome.provider and .lane == $outcome.lane and .account == $outcome.account
+        and .taskClass == $outcome.taskClass and .workType == $outcome.workType
+        and .risk == $outcome.risk and .mode == $outcome.mode
+      ' <<<"$current" >/dev/null || { fm_route_diagnostic 'reservation-outcome-mismatch'; return 1; }
+      rm -f -- "$reservation"
+    fi
+    printf '%s\n' "$existing"
     return 0
   fi
   [ -s "$reservation" ] || { fm_route_diagnostic 'reservation-not-found'; return 1; }
@@ -451,7 +501,7 @@ fm_route_finalize_locked() {
     return 1
   fi
   record=$(jq -cn --argjson reservation "$current" --argjson score "$score" --arg terminal "$terminal" '
-    {kind:"terminal",timestamp:$score.timestamp,taskId:$reservation.taskId,generation:$reservation.generation,profile:$reservation.profile,provider:$reservation.provider,lane:$reservation.lane,account:$reservation.account,taskClass:$reservation.taskClass,risk:$reservation.risk,mode:$reservation.mode,elapsedSeconds:([$score.timestamp-$reservation.createdAt,0]|max),tests:$score.tests,review:$score.review,redundant:$score.redundant,terminal:$terminal}
+    {kind:"terminal",timestamp:$score.timestamp,taskId:$reservation.taskId,generation:$reservation.generation,profile:$reservation.profile,provider:$reservation.provider,lane:$reservation.lane,account:$reservation.account,taskClass:$reservation.taskClass,workType:$reservation.workType,risk:$reservation.risk,mode:$reservation.mode,elapsedSeconds:([$score.timestamp-$reservation.createdAt,0]|max),tests:$score.tests,review:$score.review,redundant:$score.redundant,terminal:$terminal}
   ')
   fm_route_append_outcome_locked "$record" || return 1
   rm -f -- "$reservation"
@@ -464,13 +514,42 @@ fm_route_observe_locked() {
   [ -z "$forbidden" ] || { fm_route_diagnostic "forbidden outcome field: $forbidden"; return 1; }
   reason=$(jq -r '
     def expected: ["action","maxWorkers","ranked","reason","rejected","selected","uncertainty"];
+    def selected_expected: ["profile","harness","model","provider","lane","account","fitTier","reasoningClass","catalogSupported","authState","spendPriority","runwaySeconds","activeLane","historySuccesses","historyAttempts","costTier"];
+    def identifier: type == "string" and length <= 128 and test("^[A-Za-z0-9][A-Za-z0-9._-]*$");
+    def selected_error:
+      if type != "object" then "selected profile is required"
+      elif (keys_unsorted - selected_expected | length) > 0 then "unexpected field \((keys_unsorted - selected_expected)[0])"
+      elif (selected_expected - keys_unsorted | length) > 0 then "missing \((selected_expected - keys_unsorted)[0])"
+      elif (.profile | identifier | not) then "profile"
+      elif (.harness | IN("claude","codex","pi","pi-signed") | not) then "harness"
+      elif (.model | type) != "string" or (.model | length) == 0 or (.model | length) > 256 or (.model | test("^[A-Za-z0-9][A-Za-z0-9._:/-]*$") | not) then "model"
+      elif (.provider | identifier | not) then "provider"
+      elif (.lane | identifier | not) then "lane"
+      elif (.account | identifier | not) then "account"
+      elif ((.harness == "pi" or .harness == "pi-signed") and .account != "none") then "account"
+      elif ((.harness == "claude" or .harness == "codex") and .account == "none") then "account"
+      elif (.fitTier | type) != "number" or (.fitTier | floor) != .fitTier or .fitTier < 0 then "fitTier"
+      elif (.reasoningClass | IN("basic","standard","strong","maximum") | not) then "reasoningClass"
+      elif (.catalogSupported | type) != "boolean" then "catalogSupported"
+      elif (.authState != null and (.authState | IN("usable","unusable","unknown") | not)) then "authState"
+      elif (.spendPriority != null and (.spendPriority | type) != "number") then "spendPriority"
+      elif (.runwaySeconds != null and ((.runwaySeconds | type) != "number" or .runwaySeconds < 0)) then "runwaySeconds"
+      elif (.activeLane | type) != "number" or (.activeLane | floor) != .activeLane or .activeLane < 0 then "activeLane"
+      elif (.historySuccesses | type) != "number" or (.historySuccesses | floor) != .historySuccesses or .historySuccesses < 0 then "historySuccesses"
+      elif (.historyAttempts | type) != "number" or (.historyAttempts | floor) != .historyAttempts or .historyAttempts < .historySuccesses then "historyAttempts"
+      elif (.costTier != null and ((.costTier | type) != "number" or (.costTier | floor) != .costTier or .costTier < 0)) then "costTier"
+      else "ok" end;
     if type != "object" then "top-level value must be an object"
     elif (keys_unsorted - expected | length) > 0 then "unexpected field \((keys_unsorted - expected)[0])"
+    elif (expected - keys_unsorted | length) > 0 then "missing \((expected - keys_unsorted)[0])"
     elif .action != "selected" then "decision must select a profile"
-    elif (.selected | type) != "object" then "selected profile is required"
+    elif (.selected | selected_error) != "ok" then "selected:\(.selected | selected_error)"
     else "ok" end
   ' "$decision" 2>/dev/null) || { fm_route_diagnostic 'invalid decision JSON'; return 1; }
-  [ "$reason" = ok ] || { fm_route_diagnostic "invalid decision schema: $reason"; return 1; }
+  if [ "$reason" != ok ]; then
+    case "$reason" in selected:*) fm_route_diagnostic "invalid selected route schema: ${reason#selected:}" ;; *) fm_route_diagnostic "invalid decision schema: $reason" ;; esac
+    return 1
+  fi
   record=$(jq -cn --slurpfile request "$request" --slurpfile decision "$decision" --argjson now "$now" '
     ($request[0]) as $r | ($decision[0].selected) as $d |
     {kind:"simulation",timestamp:$now,taskId:$r.taskId,taskClass:$r.taskClass,workType:$r.workType,risk:$r.risk,profile:$d.profile,provider:$d.provider,lane:$d.lane,account:$d.account,elapsedSeconds:$r.estimatedSeconds,terminal:"observed"}
@@ -482,7 +561,7 @@ fm_route_observe_locked() {
 fm_route_evidence_locked() {
   local work_type=$1 outcomes
   outcomes=$(fm_route_read_outcomes) || { fm_route_diagnostic 'invalid routing state'; return 1; }
-  jq -cn --arg workType "$work_type" --argjson outcomes "$outcomes" '$outcomes | map(select(.workType? == $workType)) | group_by(.profile) | map({profile:.[0].profile,successes:([.[] | select(.terminal == "completed")] | length),attempts:length}) | sort_by(.profile)'
+  jq -cn --arg workType "$work_type" --argjson outcomes "$outcomes" '$outcomes | map(select(.kind == "terminal" and .workType == $workType)) | group_by(.profile) | map({profile:.[0].profile,successes:([.[] | select(.terminal == "completed")] | length),attempts:length}) | sort_by(.profile)'
 }
 
 fm_route_status_locked() {
@@ -495,7 +574,7 @@ fm_route_status_locked() {
     mode=$(jq -r '.[0].mode' <<<"$reservations")
   fi
   jq -cn --arg mode "$mode" --argjson reservations "$reservations" --argjson circuits "$circuits" --argjson now "$now" '
-    {mode:$mode,caps:{canary:3,automatic:6,burst:8,perLane:2},active:{total:($reservations|length),byLane:($reservations|group_by(.lane)|map({key:.[0].lane,value:length})|from_entries),byAccount:($reservations|map(select(.account != "none"))|group_by(.account)|map({key:.[0].account,value:length})|from_entries)},openCircuits:([$circuits.lanes|to_entries[]|select(.value.openUntil? > $now)|{lane:.key,provider:.value.provider,until:.value.openUntil}]|sort_by(.lane))}
+    {mode:$mode,caps:{canary:3,automatic:6,burst:8,perLane:2,perAccount:2},circuitBreaker:{failures:3,windowSeconds:900,cooldownSeconds:1800},active:{total:($reservations|length),byLane:($reservations|group_by(.lane)|map({key:.[0].lane,value:length})|from_entries),byAccount:($reservations|map(select(.account != "none"))|group_by(.account)|map({key:.[0].account,value:length})|from_entries)},openCircuits:([$circuits.lanes|to_entries[]|select(.value.openUntil? > $now)|{lane:.key,provider:.value.provider,until:.value.openUntil}]|sort_by(.lane))}
   '
 }
 

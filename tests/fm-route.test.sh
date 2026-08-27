@@ -44,6 +44,11 @@ candidate() {
     '{profile:$profile,harness:"pi",model:("model-"+$profile),provider:"provider",lane:$lane,account:"none",fitTier:$fit,reasoningClass:"strong",catalogSupported:true,authState:"usable",spendPriority:$spend,runwaySeconds:10000,activeLane:$active,historySuccesses:$successes,historyAttempts:$attempts,costTier:$cost}'
 }
 
+terminal_outcome() {
+  jq -cn --arg profile "$1" --arg task "$2" --arg terminal "$3" \
+    '{kind:"terminal",timestamp:1000,taskId:$task,generation:("gen-"+$task),profile:$profile,provider:"provider",lane:("lane-"+$task),account:"none",taskClass:"standard",workType:"implementation",risk:"medium",mode:"automatic",elapsedSeconds:10,tests:"unknown",review:"unknown",redundant:"no",terminal:$terminal}'
+}
+
 write_candidate_array() {
   printf '%s\n' "$@" | jq -s . >"$CANDIDATES"
 }
@@ -169,16 +174,16 @@ test_history_is_read_from_state_only_for_equal_attempts() {
     "$(candidate proven lane-a 3 1 88 0 99 null)" \
     "$(candidate weak lane-b 3 1 88 99 99 null)"
   printf '%s\n' \
-    '{"profile":"proven","workType":"implementation","terminal":"completed"}' \
-    '{"profile":"proven","workType":"implementation","terminal":"completed"}' \
-    '{"profile":"weak","workType":"implementation","terminal":"completed"}' \
-    '{"profile":"weak","workType":"implementation","terminal":"failed_safe"}' \
+    "$(terminal_outcome proven proven-1 completed)" \
+    "$(terminal_outcome proven proven-2 completed)" \
+    "$(terminal_outcome weak weak-1 completed)" \
+    "$(terminal_outcome weak weak-2 failed_safe)" \
     >"$FM_STATE_OVERRIDE/routing/outcomes.jsonl"
   out=$(select_json) || fail "history-backed selection failed"
   jq -e '.selected.profile == "proven" and .selected.historySuccesses == 2 and .selected.historyAttempts == 2' <<<"$out" >/dev/null \
     || fail "caller history was not replaced with equal-attempt routing history"
 
-  printf '%s\n' '{"profile":"weak","workType":"implementation","terminal":"failed_safe"}' >>"$FM_STATE_OVERRIDE/routing/outcomes.jsonl"
+  terminal_outcome weak weak-3 failed_safe >>"$FM_STATE_OVERRIDE/routing/outcomes.jsonl"
   out=$(select_json) || fail "unequal-attempt decision failed"
   jq -e '.action == "escalate" and .reason == "evidence-tie" and .selected == null' <<<"$out" >/dev/null \
     || fail "raw successes were compared across unequal attempt counts"
@@ -261,10 +266,21 @@ reset_route_state() {
 
 reserve_route() {
   local task=$1 generation=$2 profile=$3 provider=$4 lane=$5 account=$6 class=$7 risk=$8 mode=$9
+  local work_type=${WORK_TYPE_OVERRIDE:-implementation}
   shift 9
   "$ROUTE" reserve --task "$task" --generation "$generation" --profile "$profile" \
     --provider "$provider" --lane "$lane" --account "$account" --class "$class" \
-    --risk "$risk" --mode "$mode" --now 1000 "$@"
+    --work-type "$work_type" --risk "$risk" --mode "$mode" --now 1000 "$@"
+}
+
+test_reserve_requires_a_bounded_work_type() {
+  reset_route_state
+  expect_failure_contains 'work-type is required' "$ROUTE" reserve --task task-1 --generation gen-1 --profile profile-1 --provider openai --lane codex-primary --account codex-primary --class standard --risk low --mode automatic --now 1000
+  expect_failure_contains 'invalid work type' "$ROUTE" reserve --task task-1 --generation gen-1 --profile profile-1 --provider openai --lane codex-primary --account codex-primary --class standard --work-type 'implementation notes' --risk low --mode automatic --now 1000
+  write_request standard 'implementation notes' low false 1 strong 60
+  write_candidates "[$(candidate only lane-1 3 1 0 0 0 null)]"
+  expect_failure_contains 'invalid request schema: workType' "$ROUTE" select --request "$REQUEST" --candidates "$CANDIDATES"
+  pass "reservations and requests share one bounded work-type contract"
 }
 
 test_canary_cap_is_atomic_and_duplicate_reserve_is_idempotent() {
@@ -343,9 +359,14 @@ test_failure_policy_and_circuit_breaker_are_bounded() {
   jq -e '.action == "circuit-open" and .until == 2900' <<<"$out" >/dev/null || fail "duplicate failure changed the circuit"
   out=$("$ROUTE" failure --task quota-4 --generation gen-4 --provider moonshot --lane pi-moonshot-1 --kind quota --now 1200) || fail "open circuit failure check failed"
   jq -e '.action == "circuit-open" and .until == 2900' <<<"$out" >/dev/null || fail "failure during cooldown extended the circuit"
+  expect_failure_contains 'failure-conflict' "$ROUTE" failure --task quota-4 --generation gen-4 --provider moonshot --lane different-lane --kind unsafe --now 1200
   expect_failure_contains 'circuit-open' reserve_route blocked gen-1 profile-x moonshot pi-moonshot-1 none standard low automatic
-  "$ROUTE" reserve --task recovered --generation gen-1 --profile profile-x --provider moonshot --lane pi-moonshot-1 --account none --class standard --risk low --mode automatic --now 2901 >/dev/null \
+  "$ROUTE" reserve --task recovered --generation gen-1 --profile profile-x --provider moonshot --lane pi-moonshot-1 --account none --class standard --work-type implementation --risk low --mode automatic --now 2901 >/dev/null \
     || fail "cooled-down circuit did not admit new work"
+  out=$("$ROUTE" failure --task quota-4 --generation gen-4 --provider moonshot --lane pi-moonshot-1 --kind quota --now 4000) || fail "durable failure replay failed after cooldown"
+  jq -e '.action == "circuit-open" and .until == 2900' <<<"$out" >/dev/null || fail "failure replay changed after cooldown"
+  "$ROUTE" failure --task unsafe-cache --generation gen-1 --provider zai --lane pi-zai-2 --kind transient --now 1000 >/dev/null
+  expect_failure_contains 'failure-conflict' "$ROUTE" failure --task unsafe-cache --generation gen-1 --provider zai --lane pi-zai-2 --kind unsafe --now 1001
   "$ROUTE" failure --task unsafe --generation gen-1 --provider zai --lane pi-zai-1 --kind unsafe --now 1000 | jq -e '.action == "escalate"' >/dev/null \
     || fail "unsafe failure did not escalate"
   pass "failure actions retry once, open deterministic circuits, and escalate unsafe work"
@@ -365,8 +386,10 @@ test_score_finalize_and_outcome_privacy_are_strict() {
   [ ! -e "$FM_STATE_OVERRIDE/routing/reservations/task-1.json" ] || fail "finalize leaked active capacity"
   [ "$(wc -l < "$FM_STATE_OVERRIDE/routing/outcomes.jsonl")" -eq 1 ] || fail "finalize duplicated the outcome"
   outcome=$(cat "$FM_STATE_OVERRIDE/routing/outcomes.jsonl")
-  jq -e 'keys == ["account","elapsedSeconds","generation","kind","lane","mode","profile","provider","redundant","review","risk","taskClass","taskId","terminal","tests","timestamp"] and .elapsedSeconds == 10' <<<"$outcome" >/dev/null \
+  jq -e 'keys == ["account","elapsedSeconds","generation","kind","lane","mode","profile","provider","redundant","review","risk","taskClass","taskId","terminal","tests","timestamp","workType"] and .elapsedSeconds == 10 and .workType == "implementation"' <<<"$outcome" >/dev/null \
     || fail "outcome schema was not bounded"
+  "$ROUTE" evidence --work-type implementation | jq -e '. == [{"profile":"profile-1","successes":1,"attempts":1}]' >/dev/null \
+    || fail "finalized live work did not contribute work-type evidence"
   ! grep -qiE 'prompt|source|secret|token|cookie|authorization|password' "$FM_STATE_OVERRIDE/routing/outcomes.jsonl" \
     || fail "private payload marker reached the outcome ledger"
   pass "score and finalization are idempotent and privacy-safe"
@@ -382,12 +405,14 @@ test_observation_evidence_status_and_report_are_non_mutating() {
   "$ROUTE" observe --request "$REQUEST" --decision "$LAB/decision.json" --now 1000 >/dev/null || fail "simulation observation failed"
   [ ! -d "$FM_STATE_OVERRIDE/routing/reservations" ] || [ -z "$(find "$FM_STATE_OVERRIDE/routing/reservations" -type f -name '*.json' -print -quit)" ] \
     || fail "simulation observation created active capacity"
-  "$ROUTE" evidence --work-type implementation | jq -e '. == [{"profile":"observed","successes":0,"attempts":1}]' >/dev/null \
-    || fail "evidence did not expose raw counts only"
+  "$ROUTE" evidence --work-type implementation | jq -e '. == []' >/dev/null \
+    || fail "simulation observation polluted live selector evidence"
+  select_json | jq -e '.selected.historyAttempts == 0 and .selected.historySuccesses == 0' >/dev/null \
+    || fail "simulation observation polluted selector history hydration"
 
   reserve_route live gen-live active openai codex-primary codex-primary standard low automatic >/dev/null
   status=$("$ROUTE" status) || fail "routing status failed"
-  jq -e '.caps == {"canary":3,"automatic":6,"burst":8,"perLane":2} and .active.total == 1 and .openCircuits == []' <<<"$status" >/dev/null \
+  jq -e '.caps == {"canary":3,"automatic":6,"burst":8,"perLane":2,"perAccount":2} and .active.total == 1 and .openCircuits == []' <<<"$status" >/dev/null \
     || fail "status omitted caps or active totals"
 
   "$ROUTE" release --task live --generation gen-live >/dev/null
@@ -395,6 +420,67 @@ test_observation_evidence_status_and_report_are_non_mutating() {
   jq -e '.stage == "simulation" and .minimum == 1 and .count == 1 and .meetsMinimum == true and .medianElapsedSeconds == 120' <<<"$report" >/dev/null \
     || fail "simulation report gates or median were not deterministic"
   pass "observations do not reserve capacity and reports expose bounded aggregate facts"
+}
+
+test_finalize_recovers_between_ledger_publish_and_reservation_delete() {
+  local reservation="$FM_STATE_OVERRIDE/routing/reservations/recovery.json" snapshot="$LAB/recovery-reservation.json"
+  reset_route_state
+  WORK_TYPE_OVERRIDE=debugging reserve_route recovery gen-1 profile-r openai codex-primary codex-primary standard medium automatic >/dev/null
+  "$ROUTE" score --task recovery --generation gen-1 --terminal completed --tests pass --review pass --redundant no --now 1010 >/dev/null
+  cp "$reservation" "$snapshot"
+  "$ROUTE" finalize --task recovery --generation gen-1 --terminal completed >/dev/null
+  cp "$snapshot" "$reservation"
+  expect_failure_contains 'terminal-outcome-conflict' "$ROUTE" finalize --task recovery --generation gen-1 --terminal failed_safe
+  [ -f "$reservation" ] || fail "conflicting recovery removed the reservation"
+  "$ROUTE" finalize --task recovery --generation gen-1 --terminal completed >/dev/null || fail "matching recovery did not reconcile"
+  [ ! -e "$reservation" ] || fail "matching recovery left the reservation active"
+  [ "$(jq -s '[.[] | select(.taskId == "recovery")] | length' "$FM_STATE_OVERRIDE/routing/outcomes.jsonl")" -eq 1 ] || fail "recovery duplicated the terminal ledger row"
+  pass "finalize reconciles the ledger-published reservation-delete crash window"
+}
+
+test_observe_and_ledger_schemas_are_exact_and_sanitized() {
+  local decision
+  reset_route_state
+  write_request standard implementation low false 1 strong 120
+  write_candidates "[$(candidate observed lane-1 3 1 0 0 0 null)]"
+  decision=$(select_json) || fail "strict observation decision failed"
+  jq '.selected.notes="arbitrary"' <<<"$decision" >"$LAB/decision-invalid.json"
+  expect_failure_contains 'invalid selected route schema: unexpected field notes' "$ROUTE" observe --request "$REQUEST" --decision "$LAB/decision-invalid.json" --now 1000
+  jq '.selected.provider=42' <<<"$decision" >"$LAB/decision-invalid.json"
+  expect_failure_contains 'invalid selected route schema: provider' "$ROUTE" observe --request "$REQUEST" --decision "$LAB/decision-invalid.json" --now 1000
+  jq '.selected.model="arbitrary private text"' <<<"$decision" >"$LAB/decision-invalid.json"
+  expect_failure_contains 'invalid selected route schema: model' "$ROUTE" observe --request "$REQUEST" --decision "$LAB/decision-invalid.json" --now 1000
+  mkdir -p "$FM_STATE_OVERRIDE/routing"
+  printf '%s\n' '{"prompt":"secret"}' >"$FM_STATE_OVERRIDE/routing/outcomes.jsonl"
+  expect_failure_contains 'invalid routing state' "$ROUTE" evidence --work-type implementation
+  pass "observe and persisted ledger reads reject unbounded or private state"
+}
+
+test_status_exposes_complete_capacity_and_breaker_policy() {
+  reset_route_state
+  "$ROUTE" status --now 1000 | jq -e '
+    .caps == {"canary":3,"automatic":6,"burst":8,"perLane":2,"perAccount":2}
+    and .circuitBreaker == {"failures":3,"windowSeconds":900,"cooldownSeconds":1800}
+  ' >/dev/null || fail "status omitted account or circuit-breaker bounds"
+  pass "status exposes the complete fixed admission policy"
+}
+
+test_every_single_value_option_rejects_duplicates() {
+  write_request standard implementation low false 1 strong 120
+  write_candidates "[$(candidate only lane-1 3 1 0 0 0 null)]"
+  printf '%s\n' '{"action":"selected","maxWorkers":1,"ranked":[],"reason":"test","rejected":[],"selected":{},"uncertainty":[]}' >"$LAB/duplicate-decision.json"
+  expect_failure_contains 'usage:' "$ROUTE" select --request "$REQUEST" --request "$REQUEST" --candidates "$CANDIDATES"
+  expect_failure_contains 'usage:' "$ROUTE" reserve --task one --task two
+  expect_failure_contains 'usage:' "$ROUTE" verify-reservation --profile one --profile two
+  expect_failure_contains 'usage:' "$ROUTE" release --generation one --generation two
+  expect_failure_contains 'usage:' "$ROUTE" failure --kind quota --kind auth
+  expect_failure_contains 'usage:' "$ROUTE" score --tests pass --tests fail
+  expect_failure_contains 'usage:' "$ROUTE" finalize --terminal completed --terminal cancelled
+  expect_failure_contains 'usage:' "$ROUTE" observe --decision "$LAB/duplicate-decision.json" --decision "$LAB/duplicate-decision.json"
+  expect_failure_contains 'usage:' "$ROUTE" evidence --work-type implementation --work-type debugging
+  expect_failure_contains 'usage:' "$ROUTE" status --now 1 --now 2
+  expect_failure_contains 'usage:' "$ROUTE" report --minimum 1 --minimum 2
+  pass "all public commands reject repeated single-valued options"
 }
 
 test_fit_beats_quota
@@ -408,9 +494,14 @@ test_cost_breaks_ties_only_when_every_cost_is_known
 test_request_schema_is_strict
 test_candidate_schema_is_strict
 test_input_and_now_validation_are_sanitized
+test_reserve_requires_a_bounded_work_type
 test_canary_cap_is_atomic_and_duplicate_reserve_is_idempotent
 test_lane_account_and_burst_caps_are_enforced
 test_reservation_verification_and_generation_release_are_exact
 test_failure_policy_and_circuit_breaker_are_bounded
 test_score_finalize_and_outcome_privacy_are_strict
 test_observation_evidence_status_and_report_are_non_mutating
+test_finalize_recovers_between_ledger_publish_and_reservation_delete
+test_observe_and_ledger_schemas_are_exact_and_sanitized
+test_status_exposes_complete_capacity_and_breaker_policy
+test_every_single_value_option_rejects_duplicates
