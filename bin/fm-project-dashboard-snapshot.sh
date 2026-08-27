@@ -36,9 +36,15 @@
 # A captain-actionable queued row is a decision, not queued work: it appears in
 # decisions[] or deferred_decisions[] and never in queued[], so one open question
 # is never shown twice on a card.
-# A Done row still held for the captain is a transfer record, not shipped work,
-# so it is absent from both landed[] and prs[] whichever record supplied the
-# link. A row held for the captain that is still in flight keeps its PR link.
+# A Done row still held for the captain is a resolved decision, not shipped
+# work: it is absent from landed[] and prs[] whichever record supplied the link,
+# and appears instead in the bounded resolved_decisions[] surface under
+# decisions. A row held for the captain that is still in flight keeps its PR
+# link.
+# A captain decision that is due now appears only under decisions[], even when
+# its own task has parked awaiting the answer. A decision deferred to a future
+# hold-until date is not yet actionable, so it appears only under waiting[]
+# until that date arrives.
 # Work already shown as waiting is not repeated under queued[]: each item has
 # exactly one lifecycle place, and it returns to queued[] only once its blocker
 # or hold clears.
@@ -433,6 +439,7 @@ jq -n \
                 summary:((.reason | present) // (.summary | present) // ""),
                 deferred:(.deferred_marker == true),owner:$owner.id} ]
         | dedupe_first([.owner,.id,.key])) as $decisions_all
+      | ([ $decisions_all[] | (.owner + "\u001f" + .id) ]) as $decision_keys
       | ([ $decisions_all[] | select(.deferred | not) ]) as $decisions
       | ([ $decisions_all[] | select(.deferred) ]) as $deferred_decisions
       | ([ $tasks[]
@@ -468,7 +475,9 @@ jq -n \
              | $owner.record.holds[]?
              | select(matches_project($owner; $name))
              | {id,title:(.title // .id),reason:((.reason | present) // "Waiting"),owner:$owner.id} ]
-        | dedupe_first([.owner,.id])) as $waiting
+        | dedupe_first([.owner,.id])
+        | map(. as $row
+              | select(($decision_keys | index($row.owner + "\u001f" + $row.id)) == null))) as $waiting
       | ([ $waiting[] | (.owner + "\u001f" + .id) ]) as $waiting_keys
       | ([ $backlog[]
            | select(.state == "queued" and .captain_actionable != true)
@@ -491,6 +500,12 @@ jq -n \
              | {id,title,completed:(.completion.date // null),pr_url,report_path,owner:$owner.id} ]
         | dedupe_first([.owner,.id])
         | sort_by([(.completed // ""),.id]) | reverse) as $landed_all
+      | ([ $backlog[]
+           | select(.state == "done" and .hold_kind == "captain")
+           | {id,title,summary:((.hold_reason | present) // .title),
+              completed:(.completion.date // .merged // .reported // .done),owner:"main"} ]
+        | dedupe_first([.owner,.id])
+        | sort_by([(.completed // ""),.id]) | reverse) as $resolved_all
       | ([ $tasks[] as $task
            | select($task.pr.url != null)
            | (([ $backlog[] | select(.id == $task.id and .state == "done") ][0]) // null) as $done_row
@@ -610,6 +625,7 @@ jq -n \
           waiting:$waiting,
           queued:$queued,
           landed:($landed_all[:5]),
+          resolved_decisions:($resolved_all[:5]),
           prs:($prs_all[:5]),
           unattributed:$unattributed,
           deferred_decisions:$deferred_decisions,
@@ -622,6 +638,7 @@ jq -n \
             unreadable:($unreadable | length),
             finished:($finished | length),
             waiting:($waiting | length),queued:($queued | length),landed:($landed_all | length),
+            resolved_decisions:($resolved_all | length),
             prs:($prs_all | length),unattributed:($unattributed | length),
             deferred_decisions:($deferred_decisions | length)}
         }

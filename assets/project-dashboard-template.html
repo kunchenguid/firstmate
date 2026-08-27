@@ -231,6 +231,15 @@ __FM_PROJECT_DASHBOARD_DATA__
         project.finished.map(item => ({...item, reason: item.detail || "Crew state reports done; no further detail"})), {});
       detailGrid.append(finished);
     }
+    if (project.resolved_decisions.length) {
+      const resolved = node("section", "pd-panel");
+      const resolvedTitle = project.counts.resolved_decisions > project.resolved_decisions.length
+        ? `Decisions recently resolved (${project.resolved_decisions.length} of ${project.counts.resolved_decisions})`
+        : "Decisions recently resolved";
+      appendList(resolved, resolvedTitle,
+        project.resolved_decisions.map(item => ({...item, reason: item.summary || item.completed || "Resolved"})), {});
+      detailGrid.append(resolved);
+    }
     if (project.deferred_decisions.length) {
       const deferred = node("section", "pd-panel");
       appendList(deferred, "Deferred / superseded holds", project.deferred_decisions.map(item => ({...item, reason: item.summary || "Marked deferred or superseded"})), {});

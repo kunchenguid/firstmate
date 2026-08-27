@@ -1320,7 +1320,8 @@ test_captain_decision_is_not_also_queued_work() {
     | (.decisions | any(.id == "alpha-call"))
       and (.queued | map(.id)) == ["alpha-next"]
       and (.queued | any(.id == "alpha-call") | not)
-  ' >/dev/null || fail "a captain decision was listed as queued work too: $out"
+      and (.waiting | any(.id == "alpha-call") | not)
+  ' >/dev/null || fail "a captain decision was listed as queued or waiting work too: $out"
 
   jq '
     .backlog.records |= map(select(.repo != "alpha"))
@@ -1369,8 +1370,11 @@ test_captain_held_done_row_is_neither_landed_nor_a_pr_link() {
     .projects[] | select(.name == "alpha")
     | (.landed | map(.id)) == ["old"] and .counts.landed == 1
       and (.prs | map(.id)) == ["old"] and .counts.prs == 1
-  ' >/dev/null || fail "a captain-held done row reached the landed or PR surface: $out"
-  pass "a Done row still held for the captain is neither landed work nor a PR link"
+      and (.resolved_decisions | map(.id)) == ["cap"]
+      and .counts.resolved_decisions == 1
+      and .resolved_decisions[0].summary == "handed to the captain"
+  ' >/dev/null || fail "a captain-held done row reached the wrong surface, or vanished: $out"
+  pass "a resolved captain decision surfaces under decisions, not landed work or PR history"
 }
 
 test_captain_held_in_flight_row_keeps_its_pr_link() {
@@ -1435,6 +1439,52 @@ test_waiting_work_is_not_repeated_under_queued_next() {
           and (.queued | map(.id)) == ["d-next"])
   ' >/dev/null || fail "waiting work was repeated under queued next: $out"
   pass "waiting work appears only under waiting, never also under queued next"
+}
+
+test_date_deferred_decision_waits_until_it_is_due() {
+  local home epoch out
+  home=$(make_home deferred-until)
+  write_fleet_fixture "$home"
+  : > "$home/state/a-later.meta"
+  : > "$home/state/a-later.status"
+  jq --arg home "$home" '
+    .backlog.records = [
+      {structured:true,id:"a-later",repo:"alpha",title:"Pick the rollout window",state:"queued",
+       since:"2020-01-01",hold_kind:"captain",hold_reason:"Revisit after the vendor ships",
+       hold_until:"2099-01-01",captain_actionable:false,unresolved_blocker_ids:[]}]
+    | .tasks = [
+        {id:"a-later",kind:"ship",project:"alpha",
+         paths:{meta:{path:($home + "/state/a-later.meta"),present:true},
+                status_log:{path:($home + "/state/a-later.status"),present:true},
+                worktree:{path:null,present:false},home:{path:null,present:false},report:{path:null,present:false}},
+         secondmate_projects:[],current_state:{state:"parked",source:"fixture",detail:"Captain choice"},
+         hints:{open_decisions:[]},pr:{url:null},
+         backlog:{id:"a-later",repo:"alpha",title:"Pick the rollout window"}}]
+    | .secondmate_current.records = []
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "date-deferred snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "alpha")
+    | .status == "waiting"
+      and (.waiting | map(.id)) == ["a-later"]
+      and .decisions == [] and .counts.decisions == 0
+      and .queued == []
+  ' >/dev/null || fail "a decision deferred to a future date did not wait: $out"
+
+  jq '.backlog.records |= map(if .id == "a-later" then
+        .hold_until = "2020-01-01" | .captain_actionable = true else . end)' \
+    "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  out=$(run_snapshot "$home" "$epoch") || fail "now-due snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "alpha")
+    | .status == "needs_attention"
+      and (.decisions | map(.id)) == ["a-later"]
+      and .waiting == [] and .queued == []
+  ' >/dev/null || fail "a decision that became due did not move to decisions only: $out"
+  pass "a date-deferred decision waits until due, then appears only under decisions"
 }
 
 extract_payload() {  # <board>
@@ -1704,6 +1754,7 @@ test_pull_request_list_is_bounded_like_landed
 test_captain_decision_is_not_also_queued_work
 test_captain_held_done_row_is_neither_landed_nor_a_pr_link
 test_captain_held_in_flight_row_keeps_its_pr_link
+test_date_deferred_decision_waits_until_it_is_due
 test_waiting_work_is_not_repeated_under_queued_next
 test_attention_next_step_is_an_action_not_a_bare_title
 test_unattributable_secondmate_state_is_disclosed
