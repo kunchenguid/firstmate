@@ -411,8 +411,7 @@ cleanup_ready() {
   local task=$1 generation=$2 work_type=${3:-implementation}
   "$ROUTE" cleanup-ready --task "$task" --generation "$generation" \
     --profile profile-1 --provider openai --lane codex-primary \
-    --account codex-primary --class standard --work-type "$work_type" --risk medium --mode automatic \
-    --terminal completed
+    --account codex-primary --class standard --work-type "$work_type" --risk medium --mode automatic
 }
 
 cleanup_finalize() {
@@ -1488,7 +1487,8 @@ test_cleanup_finalization_uses_canonical_capability_and_unknown_scores() {
   activate_fresh_admission cleanup gen-1 "$metadata" >/dev/null
   capability=$(claim_path cleanup gen-1)
 
-  cleanup_ready cleanup gen-1 >/dev/null || fail "cleanup preflight rejected an active exact generation"
+  [ "$(cleanup_ready cleanup gen-1)" = '{"terminal":"completed"}' ] \
+    || fail "cleanup preflight did not resolve the no-score completed default"
   [ -f "$capability" ] || fail "cleanup preflight consumed its capability"
   outcome=$(cleanup_finalize cleanup gen-1 completed) || fail "cleanup finalization failed"
   jq -e '.terminal == "completed" and .tests == "unknown" and .review == "unknown" and .redundant == "no"' <<<"$outcome" >/dev/null \
@@ -1500,6 +1500,110 @@ test_cleanup_finalization_uses_canonical_capability_and_unknown_scores() {
   [ "$(jq -s '[.[] | select(.taskId == "cleanup" and .generation == "gen-1")] | length' "$FM_STATE_OVERRIDE/routing/outcomes.jsonl")" -eq 1 ] \
     || fail "cleanup finalization replay duplicated its outcome"
   pass "cleanup finalization derives the canonical capability and preserves unknown scores"
+}
+
+test_cleanup_resolution_preserves_every_terminal_exactly_once() {
+  local terminal metadata capability outcome ready count
+  for terminal in completed failed_safe escalated cancelled superseded; do
+    reset_route_state
+    metadata="$FM_STATE_OVERRIDE/cleanup.meta"
+    rm -f "$metadata"
+    reserve_route cleanup gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+    activate_fresh_admission cleanup gen-1 "$metadata" >/dev/null
+    capability=$(claim_path cleanup gen-1)
+    "$ROUTE" score --task cleanup --generation gen-1 --terminal "$terminal" \
+      --tests unknown --review unknown --redundant no --now 1010 >/dev/null
+
+    ready=$(cleanup_ready cleanup gen-1) || fail "cleanup preflight rejected terminal $terminal"
+    [ "$ready" = "{\"terminal\":\"$terminal\"}" ] \
+      || fail "cleanup preflight did not return the strict $terminal resolution: $ready"
+    outcome=$(cleanup_finalize cleanup gen-1 "$terminal") \
+      || fail "cleanup finalization rejected resolved terminal $terminal"
+    jq -e --arg terminal "$terminal" \
+      '.terminal == $terminal and .tests == "unknown" and .review == "unknown" and .redundant == "no"' \
+      <<<"$outcome" >/dev/null || fail "cleanup changed score fields for terminal $terminal"
+    [ ! -e "$(reservation_path cleanup gen-1)" ] || fail "$terminal cleanup leaked its reservation"
+    [ ! -e "$capability" ] || fail "$terminal cleanup leaked its capability"
+
+    ready=$(cleanup_ready cleanup gen-1) || fail "$terminal terminal outcome replay was not cleanup-ready"
+    [ "$ready" = "{\"terminal\":\"$terminal\"}" ] \
+      || fail "$terminal outcome replay resolved a different terminal"
+    cleanup_finalize cleanup gen-1 "$terminal" >/dev/null \
+      || fail "$terminal cleanup finalization replay was not idempotent"
+    count=$(jq -s '[.[] | select(.taskId == "cleanup" and .generation == "gen-1")] | length' \
+      "$FM_STATE_OVERRIDE/routing/outcomes.jsonl")
+    [ "$count" -eq 1 ] || fail "$terminal cleanup wrote $count terminal outcomes"
+  done
+  pass "cleanup resolution finalizes every terminal enum exactly once and releases one reservation and capability"
+}
+
+test_cleanup_resolution_rejects_terminal_score_conflict_without_mutation() {
+  local metadata reservation capability outcomes before_res before_cap before_out out
+  reset_route_state
+  metadata="$FM_STATE_OVERRIDE/cleanup.meta"
+  rm -f "$metadata"
+  reserve_route cleanup gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  activate_fresh_admission cleanup gen-1 "$metadata" >/dev/null
+  "$ROUTE" score --task cleanup --generation gen-1 --terminal failed_safe \
+    --tests fail --review unknown --redundant no --now 1010 >/dev/null
+  reservation=$(reservation_path cleanup gen-1)
+  capability=$(claim_path cleanup gen-1)
+  outcomes="$FM_STATE_OVERRIDE/routing/outcomes.jsonl"
+  jq -cn --argjson reservation "$(cat "$reservation")" '
+    {kind:"terminal",timestamp:1010,taskId:$reservation.taskId,generation:$reservation.generation,
+     profile:$reservation.profile,provider:$reservation.provider,lane:$reservation.lane,account:$reservation.account,
+     taskClass:$reservation.taskClass,workType:$reservation.workType,risk:$reservation.risk,mode:$reservation.mode,
+     elapsedSeconds:10,tests:"unknown",review:"unknown",redundant:"no",terminal:"completed"}
+  ' >"$outcomes"
+  before_res=$(od -An -v -tx1 "$reservation")
+  before_cap=$(od -An -v -tx1 "$capability")
+  before_out=$(od -An -v -tx1 "$outcomes")
+
+  out=$(cleanup_ready cleanup gen-1 2>&1) && fail "terminal outcome/score conflict unexpectedly became cleanup-ready"
+  assert_contains "$out" 'terminal-score-conflict' "terminal conflict diagnostic was not stable"
+  [ "$(od -An -v -tx1 "$reservation")" = "$before_res" ] || fail "terminal conflict mutated reservation bytes"
+  [ "$(od -An -v -tx1 "$capability")" = "$before_cap" ] || fail "terminal conflict mutated capability bytes"
+  [ "$(od -An -v -tx1 "$outcomes")" = "$before_out" ] || fail "terminal conflict mutated outcome bytes"
+  pass "cleanup resolution refuses terminal/score conflict without mutation"
+}
+
+test_cleanup_resolution_rejects_corrupt_private_state_without_leaking_it() {
+  local metadata reservation out before
+  reset_route_state
+  metadata="$FM_STATE_OVERRIDE/cleanup.meta"
+  rm -f "$metadata"
+  reserve_route cleanup gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  activate_fresh_admission cleanup gen-1 "$metadata" >/dev/null
+  reservation=$(reservation_path cleanup gen-1)
+  jq '.score={terminal:"failed_safe",tests:"fail",review:"unknown",redundant:"no",timestamp:1010,prompt:"secret-value"}' \
+    "$reservation" >"$reservation.next"
+  mv "$reservation.next" "$reservation"
+  before=$(od -An -v -tx1 "$reservation")
+
+  out=$(cleanup_ready cleanup gen-1 2>&1) && fail "private corrupt score unexpectedly became cleanup-ready"
+  assert_not_contains "$out" 'secret-value' "cleanup preflight leaked private corrupt state"
+  assert_not_contains "$out" 'prompt' "cleanup preflight disclosed a forbidden private field"
+  [ "$(od -An -v -tx1 "$reservation")" = "$before" ] || fail "private corrupt state was mutated during refusal"
+  pass "cleanup resolution rejects corrupt private score state with bounded diagnostics"
+}
+
+test_cleanup_outcome_replay_still_validates_admission_state() {
+  local metadata outcomes before out
+  reset_route_state
+  metadata="$FM_STATE_OVERRIDE/cleanup.meta"
+  rm -f "$metadata"
+  reserve_route cleanup gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  activate_fresh_admission cleanup gen-1 "$metadata" >/dev/null
+  cleanup_finalize cleanup gen-1 completed >/dev/null || fail "outcome replay setup did not finalize"
+  outcomes="$FM_STATE_OVERRIDE/routing/outcomes.jsonl"
+  before=$(od -An -v -tx1 "$outcomes")
+  printf '{corrupt admission\n' >"$FM_STATE_OVERRIDE/routing/admissions/cleanup.json"
+
+  out=$(cleanup_ready cleanup gen-1 2>&1) && fail "terminal outcome replay ignored a corrupt admission journal"
+  assert_contains "$out" 'invalid admission state' "corrupt replay admission did not return a bounded diagnostic"
+  [ "$(od -An -v -tx1 "$outcomes")" = "$before" ] || fail "corrupt replay admission mutated outcome bytes"
+  [ ! -e "$(reservation_path cleanup gen-1)" ] || fail "corrupt replay admission recreated a reservation"
+  pass "terminal outcome replay validates admission state before authorizing cleanup"
 }
 
 test_cleanup_preflight_rejects_missing_capability_and_corrupt_journal() {
@@ -1653,6 +1757,7 @@ test_every_single_value_option_rejects_duplicates() {
   expect_failure_contains 'usage:' "$ROUTE" score --tests pass --tests fail
   expect_failure_contains 'usage:' "$ROUTE" finalize --terminal completed --terminal cancelled
   expect_failure_contains 'usage:' "$ROUTE" cleanup-ready --task one --task two
+  expect_failure_contains 'usage:' "$ROUTE" cleanup-ready --terminal completed
   expect_failure_contains 'usage:' "$ROUTE" cleanup-finalize --terminal completed --terminal cancelled
   expect_failure_contains 'usage:' "$ROUTE" observe --decision "$LAB/duplicate-decision.json" --decision "$LAB/duplicate-decision.json"
   expect_failure_contains 'usage:' "$ROUTE" evidence --work-type implementation --work-type debugging
@@ -1705,6 +1810,10 @@ test_failure_policy_and_circuit_breaker_are_bounded
 test_unsafe_failure_always_escalates_without_corrupting_breakers
 test_score_finalize_and_outcome_privacy_are_strict
 test_cleanup_finalization_uses_canonical_capability_and_unknown_scores
+test_cleanup_resolution_preserves_every_terminal_exactly_once
+test_cleanup_resolution_rejects_terminal_score_conflict_without_mutation
+test_cleanup_resolution_rejects_corrupt_private_state_without_leaking_it
+test_cleanup_outcome_replay_still_validates_admission_state
 test_cleanup_preflight_rejects_missing_capability_and_corrupt_journal
 test_cleanup_preflight_recovers_stale_admission_before_finalizing
 test_observation_evidence_status_and_report_are_non_mutating

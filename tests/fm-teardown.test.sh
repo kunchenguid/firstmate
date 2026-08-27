@@ -331,31 +331,34 @@ test_refused_teardown_keeps_routed_generation() {
 }
 
 test_successful_teardown_finalizes_routed_generation_once() {
-  local case_dir reservation capability outcomes
-  case_dir=$(make_case routed-success)
-  write_meta "$case_dir" no-mistakes ship
-  make_active_routed_task "$case_dir"
-  reservation=$(route_reservation_path "$case_dir" task-x1 gen-task-x1)
-  capability=$(route_claim_path "$case_dir" task-x1 gen-task-x1)
-  outcomes="$case_dir/state/routing/outcomes.jsonl"
-  FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" score --task task-x1 \
-    --generation gen-task-x1 --terminal completed --tests pass \
-    --review pass --redundant no --now 1000 >/dev/null
+  local terminal case_dir reservation capability outcomes count
+  for terminal in completed failed_safe escalated cancelled superseded; do
+    case_dir=$(make_case "routed-success-$terminal")
+    write_meta "$case_dir" no-mistakes ship
+    make_active_routed_task "$case_dir"
+    reservation=$(route_reservation_path "$case_dir" task-x1 gen-task-x1)
+    capability=$(route_claim_path "$case_dir" task-x1 gen-task-x1)
+    outcomes="$case_dir/state/routing/outcomes.jsonl"
+    FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" score --task task-x1 \
+      --generation gen-task-x1 --terminal "$terminal" --tests unknown \
+      --review unknown --redundant no --now 1000 >/dev/null
 
-  run_teardown "$case_dir" >/dev/null
-  [ ! -e "$reservation" ] || fail "successful cleanup leaked routed capacity"
-  [ ! -e "$capability" ] || fail "successful cleanup leaked its capability"
-  [ "$(jq -s '[.[] | select(.taskId == "task-x1" and .generation == "gen-task-x1")] | length' "$outcomes")" -eq 1 ] \
-    || fail "successful cleanup did not write exactly one generation outcome"
-  jq -e 'select(.taskId == "task-x1") | .workType == "review" and .terminal == "completed" and .tests == "pass" and .review == "pass" and .redundant == "no"' "$outcomes" >/dev/null \
-    || fail "successful cleanup did not merge the pending score"
+    run_teardown "$case_dir" >/dev/null || fail "teardown rejected resolved terminal $terminal"
+    [ ! -e "$reservation" ] || fail "$terminal cleanup leaked routed capacity"
+    [ ! -e "$capability" ] || fail "$terminal cleanup leaked its capability"
+    count=$(jq -s '[.[] | select(.taskId == "task-x1" and .generation == "gen-task-x1")] | length' "$outcomes")
+    [ "$count" -eq 1 ] || fail "$terminal cleanup wrote $count generation outcomes"
+    jq -e --arg terminal "$terminal" \
+      'select(.taskId == "task-x1") | .workType == "review" and .terminal == $terminal and .tests == "unknown" and .review == "unknown" and .redundant == "no"' \
+      "$outcomes" >/dev/null || fail "teardown did not preserve the pending $terminal score"
 
-  if run_teardown "$case_dir" >/dev/null 2>&1; then
-    fail "teardown replay without task metadata unexpectedly succeeded"
-  fi
-  [ "$(jq -s '[.[] | select(.taskId == "task-x1" and .generation == "gen-task-x1")] | length' "$outcomes")" -eq 1 ] \
-    || fail "cleanup replay duplicated the terminal outcome"
-  pass "successful cleanup finalizes one generation exactly once"
+    if run_teardown "$case_dir" >/dev/null 2>&1; then
+      fail "$terminal teardown replay without task metadata unexpectedly succeeded"
+    fi
+    [ "$(jq -s '[.[] | select(.taskId == "task-x1" and .generation == "gen-task-x1")] | length' "$outcomes")" -eq 1 ] \
+      || fail "$terminal cleanup replay duplicated the terminal outcome"
+  done
+  pass "successful cleanup finalizes every terminal enum exactly once"
 }
 
 test_teardown_accepts_legacy_eight_field_route_metadata() {
@@ -462,17 +465,62 @@ test_teardown_replays_after_terminal_ledger_publish() {
   write_meta "$case_dir" no-mistakes ship
   make_active_routed_task "$case_dir"
   outcomes="$case_dir/state/routing/outcomes.jsonl"
+  FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" score --task task-x1 \
+    --generation gen-task-x1 --terminal failed_safe --tests fail \
+    --review unknown --redundant no --now 1010 >/dev/null
   FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" cleanup-finalize \
     --task task-x1 --generation gen-task-x1 --profile profile-1 \
     --provider openai --lane codex-primary --account codex-primary \
-    --class standard --work-type review --risk medium --mode automatic --terminal completed >/dev/null
+    --class standard --work-type review --risk medium --mode automatic --terminal failed_safe >/dev/null
   [ -f "$case_dir/state/task-x1.meta" ] || fail "ledger-publish crash setup lost task metadata"
 
   run_teardown "$case_dir" >/dev/null
   [ ! -e "$case_dir/state/task-x1.meta" ] || fail "ledger-published cleanup replay retained metadata"
   [ "$(jq -s '[.[] | select(.taskId == "task-x1" and .generation == "gen-task-x1")] | length' "$outcomes")" -eq 1 ] \
     || fail "ledger-published cleanup replay duplicated its outcome"
-  pass "cleanup replay converges after terminal ledger publication"
+  jq -e 'select(.taskId == "task-x1") | .terminal == "failed_safe"' "$outcomes" >/dev/null \
+    || fail "cleanup replay changed the published terminal outcome"
+  pass "cleanup replay converges from the authoritative terminal ledger outcome"
+}
+
+test_concurrent_score_change_retains_metadata_then_retry_converges() {
+  local case_dir metadata reservation capability outcomes
+  case_dir=$(make_case routed-concurrent-score)
+  write_meta "$case_dir" no-mistakes ship
+  make_active_routed_task "$case_dir"
+  metadata="$case_dir/state/task-x1.meta"
+  reservation=$(route_reservation_path "$case_dir" task-x1 gen-task-x1)
+  capability=$(route_claim_path "$case_dir" task-x1 gen-task-x1)
+  outcomes="$case_dir/state/routing/outcomes.jsonl"
+  cat >"$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = return ] && [ ! -e "$case_dir/score-changed" ]; then
+  FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" score --task task-x1 \
+    --generation gen-task-x1 --terminal failed_safe --tests fail \
+    --review unknown --redundant no --now 1010 >/dev/null || exit 1
+  : >"$case_dir/score-changed"
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  if run_teardown "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"; then
+    fail "concurrent score change unexpectedly finalized the stale completed resolution"
+  fi
+  [ -e "$case_dir/score-changed" ] || fail "concurrent score change did not occur after cleanup preflight"
+  [ -f "$metadata" ] || fail "concurrent score change failure removed retry metadata"
+  [ -f "$reservation" ] || fail "concurrent score change failure released capacity"
+  [ -f "$capability" ] || fail "concurrent score change failure removed capability"
+  [ ! -e "$outcomes" ] || fail "concurrent score change wrote a stale terminal outcome"
+
+  run_teardown "$case_dir" >/dev/null || fail "retry did not resolve the newly scored terminal"
+  [ ! -e "$reservation" ] || fail "score-change retry leaked capacity"
+  [ ! -e "$capability" ] || fail "score-change retry leaked capability"
+  jq -e 'select(.taskId == "task-x1") | .terminal == "failed_safe" and .tests == "fail" and .review == "unknown"' \
+    "$outcomes" >/dev/null || fail "score-change retry did not converge to the authoritative pending score"
+  [ "$(jq -s '[.[] | select(.taskId == "task-x1" and .generation == "gen-task-x1")] | length' "$outcomes")" -eq 1 ] \
+    || fail "score-change retry did not write exactly one outcome"
+  pass "concurrent score change fails stale finalization safely and converges on retry"
 }
 
 test_dirty_refusal_does_not_recover_stale_routing_admission() {
@@ -525,22 +573,33 @@ test_route_tuple_conflict_preflight_is_read_only() {
 }
 
 test_terminal_conflict_preflight_is_read_only() {
-  local case_dir outcomes before_outcome before_meta
+  local case_dir outcomes reservation capability before_outcome before_reservation before_capability before_meta
   case_dir=$(make_case routed-terminal-conflict)
   write_meta "$case_dir" no-mistakes ship
   make_active_routed_task "$case_dir"
   outcomes="$case_dir/state/routing/outcomes.jsonl"
-  FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" cleanup-finalize \
-    --task task-x1 --generation gen-task-x1 --profile profile-1 \
-    --provider openai --lane codex-primary --account codex-primary \
-    --class standard --work-type review --risk medium --mode automatic --terminal failed_safe >/dev/null
+  reservation=$(route_reservation_path "$case_dir" task-x1 gen-task-x1)
+  capability=$(route_claim_path "$case_dir" task-x1 gen-task-x1)
+  FM_STATE_OVERRIDE="$case_dir/state" "$ROUTE" score --task task-x1 \
+    --generation gen-task-x1 --terminal failed_safe --tests fail \
+    --review unknown --redundant no --now 1010 >/dev/null
+  jq -cn --argjson reservation "$(cat "$reservation")" '
+    {kind:"terminal",timestamp:1010,taskId:$reservation.taskId,generation:$reservation.generation,
+     profile:$reservation.profile,provider:$reservation.provider,lane:$reservation.lane,account:$reservation.account,
+     taskClass:$reservation.taskClass,workType:$reservation.workType,risk:$reservation.risk,mode:$reservation.mode,
+     elapsedSeconds:10,tests:"unknown",review:"unknown",redundant:"no",terminal:"completed"}
+  ' >"$outcomes"
   before_outcome=$(od -An -v -tx1 "$outcomes")
+  before_reservation=$(od -An -v -tx1 "$reservation")
+  before_capability=$(od -An -v -tx1 "$capability")
   before_meta=$(od -An -v -tx1 "$case_dir/state/task-x1.meta")
 
   if run_teardown "$case_dir" >/dev/null 2>&1; then
     fail "terminal conflict unexpectedly cleaned up"
   fi
   [ "$(od -An -v -tx1 "$outcomes")" = "$before_outcome" ] || fail "terminal conflict mutated outcome bytes"
+  [ "$(od -An -v -tx1 "$reservation")" = "$before_reservation" ] || fail "terminal conflict mutated reservation bytes"
+  [ "$(od -An -v -tx1 "$capability")" = "$before_capability" ] || fail "terminal conflict mutated capability bytes"
   [ "$(od -An -v -tx1 "$case_dir/state/task-x1.meta")" = "$before_meta" ] || fail "terminal conflict mutated task metadata"
   [ -d "$case_dir/wt" ] || fail "terminal conflict reached worktree return"
   pass "terminal conflict preflight leaves outcome and task bytes unchanged"
@@ -3034,6 +3093,7 @@ test_legacy_teardown_replays_after_terminal_ledger_publish
 test_missing_routing_capability_refuses_before_cleanup
 test_routed_finalization_failure_after_return_converges_on_retry
 test_teardown_replays_after_terminal_ledger_publish
+test_concurrent_score_change_retains_metadata_then_retry_converges
 test_dirty_refusal_does_not_recover_stale_routing_admission
 test_route_tuple_conflict_preflight_is_read_only
 test_terminal_conflict_preflight_is_read_only

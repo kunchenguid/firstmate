@@ -184,14 +184,14 @@ case "$command" in
       --lane) require_value "$@"; LANE=$2; shift 2 ;; --account) require_value "$@"; ACCOUNT=$2; shift 2 ;;
       --class) require_value "$@"; CLASS=$2; shift 2 ;; --work-type) require_value "$@"; WORK_TYPE=$2; shift 2 ;; --risk) require_value "$@"; RISK=$2; shift 2 ;;
       --mode) require_value "$@"; MODE=$2; shift 2 ;;
-      --terminal) require_value "$@"; TERMINAL=$2; shift 2 ;;
+      --terminal) [ "$command" = cleanup-finalize ] || usage; require_value "$@"; TERMINAL=$2; shift 2 ;;
       *) usage ;;
     esac; done
     fm_route_validate_route_tuple "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" "$WORK_TYPE" "$RISK" "$MODE"
-    validate_terminal "$TERMINAL"
     if [ "$command" = cleanup-ready ]; then
-      fm_routing_with_lock fm_route_cleanup_ready_locked "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" "$WORK_TYPE" "$RISK" "$MODE" "$TERMINAL"
+      fm_routing_with_lock fm_route_cleanup_ready_locked "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" "$WORK_TYPE" "$RISK" "$MODE"
     else
+      validate_terminal "$TERMINAL"
       fm_routing_with_lock fm_route_cleanup_finalize_locked "$TASK" "$GENERATION" "$PROFILE" "$PROVIDER" "$LANE" "$ACCOUNT" "$CLASS" "$WORK_TYPE" "$RISK" "$MODE" "$TERMINAL"
     fi
     ;;

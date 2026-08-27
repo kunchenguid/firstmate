@@ -1852,14 +1852,13 @@ fm_route_cleanup_admission_ready_locked() {
 }
 
 fm_route_cleanup_outcome_matches() {
-  local existing=$1 profile=$2 provider=$3 lane=$4 account=$5 task_class=$6 work_type=$7 risk=$8 mode=$9 terminal=${10}
+  local existing=$1 profile=$2 provider=$3 lane=$4 account=$5 task_class=$6 work_type=$7 risk=$8 mode=$9
   jq -e --arg profile "$profile" --arg provider "$provider" --arg lane "$lane" \
     --arg account "$account" --arg class "$task_class" --arg workType "$work_type" --arg risk "$risk" \
-    --arg mode "$mode" --arg terminal "$terminal" '
+    --arg mode "$mode" '
       .profile == $profile and .provider == $provider and .lane == $lane
       and .account == $account and .taskClass == $class
       and .workType == $workType and .risk == $risk and .mode == $mode
-      and .terminal == $terminal
     ' <<<"$existing" >/dev/null
 }
 
@@ -1876,31 +1875,67 @@ fm_route_cleanup_route_matches() {
     ' <<<"$route" >/dev/null
 }
 
-fm_route_cleanup_ready_locked() {
-  local task=$1 generation=$2 profile=$3 provider=$4 lane=$5 account=$6 task_class=$7 work_type=$8 risk=$9 mode=${10} terminal=${11}
-  local reservation current admission claim_file outcomes existing future
-  outcomes=$(fm_route_read_outcomes) || { fm_route_diagnostic 'invalid routing state'; return 1; }
-  existing=$(jq -c --arg task "$task" --arg generation "$generation" \
-    '.[] | select(.kind == "terminal" and .taskId == $task and .generation == $generation)' \
-    <<<"$outcomes" | head -n 1)
+fm_route_cleanup_terminal_resolution() {
+  local existing=${1:-} current=${2:-} existing_terminal='' score_terminal='' terminal=''
   if [ -n "$existing" ]; then
-    fm_route_cleanup_outcome_matches "$existing" "$profile" "$provider" "$lane" "$account" "$task_class" "$work_type" "$risk" "$mode" "$terminal" \
+    existing_terminal=$(jq -r '.terminal' <<<"$existing") || return 1
+  fi
+  if [ -n "$current" ]; then
+    score_terminal=$(jq -r '.score.terminal // empty' <<<"$current") || return 1
+  fi
+  if [ -n "$existing_terminal" ] && [ -n "$score_terminal" ] \
+    && [ "$existing_terminal" != "$score_terminal" ]; then
+    fm_route_diagnostic 'terminal-score-conflict'
+    return 1
+  fi
+  if [ -n "$existing" ] && [ -n "$score_terminal" ]; then
+    jq -e --argjson outcome "$existing" '
+      .score.terminal == $outcome.terminal
+      and .score.tests == $outcome.tests
+      and .score.review == $outcome.review
+      and .score.redundant == $outcome.redundant
+      and .score.timestamp == $outcome.timestamp
+    ' <<<"$current" >/dev/null || {
+      fm_route_diagnostic 'terminal-score-conflict'
+      return 1
+    }
+  fi
+  terminal=${existing_terminal:-${score_terminal:-completed}}
+  case "$terminal" in
+    completed|failed_safe|escalated|cancelled|superseded) ;;
+    *) fm_route_diagnostic 'invalid routing state'; return 1 ;;
+  esac
+  jq -cn --arg terminal "$terminal" '{terminal:$terminal}'
+}
+
+fm_route_cleanup_ready_locked() {
+  local task=$1 generation=$2 profile=$3 provider=$4 lane=$5 account=$6 task_class=$7 work_type=$8 risk=$9 mode=${10}
+  local reservation current admission claim_file outcomes matches existing future
+  outcomes=$(fm_route_read_outcomes) || { fm_route_diagnostic 'invalid routing state'; return 1; }
+  matches=$(jq -c --arg task "$task" --arg generation "$generation" \
+    '[.[] | select(.kind == "terminal" and .taskId == $task and .generation == $generation)]' \
+    <<<"$outcomes") || return 1
+  [ "$(jq -r 'length' <<<"$matches")" -le 1 ] \
+    || { fm_route_diagnostic 'terminal-outcome-conflict'; return 1; }
+  existing=$(jq -c '.[0] // empty' <<<"$matches")
+  if [ -n "$existing" ]; then
+    fm_route_cleanup_outcome_matches "$existing" "$profile" "$provider" "$lane" "$account" "$task_class" "$work_type" "$risk" "$mode" \
       || { fm_route_diagnostic 'terminal-outcome-conflict'; return 1; }
     reservation=$(fm_route_optional_reservation_path "$task" "$generation") || return 1
-    if [ -z "$reservation" ]; then
-      claim_file=$(fm_route_claim_file_path "$task" "$generation") || return 1
-      [ ! -e "$claim_file" ] || fm_route_read_claim_file "$claim_file" >/dev/null || return 1
-      printf '%s\n' "$existing"
-      return 0
-    fi
   fi
   admission=$(fm_route_admission_path "$task") || return 1
   if [ -e "$admission" ]; then
     future=$(fm_route_cleanup_admission_ready_locked "$task") || return 1
     fm_route_cleanup_route_matches "$future" "$task" "$generation" "$profile" "$provider" "$lane" "$account" "$task_class" "$work_type" "$risk" "$mode" \
       || { fm_route_diagnostic 'reservation-mismatch'; return 1; }
-    fm_route_public_reservation "$future"
-    return 0
+    fm_route_cleanup_terminal_resolution "$existing" "$future"
+    return $?
+  fi
+  if [ -n "$existing" ] && [ -z "$reservation" ]; then
+    claim_file=$(fm_route_claim_file_path "$task" "$generation") || return 1
+    [ ! -e "$claim_file" ] || fm_route_read_claim_file "$claim_file" >/dev/null || return 1
+    fm_route_cleanup_terminal_resolution "$existing"
+    return $?
   fi
   reservation=$(fm_route_find_reservation_path "$task" "$generation") \
     || { fm_route_diagnostic 'reservation-not-found'; return 1; }
@@ -1911,17 +1946,23 @@ fm_route_cleanup_ready_locked() {
     || { fm_route_diagnostic 'reservation-mismatch'; return 1; }
   claim_file=$(fm_route_claim_file_path "$task" "$generation") || return 1
   fm_route_authorize_reservation "$task" "$generation" "$claim_file" "$current" || return 1
-  fm_route_public_reservation "$current"
+  fm_route_cleanup_terminal_resolution "$existing" "$current"
 }
 
 fm_route_cleanup_finalize_locked() {
   local task=$1 generation=$2 profile=$3 provider=$4 lane=$5 account=$6 task_class=$7 work_type=$8 risk=$9 mode=${10} terminal=${11}
-  local claim_file
-  fm_route_cleanup_ready_locked "$task" "$generation" "$profile" "$provider" "$lane" "$account" "$task_class" "$work_type" "$risk" "$mode" "$terminal" >/dev/null \
+  local claim_file resolution resolved
+  resolution=$(fm_route_cleanup_ready_locked "$task" "$generation" "$profile" "$provider" "$lane" "$account" "$task_class" "$work_type" "$risk" "$mode") \
     || return 1
+  resolved=$(jq -er 'select(type == "object" and keys == ["terminal"] and (.terminal | IN("completed","failed_safe","escalated","cancelled","superseded"))) | .terminal' \
+    <<<"$resolution") || { fm_route_diagnostic 'invalid routing state'; return 1; }
+  [ "$resolved" = "$terminal" ] || { fm_route_diagnostic 'terminal-outcome-conflict'; return 1; }
   fm_route_recover_for_cleanup_locked "$task" || return 1
-  fm_route_cleanup_ready_locked "$task" "$generation" "$profile" "$provider" "$lane" "$account" "$task_class" "$work_type" "$risk" "$mode" "$terminal" >/dev/null \
+  resolution=$(fm_route_cleanup_ready_locked "$task" "$generation" "$profile" "$provider" "$lane" "$account" "$task_class" "$work_type" "$risk" "$mode") \
     || return 1
+  resolved=$(jq -er 'select(type == "object" and keys == ["terminal"] and (.terminal | IN("completed","failed_safe","escalated","cancelled","superseded"))) | .terminal' \
+    <<<"$resolution") || { fm_route_diagnostic 'invalid routing state'; return 1; }
+  [ "$resolved" = "$terminal" ] || { fm_route_diagnostic 'terminal-outcome-conflict'; return 1; }
   claim_file=$(fm_route_claim_file_path "$task" "$generation") || return 1
   fm_route_finalize_locked "$task" "$generation" "$terminal" "$claim_file"
 }

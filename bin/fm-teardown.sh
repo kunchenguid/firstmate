@@ -223,6 +223,7 @@ META_LOCK_HELD=1
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 
 ROUTE_FINALIZATION_READY=0
+ROUTE_TERMINAL=
 ROUTE_GENERATION=$(fm_meta_get "$META" route_generation)
 ROUTE_PROFILE=$(fm_meta_get "$META" route_profile)
 ROUTE_PROVIDER=$(fm_meta_get "$META" route_provider)
@@ -255,14 +256,22 @@ if [ "$ROUTE_FIELD_COUNT" -ne 0 ]; then
     echo "REFUSED: routed task metadata is incomplete; preserving task and routing state" >&2
     exit 1
   }
-  "$SCRIPT_DIR/fm-route.sh" cleanup-ready \
+  if ! ROUTE_RESOLUTION=$("$SCRIPT_DIR/fm-route.sh" cleanup-ready \
     --task "$ID" --generation "$ROUTE_GENERATION" --profile "$ROUTE_PROFILE" \
     --provider "$ROUTE_PROVIDER" --lane "$ROUTE_LANE" --account "$ROUTE_ACCOUNT" \
     --class "$ROUTE_CLASS" --work-type "$ROUTE_WORK_TYPE" --risk "$ROUTE_RISK" --mode "$ROUTE_MODE" \
-    --terminal completed >/dev/null || {
-      echo "REFUSED: routed task finalization is not ready; preserving task and routing state" >&2
-      exit 1
-    }
+  ); then
+    echo "REFUSED: routed task finalization is not ready; preserving task and routing state" >&2
+    exit 1
+  fi
+  ROUTE_TERMINAL=$(jq -er '
+    select(type == "object" and keys == ["terminal"]
+      and (.terminal | IN("completed","failed_safe","escalated","cancelled","superseded")))
+    | .terminal
+  ' <<<"$ROUTE_RESOLUTION" 2>/dev/null) || {
+    echo "REFUSED: routed task finalization returned an invalid terminal resolution; preserving task and routing state" >&2
+    exit 1
+  }
   ROUTE_FINALIZATION_READY=1
 fi
 
@@ -2610,7 +2619,7 @@ if [ "$ROUTE_FINALIZATION_READY" = 1 ]; then
     --task "$ID" --generation "$ROUTE_GENERATION" --profile "$ROUTE_PROFILE" \
     --provider "$ROUTE_PROVIDER" --lane "$ROUTE_LANE" --account "$ROUTE_ACCOUNT" \
     --class "$ROUTE_CLASS" --work-type "$ROUTE_WORK_TYPE" --risk "$ROUTE_RISK" --mode "$ROUTE_MODE" \
-    --terminal completed >/dev/null || {
+    --terminal "$ROUTE_TERMINAL" >/dev/null || {
       echo "error: routed task finalization failed; retaining task metadata for retry" >&2
       exit 1
     }
