@@ -1268,15 +1268,27 @@ test_pull_request_list_is_bounded_like_landed() {
   local home epoch out
   home=$(make_home pr-cap)
   write_fleet_fixture "$home"
-  jq '
+  jq --arg home "$home" '
     .backlog.records = [range(0;40) as $i | {structured:true,id:("done-" + ($i|tostring)),repo:"alpha",
       title:("Landed " + ($i|tostring)),state:"done",hold_kind:null,
       pr_url:("https://github.com/example/alpha/pull/" + (($i + 1)|tostring)),
       completion:{date:("2026-07-" + (if $i < 9 then "0" else "" end) + (($i + 1)|tostring))}}]
-    | .backlog.records += [{structured:true,id:"open-now",repo:"alpha",title:"Open work",
-        state:"in_flight",since:"2020-01-01",captain_actionable:false,unresolved_blocker_ids:[],
-        pr_url:"https://github.com/example/alpha/pull/999"}]
-    | .tasks = []
+    | .backlog.records += [
+        {structured:true,id:"open-now",repo:"alpha",title:"Open work",
+         state:"in_flight",since:"2020-01-01",captain_actionable:false,unresolved_blocker_ids:[],
+         pr_url:"https://github.com/example/alpha/pull/999"},
+        {structured:true,id:"tear",repo:"alpha",title:"Merged, not yet torn down",state:"done",
+         hold_kind:null,pr_url:"https://github.com/example/alpha/pull/1000",
+         completion:{date:"2020-01-01"}}]
+    | .tasks = [
+        {id:"tear",kind:"ship",project:"alpha",
+         paths:{meta:{path:($home + "/state/alpha-work.meta"),present:true},
+                status_log:{path:($home + "/state/alpha-work.status"),present:true},
+                worktree:{path:null,present:false},home:{path:null,present:false},report:{path:null,present:false}},
+         secondmate_projects:[],
+         current_state:{state:"done",source:"fixture",detail:"run passed: PR merged/closed"},
+         hints:{open_decisions:[]},pr:{url:"https://github.com/example/alpha/pull/1000"},
+         backlog:{id:"tear",repo:"alpha",title:"Merged, not yet torn down"}}]
     | .secondmate_current.records = []
   ' "$home/fleet.json" > "$home/fleet.tmp"
   mv "$home/fleet.tmp" "$home/fleet.json"
@@ -1284,11 +1296,11 @@ test_pull_request_list_is_bounded_like_landed() {
   out=$(run_snapshot "$home" "$epoch") || fail "pr-cap snapshot failed"
   printf '%s' "$out" | jq -e '
     .projects[] | select(.name == "alpha")
-    | (.landed | length) == 5 and .counts.landed == 40
+    | (.landed | length) == 5 and .counts.landed == 41
       and (.landed | map(.id)) == ["done-39","done-38","done-37","done-36","done-35"]
-      and (.prs | length) == 5 and .counts.prs == 41
+      and (.prs | length) == 5 and .counts.prs == 42
       and (.prs | map(.id)) == ["open-now","done-39","done-38","done-37","done-36"]
-  ' >/dev/null || fail "the PR list is unbounded, misordered, or buries current work: $out"
+  ' >/dev/null || fail "the PR list is unbounded, misordered, or ranks landed work as current: $out"
   pass "the pull-request list keeps current work and the newest landings"
 }
 

@@ -35,7 +35,9 @@
 # project, so it is dropped rather than reported as fleet incompleteness.
 # landed[] and prs[] are the two surfaces fed by the append-only Done section;
 # both publish at most five rows, newest completion first, and carry the true
-# total in counts. prs[] lists current work ahead of completed work.
+# total in counts. prs[] lists current work ahead of completed work, and a task
+# whose backlog row is already done counts as completed work whichever record
+# supplied its link.
 # A done task whose backlog row is not yet done is disclosed in finished[] with
 # the crew detail repeated verbatim. That detail is the only local record of
 # what done means for the task, so the board never infers a lifecycle stage -
@@ -476,8 +478,14 @@ jq -n \
              | {id,title,completed:(.completion.date // null),pr_url,report_path,owner:$owner.id} ]
         | dedupe_first([.owner,.id])
         | sort_by([(.completed // ""),.id]) | reverse) as $landed_all
-      | ([ $tasks[] | select(.pr.url != null)
-           | {id,title:(.backlog.title // .id),url:.pr.url,owner:"main",current:true,completed:null} ]
+      | ([ $tasks[] as $task
+           | select($task.pr.url != null)
+           | (([ $backlog[] | select(.id == $task.id and .state == "done") ][0]) // null) as $done_row
+           | {id:$task.id,title:($task.backlog.title // $task.id),url:$task.pr.url,owner:"main",
+              current:($done_row == null),
+              completed:(if $done_row == null then null
+                         else ($done_row.completion.date // $done_row.merged
+                               // $done_row.reported // $done_row.done) end)} ]
          + [ $backlog[] | select(.pr_url != null)
              | {id,title,url:.pr_url,owner:"main",
                 current:(.state != "done"),
