@@ -384,7 +384,7 @@ case "$MODE" in
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When the project's upstream is third-party (the captain does not own it), every push and the PR target the captain's fork, never the upstream repo; resolve that fork as \`<owner>/<repo>\`, where \`<owner>\` is the \`body\` returned by \`gh-axi api /user --jq .login\`; if that repository is absent or inaccessible, report blocked instead of using upstream; the configured merge authority is unchanged.
+When the project's upstream is third-party (the captain does not own it), every push and the PR target the captain's fork, never the upstream repo; use only a fork \`<owner>/<repo>\` explicitly identified by the captain or firstmate as the captain's, and never infer \`<owner>\` from the worker's GitHub credentials; if that identity or repository is absent or inaccessible, report blocked instead of using upstream; the configured merge authority is unchanged.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
@@ -410,7 +410,7 @@ EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
-When the project's upstream is third-party (the captain does not own it), every push and the PR target the captain's fork, never the upstream repo; resolve that fork as \`<owner>/<repo>\`, where \`<owner>\` is the \`body\` returned by \`gh-axi api /user --jq .login\`; if that repository is absent or inaccessible, report blocked instead of using upstream; the configured merge authority is unchanged.
+When the project's upstream is third-party (the captain does not own it), every push and the PR target the captain's fork, never the upstream repo; use only a fork \`<owner>/<repo>\` explicitly identified by the captain or firstmate as the captain's, and never infer \`<owner>\` from the worker's GitHub credentials; if that identity or repository is absent or inaccessible, report blocked instead of using upstream; the configured merge authority is unchanged.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 

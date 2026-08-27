@@ -339,10 +339,12 @@ test_fork_pr_rule_in_pr_opening_dods() {
       "$id ($mode): brief lost the fork-PR target rule"
     assert_grep "the configured merge authority is unchanged" "$brief" \
       "$id ($mode): fork-PR rule must reassure that merge authority is unchanged"
-    assert_grep "gh-axi api /user --jq .login" "$brief" \
-      "$id ($mode): brief did not make the captain's fork owner resolvable"
+    assert_grep "explicitly identified by the captain or firstmate as the captain's" "$brief" \
+      "$id ($mode): captain fork target lacks explicit captain/firstmate provenance"
+    assert_grep "never infer \`<owner>\` from the worker's GitHub credentials" "$brief" \
+      "$id ($mode): brief still permits worker credentials to stand in for captain identity"
     assert_grep "report blocked instead of using upstream" "$brief" \
-      "$id ($mode): missing captain fork must fail closed instead of falling back upstream"
+      "$id ($mode): missing captain fork identity or repository must fail closed instead of falling back upstream"
   done
   # local-only ships no PR, so the fork-PR target line must not appear there.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forkpr-c3 some-proj --mode local-only >/dev/null 2>&1
