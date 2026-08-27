@@ -540,6 +540,14 @@ Token discipline: status files before panes; default peeks to 40 lines; never st
 The context-% shown in a peek is not actionable as crew health; ignore it and intervene only on real signals (`signal`, `stale`, `needs-decision`, `blocked`), looping or confusion in the pane, or a question the brief already answers.
 Silence is the correct state while a healthy background watcher is waiting.
 
+### herdr workspace hygiene
+
+When the crew runs on herdr, the fleet stays legible only if it is organised:
+**one workspace per project, and every agent pane named for the work it is doing**,
+not for its task id. herdr addresses agents by name, so the name is the address.
+`bin/fm-herdr-workspaces.sh` reconciles workspaces against `data/projects.md` and
+carries the naming convention; run it with no arguments for a plan that changes nothing.
+
 ### Away-mode stub
 
 Invoke the `/afk` skill when the captain says `/afk`, says they are going afk, `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
