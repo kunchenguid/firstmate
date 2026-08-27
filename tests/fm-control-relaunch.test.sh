@@ -168,6 +168,8 @@ run_control() {  # <case-dir> <args...>
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
     FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_COMPLETE_JOURNAL_MV_FAIL="${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" \
     FM_FAKE_META_PUBLISH_MV_FAIL="${FM_FAKE_META_PUBLISH_MV_FAIL:-}" \
+    FM_FAKE_JOURNAL_PHASE_MV_FAIL="${FM_FAKE_JOURNAL_PHASE_MV_FAIL:-}" \
+    FM_REAL_CP="${FM_REAL_CP:-}" FM_FAKE_CP_RESTORE_FAIL_PATH="${FM_FAKE_CP_RESTORE_FAIL_PATH:-}" \
     FM_FAKE_POST_PUBLISH_SIGNAL="${FM_FAKE_POST_PUBLISH_SIGNAL:-}" \
     FM_FAKE_TRACE_PREPARE="${FM_FAKE_TRACE_PREPARE:-}" \
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
@@ -217,6 +219,13 @@ if [ -n "${FM_FAKE_META_PUBLISH_MV_FAIL:-}" ]; then
     [ "$path" != "$FM_FAKE_META_PUBLISH_MV_FAIL" ] || exit 1
   done
 fi
+if [ -n "${FM_FAKE_JOURNAL_PHASE_MV_FAIL:-}" ]; then
+  for path in "$@"; do
+    if [ -f "$path" ] && grep -Fqx "phase=$FM_FAKE_JOURNAL_PHASE_MV_FAIL" "$path"; then
+      exit 1
+    fi
+  done
+fi
 source_path=
 target_path=
 for path in "$@"; do
@@ -242,6 +251,30 @@ fi
 exit "$rc"
 SH
   chmod +x "$1/fakebin/mv"
+}
+
+make_cp_failure_stub() {  # <case-dir>
+  cat > "$1/fakebin/cp" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_FAKE_CP_RESTORE_FAIL_PATH:-}" ]; then
+  src=
+  dest=
+  for arg in "$@"; do
+    case "$arg" in
+      -*) ;;
+      *) src=$dest; dest=$arg ;;
+    esac
+  done
+  case "$src" in
+    *control-recover-missing.brief-prior)
+      [ "$dest" != "$FM_FAKE_CP_RESTORE_FAIL_PATH" ] || exit 1
+      ;;
+  esac
+fi
+exec "$FM_REAL_CP" "$@"
+SH
+  chmod +x "$1/fakebin/cp"
 }
 
 make_rm_failure_stub() {  # <case-dir>
@@ -419,7 +452,9 @@ run_herdr_control() {  # <case-dir> <args...>
     FM_FAKE_OLD_AMBIG="${FM_FAKE_OLD_AMBIG:-}" FM_FAKE_SEPARATE_LIVE="${FM_FAKE_SEPARATE_LIVE:-}" \
     FM_FAKE_CREATE_FAIL="${FM_FAKE_CREATE_FAIL:-}" FM_FAKE_LAUNCH_FAIL="${FM_FAKE_LAUNCH_FAIL:-}" \
     FM_FAKE_CREATE_INCOMPLETE="${FM_FAKE_CREATE_INCOMPLETE:-}" FM_FAKE_CREATE_CONTRADICTORY="${FM_FAKE_CREATE_CONTRADICTORY:-}" \
-    FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_POST_PUBLISH_SIGNAL="${FM_FAKE_POST_PUBLISH_SIGNAL:-}" \
+    FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_JOURNAL_PHASE_MV_FAIL="${FM_FAKE_JOURNAL_PHASE_MV_FAIL:-}" \
+    FM_REAL_CP="${FM_REAL_CP:-}" FM_FAKE_CP_RESTORE_FAIL_PATH="${FM_FAKE_CP_RESTORE_FAIL_PATH:-}" \
+    FM_FAKE_POST_PUBLISH_SIGNAL="${FM_FAKE_POST_PUBLISH_SIGNAL:-}" \
     FM_SPAWN_NO_GUARD=1 FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 \
     FM_CONTROL_LAUNCH_WAIT=0.05 FM_CONTROL_RECOVER_MISSING_LAUNCH_WAIT=0.05 \
     "$CONTROL" "$@" 2>&1
@@ -1829,6 +1864,36 @@ test_missing_herdr_recovery_rolls_back_after_launch_failure() {
   pass "missing Herdr recovery: launch failure rolls back without changing the recorded task identity or instructions"
 }
 
+test_missing_herdr_recovery_reports_failed_early_brief_restore() {
+  local dir out rc before brief brief_before real_cp real_mv
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case early-restore mr19)
+  before=$(cat "$dir/home/state/mr19.meta")
+  brief="$dir/home/data/mr19/brief.md"
+  brief_before=$(cat "$brief")
+  real_cp=$(command -v cp)
+  real_mv=$(command -v mv)
+  make_cp_failure_stub "$dir"
+  make_mv_failure_stub "$dir"
+  out=$(FM_REAL_CP="$real_cp" FM_REAL_MV="$real_mv" \
+    FM_FAKE_CP_RESTORE_FAIL_PATH="$brief" FM_FAKE_JOURNAL_PHASE_MV_FAIL=noted \
+    run_herdr_control "$dir" mr19 recover-missing --captain-authorized --note 'recorded note must not be hidden'); rc=$?
+  expect_code 1 "$rc" "an early journal failure with failed brief restore must fail closed"$'\n'"$out"
+  assert_contains "$out" "prior instructions could not be restored" \
+    "the rollback message must not claim the brief was restored"
+  assert_grep "rollback=prior-record-kept-instructions-restore-failed" \
+    "$dir/home/state/mr19.control-recover-missing" \
+    "the transaction should record the failed brief restoration"
+  [ "$(cat "$dir/home/state/mr19.meta")" = "$before" ] \
+    || fail "early recovery rollback must retain the prior durable record"
+  [ "$(cat "$brief")" != "$brief_before" ] \
+    || fail "the fixture must prove the appended recovery instructions survived the failed restore"
+  assert_grep "recorded note must not be hidden" "$brief" \
+    "failed restoration should leave evidence in the brief rather than reporting preservation"
+  [ ! -e "$dir/fake/created" ] || fail "early rollback must not allocate a replacement endpoint"
+  pass "missing Herdr recovery: early rollback reports a failed brief restoration truthfully"
+}
+
 test_missing_herdr_recovery_distinguishes_missing_from_normal_relaunch() {
   local dir out rc before
   unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
@@ -1958,6 +2023,7 @@ test_missing_herdr_recovery_retains_evidence_when_endpoint_allocation_fails
 test_missing_herdr_recovery_refuses_live_process_ownership
 test_missing_herdr_recovery_refuses_ambiguous_state
 test_missing_herdr_recovery_rolls_back_after_launch_failure
+test_missing_herdr_recovery_reports_failed_early_brief_restore
 test_missing_herdr_recovery_distinguishes_missing_from_normal_relaunch
 test_missing_herdr_recovery_does_not_change_normal_dead_endpoint_relaunch
 test_spawn_missing_herdr_recovery_is_not_a_direct_escape_hatch

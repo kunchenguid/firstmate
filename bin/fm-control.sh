@@ -949,11 +949,18 @@ recover_missing_rollback() {
   RECOVERY_ACTIVE=0
   case "$RECOVERY_PHASE" in
     checkpoint|noted|ownership-cleared)
-      if [ -f "$RECOVERY_BRIEF_PRIOR" ]; then
-        cp -p "$RECOVERY_BRIEF_PRIOR" "$RECOVERY_BRIEF" 2>/dev/null || true
+      if [ ! -f "$RECOVERY_BRIEF_PRIOR" ]; then
+        recovery_journal_write "failed:$RECOVERY_PHASE" "rollback=prior-record-kept" || true
+        echo "error: missing-endpoint recovery of $ID was refused before a replacement endpoint was published; the recorded task copy and durable record were preserved" >&2
+      elif cp -p "$RECOVERY_BRIEF_PRIOR" "$RECOVERY_BRIEF" 2>/dev/null; then
+        recovery_journal_write "failed:$RECOVERY_PHASE" \
+          "rollback=prior-record-kept-instructions-restored" || true
+        echo "error: missing-endpoint recovery of $ID was refused before a replacement endpoint was published; the recorded task copy, instructions, and durable record were preserved" >&2
+      else
+        recovery_journal_write "failed:$RECOVERY_PHASE" \
+          "rollback=prior-record-kept-instructions-restore-failed" || true
+        echo "error: missing-endpoint recovery of $ID was refused before a replacement endpoint was published; its durable record and recovery evidence were retained, but the prior instructions could not be restored" >&2
       fi
-      recovery_journal_write "failed:$RECOVERY_PHASE" "rollback=prior-record-kept" || true
-      echo "error: missing-endpoint recovery of $ID was refused before a replacement endpoint was published; the recorded task copy and durable record were preserved" >&2
       ;;
     launching)
       if [ "$(fm_meta_get "$META" control_recover_missing_tx)" = "$RECOVERY_TX" ]; then
