@@ -403,6 +403,48 @@ def request_assignment(config, task, generation):
     raise WrapperError("Azure worker assignment timed out{}".format(detail), "assignment_timeout", True)
 
 
+def execute_service(config, task, generation, assignment, account_home, staged, outcome_dir, argv):
+    subscription = config["lifecycle_env"]["FM_AZURE_SUBSCRIPTION_ID"]
+    deadline = time.monotonic() + config["wall_seconds"] + 1800
+    last_error = None
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        try:
+            return lifecycle(
+                config, "execute", "--task", task, "--task-generation", generation,
+                "--assignment-generation", assignment,
+                "--wall-seconds", str(config["wall_seconds"]),
+                "--payload-dir", str(staged), "--account-dir", account_home,
+                "--outcome-dir", str(outcome_dir), "--confirm-execute",
+                "--confirm-subscription", subscription, "--", *argv,
+                timeout=max(1, math.ceil(remaining)),
+            )
+        except WrapperError as error:
+            if not error.retryable:
+                raise
+            last_error = error
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            lifecycle(
+                config, "reconcile", "--apply", "--confirm-subscription", subscription,
+                timeout=max(1, math.ceil(remaining)),
+            )
+        except WrapperError as error:
+            if not error.retryable:
+                raise
+            last_error = error
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(config["poll_seconds"], remaining))
+    detail = ": {}".format(last_error) if last_error is not None else ""
+    raise WrapperError(
+        "Azure worker execution exhausted its exact-identity retry window{}".format(detail),
+        "execution_timeout", False,
+    )
+
+
 def extract_service_return(root, execution, request):
     bundle = root / "outcome" / "outcome.bundle"
     if execution.get("service_return_present") is not True or not bundle.is_file():
@@ -659,13 +701,9 @@ def execute(args):
             assignment, account_home = request_assignment(config, task, generation)
             outcome_dir = root / "outcome"
             outcome_dir.mkdir(exist_ok=True, mode=0o700)
-            output = lifecycle(
-                config, "execute", "--task", task, "--task-generation", generation,
-                "--assignment-generation", assignment, "--wall-seconds", str(config["wall_seconds"]),
-                "--payload-dir", str(staged), "--account-dir", account_home,
-                "--outcome-dir", str(outcome_dir), "--confirm-execute",
-                "--confirm-subscription", config["lifecycle_env"]["FM_AZURE_SUBSCRIPTION_ID"],
-                "--", *request["guest_argv"], timeout=config["wall_seconds"] + 1800,
+            output = execute_service(
+                config, task, generation, assignment, account_home, staged, outcome_dir,
+                request["guest_argv"],
             )
             execution = last_json(output, "worker execution")
             request_digest = execution.get("request_digest")

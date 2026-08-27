@@ -91,6 +91,13 @@ elif command == "status":
     }]
     print(json.dumps({"account_placements": placements}, separators=(",", ":")))
 elif command == "execute":
+    failures = root / "execute-failures"
+    if failures.exists():
+        remaining = int(failures.read_text().strip())
+        if remaining > 0:
+            failures.write_text(str(remaining - 1))
+            print("fixture transient execute refusal", file=sys.stderr)
+            raise SystemExit(75)
     request_digest = "d" * 64
     payload = Path(value("--payload-dir"))
     outcome_dir = Path(value("--outcome-dir"))
@@ -442,6 +449,34 @@ assert len(requests) == 1, requests
 assert len(reconciles) >= 3, reconciles
 PY
 pass "wrapper resumes transient reconciliation under one durable Azure task identity"
+
+printf 'ok\n' > "$TMP_ROOT/mode"
+printf '2\n' > "$TMP_ROOT/execute-failures"
+: > "$TMP_ROOT/calls.log"
+write_request "$TMP_ROOT/request-transient-execute.json" job-transient-execute
+"$WRAPPER" --config "$TMP_ROOT/config.json" execute \
+  --request "$TMP_ROOT/request-transient-execute.json" --payload "$PAYLOAD" \
+  --result "$TMP_ROOT/result-transient-execute.json" \
+  --outcome "$TMP_ROOT/outcome-transient-execute.bundle" \
+  --step-outcome "$TMP_ROOT/step-outcome-transient-execute.json" \
+  || fail "transient execute refusals escaped the durable worker invocation"
+python3 - "$TMP_ROOT/result-transient-execute.json" "$TMP_ROOT/calls.log" <<'PY' \
+  || fail "transient execute retries duplicated or lost the assigned Azure job"
+import json, pathlib, re, sys
+result = json.loads(pathlib.Path(sys.argv[1]).read_text())
+calls = pathlib.Path(sys.argv[2]).read_text().splitlines()
+requests = [line for line in calls if line.startswith("request ")]
+executes = [line for line in calls if line.startswith("execute ")]
+identities = {
+    re.search(r"--task ([^ ]+) --task-generation ([^ ]+)", line).groups()
+    for line in requests + executes
+}
+assert result["outcome"] == "succeeded", result
+assert len(requests) == 1, requests
+assert len(executes) == 3, executes
+assert len(identities) == 1, identities
+PY
+pass "wrapper resumes transient execution under one assigned Azure task identity"
 
 printf 'ok\n' > "$TMP_ROOT/mode"
 printf '2\n' > "$TMP_ROOT/cleanup-reconcile-failures"
