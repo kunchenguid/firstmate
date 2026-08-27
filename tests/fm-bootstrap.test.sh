@@ -805,6 +805,19 @@ SH
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ -z "$out" ] || fail "relative origin must remain local and bootstrap silently, got: $out"
 
+  case_dir="$TMP_ROOT/forge-local-only-remote"
+  project="$case_dir/home/projects/local-project"
+  mkdir -p "$project" "$case_dir/home/config" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '- local-project [local-only] - local work (added 2026-08-27)' > "$case_dir/home/data/projects.md"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://github.com/example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/gh" "$fakebin/gh-axi"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "local-only projects must not require forge tooling or auth, got: $out"
+
   case_dir="$TMP_ROOT/forge-upstream-only"
   project="$case_dir/home/projects/upstream-only"
   mkdir -p "$project" "$case_dir/home/config"

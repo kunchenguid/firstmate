@@ -848,7 +848,13 @@ missing_tool_diagnostic() {
 # require GitHub tooling, inactive backends do not add tools, and an invalid
 # backend is reported before the universal checks continue.
 COMMON_TOOLS="node git no-mistakes chrome-devtools-axi lavish-axi tasks-axi quota-axi"
-FORGE_PROJECTS=$(fm_forge_scan_registered_projects "$PROJECTS")
+FORGE_PROJECTS_RAW=$(fm_forge_scan_registered_projects "$PROJECTS")
+FORGE_PROJECTS=$(while IFS=$'\t' read -r _proj_id _proj_provider _proj_host; do
+  [ -n "${_proj_provider:-}" ] || continue
+  _proj_mode=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-project-mode.sh" "$_proj_id" 2>/dev/null || true)
+  [ "${_proj_mode%% *}" = local-only ] && continue
+  printf '%s\t%s\t%s\n' "$_proj_id" "$_proj_provider" "${_proj_host:-}"
+done <<< "$FORGE_PROJECTS_RAW")
 FORGE_PROVIDERS_SEEN=$(printf '%s\n' "$FORGE_PROJECTS" | awk -F '\t' 'NF >= 2 {print $2}' | sort -u)
 while IFS=$'\t' read -r _proj_id _proj_provider _proj_host; do
   [ -n "${_proj_provider:-}" ] || continue
