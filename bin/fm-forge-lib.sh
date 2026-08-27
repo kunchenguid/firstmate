@@ -183,6 +183,10 @@ fm_forge_provider_tools() {
 fm_forge_check_auth() {
   local provider=${1:-} host=${2:-}
 
+  # Keep the auth boundary canonical even when called directly rather than via
+  # fm_forge_scan_registered_projects, which also normalizes its records.
+  host=$(fm_forge_normalize_host "$host")
+
   case "$provider" in
     github)
       if ! command -v gh >/dev/null 2>&1; then
