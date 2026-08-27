@@ -285,6 +285,37 @@ The CLI matrix was checked directly:
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
 
+### Windows presentation-lock namespace
+
+The native Windows namespace proof was verified on 2026-08-27 against Herdr 0.8.2, Git for Windows 2.55.0, and Windows PowerShell 5.1.26100.9168.
+The existing NTFS directory remained current-user-owned while Git Bash continued reporting synthetic mode `0755` after `chmod 700`.
+The adapter accepted that directory only after its Windows DACL allowed the current identity, SYSTEM, and built-in Administrators, while the executable regression also replaced the fixture DACL with an explicit Everyone read grant and required rejection.
+
+```sh
+source bin/backends/herdr.sh
+d=/tmp/firstmate-herdr-presentation
+printf 'mode=%s\nnamespace_uid=%s\ncurrent_uid=%s\n' \
+  "$(fm_backend_herdr_presentation_lock_namespace_mode "$d")" \
+  "$(fm_backend_herdr_presentation_lock_namespace_uid "$d")" \
+  "$(id -u)"
+fm_backend_herdr_presentation_lock_namespace_windows_acl_valid "$d"
+printf 'acl_exit=%s\n' "$?"
+fm_backend_herdr_presentation_lock_namespace_valid "$d"
+printf 'namespace_exit=%s\n' "$?"
+```
+
+Observed output:
+
+```text
+mode=755
+namespace_uid=4096
+current_uid=4096
+acl_exit=0
+namespace_exit=0
+```
+
+`tests/fm-backend-herdr.test.sh` pins the synthetic-mode acceptance, unsafe-ACL refusal, wrong-owner refusal, non-directory refusal, and unchanged Linux and macOS mode `0700` requirement through the adapter's executable lock-path behavior.
+
 ### Submit confirmation
 
 Measured 2026-08-19 against Herdr 0.8.0 and Claude Code 2.1.236 in an isolated `fm-lab-` session.

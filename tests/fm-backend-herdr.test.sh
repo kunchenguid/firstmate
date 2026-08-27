@@ -2618,6 +2618,184 @@ test_presentation_session_lock_path_is_shared_across_homes() {
   pass "herdr presentation lock: one path per session/socket across homes"
 }
 
+presentation_lock_path_for_namespace_case() {
+  FM_TEST_NAMESPACE_OS=$1 FM_TEST_NAMESPACE_MODE=$2 \
+    FM_TEST_NAMESPACE_OWNER=$3 FM_TEST_NAMESPACE_ACL=$4 \
+    FM_TEST_NAMESPACE_DIR=$5 bash -c '
+      . "$0/bin/backends/herdr.sh"
+      uname() { printf "%s\n" "$FM_TEST_NAMESPACE_OS"; }
+      fm_backend_herdr_presentation_lock_namespace() {
+        printf "%s" "$FM_TEST_NAMESPACE_DIR"
+      }
+      fm_backend_herdr_presentation_lock_namespace_uid() {
+        printf "%s\n" "$FM_TEST_NAMESPACE_OWNER"
+      }
+      fm_backend_herdr_presentation_lock_namespace_mode() {
+        printf "%s\n" "$FM_TEST_NAMESPACE_MODE"
+      }
+      fm_backend_herdr_presentation_lock_namespace_windows_acl_valid() {
+        [ "$FM_TEST_NAMESPACE_ACL" = safe ]
+      }
+      fm_backend_herdr_presentation_session_socket_path() {
+        [ "$1" = fmtest ] || return 1
+        printf "%s/fmtest.sock" "$FM_TEST_NAMESPACE_DIR"
+      }
+      fm_backend_herdr_presentation_session_lock_path fmtest
+    ' "$ROOT"
+}
+
+test_presentation_lock_namespace_is_platform_aware() {
+  local dir owner path status os mode
+  dir="$TMP_ROOT/presentation-lock-namespace"
+  mkdir "$dir"
+  owner=$(id -u)
+
+  path=$(presentation_lock_path_for_namespace_case \
+    MSYS_NT-10.0-26200 755 "$owner" safe "$dir")
+  status=$?
+  [ "$status" -eq 0 ] \
+    || fail "native Windows synthetic mode 755 rejected a private current-user namespace"
+  case "$path" in
+    "$dir"/order-*.lock) ;;
+    *) fail "native Windows namespace returned an unexpected lock path: $path" ;;
+  esac
+
+  path=$(presentation_lock_path_for_namespace_case \
+    MINGW64_NT-10.0-26200 755 "$owner" unsafe "$dir" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "native Windows accepted an unsafe namespace ACL: $path"
+
+  path=$(presentation_lock_path_for_namespace_case \
+    CYGWIN_NT-10.0 755 "$((owner + 1))" safe "$dir" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "native Windows accepted a foreign-owned namespace: $path"
+
+  for os in Linux Darwin; do
+    for mode in 755 770 777; do
+      path=$(presentation_lock_path_for_namespace_case \
+        "$os" "$mode" "$owner" safe "$dir" 2>&1)
+      status=$?
+      [ "$status" -ne 0 ] \
+        || fail "$os accepted presentation namespace mode $mode: $path"
+    done
+    path=$(presentation_lock_path_for_namespace_case \
+      "$os" 700 "$owner" unsafe "$dir")
+    status=$?
+    [ "$status" -eq 0 ] \
+      || fail "$os rejected the required current-user mode 700 namespace"
+  done
+
+  : > "$dir/not-a-directory"
+  path=$(presentation_lock_path_for_namespace_case \
+    MSYS_NT-10.0-26200 755 "$owner" safe "$dir/not-a-directory" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "native Windows accepted a non-directory namespace: $path"
+  pass "herdr presentation lock: Windows proves ACL privacy while Linux and macOS require mode 700"
+}
+
+test_presentation_lock_namespace_windows_acl_proof() {
+  local dir junction junction_native native
+  case "$(uname -s 2>/dev/null)" in
+    MSYS*|MINGW*|CYGWIN*) ;;
+    *) return 0 ;;
+  esac
+  command -v cygpath >/dev/null 2>&1 \
+    || fail "native Windows ACL proof requires cygpath"
+  command -v powershell.exe >/dev/null 2>&1 \
+    || fail "native Windows ACL proof requires Windows PowerShell"
+  dir="$TMP_ROOT/presentation-lock-windows-acl"
+  mkdir "$dir"
+  native=$(cygpath -w "$dir") || fail "could not convert the ACL fixture path"
+
+  # shellcheck disable=SC2016 # The single-quoted script is evaluated by PowerShell.
+  FM_TEST_NAMESPACE_NATIVE=$native powershell.exe -NoProfile -NonInteractive -Command '
+    $ErrorActionPreference = "Stop"
+    $path = $env:FM_TEST_NAMESPACE_NATIVE
+    $current = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetOwner($current)
+    $security.SetAccessRuleProtection($true, $false)
+    $inherit = [Security.AccessControl.InheritanceFlags]"ContainerInherit, ObjectInherit"
+    foreach ($sid in @($current.Value, "S-1-5-18", "S-1-5-32-544")) {
+      $identity = [Security.Principal.SecurityIdentifier]::new($sid)
+      $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+        $identity,
+        [Security.AccessControl.FileSystemRights]::FullControl,
+        $inherit,
+        [Security.AccessControl.PropagationFlags]::None,
+        [Security.AccessControl.AccessControlType]::Allow
+      )
+      [void]$security.AddAccessRule($rule)
+    }
+    [IO.DirectoryInfo]::new($path).SetAccessControl($security)
+  ' >/dev/null 2>&1 || fail "could not build the private Windows ACL fixture"
+
+  ROOT="$ROOT" DIR="$dir" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_presentation_lock_namespace_windows_acl_valid "$DIR"
+  ' \
+    || fail "the Windows ACL proof rejected a private current-user namespace"
+
+  junction="$TMP_ROOT/presentation-lock-windows-junction"
+  junction_native=$(cygpath -w "$junction") \
+    || fail "could not convert the reparse-point fixture path"
+  # shellcheck disable=SC2016 # The single-quoted script is evaluated by PowerShell.
+  FM_TEST_NAMESPACE_NATIVE=$native FM_TEST_JUNCTION_NATIVE=$junction_native \
+    powershell.exe -NoProfile -NonInteractive -Command '
+      $ErrorActionPreference = "Stop"
+      [void](New-Item -ItemType Junction -Path $env:FM_TEST_JUNCTION_NATIVE -Target $env:FM_TEST_NAMESPACE_NATIVE)
+    ' >/dev/null 2>&1 || fail "could not build the Windows reparse-point fixture"
+  if ROOT="$ROOT" DIR="$junction" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_presentation_lock_namespace_windows_acl_valid "$DIR"
+  '; then
+    fail "the Windows ACL proof accepted a reparse-point namespace"
+  fi
+
+  # shellcheck disable=SC2016 # The single-quoted script is evaluated by PowerShell.
+  FM_TEST_NAMESPACE_NATIVE=$native powershell.exe -NoProfile -NonInteractive -Command '
+    $ErrorActionPreference = "Stop"
+    $item = [IO.DirectoryInfo]::new($env:FM_TEST_NAMESPACE_NATIVE)
+    $security = $item.GetAccessControl()
+    $everyone = [Security.Principal.SecurityIdentifier]::new("S-1-1-0")
+    $inherit = [Security.AccessControl.InheritanceFlags]"ContainerInherit, ObjectInherit"
+    $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+      $everyone,
+      [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+      $inherit,
+      [Security.AccessControl.PropagationFlags]::None,
+      [Security.AccessControl.AccessControlType]::Allow
+    )
+    [void]$security.AddAccessRule($rule)
+    $item.SetAccessControl($security)
+  ' >/dev/null 2>&1 || fail "could not build the unsafe Windows ACL fixture"
+
+  if ROOT="$ROOT" DIR="$dir" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_presentation_lock_namespace_windows_acl_valid "$DIR"
+  '; then
+    fail "the Windows ACL proof accepted a namespace readable by Everyone"
+  fi
+  pass "herdr presentation lock: native Windows DACL proof rejects broad access"
+}
+
+test_presentation_session_lock_path_rejects_ambiguous_identity() {
+  local path status
+  path=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      printf "%s\n" \
+        "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"/tmp/a.sock\"},{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"/tmp/b.sock\"}]}"
+    }
+    fm_backend_herdr_presentation_session_lock_path fmtest
+  ' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "ambiguous named-session socket identity returned a lock path: $path"
+  [ -z "$path" ] || fail "ambiguous named-session socket identity emitted output: $path"
+  pass "herdr presentation lock: ambiguous named-session socket identity remains rejected"
+}
+
 test_presentation_session_lock_path_rejects_malformed_socket() {
   local dir log resp fb path status
   dir="$TMP_ROOT/presentation-malformed-socket"; mkdir -p "$dir/responses"
@@ -4514,6 +4692,9 @@ test_wait_transition_clean_timeout_returns_1() {
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
+test_presentation_lock_namespace_is_platform_aware
+test_presentation_lock_namespace_windows_acl_proof
+test_presentation_session_lock_path_rejects_ambiguous_identity
 test_version_check_accepts_current_protocol
 test_version_check_refuses_old_protocol
 test_version_check_refuses_missing_herdr

@@ -16,6 +16,7 @@ Prerequisites:
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
 - `python3` only for optional protocol-16 presentation-space ordering and native event subscription.
+- Git for Windows' `cygpath` and built-in Windows PowerShell for native Windows presentation-lock ACL verification.
 
 Herdr is dual-licensed AGPL-3.0-or-later or commercial.
 Firstmate invokes its CLI as a separate process.
@@ -114,6 +115,8 @@ An ambiguous response grants no mutation or cleanup authority.
 Protocol 16 exposes `workspace.move` over the named session socket but no CLI subcommand.
 `bin/backends/herdr-workspace-move.py` sends only that whitelisted method and verifies the complete returned workspace order.
 Projected children are placed in one contiguous block immediately after their owning home when the session layout, protocol, socket, `python3`, and machine-private per-session lock are all verifiable.
+The shared lock namespace must be a current-user-owned, non-symlink directory; Linux and macOS additionally require mode `0700`.
+Native Windows Git Bash reports synthetic NTFS mode bits, so Firstmate does not treat its persistent `0755` report as privacy evidence and instead requires Windows PowerShell to prove that the directory is not a reparse point, is owned by the current identity, has a non-null DACL, and grants access only to that identity, SYSTEM, and built-in Administrators.
 Existing legacy child labels may extend an already adjacent block read-only but are never renamed or migrated.
 A foreign, ambiguous, detached, or manually interleaved child makes ordering skip with a warning rather than rewriting the layout.
 
