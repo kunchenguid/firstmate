@@ -270,6 +270,15 @@ deny_outside_roots() {  # <home> <granted roots...>
 
 allow_all() { chmod -R u+w "$1" 2>/dev/null || true; }
 
+# The necessity/isolation probes below prove a grant is load-bearing by removing
+# the write bit from a path OUTSIDE the grant and asserting the write is then
+# denied. That confinement is discretionary (chmod a-w), and UID 0 bypasses the
+# discretionary write bit, so as root - which containerized CI commonly runs as -
+# the "denied" write would instead succeed and trip the vacuity guard, failing a
+# correct grant. Skip the negative probes when they cannot bind; the positive
+# sufficiency assertions still run and are what prove the grant actually works.
+dac_confines() { [ "$(id -u 2>/dev/null || echo 0)" -ne 0 ]; }
+
 test_granted_set_is_sufficient_for_the_whole_contract() {
   local rec out roots status_file report gitdir
   rec=$(make_case sufficiency); read_case "$rec"
@@ -325,6 +334,14 @@ test_each_root_is_load_bearing() {
   roots=$(granted_roots "$LAUNCH_LOG")
   report="$HOME_DIR/data/$CASE_ID/report.md"
 
+  printf '%s\n' "$roots" | grep -qc . >/dev/null \
+    || fail "no roots were granted at all"
+
+  if ! dac_confines; then
+    pass "each granted root is load-bearing: negative confinement probes skipped as root (DAC write bits do not restrain UID 0)"
+    return
+  fi
+
   # The data root: without it the report cannot be created at all, which is the
   # exact 2026-08-26 loss (a finished report with nowhere to land).
   chmod a-w "$HOME_DIR/data/$CASE_ID"
@@ -351,8 +368,6 @@ test_each_root_is_load_bearing() {
   fi
   chmod -R u+w "$(cd "$(git -C "$WT_DIR" rev-parse --git-common-dir)" && pwd -P)"
 
-  printf '%s\n' "$roots" | grep -qc . >/dev/null \
-    || fail "no roots were granted at all"
   pass "each granted root is load-bearing: removing it breaks the report, the completion-gate lock, or staging"
 }
 
@@ -388,8 +403,9 @@ test_ship_grant_is_sufficient_and_isolates_siblings() {
 
   # Isolation: with state/ denied, a mistaken command targeting ANOTHER task's
   # records (a new file in state/) fails - exactly what granting state/ would have
-  # allowed and what Greptile flagged.
-  if ( exec 2>/dev/null; echo x > "$HOME_DIR/state/sibling.status" ); then
+  # allowed and what Greptile flagged. This is a discretionary-write-bit probe, so
+  # it only binds off root (UID 0 bypasses the write bit).
+  if dac_confines && ( exec 2>/dev/null; echo x > "$HOME_DIR/state/sibling.status" ); then
     chmod -R u+w "$HOME_DIR"
     fail "the ship grant let a worker create a sibling task record in state/; the per-file grant is not isolating"
   fi
