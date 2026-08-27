@@ -318,6 +318,89 @@ SH
   pass "session-lock: peer authentication rejects stale, recycled, malformed, and symlinked locks"
 }
 
+test_claimed_answers_the_shared_liveness_question() {
+  local dir state checker pi_bin pi_pid stranger_pid dead_pid
+  dir="$TMP_ROOT/claimed"
+  state="$dir/state"
+  checker="$ROOT/bin/fm-session-lock-check.sh"
+  mkdir -p "$state"
+
+  # No record at all: the window every fresh session starts in.
+  if "$checker" --claimed "$state"; then
+    fail "a home with no session record was reported as claimed"
+  fi
+
+  # A pid an unrelated live process holds. This is the stale record a recycled
+  # pid produces, and generic pid liveness cannot tell it from a real session.
+  sleep 30 &
+  stranger_pid=$!
+  printf '%s\n' "$stranger_pid" >"$state/.lock"
+  if "$checker" --claimed "$state"; then
+    kill "$stranger_pid" 2>/dev/null || true
+    wait "$stranger_pid" 2>/dev/null || true
+    fail "an unrelated live process holding a recycled pid claimed the home"
+  fi
+  kill "$stranger_pid" 2>/dev/null || true
+  wait "$stranger_pid" 2>/dev/null || true
+
+  # A genuinely live verified harness: the case that must stay claimed, so a
+  # second session can never mirror or overwrite a live session's home.
+  pi_bin="$dir/pi"
+  cp /bin/bash "$pi_bin"
+  chmod +x "$pi_bin"
+  "$pi_bin" -c 'sleep 30; :' &
+  pi_pid=$!
+  printf '%s\n' "$pi_pid" >"$state/.lock"
+  "$checker" --claimed "$state" || {
+    kill "$pi_pid" 2>/dev/null || true
+    wait "$pi_pid" 2>/dev/null || true
+    fail "a live verified firstmate session did not hold its own home"
+  }
+
+  # The same pid once its session is gone.
+  kill "$pi_pid" 2>/dev/null || true
+  wait "$pi_pid" 2>/dev/null || true
+  dead_pid=$pi_pid
+  printf '%s\n' "$dead_pid" >"$state/.lock"
+  if "$checker" --claimed "$state"; then
+    fail "a dead session's record kept the home claimed"
+  fi
+
+  # Records that are not a usable pid at all.
+  for content in 'not-a-pid' '' '0' '1'; do
+    printf '%s\n' "$content" >"$state/.lock"
+    if "$checker" --claimed "$state"; then
+      fail "a malformed session record ('$content') claimed the home"
+    fi
+  done
+
+  # A symlinked record is never the home's own file, whatever it points at.
+  "$pi_bin" -c 'sleep 30; :' &
+  pi_pid=$!
+  rm -f "$state/.lock"
+  printf '%s\n' "$pi_pid" >"$dir/elsewhere"
+  ln -s "$dir/elsewhere" "$state/.lock"
+  if "$checker" --claimed "$state"; then
+    kill "$pi_pid" 2>/dev/null || true
+    wait "$pi_pid" 2>/dev/null || true
+    fail "a symlinked session record claimed the home"
+  fi
+  # The divergence itself: the very same live session, recorded as a regular
+  # file, does claim the home, so the symlink case above is not vacuous.
+  rm -f "$state/.lock"
+  printf '%s\n' "$pi_pid" >"$state/.lock"
+  "$checker" --claimed "$state" || {
+    kill "$pi_pid" 2>/dev/null || true
+    wait "$pi_pid" 2>/dev/null || true
+    fail "the symlink probe was vacuous: the same live session was refused as a regular record too"
+  }
+  kill "$pi_pid" 2>/dev/null || true
+  wait "$pi_pid" 2>/dev/null || true
+
+  expect_code 2 "$("$checker" --claimed 2>/dev/null; echo $?)" "--claimed without a state directory must be a usage error"
+  pass "telegram session-lock: a home is claimed only by a live verified firstmate session, never by an unrelated process on a recycled pid"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -460,6 +543,7 @@ test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_telegram_peer_authentication_binds_lock_to_process_start
 test_peer_authentication_rejects_stale_and_invalid_locks
+test_claimed_answers_the_shared_liveness_question
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

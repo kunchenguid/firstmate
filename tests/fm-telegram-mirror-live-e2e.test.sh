@@ -38,6 +38,7 @@ WORK="$TMP_ROOT/work"
 PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
 MODEL_PID=
 BOT_PID=
+STRANGER_PID=
 
 mkdir -p "$HOME_DIR" "$WORK" "$FM_LAB_HOME/state"
 
@@ -45,6 +46,7 @@ cleanup() {
   tmux -L "$SOCKET" kill-server 2>/dev/null || true
   [ -n "$MODEL_PID" ] && kill "$MODEL_PID" 2>/dev/null
   [ -n "$BOT_PID" ] && kill "$BOT_PID" 2>/dev/null
+  [ -n "$STRANGER_PID" ] && kill "$STRANGER_PID" 2>/dev/null
   fm_test_cleanup
 }
 trap cleanup EXIT
@@ -245,7 +247,10 @@ pass "a Telegram screenshot without a caption reaches the model as the [Image at
 # the session Pi has already started, so the bridge is loaded before the home
 # names it. The fixture above writes the lock first and would never see that
 # window; here Pi starts against an unrecorded home, exactly as a real Firstmate
-# session does, and the mirror has to come up on its own once the lock lands.
+# session does, and the mirror has to come up on its own once the lock lands -
+# including across a leftover record whose pid an unrelated live process has
+# since inherited, which is indistinguishable from a live session to anything
+# coarser than Firstmate's own harness classification.
 # The rendered footer is asserted from the real TUI because how Pi orders,
 # joins, and separates independently published statuses is Pi's own behavior.
 start_pi_unrecorded() {
@@ -274,6 +279,19 @@ sleep 2
 capture_pane | grep -q 'telegram:' \
   && fail "the mirror published a footer status before the home recorded its live session (Pi $PI_VERSION)"
 
+# A leftover record naming a pid an unrelated live process has since inherited
+# is not a live Firstmate session. Firstmate's own session start overwrites it,
+# so the bridge must keep waiting for the real record rather than concluding the
+# home belongs to someone else and staying dark until a reload.
+sleep 600 &
+STRANGER_PID=$!
+printf '%s\n' "$STRANGER_PID" >"$FM_LAB_HOME/state/.lock"
+sleep 2
+capture_pane | grep -q 'telegram:' \
+  && fail "an unrelated live process on a recycled pid was treated as this home's session (Pi $PI_VERSION)"
+[ "$(frames_of hello)" -eq 0 ] \
+  || fail "the bridge connected on behalf of an unrelated live process (Pi $PI_VERSION)"
+
 # The lock names the pane's own process, which is Pi itself: the fixture execs
 # Pi into the pane, so this is the same shape fm-session-start.sh records.
 tmux -L "$SOCKET" display-message -p -t "$SESSION" '#{pane_pid}' >"$TMP_ROOT/pane-pid"
@@ -301,4 +319,4 @@ case $STATUS_LINE in
 esac
 [ "$(capture_pane | grep -c 'telegram:')" -eq 1 ] \
   || fail "the Telegram status was rendered more than once: (Pi $PI_VERSION)"
-pass "a real Pi session started before its home recorded the session brings the mirror up without a reload and renders it ahead of the next status on one separated footer line (Pi $PI_VERSION)"
+pass "a real Pi session started before its home recorded the session, and left holding a record an unrelated live process had inherited, brings the mirror up without a reload and renders it ahead of the next status on one separated footer line (Pi $PI_VERSION)"

@@ -23,7 +23,6 @@ import {
   constants as fsConstants,
   existsSync,
   fstatSync,
-  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -132,32 +131,22 @@ function ownsSessionLock(): boolean {
   return result.status === 0;
 }
 
-// A lock naming a live process belongs to a session that already claimed this
-// home, and no later check can hand it to this one. A missing, malformed, or
-// dead-pid lock means the home is unclaimed, which is exactly the window
-// between Pi starting and bin/fm-session-start.sh recording the new session.
-// Ownership itself stays with the checker script; this only decides whether
-// asking again could ever change the answer.
+// A home already claimed by another live Firstmate session belongs to that
+// session, and no later check can hand it to this one. Anything else - no
+// record, a malformed or symlinked one, a dead pid, or a pid an unrelated
+// process has since inherited - means the home is unclaimed, which is exactly
+// the window between Pi starting and bin/fm-session-start.sh recording the new
+// session. Both answers come from the same checker script, so which processes
+// count as a live Firstmate session is decided once, in bash, rather than
+// approximated here: a bare kill(pid, 0) would read a recycled pid as a live
+// claim and leave the mirror dark until the captain reloaded Pi, while
+// Firstmate's own session start would overwrite that record without hesitating.
 function sessionLockClaimed(): boolean {
-  const lockPath = join(stateDirectory(), ".lock");
-  let lockPid = "";
-  try {
-    const lockStat = lstatSync(lockPath);
-    if (!lockStat.isFile() || lockStat.isSymbolicLink()) return false;
-    lockPid = readFileSync(lockPath, "utf8").trim();
-  } catch {
-    return false;
-  }
-  if (!/^[0-9]+$/.test(lockPid)) return false;
-  const pid = Number(lockPid);
-  if (!Number.isSafeInteger(pid) || pid <= 1) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    // A process this user cannot signal is still a live claim.
-    return (error as NodeJS.ErrnoException | null)?.code === "EPERM";
-  }
+  const result = spawnSync(sessionLockChecker(), ["--claimed", stateDirectory()], {
+    stdio: "ignore",
+    timeout: 2000,
+  });
+  return result.status === 0;
 }
 
 function readDisplayStatus(): boolean {

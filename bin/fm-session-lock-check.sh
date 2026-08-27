@@ -1,19 +1,42 @@
 #!/usr/bin/env bash
-# Verify that a process belongs to the live Pi session holding a home's session lock.
+# Read-only session-lock answers for the Telegram integration, whose halves run
+# outside bash (bin/fm-telegram.py and .pi/extensions/fm-telegram-mirror.ts) and
+# must not restate the shared harness-identity rules of their own.
+# Shared harness identity and session-lock ownership are decided by
+# bin/fm-session-lock-lib.sh; peer authentication below additionally binds a Pi
+# owner to the lock file's process generation.
+#
 # Usage: fm-session-lock-check.sh <state-dir> <peer-pid>
+#          exit 0 when <peer-pid> belongs to the live Pi session holding the
+#          home's lock, and that lock was recorded by this Pi generation.
+#        fm-session-lock-check.sh --claimed <state-dir>
+#          exit 0 when a live verified firstmate session holds the home's lock.
+#          Absent, non-regular, symlinked, malformed, dead, and
+#          reused-by-an-unrelated-process records all fail this claimed query.
 set -u
 
-if [ "$#" -ne 2 ]; then
-  echo "usage: fm-session-lock-check.sh <state-dir> <peer-pid>" >&2
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+
+usage() {
+  echo "usage: fm-session-lock-check.sh <state-dir> <peer-pid> | --claimed <state-dir>" >&2
   exit 2
+}
+
+if [ "${1:-}" = "--claimed" ]; then
+  [ "$#" -eq 2 ] || usage
+  fm_session_lock_claimed "$2" >/dev/null || exit 1
+  exit 0
+fi
+
+if [ "$#" -ne 2 ]; then
+  usage
 fi
 case "$2" in
   ''|*[!0-9]*) exit 1 ;;
 esac
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=bin/fm-session-lock-lib.sh
-. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 fm_session_lock_owned_by_pid "$1" "$2" || exit 1
 
 lock_path=$1/.lock

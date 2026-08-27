@@ -5,7 +5,8 @@
 # lock, and does the current process descend from that same harness?" decision.
 # bin/fm-lock.sh uses it to acquire and inspect state/.lock;
 # bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires inside the
-# lock-owning primary session before it may arm or rewake.
+# lock-owning primary session before it may arm or rewake;
+# bin/fm-session-lock-check.sh exposes it read-only to the Telegram bridge.
 # This file is sourced by scripts and has no side effects on source.
 
 # Cursor process identity is NOT expressible as a command-name pattern and is
@@ -152,15 +153,17 @@ fm_harness_pid_alive() {
   fm_harness_process_matches "$comm" "$args"
 }
 
-# True when state dir $1 holds a regular, non-symlink session lock naming a
-# live verified harness in process $2's own harness ancestry. Membership is the
-# honest test of that question, because the lock owner sits at an unknown depth
-# in a contiguous Claude run - it is the outermost pid when a hook fires inside
-# the session's nested worker chain, and an inner pid when a harness-named daemon
-# parents the session. A stale, malformed, or non-regular lock and an ancestry
-# that cannot be resolved all fail closed.
-fm_session_lock_owned_by_pid() {  # <state> <start-pid>
-  local state=$1 start_pid=$2 lock_pid pids pid
+# Print the pid of the live verified harness holding state dir $1's session
+# lock, or return 1 when no live firstmate session holds that home.
+#
+# This is the "is this home claimed at all?" half of ownership and uses the
+# same live verified-harness test that bin/fm-lock.sh applies to an existing
+# regular record. Absent, non-regular, symlinked, malformed, dead, and
+# reused-by-an-unrelated-process locks all fail this query. Generic pid liveness
+# is not enough on its own, because an ordinary process that inherited a
+# recycled pid would otherwise keep a dead session's home claimed forever.
+fm_session_lock_claimed() {  # <state>
+  local state=$1 lock_pid
   [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || return 1
   lock_pid=$(cat "$state/.lock" 2>/dev/null) || return 1
   case "$lock_pid" in
@@ -168,6 +171,19 @@ fm_session_lock_owned_by_pid() {  # <state> <start-pid>
   esac
   [ "$lock_pid" -gt 1 ] 2>/dev/null || return 1
   fm_harness_pid_alive "$lock_pid" || return 1
+  printf '%s\n' "$lock_pid"
+}
+
+# True when state dir $1 holds a claimed session lock whose live verified
+# harness is in process $2's own harness ancestry. Membership is the honest test
+# of that question, because the lock owner sits at an unknown depth in a
+# contiguous Claude run - it is the outermost pid when a hook fires inside the
+# session's nested worker chain, and an inner pid when a harness-named daemon
+# parents the session. An unclaimed lock and an ancestry that cannot be resolved
+# both fail closed.
+fm_session_lock_owned_by_pid() {  # <state> <start-pid>
+  local state=$1 start_pid=$2 lock_pid pids pid
+  lock_pid=$(fm_session_lock_claimed "$state") || return 1
   pids=$(fm_harness_ancestry_pids "$start_pid") || return 1
   while IFS= read -r pid; do
     [ "$pid" = "$lock_pid" ] && return 0

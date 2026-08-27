@@ -50,12 +50,24 @@ cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$FIXTURE/lib/fm-operation
 ln -s "$PI_PACKAGE_DIR" "$FIXTURE/node_modules/@earendil-works/pi-coding-agent"
 ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$FIXTURE/node_modules/@earendil-works/pi-tui"
 printf '%s\n' '{"type":"module"}' >"$FIXTURE/package.json"
-cat >"$TMP_ROOT/session-lock-check" <<'SH'
+cat >"$TMP_ROOT/session-lock-check" <<SH
 #!/bin/sh
-[ -f "$1/.lock" ] && [ ! -L "$1/.lock" ] || exit 1
-[ "$(cat "$1/.lock")" = "$2" ]
+# Ownership cannot be genuine in this fixture - its session is node, not a
+# harness - so that half is stood in for. The "is this home already claimed?"
+# half is answered by the real shared classification, because that is the
+# question a recycled pid makes dangerous.
+if [ "\$1" = "--claimed" ]; then
+  exec "$ROOT/bin/fm-session-lock-check.sh" --claimed "\$2"
+fi
+[ -f "\$1/.lock" ] && [ ! -L "\$1/.lock" ] || exit 1
+[ "\$(cat "\$1/.lock")" = "\$2" ]
 SH
 chmod +x "$TMP_ROOT/session-lock-check"
+# A real verified-harness process for the fixture to point locks at: a copy of
+# bash named "pi", which Firstmate's shared classification identifies exactly as
+# it identifies a live Pi session.
+cp /bin/bash "$TMP_ROOT/pi"
+chmod +x "$TMP_ROOT/pi"
 
 OUT="$TMP_ROOT/node-output"
 if ! (cd "$FIXTURE" && \
@@ -67,11 +79,12 @@ if ! (cd "$FIXTURE" && \
   FM_TELEGRAM_MAX_OUTSTANDING_WRITE_BYTES=100000 \
   FM_TELEGRAM_TESTING=1 \
   FM_TELEGRAM_SESSION_LOCK_CHECK="$TMP_ROOT/session-lock-check" \
+  FM_TEST_PI_BIN="$TMP_ROOT/pi" \
   FM_HOME="$TMP_ROOT/fmhome" \
   WORKER_HOME="$TMP_ROOT/workerhome" \
   PENDING_HOME="$TMP_ROOT/pendinghome" \
   FM_TELEGRAM_LOCK_WAIT_MS=100 \
-  FM_TELEGRAM_LOCK_WAIT_ATTEMPTS=40 \
+  FM_TELEGRAM_LOCK_WAIT_ATTEMPTS=200 \
   node --input-type=module >"$OUT" 2>&1) <<'JS'
 import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
@@ -770,8 +783,9 @@ await waitFor(() => connections > connectionsAfterShutdown, "a reconnect on the 
 //    the session that holds the Firstmate home's lock may mirror.
 const connectionsBeforeWorker = connections;
 mkdirSync(join(process.env.WORKER_HOME, "state"), { recursive: true });
-// A live pid that is not this process's ancestor: exactly a crewmate's shape.
-const workerOwner = spawn(process.execPath, ["-e", "setTimeout(() => {}, 10000)"]);
+// A genuinely live Firstmate session that is not this process's ancestor:
+// exactly a crewmate's shape, and the case that must stay inert.
+const workerOwner = spawn(process.env.FM_TEST_PI_BIN, ["-c", "sleep 20; :"]);
 writeFileSync(join(process.env.WORKER_HOME, "state", ".lock"), `${workerOwner.pid}\n`);
 process.env.FM_HOME = process.env.WORKER_HOME;
 const workerHandlers = new Map();
@@ -801,8 +815,10 @@ process.env.FM_HOME = process.env.WORKER_HOME.replace("workerhome", "fmhome");
 //    loads this file while the session is starting, and Firstmate records the
 //    session lock from inside that same session moments later, so a bridge that
 //    answered "not mine" once at load stayed dark until the captain reloaded Pi.
-//    Malformed and symlink locks are also unclaimed and must keep retrying until
-//    the regular lock arrives, with no reload, second import, or session_start.
+//    Every record that Firstmate's own session start would overwrite - absent,
+//    malformed, symlinked, dead, and a pid an unrelated process has since
+//    inherited - is unclaimed here too, and must keep the bridge retrying until
+//    the valid record arrives, with no reload, second import, or session_start.
 const connectionsBeforePending = connections;
 const pendingState = join(process.env.PENDING_HOME, "state");
 mkdirSync(pendingState, { recursive: true });
@@ -843,6 +859,30 @@ if (pendingCommands.length !== 0 || pendingFooter.size !== 0) {
 
 const pendingLock = join(pendingState, ".lock");
 const symlinkTarget = join(pendingState, "symlink-target");
+
+// A pid an unrelated live process inherited. Generic pid liveness reads this as
+// a live claim, which is what left the mirror dark until a reload; the shared
+// classification reads it as the stale record it is.
+const stranger = spawn(process.execPath, ["-e", "setTimeout(() => {}, 20000)"]);
+writeFileSync(pendingLock, `${stranger.pid}\n`);
+await new Promise((resolve) => setTimeout(resolve, 400));
+if (connections !== connectionsBeforePending || pendingCommands.length !== 0) {
+  fail("an unrelated live process on a recycled pid was mirrored as this home's session");
+}
+
+// No record at all, then a record naming a Firstmate session that has ended.
+unlinkSync(pendingLock);
+await new Promise((resolve) => setTimeout(resolve, 300));
+const departed = spawn(process.env.FM_TEST_PI_BIN, ["-c", "sleep 20; :"]);
+const departedPid = departed.pid;
+departed.kill("SIGKILL");
+await new Promise((resolve) => departed.once("exit", resolve));
+writeFileSync(pendingLock, `${departedPid}\n`);
+await new Promise((resolve) => setTimeout(resolve, 300));
+if (connections !== connectionsBeforePending || pendingCommands.length !== 0 || pendingFooter.size !== 0) {
+  fail("an absent or dead session record ended the wait instead of leaving the home unclaimed");
+}
+
 unlinkSync(pendingLock);
 writeFileSync(symlinkTarget, `${process.pid}\n`);
 symlinkSync(symlinkTarget, pendingLock);
@@ -853,6 +893,7 @@ if (connections !== connectionsBeforePending || pendingCommands.length !== 0 || 
 unlinkSync(pendingLock);
 writeFileSync(pendingLock, `${process.pid}\n`);
 await waitFor(() => connections > connectionsBeforePending, "the bridge to connect once the home recorded its session");
+stranger.kill("SIGKILL");
 await waitFor(() => pendingFooter.get("firstmate-telegram") !== undefined, "the Telegram footer to appear without a Pi reload");
 if (!pendingFooter.get("firstmate-telegram").startsWith("telegram: ")) {
   fail(`the recovered footer was not the mirror's status: ${pendingFooter.get("firstmate-telegram")}`);
