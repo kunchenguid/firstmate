@@ -9,6 +9,16 @@ Exact task chronology, branch names, temporary homes, local paths, process ids, 
 ## tmux
 
 Codex max-effort launch was verified on 2026-08-27 against codex-cli 0.149.1.
+The installed version was recorded with:
+
+```sh
+codex --version
+```
+
+```text
+codex-cli 0.149.1
+```
+
 The real interactive harness was launched with the same configuration shape used by `fm-spawn.sh`:
 
 ```sh
