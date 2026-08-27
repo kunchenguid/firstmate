@@ -148,7 +148,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | claude | Open the current interactive session's `/model` picker; `claude --help` documents the accepted alias or full-model-name input shape. |
 | codex | Open the current interactive session's `/model` picker. |
 | opencode | Run `opencode models [provider]`, which lists available provider/model identifiers. |
-| pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
+| pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. `--list-models` runs in CLI mode before extensions load, so it only shows the static provider catalog (built-in providers plus custom `~/.pi/agent/models.json` entries). Extension-registered providers, such as the `cursor` provider from `pi-cursor-sdk`, register at runtime via `pi.registerProvider()` and are NOT visible in `--list-models`. To discover extension-registered models, consult the extension's own model cache (e.g. `~/.pi/agent/cursor-sdk-model-list.json` for Cursor) or use the interactive `/model` picker after the extension loads. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
 | cursor | Run `cursor-agent --list-models` (or the legacy `agent --list-models`), which lists the ids available to the current Cursor account. `cursor` is not the CLI name. |
