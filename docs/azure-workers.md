@@ -284,8 +284,8 @@ The tracking monitor retries collection, receipt minting, release recording, and
 Only then does it remove the locally staged provider credential and convergence files; the credential-free outcome bundle and task report remain.
 After an exact release receipt, reconcile deallocates the VM promptly.
 Azure deallocation stops compute billing but not disks, NICs, public foundation meters, monitoring, or storage operations.
-After deallocation it deletes the named execute and bootstrap Run Commands and monitor extension before the VM, then proves VM absence and disk/NIC detach before deleting NIC and OS disk; the TTL remains enabled until those proofs complete and is deleted last among compute children.
-Reset then conditionally deletes the result, request, global reservation, released account disk, task disk, identity, role, and container.
+After deallocation it deletes the named execute and bootstrap Run Commands and monitor extension before the VM, then proves VM absence and disk/NIC detach before deleting NIC and OS disk concurrently; the TTL remains enabled until those proofs complete and is deleted last among compute children.
+Reset validates every exact resource first, conditionally deletes the independent result, request, global reservation, released account disk, task disk, identity, role, and staging archives concurrently, then re-inventories and deletes the state container last. Every mutation retains its existing exact-ID, immutable-identity, tag, detach, and ETag fences; a partial provider success remains an ordinary idempotent replay.
 The default cooldown is 300 seconds and may be configured from zero through 1,800 seconds.
 The default and currently required warm-idle target is zero.
 A release-proved worker whose VM is already dark but whose `cooldown_started_at` is null - the operator-side deallocate that surrender's dark-compute gate requires never stamps the field - gets the stamp durably on the planner's first observation, so the cooldown clock starts instead of restarting forever and `delete-compute` becomes due.

@@ -18,6 +18,7 @@ exact-assignment gate enforces it today.
 """
 
 import base64
+import concurrent.futures
 import contextlib
 import datetime as dt
 import email.utils
@@ -2526,6 +2527,35 @@ def conditional_delete(controller, kind, resource):
         raise ProviderError("conditional {} deletion failed: {}".format(kind, stderr))
 
 
+def run_independent_cleanup(operations):
+    """Run already-fenced, mutually independent cleanup mutations together.
+
+    Each operation is replay-safe under its own exact provider precondition.
+    Wait for every submitted operation before reporting a deterministic first
+    failure so a partial Azure success remains a normal idempotent replay, not
+    an unobserved background mutation.
+    """
+    if not operations:
+        return
+    errors = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(operations))) as executor:
+        submitted = [
+            (index, label, executor.submit(operation))
+            for index, (label, operation) in enumerate(operations)
+        ]
+        for index, label, future in submitted:
+            try:
+                future.result()
+            except Exception as exc:
+                errors.append((index, label, exc))
+    if errors:
+        _, label, error = min(errors, key=lambda item: item[0])
+        detail = "independent cleanup failed for {}: {}".format(label, error)
+        if isinstance(error, ProviderIdentityRefusal):
+            raise ProviderIdentityRefusal(detail)
+        raise ProviderError(detail)
+
+
 def mutate_deallocate(controller, action):
     snapshot = inventory(controller, include_metrics=False)
     resources = cleanup_recorded_exact(
@@ -2598,6 +2628,7 @@ def mutate_delete_compute(controller, action):
     if worker is None:
         raise ProviderError("VM deletion also lost exact retained task/account capacity")
     remaining = worker.get("resources") or {}
+    detached = []
     for kind in (
         "task-command", "bootstrap-command", "monitor-extension", "vm", "nic", "os-disk",
     ):
@@ -2631,7 +2662,14 @@ def mutate_delete_compute(controller, action):
             prior = action["resources"].get(kind)
             if prior is None or resource["id"] != prior["id"] or resource["immutable_id"] != prior["immutable_id"]:
                 raise ProviderError("detached {} immutable identity changed".format(kind))
+            detached.append((
+                kind,
+                lambda kind=kind, resource=resource: conditional_delete(
+                    controller, kind, resource),
+            ))
+            continue
         conditional_delete(controller, kind, resource)
+    run_independent_cleanup(detached)
     final = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
     if final is None:
         raise ProviderError("compute cleanup lost retained task/account ownership")
@@ -2696,6 +2734,7 @@ def mutate_reset(controller, action):
         "ttl-schedule",
     )):
         raise ProviderError("reset refuses while disposable compute or children still exist")
+    independent = []
     for kind in (
         "staging-result", "staging-request", "global-reservation", "role-assignment",
         "identity", "account-disk", "task-disk",
@@ -2712,29 +2751,43 @@ def mutate_reset(controller, action):
                 "worker/{:02d}/reservation.json".format(action["slot"])
                 if kind == "global-reservation" else expected_names(controller, action["slot"])[kind]
             )
-            _, rc, stderr = az(controller, [
-                "storage", "blob", "delete", "--auth-mode", "login", "--account-name", account,
-                "--container-name", container_name, "--name", blob_name,
-                "--if-match", resource["etag"],
-            ], check=False)
-            if rc != 0:
-                raise ProviderError("conditional {} blob deletion failed: {}".format(kind, stderr))
+            def delete_bound_blob(
+                kind=kind, account=account, container_name=container_name,
+                blob_name=blob_name, etag=resource["etag"],
+            ):
+                _, rc, stderr = az(controller, [
+                    "storage", "blob", "delete", "--auth-mode", "login",
+                    "--account-name", account, "--container-name", container_name,
+                    "--name", blob_name, "--if-match", etag,
+                ], check=False)
+                if rc != 0:
+                    raise ProviderError(
+                        "conditional {} blob deletion failed: {}".format(kind, stderr))
+            independent.append((kind, delete_bound_blob))
         else:
-            conditional_delete(controller, kind, resource)
+            independent.append((
+                kind,
+                lambda kind=kind, resource=resource: conditional_delete(
+                    controller, kind, resource),
+            ))
     # The payload and account archives are per-execution transport (their
     # content is bound through the request manifests, never identity-fenced),
     # and the account archive fronts provider credentials: both are removed
     # unconditionally at reset, tolerating absence.
     state_container_name = expected_names(controller, action["slot"])["state-container"]
     for blob_name in ("payload.tar.gz", "account.tar.gz"):
-        _, rc, stderr = az(controller, [
-            "storage", "blob", "delete", "--auth-mode", "login",
-            "--account-name", os.environ.get("FM_AZURE_STORAGE_NAME", ""),
-            "--container-name", state_container_name,
-            "--name", blob_name,
-        ], check=False)
-        if rc != 0 and "does not exist" not in stderr and "BlobNotFound" not in stderr:
-            raise ProviderError("staging archive deletion failed for {}: {}".format(blob_name, stderr))
+        def delete_archive(blob_name=blob_name):
+            _, rc, stderr = az(controller, [
+                "storage", "blob", "delete", "--auth-mode", "login",
+                "--account-name", os.environ.get("FM_AZURE_STORAGE_NAME", ""),
+                "--container-name", state_container_name,
+                "--name", blob_name,
+            ], check=False)
+            if rc != 0 and "does not exist" not in stderr and "BlobNotFound" not in stderr:
+                raise ProviderError(
+                    "staging archive deletion failed for {}: {}".format(blob_name, stderr))
+        independent.append((blob_name, delete_archive))
+    run_independent_cleanup(independent)
     refreshed = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
     if refreshed is None:
         raise ProviderError("cleanup marker container disappeared before exact reset completed")

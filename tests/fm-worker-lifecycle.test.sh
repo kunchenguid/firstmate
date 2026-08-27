@@ -9100,7 +9100,88 @@ PY
   pass "the compartment payload lane admits exactly what fm-spawn.sh stages, requires it, and leaves the crewmate lane narrow"
 }
 
+independent_cleanup_contract() {
+  python3 - "$AZURE" <<'PY' || fail "independent Azure cleanup contract failed"
+import importlib.util
+import inspect
+import sys
+import threading
+import time
+
+spec = importlib.util.spec_from_file_location("azure_provider_cleanup", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+started = []
+lock = threading.Lock()
+all_started = threading.Event()
+
+def operation(label):
+    def run():
+        with lock:
+            started.append(label)
+            if len(started) == 3:
+                all_started.set()
+        assert all_started.wait(2), started
+    return run
+
+module.run_independent_cleanup([
+    ("identity", operation("identity")),
+    ("account-disk", operation("account-disk")),
+    ("task-disk", operation("task-disk")),
+])
+assert sorted(started) == ["account-disk", "identity", "task-disk"], started
+
+def fail_after(delay, message):
+    def run():
+        time.sleep(delay)
+        raise module.ProviderError(message)
+    return run
+
+try:
+    module.run_independent_cleanup([
+        ("first", fail_after(0.03, "first failure")),
+        ("second", fail_after(0, "second failure")),
+    ])
+except module.ProviderError as exc:
+    assert "first: first failure" in str(exc), exc
+else:
+    raise AssertionError("parallel cleanup swallowed provider failures")
+
+try:
+    module.run_independent_cleanup([
+        ("identity", fail_after(0, "ordinary identity failure")),
+        ("fenced", lambda: (_ for _ in ()).throw(
+            module.ProviderIdentityRefusal("identity changed"))),
+    ])
+except module.ProviderError as exc:
+    assert not isinstance(exc, module.ProviderIdentityRefusal), exc
+    assert "identity: ordinary identity failure" in str(exc), exc
+else:
+    raise AssertionError("input-order failure selection became timing-dependent")
+
+try:
+    module.run_independent_cleanup([
+        ("fenced", lambda: (_ for _ in ()).throw(
+            module.ProviderIdentityRefusal("identity changed"))),
+    ])
+except module.ProviderIdentityRefusal as exc:
+    assert "fenced: identity changed" in str(exc), exc
+else:
+    raise AssertionError("parallel cleanup downgraded an identity refusal")
+
+delete_source = inspect.getsource(module.mutate_delete_compute)
+reset_source = inspect.getsource(module.mutate_reset)
+assert "run_independent_cleanup(detached)" in delete_source
+assert "run_independent_cleanup(independent)" in reset_source
+assert delete_source.index('wait_absent(controller, resource["id"])') < delete_source.index(
+    "run_independent_cleanup(detached)")
+PY
+  pass "independent exact Azure cleanup mutations overlap and fail deterministically"
+}
+
 static_contract
+independent_cleanup_contract
 service_complete_front_door
 service_reconcile_scope_contract
 service_complete_replay_contract
