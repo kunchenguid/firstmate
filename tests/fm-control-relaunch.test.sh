@@ -186,26 +186,24 @@ meta_field() {  # <case-dir> <id> <key>
 }
 
 activate_test_route() {  # <case-dir> <task> <generation>
-  local dir=$1 task=$2 generation=$3 claim
-  claim=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  local dir=$1 task=$2 generation=$3 capability candidate metadata
+  capability="$dir/home/state/routing/claims/$task/$generation.cap"
+  candidate="$dir/home/state/$task.meta.route-candidate"
+  metadata="$dir/home/state/$task.meta"
   FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
     "$ROOT/bin/fm-route.sh" reserve --task "$task" --generation "$generation" \
       --profile claude-sonnet --provider anthropic --lane claude-primary \
       --account claude-primary --class standard --work-type implementation \
       --risk medium --mode automatic --now 1000 >/dev/null
   FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
-    "$ROOT/bin/fm-route.sh" claim-reservation --task "$task" --generation "$generation" \
+    "$ROOT/bin/fm-route.sh" begin-admission --task "$task" --generation "$generation" \
       --profile claude-sonnet --provider anthropic --lane claude-primary \
       --account claude-primary --class standard --risk medium --mode automatic \
-      --claim "$claim" --now 1001 >/dev/null
-  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
-    "$ROOT/bin/fm-route.sh" activate-reservation --task "$task" --generation "$generation" \
-      --claim "$claim" >/dev/null
-}
-
-append_test_route_meta() {  # <meta> <generation>
+      --transition fresh --claim-file "$capability" --metadata-file "$metadata" \
+      >/dev/null
+  cp "$metadata" "$candidate"
   {
-    printf 'route_generation=%s\n' "$2"
+    printf 'route_generation=%s\n' "$generation"
     printf '%s\n' 'route_profile=claude-sonnet'
     printf '%s\n' 'route_provider=anthropic'
     printf '%s\n' 'route_lane=claude-primary'
@@ -213,7 +211,14 @@ append_test_route_meta() {  # <meta> <generation>
     printf '%s\n' 'route_class=standard'
     printf '%s\n' 'route_risk=medium'
     printf '%s\n' 'route_mode=automatic'
-  } >> "$1"
+  } >> "$candidate"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$ROOT/bin/fm-route.sh" prepare-admission --task "$task" \
+      --claim-file "$capability" --candidate "$candidate" >/dev/null
+  mv "$candidate" "$metadata"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$ROOT/bin/fm-route.sh" commit-admission --task "$task" \
+      --claim-file "$capability" >/dev/null
 }
 
 journal_field() {  # <case-dir> <id> <key>
@@ -336,22 +341,8 @@ test_relaunch_preserves_and_readmits_the_original_route_generation() {
   jq -n --arg config_dir "$dir/claude-primary" \
     '{version:1,accounts:{"claude-primary":{harness:"claude",envName:"CLAUDE_CONFIG_DIR",configDir:$config_dir}}}' \
     > "$dir/home/config/crew-accounts.json"
-  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
-    "$ROOT/bin/fm-route.sh" reserve --task rl35 --generation gen-original \
-      --profile claude-sonnet --provider anthropic --lane claude-primary \
-      --account claude-primary --class standard --work-type implementation \
-      --risk medium --mode automatic --now 1000 >/dev/null
-  {
-    printf '%s\n' 'route_generation=gen-original'
-    printf '%s\n' 'route_profile=claude-sonnet'
-    printf '%s\n' 'route_provider=anthropic'
-    printf '%s\n' 'route_lane=claude-primary'
-    printf '%s\n' 'route_account=claude-primary'
-    printf '%s\n' 'route_class=standard'
-    printf '%s\n' 'route_risk=medium'
-    printf '%s\n' 'route_mode=automatic'
-  } >> "$dir/home/state/rl35.meta"
-  reservation="$dir/home/state/routing/reservations/rl35.json"
+  activate_test_route "$dir" rl35 gen-original
+  reservation="$dir/home/state/routing/reservations/rl35/gen-original.json"
 
   out=$(run_control "$dir" rl35 relaunch --note "continue on the admitted route"); rc=$?
   expect_code 0 "$rc" "routed relaunch should succeed on its original reservation"$'\n'"$out"
@@ -374,8 +365,7 @@ test_explicit_off_relaunch_suppresses_inherited_route_metadata() {
     '{version:1,accounts:{"claude-primary":{harness:"claude",envName:"CLAUDE_CONFIG_DIR",configDir:$config_dir}}}' \
     > "$dir/home/config/crew-accounts.json"
   activate_test_route "$dir" rl36 gen-old
-  append_test_route_meta "$dir/home/state/rl36.meta" gen-old
-  reservation="$dir/home/state/routing/reservations/rl36.json"
+  reservation="$dir/home/state/routing/reservations/rl36/gen-old.json"
   printf 'zsh' > "$dir/fake/command"
 
   out=$(run_spawn "$dir" rl36 --relaunch --route-mode off); rc=$?
@@ -397,7 +387,6 @@ test_explicit_reroute_requires_a_distinct_reserved_generation() {
     '{version:1,accounts:{"claude-primary":{harness:"claude",envName:"CLAUDE_CONFIG_DIR",configDir:$config_dir}}}' \
     > "$dir/home/config/crew-accounts.json"
   activate_test_route "$dir" rl37 gen-old
-  append_test_route_meta "$dir/home/state/rl37.meta" gen-old
   printf 'zsh' > "$dir/fake/command"
 
   out=$(run_spawn "$dir" rl37 --relaunch --harness claude \
@@ -411,8 +400,6 @@ test_explicit_reroute_requires_a_distinct_reserved_generation() {
     || fail "same-generation refusal changed recorded routing"
 
   FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
-    "$ROOT/bin/fm-route.sh" release --task rl37 --generation gen-old >/dev/null
-  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
     "$ROOT/bin/fm-route.sh" reserve --task rl37 --generation gen-new \
       --profile claude-sonnet --provider anthropic --lane claude-primary \
       --account claude-primary --class standard --work-type implementation \
@@ -424,10 +411,63 @@ test_explicit_reroute_requires_a_distinct_reserved_generation() {
   expect_code 0 "$rc" "distinct reserved reroute should succeed"$'\n'"$out"
   [ "$(meta_field "$dir" rl37 route_generation)" = gen-new ] \
     || fail "distinct reserved reroute did not publish its new generation"
-  reservation="$dir/home/state/routing/reservations/rl37.json"
+  reservation="$dir/home/state/routing/reservations/rl37/gen-new.json"
   jq -e '.generation == "gen-new" and .admissionState == "active"' "$reservation" >/dev/null \
     || fail "distinct reserved reroute was not activated"
   pass "fm-spawn relaunch: explicit reroute requires and activates a distinct generation"
+}
+
+test_routed_relaunch_prepublication_failures_preserve_old_capacity() {
+  local dir out rc meta old_res new_res real_mv transition
+  real_mv=$(command -v mv)
+
+  for transition in inherit off replacement; do
+    dir=$(new_case "route-fail-$transition" "rl-$transition")
+    add_ship_task "$dir" "rl-$transition" claude
+    mkdir -p "$dir/home/config" "$dir/claude-primary"
+    jq -n --arg config_dir "$dir/claude-primary" \
+      '{version:1,accounts:{"claude-primary":{harness:"claude",envName:"CLAUDE_CONFIG_DIR",configDir:$config_dir}}}' \
+      > "$dir/home/config/crew-accounts.json"
+    activate_test_route "$dir" "rl-$transition" gen-old
+    meta="$dir/home/state/rl-$transition.meta"
+    old_res="$dir/home/state/routing/reservations/rl-$transition/gen-old.json"
+    cp "$meta" "$meta.before"
+    printf 'zsh' > "$dir/fake/command"
+    make_mv_failure_stub "$dir"
+
+    case "$transition" in
+      inherit)
+        out=$(FM_REAL_MV="$real_mv" FM_FAKE_META_PUBLISH_MV_FAIL="$meta" \
+          run_spawn "$dir" "rl-$transition" --relaunch); rc=$?
+        ;;
+      off)
+        out=$(FM_REAL_MV="$real_mv" FM_FAKE_META_PUBLISH_MV_FAIL="$meta" \
+          run_spawn "$dir" "rl-$transition" --relaunch --route-mode off); rc=$?
+        ;;
+      replacement)
+        FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+          "$ROOT/bin/fm-route.sh" reserve --task "rl-$transition" --generation gen-new \
+            --profile claude-sonnet --provider anthropic --lane claude-primary \
+            --account claude-primary --class standard --work-type implementation \
+            --risk medium --mode automatic --now 1010 >/dev/null
+        new_res="$dir/home/state/routing/reservations/rl-$transition/gen-new.json"
+        out=$(FM_REAL_MV="$real_mv" FM_FAKE_META_PUBLISH_MV_FAIL="$meta" \
+          run_spawn "$dir" "rl-$transition" --relaunch --harness claude \
+            --route-generation gen-new --route-profile claude-sonnet --route-provider anthropic \
+            --route-lane claude-primary --route-account claude-primary --route-class standard \
+            --route-risk medium --route-mode automatic); rc=$?
+        ;;
+    esac
+    expect_code 1 "$rc" "$transition relaunch should fail before route metadata publication"$'\n'"$out"
+    cmp -s "$meta.before" "$meta" || fail "$transition failure changed old route metadata"
+    jq -e '.admissionState == "active"' "$old_res" >/dev/null \
+      || fail "$transition failure did not preserve the old active reservation"
+    assert_absent "$dir/home/state/routing/admissions/rl-$transition.json" \
+      "$transition failure left an admission journal owned by a live launcher"
+    [ "$transition" != replacement ] || assert_absent "$new_res" \
+      "replacement failure retained its unadmitted new reservation"
+  done
+  pass "fm-spawn relaunch: every prepublication route failure preserves old capacity"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -1450,6 +1490,7 @@ test_relaunch_preserves_durable_task_metadata
 test_relaunch_preserves_and_readmits_the_original_route_generation
 test_explicit_off_relaunch_suppresses_inherited_route_metadata
 test_explicit_reroute_requires_a_distinct_reserved_generation
+test_routed_relaunch_prepublication_failures_preserve_old_capacity
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions

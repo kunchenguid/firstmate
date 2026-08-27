@@ -159,7 +159,8 @@ test_load_precedes_history() {
     "$(candidate idle lane-idle 3 1 50 0 0 null)" \
     "$(candidate busy lane-busy 3 1 0 100 100 null)"
   mkdir -p "$FM_STATE_OVERRIDE/routing/reservations"
-  printf '%s\n' '{"taskId":"other","lane":"lane-busy"}' >"$FM_STATE_OVERRIDE/routing/reservations/other.json"
+  jq -n '{taskId:"other",generation:"gen-other",profile:"profile-other",provider:"provider",lane:"lane-busy",account:"none",taskClass:"standard",workType:"implementation",risk:"medium",mode:"automatic",burst:false,createdAt:1000,score:null}' \
+    >"$FM_STATE_OVERRIDE/routing/reservations/other.json"
   select_json | jq -e '.selected.profile == "idle" and .selected.activeLane == 0' >/dev/null \
     || fail "current lane load did not precede caller history"
   pass "selector overwrites caller load and applies it before history"
@@ -264,6 +265,95 @@ reset_route_state() {
   rm -rf "$FM_STATE_OVERRIDE/routing"
 }
 
+reservation_path() {
+  printf '%s/routing/reservations/%s/%s.json\n' "$FM_STATE_OVERRIDE" "$1" "$2"
+}
+
+claim_path() {
+  printf '%s/routing/claims/%s/%s.cap\n' "$FM_STATE_OVERRIDE" "$1" "$2"
+}
+
+begin_fresh_admission() {
+  local task=$1 generation=$2 metadata=$3
+  "$ROUTE" begin-admission --task "$task" --generation "$generation" \
+    --profile profile-1 --provider openai --lane codex-primary \
+    --account codex-primary --class standard --risk medium --mode automatic \
+    --transition fresh --metadata-file "$metadata" \
+    --claim-file "$(claim_path "$task" "$generation")"
+}
+
+write_route_metadata() {
+  local file=$1 generation=$2 profile=${3:-profile-1} lane=${4:-codex-primary} account=${5:-codex-primary}
+  {
+    printf 'task=task-1\n'
+    printf 'route_generation=%s\n' "$generation"
+    printf 'route_profile=%s\n' "$profile"
+    printf 'route_provider=openai\n'
+    printf 'route_lane=%s\n' "$lane"
+    printf 'route_account=%s\n' "$account"
+    printf 'route_class=standard\n'
+    printf 'route_risk=medium\n'
+    printf 'route_mode=automatic\n'
+  } >"$file"
+}
+
+activate_fresh_admission() {
+  local task=$1 generation=$2 metadata=$3 candidate capability
+  candidate="$metadata.candidate"
+  capability=$(claim_path "$task" "$generation")
+  begin_fresh_admission "$task" "$generation" "$metadata" >/dev/null
+  write_route_metadata "$candidate" "$generation"
+  "$ROUTE" prepare-admission --task "$task" --candidate "$candidate" --claim-file "$capability" >/dev/null
+  mv "$candidate" "$metadata"
+  "$ROUTE" commit-admission --task "$task" --claim-file "$capability" >/dev/null
+}
+
+begin_inherited_admission() {
+  local task=$1 generation=$2 metadata=$3
+  "$ROUTE" begin-admission --task "$task" --generation "$generation" \
+    --profile profile-1 --provider openai --lane codex-primary \
+    --account codex-primary --class standard --risk medium --mode automatic \
+    --transition inherit --metadata-file "$metadata" \
+    --claim-file "$(claim_path "$task" "$generation")"
+}
+
+begin_off_admission() {
+  local task=$1 generation=$2 metadata=$3 profile=${4:-profile-1} lane=${5:-codex-primary} account=${6:-codex-primary}
+  "$ROUTE" begin-admission --task "$task" --generation "$generation" \
+    --profile "$profile" --provider openai --lane "$lane" \
+    --account "$account" --class standard --risk medium --mode automatic \
+    --transition off --metadata-file "$metadata" \
+    --claim-file "$(claim_path "$task" "$generation")"
+}
+
+begin_replacement_admission() {
+  local task=$1 generation=$2 prior_generation=$3 metadata=$4
+  "$ROUTE" begin-admission --task "$task" --generation "$generation" \
+    --profile profile-2 --provider openai --lane codex-secondary \
+    --account codex-secondary --class standard --risk medium --mode automatic \
+    --transition replacement --prior-generation "$prior_generation" \
+    --metadata-file "$metadata" --claim-file "$(claim_path "$task" "$generation")" \
+    --prior-claim-file "$(claim_path "$task" "$prior_generation")"
+}
+
+age_admission() {
+  local task=$1 generation=${2:-} now old journal reservation temporary
+  now=$(date +%s)
+  old=$((now - 301))
+  journal="$FM_STATE_OVERRIDE/routing/admissions/$task.json"
+  temporary="$journal.tmp"
+  jq --argjson old "$old" '.createdAt=$old' "$journal" >"$temporary"
+  mv "$temporary" "$journal"
+  if [ -n "$generation" ]; then
+    reservation=$(reservation_path "$task" "$generation")
+    if [ -s "$reservation" ] && [ "$(jq -r '.admissionState // "reserved"' "$reservation")" = claimed ]; then
+      temporary="$reservation.tmp"
+      jq --argjson old "$old" '.claimedAt=$old' "$reservation" >"$temporary"
+      mv "$temporary" "$reservation"
+    fi
+  fi
+}
+
 reserve_route() {
   local task=$1 generation=$2 profile=$3 provider=$4 lane=$5 account=$6 class=$7 risk=$8 mode=$9
   local work_type=${WORK_TYPE_OVERRIDE:-implementation}
@@ -271,14 +361,6 @@ reserve_route() {
   "$ROUTE" reserve --task "$task" --generation "$generation" --profile "$profile" \
     --provider "$provider" --lane "$lane" --account "$account" --class "$class" \
     --work-type "$work_type" --risk "$risk" --mode "$mode" --now 1000 "$@"
-}
-
-claim_route() {
-  local task=$1 generation=$2 claim=$3
-  "$ROUTE" claim-reservation --task "$task" --generation "$generation" \
-    --profile profile-1 --provider openai --lane codex-primary \
-    --account codex-primary --class standard --risk medium --mode automatic \
-    --claim "$claim" --now 1001
 }
 
 test_reserve_requires_a_bounded_work_type() {
@@ -344,31 +426,23 @@ test_reservation_verification_and_generation_release_are_exact() {
     || fail "exact reservation did not verify"
   expect_failure_contains 'reservation-mismatch' "$ROUTE" verify-reservation --task task-1 --generation gen-1 --profile wrong --provider openai --lane codex-primary --account codex-primary --class high_risk --risk high --mode automatic
   expect_failure_contains 'reservation-generation-mismatch' "$ROUTE" release --task task-1 --generation wrong
-  [ -f "$FM_STATE_OVERRIDE/routing/reservations/task-1.json" ] || fail "wrong generation released a live reservation"
+  [ -f "$(reservation_path task-1 gen-1)" ] || fail "wrong generation released a live reservation"
   "$ROUTE" release --task task-1 --generation gen-1 >/dev/null || fail "reservation release failed"
   "$ROUTE" release --task task-1 --generation gen-1 >/dev/null || fail "duplicate release was not idempotent"
   pass "reservation verification and release bind the complete route generation"
 }
 
 test_reservation_claim_blocks_concurrent_lifecycle_until_activation() {
-  local claim_a claim_b claim_out release_pid finalize_pid release_rc finalize_rc
-  claim_a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  claim_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  local release_pid finalize_pid release_rc finalize_rc capability metadata="$FM_STATE_OVERRIDE/task-1.meta"
   reset_route_state
   reserve_route task-1 gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
-  claim_out=$(claim_route task-1 gen-1 "$claim_a")
-  jq -e '.state == "claimed" and .idempotent == false' <<<"$claim_out" >/dev/null \
-    || fail "initial reservation claim failed"
-  assert_not_contains "$claim_out" "$claim_a" "claim token leaked through command output"
-  ! grep -Fq "$claim_a" "$FM_STATE_OVERRIDE/routing/reservations/task-1.json" \
-    || fail "raw claim token was persisted"
-  claim_route task-1 gen-1 "$claim_a" | jq -e '.state == "claimed" and .idempotent == true' >/dev/null \
-    || fail "same-token reservation claim was not idempotent"
-  expect_failure_contains 'reservation-claim-conflict' claim_route task-1 gen-1 "$claim_b"
+  begin_fresh_admission task-1 gen-1 "$metadata" >/dev/null
+  capability=$(claim_path task-1 gen-1)
 
   "$ROUTE" release --task task-1 --generation gen-1 >"$LAB/claimed-release.out" 2>&1 &
   release_pid=$!
-  "$ROUTE" finalize --task task-1 --generation gen-1 --terminal cancelled >"$LAB/claimed-finalize.out" 2>&1 &
+  "$ROUTE" finalize --task task-1 --generation gen-1 --terminal cancelled \
+    --claim-file "$capability" >"$LAB/claimed-finalize.out" 2>&1 &
   finalize_pid=$!
   set +e
   wait "$release_pid"; release_rc=$?
@@ -379,55 +453,515 @@ test_reservation_claim_blocks_concurrent_lifecycle_until_activation() {
     "ordinary release did not respect pending admission ownership"
   [ "$finalize_rc" -ne 0 ] \
     || fail "ordinary finalize unexpectedly consumed a pending admission claim"
-  assert_grep 'reservation-claim-required' "$LAB/claimed-finalize.out" \
+  assert_grep 'admission recovery required' "$LAB/claimed-finalize.out" \
     "ordinary finalize did not respect pending admission ownership"
-  assert_present "$FM_STATE_OVERRIDE/routing/reservations/task-1.json" \
+  assert_present "$(reservation_path task-1 gen-1)" \
     "concurrent lifecycle command stole claimed capacity"
-
-  "$ROUTE" activate-reservation --task task-1 --generation gen-1 --claim "$claim_a" \
-    | jq -e '.state == "active" and .idempotent == false' >/dev/null \
-    || fail "claim activation failed"
-  "$ROUTE" activate-reservation --task task-1 --generation gen-1 --claim "$claim_a" \
-    | jq -e '.state == "active" and .idempotent == true' >/dev/null \
-    || fail "claim activation was not idempotent"
-  expect_failure_contains 'reservation-active' claim_route task-1 gen-1 "$claim_b"
-  "$ROUTE" release --task task-1 --generation gen-1 >/dev/null \
-    || fail "ordinary release did not resume after activation"
-  pass "claimed reservations block concurrent release and finalization until activation"
+  "$ROUTE" abort-admission --task task-1 --claim-file "$capability" >/dev/null \
+    || fail "owned admission could not roll back after concurrent lifecycle refusal"
+  assert_absent "$(reservation_path task-1 gen-1)" "admission rollback leaked claimed capacity"
+  pass "claimed reservations block concurrent release and finalization until convergence"
 }
 
 test_claim_release_is_exact_and_stale_claims_are_recoverable() {
-  local claim_a claim_b reservation
-  claim_a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  claim_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  local capability backup metadata="$FM_STATE_OVERRIDE/task-1.meta" rc
   reset_route_state
   reserve_route task-1 gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
-  claim_route task-1 gen-1 "$claim_a" >/dev/null
-  reservation="$FM_STATE_OVERRIDE/routing/reservations/task-1.json"
-  expect_failure_contains 'reservation-claim-mismatch' "$ROUTE" release --task task-1 --generation gen-1 --claim "$claim_b"
-  assert_present "$reservation" "wrong claim released an owned reservation"
-  expect_failure_contains 'reservation-claim-not-stale' "$ROUTE" release --task task-1 --generation gen-1 --stale-before 1000
-  "$ROUTE" release --task task-1 --generation gen-1 --stale-before 1001 >/dev/null \
-    || fail "stale claimed reservation was not recoverable"
-
-  reserve_route task-2 gen-2 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
-  claim_route task-2 gen-2 "$claim_a" >/dev/null
-  "$ROUTE" release --task task-2 --generation gen-2 --claim "$claim_a" >/dev/null \
-    || fail "exact claim owner could not release its reservation"
-  assert_absent "$FM_STATE_OVERRIDE/routing/reservations/task-2.json" \
-    "exact claim release leaked capacity"
-  expect_failure_contains 'invalid claim token' "$ROUTE" claim-reservation --task task-3 --generation gen-3 --profile profile-1 --provider openai --lane codex-primary --account codex-primary --class standard --risk medium --mode automatic --claim short --now 1001
-  pass "claim release requires exact ownership and stale claims have bounded recovery"
+  begin_fresh_admission task-1 gen-1 "$metadata" >/dev/null
+  capability=$(claim_path task-1 gen-1)
+  backup="$LAB/task-1.cap"
+  cp "$capability" "$backup"
+  printf '%s\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb >"$capability"
+  set +e
+  "$ROUTE" abort-admission --task task-1 --claim-file "$capability" >"$LAB/wrong-cap.out" 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "wrong capability unexpectedly rolled back admission"
+  assert_grep 'admission capability mismatch' "$LAB/wrong-cap.out" \
+    "wrong capability was not diagnosed"
+  assert_present "$(reservation_path task-1 gen-1)" "wrong capability changed claimed capacity"
+  cp "$backup" "$capability"
+  chmod 644 "$capability"
+  set +e
+  "$ROUTE" abort-admission --task task-1 --claim-file "$capability" >"$LAB/wrong-mode.out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "wrong capability mode unexpectedly rolled back admission"
+  assert_grep 'invalid claim file' "$LAB/wrong-mode.out" "wrong capability mode was not diagnosed"
+  assert_present "$(reservation_path task-1 gen-1)" "wrong capability mode changed claimed capacity"
+  cp "$backup" "$capability"
+  chmod 600 "$capability"
+  "$ROUTE" abort-admission --task task-1 --claim-file "$capability" >/dev/null \
+    || fail "exact capability could not roll back its admission"
+  pass "admission rollback requires the exact protected capability"
 }
 
 test_spawn_claim_requires_an_implementation_reservation() {
-  local claim
-  claim=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   reset_route_state
   WORK_TYPE_OVERRIDE=research \
     reserve_route task-1 gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
-  expect_failure_contains 'reservation-mismatch' claim_route task-1 gen-1 "$claim"
+  expect_failure_contains 'reservation-mismatch' \
+    begin_fresh_admission task-1 gen-1 "$FM_STATE_OVERRIDE/task-1.meta"
   pass "spawn admission cannot claim a non-implementation reservation"
+}
+
+test_active_generation_can_hold_one_distinct_pending_replacement() {
+  local metadata="$FM_STATE_OVERRIDE/task-1.meta"
+  reset_route_state
+  reserve_route task-1 gen-old profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  activate_fresh_admission task-1 gen-old "$metadata"
+
+  reserve_route task-1 gen-new profile-2 openai codex-secondary codex-secondary standard medium automatic >/dev/null \
+    || fail "active generation prevented one distinct pending replacement"
+  [ -s "$FM_STATE_OVERRIDE/routing/reservations/task-1/gen-old.json" ] \
+    || fail "active generation was not retained in generation-scoped storage"
+  [ -s "$FM_STATE_OVERRIDE/routing/reservations/task-1/gen-new.json" ] \
+    || fail "pending replacement was not written beside the active generation"
+  expect_failure_contains 'reservation-conflict' \
+    reserve_route task-1 gen-third profile-3 openai codex-third codex-third standard medium automatic
+  pass "one active generation can coexist with one pending replacement"
+}
+
+test_fresh_admission_uses_only_a_protected_capability_file() {
+  local output capability reservation metadata="$FM_STATE_OVERRIDE/task-1.meta" outside="$LAB/outside-claims"
+  reset_route_state
+  reserve_route task-1 gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  capability=$(claim_path task-1 gen-1)
+  reservation=$(reservation_path task-1 gen-1)
+
+  output=$(begin_fresh_admission task-1 gen-1 "$metadata") \
+    || fail "fresh capability-file admission failed"
+  [ -f "$capability" ] && [ ! -L "$capability" ] \
+    || fail "fresh admission did not create a regular capability file"
+  [ "$(stat -c '%a' "$capability" 2>/dev/null || stat -f '%Lp' "$capability")" = 600 ] \
+    || fail "fresh admission capability was not mode 0600"
+  [ "$(wc -c <"$capability" | tr -d ' ')" -eq 65 ] \
+    || fail "fresh admission capability did not contain one bounded token"
+  ! grep -Fq "$(tr -d '\n' <"$capability")" <<<"$output" \
+    || fail "fresh admission exposed its capability in output"
+  jq -e '.admissionState == "claimed" and (.ownerPid | type) == "number" and (.ownerStart | test("^[a-f0-9]{64}$")) and .claimPriorState == "reserved"' "$reservation" >/dev/null \
+    || fail "fresh admission did not persist bounded owner identity"
+
+  reset_route_state
+  mkdir -p "$outside" "$FM_STATE_OVERRIDE/routing"
+  ln -s "$outside" "$FM_STATE_OVERRIDE/routing/claims"
+  reserve_route symlinked gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  expect_failure_contains 'invalid routing state' \
+    begin_fresh_admission symlinked gen-1 "$FM_STATE_OVERRIDE/symlinked.meta"
+  [ -z "$(find "$outside" -mindepth 1 -print -quit)" ] \
+    || fail "claim-directory symlink caused an external filesystem side effect"
+  pass "fresh admission keeps its capability in one protected file"
+}
+
+test_raw_claim_and_unauthenticated_active_reclaim_flags_are_removed() {
+  local raw=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  reset_route_state
+  reserve_route task-2 gen-2 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  expect_failure_contains 'usage:' "$ROUTE" claim-reservation --task task-2 --generation gen-2 \
+    --profile profile-1 --provider openai --lane codex-primary --account codex-primary \
+    --class standard --risk medium --mode automatic --claim "$raw" --now 1001
+  expect_failure_contains 'usage:' "$ROUTE" release --task task-2 --generation gen-2 --stale-before 1000
+  pass "raw claim, from-active, and caller-selected staleness are not public interfaces"
+}
+
+test_fresh_admission_journal_commits_only_the_published_metadata() {
+  local metadata="$FM_STATE_OVERRIDE/task-1.meta" capability reservation
+  reset_route_state
+  reserve_route task-1 gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  capability=$(claim_path task-1 gen-1)
+  reservation=$(reservation_path task-1 gen-1)
+  activate_fresh_admission task-1 gen-1 "$metadata" \
+    || fail "fresh admission journal did not commit published metadata"
+  jq -e '.admissionState == "active" and has("claimHash") and (has("ownerPid") | not) and (has("claimedAt") | not)' "$reservation" >/dev/null \
+    || fail "fresh admission did not converge to the exact active schema"
+  assert_absent "$FM_STATE_OVERRIDE/routing/admissions/task-1.json" \
+    "fresh admission left its completed journal behind"
+  assert_present "$capability" "active admission did not retain its capability"
+  pass "fresh admission journal activates only after exact metadata publication"
+}
+
+test_relaunch_abort_restores_or_preserves_only_the_owned_generations() {
+  local metadata="$FM_STATE_OVERRIDE/task-1.meta" old_cap new_cap old_res new_res
+  reset_route_state
+  rm -f "$metadata"
+  reserve_route task-1 gen-old profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  activate_fresh_admission task-1 gen-old "$metadata"
+  old_cap=$(claim_path task-1 gen-old)
+  old_res=$(reservation_path task-1 gen-old)
+
+  begin_inherited_admission task-1 gen-old "$metadata" >/dev/null
+  "$ROUTE" abort-admission --task task-1 --claim-file "$old_cap" >/dev/null \
+    || fail "inherited prepublication abort did not restore the active route"
+  jq -e '.admissionState == "active"' "$old_res" >/dev/null \
+    || fail "inherited abort deleted or left claimed the old active route"
+
+  begin_off_admission task-1 gen-old "$metadata" >/dev/null
+  "$ROUTE" abort-admission --task task-1 --claim-file "$old_cap" >/dev/null \
+    || fail "explicit-off prepublication abort did not preserve the old active route"
+  jq -e '.admissionState == "active"' "$old_res" >/dev/null \
+    || fail "explicit-off abort changed the old active route"
+
+  reserve_route task-1 gen-new profile-2 openai codex-secondary codex-secondary standard medium automatic >/dev/null
+  new_cap=$(claim_path task-1 gen-new)
+  new_res=$(reservation_path task-1 gen-new)
+  begin_replacement_admission task-1 gen-new gen-old "$metadata" >/dev/null
+  "$ROUTE" abort-admission --task task-1 --claim-file "$new_cap" --prior-claim-file "$old_cap" >/dev/null \
+    || fail "replacement prepublication abort failed"
+  jq -e '.admissionState == "active"' "$old_res" >/dev/null \
+    || fail "replacement abort changed the old active route"
+  assert_absent "$new_res" "replacement abort leaked the new reservation"
+  assert_absent "$new_cap" "replacement abort leaked the new capability"
+  pass "relaunch abort preserves old active capacity and removes only a new claim"
+}
+
+test_relaunch_commit_retires_old_capacity_only_after_publication() {
+  local metadata="$FM_STATE_OVERRIDE/task-1.meta" candidate old_cap new_cap old_res new_res
+  reset_route_state
+  rm -f "$metadata"
+  reserve_route task-1 gen-old profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  activate_fresh_admission task-1 gen-old "$metadata"
+  old_cap=$(claim_path task-1 gen-old)
+  old_res=$(reservation_path task-1 gen-old)
+
+  begin_inherited_admission task-1 gen-old "$metadata" >/dev/null
+  candidate="$metadata.inherit"
+  write_route_metadata "$candidate" gen-old
+  printf 'launch_nonce=inherited\n' >>"$candidate"
+  "$ROUTE" prepare-admission --task task-1 --candidate "$candidate" --claim-file "$old_cap" >/dev/null
+  mv "$candidate" "$metadata"
+  "$ROUTE" commit-admission --task task-1 --claim-file "$old_cap" >/dev/null
+  jq -e '.admissionState == "active"' "$old_res" >/dev/null \
+    || fail "published inherited relaunch did not reactivate its route"
+
+  reserve_route task-1 gen-new profile-2 openai codex-secondary codex-secondary standard medium automatic >/dev/null
+  new_cap=$(claim_path task-1 gen-new)
+  new_res=$(reservation_path task-1 gen-new)
+  begin_replacement_admission task-1 gen-new gen-old "$metadata" >/dev/null
+  candidate="$metadata.replacement"
+  write_route_metadata "$candidate" gen-new profile-2 codex-secondary codex-secondary
+  "$ROUTE" prepare-admission --task task-1 --candidate "$candidate" \
+    --claim-file "$new_cap" --prior-claim-file "$old_cap" >/dev/null
+  mv "$candidate" "$metadata"
+  "$ROUTE" commit-admission --task task-1 --claim-file "$new_cap" --prior-claim-file "$old_cap" >/dev/null
+  jq -e '.admissionState == "active"' "$new_res" >/dev/null \
+    || fail "published replacement did not activate the new generation"
+  assert_absent "$old_res" "published replacement retained old active capacity"
+  assert_absent "$old_cap" "published replacement retained the old capability"
+
+  begin_off_admission task-1 gen-new "$metadata" profile-2 codex-secondary codex-secondary >/dev/null
+  candidate="$metadata.off"
+  printf 'task=task-1\nlaunch_nonce=static\n' >"$candidate"
+  "$ROUTE" prepare-admission --task task-1 --candidate "$candidate" --claim-file "$new_cap" >/dev/null
+  mv "$candidate" "$metadata"
+  "$ROUTE" commit-admission --task task-1 --claim-file "$new_cap" >/dev/null
+  assert_absent "$new_res" "published explicit-off relaunch retained routed capacity"
+  assert_absent "$new_cap" "published explicit-off relaunch retained its capability"
+  pass "published inherited, replacement, and off relaunches converge exact capacity"
+}
+
+test_stale_recovery_requires_timeout_and_a_dead_matching_owner() {
+  local metadata="$FM_STATE_OVERRIDE/task-1.meta" capability live_cap live_meta="$FM_STATE_OVERRIDE/live-owner.meta" out rc
+  reset_route_state
+  rm -f "$metadata"
+  reserve_route live-owner gen-live profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  begin_fresh_admission live-owner gen-live "$live_meta" >/dev/null
+  live_cap=$(claim_path live-owner gen-live)
+  age_admission live-owner gen-live
+  if out=$("$ROUTE" recover-admission --task live-owner --claim-file "$live_cap" 2>&1); then rc=0; else rc=$?; fi
+  [ "$rc" -ne 0 ] || fail "recovery reclaimed an admission owned by this live process"
+  assert_contains "$out" "admission owner is still live" \
+    "recovery did not verify the stale owner's process identity"
+  "$ROUTE" abort-admission --task live-owner --claim-file "$live_cap" >/dev/null \
+    || fail "live admission owner could not roll back its claim"
+
+  reserve_route task-1 gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  capability=$(claim_path task-1 gen-1)
+  (begin_fresh_admission task-1 gen-1 "$metadata" >/dev/null) &
+  wait "$!" || fail "dead-owner admission setup failed"
+
+  if out=$("$ROUTE" recover-admission --task task-1 --claim-file "$capability" 2>&1); then rc=0; else rc=$?; fi
+  [ "$rc" -ne 0 ] || fail "recovery ignored the fixed timeout"
+  assert_contains "$out" "admission owner is not stale" \
+    "recovery did not enforce the fixed timeout"
+  age_admission task-1 gen-1
+  "$ROUTE" recover-admission --task task-1 --claim-file "$capability" >/dev/null \
+    || fail "stale dead-owner admission did not roll back"
+  assert_absent "$(reservation_path task-1 gen-1)" "stale rollback leaked its reservation"
+  "$ROUTE" recover-admission --task task-1 --claim-file "$capability" >/dev/null \
+    || fail "repeated recovery was not idempotent"
+  pass "stale recovery requires the fixed timeout and a dead process identity"
+}
+
+test_corrupt_reservation_state_is_rejected_without_mutation() {
+  local reservation before after
+  reset_route_state
+  reserve_route corrupt gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  reservation=$(reservation_path corrupt gen-1)
+  jq '.unexpected="private detail"' "$reservation" >"$reservation.next"
+  mv "$reservation.next" "$reservation"
+  before=$(od -An -v -tx1 "$reservation")
+  expect_failure_contains 'invalid routing state' "$ROUTE" status
+  expect_failure_contains 'invalid routing state' "$ROUTE" release --task corrupt --generation gen-1
+  expect_failure_contains 'invalid routing state' "$ROUTE" finalize --task corrupt --generation gen-1 \
+    --terminal cancelled --claim-file "$(claim_path corrupt gen-1)"
+  after=$(od -An -v -tx1 "$reservation")
+  [ "$after" = "$before" ] || fail "corrupt reservation read mutated its source"
+
+  reset_route_state
+  reserve_route journal-corrupt gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  begin_fresh_admission journal-corrupt gen-1 "$FM_STATE_OVERRIDE/journal-corrupt.meta" >/dev/null
+  reservation="$FM_STATE_OVERRIDE/routing/admissions/journal-corrupt.json"
+  jq '.metadataFile="/tmp/attacker-controlled.meta"' "$reservation" >"$reservation.next"
+  mv "$reservation.next" "$reservation"
+  before=$(od -An -v -tx1 "$reservation")
+  expect_failure_contains 'invalid admission state' "$ROUTE" abort-admission --task journal-corrupt \
+    --claim-file "$(claim_path journal-corrupt gen-1)"
+  after=$(od -An -v -tx1 "$reservation")
+  [ "$after" = "$before" ] || fail "corrupt admission journal was mutated"
+
+  reset_route_state
+  reserve_route fractional gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  reservation=$(reservation_path fractional gen-1)
+  jq '.createdAt=1000.5' "$reservation" >"$reservation.next"
+  mv "$reservation.next" "$reservation"
+  expect_failure_contains 'invalid routing state' "$ROUTE" status
+  pass "every reservation read rejects non-exact state without mutation"
+}
+
+test_routing_storage_rejects_symlinked_parent_directories() {
+  local outside="$LAB/outside-routing" reservation
+  reset_route_state
+  rm -rf "$outside"
+  mkdir -p "$outside" "$FM_STATE_OVERRIDE/routing"
+  ln -s "$outside" "$FM_STATE_OVERRIDE/routing/reservations"
+  expect_failure_contains 'invalid routing state' \
+    reserve_route escaped gen-1 profile-1 openai codex-primary codex-primary standard medium automatic
+  [ -z "$(find "$outside" -mindepth 1 -print -quit)" ] \
+    || fail "symlinked reservations root received an external write"
+
+  reset_route_state
+  rm -rf "$outside"
+  mkdir -p "$outside" "$FM_STATE_OVERRIDE/routing/reservations"
+  ln -s "$outside" "$FM_STATE_OVERRIDE/routing/reservations/escaped"
+  expect_failure_contains 'invalid routing state' \
+    reserve_route escaped gen-1 profile-1 openai codex-primary codex-primary standard medium automatic
+  [ -z "$(find "$outside" -mindepth 1 -print -quit)" ] \
+    || fail "symlinked reservation task directory received an external write"
+
+  reset_route_state
+  rm -rf "$outside"
+  reserve_route escaped gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  mkdir -p "$outside"
+  ln -s "$outside" "$FM_STATE_OVERRIDE/routing/admissions"
+  expect_failure_contains 'invalid routing state' \
+    begin_fresh_admission escaped gen-1 "$FM_STATE_OVERRIDE/escaped.meta"
+  reservation=$(reservation_path escaped gen-1)
+  jq -e '.admissionState == "reserved"' "$reservation" >/dev/null \
+    || fail "symlinked admissions root changed the reservation"
+  [ -z "$(find "$outside" -mindepth 1 -print -quit)" ] \
+    || fail "symlinked admissions root received an external write"
+  pass "routing storage refuses symlinked roots and task directories"
+}
+
+test_cleanup_crashes_converge_without_orphaning_capabilities() {
+  local metadata capability reservation journal candidate
+  reset_route_state
+  metadata="$FM_STATE_OVERRIDE/release-cleanup.meta"
+  reserve_route release-cleanup gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  activate_fresh_admission release-cleanup gen-1 "$metadata" >/dev/null
+  capability=$(claim_path release-cleanup gen-1)
+  reservation=$(reservation_path release-cleanup gen-1)
+  rm -f "$reservation"
+  "$ROUTE" release --task release-cleanup --generation gen-1 --claim-file "$capability" >/dev/null \
+    || fail "release could not clean its post-reservation orphan capability"
+  assert_absent "$capability" "release recovery leaked its orphan capability"
+
+  metadata="$FM_STATE_OVERRIDE/rollback-cleanup.meta"
+  reserve_route rollback-cleanup gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  (begin_fresh_admission rollback-cleanup gen-1 "$metadata" >/dev/null) &
+  wait "$!" || fail "rollback cleanup setup failed"
+  capability=$(claim_path rollback-cleanup gen-1)
+  reservation=$(reservation_path rollback-cleanup gen-1)
+  journal="$FM_STATE_OVERRIDE/routing/admissions/rollback-cleanup.json"
+  jq '.phase="rollingBack"' "$journal" >"$journal.next"
+  mv "$journal.next" "$journal"
+  rm -f "$reservation"
+  age_admission rollback-cleanup
+  "$ROUTE" recover-admission --task rollback-cleanup --claim-file "$capability" >/dev/null \
+    || fail "rollback cleanup did not converge after reservation deletion"
+  assert_absent "$capability" "rollback cleanup leaked its capability"
+  assert_absent "$journal" "rollback cleanup leaked its journal"
+
+  metadata="$FM_STATE_OVERRIDE/off-cleanup.meta"
+  reserve_route off-cleanup gen-old profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  activate_fresh_admission off-cleanup gen-old "$metadata" >/dev/null
+  capability=$(claim_path off-cleanup gen-old)
+  reservation=$(reservation_path off-cleanup gen-old)
+  candidate="$metadata.candidate"
+  (
+    begin_off_admission off-cleanup gen-old "$metadata" >/dev/null
+    printf 'task=off-cleanup\n' >"$candidate"
+    "$ROUTE" prepare-admission --task off-cleanup --candidate "$candidate" --claim-file "$capability" >/dev/null
+    mv "$candidate" "$metadata"
+  ) &
+  wait "$!" || fail "off cleanup setup failed"
+  journal="$FM_STATE_OVERRIDE/routing/admissions/off-cleanup.json"
+  jq '.phase="committing"' "$journal" >"$journal.next"
+  mv "$journal.next" "$journal"
+  rm -f "$reservation" "$capability"
+  age_admission off-cleanup
+  "$ROUTE" recover-admission --task off-cleanup --claim-file "$capability" >/dev/null \
+    || fail "commit cleanup could not converge after capability deletion"
+  assert_absent "$journal" "commit cleanup leaked its journal"
+  pass "release, rollback, and commit cleanup crashes converge idempotently"
+}
+
+test_recovery_rolls_back_each_fresh_beginning_crash_window() {
+  local metadata="$FM_STATE_OVERRIDE/task-1.meta" capability reservation journal temp
+  reset_route_state
+  rm -f "$metadata"
+  reserve_route task-1 gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  capability=$(claim_path task-1 gen-1)
+  reservation=$(reservation_path task-1 gen-1)
+  journal="$FM_STATE_OVERRIDE/routing/admissions/task-1.json"
+  (begin_fresh_admission task-1 gen-1 "$metadata" >/dev/null) &
+  wait "$!" || fail "beginning-crash claimed setup failed"
+  temp="$journal.tmp"
+  jq '.phase="beginning" | .targetClaimHash=null' "$journal" >"$temp"
+  mv "$temp" "$journal"
+  age_admission task-1 gen-1
+  "$ROUTE" recover-admission --task task-1 --claim-file "$capability" >/dev/null \
+    || fail "recovery could not authenticate a beginning journal after claim persistence"
+  assert_absent "$reservation" "beginning recovery leaked the fresh reservation"
+  assert_absent "$capability" "beginning recovery leaked the fresh capability"
+
+  reserve_route task-2 gen-2 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  capability=$(claim_path task-2 gen-2)
+  reservation=$(reservation_path task-2 gen-2)
+  journal="$FM_STATE_OVERRIDE/routing/admissions/task-2.json"
+  temp="$journal.tmp"
+  (begin_fresh_admission task-2 gen-2 "$FM_STATE_OVERRIDE/task-2.meta" >/dev/null) &
+  wait "$!" || fail "beginning-crash reservation setup failed"
+  jq '.phase="beginning" | .targetClaimHash=null' "$journal" >"$temp"
+  mv "$temp" "$journal"
+  jq 'del(.claimHash,.claimedAt,.ownerPid,.ownerStart,.claimPriorState) | .admissionState="reserved"' \
+    "$reservation" >"$reservation.next"
+  mv "$reservation.next" "$reservation"
+  rm -f "$capability"
+  age_admission task-2
+  "$ROUTE" recover-admission --task task-2 --claim-file "$capability" >/dev/null \
+    || fail "recovery could not roll back a beginning journal before capability persistence"
+  assert_absent "$reservation" "pre-capability beginning recovery leaked capacity"
+  assert_absent "$journal" "pre-capability beginning recovery leaked its journal"
+  pass "fresh beginning journals recover before and after capability persistence"
+}
+
+test_dead_owner_recovery_rolls_back_every_prepublication_relaunch() {
+  local metadata="$FM_STATE_OVERRIDE/task-1.meta" old_cap new_cap old_res new_res
+  reset_route_state
+  rm -f "$metadata"
+  reserve_route task-1 gen-old profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  activate_fresh_admission task-1 gen-old "$metadata"
+  old_cap=$(claim_path task-1 gen-old)
+  old_res=$(reservation_path task-1 gen-old)
+
+  (begin_inherited_admission task-1 gen-old "$metadata" >/dev/null) &
+  wait "$!" || fail "dead inherited owner setup failed"
+  age_admission task-1 gen-old
+  "$ROUTE" recover-admission --task task-1 --claim-file "$old_cap" >/dev/null \
+    || fail "dead inherited owner did not roll back"
+  jq -e '.admissionState == "active"' "$old_res" >/dev/null \
+    || fail "inherited crash recovery did not restore active"
+
+  (begin_off_admission task-1 gen-old "$metadata" >/dev/null) &
+  wait "$!" || fail "dead off owner setup failed"
+  age_admission task-1
+  "$ROUTE" recover-admission --task task-1 --claim-file "$old_cap" >/dev/null \
+    || fail "dead off owner did not roll back"
+  jq -e '.admissionState == "active"' "$old_res" >/dev/null \
+    || fail "off crash recovery changed old active capacity"
+
+  reserve_route task-1 gen-new profile-2 openai codex-secondary codex-secondary standard medium automatic >/dev/null
+  new_cap=$(claim_path task-1 gen-new)
+  new_res=$(reservation_path task-1 gen-new)
+  (begin_replacement_admission task-1 gen-new gen-old "$metadata" >/dev/null) &
+  wait "$!" || fail "dead replacement owner setup failed"
+  age_admission task-1 gen-new
+  "$ROUTE" recover-admission --task task-1 --claim-file "$new_cap" --prior-claim-file "$old_cap" >/dev/null \
+    || fail "dead replacement owner did not roll back"
+  jq -e '.admissionState == "active"' "$old_res" >/dev/null \
+    || fail "replacement crash recovery changed old active capacity"
+  assert_absent "$new_res" "replacement crash recovery retained new pending capacity"
+  pass "dead-owner recovery rolls back inherited, off, and replacement before publication"
+}
+
+test_dead_owner_recovery_finishes_every_published_transition() {
+  local metadata="$FM_STATE_OVERRIDE/task-1.meta" candidate old_cap new_cap old_res new_res
+  reset_route_state
+  rm -f "$metadata"
+  reserve_route task-1 gen-old profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  candidate="$metadata.fresh"
+  write_route_metadata "$candidate" gen-old
+  old_cap=$(claim_path task-1 gen-old)
+  old_res=$(reservation_path task-1 gen-old)
+  (
+    begin_fresh_admission task-1 gen-old "$metadata" >/dev/null
+    "$ROUTE" prepare-admission --task task-1 --candidate "$candidate" --claim-file "$old_cap" >/dev/null
+  ) &
+  wait "$!" || fail "published fresh crash setup failed"
+  mv "$candidate" "$metadata"
+  age_admission task-1 gen-old
+  "$ROUTE" recover-admission --task task-1 --claim-file "$old_cap" >/dev/null \
+    || fail "published fresh transition did not recover"
+  jq -e '.admissionState == "active"' "$old_res" >/dev/null \
+    || fail "published fresh recovery did not activate"
+
+  candidate="$metadata.inherit"
+  write_route_metadata "$candidate" gen-old
+  printf 'launch_nonce=crash-inherit\n' >>"$candidate"
+  (
+    begin_inherited_admission task-1 gen-old "$metadata" >/dev/null
+    "$ROUTE" prepare-admission --task task-1 --candidate "$candidate" --claim-file "$old_cap" >/dev/null
+  ) &
+  wait "$!" || fail "published inherit crash setup failed"
+  mv "$candidate" "$metadata"
+  age_admission task-1 gen-old
+  "$ROUTE" recover-admission --task task-1 --claim-file "$old_cap" >/dev/null \
+    || fail "published inherited transition did not recover"
+  jq -e '.admissionState == "active"' "$old_res" >/dev/null \
+    || fail "published inherited recovery did not reactivate"
+
+  reserve_route task-1 gen-new profile-2 openai codex-secondary codex-secondary standard medium automatic >/dev/null
+  candidate="$metadata.replacement"
+  write_route_metadata "$candidate" gen-new profile-2 codex-secondary codex-secondary
+  new_cap=$(claim_path task-1 gen-new)
+  new_res=$(reservation_path task-1 gen-new)
+  (
+    begin_replacement_admission task-1 gen-new gen-old "$metadata" >/dev/null
+    "$ROUTE" prepare-admission --task task-1 --candidate "$candidate" \
+      --claim-file "$new_cap" --prior-claim-file "$old_cap" >/dev/null
+  ) &
+  wait "$!" || fail "published replacement crash setup failed"
+  mv "$candidate" "$metadata"
+  age_admission task-1 gen-new
+  "$ROUTE" recover-admission --task task-1 --claim-file "$new_cap" --prior-claim-file "$old_cap" >/dev/null \
+    || fail "published replacement transition did not recover"
+  jq -e '.admissionState == "active"' "$new_res" >/dev/null \
+    || fail "published replacement recovery did not activate new"
+  assert_absent "$old_res" "published replacement recovery retained old capacity"
+
+  candidate="$metadata.off"
+  printf 'task=task-1\nlaunch_nonce=crash-off\n' >"$candidate"
+  (
+    begin_off_admission task-1 gen-new "$metadata" profile-2 codex-secondary codex-secondary >/dev/null
+    "$ROUTE" prepare-admission --task task-1 --candidate "$candidate" --claim-file "$new_cap" >/dev/null
+  ) &
+  wait "$!" || fail "published off crash setup failed"
+  mv "$candidate" "$metadata"
+  age_admission task-1
+  "$ROUTE" recover-admission --task task-1 --claim-file "$new_cap" >/dev/null \
+    || fail "published off transition did not recover"
+  assert_absent "$new_res" "published off recovery retained routed capacity"
+  pass "dead-owner recovery finishes fresh, inherited, replacement, and off publication"
 }
 
 test_failure_policy_and_circuit_breaker_are_bounded() {
@@ -483,17 +1017,23 @@ test_unsafe_failure_always_escalates_without_corrupting_breakers() {
 }
 
 test_score_finalize_and_outcome_privacy_are_strict() {
-  local outcome
+  local outcome capability metadata="$FM_STATE_OVERRIDE/task-1.meta"
   reset_route_state
   reserve_route task-1 gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  capability=$(claim_path task-1 gen-1)
+  expect_failure_contains 'reservation-not-active' "$ROUTE" finalize --task task-1 --generation gen-1 \
+    --terminal completed --claim-file "$capability"
+  activate_fresh_admission task-1 gen-1 "$metadata" >/dev/null
   expect_failure_contains 'forbidden outcome field: prompt' "$ROUTE" score --task task-1 --generation gen-1 --terminal completed --tests pass --review pass --redundant no --now 1010 --extra-json '{"prompt":"secret"}'
   expect_failure_contains 'unexpected outcome field: harmless' "$ROUTE" score --task task-1 --generation gen-1 --terminal completed --tests pass --review pass --redundant no --now 1010 --extra-json '{"harmless":true}'
   "$ROUTE" score --task task-1 --generation gen-1 --terminal completed --tests pass --review pass --redundant no --now 1010 >/dev/null || fail "score failed"
   "$ROUTE" score --task task-1 --generation gen-1 --terminal completed --tests pass --review pass --redundant no --now 1011 >/dev/null || fail "duplicate score was not idempotent"
   [ ! -e "$FM_STATE_OVERRIDE/routing/outcomes.jsonl" ] || fail "score finalized before safe cleanup"
-  "$ROUTE" finalize --task task-1 --generation gen-1 --terminal completed >/dev/null || fail "finalize failed"
-  "$ROUTE" finalize --task task-1 --generation gen-1 --terminal completed >/dev/null || fail "duplicate finalize was not idempotent"
-  [ ! -e "$FM_STATE_OVERRIDE/routing/reservations/task-1.json" ] || fail "finalize leaked active capacity"
+  "$ROUTE" finalize --task task-1 --generation gen-1 --terminal completed \
+    --claim-file "$capability" >/dev/null || fail "finalize failed"
+  "$ROUTE" finalize --task task-1 --generation gen-1 --terminal completed \
+    --claim-file "$capability" >/dev/null || fail "duplicate finalize was not idempotent"
+  [ ! -e "$(reservation_path task-1 gen-1)" ] || fail "finalize leaked active capacity"
   [ "$(wc -l < "$FM_STATE_OVERRIDE/routing/outcomes.jsonl")" -eq 1 ] || fail "finalize duplicated the outcome"
   outcome=$(cat "$FM_STATE_OVERRIDE/routing/outcomes.jsonl")
   jq -e 'keys == ["account","elapsedSeconds","generation","kind","lane","mode","profile","provider","redundant","review","risk","taskClass","taskId","terminal","tests","timestamp","workType"] and .elapsedSeconds == 10 and .workType == "implementation"' <<<"$outcome" >/dev/null \
@@ -533,17 +1073,29 @@ test_observation_evidence_status_and_report_are_non_mutating() {
 }
 
 test_finalize_recovers_between_ledger_publish_and_reservation_delete() {
-  local reservation="$FM_STATE_OVERRIDE/routing/reservations/recovery.json" snapshot="$LAB/recovery-reservation.json"
+  local reservation capability snapshot="$LAB/recovery-reservation.json" cap_snapshot="$LAB/recovery-capability"
+  reservation=$(reservation_path recovery gen-1)
+  capability=$(claim_path recovery gen-1)
   reset_route_state
-  WORK_TYPE_OVERRIDE=debugging reserve_route recovery gen-1 profile-r openai codex-primary codex-primary standard medium automatic >/dev/null
+  reserve_route recovery gen-1 profile-1 openai codex-primary codex-primary standard medium automatic >/dev/null
+  activate_fresh_admission recovery gen-1 "$FM_STATE_OVERRIDE/recovery.meta" >/dev/null
   "$ROUTE" score --task recovery --generation gen-1 --terminal completed --tests pass --review pass --redundant no --now 1010 >/dev/null
   cp "$reservation" "$snapshot"
-  "$ROUTE" finalize --task recovery --generation gen-1 --terminal completed >/dev/null
+  cp "$capability" "$cap_snapshot"
+  "$ROUTE" finalize --task recovery --generation gen-1 --terminal completed --claim-file "$capability" >/dev/null
+  mkdir -p "$(dirname "$reservation")"
   cp "$snapshot" "$reservation"
-  expect_failure_contains 'terminal-outcome-conflict' "$ROUTE" finalize --task recovery --generation gen-1 --terminal failed_safe
+  cp "$cap_snapshot" "$capability"
+  chmod 600 "$capability"
+  expect_failure_contains 'terminal-outcome-conflict' "$ROUTE" finalize --task recovery --generation gen-1 --terminal failed_safe --claim-file "$capability"
   [ -f "$reservation" ] || fail "conflicting recovery removed the reservation"
-  "$ROUTE" finalize --task recovery --generation gen-1 --terminal completed >/dev/null || fail "matching recovery did not reconcile"
+  "$ROUTE" finalize --task recovery --generation gen-1 --terminal completed --claim-file "$capability" >/dev/null || fail "matching recovery did not reconcile"
   [ ! -e "$reservation" ] || fail "matching recovery left the reservation active"
+  cp "$cap_snapshot" "$capability"
+  chmod 600 "$capability"
+  "$ROUTE" finalize --task recovery --generation gen-1 --terminal completed --claim-file "$capability" >/dev/null \
+    || fail "matching recovery did not clean an orphaned finalization capability"
+  [ ! -e "$capability" ] || fail "matching recovery left an orphaned finalization capability"
   [ "$(jq -s '[.[] | select(.taskId == "recovery")] | length' "$FM_STATE_OVERRIDE/routing/outcomes.jsonl")" -eq 1 ] || fail "recovery duplicated the terminal ledger row"
   pass "finalize reconciles the ledger-published reservation-delete crash window"
 }
@@ -618,6 +1170,19 @@ test_reservation_verification_and_generation_release_are_exact
 test_reservation_claim_blocks_concurrent_lifecycle_until_activation
 test_claim_release_is_exact_and_stale_claims_are_recoverable
 test_spawn_claim_requires_an_implementation_reservation
+test_active_generation_can_hold_one_distinct_pending_replacement
+test_fresh_admission_uses_only_a_protected_capability_file
+test_fresh_admission_journal_commits_only_the_published_metadata
+test_relaunch_abort_restores_or_preserves_only_the_owned_generations
+test_relaunch_commit_retires_old_capacity_only_after_publication
+test_stale_recovery_requires_timeout_and_a_dead_matching_owner
+test_corrupt_reservation_state_is_rejected_without_mutation
+test_routing_storage_rejects_symlinked_parent_directories
+test_cleanup_crashes_converge_without_orphaning_capabilities
+test_recovery_rolls_back_each_fresh_beginning_crash_window
+test_dead_owner_recovery_rolls_back_every_prepublication_relaunch
+test_dead_owner_recovery_finishes_every_published_transition
+test_raw_claim_and_unauthenticated_active_reclaim_flags_are_removed
 test_failure_policy_and_circuit_breaker_are_bounded
 test_unsafe_failure_always_escalates_without_corrupting_breakers
 test_score_finalize_and_outcome_privacy_are_strict

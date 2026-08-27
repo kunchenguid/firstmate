@@ -754,9 +754,9 @@ RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 ROUTE_ACTIVE=0
-ROUTE_RESERVATION_OWNED=0
-ROUTE_CLAIM=
-ROUTE_RETIRE_ON_PUBLISH=0
+ROUTE_ADMISSION_STARTED=0
+ROUTE_CLAIM_FILE=
+ROUTE_PRIOR_CLAIM_FILE=
 ROUTE_ACCOUNT_ENV_NAME=
 ROUTE_ACCOUNT_CONFIG_DIR=
 
@@ -777,42 +777,38 @@ parse_orca_worktree_result() {
   fi
 }
 
-spawn_route_claim_token() {
-  local claim
-  claim=$(LC_ALL=C od -An -N32 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
-  case "$claim" in
-    *[!a-f0-9]*) return 1 ;;
-  esac
-  [ "${#claim}" -eq 64 ] || return 1
-  printf '%s\n' "$claim"
-}
-
-spawn_route_claim() {  # <from-active:true|false>
-  local from_active=$1
-  local -a route_claim_args
-  [ -n "$ROUTE_CLAIM" ] || ROUTE_CLAIM=$(spawn_route_claim_token) || {
-    echo "error: could not generate a secure routing admission claim" >&2
-    return 1
-  }
-  route_claim_args=()
-  [ "$from_active" = false ] || route_claim_args+=(--from-active)
-  if ! "$FM_ROOT/bin/fm-route.sh" claim-reservation \
+spawn_route_begin() {  # <fresh|inherit|replacement|off> [prior-generation]
+  local transition=$1 prior_generation=${2:-}
+  local -a prior_args
+  ROUTE_CLAIM_FILE="$STATE/routing/claims/$ID/$ROUTE_GENERATION.cap"
+  ROUTE_PRIOR_CLAIM_FILE=
+  prior_args=()
+  if [ "$transition" = replacement ]; then
+    ROUTE_PRIOR_CLAIM_FILE="$STATE/routing/claims/$ID/$prior_generation.cap"
+    prior_args=(--prior-generation "$prior_generation" --prior-claim-file "$ROUTE_PRIOR_CLAIM_FILE")
+  fi
+  if ! "$FM_ROOT/bin/fm-route.sh" begin-admission \
       --task "$ID" --generation "$ROUTE_GENERATION" --profile "$ROUTE_PROFILE" \
       --provider "$ROUTE_PROVIDER" --lane "$ROUTE_LANE" --account "$ROUTE_ACCOUNT" \
       --class "$ROUTE_CLASS" --risk "$ROUTE_RISK" --mode "$ROUTE_MODE" \
-      --claim "$ROUTE_CLAIM" "${route_claim_args[@]}" >/dev/null 2>&1; then
-    echo "error: matching routing reservation is required and must be unclaimed" >&2
+      --transition "$transition" --metadata-file "$STATE/$ID.meta" \
+      --claim-file "$ROUTE_CLAIM_FILE" "${prior_args[@]}" >/dev/null 2>&1; then
+    echo "error: matching routing reservation is required and must be authorized" >&2
     return 1
   fi
-  ROUTE_RESERVATION_OWNED=1
+  ROUTE_ADMISSION_STARTED=1
 }
 
 spawn_abort_cleanup() {
   local status=$?
-  if [ "$status" -ne 0 ] && [ "$ROUTE_RESERVATION_OWNED" = 1 ]; then
-    ROUTE_RESERVATION_OWNED=0
-    "$FM_ROOT/bin/fm-route.sh" release --task "$ID" \
-      --generation "$ROUTE_GENERATION" --claim "$ROUTE_CLAIM" >/dev/null 2>&1 || true
+  local -a route_abort_args
+  if [ "$status" -ne 0 ] && [ "$ROUTE_ADMISSION_STARTED" = 1 ]; then
+    ROUTE_ADMISSION_STARTED=0
+    route_abort_args=(--task "$ID" --claim-file "$ROUTE_CLAIM_FILE")
+    [ -z "$ROUTE_PRIOR_CLAIM_FILE" ] || route_abort_args+=(--prior-claim-file "$ROUTE_PRIOR_CLAIM_FILE")
+    if ! "$FM_ROOT/bin/fm-route.sh" abort-admission "${route_abort_args[@]}" >/dev/null 2>&1; then
+      echo "warning: routed admission recovery remains pending for $ID" >&2
+    fi
   fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
@@ -1022,7 +1018,7 @@ if [ "$KIND" = secondmate ] && [ "$ROUTE_FLAGS_PRESENT" = 1 ] \
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$ROUTE_REQUESTED" = 1 ]; then
   ROUTE_ACTIVE=1
-  spawn_route_claim false || exit 1
+  spawn_route_begin fresh || exit 1
 fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
@@ -1175,8 +1171,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
       ROUTE_CLASS=$RECORDED_ROUTE_CLASS
       ROUTE_RISK=$RECORDED_ROUTE_RISK
       ROUTE_MODE=$RECORDED_ROUTE_MODE
-      ROUTE_RETIRE_ON_PUBLISH=1
-      spawn_route_claim true || exit 1
+      spawn_route_begin off || exit 1
     fi
   elif [ "$ROUTE_REQUESTED" = 1 ]; then
     if [ -n "$RECORDED_ROUTE_GENERATION" ] && [ "$ROUTE_GENERATION" = "$RECORDED_ROUTE_GENERATION" ]; then
@@ -1184,7 +1179,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
       exit 1
     fi
     ROUTE_ACTIVE=1
-    spawn_route_claim false || exit 1
+    spawn_route_begin replacement "$RECORDED_ROUTE_GENERATION" || exit 1
   elif [ -n "$RECORDED_ROUTE_GENERATION" ]; then
     ROUTE_GENERATION=$RECORDED_ROUTE_GENERATION
     ROUTE_PROFILE=$RECORDED_ROUTE_PROFILE
@@ -1195,7 +1190,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     ROUTE_RISK=$RECORDED_ROUTE_RISK
     ROUTE_MODE=$RECORDED_ROUTE_MODE
     ROUTE_ACTIVE=1
-    spawn_route_claim true || exit 1
+    spawn_route_begin inherit || exit 1
   fi
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
@@ -2844,6 +2839,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_LOCK_HELD=1
   SPAWN_META_TMP="$STATE/.$ID.meta.relaunch.${BASHPID:-$$}"
   SPAWN_META_PATH=$SPAWN_META_TMP
+elif [ "$ROUTE_ADMISSION_STARTED" = 1 ]; then
+  SPAWN_META_TMP="$STATE/.$ID.meta.admission.${BASHPID:-$$}"
+  SPAWN_META_PATH=$SPAWN_META_TMP
 fi
 preserve_relaunch_meta() {
   awk -F= '
@@ -2913,6 +2911,14 @@ preserve_relaunch_meta() {
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
 } > "$SPAWN_META_PATH"
+if [ "$ROUTE_ADMISSION_STARTED" = 1 ]; then
+  route_prepare_args=(--task "$ID" --candidate "$SPAWN_META_PATH" --claim-file "$ROUTE_CLAIM_FILE")
+  [ -z "$ROUTE_PRIOR_CLAIM_FILE" ] || route_prepare_args+=(--prior-claim-file "$ROUTE_PRIOR_CLAIM_FILE")
+  if ! "$FM_ROOT/bin/fm-route.sh" prepare-admission "${route_prepare_args[@]}" >/dev/null 2>&1; then
+    echo "error: routed launch metadata could not be bound to its admission" >&2
+    exit 1
+  fi
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
@@ -2921,20 +2927,20 @@ if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_TMP=
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
+elif [ "$ROUTE_ADMISSION_STARTED" = 1 ]; then
+  SPAWN_META_PUBLISH_STARTED=1
+  mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
+  SPAWN_META_PUBLISH_STARTED=0
+  SPAWN_META_TMP=
 fi
-if [ "$ROUTE_ACTIVE" = 1 ]; then
-  if ! "$FM_ROOT/bin/fm-route.sh" activate-reservation --task "$ID" \
-      --generation "$ROUTE_GENERATION" --claim "$ROUTE_CLAIM" >/dev/null 2>&1; then
-    echo "error: routed launch metadata was published but reservation activation failed" >&2
+if [ "$ROUTE_ADMISSION_STARTED" = 1 ]; then
+  route_commit_args=(--task "$ID" --claim-file "$ROUTE_CLAIM_FILE")
+  [ -z "$ROUTE_PRIOR_CLAIM_FILE" ] || route_commit_args+=(--prior-claim-file "$ROUTE_PRIOR_CLAIM_FILE")
+  if ! "$FM_ROOT/bin/fm-route.sh" commit-admission "${route_commit_args[@]}" >/dev/null 2>&1; then
+    echo "error: routed launch publication requires admission recovery" >&2
     exit 1
   fi
-elif [ "$ROUTE_RETIRE_ON_PUBLISH" = 1 ]; then
-  if ! "$FM_ROOT/bin/fm-route.sh" release --task "$ID" \
-      --generation "$ROUTE_GENERATION" --claim "$ROUTE_CLAIM" >/dev/null 2>&1; then
-    echo "error: static relaunch metadata was published but prior route retirement failed" >&2
-    exit 1
-  fi
-  ROUTE_RESERVATION_OWNED=0
+  ROUTE_ADMISSION_STARTED=0
 fi
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   # The record is published, so this task is now part of the set a teardown

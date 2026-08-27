@@ -897,7 +897,7 @@ test_mismatched_and_path_unsafe_routes_do_not_release_an_owned_reservation() {
   rec=$(make_spawn_case route-mismatch pi "$id")
   read_case_record "$rec"
   reserve_route "$HOME_DIR" "$id" gen-1 pi-kimi moonshot pi-moonshot-1 none standard medium automatic
-  reservation="$HOME_DIR/state/routing/reservations/$id.json"
+  reservation="$HOME_DIR/state/routing/reservations/$id/gen-1.json"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" --harness pi --route-generation gen-1 --route-profile wrong \
     --route-provider moonshot --route-lane pi-moonshot-1 --route-account none \
@@ -940,7 +940,7 @@ test_launch_failure_releases_only_the_owned_generation() {
   rec=$(make_spawn_case route-launch-fail pi "$id")
   read_case_record "$rec"
   reserve_route "$HOME_DIR" "$id" gen-1 pi-kimi moonshot pi-moonshot-1 none standard medium automatic
-  reservation="$HOME_DIR/state/routing/reservations/$id.json"
+  reservation="$HOME_DIR/state/routing/reservations/$id/gen-1.json"
   out=$(FM_FAKE_TMUX_FAIL=1 run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" --harness pi --model cliproxyapi/kimi-k3 "${ROUTED_ARGS[@]}")
   status=$?
@@ -955,7 +955,7 @@ test_claim_ownership_spans_endpoint_setup_through_metadata_publication() {
   rec=$(make_spawn_case route-claim-window pi "$id")
   read_case_record "$rec"
   reserve_route "$HOME_DIR" "$id" gen-1 pi-kimi moonshot pi-moonshot-1 none standard medium automatic
-  reservation="$HOME_DIR/state/routing/reservations/$id.json"
+  reservation="$HOME_DIR/state/routing/reservations/$id/gen-1.json"
   FM_FAKE_ROUTE_CLAIM_READY="$CASE_DIR/claim-ready" \
     FM_FAKE_ROUTE_CLAIM_RELEASE="$CASE_DIR/claim-release" \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
@@ -983,7 +983,7 @@ test_claim_ownership_spans_endpoint_setup_through_metadata_publication() {
     "concurrent release crossed claimed spawn setup"
   [ "$finalize_rc" -ne 0 ] \
     || fail "concurrent finalize unexpectedly consumed a pending spawn claim"
-  assert_contains "$finalize_out" "reservation-claim-required" \
+  assert_contains "$finalize_out" "admission recovery required" \
     "concurrent finalize crossed claimed spawn setup"
   assert_present "$reservation" "concurrent lifecycle stole claimed spawn capacity"
   : > "$CASE_DIR/claim-release"
@@ -1023,7 +1023,7 @@ test_native_harness_mismatch_and_pi_account_binding_are_refused() {
   read_case_record "$rec"
   make_account_map "$HOME_DIR" codex-secondary codex CODEX_HOME "$HOME_DIR/codex-2"
   reserve_route "$HOME_DIR" "$id" gen-1 codex-sol openai codex-secondary codex-secondary standard medium automatic
-  reservation="$HOME_DIR/state/routing/reservations/$id.json"
+  reservation="$HOME_DIR/state/routing/reservations/$id/gen-1.json"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" --harness claude --route-generation gen-1 --route-profile codex-sol \
     --route-provider openai --route-lane codex-secondary --route-account codex-secondary \
@@ -1036,7 +1036,7 @@ test_native_harness_mismatch_and_pi_account_binding_are_refused() {
   rec=$(make_spawn_case route-pi-account pi "$id")
   read_case_record "$rec"
   reserve_route "$HOME_DIR" "$id" gen-1 pi-kimi moonshot pi-moonshot-1 codex-secondary standard medium automatic
-  reservation="$HOME_DIR/state/routing/reservations/$id.json"
+  reservation="$HOME_DIR/state/routing/reservations/$id/gen-1.json"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" --harness pi --route-generation gen-1 --route-profile pi-kimi \
     --route-provider moonshot --route-lane pi-moonshot-1 --route-account codex-secondary \
