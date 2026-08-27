@@ -141,7 +141,42 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+# A pooled copy can retain ignored files from an earlier lease. If that earlier
+# lease was a persistent second-mate home, its identity marker would make the
+# session-start hook treat this linked ordinary task copy as that old home and
+# inject its foreign fleet digest before the worker reads the current project.
+# The ordinary spawn must stop before launch while preserving the marker and
+# foreign state for safe inspection rather than deleting a possibly legitimate
+# persistent home.
+test_stale_secondmate_identity_refuses_ordinary_spawn_without_mutation() {
+  local rec id out status
+  id=settle-stale-role-z3
+  rec=$(make_settle_case settle-stale-role "$id" 0)
+  read_settle_record "$rec"
+  printf '%s\n' '.fm-secondmate-home' 'state/' 'data/' >> "$(git -C "$WT_DIR" rev-parse --git-path info/exclude)"
+  printf '%s\n' redacteur-linkedin > "$WT_DIR/.fm-secondmate-home"
+  mkdir -p "$WT_DIR/state" "$WT_DIR/data"
+  printf '%s\n' 'foreign fleet state' > "$WT_DIR/state/foreign.status"
+  printf '%s\n' 'foreign charter' > "$WT_DIR/data/charter.md"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "ordinary spawn accepted a worktree carrying a second-mate identity"
+  assert_contains "$out" "carries secondmate identity 'redacteur-linkedin'" \
+    "spawn did not explain the incompatible role identity"
+  assert_contains "$out" "refusing to launch" \
+    "spawn did not report that launch was refused"
+  assert_grep 'redacteur-linkedin' "$WT_DIR/.fm-secondmate-home" \
+    "spawn mutated the persistent-home identity marker"
+  assert_grep 'foreign fleet state' "$WT_DIR/state/foreign.status" \
+    "spawn mutated foreign fleet state"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "refused ordinary spawn published worker metadata"
+  pass "an ordinary spawn refuses a stale second-mate identity without mutating the possible persistent home"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_stale_secondmate_identity_refuses_ordinary_spawn_without_mutation
 
 echo "# all fm-spawn-worktree-settle tests passed"
