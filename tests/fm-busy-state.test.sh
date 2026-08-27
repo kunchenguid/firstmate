@@ -342,6 +342,30 @@ test_codex_herdr_native_idle_stays_unknown() {
   pass "Herdr-native idle remains inconclusive for Codex"
 }
 
+test_kimi_herdr_native_busy_is_independent_proof() {
+  local state out
+  state=$(new_state_dir kimi-herdr-native-busy)
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_busy_state() { printf 'busy'; }
+  out=$(fm_busy_classify herdr s:p kimi t1 "$state")
+  unset -f fm_backend_busy_state
+  [ "$out" = "busy herdr-native" ] \
+    || fail "Herdr-native busy must remain reachable when Kimi's own sources are unverified, got '$out'"
+  pass "Herdr-native busy independently proves a Kimi turn is active"
+}
+
+test_kimi_herdr_native_idle_stays_unknown() {
+  local state out
+  state=$(new_state_dir kimi-herdr-native-idle)
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_busy_state() { printf 'idle'; }
+  out=$(fm_busy_classify herdr s:p kimi t1 "$state")
+  unset -f fm_backend_busy_state
+  [ "$out" = "unknown kimi-unverified" ] \
+    || fail "Herdr-native idle must not hide Kimi's unverified semantic sources, got '$out'"
+  pass "Herdr-native idle remains inconclusive for Kimi"
+}
+
 test_kimi_unverified_gate() {
   local state gen out
   state=$(new_state_dir kimi-gate)
@@ -481,6 +505,8 @@ test_grok_regex_isolated
 test_codex_unverified_gate
 test_codex_herdr_native_idle_stays_unknown
 test_codex_herdr_native_busy_is_independent_proof
+test_kimi_herdr_native_idle_stays_unknown
+test_kimi_herdr_native_busy_is_independent_proof
 test_kimi_unverified_gate
 test_cursor_ignores_rendered_and_native_signals
 test_dead_endpoint_overrides

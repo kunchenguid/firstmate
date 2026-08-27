@@ -46,16 +46,16 @@
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
 #   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
-#   2. standalone Kimi before verification       -> unknown kimi-unverified
-#   3. Codex with no verified harness source may still accept an independent
-#      Herdr-native busy verdict; native idle remains inconclusive
-#   4. a valid, gen-matching, source-trusted record -> its state and source
-#   5. no record at all: herdr's native busy verdict is trusted as busy
+#   2. Kimi or Codex with no verified harness source may still accept an
+#      independent Herdr-native busy verdict; native idle remains inconclusive
+#      and preserves the harness-specific unverified source
+#   3. a valid, gen-matching, source-trusted record -> its state and source
+#   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
 #      muse session-log and cursor transcript pull sources, then the Grok-only
 #      temporary regex fallback classifies a grok task from its rendered tail,
 #      then unknown missing
-#   6. malformed, stale, or untrusted records -> unknown, never a fallback
+#   5. malformed, stale, or untrusted records -> unknown, never a fallback
 # The Grok arm is the ONLY rendered-text classification that survives the
 # redesign, because Grok's structured lifecycle was not credited-live-verified
 # in the approved audit; it is scoped to harness=grok and can never classify
@@ -93,11 +93,13 @@
 FM_BUSY_LIB_VERSION=v1
 
 # Standalone-Kimi verification gate. Empty means no installed Kimi version
-# has passed live verification, so every standalone Kimi task classifies
-# unknown kimi-unverified and fm-spawn wires no Kimi busy events. Kimi's
-# rendered moon-phase spinner is deliberately NOT a state source here: the
-# approved redesign forbids inventing a Kimi UI signature, and that spinner
-# is locale- and emoji-font-sensitive.
+# has passed live verification, so Kimi-owned state classifies unknown
+# kimi-unverified and fm-spawn wires no Kimi busy events. An independent
+# Herdr-native busy verdict can still prove a Kimi turn active while retaining
+# its herdr-native attribution; native idle remains inconclusive. Kimi's rendered
+# moon-phase spinner is deliberately NOT a state source here: the approved
+# redesign forbids inventing a Kimi UI signature, and that spinner is locale-
+# and emoji-font-sensitive.
 #
 # Preferred source, in order: Wire mode's JSON-RPC `prompt` request lifetime,
 # whose outstanding request exactly brackets a turn and returns finished,
@@ -844,21 +846,16 @@ fm_busy_grok_tail_busy() {
 # if available, else reports unknown capture-failed.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
-  local out rc r_state r_source native log codex_unverified=0
+  local out rc r_state r_source native log unverified_source=
   case "$harness" in
     kimi*)
       if ! fm_busy_kimi_verified; then
-        printf 'unknown kimi-unverified'
-        return 0
+        unverified_source=kimi-unverified
       fi
       ;;
     codex*)
       if ! fm_busy_codex_semantic_source; then
-        # Codex's own lifecycle sources are unverified, but that must not hide
-        # independent backend proof. Skip stored harness records, consult the
-        # existing Herdr-native busy-only branch below, and preserve the
-        # codex-unverified attribution when native state is idle or unreadable.
-        codex_unverified=1
+        unverified_source=codex-unverified
       fi
       ;;
     cursor*)
@@ -880,7 +877,10 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       return 0
       ;;
   esac
-  if [ "$codex_unverified" = 1 ]; then
+  if [ -n "$unverified_source" ]; then
+    # An unverified harness owns no trusted stored record, but it must not hide
+    # independent backend proof. Consult the Herdr-native busy-only branch below,
+    # then preserve the harness-specific unknown source for every other result.
     out=missing
     rc=1
   else
@@ -914,8 +914,8 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       return 0
     fi
   fi
-  if [ "$codex_unverified" = 1 ]; then
-    printf 'unknown codex-unverified'
+  if [ -n "$unverified_source" ]; then
+    printf 'unknown %s' "$unverified_source"
     return 0
   fi
   case "$harness" in
@@ -989,6 +989,18 @@ fm_busy_classify_meta() {  # <meta-file> <id> <state-dir> [tail40]
     return 0
   fi
   fm_busy_classify "$backend" "$target" "$harness" "$id" "$state" "$tail40"
+}
+
+# fm_busy_classify_meta_live: the metadata-resolving form of
+# fm_busy_classify_live. A cached semantic record can classify busy only while
+# the recorded endpoint still exists; an absent or unreadable endpoint is dead.
+fm_busy_classify_meta_live() {  # <meta-file> <id> <state-dir>
+  local meta=$1 id=$2 state=$3 backend target harness
+  [ -f "$meta" ] || { printf 'unknown missing'; return 0; }
+  backend=$(fm_backend_of_meta "$meta")
+  target=$(fm_backend_target_of_meta "$meta")
+  harness=$(fm_meta_get "$meta" harness)
+  fm_busy_classify_live "$backend" "$target" "$harness" "$id" "$state"
 }
 
 # fm_busy_is_busy: boolean view for callers that only gate on provable

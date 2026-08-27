@@ -443,11 +443,11 @@ EOF
     status_line=$(grep -v '^[[:space:]]*$' "$STATE/$task.status" 2>/dev/null | tail -1 || true)
     status_verb=$(status_line_verb "$status_line")
     if [ "$status_verb" != blocked ]; then
-      busy_verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE")
-      # Only positive proof of an active turn suppresses the alert. Idle and
-      # unknown both wake conservatively because missing a mate waiting on the
-      # primary is worse than an extra supervision turn; blocked always wakes
-      # above this branch even if liveness evidence races or lags the status.
+      busy_verdict=$(fm_busy_classify_meta_live "$meta" "$task" "$STATE")
+      # Only a live endpoint's exact busy verdict suppresses the alert. Cached,
+      # idle, unknown, dead, and unreadable state all wake because under-reporting
+      # a mate waiting on the primary is worse than one extra supervision turn;
+      # blocked always wakes even if liveness evidence races or lags the status.
       [ "${busy_verdict%% *}" = busy ] && continue
     fi
     row_key="$epoch-$seq"

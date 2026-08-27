@@ -317,13 +317,20 @@ SH
   pass "foreign secondmate queue stalls notify once, remain byte-stable, and stay quiet when empty or healthy"
 }
 
-run_secondmate_stall_state_case() {  # <name> <busy|idle|unknown> <status-line-or-empty> <wake|quiet>
-  local name=$1 liveness=$2 status_line=$3 expected=$4 dir state sub fakebin out gen
-  dir=$(make_case "secondmate-stall-state-$name")
+run_secondmate_stall_state_case() {  # <name> <busy|idle|unknown> <status-line-or-empty> <wake|quiet> [<live|dead>]
+  local name=$1 liveness=$2 status_line=$3 expected=$4 endpoint=${5:-live}
+  local dir state sub fakebin out gen pane_alive
+  dir=$(make_supercase "secondmate-stall-state-$name")
   state="$dir/state"
   sub="$dir/secondmate"
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
+  make_fake_crew_state "$fakebin" >/dev/null
+  case "$endpoint" in
+    live) pane_alive=1 ;;
+    dead) pane_alive=0 ;;
+    *) fail "$name named unsupported endpoint state '$endpoint'" ;;
+  esac
   mkdir -p "$sub/state"
   printf 'mate\n' > "$sub/.fm-secondmate-home"
   printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
@@ -352,7 +359,8 @@ run_secondmate_stall_state_case() {  # <name> <busy|idle|unknown> <status-line-o
   fi
 
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='fm-mate' \
+    FM_FAKE_TMUX_PANE_ALIVE="$pane_alive" \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$out" 2> "$dir/watch.err" || true
@@ -390,6 +398,11 @@ test_secondmate_idle_aged_queue_wakes() {
 test_secondmate_unknown_liveness_aged_queue_wakes() {
   run_secondmate_stall_state_case unknown unknown '' wake
   pass "unknown secondmate liveness fails toward waking the primary"
+}
+
+test_secondmate_dead_endpoint_with_stale_busy_record_wakes() {
+  run_secondmate_stall_state_case dead-endpoint busy '' wake dead
+  pass "a dead secondmate endpoint wakes despite its stale busy record"
 }
 
 test_secondmate_stall_marker_rejects_symlink() {
@@ -1075,6 +1088,7 @@ test_secondmate_blocked_aged_queue_wakes
 test_secondmate_idle_aged_queue_wakes
 test_secondmate_unknown_liveness_aged_queue_wakes
 test_secondmate_busy_aged_queue_stays_quiet
+test_secondmate_dead_endpoint_with_stale_busy_record_wakes
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash
 test_empty_prefix_mate_preserves_other_mate_receipt

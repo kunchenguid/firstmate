@@ -182,7 +182,7 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | OpenCode | 1.17.18 | Plugin `session.status` | In a real TUI pane: seed, then `busy source=opencode-plugin event=session-busy`, then `idle source=opencode-plugin event=session-status-idle`. |
 | Claude | 2.1.220 (Claude Code) | Hooks `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionEnd` | `UserPromptSubmit` fired for the argv launch prompt and each steer, and `Stop` closed every completed turn. A mid-stream Escape interrupt fired no closing hook, which is why the firstmate-controlled clear exists. `StopFailure` and `SessionEnd` are wired from the four hook names present in the installed binary; only the abnormal paths they cover were not reproduced live. |
 | Codex | codex-cli 0.145.0 | No usable Codex-owned source | See below; Codex-owned state classifies `unknown codex-unverified`, while an independent Herdr-native `busy` verdict remains reachable and attributed `busy herdr-native`. |
-| Kimi (standalone) | not installed | None usable | No binary on `PATH`, so the gate stays closed and it classifies `unknown kimi-unverified`. |
+| Kimi (standalone) | not installed | No usable Kimi-owned source | No binary on `PATH`, so Kimi-owned state remains `unknown kimi-unverified`; an independent Herdr-native `busy` verdict remains reachable and attributed `busy herdr-native`. |
 | Grok | 0.2.112 | Isolated rendered-tail fallback | Retained unconverted; the approved audit could not credit a live structured-lifecycle run. |
 
 Codex was probed two ways, both refused:
@@ -435,6 +435,119 @@ Full fixed output:
 ```text
 CASE revision=fixed test=test_secondmate_unknown_liveness_aged_queue_wakes
 ok - unknown secondmate liveness fails toward waking the primary
+exit=0
+```
+
+### Review-hardening red/green record
+
+The review-hardening pass added three behavioral cases on the same platform and Bash version recorded above.
+The unfixed revision was `63308ac0cc3f831959be25d0f66836453b6ae641`, and the fixed version was its review working tree with the source and test changes recorded in this section.
+The Kimi native-busy and dead-endpoint cases were RED before and GREEN after, so they demonstrate the fixes.
+The Kimi native-idle case was GREEN before and GREEN after, so it is a regression guard and is not evidence that the fix changed behavior.
+
+The exact additional preparation reused `run_test` and `run_case` from above:
+
+```sh
+review_unfixed_root=$PWD/.verification-review-unfixed
+[ ! -e "$review_unfixed_root" ] || exit 73
+mkdir "$review_unfixed_root"
+git archive 63308ac0cc3f831959be25d0f66836453b6ae641 | tar -x -C "$review_unfixed_root"
+cp tests/fm-busy-state.test.sh tests/fm-wake-queue.test.sh "$review_unfixed_root/tests/"
+```
+
+#### Fix demonstration: Kimi on Herdr native busy
+
+This proves that independent Herdr-native `busy` remains reachable even though Kimi-owned semantic sources are unverified.
+
+Unfixed command:
+
+```sh
+run_case 63308ac-unfixed "$review_unfixed_root" tests/fm-busy-state.test.sh test_arm_seeds_busy_spawn test_kimi_herdr_native_busy_is_independent_proof
+```
+
+Full unfixed output:
+
+```text
+CASE revision=63308ac-unfixed test=test_kimi_herdr_native_busy_is_independent_proof
+not ok - Herdr-native busy must remain reachable when Kimi's own sources are unverified, got 'unknown kimi-unverified'
+exit=1
+```
+
+Fixed command:
+
+```sh
+run_case review-fixed "$fixed_root" tests/fm-busy-state.test.sh test_arm_seeds_busy_spawn test_kimi_herdr_native_busy_is_independent_proof
+```
+
+Full fixed output:
+
+```text
+CASE revision=review-fixed test=test_kimi_herdr_native_busy_is_independent_proof
+ok - Herdr-native busy independently proves a Kimi turn is active
+exit=0
+```
+
+#### Regression guard: Kimi on Herdr native idle
+
+This proves that Herdr-native `idle` remains inconclusive and leaves Kimi explicitly `unknown kimi-unverified`.
+
+Unfixed command:
+
+```sh
+run_case 63308ac-unfixed "$review_unfixed_root" tests/fm-busy-state.test.sh test_arm_seeds_busy_spawn test_kimi_herdr_native_idle_stays_unknown
+```
+
+Full unfixed output:
+
+```text
+CASE revision=63308ac-unfixed test=test_kimi_herdr_native_idle_stays_unknown
+ok - Herdr-native idle remains inconclusive for Kimi
+exit=0
+```
+
+Fixed command:
+
+```sh
+run_case review-fixed "$fixed_root" tests/fm-busy-state.test.sh test_arm_seeds_busy_spawn test_kimi_herdr_native_idle_stays_unknown
+```
+
+Full fixed output:
+
+```text
+CASE revision=review-fixed test=test_kimi_herdr_native_idle_stays_unknown
+ok - Herdr-native idle remains inconclusive for Kimi
+exit=0
+```
+
+#### Fix demonstration: dead endpoint with a stale busy record
+
+This proves that an aged queue wakes when the recorded endpoint is dead even if its last semantic record still says busy.
+
+Unfixed command:
+
+```sh
+run_case 63308ac-unfixed "$review_unfixed_root" tests/fm-wake-queue.test.sh test_self_held_lock_reclaims_instead_of_deadlocking test_secondmate_dead_endpoint_with_stale_busy_record_wakes
+```
+
+Full unfixed output:
+
+```text
+CASE revision=63308ac-unfixed test=test_secondmate_dead_endpoint_with_stale_busy_record_wakes
+not ok - dead-endpoint did not wake for an aged foreign row: out=checkpoint: no actionable wake within 2s; err=
+exit=1
+```
+
+Fixed command:
+
+```sh
+run_case review-fixed "$fixed_root" tests/fm-wake-queue.test.sh test_self_held_lock_reclaims_instead_of_deadlocking test_secondmate_dead_endpoint_with_stale_busy_record_wakes
+```
+
+Full fixed output:
+
+```text
+CASE revision=review-fixed test=test_secondmate_dead_endpoint_with_stale_busy_record_wakes
+ok - a dead secondmate endpoint wakes despite its stale busy record
 exit=0
 ```
 
