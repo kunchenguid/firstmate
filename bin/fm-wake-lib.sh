@@ -1018,12 +1018,12 @@ fm_failure_episode_reset() {
 #     episode-state mutation, each ledger write, and each continuation.
 #   - The irrevocable commit point of a translation is the EXIT STATUS: the
 #     harness delivers the collected stderr banner only on exit 2 and discards
-#     it on exit 0, so the owned terminal ledger write is the atomic commit -
-#     when it succeeds the owner exits 2 unconditionally, and when it is
-#     refused (superseded) the owner exits 0 silently even after printing.
-#     The once-per-episode failure notice commits in the same owned critical
-#     section as the winning "failed" write, so the notice can never be
-#     consumed by a generation whose delivery lost.
+#     it on exit 0. Markerless outcomes commit with the owned terminal ledger
+#     write. The once-per-episode failure notice commits only when its marker is
+#     created after the winning "failed" write in the same owned critical
+#     section. A superseded generation or failed required-marker creation is
+#     refused and exits 0 silently even after printing; a later generation
+#     supersedes the terminal entry and retries the notice.
 #
 # This structurally removes the failure classes the lock-held-across-arm
 # design produced: a hung owner deferring every later firing forever (observed
@@ -1162,11 +1162,12 @@ fm_autoarm_claim_next() {  # <state-dir> [grace]
 
 # Write a new outcome for a generation this process still owns, re-verified
 # under the micro-mutex so a superseded owner can never clobber a newer claim.
-# With a fourth argument, atomically create that marker file in the same owned
-# critical section as the write (the once-per-episode failure notice), so the
-# marker can only ever be consumed by the generation whose translation wins.
-# Returns 0 written, 2 superseded, 1 unable (bounded contention or write
-# failure).
+# With a fourth argument, create that marker after the ledger rename in the same
+# owned critical section (the once-per-episode failure notice). A marker failure
+# refuses the commit even though its terminal ledger entry remains; marker-first
+# ordering could permanently suppress a notice whose ledger write never won.
+# Returns 0 committed, 2 refused (superseded or required-marker failure), and 1
+# unable (bounded contention or ledger-write failure).
 fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file]
   local state=$1 gen=$2 outcome=$3 marker=${4:-} lock epoch pid identity tmp i
   lock="$state/.claude-autoarm.lock"

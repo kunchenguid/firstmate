@@ -39,11 +39,12 @@
 #     an actionable arm close (signal:/stale:/check:/heartbeat) prints one
 #     rewake banner to stderr and exits 2, which wakes Claude even while idle
 #     ("Stop hook feedback"). The irrevocable commit point is the EXIT STATUS:
-#     the harness delivers the collected stderr only on exit 2, so the owned
-#     terminal ledger write decides the exit, and a generation whose write is
-#     refused exits 0 silently even after printing. A close that reports no
-#     actionable reason is benign when a live identity-matched watcher still
-#     has a fresh beacon.
+#     the harness delivers the collected stderr only on exit 2, so an owned
+#     terminal commit decides the exit. Markerless outcomes commit with the
+#     ledger write; the failure notice additionally requires its marker write.
+#     A refused generation exits 0 silently even after printing. A close that
+#     reports no actionable reason is benign when a live identity-matched
+#     watcher still has a fresh beacon.
 #   - Failure handling: a typed failure is rechecked against the same live,
 #     fresh watcher predicate and retried a bounded number of times in this
 #     hook. Only an exhausted failure with no verified watcher emits one
@@ -169,9 +170,10 @@ MY_GEN=$FM_AUTOARM_MY_GEN
 [ -n "$MY_GEN" ] || exit 0
 
 # Commit <outcome> (optionally with the once-per-episode notice marker) for
-# this generation. Success means this generation's translation WINS: the owned
-# ledger write is the atomic commit and the caller exits 2 unconditionally
-# after it. Failure means refused or unverifiable: the caller goes silent
+# this generation. Success means this generation's translation WINS and the
+# caller exits 2 unconditionally. Markerless outcomes commit with the owned
+# ledger write; a notice wins only when its following marker write succeeds in
+# the same hold. Failure means refused or unverifiable: the caller goes silent
 # (cleanup, exit 0) - the harness discards the collected stderr on exit 0, so
 # even an already-printed banner is never delivered by a losing generation.
 autoarm_commit() {  # <outcome> [marker-file]
