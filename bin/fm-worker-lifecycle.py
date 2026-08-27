@@ -3240,6 +3240,16 @@ def parser():
     service_complete.add_argument("--request-digest", required=True)
     service_complete.add_argument("--confirm-subscription", required=True)
 
+    service_cancel = sub.add_parser(
+        "service-cancel",
+        help="release one cancelled no-mistakes worker before any execution started",
+    )
+    service_cancel.add_argument("--task", required=True)
+    service_cancel.add_argument("--task-generation", required=True)
+    service_cancel.add_argument("--assignment-generation", required=True)
+    service_cancel.add_argument("--confirm-cancel", action="store_true")
+    service_cancel.add_argument("--confirm-subscription", required=True)
+
     resume = sub.add_parser("resume", help="reattach exact retained dirty task capacity")
     resume.add_argument("--task", required=True)
     resume.add_argument("--task-generation", required=True)
@@ -4611,6 +4621,86 @@ def command_service_complete(env, args):
     print("service execution proved; exact idle capacity is eligible for cleanup")
 
 
+def command_service_cancel(env, args):
+    """Release a cancelled no-mistakes assignment that never executed."""
+    if not args.confirm_cancel:
+        raise LifecycleError("--confirm-cancel is required")
+    if args.confirm_subscription != env["subscription"]:
+        raise LifecycleError(
+            "--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
+    task = require_id("task", args.task)
+    generation = require_id("task generation", args.task_generation)
+    assignment = require_id("assignment generation", args.assignment_generation)
+    with controller_lock(env):
+        state = load_state(env)
+        key = request_key(task, generation)
+        item = state["queue"].get(key)
+        if item is None or item.get("role") != "no-mistakes":
+            raise LifecycleError("service cancellation is owned by no-mistakes workers only")
+        receipt = item.get("service_completion_receipt")
+        if receipt is not None:
+            if not isinstance(receipt, dict):
+                raise LifecycleError("service cancellation receipt identity differs")
+            unsigned = dict(receipt)
+            proof_digest = unsigned.pop("proof_digest", None)
+            if (
+                item.get("status") not in ("releasing", "complete")
+                or receipt.get("schema") != "fm.worker-service-cancel/v1"
+                or receipt.get("task") != task
+                or receipt.get("task_generation") != generation
+                or receipt.get("assignment_generation") != assignment
+                or receipt.get("verdict") != "cancelled-before-execution"
+                or proof_digest != digest_value(unsigned)
+            ):
+                raise LifecycleError("service cancellation receipt identity differs")
+            worker = state["workers"].get(str(item.get("slot")))
+            if item.get("status") == "releasing" and (
+                worker is None or worker.get("queue_key") != key
+                or worker.get("release_proof") != receipt
+            ):
+                raise LifecycleError("releasing service cancellation lost its exact worker")
+            print("service cancellation already recorded with exact identity")
+            return
+        if item.get("status") != "assigned":
+            raise LifecycleError("service cancellation requires one exact assigned worker")
+        worker = state["workers"].get(str(item.get("slot")))
+        if worker is None or worker.get("queue_key") != key:
+            raise LifecycleError("service cancellation has no exact durable worker owner")
+        if worker.get("role") != "no-mistakes":
+            raise LifecycleError("service cancellation worker role differs")
+        if worker.get("assignment_generation") != assignment:
+            raise LifecycleError("service cancellation assignment generation is not exact")
+        if (state.get("pending_actions") or {}).get(str(worker["slot"])) is not None:
+            raise LifecycleError("service cancellation worker has a pending provider action")
+        executions = [
+            execution for execution in (state.get("executions") or {}).values()
+            if isinstance(execution, dict)
+            and execution.get("task") == task
+            and execution.get("task_generation") == generation
+            and execution.get("assignment_generation") == assignment
+        ]
+        if worker.get("last_execution_digest") is not None or executions:
+            raise LifecycleError("service cancellation refuses a worker that executed")
+        proof = {
+            "schema": "fm.worker-service-cancel/v1",
+            **worker["bindings"],
+            "assignment_generation": assignment,
+            "cloud_instance_id": worker["cloud_instance_id"],
+            "resources": worker["resources"],
+            "verdict": "cancelled-before-execution",
+        }
+        proof["proof_digest"] = digest_value(proof)
+        if worker.get("release_proof") is not None:
+            raise LifecycleError("worker already has a different release proof")
+        worker["release_proof"] = copy.deepcopy(proof)
+        worker["released_at"] = iso_utc()
+        worker["phase"] = "release-proved"
+        item["service_completion_receipt"] = copy.deepcopy(proof)
+        item["status"] = "releasing"
+        save_state(env, state)
+    print("service cancellation proved; exact idle capacity is eligible for cleanup")
+
+
 def command_withdraw(env, args):
     """Retire a projecting or queued request that no worker ever took.
 
@@ -5473,6 +5563,8 @@ def main(argv=None):
         command_release(env, args)
     elif args.command == "service-complete":
         command_service_complete(env, args)
+    elif args.command == "service-cancel":
+        command_service_cancel(env, args)
     elif args.command == "withdraw":
         command_withdraw(env, args)
     elif args.command == "surrender":

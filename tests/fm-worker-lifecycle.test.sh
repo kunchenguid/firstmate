@@ -26,7 +26,13 @@ service_complete_front_door() {
     *--request-digest*--confirm-subscription*) ;;
     *) fail "service-complete help lost its exact execution binding" ;;
   esac
-  pass "supported lifecycle wrapper exposes service-complete"
+  help=$(FM_HOME="$tmp/home" "$WRAPPER" service-cancel --help) \
+    || fail "supported lifecycle wrapper rejected service-cancel"
+  case "$help" in
+    *--assignment-generation*--confirm-cancel*--confirm-subscription*) ;;
+    *) fail "service-cancel help lost its exact assignment binding" ;;
+  esac
+  pass "supported lifecycle wrapper exposes service completion and cancellation"
 }
 
 service_complete_replay_contract() {
@@ -161,6 +167,102 @@ else:
 assert terminal_state["pending_actions"]["1"] == terminal_action, terminal_state
 PY
   pass "service completion replays across releasing and completed crash windows"
+}
+
+service_cancel_replay_contract() {
+  python3 - "$CONTROLLER" <<'PY' || fail "service cancellation replay contract failed"
+import contextlib
+import copy
+import importlib.util
+from types import SimpleNamespace
+import sys
+
+spec = importlib.util.spec_from_file_location("lifecycle", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+bindings = {
+    "home_binding": "1" * 64,
+    "task": "cancel-task",
+    "task_generation": "cancel-generation",
+    "assignment_generation": "asg-00000001",
+    "account_binding": "2" * 64,
+    "worktree_binding": "3" * 64,
+    "repository_binding": "4" * 64,
+    "repository_generation": "repository-generation",
+}
+item = {**bindings, "role": "no-mistakes", "status": "assigned", "slot": 1}
+worker = {
+    "slot": 1,
+    "role": "no-mistakes",
+    "queue_key": "cancel-task@cancel-generation",
+    "assignment_generation": bindings["assignment_generation"],
+    "bindings": bindings,
+    "cloud_instance_id": "worker-instance",
+    "resources": {"vm": {"id": "/exact/vm"}},
+    "last_execution_digest": None,
+    "release_proof": None,
+}
+state = {
+    "queue": {"cancel-task@cancel-generation": item},
+    "workers": {"1": worker},
+    "executions": {},
+    "pending_actions": {},
+}
+module.controller_lock = lambda _env: contextlib.nullcontext()
+module.load_state = lambda _env: state
+module.save_state = lambda _env, _state: None
+args = SimpleNamespace(
+    task="cancel-task",
+    task_generation="cancel-generation",
+    assignment_generation=bindings["assignment_generation"],
+    confirm_cancel=True,
+    confirm_subscription="subscription",
+)
+env = {"subscription": "subscription"}
+
+module.command_service_cancel(env, args)
+assert item["status"] == "releasing", item
+assert item["service_completion_receipt"] == worker["release_proof"], item
+assert worker["release_proof"]["verdict"] == "cancelled-before-execution", worker
+module.command_service_cancel(env, args)
+
+item["status"] = "complete"
+replacement = {"queue_key": "later@task", "release_proof": None}
+state["workers"] = {"1": replacement}
+replacement_before = copy.deepcopy(replacement)
+module.command_service_cancel(env, args)
+assert replacement == replacement_before, replacement
+
+valid_receipt = item["service_completion_receipt"]
+item["service_completion_receipt"] = "corrupt"
+try:
+    module.command_service_cancel(env, args)
+except module.LifecycleError as exc:
+    assert "receipt identity differs" in str(exc), exc
+else:
+    raise AssertionError("malformed service cancellation receipt escaped as valid")
+item["service_completion_receipt"] = valid_receipt
+
+item["status"] = "assigned"
+item.pop("service_completion_receipt")
+state["workers"] = {"1": worker}
+worker["release_proof"] = None
+state["executions"] = {"5" * 64: {
+    "task": args.task,
+    "task_generation": args.task_generation,
+    "assignment_generation": args.assignment_generation,
+}}
+try:
+    module.command_service_cancel(env, args)
+except module.LifecycleError as exc:
+    assert "executed" in str(exc), exc
+else:
+    raise AssertionError("service cancellation discarded a recorded execution")
+assert item["status"] == "assigned", item
+assert worker["release_proof"] is None, worker
+PY
+  pass "service cancellation releases only an exact never-executed assignment and replays"
 }
 
 static_contract() {
@@ -8858,6 +8960,7 @@ PY
 static_contract
 service_complete_front_door
 service_complete_replay_contract
+service_cancel_replay_contract
 compartment_payload_contract
 classification_and_admission_matrix
 azure_provider_refusal_matrix
