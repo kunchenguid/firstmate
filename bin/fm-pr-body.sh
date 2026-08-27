@@ -718,7 +718,7 @@ cmd_check() {
 }
 
 cmd_publish() {
-  local file=''
+  local file='' forge_argv=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --file) file=${2:?--file requires a value}; shift 2 ;;
@@ -730,10 +730,21 @@ cmd_publish() {
   [ -n "$file" ] || die_usage "publish requires --file <path>"
   [ -f "$file" ] || die_usage "--file not found: $file"
   [ $# -gt 0 ] || die_usage "publish requires the forge command after --"
+  forge_argv=("$@")
   local content
   content=$(cat -- "$file") || { echo "error: could not read: $file" >&2; exit 1; }
   refuse_unsafe_publication "$content" || exit 1
-  exec "$@"
+  # shellcheck source=bin/fm-pr-comment-watch-lib.sh
+  . "$SCRIPT_DIR/fm-pr-comment-watch-lib.sh"
+  if fm_pcw_forge_command_is_rereview_request "${forge_argv[@]}"; then
+    if fm_pcw_extract_pr_url_from_forge_argv "${forge_argv[@]}"; then
+      "$SCRIPT_DIR/fm-pr-comment-watch.sh" rereview-ready --url "$FM_PCW_PR_URL" || exit 1
+    else
+      echo "error: could not resolve the pull request URL for re-review readiness" >&2
+      exit 1
+    fi
+  fi
+  exec "${forge_argv[@]}"
 }
 
 cmd_has_template() {

@@ -776,6 +776,8 @@ $SHIP_EVIDENCE_RULE
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when its PR is ready for review: CI is green and every review thread is resolved, never merely opened.
+Before requesting another review round on an existing pull request, run \`$FM_ROOT/bin/fm-pr-comment-watch.sh rereview-ready --url <pr-url>\`; it refuses until every open review thread has your inline reply and either a GitHub resolution or a recorded defer via \`$FM_ROOT/bin/fm-pr-comment-watch.sh defer --url <pr-url> --thread-id <id>\`.
+Route that re-review request through \`$FM_ROOT/bin/fm-pr-body.sh publish --file <path> -- gh-axi pr edit <pr-url> --add-reviewer <reviewer-login>\` so the refusal is structural rather than advisory.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`; after the PR reaches that ready state, append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF

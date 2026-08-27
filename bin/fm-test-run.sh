@@ -236,6 +236,7 @@ family_for_basename() {
       printf '%s\n' backend-dispatch
       ;;
     fm-check-register.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|fm-review-diff.test.sh|\
+    fm-pr-comment-watch.test.sh|fm-pr-comment-watch-mechanism.test.sh|\
     fm-teardown.test.sh|fm-teardown-custody.test.sh|fm-x-mode.test.sh|fm-slack-captain-channel.test.sh|fm-slack-socket.test.sh|\
     fm-slack-captain-comms-guard.test.sh)
       printf '%s\n' pr-forge
