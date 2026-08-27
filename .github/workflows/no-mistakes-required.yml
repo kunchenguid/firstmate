@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 # GitHub concurrency groups retain at most one pending run, replacing older
 # pending runs even when cancel-in-progress is false. Give body-bearing events
@@ -26,5 +27,63 @@ jobs:
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
+      # The event payload snapshots the PR body at the moment the event fires.
+      # `git push no-mistakes` pushes the branch first (synchronize) and rebinds
+      # the body attestation to the new head a moment later (edited), so the
+      # synchronize run's payload body still attests the previous head even
+      # when the live body was corrected long before a runner picked the job
+      # up. Judge the live body instead, waiting briefly for that rebind. The
+      # pinned action still owns the verdict: this step only chooses which body
+      # it reads, and a body that never binds the pushed head fails as before.
+      # If the API cannot be read at all, the action falls back to the payload
+      # body, so the gate never gets weaker than the snapshot it judged before.
+      - name: Read the live pull request body
+        id: live-body
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          attempts=${NM_LIVE_BODY_ATTEMPTS:-12}
+          interval=${NM_LIVE_BODY_INTERVAL:-10}
+          # A cheap wait probe only: the pinned action parses the attestation.
+          bound="\"head_sha\":\"${PR_HEAD_SHA}\""
+          scratch=$(mktemp -d)
+          trap 'rm -rf "$scratch"' EXIT
+          live="$scratch/pr.json"
+          have_live=0
+          attempt=1
+          while :; do
+            if gh api "repos/${PR_REPO}/pulls/${PR_NUMBER}" > "$scratch/fetch.json" 2> "$scratch/fetch.err" &&
+              jq -e 'type == "object"' "$scratch/fetch.json" > /dev/null 2>&1; then
+              mv "$scratch/fetch.json" "$live"
+              have_live=1
+              if jq -e --arg bound "$bound" '(.body // "") | contains($bound)' "$live" > /dev/null; then
+                echo "PR #${PR_NUMBER} body attests head ${PR_HEAD_SHA} (attempt ${attempt}/${attempts})."
+                break
+              fi
+              echo "PR #${PR_NUMBER} body does not attest head ${PR_HEAD_SHA} yet (attempt ${attempt}/${attempts})."
+            else
+              echo "Could not read PR #${PR_NUMBER} from the GitHub API (attempt ${attempt}/${attempts}): $(cat "$scratch/fetch.err")"
+            fi
+            [ "$attempt" -lt "$attempts" ] || break
+            attempt=$((attempt + 1))
+            sleep "$interval"
+          done
+          if [ "$have_live" -eq 1 ]; then
+            delimiter="nm-live-body-$$-${RANDOM}${RANDOM}"
+            {
+              printf 'body<<%s\n' "$delimiter"
+              jq -r '.body // ""' "$live"
+              printf '%s\n' "$delimiter"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Could not read the live PR #${PR_NUMBER} body; judging the event payload body instead."
+            printf 'body=\n' >> "$GITHUB_OUTPUT"
+          fi
       - name: Verify no-mistakes signature and pipeline attestation
         uses: kunchenguid/no-mistakes/.github/actions/require-no-mistakes@32d396ac0f29135daf7fcb9964aba9d5f4e796d6 # post-v1.57.1, untagged (action added in #819)
+        with:
+          pr-body: ${{ steps.live-body.outputs.body }}
