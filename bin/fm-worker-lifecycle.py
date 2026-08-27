@@ -2057,6 +2057,14 @@ def make_action(env, action_type, worker=None, item=None, **fields):
         })
         if worker.get("retired_execute_key") is not None:
             action["retired_execute_key"] = worker["retired_execute_key"]
+        service_cancel_proof = worker.get("release_proof")
+        if (
+            action_type == "delete-compute"
+            and isinstance(service_cancel_proof, dict)
+            and service_cancel_proof.get("schema") == "fm.worker-service-cancel/v1"
+            and service_cancel_proof.get("verdict") == "cancelled-before-execution"
+        ):
+            action["service_cancel_proof"] = copy.deepcopy(service_cancel_proof)
     if item is not None:
         action["request"] = item
     action.update(fields)

@@ -235,6 +235,9 @@ MAX_ATTACH_SEQUENCE = 32
 # Child model/effort ride the child's spawn argv, so the monitor is stricter
 # than the runner: a bounded shell-safe token or nothing.
 SAFE_OPTION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+SAFE_MODEL_OPTION = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$"
+)
 # The cloud lane runs exactly one runtime: fm-spawn refuses every other
 # harness under cloud placement and forces this one itself.
 CLOUD_CHILD_HARNESS = "pi"
@@ -971,9 +974,14 @@ def check_child_request(message, task, generation, assignment):
         # fm-secondmate-session.py refuses leading-dash inbox text, and the
         # same reason child_model/child_effort carry a strict charset here.
         return "request brief begins with '-' and cannot ride the pi argv"
-    for key in CHILD_REQUEST_OPTIONAL:
-        if key in message and not SAFE_OPTION.fullmatch(message[key]):
-            return "request {} is malformed".format(key)
+    if "child_model" in message and not SAFE_MODEL_OPTION.fullmatch(
+        message["child_model"]
+    ):
+        return "request child_model is malformed"
+    if "child_effort" in message and not SAFE_OPTION.fullmatch(
+        message["child_effort"]
+    ):
+        return "request child_effort is malformed"
     return ""
 
 

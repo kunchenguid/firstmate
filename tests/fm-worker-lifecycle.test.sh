@@ -313,7 +313,7 @@ PY
 }
 
 service_cancel_replay_contract() {
-  python3 - "$CONTROLLER" <<'PY' || fail "service cancellation replay contract failed"
+  python3 - "$CONTROLLER" "$AZURE" <<'PY' || fail "service cancellation replay contract failed"
 import contextlib
 import copy
 import importlib.util
@@ -323,6 +323,9 @@ import sys
 spec = importlib.util.spec_from_file_location("lifecycle", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+provider_spec = importlib.util.spec_from_file_location("azure_provider", sys.argv[2])
+provider = importlib.util.module_from_spec(provider_spec)
+provider_spec.loader.exec_module(provider)
 
 bindings = {
     "home_binding": "1" * 64,
@@ -368,6 +371,14 @@ module.command_service_cancel(env, args)
 assert item["status"] == "releasing", item
 assert item["service_completion_receipt"] == worker["release_proof"], item
 assert worker["release_proof"]["verdict"] == "cancelled-before-execution", worker
+action_env = {"deployment_generation": "deployment", "owner": "owner"}
+worker.update({"sku": "Standard_D4as_v6", "sku_family": "standardDav6Family", "cloud_generation": 1, "reservation_usd": 1.0})
+delete_action = module.make_action(action_env, "delete-compute", worker=worker)
+assert delete_action["service_cancel_proof"] == worker["release_proof"], delete_action
+assert provider.service_cancel_allows_missing_task_command(delete_action)
+foreign_cancel = copy.deepcopy(delete_action)
+foreign_cancel["service_cancel_proof"]["task"] = "foreign-task"
+assert not provider.service_cancel_allows_missing_task_command(foreign_cancel)
 module.command_service_cancel(env, args)
 
 item["status"] = "complete"

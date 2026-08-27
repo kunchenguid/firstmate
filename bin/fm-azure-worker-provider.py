@@ -1596,6 +1596,37 @@ def upload_json_blob(
                         and hashlib.sha256(current_payload).hexdigest() == digest
                     ):
                         return digest
+                    # Sequential executes deliberately reuse the assignment's
+                    # fixed request/result blob names. The worker record can
+                    # still carry the ETag from the prior execute, so adopt the
+                    # observed same-assignment blob and retry one CAS rather
+                    # than permanently wedging retained-disk recovery. Another
+                    # assignment never passes the complete expected tag subset,
+                    # and a concurrent writer loses the fresh If-Match.
+                    current_metadata = current.get("metadata") or {}
+                    expected_metadata = tags_to_metadata(tags)
+                    sequential_identity_keys = {
+                        "assignment_generation", "task_binding"
+                    }
+                    if (
+                        overwrite
+                        and sequential_identity_keys.issubset(expected_metadata)
+                        and all(
+                            current_metadata.get(key) == item
+                            for key, item in expected_metadata.items()
+                        )
+                    ):
+                        retry_args = list(upload_args)
+                        match_index = retry_args.index("--if-match")
+                        retry_args[match_index + 1] = current_etag
+                        _, retry_rc, retry_stderr = az(
+                            controller, retry_args, check=False
+                        )
+                        if retry_rc == 0:
+                            return digest
+                        raise ProviderError(
+                            "exact worker staging upload failed: {}".format(retry_stderr)
+                        )
                 finally:
                     with contextlib.suppress(FileNotFoundError):
                         Path(current_path).unlink()
@@ -2576,6 +2607,24 @@ def mutate_deallocate(controller, action):
     return final
 
 
+def service_cancel_allows_missing_task_command(action):
+    proof = action.get("service_cancel_proof")
+    if not isinstance(proof, dict):
+        return False
+    unsigned = dict(proof)
+    supplied = unsigned.pop("proof_digest", None)
+    bindings = action.get("bindings") or {}
+    return (
+        proof.get("schema") == "fm.worker-service-cancel/v1"
+        and proof.get("verdict") == "cancelled-before-execution"
+        and supplied == hashlib.sha256(canonical_bytes(unsigned)).hexdigest()
+        and proof.get("task") == bindings.get("task")
+        and proof.get("task_generation") == bindings.get("task_generation")
+        and proof.get("assignment_generation") == bindings.get("assignment_generation")
+        and proof.get("cloud_instance_id") == action.get("cloud_instance_id")
+    )
+
+
 def mutate_delete_compute(controller, action):
     snapshot = inventory(controller, include_metrics=False)
     worker = worker_by_slot(snapshot, action["slot"])
@@ -2596,7 +2645,11 @@ def mutate_delete_compute(controller, action):
             or not cleanup_marker(container, EXECUTE_ABANDON_MARKER, retired_execute_key)
         ):
             raise ProviderError("retired-execute custody marker is not exact")
-        if task_command_missing and retired_execute_key is None:
+        if (
+            task_command_missing
+            and retired_execute_key is None
+            and not service_cancel_allows_missing_task_command(action)
+        ):
             raise ProviderError(
                 "missing task-command has no exact retired-execute custody proof"
             )
@@ -3289,6 +3342,11 @@ def mutate_execute(controller, action):
     if disposition in (EXECUTE_DISPOSITION_TERMINAL, EXECUTE_DISPOSITION_RECOVERED):
         if disposition == EXECUTE_DISPOSITION_RECOVERED:
             persist_execute_result(controller, action, names, tags, recovered)
+            worker = worker_by_slot(
+                inventory(controller, include_metrics=False), action["slot"]
+            )
+            if worker is None:
+                raise ProviderError("execution result persistence lost its exact worker")
         return worker, recovered
     if disposition != EXECUTE_DISPOSITION_SUBMIT:
         raise ProviderError("worker execution disposition is unsupported")
@@ -3389,7 +3447,10 @@ def mutate_execute(controller, action):
     if execution is None:
         raise ProviderError("private worker execution returned no exact result")
     persist_execute_result(controller, action, names, tags, execution)
-    return worker_by_slot(inventory(controller, include_metrics=False), action["slot"]), execution
+    worker = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
+    if worker is None:
+        raise ProviderError("execution result persistence lost its exact worker")
+    return worker, execution
 
 
 def mutate_steer(controller, action):

@@ -1484,7 +1484,7 @@ test_chain_tip_argv_is_accepted_by_the_real_lifecycle_cli() {
 
 test_valid_child_request_spawns_with_the_exact_parent_pair() {
   make_world child-valid
-  emit_child_intent '{"kind":"ship","brief":"ship the compartment child","model":"gpt-5","effort":"high"}'
+  emit_child_intent '{"kind":"ship","brief":"ship the compartment child","model":"openai-codex/gpt-5.6-sol","effort":"high"}'
   start_monitor
   wait_for "the child spawn" test -s "$SP_LOG"
   wait_for "the acceptance delivered into the inbox" inbox_has 'FIRSTMATE ACCEPTED'
@@ -1504,7 +1504,7 @@ PY
   argv=$(sed -n 1p "$SP_LOG")
   # The project resolves out of the COMPARTMENT's home (alpha), never the
   # primary's (primary-only): the split points fm-spawn's projects/ there.
-  [ "$argv" = "$(printf '%s\x1f%s\x1f--harness\x1fpi\x1f--model\x1fgpt-5\x1f--effort\x1fhigh' "$child" "$LANDING/projects/alpha")" ] \
+  [ "$argv" = "$(printf '%s\x1f%s\x1f--harness\x1fpi\x1f--model\x1fopenai-codex/gpt-5.6-sol\x1f--effort\x1fhigh' "$child" "$LANDING/projects/alpha")" ] \
     || fail "the child spawn argv is not the exact ship shape: $(printf '%s' "$argv" | tr '\037' '|')"
   env_line=$(sed -n 2p "$SP_LOG")
   assert_contains "$env_line" "FM_HOME=$HOME_DIR" \

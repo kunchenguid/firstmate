@@ -1479,6 +1479,51 @@ try:
     raise AssertionError("an overwrite upload took the create-once convergence path")
 except provider.ProviderError as exc:
     assert "staging upload failed" in str(exc), exc
+
+# A later execute reuses the assignment's fixed request blob name. Its action
+# can carry the ETag observed before the prior execute updated that blob, so a
+# same-assignment ConditionNotMet must adopt the current ETag and retry one CAS.
+# A foreign assignment still fails the complete expected-tag comparison.
+conditional_tags = {"task-binding": "task-one", "assignment-generation": "asg-00000001"}
+conditional_calls = []
+old_payload = b'{"old":true}\n'
+
+
+def conditional_az(controller, args, check=True, timeout=provider.AZ_TIMEOUT_SECONDS):
+    conditional_calls.append(list(args))
+    if "upload" in args:
+        match = args[args.index("--if-match") + 1]
+        if match == '"stale"':
+            return None, 1, "ErrorCode:ConditionNotMet"
+        assert match == '"current"', args
+        return {}, 0, ""
+    if "show" in args:
+        return {
+            "etag": '"current"',
+            "metadata": provider.tags_to_metadata(conditional_tags),
+            "properties": {"etag": '"current"'},
+        }, 0, ""
+    if "download" in args:
+        Path(args[args.index("--file") + 1]).write_bytes(old_payload)
+        return {}, 0, ""
+    raise AssertionError(args)
+
+
+provider.az = conditional_az
+provider.upload_json_blob(
+    controller, "acct", "worker-state-01", "request.json", {"new": True},
+    conditional_tags, overwrite=True, if_match='"stale"',
+)
+assert sum(1 for args in conditional_calls if "upload" in args) == 2, conditional_calls
+foreign_tags = dict(conditional_tags, **{"assignment-generation": "asg-00000002"})
+try:
+    provider.upload_json_blob(
+        controller, "acct", "worker-state-01", "request.json", {"newer": True},
+        foreign_tags, overwrite=True, if_match='"stale"',
+    )
+    raise AssertionError("a foreign assignment replaced the sequential execute blob")
+except provider.ProviderError as exc:
+    assert "staging upload failed" in str(exc), exc
 # The checks above drive upload_json_blob directly and so cannot see the REAL
 # caller dropping volatile_fields, which is what made S1 revertible with a
 # green suite. Capture what create_lifecycle_children actually passes.
