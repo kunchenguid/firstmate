@@ -221,6 +221,7 @@ EOF
   while IFS=$'\t' read -r id title body; do
     [ -n "$id" ] || continue
     due=0
+    list_contains "$notify" "$id" && due=1
     if list_contains "$projected" "$id"; then
       if [ "$dry" -eq 1 ]; then
         printf 'would check %s (%s) and refresh it only if its title or reason changed\n' "$id" "$title"
@@ -228,7 +229,6 @@ EOF
         continue
       fi
     else
-      list_contains "$notify" "$id" && due=1
       if [ "$dry" -eq 1 ]; then
         if [ "$due" -eq 1 ]; then
           printf 'would add %s (%s), alerting the captain now\n' "$id" "$title"

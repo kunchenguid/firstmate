@@ -58,6 +58,9 @@ case "$verb" in
     name=$3
     body=$4
     due=$5
+    if [ -n "${FAKE_REMINDERS_COMPLETE_BEFORE_UPSERT:-}" ]; then
+      awk -F'\t' -v OFS='\t' -v p="$prefix" 'BEGIN { n = length(p) } $1 == "0" && substr($3, 1, n) == p { $1 = "1" } { print }' "$store" > "$store.tmp" && mv "$store.tmp" "$store"
+    fi
     exists=0
     if awk -F'\t' -v p="$prefix" 'BEGIN { n = length(p) }
       $1 == "0" && substr($3, 1, n) == p { found = 1 } END { exit !found }' "$store"; then
@@ -291,6 +294,13 @@ case "$(row_for call-d)" in
 esac
 OUT=$(run sync --notify call-d 2>&1)
 assert_not_contains "$OUT" "alerted the captain" "a rerun does not re-alert a call already projected"
+OUT=$(FAKE_REMINDERS_COMPLETE_BEFORE_UPSERT=1 run sync --notify call-d 2>&1)
+ACTIVE_CALL_D=$(row_for call-d | grep '^0' || true)
+assert_contains "$OUT" "alerted the captain" "a named call completed after listing still alerts its replacement"
+case "$ACTIVE_CALL_D" in
+  *$'\t'1) pass "a replacement created after a stale list snapshot keeps its due time" ;;
+  *) fail "the replacement lost its due time: $(row_for call-d)" ;;
+esac
 
 OUT=$(run sync --notify not-a-real-task 2>&1)
 assert_contains "$OUT" "nothing to alert for not-a-real-task" \
@@ -344,6 +354,8 @@ RC=$?
 ELAPSED=$(( $(date +%s) - START ))
 [ "$ELAPSED" -lt 10 ] || fail "a wedged Reminders step held the caller for ${ELAPSED}s"
 [ "$RC" -ne 0 ] || fail "a wedged Reminders step must be reported as a failure"
+[ ! -e "$HOME_DIR/state/.captain-reminders.lock" ] && [ ! -L "$HOME_DIR/state/.captain-reminders.lock" ] \
+  || fail "an unwrapped session-start-style timeout left the projection lock held"
 [ "$(grep -c '^list$' "$TIMEOUT_LOG")" = 1 ] || fail "the deadline test did not list once: $(cat "$TIMEOUT_LOG")"
 [ "$(grep -c '^upsert$' "$TIMEOUT_LOG")" = 1 ] || fail "the whole deadline allowed repeated wedged upserts: $(cat "$TIMEOUT_LOG")"
 assert_not_contains "$(cat "$TIMEOUT_LOG")" "complete" "no further Reminders calls run after the deadline"
