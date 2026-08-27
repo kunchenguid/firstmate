@@ -186,6 +186,8 @@ test_remote_worker_directory_remains_remote() {
   repo=$home/projects/titan
   clone_origin "$origin" "$repo"
   remote_path=$home/remote-host-only/titan
+  mkdir -p "$(dirname "$remote_path")"
+  clone_origin "$origin" "$remote_path"
   qualified=remote-mac:$remote_path
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight
@@ -206,13 +208,15 @@ EOF
   crew_state=$(make_crew_state_fake "$home")
   out=$(FM_CREW_STATE_BIN="$crew_state" run_triage "$home" remote-worker "$repo" \
     "Upstash quota exhaustion")
-  printf '%s' "$out" | jq -e --arg qualified "$qualified" '
+  printf '%s' "$out" | jq -e --arg qualified "$qualified" --arg remote_path "$remote_path" '
     (.workers.registry_entries[] | select(.id == "remote-worker")
       | .working_directory == $qualified
         and .remote_host == "remote-mac"
         and .active == true
         and .activity_matches_incident == true
-        and .wrong_worktree == false)
+        and .repository_match == null
+        and .wrong_worktree == null)
+      and ([.repository.copies[].path] | index($remote_path)) == null
       and ([.workers.active[].id] | index("remote-worker")) != null
       and ([.workers.stale_registry_entries[].id] | index("remote-worker")) == null
       and ([.workers.wrong_worktree[].id] | index("remote-worker")) == null
@@ -251,13 +255,25 @@ SH
 }
 
 test_external_quota_no_code_lifecycle_and_status() {
-  local home origin repo out view bearings snapshot bypass_evidence
+  local home origin repo out view bearings snapshot bypass_evidence invalid_kind invalid_request
   home=$(make_home quota-lifecycle)
   origin=$(make_origin quota-lifecycle)
   repo=$home/projects/titan
   clone_origin "$origin" "$repo"
   bypass_evidence=$home/quota-with-approval-bypass.json
   jq '.approval.required=false' "$QUOTA_FIXTURE" > "$bypass_evidence"
+  invalid_kind=$home/quota-with-empty-approval-kind.json
+  invalid_request=$home/quota-with-invalid-approval-request.json
+  jq '.approval.kind=""' "$QUOTA_FIXTURE" > "$invalid_kind"
+  jq '.approval.request=42' "$QUOTA_FIXTURE" > "$invalid_request"
+  if run_triage "$home" invalid-approval-kind "$repo" \
+    "Titan companion cannot read state" --evidence "$invalid_kind" >/dev/null 2>&1; then
+    fail "empty approval kind was accepted"
+  fi
+  if run_triage "$home" invalid-approval-request "$repo" \
+    "Titan companion cannot read state" --evidence "$invalid_request" >/dev/null 2>&1; then
+    fail "non-string approval request was accepted"
+  fi
   out=$(run_triage "$home" quota-lifecycle "$repo" \
     "Titan companion cannot read state" --evidence "$bypass_evidence")
   printf '%s' "$out" | jq -e '
@@ -306,6 +322,28 @@ test_external_quota_no_code_lifecycle_and_status() {
   FM_HOME="$home" FM_INCIDENT_NOW=2026-08-26T20:06:00Z \
     "$INCIDENT" repair --incident quota-lifecycle \
     --note "Upstash plan upgraded and companion re-paired." >/dev/null
+  cat > "$home/failed-verification.json" <<'EOF'
+{
+  "verification": {
+    "runtime_path_ok": false,
+    "checks": [
+      {"name": "user status path", "status": "fail", "evidence": "state unavailable"}
+    ]
+  }
+}
+EOF
+  if FM_HOME="$home" FM_INCIDENT_NOW=2026-08-26T20:06:30Z \
+    "$INCIDENT" verify --incident quota-lifecycle \
+    --evidence "$home/failed-verification.json" >/dev/null 2>&1; then
+    fail "failed runtime verification was reported complete"
+  fi
+  bearings=$(FM_HOME="$home" "$BEARINGS" --json)
+  printf '%s' "$bearings" | jq -e '
+    .runtime_incidents[]
+    | select(.id == "quota-lifecycle")
+    | .verification == "current"
+      and .flow == "triage:complete → diagnosis:complete → approval:complete → repair:complete → verification:current"
+  ' >/dev/null || fail "Bearings hid the failed verification lifecycle: $bearings"
   cat > "$home/verified.json" <<'EOF'
 {
   "verification": {
@@ -357,7 +395,8 @@ EOF
     | select(.id == "quota-lifecycle")
     | .phase == "verification"
       and .code_change_required == "no"
-      and .flow == "triage → diagnosis → approval → repair → verification"
+      and .verification == "complete"
+      and .flow == "triage:complete → diagnosis:complete → approval:complete → repair:complete → verification:complete"
   ' >/dev/null || fail "bearings omitted the runtime-incident fast path: $bearings"
   pass "external quota failure requests one approval, records the narrow repair, and verifies the full path"
 }

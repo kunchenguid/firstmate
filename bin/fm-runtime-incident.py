@@ -336,6 +336,8 @@ def registered_paths(state: Path) -> tuple[set[Path], int]:
     meta_paths = sorted(state.glob("*.meta"))
     for meta in meta_paths[:MAX_COPIES]:
         values = meta_values(meta)
+        if values.get("remote_host"):
+            continue
         for key in ("worktree", "project", "home"):
             value = values.get(key)
             if value and value.startswith("/"):
@@ -666,22 +668,29 @@ def collect_workers(
         objective_terms = terms(objective + " " + (current_state["detail"] or ""))
         match_value: bool | None
         match_reason: str
-        wrong_worktree = False
+        repository_match: bool | None = None
+        wrong_worktree: bool | None = None
         if remote_host and (not cwd_value or not cwd_value.startswith("/")):
+            repository_match = False
             match_value = False
             match_reason = "registered remote working directory is absent"
             wrong_worktree = True
         elif not remote_host and (not cwd or not cwd_exists):
+            repository_match = False
             match_value = False
             match_reason = "registered working directory is absent"
             wrong_worktree = True
         elif not remote_host and (
             not cwd_record or cwd_record["origin"] != repo_info["canonical_remote"]
         ):
+            repository_match = False
             match_value = False
             match_reason = "worker is operating in a different repository"
             wrong_worktree = True
         elif incident_terms and objective_terms:
+            if not remote_host:
+                repository_match = True
+                wrong_worktree = False
             overlap = sorted(incident_terms & objective_terms)
             match_value = True if overlap else None
             match_reason = (
@@ -690,12 +699,16 @@ def collect_workers(
                 else "no lexical overlap; semantic relevance is unknown"
             )
         else:
+            if not remote_host:
+                repository_match = True
+                wrong_worktree = False
             match_value = None
             match_reason = "insufficient objective terms to prove relevance"
 
         registered_copy = copy_by_path.get(str(cwd)) if cwd and not remote_host else None
         stale_path = bool(registered_copy and registered_copy["stale_remote"])
         if stale_path:
+            repository_match = False
             wrong_worktree = True
             match_value = False
             match_reason = "registered path is a superseded repository copy"
@@ -709,6 +722,7 @@ def collect_workers(
             "active": active_value,
             "activity_matches_incident": match_value,
             "match_reason": match_reason,
+            "repository_match": repository_match,
             "wrong_worktree": wrong_worktree,
             "authoritative_worktree": authoritative_path,
             "backend": values.get("backend", "tmux"),
@@ -729,7 +743,7 @@ def collect_workers(
             stale.append({"id": task_id, "path": cwd_value or "", "reason": "path is absent"})
         elif stale_path:
             stale.append({"id": task_id, "path": str(cwd), "reason": "path is superseded by newer origin/main evidence"})
-        if is_active and wrong_worktree:
+        if is_active and wrong_worktree is True:
             wrong.append({
                 "id": task_id,
                 "path": entry["working_directory"] or "",
@@ -911,8 +925,14 @@ def classify(evidence: dict[str, Any], repo_info: dict[str, Any]) -> dict[str, A
     default_kind, default_request = default_approvals.get(category, ("none", "No operational approval is currently identified."))
     operational_repair_ready = code_required == "no" and category != "unknown"
     approval_required = operational_repair_ready
-    approval_kind = compact(approval_input.get("kind", default_kind), 80)
-    approval_request = compact(approval_input.get("request", default_request), 300)
+    approval_kind_input = approval_input.get("kind", default_kind)
+    approval_request_input = approval_input.get("request", default_request)
+    if not isinstance(approval_kind_input, str) or not approval_kind_input.strip():
+        raise IncidentError("approval.kind must be a non-empty string")
+    if not isinstance(approval_request_input, str) or not approval_request_input.strip():
+        raise IncidentError("approval.request must be a non-empty string")
+    approval_kind = compact(approval_kind_input, 80)
+    approval_request = compact(approval_request_input, 300)
     if not operational_repair_ready:
         approval_required = False
         approval_kind = "none"
@@ -1243,6 +1263,8 @@ def validate_compact_status(record: dict[str, Any]) -> None:
     compact_status_bool(approval["required"], incident_id, "approval.required")
     for field in ("kind", "request", "status"):
         compact_status_string(approval[field], incident_id, f"approval.{field}")
+        if not approval[field].strip():
+            raise compact_status_error(incident_id, f"approval.{field}")
 
     inventory = compact_status_mapping(
         record["inventory"],
@@ -1454,6 +1476,15 @@ def approve(args: argparse.Namespace) -> int:
 
     def transition(record: dict[str, Any]) -> None:
         approval = record["approval"]
+        approval_kind = approval.get("kind")
+        approval_request = approval.get("request")
+        if (
+            not isinstance(approval_kind, str)
+            or not approval_kind.strip()
+            or not isinstance(approval_request, str)
+            or not approval_request.strip()
+        ):
+            raise IncidentError("incident has no valid operational approval request")
         if (
             record.get("phase") != "approval"
             or not approval.get("required")
@@ -1462,8 +1493,8 @@ def approve(args: argparse.Namespace) -> int:
             or record.get("verification", {}).get("status") != "pending"
         ):
             raise IncidentError("incident has no pending operational approval")
-        if args.kind != approval.get("kind"):
-            raise IncidentError(f"approval kind must exactly match {approval.get('kind')}")
+        if args.kind != approval_kind:
+            raise IncidentError(f"approval kind must exactly match {approval_kind}")
         approval.update({"status": "approved", "note": compact(args.note, 300), "approved_at": now})
         record["phase"] = "repair"
         record["updated_at"] = now

@@ -115,7 +115,7 @@ Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
   runtime_incidents{id,phase,classification,code_change_required,approval,
-                    safest_next_action,flow},
+                    safest_next_action,flow,verification},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
@@ -457,7 +457,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
            code_change_required:.diagnosis.code_change_required,
            approval:.approval.status,
            safest_next_action:(.safest_next_action | trunc(160)),
-           flow:"triage → diagnosis → approval → repair → verification"} ],
+           flow:([.flow[] | (.name + ":" + .status)] | join(" → ")),
+           verification:([.flow[] | select(.name == "verification") | .status][0] // "unknown")} ],
       in_flight: (if $all_in_flight == 1 then $in_flight_all else $in_flight_all[:$in_flight_n] end),
       secondmates: (if $all_secondmates == 1 then $secondmates_all else $secondmates_all[:$secondmates_n] end),
       secondmate_reconcile: [ (.secondmate_current.records // [])[]
