@@ -134,8 +134,8 @@ test_ship_grants_state_data_and_out_of_tree_git_dir() {
   roots=$(granted_roots "$LAUNCH_LOG")
   printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/state" \
     || fail "the status/lock directory was not granted: $roots"
-  printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/data" \
-    || fail "the report/backlog directory was not granted: $roots"
+  printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/data/$CASE_ID" \
+    || fail "the task's own report directory was not granted: $roots"
   printf '%s\n' "$roots" | grep -qxF "$gitdir" \
     || fail "the linked worktree's git common dir was not granted: $roots"
   [ "$(count_roots "$LAUNCH_LOG")" = 3 ] \
@@ -147,6 +147,10 @@ test_ship_grants_state_data_and_out_of_tree_git_dir() {
     && fail "the firstmate home itself must never be granted: $roots"
   printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/config" \
     && fail "config/ must never be granted: $roots"
+  # The report grant is the task's OWN data/<id>/, never the shared data/ root, so
+  # a mistaken command cannot reach another task's report or the shared backlog.
+  printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/data" \
+    && fail "the shared data/ root must never be granted; only the task's own data/<id>/: $roots"
   grep -q '__CODEXADDDIRS__' "$LAUNCH_LOG" \
     && fail "the placeholder leaked into the launch command"
 
@@ -164,11 +168,13 @@ test_scout_grant_matches_ship() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$CASE_ID" "$PROJ_DIR" codex --scout) || fail "codex scout spawn failed: $out"
   roots=$(granted_roots "$LAUNCH_LOG")
-  printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/data" \
-    || fail "a scout cannot deliver data/<id>/report.md without the data grant: $roots"
+  printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/data/$CASE_ID" \
+    || fail "a scout cannot deliver data/<id>/report.md without its own data/<id>/ grant: $roots"
   printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/state" \
     || fail "a scout cannot append status or pass the completion gate without the state grant: $roots"
-  pass "codex scout: the report, status, and completion-gate paths are all granted"
+  printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/data" \
+    && fail "a scout must not receive the shared data/ root, only its own data/<id>/: $roots"
+  pass "codex scout: the report, status, and completion-gate paths are all granted, and the shared data/ root is not"
 }
 
 test_secondmate_grants_only_the_parent_status_directory() {

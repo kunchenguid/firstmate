@@ -70,20 +70,24 @@ A root that does not exist is tolerated rather than fatal, and does not disturb 
 ## Why the grant names directories
 
 A root may be a single **file**: granting `data/backlog.md` made exactly that file writable while its sibling `data/captain.md` stayed denied.
-Directory roots are nonetheless what firstmate grants, and the reason is firstmate's own lock designs, not a codex limitation:
+The report grant is nonetheless a directory - the task's own `data/<id>/` - and `state/` is a directory too, for firstmate's own reasons, not a codex limitation:
 
-- `fm_lock_owner_dir` (`bin/fm-wake-lib.sh`) creates its owner directory with `mktemp -d "<lockpath>.owner.XXXXXX"`, so the path cannot be named ahead of time. The captain-hold completion gate takes that lock in `state/`.
-- `tasks-axi` takes `data/backlog.md.lock` beside the backlog, so a file-only grant of `backlog.md` fails any backlog mutation:
+- `fm_lock_owner_dir` (`bin/fm-wake-lib.sh`) creates its owner directory with `mktemp -d "<lockpath>.owner.XXXXXX"`, so the path cannot be named ahead of time. The captain-hold completion gate takes that lock in `state/`, which is why `state/` has to be the whole directory rather than the `<id>.status` file alone.
+- The scout report at `data/<id>/report.md` does not exist yet at launch, while the task's `data/<id>/` directory already does (it holds `brief.md`), so the report grant names that directory.
+
+The report is scoped to the task's own `data/<id>/`, **not** the shared `data/` root, on purpose.
+Backlog mutation is the parent firstmate's job and is never part of a crewmate's or scout's contract, so granting the whole of `data/` only exposed every other task's report and the shared `data/backlog.md` to a mistaken command for no contract reason.
+Confirming that a file-only `backlog.md` grant would in any case fail a backlog mutation, had one been in the contract:
 
 ```
 $ codex sandbox ... -c "sandbox_workspace_write.writable_roots=[\"$FMH/data/backlog.md\"]" -- tasks-axi hold ...
 error: "EPERM: operation not permitted, open '.../data/backlog.md.lock'"
 ```
 
-So the grant is `state/`, `data/`, and the out-of-tree git common directory - never `$FM_HOME` itself, which keeps `.env`, `config/`, `projects/`, and every other home denied.
+So the grant is `state/`, the task's own `data/<id>/`, and the out-of-tree git common directory - never the shared `data/` root and never `$FM_HOME` itself, which keeps `.env`, `config/`, `projects/`, and every other home denied.
 
 The captain-hold completion gate needs only the `state/` grant: `fm-captain-hold.sh complete` and `verify` both succeeded with `state/` alone, because their `tasks-axi` reads take no backlog lock.
-The `data/` grant is what a scout report and any crewmate-side backlog mutation need.
+The `data/<id>/` grant is what a scout report needs.
 
 ## What this grant does not change
 
@@ -126,7 +130,7 @@ Cursor's sandbox therefore does not confine writes to the workspace the way code
 
 | Claim | Where it is enforced |
 |---|---|
-| The composed launch grants exactly `state/`, `data/`, and the out-of-tree git common dir for a crewmate or scout, and only the parent `state/` for a secondmate | `tests/fm-codex-sandbox-grant.test.sh` (portable, no codex) |
+| The composed launch grants exactly `state/`, the task's own `data/<id>/`, and the out-of-tree git common dir for a crewmate or scout, and only the parent `state/` for a secondmate; the shared `data/` root is never granted | `tests/fm-codex-sandbox-grant.test.sh` (portable, no codex) |
 | No other adapter's launch acquired a grant | `tests/fm-codex-sandbox-grant.test.sh` |
 | The granted set is sufficient for a real status append, report, captain-hold completion gate, and commit, and each root is load-bearing | `tests/fm-codex-sandbox-grant.test.sh`, by making everything outside the emitted roots unwritable |
 | codex still denies those paths without the grant and allows exactly them with it | `tests/fm-codex-sandbox-grant-live-e2e.test.sh` (opt-in, real binary) |
@@ -136,5 +140,5 @@ Not proven, stated plainly:
 
 - The **interactive TUI** path was not driven end to end. What is proven is that the interactive parser accepts the exact repeated flag, and that the same flag reaches the sandbox policy in `codex exec`. Both surfaces share one top-level flag parser, but no test drives a real interactive pane through the three writes.
 - A codex worker **completing a no-mistakes ship** is not covered, and by the measurements above cannot work: the pipeline needs network and `~/.no-mistakes`.
-- `bin/fm-captain-hold.sh` **registering** a new captain hold from a crewmate is covered only by the `data/` grant being present; the portable suite exercises `complete` and `verify`, not `hold`.
+- `bin/fm-captain-hold.sh` **registering** a new captain hold from a crewmate would take `data/backlog.md.lock` and so is not served by the task-scoped `data/<id>/` grant; this is deliberate, because registering a hold is the parent firstmate's job and no crewmate or scout contract does it. The portable suite exercises `complete` and `verify`, which need only `state/`.
 - The recursion `fm_lock_try_acquire` performs when `fm_lock_try_create` fails for a **permanent** reason (the observed `.lock.steal.steal...` until `File name too long`) is not fixed here. Removing the denial removes the trigger seen on 2026-08-26, but any other permanent write failure - a full or read-only filesystem - would still recurse.

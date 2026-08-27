@@ -1109,26 +1109,33 @@ pi_supports_tui_mode() {
 # to finish its brief (observed 2026-08-26: a codex scout produced a complete
 # report it could not deliver, and fm-captain-hold.sh's lock retry recursed on the
 # denial until the filename was too long):
-#   state/  the status appends supervision reads, plus <id>.meta and the
-#           mktemp-named lock owner directories fm-captain-hold.sh's completion
-#           gate creates there (fm_lock_owner_dir in bin/fm-wake-lib.sh).
-#   data/   the scout report at data/<id>/report.md, plus backlog.md and the
-#           backlog.md.lock tasks-axi takes beside it for any backlog mutation.
+#   state/      the status appends supervision reads, plus <id>.meta and the
+#               mktemp-named lock owner directories fm-captain-hold.sh's completion
+#               gate creates there (fm_lock_owner_dir in bin/fm-wake-lib.sh).
+#   data/<id>/  the scout report at data/<id>/report.md. This is the task's OWN
+#               data subdirectory, NOT the shared data/ root: the report is the
+#               only data write the contract makes (backlog mutation is the parent
+#               firstmate's job, never a crewmate's), so scoping the grant to the
+#               one task's directory keeps every OTHER task's report and the shared
+#               backlog out of a mistaken command's reach.
 #   the task worktree's git COMMON dir, which for a pooled worktree lives inside
-#           the primary checkout: without it `git add` is denied, so a codex ship
-#           task cannot stage or commit anything at all.
-# Two firstmate lock designs, not codex, are what force DIRECTORY roots here:
-# --add-dir accepts a single file, but a mktemp-named owner directory and
-# tasks-axi's sibling backlog.md.lock cannot be named ahead of time. So the grant
-# is those two directories and that one git directory - never $FM_HOME itself,
-# which keeps .env, config/, projects/, and every other home denied.
+#               the primary checkout: without it `git add` is denied, so a codex
+#               ship task cannot stage or commit anything at all.
+# state/ has to be a whole DIRECTORY root, not a file root, because the completion
+# gate's lock owner directory is mktemp-named (state/.meta-<id>.lock.owner.XXXXXX)
+# and cannot be named ahead of time, so the worker needs write on state/ itself.
+# data/<id>/ is granted as a directory too, because report.md does not exist yet at
+# launch while the task's data/<id>/ dir (holding brief.md) already does. The grant
+# is that directory, the task's own data/<id>/, and that one git directory - never
+# $FM_HOME itself, which keeps .env, config/, projects/, and every other home denied.
 # --add-dir is used rather than -c sandbox_workspace_write.writable_roots=[...]
 # because it is additive: the -c form REPLACES an operator's own configured roots.
-# The harness-adapters skill owns what this leaves a codex worker able to finish
-# (network stays denied on every root), and docs/verification/codex-sandbox.md
-# owns the measurements and the command that refreshes them.
-codex_writable_roots() {  # <kind> <worktree>; prints one absolute root per line
-  local kind=$1 worktree=$2 wt_real gitdir
+# The brief's own rule against writing outside the worktree stays stricter than
+# this sandbox, so the grant is a backstop, not a permission. The harness-adapters
+# skill owns what this leaves a codex worker able to finish (network stays denied
+# on every root), and docs/verification/codex-sandbox.md owns the measurements.
+codex_writable_roots() {  # <kind> <worktree> <id>; prints one absolute root per line
+  local kind=$1 worktree=$2 id=$3 wt_real gitdir
   printf '%s\n' "$STATE"
   # A secondmate's own home IS its workspace, so its data/, state/, projects/ and
   # crewmate spawns are already inside the sandbox. The one path it needs outside
@@ -1136,7 +1143,7 @@ codex_writable_roots() {  # <kind> <worktree>; prints one absolute root per line
   # how every routed answer returns (bin/fm-brief.sh's charter). It commits
   # nothing in its home, so it gets no data or git-directory grant.
   [ "$kind" != secondmate ] || return 0
-  printf '%s\n' "$DATA"
+  printf '%s\n' "$DATA/$id"
   wt_real=$(cd "$worktree" 2>/dev/null && pwd -P) || return 0
   gitdir=$(git -C "$worktree" rev-parse --git-common-dir 2>/dev/null) || return 0
   [ -n "$gitdir" ] || return 0
@@ -1153,12 +1160,12 @@ codex_writable_roots() {  # <kind> <worktree>; prints one absolute root per line
   printf '%s\n' "$gitdir"
 }
 
-codex_add_dir_flags() {  # <kind> <worktree>; prints the shell-quoted --add-dir flags
-  local kind=$1 worktree=$2 root out=''
+codex_add_dir_flags() {  # <kind> <worktree> <id>; prints the shell-quoted --add-dir flags
+  local kind=$1 worktree=$2 id=$3 root out=''
   while IFS= read -r root; do
     [ -n "$root" ] || continue
     out="$out--add-dir $(shell_quote "$root") "
-  done < <(codex_writable_roots "$kind" "$worktree")
+  done < <(codex_writable_roots "$kind" "$worktree" "$id")
   printf '%s' "$out"
 }
 
@@ -2803,7 +2810,7 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
-  codex) LAUNCH=${LAUNCH//__CODEXADDDIRS__/"$(codex_add_dir_flags "$KIND" "$WT")"} ;;
+  codex) LAUNCH=${LAUNCH//__CODEXADDDIRS__/"$(codex_add_dir_flags "$KIND" "$WT" "$ID")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
