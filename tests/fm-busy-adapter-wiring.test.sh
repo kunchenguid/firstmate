@@ -396,6 +396,33 @@ test_claude_hooks_spawn_refuses_unmergeable_settings_untouched() {
   pass "claude spawn refuses an unmergeable committed settings file loudly, leaving its bytes untouched and no armed busy records"
 }
 
+test_claude_hooks_spawn_retires_busy_gen_when_install_fails_after_arm() {
+  local rec id=busy-cl-5 out rc state
+  rec=$(make_spawn_case claude-install-failure claude "$id")
+  read_case_record "$rec"
+  state="$HOME_DIR/state"
+  # A corrupt/old-schema ownership record left behind from a superseded
+  # incarnation cannot prove which hooks are firstmate's own, so install
+  # refuses it - but the settings file itself is absent, so the pre-arm
+  # mergeability probe (which only checks the settings file's JSON shape)
+  # passes and the busy contract is armed before install's refusal is
+  # discovered, exercising the post-arm failure path rather than the
+  # pre-arm refusal test_claude_hooks_spawn_refuses_unmergeable_settings_untouched
+  # already covers.
+  printf '%s\n' '{"version":1,"entries":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply old-gen"}]}]}}' \
+    > "$state/$id.claude-settings-owned"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "claude spawn must refuse when the settings install fails after the busy contract is armed: $out"
+  assert_contains "$out" "could not arm claude busy hooks" \
+    "the refusal must name the post-arm install failure"
+  assert_absent "$state/$id.busy-gen" \
+    "a spawn refused after arming must retire the busy generation it minted, not leave it armed"
+  assert_absent "$state/$id.busy-state" \
+    "a spawn refused after arming must not leave a seeded busy-state record behind"
+  pass "claude spawn retires the busy generation it armed when the claude settings install fails afterward"
+}
+
 test_codex_unverified_until_a_semantic_source_exists() {
   local rec id=busy-cx-1 out state
   rec=$(make_spawn_case codex-unverified codex "$id")
@@ -437,6 +464,7 @@ test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
 test_claude_hooks_merge_preserves_committed_project_settings
 test_claude_hooks_spawn_refuses_unmergeable_settings_untouched
+test_claude_hooks_spawn_retires_busy_gen_when_install_fails_after_arm
 test_codex_unverified_until_a_semantic_source_exists
 
 echo "all fm-busy-adapter-wiring tests passed"

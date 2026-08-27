@@ -515,6 +515,68 @@ test_claude_settings_clear_strips_own_hooks_and_diff_predicate() {
   pass "fm-control-lib: claude settings clear strips only recorded entries and retires the record, and the record-driven diff predicate refuses everything it cannot account for"
 }
 
+test_claude_settings_clear_propagates_record_removal_failure() {
+  local dir=$TMP_ROOT/claude-settings-clear-rm-failure fakebin real_rm
+  mkdir -p "$dir"
+  fakebin=$(fm_fakebin "$dir")
+  real_rm=$(command -v rm)
+  cat > "$fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ -n "${FM_FAKE_RM_FAIL_PATH:-}" ] && [ "$arg" = "$FM_FAKE_RM_FAIL_PATH" ]; then
+    exit 1
+  fi
+done
+exec "$FM_REAL_RM" "$@"
+SH
+  chmod +x "$fakebin/rm"
+
+  # Branch 1: the settings file is already gone, so clear only has the record
+  # left to retire; a failed rm on it must fail the caller, not swallow the
+  # failure and report a clean retirement that never happened.
+  printf '%s\n' '{"version":1,"commands":{"Stop":["fm-busy-event.sh apply gen1"]}}' \
+    > "$dir/absent-record"
+  ( PATH="$fakebin:$PATH" FM_REAL_RM="$real_rm" \
+    FM_FAKE_RM_FAIL_PATH="$dir/absent-record" \
+    fm_control_claude_settings_clear "$dir/absent-settings.json" "$dir/absent-record" ) \
+    && fail "clear must fail when it cannot retire an orphaned record's rm"
+  [ -e "$dir/absent-record" ] \
+    || fail "the record whose rm was blocked should still be on disk"
+
+  # Branch 2: firstmate created the file and stripping its own entries empties
+  # it, so both the file and the record are removed; a failed rm on the
+  # record (after the file rm already succeeded) must still fail the caller.
+  fm_control_claude_settings_install "$dir/created.json" \
+    '{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen2"}]}]}' \
+    "$dir/created-record" \
+    || fail "install fixture for branch 2 must succeed"
+  ( PATH="$fakebin:$PATH" FM_REAL_RM="$real_rm" \
+    FM_FAKE_RM_FAIL_PATH="$dir/created-record" \
+    fm_control_claude_settings_clear "$dir/created.json" "$dir/created-record" ) \
+    && fail "clear must fail when it cannot retire the record of a fully-emptied firstmate-created file"
+  [ ! -e "$dir/created.json" ] \
+    || fail "the firstmate-created file itself should still be removed even though the record rm failed"
+  [ -e "$dir/created-record" ] \
+    || fail "the record whose rm was blocked should still be on disk"
+
+  # Branch 3: the file holds none of the recorded entries, so clear skips the
+  # rewrite and only retires the record; a failed rm on it must still fail
+  # the caller instead of reporting success.
+  printf '%s\n' '{"permissions":{"allow":["Bash(npm test)"]}}' > "$dir/untouched.json"
+  printf '%s\n' '{"version":1,"commands":{"Stop":["fm-busy-event.sh apply gone-gen"]}}' \
+    > "$dir/untouched-record"
+  ( PATH="$fakebin:$PATH" FM_REAL_RM="$real_rm" \
+    FM_FAKE_RM_FAIL_PATH="$dir/untouched-record" \
+    fm_control_claude_settings_clear "$dir/untouched.json" "$dir/untouched-record" ) \
+    && fail "clear must fail when it cannot retire a record whose entries were never present in the file"
+  [ "$(cat "$dir/untouched.json")" = '{"permissions":{"allow":["Bash(npm test)"]}}' ] \
+    || fail "the untouched file's bytes must stay untouched regardless of the record rm outcome"
+  [ -e "$dir/untouched-record" ] \
+    || fail "the record whose rm was blocked should still be on disk"
+
+  pass "fm-control-lib: claude settings clear propagates a failed record-removal rm as a caller failure on every retirement path"
+}
+
 # The two real-world ways the previous whole-entry-equality design lost
 # ownership silently and permanently, now pinned as regressions:
 # 1. claude itself rewrites .claude/settings.local.json (a mid-task
@@ -1182,6 +1244,7 @@ test_unverified_harness_is_refused
 test_harness_family_resolution
 test_claude_settings_install_preserves_project_keys_and_replaces_own_hooks
 test_claude_settings_clear_strips_own_hooks_and_diff_predicate
+test_claude_settings_clear_propagates_record_removal_failure
 test_claude_settings_ownership_survives_entry_rewrite_and_crash_window
 test_prefixed_recorded_harness_reaches_each_control_verb
 test_backend_key_capability_matrix
