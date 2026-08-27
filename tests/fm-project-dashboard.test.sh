@@ -65,7 +65,7 @@ write_fleet_fixture() {  # <home>
          hints:{open_decisions:[]},pr:{url:null},backlog:null}
       ],
       secondmate_current:{records:[{
-        id:"delta-mate",home:($home + "/secondmates/delta"),remote:false,
+        id:"delta-mate",home:($home + "/secondmates/delta"),remote:false,projects:["delta"],
         current:{state:"active_child_work",reason:null},
         active_children:[{id:"delta-child",title:"Delta rollout",repo:"delta",state:"working",doing:"Roll out Delta"}],
         decisions_open:[],holds:[],queued:[],
@@ -944,6 +944,110 @@ test_next_step_names_the_item_that_set_the_status() {
   pass "the next step names the unattributable item that set the status"
 }
 
+test_unattributable_deferred_and_blocked_rows_do_not_paint_cards_red() {
+  local home epoch out
+  home=$(make_home unattributable-rank-kind)
+  write_fleet_fixture "$home"
+  jq '
+    .backlog.records = []
+    | .tasks |= map(select(.kind == "secondmate") | .secondmate_projects = ["delta","gamma"])
+    | .secondmate_current.records |= map(
+        if .id == "delta-mate" then
+          .projects = ["delta","gamma"]
+          | .current = {state:"no_active_work",reason:null}
+          | .active_children = []
+          | .landed = []
+          | .holds = []
+          | .queued = []
+          | .decisions_open = [
+              {id:"h1",key:"h1",verb:"captain-hold",summary:"Deferred rollout",
+               reason:"revisit next quarter",repo:null,deferred_marker:true,source:"backlog"},
+              {id:"b1",key:"b1",verb:"blocked",summary:"Blocked on vendor",repo:null,source:"status"}]
+        else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "unattributable-kind snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .summary.needs_attention == 0
+      and ([.projects[] | select(.name == "delta" or .name == "gamma")]
+           | all(.status == "idle_queued"
+                 and .next_step == "No work queued"
+                 and (.unattributed | map(.kind)) == ["deferred_decision"]))
+  ' >/dev/null || fail "a deferred or blocked unattributable row painted the card red: $out"
+
+  jq '
+    .secondmate_current.records |= map(
+      if .id == "delta-mate" then
+        .decisions_open = [{id:"d1",key:"d1",verb:"needs-decision",summary:"Approve rollout",
+          reason:null,repo:null,source:"status"}]
+      else . end)
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  out=$(run_snapshot "$home" "$epoch") || fail "live-decision control snapshot failed"
+  printf '%s' "$out" | jq -e '
+    [.projects[] | select(.name == "delta" or .name == "gamma")]
+    | all(.status == "needs_attention" and (.unattributed | map(.kind)) == ["decision"])
+  ' >/dev/null || fail "a live unattributable decision stopped raising attention: $out"
+  pass "an unattributable deferred or blocked row is disclosed without painting the card red"
+}
+
+test_held_in_flight_backlog_row_reaches_the_card_without_task_metadata() {
+  local home epoch out
+  home=$(make_home held-in-flight)
+  write_fleet_fixture "$home"
+  jq '
+    .tasks = []
+    | .backlog.records = [
+        {structured:true,id:"a-held",repo:"alpha",title:"Ship the exporter",state:"in_flight",
+         current_role:"held",hold_reason:"Waiting on the vendor patch",hold_kind:"external",
+         captain_actionable:false,unresolved_blocker_ids:[]}]
+    | .secondmate_current.records = []
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "held in-flight snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .projects[] | select(.name == "alpha")
+    | .status == "waiting"
+      and (.waiting | map(.id)) == ["a-held"]
+      and .next_step == "Waiting on the vendor patch"
+  ' >/dev/null || fail "a held in-flight backlog row reached no card: $out"
+  pass "a held in-flight backlog row reaches the card without live task metadata"
+}
+
+test_invalid_main_inventory_is_disclosed() {
+  local home epoch out
+  home=$(make_home main-inventory)
+  write_fleet_fixture "$home"
+  jq '
+    .tasks = []
+    | .backlog.records = [
+        {structured:true,id:"a-orphan",repo:"alpha",title:"Orphan work",state:"in_flight",
+         current_role:"worker",captain_actionable:false,unresolved_blocker_ids:[]}]
+    | .secondmate_current.records = []
+    | .main_inventory = {valid:false,
+        reason:"in-flight backlog item has no child metadata: a-orphan",
+        orphan_in_flight:["a-orphan"],unstructured_current_count:0}
+  ' "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  epoch=$(date +%s)
+  out=$(run_snapshot "$home" "$epoch") || fail "main-inventory snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .disclosures | any(
+      .surface == "main backlog inventory is invalid: in-flight backlog item has no child metadata: a-orphan"
+      and .reveal == "inspect data/backlog.md In flight against state/*.meta")
+  ' >/dev/null || fail "an invalid main backlog inventory was never disclosed: $out"
+
+  jq '.main_inventory = {valid:true,reason:null,orphan_in_flight:[],unstructured_current_count:0}' \
+    "$home/fleet.json" > "$home/fleet.tmp"
+  mv "$home/fleet.tmp" "$home/fleet.json"
+  out=$(run_snapshot "$home" "$epoch") || fail "valid-inventory snapshot failed"
+  printf '%s' "$out" | jq -e '.disclosures == []' >/dev/null \
+    || fail "a valid main inventory still reported a problem: $out"
+  pass "an invalid main backlog inventory is disclosed board-wide"
+}
+
 extract_payload() {  # <board>
   sed -n '/<script id="project-dashboard-data" type="application\/json">/,/<\/script>/p' "$1" | sed '1d;$d'
 }
@@ -1180,6 +1284,9 @@ test_unattributable_item_escalates_only_to_its_own_kind
 test_secondmate_reaching_no_project_is_disclosed
 test_state_reaching_no_card_is_disclosed_whatever_the_clone_list
 test_next_step_names_the_item_that_set_the_status
+test_unattributable_deferred_and_blocked_rows_do_not_paint_cards_red
+test_held_in_flight_backlog_row_reaches_the_card_without_task_metadata
+test_invalid_main_inventory_is_disclosed
 test_attention_next_step_is_an_action_not_a_bare_title
 test_unattributable_secondmate_state_is_disclosed
 test_registered_secondmate_without_a_task_still_owns_its_projects

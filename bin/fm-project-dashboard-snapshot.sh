@@ -24,6 +24,9 @@
 # A main-home task whose crew state reads back as unknown is disclosed in
 # unreadable[] and raises the project to needs_attention rather than letting the
 # card read idle.
+# A held in-flight backlog row reaches the card from the backlog alone, without
+# live task metadata, the way the canonical bearings gate list reads it, and an
+# invalid main backlog inventory is disclosed board-wide.
 # A done task whose backlog row is not yet done is disclosed in finished[] with
 # the crew detail repeated verbatim. That detail is the only local record of
 # what done means for the task, so the board never infers a lifecycle stage -
@@ -245,9 +248,8 @@ jq -n \
   | ([ $fleet_data.secondmate_current.records[]? | .id ]) as $mate_record_ids
   | ([ ($fleet_data.secondmate_current.records[]?
         | . as $record
-        | (([ $fleet_data.tasks[]? | select(.id == $record.id) ][0]) // null) as $task
         | {id:$record.id,
-           projects:((($record.projects // []) + ($task.secondmate_projects // [])) | unique),
+           projects:($record.projects // []),
            activity:($task_activity[$record.id] // 0),
            record:$record}),
        ($fleet_data.tasks[]?
@@ -305,6 +307,10 @@ jq -n \
                     else ("secondmate " + $owner.id
                           + " state is unavailable and reaches no project card") end),
            reveal:"record its projects in data/secondmates.md, or label the work with a registered repo"}),
+       (if $fleet_data.main_inventory.valid == false then
+          {surface:("main backlog inventory is invalid: "
+                    + ($fleet_data.main_inventory.reason // "unknown reason")),
+           reveal:"inspect data/backlog.md In flight against state/*.meta"} else empty end),
        (if $mate_registry.input_truncated == true then
           {surface:"secondmate registry input truncated by the bounded read",
            reveal:"raise FM_SNAPSHOT_REGISTRY_LINES or FM_SNAPSHOT_REGISTRY_BYTES"} else empty end) ]) as $disclosures
@@ -315,6 +321,7 @@ jq -n \
       | ([ $fleet_data.backlog.records[]?
            | select(.structured == true and .repo == $name) ]) as $backlog
       | ([ $backlog[] | select(.state == "done") | .id ]) as $landed_ids
+      | ([ $tasks[] | select(.current_state.state == "working") | .id ]) as $working_ids
       | ([ $mate_owners[]
            | select((.projects | index($name) != null)
                     or (owner_items(.) | any(.repo == $name))) ]) as $owners
@@ -398,6 +405,11 @@ jq -n \
                  (((.unresolved_blocker_ids // []) | length) > 0 or
                   (.hold_reason != null and .captain_actionable != true)))
              | {id,title,reason:((.hold_reason | present) // (.blocked_reason | present) // "Waiting"),owner:"main"} ]
+         + [ $backlog[]
+             | . as $row
+             | select(.state == "in_flight" and .current_role == "held"
+                      and (($working_ids | index($row.id)) == null))
+             | {id,title,reason:((.hold_reason | present) // (.blocked_reason | present) // "Waiting"),owner:"main"} ]
          + [ $owners[] as $owner
              | $owner.record.holds[]?
              | select(matches_project($owner; $name))
@@ -438,8 +450,11 @@ jq -n \
       | ([ $registered_owners[] as $owner
            | ($owner.record.active_children[]? | select(unattributable($owner))
               | {kind:"active_work",id,title:(.title // .id),owner:$owner.id}),
-             ($owner.record.decisions_open[]? | select(unattributable($owner))
-              | {kind:"decision",id,title:(.summary // .id),owner:$owner.id}),
+             ($owner.record.decisions_open[]?
+              | select(.verb != "blocked")
+              | select(unattributable($owner))
+              | {kind:(if .deferred_marker == true then "deferred_decision" else "decision" end),
+                 id,title:(.summary // .id),owner:$owner.id}),
              ($owner.record.holds[]? | select(unattributable($owner))
               | {kind:"waiting",id,title:(.title // .id),owner:$owner.id}),
              ($owner.record.queued[]? | select(unattributable($owner))
