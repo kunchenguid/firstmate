@@ -148,7 +148,8 @@ render_viewport() {
     --dump-dom \
     "file://$board" > "$dom" 2>/dev/null &
   chrome_pid=$!
-  while kill -0 "$chrome_pid" 2>/dev/null && [ "$chrome_wait" -lt 100 ]; do
+  # A loaded CI runner can take more than ten seconds to start Chromium.
+  while kill -0 "$chrome_pid" 2>/dev/null && [ "$chrome_wait" -lt 300 ]; do
     if grep -Fq '</html>' "$dom" 2>/dev/null && grep -Fq 'id="fm-layout-result"' "$dom" 2>/dev/null; then
       break
     fi
