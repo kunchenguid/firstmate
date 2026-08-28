@@ -28,6 +28,27 @@ PF_TEST_NOW=1787539200
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
 
+# Fixture timestamps are derived from the moment the suite starts, never written
+# as literal dates. A literal is a time bomb: the seeded thread window silently
+# flips from open to expired the moment that date passes, and every test that
+# only wants a reachable thread starts failing on a change it has nothing to do
+# with. Deriving them keeps each fixture's meaning ("received a week ago, the
+# public reply window is still comfortably open") true on every future run.
+FIXTURE_EPOCH=$(date -u +%s)
+FIXTURE_RECEIVED_EPOCH=$((FIXTURE_EPOCH - 604800))            # a week before now
+# Well clear of the 48-hour "closing" band, so a seeded window classifies as ok.
+FIXTURE_FOLLOWUP_EXPIRES_EPOCH=$((FIXTURE_EPOCH + 604800))    # a week after now
+FIXTURE_OBLIGATION_EXPIRES_EPOCH=$((FIXTURE_EPOCH + 5184000)) # sixty days after now
+
+# fixture_rfc3339: <epoch> -> UTC RFC3339, on BSD and GNU date alike.
+fixture_rfc3339() {
+  date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ
+}
+
+FIXTURE_RECEIVED_AT=$(fixture_rfc3339 "$FIXTURE_RECEIVED_EPOCH")
+FIXTURE_FOLLOWUP_EXPIRES_AT=$(fixture_rfc3339 "$FIXTURE_FOLLOWUP_EXPIRES_EPOCH")
+FIXTURE_OBLIGATION_EXPIRES_AT=$(fixture_rfc3339 "$FIXTURE_OBLIGATION_EXPIRES_EPOCH")
+
 # A fakebin `curl` standing in for the relay. It logs every call so a test can
 # prove exactly how many public posts happened, and honours FAKE_FOLLOWUP_CODE so
 # a transport failure can be simulated.
@@ -115,12 +136,12 @@ tasks_in() {  # <home> <tasks-axi args...>
 seed_commitment() {
   local home=$1 obligation=$2 request=$3 platform=$4 work_home=$5 work_id=$6
   jq -n --arg r "$request" --arg p "$platform" \
+    --arg rcv "$FIXTURE_RECEIVED_AT" --arg exp "$FIXTURE_FOLLOWUP_EXPIRES_AT" \
     '{request_id:$r, platform:$p,
       context_binding:{version:"ctx1", value:("ctx1_" + $r)},
       public_safe_summary:"fix worker placement when two spaces share a name",
-      received_at:"2026-07-30T10:00:00Z",
-      followup_expires_at:"2026-08-06T10:00:00Z",
-      reservation_expires_at:"2026-08-06T10:00:00Z"}' > "$home/request.json"
+      received_at:$rcv, followup_expires_at:$exp,
+      reservation_expires_at:$exp}' > "$home/request.json"
   jq -n '{type:"pr-merged", project:"firstmate",
           required_deliverables:["pr_url"], completion_policy:"all-required"}' \
     > "$home/expected.json"
@@ -130,7 +151,7 @@ seed_commitment() {
 
   tasks_in "$home" public-followup add "$obligation" \
     --request-context-file "$home/request.json" --purpose promised-final \
-    --expected-final-file "$home/expected.json" --expires-at 2026-10-01T00:00:00Z >/dev/null \
+    --expected-final-file "$home/expected.json" --expires-at "$FIXTURE_OBLIGATION_EXPIRES_AT" >/dev/null \
     || fail "could not create the public commitment"
   tasks_in "$home" public-followup bind-work "$obligation" \
     --relation-file "$home/relation.json" >/dev/null \
@@ -157,12 +178,12 @@ seed_commitment() {
 seed_repro_commitment() {   # <home> <obligation> <request> <work-home> <work-id>
   local home=$1 obligation=$2 request=$3 work_home=$4 work_id=$5
   jq -n --arg r "$request" \
+    --arg rcv "$FIXTURE_RECEIVED_AT" --arg exp "$FIXTURE_FOLLOWUP_EXPIRES_AT" \
     '{request_id:$r, platform:"discord",
       context_binding:{version:"ctx1", value:("ctx1_" + $r)},
       public_safe_summary:"reproduce a Pi recovery notification loop",
-      received_at:"2026-08-21T01:12:00Z",
-      followup_expires_at:"2026-08-28T01:12:00Z",
-      reservation_expires_at:"2026-08-28T01:12:00Z"}' > "$home/request.json"
+      received_at:$rcv, followup_expires_at:$exp,
+      reservation_expires_at:$exp}' > "$home/request.json"
   jq -n '{type:"report-ready", project:"firstmate",
           required_deliverables:["report_path"], completion_policy:"all-required"}' \
     > "$home/expected.json"
@@ -171,7 +192,7 @@ seed_repro_commitment() {   # <home> <obligation> <request> <work-home> <work-id
       role:"fulfills", required:true, generation:1}' > "$home/relation.json"
   tasks_in "$home" public-followup add "$obligation" --request-context-file "$home/request.json" \
     --purpose promised-final --expected-final-file "$home/expected.json" \
-    --expires-at 2026-10-01T00:00:00Z >/dev/null || fail "add failed"
+    --expires-at "$FIXTURE_OBLIGATION_EXPIRES_AT" >/dev/null || fail "add failed"
   tasks_in "$home" public-followup bind-work "$obligation" --relation-file "$home/relation.json" >/dev/null \
     || fail "bind-work failed"
   FM_HOME="$home" FMX_NOW_OVERRIDE="$PF_TEST_NOW" bash -c \
@@ -1834,7 +1855,7 @@ test_rechain_refuses_unclaimed_existing_destination() {
   tasks_in "$home" public-followup add public-final-existing-b \
     --request-context-file "$home/request.json" --purpose promised-final \
     --expected-final-file "$home/collision-expected.json" \
-    --expires-at 2026-08-28T01:12:00Z >/dev/null || fail "could not seed destination collision"
+    --expires-at "$FIXTURE_OBLIGATION_EXPIRES_AT" >/dev/null || fail "could not seed destination collision"
 
   expect_failure "a first rechain must not adopt an unrelated existing obligation" \
     run_pf "$home" rechain public-final-existing-b --from public-final-existing-a \
@@ -2012,8 +2033,9 @@ test_expiry_escalation_uses_now_override() {
   local home out exp now_closing now_expired registry tmp
   home=$(make_home expiry-window)
   seed_repro_commitment "$home" pf-exp req-exp main work-exp
-  exp=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' '2026-08-28T01:12:00Z' +%s 2>/dev/null) \
-    || exp=$(date -u -d '2026-08-28T01:12:00Z' +%s)
+  # The pinned clock is derived from the window the fixture actually seeded, so
+  # this test cannot drift away from the seeder.
+  exp=$FIXTURE_FOLLOWUP_EXPIRES_EPOCH
   now_closing=$((exp - 3600))
   now_expired=$((exp + 60))
   out=$(FMX_NOW_OVERRIDE="$now_expired" run_pf "$home" pending)
