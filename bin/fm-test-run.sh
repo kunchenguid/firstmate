@@ -785,7 +785,7 @@ run_coverage_guard() {
       rm -rf "$tmp"
       return 1
     fi
-    printf '%s\n' "${SCRIPTS[@]}" >>"$tmp/serial_shards_raw"
+    printf '%s\n' "${SCRIPTS[@]+"${SCRIPTS[@]}"}" >>"$tmp/serial_shards_raw"
     shard=$((shard + 1))
   done
   SCRIPTS=()
@@ -1340,7 +1340,7 @@ apply_exclude_families() {
   for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
     fam=$(family_for_basename "$(basename "$s")")
     keep=1
-    for ex in "${EXCLUDE_FAMILIES[@]}"; do
+    for ex in "${EXCLUDE_FAMILIES[@]+"${EXCLUDE_FAMILIES[@]}"}"; do
       if [ "$fam" = "$ex" ]; then
         keep=0
         break
@@ -1670,7 +1670,7 @@ case "${MODE:-}" in
     ;;
   scripts)
     # Normalize and re-add through add_script for consistent paths.
-    raw=("${SCRIPTS[@]}")
+    raw=("${SCRIPTS[@]+"${SCRIPTS[@]}"}")
     SCRIPTS=()
     for s in "${raw[@]}"; do
       add_script "$s"
@@ -1702,8 +1702,41 @@ if [ "$LIST_ONLY" -eq 1 ] || [ "$LIST_SCHEDULED" -eq 1 ]; then
   exit 0
 fi
 
+# An empty selection is a clean result, not a no-op that falls through. Exiting
+# here also keeps every array expansion below off the empty-array path: under
+# `set -u`, bash 3.2 (the stock macOS shell) treats "${arr[@]}" on an empty
+# array as an unbound-variable error, while bash 4.4+ makes it a harmless no-op.
+# A contributor on stock macOS who changes only documentation must still get
+# total=0 and exit 0 rather than a crash.
 if [ "${#SCRIPTS[@]}" -eq 0 ]; then
   log "nothing to run"
+  empty_finished_ms=$(now_ms)
+  empty_duration=$((empty_finished_ms - RUN_STARTED_MS))
+  [ "$empty_duration" -ge 0 ] || empty_duration=0
+  empty_rc=0
+  printf 'FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=%s\n' "$empty_duration"
+  # The budget covers the whole invocation, so a selection phase that outran it
+  # still fails - reporting zero work is not the same as reporting no time.
+  if [ -n "$MAX_WALL_MS" ]; then
+    printf 'FM_TEST_BUDGET max_wall_ms=%s duration_ms=%s\n' "$MAX_WALL_MS" "$empty_duration"
+    if [ "$empty_duration" -gt "$MAX_WALL_MS" ]; then
+      log "wall-clock budget exceeded: ${empty_duration}ms > ${MAX_WALL_MS}ms for $SELECTION_DESC"
+      empty_rc=1
+    fi
+  fi
+  if [ -n "$JSON_PATH" ]; then
+    empty_rec=$(mktemp)
+    empty_fam=$(mktemp)
+    : >"$empty_rec"
+    : >"$empty_fam"
+    empty_finished_iso=$(now_iso)
+    mkdir -p "$(dirname "$JSON_PATH")"
+    write_json_artifact "$JSON_PATH" "$RUN_STARTED_ISO" "$empty_finished_iso" \
+      "fm-test-run-${RUN_STARTED_MS}-$$" 0 0 0 "$empty_duration" \
+      "$SELECTION_DESC" "$empty_rec" "$empty_fam"
+    rm -f "$empty_rec" "$empty_fam"
+  fi
+  exit "$empty_rc"
 fi
 
 # Verify selected scripts exist before starting.
