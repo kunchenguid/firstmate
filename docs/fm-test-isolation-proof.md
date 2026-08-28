@@ -1,8 +1,8 @@
 # Firstmate test isolation proof
 
-This record is the concurrent isolation proof for the portable parallel candidate set.
-`bin/fm-test-isolation-proof.sh` is the authoritative harness and `docs/fm-test-isolation-proof.json` is the machine-readable result.
-`bin/fm-test-run.sh` owns the production lane partition.
+This record owns concurrent isolation evidence for the portable parallel candidate set and admitted runner families.
+`bin/fm-test-isolation-proof.sh` is the authoritative harness and `docs/fm-test-isolation-proof.json` is the portable pool's machine-readable result.
+`bin/fm-test-run.sh` owns production lane partitioning and family concurrency admission.
 
 ## Verification
 
@@ -92,9 +92,13 @@ A family is admitted to `list_concurrent_safe_families` in `bin/fm-test-run.sh` 
 | 1 | `FM_ISOLATION_SUMMARY total=18 failed=0 concurrency=4 duration_ms=394675` |
 | 2 | `FM_ISOLATION_SUMMARY total=18 failed=0 concurrency=4 duration_ms=374869` |
 
-Those archived harness runs used alphabetical launch order and oldest-worker reclamation. They establish the worker isolation result, but they did not reproduce the production scheduler's load profile and are not the sole basis for admission. The current harness consumes the runner's longest-hint-first schedule and reclaims any completed worker, matching the admitted execution condition.
+Those archived harness runs used alphabetical launch order and oldest-worker reclamation.
+They establish the worker isolation result, but they did not reproduce the production scheduler's load profile and are not the sole basis for admission.
+The current harness consumes the runner's longest-hint-first schedule and reclaims any completed worker, matching the admitted execution condition.
 
-Admission is also supported by three independent runs of the production scheduler: `bin/fm-test-run.sh --changed` used automatic concurrency at four workers, longest-first scheduling, selected 19 scripts, and completed with 0 failures in 208s, 216s, and 226s. Those runs exercised the production path that the family admission enables.
+Admission is also supported by three independent runs of the production scheduler using `bin/fm-test-run.sh --changed --max-wall-ms 300000`.
+Each used automatic concurrency at four workers, longest-first scheduling, selected 19 scripts, completed with 0 failures, and passed the five-minute budget guard in 208s, 216s, and 226s.
+Those runs exercised the production path that the family admission enables.
 
 These scripts assert how quickly a real watcher reaches its next poll, so they are sensitive to CPU oversubscription rather than to shared state.
 An earlier attempt on the same host measured three failures (`fm-watch-checkpoint`, `fm-watch-recovery-loop`, `fm-watch-arm`) while six unrelated busy processes were running, at roughly ten runnable processes against fourteen cores.

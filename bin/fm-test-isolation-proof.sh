@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# fm-test-isolation-proof.sh - bounded concurrent isolation proof for portable
-# behavior-test candidates (Phase 2 pre-shard gate).
+# fm-test-isolation-proof.sh - bounded concurrent isolation proofs for portable
+# behavior-test candidates and selected runner families.
 #
-# This is the single owner of the proven parallel candidate set, the concurrent
-# proof run, and the isolation checks that admitted that set. Production
-# portable CI shards and bounded local fm-test-run.sh --jobs for this exact set
-# are owned by bin/fm-test-run.sh (docs/fm-test-portable-shards.md).
+# This is the single owner of the proven portable candidate set, the reusable
+# concurrent proof run, and its isolation checks. Production portable CI shards,
+# bounded local fm-test-run.sh --jobs admission, and family worker caps are owned
+# by bin/fm-test-run.sh (docs/fm-test-portable-shards.md).
 #
-# It does NOT:
-#   - compose production CI shard membership (fm-test-run.sh owns that partition)
-#   - run real Herdr, real default-server tmux, watcher lock races, AFK, live
-#     harnesses, or GUI backends
+# It does NOT compose production CI shard membership; fm-test-run.sh owns that
+# partition. The default portable pool excludes real Herdr, real default-server
+# tmux, watcher lock races, AFK, live harnesses, and GUI backends. A named family
+# pool instead runs that family's exact membership and inherits its prerequisites.
 #
 # Usage:
 #   fm-test-isolation-proof.sh [--pool <name>] [--jobs N] [--json path] [--list]

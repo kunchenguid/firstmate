@@ -53,7 +53,9 @@
 #                   longest-hint-first so the slowest script is not stranded
 #                   alone at the tail. Default is 1 (serial) for every selection
 #                   mode EXCEPT --changed, which defaults to min(4, cpus) when
-#                   every script it selected is admissible. Explicit --jobs wins.
+#                   at least two selected scripts are admissible. Any unproven
+#                   remainder runs serially after that concurrent group.
+#                   Explicit --jobs wins.
 #   --per-script-timeout-secs N
 #                   terminate a script that runs longer than N seconds and
 #                   record it as exit 124 (0 disables, the default). The
@@ -77,12 +79,14 @@
 #
 # After all scripts (stdout):
 #   FM_TEST_SUMMARY total=<n> failed=<n> skipped_gate=<n> duration_ms=<n>
-#   FM_TEST_BUDGET max_wall_ms=<n> duration_ms=<n>   (only with --max-wall-ms)
 #   FM_TEST_SUMMARY_FAMILY family=<name> count=<n> duration_ms=<n> failed=<n>
 #   FM_TEST_SLOWEST rank=<k> script=<path> duration_ms=<n>
+#   FM_TEST_BUDGET max_wall_ms=<n> duration_ms=<n>   (only with --max-wall-ms)
 #
-# Exit status is non-zero if any selected script exits non-zero or a configured
-# --fail-on-gate-skip token appears. Other gate skips (first meaningful line
+# Exit status is non-zero if any selected script exits non-zero, a configured
+# --fail-on-gate-skip token appears, the measured duration exceeds
+# --max-wall-ms, timing-artifact finalization fails, or a concurrent worker
+# violates its isolation check. Other gate skips (first meaningful line
 # matching ^skip:) remain successful and are counted as skipped_gate.
 #
 # Family labels, the changed-file map, and production portable-shard composition
@@ -1980,9 +1984,9 @@ if [ "$JOBS" -eq 1 ]; then
     run_one_serial "$script"
   done
 else
-  # Bounded concurrent execution for proven-isolated scripts only. Each worker
-  # gets a private mode-0700 TMPDIR so mktemp roots cannot collide. Retries are
-  # never used as a green strategy.
+  # Bounded concurrent execution for admitted scripts. Each worker gets a
+  # private mode-0700 TMPDIR so mktemp roots cannot collide. Retries are never
+  # used as a green strategy.
   worker_n=0
   active_workers=0
 
