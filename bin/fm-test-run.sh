@@ -894,6 +894,61 @@ families_for_test_reference() {
   [ "$found" -eq 1 ]
 }
 
+# Tests that name <needle>, selected as individual scripts rather than widened
+# to each referencing test's whole family. A direct reference is per-script
+# evidence, so it selects per script: one real-Herdr E2E sourcing a shared
+# helper must not drag in every other script of that expensive family.
+scripts_for_test_reference() {
+  local needle=$1 s
+  local found=0
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    if grep -Fq "$needle" "$s"; then
+      printf '__script__:%s\n' "$(basename "$s")"
+      found=1
+    fi
+  done < <(all_repo_tests)
+  [ "$found" -eq 1 ]
+}
+
+# bin/ scripts other than <needle> itself that name <needle>.
+bin_consumers_of() {
+  local needle=$1 b
+  for b in bin/*.sh bin/backends/*.sh; do
+    [ -f "$b" ] || continue
+    [ "$(basename "$b")" = "$needle" ] || ! grep -Fq "$needle" "$b" || printf '%s\n' "$b"
+  done
+}
+
+# An unmapped bin/ path has no curated family of its own. Its blast radius is
+# the tests that name it, plus the curated families of the bin/ scripts that
+# consume it. Direct test references resolve per script (above) while consumer
+# scripts resolve back through the curated map, so genuine family-level
+# coupling a maintainer recorded is preserved while an incidental single-script
+# reference no longer selects that script's whole family.
+BIN_FALLBACK_DEPTH=0
+families_for_unmapped_bin() {
+  local path=$1 needle consumer out found=0
+  needle=$(basename "$path")
+  if out=$(scripts_for_test_reference "$needle"); then
+    printf '%s\n' "$out"
+    found=1
+  fi
+  if [ "$BIN_FALLBACK_DEPTH" -lt 2 ]; then
+    BIN_FALLBACK_DEPTH=$((BIN_FALLBACK_DEPTH + 1))
+    while IFS= read -r consumer; do
+      [ -n "$consumer" ] || continue
+      out=$(families_for_changed_path "$consumer" | grep -v '^__unmapped__:' || true)
+      if [ -n "$out" ]; then
+        printf '%s\n' "$out"
+        found=1
+      fi
+    done < <(bin_consumers_of "$needle")
+    BIN_FALLBACK_DEPTH=$((BIN_FALLBACK_DEPTH - 1))
+  fi
+  [ "$found" -eq 1 ]
+}
+
 # Conservative path → family map. Over-selects rather than under-selects.
 # Never expands to the complete suite.
 families_for_changed_path() {
@@ -1077,7 +1132,7 @@ families_for_changed_path() {
       # the fixture case above applies. Refusing on its absent mapping would
       # make every retirement branch unable to select its changed tests.
       if [ -e "$path" ]; then
-        families_for_test_reference "$(basename "$path")" \
+        families_for_unmapped_bin "$path" \
           || printf '%s\n' "__unmapped__:$path"
       fi
       ;;
