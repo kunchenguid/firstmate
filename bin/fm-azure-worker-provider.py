@@ -484,9 +484,50 @@ def resource_record(kind, value, power_state=None, tags_override=None):
 
 def azure_resource_not_found(stderr):
     return bool(re.search(
-        r"(?:\(ResourceNotFound\)|^Code:\s*ResourceNotFound\s*$)",
+        r"(?:\((?:ResourceNotFound|ParentResourceNotFound|ContainerNotFound)\)"
+        r"|^(?:Code|ErrorCode):\s*"
+        r"(?:ResourceNotFound|ParentResourceNotFound|ContainerNotFound)\s*$)",
         str(stderr or ""), re.MULTILINE,
     ))
+
+
+def show_exact_optional(controller, args):
+    """Read one exact Azure object; only a recognized absence becomes None."""
+    value, rc, stderr = az(controller, args, check=False)
+    if rc != 0:
+        if azure_resource_not_found(stderr):
+            return None
+        raise ProviderError("exact Azure inventory read failed or was malformed: {}".format(stderr))
+    if not isinstance(value, dict):
+        raise ProviderError("exact Azure inventory read failed or was malformed: {}".format(stderr))
+    return value
+
+
+def show_exact_optional_many(controller, operations):
+    """Read independent exact objects concurrently, preserving error order."""
+    if not operations:
+        return {}
+    keys = [key for key, _ in operations]
+    if len(keys) != len(set(keys)):
+        raise ProviderError("exact Azure inventory operation keys are not unique")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(operations))) as executor:
+        futures = {
+            key: executor.submit(show_exact_optional, controller, args)
+            for key, args in operations
+        }
+        results = {}
+        failures = []
+        for key in keys:
+            try:
+                results[key] = futures[key].result()
+            except Exception as exc:
+                failures.append((key, exc))
+        if failures:
+            key, exc = failures[0]
+            if isinstance(exc, ProviderError):
+                raise ProviderError("{}: {}".format(key, exc))
+            raise ProviderError("{}: exact Azure inventory read failed: {}".format(key, exc))
+    return results
 
 
 def show_full(controller, resource_id, api_version=None, inventory_missing_ok=False):
@@ -1098,37 +1139,116 @@ def inventory(controller, include_metrics=True, target_slot=None):
         raise ProviderError("Azure subscription scope is not the exact enabled controller binding")
 
     prefix = re.escape(controller["prefix"])
-    vms = list_json(
-        controller,
-        ["vm", "list", "--resource-group", controller["resource_group"], "--show-details"],
-        transient_not_found_attempts=4,
-    )
-    nics = list_json(controller, ["network", "nic", "list", "--resource-group", controller["resource_group"]])
-    disks = list_json(controller, ["disk", "list", "--resource-group", controller["resource_group"]])
-    identities = list_json(controller, ["identity", "list", "--resource-group", controller["resource_group"]])
-    extensions = list_json(controller, [
-        "resource", "list", "--resource-group", controller["resource_group"],
-        "--resource-type", "Microsoft.Compute/virtualMachines/extensions",
-    ])
-    run_commands = list_json(controller, [
-        "resource", "list", "--resource-group", controller["resource_group"],
-        "--resource-type", "Microsoft.Compute/virtualMachines/runCommands",
-    ])
-    schedules = list_json(controller, [
-        "resource", "list", "--resource-group", controller["resource_group"],
-        "--resource-type", "Microsoft.DevTestLab/schedules",
-    ])
-    # Scope casing varies across ARM responses, so filter client-side rather
-    # than with a case-sensitive JMESPath query.
-    scope_marker = "/resourcegroups/{}/".format(controller["resource_group"]).lower()
-    roles = [
-        role for role in list_json(controller, ["role", "assignment", "list", "--all"])
-        if scope_marker in str(role.get("scope") or "").lower()
-    ]
-    containers = list_json(controller, [
-        "storage", "container", "list", "--auth-mode", "login", "--include-metadata",
-        "--account-name", os.environ.get("FM_AZURE_STORAGE_NAME", ""),
-    ])
+    if target_slot is None:
+        vms = list_json(
+            controller,
+            ["vm", "list", "--resource-group", controller["resource_group"], "--show-details"],
+            transient_not_found_attempts=4,
+        )
+        nics = list_json(controller, ["network", "nic", "list", "--resource-group", controller["resource_group"]])
+        disks = list_json(controller, ["disk", "list", "--resource-group", controller["resource_group"]])
+        identities = list_json(controller, ["identity", "list", "--resource-group", controller["resource_group"]])
+        extensions = list_json(controller, [
+            "resource", "list", "--resource-group", controller["resource_group"],
+            "--resource-type", "Microsoft.Compute/virtualMachines/extensions",
+        ])
+        run_commands = list_json(controller, [
+            "resource", "list", "--resource-group", controller["resource_group"],
+            "--resource-type", "Microsoft.Compute/virtualMachines/runCommands",
+        ])
+        schedules = list_json(controller, [
+            "resource", "list", "--resource-group", controller["resource_group"],
+            "--resource-type", "Microsoft.DevTestLab/schedules",
+        ])
+        # Scope casing varies across ARM responses, so filter client-side rather
+        # than with a case-sensitive JMESPath query.
+        scope_marker = "/resourcegroups/{}/".format(controller["resource_group"]).lower()
+        roles = [
+            role for role in list_json(controller, ["role", "assignment", "list", "--all"])
+            if scope_marker in str(role.get("scope") or "").lower()
+        ]
+        containers = list_json(controller, [
+            "storage", "container", "list", "--auth-mode", "login", "--include-metadata",
+            "--account-name", os.environ.get("FM_AZURE_STORAGE_NAME", ""),
+        ])
+    else:
+        names = expected_names(controller, target_slot)
+        resource_group = controller["resource_group"]
+        storage = os.environ.get("FM_AZURE_STORAGE_NAME", "")
+
+        vm_id = exact_id(controller, "Microsoft.Compute", "virtualMachines", names["vm"])
+        exact = show_exact_optional_many(controller, [
+            ("vm", [
+                "vm", "show", "--resource-group", resource_group,
+                "--name", names["vm"], "--show-details",
+            ]),
+            ("nic", [
+                "network", "nic", "show", "--resource-group", resource_group,
+                "--name", names["nic"],
+            ]),
+            ("os-disk", [
+                "disk", "show", "--resource-group", resource_group,
+                "--name", names["os-disk"],
+            ]),
+            ("task-disk", [
+                "disk", "show", "--resource-group", resource_group,
+                "--name", names["task-disk"],
+            ]),
+            ("account-disk", [
+                "disk", "show", "--resource-group", resource_group,
+                "--name", names["account-disk"],
+            ]),
+            ("identity", [
+                "identity", "show", "--resource-group", resource_group,
+                "--name", names["identity"],
+            ]),
+            ("monitor-extension", [
+                "resource", "show", "--ids",
+                vm_id + "/extensions/" + names["monitor-extension"],
+            ]),
+            ("bootstrap-command", [
+                "resource", "show", "--ids",
+                vm_id + "/runCommands/" + names["bootstrap-command"],
+            ]),
+            ("task-command", [
+                "resource", "show", "--ids",
+                vm_id + "/runCommands/" + names["task-command"],
+            ]),
+            ("ttl-schedule", [
+                "resource", "show", "--ids", exact_id(
+                    controller, "Microsoft.DevTestLab", "schedules", names["ttl-schedule"],
+                ), "--api-version", "2018-09-15",
+            ]),
+            ("state-container", [
+                "storage", "container", "show", "--auth-mode", "login",
+                "--account-name", storage, "--name", names["state-container"],
+            ]),
+        ])
+
+        def present(kind):
+            return [exact[kind]] if exact[kind] is not None else []
+
+        vms = present("vm")
+        nics = present("nic")
+        disks = [
+            exact[kind] for kind in ("os-disk", "task-disk", "account-disk")
+            if exact[kind] is not None
+        ]
+        identities = present("identity")
+        extensions = present("monitor-extension")
+        run_commands = [
+            exact[kind] for kind in ("bootstrap-command", "task-command")
+            if exact[kind] is not None
+        ]
+        schedules = present("ttl-schedule")
+        containers = present("state-container")
+        container_scope = (
+            exact_id(controller, "Microsoft.Storage", "storageAccounts", storage)
+            + "/blobServices/default/containers/" + names["state-container"]
+        )
+        roles = list_json(controller, [
+            "role", "assignment", "list", "--scope", container_scope,
+        ]) if containers else []
 
     workers = {}
     conflicts = []
@@ -1234,7 +1354,9 @@ def inventory(controller, include_metrics=True, target_slot=None):
         )
         # The generic resource listing omits properties and etag; only the full
         # object carries an immutable child identity.
-        value = show_full(controller, extension["id"], inventory_missing_ok=True)
+        value = dict(extension) if target_slot is not None else show_full(
+            controller, extension["id"], inventory_missing_ok=True,
+        )
         if value is None:
             continue
         value["attached_to"] = vm_id
@@ -1250,7 +1372,9 @@ def inventory(controller, include_metrics=True, target_slot=None):
         if kind is None:
             conflicts.append({"kind": "run-command", "slot": slot, "reason": "undeclared worker Run Command child"})
             continue
-        value = show_full(controller, command["id"], inventory_missing_ok=True)
+        value = dict(command) if target_slot is not None else show_full(
+            controller, command["id"], inventory_missing_ok=True,
+        )
         if value is None:
             continue
         value["attached_to"] = exact_id(
@@ -1263,7 +1387,7 @@ def inventory(controller, include_metrics=True, target_slot=None):
     for schedule in schedules:
         slot = slot_from_name(schedule.get("name"), r"^shutdown-computevm-vm-{}-wkr-".format(prefix))
         if slot is not None and (target_slot is None or slot == target_slot):
-            value = show_full(
+            value = dict(schedule) if target_slot is not None else show_full(
                 controller, schedule["id"], api_version="2018-09-15",
                 inventory_missing_ok=True,
             )

@@ -9223,40 +9223,45 @@ controller = {
 tags = {
     "workload": "firstmate", "deployment-generation": "dep", "cleanup-owner": "owner",
 }
-vms = [
-    {"name": "vm-fixture-wkr-01", "id": "/vm/1", "vmId": "vm-id-1",
-     "powerState": "VM running", "tags": tags},
-    {"name": "vm-fixture-wkr-02", "id": "/vm/2", "vmId": "vm-id-2",
-     "powerState": "VM running", "tags": tags},
-]
-extensions = [
-    {"name": "vm-fixture-wkr-01/AzureMonitorLinuxAgent", "id": "/vm/1/ext"},
-    {"name": "vm-fixture-wkr-02/AzureMonitorLinuxAgent", "id": "/vm/2/ext"},
-]
-expanded = []
-
-provider.az = lambda _controller, args, check=False, timeout=provider.AZ_TIMEOUT_SECONDS: (
-    ({"id": controller["subscription"], "state": "Enabled"}, 0, "")
-    if args[:2] == ["account", "show"] else (None, 1, "unexpected")
+calls = []
+vm_id = provider.exact_id(
+    controller, "Microsoft.Compute", "virtualMachines", "vm-fixture-wkr-02",
 )
-def listing(_controller, args, transient_not_found_attempts=1):
-    if args[:2] == ["vm", "list"]:
-        return vms
-    if args[:2] == ["resource", "list"] and args[-1] == "Microsoft.Compute/virtualMachines/extensions":
-        return extensions
-    return []
-provider.list_json = listing
-def show(_controller, resource_id, api_version=None, inventory_missing_ok=False):
-    expanded.append(resource_id)
-    return {
-        "id": resource_id, "tags": tags,
-        "properties": {"provisioningState": "Succeeded"},
-    }
-provider.show_full = show
+extension_id = vm_id + "/extensions/AzureMonitorLinuxAgent"
+
+def exact_read(_controller, args, check=False, timeout=provider.AZ_TIMEOUT_SECONDS):
+    calls.append(tuple(args))
+    if args[:2] == ["account", "show"]:
+        return {"id": controller["subscription"], "state": "Enabled"}, 0, ""
+    if args[:2] == ["vm", "show"]:
+        assert args[args.index("--name") + 1] == "vm-fixture-wkr-02", args
+        return {
+            "name": "vm-fixture-wkr-02", "id": vm_id, "vmId": "vm-id-2",
+            "powerState": "VM running", "tags": tags, "identity": {},
+        }, 0, ""
+    if args[:3] == ["resource", "show", "--ids"] and args[3] == extension_id:
+        return {
+            "name": "vm-fixture-wkr-02/AzureMonitorLinuxAgent",
+            "id": extension_id, "tags": tags,
+            "properties": {"provisioningState": "Succeeded"},
+        }, 0, ""
+    if args[:3] == ["storage", "container", "show"]:
+        return None, 1, "ErrorCode:ContainerNotFound"
+    return None, 1, "(ResourceNotFound) exact fixture absence"
+
+provider.az = exact_read
+provider.list_json = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+    AssertionError("targeted inventory issued a list operation")
+)
 
 snapshot = provider.inventory_slot(controller, 2)
 assert [worker["slot"] for worker in snapshot["workers"]] == [2], snapshot
-assert expanded == ["/vm/2/ext"], expanded
+assert snapshot["workers"][0]["resources"]["monitor-extension"]["id"] == extension_id
+assert all("wkr-01" not in " ".join(call) for call in calls), calls
+assert not any("list" in call[:3] for call in calls), calls
+assert any(call[:2] == ("vm", "show") for call in calls), calls
+assert any(call[:2] == ("network", "nic") for call in calls), calls
+assert sum(call[:2] == ("disk", "show") for call in calls) == 3, calls
 assert snapshot["capacity_reservations"] == []
 assert snapshot["metrics"]["actual_usd"] is None
 try:
