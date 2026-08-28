@@ -87,12 +87,43 @@ which is the single biggest simplification available here.
 
 ```
 pk = "repo"                      (constant)
-sk = "bankrate/portkey"          (owner/repo, exactly as the webhook reports it)
+sk = "1202845285"                (GitHub's repository.id, as a string)
 ```
+
+**Keyed on the repository id, not `owner/repo`.** This is the single most
+important choice in the data model, and an earlier draft got it wrong.
+
+`owner/repo` is mutable. GitHub's `repository.id` is not. Key on the name and a
+**rename silently unenrolls the repository**: the record is stranded on the old
+name, webhooks arrive under the new one and get dropped by the worker's
+enrollment gate, and the repository stops being evaluated with nothing reporting
+that it has. It also keeps counting toward `fleetSize`, so
+`minFleetForConfidence` is satisfied by a fleet that is partly fictional. Key on
+the id and a rename is a non-event.
+
+Three things fall out of this beyond the rename fix:
+
+- **Conductor's join gets simpler and faster.** `repos.external_id` is
+  `string` and **`unique`** (`2024_04_05_175717_create_repos_table.php:16`), so
+  the join is `whereIn('external_id', $ids)` on an indexed column — replacing a
+  `CONCAT(owner, '/', name)` comparison that could not use an index and needed
+  hand-written SQL with a bespoke empty-array guard.
+- **Fork inheritance becomes impossible by construction.** A fork has a
+  different id. The old design achieved this with exact string matching, which
+  was a property of the comparison; now it is a property of the key.
+- **The two services agree on identity.** Conductor already syncs `repos` by
+  `external_id` and therefore already follows renames
+  (`Repo::syncFromGithubWebhook`). Keying enrollment the same way means both
+  sides move together instead of drifting.
+
+`repository.id` is present on every repository-scoped webhook event, so all four
+routed events (`pull_request`, `check_suite`, `push`, `check_run`) can resolve
+enrollment.
 
 | Attribute | Type | Notes |
 |---|---|---|
-| `repo` | S | Duplicates `sk`. Readers should not have to know the key encoding. |
+| `repoId` | S | Duplicates `sk`. Readers should not have to know the key encoding. |
+| `repo` | S | `owner/repo` — a **display label**, not an identifier. Nothing resolves enrollment through it. Refreshed by Conductor's sync when a repository is renamed; may lag until then, which is why it must never be used as a key. |
 | `classification` | S | `sandbox` \| `internal-tool` \| `prod-service`. Gate 9 reads it. |
 | `ciTrustTier` | N | Gate 10 reads it. |
 | `mode` | S | `shadow` \| `off`. |
@@ -121,13 +152,16 @@ reachable at today's size; the loop is insurance against the day it is.
 ### History records
 
 ```
-pk = "history#bankrate/portkey"
+pk = "history#1202845285"               (history#{repository.id})
 sk = "2026-08-28T14:03:11.221Z#7"      (ISO 8601 + version)
 ```
 
+Keyed on the id for the same reason as the record: a rename must not orphan a
+repository's history from its enrollment.
+
 | Attribute | Notes |
 |---|---|
-| `action` | `enroll` \| `update` \| `pause` \| `resume` \| `unenroll` |
+| `action` | `enroll` \| `update` \| `pause` \| `resume` \| `unenroll` \| `rename` \| `auto-pause` |
 | `actor` | The Conductor user's email. |
 | `at` | ISO 8601. |
 | `before` / `after` | JSON strings of the record. `before` absent on enroll, `after` absent on unenroll. |
@@ -175,9 +209,14 @@ finds every call site** — that is the mechanism, not a nice side effect.
 ```ts
 // src/enrollment.ts
 
-/** One repository's enrollment, or undefined when it has none. Throws on a failed read. */
+/**
+ * One repository's enrollment, or undefined when it has none.
+ *
+ * Takes `repository.id` as a string, NOT `owner/repo` — the name is mutable and
+ * a rename would silently unenroll the repository. Throws on a failed read.
+ */
 export async function lookupEnrollment(
-  repoFullName: string,
+  repoId: string,
   send?: DynamoSender,
 ): Promise<EnrollmentRecord | undefined>;
 
@@ -238,9 +277,10 @@ release, and a route.
 New order, inside the per-record loop:
 
 1. Gate on `ghEvent` (unchanged) — `status` and friends still cost nothing.
-2. Parse the body once. Read `repository.full_name`.
-3. `lookupEnrollment`. Absent or `mode: off` → log and return **without
-   claiming**.
+2. Parse the body once. Read **both** `repository.id` (resolves enrollment) and
+   `repository.full_name` (logs, `EvalContext`, and the name-based freeze path).
+3. `lookupEnrollment(String(repository.id))`. Absent or `mode: off` → log and
+   return **without claiming**.
 4. Claim, then route, passing the resolved record down.
 
 Dropping without claiming is safe precisely because nothing was done: a
@@ -344,10 +384,15 @@ protected static ?string $navigationLabel = 'Auto-Merge';
 sorted immediately after `RepoResource` (which sets the same group at
 `app/Filament/Resources/Repos/RepoResource.php:49`).
 
-**The join key is `CONCAT(owner, '/', name)`.** The `repos` table has `owner`
-and `name` columns and no `full_name`, while zapp keys on `owner/repo` exactly
-as the webhook reports it. Every filter that pushes the enrolled set into SQL
-does so against that expression.
+**The join key is `repos.external_id`** — `string`, `unique`, and therefore
+indexed. Every filter that pushes the enrolled set into SQL does so as
+`whereIn('external_id', $ids)`, which Laravel renders safely for an empty array
+without a hand-written guard.
+
+An earlier draft joined on `CONCAT(owner, '/', name)`, which could not use an
+index, needed raw SQL, and needed a bespoke empty-array case because `IN ()` is
+a syntax error. Keying enrollment on the repository id removes all three
+problems at once.
 
 The fleet is loaded once per request into a keyed map and read from there for
 every column. It must **not** be a public Livewire property — Livewire
@@ -355,38 +400,56 @@ serialises those between requests, which would both bloat the payload and
 reintroduce the staleness the no-cache decision exists to avoid. A protected
 memoised accessor, invalidated after any write action.
 
-### Stale enrollments
+### Drift, and why the design prevents it rather than reporting it
 
-Two ways an enrollment record becomes unreachable from an Eloquent-backed table,
-and neither is hypothetical:
+`fleetSize` is a denominator. It feeds `minFleetForConfidence: 5`, so an
+enrollment record that no longer corresponds to a repository anyone can open a
+pull request against does not merely sit there — it makes `internalConfidence`
+grade against a fleet smaller than it believes it has, instead of correctly
+reading `unknown`. That is a silent corruption of the exact signal the fleet was
+grown to eight repositories to enable.
 
-- **No inventory row.** zapp keys enrollment on `owner/repo` from the webhook
-  payload; Conductor's `repos` table syncs by the stable `external_id`. So a
-  **rename** leaves Conductor following the new name and the enrollment record
-  stranded on the old one. A deletion does the same
-  (`Repo::deleteByGithubId`), as does every fresh local database.
-- **Archived.** The row exists, so it is not an orphan, but the table hides
-  archived repositories by default. This is the likelier of the two — archived
-  repos are common, renames are rare.
+There are three ways a repository can leave the set of things worth evaluating.
+The design handles each at its cause:
 
-The second case is a trap for the implementation: a hard `Repo::query()->active()`
-scope on the table would make such a record invisible on the page *without*
-putting it in the orphan list, while zapp kept counting it. `RepoResource`
-handles archived rows with a **clearable** `TernaryFilter` defaulting to false
-(`RepoResource.php:319`) rather than a scope, and this page must do the same.
+| Event | Handled by | Result |
+|---|---|---|
+| **Renamed** | Keying on `repository.id` | A non-event. Enrollment follows the repository. Conductor's sync refreshes the `repo` display label and records a `rename` history row. |
+| **Archived** | Conductor's GitHub sync auto-pauses it | `mode` becomes `off`, so `fleetSize` — which counts only `mode === 'shadow'` — self-corrects with no human action. The record and its history survive. |
+| **Deleted** | Same auto-pause path | Same. Unenrolling stays a human action, because deletion of an audit record should be. |
 
-Both are surfaced in a labelled section above the table, each with its reason,
-and both are removable through a page **header** action — a stale record has no
+Prevention at the point of entry, too: **the Enroll action refuses an archived
+repository.** Enrolling something that cannot receive a pull request has no
+meaning, and rejecting it costs one `visible()` check.
+
+The auto-pause writes a history row with actor `system:github-sync` and action
+`auto-pause`, so a mode change nobody chose is still attributable. It **pauses
+rather than unenrolls** deliberately: pausing is reversible and preserves the
+classification and tier somebody reasoned about, while an automated deletion of
+an audit trail is not something a scheduled job should be able to do.
+
+A "needs attention" banner remains, listing records whose repository is missing
+or archived. But its role changes completely: with the three causes handled, it
+should be **empty in normal operation**, so a non-empty banner means the sync is
+disabled (`features.syncs.github`) or lagging. It is an anomaly indicator, not
+routine bookkeeping. Its header action can unenroll — a stale record has no
 usable Eloquent row, so it cannot carry a row action.
 
-The reason this is worth building rather than deferring: a stale record is inert
-for *evaluation* — a deleted repo sends no webhooks, and a renamed one sends
-them under a name that is not enrolled, so the worker drops them. It is not
-inert for *data*. `fleetSize` counts it, and that is the denominator behind
-`minFleetForConfidence: 5`, so stale records make `internalConfidence` grade
-against a fleet smaller than it believes it has instead of correctly reading
-`unknown`. A wrong number nobody can fix from the page is a number that stays
-wrong.
+One implementation trap remains, and it is not obvious: an enrolled repository
+that is later archived still **has** a `repos` row, so it is not missing from
+inventory — but a hard `Repo::query()->active()` scope on the table would hide
+it anyway, leaving it invisible on the page while zapp still counted it.
+`RepoResource` handles archived rows with a **clearable** `TernaryFilter`
+defaulting to false (`RepoResource.php:319`) rather than a scope, and this page
+must do the same.
+
+**What keying on the id does not fix.** The per-repo freeze parameter is
+`/zapp/freeze/{owner}/{repo}` and stays name-based — deliberately, because a
+human reaching for an emergency brake mid-incident should type a repository
+name, not look up a numeric id. The consequence is that a freeze set under a
+repository's old name silently stops applying after a rename. That is
+pre-existing rather than introduced here, but it is now the only place a rename
+still bites, and it belongs in `docs/architecture.md` as a sharp edge.
 
 ### Absent is not empty
 
@@ -556,10 +619,12 @@ runs only `mailpit`.
    `ZAPP_ENROLLMENT_TABLE=zapp-enrollments`; `.env.example` documents both.
 3. `php artisan zapp:enrollment-seed` creates the table and writes the eight
    records currently in `policy-rules.yaml`.
-4. **The same command ensures a `repos` row exists for each of the eight.**
-   Without it every seeded record renders in the orphan section and the main
-   table shows nothing enrolled — which is a correct rendering of an empty
-   inventory and a confusing first impression.
+4. **The same command ensures a `repos` row exists for each of the eight, with
+   the right `external_id`.** Without it every seeded record renders in the
+   needs-attention banner and the main table shows nothing enrolled — a correct
+   rendering of an empty inventory, and a baffling first impression. The eight
+   ids are fixed values, resolved once and hard-coded rather than fetched, so
+   the seed needs no GitHub credentials.
 
 Then: log in at `http://127.0.0.1:8000/admin`, open Inventory → Auto-Merge, and
 enroll, edit, pause, and unenroll a repository, with `ZAPP_ENROLLMENT_WRITES_ENABLED`
@@ -626,7 +691,14 @@ which no longer exists — they take a local fixture record),
 `$this->mock()` — matching `ListReposTest.php`.
 
 - The table renders enrolled and unenrolled repositories, joined on
-  `CONCAT(owner, '/', name)`.
+  `repos.external_id`.
+- **A rename does not disturb anything.** Change a `repos` row's `owner`/`name`
+  while leaving `external_id` alone: the repository stays enrolled, under its
+  new name. This is the test that pins the whole reason for id-keying.
+- The Enroll action is hidden for an archived repository.
+- Conductor's GitHub sync auto-pauses an enrollment whose repository became
+  archived or vanished, writing a history row with actor `system:github-sync`,
+  and does **not** unenroll it.
 - A record with no `repos` row, and a record whose repo is archived, both render
   in the stale section with their reason, and both can be unenrolled from the
   header action.

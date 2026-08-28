@@ -15,9 +15,10 @@
 ## Global Constraints
 
 - **Table:** `zapp-enrollments`. Same name in every environment; the AWS account disambiguates. conductor-api's `development` account (`194918977890`) is zapp's `qa`, and `production` (`835272777014`) is zapp's `prod` — **the same accounts**, so no cross-account role is needed.
-- **Enrollment records:** `pk = "repo"`, `sk = "{owner}/{repo}"`.
-- **History records:** `pk = "history#{owner}/{repo}"`, `sk = "{ISO8601}#{version}"`.
-- **The join key is `CONCAT(owner, '/', name)`.** The `repos` table has no `full_name` column.
+- **Enrollment records:** `pk = "repo"`, `sk = "{repository.id}"` — GitHub's numeric repository id, as a string.
+- **History records:** `pk = "history#{repository.id}"`, `sk = "{ISO8601}#{version}"`.
+- **ENROLLMENT IS KEYED ON THE REPOSITORY ID, NEVER THE NAME.** `owner/repo` is mutable; the id is not. Keyed on the name, a **rename silently unenrols the repository** — zapp's worker resolves enrollment by id, so the record would strand on the old name while webhooks arrived under the new one. Each record carries a `repo` attribute holding `owner/repo`, but it is a **display label**; nothing resolves enrollment through it, and Conductor's sync refreshes it on rename.
+- **The join key is `repos.external_id`** — `string` and `unique` (`2024_04_05_175717_create_repos_table.php:16`), therefore indexed. Filters push the enrolled set into SQL as `whereIn('external_id', $ids)`, which Laravel renders safely for an empty array with no hand-written guard.
 - **Absent is not empty.** `signalChecks`, `blockingChecks` and `baseBranches` absent means "use zapp's global list"; present-and-empty means "use nothing". A write must be able to express both.
 - **Every write is a transaction** pairing the record with its history row, conditioned on `version`. A conditional failure means another operator changed it — surface it, never retry.
 - **Writes are permission-gated** on a new `manage auto-merge enrollment` Spatie permission and feature-flagged on `features.zapp_enrollment_writes`.
@@ -41,12 +42,12 @@ All DynamoDB access, behind one injectable class. This is conductor-api's **firs
 **Interfaces:**
 - Consumes: the table schema from the zapp plan's Task 1.
 - Produces:
-  - `EnrollmentData` — `repo`, `classification`, `ciTrustTier`, `mode`, `stageEnabled`, `?signalChecks`, `?blockingChecks`, `?baseBranches`, `version`, `updatedBy`, `updatedAt`
-  - `EnrollmentStore::fleet(): Collection` — keyed by repo full name
-  - `EnrollmentStore::find(string $repo): ?EnrollmentData`
+  - `EnrollmentData` — `repoId`, `repo`, `classification`, `ciTrustTier`, `mode`, `stageEnabled`, `?signalChecks`, `?blockingChecks`, `?baseBranches`, `version`, `updatedBy`, `updatedAt`
+  - `EnrollmentStore::fleet(): Collection` — **keyed by repository id**, matching `repos.external_id`
+  - `EnrollmentStore::find(string $repoId): ?EnrollmentData`
   - `EnrollmentStore::create(EnrollmentData $data, string $actor): void`
   - `EnrollmentStore::replace(EnrollmentData $data, int $expectedVersion, string $actor, string $action): void`
-  - `EnrollmentStore::delete(string $repo, int $expectedVersion, string $actor): void`
+  - `EnrollmentStore::delete(string $repoId, int $expectedVersion, string $actor): void`
   - `EnrollmentConflictException`
 
 - [ ] **Step 1: Verify the base**
@@ -100,7 +101,8 @@ class EnrollmentStoreTest extends TestCase
     {
         return array_merge([
             'pk' => ['S' => 'repo'],
-            'sk' => ['S' => 'bankrate/portkey'],
+            'sk' => ['S' => '1202845285'],
+            'repoId' => ['S' => '1202845285'],
             'repo' => ['S' => 'bankrate/portkey'],
             'classification' => ['S' => 'prod-service'],
             'ciTrustTier' => ['N' => '2'],
@@ -115,6 +117,7 @@ class EnrollmentStoreTest extends TestCase
     private function data(array $over = []): EnrollmentData
     {
         return EnrollmentData::from(array_merge([
+            'repoId' => '1202845285',
             'repo' => 'bankrate/portkey',
             'classification' => 'prod-service',
             'ciTrustTier' => 2,
@@ -150,9 +153,10 @@ class EnrollmentStoreTest extends TestCase
         $this->assertSame('pk = :pk', $captured['KeyConditionExpression']);
         $this->assertSame(['S' => 'repo'], $captured['ExpressionAttributeValues'][':pk']);
         $this->assertTrue($captured['ConsistentRead']);
-        $this->assertSame(['bankrate/portkey'], $fleet->keys()->all());
-        $this->assertSame('prod-service', $fleet->get('bankrate/portkey')->classification);
-        $this->assertSame(3, $fleet->get('bankrate/portkey')->version);
+        $this->assertSame(['1202845285'], $fleet->keys()->all(),
+            'keyed by repository id, so it lines up with repos.external_id');
+        $this->assertSame('prod-service', $fleet->get('1202845285')->classification);
+        $this->assertSame(3, $fleet->get('1202845285')->version);
     }
 
     #[Test]
@@ -163,18 +167,18 @@ class EnrollmentStoreTest extends TestCase
                 ->twice()
                 ->andReturn(
                     new Result([
-                        'Items' => [$this->item(['sk' => ['S' => 'bankrate/a'], 'repo' => ['S' => 'bankrate/a']])],
-                        'LastEvaluatedKey' => ['pk' => ['S' => 'repo'], 'sk' => ['S' => 'bankrate/a']],
+                        'Items' => [$this->item(['sk' => ['S' => '111'], 'repoId' => ['S' => '111']])],
+                        'LastEvaluatedKey' => ['pk' => ['S' => 'repo'], 'sk' => ['S' => '111']],
                     ]),
                     new Result([
-                        'Items' => [$this->item(['sk' => ['S' => 'bankrate/b'], 'repo' => ['S' => 'bankrate/b']])],
+                        'Items' => [$this->item(['sk' => ['S' => '222'], 'repoId' => ['S' => '222']])],
                     ]),
                 );
         });
 
         $fleet = app(EnrollmentStore::class)->fleet();
 
-        $this->assertSame(['bankrate/a', 'bankrate/b'], $fleet->keys()->all());
+        $this->assertSame(['111', '222'], $fleet->keys()->all());
     }
 
     #[Test]
@@ -184,7 +188,7 @@ class EnrollmentStoreTest extends TestCase
             $mock->shouldReceive('query')->once()->andReturn(new Result(['Items' => [$this->item()]]));
         });
 
-        $record = app(EnrollmentStore::class)->fleet()->get('bankrate/portkey');
+        $record = app(EnrollmentStore::class)->fleet()->get('1202845285');
 
         $this->assertNull($record->signalChecks, 'absent means "use zapp\'s global list"');
     }
@@ -197,7 +201,7 @@ class EnrollmentStoreTest extends TestCase
                 ->andReturn(new Result(['Items' => [$this->item(['signalChecks' => ['L' => []]])]]));
         });
 
-        $record = app(EnrollmentStore::class)->fleet()->get('bankrate/portkey');
+        $record = app(EnrollmentStore::class)->fleet()->get('1202845285');
 
         $this->assertSame([], $record->signalChecks, 'empty means "wait on nothing" — a different fact');
     }
@@ -225,10 +229,12 @@ class EnrollmentStoreTest extends TestCase
 
         $this->assertSame('attribute_not_exists(sk)', $record['Put']['ConditionExpression']);
         $this->assertSame(['S' => 'repo'], $record['Put']['Item']['pk']);
+        $this->assertSame(['S' => '1202845285'], $record['Put']['Item']['sk'], 'keyed on the id');
         $this->assertSame(['N' => '1'], $record['Put']['Item']['version']);
         $this->assertSame(['S' => self::ACTOR], $record['Put']['Item']['enrolledBy']);
 
-        $this->assertSame(['S' => 'history#bankrate/portkey'], $history['Put']['Item']['pk']);
+        $this->assertSame(['S' => 'history#1202845285'], $history['Put']['Item']['pk'],
+            'history keyed on the id too, so a rename cannot orphan it from the record');
         $this->assertSame(['S' => 'enroll'], $history['Put']['Item']['action']);
         $this->assertSame(['S' => self::ACTOR], $history['Put']['Item']['actor']);
     }
@@ -331,7 +337,7 @@ class EnrollmentStoreTest extends TestCase
                 });
         });
 
-        app(EnrollmentStore::class)->delete('bankrate/portkey', 3, self::ACTOR);
+        app(EnrollmentStore::class)->delete('1202845285', 3, self::ACTOR);
 
         [$record, $history] = $captured['TransactItems'];
         $this->assertSame('version = :expected', $record['Delete']['ConditionExpression']);
@@ -392,6 +398,13 @@ use Spatie\LaravelData\Data;
 class EnrollmentData extends Data
 {
     public function __construct(
+        /** GitHub's repository id, as a string. The IDENTITY — this is `sk`. */
+        public string $repoId,
+        /**
+         * `owner/repo`. A DISPLAY LABEL, not an identifier: nothing resolves
+         * enrollment through it, and it may lag a rename until the sync
+         * refreshes it. Key on $repoId.
+         */
         public string $repo,
         public string $classification,
         public int $ciTrustTier,
@@ -485,7 +498,7 @@ class EnrollmentStore
     }
 
     /**
-     * Every enrollment record, keyed by `owner/repo`.
+     * Every enrollment record, keyed by repository id.
      *
      * PAGINATES on LastEvaluatedKey. The table holds one item per ENROLLED
      * repository — eight today, not one per org repo — so the 1 MB limit is far
@@ -513,7 +526,9 @@ class EnrollmentStore
 
             foreach ($result['Items'] ?? [] as $item) {
                 $record = $this->fromItem($item);
-                $records->put($record->repo, $record);
+                // Keyed by repository id, matching repos.external_id — NOT by
+                // name, which is a label that can change under us.
+                $records->put($record->repoId, $record);
             }
 
             $startKey = $result['LastEvaluatedKey'] ?? null;
@@ -522,12 +537,12 @@ class EnrollmentStore
         return $records;
     }
 
-    /** One repository's enrollment, or null when it has none. */
-    public function find(string $repo): ?EnrollmentData
+    /** One repository's enrollment, or null when it has none. Keyed on the repository id. */
+    public function find(string $repoId): ?EnrollmentData
     {
         $result = $this->client->getItem([
             'TableName' => $this->table(),
-            'Key' => ['pk' => ['S' => self::FLEET_PK], 'sk' => ['S' => $repo]],
+            'Key' => ['pk' => ['S' => self::FLEET_PK], 'sk' => ['S' => $repoId]],
             'ConsistentRead' => true,
         ]);
 
@@ -544,7 +559,7 @@ class EnrollmentStore
         $item['enrolledBy'] = ['S' => $actor];
         $item['enrolledAt'] = ['S' => $now];
 
-        $this->transact($data->repo, [
+        $this->transact($data->repoId, [
             [
                 'Put' => [
                     'TableName' => $this->table(),
@@ -554,7 +569,7 @@ class EnrollmentStore
                     'ConditionExpression' => 'attribute_not_exists(sk)',
                 ],
             ],
-            $this->historyPut($data->repo, 'enroll', 1, $actor, $now, null, $data),
+            $this->historyPut($data->repoId, 'enroll', 1, $actor, $now, null, $data),
         ]);
     }
 
@@ -569,11 +584,11 @@ class EnrollmentStore
      */
     public function replace(EnrollmentData $data, int $expectedVersion, string $actor, string $action): void
     {
-        $before = $this->find($data->repo);
+        $before = $this->find($data->repoId);
         $now = now()->toIso8601String();
         $nextVersion = $expectedVersion + 1;
 
-        $this->transact($data->repo, [
+        $this->transact($data->repoId, [
             [
                 'Put' => [
                     'TableName' => $this->table(),
@@ -582,26 +597,26 @@ class EnrollmentStore
                     'ExpressionAttributeValues' => [':expected' => ['N' => (string) $expectedVersion]],
                 ],
             ],
-            $this->historyPut($data->repo, $action, $nextVersion, $actor, $now, $before, $data),
+            $this->historyPut($data->repoId, $action, $nextVersion, $actor, $now, $before, $data),
         ]);
     }
 
     /** Remove a record. The history row keeps the deletion auditable. */
-    public function delete(string $repo, int $expectedVersion, string $actor): void
+    public function delete(string $repoId, int $expectedVersion, string $actor): void
     {
-        $before = $this->find($repo);
+        $before = $this->find($repoId);
         $now = now()->toIso8601String();
 
-        $this->transact($repo, [
+        $this->transact($repoId, [
             [
                 'Delete' => [
                     'TableName' => $this->table(),
-                    'Key' => ['pk' => ['S' => self::FLEET_PK], 'sk' => ['S' => $repo]],
+                    'Key' => ['pk' => ['S' => self::FLEET_PK], 'sk' => ['S' => $repoId]],
                     'ConditionExpression' => 'version = :expected',
                     'ExpressionAttributeValues' => [':expected' => ['N' => (string) $expectedVersion]],
                 ],
             ],
-            $this->historyPut($repo, 'unenroll', $expectedVersion + 1, $actor, $now, $before, null),
+            $this->historyPut($repoId, 'unenroll', $expectedVersion + 1, $actor, $now, $before, null),
         ]);
     }
 
@@ -612,13 +627,13 @@ class EnrollmentStore
      * `TransactionCanceledException`, NOT `ConditionalCheckFailedException` —
      * catching the latter here would let a clobbering write look like a success.
      */
-    private function transact(string $repo, array $items): void
+    private function transact(string $repoId, array $items): void
     {
         try {
             $this->client->transactWriteItems(['TransactItems' => $items]);
         } catch (AwsException $e) {
             if ($e->getAwsErrorCode() === 'TransactionCanceledException') {
-                throw EnrollmentConflictException::forRepo($repo);
+                throw EnrollmentConflictException::forRepo($repoId);
             }
 
             throw $e;
@@ -627,7 +642,7 @@ class EnrollmentStore
 
     /** Build one history row. `before` is null on enroll; `after` is null on unenroll. */
     private function historyPut(
-        string $repo,
+        string $repoId,
         string $action,
         int $version,
         string $actor,
@@ -638,7 +653,7 @@ class EnrollmentStore
         $item = [
             // A partition per repository, NOT the shared fleet partition —
             // history rows sharing it would appear in every fleet read.
-            'pk' => ['S' => "history#{$repo}"],
+            'pk' => ['S' => "history#{$repoId}"],
             // The version suffix is not decoration: two writes in the same
             // millisecond would collide on the timestamp alone.
             'sk' => ['S' => "{$at}#{$version}"],
@@ -664,7 +679,9 @@ class EnrollmentStore
     {
         $item = [
             'pk' => ['S' => self::FLEET_PK],
-            'sk' => ['S' => $data->repo],
+            // The id, not the name. Enrollment must survive a rename.
+            'sk' => ['S' => $data->repoId],
+            'repoId' => ['S' => $data->repoId],
             'repo' => ['S' => $data->repo],
             'classification' => ['S' => $data->classification],
             'ciTrustTier' => ['N' => (string) $data->ciTrustTier],
@@ -700,6 +717,7 @@ class EnrollmentStore
         };
 
         return new EnrollmentData(
+            repoId: $item['repoId']['S'],
             repo: $item['repo']['S'],
             classification: $item['classification']['S'],
             ciTrustTier: (int) $item['ciTrustTier']['N'],
@@ -1157,16 +1175,23 @@ class SeedZappEnrollment extends Command
 
     protected $description = 'Create and seed a local zapp enrollment registry (DynamoDB Local only)';
 
-    /** The eight repositories zapp enrolled in PLAT-1233, at their real settings. */
+    /**
+     * The eight repositories zapp enrolled in PLAT-1233, at their real settings.
+     *
+     * `[repo, githubId, classification, ciTrustTier]`. The ids were resolved once
+     * with `gh api repos/bankrate/<name> --jq .id` and hard-coded, so seeding a
+     * local database needs no GitHub credentials. They are also written to
+     * `repos.external_id`, which is what the page joins on.
+     */
     private const RECORDS = [
-        ['bankrate/platform-cicd-v2-demo', 'sandbox', 2],
-        ['bankrate/conductor', 'internal-tool', 2],
-        ['bankrate/conductor-api', 'prod-service', 2],
-        ['bankrate/portkey', 'prod-service', 2],
-        ['bankrate/zapp', 'sandbox', 2],
-        ['bankrate/brand-identity-pages-app', 'prod-service', 2],
-        ['bankrate/redirect-management-api-v2', 'prod-service', 1],
-        ['bankrate/crank', 'internal-tool', 2],
+        ['bankrate/platform-cicd-v2-demo', '1324428773', 'sandbox', 2],
+        ['bankrate/conductor', '660337931', 'internal-tool', 2],
+        ['bankrate/conductor-api', '782637277', 'prod-service', 2],
+        ['bankrate/portkey', '1202845285', 'prod-service', 2],
+        ['bankrate/zapp', '1344975715', 'sandbox', 2],
+        ['bankrate/brand-identity-pages-app', '1244666547', 'prod-service', 2],
+        ['bankrate/redirect-management-api-v2', '656712940', 'prod-service', 1],
+        ['bankrate/crank', '1323400735', 'internal-tool', 2],
     ];
 
     public function handle(EnrollmentStore $store): int
@@ -1186,22 +1211,27 @@ class SeedZappEnrollment extends Command
         $store->createTable();
         $existing = $store->fleet();
 
-        foreach (self::RECORDS as [$repo, $classification, $tier]) {
+        foreach (self::RECORDS as [$repo, $repoId, $classification, $tier]) {
             [$owner, $name] = explode('/', $repo, 2);
 
-            // The page joins on CONCAT(owner, '/', name), so both sides need a row.
+            // The page joins on repos.external_id, so both sides need a row and
+            // the id must match exactly.
             Repo::query()->firstOrCreate(
-                ['owner' => $owner, 'name' => $name],
-                ['visibility' => 'internal', 'private' => true, 'archived' => false, 'default_branch' => 'main'],
+                ['external_id' => $repoId],
+                [
+                    'owner' => $owner, 'name' => $name, 'visibility' => 'internal',
+                    'private' => true, 'archived' => false, 'default_branch' => 'main',
+                ],
             );
 
-            if ($existing->has($repo)) {
+            if ($existing->has($repoId)) {
                 $this->line("skipped {$repo} (already enrolled)");
 
                 continue;
             }
 
             $store->create(new EnrollmentData(
+                repoId: $repoId,
                 repo: $repo,
                 classification: $classification,
                 ciTrustTier: $tier,
@@ -1262,12 +1292,12 @@ The table, the join, the stale-enrollment banner, and the nav entry. No writes y
 **Files:**
 - Create: `app/Filament/Pages/AutoMerge.php`
 - Create: `resources/views/filament/pages/auto-merge.blade.php`
-- Modify: `app/Models/Repo.php` (add a `fullNameIn` scope and a `full_name` accessor)
+- Modify: `app/Models/Repo.php` (add a `full_name` accessor — no query scope needed)
 - Create: `tests/Feature/Filament/Pages/AutoMergeTest.php`
 
 **Interfaces:**
 - Consumes: `EnrollmentStore::fleet()`, `EnrollmentData` from Task 1.
-- Produces: `AutoMerge::class` with a memoised `enrollments(): Collection`, `needsAttention(): Collection` (each entry `{record: EnrollmentData, reason: string}`), `enrollmentFor(Repo): ?EnrollmentData` and `refreshEnrollments(): void`; `Repo::scopeFullNameIn(array $names)` and `Repo::$full_name`.
+- Produces: `AutoMerge::class` with a memoised `enrollments(): Collection`, `needsAttention(): Collection` (each entry `{record: EnrollmentData, reason: string}`), `enrollmentFor(Repo): ?EnrollmentData` and `refreshEnrollments(): void`; `Repo::$full_name`. **No query scope** — filters use `whereIn('external_id', $ids)` directly.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1303,9 +1333,11 @@ class AutoMergeTest extends TestCase
         Permission::findOrCreate('manage auto-merge enrollment');
     }
 
-    private function record(string $repo, array $over = []): EnrollmentData
+    /** `$repoId` is the identity; `$repo` is only the label. */
+    private function record(string $repoId, string $repo, array $over = []): EnrollmentData
     {
         return EnrollmentData::from(array_merge([
+            'repoId' => $repoId,
             'repo' => $repo,
             'classification' => 'sandbox',
             'ciTrustTier' => 2,
@@ -1322,7 +1354,7 @@ class AutoMergeTest extends TestCase
 
     private function fleetIs(EnrollmentData ...$records): void
     {
-        $keyed = collect($records)->keyBy(fn (EnrollmentData $r): string => $r->repo);
+        $keyed = collect($records)->keyBy(fn (EnrollmentData $r): string => $r->repoId);
 
         $this->mock(EnrollmentStore::class, function (MockInterface $mock) use ($keyed): void {
             $mock->shouldReceive('fleet')->andReturn($keyed);
@@ -1332,10 +1364,10 @@ class AutoMergeTest extends TestCase
     #[Test]
     public function it_lists_enrolled_and_unenrolled_repositories_together(): void
     {
-        Repo::factory()->create(['owner' => 'bankrate', 'name' => 'portkey']);
-        Repo::factory()->create(['owner' => 'bankrate', 'name' => 'brcc-api']);
+        Repo::factory()->create(['external_id' => '1202845285', 'owner' => 'bankrate', 'name' => 'portkey']);
+        Repo::factory()->create(['external_id' => '999', 'owner' => 'bankrate', 'name' => 'brcc-api']);
 
-        $this->fleetIs($this->record('bankrate/portkey', ['classification' => 'prod-service']));
+        $this->fleetIs($this->record('1202845285', 'bankrate/portkey', ['classification' => 'prod-service']));
         $this->actingAs(User::factory()->create());
 
         Livewire::test(AutoMerge::class)
@@ -1348,10 +1380,10 @@ class AutoMergeTest extends TestCase
     #[Test]
     public function the_enrolled_filter_pushes_the_enrolled_set_into_sql(): void
     {
-        Repo::factory()->create(['owner' => 'bankrate', 'name' => 'portkey']);
-        Repo::factory()->create(['owner' => 'bankrate', 'name' => 'brcc-api']);
+        Repo::factory()->create(['external_id' => '1202845285', 'owner' => 'bankrate', 'name' => 'portkey']);
+        Repo::factory()->create(['external_id' => '999', 'owner' => 'bankrate', 'name' => 'brcc-api']);
 
-        $this->fleetIs($this->record('bankrate/portkey'));
+        $this->fleetIs($this->record('1202845285', 'bankrate/portkey'));
         $this->actingAs(User::factory()->create());
 
         Livewire::test(AutoMerge::class)
@@ -1379,11 +1411,11 @@ class AutoMergeTest extends TestCase
     #[Test]
     public function an_enrollment_with_no_inventory_row_is_surfaced_not_hidden(): void
     {
-        Repo::factory()->create(['owner' => 'bankrate', 'name' => 'portkey', 'archived' => false]);
+        Repo::factory()->create(['external_id' => '1202845285', 'owner' => 'bankrate', 'name' => 'portkey', 'archived' => false]);
 
         $this->fleetIs(
-            $this->record('bankrate/portkey'),
-            $this->record('bankrate/deleted-repo'),
+            $this->record('1202845285', 'bankrate/portkey'),
+            $this->record('555', 'bankrate/deleted-repo'),
         );
         $this->actingAs(User::factory()->create());
 
@@ -1399,9 +1431,9 @@ class AutoMergeTest extends TestCase
     #[Test]
     public function an_enrolled_but_archived_repository_is_flagged_and_still_reachable(): void
     {
-        Repo::factory()->create(['owner' => 'bankrate', 'name' => 'old-service', 'archived' => true]);
+        Repo::factory()->create(['external_id' => '777', 'owner' => 'bankrate', 'name' => 'old-service', 'archived' => true]);
 
-        $this->fleetIs($this->record('bankrate/old-service'));
+        $this->fleetIs($this->record('777', 'bankrate/old-service'));
         $this->actingAs(User::factory()->create());
 
         // The regression this pins: a hard `->active()` scope on the query would
@@ -1417,8 +1449,8 @@ class AutoMergeTest extends TestCase
     #[Test]
     public function the_archived_filter_defaults_to_hiding_them_but_can_be_cleared(): void
     {
-        Repo::factory()->create(['owner' => 'bankrate', 'name' => 'live-service', 'archived' => false]);
-        $archived = Repo::factory()->create(['owner' => 'bankrate', 'name' => 'old-service', 'archived' => true]);
+        Repo::factory()->create(['external_id' => '888', 'owner' => 'bankrate', 'name' => 'live-service', 'archived' => false]);
+        $archived = Repo::factory()->create(['external_id' => '777', 'owner' => 'bankrate', 'name' => 'old-service', 'archived' => true]);
 
         $this->fleetIs();
         $this->actingAs(User::factory()->create());
@@ -1427,6 +1459,27 @@ class AutoMergeTest extends TestCase
             ->assertCanNotSeeTableRecords([$archived])
             ->filterTable('archived', null)
             ->assertCanSeeTableRecords([$archived]);
+    }
+
+    #[Test]
+    public function a_renamed_repository_stays_enrolled(): void
+    {
+        // THE test for id-keying. Conductor's sync follows a rename by
+        // external_id, so the row's owner/name change while the id does not.
+        // Keyed on the name, this repository would silently fall out of
+        // enrollment; keyed on the id, the rename is a non-event.
+        Repo::factory()->create([
+            'external_id' => '1202845285', 'owner' => 'bankrate', 'name' => 'portkey-v2',
+        ]);
+
+        $this->fleetIs($this->record('1202845285', 'bankrate/portkey'));
+        $this->actingAs(User::factory()->create());
+
+        Livewire::test(AutoMerge::class)
+            ->assertOk()
+            ->assertSee('portkey-v2')
+            ->assertSee('shadow')
+            ->assertDontSee('not in Conductor');
     }
 
     #[Test]
@@ -1453,44 +1506,30 @@ php artisan test --filter=AutoMergeTest
 
 Expected: FAIL — `App\Filament\Pages\AutoMerge` does not exist.
 
-- [ ] **Step 3: Add the model scope and accessor**
+- [ ] **Step 3: Add the display accessor**
 
 In `app/Models/Repo.php`, add after `scopeScorecardEligible`:
 
 ```php
-    /**
-     * Restrict to repositories whose `owner/name` appears in the given list.
-     *
-     * The `repos` table has no `full_name` column, and zapp keys enrollment on
-     * `owner/repo` exactly as the webhook reports it, so the join is on a
-     * concatenation.
-     *
-     * An EMPTY list matches nothing. That case is load-bearing: `IN ()` is a
-     * SQL syntax error, and writing the empty case as a no-op instead would
-     * make "show me enrolled repositories" return all of them when the fleet is
-     * empty.
-     *
-     * @param  array<int, string>  $names
-     */
-    public function scopeFullNameIn(Builder $query, array $names): Builder
-    {
-        if ($names === []) {
-            return $query->whereRaw('1 = 0');
-        }
-
-        $placeholders = implode(',', array_fill(0, count($names), '?'));
-
-        return $query->whereRaw("CONCAT(owner, '/', name) IN ({$placeholders})", $names);
-    }
-
-    /** The `owner/name` form zapp keys enrollment on. */
+    /** The `owner/name` form, for display and for zapp's enrollment label. */
     public function getFullNameAttribute(): string
     {
         return "{$this->owner}/{$this->name}";
     }
 ```
 
-`Builder` is already imported in that file.
+**No query scope is needed.** Enrollment is keyed on the repository id, and
+`repos.external_id` is `string` and `unique`
+(`2024_04_05_175717_create_repos_table.php:16`), so every filter is a plain
+`whereIn('external_id', $ids)` — indexed, and Laravel already renders an empty
+array as a match-nothing condition.
+
+An earlier draft of this plan joined on `CONCAT(owner, '/', name)` and needed a
+custom `fullNameIn` scope with raw SQL and a hand-written empty-array guard,
+because `IN ()` is a syntax error and a no-op guard would have made "show me
+enrolled repositories" return all 1,112 when the fleet was empty. Keying on the
+id removes the scope, the raw SQL, and that trap together. **Do not add
+`fullNameIn`.**
 
 - [ ] **Step 4: Write the page**
 
@@ -1555,7 +1594,11 @@ class AutoMerge extends Page implements HasTable
      */
     private ?Collection $fleet = null;
 
-    /** @return Collection<string, EnrollmentData> */
+    /**
+     * The fleet, keyed by repository id — the same value as `repos.external_id`.
+     *
+     * @return Collection<string, EnrollmentData>
+     */
     public function enrollments(): Collection
     {
         return $this->fleet ??= app(EnrollmentStore::class)->fleet();
@@ -1593,13 +1636,13 @@ class AutoMerge extends Page implements HasTable
     public function needsAttention(): Collection
     {
         $rows = Repo::query()
-            ->fullNameIn($this->enrollments()->keys()->all())
+            ->whereIn('external_id', $this->enrollments()->keys()->all())
             ->get()
-            ->keyBy->full_name;
+            ->keyBy('external_id');
 
         return $this->enrollments()
             ->map(function (EnrollmentData $record) use ($rows): ?array {
-                $repo = $rows->get($record->repo);
+                $repo = $rows->get($record->repoId);
 
                 if ($repo === null) {
                     return ['record' => $record, 'reason' => 'not in Conductor\'s inventory'];
@@ -1615,10 +1658,10 @@ class AutoMerge extends Page implements HasTable
             ->values();
     }
 
-    /** The record for one inventory row, or null. */
+    /** The record for one inventory row, or null. Joined on the repository id. */
     public function enrollmentFor(Repo $repo): ?EnrollmentData
     {
-        return $this->enrollments()->get($repo->full_name);
+        return $this->enrollments()->get($repo->external_id);
     }
 
     public function table(Table $table): Table
@@ -1703,11 +1746,10 @@ class AutoMerge extends Page implements HasTable
                     ->trueLabel('Enrolled only')
                     ->falseLabel('Not enrolled')
                     ->queries(
-                        true: fn (Builder $query): Builder => $query->fullNameIn($this->enrollments()->keys()->all()),
-                        false: fn (Builder $query): Builder => $query->whereNotIn(
-                            'id',
-                            Repo::query()->fullNameIn($this->enrollments()->keys()->all())->select('id'),
-                        ),
+                        true: fn (Builder $query): Builder => $query
+                            ->whereIn('external_id', $this->enrollments()->keys()->all()),
+                        false: fn (Builder $query): Builder => $query
+                            ->whereNotIn('external_id', $this->enrollments()->keys()->all()),
                         blank: fn (Builder $query): Builder => $query,
                     ),
                 SelectFilter::make('classification')
@@ -1721,12 +1763,12 @@ class AutoMerge extends Page implements HasTable
                             return $query;
                         }
 
-                        $names = $this->enrollments()
+                        $ids = $this->enrollments()
                             ->filter(fn (EnrollmentData $r): bool => $r->classification === $data['value'])
                             ->keys()
                             ->all();
 
-                        return $query->fullNameIn($names);
+                        return $query->whereIn('external_id', $ids);
                     }),
                 // Matches RepoResource.php:319 — a default that can be cleared,
                 // so an enrolled-then-archived repository is reachable.
@@ -1844,7 +1886,7 @@ Append to `tests/Feature/Filament/Pages/AutoMergeTest.php`:
     #[Test]
     public function enrolling_writes_the_record_with_the_acting_user_as_actor(): void
     {
-        $repo = Repo::factory()->create(['owner' => 'bankrate', 'name' => 'brcc-api']);
+        $repo = Repo::factory()->create(['external_id' => '999', 'owner' => 'bankrate', 'name' => 'brcc-api']);
         $user = $this->permittedUser();
 
         $this->mock(EnrollmentStore::class, function (MockInterface $mock) use ($user): void {
@@ -1852,7 +1894,8 @@ Append to `tests/Feature/Filament/Pages/AutoMergeTest.php`:
             $mock->shouldReceive('create')
                 ->once()
                 ->withArgs(function (EnrollmentData $data, string $actor) use ($user): bool {
-                    return $data->repo === 'bankrate/brcc-api'
+                    return $data->repoId === '999'
+                        && $data->repo === 'bankrate/brcc-api'
                         && $data->classification === 'prod-service'
                         && $data->ciTrustTier === 2
                         && $data->mode === 'shadow'
@@ -1879,7 +1922,7 @@ Append to `tests/Feature/Filament/Pages/AutoMergeTest.php`:
     #[Test]
     public function leaving_the_override_toggle_off_writes_null_not_an_empty_list(): void
     {
-        $repo = Repo::factory()->create(['owner' => 'bankrate', 'name' => 'brcc-api']);
+        $repo = Repo::factory()->create(['external_id' => '999', 'owner' => 'bankrate', 'name' => 'brcc-api']);
 
         $this->mock(EnrollmentStore::class, function (MockInterface $mock): void {
             $mock->shouldReceive('fleet')->andReturn(collect());
@@ -1903,7 +1946,7 @@ Append to `tests/Feature/Filament/Pages/AutoMergeTest.php`:
     #[Test]
     public function turning_the_override_on_with_an_empty_list_writes_an_empty_list(): void
     {
-        $repo = Repo::factory()->create(['owner' => 'bankrate', 'name' => 'brcc-api']);
+        $repo = Repo::factory()->create(['external_id' => '999', 'owner' => 'bankrate', 'name' => 'brcc-api']);
 
         $this->mock(EnrollmentStore::class, function (MockInterface $mock): void {
             $mock->shouldReceive('fleet')->andReturn(collect());
@@ -1929,11 +1972,11 @@ Append to `tests/Feature/Filament/Pages/AutoMergeTest.php`:
     #[Test]
     public function pausing_replaces_the_record_with_a_pause_action_and_the_read_version(): void
     {
-        $repo = Repo::factory()->create(['owner' => 'bankrate', 'name' => 'portkey']);
+        $repo = Repo::factory()->create(['external_id' => '1202845285', 'owner' => 'bankrate', 'name' => 'portkey']);
 
         $this->mock(EnrollmentStore::class, function (MockInterface $mock): void {
             $mock->shouldReceive('fleet')->andReturn(collect([
-                'bankrate/portkey' => $this->record('bankrate/portkey', ['version' => 5]),
+                '1202845285' => $this->record('1202845285', 'bankrate/portkey', ['version' => 5]),
             ]));
             $mock->shouldReceive('replace')
                 ->once()
@@ -1952,13 +1995,13 @@ Append to `tests/Feature/Filament/Pages/AutoMergeTest.php`:
     #[Test]
     public function unenrolling_deletes_at_the_read_version(): void
     {
-        $repo = Repo::factory()->create(['owner' => 'bankrate', 'name' => 'portkey']);
+        $repo = Repo::factory()->create(['external_id' => '1202845285', 'owner' => 'bankrate', 'name' => 'portkey']);
 
         $this->mock(EnrollmentStore::class, function (MockInterface $mock): void {
             $mock->shouldReceive('fleet')->andReturn(collect([
-                'bankrate/portkey' => $this->record('bankrate/portkey', ['version' => 5]),
+                '1202845285' => $this->record('1202845285', 'bankrate/portkey', ['version' => 5]),
             ]));
-            $mock->shouldReceive('delete')->once()->with('bankrate/portkey', 5, \Mockery::type('string'));
+            $mock->shouldReceive('delete')->once()->with('1202845285', 5, \Mockery::type('string'));
         });
 
         $this->actingAs($this->permittedUser());
@@ -1971,11 +2014,11 @@ Append to `tests/Feature/Filament/Pages/AutoMergeTest.php`:
     #[Test]
     public function a_concurrent_change_is_reported_and_not_retried(): void
     {
-        $repo = Repo::factory()->create(['owner' => 'bankrate', 'name' => 'portkey']);
+        $repo = Repo::factory()->create(['external_id' => '1202845285', 'owner' => 'bankrate', 'name' => 'portkey']);
 
         $this->mock(EnrollmentStore::class, function (MockInterface $mock): void {
             $mock->shouldReceive('fleet')->andReturn(collect([
-                'bankrate/portkey' => $this->record('bankrate/portkey', ['version' => 5]),
+                '1202845285' => $this->record('1202845285', 'bankrate/portkey', ['version' => 5]),
             ]));
             // Once. A retry would clobber whatever the other operator wrote.
             $mock->shouldReceive('replace')->once()->andThrow(
@@ -1993,13 +2036,13 @@ Append to `tests/Feature/Filament/Pages/AutoMergeTest.php`:
     #[Test]
     public function a_stale_enrollment_can_be_unenrolled_from_the_header_action(): void
     {
-        Repo::factory()->create(['owner' => 'bankrate', 'name' => 'old-service', 'archived' => true]);
+        Repo::factory()->create(['external_id' => '777', 'owner' => 'bankrate', 'name' => 'old-service', 'archived' => true]);
 
         $this->mock(EnrollmentStore::class, function (MockInterface $mock): void {
             $mock->shouldReceive('fleet')->andReturn(collect([
-                'bankrate/old-service' => $this->record('bankrate/old-service', ['version' => 4]),
+                '777' => $this->record('777', 'bankrate/old-service', ['version' => 4]),
             ]));
-            $mock->shouldReceive('delete')->once()->with('bankrate/old-service', 4, \Mockery::type('string'));
+            $mock->shouldReceive('delete')->once()->with('777', 4, \Mockery::type('string'));
         });
 
         $this->actingAs($this->permittedUser());
@@ -2008,14 +2051,14 @@ Append to `tests/Feature/Filament/Pages/AutoMergeTest.php`:
         // action. Without a header action the only remedy is a CLI delete-item,
         // and fleetSize stays wrong indefinitely.
         Livewire::test(AutoMerge::class)
-            ->callAction('resolve_stale', data: ['repo' => 'bankrate/old-service'])
+            ->callAction('resolve_stale', data: ['repo' => '777'])
             ->assertHasNoActionErrors();
     }
 
     #[Test]
     public function a_user_without_the_permission_gets_no_write_actions(): void
     {
-        $repo = Repo::factory()->create(['owner' => 'bankrate', 'name' => 'brcc-api']);
+        $repo = Repo::factory()->create(['external_id' => '999', 'owner' => 'bankrate', 'name' => 'brcc-api']);
 
         $this->fleetIs();
         $this->actingAs(User::factory()->create());
@@ -2030,7 +2073,7 @@ Append to `tests/Feature/Filament/Pages/AutoMergeTest.php`:
     {
         config(['features.zapp_enrollment_writes' => false]);
 
-        $repo = Repo::factory()->create(['owner' => 'bankrate', 'name' => 'brcc-api']);
+        $repo = Repo::factory()->create(['external_id' => '999', 'owner' => 'bankrate', 'name' => 'brcc-api']);
 
         $this->fleetIs();
         $this->actingAs($this->permittedUser());
@@ -2141,9 +2184,19 @@ class EnrollmentFormSchema
         return $fields;
     }
 
-    /** Build the record from submitted form data. An override that is off becomes null. */
-    public static function toData(string $repo, array $form, int $version, string $actor): EnrollmentData
-    {
+    /**
+     * Build the record from submitted form data. An override that is off becomes null.
+     *
+     * Takes BOTH identifiers: `$repoId` is the key (`repos.external_id`), and
+     * `$repo` is the display label written alongside it.
+     */
+    public static function toData(
+        string $repoId,
+        string $repo,
+        array $form,
+        int $version,
+        string $actor,
+    ): EnrollmentData {
         $override = function (string $field) use ($form): ?array {
             if (! ($form['override'.ucfirst($field)] ?? false)) {
                 return null;
@@ -2153,6 +2206,7 @@ class EnrollmentFormSchema
         };
 
         return new EnrollmentData(
+            repoId: $repoId,
             repo: $repo,
             classification: $form['classification'],
             ciTrustTier: (int) $form['ciTrustTier'],
@@ -2196,11 +2250,16 @@ In `app/Filament/Pages/AutoMerge.php`, add `->recordActions([...])` to the `tabl
                     Action::make('enroll')
                         ->label('Enroll')
                         ->icon(Heroicon::OutlinedPlusCircle)
-                        ->visible(fn (Repo $record): bool => $this->canWrite() && $this->enrollmentFor($record) === null)
+                        // Archived repositories are excluded at the point of
+                        // entry: they cannot receive a pull request, so enrolling
+                        // one only inflates fleetSize.
+                        ->visible(fn (Repo $record): bool => $this->canWrite()
+                            && ! $record->archived
+                            && $this->enrollmentFor($record) === null)
                         ->schema(EnrollmentFormSchema::make())
                         ->action(fn (Repo $record, array $data) => $this->guarded(
                             fn () => app(EnrollmentStore::class)->create(
-                                EnrollmentFormSchema::toData($record->full_name, $data, 1, $this->actor()),
+                                EnrollmentFormSchema::toData($record->external_id, $record->full_name, $data, 1, $this->actor()),
                                 $this->actor(),
                             ),
                             "Enrolled {$record->full_name}",
@@ -2220,7 +2279,7 @@ In `app/Filament/Pages/AutoMerge.php`, add `->recordActions([...])` to the `tabl
 
                             $this->guarded(
                                 fn () => app(EnrollmentStore::class)->replace(
-                                    EnrollmentFormSchema::toData($record->full_name, $data, $version, $this->actor()),
+                                    EnrollmentFormSchema::toData($record->external_id, $record->full_name, $data, $version, $this->actor()),
                                     $version,
                                     $this->actor(),
                                     'update',
@@ -2272,7 +2331,7 @@ In `app/Filament/Pages/AutoMerge.php`, add `->recordActions([...])` to the `tabl
                         ->modalSubmitActionLabel('Unenroll')
                         ->action(fn (Repo $record) => $this->guarded(
                             fn () => app(EnrollmentStore::class)->delete(
-                                $record->full_name,
+                                $record->external_id,
                                 $this->enrollmentFor($record)->version,
                                 $this->actor(),
                             ),
@@ -2305,14 +2364,14 @@ nobody can fix from the page is a number that stays wrong.
                         ->label('Repository')
                         ->options(fn (): array => $this->needsAttention()
                             ->mapWithKeys(fn (array $item): array => [
-                                $item['record']->repo => "{$item['record']->repo} — {$item['reason']}",
+                                $item['record']->repoId => "{$item['record']->repo} — {$item['reason']}",
                             ])
                             ->all())
                         ->required(),
                 ])
                 ->action(function (array $data): void {
                     $stale = $this->needsAttention()
-                        ->firstWhere(fn (array $item): bool => $item['record']->repo === $data['repo']);
+                        ->firstWhere(fn (array $item): bool => $item['record']->repoId === $data['repo']);
 
                     if ($stale === null) {
                         Notification::make()
@@ -2327,7 +2386,7 @@ nobody can fix from the page is a number that stays wrong.
 
                     $this->guarded(
                         fn () => app(EnrollmentStore::class)->delete(
-                            $stale['record']->repo,
+                            $stale['record']->repoId,
                             $stale['record']->version,
                             $this->actor(),
                         ),
@@ -2406,7 +2465,320 @@ git commit -m "feat(auto-merge): enroll, edit, pause and unenroll from the page"
 
 ---
 
-### Task 6: Grant the task role access to the table
+### Task 6: Auto-pause enrollment when a repository is archived or gone
+
+The piece that makes drift self-correcting. Without it, `fleetSize` stays wrong
+until a human notices the banner.
+
+**Files:**
+- Create: `app/Actions/ReconcileZappEnrollment.php`
+- Modify: whichever command runs the GitHub repo sync (find it via `config('features.syncs.github')` and `SYNC_GITHUB_ENABLED`)
+- Create: `tests/Feature/Actions/ReconcileZappEnrollmentTest.php`
+
+**Interfaces:**
+- Consumes: `EnrollmentStore::fleet/replace`, `EnrollmentData`.
+- Produces: `ReconcileZappEnrollment::handle(): array` returning `['paused' => int, 'renamed' => int]`.
+
+- [ ] **Step 1: Find the sync**
+
+```bash
+cd ~/Projects/conductor-api
+grep -rn "syncs.github" app/ config/ routes/
+```
+
+Read the command it names and note where it finishes updating `repos`. The
+reconcile runs **after** that, so it sees the post-sync truth.
+
+- [ ] **Step 2: Write the failing tests**
+
+Create `tests/Feature/Actions/ReconcileZappEnrollmentTest.php`:
+
+```php
+<?php
+
+namespace Tests\Feature\Actions;
+
+use App\Actions\ReconcileZappEnrollment;
+use App\Data\Zapp\EnrollmentData;
+use App\Models\Repo;
+use App\Services\Zapp\EnrollmentStore;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Mockery\MockInterface;
+use PHPUnit\Framework\Attributes\Test;
+use Tests\TestCase;
+
+class ReconcileZappEnrollmentTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private function record(string $repoId, string $repo, array $over = []): EnrollmentData
+    {
+        return EnrollmentData::from(array_merge([
+            'repoId' => $repoId,
+            'repo' => $repo,
+            'classification' => 'sandbox',
+            'ciTrustTier' => 2,
+            'mode' => 'shadow',
+            'stageEnabled' => false,
+            'signalChecks' => null,
+            'blockingChecks' => null,
+            'baseBranches' => null,
+            'version' => 3,
+            'updatedBy' => 'scrosby@bankrate.com',
+            'updatedAt' => '2026-08-28T12:00:00+00:00',
+        ], $over));
+    }
+
+    #[Test]
+    public function an_archived_repository_is_paused_not_unenrolled(): void
+    {
+        Repo::factory()->create(['external_id' => '777', 'owner' => 'bankrate', 'name' => 'old', 'archived' => true]);
+
+        $this->mock(EnrollmentStore::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('fleet')->andReturn(collect(['777' => $this->record('777', 'bankrate/old')]));
+            // PAUSE, never delete. Pausing is reversible and preserves the
+            // classification and tier somebody reasoned about; a scheduled job
+            // should not be able to destroy an audit record.
+            $mock->shouldReceive('delete')->never();
+            $mock->shouldReceive('replace')
+                ->once()
+                ->withArgs(function (EnrollmentData $data, int $expected, string $actor, string $action): bool {
+                    return $data->mode === 'off'
+                        && $expected === 3
+                        && $actor === 'system:github-sync'
+                        && $action === 'auto-pause';
+                });
+        });
+
+        $this->assertSame(['paused' => 1, 'renamed' => 0], app(ReconcileZappEnrollment::class)->handle());
+    }
+
+    #[Test]
+    public function a_repository_that_vanished_from_inventory_is_paused(): void
+    {
+        // No repos row at all — deleted in GitHub, so the sync removed it.
+        $this->mock(EnrollmentStore::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('fleet')->andReturn(collect(['555' => $this->record('555', 'bankrate/deleted')]));
+            $mock->shouldReceive('delete')->never();
+            $mock->shouldReceive('replace')->once()->withArgs(
+                fn (EnrollmentData $d, int $v, string $a, string $action): bool => $d->mode === 'off' && $action === 'auto-pause',
+            );
+        });
+
+        $this->assertSame(['paused' => 1, 'renamed' => 0], app(ReconcileZappEnrollment::class)->handle());
+    }
+
+    #[Test]
+    public function an_already_paused_record_is_left_alone(): void
+    {
+        Repo::factory()->create(['external_id' => '777', 'owner' => 'bankrate', 'name' => 'old', 'archived' => true]);
+
+        $this->mock(EnrollmentStore::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('fleet')->andReturn(collect([
+                '777' => $this->record('777', 'bankrate/old', ['mode' => 'off']),
+            ]));
+            // Idempotence matters: this runs on every sync, and re-pausing would
+            // append a history row per run forever.
+            $mock->shouldReceive('replace')->never();
+        });
+
+        $this->assertSame(['paused' => 0, 'renamed' => 0], app(ReconcileZappEnrollment::class)->handle());
+    }
+
+    #[Test]
+    public function a_healthy_repository_is_untouched(): void
+    {
+        Repo::factory()->create(['external_id' => '999', 'owner' => 'bankrate', 'name' => 'live', 'archived' => false]);
+
+        $this->mock(EnrollmentStore::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('fleet')->andReturn(collect(['999' => $this->record('999', 'bankrate/live')]));
+            $mock->shouldReceive('replace')->never();
+        });
+
+        $this->assertSame(['paused' => 0, 'renamed' => 0], app(ReconcileZappEnrollment::class)->handle());
+    }
+
+    #[Test]
+    public function a_renamed_repository_has_its_label_refreshed_and_stays_enrolled(): void
+    {
+        Repo::factory()->create([
+            'external_id' => '1202845285', 'owner' => 'bankrate', 'name' => 'portkey-v2', 'archived' => false,
+        ]);
+
+        $this->mock(EnrollmentStore::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('fleet')->andReturn(collect([
+                '1202845285' => $this->record('1202845285', 'bankrate/portkey'),
+            ]));
+            $mock->shouldReceive('replace')
+                ->once()
+                ->withArgs(function (EnrollmentData $data, int $v, string $a, string $action): bool {
+                    // Label only. The mode is untouched — a rename is not a
+                    // reason to stop evaluating anything.
+                    return $data->repo === 'bankrate/portkey-v2'
+                        && $data->mode === 'shadow'
+                        && $action === 'rename';
+                });
+        });
+
+        $this->assertSame(['paused' => 0, 'renamed' => 1], app(ReconcileZappEnrollment::class)->handle());
+    }
+}
+```
+
+- [ ] **Step 3: Run them to verify they fail**
+
+```bash
+php artisan test --filter=ReconcileZappEnrollmentTest
+```
+
+Expected: FAIL — `App\Actions\ReconcileZappEnrollment` does not exist.
+
+- [ ] **Step 4: Write the action**
+
+Create `app/Actions/ReconcileZappEnrollment.php`:
+
+```php
+<?php
+
+namespace App\Actions;
+
+use App\Data\Zapp\EnrollmentData;
+use App\Exceptions\EnrollmentConflictException;
+use App\Models\Repo;
+use App\Services\Zapp\EnrollmentStore;
+use Illuminate\Support\Facades\Log;
+
+/**
+ * Keep zapp's enrollment registry honest after a GitHub sync.
+ *
+ * WHY THIS EXISTS. `fleetSize` counts enrolled repositories with
+ * `mode: shadow`, and it is the denominator behind zapp's
+ * `minFleetForConfidence`. An enrollment for a repository nobody can open a
+ * pull request against does not merely sit there — it makes the "taken
+ * elsewhere" signal grade against a fleet smaller than it believes it has,
+ * instead of correctly reading `unknown`. Left to a human noticing a banner,
+ * that number stays wrong.
+ *
+ * PAUSES, NEVER UNENROLS. Pausing is reversible and preserves the
+ * classification and CI trust tier somebody reasoned about. Deleting an audit
+ * record is not something a scheduled job should be able to do, so unenrolling
+ * stays a human action from the page.
+ *
+ * A RENAME IS NOT A REASON TO PAUSE. Enrollment is keyed on the repository id,
+ * so a rename never breaks it; this only refreshes the stored display label so
+ * anyone reading the DynamoDB table directly sees the current name, and leaves
+ * a `rename` history row.
+ */
+class ReconcileZappEnrollment
+{
+    /** Recorded as the actor, so a mode change nobody chose is still attributable. */
+    private const ACTOR = 'system:github-sync';
+
+    public function __construct(private readonly EnrollmentStore $store) {}
+
+    /** @return array{paused: int, renamed: int} */
+    public function handle(): array
+    {
+        $fleet = $this->store->fleet();
+
+        $rows = Repo::query()
+            ->whereIn('external_id', $fleet->keys()->all())
+            ->get()
+            ->keyBy('external_id');
+
+        $paused = 0;
+        $renamed = 0;
+
+        foreach ($fleet as $repoId => $record) {
+            $repo = $rows->get($repoId);
+            $gone = $repo === null || $repo->archived;
+
+            if ($gone) {
+                // Already paused: do nothing. This runs on every sync, and
+                // re-pausing would append a history row per run forever.
+                if ($record->mode === 'off') {
+                    continue;
+                }
+
+                $this->write(
+                    EnrollmentData::from([...$record->toArray(), 'mode' => 'off']),
+                    $record->version,
+                    'auto-pause',
+                    $repoId,
+                );
+                $paused++;
+
+                continue;
+            }
+
+            if ($repo->full_name !== $record->repo) {
+                $this->write(
+                    EnrollmentData::from([...$record->toArray(), 'repo' => $repo->full_name]),
+                    $record->version,
+                    'rename',
+                    $repoId,
+                );
+                $renamed++;
+            }
+        }
+
+        return ['paused' => $paused, 'renamed' => $renamed];
+    }
+
+    /**
+     * Apply one change, surviving a conflict.
+     *
+     * A conflict here is benign and must not abort the loop: an operator edited
+     * that record while the sync ran, their write is the newer truth, and the
+     * next sync re-evaluates. This is the one place a conflict is swallowed
+     * rather than surfaced, because there is no operator waiting on a form.
+     */
+    private function write(EnrollmentData $data, int $expectedVersion, string $action, string $repoId): void
+    {
+        try {
+            $this->store->replace($data, $expectedVersion, self::ACTOR, $action);
+        } catch (EnrollmentConflictException) {
+            Log::info('zapp enrollment reconcile skipped a concurrently-edited record', [
+                'repo_id' => $repoId,
+                'action' => $action,
+            ]);
+        }
+    }
+}
+```
+
+- [ ] **Step 5: Call it from the sync**
+
+At the end of the GitHub sync command found in Step 1, after `repos` is updated:
+
+```php
+        $result = app(\App\Actions\ReconcileZappEnrollment::class)->handle();
+
+        if ($result['paused'] > 0 || $result['renamed'] > 0) {
+            $this->info("zapp enrollment: paused {$result['paused']}, relabelled {$result['renamed']}");
+        }
+```
+
+Gate it on the write flag so the kill switch covers this path too:
+
+```php
+        if (config('features.zapp_enrollment_writes')) {
+            // ... the block above
+        }
+```
+
+- [ ] **Step 6: Run and commit**
+
+```bash
+php artisan test --filter=ReconcileZappEnrollmentTest
+vendor/bin/pint --test app/Actions/ReconcileZappEnrollment.php
+git add app/Actions/ReconcileZappEnrollment.php tests/Feature/Actions app/Console
+git commit -m "feat(auto-merge): auto-pause enrollment for archived or deleted repositories"
+```
+
+---
+
+### Task 7: Grant the task role access to the table
 
 **Files:**
 - Modify: `infrastructure/terraform/iam.tf`
@@ -2498,7 +2870,7 @@ git commit -m "docs(infra): document the zapp enrollment env vars"
 
 ---
 
-### Task 7: Validate it end to end, locally
+### Task 8: Validate it end to end, locally
 
 The requirement: log in and use the page for real, the way the Portkey reader/writer work was validated.
 
@@ -2557,15 +2929,35 @@ Reload `/admin`, open **Inventory → Auto-Merge**, and confirm each of these:
 Then exercise the stale path, which the seed does not produce on its own:
 
 ```bash
-php artisan tinker --execute="\App\Models\Repo::where('owner','bankrate')->where('name','crank')->update(['archived' => true]);"
+php artisan tinker --execute="\App\Models\Repo::where('name','crank')->update(['archived' => true]);"
 ```
 
 | Check | Expected |
 |---|---|
 | Reload | warning banner names `bankrate/crank — archived in GitHub`; `crank` is gone from the table |
-| Clear the `archived` filter | `crank` reappears, still badged `shadow` |
+| Clear the `archived` filter | `crank` reappears, still badged `shadow`, with no Enroll action offered |
 | **Resolve stale enrollments** | header action visible with badge `1` |
-| Select `crank`, submit | success notification, banner clears, `fleetSize` drops by one |
+| Run the reconcile instead | `php artisan tinker --execute="dd(app(\App\Actions\ReconcileZappEnrollment::class)->handle());"` returns `['paused' => 1, 'renamed' => 0]` |
+| Reload | `crank` badges `paused`, banner still lists it (archived), and it no longer counts toward the active fleet |
+| Run the reconcile again | `['paused' => 0, 'renamed' => 0]` — idempotent, no second history row |
+
+Then prove the rename case, which is the whole reason enrollment is keyed on the
+repository id:
+
+```bash
+php artisan tinker --execute="\App\Models\Repo::where('name','portkey')->update(['name' => 'portkey-v2']);"
+```
+
+| Check | Expected |
+|---|---|
+| Reload | the row shows `portkey-v2`, **still badged `shadow`**, and it is NOT in the stale banner |
+| Run the reconcile | `['paused' => 0, 'renamed' => 1]` |
+| Query DynamoDB | the record's `sk` and `repoId` are unchanged; only `repo` now reads `bankrate/portkey-v2` |
+| Query its history | a `rename` row with actor `system:github-sync` |
+
+That last table is the one to read carefully. Keyed on the name, this repository
+would have silently stopped being evaluated while still counting toward
+`fleetSize`.
 
 - [ ] **Step 6: Verify the writes really landed, and that absence was preserved**
 
@@ -2575,7 +2967,7 @@ aws dynamodb query --table-name zapp-enrollments \
   --key-condition-expression 'pk = :pk' \
   --expression-attribute-values '{":pk":{"S":"repo"}}' \
   --endpoint-url http://localhost:8001 --region us-east-1 \
-  --query 'Items[].{repo:repo.S,mode:mode.S,v:version.N,sc:signalChecks}' --output table
+  --query 'Items[].{id:repoId.S,repo:repo.S,mode:mode.S,v:version.N,sc:signalChecks}' --output table
 ```
 
 Expected: the repo you enrolled is present, and the `sc` column is **empty** for
@@ -2587,7 +2979,7 @@ Then the history for a repository you edited:
 ```bash
 aws dynamodb query --table-name zapp-enrollments \
   --key-condition-expression 'pk = :pk' \
-  --expression-attribute-values '{":pk":{"S":"history#bankrate/brcc-api"}}' \
+  --expression-attribute-values '{":pk":{"S":"history#999"}}' \
   --endpoint-url http://localhost:8001 --region us-east-1 \
   --query 'Items[].{action:action.S,actor:actor.S,at:at.S,v:version.N}' --output table
 ```
@@ -2601,7 +2993,7 @@ With the Edit form open for one repository, change its version behind the page's
 
 ```bash
 aws dynamodb update-item --table-name zapp-enrollments \
-  --key '{"pk":{"S":"repo"},"sk":{"S":"bankrate/portkey"}}' \
+  --key '{"pk":{"S":"repo"},"sk":{"S":"1202845285"}}' \
   --update-expression 'SET version = :v' \
   --expression-attribute-values '{":v":{"N":"99"}}' \
   --endpoint-url http://localhost:8001 --region us-east-1
@@ -2637,13 +3029,17 @@ git commit -m "docs(auto-merge): how to run the enrollment page locally"
 
 ## Self-review notes
 
-**Spec coverage.** The `EnrollmentStore`, `TransactWriteItems`, optimistic concurrency and absent-vs-empty marshalling → Task 1; the permission, its migration and the feature flag → Task 2; DynamoDB Local and the seed → Task 3; the page, the `CONCAT` join and the orphan section → Task 4; the four write actions, the override toggles and the doc links → Task 5; IAM and env vars → Task 6; the log-in-and-click validation → Task 7.
+**Spec coverage.** The `EnrollmentStore`, `TransactWriteItems`, optimistic concurrency and absent-vs-empty marshalling → Task 1; the permission, its migration and the feature flag → Task 2; DynamoDB Local and the seed → Task 3; the page, the `external_id` join and the stale banner → Task 4; the four write actions, the override toggles, the archived-repo guard and the doc links → Task 5; the sync auto-pause → Task 6; IAM and env vars → Task 7; the log-in-and-click validation → Task 8.
 
 **One thing the spec asked for that landed differently.** The spec said "a header link plus per-field hints"; the hints are `helperText` on each form field in Task 5's `EnrollmentFormSchema` and the header link is in the Blade view, and only the document is deep-linked — no anchors, since anchors outside zapp's own tested `DOC_ANCHORS` set are unverified.
 
-**The spec's "orphan section" grew a second cause.** The spec described orphans as enrollment records with no inventory row. There is a second way a record becomes uneditable from the table, and it is the likelier one: the repository is **archived**. It has a `repos` row, so it is not an orphan, but the table's `archived` filter hides it by default — and an earlier draft of this plan used a hard `Repo::query()->active()` scope, which would have made such a record invisible on the page while zapp kept counting it in `fleetSize`. `RepoResource.php:319` uses a clearable `TernaryFilter` for exactly this reason, and Task 4 now follows it. `needsAttention()` covers both causes with a per-row reason, and Task 5's `resolve_stale` header action makes both removable — a stale record has no usable Eloquent row, so it cannot carry a row action, and without the header action the only remedy would be a CLI `delete-item`.
+**Drift is prevented at its cause, not reported.** An earlier draft keyed enrollment on `owner/repo` and then added a banner listing records that had drifted. That was backwards. `owner/repo` is mutable, so a **rename silently unenrolled a repository** — the record stranded on the old name, webhooks arrived under the new one and were dropped, and it kept counting toward `fleetSize`, which is the denominator behind zapp's `minFleetForConfidence: 5`. The fix is the key: enrollment is now keyed on `repository.id`, and a rename is a non-event.
 
-Why this is worth the ~40 lines: a stale record is inert for *evaluation* (a deleted repo sends no webhooks; a renamed one sends them under a name that is not enrolled, and the worker drops those) but not for *data*. `fleetSize` counts it, and that is the denominator behind `minFleetForConfidence: 5` — so stale records make `internalConfidence` grade against a fleet smaller than it believes it has, instead of correctly reading `unknown`. A wrong number nobody can fix from the page is a number that stays wrong.
+That change paid for itself three more times. `repos.external_id` is `string` and `unique`, so the join became `whereIn('external_id', $ids)` on an indexed column — deleting a `CONCAT(owner, '/', name)` comparison, its raw SQL, and a hand-written empty-array guard that existed only because `IN ()` is a syntax error and a no-op guard would have reported all 1,112 repositories as enrolled. Fork inheritance became impossible by construction rather than by careful string comparison. And the two services now agree on identity, since Conductor already syncs `repos` by `external_id`.
+
+The other two drift causes — archived and deleted — are handled by Task 6's reconcile, which **pauses** rather than unenrols, so `fleetSize` self-corrects with no human action while the audit record survives. Task 5 also hides Enroll for an archived repository, so the state cannot be created in the first place.
+
+What survives of the banner is a genuine anomaly indicator: with all three causes handled it should be empty, so a non-empty banner means the sync is disabled or lagging. One implementation trap remains and Task 4 pins it with a test — an enrolled-then-archived repository **has** a `repos` row, so it is not missing from inventory, but a hard `Repo::query()->active()` scope would hide it from the table anyway, leaving it invisible while zapp counted it. `RepoResource.php:319` uses a clearable `TernaryFilter` for this reason and Task 4 follows it.
 
 **Type consistency.** `EnrollmentData` keeps its field names throughout, and `EnrollmentFormSchema::fill` / `::toData` are exact inverses over the `override{Field}` booleans. `EnrollmentStore::replace` takes `(EnrollmentData, int $expectedVersion, string $actor, string $action)` in Task 1 and is called with exactly that in Task 5. `AutoMergePermission::NAME` is the single source for the permission string, used by the migration, the seeder list and `canWrite()`.
 

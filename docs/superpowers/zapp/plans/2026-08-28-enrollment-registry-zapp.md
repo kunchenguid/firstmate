@@ -15,8 +15,10 @@
 ## Global Constraints
 
 - **Table name:** `zapp-enrollments`. No environment suffix — `local.name = var.app_name` in `infrastructure/terraform/init.tf`, exactly like the existing `zapp-evaluations` and `zapp-delivery-ids`.
-- **Partition key:** `pk = "repo"` (constant) for enrollment records; `sk = "owner/repo"`.
-- **History key:** `pk = "history#owner/repo"`, `sk = "<ISO8601>#<version>"`. zapp reads neither and writes neither; the schema is fixed here so Conductor can rely on it.
+- **Partition key:** `pk = "repo"` (constant) for enrollment records; **`sk` is GitHub's `repository.id` as a string**, e.g. `"1202845285"`.
+- **History key:** `pk = "history#{repository.id}"`, `sk = "<ISO8601>#<version>"`. zapp reads neither and writes neither; the schema is fixed here so Conductor can rely on it.
+- **ENROLLMENT IS KEYED ON THE REPOSITORY ID, NEVER THE NAME.** `owner/repo` is mutable; `repository.id` is not. Keyed on the name, a **rename silently unenrolls the repository** — the record strands on the old name, webhooks arrive under the new one and get dropped by the enrollment gate, the repo stops being evaluated with nothing reporting that it has, and it keeps counting toward `fleetSize` so `minFleetForConfidence` is satisfied by a partly fictional fleet. Every record carries a `repo` attribute holding `owner/repo`, but it is a **display label only**; nothing resolves enrollment through it and it may lag a rename.
+- `repository.id` is present on every repository-scoped webhook event, so all four routed events can resolve enrollment.
 - **zapp never writes enrollment.** Its IAM grant is `GetItem` and `Query` only, and the absence of `PutItem` is the enforcement.
 - **No `dynamodb:Scan` anywhere.** The existing IAM policy states this as a design property; this work must not be what breaks it.
 - **`ConsistentRead: true` on every read.**
@@ -74,7 +76,13 @@ Create `infrastructure/terraform/enrollments.tf`:
 # partition holds one item per ENROLLED repo — eight today — against a 10 GB and
 # 3,000 RCU/s ceiling, so it is nowhere near hot.
 #
-# History rows live under `pk = "history#{owner}/{repo}"`, a separate partition
+# `sk` IS GITHUB'S repository.id, NOT owner/repo. The name is mutable, and keyed
+# on the name a rename silently unenrols the repository: the record strands on
+# the old name while webhooks arrive under the new one and get dropped. Each
+# record also carries a `repo` attribute for humans reading this table, but it is
+# a label, not an identifier.
+#
+# History rows live under `pk = "history#{repository.id}"`, a separate partition
 # per repository, precisely so they never appear in a fleet read.
 #
 # No TTL: this table is configuration, and its history is the audit trail.
@@ -192,7 +200,7 @@ The new functions land next to the existing YAML-backed ones. Nothing calls them
 - Consumes: `client` and `DynamoSender` from `src/deliveries.ts`; `EnrollmentRecord` and `Rules` from `src/rules-types.ts`.
 - Produces:
   - `interface StoredEnrollment extends EnrollmentRecord { version: number; updatedBy: string; updatedAt: string }`
-  - `lookupEnrollment(repoFullName: string, send?: DynamoSender): Promise<StoredEnrollment | undefined>`
+  - `lookupEnrollment(repoId: string, send?: DynamoSender): Promise<StoredEnrollment | undefined>` — **takes `repository.id`, not `owner/repo`**
   - `loadFleet(send?: DynamoSender): Promise<StoredEnrollment[]>`
   - `fleetSizeFromTable(send?: DynamoSender): Promise<number>`
   - `isEnrolledRecord(e: StoredEnrollment | undefined): boolean`
@@ -220,12 +228,15 @@ import { rules } from '../src/rules.js';
 process.env.ENROLLMENTS_TABLE = 'zapp-enrollments-test';
 
 const DEMO = 'bankrate/platform-cicd-v2-demo';
+const DEMO_ID = '1324428773';
 
 /** One stored item, in the AttributeValue shape DynamoDB returns. */
 function item(over: Record<string, unknown> = {}) {
   return {
     pk: { S: 'repo' },
-    sk: { S: DEMO },
+    // The GitHub repository id. `repo` below is a display label, not the key.
+    sk: { S: DEMO_ID },
+    repoId: { S: DEMO_ID },
     repo: { S: DEMO },
     classification: { S: 'sandbox' },
     ciTrustTier: { N: '2' },
@@ -239,8 +250,9 @@ function item(over: Record<string, unknown> = {}) {
 }
 
 test('lookupEnrollment returns the record, including its write metadata', async () => {
-  const record = await lookupEnrollment(DEMO, async () => ({ Item: item() }));
-  assert.equal(record?.repo, DEMO);
+  const record = await lookupEnrollment(DEMO_ID, async () => ({ Item: item() }));
+  assert.equal(record?.repoId, DEMO_ID);
+  assert.equal(record?.repo, DEMO, 'the display label rides along, but is not the key');
   assert.equal(record?.classification, 'sandbox');
   assert.equal(record?.ciTrustTier, 2);
   assert.equal(record?.mode, 'shadow');
@@ -249,54 +261,65 @@ test('lookupEnrollment returns the record, including its write metadata', async 
   assert.equal(record?.updatedBy, 'scrosby@bankrate.com');
 });
 
-test('lookupEnrollment reads consistently, by key, from the fleet partition', async () => {
+test('lookupEnrollment keys on the repository id, not the name', async () => {
   let sent: any;
-  await lookupEnrollment(DEMO, async (cmd: any) => { sent = cmd.input; return { Item: item() }; });
+  await lookupEnrollment(DEMO_ID, async (cmd: any) => { sent = cmd.input; return { Item: item() }; });
   assert.equal(sent.TableName, 'zapp-enrollments-test');
-  assert.deepEqual(sent.Key, { pk: { S: 'repo' }, sk: { S: DEMO } });
+  assert.deepEqual(sent.Key, { pk: { S: 'repo' }, sk: { S: DEMO_ID } },
+    'the name is mutable — keyed on it, a rename would silently unenrol the repository');
   assert.equal(sent.ConsistentRead, true);
 });
 
+test('a renamed repository keeps its enrollment', async () => {
+  // The whole reason for id-keying. The stored label still says the old name;
+  // the lookup succeeds anyway because the id is what was asked for.
+  const record = await lookupEnrollment(DEMO_ID, async () => ({
+    Item: item({ repo: { S: 'bankrate/renamed-demo' } }),
+  }));
+  assert.equal(isEnrolledRecord(record), true);
+  assert.equal(record?.repoId, DEMO_ID);
+});
+
 test('an absent item is not enrolled — a fact, not an error', async () => {
-  const record = await lookupEnrollment('bankrate/brcc-api', async () => ({}));
+  const record = await lookupEnrollment('999999999', async () => ({}));
   assert.equal(record, undefined);
   assert.equal(isEnrolledRecord(record), false);
 });
 
 test('a FAILED read throws — it never reads as "not enrolled"', async () => {
   await assert.rejects(
-    () => lookupEnrollment(DEMO, async () => { throw new Error('throttled'); }),
+    () => lookupEnrollment(DEMO_ID, async () => { throw new Error('throttled'); }),
     /throttled/,
     'a read that could not answer must not be reported as an answer',
   );
 });
 
 test('mode "off" is retrievable but not enrolled — paused and absent differ', async () => {
-  const record = await lookupEnrollment(DEMO, async () => ({ Item: item({ mode: { S: 'off' } }) }));
+  const record = await lookupEnrollment(DEMO_ID, async () => ({ Item: item({ mode: { S: 'off' } }) }));
   assert.equal(record?.mode, 'off');
   assert.equal(isEnrolledRecord(record), false);
 });
 
 test('an UNRECOGNISED mode is not enrolled — the check is an allow-list', async () => {
-  const record = await lookupEnrollment(DEMO, async () => ({ Item: item({ mode: { S: 'enforce' } }) }));
+  const record = await lookupEnrollment(DEMO_ID, async () => ({ Item: item({ mode: { S: 'enforce' } }) }));
   assert.equal(isEnrolledRecord(record), false,
     'the table is not build-time validated, so only a known active mode may count as enrolled');
 });
 
 test('an absent signalChecks attribute inherits the global list', async () => {
-  const record = await lookupEnrollment(DEMO, async () => ({ Item: item() }));
+  const record = await lookupEnrollment(DEMO_ID, async () => ({ Item: item() }));
   assert.equal(record?.signalChecks, undefined, 'the key must not be set at all');
   assert.ok(signalChecksForRecord(record, rules()).includes('codecov/project'));
 });
 
 test('a present-but-empty signalChecks means nothing is waited on', async () => {
-  const record = await lookupEnrollment(DEMO, async () => ({ Item: item({ signalChecks: { L: [] } }) }));
+  const record = await lookupEnrollment(DEMO_ID, async () => ({ Item: item({ signalChecks: { L: [] } }) }));
   assert.deepEqual(record?.signalChecks, []);
   assert.deepEqual(signalChecksForRecord(record, rules()), []);
 });
 
 test('a per-repo override replaces the global list rather than merging', async () => {
-  const record = await lookupEnrollment(DEMO, async () => ({
+  const record = await lookupEnrollment(DEMO_ID, async () => ({
     Item: item({ signalChecks: { L: [{ S: 'Cycode: SAST' }] } }),
   }));
   assert.deepEqual(signalChecksForRecord(record, rules()), ['Cycode: SAST']);
@@ -304,21 +327,21 @@ test('a per-repo override replaces the global list rather than merging', async (
 
 test('loadFleet follows LastEvaluatedKey to the end', async () => {
   const pages = [
-    { Items: [item({ sk: { S: 'bankrate/a' }, repo: { S: 'bankrate/a' } })], LastEvaluatedKey: { pk: { S: 'repo' }, sk: { S: 'bankrate/a' } } },
-    { Items: [item({ sk: { S: 'bankrate/b' }, repo: { S: 'bankrate/b' } })] },
+    { Items: [item({ sk: { S: '111' }, repoId: { S: '111' }, repo: { S: 'bankrate/a' } })], LastEvaluatedKey: { pk: { S: 'repo' }, sk: { S: '111' } } },
+    { Items: [item({ sk: { S: '222' }, repoId: { S: '222' }, repo: { S: 'bankrate/b' } })] },
   ];
   let call = 0;
   const fleet = await loadFleet(async () => pages[call++]);
   assert.equal(call, 2, 'a truncated read must not be mistaken for the whole fleet');
-  assert.deepEqual(fleet.map((r) => r.repo), ['bankrate/a', 'bankrate/b']);
+  assert.deepEqual(fleet.map((r) => r.repoId), ['111', '222']);
 });
 
 test('fleetSizeFromTable counts only repos whose mode is shadow', async () => {
   const size = await fleetSizeFromTable(async () => ({
     Items: [
-      item({ sk: { S: 'bankrate/a' }, repo: { S: 'bankrate/a' } }),
-      item({ sk: { S: 'bankrate/b' }, repo: { S: 'bankrate/b' }, mode: { S: 'off' } }),
-      item({ sk: { S: 'bankrate/c' }, repo: { S: 'bankrate/c' } }),
+      item({ sk: { S: '111' }, repoId: { S: '111' }, repo: { S: 'bankrate/a' } }),
+      item({ sk: { S: '222' }, repoId: { S: '222' }, repo: { S: 'bankrate/b' }, mode: { S: 'off' } }),
+      item({ sk: { S: '333' }, repoId: { S: '333' }, repo: { S: 'bankrate/c' } }),
     ],
   }));
   assert.equal(size, 2);
@@ -399,6 +422,9 @@ function fromItem(item: Record<string, any>): StoredEnrollment {
     attr === undefined ? undefined : ((attr.L ?? []) as any[]).map((v) => v.S as string);
 
   const record: StoredEnrollment = {
+    repoId: item.repoId.S,
+    // A LABEL, not an identifier. May lag a rename until Conductor's sync
+    // refreshes it; nothing resolves enrollment through it.
     repo: item.repo.S,
     classification: item.classification.S,
     ciTrustTier: Number(item.ciTrustTier.N),
@@ -422,6 +448,11 @@ function fromItem(item: Record<string, any>): StoredEnrollment {
 /**
  * The enrollment record for one repository, if it has one.
  *
+ * KEYED ON `repository.id`, NOT `owner/repo`. The name is mutable, and keyed on
+ * it a rename silently unenrols the repository: the record strands on the old
+ * name while webhooks arrive under the new one and get dropped by the gate
+ * below. The id never changes, so a rename is a non-event.
+ *
  * Returns the record even when `mode` is `off`: "enrolled but paused" and "not
  * enrolled at all" are different facts, and gate 1 reports which.
  *
@@ -435,12 +466,12 @@ function fromItem(item: Record<string, any>): StoredEnrollment {
  *     is to tell those apart.
  */
 export async function lookupEnrollment(
-  repoFullName: string,
+  repoId: string,
   send: DynamoSender = defaultSend,
 ): Promise<StoredEnrollment | undefined> {
   const res = (await send(new GetItemCommand({
     TableName: enrollmentsTable(),
-    Key: { pk: { S: FLEET_PK }, sk: { S: repoFullName } },
+    Key: { pk: { S: FLEET_PK }, sk: { S: repoId } },
     ConsistentRead: true,
   }))) as { Item?: Record<string, any> };
 
@@ -566,8 +597,9 @@ test('a minimal record seeds at version 1 with both write-metadata pairs', () =>
   }], ACTOR, AT);
 
   assert.deepEqual(put.Item.pk, { S: 'repo' });
-  assert.deepEqual(put.Item.sk, { S: 'bankrate/zapp' });
-  assert.deepEqual(put.Item.repo, { S: 'bankrate/zapp' });
+  assert.deepEqual(put.Item.sk, { S: '1344975715' }, 'keyed on the id, not the name');
+  assert.deepEqual(put.Item.repoId, { S: '1344975715' });
+  assert.deepEqual(put.Item.repo, { S: 'bankrate/zapp' }, 'the name rides along as a label');
   assert.deepEqual(put.Item.classification, { S: 'sandbox' });
   assert.deepEqual(put.Item.ciTrustTier, { N: '2' });
   assert.deepEqual(put.Item.mode, { S: 'shadow' });
@@ -577,6 +609,13 @@ test('a minimal record seeds at version 1 with both write-metadata pairs', () =>
   assert.deepEqual(put.Item.enrolledAt, { S: AT });
   assert.deepEqual(put.Item.updatedBy, { S: ACTOR });
   assert.deepEqual(put.Item.updatedAt, { S: AT });
+});
+
+test('an unknown repo fails loudly rather than seeding an unkeyed record', () => {
+  assert.throws(() => buildSeedItems([{
+    repo: 'bankrate/never-heard-of-it', classification: 'sandbox', ciTrustTier: 2,
+    mode: 'shadow', stageEnabled: false,
+  }], ACTOR, AT), /no GitHub repository id known/);
 });
 
 test('an absent override writes NO attribute at all', () => {
@@ -593,7 +632,7 @@ test('an absent override writes NO attribute at all', () => {
 
 test('a present override is written as a string list, empty included', () => {
   const [put] = buildSeedItems([{
-    repo: 'bankrate/narrow', classification: 'sandbox', ciTrustTier: 2,
+    repo: 'bankrate/crank', classification: 'internal-tool', ciTrustTier: 2,
     mode: 'shadow', stageEnabled: false, signalChecks: [],
   }], ACTOR, AT);
 
@@ -602,8 +641,8 @@ test('a present override is written as a string list, empty included', () => {
 
 test('seeding is idempotent by construction — it overwrites by key', () => {
   const items = buildSeedItems([
-    { repo: 'bankrate/a', classification: 'sandbox', ciTrustTier: 2, mode: 'shadow', stageEnabled: false },
-    { repo: 'bankrate/a', classification: 'sandbox', ciTrustTier: 2, mode: 'shadow', stageEnabled: false },
+    { repo: 'bankrate/zapp', classification: 'sandbox', ciTrustTier: 2, mode: 'shadow', stageEnabled: false },
+    { repo: 'bankrate/zapp', classification: 'sandbox', ciTrustTier: 2, mode: 'shadow', stageEnabled: false },
   ], ACTOR, AT);
 
   assert.deepEqual(items[0].Item.sk, items[1].Item.sk,
@@ -640,6 +679,23 @@ import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
 import { DynamoDBClient, PutItemCommand } from '@aws-sdk/client-dynamodb';
 
+// GitHub repository ids for the eight repos in policy-rules.yaml, resolved once
+// with `gh api repos/bankrate/<name> --jq .id`.
+//
+// HARD-CODED rather than fetched. The YAML has no ids, and a seed script that
+// needs GitHub credentials is a seed script that fails in the one situation it
+// exists for. This map is used exactly once, by this migration.
+const REPO_IDS = {
+  'bankrate/platform-cicd-v2-demo': '1324428773',
+  'bankrate/conductor': '660337931',
+  'bankrate/conductor-api': '782637277',
+  'bankrate/portkey': '1202845285',
+  'bankrate/zapp': '1344975715',
+  'bankrate/brand-identity-pages-app': '1244666547',
+  'bankrate/redirect-management-api-v2': '656712940',
+  'bankrate/crank': '1323400735',
+};
+
 /**
  * Build one PutItemCommand input per enrollment record.
  *
@@ -652,9 +708,17 @@ import { DynamoDBClient, PutItemCommand } from '@aws-sdk/client-dynamodb';
  */
 export function buildSeedItems(repos, actor, now) {
   return repos.map((r) => {
+    const repoId = REPO_IDS[r.repo];
+    if (repoId === undefined) {
+      throw new Error(`no GitHub repository id known for ${r.repo} — add it to REPO_IDS`);
+    }
+
     const Item = {
       pk: { S: 'repo' },
-      sk: { S: r.repo },
+      // The id, not the name: enrollment must survive a rename.
+      sk: { S: repoId },
+      repoId: { S: repoId },
+      // A display label for humans reading this table.
       repo: { S: r.repo },
       classification: { S: r.classification },
       ciTrustTier: { N: String(r.ciTrustTier) },
@@ -766,7 +830,7 @@ aws dynamodb query --table-name zapp-enrollments \
   --key-condition-expression 'pk = :pk' \
   --expression-attribute-values '{":pk":{"S":"repo"}}' \
   --profile bankrate-qa --region us-east-1 \
-  --query 'Items[].{repo:repo.S,mode:mode.S,cls:classification.S,sc:signalChecks}' --output table
+  --query 'Items[].{id:repoId.S,repo:repo.S,mode:mode.S,cls:classification.S,sc:signalChecks}' --output table
 ```
 
 Expected: `8`, and every `sc` column empty — none of the eight YAML records carries an override today.
@@ -791,6 +855,12 @@ The behavioural core of this plan. With eight enrolled repos against 1,112 in th
 In `tests/worker.test.ts`, replace the `harness` helper's `isEnrolled` line and add the new tests. The helper becomes:
 
 ```ts
+// `prPayload()` at the top of this file builds `repository: { full_name: repo }`.
+// Add the id, since enrollment now resolves through it:
+//
+//   repository: { id: 1324428773, full_name: repo },
+//
+// and give `sqsEvent`-driven tests whatever id they assert on.
 function harness({ claimed = true, enrolled = true, postFails = false, readFails = false } = {}) {
   const state = {
     claims: [] as string[], confirms: [] as string[], releases: [] as string[],
@@ -800,12 +870,13 @@ function harness({ claimed = true, enrolled = true, postFails = false, readFails
     claimDelivery: async (id: string) => { state.claims.push(id); return claimed; },
     confirmDelivery: async (id: string) => { state.confirms.push(id); },
     releaseDelivery: async (id: string) => { state.releases.push(id); },
-    lookupEnrollment: async (repo: string) => {
-      state.lookups.push(repo);
+    lookupEnrollment: async (repoId: string) => {
+      state.lookups.push(repoId);
       if (readFails) throw new Error('throttled');
       return enrolled
-        ? { repo, classification: 'sandbox' as const, ciTrustTier: 2, mode: 'shadow' as const,
-            stageEnabled: false, version: 1, updatedBy: 'x', updatedAt: 'y' }
+        ? { repoId, repo: DEMO, classification: 'sandbox' as const, ciTrustTier: 2,
+            mode: 'shadow' as const, stageEnabled: false,
+            version: 1, updatedBy: 'x', updatedAt: 'y' }
         : undefined;
     },
     upsertShadowCheck: async (repo: string, sha: string, name: string) => {
@@ -826,8 +897,8 @@ Then add:
 ```ts
 test('an unenrolled repo is dropped WITHOUT claiming the delivery', async () => {
   const { worker, state } = harness({ enrolled: false });
-  await worker(sqsEvent(prPayload({ repo: 'bankrate/not-enrolled' })));
-  assert.deepEqual(state.lookups, ['bankrate/not-enrolled']);
+  await worker(sqsEvent(prPayload({ repo: 'bankrate/not-enrolled', id: 42 })));
+  assert.deepEqual(state.lookups, ['42'], 'the lookup key is the id, not the name');
   assert.deepEqual(state.claims, [], 'nothing was done, so nothing needed claiming');
   assert.deepEqual(state.confirms, []);
   assert.deepEqual(state.releases, []);
@@ -859,7 +930,21 @@ test('a payload with no repository is malformed and reaches the DLQ', async () =
   const { worker, state } = harness();
   await assert.rejects(
     () => worker(sqsEvent(JSON.stringify({ action: 'opened', pull_request: { number: 1 } }))),
-    /repository\.full_name/,
+    /repository\.id/,
+  );
+  assert.deepEqual(state.claims, []);
+});
+
+test('a payload carrying a name but no repository id is malformed', async () => {
+  const { worker, state } = harness();
+  await assert.rejects(
+    () => worker(sqsEvent(JSON.stringify({
+      action: 'opened',
+      pull_request: { number: 1, head: { sha: 'f00d42' } },
+      repository: { full_name: 'bankrate/x' },
+    }))),
+    /repository\.id/,
+    'the name alone is not enough to resolve enrollment',
   );
   assert.deepEqual(state.claims, []);
 });
@@ -881,8 +966,8 @@ function createWorkerWithMode(mode: 'shadow' | 'off') {
     claimDelivery: async (id: string) => { state.claims.push(id); return true; },
     confirmDelivery: async () => {},
     releaseDelivery: async () => {},
-    lookupEnrollment: async (repo: string) => ({
-      repo, classification: 'sandbox' as const, ciTrustTier: 2, mode,
+    lookupEnrollment: async (repoId: string) => ({
+      repoId, repo: DEMO, classification: 'sandbox' as const, ciTrustTier: 2, mode,
       stageEnabled: false, version: 1, updatedBy: 'x', updatedAt: 'y',
     }),
     upsertShadowCheck: async (repo: string, sha: string, name: string) => { state.posts.push({ repo, sha, name }); },
@@ -895,9 +980,10 @@ function createWorkerWithMode(mode: 'shadow' | 'off') {
 Also update the existing tests that set `isEnrolled` directly — `tests/worker.test.ts` lines 127, 153, 241, 267, 341, 370, 420, 459. Each `isEnrolled: () => true` becomes:
 
 ```ts
-    lookupEnrollment: async (repo: string) => ({
-      repo, classification: 'sandbox' as const, ciTrustTier: 2, mode: 'shadow' as const,
-      stageEnabled: false, version: 1, updatedBy: 'x', updatedAt: 'y',
+    lookupEnrollment: async (repoId: string) => ({
+      repoId, repo: DEMO, classification: 'sandbox' as const, ciTrustTier: 2,
+      mode: 'shadow' as const, stageEnabled: false,
+      version: 1, updatedBy: 'x', updatedAt: 'y',
     }),
 ```
 
@@ -1006,10 +1092,18 @@ export function createWorker(deps: WorkerDeps) {
       // A parse failure throws before any claim is taken, which is correct —
       // there is nothing to release.
       const payload = JSON.parse(record.body);
+
+      // BOTH are needed, for different jobs. `id` resolves enrollment because it
+      // survives a rename; `full_name` is what logs, EvalContext and the
+      // name-based freeze path use.
+      const repoId: string | undefined = payload?.repository?.id === undefined
+        ? undefined
+        : String(payload.repository.id);
       const repoFullName: string | undefined = payload?.repository?.full_name;
-      if (!repoFullName) {
+
+      if (!repoId || !repoFullName) {
         log('error', 'payload_missing_repo', { event: ghEvent, delivery: deliveryId });
-        throw new Error('malformed payload: missing repository.full_name');
+        throw new Error('malformed payload: missing repository.id or repository.full_name');
       }
 
       // ENROLLMENT GATE, BEFORE THE CLAIM. Eight repositories are enrolled out
@@ -1022,7 +1116,7 @@ export function createWorker(deps: WorkerDeps) {
       // none here.
       let enrollment: StoredEnrollment | undefined;
       try {
-        enrollment = await deps.lookupEnrollment(repoFullName);
+        enrollment = await deps.lookupEnrollment(repoId);
       } catch (err) {
         // Deliberately outside the try/catch below: no claim has been taken, so
         // there is nothing to release. The throw propagates, SQS retries, and
@@ -1031,7 +1125,7 @@ export function createWorker(deps: WorkerDeps) {
         // NOT degraded to "not enrolled". That would stop evaluating the entire
         // fleet while every delivery reported success.
         log('error', 'enrollment_read_failed', {
-          repo: repoFullName, event: ghEvent, delivery: deliveryId,
+          repo: repoFullName, repo_id: repoId, event: ghEvent, delivery: deliveryId,
           error: err instanceof Error ? err.message : String(err),
         });
         throw err;
@@ -1039,7 +1133,8 @@ export function createWorker(deps: WorkerDeps) {
 
       if (!isEnrolledRecord(enrollment)) {
         log('info', enrollment === undefined ? 'repo_not_enrolled' : 'repo_paused', {
-          repo: repoFullName, mode: enrollment?.mode, event: ghEvent, delivery: deliveryId,
+          repo: repoFullName, repo_id: repoId, mode: enrollment?.mode,
+          event: ghEvent, delivery: deliveryId,
         });
         continue;
       }
@@ -1150,6 +1245,7 @@ test('the eval record snapshots the enrollment it was decided under', async () =
   await recordEvaluation({
     ...record(),
     enrollment: {
+      repoId: '1324428773',
       repo: 'bankrate/platform-cicd-v2-demo', classification: 'sandbox' as const,
       ciTrustTier: 2, mode: 'shadow' as const, stageEnabled: false,
       version: 7, updatedBy: 'scrosby@bankrate.com', updatedAt: '2026-08-28T12:00:00.000Z',
@@ -1161,6 +1257,8 @@ test('the eval record snapshots the enrollment it was decided under', async () =
     'rulesSha no longer covers enrollment, so gates 9 and 10 inputs must be on the record');
   assert.equal(snapshot.ciTrustTier, 2);
   assert.equal(snapshot.version, 7);
+  assert.equal(snapshot.repoId, '1324428773',
+    'the id is what identifies the enrollment, so an audit survives a later rename');
 });
 
 test('a record with no enrollment writes NULL, not a missing attribute', async () => {
@@ -1386,6 +1484,12 @@ In `src/rules-types.ts`, delete `EnrollmentRecord` (lines 93-106) and the `repos
 ```ts
 /** One enrolled repository, as stored in the zapp-enrollments table. */
 export interface EnrollmentRecord {
+  /** GitHub's `repository.id`, as a string. The IDENTITY — this is `sk`. */
+  repoId: string;
+  /**
+   * `owner/repo`. A DISPLAY LABEL, not an identifier: it may lag a rename until
+   * Conductor's sync refreshes it, and nothing resolves enrollment through it.
+   */
   repo: string;
   classification: RepoClassification;
   ciTrustTier: number;
@@ -1463,6 +1567,7 @@ absent-vs-empty handling, both of which are tested where they live.
 ```ts
 /** The demo repo's enrollment, previously read from policy-rules.yaml. */
 const DEMO_ENROLLMENT: EnrollmentRecord = {
+  repoId: '1324428773',
   repo: DEMO,
   classification: 'sandbox',
   ciTrustTier: 2,
@@ -1723,6 +1828,7 @@ Work through each reference and correct it. The substantive ones:
 - `README.md:187` and `docs/architecture.md:12,82,121` — `repository_selection: selected` → `all`, with the note that `checks:write` is held org-wide and exercised only on enrolled repositories.
 - `docs/architecture.md:337,339` — `policy-rules.yaml` is the source of truth "for the eligibility gates and enrollment" → gates and thresholds only.
 - `docs/policy.md:40` — gate 1's description says "has an entry in `policy-rules.yaml`" → "has an item in the `zapp-enrollments` table and that item's mode is `shadow`".
+- `docs/architecture.md` gains a **sharp edge**: enrollment is keyed on `repository.id` and survives a rename, but the per-repo freeze parameter `/zapp/freeze/{owner}/{repo}` is name-based and does not. That is deliberate — a human reaching for an emergency brake mid-incident should type a repository name, not look up a numeric id — but it means a freeze set under a repository's old name silently stops applying after a rename. It is now the only place a rename still bites.
 - `docs/call-flows.md` — the participant named `src/enrollment.ts<br/>isEnrolled()` in three diagrams (17, 350, 448) becomes `src/enrollment.ts<br/>lookupEnrollment()`, and in each the call must move **above** the claim step. Prose at 84-85, 142-144, 411 and 492 describes the old ordering.
 
 - [ ] **Step 3: Verify no stale claims survive**
