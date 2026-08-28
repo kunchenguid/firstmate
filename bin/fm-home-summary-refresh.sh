@@ -14,9 +14,9 @@
 # complete ledger in place and never exposes partial JSON at the ledger path.
 # A home-local refresh lock serializes concurrent triggers so an older in-flight
 # summary cannot overwrite one computed after a later status change. The shared
-# timeout owner bounds lock acquisition and production together with
-# FM_HOME_SUMMARY_TIMEOUT (default 60 seconds). No reader can observe temporary
-# output through the ledger path.
+# timeout owner bounds the complete refresh with FM_HOME_SUMMARY_TIMEOUT
+# (default 60 seconds). No reader can observe temporary output through the
+# ledger path.
 #
 # With --best-effort, any failure is appended to the bounded home-local
 # state/.home-summary-refresh.log and the command exits zero. Session start,
@@ -38,6 +38,7 @@ REFRESH_LOCK="$STATE/.home-summary-refresh.lock"
 ERROR_LOG_MAX_BYTES=${FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES:-65536}
 HOME_SUMMARY_TIMEOUT=${FM_HOME_SUMMARY_TIMEOUT:-60}
 BEST_EFFORT=0
+HOME_SUMMARY_MODE=parent
 HOME_SUMMARY_ERROR=
 HOME_SUMMARY_TMP=
 HOME_SUMMARY_ERR_TMP=
@@ -57,6 +58,11 @@ usage() {
 case "${1:-}" in
   '') ;;
   --best-effort) BEST_EFFORT=1 ;;
+  --_worker)
+    HOME_SUMMARY_MODE=worker
+    BEST_EFFORT=${FM_HOME_SUMMARY_WORKER_BEST_EFFORT:-0}
+    ;;
+  --_log-timeout) HOME_SUMMARY_MODE=log-timeout ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac
@@ -83,9 +89,7 @@ home_summary_fail() {
 }
 
 home_summary_refresh_once() {
-  local producer_rc producer_error started_epoch deadline_epoch remaining
-  started_epoch=$(date +%s)
-  deadline_epoch=$((started_epoch + HOME_SUMMARY_TIMEOUT))
+  local producer_rc producer_error
   if ! mkdir -p "$STATE" 2>/dev/null; then
     home_summary_fail "state directory is unavailable: $STATE"
     return 1
@@ -94,13 +98,7 @@ home_summary_refresh_once() {
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  while ! fm_lock_try_acquire "$REFRESH_LOCK"; do
-    if [ "$(date +%s)" -ge "$deadline_epoch" ]; then
-      home_summary_fail "refresh timed out waiting for its publication lock"
-      return 1
-    fi
-    sleep 0.1
-  done
+  fm_lock_acquire_wait "$REFRESH_LOCK"
   HOME_SUMMARY_LOCK_HELD=1
   HOME_SUMMARY_TMP=$(umask 077; mktemp "$STATE/.home-summary.json.XXXXXX") || {
     home_summary_fail "could not create an atomic publication file in $STATE"
@@ -111,12 +109,7 @@ home_summary_refresh_once() {
     return 1
   }
 
-  remaining=$((deadline_epoch - $(date +%s)))
-  if [ "$remaining" -le 0 ]; then
-    home_summary_fail "refresh timed out before summary production"
-    return 1
-  fi
-  if fm_run_timed "$remaining" env \
+  if env \
     FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_HOME="$FM_HOME" \
     FM_STATE_OVERRIDE="$STATE" \
@@ -196,6 +189,35 @@ home_summary_log_failure() {
     rm -f -- "$tmp" 2>/dev/null || true
   fi
 }
+
+if [ "$HOME_SUMMARY_MODE" = log-timeout ]; then
+  HOME_SUMMARY_ERROR="refresh exceeded its ${HOME_SUMMARY_TIMEOUT}-second deadline"
+  home_summary_log_failure
+  exit 0
+fi
+
+if [ "$HOME_SUMMARY_MODE" = parent ]; then
+  if fm_run_timed "$HOME_SUMMARY_TIMEOUT" env \
+    FM_HOME_SUMMARY_WORKER_BEST_EFFORT="$BEST_EFFORT" \
+    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --_worker; then
+    exit 0
+  else
+    refresh_rc=$?
+  fi
+  if [ "$refresh_rc" -ne 124 ]; then
+    exit "$refresh_rc"
+  fi
+  if [ "$BEST_EFFORT" -eq 1 ]; then
+    fm_run_timed 2 env FM_HOME_SUMMARY_TIMEOUT="$HOME_SUMMARY_TIMEOUT" \
+      "$SCRIPT_DIR/fm-home-summary-refresh.sh" --_log-timeout >/dev/null 2>&1 \
+      || printf 'fm-home-summary-refresh: refresh exceeded its %s-second deadline\n' \
+        "$HOME_SUMMARY_TIMEOUT" >&2
+    exit 0
+  fi
+  printf 'fm-home-summary-refresh: refresh exceeded its %s-second deadline\n' \
+    "$HOME_SUMMARY_TIMEOUT" >&2
+  exit "$refresh_rc"
+fi
 
 if home_summary_refresh_once; then
   exit 0

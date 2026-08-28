@@ -341,10 +341,35 @@ PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   || fail "lock timeout changed the best-effort caller result"
 elapsed=$(( $(date +%s) - started ))
 [ "$elapsed" -lt 4 ] || fail "best-effort refresh waited $elapsed seconds on its lock"
-grep -F 'refresh timed out waiting for its publication lock' \
+grep -F 'refresh exceeded its 1-second deadline' \
   "$HOME_DIR/state/.home-summary-refresh.log" >/dev/null \
   || fail "publication lock timeout was not logged"
 kill "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
 wait "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
 LOCK_HOLDER_PID=
 pass "best-effort refresh bounds publication lock acquisition"
+
+HANGBIN="$TMP_ROOT/hangbin"
+REAL_JQ=$(command -v jq)
+mkdir -p "$HANGBIN"
+cat > "$HANGBIN/jq" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    */.home-summary.json.*) sleep 30 ;;
+  esac
+done
+exec "$FM_TEST_REAL_JQ" "$@"
+SH
+chmod +x "$HANGBIN/jq"
+started=$(date +%s)
+PATH="$HANGBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_HOME_SUMMARY_TIMEOUT=1 \
+  "$WRITER" --best-effort \
+  || fail "validation timeout changed the best-effort caller result"
+elapsed=$(( $(date +%s) - started ))
+[ "$elapsed" -lt 4 ] || fail "best-effort refresh waited $elapsed seconds on validation"
+grep -F 'refresh exceeded its 1-second deadline' \
+  "$HOME_DIR/state/.home-summary-refresh.log" >/dev/null \
+  || fail "publication validation timeout was not logged"
+pass "best-effort refresh bounds validation and publication"
