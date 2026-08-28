@@ -164,6 +164,36 @@ mark_surfaced() {  # <status-file>
   printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
 }
 
+fm_push_transition_apply_status() {  # <state> <window> <backend-status>
+  local state=$1 window=$2 to=$3 task status_file last line
+  FM_PUSH_TRANSITION_STATUS_LINE=
+  task=$(window_to_task "$window" "$state")
+  [ -n "$task" ] || return 1
+  status_file="$state/$task.status"
+  [ ! -L "$status_file" ] || return 1
+  last=$(last_status_line "$status_file")
+  case "$to" in
+    working)
+      line='working: live supervision reported active work'
+      ;;
+    blocked)
+      if [ "$(status_line_verb "$last")" = blocked ]; then
+        line=$last
+      else
+        line='blocked: live supervision reported the worker blocked'
+      fi
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  if [ "$last" != "$line" ]; then
+    printf '%s\n' "$line" >> "$status_file" || return 1
+  fi
+  fm_human_notify_apply_transition "$state" "$task" "$line" || true
+  FM_PUSH_TRANSITION_STATUS_LINE=$line
+}
+
 # Act on a fresh actionable transition from a push-capable backend.
 handle_push_transition() {  # <backend> <session> <record>
   local backend=$1 session=$2 record=$3 pane_id to window task reason last display
@@ -184,6 +214,10 @@ handle_push_transition() {  # <backend> <session> <record>
     triage_log "absorbed push $to (declared wait): $window"
     fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
     return
+  fi
+  if [ "$to" = blocked ]; then
+    fm_push_transition_apply_status "$STATE" "$window" "$to" || exit 1
+    last=$FM_PUSH_TRANSITION_STATUS_LINE
   fi
   if fm_human_notify_class "$last" >/dev/null 2>&1; then
     if fm_backend_transition_reopened "$backend" "$STATE" "$session" "$record"; then

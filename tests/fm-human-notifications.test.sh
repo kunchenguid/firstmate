@@ -208,6 +208,30 @@ assert_contains "$(cat "$TMP_ROOT/reopen.out")" 'new failure evidence surfaced' 
   "reopened failure did not surface after its lifecycle clear"
 pass "coalesced resolution and reopening is actionable before receipt recording"
 
+DEDUP="$TMP_ROOT/range-dedup"
+mkdir -p "$DEDUP"
+printf 'display_name=CRM · Duplicate Choice\nbusy_gen=dedup-1\nkind=ship\nproject=firstmate\n' > "$DEDUP/d.meta"
+printf '%s\n%s\n' "$DECISION" "$DECISION" > "$DEDUP/d.status"
+touch "$DEDUP/.last-heartbeat" "$DEDUP/.last-check"
+FM_STATE_OVERRIDE="$DEDUP" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$TMP_ROOT" \
+  FM_POLL=0.05 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=999999 FM_CHECK_INTERVAL=999999 \
+  "$ROOT/bin/fm-watch.sh" > "$TMP_ROOT/dedup.out" 2> "$TMP_ROOT/dedup.err" &
+WATCH_PID=$!
+for _ in $(seq 1 100); do
+  kill -0 "$WATCH_PID" 2>/dev/null || break
+  sleep 0.05
+done
+if kill -0 "$WATCH_PID" 2>/dev/null; then
+  kill "$WATCH_PID" 2>/dev/null || true
+  wait "$WATCH_PID" 2>/dev/null || true
+  fail "duplicate decision range did not produce its actionable wake"
+fi
+wait "$WATCH_PID" 2>/dev/null || true
+DEDUP_REASON=$(cat "$TMP_ROOT/dedup.out")
+[ "$(printf '%s' "$DEDUP_REASON" | grep -Fo 'a decision changed' | wc -l | tr -d ' ')" -eq 1 ] \
+  || fail "one unread range rendered an identical decision more than once: $DEDUP_REASON"
+pass "one unread range renders each notification fingerprint once"
+
 CURRENT="$TMP_ROOT/currentness"
 mkdir -p "$CURRENT"
 printf 'display_name=CRM · Current State\nbusy_gen=current-1\nkind=ship\nproject=firstmate\n' > "$CURRENT/c.meta"

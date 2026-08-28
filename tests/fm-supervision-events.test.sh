@@ -35,6 +35,7 @@ reset_state() {
   rm -f "$STATE_DIR"/*.meta "$STATE_DIR"/*.status "$STATE_DIR"/.wake-queue \
     "$STATE_DIR"/.wake-queue.seq "$STATE_DIR"/.watch-triage.log \
     "$STATE_DIR"/.herdr-escalated-* "$STATE_DIR"/.herdr-working-* \
+    "$STATE_DIR"/.hb-surfaced-* "$STATE_DIR"/.subsuper-seen-status-* \
     "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled 2>/dev/null || true
   rm -rf "$STATE_DIR/human-notifications"
   : > "$WAKE_LOG"
@@ -69,13 +70,17 @@ fm_human_notify_record "$STATE_DIR" tk1 'blocked [key=access]: credential remain
 if fm_backend_herdr_apply_transition "$STATE_DIR" default "$(mkrec wG:pQ working)"; then
   fail "a working transition became actionable"
 fi
-fm_human_notify_pending "$STATE_DIR" tk1 'blocked [key=access]: credential remains unavailable' \
-  || fail "the working transition did not clear the prior human receipt"
+[ "$(last_status_line "$STATE_DIR/tk1.status")" = 'working: live supervision reported active work' ] \
+  || fail "the working edge did not update the shared durable current condition"
 handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
-grep -q 'CRM · Import: blocker evidence changed' "$WAKE_LOG" \
-  || fail "a genuinely reopened blocked edge did not surface readably"
+[ "$(last_status_line "$STATE_DIR/tk1.status")" = 'blocked: live supervision reported the worker blocked' ] \
+  || fail "the blocked edge did not update the shared durable current condition"
+grep -q 'CRM · Import: blocker evidence changed - live supervision reported the worker blocked' "$WAKE_LOG" \
+  || fail "a genuinely reopened blocked edge did not surface its fresh evidence readably"
+! grep -q 'credential remains unavailable' "$WAKE_LOG" \
+  || fail "the reopened blocked edge reused stale blocker evidence"
 ! grep -q 'default:wG:pQ' "$WAKE_LOG" || fail "the reopened blocked reason leaked its private endpoint"
-pass "handle_push_transition: working clears the receipt before a reopened blocked edge"
+pass "handle_push_transition: Herdr lifecycle edges update shared current status before notification"
 
 reset_state
 fm_write_meta "$STATE_DIR/tk1.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"

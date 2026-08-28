@@ -66,11 +66,13 @@
 #                          demand-deep-inspection marker, for human inspection
 #                          only - never an automatic interrupt, signal, or restart
 #                          of the worker or its tool process.
-#   check: Registered state check: new output is ready. Action required: inspect
-#                          the authenticated result. Its source path and raw output
-#                          remain in the durable queue record.
-#   check: Background process result: a captured result is ready. Action required:
-#                          inspect the pending result and run its registered handler.
+#   check: <display-name>: an authenticated state check produced a new result now.
+#                          Action required: inspect the result and handle its reported
+#                          outcome. Its source path and raw output remain private in
+#                          the durable queue record.
+#   check: <process label>: a captured result is ready now. Action required: inspect
+#                          the pending result and run its registered handler.
+#                          The label comes from authenticated result metadata.
 #                          Routing keys remain private in the durable queue; this is
 #                          reported once per captured generation, never again while
 #                          that record stays queued and never once acknowledged.
@@ -300,7 +302,7 @@ window_human_ref() {  # <window>
 }
 
 signal_human_reason() {  # stdin: scan_signals rows
-  local sf sig f seen base task display_name last summary reason='' unread line before
+  local sf sig f seen base task display_name last summary reason='' unread line before fingerprints=''
   while IFS=$(printf '\t') read -r sf sig f seen; do
     [ -n "$sf" ] || continue
     case "$f" in *.status) ;; *) continue ;; esac
@@ -312,6 +314,10 @@ signal_human_reason() {  # stdin: scan_signals rows
       [ -n "$line" ] || continue
       if status_human_condition_is_current "$f" "$line" \
         && fm_human_notify_pending "$STATE" "$task" "$line"; then
+        case "$fingerprints" in
+          *"|$FM_HUMAN_NOTIFY_FINGERPRINT|"*) continue ;;
+        esac
+        fingerprints="$fingerprints|$FM_HUMAN_NOTIFY_FINGERPRINT|"
         summary=$(fm_human_notify_summary "$STATE" "$task" "$line") || summary=''
         [ -z "$summary" ] || reason="$reason${reason:+ | }$summary"
       fi
@@ -913,28 +919,57 @@ procevent_surfaced_marker() {  # <queue-key>
 procevent_surface_after_output() {
   local output_status=$1 key marker tmp status=0
   if [ "$output_status" -eq 0 ]; then
-    for key in $PROCEVENT_SURFACED; do
+    while IFS= read -r key; do
+      [ -n "$key" ] || continue
       marker=$(procevent_surfaced_marker "$key")
       tmp=$(umask 077; mktemp "$STATE/.seen-procevent.XXXXXX") || { status=1; continue; }
       if ! mv -f -- "$tmp" "$marker"; then
         rm -f -- "$tmp"
         status=1
       fi
-    done
+    done <<EOF
+$PROCEVENT_SURFACED
+EOF
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
 }
 
+procevent_display_label() {  # <private-queue-key>
+  local key=$1 rest source sequence adapter_file adapter label
+  case "$key" in procevent:*:*) ;; *) return 1 ;; esac
+  rest=${key#procevent:}
+  source=${rest%:*}
+  sequence=${rest##*:}
+  fm_task_id_path_safe "$source" || return 1
+  case "$sequence" in ''|*[!0-9]*) return 1 ;; esac
+  adapter_file="$STATE/procevent-inbox/$source.$sequence.adapter"
+  [ -f "$adapter_file" ] && [ ! -L "$adapter_file" ] || return 1
+  IFS= read -r adapter < "$adapter_file" || return 1
+  case "$adapter" in ''|*[!a-z0-9-]*) return 1 ;; esac
+  case "$adapter" in
+    lavish) label='Lavish review' ;;
+    remote-reply) label='Remote reply' ;;
+    when) label='Condition watch' ;;
+    *) label="$(fm_display_name_fallback "$adapter") process" ;;
+  esac
+  printf '%s' "$label"
+}
+
 procevent_surface_queued() {
-  local sequence key payload reason selected_sequence='' selected_payload=''
+  local sequence key payload reason selected_sequence='' selected_payload='' label labels='' label_count=0
   PROCEVENT_SURFACED=
   [ -s "$FM_WAKE_QUEUE" ] || return 0
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   while IFS=$(printf '\t') read -r sequence key payload; do
     [ -n "$key" ] || continue
     [ -e "$(procevent_surfaced_marker "$key")" ] && continue
-    PROCEVENT_SURFACED="$PROCEVENT_SURFACED $key"
+    PROCEVENT_SURFACED="$PROCEVENT_SURFACED${PROCEVENT_SURFACED:+$'\n'}$key"
+    label=$(procevent_display_label "$key") || label='Background process'
+    case ";$labels;" in
+      *";$label;"*) ;;
+      *) labels="$labels${labels:+;}$label"; label_count=$((label_count + 1)) ;;
+    esac
     if [ -z "$selected_sequence" ] || [ "$sequence" -gt "$selected_sequence" ]; then
       selected_sequence=$sequence
       selected_payload=$payload
@@ -953,7 +988,11 @@ procevent_surface_queued() {
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 0
   fi
-  reason="check: Background process result: a captured result is ready. Action required: inspect the pending result and run its registered handler."
+  if [ "$label_count" -eq 1 ]; then
+    reason="check: $labels: a captured result is ready now. Action required: inspect the pending result and run its registered handler."
+  else
+    reason="check: $labels: captured results are ready now. Action required: inspect each pending result and run its registered handler."
+  fi
   watch_delivery_preselect "$selected_sequence" "$selected_payload" || {
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
@@ -1543,7 +1582,14 @@ EOF
       fi
       if [ -n "$out" ]; then
         queue_reason="check: $c: $out"
-        reason="check: Registered state check: new output is ready. Action required: inspect the authenticated result."
+        if [ "$(basename "$c")" = x-watch.check.sh ]; then
+          check_display=Relay
+        elif [ -f "$STATE/$id.meta" ]; then
+          check_display=$(fm_display_name_for_meta "$STATE/$id.meta" "$id")
+        else
+          check_display=$(fm_display_name_fallback "$id")
+        fi
+        reason="check: $check_display: an authenticated state check produced a new result now. Action required: inspect the result and handle its reported outcome."
         fm_wake_append check "$c" "$queue_reason" || exit 1
         touch "$STATE/.last-check"
         wake "$reason"

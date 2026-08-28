@@ -2624,7 +2624,7 @@ test_procevent_captured_result_surfaces_proactively() {
   pid=$!
   wait_for_exit "$pid" 100 \
     || fail "a healthy watcher never surfaced a durably captured process-event result: $(cat "$out")"
-  grep -F "check: Background process result: a captured result is ready. Action required: inspect the pending result and run its registered handler." "$out" >/dev/null \
+  grep -F "check: Lavish review: a captured result is ready now. Action required: inspect the pending result and run its registered handler." "$out" >/dev/null \
     || fail "the process-event wake omitted its readable reason and exact action: $(cat "$out")"
   grep -F "delivery-src" "$out" >/dev/null \
     && fail "the process-event presentation leaked its private routing key: $(cat "$out")"
@@ -2693,7 +2693,7 @@ test_procevent_marker_keys_are_injective() {
   procevent_watch_bg "$dir" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "colliding-looking process-event keys were not surfaced"
-  grep -F "Background process result: a captured result is ready. Action required:" "$out" >/dev/null \
+  grep -F "Background process: a captured result is ready now. Action required:" "$out" >/dev/null \
     || fail "distinct process-event keys did not produce a readable wake"
   grep -F "procevent:" "$out" >/dev/null && fail "process-event presentation leaked private queue keys"
   marker_count=$(find "$state" -maxdepth 1 -name '.seen-procevent-*' -type f | awk 'END { print NR + 0 }')
@@ -2768,7 +2768,7 @@ test_procevent_surface_crash_boundaries() {
   [ -s "$state/.wake-queue" ] || fail "failed output consumed the durable queue record"
   procevent_watch_bg "$dir" "$out"; pid=$!
   wait_for_exit "$pid" 100 || fail "the record was not replayable after output failure"
-  grep -F "Background process result: a captured result is ready. Action required:" "$out" >/dev/null \
+  grep -F "Background process: a captured result is ready now. Action required:" "$out" >/dev/null \
     || fail "output failure lost proactive replay"
 
   dir=$(make_case procevent-before-marker); state="$dir/state"; out="$dir/watch.out"
@@ -2778,7 +2778,7 @@ test_procevent_surface_crash_boundaries() {
   wait_for_exit "$pid" 100
   exit_status=$?
   [ "$exit_status" -ne 124 ] || fail "the watcher survived the injected pre-marker crash"
-  grep -F "Background process result: a captured result is ready. Action required:" "$out" >/dev/null \
+  grep -F "Background process: a captured result is ready now. Action required:" "$out" >/dev/null \
     || fail "the pre-marker crash happened before output"
   marker=$(find "$state" -maxdepth 1 -name '.seen-procevent-*' -type f | head -1)
   [ -z "$marker" ] || fail "a pre-marker crash committed suppression"
@@ -2792,7 +2792,7 @@ test_procevent_surface_crash_boundaries() {
   wait_for_exit "$pid" 100
   exit_status=$?
   [ "$exit_status" -ne 124 ] || fail "the watcher survived the injected post-marker crash"
-  grep -F "Background process result: a captured result is ready. Action required:" "$out" >/dev/null \
+  grep -F "Background process: a captured result is ready now. Action required:" "$out" >/dev/null \
     || fail "the post-marker crash lost actionable output"
   marker=$(find "$state" -maxdepth 1 -name '.seen-procevent-*' -type f | head -1)
   [ -n "$marker" ] || fail "the post-marker crash did not reach marker commit"
@@ -2825,7 +2825,7 @@ test_procevent_marker_failure_exits_and_replays() {
   FM_MARKER_MV_MODE=fail procevent_watch_bg "$dir" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "marker failure did not end the actionable watcher cycle successfully"
-  output_count=$(grep -Fc "Background process result: a captured result is ready. Action required:" "$out" || true)
+  output_count=$(grep -Fc "Background process: a captured result is ready now. Action required:" "$out" || true)
   [ "$output_count" = 1 ] || fail "marker failure printed the actionable reason $output_count times"
   marker=$(find "$state" -maxdepth 1 -name '.seen-procevent-*' -type f | head -1)
   [ -z "$marker" ] || fail "marker failure committed suppression"
@@ -2834,7 +2834,7 @@ test_procevent_marker_failure_exits_and_replays() {
   procevent_watch_bg "$dir" "$out.replay"
   pid=$!
   wait_for_exit "$pid" 100 || fail "marker failure did not leave the durable record replayable"
-  grep -F "Background process result: a captured result is ready. Action required:" "$out.replay" >/dev/null \
+  grep -F "Background process: a captured result is ready now. Action required:" "$out.replay" >/dev/null \
     || fail "marker failure lost the later proactive replay"
   FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "marker-failure fixture drain failed"
   pass "marker failure exits through the shared wake owner, releases its lock, and replays later"

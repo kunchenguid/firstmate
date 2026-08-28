@@ -174,7 +174,7 @@ SH
     || fail "could not register queue custom check"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for check output"
-  grep -F "check: Registered state check: new output is ready. Action required: inspect the authenticated result." "$out" >/dev/null \
+  grep -F "check: Task: an authenticated state check produced a new result now. Action required: inspect the result and handle its reported outcome." "$out" >/dev/null \
     || fail "watcher did not print a readable check wake"
   grep -F "$check_file" "$out" >/dev/null && fail "check presentation leaked its private source path"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after check wake failed"

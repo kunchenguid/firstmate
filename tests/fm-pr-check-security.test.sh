@@ -2438,7 +2438,7 @@ SH
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "registered custom check did not run: $(cat "$dir/watch-custom.err")"
-  assert_grep "check: Registered state check: new output is ready. Action required: inspect the authenticated result." "$dir/watch-custom.out" \
+  assert_grep "check: B · Custom: an authenticated state check produced a new result now. Action required: inspect the result and handle its reported outcome." "$dir/watch-custom.out" \
     "registered custom check output did not produce a readable actionable wake"
   assert_no_grep "$state/b-custom.check.sh" "$dir/watch-custom.out" \
     "registered custom check presentation leaked its private source path"

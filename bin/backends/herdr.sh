@@ -3335,7 +3335,7 @@ fm_backend_herdr_working_marker() {  # <state_dir> <window>
 # with no output. <session> reconstructs the window ("<session>:<pane_id>") for
 # the marker key, matching the watcher's own key scheme.
 fm_backend_herdr_apply_transition() {  # <state_dir> <session> <record>
-  local state=$1 session=$2 record=$3 pane_id to action window marker task
+  local state=$1 session=$2 record=$3 pane_id to action window marker
   pane_id=$(fm_transition_pane_id "$record")
   [ -n "$pane_id" ] || return 1
   to=$(fm_transition_to_status "$record")
@@ -3352,10 +3352,8 @@ fm_backend_herdr_apply_transition() {  # <state_dir> <session> <record>
     absorb)
       rm -f "$marker" 2>/dev/null || true
       : > "$(fm_backend_herdr_working_marker "$state" "$window")"
-      if command -v fm_human_notify_apply_transition >/dev/null 2>&1 \
-        && command -v window_to_task >/dev/null 2>&1; then
-        task=$(window_to_task "$window" "$state")
-        [ -z "$task" ] || fm_human_notify_apply_transition "$state" "$task" 'working: backend reported active work' || true
+      if command -v fm_push_transition_apply_status >/dev/null 2>&1; then
+        fm_push_transition_apply_status "$state" "$window" working || return 1
       fi
       ;;
   esac
