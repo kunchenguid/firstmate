@@ -17,7 +17,7 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
 
 # Known harness command names; extend when a new adapter is verified.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi(\.exe)?$|^pi-signed(\.exe)?$'
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
@@ -37,6 +37,9 @@ FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
 fm_harness_path_name() {  # <path>
   local path=$1 name
   [ -n "$path" ] || return 1
+  path=${path//\\//}
+  path=${path#\"}
+  path=${path%\"}
   for name in "${FM_HARNESS_NAMES[@]}"; do
     case "/$path/" in
       */"$name"/*) printf '%s' "$name"; return 0 ;;
@@ -58,34 +61,118 @@ fm_harness_path_name() {  # <path>
 #   3. a bare interpreter (node, python) running a harness script path.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
+FM_HARNESS_MATCH_NAME=
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
-  base=$(basename -- "$comm")
+  FM_HARNESS_MATCH_NAME=
+  base=${comm//\\//}
+  base=$(basename -- "$base")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
-    case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
+    case "$base" in
+      *claude*) FM_HARNESS_MATCH_NAME=claude; FM_HARNESS_IS_CLAUDE=1 ;;
+      *codex*) FM_HARNESS_MATCH_NAME=codex ;;
+      *opencode*) FM_HARNESS_MATCH_NAME=opencode ;;
+      *grok*) FM_HARNESS_MATCH_NAME=grok ;;
+      *kimi*) FM_HARNESS_MATCH_NAME=kimi ;;
+      *pi-signed*) FM_HARNESS_MATCH_NAME=pi-signed ;;
+      pi|pi.exe) FM_HARNESS_MATCH_NAME=pi ;;
+    esac
     return 0
   fi
   argv0=${args%% *}
   if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0"); then
+    FM_HARNESS_MATCH_NAME=$name
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
   # Bare interpreter (e.g. node): match the harness name in its script path.
   case "$comm" in
     *node*|*python*)
-      if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
-        case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
+      if name=$(fm_harness_path_name "$args"); then
+        FM_HARNESS_MATCH_NAME=$name
+        case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
         return 0
       fi
+      case "$args" in
+        *claude*) FM_HARNESS_MATCH_NAME=claude; FM_HARNESS_IS_CLAUDE=1; return 0 ;;
+        *codex*) FM_HARNESS_MATCH_NAME=codex; return 0 ;;
+        *opencode*) FM_HARNESS_MATCH_NAME=opencode; return 0 ;;
+        *grok*) FM_HARNESS_MATCH_NAME=grok; return 0 ;;
+        *kimi*) FM_HARNESS_MATCH_NAME=kimi; return 0 ;;
+        *" pi-signed "*|*/pi-signed) FM_HARNESS_MATCH_NAME=pi-signed; return 0 ;;
+        *" pi "*|*/pi) FM_HARNESS_MATCH_NAME=pi; return 0 ;;
+      esac
       ;;
   esac
   # Cursor: its own owner decides, from Cursor's name or versioned install tree
   # in the command path or argv[0]. Without this a Cursor primary can never
   # locate its own harness in the ancestry, so every session start refuses the
   # fleet lock as read-only and the park can never arm.
-  fm_cursor_process_matches "$comm" "$args" "$argv0" && return 0
+  if fm_cursor_process_matches "$comm" "$args" "$argv0"; then
+    FM_HARNESS_MATCH_NAME=cursor
+    return 0
+  fi
   return 1
+}
+
+# Git Bash ships the MSYS process viewer rather than procps. It has no `ps -o`
+# fields, and a native Windows parent appears as PPID 1, so the Unix walk cannot
+# identify a native Codex process. Resolve that process tree through Windows'
+# own process table while preserving the same tabular contract used below.
+fm_process_uses_windows_table() {
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*)
+      # A Cygwin installation may provide a full procps implementation. Keep
+      # the established Unix provider whenever the exact required query works.
+      ps -o comm= -p "$$" >/dev/null 2>&1 && return 1
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_windows_current_pid() {
+  local row
+  row=$(ps -l -p "$$" 2>/dev/null | sed -n '2p') || return 1
+  set -- $row
+  case "${4:-}" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$4"
+}
+
+fm_windows_process_rows() {  # <pid> <limit>
+  local pid=$1 limit=$2 helper
+  case "$pid:$limit" in
+    *[!0-9:]*|:*|*:) return 1 ;;
+  esac
+  helper="$(cd "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/fm-windows-process.ps1"
+  [ -f "$helper" ] || return 1
+  command -v powershell.exe >/dev/null 2>&1 || return 1
+  powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+    -File "$helper" ancestry "$pid" "$limit" 2>/dev/null
+}
+
+# Print pid<TAB>ppid<TAB>command<TAB>arguments for the current process and its
+# parents. The optional bound defaults to the session-lock walk's sixteen hops.
+fm_process_ancestry_rows() {  # [limit]
+  local limit=${1:-16} pid comm args ppid winpid
+  case "$limit" in ''|*[!0-9]*|0) return 1 ;; esac
+  if fm_process_uses_windows_table; then
+    winpid=$(fm_windows_current_pid) || return 1
+    fm_windows_process_rows "$winpid" "$limit"
+    return
+  fi
+  pid=$$
+  while [ "$limit" -gt 0 ]; do
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    case "$pid:$ppid" in *[!0-9:]*|:*|*:) break ;; esac
+    printf '%s\t%s\t%s\t%s\n' "$pid" "$ppid" "$comm" "$args"
+    [ "$ppid" -gt 1 ] || break
+    pid=$ppid
+    limit=$((limit - 1))
+  done
 }
 
 # Walk the current process ancestry (up to 16 hops) and print this session's
@@ -107,10 +194,14 @@ fm_harness_process_matches() {  # <comm> <args>
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
 fm_harness_ancestry_pids() {
-  local pid=$$ comm args extending=0 printed=0
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
+  local rows pid ppid comm args extending=0 printed=0
+  if [ -n "${FM_SESSION_HARNESS_PID:-}" ] && fm_harness_pid_alive "$FM_SESSION_HARNESS_PID"; then
+    printf '%s\n' "$FM_SESSION_HARNESS_PID"
+    return 0
+  fi
+  rows=$(fm_process_ancestry_rows 16) || return 1
+  while IFS=$'\t' read -r pid ppid comm args; do
+    [ -n "$pid" ] || continue
     if fm_harness_process_matches "$comm" "$args"; then
       printf '%s\n' "$pid"
       printed=1
@@ -119,9 +210,9 @@ fm_harness_ancestry_pids() {
     elif [ "$extending" -eq 1 ]; then
       break
     fi
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
-  done
+  done <<EOF
+$rows
+EOF
   [ "$printed" -eq 1 ]
 }
 
@@ -145,10 +236,19 @@ EOF
 
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
-  local pid=$1 comm args
-  kill -0 "$pid" 2>/dev/null || return 1
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  args=$(ps -o args= -p "$pid" 2>/dev/null)
+  local pid=$1 row row_pid ppid comm args
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if fm_process_uses_windows_table; then
+    row=$(fm_windows_process_rows "$pid" 1) || return 1
+    IFS=$'\t' read -r row_pid ppid comm args <<EOF
+$row
+EOF
+    [ "$row_pid" = "$pid" ] || return 1
+  else
+    kill -0 "$pid" 2>/dev/null || return 1
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
+  fi
   fm_harness_process_matches "$comm" "$args"
 }
 

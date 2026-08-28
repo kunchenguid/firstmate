@@ -31,6 +31,18 @@ Use `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` agai
 
 Verify setup by spawning a small task and confirming metadata contains `backend=zellij`, `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 
+### Windows without WSL
+
+Native Windows operation is experimental.
+Use Windows Terminal with a Git Bash profile for the Firstmate shell and Zellij interface; Windows PowerShell remains useful for installation and diagnostics, but Firstmate's scripts are Bash entrypoints.
+Keep Firstmate at an ordinary Windows path such as `D:\git\firstmate`, select `zellij` in `config/backend`, and launch Codex from that repository.
+Git for Windows supplies Bash and the Unix command-line tools Firstmate expects, while Codex's tracked lifecycle hooks cross `cmd.exe` through `bin/fm-codex-hook.cmd` and return to the tracked Bash dispatcher.
+The session lock resolves native Codex ownership through the Windows process table because Git Bash's MSYS `ps` cannot see a native parent chain.
+No WSL installation or Linux-hosted copy of the project is required for this path.
+
+The native Windows path does not make every optional backend or maintainer test portable.
+Use the explicit Zellij backend, and treat tests that require tmux, `python3` by that exact name, Unix executable aliases, or Unix symlink semantics as unsupported test-host assumptions unless their own guide says otherwise.
+
 ## Task shape and home isolation
 
 Every task receives one tab in the shared Zellij session.

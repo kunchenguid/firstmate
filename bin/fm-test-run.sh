@@ -137,7 +137,7 @@ family_for_basename() {
     fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-classify-decision-key.test.sh|\
-    fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
+    fm-codex-hook.test.sh|fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
@@ -412,6 +412,7 @@ tests/fm-claude-stop-autoarm-live-e2e.test.sh 30
 tests/fm-claude-stop-autoarm.test.sh 60633
 tests/fm-cmux-claude-composer-live-e2e.test.sh 20
 tests/fm-codex-continuity-live-e2e.test.sh 19
+tests/fm-codex-hook.test.sh 3000
 tests/fm-composer-matrix-live-e2e.test.sh 21
 tests/fm-control-relaunch.test.sh 31881
 tests/fm-control.test.sh 36712
@@ -969,11 +970,13 @@ families_for_changed_path() {
     bin/fm-gate-refuse*|bin/fm-lock*|bin/fm-quota-axi-lib.sh)
       printf '%s\n' session-bootstrap
       ;;
-    bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
+    bin/fm-sessionstart-run.sh|bin/fm-codex-hook.sh|bin/fm-codex-hook.cmd|\
+    .claude/settings.json|.codex/hooks.json|\
     .pi/extensions/fm-primary-turnend-guard.ts)
       # The run tier's two harness-supplied facts (source vocabulary and
       # context-reset stdout injection) only show up against a real harness.
       printf '%s\n' session-bootstrap
+      printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;
     bin/fm-timeout-lib.sh)

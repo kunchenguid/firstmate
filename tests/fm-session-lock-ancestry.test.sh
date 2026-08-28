@@ -220,6 +220,72 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+test_native_windows_process_table_identifies_codex() {
+  local dir fakebin got
+  dir="$TMP_ROOT/native-windows"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -l)
+    printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
+    printf '%s\n' '      100       1     100        410  ?        197609 00:00:00 /usr/bin/bash'
+    ;;
+  *) exit 2 ;;
+esac
+SH
+  cat > "$fakebin/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ] && [ "$1" != ancestry ]; do shift; done
+[ "${1:-}" = ancestry ] || exit 1
+case "${2:-}" in
+  410)
+    printf '410\t510\tC:\\Program Files\\Git\\bin\\bash.exe\tbash bin/fm-codex-hook.sh sessionstart\n'
+    printf '510\t610\tC:\\Windows\\System32\\cmd.exe\tcmd.exe /C bin\\fm-codex-hook.cmd sessionstart\n'
+    printf '610\t710\tC:\\Users\\u\\AppData\\Roaming\\npm\\codex.exe\tcodex.exe\n'
+    ;;
+  610)
+    printf '610\t710\tC:\\Users\\u\\AppData\\Roaming\\npm\\codex.exe\tcodex.exe\n'
+    ;;
+  999)
+    printf '999\t710\tC:\\Windows\\System32\\notepad.exe\tnotepad.exe\n'
+    ;;
+esac
+SH
+  chmod +x "$fakebin/ps" "$fakebin/powershell.exe"
+
+  got=$(PATH="$fakebin:$PATH" bash -c '
+    uname() { printf "%s\n" MINGW64_NT; }
+    . "$0"
+    fm_harness_ancestry_pid
+  ' "$LIB") || fail "native Windows Codex was not found through the Windows process table"
+  [ "$got" = 610 ] || fail "native Windows ancestry resolved '$got', expected Codex pid 610"
+
+  got=$(PATH="$fakebin:$PATH" FM_SESSION_HARNESS_PID=610 bash -c '
+    uname() { printf "%s\n" MINGW64_NT; }
+    . "$0"
+    fm_process_ancestry_rows() { return 1; }
+    fm_harness_ancestry_pid
+  ' "$LIB") || fail "captured native Windows Codex identity was not reusable after the parent chain disappeared"
+  [ "$got" = 610 ] || fail "captured native Windows ancestry resolved '$got', expected Codex pid 610"
+
+  printf '610\n' > "$dir/state/.lock"
+  PATH="$fakebin:$PATH" bash -c '
+    uname() { printf "%s\n" MINGW64_NT; }
+    . "$0"
+    fm_harness_pid_alive 610 && fm_session_lock_owned_by_self "$1"
+  ' "$LIB" "$dir/state" || fail "native Windows Codex did not retain its live owned lock"
+  if PATH="$fakebin:$PATH" bash -c '
+    uname() { printf "%s\n" MINGW64_NT; }
+    . "$0"
+    fm_harness_pid_alive 999
+  ' "$LIB"; then
+    fail "an ordinary native Windows process was accepted as a live harness"
+  fi
+  pass "session-lock: native Windows Codex identity uses the Windows process table"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -360,6 +426,11 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
-test_e2e_version_named_session_claims_the_home
-test_e2e_daemon_parented_session_claims_the_home
-test_e2e_daemon_parented_version_named_session_keeps_its_lock
+test_native_windows_process_table_identifies_codex
+if ps -o comm= -p "$$" >/dev/null 2>&1; then
+  test_e2e_version_named_session_claims_the_home
+  test_e2e_daemon_parented_session_claims_the_home
+  test_e2e_daemon_parented_version_named_session_keeps_its_lock
+else
+  pass "session-lock e2e: procps-only executable-alias fixtures skipped on native Windows"
+fi

@@ -6,6 +6,13 @@ This record supports current session-start, turn-end, watcher-continuity, and we
 Operator behavior and active limits remain in the linked current guides.
 Task-specific chronology, temporary paths, run identifiers, and delivery transcripts remain in private reports or PR evidence.
 
+## Native Windows Codex transport
+
+The native Windows transport was exercised on 2026-08-27 with Codex CLI 0.150.1, Git for Windows Bash, Windows PowerShell, and Zellij 0.45.0.
+The tracked `commandWindows` entries survived real `cmd.exe` parsing for SessionStart, both PreToolUse adapters, and Stop while preserving each JSON payload on stdin.
+The Windows process-table helper resolved a live native Codex ancestor across the `bash.exe` and `cmd.exe` hook bridge, and the session-lock behavior test pins the same process shape deterministically.
+The observed interactive Codex TUI fired the tracked project SessionStart registration; context-reset and re-emit delivery remain outside this evidence until the live reset guard records them.
+
 ## Native session-start delivery
 
 The cross-harness transport pass ran on 2026-07-17 with Codex 0.144.4, Grok 0.2.103, OpenCode 1.17.18, Pi 0.80.10, and the tracked Claude hook wiring.

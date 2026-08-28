@@ -64,6 +64,8 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 The first mate detects and offers to install supported missing tools after you approve.
 Backend-specific setup is linked in [Documentation](#documentation).
+Native Windows operation without WSL is experimental and uses Windows Terminal, Git for Windows, and the explicit Zellij backend.
+The current setup and compatibility boundary are in [docs/zellij-backend.md](docs/zellij-backend.md#windows-without-wsl).
 
 ### Recommended harnesses
 
