@@ -180,15 +180,28 @@ fm_codex_queue_deliver() {
   printf 'accepted\n'
 }
 
-fm_codex_queue_acknowledge() { # <recovery-generation>
-  local generation=$1 stored record
+fm_codex_queue_acknowledge() { # <recovery-generation> [<session-generation>]
+  local generation=$1 session_gen=${2:-} stored stored_session record record_header field_count
   case "$generation" in *[!A-Za-z0-9._-]*|'') return 2 ;; esac
+  case "$session_gen" in *[!A-Za-z0-9._-]*) return 2 ;; esac
   mkdir -p "$STATE" || return 1
   fm_lock_acquire_wait "$FM_CODEX_PRIMARY_LOCK" || return 1
+  if [ -z "$session_gen" ] && fm_codex_record_shape_valid "$FM_CODEX_PRIMARY_BINDING" fm-codex-primary-binding-v1 6; then
+    session_gen=$(fm_codex_record_field "$FM_CODEX_PRIMARY_BINDING" session_generation 2>/dev/null || true)
+  fi
   for record in "$OUTSTANDING" "$FALLBACK_OUTSTANDING"; do
     if [ -f "$record" ] && [ ! -L "$record" ]; then
+      case "$record" in
+        *".codex-queue-outstanding") record_header=fm-codex-queue-outstanding-v1 field_count=5 ;;
+        *) record_header=fm-codex-present-fallback-v1 field_count=4 ;;
+      esac
       stored=$(fm_codex_record_field "$record" recovery_generation 2>/dev/null || true)
-      [ "$stored" != "$generation" ] || rm -f -- "$record"
+      stored_session=$(fm_codex_record_field "$record" session_generation 2>/dev/null || true)
+      if [ "$stored" = "$generation" ] \
+        && { [ -z "$session_gen" ] || [ "$stored_session" = "$session_gen" ]; } \
+        && fm_codex_record_shape_valid "$record" "$record_header" "$field_count"; then
+        rm -f -- "$record"
+      fi
     fi
   done
   fm_lock_release "$FM_CODEX_PRIMARY_LOCK"
@@ -197,6 +210,9 @@ fm_codex_queue_acknowledge() { # <recovery-generation>
 case "${1:-}" in
   capability) fm_codex_queue_capable ;;
   deliver) fm_codex_queue_deliver ;;
-  acknowledge) [ "$#" -eq 2 ] || exit 2; fm_codex_queue_acknowledge "$2" ;;
-  *) printf 'usage: fm-codex-queue-wake.sh capability|deliver|acknowledge RECOVERY_GENERATION\n' >&2; exit 2 ;;
+  acknowledge)
+    case "$#" in 2|3) ;; *) exit 2 ;; esac
+    fm_codex_queue_acknowledge "$2" "${3:-}"
+    ;;
+  *) printf 'usage: fm-codex-queue-wake.sh capability|deliver|acknowledge RECOVERY_GENERATION [SESSION_GENERATION]\n' >&2; exit 2 ;;
 esac

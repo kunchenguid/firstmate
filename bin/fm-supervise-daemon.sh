@@ -196,6 +196,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$FM_DAEMON_DIR/fm-busy-lib.sh"
 
+# Codex primary binding, shape validation and record-field helpers, used by
+# present_handle_wake to validate native-queue outstanding records against the
+# shared v1 shape contract instead of positional line indexing.
+# shellcheck source=bin/fm-codex-primary.sh
+. "$FM_DAEMON_DIR/fm-codex-primary.sh"
+
 # --- tunables ---------------------------------------------------------------
 # Supervisor backends this daemon knows how to inject into today. zellij, orca,
 # and cmux are real backends elsewhere in firstmate (bin/fm-backend.sh) but this
@@ -1430,12 +1436,11 @@ present_handle_wake() {  # <reason> <state>
     "$state/.watcher-down" 2>/dev/null | tail -1)
   if [ "$harness" = codex ] && [ -n "$generation" ] && [ -n "$recovery" ] \
     && [ -f "$fallback_record" ] && [ ! -L "$fallback_record" ] \
-    && [ "$(sed -n '1p' "$fallback_record" 2>/dev/null || true)" = fm-codex-present-fallback-v1 ] \
-    && [ "$(sed -n '2s/^thread_uuid=//p' "$fallback_record" 2>/dev/null || true)" = "$thread" ] \
-    && [ "$(sed -n '3s/^session_generation=//p' "$fallback_record" 2>/dev/null || true)" = "$generation" ] \
-    && [ "$(sed -n '4s/^recovery_generation=//p' "$fallback_record" 2>/dev/null || true)" = "$recovery" ] \
-    && [ "$(sed -n '5p' "$fallback_record" 2>/dev/null || true)" = status=accepted ] \
-    && [ "$(wc -l < "$fallback_record" 2>/dev/null | tr -d '[:space:]')" = 5 ]; then
+    && fm_codex_record_shape_valid "$fallback_record" fm-codex-present-fallback-v1 4 \
+    && [ "$(fm_codex_record_field "$fallback_record" thread_uuid 2>/dev/null || true)" = "$thread" ] \
+    && [ "$(fm_codex_record_field "$fallback_record" session_generation 2>/dev/null || true)" = "$generation" ] \
+    && [ "$(fm_codex_record_field "$fallback_record" recovery_generation 2>/dev/null || true)" = "$recovery" ] \
+    && [ "$(fm_codex_record_field "$fallback_record" status 2>/dev/null || true)" = accepted ]; then
     log "present terminal fallback doorbell coalesced: $reason"
     return 0
   fi

@@ -116,6 +116,24 @@ fm_codex_lock_generation_read() {
   FM_CODEX_LOCK_IDENTITY_SHA256=$identity_hash
 }
 
+fm_codex_bind_diagnostic_locked() {
+  local code=$1 message=$2 now old_time old_code tmp DIAGNOSTIC
+  DIAGNOSTIC="$STATE/.codex-queue-diagnostic"
+  now=$(date +%s)
+  old_time=$(sed -n '1s/^epoch=//p' "$DIAGNOSTIC" 2>/dev/null || true)
+  old_code=$(sed -n '2s/^code=//p' "$DIAGNOSTIC" 2>/dev/null || true)
+  case "$old_time" in ''|*[!0-9]*) old_time=0 ;; esac
+  if [ "$code" != "$old_code" ] || [ $((now - old_time)) -ge 300 ]; then
+    tmp=$(mktemp "$STATE/.codex-queue-diagnostic.XXXXXX") || return 0
+    if printf 'epoch=%s\ncode=%s\n' "$now" "$code" > "$tmp" && chmod 0600 "$tmp" \
+      && _fm_atomic_replace "$tmp" "$DIAGNOSTIC"; then
+      :
+    else
+      rm -f -- "$tmp"
+    fi
+  fi
+}
+
 fm_codex_bind() { # [source] [session-start-uuid]
   local thread source lifecycle_thread owner lock_owner identity identity_hash home_real home_hash old_binding generation
   lifecycle_thread=${2:-}
@@ -163,7 +181,15 @@ fm_codex_bind() { # [source] [session-start-uuid]
     return 1
   fi
   [ "$old_binding" = "$thread|$generation|$identity_hash" ] \
-    || rm -f -- "$STATE/.codex-queue-outstanding" "$STATE/.codex-present-fallback-outstanding"
+    || {
+         rm -f -- "$STATE/.codex-queue-outstanding" "$STATE/.codex-present-fallback-outstanding"
+         if [ -e "$STATE/.codex-queue-outstanding" ] || [ -e "$STATE/.codex-present-fallback-outstanding" ]; then
+           fm_codex_bind_diagnostic_locked bind-rm 'primary binding changed but stale native-queue doorbell records could not be removed from state/'
+           rm -f -- "$FM_CODEX_PRIMARY_BINDING"
+           fm_lock_release "$FM_CODEX_PRIMARY_LOCK"
+           return 1
+         fi
+       }
   fm_lock_release "$FM_CODEX_PRIMARY_LOCK"
 }
 
