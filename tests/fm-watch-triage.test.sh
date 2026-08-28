@@ -1660,11 +1660,10 @@ test_endpoint_gone_alarms_despite_a_declared_pause() {
 
 # --- a fractional poll interval does not abort the lost-endpoint alarm --------
 # FM_POLL is a whole-second cadence by contract but the watcher tests drive it as
-# low as 0.2, and the confirmation window scales the interval. Multiplying a
-# decimal in Bash integer arithmetic aborts the shell under set -u, so a lost
-# endpoint could silently kill supervision at the exact moment it is needed. The
-# window now floors the interval to a whole second, so a fractional cadence still
-# alarms on the second consecutive missing poll rather than crashing on it.
+# low as 0.2. The confirmation is now counted in polls, not in a wall-clock window
+# scaled from FM_POLL, so no arithmetic ever touches the decimal cadence and a lost
+# endpoint still alarms on the second consecutive missing poll under a fractional
+# interval instead of aborting the shell on a decimal under set -u.
 test_endpoint_gone_survives_a_fractional_poll_interval() {
   local dir state fakebin out statusf window key pid
   dir=$(make_case endpoint-gone-fractional); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1692,6 +1691,58 @@ test_endpoint_gone_survives_a_fractional_poll_interval() {
   ack_stopped_cycle "$state" || fail "could not acknowledge the fractional-poll lost-endpoint alarm"
   unset FM_FAKE_CREW_STATE FM_FAKE_TMUX_MISSING_WINDOW FM_FAKE_TMUX_WINDOW
   pass "a lost endpoint still alarms under a fractional poll interval instead of aborting on the decimal"
+}
+
+# --- a lost endpoint is confirmed across polls, never across wall-clock --------
+# The confirmation must key on the IMMEDIATELY preceding poll of this window, not on
+# how much wall-clock elapsed since the first missing verdict. A single poll cycle
+# can run far longer than FM_POLL behind a large fleet's captures, so an earlier
+# implementation that expired the pending confirmation after a fixed multiple of
+# FM_POLL would, on any fleet whose real poll gap exceeded that window, reset the
+# confirmation on every poll and leave a genuinely dead worker silent forever - its
+# own last words explaining the silence. Counting polls confirms on the next poll no
+# matter how slow the cycle. Seeding the pending record on the immediately preceding
+# poll but with an arbitrarily ancient implied wall-clock (the counter is far above
+# any plausible epoch-seconds window) drives exactly that gap: the fixture alarms on
+# the very next poll here, where the elapsed-time rule would have re-armed instead.
+test_endpoint_gone_confirms_across_a_slow_poll_cycle() {
+  local dir state fakebin out statusf window key seed pid
+  dir=$(make_case endpoint-gone-slowcycle); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; statusf="$state/slow.status"
+  window="test:fm-slow"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/slow.meta"
+  printf 'paused: benchmark batch running, ~40-60 min expected\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-slow_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  unset FM_FAKE_TMUX_CAPTURE 2>/dev/null || true
+  export FM_FAKE_TMUX_WINDOW="$window"
+  export FM_FAKE_TMUX_MISSING_WINDOW="$dir/gone.flag"
+  : > "$FM_FAKE_TMUX_MISSING_WINDOW"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable'
+  # The window has already been seen missing once, on poll <seed>, and the watcher
+  # is about to run poll <seed+1> - the immediately following poll - however long ago
+  # in wall-clock that first sighting was. <seed> doubles as the implied stale
+  # wall-clock the old elapsed-time rule would have read this pending record as.
+  seed=5000
+  printf '%s' "$seed" > "$state/.watch-poll-seq"
+  printf '%s' "$seed" > "$state/.endpoint-gone-pending-$key"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=1200 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || fail "a lost endpoint confirmed on the previous poll never alarmed on the next one: $(cat "$out")"
+  grep -F "endpoint gone" "$out" >/dev/null \
+    || fail "a poll-adjacent lost endpoint did not name itself in the wake: $(cat "$out")"
+  [ -e "$state/.endpoint-gone-$key" ] || fail "the poll-adjacent lost-endpoint marker was not recorded"
+  # Exactly one poll elapsed to the alarm: it confirmed on the immediately following
+  # poll rather than re-arming, which is what the elapsed-time rule would have forced.
+  [ "$(cat "$state/.watch-poll-seq" 2>/dev/null || echo 0)" = "$(( seed + 1 ))" ] \
+    || fail "the lost endpoint took more than the immediately following poll to confirm"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the poll-adjacent lost-endpoint alarm"
+  unset FM_FAKE_CREW_STATE FM_FAKE_TMUX_MISSING_WINDOW FM_FAKE_TMUX_WINDOW
+  pass "a lost endpoint confirms on the immediately following poll regardless of the wall-clock gap between polls"
 }
 
 # --- an ordinary teardown is not a lost endpoint -----------------------------
@@ -3162,6 +3213,7 @@ test_acknowledged_wedge_escalation_backs_off
 test_declared_pause_survives_a_redrawing_pane
 test_endpoint_gone_alarms_despite_a_declared_pause
 test_endpoint_gone_survives_a_fractional_poll_interval
+test_endpoint_gone_confirms_across_a_slow_poll_cycle
 test_teardown_race_does_not_alarm_as_a_lost_endpoint
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound

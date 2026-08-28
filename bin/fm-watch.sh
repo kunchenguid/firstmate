@@ -559,16 +559,6 @@ clear_write_tracking() {  # <window-key>
   rm -f "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key"
 }
 
-# How far past a scheduled next poll a pending confirmation still counts as the
-# IMMEDIATELY preceding poll of this window. The pending record is evidence about
-# one specific poll pair, so it has to expire: nothing clears it for a window that
-# stops being polled at all, which is exactly what teardown does, and a record left
-# behind by a torn-down task would otherwise let a single missing verdict alarm
-# instantly the next time that window name is recorded. Ten intervals is far past a
-# next poll even behind a large fleet's captures, and far short of the gap any
-# respawn leaves, so an expired record simply starts a fresh pair.
-ENDPOINT_GONE_CONFIRM_POLLS=10
-
 # A recorded endpoint whose pane cannot be captured is either GONE or transiently
 # unreadable, and only the backend can tell those apart. Only a `missing` verdict -
 # the window is absent from a SUCCESSFUL backend inventory - is proof the worker's
@@ -588,14 +578,26 @@ ENDPOINT_GONE_CONFIRM_POLLS=10
 # bin/fm-teardown.sh closes the runtime endpoint before it removes the task metadata,
 # and the watcher enumerates windows from that metadata without taking the metadata
 # lock, so a poll landing in that gap sees a window that is genuinely absent and
-# genuinely still recorded. Confirming across a poll interval costs a lost endpoint one FM_POLL of
+# genuinely still recorded. Confirming across a poll costs a lost endpoint one poll of
 # detection latency - irrelevant against a worker that is not coming back - and costs
 # a completing task the false "inspect and recover" wake entirely, since its metadata
 # is gone well before the next poll. Only an unbroken run counts: any other verdict,
 # including the transient `unreadable` a backend hiccup produces, drops the pending
 # confirmation so two hiccups a minute apart can never add up to an alarm.
+#
+# "Consecutive" is counted in POLLS, never in wall-clock. The pending record stores
+# the poll-cycle sequence (POLL_SEQ) the first missing verdict was seen on, and a
+# confirmation counts only when the stored value is the IMMEDIATELY preceding poll of
+# this window (POLL_SEQ - 1). An elapsed-time proxy would multiply FM_POLL to guess
+# where the previous poll landed, but a single poll cycle can run far longer than
+# FM_POLL behind a large fleet's captures, so any window a dead worker's poll gap
+# exceeds would reset its own confirmation on every poll and the alarm would never
+# fire. Counting polls confirms on the next poll no matter how slow the cycle, and a
+# stale record a torn-down task leaves behind never matches POLL_SEQ - 1 the next time
+# that window name is recorded, so a reused name simply starts a fresh pair rather than
+# alarming instantly.
 endpoint_gone_check() {  # <window>
-  local win=$1 key marker pending reason now since poll_secs
+  local win=$1 key marker pending reason recorded
   key=$(window_key "$win")
   marker="$STATE/.endpoint-gone-$key"
   pending="$STATE/.endpoint-gone-pending-$key"
@@ -604,19 +606,10 @@ endpoint_gone_check() {  # <window>
     rm -f "$pending"
     return 0
   fi
-  now=$(date +%s)
-  since=$(cat "$pending" 2>/dev/null || true)
-  case "$since" in ''|*[!0-9]*) since= ;; esac
-  # FM_POLL is a whole-second cadence by contract but is driven fractionally in
-  # tests (as low as 0.2) and integer arithmetic on a decimal aborts the shell
-  # under set -u, which would silently kill supervision at the exact moment a lost
-  # endpoint needs it. The confirmation window is integer seconds either way, so
-  # floor POLL to a whole second with a 1s minimum before scaling it.
-  poll_secs=${POLL%%.*}
-  case "$poll_secs" in ''|*[!0-9]*) poll_secs=1 ;; esac
-  [ "$poll_secs" -ge 1 ] || poll_secs=1
-  if [ -z "$since" ] || [ "$(( now - since ))" -gt "$(( poll_secs * ENDPOINT_GONE_CONFIRM_POLLS ))" ]; then
-    printf '%s' "$now" > "$pending"
+  recorded=$(cat "$pending" 2>/dev/null || true)
+  case "$recorded" in ''|*[!0-9]*) recorded= ;; esac
+  if [ -z "$recorded" ] || [ "$recorded" -ne "$(( POLL_SEQ - 1 ))" ]; then
+    printf '%s' "$POLL_SEQ" > "$pending"
     return 0
   fi
   reason="stale: $win (endpoint gone: the recorded window is absent from its backend on two consecutive polls, so the worker's process is no longer running - a declared wait does not cover this; inspect and recover or clean up)"
@@ -1351,6 +1344,14 @@ resurface_after_downtime() {
   wake "check: rearm-resurface"
 }
 
+# Monotonic poll-cycle counter, one increment per poll below. endpoint_gone_check
+# confirms a lost endpoint only across two IMMEDIATELY consecutive polls, and
+# "consecutive" has to be counted in polls, not wall-clock, so a slow fleet cycle
+# cannot reset a dead worker's confirmation forever. Seeded from disk so the poll a
+# pending record refers to still means "the previous poll" across a watcher restart.
+POLL_SEQ=$(cat "$STATE/.watch-poll-seq" 2>/dev/null || echo 0)
+case "$POLL_SEQ" in ''|*[!0-9]*) POLL_SEQ=0 ;; esac
+
 while :; do
   # Self-eviction: if the singleton lock no longer names this process, a second
   # watcher has taken over (e.g. a transient duplicate from a racy arm). Stand
@@ -1365,6 +1366,12 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+
+  # Advance the poll-cycle counter once per poll, before any window is examined, so
+  # every window's endpoint_gone_check this cycle reads the same sequence. Persisted
+  # so a pending confirmation survives a watcher restart meaning the same poll pair.
+  POLL_SEQ=$(( POLL_SEQ + 1 ))
+  printf '%s' "$POLL_SEQ" > "$STATE/.watch-poll-seq"
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery
