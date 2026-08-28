@@ -58,6 +58,20 @@ host_lacks_real_symlink_support() {
   return 1
 }
 
+stale_fixture_pid() {
+  printf '%s\n' 2147483647
+}
+
+assert_fixture_pid_not_live() {
+  local state=$1 pid=$2
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_pid_alive "$2"; then
+      exit 1
+    fi
+  ' _ "$LIB" "$pid" || fail "fixture stale pid is unexpectedly live"
+}
+
 test_singleton_start() {
   local dir state fakebin out1 out2 pid1 pid2 live i
   dir=$(make_case singleton)
@@ -569,10 +583,10 @@ test_msys_lock_steals_abandoned_directory_lock() {
   lockdir="$state/.contend.lock"
   ln_used="$dir/ln-used"
   make_fake_msys_lock_bin "$fakebin"
-  stalepid=$(dead_pid)
+  stalepid=$(stale_fixture_pid)
+  assert_fixture_pid_not_live "$state" "$stalepid"
   mkdir "$lockdir"
   printf '%s\n' "$stalepid" > "$lockdir/pid"
-  kill -0 "$stalepid" 2>/dev/null && fail "stale MSYS directory fixture pid is unexpectedly live"
   rc=0
   PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
@@ -581,7 +595,7 @@ test_msys_lock_steals_abandoned_directory_lock() {
     [ "${FM_LOCK_RECOVERED_PID:-}" = "$3" ] || exit 22
     current=$(cat "$2/pid" 2>/dev/null || true)
     [ -n "$current" ] || exit 23
-    [ "$current" != "$3" ] || exit 24
+    [ "$current" = "${BASHPID:-$$}" ] || exit 24
     fm_lock_release "$2"
     [ ! -e "$2" ] && [ ! -L "$2" ] || exit 25
   ' _ "$LIB" "$lockdir" "$stalepid" || rc=$?
@@ -598,8 +612,9 @@ test_msys_lock_live_steal_mutex_is_not_reclaimed() {
   lockdir="$state/.contend.lock"
   holder_file="$dir/holder"
   ln_used="$dir/ln-used"
-  dead=$(dead_pid)
+  dead=$(stale_fixture_pid)
   make_fake_msys_lock_bin "$fakebin"
+  assert_fixture_pid_not_live "$state" "$dead"
   mkdir "$lockdir"
   printf '%s\n' "$dead" > "$lockdir/pid"
   PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
@@ -635,7 +650,7 @@ test_msys_lock_live_steal_mutex_is_not_reclaimed() {
 }
 
 test_msys_stale_corrupted_lock_recovers_generated_owner_dir() {
-  local dir state fakebin lockdir nested ln_used rc
+  local dir state fakebin lockdir nested ln_used rc stalepid
   dir=$(make_case msys-lock-corrupted-recovery)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -643,9 +658,11 @@ test_msys_stale_corrupted_lock_recovers_generated_owner_dir() {
   nested="$lockdir/.contend.lock.owner.stale123"
   ln_used="$dir/ln-used"
   make_fake_msys_lock_bin "$fakebin"
+  stalepid=$(stale_fixture_pid)
+  assert_fixture_pid_not_live "$state" "$stalepid"
   mkdir -p "$nested"
-  printf '%s\n' "$(dead_pid)" > "$lockdir/pid"
-  printf '%s\n' "$(dead_pid)" > "$nested/pid"
+  printf '%s\n' "$stalepid" > "$lockdir/pid"
+  printf '%s\n' "$stalepid" > "$nested/pid"
   printf '%s\n' "$state" > "$nested/fm-home"
   rc=0
   PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
@@ -662,7 +679,7 @@ test_msys_stale_corrupted_lock_recovers_generated_owner_dir() {
 }
 
 test_msys_stale_corrupted_lock_refuses_empty_nested_owner_dir() {
-  local dir state fakebin lockdir nested ln_used rc
+  local dir state fakebin lockdir nested ln_used rc stalepid
   dir=$(make_case msys-lock-corrupted-empty-refusal)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -670,8 +687,10 @@ test_msys_stale_corrupted_lock_refuses_empty_nested_owner_dir() {
   nested="$lockdir/.contend.lock.owner.stale123"
   ln_used="$dir/ln-used"
   make_fake_msys_lock_bin "$fakebin"
+  stalepid=$(stale_fixture_pid)
+  assert_fixture_pid_not_live "$state" "$stalepid"
   mkdir -p "$nested"
-  printf '%s\n' "$(dead_pid)" > "$lockdir/pid"
+  printf '%s\n' "$stalepid" > "$lockdir/pid"
   rc=0
   PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
@@ -686,7 +705,7 @@ test_msys_stale_corrupted_lock_refuses_empty_nested_owner_dir() {
 }
 
 test_msys_stale_corrupted_lock_refuses_unknown_nested_content() {
-  local dir state fakebin lockdir nested ln_used rc
+  local dir state fakebin lockdir nested ln_used rc stalepid
   dir=$(make_case msys-lock-corrupted-refusal)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -694,9 +713,11 @@ test_msys_stale_corrupted_lock_refuses_unknown_nested_content() {
   nested="$lockdir/.contend.lock.owner.stale123"
   ln_used="$dir/ln-used"
   make_fake_msys_lock_bin "$fakebin"
+  stalepid=$(stale_fixture_pid)
+  assert_fixture_pid_not_live "$state" "$stalepid"
   mkdir -p "$nested"
-  printf '%s\n' "$(dead_pid)" > "$lockdir/pid"
-  printf '%s\n' "$(dead_pid)" > "$nested/pid"
+  printf '%s\n' "$stalepid" > "$lockdir/pid"
+  printf '%s\n' "$stalepid" > "$nested/pid"
   printf 'keep\n' > "$nested/foreign.txt"
   rc=0
   PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
