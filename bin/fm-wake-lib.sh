@@ -460,10 +460,9 @@ fm_lock_try_create() {
           FM_LOCK_OWNER_DIR=$legacy_owner
           return 0
         fi
-      else
-        fm_lock_remove_stray_owner_artifact "$lockdir" "$ownerdir"
       fi
     fi
+    fm_lock_remove_stray_owner_artifact "$lockdir" "$ownerdir"
   else
     fm_lock_remove_stray_owner_artifact "$lockdir" "$ownerdir"
   fi

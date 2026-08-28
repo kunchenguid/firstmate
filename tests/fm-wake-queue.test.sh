@@ -1266,6 +1266,80 @@ EOF
   pass "contended MSYS publication cleans stray owner entries before stale recovery"
 }
 
+test_symlink_lock_contention_cleans_nested_owner_artifact() {
+  local dir state fakebin lock real_ln rc ready release holder
+  dir=$(make_case symlink-lock-contention)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lock="$state/.fixture.lock"
+  ready="$dir/holder.ready"
+  release="$dir/holder.release"
+  real_ln=$(command -v ln)
+  mkdir -p "$fakebin"
+  cat > "$fakebin/ln" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = -s ] && [ "$#" -eq 3 ] && [ "$3" = "${TARGET_LOCK:-}" ] && [ ! -e "${LN_RACED_ONCE:-}" ]; then
+  : > "$LN_RACED_ONCE" || exit 1
+  nested="$3/$(basename "$2")"
+  mkdir "$nested" || exit 1
+  cp -R "$2"/. "$nested"/ || exit 1
+  exit 0
+fi
+exec "$REAL_LN" "$@"
+EOF
+  chmod +x "$fakebin/ln"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock=$2
+    ready=$3
+    release=$4
+    fm_lock_try_acquire "$lock" || exit 30
+    [ -L "$lock" ] || exit 31
+    printf "ready\n" > "$ready"
+    while [ ! -e "$release" ]; do
+      sleep 0.1
+    done
+    fm_lock_release "$lock"
+    [ ! -e "$lock" ] && [ ! -L "$lock" ] || exit 32
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$ready" "$release" &
+  holder=$!
+  wait_for_file_text "$ready" "ready" || {
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    fail "symlink holder never acquired the lock"
+  }
+
+  rc=0
+  PATH="$fakebin:$PATH" TARGET_LOCK="$lock" LN_RACED_ONCE="$dir/ln-raced.once" REAL_LN="$real_ln" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock=$2
+    holder_pid=$3
+    owner=$(fm_lock_link_owner "$lock") || exit 13
+    fm_lock_try_acquire "$lock" && exit 10
+    [ "${FM_LOCK_HELD_PID:-}" = "$holder_pid" ] || exit 11
+    [ -L "$lock" ] || exit 12
+    if compgen -G "$owner/.fixture.lock.owner.*" >/dev/null; then
+      exit 14
+    fi
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$holder" || rc=$?
+  [ "$rc" -eq 0 ] || {
+    : > "$release"
+    wait "$holder" 2>/dev/null || true
+    fail "symlink contention left a nested owner artifact behind (rc=$rc)"
+  }
+
+  : > "$release"
+  wait "$holder" || fail "symlink holder did not release cleanly after contention"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 20
+    fm_lock_release "$2"
+    [ ! -e "$2" ] && [ ! -L "$2" ] || exit 21
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" || fail "symlink lock was not reacquirable after nested-owner cleanup"
+  pass "symlink lock contention cleans nested owner artifacts"
+}
+
 # Drain-time historical annotation staleness: a turn-ended-only wake row must
 # not present an already-announced status line as a new update, while a status
 # file with unannounced bytes keeps its annotation and a direct status row is
@@ -1318,6 +1392,7 @@ test_historical_annotation_skips_announced_status() {
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_msys_copied_owner_directory_is_a_valid_lock
 test_msys_contended_publication_cleans_stray_owner_link
+test_symlink_lock_contention_cleans_nested_owner_artifact
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash
