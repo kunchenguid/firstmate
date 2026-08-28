@@ -644,6 +644,23 @@ test_unignored_copy_a_task_rewrote_after_seeding_is_kept() {
   pass "a seeded copy the task rewrote is kept, because the record names one exact file"
 }
 
+test_unignored_copy_recreated_with_same_bytes_is_kept() {
+  local dir project worktree
+  dir=$(new_fixture env-local-same-bytes)
+  project=$dir/project
+  worktree=$dir/worktree
+  seed_env_local "$project"
+  acquire_env_local "$project" "$worktree"
+  rm -f "$worktree/.env.local"
+  cp "$project/.env.local" "$worktree/.env.local"
+  remove_env_local_ignore "$project"
+  expect_spawn_refusal "$project" "$worktree" \
+    "a same-byte replacement of the seeded file is task-authored work"
+  assert_file "$worktree/.env.local" \
+    "same-byte replacement remains after acquisition refuses it"
+  pass "an unignored copy recreated with the same bytes is kept"
+}
+
 test_unignored_copy_differing_from_the_source_is_kept() {
   local rec id out status before after
   id='pool-env-local-r9'
@@ -1251,6 +1268,7 @@ test_unignored_local_env_file_is_not_seeded
 test_unignored_copy_matching_the_source_is_retired
 test_unignored_copy_matching_the_source_without_a_record_is_kept
 test_unignored_copy_a_task_rewrote_after_seeding_is_kept
+test_unignored_copy_recreated_with_same_bytes_is_kept
 test_unignored_copy_differing_from_the_source_is_kept
 test_teardown_returns_a_slot_whose_task_dropped_the_ignore_rule
 test_teardown_still_refuses_a_task_authored_local_env_file
