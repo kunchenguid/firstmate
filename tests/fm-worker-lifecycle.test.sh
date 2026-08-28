@@ -136,6 +136,60 @@ with contextlib.redirect_stdout(output):
 assert drained == [("2", True)], drained
 assert json.loads(output.getvalue())["actions"] == [{"slot": 2, "type": "replay"}]
 
+# A service cancellation can predate the action field that transports its
+# proof. If compute is now exactly absent and no execution was ever recorded,
+# retire only that legacy delete claim so task-scoped reconcile can reset the
+# retained disks instead of refusing forever.
+key, item, target = worker("service", "generation", 2, "releasing")
+target["bindings"].update({
+    "assignment_generation": target["assignment_generation"],
+})
+proof = {
+    "schema": "fm.worker-service-cancel/v1", "task": "service",
+    "task_generation": "generation",
+    "assignment_generation": target["assignment_generation"],
+    "verdict": "cancelled-before-execution",
+}
+proof["proof_digest"] = module.digest_value(proof)
+target.update({
+    "release_proof": proof, "last_execution_digest": None,
+})
+item["service_completion_receipt"] = proof
+legacy = {
+    "type": "delete-compute", "slot": 2,
+    "bindings": dict(target["bindings"]),
+    "release_proof_digest": proof["proof_digest"],
+}
+state = {
+    "queue": {key: item}, "workers": {"2": target},
+    "pending_actions": {"2": legacy}, "executions": {},
+    "cleanup_refusals": [],
+}
+original_inventory_by_slot = module.inventory_by_slot
+original_classify_worker = module.classify_worker
+module.inventory_by_slot = lambda _inventory: {2: {"slot": 2, "resources": {}}}
+module.classify_worker = lambda _worker, _cloud, now=None: (
+    "orphaned-safe-to-delete", "exact released residual data capacity"
+)
+assert module.adopt_observed_service_cancel_cleanup(
+    state, "service", "generation", inventory
+)
+assert "2" not in state["pending_actions"], state
+assert "adopted observed cancelled state" in state["cleanup_refusals"][-1]["note"]
+
+# Actual or recorded output is never adopted away.
+state["pending_actions"]["2"] = dict(legacy)
+state["executions"]["request"] = {
+    "task": "service", "task_generation": "generation",
+    "assignment_generation": target["assignment_generation"],
+}
+assert not module.adopt_observed_service_cancel_cleanup(
+    state, "service", "generation", inventory
+)
+assert state["pending_actions"]["2"] == legacy
+module.inventory_by_slot = original_inventory_by_slot
+module.classify_worker = original_classify_worker
+
 # Cleanup likewise plans only the named released worker while an unrelated
 # slot retains its own pending action.
 key, item, target = worker("service", "generation", 2, "releasing")
@@ -920,12 +974,21 @@ module.az = lambda *_args, **_kwargs: (
     "ERROR: (ResourceNotFound) child disappeared\nCode: ResourceNotFound\n",
 )
 assert module.show_full(controller, "/child", inventory_missing_ok=True) is None
+# Azure reports a listed Run Command whose parent VM disappeared as generic
+# NotFound with target vmName rather than ResourceNotFound. It is the same
+# read-only child-list race and is absence only on the opted-in inventory read.
+module.az = lambda *_args, **_kwargs: (
+    None, 3,
+    "ERROR: (NotFound) The entity was not found in this Azure location.\n"
+    "Code: NotFound\nTarget: vmName\n",
+)
+assert module.show_full(controller, "/child", inventory_missing_ok=True) is None
 try:
     module.show_full(controller, "/child")
 except module.ProviderError as exc:
-    assert "ResourceNotFound" in str(exc), exc
+    assert "NotFound" in str(exc), exc
 else:
-    raise AssertionError("non-inventory child read softened ResourceNotFound")
+    raise AssertionError("non-inventory child read softened an Azure absence response")
 module.az = lambda *_args, **_kwargs: (None, 3, "ERROR: (AuthorizationFailed) denied")
 try:
     module.show_full(controller, "/child")

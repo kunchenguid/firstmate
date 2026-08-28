@@ -3870,6 +3870,63 @@ def service_task_projection(state, task, generation):
     }
 
 
+def adopt_observed_service_cancel_cleanup(state, task, generation, inventory):
+    """Retire a legacy delete claim after exact cancelled state is observable."""
+    key = request_key(task, generation)
+    item = state["queue"].get(key)
+    if item is None or item.get("role") != "no-mistakes" or item.get("status") != "releasing":
+        return False
+    slot_key, worker = service_worker_for_key(state, key)
+    if slot_key is None or worker is None:
+        return False
+    action = (state.get("pending_actions") or {}).get(slot_key)
+    if (
+        not isinstance(action, dict)
+        or action.get("type") != "delete-compute"
+        or action.get("service_cancel_proof") is not None
+        or action.get("bindings") != worker.get("bindings")
+    ):
+        return False
+    proof = worker.get("release_proof")
+    if not isinstance(proof, dict) or item.get("service_completion_receipt") != proof:
+        return False
+    unsigned = copy.deepcopy(proof)
+    supplied = unsigned.pop("proof_digest", None)
+    bindings = worker.get("bindings") or {}
+    if (
+        proof.get("schema") != "fm.worker-service-cancel/v1"
+        or proof.get("verdict") != "cancelled-before-execution"
+        or supplied != digest_value(unsigned)
+        or action.get("release_proof_digest") != supplied
+        or proof.get("task") != task
+        or proof.get("task_generation") != generation
+        or proof.get("assignment_generation") != worker.get("assignment_generation")
+        or bindings.get("task") != task
+        or bindings.get("task_generation") != generation
+        or worker.get("last_execution_digest") is not None
+    ):
+        return False
+    executions = [
+        execution for execution in (state.get("executions") or {}).values()
+        if isinstance(execution, dict)
+        and execution.get("task") == task
+        and execution.get("task_generation") == generation
+        and execution.get("assignment_generation") == worker.get("assignment_generation")
+    ]
+    if executions:
+        return False
+    cloud = inventory_by_slot(inventory).get(int(slot_key))
+    classification, _note = classify_worker(worker, cloud)
+    if classification != "orphaned-safe-to-delete":
+        return False
+    record_refusal(state, worker, LifecycleError(
+        "adopted observed cancelled state: legacy delete-compute claim omitted the exact "
+        "service-cancel proof after compute was already absent; no recorded execution exists"
+    ))
+    state["pending_actions"].pop(slot_key, None)
+    return True
+
+
 def command_service_reconcile(env, args):
     """Advance only one service request, never unrelated fleet convergence."""
     if args.confirm_subscription != env["subscription"]:
@@ -3892,6 +3949,18 @@ def command_service_reconcile(env, args):
             (state.get("pending_actions") or {}).get(slot_key)
             if slot_key is not None else None
         )
+    inventory = None
+    if pending is not None and pending.get("type") == "delete-compute":
+        if worker is None or slot_key is None:
+            raise LifecycleError("service reconcile task has no exact durable worker owner")
+        inventory = provider_slot_inventory(env, worker["slot"])
+        with controller_lock(env):
+            state = load_state(env)
+            if adopt_observed_service_cancel_cleanup(
+                state, task, generation, inventory
+            ):
+                save_state(env, state)
+                pending = None
     if pending is not None:
         drained, _ = drain_pending(env, slot=slot_key, strict=True)
         with controller_lock(env):
@@ -3909,12 +3978,13 @@ def command_service_reconcile(env, args):
             print("pending: slot={} task={}@{}".format(slot_key, task, generation))
         return
 
-    if item.get("status") == "queued":
-        inventory = provider_call(env, "inventory")["inventory"]
-    else:
-        if worker is None or slot_key is None:
-            raise LifecycleError("service reconcile task has no exact durable worker owner")
-        inventory = provider_slot_inventory(env, worker["slot"])
+    if inventory is None:
+        if item.get("status") == "queued":
+            inventory = provider_call(env, "inventory")["inventory"]
+        else:
+            if worker is None or slot_key is None:
+                raise LifecycleError("service reconcile task has no exact durable worker owner")
+            inventory = provider_slot_inventory(env, worker["slot"])
     action = None
     with contextlib.ExitStack() as stack:
         with controller_lock(env):
