@@ -476,6 +476,15 @@ SH
   chmod +x "$fakebin/uname" "$fakebin/ln"
 }
 
+make_fake_uname_lock_bin() {
+  local fakebin=$1 uname_value=$2
+  cat > "$fakebin/uname" <<SH
+#!/usr/bin/env bash
+printf '%s\n' '$uname_value'
+SH
+  chmod +x "$fakebin/uname"
+}
+
 make_fake_cygwin_lock_bin() {
   local fakebin=$1
   cat > "$fakebin/uname" <<'SH'
@@ -769,6 +778,38 @@ test_msys_stale_corrupted_lock_refuses_partial_nested_cleanup() {
   [ "$rc" -eq 0 ] || fail "MSYS stale lock partially deleted earlier nested evidence before refusal (rc=$rc)"
   [ ! -e "$ln_used" ] || fail "MSYS partial-refusal path invoked ln -s"
   pass "MSYS stale lock refusal preserves all nested evidence when later content is foreign"
+}
+
+test_non_windows_mingw_name_keeps_symlink_publication() {
+  local dir state fakebin lockdir ln_used real_ln rc
+  if host_lacks_real_symlink_support; then
+    pass "generic mingw-name symlink publication skipped on MSYS host"
+    return
+  fi
+  dir=$(make_case mingw-name-symlink-publication)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lockdir="$state/.contend.lock"
+  ln_used="$dir/ln-used"
+  real_ln=$(command -v ln)
+  make_fake_uname_lock_bin "$fakebin" MINGW64
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+printf 'used\n' > "${FM_TEST_LN_USED:?}"
+exec "${REAL_LN:?}" "$@"
+SH
+  chmod +x "$fakebin/ln"
+  rc=0
+  PATH="$fakebin:$PATH" REAL_LN="$real_ln" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 10
+    [ -L "$2" ] || exit 11
+    [ -e "$3" ] || exit 12
+    fm_lock_release "$2"
+    [ ! -e "$2" ] && [ ! -L "$2" ] || exit 13
+  ' _ "$LIB" "$lockdir" "$ln_used" || rc=$?
+  [ "$rc" -eq 0 ] || fail "generic MINGW name incorrectly switched to legacy directory publication (rc=$rc)"
+  pass "only Windows MSYS/MINGW uname spellings switch lock publication"
 }
 
 test_cygwin_lock_keeps_symlink_publication() {
@@ -1610,6 +1651,7 @@ test_msys_stale_corrupted_lock_recovers_generated_owner_dir
 test_msys_stale_corrupted_lock_refuses_empty_nested_owner_dir
 test_msys_stale_corrupted_lock_refuses_unknown_nested_content
 test_msys_stale_corrupted_lock_refuses_partial_nested_cleanup
+test_non_windows_mingw_name_keeps_symlink_publication
 test_cygwin_lock_keeps_symlink_publication
 test_symlink_lock_contention_cleans_stray_owner_link
 test_watch_restart_rejects_reused_pid

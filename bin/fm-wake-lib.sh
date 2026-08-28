@@ -354,7 +354,7 @@ fm_lock_points_to_owner() {
 
 fm_lock_uses_legacy_directory() {
   case "$_FM_UNAME" in
-    MSYS*|MINGW*) return 0 ;;
+    MSYS_NT-*|MINGW*_NT-*) return 0 ;;
   esac
   return 1
 }
