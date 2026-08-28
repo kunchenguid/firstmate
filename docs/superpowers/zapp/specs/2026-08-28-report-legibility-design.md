@@ -6,7 +6,7 @@ Epic [PLAT-1184](https://redventures.atlassian.net/browse/PLAT-1184), Phase 0 sh
 
 **This is Spec J.** It is the first spec in this epic driven by a reader complaint rather than a missing capability: the report is accurate and nobody wants to read it.
 
-Status: **drafted 2026-08-28 for review.** Two decisions resolved in review before drafting — dots-only in the channel, and interpret-with-the-number-attached. Two open decisions flagged inline.
+Status: drafted 2026-08-28; all four decisions resolved — dots-only in the channel, interpret-with-the-number-attached, export `CI_DEPENDENT_GATES`, and test that the doc anchors resolve. Plan written.
 
 ## Composability
 
@@ -105,7 +105,17 @@ Three concrete rules, each with its precondition:
 
 **The test that keeps this honest:** a fixture with 12 enrolled repositories and a medium-heavy distribution must render **no** "expected this early" sentence. That single assertion is what stops the reassurance outliving its basis.
 
-> **Open decision 1.** `CI_DEPENDENT_GATES` currently lives in `src/evaluate.ts` as a private constant (`checksGreen`, `coverageFloor`). The report needs the same set to call a failure transient. Export it from `evaluate.ts`, or restate it in the report? Exporting couples the report to the evaluator; restating risks the two drifting so the report calls a failure transient that the evaluator has stopped treating as re-evaluable. I lean **export** — a drift here produces a confidently wrong sentence, and the coupling is one `ReadonlySet` of gate names.
+**Resolved 2026-08-28: export it** — and a correction came with the decision.
+
+`CI_DEPENDENT_GATES` has **four** members as of Spec G, not the two this spec first assumed:
+
+```ts
+checksGreen, coverageFloor, freezeOff, notBlocked
+```
+
+It means "can clear without a new commit", which is broader than "CI is still running". A pull request held by a `do-not-automerge` label or by a fleet freeze is in that set, and describing either as CI-not-yet-reported would be false — it would tell a reader to wait for something that is not coming.
+
+So the export backs the claim it actually supports, **"can still clear without a new commit"**, and the CI-specific wording keys on the **dominant gate by name**. A narrower `CI_REPORTING_GATES` subset (`checksGreen`, `coverageFloor`) lives in `interpret.ts` for that purpose. The test that pins the distinction: a week dominated by `notBlocked` must not use the word "CI".
 
 ## The seven findings
 
@@ -211,7 +221,9 @@ The code's note says a scan stops being fine around fifty repositories. The real
 - **Parent survives a failed reply** — the parent's `ts` is returned and the error names the section.
 - **Docs anchors resolve** — every anchor the render links to exists as a heading in `docs/weekly-report.md`. A trail that dead-ends is worse than no trail, and this is the assertion that keeps it live as either file is edited.
 
-> **Open decision 2.** Anchor checking couples a test to a markdown file's headings, which is unusual and mildly brittle — a heading reworded without touching the renderer fails the suite. The alternative is trusting the links and finding out from a reader. I lean **keep the test**: this spec's whole premise is that the trail is the product, and a broken trail is invisible to everyone except the person who most needed it.
+**Resolved 2026-08-28: keep the test.** `tests/report-docs.test.ts` slugifies every heading in `docs/weekly-report.md` and asserts each `DOC_ANCHORS` entry resolves. It also asserts `policy.md` no longer carries line-anchored links into `query.ts` / `render.ts`, so the section cannot quietly grow back.
+
+The brittleness is real and it is the point: reword a heading and the suite tells you immediately, rather than a reader finding a link that lands at the top of the file. One wrinkle worth knowing — an em dash in `## Eligibility — what blocked` produces a **double** hyphen in the slug (`eligibility--what-blocked`), which is why `DOC_ANCHORS` spells it that way.
 
 ## Out of scope
 
