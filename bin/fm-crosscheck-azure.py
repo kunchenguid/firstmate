@@ -1997,6 +1997,7 @@ def replay_pi_result(
     known_finding_ids: set[str],
     eligible_equivalent_ids: set[str],
     active_finding_ids: set[str],
+    blocking_finding_ids: set[str] | None = None,
     allow_lookup_request: bool = False,
 ) -> dict[str, Any]:
     """Controller-replay the digest-bound Pi extension event log."""
@@ -2020,6 +2021,7 @@ def replay_pi_result(
             known_finding_ids=known_finding_ids,
             eligible_equivalent_ids=eligible_equivalent_ids,
             active_finding_ids=active_finding_ids,
+            blocking_finding_ids=blocking_finding_ids,
             allow_lookup_request=allow_lookup_request,
         )
     except Exception as exc:
@@ -2180,6 +2182,7 @@ def make_input(
     known_finding_ids: list[str] | None = None,
     eligible_equivalent_ids: list[str] | None = None,
     active_finding_ids: list[str] | None = None,
+    blocking_finding_ids: list[str] | None = None,
     lookup_allowed: bool = False,
 ) -> str:
     if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
@@ -2214,6 +2217,7 @@ def make_input(
                     "repo_read",
                     "report_finding",
                     "report_suspicion",
+                    "retract_review_item",
                     "update_finding",
                     "request_lookup",
                     "finish_review",
@@ -2227,6 +2231,7 @@ def make_input(
             "known_finding_ids": known_finding_ids or [],
             "eligible_equivalent_ids": eligible_equivalent_ids or [],
             "active_finding_ids": active_finding_ids or [],
+            "blocking_finding_ids": blocking_finding_ids or [],
             "lookup_allowed": lookup_allowed,
         },
         "protocol": {
@@ -2590,6 +2595,9 @@ def _run_azure_review_in_lane(
                         ledger, snapshot_value["head_sha"]
                     )
                 ),
+                blocking_finding_ids=sorted(
+                    core.blocking_finding_ids(ledger)
+                ),
                 lookup_allowed=(
                     config["harness"] == "pi" and lookup_context is None
                 ),
@@ -2718,6 +2726,7 @@ def _run_azure_review_in_lane(
                             ledger, snapshot_value["head_sha"]
                         )
                     ),
+                    blocking_finding_ids=core.blocking_finding_ids(ledger),
                     allow_lookup_request=True,
                 )
                 raise LookupPassRequested(
@@ -2785,6 +2794,7 @@ def _run_azure_review_in_lane(
                             ledger, snapshot_value["head_sha"]
                         )
                     ),
+                    blocking_finding_ids=core.blocking_finding_ids(ledger),
                     allow_lookup_request=False,
                 )
             raw_review = (

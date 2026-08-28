@@ -422,7 +422,7 @@ done
 [ "$provider" = "${FM_TEST_PI_EXPECT_PROVIDER:-openai-codex}" ] || exit 65
 [ "$model" = "${FM_TEST_PI_EXPECT_MODEL:-gpt-5.6-sol}" ] || exit 66
 [ "$thinking" = xhigh ] || [ "$thinking" = low ] || exit 67
-[ "$tools" = repo_search,repo_read,report_finding,report_suspicion,update_finding,request_lookup,finish_review ] || exit 68
+[ "$tools" = repo_search,repo_read,report_finding,report_suspicion,retract_review_item,update_finding,request_lookup,finish_review ] || exit 68
 [ -f "$extension" ] && [ -f "${FM_CROSSCHECK_REVIEW_SCHEMA:-}" ] \
   && [ -n "$system_prompt" ] || exit 97
 [ "$context_isolated" = yes ] || {
@@ -618,23 +618,25 @@ base = {
 
 if scenario == "wrong-head":
     base["head_sha"] = "f" * 40
-elif scenario == "new-finding":
+elif scenario in {"new-finding", "advisory-finding"}:
     reproduction = protocol / "reproductions" / "bug.sh"
     reproduction.parent.mkdir(parents=True, exist_ok=True)
     reproduction.write_text("#!/usr/bin/env bash\necho REPRODUCED-BUG\nexit 7\n")
     os.chmod(reproduction, 0o755)
-    base["new_findings"] = [{
+    finding = {
         "title": "Reproduced defect",
-        "severity": "blocking",
+        "severity": "high" if scenario == "advisory-finding" else "blocking",
         "description": "The executable reproduction demonstrates the defect.",
         "citations": [{"path": "app.txt", "line": 1}],
-        "reproduction": {
+    }
+    if scenario == "new-finding":
+        finding["reproduction"] = {
             "test_path": ".crosscheck/reproductions/bug.sh",
             "command": "bash .crosscheck/reproductions/bug.sh",
             "expected_exit": 7,
             "output_contains": "REPRODUCED-BUG",
-        },
-    }]
+        }
+    base["new_findings"] = [finding]
 elif scenario in {
     "verified-fixed-jest",
     "inadequate-jest",
@@ -2266,7 +2268,7 @@ test_pi_reviewer_executes_bound_policy_profile() {
     || fail "Pi reviewer did not complete"
   assert_contains "$output" 'crosscheck clear' \
     "Pi reviewer did not earn a clear result"
-  assert_grep '--mode json --offline --provider openai-codex --model gpt-5.6-sol --thinking xhigh --tools repo_search,repo_read,report_finding,report_suspicion,update_finding,request_lookup,finish_review --extension' \
+  assert_grep '--mode json --offline --provider openai-codex --model gpt-5.6-sol --thinking xhigh --tools repo_search,repo_read,report_finding,report_suspicion,retract_review_item,update_finding,request_lookup,finish_review --extension' \
     "$case_dir/pi.log" \
     "Pi reviewer was not invoked with its pinned provider, model, effort, and tools"
   assert_grep '--no-context-files' "$case_dir/pi.log" \
@@ -2574,7 +2576,7 @@ PY
       || fail "$model reviewer did not complete"
     assert_contains "$output" 'crosscheck clear' \
       "$model reviewer did not earn a clear result"
-    assert_grep "--mode json --offline --provider $slot --model $model --thinking xhigh --tools repo_search,repo_read,report_finding,report_suspicion,update_finding,request_lookup,finish_review --extension" \
+    assert_grep "--mode json --offline --provider $slot --model $model --thinking xhigh --tools repo_search,repo_read,report_finding,report_suspicion,retract_review_item,update_finding,request_lookup,finish_review --extension" \
       "$case_dir/pi.log" \
       "$model reviewer was not invoked on the $slot provider with its pinned model, effort, and tools"
     assert_no_grep 'CROSSCHECK DEGRADED' "$case_dir/err" \
@@ -2610,8 +2612,8 @@ assert "execution_proof" not in reviewer
       || fail "$model did not execute exactly one substantive review pass"
     assert_grep 'skeptical re-challenge happens in the same session' "$case_dir/prompt.log" \
       "$model was not prompted for the in-session skeptical re-challenge"
-    assert_grep 'accepted reports are append-only' "$case_dir/prompt.log" \
-      "$model was not told to re-challenge candidates before reporting them"
+    assert_grep 'Reports are provisional' "$case_dir/prompt.log" \
+      "$model was not told how to retract a disproved candidate"
     assert_no_grep 'review-execution.sh' "$case_dir/prompt.log" \
       "$model synthesis received a challenge execution claim instead of hypotheses"
     assert_no_grep 'CODEX FALLBACK' "$case_dir/data/task-x1/crosscheck.md" \
@@ -5173,6 +5175,7 @@ spec.loader.exec_module(module)
 head = "a" * 40
 verified = {
     "id": "cc-aaaaaaaaaaaa",
+    "severity": "blocking",
     "lifecycle": "verified-fixed",
     "history": [{
         "status": "verified-fixed",
@@ -5182,6 +5185,7 @@ verified = {
 }
 equivalent = {
     "id": "cc-bbbbbbbbbbbb",
+    "severity": "blocking",
     "lifecycle": "closed-equivalent",
     "history": [{
         "status": "closed-equivalent",
@@ -5366,6 +5370,315 @@ assert "execution_proof" not in run["reviewer"]
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "reading-only verdict was not durably recorded as identity-only blocking"
   pass "a reading-only suspicion is a valid identity-only blocking review"
+}
+
+test_pi_provisional_retraction_and_advisory_gating() {
+  local case_dir
+  case_dir="$TMP_ROOT/pi-provisional-review-items"
+  mkdir -p "$case_dir/repository"
+  printf 'review line\n' > "$case_dir/repository/review.txt"
+
+  node --input-type=module - "$ROOT/bin/fm-crosscheck-pi-verdict-extension.mjs" "$case_dir" <<'JS' \
+    || fail "the Pi extension did not preserve provisional review-item semantics"
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const extensionPath = process.argv[2];
+const root = process.argv[3];
+const schema = `${root}/schema.json`;
+const citation = { type: "array", items: { type: "object" } };
+writeFileSync(schema, JSON.stringify({ properties: {
+  summary: { type: "string" },
+  citations: citation,
+  new_findings: { items: { properties: {
+    severity: {}, title: {}, citations: citation, description: {},
+  } } },
+  suspicions: { items: { properties: { description: {}, citations: citation } } },
+  finding_updates: { items: { properties: {
+    id: {}, status: {}, note: {}, equivalent_to: {},
+  } } },
+} }));
+Object.assign(process.env, {
+  FM_CROSSCHECK_REVIEW_SCHEMA: schema,
+  FM_CROSSCHECK_REPOSITORY: `${root}/repository`,
+  FM_CROSSCHECK_BASE_SHA: "b".repeat(40),
+  FM_CROSSCHECK_HEAD_SHA: "a".repeat(40),
+  FM_CROSSCHECK_FINDING_IDS: "[]",
+  FM_CROSSCHECK_ACTIVE_FINDING_IDS: "[]",
+  FM_CROSSCHECK_BLOCKING_FINDING_IDS: "[]",
+  FM_CROSSCHECK_ELIGIBLE_EQUIVALENT_IDS: "[]",
+});
+
+function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+function digest(value) {
+  return `sha256:${createHash("sha256").update(canonical(value)).digest("hex")}`;
+}
+async function session(name) {
+  const log = `${root}/${name}.jsonl`;
+  process.env.FM_CROSSCHECK_TOOL_EVENT_LOG = log;
+  const tools = [];
+  const extension = await import(pathToFileURL(extensionPath).href + `?session=${name}`);
+  extension.default({ registerTool(tool) { tools.push(tool); } });
+  return { log, tools: Object.fromEntries(tools.map((tool) => [tool.name, tool])) };
+}
+function payload(result) {
+  assert.deepEqual(result.details, { accepted: true });
+  return JSON.parse(result.content[0].text);
+}
+function validateLog(log, expectedResults) {
+  const records = readFileSync(log, "utf8").trim().split("\n").map(JSON.parse);
+  assert.equal(records.length, expectedResults.length);
+  records.forEach((record, index) => assert.equal(record.result_sha256, digest(expectedResults[index])));
+}
+const citationValue = [{ path: "review.txt", line: 1 }];
+
+const retracting = await session("retracting");
+const finding = payload(await retracting.tools.report_finding.execute("finding", {
+  severity: "blocking", title: "candidate", citations: citationValue,
+  explanation: "candidate failure",
+}));
+assert.equal(finding.provisional_id, "provisional-finding-0001");
+const suspicion = payload(await retracting.tools.report_suspicion.execute("suspicion", {
+  description: "candidate uncertainty", citations: citationValue,
+}));
+assert.equal(suspicion.provisional_id, "provisional-suspicion-0001");
+const retractFinding = payload(await retracting.tools.retract_review_item.execute("retract-finding", {
+  id: finding.provisional_id, explanation: "the cited production path disproves it",
+}));
+const duplicate = await retracting.tools.retract_review_item.execute("duplicate", {
+  id: finding.provisional_id, explanation: "duplicate",
+});
+assert.deepEqual(duplicate.details, { accepted: false, correctable: true });
+const retractSuspicion = payload(await retracting.tools.retract_review_item.execute("retract-suspicion", {
+  id: suspicion.provisional_id, explanation: "bounded context resolved it",
+}));
+payload(await retracting.tools.finish_review.execute("finish", {
+  verdict: "CLEAR", summary: "all candidates were disproved", citations: citationValue,
+}));
+validateLog(retracting.log, [
+  { admitted: true, provisional_id: finding.provisional_id },
+  { admitted: true, provisional_id: suspicion.provisional_id },
+  { retracted: true, provisional_id: finding.provisional_id },
+  { retracted: true, provisional_id: suspicion.provisional_id },
+  { finalized: true },
+]);
+
+const advisory = await session("advisory");
+payload(await advisory.tools.report_finding.execute("finding", {
+  severity: "high", title: "advisory", citations: citationValue,
+  explanation: "important but not merge blocking",
+}));
+payload(await advisory.tools.finish_review.execute("finish", {
+  verdict: "CLEAR", summary: "release-ready with advisory", citations: citationValue,
+}));
+
+const blocking = await session("blocking");
+payload(await blocking.tools.report_finding.execute("finding", {
+  severity: "blocking", title: "blocker", citations: citationValue,
+  explanation: "release blocker",
+}));
+payload(await blocking.tools.finish_review.execute("finish", {
+  verdict: "BLOCKING", summary: "release blocker remains", citations: citationValue,
+}));
+JS
+
+  "$CROSSCHECK_PYTHON" - "$ROOT/bin/fm-crosscheck-pi-reviewer.py" \
+    "$CROSSCHECK_PY" "$case_dir" <<'PY' \
+    || fail "the controller replay did not reproduce provisional item semantics"
+import importlib.util
+import json
+from pathlib import Path
+import sys
+
+runtime_path, core_path, case_path = map(Path, sys.argv[1:4])
+
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+runtime = load("crosscheck_pi_protocol_test", runtime_path)
+core = load("crosscheck_core_protocol_test", core_path)
+repository = case_path / "repository"
+
+def replay(name, **kwargs):
+    records = [
+        json.loads(line)
+        for line in (case_path / f"{name}.jsonl").read_text().splitlines()
+    ]
+    return runtime.replay_tool_log(
+        records,
+        repository=repository,
+        head_sha="a" * 40,
+        base_sha="b" * 40,
+        executing_account_home="/account",
+        execution_home="/home",
+        **kwargs,
+    )
+
+retracted = replay("retracting")["verdict"]
+assert retracted["new_findings"] == []
+assert retracted["suspicions"] == []
+
+advisory = replay("advisory")["verdict"]
+assert advisory["new_findings"] == [{
+    "title": "advisory",
+    "severity": "high",
+    "description": "important but not merge blocking",
+    "citations": [{"path": "review.txt", "line": 1}],
+}]
+
+blocking = replay("blocking")["verdict"]
+assert blocking["new_findings"][0]["severity"] == "blocking"
+
+prior_advisory = {
+    "findings": [{
+        "id": "cc-advisory0001",
+        "severity": "high",
+        "lifecycle": "open",
+        "history": [{"status": "open", "head_sha": "a" * 40}],
+    }]
+}
+active = set(core.active_findings_for_head(prior_advisory, "a" * 40))
+assert active == set()
+finish = {
+    "verdict": "CLEAR",
+    "summary": "prior advisory does not block",
+    "citations": [{"path": "review.txt", "line": 1}],
+}
+records = [{
+    "seq": 1,
+    "name": "finish_review",
+    "arguments": finish,
+    "result_sha256": runtime.value_digest({"finalized": True}),
+}]
+result = runtime.replay_tool_log(
+    records,
+    repository=repository,
+    head_sha="a" * 40,
+    base_sha="b" * 40,
+    executing_account_home="/account",
+    execution_home="/home",
+    known_finding_ids={"cc-advisory0001"},
+    active_finding_ids=active,
+    blocking_finding_ids=set(),
+)
+assert result["verdict"]["summary"] == finish["summary"]
+PY
+  pass "Pi provisional items retract in-session and only explicit blockers gate"
+}
+
+test_legacy_advisory_only_blocking_run_is_effectively_clear() {
+  local record case_dir base head ledger before_source rc
+  record=$(make_case legacy-advisory-only)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  run_case "$case_dir" "$base" "$head" advisory-finding run \
+    > "$case_dir/initial.out" 2> "$case_dir/initial.err" \
+    || fail "the advisory review did not complete: $(cat "$case_dir/initial.err")"
+  assert_grep 'State: **CLEAR**' \
+    "$case_dir/data/task-x1/crosscheck.md" \
+    "the advisory report was not clear"
+  assert_grep 'severity=high' \
+    "$case_dir/data/task-x1/crosscheck.md" \
+    "a clear advisory report omitted the finding severity"
+  ledger="$case_dir/data/task-x1/crosscheck-ledger.json"
+  python3 - "$ledger" "$case_dir/legacy-source.json" "$CROSSCHECK_PY" <<'PY'
+import hashlib
+import importlib.util
+import json
+import sys
+
+path, source_path, core_path = sys.argv[1:4]
+spec = importlib.util.spec_from_file_location("legacy_advisory_core", core_path)
+core = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(core)
+ledger = json.load(open(path))
+finding = ledger["findings"][0]
+assert finding["severity"] == "high" and finding["lifecycle"] == "open"
+run = ledger["runs"][0]
+assert run["state"] == "clear" and run["active_blockers"] == []
+run["state"] = "blocking"
+run["active_blockers"] = [finding["id"]]
+run["summary"] = "Legacy policy blocked every unresolved severity."
+if "telemetry" in run:
+    run["telemetry"]["outcome"] = "blocking"
+reviewer = run["reviewer"]
+reviewer["review_contract_sha256"] = "f" * 64
+reviewer["reviewer_identity_sha256"] = hashlib.sha256(json.dumps(
+    core.reviewer_identity_material(reviewer),
+    sort_keys=True,
+    separators=(",", ":"),
+).encode()).hexdigest()
+json.dump(run, open(source_path, "w"), sort_keys=True)
+json.dump(ledger, open(path, "w"), sort_keys=True)
+PY
+  before_source=$(cat "$case_dir/legacy-source.json")
+  : > "$case_dir/codex.log"
+  run_case "$case_dir" "$base" "$head" clear run \
+    > "$case_dir/reuse.out" 2> "$case_dir/reuse.err" \
+    || fail "the legacy advisory-only run was not reused: $(cat "$case_dir/reuse.err")"
+  [ ! -s "$case_dir/codex.log" ] \
+    || fail "advisory-only compatibility spent on another review: $(cat "$case_dir/codex.log")"
+  python3 - "$ledger" "$before_source" <<'PY' \
+    || fail "the legacy advisory-only run did not preserve history and append a clear reuse"
+import json
+import sys
+
+ledger = json.load(open(sys.argv[1]))
+source = json.loads(sys.argv[2])
+assert ledger["runs"][0] == source
+assert ledger["runs"][0]["state"] == "blocking"
+assert ledger["runs"][-1]["state"] == "clear"
+assert ledger["runs"][-1]["telemetry"]["reuse"]["source_run_sha256"]
+PY
+  run_case "$case_dir" "$base" "$head" clear verify \
+    > "$case_dir/verify.out" 2> "$case_dir/verify.err" \
+    || fail "the reused advisory-only review was not verifiable: $(cat "$case_dir/verify.err")"
+
+  record=$(make_case non-review-blocking)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  run_case "$case_dir" "$base" "$head" advisory-finding run \
+    > "$case_dir/initial.out" 2> "$case_dir/initial.err" \
+    || fail "the negative-control advisory review did not complete"
+  ledger="$case_dir/data/task-x1/crosscheck-ledger.json"
+  python3 - "$ledger" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+ledger = json.load(open(path))
+run = ledger["runs"][0]
+run.update({
+    "state": "blocking",
+    "summary": "Reviewer infrastructure failed before an admitted review.",
+    "reviewer": None,
+    "citations": [],
+    "new_findings": [],
+    "active_blockers": [],
+})
+run.pop("telemetry", None)
+json.dump(ledger, open(path, "w"), sort_keys=True)
+PY
+  set +e
+  run_case "$case_dir" "$base" "$head" clear verify \
+    > "$case_dir/verify.out" 2> "$case_dir/verify.err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "non-review blocking run"
+  assert_grep 'latest exact-head crosscheck attempt is blocking' \
+    "$case_dir/verify.err" "a non-review blocking run was reclassified as clear"
+  pass "legacy advisory-only blocking runs clear without spend while non-review failures stay blocking"
 }
 
 test_launcher_requires_supported_python() {
@@ -6197,7 +6510,7 @@ PY
   mkdir -p "$probe_dir/repository"
   printf 'review line\n' > "$probe_dir/repository/review.txt"
   : > "$probe_dir/tool-events.jsonl"
-  pi_tool_names=repo_search,repo_read,report_finding,report_suspicion,update_finding,request_lookup,finish_review
+  pi_tool_names=repo_search,repo_read,report_finding,report_suspicion,retract_review_item,update_finding,request_lookup,finish_review
   if ! FM_CROSSCHECK_REVIEW_SCHEMA="$probe_dir/local-schema.json" \
     FM_CROSSCHECK_REPOSITORY="$probe_dir/repository" \
     FM_CROSSCHECK_TOOL_EVENT_LOG="$probe_dir/tool-events.jsonl" \
@@ -6260,7 +6573,8 @@ const extension = await import(pathToFileURL(process.argv[2]));
 extension.default({ registerTool(value) { tools.push(value); } });
 const expected = [
   "repo_search", "repo_read", "report_finding",
-  "report_suspicion", "update_finding", "request_lookup", "finish_review",
+  "report_suspicion", "retract_review_item", "update_finding",
+  "request_lookup", "finish_review",
 ];
 if (JSON.stringify(tools.map((tool) => tool.name)) !== JSON.stringify(expected)) throw new Error("tool names drifted");
 for (const tool of tools) {
@@ -6721,6 +7035,8 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_launcher_requires_supported_python|\
     test_completed_reviewer_suspicion_is_blocking|\
     test_reading_only_suspicion_is_identity_only_blocking|\
+    test_pi_provisional_retraction_and_advisory_gating|\
+    test_legacy_advisory_only_blocking_run_is_effectively_clear|\
     test_new_finding_requires_executed_reproduction|\
     test_failed_new_finding_reproduction_becomes_a_suspicion|\
     test_silence_never_closes_prior_finding|\
@@ -6879,6 +7195,8 @@ test_reviewer_configuration_failures_are_tool_failures
 test_stopped_reviewer_and_wrong_head_are_unreviewed
 test_completed_reviewer_suspicion_is_blocking
 test_reading_only_suspicion_is_identity_only_blocking
+test_pi_provisional_retraction_and_advisory_gating
+test_legacy_advisory_only_blocking_run_is_effectively_clear
 test_pytest_runner_resolves_through_a_uv_aware_ladder
 test_moved_default_branch_stays_reviewable
 test_unavailable_reviewer_fails_over_to_the_next_account

@@ -45,6 +45,7 @@ PI_TOOL_NAMES = (
     "repo_read",
     "report_finding",
     "report_suspicion",
+    "retract_review_item",
     "update_finding",
     "request_lookup",
     "finish_review",
@@ -3836,12 +3837,66 @@ def finding_is_clear_for_head(
 
 
 def active_findings_for_head(ledger: dict[str, Any], head_sha: str) -> list[str]:
+    """Return unresolved findings that explicitly block the merge."""
+
     by_id = {finding["id"]: finding for finding in ledger["findings"]}
     return [
         finding["id"]
         for finding in ledger["findings"]
-        if not finding_is_clear_for_head(finding, head_sha, by_id)
+        if finding.get("severity") == "blocking"
+        and not finding_is_clear_for_head(finding, head_sha, by_id)
     ]
+
+
+def blocking_finding_ids(ledger: dict[str, Any]) -> set[str]:
+    """Return every durable finding whose explicit severity is blocking."""
+
+    return {
+        finding["id"]
+        for finding in ledger["findings"]
+        if finding.get("severity") == "blocking"
+    }
+
+
+def legacy_advisory_only_blocking_run(
+    ledger: dict[str, Any], run: dict[str, Any]
+) -> bool:
+    """Whether an admitted historical run blocked only on advisories."""
+
+    recorded_blockers = run.get("active_blockers")
+    if (
+        run.get("state") != "blocking"
+        or run.get("suspicions")
+        or not isinstance(run.get("reviewer"), dict)
+        or not run.get("citations")
+        or not isinstance(recorded_blockers, list)
+        or not recorded_blockers
+    ):
+        return False
+    by_id = {finding["id"]: finding for finding in ledger["findings"]}
+    if any(
+        finding_id not in by_id
+        or by_id[finding_id].get("severity") == "blocking"
+        for finding_id in recorded_blockers
+    ):
+        return False
+    return not active_findings_for_head(ledger, run["head_sha"])
+
+
+def effective_run_state(ledger: dict[str, Any], run: dict[str, Any]) -> str:
+    """Interpret an immutable run under the current blocking-only policy.
+
+    Historical runs recorded every unresolved severity as blocking. Their
+    bytes stay unchanged, but an exact-head run with only advisory findings is
+    now an effective clear. Suspicions and non-review failures keep their
+    original meaning.
+    """
+
+    return (
+        "clear"
+        if legacy_advisory_only_blocking_run(ledger, run)
+        else run["state"]
+    )
 
 
 def load_ledger(path: Path, task_id: str, url: str) -> dict[str, Any]:
@@ -4353,24 +4408,32 @@ def reusable_clear_run(
         and run["claims_sha256"] == snapshot_value["claims_sha256"]
         and run["base_sha"] == snapshot_value["base_sha"]
     ]
-    if not matching or matching[-1]["state"] != "clear":
+    if not matching or effective_run_state(ledger, matching[-1]) != "clear":
         return None
     for run in reversed(ledger["runs"]):
         reviewer = run.get("reviewer")
         telemetry = run.get("telemetry")
+        legacy_advisory_compatibility = legacy_advisory_only_blocking_run(
+            ledger, run
+        )
         if not (
             run["head_sha"] == snapshot_value["head_sha"]
             and run["claims_sha256"] == snapshot_value["claims_sha256"]
             and run["base_sha"] == snapshot_value["base_sha"]
-            and run["state"] == "clear"
-            and not run["active_blockers"]
+            and effective_run_state(ledger, run) == "clear"
+            and not active_findings_for_head(ledger, run["head_sha"])
             and not run["suspicions"]
             and bool(run["citations"])
             and isinstance(reviewer, dict)
-            and reviewer.get("reviewer_identity_sha256")
-            == config.get("reviewer_identity_sha256")
-            and reviewer.get("review_contract_sha256")
-            == config.get("review_contract_sha256")
+            and (
+                legacy_advisory_compatibility
+                or (
+                    reviewer.get("reviewer_identity_sha256")
+                    == config.get("reviewer_identity_sha256")
+                    and reviewer.get("review_contract_sha256")
+                    == config.get("review_contract_sha256")
+                )
+            )
             and not (
                 isinstance(telemetry, dict) and telemetry.get("reuse") is not None
             )
@@ -4626,6 +4689,7 @@ Compensate explicitly: attack the change adversarially, try to falsify the autho
 Do not trust the PR description or a previous clean run.
 Do not change tracked files.
 Report only actionable findings supported by exact file and line citations.
+Only severity `blocking` prevents merge; high, medium, and low findings remain durable advisories.
 Mark a prior finding verified-fixed when the exact head no longer contains the cited defect.
 If the snapshot is insufficient for a trustworthy conclusion, return a suspicion.
 Suspicions block the merge.
@@ -4661,7 +4725,8 @@ Bounded durable-finding lifecycle metadata:
 SINGLE-PASS REVIEW DEPTH:
 Perform one substantive full-diff review. Before finalizing, briefly attack each
 candidate finding and suspicion from the opposite position: re-read its cited
-code, try to falsify the claimed failure, and retain only items that survive.
+code, try to falsify the claimed failure, and retract any provisional item that
+does not survive before calling finish_review.
 This skeptical re-challenge happens in the same session. Do not start a second
 full review and never wait or sleep to affect timing.
 """
@@ -5628,12 +5693,14 @@ def run_reviewer(
 INCREMENTAL PI REVIEW MODE (TRUSTED CONTROLLER INSTRUCTION):
 You cannot write files or run commands. Inspect the complete untrusted diff
 below, then use repo_search and repo_read for bounded exact-head context.
-Hold candidate items in working context while you investigate them. Perform the
-skeptical re-challenge before calling report_finding, report_suspicion, or
-update_finding, because accepted reports are append-only. Emit only items that
-survive that re-challenge, then call finish_review exactly once as the final
-action. If public upstream context would materially resolve uncertainty, you may
-instead call request_lookup once as the final action of this provisional pass.
+Investigate each candidate and perform the skeptical re-challenge before
+finalization. Reports are provisional: if a reported item does not survive,
+call retract_review_item with its returned provisional ID. Only surviving
+severity-blocking findings and unresolved suspicions require BLOCKING; high,
+medium, and low findings are durable advisories. Call finish_review exactly
+once as the final action. If public upstream context would materially resolve
+uncertainty, you may instead call request_lookup once as the final action of
+this provisional pass.
 
 {packet_open}
 {packet.stdout}
@@ -5782,6 +5849,9 @@ instead call request_lookup once as the final action of this provisional pass.
             ),
             separators=(",", ":"),
         )
+        environment["FM_CROSSCHECK_BLOCKING_FINDING_IDS"] = json.dumps(
+            sorted(blocking_finding_ids(ledger)), separators=(",", ":")
+        )
         environment["FM_CROSSCHECK_TRUST_SNAPSHOT_MANIFEST"] = "0"
         environment["FM_CROSSCHECK_EXECUTING_ACCOUNT_HOME"] = config[
             "executing_account_home"
@@ -5876,6 +5946,7 @@ instead call request_lookup once as the final action of this provisional pass.
                 active_finding_ids=set(
                     active_findings_for_head(ledger, snapshot_value["head_sha"])
                 ),
+                blocking_finding_ids=blocking_finding_ids(ledger),
                 allow_lookup_request=allow_lookup,
             )
 
@@ -6000,6 +6071,7 @@ instead call request_lookup once as the final action of this provisional pass.
                         ledger, snapshot_value["head_sha"]
                     )
                 ),
+                blocking_finding_ids=blocking_finding_ids(ledger),
             )
         except Exception as exc:
             tool_fail(f"Pi reviewer tool event replay failed: {exc}")
@@ -6655,7 +6727,8 @@ def render_report(ledger: dict[str, Any], run: dict[str, Any]) -> str:
     if ledger["findings"]:
         for finding in ledger["findings"]:
             lines.append(
-                f"- `{finding['id']}` [{finding['lifecycle']}] {finding['title']}"
+                f"- `{finding['id']}` [{finding['lifecycle']}; "
+                f"severity={finding['severity']}] {finding['title']}"
             )
     else:
         lines.append("No findings have been admitted by exact-head semantic review.")
@@ -7299,12 +7372,13 @@ def verified_crosscheck_head(root: Path, home: Path, task_id: str, url: str) -> 
         "no crosscheck attempt exists for the live head and PR claims",
     )
     latest = matching[-1]
+    latest_state = effective_run_state(ledger, latest)
     if latest["state"] == "tool-failure":
         tool_fail(
             "latest exact-head crosscheck attempt is a tool failure: "
             f"{latest['summary']}"
         )
-    if latest["state"] == "blocking":
+    if latest_state == "blocking":
         blocking_fail(
             "latest exact-head crosscheck attempt is blocking: "
             f"{latest['summary']}"
@@ -7315,9 +7389,9 @@ def verified_crosscheck_head(root: Path, home: Path, task_id: str, url: str) -> 
             f"{latest['summary']}"
         )
     require(
-        latest["state"] == "clear",
+        latest_state == "clear",
         "no valid review exists for the exact head; latest attempt state is "
-        f"{latest['state']}",
+        f"{latest_state}",
     )
     reviewed_run = latest
     telemetry = latest.get("telemetry")
@@ -7340,11 +7414,13 @@ def verified_crosscheck_head(root: Path, home: Path, task_id: str, url: str) -> 
         source_reviewer = reviewed_run.get("reviewer")
         latest_reviewer = latest.get("reviewer")
         require(
-            reviewed_run["state"] == "clear"
+            effective_run_state(ledger, reviewed_run) == "clear"
             and reviewed_run["head_sha"] == latest["head_sha"]
             and reviewed_run["base_sha"] == latest["base_sha"]
             and reviewed_run["claims_sha256"] == latest["claims_sha256"]
-            and not reviewed_run["active_blockers"]
+            and not active_findings_for_head(
+                ledger, reviewed_run["head_sha"]
+            )
             and not reviewed_run["suspicions"]
             and not (
                 isinstance(reviewed_run.get("telemetry"), dict)
@@ -7399,7 +7475,10 @@ def verified_crosscheck_head(root: Path, home: Path, task_id: str, url: str) -> 
             "no valid review exists for the exact head; the reviewer verdict has "
             "no successful exact-base/exact-head execution proof",
         )
-    require(not latest.get("active_blockers"), "clear crosscheck run records active blockers")
+    require(
+        not active_findings_for_head(ledger, snapshot_value["head_sha"]),
+        "clear crosscheck run records active blockers",
+    )
     require(not latest.get("suspicions"), "clear crosscheck run records unresolved suspicions")
     return snapshot_value["head_sha"]
 

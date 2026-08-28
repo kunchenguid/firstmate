@@ -95,10 +95,14 @@ The reviewer must:
 
 - review the exact supplied head;
 - cite a repository path and line for every finding or suspicion;
+- retract any provisional finding or suspicion that does not survive the in-session re-check;
 - update known finding lifecycles explicitly;
 - call `finish_review` exactly once;
-- return `BLOCKING` whenever a new finding, unresolved suspicion, or active
-  earlier finding remains.
+- return `BLOCKING` whenever an unresolved suspicion or an unresolved severity-`blocking` finding remains.
+
+`report_finding` and `report_suspicion` return stable provisional IDs for the current review.
+`retract_review_item` removes a disproved item from the final verdict without discarding its append-only report and retraction events.
+High, medium, and low severity findings remain durable advisories and do not block merge.
 
 The controller independently replays the accepted structured tool log. A
 missing, multiple, malformed, or contradictory final verdict gets one bounded

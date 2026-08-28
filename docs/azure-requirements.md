@@ -1046,7 +1046,7 @@ A terminal event reporting the historical Fast selector, another provider, or no
 The same readback check runs in both the local Pi lane and the Azure model guest.
 
 The local regular lane now performs one substantive full-diff pass with an in-session skeptical re-challenge before finalization.
-The reviewer uses bounded exact-head repository search/read, submits evidence helpers only as data, records findings and suspicions incrementally, and finalizes once.
+The reviewer uses bounded exact-head repository search/read, records findings and suspicions provisionally, retracts disproved items during its in-session re-check, and finalizes once.
 The controller replays the accepted digest-bound event log independently before any review becomes durable.
 The reviewer record binds the one-pass depth mode and exact terminal provider/model readback fail-closed to the registered regular cross-family lane, while exact-head reuse remains available only under its existing unchanged contract.
 
