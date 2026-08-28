@@ -17,13 +17,17 @@ PARENT_HOME="$TMP_ROOT/parent-home"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 WATCH_PID=
 SLOW_WRITER_PID=
-SLOW_SNAPSHOT_PID=
+SLOW_WORKER_PGID=
 SLOW_NM_PID=
 LOCK_HOLDER_PID=
 
 cleanup() {
   local pid
-  for pid in "$WATCH_PID" "$SLOW_WRITER_PID" "$SLOW_SNAPSHOT_PID" "$SLOW_NM_PID" "$LOCK_HOLDER_PID"; do
+  case "$SLOW_WORKER_PGID" in
+    ''|*[!0-9]*) ;;
+    *) kill -KILL -- "-$SLOW_WORKER_PGID" >/dev/null 2>&1 || true ;;
+  esac
+  for pid in "$WATCH_PID" "$SLOW_WRITER_PID" "$SLOW_NM_PID" "$LOCK_HOLDER_PID"; do
     [ -n "$pid" ] || continue
     kill -KILL "$pid" >/dev/null 2>&1 || true
   done
@@ -257,16 +261,37 @@ while [ ! -s "$SLOW_MARKER" ] && [ "$i" -lt 100 ]; do
   i=$((i + 1))
 done
 [ -s "$SLOW_MARKER" ] || fail "the real producer did not reach the controlled slow current-state read"
-SLOW_SNAPSHOT_PID=$(pgrep -P "$SLOW_WRITER_PID" 2>/dev/null | head -1 || true)
 SLOW_NM_PID=$(cat "$SLOW_MARKER" 2>/dev/null || true)
-kill -KILL "$SLOW_WRITER_PID" >/dev/null 2>&1 || true
+writer_pgid=$(ps -o pgid= -p "$SLOW_WRITER_PID" 2>/dev/null | tr -d '[:space:]')
+ancestor=$SLOW_NM_PID
+child_pgid=
+i=0
+while [ "$i" -lt 20 ]; do
+  ancestor_pgid=$(ps -o pgid= -p "$ancestor" 2>/dev/null | tr -d '[:space:]')
+  parent=$(ps -o ppid= -p "$ancestor" 2>/dev/null | tr -d '[:space:]')
+  if [ "$parent" = "$SLOW_WRITER_PID" ]; then
+    if [ "$ancestor_pgid" != "$writer_pgid" ]; then
+      SLOW_WORKER_PGID=$ancestor_pgid
+    else
+      SLOW_WORKER_PGID=$child_pgid
+    fi
+    break
+  fi
+  child_pgid=$ancestor_pgid
+  ancestor=$parent
+  i=$((i + 1))
+done
+case "$SLOW_WORKER_PGID" in
+  ''|*[!0-9]*) fail "the bounded writer did not expose its worker process group" ;;
+esac
+[ "$SLOW_WORKER_PGID" != "$writer_pgid" ] \
+  || fail "the bounded worker did not have an isolated process group"
+kill -KILL -- "-$SLOW_WORKER_PGID" >/dev/null 2>&1 \
+  || fail "the bounded writer process group could not be terminated"
 wait "$SLOW_WRITER_PID" >/dev/null 2>&1 || true
 SLOW_WRITER_PID=
-[ -z "$SLOW_SNAPSHOT_PID" ] || kill -KILL "$SLOW_SNAPSHOT_PID" >/dev/null 2>&1 || true
-[ -z "$SLOW_NM_PID" ] || kill -KILL "$SLOW_NM_PID" >/dev/null 2>&1 || true
-SLOW_SNAPSHOT_PID=
+SLOW_WORKER_PGID=
 SLOW_NM_PID=
-sleep 0.1
 jq -e . "$HOME_DIR/state/home-summary.json" >/dev/null \
   || fail "killing the writer exposed invalid JSON at the ledger path"
 cmp -s "$TMP_ROOT/prior-ledger.json" "$HOME_DIR/state/home-summary.json" \
