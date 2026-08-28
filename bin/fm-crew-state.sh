@@ -378,6 +378,39 @@ forge_pr_coordinates() {  # <pr-url>
   printf '%s/%s %s' "$owner" "$repo" "$number"
 }
 
+forge_deadline_remaining() {  # <deadline>
+  local deadline=$1 remaining
+  remaining=$((deadline - SECONDS))
+  [ "$remaining" -gt 0 ] || return 1
+  printf '%s\n' "$remaining"
+}
+
+forge_read_producers() {  # <repo> <head> <remaining-seconds> <output-dir>
+  local repo=$1 head=$2 remaining=$3 output_dir=$4 suites_pid combined_pid rc
+  (
+    rc=0
+    fm_run_timed "$remaining" gh api "repos/$repo/commits/$head/check-suites?per_page=100" \
+      --jq '.total_count, (.check_suites[] | "\(.status)|\(.conclusion)|\(.latest_check_runs_count)")' \
+      > "$output_dir/suites" || rc=$?
+    printf '%s\n' "$rc" > "$output_dir/suites.rc"
+  ) &
+  suites_pid=$!
+  (
+    rc=0
+    fm_run_timed "$remaining" gh api "repos/$repo/commits/$head/status" \
+      --jq '"\(.state)|\(.total_count)"' > "$output_dir/combined" || rc=$?
+    printf '%s\n' "$rc" > "$output_dir/combined.rc"
+  ) &
+  combined_pid=$!
+  wait "$suites_pid" 2>/dev/null || true
+  wait "$combined_pid" 2>/dev/null || true
+}
+
+forge_snapshot_cleanup() {  # <output-dir>
+  rm -f "$1/suites" "$1/suites.rc" "$1/combined" "$1/combined.rc" 2>/dev/null || true
+  rmdir "$1" 2>/dev/null || true
+}
+
 # This function owns the terminal CI evidence rule. A verdict is terminal only
 # after a complete positive observation of the exact fact claimed, bound to one
 # stable PR head. Silence, failed or timed-out reads, incomplete snapshots, and
@@ -387,6 +420,7 @@ forge_pr_coordinates() {  # <pr-url>
 forge_zero_check_verdict() {  # <pr-url> <expected-head> -> verdict[ <detail>]
   local url=$1 expected_head=$2 coords repo number pr_head suites total combined
   local final_pr_head combined_state combined_total
+  local deadline remaining snapshot_dir suites_rc combined_rc
   local unfinished=0 runs=0 gated=0 seen=0 snapshot_valid=1
   command -v gh >/dev/null 2>&1 || { printf 'unknown forge could not be reached'; return; }
   coords=$(forge_pr_coordinates "$url")
@@ -394,15 +428,31 @@ forge_zero_check_verdict() {  # <pr-url> <expected-head> -> verdict[ <detail>]
   [ -n "$expected_head" ] || { printf 'invalid attributed run has no head'; return; }
   repo=${coords%% *}
   number=${coords##* }
-  pr_head=$(fm_run_timed "$FORGE_TIMEOUT" gh api "repos/$repo/pulls/$number" --jq .head.sha) || pr_head=
+  deadline=$((SECONDS + FORGE_TIMEOUT))
+  remaining=$(forge_deadline_remaining "$deadline") \
+    || { printf 'unknown forge evidence deadline expired'; return; }
+  pr_head=$(fm_run_timed "$remaining" gh api "repos/$repo/pulls/$number" --jq .head.sha) || pr_head=
   pr_head=$(trim "$pr_head")
   [ -n "$pr_head" ] || { printf 'unknown forge could not read the PR head'; return; }
   [ "$pr_head" = "$expected_head" ] || { printf 'invalid PR head changed from the attributed run'; return; }
-  suites=$(fm_run_timed "$FORGE_TIMEOUT" gh api "repos/$repo/commits/$expected_head/check-suites?per_page=100" \
-    --jq '.total_count, (.check_suites[] | "\(.status)|\(.conclusion)|\(.latest_check_runs_count)")') || suites=
-  combined=$(fm_run_timed "$FORGE_TIMEOUT" gh api "repos/$repo/commits/$expected_head/status" \
-    --jq '"\(.state)|\(.total_count)"') || combined=
-  final_pr_head=$(fm_run_timed "$FORGE_TIMEOUT" gh api "repos/$repo/pulls/$number" --jq .head.sha) || final_pr_head=
+  remaining=$(forge_deadline_remaining "$deadline") \
+    || { printf 'unknown forge evidence deadline expired'; return; }
+  snapshot_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-crew-forge.XXXXXX") \
+    || { printf 'unknown forge could not stage a complete evidence read'; return; }
+  forge_read_producers "$repo" "$expected_head" "$remaining" "$snapshot_dir"
+  suites_rc=$(cat "$snapshot_dir/suites.rc" 2>/dev/null || true)
+  combined_rc=$(cat "$snapshot_dir/combined.rc" 2>/dev/null || true)
+  suites=$(cat "$snapshot_dir/suites" 2>/dev/null || true)
+  combined=$(cat "$snapshot_dir/combined" 2>/dev/null || true)
+  forge_snapshot_cleanup "$snapshot_dir"
+  case "$suites_rc:$combined_rc" in
+    0:0) ;;
+    *124*|*:124) printf 'unknown forge evidence deadline expired'; return ;;
+    *) printf 'unknown forge could not read complete CI evidence'; return ;;
+  esac
+  remaining=$(forge_deadline_remaining "$deadline") \
+    || { printf 'unknown forge evidence deadline expired'; return; }
+  final_pr_head=$(fm_run_timed "$remaining" gh api "repos/$repo/pulls/$number" --jq .head.sha) || final_pr_head=
   final_pr_head=$(trim "$final_pr_head")
   [ -n "$final_pr_head" ] || { printf 'unknown forge could not re-read the PR head'; return; }
   [ "$final_pr_head" = "$expected_head" ] || { printf 'invalid PR head changed while forge evidence was read'; return; }
@@ -449,10 +499,22 @@ EOF
     return
   fi
   if [ "$gated" = 1 ]; then
-    printf 'ci-pending awaiting maintainer approval, no checks have run'
+    if [ "$runs" -eq 0 ]; then
+      printf 'ci-pending awaiting maintainer approval, no checks have run'
+    elif [ "$runs" -eq 1 ]; then
+      printf 'ci-pending awaiting maintainer approval; 1 check run has reported'
+    else
+      printf 'ci-pending awaiting maintainer approval; %s check runs have reported' "$runs"
+    fi
     return
   fi
-  printf 'ci-pending no checks have reported yet'
+  if [ "$runs" -eq 0 ]; then
+    printf 'ci-pending no checks have reported yet'
+  elif [ "$runs" -eq 1 ]; then
+    printf 'ci-pending 1 check run has reported; check suites are not all complete and successful'
+  else
+    printf 'ci-pending %s check runs have reported; check suites are not all complete and successful' "$runs"
+  fi
 }
 
 # Current readiness for the active monitoring call site. The last recognized

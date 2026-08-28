@@ -90,6 +90,8 @@ SH
 set -u
 [ "${FM_FAKE_GH_FAILS:-0}" = 1 ] && exit 1
 [ "${1:-}" = api ] || exit 1
+[ -z "${FM_FAKE_GH_CALLS_FILE:-}" ] || printf '%s\n' "${2:-}" >> "$FM_FAKE_GH_CALLS_FILE"
+[ "${FM_FAKE_GH_DELAY:-0}" = 0 ] || sleep "$FM_FAKE_GH_DELAY"
 case "$2" in
   */check-suites*) printf '%s\n' "${FM_FAKE_CHECK_SUITES:-}" ;;
   */status)        printf '%s\n' "${FM_FAKE_COMBINED_STATUS:-pending|0}" ;;
@@ -215,16 +217,19 @@ reset_fakes() {
   FM_FAKE_PR_HEAD_AFTER_READ=""
   FM_FAKE_PR_HEAD_READS_FILE=""
   FM_FAKE_GH_FAILS=0
+  FM_FAKE_GH_DELAY=0
+  FM_FAKE_GH_CALLS_FILE=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS FM_FAKE_CI_LOGS_RC
   export FM_FAKE_CHECK_SUITES FM_FAKE_COMBINED_STATUS FM_FAKE_PR_HEAD
-  export FM_FAKE_PR_HEAD_AFTER_READ FM_FAKE_PR_HEAD_READS_FILE FM_FAKE_GH_FAILS
+  export FM_FAKE_PR_HEAD_AFTER_READ FM_FAKE_PR_HEAD_READS_FILE FM_FAKE_GH_FAILS FM_FAKE_GH_DELAY FM_FAKE_GH_CALLS_FILE
 }
 
 # The three forge answers this reader has to tell apart.
 suites_none()  { printf '0\n'; }
 suites_gated() { printf '2\ncompleted|action_required|0\ncompleted|action_required|0\n'; }
 suites_green() { printf '2\ncompleted|success|12\ncompleted|success|1\n'; }
+suites_mixed_gated() { printf '2\ncompleted|success|3\ncompleted|action_required|0\n'; }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
 
@@ -572,7 +577,29 @@ test_no_checks_marker_awaiting_approval_is_not_green() {
   assert_not_contains "$out" "state: done" "approval-gated head must never read done"
   assert_not_contains "$out" "checks green" "approval-gated head must never read checks green"
   assert_contains "$out" "awaiting maintainer approval" "detail names why nothing has run"
+  assert_contains "$out" "no checks have run" "zero observed runs retain the zero-check detail"
   pass "no-checks marker with approval-gated workflows is not green"
+}
+
+test_nonterminal_suite_details_preserve_observed_run_counts() {
+  reset_fakes
+  local d out; d=$(new_case ci-mixed-suite-details)
+  make_repo_on_branch "$d/wt" fm/feat-cimixed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cimixed.meta" "window=fm:fm-feat-cimixed" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cimixed)"
+  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
+  FM_FAKE_CHECK_SUITES=$(suites_mixed_gated)
+  out=$(run_crew_state "$d" feat-cimixed)
+  assert_contains "$out" "state: working" "mixed approval-gated evidence stays nonterminal"
+  assert_contains "$out" "awaiting maintainer approval; 3 check runs have reported" "mixed approval detail preserves observed runs"
+  assert_not_contains "$out" "no checks have run" "mixed approval evidence is not described as zero checks"
+  FM_FAKE_CHECK_SUITES=$(printf '2\ncompleted|success|3\ncompleted|failure|1\n')
+  out=$(run_crew_state "$d" feat-cimixed)
+  assert_contains "$out" "state: working" "mixed failed evidence stays nonterminal"
+  assert_contains "$out" "4 check runs have reported; check suites are not all complete and successful" "mixed failure detail preserves observed runs"
+  assert_not_contains "$out" "no checks have reported yet" "reported failed checks are not described as absent"
+  pass "nonterminal suite details preserve observed check-run counts"
 }
 
 test_both_no_checks_spellings_agree() {
@@ -757,6 +784,29 @@ test_no_checks_marker_failing_forge_call_is_not_green() {
   assert_contains "$out" "state: working" "a failing forge call stays nonterminal"
   assert_not_contains "$out" "checks green" "a failing forge call never invents green"
   pass "no-checks marker with a failing forge call is never green"
+}
+
+test_forge_evidence_uses_one_aggregate_deadline() {
+  reset_fakes
+  local d out start elapsed calls; d=$(new_case ci-forge-deadline)
+  make_repo_on_branch "$d/wt" fm/feat-cideadline
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cideadline.meta" "window=fm:fm-feat-cideadline" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cideadline)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  FM_FAKE_CHECK_SUITES=$(suites_green)
+  FM_FAKE_GH_DELAY=2
+  FM_FAKE_GH_CALLS_FILE="$d/gh.calls"
+  start=$SECONDS
+  out=$(FM_CREW_STATE_FORGE_TIMEOUT=3 run_crew_state "$d" feat-cideadline)
+  elapsed=$((SECONDS - start))
+  calls=$(wc -l < "$FM_FAKE_GH_CALLS_FILE" | tr -d ' ')
+  [ "$elapsed" -lt 10 ] || fail "aggregate forge evidence exceeded the reader budget (${elapsed}s)"
+  [ "$calls" -lt 4 ] || fail "aggregate forge deadline allowed all $calls sequential reads"
+  assert_contains "$out" "state: working" "expired aggregate evidence stays nonterminal"
+  assert_contains "$out" "forge evidence deadline expired" "deadline exhaustion is observable"
+  assert_not_contains "$out" "checks green" "partial deadline-bound evidence cannot authorize green"
+  pass "forge evidence uses one aggregate deadline"
 }
 
 test_passed_marker_with_unreadable_forge_is_not_green() {
@@ -1731,6 +1781,7 @@ test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
 test_no_checks_marker_awaiting_approval_is_not_green
+test_nonterminal_suite_details_preserve_observed_run_counts
 test_both_no_checks_spellings_agree
 test_no_checks_marker_with_complete_empty_surfaces_reports_no_ci
 test_no_checks_marker_with_passing_checks_is_green
@@ -1741,6 +1792,7 @@ test_forge_head_must_remain_stable_across_evidence_read
 test_incomplete_check_suite_snapshot_is_not_green
 test_no_checks_marker_unreadable_forge_is_not_green
 test_no_checks_marker_failing_forge_call_is_not_green
+test_forge_evidence_uses_one_aggregate_deadline
 test_passed_marker_with_unreadable_forge_is_not_green
 test_partial_ci_log_cannot_authorize_green
 test_agent_prose_is_not_read_as_a_marker
