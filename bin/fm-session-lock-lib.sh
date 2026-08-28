@@ -178,6 +178,22 @@ fm_process_ancestry_rows() {  # [limit]
   done
 }
 
+fm_process_row_for_pid() {  # <pid>
+  local pid=$1 comm argv0 args ppid
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if fm_process_uses_windows_table; then
+    fm_windows_process_rows "$pid" 1
+    return
+  fi
+  kill -0 "$pid" 2>/dev/null || return 1
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+  argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
+  args=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
+  ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+  case "$ppid" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\t%s\t%s\t%s\t%s\n' "$pid" "$ppid" "$comm" "$argv0" "$args"
+}
+
 # Walk the current process ancestry (up to 16 hops) and print this session's
 # contiguous verified-harness ancestry, innermost pid first.
 #
@@ -240,19 +256,11 @@ EOF
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
   local pid=$1 row row_pid ppid comm argv0 args
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  if fm_process_uses_windows_table; then
-    row=$(fm_windows_process_rows "$pid" 1) || return 1
-    IFS=$'\t' read -r row_pid ppid comm argv0 args <<EOF
+  row=$(fm_process_row_for_pid "$pid") || return 1
+  IFS=$'\t' read -r row_pid ppid comm argv0 args <<EOF
 $row
 EOF
-    [ "$row_pid" = "$pid" ] || return 1
-  else
-    kill -0 "$pid" 2>/dev/null || return 1
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
-  fi
+  [ "$row_pid" = "$pid" ] || return 1
   fm_harness_process_matches "$comm" "$args" "$argv0"
 }
 

@@ -334,11 +334,16 @@ while [ "$#" -gt 0 ] && [ "$1" != ancestry ]; do shift; done
 case "${2:-}" in
   410)
     printf '410\t510\tC:\\Program Files\\Git\\bin\\bash.exe\tC:\\Program Files\\Git\\bin\\bash.exe\tbash bin/fm-codex-hook.sh sessionstart\n'
-    printf '510\t610\tC:\\Windows\\System32\\cmd.exe\tC:\\Windows\\System32\\cmd.exe\tcmd.exe /C bin\\fm-codex-hook.cmd sessionstart\n'
-    printf '610\t710\tC:\\Users\\u\\AppData\\Roaming\\npm\\codex.exe\tC:\\Users\\u\\AppData\\Roaming\\npm\\codex.exe\tcodex.exe\n'
+    if [ "${FM_TEST_BRIDGE_LOST:-}" != 1 ]; then
+      printf '510\t610\tC:\\Windows\\System32\\cmd.exe\tC:\\Windows\\System32\\cmd.exe\tcmd.exe /C bin\\fm-codex-hook.cmd sessionstart\n'
+      printf '610\t710\tC:\\Users\\u\\AppData\\Roaming\\npm\\codex.exe\tC:\\Users\\u\\AppData\\Roaming\\npm\\codex.exe\tcodex.exe\n'
+    fi
     ;;
   610)
     printf '610\t710\tC:\\Users\\u\\AppData\\Roaming\\npm\\codex.exe\tC:\\Users\\u\\AppData\\Roaming\\npm\\codex.exe\tcodex.exe\n'
+    ;;
+  620)
+    printf '620\t710\tC:\\tmp\\codex\\runner.exe\tC:\\tmp\\codex\\runner.exe\tC:\\tmp\\codex\\runner.exe\n'
     ;;
   999)
     printf '999\t710\tC:\\Windows\\System32\\notepad.exe\tC:\\Windows\\System32\\notepad.exe\tnotepad.exe\n'
@@ -362,6 +367,21 @@ SH
   ' "$LIB") || fail "captured native Windows Codex identity was not reusable after the parent chain disappeared"
   [ "$got" = 610 ] || fail "captured native Windows ancestry resolved '$got', expected Codex pid 610"
 
+  got=$(env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    -u PI_CODING_AGENT -u GROK_AGENT PATH="$fakebin:$PATH" \
+    FM_TEST_BRIDGE_LOST=1 FM_SESSION_HARNESS_PID=610 \
+    "$ROOT/bin/fm-harness.sh") \
+    || fail "captured native Windows Codex identity was not detected after bridge loss"
+  [ "$got" = codex ] \
+    || fail "captured native Windows Codex identity resolved '$got', expected codex"
+
+  got=$(env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    -u PI_CODING_AGENT -u GROK_AGENT PATH="$fakebin:$PATH" \
+    FM_TEST_BRIDGE_LOST=1 FM_SESSION_HARNESS_PID=620 \
+    "$ROOT/bin/fm-harness.sh")
+  [ "$got" = unknown ] \
+    || fail "captured path-only Codex evidence resolved '$got', expected unknown"
+
   printf '610\n' > "$dir/state/.lock"
   PATH="$fakebin:$PATH" bash -c '
     uname() { printf "%s\n" MINGW64_NT; }
@@ -375,7 +395,7 @@ SH
   ' "$LIB"; then
     fail "an ordinary native Windows process was accepted as a live harness"
   fi
-  pass "session-lock: native Windows Codex identity uses the Windows process table"
+  pass "session-lock: captured native Windows Codex identity survives bridge loss"
 }
 
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
