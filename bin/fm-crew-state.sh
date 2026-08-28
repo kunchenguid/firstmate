@@ -37,11 +37,10 @@
 #      diverged from it, invalidates attribution.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
-#      the active step is ci, `axi status` alone cannot tell "still waiting on
-#      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
-#      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating.
+#      passed/checks-passed -> done, failed/cancelled -> failed. While the
+#      active step is ci, `axi status` alone cannot distinguish validating from
+#      checks-green monitoring. `forge_zero_check_verdict` owns the exact-head,
+#      complete-evidence rule used before that call site becomes terminal.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -73,6 +72,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -87,6 +88,10 @@ case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 # history every call.
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
+# Hard bound on each forge read. Forge calls happen only when a CI marker claims
+# a state that would end the wait, never on the ordinary validating path.
+FORGE_TIMEOUT=${FM_CREW_STATE_FORGE_TIMEOUT:-8}
+case "$FORGE_TIMEOUT" in ''|*[!0-9]*|0) FORGE_TIMEOUT=8 ;; esac
 SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
@@ -227,6 +232,9 @@ strip_quotes() { fm_nm_strip_quotes "$@"; }
 nm_run() {  # <args...>
   fm_nm_run "$WT" "$NM_TIMEOUT" "$@"
 }
+nm_run_checked() {  # <args...>
+  fm_nm_run_checked "$WT" "$NM_TIMEOUT" "$@"
+}
 
 # Scalar value of a TOON key in the captured run output ($RUN_OUT).
 RUN_OUT=""
@@ -323,34 +331,159 @@ nm_effective_ci_step_status() {
   fi
 }
 
-# Root cause of the PR #252 incident (2026-07): for a repo where merge is left
-# to the captain, no-mistakes' ci step (and therefore top-level status/outcome)
-# stays "running" for the ENTIRE CI-monitor phase, including long after GitHub
-# reports every check green - it only reaches outcome=passed once the PR is
-# actually merged (or failed/cancelled if closed). `axi status`'s steps[] table
-# never distinguishes "still waiting on checks" from "checks green, waiting on
-# merge": both read as plain `ci,running,...`. The only place that transition is
-# recorded is the ci step's own log text, e.g. "all CI checks passed - still
-# monitoring until merged or closed" or "no CI checks reported - still
-# monitoring until merged or closed" (verified against 360+ real run logs under
-# ~/.no-mistakes/logs/*/ci.log on the installed v1.32.2 binary, including the
-# actual PR #252 run). Reads the ci step's log tail via `axi logs` and scans it
-# for the MOST RECENT recognized marker (the log is append-only/chronological,
-# so the last match is current): green with nothing red after it means CI is
-# green right now, still only waiting on merge/close.
+no_ci_detail() {
+  local pr_url=$1
+  if [ -n "$pr_url" ]; then
+    printf 'no CI configured for this PR: nothing verified this change - %s' "$pr_url"
+  else
+    printf 'no CI configured for this PR: nothing verified this change'
+  fi
+}
+
+# --- CI readiness: what the ci step's log actually says ---------------------
+#
+# The no-mistakes ci step stays running after checks pass because it continues
+# monitoring until merge or close. Its log is the only source that records the
+# transition from validating to ready, but the log marker is an observation,
+# not a verdict. In particular, these two markers state the same fact:
+#
+#   no CI checks reported - still monitoring until merged or closed
+#   no CI checks reported yet, waiting for checks to register...
+#
+# Both mean that one poll saw zero checks. Neither means checks passed. The last
+# recognized whole-line marker is classified as a fact and any fact that could
+# end the wait is settled by forge_zero_check_verdict below.
+nm_ci_marker_class() {  # <marker-line>
+  case "$1" in
+    *"all CI checks passed"*)  printf 'passed' ;;
+    *"no CI checks reported"*) printf 'zero-checks' ;;
+    *) printf 'pending' ;;
+  esac
+}
+
+# Owner/repo/number of a GitHub pull request URL, as "<owner>/<repo> <number>".
+# Empty for another forge, so an unsupported URL remains nonterminal.
+forge_pr_coordinates() {  # <pr-url>
+  local url=$1 rest owner repo number
+  case "$url" in
+    https://github.com/*/*/pull/*) rest=${url#https://github.com/} ;;
+    *) return 0 ;;
+  esac
+  owner=${rest%%/*}; rest=${rest#*/}
+  repo=${rest%%/*};  rest=${rest#*/}
+  case "$rest" in pull/*) number=${rest#pull/} ;; *) return 0 ;; esac
+  number=${number%%/*}
+  case "$owner$repo$number" in ''|*' '*) return 0 ;; esac
+  case "$number" in ''|*[!0-9]*) return 0 ;; esac
+  printf '%s/%s %s' "$owner" "$repo" "$number"
+}
+
+# This function owns the terminal CI evidence rule. A verdict is terminal only
+# after a complete positive observation of the exact fact claimed, bound to one
+# stable PR head. Silence, failed or timed-out reads, incomplete snapshots, and
+# a moved head remain nonterminal. Complete successful zero-row reads from both
+# Check Suites and combined legacy Status prove the distinct no-CI-configured
+# outcome without claiming that validation passed.
+forge_zero_check_verdict() {  # <pr-url> <expected-head> -> verdict[ <detail>]
+  local url=$1 expected_head=$2 coords repo number pr_head suites total combined
+  local final_pr_head combined_state combined_total
+  local unfinished=0 runs=0 gated=0 seen=0 snapshot_valid=1
+  command -v gh >/dev/null 2>&1 || { printf 'unknown forge could not be reached'; return; }
+  coords=$(forge_pr_coordinates "$url")
+  [ -n "$coords" ] || { printf 'unknown pull request is not on GitHub'; return; }
+  [ -n "$expected_head" ] || { printf 'invalid attributed run has no head'; return; }
+  repo=${coords%% *}
+  number=${coords##* }
+  pr_head=$(fm_run_timed "$FORGE_TIMEOUT" gh api "repos/$repo/pulls/$number" --jq .head.sha) || pr_head=
+  pr_head=$(trim "$pr_head")
+  [ -n "$pr_head" ] || { printf 'unknown forge could not read the PR head'; return; }
+  [ "$pr_head" = "$expected_head" ] || { printf 'invalid PR head changed from the attributed run'; return; }
+  suites=$(fm_run_timed "$FORGE_TIMEOUT" gh api "repos/$repo/commits/$expected_head/check-suites?per_page=100" \
+    --jq '.total_count, (.check_suites[] | "\(.status)|\(.conclusion)|\(.latest_check_runs_count)")') || suites=
+  combined=$(fm_run_timed "$FORGE_TIMEOUT" gh api "repos/$repo/commits/$expected_head/status" \
+    --jq '"\(.state)|\(.total_count)"') || combined=
+  final_pr_head=$(fm_run_timed "$FORGE_TIMEOUT" gh api "repos/$repo/pulls/$number" --jq .head.sha) || final_pr_head=
+  final_pr_head=$(trim "$final_pr_head")
+  [ -n "$final_pr_head" ] || { printf 'unknown forge could not re-read the PR head'; return; }
+  [ "$final_pr_head" = "$expected_head" ] || { printf 'invalid PR head changed while forge evidence was read'; return; }
+  total=$(printf '%s\n' "$suites" | head -1)
+  case "$total" in ''|*[!0-9]*) printf 'invalid forge returned a malformed check-suite response'; return ;; esac
+  combined_state=${combined%%|*}
+  combined_total=${combined#*|}
+  [ "$combined_state" != "$combined" ] \
+    || { printf 'invalid forge returned a malformed commit-status response'; return; }
+  case "$combined_state" in success|pending|failure) ;; *) printf 'invalid forge returned an unknown commit-status state'; return ;; esac
+  case "$combined_total" in ''|*[!0-9]*) printf 'invalid forge returned a malformed commit-status count'; return ;; esac
+  local status conclusion count
+  while IFS='|' read -r status conclusion count; do
+    [ -n "$status" ] || continue
+    seen=$((seen + 1))
+    case "$status" in completed) ;; *) unfinished=1 ;; esac
+    case "$conclusion" in success|skipped|neutral) ;; *) unfinished=1 ;; esac
+    case "$conclusion" in action_required) gated=1 ;; esac
+    case "$count" in
+      ''|*[!0-9]*) snapshot_valid=0 ;;
+      *) runs=$((runs + count)) ;;
+    esac
+  done <<EOF
+$(printf '%s\n' "$suites" | tail -n +2)
+EOF
+  [ "$seen" -eq "$total" ] \
+    || { printf 'invalid check-suite response was incomplete (%s of %s rows)' "$seen" "$total"; return; }
+  [ "$snapshot_valid" = 1 ] \
+    || { printf 'invalid check-suite response contained an invalid run count'; return; }
+  if [ "$combined_total" -gt 0 ] && [ "$combined_state" != success ]; then
+    printf 'ci-pending commit statuses are %s' "$combined_state"
+    return
+  fi
+  if [ "$total" -eq 0 ]; then
+    if [ "$combined_total" -gt 0 ] && [ "$combined_state" = success ]; then
+      printf 'green'
+      return
+    fi
+    printf 'no-ci-configured'
+    return
+  fi
+  if [ "$unfinished" = 0 ] && [ "$runs" -gt 0 ]; then
+    printf 'green'
+    return
+  fi
+  if [ "$gated" = 1 ]; then
+    printf 'ci-pending awaiting maintainer approval, no checks have run'
+    return
+  fi
+  printf 'ci-pending no checks have reported yet'
+}
+
+# Current readiness for the active monitoring call site. The last recognized
+# whole-line marker wins. A marker that could end the wait must pass the single
+# forge verdict owner above; pending markers remain cheap and local.
 nm_ci_checks_state() {
-  local run_id log_tail marker
+  local run_id log_tail marker class pr expected_head verdict
   run_id=$(strip_quotes "$(nm_field id)")
   [ -n "$run_id" ] || { printf 'unknown'; return; }
-  log_tail=$(nm_run axi logs --step ci --run "$run_id") || true
+  if ! log_tail=$(nm_run_checked axi logs --step ci --run "$run_id"); then
+    printf 'unknown'
+    return
+  fi
   [ -n "$log_tail" ] || { printf 'unknown'; return; }
   marker=$(printf '%s\n' "$log_tail" \
-    | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
+    | grep -E '^[[:space:]]*"?(all CI checks passed - still monitoring until merged or closed|no CI checks reported - still monitoring until merged or closed|no CI checks reported yet, waiting for checks to register\.\.\.|CI checks running, waiting for results\.\.\.|checks failed|issues detected(: .+ - (manual fix requested|auto-fixing \(attempt [0-9]+/[0-9]+\)|auto-fix disabled, waiting for manual intervention|max auto-fix attempts \([0-9]+\) reached, waiting for manual intervention)\.\.\.| but checks still pending, waiting for all checks to complete\.\.\.)|base branch advanced \([^)]*\), re-arming CI monitor timeout)"?[[:space:]]*$' \
     | tail -1)
-  case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
-    *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
-    *) printf 'unknown' ;;
+  [ -n "$marker" ] || { printf 'unknown'; return; }
+  class=$(nm_ci_marker_class "$marker")
+  case "$class" in
+    pending) printf 'not-ready'; return ;;
+  esac
+  pr=$(strip_quotes "$(nm_field pr)")
+  expected_head=$(strip_quotes "$(nm_field head)")
+  verdict=$(forge_zero_check_verdict "$pr" "$expected_head")
+  case "${verdict%% *}" in
+    green)            printf 'green' ;;
+    no-ci-configured) printf 'no-ci-configured' ;;
+    ci-pending)       printf 'not-ready %s' "${verdict#ci-pending }" ;;
+    invalid)          printf 'not-ready %s' "${verdict#invalid }" ;;
+    *)                printf 'not-ready %s' "${verdict#unknown }" ;;
   esac
 }
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
@@ -532,10 +665,22 @@ if [ "$HAVE_RUN" = 1 ]; then
         case "$CI_STEP_STATUS" in
           running)
             CI_LOG_STATE=$(nm_ci_checks_state)
-            if [ "$CI_LOG_STATE" = green ]; then
-              RUN_STATE="done"
-              RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
-            fi
+            case "${CI_LOG_STATE%% *}" in
+              green)
+                if ! log_reports_ci_ready; then
+                  RUN_STATE="done"
+                  RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
+                fi
+                ;;
+              no-ci-configured)
+                RUN_STATE="done"
+                RUN_DETAIL=$(no_ci_detail "$(strip_quotes "$(nm_field pr)")")
+                ;;
+              not-ready)
+                [ "$CI_LOG_STATE" = not-ready ] \
+                  || RUN_DETAIL="$RUN_DETAIL${SEP}${CI_LOG_STATE#not-ready }"
+                ;;
+            esac
             ;;
           fixing)
             CI_LOG_STATE=not-ready
@@ -546,19 +691,24 @@ if [ "$HAVE_RUN" = 1 ]; then
   fi
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
-    if [ "$RUN_SOURCE" = coarse ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
-    fi
-    [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
-    if [ "$RUN_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
-    elif [ "$CI_STEP_STATUS" = running ] && [ -z "$CI_LOG_STATE" ]; then
-      CI_LOG_STATE=$(nm_ci_checks_state)
-    elif [ "$CI_STEP_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
-    fi
-    if [ "$CI_LOG_STATE" != not-ready ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+    if [ "$RUN_SOURCE" != coarse ]; then
+      [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
+      if [ "$RUN_STATUS" = fixing ]; then
+        CI_LOG_STATE=not-ready
+      elif [ "$CI_STEP_STATUS" = running ] && [ -z "$CI_LOG_STATE" ]; then
+        CI_LOG_STATE=$(nm_ci_checks_state)
+      elif [ "$CI_STEP_STATUS" = fixing ]; then
+        CI_LOG_STATE=not-ready
+      fi
+      case "${CI_LOG_STATE%% *}" in
+        green)
+          emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+          ;;
+        no-ci-configured)
+          RUN_STATE="done"
+          RUN_DETAIL=$(no_ci_detail "$(strip_quotes "$(nm_field pr)")")
+          ;;
+      esac
     fi
   fi
 

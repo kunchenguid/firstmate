@@ -71,11 +71,40 @@ case "${1:-}" in
         if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
         else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
       logs)
-        printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
+        printf '%s\n' "${FM_FAKE_CI_LOGS:-}"
+        exit "${FM_FAKE_CI_LOGS_RC:-0}"
+        ;;
     esac
     ;;
   runs)
     printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
+esac
+exit 0
+SH
+  # Fake `gh`, serving the read-only calls fm-crew-state may make when a ci-step
+  # marker claims a state that would end the wait. FM_FAKE_CHECK_SUITES is the
+  # exact --jq projection the helper asks for: total_count on the first line,
+  # then one status|conclusion|latest_check_runs_count row per suite.
+  cat > "$fb/gh" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${FM_FAKE_GH_FAILS:-0}" = 1 ] && exit 1
+[ "${1:-}" = api ] || exit 1
+case "$2" in
+  */check-suites*) printf '%s\n' "${FM_FAKE_CHECK_SUITES:-}" ;;
+  */status)        printf '%s\n' "${FM_FAKE_COMBINED_STATUS:-pending|0}" ;;
+  */pulls/*)
+    head=${FM_FAKE_PR_HEAD:-${FM_FAKE_RUN_HEAD:-deadbee0deadbee0deadbee0deadbee0deadbee0}}
+    if [ -n "${FM_FAKE_PR_HEAD_AFTER_READ:-}" ]; then
+      reads=0
+      [ ! -f "$FM_FAKE_PR_HEAD_READS_FILE" ] || reads=$(cat "$FM_FAKE_PR_HEAD_READS_FILE")
+      reads=$((reads + 1))
+      printf '%s\n' "$reads" > "$FM_FAKE_PR_HEAD_READS_FILE"
+      [ "$reads" -eq 1 ] || head=$FM_FAKE_PR_HEAD_AFTER_READ
+    fi
+    printf '%s\n' "$head"
+    ;;
+  *) exit 1 ;;
 esac
 exit 0
 SH
@@ -122,7 +151,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr"
+  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr" "$fb/gh"
   printf '%s\n' "$fb"
 }
 
@@ -141,6 +170,15 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
 # from the caller's environment by the fakes above.
 run_crew_state() {  # <case-dir> <id>
   PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
+}
+
+# Same, on a host with no gh at all. The minimal PATH makes `command -v gh`
+# genuinely fail instead of falling through to the developer's real gh.
+run_crew_state_without_gh() {  # <case-dir> <id>
+  local toolbin
+  toolbin=$(make_no_timeout_toolbin "$1")
+  rm -f "$1/fakebin/gh"
+  PATH="$1/fakebin:$toolbin" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
 }
 
 new_case() {  # <name> -> echoes case dir with an empty state/
@@ -170,9 +208,23 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_CI_LOGS_RC=0
+  FM_FAKE_CHECK_SUITES=""
+  FM_FAKE_COMBINED_STATUS="pending|0"
+  FM_FAKE_PR_HEAD=""
+  FM_FAKE_PR_HEAD_AFTER_READ=""
+  FM_FAKE_PR_HEAD_READS_FILE=""
+  FM_FAKE_GH_FAILS=0
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
-  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS FM_FAKE_CI_LOGS_RC
+  export FM_FAKE_CHECK_SUITES FM_FAKE_COMBINED_STATUS FM_FAKE_PR_HEAD
+  export FM_FAKE_PR_HEAD_AFTER_READ FM_FAKE_PR_HEAD_READS_FILE FM_FAKE_GH_FAILS
 }
+
+# The three forge answers this reader has to tell apart.
+suites_none()  { printf '0\n'; }
+suites_gated() { printf '2\ncompleted|action_required|0\ncompleted|action_required|0\n'; }
+suites_green() { printf '2\ncompleted|success|12\ncompleted|success|1\n'; }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
 
@@ -449,6 +501,8 @@ test_ci_ready_done_log_beats_monitoring_run() {
   fm_write_meta "$d/state/feat-ci.meta" "window=fm:fm-feat-ci" "worktree=$d/wt" "kind=ship"
   printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-ci.status"
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ci)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  FM_FAKE_CHECK_SUITES=$(suites_green)
   local out; out=$(run_crew_state "$d" feat-ci)
   assert_contains "$out" "state: done" "ci-ready status log -> done"
   assert_contains "$out" "source: status-log" "ci-ready state comes from the status log"
@@ -475,6 +529,7 @@ CI checks running, waiting for results...
 all CI checks passed - still monitoring until merged or closed
 EOF
 )
+  FM_FAKE_CHECK_SUITES=$(suites_green)
   local out; out=$(run_crew_state "$d" feat-cigreen)
   assert_contains "$out" "state: done" "green ci-monitor run -> done"
   assert_contains "$out" "source: run-step" "green ci-monitor -> run-step source"
@@ -491,6 +546,7 @@ test_top_level_ci_checks_green_surfaces_done() {
   fm_write_meta "$d/state/feat-topcigreen.meta" "window=fm:fm-feat-topcigreen" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_top_level_ci fm/feat-topcigreen)"
   FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  FM_FAKE_CHECK_SUITES=$(suites_green)
   local out; out=$(run_crew_state "$d" feat-topcigreen)
   assert_contains "$out" "state: done" "top-level ci with green log -> done"
   assert_contains "$out" "source: run-step" "top-level ci green -> run-step source"
@@ -499,18 +555,275 @@ test_top_level_ci_checks_green_surfaces_done() {
   pass "top-level ci status uses ci log green marker"
 }
 
-test_ci_monitoring_no_checks_terminal_surfaces_done() {
+# The two no-checks spellings are observations of the same fact. The forge,
+# not the spelling, decides whether checks later ran, CI is absent, or workflows
+# are still approval-gated.
+test_no_checks_marker_awaiting_approval_is_not_green() {
   reset_fakes
-  local d; d=$(new_case ci-nochecks)
-  make_repo_on_branch "$d/wt" fm/feat-cinochecks
+  local d; d=$(new_case ci-nochecks-gated)
+  make_repo_on_branch "$d/wt" fm/feat-cigated
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-cinochecks.meta" "window=fm:fm-feat-cinochecks" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecks)"
+  fm_write_meta "$d/state/feat-cigated.meta" "window=fm:fm-feat-cigated" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cigated)"
   FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
-  local out; out=$(run_crew_state "$d" feat-cinochecks)
-  assert_contains "$out" "state: done" "terminal no-checks ci-monitor run -> done"
-  assert_contains "$out" "checks green" "terminal no-checks ci-monitor detail mentions checks green"
-  pass "terminal no-checks ci-monitor marker surfaces done"
+  FM_FAKE_CHECK_SUITES=$(suites_gated)
+  local out; out=$(run_crew_state "$d" feat-cigated)
+  assert_contains "$out" "state: working" "approval-gated head -> still working"
+  assert_not_contains "$out" "state: done" "approval-gated head must never read done"
+  assert_not_contains "$out" "checks green" "approval-gated head must never read checks green"
+  assert_contains "$out" "awaiting maintainer approval" "detail names why nothing has run"
+  pass "no-checks marker with approval-gated workflows is not green"
+}
+
+test_both_no_checks_spellings_agree() {
+  reset_fakes
+  local d spelling out first="" suites i=0
+  suites=$(suites_gated)
+  for spelling in \
+    "no CI checks reported - still monitoring until merged or closed" \
+    "no CI checks reported yet, waiting for checks to register..."; do
+    i=$((i + 1))
+    reset_fakes
+    d=$(new_case "ci-nochecks-agree-$i")
+    make_repo_on_branch "$d/wt" "fm/feat-agree$i"
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-agree$i.meta" "window=fm:fm-feat-agree$i" "worktree=$d/wt" "kind=ship"
+    FM_FAKE_AXI_STATUS="$(run_ci_monitoring "fm/feat-agree$i")"
+    FM_FAKE_CI_LOGS="$spelling"
+    FM_FAKE_CHECK_SUITES="$suites"
+    out=$(run_crew_state "$d" "feat-agree$i")
+    out=${out%% · source*}
+    if [ -z "$first" ]; then first=$out
+    elif [ "$out" != "$first" ]; then
+      fail "the two no-checks spellings disagree: '$first' vs '$out'"
+    fi
+    assert_not_contains "$out" "done" "a zero-checks reading is never done here"
+  done
+  assert_contains "$first" "state: working" "the spellings agree on a nonterminal verdict"
+  pass "both no-checks spellings give the same verdict"
+}
+
+test_no_checks_marker_with_complete_empty_surfaces_reports_no_ci() {
+  reset_fakes
+  local d; d=$(new_case ci-nochecks-noci)
+  make_repo_on_branch "$d/wt" fm/feat-cinoci
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cinoci.meta" "window=fm:fm-feat-cinoci" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinoci)"
+  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
+  FM_FAKE_CHECK_SUITES=$(suites_none)
+  local out; out=$(run_crew_state "$d" feat-cinoci)
+  assert_contains "$out" "state: done" "complete empty forge surfaces settle the no-CI outcome"
+  assert_contains "$out" "no CI configured" "the terminal detail names the no-CI outcome"
+  assert_contains "$out" "nothing verified this change" "the detail does not imply validation"
+  assert_not_contains "$out" "checks green" "no CI is never described as checks green"
+  pass "complete empty forge surfaces prove no CI is configured"
+}
+
+test_no_checks_marker_with_passing_checks_is_green() {
+  reset_fakes
+  local d; d=$(new_case ci-nochecks-passed)
+  make_repo_on_branch "$d/wt" fm/feat-cinowgreen
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cinowgreen.meta" "window=fm:fm-feat-cinowgreen" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinowgreen)"
+  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
+  FM_FAKE_CHECK_SUITES=$(suites_green)
+  local out; out=$(run_crew_state "$d" feat-cinowgreen)
+  assert_contains "$out" "state: done" "checks that arrived after the marker -> done"
+  assert_contains "$out" "checks green" "passing checks retain the true-green result"
+  pass "no-checks marker is overruled by passing forge checks"
+}
+
+test_forge_head_must_match_the_attributed_run() {
+  reset_fakes
+  local d; d=$(new_case ci-forge-head-moved)
+  make_repo_on_branch "$d/wt" fm/feat-ciheadmoved
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ciheadmoved.meta" "window=fm:fm-feat-ciheadmoved" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ciheadmoved)"
+  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
+  FM_FAKE_PR_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  FM_FAKE_CHECK_SUITES=$(suites_green)
+  local out; out=$(run_crew_state "$d" feat-ciheadmoved)
+  assert_contains "$out" "state: working" "checks from a different PR head are not attributed"
+  assert_not_contains "$out" "checks green" "a newer PR head cannot make the older run green"
+  assert_contains "$out" "PR head changed" "detail names the attribution mismatch"
+  pass "forge evidence must belong to the attributed run head"
+}
+
+test_legacy_commit_status_must_be_successful_for_green() {
+  reset_fakes
+  local d out; d=$(new_case ci-legacy-status)
+  make_repo_on_branch "$d/wt" fm/feat-cilegacystatus
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cilegacystatus.meta" "window=fm:fm-feat-cilegacystatus" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cilegacystatus)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  FM_FAKE_CHECK_SUITES=$(suites_green)
+  FM_FAKE_COMBINED_STATUS="pending|1"
+  out=$(run_crew_state "$d" feat-cilegacystatus)
+  assert_contains "$out" "state: working" "a pending legacy status keeps suites nonterminal"
+  assert_not_contains "$out" "checks green" "passing suites cannot hide a pending status"
+  FM_FAKE_COMBINED_STATUS="success|1"
+  out=$(run_crew_state "$d" feat-cilegacystatus)
+  assert_contains "$out" "state: done" "successful legacy statuses preserve green"
+  assert_contains "$out" "checks green" "all successful forge evidence remains green"
+  pass "legacy commit statuses participate in the green verdict"
+}
+
+test_successful_status_only_ci_is_green() {
+  reset_fakes
+  local d out; d=$(new_case ci-status-only-green)
+  make_repo_on_branch "$d/wt" fm/feat-cistatusonly
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cistatusonly.meta" "window=fm:fm-feat-cistatusonly" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cistatusonly)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  FM_FAKE_CHECK_SUITES=$(suites_none)
+  FM_FAKE_COMBINED_STATUS="success|1"
+  out=$(run_crew_state "$d" feat-cistatusonly)
+  assert_contains "$out" "state: done" "nonempty successful status-only CI passed"
+  assert_contains "$out" "checks green" "status-only CI preserves true green"
+  pass "successful status-only CI is positive green evidence"
+}
+
+test_forge_head_must_remain_stable_across_evidence_read() {
+  reset_fakes
+  local d out; d=$(new_case ci-forge-head-race)
+  make_repo_on_branch "$d/wt" fm/feat-ciheadrace
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ciheadrace.meta" "window=fm:fm-feat-ciheadrace" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ciheadrace)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  FM_FAKE_CHECK_SUITES=$(suites_green)
+  FM_FAKE_PR_HEAD_AFTER_READ=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  FM_FAKE_PR_HEAD_READS_FILE="$d/pr-head-reads"
+  out=$(run_crew_state "$d" feat-ciheadrace)
+  assert_contains "$out" "state: working" "a PR head change during the read is nonterminal"
+  assert_not_contains "$out" "checks green" "unstable-head evidence cannot be green"
+  pass "forge evidence stays bound to one stable PR head"
+}
+
+test_incomplete_check_suite_snapshot_is_not_green() {
+  reset_fakes
+  local d suites i out; d=$(new_case ci-incomplete-suites)
+  make_repo_on_branch "$d/wt" fm/feat-ciincomplete
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ciincomplete.meta" "window=fm:fm-feat-ciincomplete" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ciincomplete)"
+  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
+  suites=31
+  i=0
+  while [ "$i" -lt 30 ]; do
+    suites="$suites
+completed|success|1"
+    i=$((i + 1))
+  done
+  FM_FAKE_CHECK_SUITES=$suites
+  out=$(run_crew_state "$d" feat-ciincomplete)
+  assert_contains "$out" "state: working" "a partial suite page is not terminal evidence"
+  assert_not_contains "$out" "checks green" "missing suite rows cannot be green"
+  assert_not_contains "$out" "no CI configured" "an incomplete read cannot prove no CI"
+  assert_contains "$out" "check-suite response was incomplete" "detail names the partial snapshot"
+  pass "an incomplete check-suite snapshot remains nonterminal"
+}
+
+test_no_checks_marker_unreadable_forge_is_not_green() {
+  reset_fakes
+  local d out; d=$(new_case ci-nochecks-noforge)
+  make_repo_on_branch "$d/wt" fm/feat-cinoforge
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cinoforge.meta" "window=fm:fm-feat-cinoforge" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinoforge)"
+  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
+  out=$(run_crew_state_without_gh "$d" feat-cinoforge)
+  assert_contains "$out" "state: working" "unreachable forge keeps zero checks nonterminal"
+  assert_not_contains "$out" "checks green" "unreachable forge never invents green"
+  assert_contains "$out" "forge could not be reached" "detail names unavailable evidence"
+  pass "no-checks marker with an unreadable forge is never green"
+}
+
+test_no_checks_marker_failing_forge_call_is_not_green() {
+  reset_fakes
+  local d out; d=$(new_case ci-nochecks-ghfail)
+  make_repo_on_branch "$d/wt" fm/feat-cighfail
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cighfail.meta" "window=fm:fm-feat-cighfail" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cighfail)"
+  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
+  FM_FAKE_GH_FAILS=1
+  out=$(run_crew_state "$d" feat-cighfail)
+  assert_contains "$out" "state: working" "a failing forge call stays nonterminal"
+  assert_not_contains "$out" "checks green" "a failing forge call never invents green"
+  pass "no-checks marker with a failing forge call is never green"
+}
+
+test_passed_marker_with_unreadable_forge_is_not_green() {
+  reset_fakes
+  local d out; d=$(new_case ci-passed-noforge)
+  make_repo_on_branch "$d/wt" fm/feat-cipassnoforge
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cipassnoforge.meta" "window=fm:fm-feat-cipassnoforge" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cipassnoforge)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  out=$(run_crew_state_without_gh "$d" feat-cipassnoforge)
+  assert_contains "$out" "state: working" "an unreadable PR head keeps the marker nonterminal"
+  assert_not_contains "$out" "checks green" "an unbound passed marker is not green"
+  pass "a passed marker needs readable exact-head proof"
+}
+
+test_partial_ci_log_cannot_authorize_green() {
+  reset_fakes
+  local d out; d=$(new_case ci-partial-green)
+  make_repo_on_branch "$d/wt" fm/feat-cipartialgreen
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cipartialgreen.meta" "window=fm:fm-feat-cipartialgreen" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cipartialgreen)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  FM_FAKE_CI_LOGS_RC=124
+  FM_FAKE_CHECK_SUITES=$(suites_green)
+  out=$(run_crew_state "$d" feat-cipartialgreen)
+  assert_contains "$out" "state: working" "a timed-out CI log prefix stays nonterminal"
+  assert_not_contains "$out" "checks green" "a partial log cannot authorize green"
+  pass "partial CI logs cannot authorize green"
+}
+
+test_agent_prose_is_not_read_as_a_marker() {
+  reset_fakes
+  local d out; d=$(new_case ci-prose)
+  make_repo_on_branch "$d/wt" fm/feat-ciprose
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ciprose.meta" "window=fm:fm-feat-ciprose" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ciprose)"
+  FM_FAKE_CI_LOGS=$(cat <<'EOF'
+  "CI checks running, waiting for results..."
+  "Verified locally: all CI checks passed after the rebase, so the remaining failure is unrelated."
+EOF
+)
+  out=$(run_crew_state "$d" feat-ciprose)
+  assert_contains "$out" "state: working" "agent prose does not end the wait"
+  assert_not_contains "$out" "checks green" "agent prose is not a pipeline marker"
+  pass "agent prose in the CI log is not read as a marker"
+}
+
+test_marker_prefix_in_agent_prose_is_not_a_marker() {
+  reset_fakes
+  local d out; d=$(new_case ci-marker-prefix-prose)
+  make_repo_on_branch "$d/wt" fm/feat-ciprefix
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ciprefix.meta" "window=fm:fm-feat-ciprefix" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ciprefix)"
+  FM_FAKE_CI_LOGS=$(cat <<'EOF'
+CI checks running, waiting for results...
+all CI checks passed locally; GitHub is still pending
+EOF
+)
+  FM_FAKE_GH_FAILS=1
+  out=$(run_crew_state "$d" feat-ciprefix)
+  assert_contains "$out" "state: working" "marker-prefix prose does not end the wait"
+  assert_not_contains "$out" "checks green" "marker-prefix prose is ignored"
+  pass "only complete CI markers are classified"
 }
 
 test_ci_monitoring_green_then_rearm_stays_working() {
@@ -738,7 +1051,7 @@ EOF
   pass "cross-branch attribution picks the branch's most recent row"
 }
 
-test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
+test_coarse_run_does_not_validate_ready_status_from_other_branch_ci() {
   reset_fakes
   local d short; d=$(new_case coarse-ready-other-log)
   make_repo_on_branch "$d/wt" fm/feat-coarseready
@@ -754,10 +1067,10 @@ EOF
 )"
   FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
   local out; out=$(run_crew_state "$d" feat-coarseready)
-  assert_contains "$out" "state: done" "coarse ready status -> done"
-  assert_contains "$out" "source: status-log" "coarse ready status remains status-log sourced"
-  assert_not_contains "$out" "state: working" "coarse ready status must not be suppressed by another branch log"
-  pass "coarse run does not probe another branch's ci log"
+  assert_contains "$out" "state: working" "coarse evidence remains nonterminal"
+  assert_not_contains "$out" "state: done" "another branch's ci log cannot prove checks green"
+  assert_not_contains "$out" "checks green" "the unvalidated status marker is not relayed"
+  pass "coarse run does not use another branch's ci evidence"
 }
 
 # A different-branch run with NO matching runs-list row must NOT be
@@ -1417,7 +1730,21 @@ test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
-test_ci_monitoring_no_checks_terminal_surfaces_done
+test_no_checks_marker_awaiting_approval_is_not_green
+test_both_no_checks_spellings_agree
+test_no_checks_marker_with_complete_empty_surfaces_reports_no_ci
+test_no_checks_marker_with_passing_checks_is_green
+test_forge_head_must_match_the_attributed_run
+test_legacy_commit_status_must_be_successful_for_green
+test_successful_status_only_ci_is_green
+test_forge_head_must_remain_stable_across_evidence_read
+test_incomplete_check_suite_snapshot_is_not_green
+test_no_checks_marker_unreadable_forge_is_not_green
+test_no_checks_marker_failing_forge_call_is_not_green
+test_passed_marker_with_unreadable_forge_is_not_green
+test_partial_ci_log_cannot_authorize_green
+test_agent_prose_is_not_read_as_a_marker
+test_marker_prefix_in_agent_prose_is_not_a_marker
 test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
@@ -1430,7 +1757,7 @@ test_terminal_passed
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
-test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
+test_coarse_run_does_not_validate_ready_status_from_other_branch_ci
 test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
