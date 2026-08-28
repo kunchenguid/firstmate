@@ -100,8 +100,11 @@ _fm_nm_is_semver_core() {  # <core_plus_extensions>
 }
 
 _fm_nm_is_semver_core_version() {  # <core>
-  local major minor patch extra
-  IFS='.' read -r major minor patch extra <<< "$1"
+  local major minor patch extra core=$1
+  case "$core" in
+    .|..|...|.*|*.|*..*) return 1 ;;
+  esac
+  IFS='.' read -r major minor patch extra <<< "$core"
   [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "${extra:-}" ] || return 1
   case "$major" in
     0) ;;
@@ -239,14 +242,11 @@ fm_nm_semver_at_least() {  # <version> <minimum>
     *-*) min_prerelease=${min_core#*-}; min_core=${min_core%%-*} ;;
     *)   min_prerelease= ;;
   esac
+  _fm_nm_is_semver_core_version "$core" || return 1
+  _fm_nm_is_semver_core_version "$min_core" || return 1
   local major minor patch min_major min_minor min_patch
   IFS='.' read -r major minor patch <<< "$core"
   IFS='.' read -r min_major min_minor min_patch <<< "$min_core"
-  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] || return 1
-  [ -n "$min_major" ] && [ -n "$min_minor" ] && [ -n "$min_patch" ] || return 1
-  case "$major$minor$patch$min_major$min_minor$min_patch" in
-    *[!0-9]*) return 1 ;;
-  esac
   [ "$major" -gt "$min_major" ] && return 0
   [ "$major" -eq "$min_major" ] || return 1
   [ "$minor" -gt "$min_minor" ] && return 0
