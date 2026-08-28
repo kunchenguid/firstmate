@@ -592,8 +592,8 @@ export default function (pi: ExtensionAPI) {
   // happens main can lose the outcome while deciding how to handle it. The
   // typed operational envelope is what makes the note self-describing; it stays
   // invisible to the captain because the note is never rendered. The
-  // instruction preserves the event-ownership boundary without dictating
-  // whether main surfaces the content.
+  // instruction preserves the event-ownership boundary while requiring the
+  // captain-facing response and leaving its wording to main.
   //
   // Encoding shells out, so it can fail on a broken checkout. This file's
   // failure direction applies: an outcome that cannot be typed is still

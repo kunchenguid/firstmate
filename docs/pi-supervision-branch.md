@@ -44,7 +44,8 @@ This feature is Pi-only by construction and changes nothing anywhere else:
 
 ## How the branch knows what the captain said
 
-Main's captain and assistant text - never tool calls, tool results, operational injections, or the branch's own merged notes - is mirrored into the branch as read-only `fm-main-mirror` messages at main's turn end, before the next wake is handed over.
+Main's captain and assistant text - never tool calls, tool results, operational injections, or the branch's own merged notes - is mirrored into the branch as read-only `fm-main-mirror` messages.
+The idle path mirrors at main's turn end, while the pre-dispatch path refreshes the live main session synchronously before accepting a branch wake so the complete current captain message precedes that wake and older dialog entries remain bounded.
 The mirror cursor is durable (`state/.branch-mirror-cursor`), so a restart replays only the not-yet-mirrored dialog from main's session file, and a replacement main session re-anchors from its start.
 The branch prompt frames mirrored text as context for judgment, never as instructions addressed to the branch; an authorization addressed to main (for example "you may merge when green") does not relax the branch's role limits.
 
@@ -55,13 +56,10 @@ Stage two is the branch's verdict on each handled event, reported through its `f
 The follow-up turn a `captain` verdict opens is itself the captain-visible outcome, so its merge note is delivered silently and never printed or rendered in Pi.
 Because Pi gives the model only a custom message's `content`, that silent note normally carries both a relay instruction and the `branch-outcome` operational kind owned by `bin/fm-operational-input.sh` inside its own text.
 This self-description lets main distinguish a new supervision outcome from its own earlier captain-facing answer; without it, main can mistake the outcome for that answer and re-emit the stale answer instead of relaying the outcome.
-The incoming captain-facing outcome identifies itself to main and requires a captain-visible response, while main retains judgment over its wording and conversational incorporation.
-Event ownership is separate: main must not re-drain, re-run, or acknowledge the fleet event after the branch has reported it.
-For routine sailboat outcomes, main independently applies judgment about whether and how to surface, summarize, reference, or incorporate the content in the captain conversation.
-If envelope encoding fails, the captain-facing note degrades to the same visibility-and-ownership instruction as plain text rather than losing the outcome or opening another turn.
+The generated [Pi supervision protocol](supervision-protocols/pi.md) owns main's event-ownership and conversational-treatment instructions for merged outcomes.
+If envelope encoding fails, the captain-facing note degrades to the same runtime instruction as plain text rather than losing the outcome or opening another turn.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is also delivered silently with no rendered note, while every other `routine` outcome stays rendered with its sailboat prefix.
 The branch prompt owns the verdict criteria, including its unconditional explicit-request rule; unsolicited routine outcomes remain routine sailboat notes, unchanged fleet reviews remain silent, and doubt escalates.
-The extension refreshes the main-dialog mirror synchronously before accepting each branch wake, preserving the complete current captain message while keeping older dialog entries bounded, so a request anywhere in the current in-flight message reaches the branch before that wake's prompt rather than waiting for `turn_end`.
 Main can read the durable outcome store on demand through its `fm_branch_outcomes` tool.
 
 ## Heartbeat routing
@@ -92,6 +90,6 @@ What is new is only the attended path: outside away mode, the branch absorbs the
 
 ## Verification
 
-Portable regressions: `tests/fm-pi-branch-extension.test.sh` (dispatch, default-on eligibility, main-only classification, eligible-row claim lifecycle, partial pre-drain recheck, fallback, filter, mirror, model-visible captain-outcome typing and plain-instruction fallback, cache key, persistence, model pin and searchable picker, effort pin), `tests/fm-branch-supervision.test.sh` (prompt stability, store append-only, leases, guards, non-branch-home invariance), the branch-offer, heartbeat-offer, heartbeat-not-ridden-by-a-check, and main-only-check-class tests in `tests/fm-pi-watch-extension.test.sh`, the recovery test in `tests/fm-session-start.test.sh`, and the per-actor consume regression in `tests/fm-wake-queue.test.sh`.
+Portable regressions: `tests/fm-pi-branch-extension.test.sh` (dispatch, default-on eligibility, main-only classification, requested-versus-unsolicited outcome delivery, pre-turn-end complete-current-request mirroring, fleet-event ownership, main outcome access, eligible-row claim lifecycle, partial pre-drain recheck, fallback, filter, model-visible captain-outcome typing and plain-instruction fallback, cache key, persistence, model pin and searchable picker, effort pin), `tests/fm-branch-supervision.test.sh` (prompt stability, store append-only, leases, guards, non-branch-home invariance), the branch-offer, heartbeat-offer, heartbeat-not-ridden-by-a-check, and main-only-check-class tests in `tests/fm-pi-watch-extension.test.sh`, the recovery test in `tests/fm-session-start.test.sh`, and the per-actor consume regression in `tests/fm-wake-queue.test.sh`.
 Live guard: `FM_PI_BRANCH_LIVE_E2E=1 tests/fm-pi-branch-live-e2e.test.sh` exercises the real installed Pi SDK's custom-message conversion and branch-session surfaces with no user credentials and no provider call; run it after every Pi upgrade and record the dated result in [docs/verification/runtime-backends.md](verification/runtime-backends.md).
 The strict typecheck in `tests/fm-pi-primary-types.test.sh` pins the extension against the installed Pi package.
