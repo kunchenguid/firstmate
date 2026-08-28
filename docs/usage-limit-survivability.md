@@ -103,6 +103,30 @@ The same rule governs evidence that could not be read at all.
 `no-signature` means the evidence was read and nothing matched, so a step log that failed to read reports `unknown reason=step-log-unreadable` instead, and a step nothing looked at is never listed as checked.
 A step the scan budget never reached is a third fact again, disclosed as `unscanned=` rather than as `unread=`, because a read nothing attempted is not a read that failed.
 
+## Why a wall verdict needs corroboration
+
+This detector reads a terminal capture and a pipeline step log, and both can contain this repository's own documentation of the detector.
+The recovery skill and the verification record quote the vendor's limit phrasings verbatim, because a record that paraphrased its evidence would stop being a record.
+The digest runs `diagnose --endpoint-only` automatically for every endpoint it cannot read as alive, so a crewmate who merely had this surface's skill or diff on screen when their endpoint died would otherwise be told `wall source=endpoint`, and told that the work is intact, about a task that genuinely failed.
+
+That is a defect class rather than a detail of this one command: a mechanism whose evidence source includes its own documentation.
+It will recur in anything that greps for text this repository also discusses, so it is worth recognising by name before writing the next such detector.
+
+The two error directions are not symmetric, and that is what decides the fix.
+A missed wall is self-correcting, because whoever is reading carries on and finds the real cause.
+A false wall asserts the work is intact and stops the reading, so a confident wrong verdict is strictly worse than an honest unknown.
+
+Only the positive is therefore tightened.
+A `wall` verdict needs the vendor phrasing and the harness's own non-zero exit in the same evidence, on a different line, and the corroborating line must not itself carry a limit phrasing.
+That last clause is what separates the harness's two emitted lines from one sentence of prose narrating both facts at once.
+It costs no true positive on record: every real detection carries the harness's exit on its own line right after the limit line.
+The negative stays `no-signature`, which is still not proof that the work crashed.
+
+The rule is whole-evidence rather than proximity or window based, because a narrowed window would trade a real detection for an accident of layout.
+The residual it leaves open is stated rather than hidden.
+A pane displaying this surface's verification record shows the limit line and the harness's exit line on separate lines exactly as the harness emitted them, because it is that step log quoted verbatim, so that one page still reads as a wall.
+Closing it would mean either degrading the record whose value depends on quoting real evidence, or guessing from layout, and both are worse trades than the residual.
+
 ## Why every bounded scan discloses what it skipped
 
 Both scans are bounded, and both are cheapest when nothing is wrong.

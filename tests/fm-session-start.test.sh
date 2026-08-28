@@ -1516,6 +1516,47 @@ EOF
   pass "session start: the scan budget costs a healthy fleet nothing"
 }
 
+# --- the fleet-state stage's share of the bound it SHARES --------------------
+#
+# The defect this pins was never the number 45. It was that two individually
+# sensible bounds - the headroom read and the shared wall-scan budget - were
+# never checked against the outer bound they share with every other stage of this
+# digest, so together they could take more than half of it in exactly the
+# post-wall state the stage exists for, truncating stages whose loss cannot be
+# recovered by following a link.
+#
+# The relationship is asserted here rather than reasoned about in prose, so an
+# edit to ANY of the three - the headroom timeout, the wall budget, or the
+# session-start timeout - fails this rather than passing quietly.
+test_fleet_state_stage_fits_its_share_of_the_session_bound() {
+  local rec root home fakebin out
+  rec=$(new_world fleet-bounds)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live-window"
+  printf 'window=fm-sess:live-window\nkind=ship\n' > "$home/state/task-live.meta"
+
+  # The SHIPPED defaults, with nothing overridden: this is the assertion that
+  # fails if a future edit makes the stage take an unreasonable share.
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" "FLEET_STATE_BOUNDS:"     "the shipped headroom and wall-scan defaults must fit inside their share of FM_SESSION_START_TIMEOUT"
+
+  # And the check is live rather than vacuous: widen the wall budget past the
+  # share and the digest says so, naming all three numbers.
+  out=$(FM_SESSION_START_WALL_BUDGET=90 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "FLEET_STATE_BOUNDS:"     "a fleet-state stage over its share of the shared bound must be disclosed, not hidden"
+  assert_contains "$out" "of the 120s session-start bound"     "the disclosure names the outer bound the stage is measured against"
+  assert_contains "$out" "FM_SESSION_START_TIMEOUT"     "the disclosure names the knobs that resolve it"
+
+  # Lowering the outer bound reaches the same check from the other side.
+  out=$(FM_SESSION_START_TIMEOUT=60 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "FLEET_STATE_BOUNDS:"     "shrinking the shared outer bound must surface the same disproportion"
+  pass "session start: the fleet-state stage is checked against the bound it shares"
+}
+
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
@@ -2658,6 +2699,7 @@ test_wall_scan_budget_is_shared_across_tasks
 test_wall_scan_covers_an_endpoint_with_no_window
 test_wall_scan_budget_covers_no_window_endpoints
 test_wall_scan_budget_leaves_a_healthy_fleet_alone
+test_fleet_state_stage_fits_its_share_of_the_session_bound
 test_composition_invokes_real_scripts
 test_branch_outcome_replay_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched

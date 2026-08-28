@@ -22,16 +22,29 @@ FM_QUOTA_AXI_MIN=0.1.29
 # The dotted version in a `quota-axi --version` banner, or nothing when the
 # string carries none. Pure: it runs nothing.
 #
-# It takes the FIRST version-like token, not the last. The obvious greedy form
-# (`s/.*\(...\).*/\1/`) silently returns the last one, so a banner that ever
-# grows a runtime suffix - `quota-axi 0.1.40 (node 22.14.0)` - would both display
-# and compare `2.14.0`: a wrong build number beside the reading, and a floor
-# check that passes on a version nobody shipped. Anchoring the prefix to
-# non-digits makes the leftmost match the tool's own version.
+# It extracts the FIRST full dotted token and NOTHING ELSE. Two forms both get
+# this wrong in ways that reach the operator. The greedy form
+# (`s/.*\(...\).*/\1/`) silently returns the LAST token, so a banner that grows
+# a runtime suffix - `quota-axi 0.1.40 (node 22.14.0)` - would display and
+# floor-check `2.14.0`. A leading `[^0-9]*` is no anchor at all: on
+# `node v22 quota-axi 0.1.40` the leftmost match starts after `node v22`, and
+# because `sed` replaces only the matched span the unmatched prefix survives,
+# yielding `node v220.1.40`. That string then fails the integer comparisons
+# below, so a CURRENT build reads as `below-floor` in bin/fm-usage-wall.sh and as
+# `MISSING: quota-axi` in bin/fm-bootstrap.sh - a definite claim about a version
+# nobody measured, from the one surface whose rule is that an unmeasured fact is
+# never reported as measured.
+#
+# So the token is required to be preceded by a non-version character, and only
+# the token itself is kept. Every line is given a leading separator first, so a
+# version at the very start of a line takes the same path as one in mid-banner
+# rather than needing a second rule.
 fm_quota_axi_version_string() {  # <version-output>
   printf '%s\n' "${1:-}" |
-    sed -n 's/[^0-9]*\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' |
-    head -1
+    sed 's/^/ /' |
+    grep -o -E '[^0-9.][0-9]+\.[0-9]+\.[0-9]+' |
+    head -1 |
+    cut -c2-
 }
 
 # 0 when the version in $1 is at or above FM_QUOTA_AXI_MIN. Pure: it runs

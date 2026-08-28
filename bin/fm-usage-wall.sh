@@ -91,19 +91,25 @@
 #      `status: failed` looked like a code verdict and was not one).
 #
 # Verdicts are deliberately three, not two:
-#   wall          a signature matched; the quoted line and its source are printed.
-#   no-signature  evidence was read and nothing matched. This is NOT a claim that
-#                 the task crashed - only that no wall signature is present in
-#                 what was readable.
+#   wall          a signature matched AND the same evidence carries the harness's
+#                 own non-zero exit on another line; the quoted line and its
+#                 source are printed. That corroboration is required because this
+#                 command's evidence sources can contain this repository's own
+#                 documentation OF this command - see first_wall_line.
+#   no-signature  evidence was read and nothing matched, or nothing matched with
+#                 corroboration. This is NOT a claim that the task crashed - only
+#                 that no corroborated wall signature is present in what was
+#                 readable.
 #   unknown       the evidence could not be read at all. A step log that failed
 #                 to read lands here (`reason=step-log-unreadable`), never on
 #                 `no-signature`, because "nothing matched" is a claim about
-#                 evidence that was actually read. A scan that ran out of budget
-#                 before reading anything lands here too, under its own reason
-#                 (`scan-budget-exhausted`), because a read nothing attempted is
-#                 not a read that failed.
-# A partial scan discloses both separately: `unread=` names logs that resisted a
-# read, `unscanned=` names logs the budget never reached.
+#                 evidence that was actually read.
+# A partial scan discloses both of its gaps separately: `unread=` names logs that
+# resisted a read, `unscanned=` names logs the budget never reached. Diagnose
+# always attempts at least one log, so budget truncation reaches a reader here as
+# `unscanned=` rather than as a reason slug of its own; the reason
+# `scan-budget-exhausted` belongs to the digest's fleet-wide scan
+# (bin/fm-session-start.sh), where a task genuinely can go unreached entirely.
 # A negative therefore never hardens into "it really failed", which matters
 # because the signature table below is only as complete as the vendor phrasings
 # actually observed.
@@ -250,11 +256,51 @@ USAGE_WALL_PATTERNS="$USAGE_WALL_PATTERNS|hit your usage limit"
 USAGE_WALL_PATTERNS="$USAGE_WALL_PATTERNS|you have (reached|hit) your (usage|weekly|monthly) limit"
 USAGE_WALL_PATTERNS="$USAGE_WALL_PATTERNS|quota exceeded"
 
-# first_wall_line: print the first line of stdin matching a usage-wall
-# signature, or nothing. Streams, so an arbitrarily large step log costs one
-# pass and no memory.
-first_wall_line() {
-  grep -m1 -i -E -- "$USAGE_WALL_PATTERNS" 2>/dev/null || true
+# A harness that hit the wall does not merely print about it - it dies. These are
+# the non-zero-exit lines the harness itself emits on the way out, and a wall
+# verdict requires one of them in the same evidence as the phrasing above.
+# Deliberately concrete rather than descriptive: a phrase like "non-zero exit" is
+# what this repository's own prose says ABOUT the harness, while `exit status 1`
+# is what the harness itself prints, and only the second can corroborate.
+USAGE_WALL_EXIT_PATTERNS='exit(ed with)? status [1-9]'
+USAGE_WALL_EXIT_PATTERNS="$USAGE_WALL_EXIT_PATTERNS|exit(ed with)? code [1-9]"
+
+# first_wall_line: print the first usage-wall signature line in <evidence>, but
+# ONLY when that evidence also carries the harness's own non-zero exit on a
+# different line. Both evidence paths go through here, so neither the endpoint
+# capture nor a step log can produce a lone-phrase wall.
+#
+# Why corroboration, preserved because it is not obvious: this detector's
+# evidence sources - a pane capture and a pipeline step log - can contain THIS
+# REPOSITORY'S OWN DOCUMENTATION OF THE DETECTOR, because the recovery skill and
+# the verification record quote the vendor phrasings verbatim, and the digest
+# runs `diagnose --endpoint-only` automatically for every endpoint it cannot read
+# as alive. A crewmate merely reading or working on this surface would otherwise
+# get `wall source=endpoint` plus "this is a provider usage limit, not a crash -
+# the work is intact" on a task that genuinely failed.
+#
+# The two error directions are not symmetric. A MISSED wall is self-correcting:
+# whoever is reading carries on and finds the real cause. A FALSE wall asserts
+# the work is intact and STOPS the reading. A confident wrong verdict is strictly
+# worse than an honest unknown, so only the POSITIVE is tightened here; the
+# negative stays `no-signature`, which is explicitly not proof the work crashed.
+#
+# It costs no true positive on record: every real detection - the 2026-08-23
+# review and test step logs, and the 2026-08-27 run that stranded this very
+# surface - carries the harness's non-zero exit on its own line right after the
+# limit line. The corroborating line must NOT itself carry a limit phrasing,
+# which is what separates the harness's two emitted lines from a sentence of
+# prose that narrates both facts at once.
+#
+# It is a whole-evidence rule, deliberately not a proximity or window one: a
+# narrowed window trades a real detection for an accident of layout. The residual
+# it therefore does not close is recorded in docs/usage-limit-survivability.md.
+first_wall_line() {  # <evidence>
+  local evidence=${1:-}
+  printf '%s\n' "$evidence" |
+    grep -i -E -- "$USAGE_WALL_EXIT_PATTERNS" 2>/dev/null |
+    grep -q -i -v -E -- "$USAGE_WALL_PATTERNS" 2>/dev/null || return 0
+  printf '%s\n' "$evidence" | grep -m1 -i -E -- "$USAGE_WALL_PATTERNS" 2>/dev/null || true
 }
 
 # --- TOON block parsing -----------------------------------------------------
@@ -526,6 +572,7 @@ headroom_build_note() {  # <build-state>
   case "$1" in
     below-floor) printf ' build=below-floor(%s)' "$FM_QUOTA_AXI_MIN" ;;
     unknown) printf ' build=unknown' ;;
+    unavailable) printf ' build=unavailable' ;;
   esac
 }
 
@@ -610,7 +657,7 @@ endpoint_evidence() {  # <meta> <task-id> -> "readable|unreadable\t<line>"
     printf 'unreadable\t\n'
     return 0
   fi
-  line=$(printf '%s\n' "$capture" | first_wall_line)
+  line=$(first_wall_line "$capture")
   printf 'readable\t%s\n' "$line"
 }
 
@@ -810,7 +857,7 @@ cmd_diagnose() {
     if logs=$(fm_nm_run_checked "$wt" "$bound" axi logs --run "$run_id" --step "$step" --full); then
       readable=$((readable + 1))
       checked="${checked:+$checked,}step-log:$step"
-      log_line=$(printf '%s\n' "$logs" | first_wall_line)
+      log_line=$(first_wall_line "$logs")
       if [ -n "$log_line" ]; then
         wall_verdict "$id" "step-log:$step" "$log_line"
         return 0
@@ -820,14 +867,14 @@ cmd_diagnose() {
     fi
     spent=$((spent + $(date +%s) - started))
   done
+  # The first step is always attempted: SCAN_BUDGET and NM_TIMEOUT are both
+  # validated positive and nothing is spent before it, so `readable -eq 0` means
+  # every attempt failed and `unread` is never empty here. Budget truncation
+  # after that shows up as `unscanned`, which is disclosed beside the failure
+  # rather than replacing it.
   if [ "$readable" -eq 0 ]; then
-    if [ -n "$unread" ]; then
-      diagnose_inconclusive "$id" "${checked:-none}" step-log-unreadable \
-        "no step log of pipeline run $run_id could be read (unread: $unread${unscanned:+; unscanned: $unscanned})"
-    else
-      diagnose_inconclusive "$id" "${checked:-none}" scan-budget-exhausted \
-        "the ${SCAN_BUDGET}s scan budget ran out before any step log of pipeline run $run_id was read (unscanned: ${unscanned:-none})"
-    fi
+    diagnose_inconclusive "$id" "${checked:-none}" step-log-unreadable \
+      "no step log of pipeline run $run_id could be read (unread: ${unread:-none}${unscanned:+; unscanned: $unscanned})"
     return 0
   fi
   printf 'USAGE_WALL: %s no-signature checked=%s run=%s%s%s\n' "$id" "$checked" "$run_id" \
@@ -912,13 +959,24 @@ git_fact() {  # <worktree> <branch|head|dirty|unpushed>
   printf '%s' "$v"
 }
 
+# steering_fact: how many steering records this task has, by state. The inbox
+# layout and the record-name rule belong to bin/fm-task-inbox-lib.sh, which
+# declares itself their one owner, so both are asked of it rather than
+# re-derived; a future layout change there then reaches this consumer instead of
+# leaving it quietly reporting "0 acknowledged, 0 still unread" on a recovery
+# record. cmd_resume sources that library, which is why this is safe to call.
 steering_fact() {  # <task-id> <unread|acknowledged>
-  local id=$1 n=0
-  local dir="$STATE/$id.inbox"
+  local id=$1 dir n=0 entry
   case "$2" in
-    unread) n=$(find "$dir" -maxdepth 1 -name '*.msg' -type f 2>/dev/null | grep -c .) || n=0 ;;
-    acknowledged) n=$(find "$dir/handled" -maxdepth 1 -name '*.msg' -type f 2>/dev/null | grep -c .) || n=0 ;;
+    unread) dir=$(fm_task_inbox_dir "$STATE" "$id") ;;
+    acknowledged) dir=$(fm_task_inbox_handled_dir "$STATE" "$id") ;;
+    *) printf '0'; return 0 ;;
   esac
+  for entry in "$dir"/*; do
+    [ -f "$entry" ] || continue
+    fm_task_inbox_seq_of "${entry##*/}" >/dev/null 2>&1 || continue
+    n=$((n + 1))
+  done
   printf '%s' "$n"
 }
 
@@ -934,6 +992,14 @@ cmd_resume() {
     shift
   done
   command -v jq >/dev/null 2>&1 || die "jq is required to read the fleet snapshot" 1
+  # Sourced here rather than at the top of the file: bin/fm-task-inbox-lib.sh
+  # pulls in bin/fm-backend.sh, and only `resume` needs the inbox layout, so the
+  # `headroom` path keeps the backend graph off it exactly as load_backend_lib
+  # intends. One source per invocation, ahead of the record composition, because
+  # steering_fact runs inside command substitutions that a source would not
+  # outlive.
+  # shellcheck source=bin/fm-task-inbox-lib.sh disable=SC1091
+  . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 
   snapshot=$(fm_run_timed "$SNAPSHOT_TIMEOUT" "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json 2>/dev/null)
   rc=$?
@@ -944,7 +1010,11 @@ cmd_resume() {
     || die "the fleet snapshot could not be read (exit $rc); no record was written so the previous one is still readable" 1
 
   mkdir -p "$(dirname "$out")" 2>/dev/null || true
-  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-resume-record.XXXXXX") || die "could not create a temporary file" 1
+  # Staged BESIDE the destination, never in TMPDIR: across a filesystem boundary
+  # `mv` degrades to copy-then-unlink, and a reader during regeneration then sees
+  # a truncated record. A same-directory rename is the only form that keeps the
+  # guarantee below.
+  tmp=$(mktemp "$(dirname "$out")/.fm-resume-record.XXXXXX") || die "could not create a temporary file beside $out" 1
   # A record is published whole or not at all: a half-written record read during
   # a recovery is worse than the previous complete one.
   resume_body "$snapshot" > "$tmp" || { rm -f "$tmp"; die "the record could not be composed" 1; }

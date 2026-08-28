@@ -146,7 +146,7 @@ Nothing here is a merge authorisation: each task keeps the posture recorded on i
 - endpoint: <endpoint-d> (present)
 - local copy: <copy-4>
 - branch: <branch-d> head: 2bf7e9ca uncommitted: 0 unpushed commits: 7
-- pipeline: run=01M10N2BCHBB680G3H0H7YQDSM status=running failed-steps=- custody=pipeline_owned next-action=continue_active_run head=4b2a52db (pipeline-only)
+- pipeline: run=<run> status=running failed-steps=- custody=pipeline_owned next-action=continue_active_run head=4b2a52db (pipeline-only)
   - the pipeline owns this branch; settle custody through its next-action before any new work on it
   - the run holds commits this local copy does not have; rebuilding from the local head would silently redo work that already exists
 - pull request: -

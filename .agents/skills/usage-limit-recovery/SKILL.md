@@ -42,6 +42,7 @@ Tell the captain the headroom and the consequence in plain outcome language, not
 Run `bin/fm-usage-wall.sh diagnose <task-id>`.
 It reads the endpoint's own output and then the failed pipeline steps' logs, and answers `wall`, `no-signature`, or `unknown`.
 `no-signature` means nothing matched in what was readable, and `unknown` means the evidence could not be read; neither is proof that the work crashed, so do not record a failure on either.
+A `wall` needs the vendor's phrasing and the harness's own non-zero exit in the same evidence, because this repository's tracked text quotes those phrasings and a pane showing it must never be read as a wall.
 Read the verdict's own disclosure before trusting a negative: `checked=` names what was actually read, `unread=` names logs that resisted a read, and `unscanned=` names logs the scan's budget never reached.
 A verdict carrying either list is a partial scan, so read those logs yourself before concluding anything.
 

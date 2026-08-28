@@ -35,6 +35,10 @@
 #     (m) a vendor limit line in a failed step's log is a `wall`, which is where
 #         the 2026-08-23 evidence actually was
 #     (n) transient transport wording (HTTP 429, "rate limited") is NOT a wall
+#     (n2) this repository's OWN tracked documentation of this detector - the
+#         recovery skill and the verification record, which quote the vendor
+#         phrasings verbatim - never reads as a wall, while a genuine limit line
+#         beside the harness's own exit still does
 #     (o) a clean read is `no-signature`, an unreadable one is `unknown`, and a
 #         cheap endpoint-only scan that finds nothing is `unknown` rather than a
 #         clean bill of health
@@ -49,6 +53,8 @@
 #     (s) it carries merge posture, branch, head and pipeline custody
 #     (t) two tasks sharing one local copy are named on both rows
 #     (u) a failed generation leaves the previous record intact
+#     (v) a successful publish is a same-directory rename, so it does not depend
+#         on TMPDIR and leaves no staging file behind
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -393,6 +399,40 @@ assert_contains "$OUT" 'source=quota-axi/0.1.1' 'the first version token is the 
 assert_contains "$OUT" 'build=below-floor' 'an old tool version is still caught behind a runtime suffix'
 pass 'headroom floor-checks the tool version, not whatever version came last'
 
+# A DIGIT RUN BEFORE the version is the shape that broke this: with no real
+# anchor the leftmost match starts mid-string and the unmatched prefix survives
+# the substitution, so `node v22 quota-axi 0.1.40` displayed `node v220.1.40` and
+# then failed the integer comparison, labelling a CURRENT build below-floor. Each
+# banner below carries the same current version and must read identically.
+for VERSION_BANNER in 'node v22 quota-axi 0.1.40' 'quota-axi2 0.1.40' '0.1.40'; do
+  CASE="$TMP_ROOT/hr-version-prefix-$(printf '%s' "$VERSION_BANNER" | tr -c 'a-zA-Z0-9' '-')"
+  mkdir -p "$CASE/fakebin"
+  cat > "$CASE/fakebin/quota-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then printf '%s\n' "$VERSION_BANNER"; exit 0; fi
+cat "$CASE/report"
+SH
+  chmod +x "$CASE/fakebin/quota-axi"
+  quota_toon healthy > "$CASE/report"
+  OUT=$(run_headroom "$CASE/fakebin")
+  assert_contains "$OUT" 'source=quota-axi/0.1.40' \
+    "the banner '$VERSION_BANNER' must display the tool version and nothing else"
+  assert_not_contains "$OUT" 'build=below-floor' \
+    "the banner '$VERSION_BANNER' is a current build and must never be labelled below-floor"
+  assert_not_contains "$OUT" 'build=unknown' \
+    "the banner '$VERSION_BANNER' carries a readable version"
+done
+pass 'headroom extracts the first full dotted version token and nothing else'
+
+# `unavailable` is the fourth build state the header declares, and the text
+# summary carries it too rather than leaving it visible only in the JSON.
+CASE="$TMP_ROOT/hr-build-unavailable"; mkdir -p "$CASE/empty"
+OUT=$( PATH="$CASE/empty:/usr/bin:/bin:/usr/sbin:/sbin" "$WALL" headroom 2>&1 )
+assert_contains "$OUT" 'build=unavailable' \
+  'no gauge at all is labelled as such in the text summary, not only in the JSON'
+assert_contains "$OUT" 'reason=quota-axi is not installed' 'the unmeasurable reason is still named'
+pass 'headroom labels an absent gauge build=unavailable in the summary line'
+
 # --- headroom: the reading budget is shared, not per call -------------------
 #
 # The two quota-axi calls used to get a full bound EACH, so one reading's worst
@@ -701,7 +741,8 @@ CASE="$TMP_ROOT/dx-session"; mkdir -p "$CASE"
 make_task "$CASE" sessioncrew
 printf 'idle shell\n' > "$CASE/capture.txt"
 fake_tmux "$CASE_FB" fm-sessioncrew "$CASE/capture.txt"
-printf 'I will start by examining the current state.%s\n' "$SESSION_LIMIT_LINE" > "$CASE/review.log"
+printf 'I will start by examining the current state.%s\nclaude exited pid=91188 error=claude exited: exit status 1: \n' \
+  "$SESSION_LIMIT_LINE" > "$CASE/review.log"
 fake_nm "$CASE_FB" "fm/sessioncrew" RUNSESS failed '    review,failed,0,120' "$CASE/review.log"
 OUT=$(run_wall "$CASE_HOME" "$CASE_FB" diagnose sessioncrew)
 assert_contains "$OUT" 'USAGE_WALL: sessioncrew wall source=step-log:review' \
@@ -723,6 +764,99 @@ assert_contains "$OUT" 'USAGE_WALL: ratecrew no-signature' \
 assert_not_contains "$OUT" 'wall source=' 'a retryable 429 must never be reported as a wall'
 assert_contains "$OUT" 'not proof the work crashed' 'a clean read still refuses to claim a crash'
 pass 'diagnose does not mistake transient throttling for a usage wall'
+
+# --- diagnose: this repository's own documentation is not a wall ------------
+#
+# The evidence sources here are a pane capture and a step log, and BOTH can carry
+# this repository's own tracked documentation OF this detector, because the
+# recovery skill and the verification record quote the vendor phrasings verbatim.
+# The digest runs `diagnose --endpoint-only` for every endpoint it cannot read as
+# alive, so a crewmate reading this surface when their endpoint dies is the
+# concrete path. The fixture is built from the tracked files themselves, so the
+# regression is pinned against the real text rather than a paraphrase of it.
+CASE="$TMP_ROOT/dx-own-docs"; mkdir -p "$CASE"
+make_task "$CASE" docscrew
+grep -h -i -E "hit your (weekly|session) limit" \
+  "$ROOT/.agents/skills/usage-limit-recovery/SKILL.md" \
+  "$ROOT/docs/verification/usage-limits.md" > "$CASE/capture.txt"
+[ -s "$CASE/capture.txt" ] \
+  || fail 'the fixture must be built from this repository real tracked phrasings'
+fake_tmux "$CASE_FB" fm-docscrew "$CASE/capture.txt"
+OUT=$(run_wall "$CASE_HOME" "$CASE_FB" diagnose docscrew --endpoint-only)
+assert_not_contains "$OUT" 'wall source=' \
+  'this repository own documentation of the detector must never read as a wall'
+assert_not_contains "$OUT" 'the work is intact' \
+  'a false wall is the one direction that stops the reading, so it must not be claimed here'
+pass 'diagnose does not read this repository own tracked phrasings as a wall'
+
+# The same text on the step-log path, where the negative is `no-signature`
+# rather than the endpoint-only `unknown`. The negative must stay `no-signature`:
+# corroboration tightens the POSITIVE only, and a miss is still not proof of a
+# crash.
+CASE="$TMP_ROOT/dx-own-docs-log"; mkdir -p "$CASE"
+make_task "$CASE" docslogcrew
+printf 'idle shell\n' > "$CASE/capture.txt"
+fake_tmux "$CASE_FB" fm-docslogcrew "$CASE/capture.txt"
+grep -h -i -E "hit your (weekly|session) limit" \
+  "$ROOT/.agents/skills/usage-limit-recovery/SKILL.md" \
+  "$ROOT/docs/verification/usage-limits.md" > "$CASE/review.log"
+fake_nm "$CASE_FB" "fm/docslogcrew" RUNDOCS failed '    review,failed,0,120' "$CASE/review.log"
+OUT=$(run_wall "$CASE_HOME" "$CASE_FB" diagnose docslogcrew)
+assert_contains "$OUT" 'USAGE_WALL: docslogcrew no-signature' \
+  'the negative on this repository own text is no-signature, never a claim of a crash'
+assert_not_contains "$OUT" 'wall source=' \
+  'a step log quoting this repository own documentation must not read as a wall'
+assert_contains "$OUT" 'not proof the work crashed' \
+  'the negative still refuses to assert that the work crashed'
+pass 'diagnose reports this repository own text as no-signature, not as a wall'
+
+# One sentence narrating BOTH facts at once is what a document does and what a
+# harness does not: the harness prints the limit and then dies, on two lines. So
+# the corroborating exit must be a line that does not itself carry a limit
+# phrasing.
+CASE="$TMP_ROOT/dx-narrated"; mkdir -p "$CASE"
+make_task "$CASE" narratedcrew
+grep -h -i -E "hit your (weekly|session) limit" \
+  "$ROOT/.agents/skills/usage-limit-recovery/SKILL.md" |
+  grep -i -E "exit status [1-9]" > "$CASE/capture.txt"
+[ -s "$CASE/capture.txt" ] \
+  || fail 'the recovery skill must still narrate the limit line and the harness exit in one sentence'
+fake_tmux "$CASE_FB" fm-narratedcrew "$CASE/capture.txt"
+OUT=$(run_wall "$CASE_HOME" "$CASE_FB" diagnose narratedcrew --endpoint-only)
+assert_not_contains "$OUT" 'wall source=' \
+  'a sentence narrating the limit and the exit together is prose, not evidence of a wall'
+pass 'diagnose requires the harness exit on a line of its own, not narrated'
+
+# The whole recovery skill on screen is the realistic shape of that hazard: a
+# crewmate reading the procedure when their own endpoint dies. The digest scans
+# that pane automatically, so the whole tracked file is fed in verbatim.
+CASE="$TMP_ROOT/dx-whole-skill"; mkdir -p "$CASE"
+make_task "$CASE" skillcrew
+cp "$ROOT/.agents/skills/usage-limit-recovery/SKILL.md" "$CASE/capture.txt"
+fake_tmux "$CASE_FB" fm-skillcrew "$CASE/capture.txt"
+OUT=$( PATH="$CASE_FB:$PATH" FM_HOME="$CASE_HOME" FM_USAGE_WALL_CAPTURE_LINES=2000 \
+  "$WALL" diagnose skillcrew --endpoint-only 2>&1 )
+assert_not_contains "$OUT" 'wall source=' \
+  'a pane showing the whole recovery skill must not be read as a usage wall'
+pass 'diagnose does not read the recovery skill on screen as a wall'
+
+# Corroboration must cost no true positive: BOTH observed vendor phrasings, each
+# followed by the harness exit as the harness actually emits it, still read as a
+# wall.
+for LIMIT_CASE in weekly session; do
+  case "$LIMIT_CASE" in
+    weekly) LIMIT_TEXT=$WEEKLY_LIMIT_LINE ;;
+    *) LIMIT_TEXT=$SESSION_LIMIT_LINE ;;
+  esac
+  CASE="$TMP_ROOT/dx-corrob-$LIMIT_CASE"; mkdir -p "$CASE"
+  make_task "$CASE" "corrob$LIMIT_CASE"
+  printf 'building the fix\n%s\nclaude exited: exit status 1\n' "$LIMIT_TEXT" > "$CASE/capture.txt"
+  fake_tmux "$CASE_FB" "fm-corrob$LIMIT_CASE" "$CASE/capture.txt"
+  OUT=$(run_wall "$CASE_HOME" "$CASE_FB" diagnose "corrob$LIMIT_CASE")
+  assert_contains "$OUT" "USAGE_WALL: corrob$LIMIT_CASE wall source=endpoint" \
+    "the $LIMIT_CASE-window phrasing beside the harness exit is still a wall"
+done
+pass 'diagnose still reports a corroborated wall for both observed phrasings'
 
 # --- diagnose: unreadable and cheap-scan negatives are unknown --------------
 
@@ -918,6 +1052,21 @@ assert_contains "$BACK" 'commits this local copy does not have' \
   'the record warns when the pipeline holds commits the local copy lacks'
 pass 'resume generates a durable record that survives the process that wrote it'
 
+# The steering counts, through the layout's declared owner. The fixture asks
+# bin/fm-task-inbox-lib.sh where the records go rather than spelling the paths
+# out, so a layout change there moves both the writer and this reader together
+# instead of leaving the record quietly reporting nothing delivered.
+INBOX=$( . "$ROOT/bin/fm-task-inbox-lib.sh" >/dev/null 2>&1; fm_task_inbox_dir "$CASE_HOME/state" recordcrew )
+HANDLED=$( . "$ROOT/bin/fm-task-inbox-lib.sh" >/dev/null 2>&1; fm_task_inbox_handled_dir "$CASE_HOME/state" recordcrew )
+mkdir -p "$INBOX" "$HANDLED"
+printf 'schema=fm-task-inbox.v1\n--\nstill unread\n' > "$INBOX/001.msg"
+printf 'schema=fm-task-inbox.v1\n--\nalready handled\n' > "$HANDLED/002.msg"
+printf 'bookkeeping\n' > "$INBOX/.ring-state"
+run_wall "$CASE_HOME" "$CASE_FB" resume >/dev/null
+assert_grep 'delivered instructions: 1 acknowledged, 1 still unread' "$RECORD" \
+  'the record counts the steering the worker has and has not acknowledged'
+pass 'resume counts steering records through the inbox layout owner'
+
 # A regenerated record reflects state as it is now, not as it was.
 git -C "$CASE_WT" checkout -q -b fm/recordcrew-moved
 run_wall "$CASE_HOME" "$CASE_FB" resume >/dev/null
@@ -971,6 +1120,27 @@ assert_contains "$OUT" 'no record was written' 'the refusal says the previous re
 assert_grep 'PRIOR RECORD SENTINEL' "$CASE_HOME/state/resume-record.md" \
   'a failed generation must leave the previous record readable'
 pass 'resume refuses rather than replacing a good record with a broken one'
+
+# The publish side of the same guarantee. The record used to be staged in TMPDIR,
+# so on a home and a temporary directory that sit on different filesystems the
+# final `mv` degraded to copy-then-unlink and a reader during regeneration could
+# see a truncated record. Staging BESIDE the destination is what keeps the rename
+# atomic, and pointing TMPDIR somewhere unusable is how that is observable: a
+# publish that still succeeds cannot have staged there.
+CASE="$TMP_ROOT/rs-publish"; mkdir -p "$CASE"
+make_task "$CASE" publishcrew
+printf 'idle shell\n' > "$CASE/capture.txt"
+fake_tmux "$CASE_FB" fm-publishcrew "$CASE/capture.txt"
+OUT=$( PATH="$CASE_FB:$PATH" FM_HOME="$CASE_HOME" TMPDIR="$CASE/no-such-tmpdir" \
+  "$WALL" resume 2>&1 )
+RC=$?
+[ "$RC" -eq 0 ] || fail "resume must publish without depending on TMPDIR: $OUT"
+RECORD="$CASE_HOME/state/resume-record.md"
+assert_grep '## publishcrew' "$RECORD" 'the record published through an unusable TMPDIR is complete'
+assert_grep 'GENERATED from live durable state' "$RECORD" 'the whole record is on disk, not a truncated prefix'
+STRAY=$(find "$CASE_HOME/state" -maxdepth 1 -name '.fm-resume-record.*' | grep -c . || true)
+[ "$STRAY" = 0 ] || fail "the staging file must not survive a successful publish, found $STRAY"
+pass 'resume publishes the record with a same-directory rename'
 
 fi
 

@@ -368,8 +368,30 @@ case "$SESSION_START_WALL_TIMEOUT" in ''|*[!0-9]*|0) SESSION_START_WALL_TIMEOUT=
 # a home holding five or six dead endpoints would otherwise spend a minute and a
 # half before the operator learned anything. When the budget runs out the
 # remaining tasks are reported as unscanned, never folded into a clean result.
-SESSION_START_WALL_BUDGET=${FM_SESSION_START_WALL_BUDGET:-45}
-case "$SESSION_START_WALL_BUDGET" in ''|*[!0-9]*|0) SESSION_START_WALL_BUDGET=45 ;; esac
+# 30s, not 45s, and the reason is which stage pays for the difference. The wall
+# scan is explicitly a FIRST READ rather than a verdict, and the digest already
+# routes an operator to the full `diagnose` for the verdict, so the marginal 15s
+# buys little. The CONTEXT stage carries the captain's preferences and this
+# home's learnings and has NO equivalent pointer, so if a stage is truncated that
+# is the one whose loss cannot be recovered by following a link.
+SESSION_START_WALL_BUDGET=${FM_SESSION_START_WALL_BUDGET:-30}
+case "$SESSION_START_WALL_BUDGET" in ''|*[!0-9]*|0) SESSION_START_WALL_BUDGET=30 ;; esac
+# The two bounds above are individually sensible and SHARE an outer bound with
+# every other stage of this digest, and that shared bound was what nobody
+# checked: 20s + 45s put the fleet-state stage alone at more than half of the
+# 120s FM_SESSION_START_TIMEOUT, in exactly the post-wall state the stage exists
+# for. The relationship is asserted here rather than reasoned about in prose, so
+# a future edit to any of the three surfaces the disproportion instead of hiding
+# it. It reports; it does not clamp - firstmate and the captain decide, and an
+# operator who deliberately widens a bound still gets the bound they asked for.
+SESSION_START_FLEET_BOUND_WORST=$((SESSION_START_HEADROOM_TIMEOUT + SESSION_START_WALL_BUDGET))
+SESSION_START_OUTER_BOUND=${FM_SESSION_START_TIMEOUT:-120}
+case "$SESSION_START_OUTER_BOUND" in ''|*[!0-9]*|0) SESSION_START_OUTER_BOUND=120 ;; esac
+# Half the outer bound is the share. One stage of eight taking more than that
+# leaves the rest of the digest unable to finish, and truncation costs the stages
+# that have no pointer to recover from.
+SESSION_START_FLEET_BOUND_FITS=1
+[ $((SESSION_START_FLEET_BOUND_WORST * 2)) -le "$SESSION_START_OUTER_BOUND" ] || SESSION_START_FLEET_BOUND_FITS=0
 
 RULE='================================================================================'
 SUBRULE='--------------------------------------------------------------------------------'
@@ -832,6 +854,12 @@ print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 # account inside the same minute. One bounded local gauge read; the command owns
 # every unmeasurable case and never reports an unread gauge as healthy.
 subsection "Headroom before dispatch"
+if [ "$SESSION_START_FLEET_BOUND_FITS" -eq 0 ]; then
+  printf 'FLEET_STATE_BOUNDS: this section may spend %ss (headroom %ss + wall scan %ss) of the %ss session-start bound.\n' \
+    "$SESSION_START_FLEET_BOUND_WORST" "$SESSION_START_HEADROOM_TIMEOUT" \
+    "$SESSION_START_WALL_BUDGET" "$SESSION_START_OUTER_BOUND"
+  printf 'FLEET_STATE_BOUNDS_NOTE: that is over half the whole digest, so later stages may be truncated - lower FM_SESSION_START_HEADROOM_TIMEOUT or FM_SESSION_START_WALL_BUDGET, or raise FM_SESSION_START_TIMEOUT.\n'
+fi
 # The gauge's own reading budget is defaulted strictly BELOW this bound. An inner
 # bound equal to the outer one is a false-unmeasurable generator: this bound
 # lands first, so a gauge that was about to answer gets reported as one that
