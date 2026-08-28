@@ -187,6 +187,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_DAEMON_DIR/fm-classify-lib.sh"
 
+# shellcheck source=bin/fm-display-name-lib.sh
+. "$FM_DAEMON_DIR/fm-display-name-lib.sh"
+
 # Supervisor-pane discovery (FM_SUPERVISOR_TARGET_DEFAULT,
 # FM_SUPERVISOR_BACKEND_DEFAULT, discover_supervisor_target,
 # discover_supervisor_backend). Shared with the script-owned away launcher
@@ -354,20 +357,37 @@ _collapse_newlines() {  # <text>
 # field for "self" is informational (logged); for "escalate" it is the pre-read
 # summary firstmate would otherwise have to re-read.
 
+daemon_task_human_ref() {  # <task-id> <state>
+  local task=$1 state=$2 display_name
+  if [ -f "$state/$task.meta" ]; then
+    display_name=$(fm_display_name_for_meta "$state/$task.meta" "$task")
+  else
+    display_name=$(fm_display_name_fallback "$task")
+  fi
+  printf '%s [task %s]' "$display_name" "$task"
+}
+
+daemon_window_human_ref() {  # <window> <state>
+  local win=$1 state=$2 task
+  task=$(window_to_task "$win" "$state")
+  [ -n "$task" ] || { printf '%s' "$win"; return; }
+  printf '%s; endpoint %s' "$(daemon_task_human_ref "$task" "$state")" "$win"
+}
+
 classify_signal() {  # <reason-after-colon> <state>
   local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen
   for f in $reason; do
     [ -e "$f" ] || continue
     last=$(last_status_line "$f")
     [ -n "$last" ] || continue
-    distilled="${distilled}$(basename "$f"): ${last} | "
+    task=$(basename "$f"); task="${task%.status}"
+    distilled="${distilled}$(daemon_task_human_ref "$task" "$state"): ${last} | "
     status_is_captain_relevant "$last" || continue
     rel=1
     # Dedupe against the catch-all scan: if this status was already escalated
     # (seen marker matches), skip escalating again. The seen marker is the
     # single source of truth shared between the per-wake signal path and the
     # heartbeat scan. all_seen stays 1 only if EVERY relevant file was seen.
-    task=$(basename "$f"); task="${task%.status}"
     seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
     [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
   done
@@ -410,7 +430,7 @@ classify_stale() {  # <window> <state>
     if ! status_is_terminal_verb "$last"; then
       case "$(status_line_verb "$last")" in
         working|resolved|captain-held)
-          printf 'self|transient stale (%s): %s' "$win" "$last"
+          printf 'self|transient stale (%s): %s' "$(daemon_window_human_ref "$win" "$state")" "$last"
           return
           ;;
       esac
@@ -422,12 +442,12 @@ classify_stale() {  # <window> <state>
       printf 'self|stale + terminal (already escalated by signal): %s' "$last"
       return
     fi
-    printf 'escalate|stale + terminal status: %s' "$last"
+    printf 'escalate|stale + terminal status for %s: %s' "$(daemon_window_human_ref "$win" "$state")" "$last"
     return
   fi
   # Non-terminal (or no status): defer to the persistence recheck. The caller
   # records/refreshes the stale marker so housekeeping can age it.
-  printf 'self|transient stale (%s): %s' "$win" "${last:-no status}"
+  printf 'self|transient stale (%s): %s' "$(daemon_window_human_ref "$win" "$state")" "${last:-no status}"
 }
 
 classify_check() {  # <full reason>  — check scripts print only when firstmate should wake
@@ -1060,7 +1080,7 @@ housekeeping() {  # <state>
     case "$?" in
       0) rm -f "$marker" ;;
       2) rm -f "$marker" ;;
-      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
+      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $(daemon_window_human_ref "$win" "$state")"
          stale_marker_remove "$win" "$state" ;;
     esac
   done
@@ -1112,13 +1132,13 @@ housekeeping() {  # <state>
       *)
         last=$(last_status_line "$state/$task.status")
         if [ -n "$last" ] && status_is_captain_held "$last"; then
-          pause_item="captain-held ${age}s (awaiting the captain, answer the held decision or release the hold): $win"
+          pause_item="captain-held ${age}s (awaiting the captain, answer the held decision or release the hold): $(daemon_window_human_ref "$win" "$state")"
           pause_items="$pause_items$pause_item"$'\n'
           printf -v pause_records '%sR\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$pause_records" "$backoff_file" "$(( backoff_streak + 1 ))" "$backoff_sig" \
             "$worker_condition" "$marker" "$now"
         elif [ -n "$last" ] && status_is_paused "$last"; then
-          pause_item="paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
+          pause_item="paused ${age}s (awaiting external, recheck whether the wait still holds): $(daemon_window_human_ref "$win" "$state")"
           pause_items="$pause_items$pause_item"$'\n'
           printf -v pause_records '%sR\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$pause_records" "$backoff_file" "$(( backoff_streak + 1 ))" "$backoff_sig" \
@@ -1142,7 +1162,7 @@ housekeeping() {  # <state>
       [ -n "$f" ] || continue
       seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
       [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] && continue
-      escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
+      escalate_add "$state" "$(daemon_task_human_ref "$task" "$state"): $last (catch-all scan)"
       mark_status_seen "$state" "$task" "$last"
     done < <(scan_captain_relevant_statuses "$state")
   fi
@@ -1288,7 +1308,7 @@ handle_wake() {  # <reason> <state>
               decision=$(classify_stale "$arg" "$state")
               case "$stale_detail" in
                 idle\ *s,\ possible\ wedge,\ escalation\ *)
-                  decision="escalate|${reason#stale: }" ;;
+                  decision="escalate|$(daemon_window_human_ref "$arg" "$state") (${stale_detail}" ;;
               esac ;;
     check:*)  decision=$(classify_check "$reason") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;

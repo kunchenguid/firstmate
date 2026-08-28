@@ -32,9 +32,9 @@
 # Compatibility contract: a task's meta may omit `backend=`; every reader here
 # treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
 # `backend=tmux` for a default-backend task, so existing and newly spawned
-# default-path metas stay byte-identical. Only a task spawned on a non-tmux
-# spawn-capable backend, currently experimental herdr, zellij, orca, or cmux,
-# carries an explicit `backend=` line.
+# default-path metas retain the same absent backend field. Only a task spawned
+# on a non-tmux spawn-capable backend, currently experimental herdr, zellij,
+# orca, or cmux, carries an explicit `backend=` line.
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
 # backend's supervision surface is conceptually an EVENT SOURCE - it produces
@@ -53,6 +53,8 @@ FM_BACKEND_DEFAULT_ROOT="$(cd "$FM_BACKEND_LIB_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_DEFAULT_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# shellcheck source=bin/fm-display-name-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-display-name-lib.sh"
 
 # Verified backend adapters. Extend only after a backend gets its own
 # bin/backends/<name>.sh and empirical verification, mirroring AGENTS.md
@@ -690,6 +692,28 @@ fm_backend_resolve_selector() {  # <raw-target> <state-dir>
 # rather than hand-writing `case "$backend" in tmux) fm_backend_tmux_x ;; esac`
 # at every call site. Each verified backend adds its own arm here, without
 # changing call sites.
+
+# fm_backend_present_task: best-effort human presentation after a task endpoint
+# is already created and bound by machine identity. The shared display-name
+# library validates the one cross-backend contract; adapters only render it and
+# never participate in selector resolution, ownership, recovery, or cleanup.
+# Tmux has an independent pane-title field and can render safely. Herdr reports
+# display-only metadata on the exact pane and, when projected, renders the name
+# in its exact-ID-bound workspace and updates its private projection journal;
+# its ordinary task tab stays machine-labeled. Zellij and
+# cmux titles currently participate in endpoint verification, while Orca names its worktree/terminal
+# at creation, so those adapters deliberately keep machine labels and no-op.
+fm_backend_present_task() {  # <backend> <target> <display-name> [expected-machine-label]
+  local backend=$1 target=$2 display_name=$3
+  fm_display_name_validate "$display_name" >/dev/null 2>&1 || return 1
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_present_task "$target" "$display_name" ;;
+    herdr) fm_backend_herdr_present_task "$target" "$display_name" "${4:-}" ;;
+    zellij|orca|cmux) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 # fm_backend_capture: bounded plain-text session capture.
 fm_backend_capture() {  # <backend> <target> <lines> [expected-label]

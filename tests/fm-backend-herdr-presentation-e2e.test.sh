@@ -149,14 +149,14 @@ else
 fi
 if [ "$status" -eq 0 ] && [ "$mutation" = workspace-create ]; then
   case "$label" in
-    $'└ active-seeded · p:'*)
+    $'└ Active · Seeded · p:'*)
       mkdir -p "$ACTIVE_SEEDED_CONTROL"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id')" > "$ACTIVE_SEEDED_CONTROL/workspace"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.tab.tab_id')" > "$ACTIVE_SEEDED_CONTROL/seeded-tab"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$ACTIVE_SEEDED_CONTROL/seeded-pane"
       ;;
-    $'└ abort-a · p:'*|$'└ abort-b · p:'*)
-      task=${label#$'└ '}; task=${task%% *}
+    $'└ Abort · A · p:'*|$'└ Abort · B · p:'*)
+      case "$label" in *'Abort · A'*) task=abort-a ;; *) task=abort-b ;; esac
       mkdir -p "$POST_CREATE_ABORT_CONTROL/$task"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id')" > "$POST_CREATE_ABORT_CONTROL/$task/workspace"
       ;;
@@ -262,7 +262,7 @@ export FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAKEBIN/herdr-workspace-mover"
 herdr_forget_inherited_pane
 
 HERDR_LAB_SESSION=$(PATH="$HERDR_ORIGINAL_PATH" \
-  "$HERDR_LAB_HELPER" name fm-herdr-presentation-projection)
+  "$HERDR_LAB_HELPER" name firstmate-readable-worker-labels-v1)
 export HERDR_SESSION="$HERDR_LAB_SESSION" HERDR_LAB_SESSION
 LAB_READY=0
 RECORDED_WORKTREES=""
@@ -382,10 +382,17 @@ make_project() {  # <dir>
   git -C "$dir" remote add origin "file://$dir.origin.git"
 }
 
-spawn_task() {  # <id> <home> <project>
+spawn_task() {  # <id> <home> <project> [spawn-args...]
   local id=$1 home=$2 project=$3
+  shift 3
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'sleep 120'" --mode no-mistakes --yolo off --backend herdr
+    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'sleep 900'" --mode no-mistakes --yolo off --backend herdr "$@"
+}
+
+relaunch_task() {  # <id> <home> <display-name>
+  FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$2" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-spawn.sh" "$1" --relaunch --display-name "$3" \
+      --harness "sh -c 'sleep 900'"
 }
 
 finish_concurrent_spawn() {  # <id> <status> <stdout> <stderr>
@@ -410,7 +417,7 @@ finish_concurrent_expected_abort() {  # <id> <status> <stdout> <stderr>
 spawn_secondmate_task() {
   local id=$1 home=$2
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$home" "sh -c 'sleep 120'" --secondmate --backend herdr
+    "$ROOT/bin/fm-spawn.sh" "$id" "$home" "sh -c 'sleep 900'" --secondmate --backend herdr
 }
 
 teardown_task() {  # <id> <home>
@@ -520,7 +527,7 @@ FIRSTMATE_WSID=$(grep '^herdr_workspace_id=' "$ANCHOR_META" | cut -d= -f2-)
 : > "$TREEHOUSE_CALL_LOG"
 OFF_HERDR_START=$(log_line_count)
 OFF_MOVE_START=$(wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]')
-spawn_task shape "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/off.out" 2> "$TMP_ROOT/off.err" \
+spawn_task shape "$HOME_DIR" "$PROJECT_DIR" --display-name "Backend · CRM Core" > "$TMP_ROOT/off.out" 2> "$TMP_ROOT/off.err" \
   || fail "opted-out spawn failed: $(cat "$TMP_ROOT/off.err")"
 OFF_HERDR_END=$(log_line_count)
 OFF_META="$TMP_ROOT/off.meta"
@@ -567,7 +574,7 @@ if [ "$FLOOR_VERDICT" = 0 ]; then
   [ -n "$DEFAULT_ON_WSID" ] && [ "$DEFAULT_ON_WSID" != "$FIRSTMATE_WSID" ] \
     || fail "an unconfigured home reused the flat firstmate workspace instead of projecting"
   DEFAULT_ON_LABEL=$(lab workspace get "$DEFAULT_ON_WSID" | jq -r '.result.workspace.label // empty')
-  [ "$DEFAULT_ON_LABEL" = "└ default-on · p:$DEFAULT_ON_TOKEN" ] \
+  [ "$DEFAULT_ON_LABEL" = "└ Default · On · p:$DEFAULT_ON_TOKEN" ] \
     || fail "default-on projection used an unexpected workspace label: $DEFAULT_ON_LABEL"
   pass "real Herdr lab: a home that configured nothing is projected by default on herdr $FLOOR_VERSION"
 else
@@ -607,7 +614,7 @@ assert_focus_is "$CAPTAIN_FOCUS" "focused secondmate fixture"
 # so no home that had already enabled the projection is turned off by the default.
 : > "$HOME_DIR/config/herdr-presentation-spaces"
 SHAPE_FOCUS_AUDIT_START=$(focus_audit_line_count)
-spawn_task shape "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/on.out" 2> "$TMP_ROOT/on.err" \
+spawn_task shape "$HOME_DIR" "$PROJECT_DIR" --display-name "Backend · CRM Core" > "$TMP_ROOT/on.out" 2> "$TMP_ROOT/on.err" \
   || fail "projected spawn failed: $(cat "$TMP_ROOT/on.err")"
 assert_focus_is "$CAPTAIN_FOCUS" "projected spawn"
 assert_raw_presentation_mutations_preserved_since "$SHAPE_FOCUS_AUDIT_START" "projected spawn"
@@ -625,8 +632,9 @@ PROJECTED_TAB=$(grep '^herdr_tab_id=' "$ON_META" | cut -d= -f2-)
 PROJECTED_PANE=$(grep '^herdr_pane_id=' "$ON_META" | cut -d= -f2-)
 PROJECTED_INFO=$(lab workspace get "$PROJECTED_WSID") || fail "could not inspect the projected workspace"
 PROJECTED_LABEL=$(printf '%s' "$PROJECTED_INFO" | jq -r '.result.workspace.label // empty')
-[ "$PROJECTED_LABEL" = "└ shape · p:$TOKEN" ] \
-  || fail "projected workspace label did not use the corner format with full token: $PROJECTED_LABEL"
+[ "$PROJECTED_LABEL" = "└ Backend · CRM Core · p:$TOKEN" ] \
+  || fail "projected workspace label did not use the explicit display name with full token: $PROJECTED_LABEL"
+pass "real Herdr lab: an explicit human display name renders while the task tab and endpoint stay machine-bound"
 PROJECTED_TABS=$(lab tab list --workspace "$PROJECTED_WSID")
 PROJECTED_PANES=$(lab pane list --workspace "$PROJECTED_WSID")
 [ "$(printf '%s' "$PROJECTED_TABS" | jq -r '.result.tabs | length')" = 1 ] \
@@ -848,8 +856,8 @@ grep -F "did not yield an isolated worktree" "$TMP_ROOT/abort-b.err" >/dev/null 
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
 ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
-  $1 == "workspace-create" && $4 ~ /^└ abort-a · p:/ { print "create-a" }
-  $1 == "workspace-create" && $4 ~ /^└ abort-b · p:/ { print "create-b" }
+  $1 == "workspace-create" && $4 ~ /^└ Abort · A · p:/ { print "create-a" }
+  $1 == "workspace-create" && $4 ~ /^└ Abort · B · p:/ { print "create-b" }
   $1 == "pane-close" && $4 == a { print "close-a" }
   $1 == "pane-close" && $4 == b { print "close-b" }
 ')
@@ -1057,12 +1065,12 @@ A1_LABEL=$(lab workspace get "$(grep '^herdr_workspace_id=' "$SECOND_HOME_A/stat
 A2_LABEL=$(lab workspace get "$(grep '^herdr_workspace_id=' "$SECOND_HOME_A/state/a2.meta" | cut -d= -f2-)" | jq -r '.result.workspace.label')
 B1_LABEL=$(lab workspace get "$(grep '^herdr_workspace_id=' "$SECOND_HOME_B/state/b1.meta" | cut -d= -f2-)" | jq -r '.result.workspace.label')
 B2_LABEL=$(lab workspace get "$(grep '^herdr_workspace_id=' "$SECOND_HOME_B/state/b2.meta" | cut -d= -f2-)" | jq -r '.result.workspace.label')
-case "$P1_LABEL" in $'└ p1 · p:'*) ;; *) fail "primary p1 label wrong: $P1_LABEL" ;; esac
-case "$P2_LABEL" in $'└ p2 · p:'*) ;; *) fail "primary p2 label wrong: $P2_LABEL" ;; esac
-case "$A1_LABEL" in $'└ a1 · p:'*) ;; *) fail "secondmate A a1 label wrong: $A1_LABEL" ;; esac
-case "$A2_LABEL" in $'└ a2 · p:'*) ;; *) fail "secondmate A a2 label wrong: $A2_LABEL" ;; esac
-case "$B1_LABEL" in $'└ b1 · p:'*) ;; *) fail "secondmate B b1 label wrong: $B1_LABEL" ;; esac
-case "$B2_LABEL" in $'└ b2 · p:'*) ;; *) fail "secondmate B b2 label wrong: $B2_LABEL" ;; esac
+case "$P1_LABEL" in $'└ Task · p:'*) ;; *) fail "primary p1 label wrong: $P1_LABEL" ;; esac
+case "$P2_LABEL" in $'└ Task · p:'*) ;; *) fail "primary p2 label wrong: $P2_LABEL" ;; esac
+case "$A1_LABEL" in $'└ Task · p:'*) ;; *) fail "secondmate A a1 label wrong: $A1_LABEL" ;; esac
+case "$A2_LABEL" in $'└ Task · p:'*) ;; *) fail "secondmate A a2 label wrong: $A2_LABEL" ;; esac
+case "$B1_LABEL" in $'└ Task · p:'*) ;; *) fail "secondmate B b1 label wrong: $B1_LABEL" ;; esac
+case "$B2_LABEL" in $'└ Task · p:'*) ;; *) fail "secondmate B b2 label wrong: $B2_LABEL" ;; esac
 
 MULTI_LIST=$(lab workspace list) || fail "could not list multi-home topology"
 MULTI_LABELS=$(printf '%s' "$MULTI_LIST" | jq -r '
@@ -1114,9 +1122,9 @@ printf '%s' "$CROSS_LIST" | jq -e '
 PCW_LABEL=$(lab workspace get "$(grep '^herdr_workspace_id=' "$HOME_DIR/state/pcw.meta" | cut -d= -f2-)" | jq -r '.result.workspace.label')
 ACW_LABEL=$(lab workspace get "$(grep '^herdr_workspace_id=' "$SECOND_HOME_A/state/acw.meta" | cut -d= -f2-)" | jq -r '.result.workspace.label')
 BCW_LABEL=$(lab workspace get "$(grep '^herdr_workspace_id=' "$SECOND_HOME_B/state/bcw.meta" | cut -d= -f2-)" | jq -r '.result.workspace.label')
-case "$PCW_LABEL" in $'└ pcw · p:'*|firstmate) ;; *) fail "cross-home primary label wrong: $PCW_LABEL" ;; esac
-case "$ACW_LABEL" in $'└ acw · p:'*|2ndmate-alpha) ;; *) fail "cross-home A label wrong: $ACW_LABEL" ;; esac
-case "$BCW_LABEL" in $'└ bcw · p:'*|2ndmate-bravo) ;; *) fail "cross-home B label wrong: $BCW_LABEL" ;; esac
+case "$PCW_LABEL" in $'└ Pcw · p:'*|firstmate) ;; *) fail "cross-home primary label wrong: $PCW_LABEL" ;; esac
+case "$ACW_LABEL" in $'└ Acw · p:'*|2ndmate-alpha) ;; *) fail "cross-home A label wrong: $ACW_LABEL" ;; esac
+case "$BCW_LABEL" in $'└ Bcw · p:'*|2ndmate-bravo) ;; *) fail "cross-home B label wrong: $BCW_LABEL" ;; esac
 pass "real Herdr lab: concurrent primary/A/B spawns preserve parent order and exact focus"
 
 # Hold the shared session lock from a different home and force flat fallback.
@@ -1164,7 +1172,11 @@ pass "real Herdr lab: session lock contention from a secondmate home falls back 
 # Exercise both the leading fm- identity style seen in Hi Bit work and the
 # project-name identity style used by Wheelhouse work.
 for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
-  spawn_task "$RESTART_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-first.out" 2> "$TMP_ROOT/$RESTART_ID-first.err" \
+  RESTART_DISPLAY_ARGS=()
+  if [ "$RESTART_ID" = fm-hibit-resume-r1 ]; then
+    RESTART_DISPLAY_ARGS=(--display-name 'Hi Bit · Resume')
+  fi
+  spawn_task "$RESTART_ID" "$HOME_DIR" "$PROJECT_DIR" "${RESTART_DISPLAY_ARGS[@]}" > "$TMP_ROOT/$RESTART_ID-first.out" 2> "$TMP_ROOT/$RESTART_ID-first.err" \
     || fail "$RESTART_ID fixture's projected spawn failed: $(cat "$TMP_ROOT/$RESTART_ID-first.err")"
   RESTART_META="$HOME_DIR/state/$RESTART_ID.meta"
   OLD_RESTART_WT=$(remember_meta_worktree "$RESTART_META")
@@ -1173,10 +1185,10 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   OLD_RESTART_LABEL=$(lab workspace get "$OLD_RESTART_WSID" | jq -r '.result.workspace.label')
   [ "$(grep '^version=' "$HOME_DIR/state/$RESTART_ID.herdr-presentation")" = version=2 ] \
     || fail "$RESTART_ID fresh projection did not publish an exact restart binding"
-  EXPECTED_CONCISE=${RESTART_ID#fm-}
+  EXPECTED_DISPLAY=$(grep '^display_name=' "$RESTART_META" | cut -d= -f2-)
   case "$OLD_RESTART_LABEL" in
-    "└ $EXPECTED_CONCISE · p:"*) ;;
-    *) fail "$RESTART_ID fresh projection label did not apply concise prefix handling: $OLD_RESTART_LABEL" ;;
+    "└ $EXPECTED_DISPLAY · p:"*) ;;
+    *) fail "$RESTART_ID fresh projection label did not use its persisted display name: $OLD_RESTART_LABEL" ;;
   esac
   PATH="$HERDR_ORIGINAL_PATH" \
     "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
@@ -1199,8 +1211,15 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
     || fail "$RESTART_ID reclaim flattened into a different workspace"
   [ "$NEW_RESTART_PANE" != "$OLD_RESTART_PANE" ] \
     || fail "$RESTART_ID reclaim reused the old husk pane"
-  [ "$(lab workspace get "$NEW_RESTART_WSID" | jq -r '.result.workspace.label')" = "$OLD_RESTART_LABEL" ] \
-    || fail "$RESTART_ID reclaim renamed or replaced the projected workspace"
+  NEW_RESTART_LABEL=$(lab workspace get "$NEW_RESTART_WSID" | jq -r '.result.workspace.label')
+  case "$NEW_RESTART_LABEL" in
+    "└ $EXPECTED_DISPLAY · p:"*) ;;
+    *) fail "$RESTART_ID restart did not preserve the exact projected workspace label: $NEW_RESTART_LABEL" ;;
+  esac
+  [ "$(grep '^display_name=' "$RESTART_META" | cut -d= -f2-)" = "$EXPECTED_DISPLAY" ] \
+    || fail "$RESTART_ID restart did not preserve its persisted display name"
+  [ "$(grep '^workspace_label=' "$HOME_DIR/state/$RESTART_ID.herdr-presentation" | cut -d= -f2-)" = "$NEW_RESTART_LABEL" ] \
+    || fail "$RESTART_ID relaunch did not update the exact projection journal label"
   if lab pane get "$OLD_RESTART_PANE" >/dev/null 2>&1; then
     fail "$RESTART_ID reclaim did not close the exact old husk pane"
   fi
@@ -1225,12 +1244,51 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
     [ "$NEW_RESTART_PANE" != "$PRIOR_RESTART_PANE" ] \
       || fail "$RESTART_ID repeated reclaim reused the prior husk pane"
     "$REAL_TREEHOUSE" return --force "$PRIOR_RESTART_WT" >/dev/null 2>&1 || true
+
+    PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
+      || fail "could not stop the isolated session for explicit relaunch"
+    PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
+      || fail "could not reprovision the isolated session for explicit relaunch"
+    RELAUNCH_PANE=$NEW_RESTART_PANE
+    lab pane send-text "$RELAUNCH_PANE" "cd '$NEW_RESTART_WT'" >/dev/null \
+      || fail "could not restore the relaunched pane to its recorded worktree"
+    lab pane send-keys "$RELAUNCH_PANE" enter >/dev/null \
+      || fail "could not submit the recorded-worktree restore command"
+    RELAUNCH_CWD=
+    for _ in {1..50}; do
+      RELAUNCH_CWD=$(lab pane get "$RELAUNCH_PANE" | jq -r '.result.pane.foreground_cwd // empty')
+      [ "$RELAUNCH_CWD" != "$NEW_RESTART_WT" ] || break
+      sleep 0.1
+    done
+    [ "$RELAUNCH_CWD" = "$NEW_RESTART_WT" ] \
+      || fail "reprovisioned relaunch pane did not return to its recorded worktree"
+    relaunch_task "$RESTART_ID" "$HOME_DIR" 'Hi Bit · Relaunch' > "$TMP_ROOT/$RESTART_ID-explicit-relaunch.out" 2> "$TMP_ROOT/$RESTART_ID-explicit-relaunch.err" \
+      || fail "$RESTART_ID explicit relaunch failed: $(cat "$TMP_ROOT/$RESTART_ID-explicit-relaunch.err")"
+    [ "$(grep '^herdr_pane_id=' "$RESTART_META" | cut -d= -f2-)" = "$RELAUNCH_PANE" ] \
+      || fail "$RESTART_ID explicit relaunch changed its machine pane"
+    RELAUNCH_LABEL=$(lab workspace get "$NEW_RESTART_WSID" | jq -r '.result.workspace.label')
+    case "$RELAUNCH_LABEL" in "└ Hi Bit · Relaunch · p:"*) ;; *) fail "$RESTART_ID explicit relaunch left stale Herdr presentation: $RELAUNCH_LABEL" ;; esac
+    [ "$(grep '^workspace_label=' "$HOME_DIR/state/$RESTART_ID.herdr-presentation" | cut -d= -f2-)" = "$RELAUNCH_LABEL" ] \
+      || fail "$RESTART_ID explicit relaunch left a stale presentation journal"
   fi
 
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/backends/herdr.sh"
+  RESTART_SESSION=$(grep '^herdr_session=' "$RESTART_META" | cut -d= -f2-)
+  RESTART_WORKSPACE=$(grep '^herdr_workspace_id=' "$RESTART_META" | cut -d= -f2-)
+  RESTART_META_PANE=$(grep '^herdr_pane_id=' "$RESTART_META" | cut -d= -f2-)
+  RESTART_TARGET=$(grep '^window=' "$RESTART_META" | cut -d= -f2-)
+  [ "$RESTART_TARGET" = "$RESTART_SESSION:$RESTART_META_PANE" ] \
+    || fail "$RESTART_ID relaunch changed its exact machine target: $RESTART_TARGET != $RESTART_SESSION:$RESTART_META_PANE"
+  if ! FM_HOME="$HOME_DIR" fm_backend_herdr_projection_endpoint_matches_journal \
+      "$RESTART_SESSION" "$RESTART_WORKSPACE" \
+      "$HOME_DIR/state/$RESTART_ID.herdr-presentation" "$RESTART_ID"; then
+    fail "$RESTART_ID display relaunch left an endpoint that its exact cleanup correlator cannot verify"
+  fi
   teardown_task "$RESTART_ID" "$HOME_DIR" > "$TMP_ROOT/$RESTART_ID-teardown.out" 2> "$TMP_ROOT/$RESTART_ID-teardown.err" \
     || fail "$RESTART_ID teardown after reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-teardown.err")"
   [ ! -e "$HOME_DIR/state/$RESTART_ID.herdr-presentation" ] \
-    || fail "$RESTART_ID exact reclaimed teardown did not retire its journal"
+    || fail "$RESTART_ID exact reclaimed teardown did not retire its journal: $(cat "$TMP_ROOT/$RESTART_ID-teardown.err")"
   "$REAL_TREEHOUSE" return --force "$OLD_RESTART_WT" >/dev/null 2>&1 || true
   "$REAL_TREEHOUSE" return --force "$NEW_RESTART_WT" >/dev/null 2>&1 || true
 done
@@ -1344,6 +1402,12 @@ remember_meta_worktree "$HOME_DIR/state/post-legacy.meta" >/dev/null
 lab tab get "$FLAT_TAB_ID" >/dev/null 2>&1 \
   || fail "correction removed the seeded flat secondmate child tab"
 pass "real Herdr lab: legacy projection labels and flat secondmate tabs are left unmigrated"
+
+# The restart/recovery fixtures above may restore any persisted tab as active.
+# Re-establish the captain fixture so this cleanup test deterministically starts with every worker non-focused.
+lab tab focus "$SECOND_TWO_TAB" >/dev/null \
+  || fail "could not restore the captain tab before multi-home teardown"
+assert_focus_is "$CAPTAIN_FOCUS" "multi-home teardown setup"
 
 # Teardown multi-home projected tasks by exact pane only.
 for META_HOME_PAIR in \

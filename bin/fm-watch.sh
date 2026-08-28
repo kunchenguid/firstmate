@@ -15,10 +15,17 @@
 # through state/.paused-recheck-publish).
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
-#   signal: <file>...      status/turn-end signals, surfaced when a newly changed
-#                          status has a captain-relevant verb or is a secondmate's
-#                          parent-directed reply, unless afk is active
-#   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
+#   signal: <display-name> [task <id>; source <file>]...
+#                          normal-mode status/turn-end signals show validated
+#                          display names with exact task ids and source paths when
+#                          newly changed status has a captain-relevant verb or is a
+#                          secondmate's parent-directed reply; away-mode keeps the
+#                          undecorated source-file handoff
+#   stale: <display-name> [endpoint <window>]
+#                          a normal-mode human wake shows the validated display name
+#                          while retaining the exact routing endpoint; away-mode
+#                          handoff remains the undecorated machine window. A
+#                          provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
 #                          line, since the crew's own log gets no new entry once
@@ -274,6 +281,36 @@ window_label() {
   [ -n "$task" ] && printf 'fm-%s' "$task"
 }
 
+window_human_ref() {  # <window>
+  local w=$1 task meta display_name
+  task=$(window_to_task "$w" "$STATE")
+  meta="$STATE/$task.meta"
+  if [ -n "$task" ] && [ -f "$meta" ]; then
+    display_name=$(fm_display_name_for_meta "$meta" "$task")
+    printf '%s [endpoint %s]' "$display_name" "$w"
+  else
+    printf '%s' "$w"
+  fi
+}
+
+signal_human_reason() {  # <space-separated-signal-files>
+  local files=$1 f base task meta display_name reason=signal:
+  # shellcheck disable=SC2086
+  for f in $files; do
+    base=$(basename "$f")
+    task=${base%.status}
+    task=${task%.turn-ended}
+    meta="$STATE/$task.meta"
+    if [ -n "$task" ] && [ -f "$meta" ]; then
+      display_name=$(fm_display_name_for_meta "$meta" "$task")
+      reason="$reason $display_name [task $task; source $f]"
+    else
+      reason="$reason $f"
+    fi
+  done
+  printf '%s' "$reason"
+}
+
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
@@ -410,7 +447,7 @@ pause_recheck_register() {  # <window> <throttle-marker> <detail> <signature> <s
 # advanced only after recovery establishes that delivery. The shared publication
 # owner finishes either supervision path before another batch can start.
 pause_recheck_flush() {
-  local count reason key win detail clean_key clean_reason records
+  local count reason key win detail ref clean_key clean_reason records
   [ -n "$pause_recheck_details" ] || return 0
   count=$(printf '%s' "$pause_recheck_details" | grep -c '')
   if [ "$count" -eq 1 ]; then
@@ -418,13 +455,14 @@ pause_recheck_flush() {
 $pause_recheck_details
 EOF
     key=$win
-    reason="stale: $win ($detail)"
+    reason="stale: $(window_human_ref "$win") ($detail)"
   else
     key=$(printf '%s' "$pause_recheck_details" | cut -f1 | paste -sd, -)
     reason="stale: $count declared waits came due for a recheck together, batched into one wake, none a wedge:"
     while IFS=$(printf '\t') read -r win detail; do
       [ -n "$win" ] || continue
-      reason="$reason $win ($detail);"
+      ref=$(window_human_ref "$win")
+      reason="$reason $ref ($detail);"
     done <<EOF
 $pause_recheck_details
 EOF
@@ -486,7 +524,7 @@ clear_write_tracking() {  # <window-key>
 # about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
 # never per poll.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason ref
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -503,9 +541,10 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
-        reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
+        ref=$(window_human_ref "$win")
+        reason="stale: $ref (idle ${age}s, possible wedge, escalation $n)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+          reason="stale: $ref (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
         rm -f "$since_file"
@@ -665,9 +704,10 @@ pause_state_class() {  # <window> <task>
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last
+  local win=$1 h=$2 key task last reason
   key=$(window_key "$win")
-  fm_wake_append stale "$win" "stale: $win" || exit 1
+  reason="stale: $(window_human_ref "$win")"
+  fm_wake_append stale "$win" "$reason" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
   clear_write_tracking "$key"
@@ -680,7 +720,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   else
     rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
   fi
-  wake "stale: $win"
+  wake "$reason"
 }
 
 # Check and heartbeat cadence must survive actionable exits and restarts: the
@@ -1330,6 +1370,9 @@ EOF
       actionable=1
     fi
     if [ "$actionable" -eq 1 ]; then
+      if ! afk_present; then
+        reason=$(signal_human_reason "$files")
+      fi
       while IFS=$(printf '\t') read -r sf sig f seen; do
         [ -n "$sf" ] || continue
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
@@ -1435,12 +1478,13 @@ EOF
               clear_write_tracking "$key"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
+              reason="stale: $(window_human_ref "$w")"
+              fm_wake_append stale "$w" "$reason" || exit 1
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               clear_write_tracking "$key"
               mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
-              wake "stale: $w"
+              wake "$reason"
             fi
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a

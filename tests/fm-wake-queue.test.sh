@@ -107,7 +107,7 @@ test_stale_enqueue_before_suppressor() {
   printf '1\n' > "$state/.count-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for stale pane"
-  grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print stale wake"
+  grep -Fx "stale: Stale [endpoint $window]" "$out" >/dev/null || fail "watcher did not print readable stale wake with its exact endpoint"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after stale wake failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "stale wake was not queued"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor was not written"
@@ -144,7 +144,7 @@ test_not_working_stale_enqueue_before_suppressor() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not surface a not-provably-working stale"
-  grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the immediate stale wake"
+  grep -Fx "stale: Stopped [endpoint $window]" "$out" >/dev/null || fail "watcher did not print the immediate readable stale wake with its exact endpoint"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after the immediate stale wake failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "immediate stale wake was not queued"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor was not advanced after the enqueue"

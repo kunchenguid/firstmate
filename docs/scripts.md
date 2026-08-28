@@ -52,9 +52,10 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-remote-home-seed.sh` | Register and provision a whole secondmate home on an SSH-reachable host              |
 | `fm-remote-readiness-lib.sh` | Shared remote second-mate readiness gate: check and, when needed, repair then re-check through `fm-remote-doctor.sh` |
 | [`fm-project-origin-lib.sh`](../bin/fm-project-origin-lib.sh) | Accepted origin-form owner shared by both remote provisioning boundaries |
-| `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
+| `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates with immutable task ids plus optional human display names on the resolved harness and runtime backend |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
+| `fm-display-name-lib.sh` | Shared validation and legacy fallback contract for presentation-only task display names |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer shapes, capability-aware screen classification, and verdicts |
 | `backends/tmux.sh`       | Verified tmux session-provider adapter                                               |
 | `backends/herdr.sh`      | Experimental herdr session-provider adapter                                          |

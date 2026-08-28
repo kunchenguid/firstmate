@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--display-name <label>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--display-name <label>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--display-name <label>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+#   --display-name is the task's concise human presentation, normally
+#   "<Project> · <Outcome>". bin/fm-display-name-lib.sh is the single owner of
+#   validation and legacy fallback. Exactly one display_name= is persisted in
+#   task metadata. The immutable task id, endpoint labels and ids, worktree,
+#   routing, control, recovery, cleanup, and incarnation tokens never derive
+#   from it. Duplicate display names are therefore harmless. An omitted value
+#   gets the shared readable fallback. --relaunch preserves the recorded value
+#   unless an explicit --display-name replaces presentation only.
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -16,7 +24,7 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#        fm-spawn.sh <task-id> --relaunch [--display-name <label>] [--harness <name>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
@@ -25,10 +33,10 @@
 #   deliberately re-launching an already-stopped task. Every identity axis -
 #   backend, kind, project or home, worktree, endpoint - comes from the task's
 #   validated state/<id>.meta, so --backend, --scout, --secondmate, a project
-#   positional, and batch pairs are all refused alongside it; only harness,
-#   model, and effort may change, which is what makes a harness switch one
-#   ordinary relaunch. It refuses unless the recorded endpoint is positively
-#   agent-free on a backend with a recovery-grade agent-state classifier (tmux
+#   positional, and batch pairs are all refused alongside it; only the human
+#   display name, harness, model, and effort may change. The display field is
+#   presentation-only, while a harness switch remains one ordinary relaunch.
+#   It refuses unless the recorded endpoint is positively agent-free on a backend with a recovery-grade agent-state classifier (tmux
 #   or herdr), refuses unless the endpoint's shell is sitting in the recorded
 #   worktree, and clears the previous harness's per-task wiring before arming
 #   the new incarnation.
@@ -142,8 +150,11 @@
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
 #   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
-#   applies to every pair. A ship batch therefore carries one delivery contract, and each
-#   pair still checks it against its own brief; a batch spanning modes is two invocations.
+#   applies to every pair. A shared --display-name also applies to every pair;
+#   duplicate presentations remain mechanically harmless because every child
+#   still owns a distinct immutable id and endpoint. A ship batch therefore
+#   carries one delivery contract, and each pair still checks it against its own
+#   brief; a batch spanning modes is two invocations.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
@@ -246,6 +257,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-display-name-lib.sh
+. "$SCRIPT_DIR/fm-display-name-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -275,6 +288,7 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+DISPLAY_NAME=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -282,6 +296,7 @@ BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
+DISPLAY_NAME_SET=0
 RELAUNCH=0
 POS=()
 want_value=
@@ -298,6 +313,7 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      display-name) DISPLAY_NAME=$a; DISPLAY_NAME_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -321,6 +337,8 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --display-name) want_value=display-name ;;
+    --display-name=*) DISPLAY_NAME=${a#--display-name=}; DISPLAY_NAME_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -332,6 +350,7 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ "$DISPLAY_NAME_SET" -eq 0 ] || fm_display_name_validate "$DISPLAY_NAME" || exit 1
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -555,8 +574,7 @@ spawn_remote_secondmate() {
   if [ "$(fm_trace_context_session_effective "$STATE/.trace-context-effective")" = on ]; then
     remote_traceparent=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CONFIG" "$meta" || true)
   fi
-  launch_args=("$id" "$harness" "$model" "$effort" "$backend")
-  [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
+  launch_args=("$id" "$harness" "$model" "$effort" "$backend" "${remote_traceparent:--}" "$DISPLAY_NAME")
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" < /dev/null 2>&1); then
     rc=0
@@ -577,6 +595,7 @@ spawn_remote_secondmate() {
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
   remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
+  remote_display_name=$(printf '%s\n' "$out" | sed -n 's/^display_name=//p' | tail -1)
   if [ "$remote_backend" != herdr ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
@@ -598,6 +617,14 @@ spawn_remote_secondmate() {
     echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
     return 1
   fi
+  if ! fm_display_name_validate "$remote_display_name" 2>/dev/null; then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote launch returned an invalid display name; preserving the remote route for reconciliation" >&2
+    return 1
+  fi
+  DISPLAY_NAME=$remote_display_name
   # Record what the remote endpoint ACTUALLY carries, read back from its own
   # launch, rather than what this side hoped to deliver. That keeps the #995
   # guarantee that the recorded carrier is the identity the child received even
@@ -610,6 +637,7 @@ spawn_remote_secondmate() {
   {
     echo "window=remote:$id"
     echo "endpoint_task_id=$id"
+    echo "display_name=$DISPLAY_NAME"
     echo "worktree=$home"
     echo "project=$root"
     echo "harness=$harness"
@@ -863,6 +891,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  [ "$DISPLAY_NAME_SET" -eq 0 ] || shared_args+=(--display-name "$DISPLAY_NAME")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
   # spanning several modes is two invocations rather than a silent mixed dispatch.
@@ -887,6 +916,14 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+if [ "$RELAUNCH" -eq 0 ] && [ "$DISPLAY_NAME_SET" -eq 0 ]; then
+  DISPLAY_NAME=$(fm_display_name_fallback "$ID")
+  PRIOR_META="$STATE/$ID.meta"
+  if [ -f "$PRIOR_META" ] && [ ! -L "$PRIOR_META" ] \
+    && [ "$(fm_backend_meta_exact_value "$PRIOR_META" endpoint_task_id 2>/dev/null || true)" = "$ID" ]; then
+    DISPLAY_NAME=$(fm_display_name_for_meta "$PRIOR_META" "$ID")
+  fi
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
   control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
@@ -943,7 +980,7 @@ fi
 # non-spawn-capable backends. The resolved value is
 # recorded in meta only when it is NOT tmux (fm-teardown.sh and fm-watch.sh's
 # window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
-# so the default path's meta stays byte-identical.
+# preserving the default path's historical backend-field representation.
 if [ "$RELAUNCH" -eq 0 ]; then
   if [ "$BACKEND_SET" -eq 1 ]; then
     BACKEND=$BACKEND_ARG
@@ -991,6 +1028,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   fm_backend_validate_task_endpoint "$RELAUNCH_META" "$ID" || exit 1
+  if [ "$DISPLAY_NAME_SET" -eq 0 ]; then
+    DISPLAY_NAME=$(fm_display_name_for_meta "$RELAUNCH_META" "$ID")
+  fi
   BACKEND=$FM_BACKEND_VALIDATED_BACKEND
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET
   fm_backend_validate_spawn "$BACKEND" || exit 1
@@ -1972,7 +2012,8 @@ case "$BACKEND" in
             spawn_herdr_presentation_order_lock_release
           else
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
-            HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
+            HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label \
+              "$ID" "$HERDR_PROJECTION_ID" "$DISPLAY_NAME")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
               "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
@@ -2632,7 +2673,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id display_name worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2641,6 +2682,7 @@ preserve_relaunch_meta() {
 {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
+  echo "display_name=$DISPLAY_NAME"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
@@ -2653,9 +2695,9 @@ preserve_relaunch_meta() {
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
-  # backend= is written only for a non-default (non-tmux) backend, so the
-  # default path's meta stays byte-identical (absent backend= means tmux;
-  # data/fm-backend-design-d7's P1 compatibility contract).
+  # backend= is written only for a non-default (non-tmux) backend, preserving
+  # the default path's absent backend field (data/fm-backend-design-d7's P1
+  # compatibility contract).
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"
@@ -2836,6 +2878,12 @@ if [ "$HARNESS" = kimi ]; then
     kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
     exit 1
   fi
+fi
+# Presentation is deliberately late and best-effort: endpoint creation,
+# metadata publication, routing, and launch all completed against machine
+# identity first. A renderer failure cannot strand or retarget the worker.
+if ! fm_backend_present_task "$BACKEND" "$T" "$DISPLAY_NAME" "$W"; then
+  echo "warning: task $ID launched, but the $BACKEND display name could not be rendered" >&2
 fi
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then

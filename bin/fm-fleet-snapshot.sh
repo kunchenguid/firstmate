@@ -30,7 +30,9 @@
 #     body carries an explicit SUPERSEDED / NOT REQUIRED / DEFERRED marker.
 #     It never changes captain_actionable; renderers may use it to keep
 #     prose-deferred rows out of default views.
-#   tasks[]: one row per state/<id>.meta, sorted by id.
+#   tasks[]: one row per state/<id>.meta, sorted by id. Each row carries the
+#     immutable id plus display_name from the shared presentation contract;
+#     legacy metadata receives a read-only fallback and is never migrated.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately.
 #     paths.status_log.last_event is historical wake-event data only, never
@@ -146,6 +148,9 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 # shellcheck source=bin/fm-backend.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-display-name-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-display-name-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-classify-lib.sh"
@@ -425,7 +430,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 task_json_lines() {
-  local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
+  local meta id display_name kind harness mode yolo project worktree home projects backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
@@ -434,6 +439,7 @@ task_json_lines() {
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     id=$(basename "$meta" .meta)
+    display_name=$(fm_display_name_for_meta "$meta" "$id")
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
     harness=$(meta_value "$meta" harness)
@@ -554,6 +560,7 @@ task_json_lines() {
 
     jq -n \
       --arg id "$id" \
+      --arg display_name "$display_name" \
       --arg kind "$kind" \
       --arg harness "$harness" \
       --arg mode "$mode" \
@@ -584,6 +591,7 @@ task_json_lines() {
       --argjson report_present "$(bool_json "$report_present")" \
       '{
         id:$id,
+        display_name:$display_name,
         kind:$kind,
         harness:($harness // ""),
         mode:($mode // ""),
@@ -1140,7 +1148,7 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
 
 secondmate_current_json() {  # <parent-tasks-json>
   local tasks=$1 registry union rows total_registered total shown truncated
-  local row id home host remote registered registry_error task status_file event_raw event_note event_epoch event_age
+  local row id home host remote registered registry_error task display_name status_file event_raw event_note event_epoch event_age
   local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
   local records='[]' seen_homes=''
   registry=$(registry_secondmates_json) || return 1
@@ -1174,6 +1182,10 @@ secondmate_current_json() {  # <parent-tasks-json>
     registered=$(printf '%s' "$row" | jq -r '.registered')
     registry_error=$(printf '%s' "$row" | jq -r '.registry_error // ""')
     task=$(printf '%s' "$row" | jq -c '.parent_task // {}')
+    display_name=$(printf '%s' "$task" | jq -r '.display_name // ""')
+    if ! fm_display_name_validate "$display_name" >/dev/null 2>&1; then
+      display_name=$(fm_display_name_fallback "$id")
+    fi
     status_file=$(printf '%s' "$task" | jq -r '.paths.status_log.path // ""')
     event_raw=$(printf '%s' "$task" | jq -r '.paths.status_log.last_event.raw // ""')
     event_note=$(printf '%s' "$task" | jq -r '.paths.status_log.last_event.note // ""')
@@ -1284,12 +1296,12 @@ secondmate_current_json() {  # <parent-tasks-json>
       fi
       if printf '%s' "$terminal" | jq -e '.contradiction == true' >/dev/null; then contradiction=true; fi
       record=$(jq -n \
-        --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg state "$state" --arg current_reason "$current_reason" --arg observed "$SNAPSHOT_NOW" \
+        --arg id "$id" --arg display_name "$display_name" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg state "$state" --arg current_reason "$current_reason" --arg observed "$SNAPSHOT_NOW" \
         --argjson registered "$registered" --argjson summary "$summary" --argjson summary_valid "$summary_valid" --argjson decisions "$decisions" \
         --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
         --argjson reconciliation "$reconciliation" --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
         --arg event_raw "$event_raw" --arg event_note "$event_note" --argjson event_age "$event_age" '
-        {id:$id,home:$home,host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
+        {id:$id,display_name:$display_name,home:$home,host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
          current:{state:$state,reason:($current_reason | if . == "" then null else . end)},invalidity:$summary.invalidity,
          provenance:{selected:"structured-home",structured_home:$home,summary_valid:$summary_valid,
            trust:(if $summary_valid then "complete" else "partial-structured" end),parent_event_role:"historical-only"},
@@ -1314,11 +1326,11 @@ secondmate_current_json() {  # <parent-tasks-json>
           '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no parent event to compare",lines:0,bytes:0,event_note_seen:false,contradiction:false}')
       fi
       record=$(jq -n \
-        --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
+        --arg id "$id" --arg display_name "$display_name" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
         --arg provenance "$provenance" --arg freshness "$freshness" --arg event_raw "$event_raw" --arg event_note "$event_note" \
         --argjson registered "$registered" --argjson event_age "$event_age" --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
         --argjson decisions "$decisions" --argjson terminal "$terminal" '
-        {id:$id,home:($home | if . == "" then null else . end),host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
+        {id:$id,display_name:$display_name,home:($home | if . == "" then null else . end),host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
          current:{state:"unknown",reason:$reason},invalidity:null,
          provenance:{selected:$provenance,structured_home:($home | if . == "" then null else . end),parent_event_role:"fallback-only-not-current"},
          freshness:{status:$freshness,observed_at:$observed,age_seconds:$event_age},

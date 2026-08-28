@@ -536,8 +536,8 @@ test_resolve_selector_three_forms() {
   local state=$TMP_ROOT/resolve-state fakebin out
   mkdir -p "$state"
   fm_write_meta "$state/task1.meta" "window=firstmate:fm-task1"
-  fm_write_meta "$state/dotfiles-d6.meta" "window=default:wA:p2" "backend=herdr"
-  fm_write_meta "$state/fm-turnend-all-harnesses-v9.meta" "window=default:wB:p3" "backend=herdr"
+  fm_write_meta "$state/dotfiles-d6.meta" "window=default:wA:p2" "backend=herdr" "display_name=Shared · Label"
+  fm_write_meta "$state/fm-turnend-all-harnesses-v9.meta" "window=default:wB:p3" "backend=herdr" "display_name=Shared · Label"
 
   [ "$(fm_backend_resolve_selector 'sess:win' "$state")" = "sess:win" ] \
     || fail "explicit session:window should be used as-is"
@@ -583,7 +583,14 @@ SH
   out=$(PATH="$fakebin:$PATH" fm_backend_resolve_selector 'adhoc' "$state")
   [ "$out" = "firstmate:adhoc" ] || fail "an ad hoc bare name should resolve via the tmux live-window fallback, got '$out'"
 
-  pass "fm_backend_resolve_selector: session:window literal, exact task id first, legacy fm-<id> label fallback, ad hoc bare name via tmux list-windows"
+  if PATH="$fakebin:$PATH" fm_backend_resolve_selector 'Shared · Label' "$state" >/dev/null 2>&1; then
+    fail "a duplicate human display name must never resolve as a task selector"
+  fi
+  [ "$(fm_backend_resolve_selector 'dotfiles-d6' "$state")" = "default:wA:p2" ] \
+    && [ "$(fm_backend_resolve_selector 'fm-turnend-all-harnesses-v9' "$state")" = "default:wB:p3" ] \
+    || fail "duplicate display names changed exact-id routing"
+
+  pass "fm_backend_resolve_selector: exact ids remain authoritative and duplicate display names are ignored"
 }
 
 test_backend_of_selector_matches_explicit_target_meta() {

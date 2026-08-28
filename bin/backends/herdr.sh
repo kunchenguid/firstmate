@@ -26,6 +26,7 @@
 # focus, and agent-absence checks all agree under the session lock.
 # Every ambiguous recovered launch uses the default flat home workspace when
 # duplicate-agent risk is independently absent.
+# Every exact task pane receives the validated task display name through Herdr's display-only metadata, with an exact-ID pane-label fallback for older supported servers, while projected workspaces also carry that display name beside their random token.
 # Target resolution stays parallel to the tmux adapter in both layouts.
 # Projected create, move, and cleanup operations capture the named session's
 # exact active workspace and tab. On Herdr 0.7.5, an explicit close that
@@ -71,6 +72,8 @@
 FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+# shellcheck source=bin/fm-display-name-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-display-name-lib.sh"
 
 # Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
 # dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
@@ -494,7 +497,7 @@ fm_backend_herdr_projection_journal_field() {  # <journal> <key>
 # journal or a version 2 exact projection binding without sourcing shell code.
 # Version 2 sets FM_BACKEND_HERDR_JOURNAL_* globals for same-process callers.
 fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
-  local journal=$1 id=$2 lines expected_label expected_task_label exact
+  local journal=$1 id=$2 lines expected_label expected_task_label display_name exact
   FM_BACKEND_HERDR_JOURNAL_VERSION=""
   FM_BACKEND_HERDR_JOURNAL_TASK_ID=""
   FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID=""
@@ -548,7 +551,18 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
   [ -n "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" ] \
     && [ -n "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" ] \
     && [ -n "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" ] || return 1
-  expected_label=$(fm_backend_herdr_projection_workspace_label "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
+  case "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" in
+    "└ "*" · p:$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
+      display_name=${FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL#"└ "}
+      display_name=${display_name%" · p:$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID"}
+      ;;
+    *) return 1 ;;
+  esac
+  if ! fm_display_name_validate "$display_name" >/dev/null 2>&1 \
+     && [ "$display_name" != "$(fm_backend_herdr_projection_concise_task_label "$id")" ]; then
+    return 1
+  fi
+  expected_label="└ $display_name · p:$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID"
   expected_task_label="fm-$id"
   [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$expected_label" ] \
     && [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" = "$expected_task_label" ]
@@ -624,6 +638,19 @@ fm_backend_herdr_projection_journal_replace_endpoint() {  # <journal> <task-id> 
     "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL"
 }
 
+fm_backend_herdr_projection_journal_replace_workspace_label() {  # <journal> <task-id> <old-label> <new-label>
+  local journal=$1 id=$2 old_label=$3 new_label=$4
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
+  [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] \
+    && [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$old_label" ] || return 1
+  fm_backend_herdr_projection_journal_write_v2 \
+    "$journal" "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" \
+    "$FM_BACKEND_HERDR_JOURNAL_HOME" "$FM_BACKEND_HERDR_JOURNAL_SESSION" \
+    "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" \
+    "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" \
+    "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" "$new_label" "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL"
+}
+
 # fm_backend_herdr_projection_concise_task_label: strip redundant owner
 # prefixes from a task id used only in the presentation workspace label.
 # Removes firstmate/, 2ndmate-<id>/, and a presentation-level fm- owner
@@ -643,10 +670,20 @@ fm_backend_herdr_projection_concise_task_label() {  # <task-id>
 
 # fm_backend_herdr_projection_workspace_label: presentation-only child label.
 # Format is literal U+2514 BOX DRAWINGS LIGHT UP AND RIGHT, one space, the
-# concise task label, then the unchanged · p:<full-22-char-token> suffix.
-# Labels and tokens remain non-authoritative correlators only.
-fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
-  printf '└ %s · p:%s' "$(fm_backend_herdr_projection_concise_task_label "$1")" "$2"
+# shared validated display name, then the unchanged · p:<full-22-char-token>
+# suffix. The optional third argument is the shared display name. A two-argument
+# legacy caller retains the historical concise-id rendering, while every current
+# spawn passes its validated explicit or fallback display. Labels and tokens
+# remain non-authoritative correlators only.
+fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id> [<display-name>]
+  local task_id=$1 projection_id=$2 display_name
+  if [ "$#" -ge 3 ]; then
+    display_name=$3
+    fm_display_name_validate "$display_name" >/dev/null 2>&1 || return 1
+  else
+    display_name=$(fm_backend_herdr_projection_concise_task_label "$task_id")
+  fi
+  printf '└ %s · p:%s' "$display_name" "$projection_id"
 }
 
 # fm_backend_herdr_presentation_session_lock_path: one machine-private lock
@@ -2510,6 +2547,71 @@ fm_backend_herdr_parse_target() {  # <target>
 fm_backend_herdr_target_ready() {  # <target>
   fm_backend_herdr_parse_target "$1" || return 1
   fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" || return 1
+}
+
+fm_backend_herdr_present_task() {  # <target> <display-name> <expected-task-label>
+  local target=$1 display_name=$2 task_label=$3 id state journal session pane lock_path
+  local attempt=0 old_label new_label info status=0 pane_status=0
+  fm_display_name_validate "$display_name" >/dev/null 2>&1 || return 1
+  case "$task_label" in fm-*) id=${task_label#fm-} ;; *) return 1 ;; esac
+  fm_backend_herdr_parse_target "$target" || return 1
+  session=$FM_BACKEND_HERDR_SESSION
+  pane=$FM_BACKEND_HERDR_PANE
+  if ! fm_backend_herdr_cli "$session" pane report-metadata \
+      --source firstmate-display-name --title "$display_name" "$pane" >/dev/null 2>&1 \
+    && ! fm_backend_herdr_cli "$session" pane rename "$pane" "$display_name" >/dev/null 2>&1; then
+    pane_status=1
+  fi
+  state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+  journal=$(fm_backend_herdr_projection_journal_path "$state" "$id")
+  [ -e "$journal" ] || return "$pane_status"
+  if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
+    . "$FM_BACKEND_HERDR_ROOT/bin/fm-wake-lib.sh"
+  fi
+  lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session") || return 1
+  while [ "$attempt" -lt 50 ]; do
+    fm_lock_try_acquire "$lock_path" && break
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  [ "$attempt" -lt 50 ] || return 1
+  if ! fm_backend_herdr_projection_journal_snapshot "$journal" "$id" \
+     || [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" != 2 ] \
+     || [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" != "$session" ] \
+     || [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" != "$pane" ] \
+     || [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" != "$task_label" ]; then
+    status=1
+  else
+    old_label=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL
+    new_label=$(fm_backend_herdr_projection_workspace_label \
+      "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" "$display_name") || status=1
+    if [ "$status" -eq 0 ] && [ "$new_label" != "$old_label" ]; then
+      if ! fm_backend_herdr_projection_live_binding_matches \
+          "$session" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" \
+          "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" \
+          "$pane" "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" \
+          "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" "$old_label" "$task_label" \
+        || ! fm_backend_herdr_cli "$session" workspace rename \
+          "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" "$new_label" >/dev/null 2>&1; then
+        status=1
+      else
+        info=$(fm_backend_herdr_cli "$session" workspace get \
+          "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" 2>/dev/null) || info=
+        if ! printf '%s' "$info" | jq -e \
+            --arg workspace "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" --arg label "$new_label" \
+            '.result.workspace.workspace_id == $workspace and .result.workspace.label == $label' \
+            >/dev/null 2>&1 \
+          || ! fm_backend_herdr_projection_journal_replace_workspace_label \
+            "$journal" "$id" "$old_label" "$new_label"; then
+          fm_backend_herdr_cli "$session" workspace rename \
+            "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" "$old_label" >/dev/null 2>&1 || true
+          status=1
+        fi
+      fi
+    fi
+  fi
+  fm_lock_release "$lock_path" || status=1
+  return "$status"
 }
 
 # fm_backend_herdr_current_path: the live FOREGROUND process's cwd, or empty on

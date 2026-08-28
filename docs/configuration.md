@@ -24,6 +24,25 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Task display names
+
+Every new task metadata record carries one `display_name=` for concise human presentation, normally shaped like `Backend · CRM Core`, `CRM · Dashboard`, `Planning · CRM Scope`, or `Firstmate · Quiet Alerts`.
+Prefer short noun labels shaped like `<Project> · <Outcome>` rather than versions, random suffixes, full task slugs, branch names, or delivery mechanics.
+Pass it with `fm-spawn.sh --display-name`; the script's help owns spawn and relaunch persistence mechanics, while [`fm-display-name-lib.sh`](../bin/fm-display-name-lib.sh) owns exact validation and fallback.
+The immutable task id remains unchanged and is the only identity used for selectors, routing, endpoint ownership, recovery, relaunch, merge, cleanup, worktree binding, and incarnation tracking.
+Duplicate display names are harmless because no control operation resolves through them.
+Legacy metadata is rendered through a safe readable fallback without an eager migration.
+An explicit relaunch label updates only the single metadata presentation field and supported presentation surfaces; it never creates, adopts, renames, or destroys an endpoint.
+
+The human fleet view, Bearings projection, session-start fleet summary, and normal supervision wakes expose the display name while retaining the exact id or endpoint.
+Tmux renders it in the independent pane-title field while keeping the unique `fm-<id>` window name.
+Herdr renders the validated explicit or readable fallback name as display-only metadata on the exact pane, including flat and secondmate endpoints, and also in an optional projected workspace beside its random presentation token while the ordinary task tab, exact pane binding, and restart journal remain machine-owned.
+Zellij and cmux retain machine-scoped visible titles because those titles currently participate in endpoint verification.
+Orca retains machine labels because its creation name binds its worktree and terminal.
+Secondmate container and remote endpoint identities remain unchanged while their exact panes and fleet summaries expose the shared human field.
+Every verified worker harness receives the same backend-neutral metadata contract; no harness owns, parses, or resolves the display name.
+These adapter choices are presentation capabilities only; [`fm-backend.sh`](../bin/fm-backend.sh) owns the shared rendering dispatch and adapters never own naming rules.
+
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.

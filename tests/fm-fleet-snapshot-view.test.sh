@@ -89,6 +89,7 @@ EOF
   printf '# Scout\n' > "$home/data/scout-task/report.md"
   fm_write_meta "$home/state/ship-task.meta" \
     "window=firstmate:fm-ship-task" \
+    "display_name=CRM · Dashboard" \
     "worktree=$home/projects/alpha-worktree" \
     "project=alpha" \
     "harness=claude" \
@@ -163,16 +164,18 @@ test_fixture_snapshot_json() {
     || fail "task ordering must be stable by id, got $ids"
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "ship-task")
-    | .current_state.state == "working"
+    | .display_name == "CRM · Dashboard"
+      and .current_state.state == "working"
       and .current_state.source == "pane"
       and .pr.url == "https://github.com/kunchenguid/firstmate/pull/9"
       and .backlog.body_excerpt == "Preserve this detail for bearings."
       and .hints.pending_decision == false
       and .paths.status_log.kind == "event_history"
-  ' >/dev/null || fail "ship task state, PR, body, and stale event hints wrong"
+  ' >/dev/null || fail "ship task display, state, PR, body, and stale event hints wrong"
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "scout-task")
-    | .paths.report.present == true
+    | .display_name == "Scout · Task"
+      and .paths.report.present == true
       and .hints.scout_report_present == true
   ' >/dev/null || fail "scout report pointer missing"
   printf '%s' "$out" | jq -e '
@@ -588,16 +591,16 @@ test_view_renders_snapshot() {
   write_fixture "$home"
   fakebin=$(make_fakebin "$home")
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
-  assert_contains "$view" "| ship-task | working / pane | ship | alpha | tmux | present | https://github.com/kunchenguid/firstmate/pull/9" \
-    "view should render ship row from snapshot"
+  assert_contains "$view" "| CRM · Dashboard | ship-task | working / pane | ship | alpha | tmux | present | https://github.com/kunchenguid/firstmate/pull/9" \
+    "view should render the human display plus exact ship id"
   assert_contains "$view" "| queued-task | Queued Task | alpha | ship | ship-task | -" \
     "view should render queued backlog row"
   assert_contains "$view" "| done-task | Done Task | alpha | ship | - | https://github.com/kunchenguid/firstmate/pull/7 |" \
     "view should render done backlog row"
   assert_contains "$view" "bin/fm-send.sh fm-secondmate-task" \
     "view should show secondmate send guidance"
-  assert_contains "$view" "| secondmate-task | working / status-log | secondmate | $home/secondmate-home | tmux | present / alive |" \
-    "view should show secondmate endpoint agent liveness"
+  assert_contains "$view" "| Secondmate · Task | secondmate-task | working / status-log | secondmate | $home/secondmate-home | tmux | present / alive |" \
+    "view should show secondmate fallback display and endpoint agent liveness"
   assert_not_contains "$view" "fm-peek.sh fm-secondmate-task" \
     "view must not tell firstmate to routinely peek secondmates"
   pass "fleet view renders the snapshot without secondmate peek guidance"

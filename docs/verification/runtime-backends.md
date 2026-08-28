@@ -30,6 +30,29 @@ zsh
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
+### Task display title
+
+The independent pane-title presentation was verified on 2026-08-28 with tmux 3.6 on Linux, using two distinct machine window names and the same human display name:
+
+```sh
+tmux() { command /usr/bin/tmux -L fm-display-proof "$@"; }
+export -f tmux
+tmux new-session -d -s labels -n fm-task-a
+tmux new-window -d -t labels: -n fm-task-b
+bash -c '. bin/fm-backend.sh; fm_backend_present_task tmux labels:fm-task-a "CRM · Dashboard" fm-task-a; fm_backend_present_task tmux labels:fm-task-b "CRM · Dashboard" fm-task-b'
+tmux display-message -p -t labels:fm-task-a 'task-a window=#{window_name} title=#{pane_title} pane=#{pane_id}'
+tmux display-message -p -t labels:fm-task-b 'task-b window=#{window_name} title=#{pane_title} pane=#{pane_id}'
+```
+
+Observed output:
+
+```text
+task-a window=fm-task-a title=CRM · Dashboard pane=%0
+task-b window=fm-task-b title=CRM · Dashboard pane=%1
+```
+
+Duplicate human titles did not change either unique machine window or pane id.
+
 ### Agent liveness name sources
 
 The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.
@@ -405,6 +428,24 @@ ok - real Herdr lab validation completed on Herdr 0.8.0 with the default-session
 ```
 
 The projected spawn in that run used the historical empty opt-in file, so a home that had already enabled the projection keeps it without any migration step.
+
+The shared task display-name contract and machine-identity separation were verified on 2026-08-28 against Herdr 0.8.0 in the generated non-default `firstmate-readable-worker-labels-v1-*` lab:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  bash tests/fm-backend-herdr-presentation-e2e.test.sh
+```
+
+Observed guarantees:
+
+```text
+ok - real Herdr lab: an explicit human display name renders while the task tab and endpoint stay machine-bound
+ok - real Herdr lab: Hi Bit and Wheelhouse-style same-identity restarts reclaim one nested space with exact focus and idempotence
+ok - real Herdr lab: missing, renamed, and duplicate tokens trigger zero destructive or adoptive calls, and live duplicate risk refuses launch
+ok - real Herdr lab validation completed on Herdr 0.8.0 with the default-session tripwire intact
+```
+
+The explicit workspace title was `Backend · CRM Core` plus the unchanged full presentation token, while the tab label and metadata endpoint retained the immutable task identity.
 One concurrent cross-home recovery case refused under contention on a loaded machine and passed on an immediate rerun; recovery-path presentation lock contention is a deliberate hard refusal rather than a flat fallback, which default-on now makes reachable from any Herdr home.
 That run measured the default-on projection on Herdr 0.8.0 only, while the focus-flash regression below was last run on 0.7.5 before the flip, so neither run covered a defective release under default-on projection; the version floor and the focus-flash suite's Part C close that gap.
 

@@ -2,7 +2,7 @@
 # Host-local lifecycle control for the remote secondmate home selected by fm-on.
 #
 # Usage:
-#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent]
+#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent|-] [display-name]
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
 #   fm-remote-secondmate-control.sh send <id> <message>
@@ -29,10 +29,12 @@
 #
 # The optional launch traceparent is the per-task W3C trace-context carrier the
 # PARENT home resolved for this secondmate; this host only delivers it to the
-# pane, and fm-spawn validates it (bin/fm-trace-context-lib.sh). Omitting it is
-# the default-off path. print_route echoes the carrier the endpoint actually
+# pane, and fm-spawn validates it (bin/fm-trace-context-lib.sh). The optional
+# display name is the parent's validated presentation value. This boundary
+# validates it before endpoint access, and fm-spawn validates it again at intake.
+# print_route echoes the values the endpoint actually
 # holds, including for an already-alive endpoint that was not relaunched, so the
-# parent records the identity the agent really received rather than an intent.
+# parent records endpoint state rather than launch intent.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -109,15 +111,17 @@ state_value() { # <id>; prints recovery-grade state
 }
 
 print_route() { # <id>
-  local id=$1 harness traceparent
+  local id=$1 harness traceparent display_name
   remote_endpoint_require "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   traceparent=$(fm_meta_get "$REMOTE_ENDPOINT_META" traceparent)
+  display_name=$(fm_display_name_for_meta "$REMOTE_ENDPOINT_META" "$id")
   printf 'schema=fm-remote-secondmate-control.v1\n'
   printf 'backend=%s\n' "$REMOTE_ENDPOINT_BACKEND"
   printf 'target=%s\n' "$REMOTE_ENDPOINT_TARGET"
   printf 'herdr_session=%s\n' "$REMOTE_HERDR_SESSION"
   printf 'harness=%s\n' "$harness"
+  printf 'display_name=%s\n' "$display_name"
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
 }
 
@@ -133,10 +137,13 @@ cmd_route() {
 }
 
 cmd_launch() {
-  local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-}
+  local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-} display_name=${7:-}
   local current meta out herdr_session
 
+  [ "$traceparent" != - ] || traceparent=
+
   validate_id "$id"
+  [ -z "$display_name" ] || fm_display_name_validate "$display_name" || exit 1
   validate_home "$id"
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
@@ -169,6 +176,7 @@ cmd_launch() {
   [ "$model" = - ] || ARGS+=(--model "$model")
   [ "$effort" = - ] || ARGS+=(--effort "$effort")
   [ -z "$traceparent" ] || ARGS+=(--traceparent "$traceparent")
+  [ -z "$display_name" ] || ARGS+=(--display-name "$display_name")
   if ! out=$(HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \
@@ -296,7 +304,7 @@ cmd_retire() {
 }
 
 case "${1:-}" in
-  launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 6 ] || usage; cmd_launch "$@" ;;
+  launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 7 ] || usage; cmd_launch "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
   send) shift; [ "$#" -eq 2 ] || usage; cmd_send "$@" ;;

@@ -254,7 +254,7 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   add_ship_task "$dir" rl1 claude
   gen_before=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" rl1)
   printf 'busy_gen=%s\n' "$gen_before" >> "$dir/home/state/rl1.meta"
-  out=$(run_control "$dir" rl1 relaunch --note "stopped mid-refactor"); rc=$?
+  out=$(run_control "$dir" rl1 relaunch --display-name "Backend · CRM Core" --note "stopped mid-refactor"); rc=$?
   expect_code 0 "$rc" "a same-harness relaunch should succeed"$'\n'"$out"
   assert_contains "$out" "relaunched rl1 harness=claude from=claude" "the outcome should name the transition"
   [ "$(meta_field "$dir" rl1 window)" = "fmses:fm-rl1" ] \
@@ -263,6 +263,10 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
     || fail "the worktree must be reused, not reallocated"
   [ "$(meta_field "$dir" rl1 kind)" = ship ] || fail "kind must survive the relaunch"
   [ "$(meta_field "$dir" rl1 project)" = "$dir/proj" ] || fail "project must survive the relaunch"
+  [ "$(meta_field "$dir" rl1 display_name)" = "Backend · CRM Core" ] \
+    || fail "the relaunch should replace only the human display name"
+  [ "$(grep -c '^display_name=' "$dir/home/state/rl1.meta")" = 1 ] \
+    || fail "the relaunch should publish exactly one display-name field"
   gen_after=$(meta_field "$dir" rl1 busy_gen)
   [ -n "$gen_after" ] && [ "$gen_after" != "$gen_before" ] \
     || fail "a relaunch must arm a fresh busy generation, got '$gen_after'"
@@ -270,7 +274,7 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
     || fail "the transaction journal should end complete"
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
   assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
-  pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
+  pass "fm-control relaunch: a same-harness relaunch updates presentation while reusing the same endpoint and worktree"
 }
 
 test_relaunch_preserves_durable_task_metadata() {

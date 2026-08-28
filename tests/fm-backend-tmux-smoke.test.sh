@@ -56,12 +56,13 @@ fm_backend_source tmux || fail "fm_backend_source tmux failed"
 SESSION="smoke"
 WINDOW="fm-smoke1"
 TARGET="$SESSION:$WINDOW"
+DISPLAY_NAME="Backend · CRM Core"
 
 # --- create session ----------------------------------------------------------
 
 tmux new-session -d -s "$SESSION" -x 200 -y 50 \
   || fail "real tmux: new-session failed"
-fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" \
+WID=$(fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME") \
   || fail "fm_backend_tmux_create_task failed to create the task window"
 tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$WINDOW" \
   || fail "created window is not visible in the real session"
@@ -90,6 +91,36 @@ for _ in $(seq 1 100); do
   fi
 done
 [ "$SHELL_READY" = true ] || fail "the tmux task shell did not become ready"
+
+# --- durable human presentation ---------------------------------------------
+
+ALLOW_SET_TITLE=false
+if tmux show-window-options -v -t "$WID" allow-set-title >/dev/null 2>&1; then
+  ALLOW_SET_TITLE=true
+  tmux set-window-option -t "$WID" allow-set-title on \
+    || fail "real tmux: could not model an adopted legacy window"
+fi
+fm_backend_tmux_present_task "$WID" "$DISPLAY_NAME" \
+  || fail "fm_backend_tmux_present_task failed to set the pane title"
+before=$(tmux display-message -p -t "$WID" '#{pane_title}|#{window_id}|#{pane_id}') \
+  || fail "real tmux: could not read the presented pane identity"
+case "$before" in
+  "$DISPLAY_NAME|$WID|"*) : ;;
+  *) fail "real tmux: presentation changed machine identity or omitted the display name: $before" ;;
+esac
+if [ "$ALLOW_SET_TITLE" = true ]; then
+  [ "$(tmux show-window-options -v -t "$WID" allow-set-title)" = off ] \
+    || fail "real tmux: presentation did not disable application titles on the adopted window"
+  tmux send-keys -t "$WID" -l "printf '\\033]2;Application Title\\033\\\\application-title-attempted\\n'"
+  tmux send-keys -t "$WID" Enter
+  wait_for_capture_text "$WID" "application-title-attempted" \
+    || fail "real tmux: the application title update command did not execute"
+  after=$(tmux display-message -p -t "$WID" '#{pane_title}|#{window_id}|#{pane_id}') \
+    || fail "real tmux: could not read pane identity after the application title update"
+  [ "$after" = "$before" ] \
+    || fail "real tmux: an application replaced the display name or machine identity: $before -> $after"
+fi
+pass "real tmux: display names render without changing machine identity and are durable when supported"
 
 tmux send-keys -t "$TARGET" "cd /tmp && PS1='smoke\$ ' && clear && printf 'setup-%s\\n' ready" Enter
 wait_for_capture_text "$TARGET" "setup-ready" || fail "the tmux task shell did not complete setup"

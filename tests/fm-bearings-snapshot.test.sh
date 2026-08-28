@@ -123,6 +123,7 @@ EOF
   printf '# Scout X\n' > "$home/data/scout-x/report.md"
   fm_write_meta "$home/state/ship-task.meta" \
     "window=firstmate:fm-ship-task" \
+    "display_name=CRM · Dashboard" \
     "worktree=$home/projects/ship-wt" \
     "project=firstmate" \
     "harness=claude" \
@@ -147,6 +148,7 @@ EOF
     "harness=codex" \
     "kind=secondmate" \
     "mode=secondmate" \
+    "display_name=Platform · Stewardship" \
     "home=$mate" \
     "projects=firstmate"
   printf 'needs-decision [key=race]: pick subscribe order\n' > "$home/state/mate.status"
@@ -534,7 +536,7 @@ test_secondmate_and_child_bounds_are_disclosed() {
   local home fakebin id mate child json expanded canonical i
   home=$(make_home secondmate-bounds)
   : > "$home/data/secondmates.md"
-  for id in a b c; do
+  for id in a home-assistant z; do
     mate="$TMP_ROOT/bounds-$id"
     make_valid_secondmate_home "$id" "$mate"
     append_secondmate_registry "$home" "$id" "$mate"
@@ -565,7 +567,8 @@ test_secondmate_and_child_bounds_are_disclosed() {
       and (.secondmate_current.records[] | select(.id == "a")
         | .counts.active_children == 3 and (.active_children | length) == 2
           and (.omitted | any(.surface == "active_children" and .count == 1)))
-      and (.secondmate_current.records | any(.id == "b" and .current.state == "no_active_work"))
+      and (.secondmate_current.records | any(.id == "home-assistant"
+        and .display_name == "Home · Assistant" and .current.state == "no_active_work"))
   ' >/dev/null || fail "canonical secondmate or child bounds were not enforced: $canonical"
   json=$(FM_SNAPSHOT_SECONDMATES=2 FM_SNAPSHOT_SECONDMATE_CHILDREN=2 FM_BEARINGS_SECONDMATES=1 \
     run "$home" "$fakebin" --json)
@@ -578,6 +581,7 @@ test_secondmate_and_child_bounds_are_disclosed() {
     run "$home" "$fakebin" --json --all-secondmates)
   printf '%s' "$expanded" | jq -e '
     (.secondmates | length) == 3
+      and (.secondmates | any(.id == "home-assistant" and .display_name == "Home · Assistant"))
       and ([.omitted[].surface] | any(test("secondmates showing|registered secondmates omitted")) | not)
   ' >/dev/null || fail "--all-secondmates did not expand the canonical and bearings bounds: $expanded"
   pass "secondmate and per-home child counts are bounded, disclosed, and explicitly expandable"
@@ -896,8 +900,15 @@ test_default_is_bounded_and_local_only() {
   # Definitive not-requested PR state, never a silent omission.
   assert_contains "$toon" 'prs: "not_requested' "default must state PR checks were not requested"
   assert_contains "$toon" "live PR discovery + checks,\"--include-prs\"" "omitted must mark the dropped live-PR surface"
-  # Valid JSON, correct schema.
-  printf '%s' "$json" | jq -e '.schema == "fm-bearings.v1"' >/dev/null || fail "json schema wrong"
+  # Valid JSON, correct schema, and human display plus exact id.
+  printf '%s' "$json" | jq -e '
+    .schema == "fm-bearings.v1"
+      and (.in_flight | any(.[]; .id == "ship-task" and .display_name == "CRM · Dashboard"))
+      and (.in_flight | any(.[]; .id == "external-wait" and .display_name == "External · Wait"))
+      and (.secondmates | any(.[]; .id == "mate"
+        and .display_name == "Platform · Stewardship"
+        and .state == "captain_decision"))
+  ' >/dev/null || fail "json schema or task display names wrong"
   pass "default output is bounded, local-only, and marks omitted surfaces"
 }
 
@@ -1624,6 +1635,8 @@ test_mixed_secondmate_roles_partial_state_and_captain_readiness() {
   append_secondmate_registry "$home" wheel "$wheel"
   append_secondmate_registry "$home" sshhip "$sshhip"
   append_secondmate_registry "$home" home-assistant "$ha"
+  fm_write_secondmate_meta "$home/state/hibit.meta" "$hibit" "firstmate:fm-hibit" hibit
+  printf 'display_name=Platform · Progress\n' >> "$home/state/hibit.meta"
 
   mkdir -p "$hibit/projects/worker" "$wheel/projects/worker" "$sshhip/projects/child" "$ha/projects/prep"
   cat > "$hibit/data/backlog.md" <<'EOF'
@@ -1731,6 +1744,9 @@ EOF
   json=$(run "$home" "$fakebin" --json --fields bodies --all-landed)
   printf '%s' "$json" | jq -e '
     ([.in_flight[].id] | sort) == ["hibit", "home-assistant", "wheel"]
+      and (.in_flight | any(.id == "hibit" and .display_name == "Platform · Progress"))
+      and (.secondmates | any(.id == "hibit" and .display_name == "Platform · Progress"
+        and .state == "active_child_work"))
       and (.decisions_open | any(.id == "sshhip/reviewer-decision"))
       and (.decisions_open | any(.id == "home-assistant/captain-run") | not)
       and (.gates | any(.id == "production-observation" and .owner == "wheel"

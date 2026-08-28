@@ -704,8 +704,10 @@ launches_after_inherit=0
 [ "$launches_before_inherit" -eq "$launches_after_inherit" ] \
   || fail "remote spawn reached launch after ambiguous partial inheritance"
 assert_absent "$PARENT/state/ios.meta" "failed remote inheritance published launch metadata"
-out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
+out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --display-name 'Platform · Stewardship')
 assert_contains "$out" 'remote=remote-mac backend=herdr' "remote spawn did not report separate host and backend dimensions"
+assert_grep 'display_name=Platform · Stewardship' "$PARENT/state/ios.meta" "parent metadata omitted the explicit remote display name"
+assert_grep 'display_name=Platform · Stewardship' "$REMOTE_HOME/state/parent-route/ios.meta" "remote metadata diverged from the parent display name"
 assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"
 assert_grep 'remote_backend=herdr' "$PARENT/state/ios.meta" "parent metadata omitted the remote-local backend"
 assert_grep 'remote_herdr_session=fm-remote' "$PARENT/state/ios.meta" "parent metadata omitted the pinned remote Herdr session"
@@ -722,9 +724,32 @@ publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.s
 # without the rendered-output fallback a tmux endpoint needs.
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios)" = idle ] \
   || fail "remote endpoint delivery observation did not execute on its own host"
-pass "remote spawn launches on the remote-local backend and records a host-qualified route"
-
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
+remote_pane=$(sed -n 's/^herdr_pane_id=//p' "$remote_route_meta")
+cp "$HERDR_STATE" "$TMP_ROOT/herdr-before-dead-label-check.json"
+jq --arg pane "$remote_pane" 'del(.typed[$pane], .working[$pane])' "$HERDR_STATE" \
+  > "$TMP_ROOT/herdr-dead-label-check.json"
+mv "$TMP_ROOT/herdr-dead-label-check.json" "$HERDR_STATE"
+cp "$HERDR_STATE" "$TMP_ROOT/herdr-dead-before-invalid-label.json"
+cp "$HERDR_LOG" "$TMP_ROOT/herdr-before-invalid-label.log"
+cp "$remote_route_meta" "$TMP_ROOT/remote-meta-before-invalid-label.meta"
+set +e
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex - - herdr - 'bad/path' \
+  > "$TMP_ROOT/invalid-remote-label.out" 2>&1
+invalid_remote_label_rc=$?
+set -e
+[ "$invalid_remote_label_rc" -ne 0 ] || fail "remote control accepted an invalid display name"
+assert_grep 'invalid display name' "$TMP_ROOT/invalid-remote-label.out" \
+  "remote control did not report invalid display-name input"
+cmp -s "$TMP_ROOT/herdr-dead-before-invalid-label.json" "$HERDR_STATE" \
+  || fail "invalid display-name input changed the dead remote endpoint"
+cmp -s "$TMP_ROOT/herdr-before-invalid-label.log" "$HERDR_LOG" \
+  || fail "invalid display-name input inspected the remote endpoint"
+cmp -s "$TMP_ROOT/remote-meta-before-invalid-label.meta" "$remote_route_meta" \
+  || fail "invalid display-name input changed remote endpoint metadata"
+cp "$TMP_ROOT/herdr-before-dead-label-check.json" "$HERDR_STATE"
+pass "remote spawn launches on the remote-local backend and rejects invalid labels before endpoint access"
+
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-session.meta"
 legacy_pane=$(sed -n 's/^herdr_pane_id=//p' "$remote_route_meta")
 awk -v pane="$legacy_pane" '

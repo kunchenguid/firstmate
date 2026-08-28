@@ -851,6 +851,51 @@ test_handle_wake_routes_self_and_escalate() {
   pass "handle_wake routes routine->self and captain->escalate"
 }
 
+test_away_escalations_present_display_name_with_machine_identity() {
+  local dir state fakebin task win pane key escalation
+  dir=$(make_supercase away-display-name)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  task=fix-auth-bug
+  win="sess:fm-$task"
+  pane="$dir/pane.txt"
+  key=$(_stale_key "$task")
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux" "display_name=CRM · Authentication"
+
+  printf 'done: ready for review\n' > "$state/$task.status"
+  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/$task.status" "$state"
+  escalation=$(cat "$state/.subsuper-escalations")
+  assert_contains "$escalation" "CRM · Authentication [task $task]" \
+    "away signal escalation omitted the display name and immutable task id"
+
+  : > "$state/.subsuper-escalations"
+  rm -f "$state/.subsuper-seen-status-$key"
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  escalation=$(cat "$state/.subsuper-escalations")
+  assert_contains "$escalation" "CRM · Authentication [task $task]; endpoint $win" \
+    "away terminal-stale escalation omitted the display name or exact endpoint"
+
+  : > "$state/.subsuper-escalations"
+  printf 'working: authentication checks\n' > "$state/$task.status"
+  printf 'idle prompt $\n' > "$pane"
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  escalation=$(cat "$state/.subsuper-escalations")
+  assert_contains "$escalation" "CRM · Authentication [task $task]; endpoint $win" \
+    "away persistent-stale escalation omitted the display name or exact endpoint"
+
+  : > "$state/.subsuper-escalations"
+  rm -f "$state/.subsuper-last-scan" "$state/.subsuper-seen-status-$key"
+  printf 'done: final review ready\n' > "$state/$task.status"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  escalation=$(cat "$state/.subsuper-escalations")
+  assert_contains "$escalation" "CRM · Authentication [task $task]: done: final review ready (catch-all scan)" \
+    "away catch-all escalation omitted the display name and immutable task id"
+
+  pass "away escalation surfaces show display names with immutable task identities"
+}
+
 test_inject_skip_forces_self() {
   local dir state
   dir=$(make_supercase skip)
@@ -2075,6 +2120,7 @@ test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate
+test_away_escalations_present_display_name_with_machine_identity
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
 test_terminal_stale_escalate_leaves_no_marker

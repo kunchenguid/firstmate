@@ -2196,8 +2196,25 @@ test_projection_seeded_prune_refuses_active_tab() {
   pass "herdr presentation focus: projected seeded pruning refuses the active tab"
 }
 
+test_flat_presentation_reports_display_metadata_to_exact_pane() {
+  local dir state log resp fb
+  dir="$TMP_ROOT/flat-presentation"; mkdir -p "$dir/responses" "$dir/state"
+  state="$dir/state"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_present_task lab-session:w9:p7 "Platform · Stewardship" fm-secondmate-alpha
+    ' "$ROOT" || fail "flat Herdr presentation did not accept a validated display name"
+  assert_contains "$(cat "$log")" $'pane\x1freport-metadata\x1f--source\x1ffirstmate-display-name\x1f--title\x1fPlatform · Stewardship\x1fw9:p7' \
+    "flat Herdr presentation did not report the display name against the exact pane id"
+  assert_not_contains "$(cat "$log")" $'workspace\x1frename' \
+    "flat Herdr presentation mutated a workspace without an ID-bound projection journal"
+  pass "herdr flat presentation: display-only metadata targets the exact machine pane"
+}
+
 test_projection_label_builder_uses_corner_and_strips_owner_prefixes() {
-  local primary secondmate token
+  local primary secondmate explicit token
   token='AbCdEfGhIjKlMnOpQrStUv'
   [ "${#token}" -eq 22 ] || fail "fixture token must be 22 characters"
   primary=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label task-p2 '"$token" "$ROOT")
@@ -2215,8 +2232,11 @@ test_projection_label_builder_uses_corner_and_strips_owner_prefixes() {
   primary=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label fm-task-p2 '"$token" "$ROOT")
   [ "$primary" = "└ task-p2 · p:$token" ] \
     || fail "presentation fm- owner prefix was not stripped: $primary"
+  explicit=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label task-p2 '"$token"' "Backend · CRM Core"' "$ROOT")
+  [ "$explicit" = "└ Backend · CRM Core · p:$token" ] \
+    || fail "explicit human display name was not rendered independently of task identity: $explicit"
   case "$primary" in $'└ '*) ;; *) fail "label must start with U+2514 and one space" ;; esac
-  pass "herdr presentation labels: └ concise-task · p:<full-token> for primary and secondmate children"
+  pass "herdr presentation labels: explicit human names and legacy concise ids retain the full non-authoritative token"
 }
 
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order() {
@@ -4484,6 +4504,7 @@ test_kill_focused_workspace_stays_plain_close
 test_endpoint_confirmed_gone_gates_on_structured_presence
 test_kill_refuses_when_presentation_lock_is_unavailable
 test_projection_seeded_prune_refuses_active_tab
+test_flat_presentation_reports_display_metadata_to_exact_pane
 test_projection_label_builder_uses_corner_and_strips_owner_prefixes
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order
 test_projection_order_secondmate_parent_block

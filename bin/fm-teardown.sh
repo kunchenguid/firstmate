@@ -2375,9 +2375,48 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+# A Herdr close may reposition shared workspace order, so the whole
+# destructive sequence below (worker reap, worktree return, pane close, record
+# removal) runs under the named-session presentation lock, acquired BEFORE
+# anything is reaped, returned, or erased. A contended or unresolvable lock
+# refuses while the isolated copy, durable records, and endpoint are intact.
+TEARDOWN_HERDR_SESSION=
+TEARDOWN_HERDR_PANE=
+if [ "$BACKEND" = herdr ]; then
+  teardown_herdr_preflight_target "$T" "$ID" || exit 1
+  fm_backend_herdr_parse_target "$T" || exit 1
+  TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
+  TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
+fi
+
+# Correlate a projected endpoint while its metadata, process, and live Herdr
+# shape are still intact. Reaping a restored shell can remove the presentation
+# projection before pane cleanup, but must not quarantine an endpoint already
+# proven exact under the session lock.
+HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
+HERDR_PRESENTATION_RETIRE_CANDIDATE=0
+HERDR_PRESENTATION_SESSION=
+HERDR_PRESENTATION_PANE=
+if [ "$BACKEND" = herdr ] \
+   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
+  fm_backend_source herdr || true
+  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
+  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
+  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
+  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
+     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
+     && [ -n "$HERDR_PRESENTATION_PANE" ] \
+     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
+     && fm_backend_herdr_projection_endpoint_matches_journal \
+       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
+       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
+    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+  fi
+fi
+
 # Every landed/discard-work refusal above has now passed (or --force skipped
 # them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
-# --force, and before ANY destructive step below - a still-parked run or a
+# --force, and before any remaining destructive step - a still-parked run or a
 # leaked process can own live work in this exact worktree. Not for
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
@@ -2390,22 +2429,6 @@ fi
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
 # pruned code root. Best effort - a sweep failure never blocks this teardown.
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
-
-# A Herdr close may reposition shared workspace order, so the whole
-# destructive sequence below (worktree return, pane close, record removal)
-# runs under the named-session presentation lock, acquired BEFORE anything is
-# returned or erased: a contended lock refuses here while the isolated copy,
-# every durable record, and the endpoint are all still intact for a plain
-# rerun. An unresolvable lock path (for example an unreachable server) also
-# refuses before any destructive step.
-TEARDOWN_HERDR_SESSION=
-TEARDOWN_HERDR_PANE=
-if [ "$BACKEND" = herdr ]; then
-  teardown_herdr_preflight_target "$T" "$ID" || exit 1
-  fm_backend_herdr_parse_target "$T" || exit 1
-  TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
-  TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
-fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
@@ -2448,27 +2471,6 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
-fi
-
-HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
-HERDR_PRESENTATION_RETIRE_CANDIDATE=0
-HERDR_PRESENTATION_SESSION=
-HERDR_PRESENTATION_PANE=
-if [ "$BACKEND" = herdr ] \
-   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
-  fm_backend_source herdr || true
-  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
-  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
-  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
-  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
-     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
-     && [ -n "$HERDR_PRESENTATION_PANE" ] \
-     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
-     && fm_backend_herdr_projection_endpoint_matches_journal \
-       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
-       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
-    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
-  fi
 fi
 
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then

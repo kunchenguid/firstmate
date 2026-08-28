@@ -886,7 +886,10 @@ fm_remote_job_probe() { # <account-home>; a fresh worker heartbeat or active job
 
 fm_remote_job_wait_for_probe() { # <remote-root> <account-home>
   local root=$1 account_home=$2 i=0
-  while [ "$i" -lt 200 ]; do
+  # A contender can spend 15 seconds waiting to reclaim a recent abandoned
+  # worker lock before it can publish identity and readiness. Keep enough
+  # startup margin for a loaded CI or remote host beyond that recovery window.
+  while [ "$i" -lt 300 ]; do
     fm_remote_job_probe "$account_home" && fm_remote_job_worker_identity_matches "$root" "$account_home" && return 0
     i=$((i + 1))
     sleep 0.1

@@ -4,7 +4,8 @@
 #
 # Usage: fm-control.sh <task-id> interrupt
 #        fm-control.sh <task-id> exit
-#        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
+#        fm-control.sh <task-id> relaunch [--display-name <label>]
+#                                         [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
 #
@@ -34,8 +35,10 @@
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME endpoint and SAME worktree, on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use
-#              of this verb. With no explicit axis, a secondmate re-resolves its
-#              durable config/secondmate-harness pin (harness plus its optional
+#              of this verb. --display-name updates only the shared human
+#              presentation field; it never participates in endpoint identity.
+#              With no explicit axis, a secondmate re-resolves its durable
+#              config/secondmate-harness pin (harness plus its optional
 #              model and effort tokens) exactly as any other respawn does, while
 #              a ship or scout keeps the exact adapter already recorded for it.
 #              A prefixed raw-command basename cannot reconstruct its launch
@@ -187,9 +190,11 @@ fi
 NEW_HARNESS=
 NEW_MODEL=
 NEW_EFFORT=
+NEW_DISPLAY_NAME=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+DISPLAY_NAME_SET=0
 NOTE=
 NOTE_SET=0
 want_value=
@@ -202,6 +207,7 @@ for a in "$@"; do
       harness) NEW_HARNESS=$a; HARNESS_SET=1 ;;
       model) NEW_MODEL=$a; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$a; EFFORT_SET=1 ;;
+      display-name) NEW_DISPLAY_NAME=$a; DISPLAY_NAME_SET=1 ;;
       note) NOTE=$a; NOTE_SET=1 ;;
       note-file)
         [ -f "$a" ] || die "--note-file '$a' is not a readable file"
@@ -219,6 +225,8 @@ for a in "$@"; do
     --model=*) NEW_MODEL=${a#--model=}; MODEL_SET=1 ;;
     --effort) want_value=effort ;;
     --effort=*) NEW_EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
+    --display-name) want_value=display-name ;;
+    --display-name=*) NEW_DISPLAY_NAME=${a#--display-name=}; DISPLAY_NAME_SET=1 ;;
     --note) want_value=note ;;
     --note=*) NOTE=${a#--note=}; NOTE_SET=1 ;;
     --note-file) want_value=note-file ;;
@@ -233,12 +241,14 @@ done
 [ -z "$want_value" ] || die "--$want_value requires a value"
 
 if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] \
+    && [ "$DISPLAY_NAME_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
+    || die "--display-name, --harness, --model, --effort, and --note apply to 'relaunch' only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
+[ "$DISPLAY_NAME_SET" = 0 ] || fm_display_name_validate "$NEW_DISPLAY_NAME" || exit 1
 case "$NEW_EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) die "--effort must be one of low, medium, high, xhigh, max" ;;
@@ -814,6 +824,7 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
+  [ "$DISPLAY_NAME_SET" = 0 ] || spawn_args+=(--display-name "$NEW_DISPLAY_NAME")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1

@@ -43,6 +43,10 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
+  select-pane)
+    [ -z "${FM_FAKE_PRESENTATION_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_PRESENTATION_LOG"
+    exit 0
+    ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -126,7 +130,8 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
-    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
+    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PRESENTATION_LOG="$launchlog.presentation" \
+    FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
@@ -808,6 +813,116 @@ test_non_claude_harness_ignores_config_dir() {
   pass "non-claude harnesses do not receive the claude CLAUDE_CONFIG_DIR prefix"
 }
 
+test_display_names_are_presentation_only_across_explicit_fallback_invalid_and_batch_spawns() {
+  local rec out status meta input
+  rec=$(make_spawn_case profile-display-labels codex display-explicit display-explicit-slug-like display-asia-readable display-email-readable display-colon-readable asian-markets-dashboard display-fallback fix-auth-bug improve-deploy-safety customer-relationship-management-dashboard-observability-improve display-invalid display-batch-a display-batch-b)
+  read_case_record "$rec"
+
+  : > "$LAUNCH_LOG.presentation"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    display-explicit "$PROJ_DIR" --display-name "Backend · CRM Core")
+  status=$?
+  expect_code 0 "$status" "explicit display-name spawn should succeed"
+  meta="$HOME_DIR/state/display-explicit.meta"
+  [ "$(grep -c '^display_name=' "$meta")" = 1 ] || fail "explicit spawn must persist one display_name"
+  assert_grep "display_name=Backend · CRM Core" "$meta" "explicit display name missing from metadata"
+  assert_grep "window=firstmate:fm-display-explicit" "$meta" "display name changed the machine endpoint"
+  assert_grep "endpoint_task_id=display-explicit" "$meta" "display name changed endpoint ownership"
+  assert_grep "select-pane -t firstmate:fm-display-explicit -T Backend · CRM Core" "$LAUNCH_LOG.presentation" \
+    "tmux did not render the display name through its independent pane title"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    display-explicit-slug-like "$PROJ_DIR" --display-name "CRM · improve-auth-safety")
+  status=$?
+  expect_code 0 "$status" "safe explicit display name with hyphenated outcome should succeed"
+  assert_grep "display_name=CRM · improve-auth-safety" "$HOME_DIR/state/display-explicit-slug-like.meta" \
+    "safe explicit display name was treated as a generated task-id fallback"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    display-asia-readable "$PROJ_DIR" --display-name "AsiaNet · Dashboard")
+  status=$?
+  expect_code 0 "$status" "ordinary Asia display-name words should succeed"
+  assert_grep "display_name=AsiaNet · Dashboard" "$HOME_DIR/state/display-asia-readable.meta" \
+    "ordinary Asia display-name words were treated as AWS credentials"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    display-email-readable "$PROJ_DIR" --display-name "Support · admin@example.com")
+  status=$?
+  expect_code 0 "$status" "ordinary email-like display-name text should succeed"
+  assert_grep "display_name=Support · admin@example.com" "$HOME_DIR/state/display-email-readable.meta" \
+    "ordinary email-like display-name text was treated as an SCP path"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    display-colon-readable "$PROJ_DIR" --display-name "CRM: Dashboard")
+  status=$?
+  expect_code 0 "$status" "ordinary colon display-name text should succeed"
+  assert_grep "display_name=CRM: Dashboard" "$HOME_DIR/state/display-colon-readable.meta" \
+    "ordinary colon display-name text was treated as an SCP path"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" asian-markets-dashboard "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Asia task-id fallback should succeed"
+  assert_grep "display_name=Asian · Markets Dashboard" "$HOME_DIR/state/asian-markets-dashboard.meta" \
+    "Asia task-id fallback was treated as an AWS credential"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" display-fallback "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "fallback display-name spawn should succeed"
+  assert_grep "display_name=Display · Fallback" "$HOME_DIR/state/display-fallback.meta" \
+    "spawn did not persist the shared readable fallback"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" fix-auth-bug "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "task-slug fallback display-name spawn should succeed"
+  assert_grep "display_name=Auth · Bug" "$HOME_DIR/state/fix-auth-bug.meta" \
+    "task-slug fallback discarded its domain nouns"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" improve-deploy-safety "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "delivery-mechanics fallback display-name spawn should succeed"
+  assert_grep "display_name=Improve · Safety" "$HOME_DIR/state/improve-deploy-safety.meta" \
+    "delivery-mechanics fallback discarded its task-specific outcome"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    customer-relationship-management-dashboard-observability-improve "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "long fallback display-name spawn should succeed"
+  assert_grep "display_name=Customer · Relationship Management Dashboard Observability Impro" \
+    "$HOME_DIR/state/customer-relationship-management-dashboard-observability-improve.meta" \
+    "long fallback should remain task-specific after bounded truncation"
+
+  for input in " padded" "bad/path" "Windows · C:tmp" "CRM · file:tmp" "CRM · ssh:host" \
+    "CRM · git@example.com:repo" "bad⁣transport" "token: abc123" "CRM · Dashboard v1" "CRM · Dashboard v 2" "CRM · Dashboard 2.0" \
+    "CRM · a1b2c3d" "fix-auth-bug" "feature-auth" \
+    "CRM · feature-auth" "Backend · fix-auth-bug" \
+    "main" "develop" "CRM · main" "Backend · develop" "Platform · master" "Core · trunk" \
+    "open-pr" "CRM · Dashboard q7" "sk-abcdefghijklmnopqrstuvwx" "GitLab · glpat-abc123" \
+    "ASIA1234567890ABCDEF · Dashboard"; do
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      display-invalid "$PROJ_DIR" --display-name "$input")
+    status=$?
+    [ "$status" -ne 0 ] || fail "invalid display name unexpectedly spawned: $input"
+    [ ! -e "$HOME_DIR/state/display-invalid.meta" ] || fail "invalid display name published task metadata"
+  done
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "display-batch-a=$PROJ_DIR" "display-batch-b=$PROJ_DIR" --display-name "CRM · Dashboard")
+  status=$?
+  expect_code 0 "$status" "batch with duplicate display names should succeed"
+  for meta in "$HOME_DIR/state/display-batch-a.meta" "$HOME_DIR/state/display-batch-b.meta"; do
+    assert_grep "display_name=CRM · Dashboard" "$meta" "batch child lost shared display name"
+  done
+  assert_grep "endpoint_task_id=display-batch-a" "$HOME_DIR/state/display-batch-a.meta" \
+    "batch display collision changed task A ownership"
+  assert_grep "endpoint_task_id=display-batch-b" "$HOME_DIR/state/display-batch-b.meta" \
+    "batch display collision changed task B ownership"
+  assert_grep "window=firstmate:fm-display-batch-a" "$HOME_DIR/state/display-batch-a.meta" \
+    "batch display collision changed task A routing"
+  assert_grep "window=firstmate:fm-display-batch-b" "$HOME_DIR/state/display-batch-b.meta" \
+    "batch display collision changed task B routing"
+  pass "display names validate strictly, fall back readably, render in tmux, and never replace batch task identity"
+}
+
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
   local rec id sm out status
   id=profile-secondmate-z16
@@ -817,13 +932,24 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   sm="$CASE_DIR/secondmate-home"
   make_seeded_secondmate_home "$sm" "$id"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" \
+    --secondmate --display-name "Platform · Stewardship")
   status=$?
   expect_code 0 "$status" "secondmate spawn should be exempt from the dispatch-profile explicit harness requirement"
   assert_contains "$out" "spawned $id harness=codex kind=secondmate" "secondmate launch did not use secondmate harness resolution"
   assert_grep "kind=secondmate" "$HOME_DIR/state/$id.meta" "secondmate meta missing kind=secondmate"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default
-  pass "active crew-dispatch profile does not block secondmate launches"
+  assert_grep "display_name=Platform · Stewardship" "$HOME_DIR/state/$id.meta" \
+    "secondmate spawn did not persist its explicit display name"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "secondmate recovery spawn without a display name should succeed"
+  assert_grep "display_name=Platform · Stewardship" "$HOME_DIR/state/$id.meta" \
+    "secondmate recovery spawn replaced its persisted display name"
+  [ "$(grep -c '^display_name=' "$HOME_DIR/state/$id.meta")" = 1 ] \
+    || fail "secondmate recovery spawn must persist exactly one display name"
+  pass "active crew-dispatch profile preserves secondmate display names across recovery spawns"
 }
 
 test_no_profile_keeps_claude_profile_defaults
@@ -856,6 +982,7 @@ test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
+test_display_names_are_presentation_only_across_explicit_fallback_invalid_and_batch_spawns
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
 echo "# all fm-spawn-dispatch-profile tests passed"

@@ -44,7 +44,8 @@
 #   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
+#                       every state/*.meta (headed by shared display name plus
+#                       immutable id), a bounded state/*.status tail,
 #                       state/.afk, and a cheap per-task endpoint-liveness read:
 #                       read-only, always runs.
 #   7. network checks - the result of the deferred network stage started back at
@@ -793,7 +794,8 @@ for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
   META_FOUND=1
   id=$(basename "$meta" .meta)
-  printf '\n--- %s ---\n' "$id"
+  display_name=$(fm_display_name_for_meta "$meta" "$id")
+  printf '\n--- %s (id: %s) ---\n' "$display_name" "$id"
   cat "$meta"
 
   window=$(fm_meta_get "$meta" window)

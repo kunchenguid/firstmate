@@ -947,7 +947,7 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   # Force a MISSING diagnostic line so the bootstrap section is non-trivial.
-  rm -f "$fakebin/node"
+  rm -f "$fakebin/chrome-devtools-axi"
 
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
   printf 'Captain memory that may be truncated away safely.\n' > "$home/data/captain.md"
@@ -961,7 +961,7 @@ EOF
   context_line=$(printf '%s\n' "$out" | grep -n '^CONTEXT$' | head -1 | cut -d: -f1)
   fleet_line=$(printf '%s\n' "$out" | grep -n '^FLEET STATE$' | head -1 | cut -d: -f1)
   next_line=$(printf '%s\n' "$out" | grep -n '^NEXT STEP$' | head -1 | cut -d: -f1)
-  inventory_line=$(printf '%s\n' "$out" | grep -n '^--- task-a ---$' | head -1 | cut -d: -f1)
+  inventory_line=$(printf '%s\n' "$out" | grep -n '^--- Task · A (id: task-a) ---$' | head -1 | cut -d: -f1)
 
   if [ -z "$lock_line" ] || [ -z "$boot_line" ] || [ -z "$wake_line" ] \
     || [ -z "$read_once_line" ] || [ -z "$context_line" ] || [ -z "$fleet_line" ] \
@@ -986,8 +986,8 @@ EOF
   assert_contains "$out" "Captain memory that may be truncated away safely." \
     "the ordering fixture did not actually print a memory file"
 
-  missing_line=$(printf '%s\n' "$out" | grep -n 'MISSING: node' | head -1 | cut -d: -f1)
-  [ -n "$missing_line" ] || fail "MISSING diagnostic did not appear at all"
+  missing_line=$(printf '%s\n' "$out" | grep -n 'MISSING: chrome-devtools-axi' | head -1 | cut -d: -f1)
+  [ -n "$missing_line" ] || fail "forced MISSING diagnostic did not appear at all"
   [ "$missing_line" -lt "$fleet_line" ] || fail "actionable MISSING diagnostic was buried after the bulk fleet-state digest"
 
   pass "digest sections are ordered safety-preamble first, live fleet state before curated memory"
@@ -1351,7 +1351,7 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  rm -f "$fakebin/node"
+  rm -f "$fakebin/chrome-devtools-axi"
 
   printf 'needs-decision: pick a library\n' > "$home/state/task-z.status"
   append_wake "$home/state" signal task-z.status "needs-decision: pick a library"
@@ -1361,7 +1361,7 @@ EOF
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"
   # fm-bootstrap.sh's own exact MISSING-tool line format.
-  assert_contains "$out" "MISSING: node (install:" "fm-bootstrap.sh's real detect line did not appear verbatim"
+  assert_contains "$out" "MISSING: chrome-devtools-axi (install:" "fm-bootstrap.sh's real detect line did not appear verbatim"
   # fm-wake-drain.sh's real drained record (raw tab-separated queue line).
   assert_contains "$out" "$(printf 'signal\ttask-z.status\tneeds-decision: pick a library')" "fm-wake-drain.sh's real drained record did not appear"
   assert_contains "$out" "wake annotation: latest wake-EVENT observed at drain, not current state: task-z.status: needs-decision: pick a library" "fm-session-start.sh did not preserve the drain's separate annotation line"
@@ -1570,7 +1570,8 @@ EOF
   assert_not_contains "$out" "OVERSIZED-BODY-LINE" "tasks-axi compact digest leaked an in-flight task body"
   assert_not_contains "$out" "QUEUED-BODY-LINE" "tasks-axi compact digest leaked a queued task body"
   assert_not_contains "$out" "DONE-ROW-LINE" "tasks-axi compact digest listed a done row at startup"
-  assert_contains "$out" "--- compact-startup ---" "in-flight meta identity disappeared from startup recovery digest"
+  assert_contains "$out" "--- Compact · Startup (id: compact-startup) ---" \
+    "in-flight display plus exact identity disappeared from startup recovery digest"
   assert_contains "$out" "worktree=$home/projects/firstmate" "in-flight recovery worktree identity disappeared from startup digest"
   assert_contains "$out" "Full task bodies remain available on demand: tasks-axi show <id> --full" \
     "compact digest omitted the full-body lookup pointer"

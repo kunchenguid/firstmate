@@ -50,11 +50,12 @@ make_fake_root() {
   mkdir -p "$fake/bin/backends" "$fake/state"
   # Symlink the REAL teardown so the test exercises actual code, not a copy.
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
-  # fm-backend.sh + its tmux adapter: symlink the REAL files (teardown sources
-  # fm-backend.sh unconditionally, and dispatches the kill call through the
-  # tmux adapter; both are unchanged by this suite's fixture, just newly
-  # required siblings since the P1 backend extraction).
+  # fm-backend.sh + its display-name helper and tmux adapter: symlink the REAL
+  # files (teardown sources fm-backend.sh unconditionally, and dispatches the
+  # kill call through the tmux adapter; these are unchanged by this suite's
+  # fixture, just required siblings of the real teardown path).
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
+  ln -s "$ROOT/bin/fm-display-name-lib.sh" "$fake/bin/fm-display-name-lib.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
@@ -139,6 +140,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
   mkdir -p "$fake/bin/backends" "$fake/state"
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
+  ln -s "$ROOT/bin/fm-display-name-lib.sh" "$fake/bin/fm-display-name-lib.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
