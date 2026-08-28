@@ -223,11 +223,10 @@ test_changed_bin_reference_selects_per_script_not_per_family() {
   pass "a bin reference selects the referencing scripts, and consumers still select their curated families"
 }
 
-# --changed selects work; it does not grant permission to change resource use.
-# Exercise begin/end markers from real fixture processes to prove serial default
-# semantics and the separate, explicit bounded-concurrency opt-in.
-test_changed_concurrency_requires_explicit_jobs_consent() {
-  local tmp repo script serial_shape parallel_shape rc
+# Exercise begin/end markers from real fixture processes to prove the bounded
+# changed-suite default, its explicit serial override, and the auto alias.
+test_changed_uses_bounded_automatic_concurrency() {
+  local tmp repo script serial_shape parallel_shape alias_shape timeout_repo timeout_script rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed-consent.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
@@ -245,21 +244,25 @@ SH
   printf '\n' >>"$repo/bin/shared-probe-lib.sh"
 
   (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD) \
-    >"$tmp/serial.out" 2>"$tmp/serial.err" \
-    || fail "default changed fixture run failed: $(cat "$tmp/serial.err")"
-  serial_shape=$(grep -E '^FM_TEST_(BEGIN|END)' "$tmp/serial.out" | head -n 2 | awk '{print $1}' | paste -sd, -)
-  [ "$serial_shape" = FM_TEST_BEGIN,FM_TEST_END ] \
-    || fail "--changed ran concurrently without consent: $serial_shape"
-
-  set +e
-  (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --jobs auto) \
-    >"$tmp/parallel.out" 2>"$tmp/parallel.err"
-  rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || fail "explicit auto-jobs fixture run failed: $(cat "$tmp/parallel.err")"
+    >"$tmp/parallel.out" 2>"$tmp/parallel.err" \
+    || fail "default changed fixture run failed: $(cat "$tmp/parallel.err")"
   parallel_shape=$(grep -E '^FM_TEST_(BEGIN|END)' "$tmp/parallel.out" | head -n 2 | awk '{print $1}' | paste -sd, -)
   [ "$parallel_shape" = FM_TEST_BEGIN,FM_TEST_BEGIN ] \
-    || fail "--jobs auto did not opt into concurrent scheduling: $parallel_shape"
+    || fail "plain --changed did not use bounded concurrent scheduling: $parallel_shape"
+
+  (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --jobs 1) \
+    >"$tmp/serial.out" 2>"$tmp/serial.err" \
+    || fail "explicit serial changed fixture run failed: $(cat "$tmp/serial.err")"
+  serial_shape=$(grep -E '^FM_TEST_(BEGIN|END)' "$tmp/serial.out" | head -n 2 | awk '{print $1}' | paste -sd, -)
+  [ "$serial_shape" = FM_TEST_BEGIN,FM_TEST_END ] \
+    || fail "explicit --jobs 1 did not force serial execution: $serial_shape"
+
+  (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --jobs auto) \
+    >"$tmp/alias.out" 2>"$tmp/alias.err" \
+    || fail "auto-jobs alias fixture run failed: $(cat "$tmp/alias.err")"
+  alias_shape=$(grep -E '^FM_TEST_(BEGIN|END)' "$tmp/alias.out" | head -n 2 | awk '{print $1}' | paste -sd, -)
+  [ "$alias_shape" = FM_TEST_BEGIN,FM_TEST_BEGIN ] \
+    || fail "--jobs auto did not preserve automatic scheduling: $alias_shape"
 
   set +e
   "$RUNNER" --jobs auto --family watcher-wake-lock --list >"$tmp/bad.out" 2>"$tmp/bad.err"
@@ -267,8 +270,38 @@ SH
   set -e
   [ "$rc" -eq 2 ] || fail "--jobs auto outside --changed must be refused, got $rc"
 
+  timeout_repo="$tmp/timeout-repo"
+  timeout_script=tests/fm-calm-pi-extension.test.sh
+  mkdir -p "$timeout_repo/bin" "$timeout_repo/tests"
+  cp "$RUNNER" "$timeout_repo/bin/fm-test-run.sh"
+  cat >"$timeout_repo/bin/fm-timeout-lib.sh" <<'SH'
+fm_run_timed() {
+  [ "$1" -eq 900 ] || return 99
+  return 124
+}
+SH
+  cat >"$timeout_repo/$timeout_script" <<'SH'
+#!/usr/bin/env bash
+touch should-not-run
+echo "not ok - automatic timeout helper was bypassed"
+SH
+  chmod +x "$timeout_repo/bin/fm-test-run.sh" "$timeout_repo/$timeout_script"
+  git -C "$timeout_repo" init -q
+  git -C "$timeout_repo" add .
+  git -C "$timeout_repo" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
+  printf '\n' >>"$timeout_repo/$timeout_script"
+  set +e
+  (cd "$timeout_repo" && bin/fm-test-run.sh --changed --base HEAD) \
+    >"$tmp/timeout.out" 2>"$tmp/timeout.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "single-script automatic timeout must fail the run, got $rc"
+  grep -Eq '^FM_TEST_END .+ tests/fm-calm-pi-extension\.test\.sh exit=124 ' "$tmp/timeout.out" \
+    || fail "single unproven changed script did not receive the automatic timeout: $(cat "$tmp/timeout.out")"
+  [ ! -e "$timeout_repo/should-not-run" ] || fail "automatic timeout helper did not own the single changed script"
+
   rm -rf "$tmp"
-  pass "changed concurrency requires explicit --jobs auto consent"
+  pass "changed defaults to bounded automatic scheduling with serial override"
 }
 
 test_empty_selection_emits_summary() {
@@ -1093,7 +1126,7 @@ test_single_script_selection
 test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure
 test_changed_bin_reference_selects_per_script_not_per_family
-test_changed_concurrency_requires_explicit_jobs_consent
+test_changed_uses_bounded_automatic_concurrency
 test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior
