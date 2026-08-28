@@ -482,6 +482,25 @@ if [ -n "$ACK_THROUGH" ]; then
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
+  {
+    SESSION_ACK_BINDING=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-codex-primary.sh" validate 2>/dev/null || true)
+    case "$SESSION_ACK_BINDING" in
+      *$'\t'*)
+        FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+          "$SCRIPT_DIR/fm-codex-queue-wake.sh" acknowledge "$ACK_THROUGH" \
+          "${SESSION_ACK_BINDING%%$'\t'*}" "${SESSION_ACK_BINDING#*$'\t'}" \
+          "$ACK_GENERATION" >/dev/null 2>&1 || true
+        if [ -s "$FM_WAKE_QUEUE" ] && [ "$RECOVERY_ACK_MOVED" != true ]; then
+          FM_HOME="$FM_HOME" FM_DAEMON_PRIMARY_HARNESS=codex FM_SUPERVISE_PRESENT=1 \
+            FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-supervise-daemon.sh" \
+            --present-wake-once \
+            "successor: acknowledged recovery=$ACK_GENERATION but newer rows remain" \
+            >/dev/null 2>&1 || true
+        fi
+        ;;
+    esac
+  }
   if [ "$RECOVERY_ACK_MOVED" = true ]; then
     printf 'wake drain: acknowledged wakes through %s, but a newer recovery episode is pending; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command\n' \
       "$ACK_THROUGH" >&2

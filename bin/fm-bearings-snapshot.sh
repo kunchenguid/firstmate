@@ -143,6 +143,7 @@ and recorded_prs{url,ci=unverified} are worker self-reports, never verified CI.
 
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing,reported},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
+  secondmate_reconcile{id,spawn_gen,host,kind,ids},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url,ci},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
@@ -580,6 +581,9 @@ MODEL=$(printf '%s\n' "$SNAP" "$CANDIDATE_PRS" | jq -s \
       prs: $prs,
       in_flight: (if $all_in_flight == 1 then $in_flight_all else $in_flight_all[:$in_flight_n] end),
       secondmates: (if $all_secondmates == 1 then $secondmates_all else $secondmates_all[:$secondmates_n] end),
+      secondmate_reconcile: [ (.secondmate_current.records // [])[]
+        | select(.reconcile_inventory != null)
+        | {id, spawn_gen:(.spawn_gen // null), host:(.host // null), kind:(.reconcile_inventory.kind // null), ids:((.reconcile_inventory.ids // []) | map(select(type == "string")) | sort)} ],
       decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end),
       landed: ($done | map({id, what:(.title | trunc(70)),
                             artifact:(.pr_url // .report_path // .local_note // "-"),owner:.home_id})),

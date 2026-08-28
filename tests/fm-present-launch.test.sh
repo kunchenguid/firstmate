@@ -17,10 +17,35 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAUNCH="$ROOT/bin/fm-present-launch.sh"
+PRIMARY="$ROOT/bin/fm-codex-primary.sh"
+CODEX_UUID=11111111-1111-4111-8111-111111111111
 
 FAILED=0
 fail() { printf 'not ok - %s\n' "$1" >&2; FAILED=1; }
 pass() { printf 'ok - %s\n' "$1"; }
+
+hash_text() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    sha256sum | awk '{print $1}'
+  fi
+}
+
+bind_codex_primary() { # <home>
+  local home=$1 identity identity_hash
+  mkdir -p "$home/state"
+  identity=$(. "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity $$) || return 1
+  identity_hash=$(printf '%s' "$identity" | hash_text) || return 1
+  # shellcheck disable=SC2031 # Callers intentionally exercise this helper in subshell fixtures.
+  printf '%s\n' "$$" > "$home/state/.lock" || return 1
+  # shellcheck disable=SC2031 # Callers intentionally exercise this helper in subshell fixtures.
+  printf 'fm-session-lock-generation-v1\n%s\npresent-launch-test\n%s\n' \
+    "$$" "$identity_hash" > "$home/state/.lock-generation" || return 1
+  # shellcheck disable=SC2031 # Callers intentionally exercise this helper in subshell fixtures.
+  CODEX_THREAD_ID="$CODEX_UUID" FM_CODEX_TESTING=1 FM_CODEX_PRIMARY_OWNER_PID_OVERRIDE=$$ \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PRIMARY" bind startup
+}
 
 SLEEPER=$(mktemp "${TMPDIR:-/tmp}/fm-present-sleeper.XXXXXX")
 printf '#!/usr/bin/env bash\nexec sleep 600\n' > "$SLEEPER"
@@ -243,7 +268,8 @@ unit_unsupported_backend_refuses() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-present-unsupported.XXXXXX")
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
-    FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start >/dev/null 2>&1; then
+    FM_SUPERVISOR_BACKEND=unsupported FM_PRESENT_PRIMARY_HARNESS=traex \
+    "$LAUNCH" start >/dev/null 2>&1; then
     fail "unsupported backend: start unexpectedly succeeded"
   elif [ ! -e "$st/state/.present-daemon-terminal" ] \
     && [ ! -e "$st/state/.supervise-present.lock" ]; then
@@ -269,7 +295,8 @@ unit_independent_pty_degrades_honestly() {
   # discover_supervisor_target fails: exactly an independent pty.
   out=$(env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION \
     -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND \
-    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start 2>&1) || status=$?
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_PRESENT_PRIMARY_HARNESS=traex \
+    "$LAUNCH" start 2>&1) || status=$?
   if [ "$status" -ne 3 ]; then
     fail "independent pty: expected degrade code 3, got $status (out: $out)"
   elif ! printf '%s' "$out" | grep -q 'durable notifications available'; then
@@ -282,6 +309,93 @@ unit_independent_pty_degrades_honestly() {
     fail "independent pty: degrade left a terminal record or lock (no unverified injection target must be armed)"
   else
     pass "independent pty: honest degrade (durable remain, injection unavailable, code 3), no state armed"
+  fi
+  rm -rf "$st"
+}
+
+# ---------------------------------------------------------------------------
+# UNIT/TOPOLOGY: Codex does not need an injectable pane when the installed
+# command exposes the native queue interface and a live authoritative binding
+# validates. A detached tmux session may host only the watcher and queue adapter,
+# and it must receive the exact state path and resolved primary harness instead
+# of trying to rediscover ancestry there.
+# ---------------------------------------------------------------------------
+unit_independent_codex_uses_queue_only_host() {
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (Codex queue-only host)"; return 0; }
+  local st fakebin out status rec daemon_pid daemon_env
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-present-codex-queue-only.XXXXXX")
+  fakebin="$st/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = queue ] && [ "${2:-}" = --help ]; then
+  printf 'Usage: codex queue --thread THREAD --message TEXT\n'
+  exit 0
+fi
+exit 2
+SH
+  chmod +x "$fakebin/codex"
+  bind_codex_primary "$st" || { fail "Codex queue-only host: could not create the authoritative test binding"; rm -rf "$st"; return 0; }
+  status=0
+  out=$(env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION \
+    -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND \
+    PATH="$fakebin:$PATH" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    FM_PRESENT_PRIMARY_HARNESS=codex "$LAUNCH" start 2>&1) || status=$?
+  rec=$(cut -f2 "$st/state/.present-daemon-terminal" 2>/dev/null || true)
+  daemon_pid=$(cat "$st/state/.supervise-present.lock/pid" 2>/dev/null || true)
+  daemon_env=
+  case "$daemon_pid" in
+    ''|*[!0-9]*) ;;
+    *) daemon_env=$(tr '\0' '\n' < "/proc/$daemon_pid/environ" 2>/dev/null || true) ;;
+  esac
+  if [ "$status" -ne 0 ]; then
+    fail "Codex queue-only host: start failed with $status ($out)"
+  elif [ -z "$rec" ] || ! tmux has-session -t "$rec" 2>/dev/null; then
+    fail "Codex queue-only host: detached host was not live ($out)"
+  elif ! printf '%s\n' "$daemon_env" | grep -qx 'FM_DAEMON_PRIMARY_HARNESS=codex'; then
+    fail "Codex queue-only host: detached daemon lost the resolved harness"
+  elif ! printf '%s\n' "$daemon_env" | grep -qx "FM_STATE_OVERRIDE=$st/state"; then
+    fail "Codex queue-only host: detached daemon lost the explicit state directory"
+  else
+    pass "Codex queue-only host: independent pty uses a detached watcher with authoritative harness/state"
+  fi
+  TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $rec"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 || true
+  rm -rf "$st"
+}
+
+# ---------------------------------------------------------------------------
+# UNIT: CLI capability alone is insufficient for an independent-pty watcher.
+# Without a currently validated primary binding there is no safe queue target
+# and no terminal fallback, so launch must return the checkpoint degradation.
+# ---------------------------------------------------------------------------
+unit_independent_codex_missing_binding_degrades() {
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (Codex missing-binding degrade)"; return 0; }
+  local st fakebin out status=0
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-present-codex-unbound.XXXXXX")
+  fakebin="$st/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = queue ] && [ "${2:-}" = --help ]; then
+  printf 'Usage: codex queue --thread THREAD --message TEXT\n'
+  exit 0
+fi
+exit 2
+SH
+  chmod +x "$fakebin/codex"
+  out=$(env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION \
+    -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND \
+    PATH="$fakebin:$PATH" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    FM_PRESENT_PRIMARY_HARNESS=codex "$LAUNCH" start 2>&1) || status=$?
+  if [ "$status" -ne 3 ]; then
+    fail "Codex missing binding: expected checkpoint degrade code 3, got $status ($out)"
+  elif [ -e "$st/state/.present-daemon-terminal" ] || [ -e "$st/state/.supervise-present.lock" ]; then
+    fail "Codex missing binding: queue-only host was armed without an authoritative target"
+  elif ! printf '%s' "$out" | grep -q 'foreground checkpoint fallback'; then
+    fail "Codex missing binding: degrade did not name the foreground checkpoint ($out)"
+  else
+    pass "Codex missing binding: capability alone cannot arm queue-only supervision"
   fi
   rm -rf "$st"
 }
@@ -332,6 +446,8 @@ unit_herdr_run_failure_preserves_unconfirmed_record
 unit_stop_malformed_record_fails_closed
 unit_unsupported_backend_refuses
 unit_independent_pty_degrades_honestly
+unit_independent_codex_uses_queue_only_host
+unit_independent_codex_missing_binding_degrades
 e2e_tmux
 
 [ "$FAILED" -eq 0 ] || exit 1

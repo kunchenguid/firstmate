@@ -6,7 +6,8 @@
 # build, or a commit-hash development build. Comparable SemVer builds must meet
 # the configured floor. A hash alone proves no ordering, so a hash build passes
 # only when bounded, read-only help probes confirm both interfaces protected by
-# the v1.31.2 contract: direct-PR `watch --pr` and AXI `run --intent`.
+# Firstmate's depended-on command surface: direct-PR `watch --pr` and AXI
+# `run --intent`.
 #
 # The help probes neither arm a run nor contact a remote. FM_NM_PROBE_TIMEOUT
 # bounds each call in seconds (default 5); malformed values use the default.

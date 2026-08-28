@@ -21,17 +21,13 @@
 # state/.subsuper-escalations and are flushed on the next "while you were out"
 # catch-up or when afk is re-entered.
 #
-# PRESENT MODE (FM_SUPERVISE_PRESENT=1, the Codex/traex durable wake fallback).
-# The same daemon runs a second, simpler mode for a primary harness that cannot
-# be woken by background-task completion (Codex/traex; Claude/grok get that wake
-# natively). Launched by bin/fm-present-launch.sh while the captain is PRESENT
-# (afk off), it runs the watcher child in its NORMAL mode - the watcher itself
-# absorbs benign wakes and exits only on an actionable one - and its sole job is
-# to nudge the captain's pane on that exit so a fresh firstmate turn starts and
-# drains state/.wake-queue. It self-triages nothing (no escalation buffer, no
-# housekeeping), uses a distinct lock/log (.supervise-present.*), injects ONLY
-# while afk is inactive, and yields (exits) the moment state/.afk appears so the
-# away daemon owns supervision. See docs/supervision-protocols/codex.md.
+# PRESENT MODE (FM_SUPERVISE_PRESENT=1).
+# The same daemon runs a second, simpler mode for Codex and traex primaries.
+# Codex first rings the exact bound thread through `codex queue`; traex and every
+# Codex native-queue failure use the guarded tmux/herdr injection path.
+# It self-triages nothing, keeps a distinct lock/log, injects only while afk is
+# inactive, and yields when state/.afk appears.
+# See docs/supervision-protocols/codex.md.
 #
 # SHELL-TARGET SAFETY. When the selected supervisor backend can report the
 # pane's foreground command, the daemon refuses to arm or inject if the target
@@ -64,7 +60,9 @@
 #     within STALE_ESCALATE_SECS + a tick, never lost. A declared wait - either a
 #     paused: external wait or a verified captain-held transfer, per
 #     fm-classify-lib.sh's combined predicate - instead gets its own longer
-#     PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
+#     PAUSE_RESURFACE_SECS recheck, never a wedge escalation, whether its pane
+#     reads idle or busy; only a status append that stops declaring the wait
+#     ends that routing.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
@@ -83,6 +81,9 @@
 # Usage: fm-supervise-daemon.sh
 #          Long-lived background loop. Normally started by the /afk skill, which
 #          sets state/.afk first. Env knobs:
+#        fm-supervise-daemon.sh --present-wake-once <reason>
+#          Make one queue-first present-mode delivery attempt through the same
+#          guarded fallback path, without starting or replacing a watcher.
 #          FM_SUPERVISOR_TARGET     supervisor pane target (override; otherwise
 #                                   auto-discovered per backend - $TMUX_PANE
 #                                   under tmux, "<session>:<pane-id>" from
@@ -108,8 +109,9 @@
 #                                   kinds.
 #          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
 #                                   as a possible wedge (default 240)
-#          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared wait (external
-#                                   or captain-held) re-surfaces as a recheck
+#          FM_PAUSE_RESURFACE_SECS  seconds a declared wait (external or
+#                                   captain-held) stays declared, idle or busy,
+#                                   before it re-surfaces as a recheck
 #                                   (default 3600)
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
@@ -199,6 +201,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # (fm_busy_classify).
 # shellcheck source=bin/fm-busy-lib.sh
 . "$FM_DAEMON_DIR/fm-busy-lib.sh"
+
+# Codex primary binding, shape validation and record-field helpers, used by
+# present_handle_wake to validate native-queue outstanding records against the
+# shared v1 shape contract instead of positional line indexing.
+# shellcheck source=bin/fm-codex-primary.sh
+. "$FM_DAEMON_DIR/fm-codex-primary.sh"
 
 # --- tunables ---------------------------------------------------------------
 # Supervisor backends this daemon knows how to inject into today. zellij, orca,
@@ -469,10 +477,11 @@ stale_marker_remove() {  # <window> <state>
 
 # Pause marker: state/.subsuper-paused-<key> holds the epoch a declared wait (a
 # paused: external wait or a verified captain-held transfer) was first observed
-# idle. Housekeeping ages it against PAUSE_RESURFACE_SECS (much longer than a
-# wedge) and re-surfaces the wait once per window. Recording is create-if-absent
-# so the timestamp is stable across a churny idle pane (many
-# distinct stale hashes map to one marker), keeping the cadence hash-immune.
+# declared, whether its pane read idle or busy. Housekeeping ages it against
+# PAUSE_RESURFACE_SECS (much longer than a wedge) and re-surfaces the wait once
+# per window. Recording is create-if-absent so the timestamp is stable across a
+# churny pane (many distinct stale hashes map to one marker), keeping the cadence
+# hash-immune.
 pause_marker_record() {  # <window> <state> - create if absent
   local win=$1 state=$2 key marker
   key=$(_stale_key "$(window_to_task "$win" "$state")")
@@ -990,9 +999,9 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
 #  2b) pause re-surface: for each declared-wait marker past PAUSE_RESURFACE_SECS,
-#     re-peek; busy/gone -> clear; still idle + still declaring the wait -> escalate
-#     a recheck digest naming which human the wait is on, and reset the window
-#     (repeating bounded re-surface, never a wedge).
+#     re-peek; gone -> clear; still declaring the wait, on an idle OR a busy pane
+#     -> escalate a recheck digest naming which human the wait is on, and reset
+#     the window (repeating bounded re-surface, never a wedge).
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
@@ -1058,15 +1067,21 @@ housekeeping() {  # <state>
     esac
   done
 
-  # (2b) pause re-surface recheck. A declared wait idles by design (fm-classify-lib.sh's
+  # (2b) pause re-surface recheck. A declared wait is waiting, not wedged (fm-classify-lib.sh's
   # status_is_paused_or_captain_held owns which declarations qualify), so it is
   # rechecked on a much longer cadence than a wedge (PAUSE_RESURFACE_SECS) and never
   # escalated as one - but it MUST re-surface, so neither a forgotten pause nor a
-  # forgotten captain hold can rot invisibly. Past the window: busy (resumed) or gone
-  # -> drop; still idle and still declaring the wait -> escalate a recheck digest and
-  # reset the marker so the window repeats. The digest names WHICH human the wait is
-  # on, because the captain is the one reading it: an external dependency for a
-  # paused: declaration, and the captain themself for a verified hold transfer.
+  # forgotten captain hold can rot invisibly. Past the window: gone -> drop; still
+  # declaring the wait -> escalate a recheck digest and reset the marker so the window
+  # repeats. The digest names WHICH human the wait is on, because the captain is the
+  # one reading it: an external dependency for a paused: declaration, and the captain
+  # themself for a verified hold transfer.
+  # Pane busy state does NOT end the wait. A declared wait can legitimately hold a
+  # pane busy - a worker parked on a long foreground call it keeps live for as long
+  # as the wait lasts - so reading busy as "the crew resumed" retires the window of
+  # exactly the declaration that needs it. The crew's own latest status line is the
+  # authority, and the loop head above already drops the marker the moment that line
+  # stops declaring the wait.
   pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
   for marker in "$state"/.subsuper-paused-*; do
     [ -e "$marker" ] || continue
@@ -1083,9 +1098,14 @@ housekeeping() {  # <state>
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "$pause_secs" ] || continue
+    # Endpoint-readability probe only: exit code 2 means the capture failed, so the
+    # endpoint is gone and there is nothing left to re-surface. The busy/idle verdict
+    # is deliberately discarded here. Do NOT reinstate a `0)` arm dropping the marker
+    # on busy: migrate_watcher_pause_markers recreates it with a fresh timestamp on
+    # the very next tick while the declaration still stands, so the window would
+    # restart forever and the wait would never mature into its one recheck.
     stale_window_is_busy "$win" "$state"
     case "$?" in
-      0) rm -f "$marker" ;;
       2) rm -f "$marker" ;;
       *)
         last=$(last_status_line "$state/$task.status")
@@ -1299,9 +1319,22 @@ handle_wake() {  # <reason> <state>
     stale:*)  kind=stale; arg="${reason#stale: }"; stale_detail="${arg#"$arg"}"
               case "$arg" in *" ("*) stale_detail="${arg#*" ("}"; arg="${arg%% \(*}" ;; esac
               decision=$(classify_stale "$arg" "$state")
-              case "$stale_detail" in
-                idle\ *s,\ possible\ wedge,\ escalation\ *)
-                  decision="escalate|${reason#stale: }" ;;
+              # An enriched wedge reason carries the watcher's own escalation count
+              # and its "do not re-absorb on the run-step/pane state alone" demand,
+              # so it outranks this daemon's cheaper status-log absorption - EXCEPT
+              # under a current declared wait. A `pause` verdict is not run-step or
+              # pane state at all: it is the crew's own declaration that this pane
+              # waits by design, which is the one question the wedge timer cannot
+              # answer for itself. Overriding it escalated healthy declared waits
+              # once per STALE_ESCALATE_SECS for as long as the wait lasted.
+              # Housekeeping (2b) then owns the re-surface, so the wait is still
+              # bounded - by one recheck per PAUSE_RESURFACE_SECS instead.
+              case "${decision%%|*}" in
+                pause) : ;;
+                *) case "$stale_detail" in
+                     idle\ *s,\ possible\ wedge,\ escalation\ *)
+                       decision="escalate|${reason#stale: }" ;;
+                   esac ;;
               esac ;;
     check:*)  decision=$(classify_check "$reason") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
@@ -1404,24 +1437,105 @@ handle_durable_wakes() {  # <watcher-reason> <state>
 log() { [ -n "${LOG:-}" ] && printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >> "$LOG"; }
 
 # --- present-mode wake handling ---------------------------------------------
-# The Codex/traex durable wake fallback. Unlike away mode, there is nothing to
+# The Codex/traex durable wake delivery path. Unlike away mode, there is nothing to
 # triage here: the watcher child ran in NORMAL mode (state/.afk absent), so it
 # already absorbed every benign wake itself and exits ONLY for an actionable
 # one. The present daemon's sole job is to convert that watcher exit into a
-# fresh firstmate turn by nudging the captain's pane - the wake channel Codex
-# lacks natively and Claude gets for free from background-task completion.
+# fresh firstmate turn. Codex prefers the exact bound thread through its native
+# queue command; traex and Codex queue failures use guarded pane injection.
 # Firstmate then drains state/.wake-queue and handles the wake through its
 # emitted supervision protocol. The wake is already durable in state/.wake-queue
-# (fm-watch enqueues before it exits), so a deferred or failed inject loses
-# nothing: the record persists for the next inject attempt, the next watcher
+# (fm-watch enqueues before it exits), so a deferred or failed doorbell loses
+# nothing: the record persists for the next delivery attempt, the next watcher
 # wake, or a manual bin/fm-wake-drain.sh at the top of any turn.
-present_handle_wake() {  # <reason> <state>
-  local reason=$1 state=$2
-  if inject_msg "Supervision wake ($reason): drain queued wakes with bin/fm-wake-drain.sh and handle per the emitted supervision protocol." "$state"; then
-    log "present nudge injected: $reason"
-  else
-    log "present nudge deferred (wake persists in state/.wake-queue): $reason"
+present_handle_wake_locked() {  # <reason> <state>
+  local reason=$1 state=$2 harness queue_err queue_line generation recovery fallback_record tmp
+  local binding thread=unbound
+  harness=$(fm_daemon_primary_harness)
+  fallback_record="$state/.codex-present-fallback-outstanding"
+  generation=$(sed -n '3p' "$state/.lock-generation" 2>/dev/null || true)
+  if [ "$harness" = codex ]; then
+    binding=$(FM_STATE_OVERRIDE="$state" "$FM_DAEMON_DIR/fm-codex-primary.sh" validate 2>/dev/null || true)
+    case "$binding" in
+      *$'\t'*)
+        thread=${binding%%$'\t'*}
+        generation=${binding#*$'\t'}
+        ;;
+    esac
   fi
+  recovery=$(sed -n 's/^\(pending\|announced\):\(handling\|downtime\):\([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\3/p' \
+    "$state/.watcher-down" 2>/dev/null | tail -1)
+  if [ "$harness" = codex ] && [ -n "$generation" ] && [ -n "$recovery" ] \
+    && [ -f "$fallback_record" ] && [ ! -L "$fallback_record" ] \
+    && fm_codex_record_shape_valid "$fallback_record" fm-codex-present-fallback-v1 4 \
+    && [ "$(fm_codex_record_field "$fallback_record" thread_uuid 2>/dev/null || true)" = "$thread" ] \
+    && [ "$(fm_codex_record_field "$fallback_record" session_generation 2>/dev/null || true)" = "$generation" ] \
+    && [ "$(fm_codex_record_field "$fallback_record" recovery_generation 2>/dev/null || true)" = "$recovery" ] \
+    && [ "$(fm_codex_record_field "$fallback_record" status 2>/dev/null || true)" = accepted ]; then
+    log "present terminal fallback doorbell coalesced: $reason"
+    return 0
+  fi
+  if [ "$harness" = codex ]; then
+    queue_err=$(mktemp "$state/.codex-queue-daemon.XXXXXX") || queue_err=
+    if FM_STATE_OVERRIDE="$state" "$FM_DAEMON_DIR/fm-codex-queue-wake.sh" deliver \
+      >/dev/null 2>"${queue_err:-/dev/null}"; then
+      [ -z "$queue_err" ] || rm -f -- "$queue_err"
+      log "present Codex queue doorbell accepted or coalesced: $reason"
+      return 0
+    fi
+    if [ -n "$queue_err" ] && [ -s "$queue_err" ]; then
+      while IFS= read -r queue_line; do
+        log "$queue_line"
+      done < "$queue_err"
+    fi
+    [ -z "$queue_err" ] || rm -f -- "$queue_err"
+  fi
+  if [ "${FM_CODEX_QUEUE_ONLY:-0}" = 1 ]; then
+    log "present terminal fallback unavailable; durable wake remains for the bounded foreground checkpoint: $reason"
+    return 1
+  fi
+  if inject_msg "Supervision wake ($reason): drain queued wakes with bin/fm-wake-drain.sh and handle per the emitted supervision protocol." "$state"; then
+    if [ "$harness" = codex ] && [ -n "$generation" ] && [ -n "$recovery" ]; then
+      tmp=$(mktemp "$state/.codex-present-fallback.XXXXXX") || tmp=
+      if [ -n "$tmp" ]; then
+        if printf 'fm-codex-present-fallback-v1\nthread_uuid=%s\nsession_generation=%s\nrecovery_generation=%s\nstatus=accepted\n' \
+          "$thread" "$generation" "$recovery" > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$fallback_record"; then
+          :
+        else
+          rm -f -- "$tmp"
+          log "present terminal fallback accepted but its coalescing record could not be published"
+        fi
+      fi
+    fi
+    log "present terminal fallback nudge injected: $reason"
+  else
+    log "present delivery deferred after native queue and terminal fallbacks (wake persists for the foreground checkpoint): $reason"
+  fi
+}
+
+present_handle_wake() {  # <reason> <state>
+  local reason=$1 state=$2 delivery_lock="$2/.codex-present-delivery.lock" result=0
+  fm_lock_acquire_wait "$delivery_lock" || return 1
+  present_handle_wake_locked "$reason" "$state" || result=$?
+  fm_lock_release "$delivery_lock"
+  return "$result"
+}
+
+fm_present_wake_once() {  # <reason>
+  local reason=$1 state backend target
+  state=$(_state_root)
+  mkdir -p "$state" || return 1
+  FM_SUPERVISE_PRESENT=1
+  if [ -z "${FM_SUPERVISOR_BACKEND:-}" ]; then
+    backend=$(discover_supervisor_backend) || true
+    FM_SUPERVISOR_BACKEND=$backend
+  fi
+  if [ -z "${FM_SUPERVISOR_TARGET:-}" ]; then
+    target=$(discover_supervisor_target) || true
+    FM_SUPERVISOR_TARGET=$target
+  fi
+  LOG="$state/.supervise-present.log"
+  present_handle_wake "$reason" "$state"
 }
 
 trim_log() {
@@ -1455,6 +1569,7 @@ fm_super_main() {
   # exclusive by afk state - see inject_msg - and the watcher singleton lock
   # keeps only one watcher child alive across both).
   local PRESENT=${FM_SUPERVISE_PRESENT:-0}
+  local CODEX_QUEUE_ONLY=${FM_CODEX_QUEUE_ONLY:-0}
   local LOG WATCH_ERR LOCK PIDFILE
   if [ "$PRESENT" = 1 ]; then
     LOG="$STATE/.supervise-present.log"
@@ -1516,7 +1631,8 @@ fm_super_main() {
   # composer/busy primitives wired up for this daemon yet - AGENTS.md section 4
   # harness-verification discipline). This is the clear refusal the task calls
   # for, instead of a confusing "does not resolve to a tmux pane" error.
-  if ! fm_backend_list_contains "$FM_SUPERVISOR_SUPPORTED_BACKENDS" "$BACKEND"; then
+  if [ "$CODEX_QUEUE_ONLY" != 1 ] \
+    && ! fm_backend_list_contains "$FM_SUPERVISOR_SUPPORTED_BACKENDS" "$BACKEND"; then
     echo "error: away-mode daemon does not support supervisor backend '$BACKEND' yet (supported: $FM_SUPERVISOR_SUPPORTED_BACKENDS); set FM_SUPERVISOR_BACKEND=tmux|herdr and FM_SUPERVISOR_TARGET to run firstmate's own pane under a supported backend" >&2
     log "startup failed: unsupported supervisor backend '$BACKEND' (source=$backend_source)"
     fm_lock_release "$LOCK" 2>/dev/null || true
@@ -1556,7 +1672,7 @@ fm_super_main() {
   # probe, so a herdr supervisor pane is checked via the herdr adapter; for
   # backend=tmux this runs the exact same `tmux display-message -p -t "$TARGET"
   # '#{pane_id}'` call as before.
-  if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
+  if [ "$CODEX_QUEUE_ONLY" != 1 ] && ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
     echo "error: supervisor target '$TARGET' does not resolve to a $BACKEND pane; set FM_SUPERVISOR_TARGET" >&2
     log "startup failed: target '$TARGET' not found (backend=$BACKEND)"
     fm_lock_release "$LOCK" 2>/dev/null || true
@@ -1564,7 +1680,7 @@ fm_super_main() {
     exit 1
   fi
   local shell_cmd
-  if shell_cmd=$(supervisor_target_login_shell "$BACKEND" "$TARGET"); then
+  if [ "$CODEX_QUEUE_ONLY" != 1 ] && shell_cmd=$(supervisor_target_login_shell "$BACKEND" "$TARGET"); then
     echo "error: away-mode daemon refuses to arm: supervisor target '$TARGET' on backend '$BACKEND' is a login shell (current command: $shell_cmd), not firstmate's agent pane. Set FM_SUPERVISOR_TARGET and FM_SUPERVISOR_BACKEND to firstmate's own pane." >&2
     log "startup failed: target '$TARGET' is a login shell (backend=$BACKEND, command=$shell_cmd, source=$target_source)"
     fm_lock_release "$LOCK" 2>/dev/null || true
@@ -1579,7 +1695,7 @@ fm_super_main() {
   # first-party signal ($TMUX_PANE, herdr markers, or an explicit captured
   # FM_SUPERVISOR_TARGET) - never the home-agnostic fallback, whose target is a
   # guess we must not claim. tmux only; herdr targets are owned by construction.
-  if [ "$BACKEND" = tmux ]; then
+  if [ "$CODEX_QUEUE_ONLY" != 1 ] && [ "$BACKEND" = tmux ]; then
     case "$target_source" in
       FALLBACK*) : ;;
       *) supervisor_tmux_stamp_own "$TARGET" || true ;;
@@ -1590,7 +1706,7 @@ fm_super_main() {
   # session another home owns), keep the daemon running so buffering and the
   # wake queue still recover every escalation, but it WILL refuse each injection
   # rather than risk a cross-home escalation. Loud, non-fatal.
-  if ! supervisor_target_home_ok "$BACKEND" "$TARGET"; then
+  if [ "$CODEX_QUEUE_ONLY" != 1 ] && ! supervisor_target_home_ok "$BACKEND" "$TARGET"; then
     echo "warn: supervisor target '$TARGET' (backend '$BACKEND') is not provably owned by this firstmate home (FM_HOME=$FM_HOME); the away-mode daemon will refuse to inject into it and rely on the wake queue instead of risking a cross-home escalation. Set FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND to firstmate's own pane." >&2
     log "startup: target '$TARGET' not owned by this home (source=$target_source, backend=$BACKEND); injections will be refused (cross-home guard)"
   fi
@@ -1641,13 +1757,30 @@ fm_super_main() {
     fi
   }
 
+  present_open_recovery() {
+    [ "$PRESENT" = 1 ] || return 1
+    fm_recovery_marker_snapshot "$STATE/.watcher-down" || return 1
+    case "$FM_RECOVERY_MARKER_TOKEN" in
+      pending:handling:*|pending:downtime:*|announced:handling:*|announced:downtime:*) return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+
   start_watcher() {
     CUR_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-watch.XXXXXX") || { log "error: mktemp failed; retrying in 5s"; sleep 5; return 1; }
-    "$WATCH" >"$CUR_TMP" 2>>"$WATCH_ERR" &
+    if present_open_recovery; then
+      FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$CUR_TMP" 2>>"$WATCH_ERR" &
+    else
+      "$WATCH" >"$CUR_TMP" 2>>"$WATCH_ERR" &
+    fi
     WATCHER_PID=$!
   }
 
   local rc reason
+  if present_open_recovery; then
+    log "present daemon recovering an open watcher episode before successor launch"
+    present_handle_wake "check: rearm-resurface" "$STATE" || true
+  fi
   while true; do
     # --- present-mode yield to away mode -----------------------------------
     # If the captain went away (state/.afk appeared) while a present daemon was
@@ -1667,7 +1800,8 @@ fm_super_main() {
     # has nowhere to go, and firstmate itself is the consumer of escalations.
     # Catch-up signals persist in state/*.status and flow on the next run, so
     # this delays rather than loses work.
-    if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
+    if [ "$CODEX_QUEUE_ONLY" != 1 ] && ! fm_backend_target_exists "$BACKEND" "$TARGET" \
+      && { [ "$PRESENT" != 1 ] || [ "$(fm_daemon_primary_harness)" != codex ]; }; then
       log "warn: supervisor target '$TARGET' gone; backing off ${INJECT_FAIL_SLEEP}s, will retry"
       # Flush is pointless with no pane; preserve any buffered escalations.
       sleep "$INJECT_FAIL_SLEEP"
@@ -1706,7 +1840,7 @@ fm_super_main() {
         fi
         log "wake: $reason"
         if [ "$PRESENT" = 1 ]; then
-          present_handle_wake "$reason" "$STATE"
+          present_handle_wake "$reason" "$STATE" || true
         elif ! handle_durable_wakes "$reason" "$STATE"; then
           log "durable wake handling was not acknowledged; restarting for recovery"
         fi
@@ -1734,7 +1868,14 @@ fm_super_main() {
 
 # Run only when executed, not when sourced (tests source the classifiers).
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
-  fm_super_main "$@"
+  case "${1:-}" in
+    '') fm_super_main ;;
+    --present-wake-once)
+      [ "$#" -eq 2 ] || { printf 'usage: fm-supervise-daemon.sh [--present-wake-once REASON]\n' >&2; exit 2; }
+      fm_present_wake_once "$2"
+      ;;
+    *) printf 'usage: fm-supervise-daemon.sh [--present-wake-once REASON]\n' >&2; exit 2 ;;
+  esac
 else
   # Library mode: these functions were SOURCED (only tests do this - production
   # execs the daemon, see bin/fm-afk-start.sh). Make it structurally impossible

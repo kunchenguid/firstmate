@@ -821,6 +821,41 @@ test_grok_adapter_missing_jq_and_no_supervision_allow() {
   pass "fm-turnend-guard-grok: missing jq and no-supervision-needed stops stay silent and bounded"
 }
 
+test_settings_hook_uses_claude_project_dir() {
+  local settings command autoarm
+  settings="$ROOT/.claude/settings.json"
+  [ -f "$settings" ] || fail "tracked .claude/settings.json is missing"
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
+  autoarm=$(jq -r '.hooks.Stop[0].hooks[1].command // empty' "$settings")
+  [ -n "$command" ] || fail "Stop hook command is missing from .claude/settings.json"
+  assert_contains "$command" 'CLAUDE_PROJECT_DIR' "Stop hook must resolve via CLAUDE_PROJECT_DIR, not a cwd-relative path"
+  assert_contains "$command" 'fm-turnend-guard.sh --claude' "Stop hook must invoke fm-turnend-guard.sh in cooperative --claude mode"
+  assert_contains "$command" 'GROK_AGENT' "Claude blocking Stop hook must stay inert when Grok loads Claude-compatible settings"
+  assert_contains "$autoarm" 'GROK_AGENT' "Claude auto-arm Stop hook must stay inert when Grok loads Claude-compatible settings"
+  case "$command" in
+    bin/fm-turnend-guard.sh|./bin/fm-turnend-guard.sh)
+      fail "Stop hook must not use a bare relative path (cwd-dependent): $command"
+      ;;
+  esac
+  pass ".claude/settings.json: Stop hook uses CLAUDE_PROJECT_DIR-anchored --claude guard command"
+}
+
+test_codex_hook_invokes_shared_guard() {
+  local settings command sessionstart
+  settings="$ROOT/.codex/hooks.json"
+  [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
+  sessionstart=$(jq -r '.hooks.SessionStart[0].hooks[0].command // empty' "$settings")
+  [ -n "$command" ] || fail "Stop hook command is missing from .codex/hooks.json"
+  [ -n "$sessionstart" ] || fail "SessionStart hook command is missing from .codex/hooks.json"
+  assert_contains "$command" 'pwd -P' "codex hook must anchor from the hook process working directory"
+  assert_contains "$command" '.codex/hooks.json' "codex hook must verify the hook-loaded firstmate root"
+  assert_contains "$command" 'fm-turnend-guard.sh' "codex hook must invoke the shared guard"
+  assert_not_contains "$command" '.cwd' "codex hook must not use payload cwd to select the guard executable"
+  assert_contains "$sessionstart" 'fm-sessionstart-run.sh' "codex SessionStart must use the shared session-start adapter"
+  pass ".codex/hooks.json: Stop uses the shared guard and SessionStart uses the shared lifecycle adapter"
+}
+
 # Grok loads Claude-compatible settings, so a TRACKED .claude/settings.json entry
 # that also has a .grok/hooks/ counterpart must refuse to run under Grok, or the
 # home gets a duplicate path. The regression this pins: the guard once tested
@@ -899,11 +934,8 @@ test_traex_hook_invokes_shared_guard() {
   pass ".trae/hooks.json: Stop hook invokes the shared primary guard"
 }
 
-# The traex hooks file is a mechanical copy of the codex one: same three fixed
-# commands (Stop guard + arm/cd PreToolUse seatbelts), differing ONLY in the
-# self-reference path token .codex/hooks.json -> .trae/hooks.json. Pin that so a
-# future edit to one file that forgets the other is caught, and so the traex file
-# can never silently drift into a different (untrusted-hash) command shape.
+# Traex and Codex share SessionStart, the Stop guard, and the PreToolUse
+# seatbelts byte-for-byte apart from their self-reference path.
 test_traex_hooks_mirror_codex_apart_from_path() {
   local codex traex normalized_codex normalized_traex
   codex="$ROOT/.codex/hooks.json"
@@ -917,11 +949,10 @@ test_traex_hooks_mirror_codex_apart_from_path() {
     || fail ".trae/hooks.json is missing the cd-pretool PreToolUse seatbelt"
   jq -e '.hooks.Stop[0].hooks[0].command | contains("fm-turnend-guard.sh")' "$traex" >/dev/null \
     || fail ".trae/hooks.json is missing the Stop guard"
-  # Byte-identical apart from the path token: mask .codex/.trae in both and compare.
   normalized_codex=$(jq -S . "$codex" | sed 's#\.codex/hooks\.json#.HOOKS#g')
   normalized_traex=$(jq -S . "$traex" | sed 's#\.trae/hooks\.json#.HOOKS#g')
   [ "$normalized_codex" = "$normalized_traex" ] \
-    || fail ".trae/hooks.json diverges from .codex/hooks.json beyond the .codex->.trae path token; keep it a mechanical copy"
+    || fail ".trae/hooks.json diverges from Codex beyond the self-reference path"
   pass ".trae/hooks.json mirrors .codex/hooks.json apart from the self-reference path"
 }
 
@@ -1421,6 +1452,7 @@ test_hook_claude_mode_blocks_on_pid_reused_arming_claim() {
   printf '%s\n' "$identity" > "$dir/state/.claude-autoarm.lock/pid-identity"
   printf 'epoch=464 owner_pid=%s outcome=arming updated_at=1\n' "$pid" > "$dir/state/.claude-autoarm-epoch"
   touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  : > "$dir/state/.last-watcher-beat"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
@@ -1428,6 +1460,77 @@ test_hook_claude_mode_blocks_on_pid_reused_arming_claim() {
   assert_contains "$out" "TURN WOULD END BLIND" "reused-pid claim block must carry the blind-turn banner"
   assert_contains "$out" "2 task(s) in flight" "reused-pid claim block must name the unsupervised work"
   pass "fm-turnend-guard --claude: a claim whose pid was reused stops counting as recovery even while its entry reads arming"
+}
+
+# The legacy stuck-arming shape (the 2026-08-26 flap): a live identity-matched
+# lock-holding owner frozen at arming past grace with a beacon just as stale
+# must not count as recovery under way.
+test_hook_claude_mode_blocks_on_stuck_arming_claim() {
+  local dir out status pid identity
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-stuck-arming-claim")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/task2.meta"
+  sleep 60 &
+  pid=$!
+  record_autoarm_owner "$dir" "$pid"
+  identity=$(fm_test_pid_identity "$pid") || fail "could not compute a claim pid-identity"
+  printf '%s\n' "$identity" > "$dir/state/.claude-autoarm.lock/pid-identity"
+  printf 'epoch=464 owner_pid=%s outcome=arming updated_at=1\n' "$pid" > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a live owner stuck arming past grace with a stale beacon must not pass for recovery under way"
+  assert_contains "$out" "TURN WOULD END BLIND" "stuck-arming claim block must carry the blind-turn banner"
+  assert_contains "$out" "2 task(s) in flight" "stuck-arming claim block must name the unsupervised work"
+  pass "fm-turnend-guard --claude: a hung owner frozen at arming with no watcher beat no longer allows a blind stop"
+}
+
+# The generation model's ownership proof: a live open ledger claim (two-line
+# entry, identity-matched owner, watcher still beating) owns recovery with no
+# lock held at all.
+test_hook_claude_mode_allows_on_open_generation_claim() {
+  local dir out status pid identity
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-open-generation")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(fm_test_pid_identity "$pid") || fail "could not compute a claim pid-identity"
+  printf 'epoch=464 owner_pid=%s outcome=arming updated_at=1\n%s\n' "$pid" "$identity" \
+    > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  : > "$dir/state/.last-watcher-beat"
+  [ ! -e "$dir/state/.claude-autoarm.lock" ] || fail "this case must start with no owner lock at all"
+  out=$(run_hook_claude "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "--claude mode must allow when a live open generation claim owns recovery"
+  [ -z "$out" ] || fail "open-generation-claim allow produced output: $out"
+  pass "fm-turnend-guard --claude: a live open generation claim owns recovery with no lock held"
+}
+
+# The same claim gone stuck (entry and beacon both past grace) stops counting
+# as recovery even though its owner is alive and identity-matched.
+test_hook_claude_mode_blocks_on_stuck_generation_claim() {
+  local dir out status pid identity
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-stuck-generation")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/task2.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(fm_test_pid_identity "$pid") || fail "could not compute a claim pid-identity"
+  printf 'epoch=464 owner_pid=%s outcome=arming updated_at=1\n%s\n' "$pid" "$identity" \
+    > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a stuck generation claim must not pass for recovery under way"
+  assert_contains "$out" "TURN WOULD END BLIND" "stuck-generation-claim block must carry the blind-turn banner"
+  assert_contains "$out" "2 task(s) in flight" "stuck-generation-claim block must name the unsupervised work"
+  pass "fm-turnend-guard --claude: a stuck generation claim no longer allows a blind stop"
 }
 
 # The same abandoned claim on the terminal path: stepping aside for it allowed the
@@ -1817,6 +1920,9 @@ test_hook_claude_mode_terminal_boundary_excludes_starting_owner
 test_hook_claude_mode_allows_on_fresh_rewake_epoch
 test_hook_claude_mode_blocks_on_abandoned_autoarm_claim
 test_hook_claude_mode_blocks_on_pid_reused_arming_claim
+test_hook_claude_mode_blocks_on_stuck_arming_claim
+test_hook_claude_mode_allows_on_open_generation_claim
+test_hook_claude_mode_blocks_on_stuck_generation_claim
 test_hook_claude_mode_terminal_fail_open_clears_abandoned_claim
 test_hook_claude_mode_preserves_fresh_failed_progression
 test_hook_claude_mode_integrated_monotonic_fail_open

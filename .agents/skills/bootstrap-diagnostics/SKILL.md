@@ -18,7 +18,7 @@ When any diagnostic needs captain attention, report the plain consequence and re
 
 - `MISSING: <tool> (install: <command>)` - list the missing tools to the captain with a one-line purpose each plus the printed install commands, wait for consent (one approval may cover the list), then run `bin/fm-bootstrap.sh install <approved tools...>`.
   For `treehouse`, this also covers an installed version whose `treehouse get` lacks `--lease`; treat it as an upgrade request.
-  For `no-mistakes`, `MISSING` means its command is absent; an installed old or unverifiable build reports `NM_INCOMPATIBLE` instead.
+  For `no-mistakes`, `MISSING` means its command is absent; an installed SemVer build older than 1.46.0, an unclassifiable build, or a build missing required capabilities reports `NM_INCOMPATIBLE` instead.
   For any axi-family tool - `gh-axi`, `lavish-axi`, `tasks-axi`, `quota-axi` - an installed version below its floor is a plain upgrade request; [`bin/fm-bootstrap.sh`](../../../bin/fm-bootstrap.sh) owns the floor policy, and never argue the floor down to whatever the home happens to have installed.
   For `tasks-axi`, this additionally covers an installed build that fails the separate feature probe (`bin/fm-tasks-axi-lib.sh` owns the definition); `config/backlog-backend=manual` only suppresses the verbose `BOOTSTRAP_INFO: tasks-axi available` fact, not this missing-tool report.
   For `quota-axi`, bootstrap requires it because firstmate reads its current output directly before resolving every crew-dispatch profile array; without it, report the missing requirement and do not choose around an unexamined candidate.
@@ -53,7 +53,7 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `FLEET_SYNC: <repo>: recovered: <detail>` - the clone had drifted onto a clean detached HEAD holding no unique commits and the sync self-healed it (re-attached the default branch and fast-forwarded); no action needed, it is reported only so the self-heal is visible.
 - `FLEET_SYNC: <repo>: STUCK: on <state>, N commits behind <base> - needs attention` - the clone is dirty, on a non-default branch, detached with unique commits, or diverged, so the sync left it untouched (never forcing or discarding); it will keep falling behind until you look.
   A loud STUCK, especially a growing N across bootstraps, means that clone needs hands-on attention; dispatch a crewmate or resolve it before it strands work.
-- `NM_INCOMPATIBLE: no-mistakes <reason> (upgrade: no-mistakes update)` - the no-mistakes binary is present, but its SemVer is below 1.31.2, its version cannot be safely classified, or a recognized commit-hash build failed a bounded read-only probe for `watch --pr` or `axi run --intent`.
+- `NM_INCOMPATIBLE: no-mistakes <reason> (upgrade: no-mistakes update)` - the no-mistakes binary is present, but its SemVer is below 1.46.0, its version cannot be safely classified, or a recognized commit-hash build failed a bounded read-only probe for `watch --pr` or `axi run --intent`.
   This is a detect-only diagnostic; bootstrap never upgrades the tool.
   Tell the captain the exact failed contract named by the line and, on explicit consent, upgrade it with the printed `no-mistakes update`, then rerun session start to confirm the line is gone.
   Never auto-upgrade, and note that no-mistakes is a shared single-instance daemon: an upgrade is a captain-authorized action, not a routine bootstrap install.

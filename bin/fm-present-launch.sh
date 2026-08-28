@@ -8,15 +8,11 @@
 # touches state/.afk, keeps no escalation buffer, and yields to away mode.
 #
 # Why this exists (docs/supervision-protocols/codex.md):
-# A primary harness that CANNOT be woken by background-task completion (Codex,
-# traex) misses supervision wakes while the captain is present - the watcher
-# enqueues an actionable wake to state/.wake-queue and exits, but nothing starts
-# a fresh model turn to drain it (contrast Claude/grok, which wake natively from
-# a completed background task). This launches bin/fm-supervise-daemon.sh in
-# PRESENT mode (FM_SUPERVISE_PRESENT=1) in a non-visible tracked terminal so the
-# daemon can nudge the captain's pane on each actionable wake, starting the turn
-# that drains the queue. The nudge is the durable fallback; the foreground
-# checkpoint (bin/fm-watch-checkpoint.sh) remains the manual backstop.
+# A bare watcher exit cannot start a Codex or traex turn.
+# This launches bin/fm-supervise-daemon.sh in a non-visible tracked terminal.
+# Codex uses its bound `codex queue` thread first and falls back to guarded pane
+# injection; traex keeps pane injection as its primary transport.
+# The foreground checkpoint remains the bounded final backstop.
 #
 # Correct supervisor targeting mirrors fm-afk-launch: capture the captain pane
 # FIRST from the pane this script runs in, then pass it in as
@@ -53,6 +49,7 @@ FM_PRESENT_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 FM_PRESENT_RECORD="$FM_PRESENT_STATE/.present-daemon-terminal"
 FM_PRESENT_WS_LABEL="firstmate-present-daemon"
 FM_PRESENT_DAEMON="$FM_PRESENT_LAUNCH_DIR/fm-supervise-daemon.sh"
+FM_PRESENT_QUEUE_ONLY=0
 
 # shellcheck source=bin/fm-backend.sh
 . "$FM_PRESENT_LAUNCH_DIR/fm-backend.sh"
@@ -70,6 +67,22 @@ set +e
 FM_AFK_LOCK="$FM_PRESENT_STATE/.supervise-present.lock"
 
 fm_present_log() { printf 'fm-present-launch: %s\n' "$*" >&2; }
+
+fm_present_primary_harness() {
+  if [ -n "${FM_PRESENT_PRIMARY_HARNESS:-}" ]; then
+    printf '%s' "$FM_PRESENT_PRIMARY_HARNESS"
+  else
+    "$FM_PRESENT_LAUNCH_DIR/fm-harness.sh" 2>/dev/null || printf unknown
+  fi
+}
+
+fm_present_codex_queue_ready() {
+  [ "$(fm_present_primary_harness)" = codex ] || return 1
+  FM_STATE_OVERRIDE="$FM_PRESENT_STATE" "$FM_PRESENT_LAUNCH_DIR/fm-codex-queue-wake.sh" capability \
+    >/dev/null 2>&1 || return 1
+  FM_STATE_OVERRIDE="$FM_PRESENT_STATE" "$FM_PRESENT_LAUNCH_DIR/fm-codex-primary.sh" validate \
+    >/dev/null 2>&1
+}
 
 # Exit code for an EXPECTED structural degrade: this primary cannot be woken by
 # automatic injection here (no injectable supervisor pane resolves, or the
@@ -215,7 +228,7 @@ fm_present_wait_ready() {  # <backend> <target>
 # Launch the daemon in a non-visible herdr workspace (--no-focus) in the
 # CAPTAIN's session, so it can inject into the captain pane which lives there.
 fm_present_create_herdr() {  # <captain-target> <captain-backend>
-  local captain_target=$1 captain_backend=$2 session out wsid pane entry cmd label
+  local captain_target=$1 captain_backend=$2 session out wsid pane entry cmd label primary_harness
   session=${captain_target%%:*}
   if [ -z "$session" ] || [ "$session" = "$captain_target" ]; then
     fm_present_log "cannot derive herdr session from captain target '$captain_target'"
@@ -232,8 +245,9 @@ fm_present_create_herdr() {  # <captain-target> <captain-backend>
     return 1
   fi
   entry=$(fm_present_entry_cmd)
-  cmd=$(printf 'exec env FM_SUPERVISE_PRESENT=1 FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
-    "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
+  primary_harness=$(fm_present_primary_harness)
+  cmd=$(printf 'exec env FM_SUPERVISE_PRESENT=1 FM_CODEX_QUEUE_ONLY=%q FM_HOME=%q FM_STATE_OVERRIDE=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q FM_DAEMON_PRIMARY_HARNESS=%q %q' \
+    "$FM_PRESENT_QUEUE_ONLY" "$FM_HOME" "$FM_PRESENT_STATE" "$captain_target" "$captain_backend" "$primary_harness" "$entry")
   if ! fm_present_record_write herdr "$session:$pane" "$wsid"; then
     fm_present_log "failed to persist herdr daemon terminal record; closing $session:$pane"
     fm_present_close_terminal herdr "$session:$pane"
@@ -258,16 +272,17 @@ fm_present_create_herdr() {  # <captain-target> <captain-backend>
 # window). tmux pane ids are server-global, so the daemon reaches the captain
 # pane by its %id from this separate session.
 fm_present_create_tmux() {  # <captain-target> <captain-backend>
-  local captain_target=$1 captain_backend=$2 session entry cmd hash nonce
+  local captain_target=$1 captain_backend=$2 session entry cmd hash nonce primary_harness
   hash=$(printf '%s' "$FM_HOME" | cksum | cut -d' ' -f1)
   nonce="$$-${RANDOM:-0}-$(date '+%s')"
   session="fm-present-daemon-$hash-$nonce"
   entry=$(fm_present_entry_cmd)
+  primary_harness=$(fm_present_primary_harness)
   # FM_TMUX_SOCKET is handed over explicitly so the daemon addresses the SAME
   # tmux server this launcher resolved, instead of re-deriving one from its own
   # detached session's environment (bin/fm-tmux-lib.sh).
-  cmd=$(printf 'exec env FM_SUPERVISE_PRESENT=1 FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q FM_TMUX_SOCKET=%q %q' \
-    "$FM_HOME" "$captain_target" "$captain_backend" "$(fm_tmux_socket)" "$entry")
+  cmd=$(printf 'exec env FM_SUPERVISE_PRESENT=1 FM_CODEX_QUEUE_ONLY=%q FM_HOME=%q FM_STATE_OVERRIDE=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q FM_TMUX_SOCKET=%q FM_DAEMON_PRIMARY_HARNESS=%q %q' \
+    "$FM_PRESENT_QUEUE_ONLY" "$FM_HOME" "$FM_PRESENT_STATE" "$captain_target" "$captain_backend" "$(fm_tmux_socket)" "$primary_harness" "$entry")
   if ! fm_present_record_write tmux "$session" ""; then
     fm_present_log "failed to persist planned tmux daemon session '$session'"
     return 1
@@ -304,20 +319,31 @@ fm_present_reconcile() {
 }
 
 fm_present_start() {
-  local captain_target captain_backend result=0
+  local captain_target captain_backend target_status=0 backend_status=0 result=0
   if daemon_lock_held_by_live_daemon; then
     fm_present_log "present daemon already running; nothing to do"
     return 0
   fi
-  captain_target=$(discover_supervisor_target) || {
-    fm_present_report_degraded "no injectable supervisor pane resolved (this primary is on an independent pty, not tmux/herdr)"
-    return "$FM_PRESENT_DEGRADED"; }
-  captain_backend=$(discover_supervisor_backend) || {
-    fm_present_report_degraded "no injectable supervisor backend resolved (this primary is on an independent pty, not tmux/herdr)"
-    return "$FM_PRESENT_DEGRADED"; }
+  captain_target=$(discover_supervisor_target) || target_status=$?
+  captain_backend=$(discover_supervisor_backend) || backend_status=$?
   mkdir -p "$FM_PRESENT_STATE"
   # Clear a leaked terminal from a prior crashed daemon before launching a new one.
   fm_present_reconcile || return 1
+  if { [ "$target_status" -ne 0 ] || [ "$backend_status" -ne 0 ] \
+    || ! fm_backend_list_contains 'tmux herdr' "$captain_backend"; } \
+    && fm_present_codex_queue_ready && command -v tmux >/dev/null 2>&1; then
+    FM_PRESENT_QUEUE_ONLY=1
+    fm_present_create_tmux codex-queue-only tmux
+    return $?
+  fi
+  if [ "$target_status" -ne 0 ]; then
+    fm_present_report_degraded "no injectable supervisor pane resolved and no detached host for the native Codex queue watcher is available"
+    return "$FM_PRESENT_DEGRADED"
+  fi
+  if [ "$backend_status" -ne 0 ]; then
+    fm_present_report_degraded "no injectable supervisor backend resolved and no detached host for the native Codex queue watcher is available"
+    return "$FM_PRESENT_DEGRADED"
+  fi
   case "$captain_backend" in
     herdr) fm_present_create_herdr "$captain_target" "$captain_backend"; result=$? ;;
     tmux)  fm_present_create_tmux "$captain_target" "$captain_backend"; result=$? ;;

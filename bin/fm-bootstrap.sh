@@ -85,7 +85,7 @@
 #          origin or any registered project clone - so a GitHub-only home is
 #          never told it is missing.
 #          no-mistakes is MISSING only when its command is absent. Installed
-#          SemVer builds below 1.31.2 and installed builds whose required
+#          SemVer builds below 1.46.0 and installed builds whose required
 #          capabilities cannot be verified report NM_INCOMPATIBLE instead.
 #          Recognized commit-hash development builds pass only when bounded,
 #          read-only help probes confirm watch --pr and axi run --intent.
@@ -93,7 +93,8 @@
 #          LAVISH_AXI_MIN below; the per-tool owners point there. An installed
 #          axi-family builds below their floors report MISSING, so the operator
 #          is asked to upgrade rather than silently running an older tool.
-#          no-mistakes instead distinguishes absence from installed incompatibility.
+#          no-mistakes instead distinguishes absence from installed incompatibility;
+#          its 1.46.0 floor protects the structured pipeline attestation contract.
 #          tasks-axi feature probes remain a separate defense-in-depth check.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). A compatible tasks-axi default backend is silent.
@@ -997,7 +998,7 @@ if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
   BACKEND_TOOLS=""
 fi
 TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
-NO_MISTAKES_MIN=1.31.2
+NO_MISTAKES_MIN=1.46.0
 # AXI-FAMILY FLOOR POLICY. Every axi-family floor is the CURRENT LATEST published
 # version of that tool, captain-bumped periodically to keep the whole fleet on the
 # newest axi tools. It is NOT the minimum feature-introduced version. These floors

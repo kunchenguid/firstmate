@@ -206,6 +206,10 @@ reset_state() {
   rm -f "$STATE_DIR"/*.status \
          "$STATE_DIR"/*.check.sh \
          "$STATE_DIR"/.wake-queue* \
+         "$STATE_DIR"/.watcher-down* \
+         "$STATE_DIR"/.watch-deliveries* \
+         "$STATE_DIR"/.codex-queue-outstanding* \
+         "$STATE_DIR"/.codex-present-fallback-outstanding* \
          "$STATE_DIR"/.watch.lock* \
          "$STATE_DIR"/.supervise-present.* \
          "$STATE_DIR"/.last-* \
@@ -276,7 +280,7 @@ CHK
   chmod 0700 "$STATE_DIR/merge-200.check.sh"
   FM_STATE_OVERRIDE="$STATE_DIR" "$ROOT/bin/fm-check-register.sh" merge-200 >/dev/null \
     || fail "Event 2: could not register the merge poll as a custom check"
-  wait_for_nudge "check:" \
+  wait_for_nudge "check: $STATE_DIR/merge-200.check.sh: merged: PR https://example.test/pr/200" \
     || { echo "daemon log:" >&2; cat "$STATE_DIR/.supervise-present.log" >&2 2>/dev/null || true; \
          fail "Event 2: PR check.sh did not auto-inject a check nudge (manual drain would have been required)"; }
   assert_clean_injection "Event 2"
