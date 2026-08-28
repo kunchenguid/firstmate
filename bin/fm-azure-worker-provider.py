@@ -164,6 +164,14 @@ VM_POWER_POLL_SECONDS = 10
 # one, since how long it takes depends on how fast Azure answers. A read count
 # fails the same way every time.
 VM_POWER_MAX_READS = 90
+# ARM can return from the landed deployment while an exact managed child is
+# still moving from Updating to Succeeded. Re-submitting the whole deployment
+# in that state is both slower and more expensive than observing the resources
+# the action already owns. Keep the wait below the caller's existing admission
+# bound and cap both wall time and reads.
+CREATE_READY_TIMEOUT_SECONDS = 240
+CREATE_READY_POLL_SECONDS = 5
+CREATE_READY_MAX_READS = 32
 STEER_CLIENT_TIMEOUT_SECONDS = 600
 # The steer is bracketed by two full inventory sweeps.
 STEER_BUDGET_SECONDS = STEER_CLIENT_TIMEOUT_SECONDS + AZ_TIMEOUT_SECONDS * 2
@@ -172,6 +180,8 @@ CREATE_LIFECYCLE_BUDGET_SECONDS = (
     BOOTSTRAP_CLIENT_TIMEOUT_SECONDS
     + VM_START_TIMEOUT_SECONDS   # a converged worker is often stopped by its TTL
     + AZ_TIMEOUT_SECONDS * 16    # instance view, task stub, TTL, blob uploads, sweeps, tagging
+    + CREATE_READY_TIMEOUT_SECONDS
+    + AZ_TIMEOUT_SECONDS         # one exact readiness read may cross the wall deadline
 )
 RESOURCE_API = {
     "vm": "2024-03-01",
@@ -1616,6 +1626,57 @@ def recorded_exact(
     return resources
 
 
+def wait_exact_create_ready(controller, action, initial_worker):
+    """Observe an exact in-flight create instead of resubmitting its template."""
+    deadline = time.monotonic() + CREATE_READY_TIMEOUT_SECONDS
+    worker = initial_worker
+    reads = 0
+    while True:
+        resources = recorded_exact(
+            action, worker, require_ready_children=False
+        )
+        if set(resources) != set(REQUIRED_RESOURCE_KINDS):
+            raise ProviderError(
+                "worker create did not produce the complete exact resource set"
+            )
+        states = {
+            kind: str(resources[kind].get("provisioning_state", "")).lower()
+            for kind in READY_CHILD_KINDS
+        }
+        failed = sorted(
+            kind for kind, state in states.items()
+            if state in ("failed", "canceled")
+        )
+        if failed:
+            raise ProviderError(
+                "exact worker create child reached terminal provisioning state: {}"
+                .format(", ".join(
+                    "{}={}".format(kind, states[kind]) for kind in failed
+                ))
+            )
+        if all(state == "succeeded" for state in states.values()):
+            return worker
+        reads += 1
+        if reads >= CREATE_READY_MAX_READS or time.monotonic() >= deadline:
+            raise ProviderError(
+                "exact worker create readiness did not converge: {}".format(
+                    ", ".join(
+                        "{}={}".format(kind, states[kind] or "unknown")
+                        for kind in sorted(states)
+                    )
+                )
+            )
+        time.sleep(CREATE_READY_POLL_SECONDS)
+        snapshot = inventory_slot(controller, action["slot"])
+        if snapshot["conflicts"]:
+            raise ProviderError(
+                "in-flight worker inventory contains foreign or unsafe resources"
+            )
+        worker = worker_by_slot(snapshot, action["slot"])
+        if worker is None:
+            raise ProviderError("exact in-flight worker slot disappeared")
+
+
 def cleanup_recorded_exact(
     action, worker, allow_missing=(), skip_immutable=(), require_ready_children=True,
 ):
@@ -2620,10 +2681,7 @@ def converge_create_tags(controller, action):
     if snapshot["conflicts"]:
         raise ProviderError("tagged worker inventory contains foreign or unsafe resources")
     worker = worker_by_slot(snapshot, action["slot"])
-    resources = recorded_exact(action, worker)
-    if set(resources) != set(REQUIRED_RESOURCE_KINDS):
-        raise ProviderError("worker create did not produce the complete exact resource set")
-    return worker
+    return wait_exact_create_ready(controller, action, worker)
 
 
 def create_or_resume(controller, action):
@@ -2636,7 +2694,21 @@ def create_or_resume(controller, action):
         resources = existing.get("resources") or {}
         if resources.get("vm"):
             try:
-                recorded_exact(action, existing)
+                recorded_exact(action, existing, require_ready_children=False)
+            except ProviderError:
+                # A submitted create can be visible with the template's exact VM
+                # bindings before child tag convergence. It is safe to replay the
+                # same landed incremental deployment and complete the same action.
+                vm_tags = resources["vm"].get("tags") or {}
+                bindings = action["bindings"]
+                if not (
+                    vm_tags.get("home-binding") == bindings["home_binding"]
+                    and vm_tags.get("task-binding") == bindings["task"]
+                    and vm_tags.get("invocation-binding") == bindings["assignment_generation"]
+                ):
+                    raise ProviderError("visible worker belongs to another task or generation")
+            else:
+                existing = wait_exact_create_ready(controller, action, existing)
                 # A fully converged worker returns from here without ever
                 # reaching create_lifecycle_children, and the TTL schedule
                 # deallocates idle workers daily. Returning one as-is reports
@@ -2651,18 +2723,6 @@ def create_or_resume(controller, action):
                         inventory_slot(controller, action["slot"]), action["slot"]
                     )
                 return existing
-            except ProviderError:
-                # A submitted create can be visible with the template's exact VM
-                # bindings before child tag convergence. It is safe to replay the
-                # same landed incremental deployment and complete the same action.
-                vm_tags = resources["vm"].get("tags") or {}
-                bindings = action["bindings"]
-                if not (
-                    vm_tags.get("home-binding") == bindings["home_binding"]
-                    and vm_tags.get("task-binding") == bindings["task"]
-                    and vm_tags.get("invocation-binding") == bindings["assignment_generation"]
-                ):
-                    raise ProviderError("visible worker belongs to another task or generation")
         elif reuse:
             recorded_exact(
                 action, existing, allow_missing=(

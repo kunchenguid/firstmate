@@ -1303,7 +1303,8 @@ provider.inventory = lambda controller, include_metrics=True, target_slot=None: 
     "conflicts": [], "workers": [existing_worker],
 }
 provider.worker_by_slot = lambda snapshot, slot: existing_worker
-provider.recorded_exact = lambda action, existing: existing
+provider.recorded_exact = lambda action, existing, **kwargs: existing["resources"]
+provider.wait_exact_create_ready = lambda controller, action, existing: existing
 provider.expected_names = lambda controller, slot: {"vm": "vm-x"}
 provider.create_or_resume(controller, {"slot": 1, "bindings": {}})
 assert [c for c in calls if c[:2] == ["vm", "start"]], (

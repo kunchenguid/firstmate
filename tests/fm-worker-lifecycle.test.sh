@@ -1651,6 +1651,39 @@ except partial_module.ProviderError as exc:
 else:
     raise AssertionError("foreign partial slot was inherited")
 
+# A replay that sees the complete, exactly bound resource set in Azure's
+# ordinary Updating -> Succeeded transition observes it in place. It must not
+# pay for or wait on a second full subscription deployment.
+ready_spec=importlib.util.spec_from_file_location("azure_provider_ready", sys.argv[1])
+ready_module=importlib.util.module_from_spec(ready_spec); ready_spec.loader.exec_module(ready_module)
+ready_action=copy.deepcopy(partial_action)
+ready_resources={kind:{
+    "id":"/{}".format(kind), "immutable_id":"i-{}".format(kind), "tags":{}
+} for kind in ready_module.REQUIRED_RESOURCE_KINDS}
+ready_worker={"slot":1,"resources":ready_resources}
+ready_calls=[]
+def ready_recorded(_action, worker, require_ready_children=True, **_kwargs):
+    state=worker["resources"]["bootstrap-command"]["provisioning_state"]
+    if require_ready_children and state != "succeeded":
+        raise ready_module.ProviderError("bootstrap-command provisioning state is not succeeded")
+    return worker["resources"]
+def ready_inventory(_controller, _slot):
+    ready_calls.append("read")
+    ready_worker["resources"]["bootstrap-command"]["provisioning_state"]="succeeded"
+    ready_worker["resources"]["monitor-extension"]["provisioning_state"]="succeeded"
+    return {"workers":[ready_worker],"conflicts":[],"capacity_reservations":[],"metrics":{}}
+ready_worker["resources"]["bootstrap-command"]["provisioning_state"]="updating"
+ready_worker["resources"]["monitor-extension"]["provisioning_state"]="succeeded"
+ready_module.recorded_exact=ready_recorded
+ready_module.inventory_slot=ready_inventory
+ready_module.worker_by_slot=lambda snapshot, slot: snapshot["workers"][0]
+ready_module.ensure_worker_running=lambda *_args: False
+ready_module.time.sleep=lambda _seconds: None
+ready_module.run_pilot_create=lambda *_args: (_ for _ in ()).throw(
+    AssertionError("transitional exact create resubmitted the deployment"))
+resumed=ready_module.create_or_resume({"prefix":"fmtest"}, ready_action)
+assert resumed is ready_worker and ready_calls == ["read"], (resumed, ready_calls)
+
 # A pre-convergence container has empty metadata; it inherits a same-slot
 # exact-fleet sibling's tags (VM first) instead of classifying as foreign,
 # while a bare orphan container keeps its emptiness and still refuses.
