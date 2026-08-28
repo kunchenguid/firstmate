@@ -108,6 +108,21 @@ Keep `--jobs` for this family at or below the proven bound rather than raising i
 The archived harness runs showed why ordering matters: the candidate sum was 818s and the balanced four-worker target 205s, but alphabetical order finished in 395s because the 193s `fm-watch-triage` started last and ran alone at the tail.
 Both `bin/fm-test-run.sh` and the current proof harness therefore order concurrent runs longest-hint-first.
 
+### pure-contract-unit: admitted
+
+- Date: 2026-08-28
+- Command: `bin/fm-test-isolation-proof.sh --pool pure-contract-unit --jobs 4`
+- Result: two consecutive runs, 32 candidates, 0 failures.
+
+| Run | Summary |
+|---|---|
+| 1 | `FM_ISOLATION_SUMMARY total=32 failed=0 concurrency=4 duration_ms=161837` |
+| 2 | `FM_ISOLATION_SUMMARY total=32 failed=0 concurrency=4 duration_ms=156462` |
+
+This family is what a change to `bin/fm-test-run.sh` itself selects, so it decides that selection's wall clock.
+Before admission, 14 of its scripts fell to the serial tail and the 33-script selection measured 327.3s against a 300s budget: the concurrent group was 19 scripts totalling 273.4s while the tail alone was 215.7s, dominated by `fm-calm-pi-extension` (77.5s), `fm-vendor-auth-probe` (51.0s), and `fm-muse-harness` (39.7s).
+Admitting the family moves that tail into the bounded concurrent group.
+
 ## Scope
 
 Each worker used a separate mode-`0700` temporary root and private `TMPDIR` and `TMP`.
