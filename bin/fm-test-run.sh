@@ -42,7 +42,9 @@
 #                   "skip: <token>" (e.g. --fail-on-gate-skip 'herdr not found').
 #                   The required Herdr CI lane uses this so a missing pin cannot
 #                   silently pass as a gate skip.
-#   --jobs N        run the selected scripts with up to N concurrent workers.
+#   --jobs N|auto   run the selected scripts with up to N concurrent workers.
+#                   `auto` is accepted only with --changed and explicitly opts
+#                   into min(4, cpus) workers for its admissible scripts.
 #                   N>1 is allowed only when every selected script is proven
 #                   safe to run concurrently: individually in the proven-isolated
 #                   set (bin/fm-test-isolation-proof.sh --list), or in a family
@@ -51,15 +53,13 @@
 #                   family proofs may impose a lower cap. Unproven stateful
 #                   scripts stay serial. Concurrent runs are ordered
 #                   longest-hint-first so the slowest script is not stranded
-#                   alone at the tail. Default is 1 (serial) for every selection
-#                   mode EXCEPT --changed, which defaults to min(4, cpus) when
-#                   at least two selected scripts are admissible. Any unproven
-#                   remainder runs serially after that concurrent group.
-#                   Explicit --jobs wins.
+#                   alone at the tail. Default is always 1 (serial); concurrency
+#                   requires explicit --jobs consent. With --jobs auto, any
+#                   unproven remainder runs serially after the concurrent group.
 #   --per-script-timeout-secs N
 #                   terminate a script that runs longer than N seconds and
 #                   record it as exit 124 (0 disables, the default). The
-#                   auto-concurrent --changed path applies 900s automatically:
+#                   explicit `--changed --jobs auto` path applies 900s automatically:
 #                   no real script approaches it, so it only converts a HUNG
 #                   script into a bounded failure. --max-wall-ms is checked
 #                   after the run and so cannot catch a hang on its own.
@@ -180,11 +180,10 @@ SCRIPTS=()
 EXCLUDE_FAMILIES=()
 FAIL_ON_GATE_SKIP=
 JOBS=1
-JOBS_EXPLICIT=0
 JOBS_MAX=8
 MAX_WALL_MS=
 PER_SCRIPT_TIMEOUT_SECS=0
-# Bound applied automatically on the auto-concurrent --changed path. No real
+# Bound applied automatically on the explicit `--changed --jobs auto` path. No real
 # script comes close: the slowest measured behavior test is the 341s Herdr
 # presentation E2E. It exists so a HUNG script becomes a bounded failure instead
 # of an unbounded suite, which is the shape that outruns a caller's budget.
@@ -1523,14 +1522,12 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --jobs)
-      [ "$#" -gt 1 ] || die "--jobs requires a positive integer"
+      [ "$#" -gt 1 ] || die "--jobs requires a positive integer or auto"
       JOBS=$2
-      JOBS_EXPLICIT=1
       shift 2
       ;;
     --jobs=*)
       JOBS=${1#--jobs=}
-      JOBS_EXPLICIT=1
       shift
       ;;
     --max-wall-ms)
@@ -1669,10 +1666,13 @@ if [ "${MODE:-}" = "aggregate" ]; then
 fi
 
 case "$JOBS" in
-  ''|*[!0-9]*) die "--jobs must be a positive integer" ;;
+  auto) ;;
+  ''|*[!0-9]*) die "--jobs must be a positive integer or auto" ;;
+  *)
+    [ "$JOBS" -ge 1 ] || die "--jobs must be >= 1"
+    [ "$JOBS" -le "$JOBS_MAX" ] || die "--jobs is capped at $JOBS_MAX (got $JOBS)"
+    ;;
 esac
-[ "$JOBS" -ge 1 ] || die "--jobs must be >= 1"
-[ "$JOBS" -le "$JOBS_MAX" ] || die "--jobs is capped at $JOBS_MAX (got $JOBS)"
 
 if [ -n "$MAX_WALL_MS" ]; then
   case "$MAX_WALL_MS" in
@@ -1727,7 +1727,10 @@ fi
 if [ -n "$FAIL_ON_GATE_SKIP" ]; then
   SELECTION_DESC="${SELECTION_DESC};fail-on-gate-skip=$FAIL_ON_GATE_SKIP"
 fi
-if [ "$JOBS" -gt 1 ]; then
+if [ "$JOBS" = auto ] && [ "$MODE" != changed ]; then
+  die "--jobs auto is accepted only with --changed"
+fi
+if [ "$JOBS" = auto ] || [ "$JOBS" -gt 1 ]; then
   SELECTION_DESC="${SELECTION_DESC};jobs=$JOBS"
 fi
 
@@ -1754,14 +1757,14 @@ for s in "${SCRIPTS[@]}"; do
   [ -x "$s" ] || [ -r "$s" ] || die "test script not readable: $s"
 done
 
-# --changed is the representative developer path: whatever a branch happens to
-# touch decides its size, so its wall clock is the one that races an agent's
-# invocation budget. When every script it selected is proven concurrent-safe,
-# schedule it with bounded parallelism by default. An explicit --jobs (including
-# --jobs 1) always wins, and every other selection mode keeps its current
-# default so the CI lanes stay byte-identical in behavior.
+# Concurrency changes resource use and execution semantics, so it is never
+# inferred from --changed. `--jobs auto` is the explicit opt-in for its bounded
+# representative-suite scheduler; numeric --jobs retains the strict all-script
+# admission rule below.
 AUTO_CONCURRENCY=0
-if [ "$JOBS_EXPLICIT" -eq 0 ] && [ "$MODE" = changed ] && [ "${#SCRIPTS[@]}" -gt 1 ]; then
+if [ "$JOBS" = auto ]; then
+  [ "$MODE" = changed ] || die "--jobs auto is accepted only with --changed"
+  JOBS=1
   auto_admissible=0
   for s in "${SCRIPTS[@]}"; do
     script_allows_concurrency "$s" && auto_admissible=$((auto_admissible + 1))

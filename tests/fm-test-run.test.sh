@@ -223,6 +223,54 @@ test_changed_bin_reference_selects_per_script_not_per_family() {
   pass "a bin reference selects the referencing scripts, and consumers still select their curated families"
 }
 
+# --changed selects work; it does not grant permission to change resource use.
+# Exercise begin/end markers from real fixture processes to prove serial default
+# semantics and the separate, explicit bounded-concurrency opt-in.
+test_changed_concurrency_requires_explicit_jobs_consent() {
+  local tmp repo script serial_shape parallel_shape rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed-consent.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
+  for script in fm-backend-herdr-smoke.test.sh fm-daemon.test.sh fm-pi-watch-extension.test.sh; do
+    cat >"$repo/tests/$script" <<'SH'
+#!/usr/bin/env bash
+sleep 1
+echo "ok - concurrency consent fixture"
+SH
+    chmod +x "$repo/tests/$script"
+  done
+  git -C "$repo" add .
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm fixtures
+  printf '\n' >>"$repo/bin/shared-probe-lib.sh"
+
+  (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD) \
+    >"$tmp/serial.out" 2>"$tmp/serial.err" \
+    || fail "default changed fixture run failed: $(cat "$tmp/serial.err")"
+  serial_shape=$(grep -E '^FM_TEST_(BEGIN|END)' "$tmp/serial.out" | head -n 2 | awk '{print $1}' | paste -sd, -)
+  [ "$serial_shape" = FM_TEST_BEGIN,FM_TEST_END ] \
+    || fail "--changed ran concurrently without consent: $serial_shape"
+
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --jobs auto) \
+    >"$tmp/parallel.out" 2>"$tmp/parallel.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "explicit auto-jobs fixture run failed: $(cat "$tmp/parallel.err")"
+  parallel_shape=$(grep -E '^FM_TEST_(BEGIN|END)' "$tmp/parallel.out" | head -n 2 | awk '{print $1}' | paste -sd, -)
+  [ "$parallel_shape" = FM_TEST_BEGIN,FM_TEST_BEGIN ] \
+    || fail "--jobs auto did not opt into concurrent scheduling: $parallel_shape"
+
+  set +e
+  "$RUNNER" --jobs auto --family watcher-wake-lock --list >"$tmp/bad.out" 2>"$tmp/bad.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "--jobs auto outside --changed must be refused, got $rc"
+
+  rm -rf "$tmp"
+  pass "changed concurrency requires explicit --jobs auto consent"
+}
+
 test_empty_selection_emits_summary() {
   local tmp repo out json rc fake_bin real_git
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-empty.XXXXXX")
@@ -1045,6 +1093,7 @@ test_single_script_selection
 test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure
 test_changed_bin_reference_selects_per_script_not_per_family
+test_changed_concurrency_requires_explicit_jobs_consent
 test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior
