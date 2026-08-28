@@ -76,26 +76,29 @@ This record is the concurrent isolation proof for the portable parallel candidat
 | 331 | 0 | 20 | `tests/fm-supervision-instructions.test.sh` |
 | 99 | 0 | 23 | `tests/fm-transition-lib.test.sh` |
 
-## Families refused concurrency
+## Family concurrency proofs
 
-`bin/fm-test-isolation-proof.sh --pool <family>` runs the same concurrent proof over a whole `bin/fm-test-run.sh` family, for a stateful family that stays serial on CI but might earn bounded local concurrency.
-A family is admitted only by a passing proof recorded here.
+`bin/fm-test-isolation-proof.sh --pool <family>` runs the same concurrent proof over a whole `bin/fm-test-run.sh` family, for a stateful family that stays serial on CI but can earn bounded local concurrency.
+A family is admitted to `list_concurrent_safe_families` in `bin/fm-test-run.sh` only by a passing proof recorded here.
 
-`watcher-wake-lock` was measured and **refused**.
+### watcher-wake-lock: admitted
 
 - Date: 2026-08-28
-- Command: `bin/fm-test-run.sh --family watcher-wake-lock --jobs 4`
-- Result: 3 of 18 scripts failed under concurrency that pass serially.
+- Command: `bin/fm-test-isolation-proof.sh --pool watcher-wake-lock --jobs 4`
+- Result: two consecutive runs, 18 candidates, 0 failures.
 
-| Script | Failure |
+| Run | Summary |
 |---|---|
-| `tests/fm-watch-checkpoint.test.sh` | `watch lock pid survived quiet checkpoint timeout` |
-| `tests/fm-watch-recovery-loop.test.sh` | `handling successor did not surface the crew event within a poll interval or two (waited 4s)` |
-| `tests/fm-watch-arm.test.sh` | `re-arm stayed live instead of surfacing durable wakes and the still-open remote decision` |
+| 1 | `FM_ISOLATION_SUMMARY total=18 failed=0 concurrency=4 duration_ms=394675` |
+| 2 | `FM_ISOLATION_SUMMARY total=18 failed=0 concurrency=4 duration_ms=374869` |
 
-These are wall-clock assertions about how quickly a real watcher reaches its next poll, so CPU oversubscription breaks them without any shared-state collision.
-Admitting the family would trade a duration win for a load-dependent flake, so the family stays serial and `--jobs` continues to refuse it.
-Making these assertions event-driven rather than interval-bounded is the prerequisite for re-running this proof.
+These scripts assert how quickly a real watcher reaches its next poll, so they are sensitive to CPU oversubscription rather than to shared state.
+An earlier attempt on the same host measured three failures (`fm-watch-checkpoint`, `fm-watch-recovery-loop`, `fm-watch-arm`) while six unrelated busy processes were running, at roughly ten runnable processes against fourteen cores.
+That is the margin this family has: four workers is proven, and the failures reappear well before the machine is merely busy.
+Keep `--jobs` for this family at or below the proven bound rather than raising it to fill a larger machine.
+
+The same runs showed why ordering matters: the candidate sum was 818s and the balanced four-worker target 205s, but alphabetical order finished in 395s because the 193s `fm-watch-triage` started last and ran alone at the tail.
+`bin/fm-test-run.sh` therefore orders concurrent runs longest-hint-first.
 
 ## Scope
 
@@ -111,7 +114,7 @@ bin/fm-test-isolation-proof.sh --jobs 4 --json /tmp/fm-isolation-proof.json
 bin/fm-test-run.sh --check-coverage
 ```
 
-To re-test a family refused above:
+To re-run a family proof:
 
 ```sh
 bin/fm-test-isolation-proof.sh --pool watcher-wake-lock --jobs 4

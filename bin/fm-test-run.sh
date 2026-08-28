@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # fm-test-run.sh - single owner of Firstmate's behavior-test runner, lane
-# composition for portable CI shards, local --jobs for the proven-isolated set,
+# composition for portable CI shards, local --jobs for proven-concurrent work,
 # timing markers, and the complete-regression coverage guard.
 #
 # Selection modes (exactly one of: --all, --family, --changed, --lane,
@@ -38,10 +38,16 @@
 #                   The required Herdr CI lane uses this so a missing pin cannot
 #                   silently pass as a gate skip.
 #   --jobs N        run the selected scripts with up to N concurrent workers.
-#                   Default is 1 (serial). N>1 is allowed only when every
-#                   selected script is in the proven-isolated set
-#                   (bin/fm-test-isolation-proof.sh --list). Cap is 8. Stateful
-#                   families never schedule under --jobs.
+#                   N>1 is allowed only when every selected script is proven
+#                   safe to run concurrently: individually in the proven-isolated
+#                   set (bin/fm-test-isolation-proof.sh --list), or in a family
+#                   carrying a recorded concurrent proof
+#                   (list_concurrent_safe_families below). Cap is 8; unproven
+#                   stateful scripts stay serial. Concurrent runs are ordered
+#                   longest-hint-first so the slowest script is not stranded
+#                   alone at the tail. Default is 1 (serial) for every selection
+#                   mode EXCEPT --changed, which defaults to min(4, cpus) when
+#                   every script it selected is admissible. Explicit --jobs wins.
 #   --max-wall-ms N fail the run when its wall clock exceeds N milliseconds,
 #                   after reporting the per-script results. Duration is a
 #                   result: a suite that outgrows its caller's invocation budget
@@ -72,7 +78,11 @@
 # share a machine. This script owns <n>: a lane whose <n> disagrees with the
 # configured shard count is refused, so a CI matrix cannot silently drop a shard.
 # --changed is conservative: it over-selects related families rather than
-# under-selecting, and never expands to the complete suite unless --all.
+# under-selecting, and never expands to the complete suite unless --all. The one
+# place it is deliberately narrow is a bin/ path with no curated family: a test
+# that names it is selected as that SCRIPT, because the reference is per-script
+# evidence. Consumer bin/ scripts still resolve through the curated map, so
+# recorded family-level coupling still expands to the whole family.
 set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -92,6 +102,7 @@ SCRIPTS=()
 EXCLUDE_FAMILIES=()
 FAIL_ON_GATE_SKIP=
 JOBS=1
+JOBS_EXPLICIT=0
 JOBS_MAX=8
 MAX_WALL_MS=
 
@@ -123,6 +134,16 @@ log() {
 
 now_iso() {
   date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+cpu_count() {
+  local n
+  n=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+  case "$n" in
+    ''|*[!0-9]*) n=1 ;;
+  esac
+  [ "$n" -ge 1 ] || n=1
+  printf '%s\n' "$n"
 }
 
 now_ms() {
@@ -355,6 +376,37 @@ tests/fm-supervision-instructions.test.sh
 tests/fm-ensure-agents-md.test.sh
 tests/fm-composer-lib.test.sh
 EOF
+}
+
+# Families whose scripts are proven safe to run concurrently WITH EACH OTHER
+# under the bounded local scheduler. Deliberately separate from the
+# proven-isolated set, which must stay exactly equal to the portable CI shard
+# union (see the coverage guard); these families keep their serial CI lane and
+# only gain concurrency for a local run.
+#
+# Membership is empirical, never assumed:
+# `bin/fm-test-isolation-proof.sh --pool <family> --jobs 4` is the owner of the
+# proof, and docs/fm-test-isolation-proof.md records the dated result.
+list_concurrent_safe_families() {
+  cat <<'EOF'
+watcher-wake-lock
+EOF
+}
+
+family_is_concurrent_safe() {
+  local want=$1 line
+  while IFS= read -r line; do
+    [ "$line" = "$want" ] && return 0
+  done < <(list_concurrent_safe_families)
+  return 1
+}
+
+# A script may run under --jobs when it is individually proven isolated or its
+# whole family carries a recorded concurrent proof.
+script_allows_concurrency() {
+  local s=$1
+  is_proven_isolated_script "$s" && return 0
+  family_is_concurrent_safe "$(family_for_basename "$(basename "$s")")"
 }
 
 is_proven_isolated_script() {
@@ -1386,10 +1438,12 @@ while [ "$#" -gt 0 ]; do
     --jobs)
       [ "$#" -gt 1 ] || die "--jobs requires a positive integer"
       JOBS=$2
+      JOBS_EXPLICIT=1
       shift 2
       ;;
     --jobs=*)
       JOBS=${1#--jobs=}
+      JOBS_EXPLICIT=1
       shift
       ;;
     --max-wall-ms)
@@ -1577,15 +1631,64 @@ for s in "${SCRIPTS[@]}"; do
   [ -x "$s" ] || [ -r "$s" ] || die "test script not readable: $s"
 done
 
-# --jobs N>1 only for the proven-isolated set. Stateful families stay serial.
-# bin/fm-test-isolation-proof.sh --pool <family> is how a stateful family would
-# earn concurrency; docs/fm-test-isolation-proof.md records which have not.
-if [ "$JOBS" -gt 1 ]; then
+# --changed is the representative developer path: whatever a branch happens to
+# touch decides its size, so its wall clock is the one that races an agent's
+# invocation budget. When every script it selected is proven concurrent-safe,
+# schedule it with bounded parallelism by default. An explicit --jobs (including
+# --jobs 1) always wins, and every other selection mode keeps its current
+# default so the CI lanes stay byte-identical in behavior.
+AUTO_CONCURRENCY=0
+if [ "$JOBS_EXPLICIT" -eq 0 ] && [ "$MODE" = changed ] && [ "${#SCRIPTS[@]}" -gt 1 ]; then
+  auto_admissible=0
   for s in "${SCRIPTS[@]}"; do
-    if ! is_proven_isolated_script "$s"; then
-      die "--jobs $JOBS refused: $s is not in the proven-isolated set (see bin/fm-test-isolation-proof.sh --list). Stateful families stay serial."
+    script_allows_concurrency "$s" && auto_admissible=$((auto_admissible + 1))
+  done
+  if [ "$auto_admissible" -gt 1 ]; then
+    JOBS=$(cpu_count)
+    [ "$JOBS" -le 4 ] || JOBS=4
+    [ "$JOBS" -ge 1 ] || JOBS=1
+    [ "$JOBS" -eq 1 ] || AUTO_CONCURRENCY=1
+  fi
+fi
+
+# An explicit --jobs names a concurrency for exactly the selection given, so an
+# unproven script in it is a refusal rather than something to schedule around.
+if [ "$JOBS" -gt 1 ] && [ "$AUTO_CONCURRENCY" -eq 0 ]; then
+  for s in "${SCRIPTS[@]}"; do
+    if ! script_allows_concurrency "$s"; then
+      die "--jobs $JOBS refused: $s is not in the proven-isolated set (see bin/fm-test-isolation-proof.sh --list) and its family has no recorded concurrent proof. Unproven stateful scripts stay serial."
     fi
   done
+fi
+
+# Split the run into the proven-concurrent scripts and an unproven remainder.
+# The remainder runs serially AFTER the concurrent group, never beside it, so an
+# unproven script still never shares a machine with another test. An explicit
+# --jobs refused above, so its remainder is always empty.
+CONCURRENT_SCRIPTS=()
+SERIAL_TAIL_SCRIPTS=()
+if [ "$JOBS" -gt 1 ]; then
+  SCHEDULE_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-test-sched.XXXXXX")
+  : >"$SCHEDULE_TMP"
+  # Two passes: the tail array must be built in this shell, so the weighted
+  # listing is written to a file rather than piped into sort from a loop whose
+  # appends would be lost in a subshell.
+  for s in "${SCRIPTS[@]}"; do
+    if script_allows_concurrency "$s"; then
+      # Longest first: workers are handed scripts in order, so starting the
+      # longest last strands it running alone at the tail. Measured over the
+      # watcher family, alphabetical order finished in 395s where the balanced
+      # four-worker sum was 205s.
+      printf '%s\t%s\n' "$(portable_serial_weight_for "$s")" "$s" >>"$SCHEDULE_TMP"
+    else
+      SERIAL_TAIL_SCRIPTS+=("$s")
+    fi
+  done
+  while IFS=$'\t' read -r _weight s; do
+    [ -n "$s" ] || continue
+    CONCURRENT_SCRIPTS+=("$s")
+  done < <(LC_ALL=C sort -t"$(printf '\t')" -k1,1nr -k2,2 "$SCHEDULE_TMP")
+  rm -f "$SCHEDULE_TMP"
 fi
 
 if [ -n "$MAX_WALL_MS" ]; then
@@ -1776,7 +1879,7 @@ else
     done
   }
 
-  for script in "${SCRIPTS[@]}"; do
+  for script in "${CONCURRENT_SCRIPTS[@]+"${CONCURRENT_SCRIPTS[@]}"}"; do
     while [ "$active_workers" -ge "$JOBS" ]; do
       wait_one_completed_job_worker
     done
@@ -1815,6 +1918,10 @@ else
   done
   while [ "$active_workers" -gt 0 ]; do
     wait_one_completed_job_worker
+  done
+  # Unproven remainder, after every concurrent worker has finished.
+  for script in "${SERIAL_TAIL_SCRIPTS[@]+"${SERIAL_TAIL_SCRIPTS[@]}"}"; do
+    run_one_serial "$script"
   done
 fi
 

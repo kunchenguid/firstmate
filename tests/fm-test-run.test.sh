@@ -518,10 +518,10 @@ test_jobs_requires_proven_isolated() {
   grep -Fq 'not in the proven-isolated set' "$tmp/err" \
     || fail "--jobs refusal message missing: $(cat "$tmp/err")"
   set +e
-  "$RUNNER" --jobs 2 tests/fm-watcher-lock.test.sh >"$tmp/out2" 2>"$tmp/err2"
+  "$RUNNER" --jobs 2 tests/fm-afk-inject-e2e.test.sh >"$tmp/out2" 2>"$tmp/err2"
   rc=$?
   set -e
-  [ "$rc" -eq 2 ] || fail "--jobs on watcher-lock must refuse, got $rc"
+  [ "$rc" -eq 2 ] || fail "--jobs on a family with no recorded proof must refuse, got $rc"
   # Sharding across runners never relaxes the serial rule inside one shard.
   shard_lane=$("$RUNNER" --list-lanes | grep -m1 '^portable-serial-[0-9]*of[0-9]*$')
   set +e
@@ -533,6 +533,50 @@ test_jobs_requires_proven_isolated() {
     || fail "shard --jobs refusal message missing: $(cat "$tmp/err3")"
   rm -rf "$tmp"
   pass "--jobs refuses non-proven / stateful selections"
+}
+
+# The complement of the refusal above: a family carrying a recorded concurrent
+# proof is admitted and actually scheduled, so the admission rule is two-sided
+# rather than a blanket refusal that happens to pass its negative cases.
+test_jobs_admits_a_concurrent_safe_family() {
+  local tmp rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs-admit.XXXXXX")
+  # --list exits before the admission guard, so this has to be a real run for
+  # the assertion to mean anything. Two cheap watcher-wake-lock scripts exercise
+  # admission and the concurrent scheduler for real.
+  set +e
+  "$RUNNER" --jobs 2 \
+    tests/fm-supervision-events.test.sh tests/fm-session-lock-ancestry.test.sh \
+    >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "--jobs on a proven family must be admitted, got $rc: $(cat "$tmp/err") $(cat "$tmp/out")"
+  grep -Fq 'FM_TEST_SUMMARY total=2 failed=0' "$tmp/out" \
+    || fail "the admitted concurrent run did not report both scripts green: $(cat "$tmp/out")"
+  rm -rf "$tmp"
+  pass "--jobs admits and schedules a family with a recorded concurrent proof"
+}
+
+# Workers are handed scripts in order, so the slowest script must start first or
+# it runs alone at the tail and throws away most of the concurrency.
+test_concurrent_runs_are_ordered_longest_first() {
+  local tmp listed first
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-order.XXXXXX")
+  set +e
+  "$RUNNER" --jobs 2 --family watcher-wake-lock --list >"$tmp/serial" 2>&1
+  set -e
+  # The scheduler reorders the real run, so assert on the begin-marker order of
+  # a real concurrent run over scripts whose hints differ by a wide margin.
+  set +e
+  "$RUNNER" --jobs 2 \
+    tests/fm-session-lock-ancestry.test.sh tests/fm-task-inbox.test.sh \
+    >"$tmp/out" 2>"$tmp/err"
+  set -e
+  first=$(grep -m1 '^FM_TEST_BEGIN' "$tmp/out" | awk '{print $3}')
+  [ "$first" = tests/fm-task-inbox.test.sh ] \
+    || fail "concurrent run did not start the longest script first, started: $first"
+  rm -rf "$tmp"
+  pass "a concurrent run starts the longest-hint script first"
 }
 
 # The duration regression this guard exists for: a suite whose scripts are all
@@ -815,6 +859,8 @@ test_portable_shard_union_and_coverage_guard
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
+test_jobs_admits_a_concurrent_safe_family
+test_concurrent_runs_are_ordered_longest_first
 test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
