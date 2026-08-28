@@ -140,6 +140,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-wake-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-human-notify-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-human-notify-lib.sh"
 
 CAPTAIN_META_LOCK=
 CAPTAIN_META_LOCK_HELD=0
@@ -441,6 +444,10 @@ command_hold() {
   show=$(task_show "$id") || fail "task $id disappeared while holding it"
   hold_kind=$(show_field_value "$show" hold_kind)
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
+  # The invoking turn owns presentation of a newly held call. Record that edge
+  # now so supervision never manufactures a timed reminder for the same hold.
+  fm_human_notify_record "$STATE" "$id" "captain-held [key=$id]: $reason" \
+    || fail "could not record the captain-held notification edge for $id"
   printf '%s\n' "$id"
 }
 
@@ -473,6 +480,7 @@ close_answered() {  # <task-id> <release-0-or-1>
   else
     tasks_axi "done" "$1" >/dev/null || fail "could not close answered captain-held task $1"
   fi
+  fm_human_notify_clear_hold "$STATE" "$1"
 }
 
 command_answer() {
@@ -506,6 +514,7 @@ command_answer() {
         || fail "task $id records this answer with mode released; a closed task cannot replay that release"
       [ "$release" = 0 ] \
         || fail "task $id records this answer with mode ${recorded_mode:-unknown}; --release cannot reopen a closed task"
+      fm_human_notify_clear_hold "$STATE" "$id"
       printf 'answered: %s\n' "$id"
       return 0
     fi
@@ -520,6 +529,7 @@ command_answer() {
     [ "$(show_field "$show" state)" = "done" ] || fail "recording the answer reopened closed task $id"
     body_has_resolution_record "$(show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
+    fm_human_notify_clear_hold "$STATE" "$id"
     printf 'repaired: %s\n' "$id"
     return 0
   fi
@@ -558,6 +568,7 @@ command_answer() {
       || fail "task $id records a different captain decision with mode ${recorded_mode:-unknown}"
     [ "$recorded_mode" = released ] && [ "$release" = 1 ] \
       || fail "task $id records this answer with mode ${recorded_mode:-unknown}; replay requires matching --release"
+    fm_human_notify_clear_hold "$STATE" "$id"
     printf 'released: %s\n' "$id"
     return 0
   fi
@@ -831,6 +842,8 @@ EOF
         fm_wake_status_append_self_announced "$STATE" "$status_file" \
           "captain-held [key=$key]: tracked by $keys" || transfer_rc=$?
         [ "$transfer_rc" -ne 2 ] || fail "cannot append the captain-held transfer for $origin/$key"
+        fm_human_notify_resolve_line "$STATE" "$origin" \
+          "resolved [key=$key]: transferred to the captain-held task" || true
       done <<EOF
 $raw_open
 EOF

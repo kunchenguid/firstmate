@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
-# exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# exact pr_head=<sha> when available, then atomically arm a static PR-state poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
@@ -17,6 +17,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-human-notify-lib.sh
+. "$SCRIPT_DIR/fm-human-notify-lib.sh"
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -72,11 +74,47 @@ fi
 # metadata and falls back to its provider-agnostic content check, and
 # bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+OLD_PR=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+OLD_PR_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+OLD_INCARNATION=$(_fm_human_notify_incarnation "$STATE" "$ID")
+READY_LINE=$(last_status_line "$STATE/$ID.status")
+READY_CLASS=$(fm_human_notify_class "$READY_LINE" 2>/dev/null || true)
+READY_WAS_RECORDED=0
+if [ "$READY_CLASS" = review-ready ] && _fm_human_notify_derive "$STATE" "$ID" "$READY_LINE"; then
+  RECORDED_FINGERPRINT=$(sed -n 's/^fingerprint=//p' "$FM_HUMAN_NOTIFY_MARKER" 2>/dev/null | head -1 || true)
+  [ "$RECORDED_FINGERPRINT" != "$FM_HUMAN_NOTIFY_FINGERPRINT" ] || READY_WAS_RECORDED=1
+fi
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
+  fi
+fi
+
+OBSERVATION="$STATE/$ID.pr-observation"
+PRESERVE_OBSERVATION=0
+EVIDENCE_CONTINUES=0
+OBSERVED_HEAD=
+if [ -f "$OBSERVATION" ] && [ ! -L "$OBSERVATION" ]; then
+  OBSERVED_HEAD=$(sed -n 's/^head=//p' "$OBSERVATION" | head -1)
+  OBSERVED_IDENTITY=$(sed -n 's/^identity=//p' "$OBSERVATION" | head -1)
+  OBSERVED_INCARNATION=$(sed -n 's/^incarnation=//p' "$OBSERVATION" | head -1)
+  CURRENT_IDENTITY=$(printf '%s' "$URL" | _fm_human_notify_sha256)
+  CURRENT_INCARNATION=$(printf '%s' "$OLD_INCARNATION" | _fm_human_notify_sha256)
+  if [ "$OLD_PR" = "$URL" ] \
+    && { [ -z "$PR_HEAD" ] || [ "$OBSERVED_HEAD" = "$PR_HEAD" ]; } \
+    && { [ -z "$OBSERVED_IDENTITY" ] || [ "$OBSERVED_IDENTITY" = "$CURRENT_IDENTITY" ]; } \
+    && { [ -z "$OBSERVED_INCARNATION" ] || [ "$OBSERVED_INCARNATION" = "$CURRENT_INCARNATION" ]; }; then
+    PRESERVE_OBSERVATION=1
+  fi
+fi
+if [ -z "$OLD_PR" ]; then
+  EVIDENCE_CONTINUES=1
+elif [ "$OLD_PR" = "$URL" ]; then
+  EFFECTIVE_OLD_HEAD=${OBSERVED_HEAD:-$OLD_PR_HEAD}
+  if [ -z "$PR_HEAD" ] || [ "$EFFECTIVE_OLD_HEAD" = "$PR_HEAD" ]; then
+    EVIDENCE_CONTINUES=1
   fi
 fi
 
@@ -134,4 +172,11 @@ fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
+[ "$PRESERVE_OBSERVATION" = 1 ] || rm -f -- "$OBSERVATION"
+if [ "$READY_WAS_RECORDED" = 1 ] && [ "$EVIDENCE_CONTINUES" = 1 ]; then
+  fm_human_notify_record "$STATE" "$ID" "$READY_LINE" || {
+    echo "error: could not preserve the review-ready notification receipt" >&2
+    exit 1
+  }
+fi
 printf 'armed: state/%s.check.sh\n' "$ID"

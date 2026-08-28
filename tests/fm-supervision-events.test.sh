@@ -34,7 +34,11 @@ sleep() { printf 'SLEEP\n' >> "$SLEEP_LOG"; }
 reset_state() {
   rm -f "$STATE_DIR"/*.meta "$STATE_DIR"/*.status "$STATE_DIR"/.wake-queue \
     "$STATE_DIR"/.wake-queue.seq "$STATE_DIR"/.watch-triage.log \
-    "$STATE_DIR"/.herdr-escalated-* "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled 2>/dev/null || true
+    "$STATE_DIR"/.herdr-escalated-* "$STATE_DIR"/.herdr-working-* \
+    "$STATE_DIR"/.hb-surfaced-* "$STATE_DIR"/.subsuper-seen-status-* \
+    "$STATE_DIR"/.subsuper-check-handoff-* \
+    "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled 2>/dev/null || true
+  rm -rf "$STATE_DIR/human-notifications"
   : > "$WAKE_LOG"
   : > "$SLEEP_LOG"
   _event_cap_key=""
@@ -54,10 +58,53 @@ handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
 [ -e "$STATE_DIR/.wake-queue" ] || fail "handle_push_transition should enqueue a wake for a blocked crew"
 grep -q 'stale' "$STATE_DIR/.wake-queue" || fail "the enqueued wake must be a stale record: $(cat "$STATE_DIR/.wake-queue")"
 grep -q 'default:wG:pQ' "$STATE_DIR/.wake-queue" || fail "the stale record must name the crew's window"
-grep -q 'herdr: agent blocked' "$STATE_DIR/.wake-queue" || fail "the stale payload must name the herdr-blocked cause"
+grep -q 'blocker evidence changed. Action required:' "$STATE_DIR/.wake-queue" || fail "the stale payload must explain the live blocked transition"
 [ -s "$WAKE_LOG" ] || fail "handle_push_transition must wake the supervisor for a blocked crew"
+! grep -q 'default:wG:pQ' "$WAKE_LOG" || fail "the surfaced push reason leaked its private endpoint"
 [ -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] || fail "handle_push_transition must commit dedupe only after enqueue"
-pass "handle_push_transition: a blocked crew enqueues a stale wake naming its window and wakes the supervisor"
+pass "handle_push_transition: a blocked crew routes privately and wakes with a readable outcome"
+
+reset_state
+fm_write_meta "$STATE_DIR/tk1.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship" "display_name=CRM · Import"
+printf 'blocked: live supervision reported the worker blocked\n' > "$STATE_DIR/tk1.status"
+fm_human_notify_record "$STATE_DIR" tk1 'blocked: live supervision reported the worker blocked'
+if fm_backend_herdr_apply_transition "$STATE_DIR" default "$(mkrec wG:pQ working)"; then
+  fail "a working transition became actionable"
+fi
+[ "$(last_status_line "$STATE_DIR/tk1.status")" = 'working: live supervision reported active work' ] \
+  || fail "the working edge did not resolve backend-owned blocker evidence"
+handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
+[ "$(last_status_line "$STATE_DIR/tk1.status")" = 'blocked: live supervision reported the worker blocked' ] \
+  || fail "the blocked edge did not update the shared durable current condition"
+grep -q 'CRM · Import: blocker evidence changed. Action required:' "$WAKE_LOG" \
+  || fail "a genuinely reopened blocked edge did not surface readably"
+! grep -q 'live supervision reported' "$WAKE_LOG" \
+  || fail "the reopened blocked edge exposed private status evidence"
+! grep -q 'default:wG:pQ' "$WAKE_LOG" || fail "the reopened blocked reason leaked its private endpoint"
+pass "handle_push_transition: Herdr lifecycle edges update shared current status before notification"
+
+reset_state
+fm_write_meta "$STATE_DIR/tk1.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship" "display_name=CRM · Import"
+printf 'failed: build endpoint returned request-7\n' > "$STATE_DIR/tk1.status"
+if fm_backend_herdr_apply_transition "$STATE_DIR" default "$(mkrec wG:pQ working)"; then
+  fail "a working transition became actionable"
+fi
+[ "$(last_status_line "$STATE_DIR/tk1.status")" = 'failed: build endpoint returned request-7' ] \
+  || fail "synthetic working superseded a genuine terminal condition"
+[ ! -e "$STATE_DIR/.herdr-working-default_wG_pQ" ] \
+  || fail "terminal evidence incorrectly armed a synthetic blocker reopen"
+pass "handle_push_transition: Herdr working cannot supersede genuine terminal evidence"
+
+reset_state
+fm_write_meta "$STATE_DIR/tk1.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship" "display_name=CRM · Import"
+printf 'done: PR https://example.test/review/7 checks green\n' > "$STATE_DIR/tk1.status"
+handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
+[ "$(last_status_line "$STATE_DIR/tk1.status")" = 'done: PR https://example.test/review/7 checks green' ] \
+  || fail "synthetic blocked evidence superseded a genuine terminal result"
+[ ! -s "$WAKE_LOG" ] || fail "synthetic blocked evidence emitted a competing terminal wake"
+[ -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] \
+  || fail "absorbed synthetic blocked evidence was not committed"
+pass "handle_push_transition: Herdr blocked cannot supersede genuine terminal evidence"
 
 reset_state
 fm_write_meta "$STATE_DIR/tk1.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
@@ -93,7 +140,7 @@ if [ -e "$STATE_DIR/.wake-queue" ] && grep -q 'stale' "$STATE_DIR/.wake-queue"; 
 fi
 [ ! -s "$WAKE_LOG" ] || fail "a captain-held crew must not wake the supervisor from the event fast-path"
 grep -q 'absorbed push' "$STATE_DIR/.watch-triage.log" 2>/dev/null || fail "the captain-held absorb should be logged to the triage log"
-pass "handle_push_transition: a captain-held crew is absorbed (no fast wake), left to the poll loop's long cadence"
+pass "handle_push_transition: a captain-held crew is absorbed with no fast wake or timed reminder"
 
 # --- event_wait_or_sleep: secondmate windows are excluded from the pane list --
 

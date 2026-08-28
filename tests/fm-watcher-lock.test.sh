@@ -444,7 +444,7 @@ test_watch_restart_rejects_reused_pid() {
   is_live_non_zombie "$pid" \
     && fail "restart did not surface recovery after replacing a reused-pid lock"
   wait "$pid" 2>/dev/null || true
-  grep -F 'check: rearm-resurface' "$out" >/dev/null \
+  grep -F 'check: Fleet supervision recovery:' "$out" >/dev/null \
     || fail "restart replaced reused-pid lock without surfacing recovery: $(cat "$out")"
   is_live_non_zombie "$live" || fail "restart killed a reused unrelated pid"
   kill "$live" 2>/dev/null || true
@@ -675,7 +675,7 @@ test_arm_starts_and_self_heals() {
       is_live_non_zombie "$armpid" \
         && fail "arm did not surface recovery after reclaiming a dead-pid lock"
       wait "$armpid" 2>/dev/null || true
-      grep -F 'check: rearm-resurface' "$armout" >/dev/null \
+      grep -F 'check: Fleet supervision recovery:' "$armout" >/dev/null \
         || fail "arm reclaimed dead-pid lock without surfacing recovery: $(cat "$armout")"
       continue
     fi
@@ -744,7 +744,9 @@ SH
   rc=0
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=0 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" || rc=$?
   [ "$rc" -eq 0 ] || fail "arm returned non-zero for an immediate wake (status $rc): $(cat "$armout")"
-  grep -F "check: $check_file: merged: https://example.test/pr/7" "$armout" >/dev/null || fail "arm did not propagate the immediate check wake"
+  grep -F "check: State check: an authenticated state check produced a new result now. Action required: inspect the result and handle its reported outcome." "$armout" >/dev/null \
+    || fail "arm did not propagate the readable immediate check wake"
+  grep -F "$check_file" "$armout" >/dev/null && fail "arm output leaked the check source path"
   ! grep -qF 'watcher: FAILED' "$armout" || fail "arm printed FAILED after a valid immediate wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after immediate arm wake failed"
   grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "$check_file" | grep -F 'merged: https://example.test/pr/7' >/dev/null || fail "immediate check wake was not queued"

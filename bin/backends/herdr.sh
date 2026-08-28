@@ -3319,6 +3319,12 @@ fm_backend_herdr_escalation_marker() {  # <state_dir> <window>
   printf '%s/%s%s' "$state" "$FM_BACKEND_HERDR_ESCALATED_PREFIX" "$key"
 }
 
+fm_backend_herdr_working_marker() {  # <state_dir> <window>
+  local state=$1 window=$2 key
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s/.herdr-working-%s' "$state" "$key"
+}
+
 # fm_backend_herdr_apply_transition: route one normalized record through the
 # shared policy table, maintaining the per-pane dedupe marker under <state_dir>.
 # On a fresh `actionable` (blocked) edge - policy actionable AND no marker yet -
@@ -3345,9 +3351,24 @@ fm_backend_herdr_apply_transition() {  # <state_dir> <session> <record>
       ;;
     absorb)
       rm -f "$marker" 2>/dev/null || true
+      if command -v fm_push_transition_apply_status >/dev/null 2>&1; then
+        fm_push_transition_apply_status "$state" "$window" working || return 1
+        if [ -n "${FM_PUSH_TRANSITION_STATUS_LINE:-}" ]; then
+          : > "$(fm_backend_herdr_working_marker "$state" "$window")"
+        fi
+      fi
       ;;
   esac
   return 1
+}
+
+fm_backend_herdr_transition_reopened() {  # <state_dir> <session> <record>
+  local state=$1 session=$2 record=$3 pane_id window
+  [ "$(fm_transition_to_status "$record")" = blocked ] || return 1
+  pane_id=$(fm_transition_pane_id "$record")
+  [ -n "$pane_id" ] || return 1
+  window="$session:$pane_id"
+  [ -e "$(fm_backend_herdr_working_marker "$state" "$window")" ]
 }
 
 fm_backend_herdr_commit_transition() {  # <state_dir> <session> <record>
@@ -3357,13 +3378,15 @@ fm_backend_herdr_commit_transition() {  # <state_dir> <session> <record>
   window="$session:$pane_id"
   marker=$(fm_backend_herdr_escalation_marker "$state" "$window")
   : > "$marker"
+  rm -f "$(fm_backend_herdr_working_marker "$state" "$window")"
 }
 
 fm_backend_herdr_clear_transition() {  # <state_dir> <window>
-  local state=$1 window=$2 marker
+  local state=$1 window=$2 marker working
   [ -n "$window" ] || return 0
   marker=$(fm_backend_herdr_escalation_marker "$state" "$window")
-  rm -f "$marker" 2>/dev/null || true
+  working=$(fm_backend_herdr_working_marker "$state" "$window")
+  rm -f "$marker" "$working" 2>/dev/null || true
 }
 
 # fm_backend_herdr_wait_transition: the bounded event wait. Blocks up to

@@ -116,15 +116,186 @@ test_classify_terminal_signal_escalates() {
   pass "captain-relevant status verbs escalate"
 }
 
+test_classify_buried_open_decision_escalates() {
+  local dir state out
+  dir=$(make_supercase classify-buried-decision)
+  state="$dir/state"
+  printf 'needs-decision [key=route]: choose north or south\nworking: preparing both routes\n' > "$state/t.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
+  case "$out" in
+    escalate\|*'decision evidence changed.'*'answer the question.'*) ;;
+    *) fail "buried open decision did not escalate: $out" ;;
+  esac
+  printf 'failed: compiler crashed\nfailed: compiler crashed\n' > "$state/t.status"
+  cp "$state/t.status" "$state/t.away-unread"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
+  [ "$(printf '%s' "$out" | awk -F 'new failure evidence surfaced' '{ print NF - 1 }')" -eq 1 ] \
+    || fail "away signal repeated one logical failure in its digest: $out"
+  case "$out" in *'compiler crashed'*) fail "away signal exposed private failure evidence: $out" ;; esac
+  printf 'PR ready: inspect /home/private/state/task and endpoint https://internal.example\n' > "$state/t.status"
+  cp "$state/t.status" "$state/t.away-unread"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
+  case "$out" in escalate\|*'new actionable update surfaced.'*'Action required:'*) ;;
+    *) fail "legacy actionable status did not produce a readable generic escalation: $out" ;;
+  esac
+  case "$out" in *'/home/private/'*|*'internal.example'*) fail "legacy actionable status exposed private evidence: $out" ;; esac
+  printf 'PR ready: prior result\nworking: revising the result\n' > "$state/t.status"
+  cp "$state/t.status" "$state/t.away-unread"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
+  case "$out" in self\|*) ;; *) fail "resolved legacy readiness remained actionable: $out" ;; esac
+  printf 'PR ready: same result\nPR ready: same result\n' > "$state/t.status"
+  cp "$state/t.status" "$state/t.away-unread"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
+  [ "$(printf '%s' "$out" | awk -F 'new actionable update surfaced' '{ print NF - 1 }')" -eq 1 ] \
+    || fail "away signal repeated one legacy condition in its digest: $out"
+  mark_escalated_seen signal "$state/t.status" "$state"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
+  case "$out" in self\|*) ;; *) fail "away signal repeated a delivered legacy condition across drains: $out" ;; esac
+  pass "away signal classification folds, durably deduplicates, and sanitizes unread conditions"
+}
+
 test_classify_check_and_unknown_escalate() {
-  local out
-  out=$(classify_check "check: /s/c.check.sh: merged: https://x")
-  case "$out" in escalate\|*) ;; *) fail "check did not escalate: $out" ;; esac
+  local dir state out
+  dir=$(make_supercase classify-check)
+  state="$dir/state"
+  printf 'display_name=Harbor · Check\nproject=/repo/harbor\nbranch=fm/check\n' > "$state/c.meta"
+  out=$(classify_check "check: $state/c.check.sh: private result from /secret/source" "$state")
+  case "$out" in
+    escalate\|*'Harbor · Check: an authenticated state check produced a new result now.'*'Action required:'*) ;;
+    *) fail "check did not produce a readable actionable escalation: $out" ;;
+  esac
+  case "$out" in *'/secret/'*|*'.check.sh'*) fail "check escalation exposed private evidence: $out" ;; esac
+  rm -f "$state/c.meta"
+  out=$(classify_check "check: $state/private-route.check.sh: opaque-result" "$state")
+  case "$out" in escalate\|'State check: an authenticated state check produced a new result now.'*) ;;
+    *) fail "metadata-free check did not use a generic readable label: $out" ;;
+  esac
+  case "$out" in *private-route*|*opaque-result*) fail "metadata-free check exposed routing evidence: $out" ;; esac
+  out=$(classify_check "check: $state/bin/fm-startup-network.sh" "$state")
+  case "$out" in escalate\|'State check: a registered check produced a new result now.'*) ;;
+    *) fail "unknown check did not use a generic readable presentation: $out" ;;
+  esac
+  case "$out" in *startup-network*|*'/bin/'*|escalate\|check:*) fail "unknown check exposed protocol or routing evidence: $out" ;; esac
+  mkdir -p "$state/procevent-inbox"
+  printf 'lavish\n' > "$state/procevent-inbox/private-source.7.adapter"
+  out=$(classify_check "check: procevent lavish private-source 7" "$state")
+  case "$out" in
+    escalate\|*'Lavish review: a captured result is ready now.'*'run its registered handler.'*) ;;
+    *) fail "process event did not produce an authenticated presentation: $out" ;;
+  esac
+  case "$out" in *procevent*|*private-source*|*' 7'*) fail "process event exposed private routing evidence: $out" ;; esac
+  out=$(classify_check "check: procevent lavish private-source 8" "$state")
+  case "$out" in escalate\|'Background process: result authentication failed now.'*) ;;
+    *) fail "unauthenticated process event did not fail safely: $out" ;;
+  esac
+  case "$out" in *private-source*|*' 8'*) fail "invalid process event exposed private routing evidence: $out" ;; esac
   out=$(classify_unknown "frobnicate: weird")
   case "$out" in escalate\|*) ;; *) fail "unknown did not fail-safe escalate: $out" ;; esac
-  out=$(classify_heartbeat)
-  case "$out" in self\|*) ;; *) fail "heartbeat did not self-handle: $out" ;; esac
-  pass "check + unknown escalate; heartbeat self-handles"
+  out=$(classify_heartbeat heartbeat)
+  case "$out" in self\|*) ;; *) fail "routine heartbeat did not self-handle: $out" ;; esac
+  out=$(classify_heartbeat 'heartbeat: Harbor: a new failure surfaced. Action required: inspect it.')
+  case "$out" in escalate\|'Harbor: a new failure surfaced. Action required: inspect it.'*) ;; *) fail "actionable heartbeat did not preserve its presentation: $out" ;; esac
+  pass "checks stay private and actionable heartbeat summaries survive replay"
+}
+
+test_away_check_retains_private_wake_until_handling() {
+  local dir state fakebin ack payload old_daemon_dir replay
+  dir=$(make_supercase away-check-durable)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  ack="$dir/acked"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/fm-wake-drain.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "$#" -gt 0 ]; then
+  : > "$FM_TEST_ACK"
+  exit 0
+fi
+if [ ! -e "$FM_TEST_ACK" ]; then
+  printf '1700000000\t3\tstale\tworker\t%s\n' 'stale: sess:fm-stalled-w8 (idle 500s, possible wedge, escalation 3, demand-deep-inspection: inspect the worker)'
+  printf '1700000000\t4\tcheck\t%s\t%s\n' "$FM_TEST_KEY" "$FM_TEST_PAYLOAD"
+fi
+printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 4 --recovery-generation fixture\n' >&2
+SH
+  chmod +x "$fakebin/fm-wake-drain.sh"
+  payload="check: $state/x-watch.check.sh: x-mention private-request-7"
+  old_daemon_dir=$FM_DAEMON_DIR
+  FM_DAEMON_DIR=$fakebin
+  FM_TEST_ACK="$ack" FM_TEST_KEY="$state/x-watch.check.sh" FM_TEST_PAYLOAD="$payload" \
+    FM_ESCALATE_BATCH_SECS=90 handle_durable_wakes "$payload" "$state" \
+    || fail "away check routing failed"
+  [ ! -e "$ack" ] || fail "away daemon acknowledged private check evidence before its handling turn"
+  grep -F 'Relay: an authenticated state check produced a new result now.' "$state/.subsuper-escalations" >/dev/null \
+    || fail "away daemon did not publish a readable Relay presentation"
+  if grep -F 'private-request-7' "$state/.subsuper-escalations" >/dev/null; then
+    fail "away presentation exposed the private check correlation"
+  fi
+  [ "$(grep -c 'possible wedge' "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "away daemon did not hand off the retained sibling wake exactly once"
+  replay=$(FM_TEST_ACK="$ack" FM_TEST_KEY="$state/x-watch.check.sh" FM_TEST_PAYLOAD="$payload" \
+    "$fakebin/fm-wake-drain.sh" 2>/dev/null)
+  case "$replay" in *'x-mention private-request-7'*) ;;
+    *) fail "private check result was unavailable to the handling turn: $replay" ;;
+  esac
+  FM_TEST_ACK="$ack" FM_TEST_KEY="$state/x-watch.check.sh" FM_TEST_PAYLOAD="$payload" \
+    FM_ESCALATE_BATCH_SECS=90 handle_durable_wakes "$payload" "$state" \
+    || fail "away check replay routing failed"
+  [ "$(grep -c 'Relay: an authenticated state check' "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "away daemon handed off the same retained check more than once"
+  [ "$(grep -c 'possible wedge' "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "away daemon replayed a sibling wake retained with the check"
+  FM_TEST_ACK="$ack" "$fakebin/fm-wake-drain.sh" --ack-through 4 --recovery-generation fixture
+  FM_TEST_ACK="$ack" FM_TEST_KEY="$state/x-watch.check.sh" FM_TEST_PAYLOAD="$payload" \
+    FM_ESCALATE_BATCH_SECS=90 handle_durable_wakes heartbeat "$state" \
+    || fail "away check acknowledgement reconciliation failed"
+  if compgen -G "$state/.subsuper-check-handoff-*" >/dev/null; then
+    fail "away check handoff marker survived handler acknowledgement"
+  fi
+  FM_DAEMON_DIR=$old_daemon_dir
+  pass "away checks retain private evidence and hand off once until acknowledgement"
+}
+
+test_away_process_event_reannouncements_handoff_once() {
+  local dir state fakebin ack old_daemon_dir count
+  dir=$(make_supercase away-procevent-reannouncement)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  ack="$dir/acked"
+  mkdir -p "$fakebin" "$state/procevent-inbox"
+  printf 'lavish\n' > "$state/procevent-inbox/review-source.7.adapter"
+  printf 'lavish\n' > "$state/procevent-inbox/review-source.8.adapter"
+  cat > "$fakebin/fm-wake-drain.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "$#" -gt 0 ]; then
+  : > "$FM_TEST_ACK"
+  exit 0
+fi
+if [ ! -e "$FM_TEST_ACK" ]; then
+  printf '1700000000\t4\tcheck\tprocevent:review-source:7\t%s\n' 'check: procevent lavish review-source 7'
+  printf '1700000000\t5\tcheck\tprocevent:review-source:7\t%s\n' 'check: procevent lavish review-source 7'
+  printf '1700000000\t6\tcheck\tprocevent:review-source:8\t%s\n' 'check: procevent lavish review-source 8'
+fi
+printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 6 --recovery-generation fixture\n' >&2
+SH
+  chmod +x "$fakebin/fm-wake-drain.sh"
+  old_daemon_dir=$FM_DAEMON_DIR
+  FM_DAEMON_DIR=$fakebin
+  FM_TEST_ACK="$ack" FM_ESCALATE_BATCH_SECS=90 \
+    handle_durable_wakes 'check: procevent lavish review-source 7' "$state" \
+    || fail "away process-event routing failed"
+  [ ! -e "$ack" ] || fail "away daemon acknowledged process-event evidence before handling"
+  count=$(grep -c 'Lavish review: a captured result is ready now.' "$state/.subsuper-escalations")
+  [ "$count" -eq 2 ] \
+    || fail "away daemon did not deduplicate one result while preserving a distinct result: $count"
+  [ "$(find "$state" -maxdepth 1 -name '.subsuper-check-handoff-*' | wc -l | tr -d ' ')" -eq 3 ] \
+    || fail "away daemon did not bind every retained queue row to a handoff marker"
+  FM_TEST_ACK="$ack" FM_ESCALATE_BATCH_SECS=90 \
+    handle_durable_wakes 'check: procevent lavish review-source 7' "$state" \
+    || fail "away process-event replay routing failed"
+  count=$(grep -c 'Lavish review: a captured result is ready now.' "$state/.subsuper-escalations")
+  [ "$count" -eq 2 ] || fail "away daemon replayed a retained process-event result: $count"
+  FM_DAEMON_DIR=$old_daemon_dir
+  pass "away process-event reannouncements hand off once per authenticated result"
 }
 
 test_stale_transient_self_records_marker() {
@@ -175,8 +346,10 @@ test_stale_diagnostic_wedge_survives_busy_housekeeping() {
     )
     [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] \
       || fail "$case_name enriched wedge did not produce exactly one escalation"
-    grep -F "${reason#stale: }" "$state/.subsuper-escalations" >/dev/null \
+    grep -F "demand-deep-inspection" "$state/.subsuper-escalations" >/dev/null \
       || fail "$case_name enriched wedge lost its demand-deep-inspection detail"
+    grep -F "$win" "$state/.subsuper-escalations" >/dev/null \
+      && fail "$case_name enriched wedge leaked its private endpoint into presentation"
     [ ! -e "$state/.subsuper-stale-$key" ] \
       || fail "$case_name enriched wedge retained ordinary stale tracking"
     case "$case_name" in
@@ -231,8 +404,8 @@ test_stale_captain_held_classifies_pause() {
   status_is_captain_relevant "$held_reason" && fail "a captain-held transfer line was treated as captain-relevant"
   printf '%s\n' "$held_reason" > "$state/held-w9h.status"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9h" "$state")
-  case "$out" in pause\|*) ;; *) fail "captain-held transfer did not classify as pause: $out" ;; esac
-  pass "a captain-held transfer classifies as pause, not as a wedge candidate"
+  case "$out" in humanwait\|*) ;; *) fail "captain-held transfer did not classify as a silent human wait: $out" ;; esac
+  pass "a captain-held transfer classifies as a human wait with no timed reminder"
 }
 
 # handle_wake on a paused stale records a pause marker, drops any pre-existing wedge
@@ -477,15 +650,10 @@ test_housekeeping_recovers_pause_batch_atomically() {
   pass "away-mode recovery publishes one buffered sibling batch and advances every record together"
 }
 
-# The other half of quieting a captain-held task: it must NOT be silenced outright.
-# fm-classify-lib.sh's cadence comment is explicit that a forgotten hold cannot rot
-# invisibly, so a held task re-surfaces on the same bounded window as a pause, with
-# its marker reset so the window repeats instead of firing once. The digest the
-# captain reads must also name the captain rather than an external dependency: the
-# hold is waiting on the one person reading the digest, so borrowing the pause verb's
-# awaiting-external wording would point them away from being the blocker.
+# A captain-held task is durable human-owned waiting, not an external pause.
+# Housekeeping removes legacy pause-cadence state and emits no timed escalation.
 test_housekeeping_captain_held_resurfaces_and_resets() {
-  local dir state fakebin win pane key age
+  local dir state fakebin win pane key
   dir=$(make_supercase captain-held-resurface)
   state="$dir/state"; fakebin="$dir/fakebin"
   win="sess:fm-held-w11h"; pane="$dir/pane.txt"
@@ -495,13 +663,9 @@ test_housekeeping_captain_held_resurfaces_and_resets() {
   echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
-  grep -F "awaiting the captain" "$state/.subsuper-escalations" >/dev/null 2>&1 || fail "a captain hold was silenced entirely instead of re-surfacing as a captain-owned recheck: $(cat "$state/.subsuper-escalations" 2>/dev/null || true)"
-  grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null 2>&1 && fail "a captain hold was re-surfaced as an external wait, hiding that the captain is the blocker"
-  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 && fail "a captain hold was re-surfaced as a possible wedge"
-  [ -e "$state/.subsuper-paused-$key" ] || fail "captain-held marker cleared instead of reset for the next window"
-  age=$(( $(date +%s) - $(cat "$state/.subsuper-paused-$key" 2>/dev/null || echo 0) ))
-  [ "$age" -lt 60 ] || fail "captain-held marker was not reset to now on re-surface (age ${age}s)"
-  pass "housekeeping re-surfaces a forgotten captain hold on the long cadence and resets its window"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "an unchanged captain hold created a timed escalation"
+  [ ! -e "$state/.subsuper-paused-$key" ] || fail "captain hold retained external-pause cadence state"
+  pass "housekeeping keeps an unchanged captain hold silent and removes legacy pause cadence state"
 }
 
 # A pause whose pane became busy again (the crew resumed) drops its marker without
@@ -580,9 +744,8 @@ test_housekeeping_stale_marker_transitions_to_pause() {
   pass "housekeeping moves an existing stale marker to pause before wedge escalation"
 }
 
-# The quieting half for a captain hold. A finished task marked captain-held is idle by
-# design, so an already-aged wedge marker converts to pause tracking on the next sweep
-# instead of firing the possible-wedge escalation.
+# A finished task marked captain-held is idle by design, so an already-aged wedge
+# marker is retired without creating an external-pause timer or escalation.
 test_housekeeping_captain_held_stale_marker_transitions_to_pause() {
   local dir state fakebin win pane key
   dir=$(make_supercase stale-to-captain-held)
@@ -593,10 +756,10 @@ test_housekeeping_captain_held_stale_marker_transitions_to_pause() {
   echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-stale-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
-  [ -e "$state/.subsuper-paused-$key" ] || fail "a captain hold did not move its stale marker to pause tracking"
+  [ ! -e "$state/.subsuper-paused-$key" ] || fail "a captain hold created an external-pause timer"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "a captain hold remained wedge-aged"
   [ ! -s "$state/.subsuper-escalations" ] || fail "a captain hold was escalated as a possible wedge"
-  pass "housekeeping moves a captain hold's existing stale marker to pause before wedge escalation"
+  pass "housekeeping retires stale tracking for a captain hold without a timed reminder"
 }
 
 test_housekeeping_pause_marker_transitions_to_clear() {
@@ -865,15 +1028,15 @@ test_away_escalations_present_display_name_with_machine_identity() {
   printf 'done: ready for review\n' > "$state/$task.status"
   FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/$task.status" "$state"
   escalation=$(cat "$state/.subsuper-escalations")
-  assert_contains "$escalation" "CRM · Authentication [task $task]" \
-    "away signal escalation omitted the display name and immutable task id"
+  assert_contains "$escalation" "CRM · Authentication: a new result surfaced. Action required: inspect the private task record and review the result." \
+    "away signal escalation omitted the readable result transition"
+  assert_not_contains "$escalation" "$task" "away signal presentation leaked its machine task id"
 
   : > "$state/.subsuper-escalations"
   rm -f "$state/.subsuper-seen-status-$key"
   FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
   escalation=$(cat "$state/.subsuper-escalations")
-  assert_contains "$escalation" "CRM · Authentication [task $task]; endpoint $win" \
-    "away terminal-stale escalation omitted the display name or exact endpoint"
+  [ -z "$escalation" ] || fail "away terminal-stale path repeated an unchanged result: $escalation"
 
   : > "$state/.subsuper-escalations"
   printf 'working: authentication checks\n' > "$state/$task.status"
@@ -882,18 +1045,20 @@ test_away_escalations_present_display_name_with_machine_identity() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
   escalation=$(cat "$state/.subsuper-escalations")
-  assert_contains "$escalation" "CRM · Authentication [task $task]; endpoint $win" \
-    "away persistent-stale escalation omitted the display name or exact endpoint"
+  assert_contains "$escalation" "CRM · Authentication" \
+    "away persistent-stale escalation omitted the display name"
+  assert_not_contains "$escalation" "$win" "away persistent-stale presentation leaked its endpoint"
 
   : > "$state/.subsuper-escalations"
   rm -f "$state/.subsuper-last-scan" "$state/.subsuper-seen-status-$key"
   printf 'done: final review ready\n' > "$state/$task.status"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   escalation=$(cat "$state/.subsuper-escalations")
-  assert_contains "$escalation" "CRM · Authentication [task $task]: done: final review ready (catch-all scan)" \
-    "away catch-all escalation omitted the display name and immutable task id"
+  assert_contains "$escalation" "CRM · Authentication: a new result surfaced. Action required: inspect the private task record and review the result." \
+    "away catch-all escalation omitted the readable result transition"
+  assert_not_contains "$escalation" "$task" "away catch-all presentation leaked its machine task id"
 
-  pass "away escalation surfaces show display names with immutable task identities"
+  pass "away escalation surfaces show readable transitions while machine identities remain private"
 }
 
 test_inject_skip_forces_self() {
@@ -1217,8 +1382,9 @@ test_classify_signal_dedup_against_scan() {
   printf 'done: PR https://x/y/pull/9' > "$state/.subsuper-seen-status-$key"
   out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/dup-s9.status" "$state")
   case "$out" in self\|*) ;; *) fail "signal not deduped against scan: $out" ;; esac
-  # Without the seen marker, it should escalate.
+  # Removing both the compatibility marker and the shared receipt models a new edge.
   rm -f "$state/.subsuper-seen-status-$key"
+  fm_human_notify_clear_task "$state" dup-s9
   out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/dup-s9.status" "$state")
   case "$out" in escalate\|*) ;; *) fail "signal should escalate when not seen: $out" ;; esac
   pass "classify_signal dedupes against the catch-all scan seen marker"
@@ -1235,8 +1401,9 @@ test_classify_stale_dedup_against_signal() {
   printf 'done: PR https://x/y/pull/10' > "$state/.subsuper-seen-status-$key"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-dup-s10" "$state")
   case "$out" in self\|*) ;; *) fail "stale not deduped against signal: $out" ;; esac
-  # Without the seen marker, it should escalate.
+  # Removing both the compatibility marker and the shared receipt models a new edge.
   rm -f "$state/.subsuper-seen-status-$key"
+  fm_human_notify_clear_task "$state" dup-s10
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-dup-s10" "$state")
   case "$out" in escalate\|*) ;; *) fail "stale should escalate when not seen: $out" ;; esac
   pass "classify_stale dedupes against the signal path seen marker"
@@ -1283,6 +1450,8 @@ test_afk_nonterminal_working_merged_keeps_wedge_aging() {
     || fail "housekeeping did not re-escalate aged nonterminal working: wedge"
   grep -q 'possible wedge' "$state/.subsuper-escalations" \
     || fail "housekeeping escalate was not a possible-wedge: $(cat "$state/.subsuper-escalations")"
+  grep -F 'Action required: inspect the worker and restart or recover it.' "$state/.subsuper-escalations" >/dev/null \
+    || fail "housekeeping wedge presentation omitted its recovery action"
   pass "AFK nonterminal working:+merged keeps wedge aging and re-escalates at bound"
 }
 
@@ -1294,7 +1463,7 @@ test_afk_genuine_done_still_terminal_stale() {
     > "$state/stage1-w2.status"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-stage1-w2" "$state")
   case "$out" in escalate\|*) ;; *) fail "genuine done: stale did not escalate: $out" ;; esac
-  out=$(classify_check "check: /s/t.check.sh: merged")
+  out=$(classify_check "check: Task: the review target merged. Action required: record the delivered result." "$state")
   case "$out" in escalate\|*) ;; *) fail "validated merge-check did not escalate: $out" ;; esac
   pass "genuine done: and merge-check events still escalate"
 }
@@ -2086,7 +2255,10 @@ test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
+test_classify_buried_open_decision_escalates
 test_classify_check_and_unknown_escalate
+test_away_check_retains_private_wake_until_handling
+test_away_process_event_reannouncements_handoff_once
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_stale_terminal_escalates

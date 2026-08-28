@@ -408,7 +408,7 @@ When any wake reports a merged PR for a project cloned in this home, refresh tha
 When Relay-linked work reaches a milestone or terminal state, load `fmx-respond`; before terminal teardown, use its promised-final reconciliation when a typed public commitment exists, otherwise post the final completion follow-up so the link clears even if earlier follow-ups were spent.
 
 A secondmate's idle endpoint is healthy, and parent supervision relies on its routed status rather than treating a quiet pane as stale.
-Waiting on a healthy supervision cycle is silent; empty polls, elapsed time, and no-change updates are not captain-facing progress.
+Waiting on a healthy supervision cycle is silent; unchanged human-owned decisions, approvals, review-ready results, and blockers notify only on meaningful evidence transitions, while `paused:` remains exclusively for external waits that may clear on their own.
 Never broadly kill watchers, especially never `pkill -f bin/fm-watch.sh`, because that can kill sibling firstmate homes.
 A forced repair must use the home-scoped owner path emitted by supervision instructions.
 

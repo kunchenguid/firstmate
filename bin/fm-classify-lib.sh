@@ -77,17 +77,17 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
-# Bounded re-surface cadence for a declared pause or a verified captain hold.
+# Bounded re-surface cadence for a declared external pause.
 # Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it
-# avoids nagging a deliberate wait while ensuring a forgotten hold cannot rot
-# invisibly - it re-surfaces once for a recheck every window. One hour by default,
-# which is the window until the FIRST recheck and the floor every later window is
-# derived from; both consumers read FM_PAUSE_RESURFACE_SECS with this default so
-# the cadence has one owner.
+# avoids nagging a deliberate external wait while still checking a dependency
+# that may clear on its own. Human-owned waits have no timed cadence and are
+# governed by bin/fm-human-notify-lib.sh instead. One hour is the first external
+# recheck and the floor later windows derive from; both supervisors read this
+# default so the cadence has one owner.
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
-# Capped exponential backoff for CONSECUTIVE UNCHANGED rechecks of the SAME wait,
+# Capped exponential backoff for consecutive unchanged rechecks of the same external wait,
 # the same shape the watcher's heartbeat already uses (FM_HEARTBEAT/FM_HEARTBEAT_MAX):
 # the first recheck still lands on the base cadence above, and each recheck that
 # finds the monitored evidence unchanged doubles the next window until this cap.
@@ -437,6 +437,11 @@ status_is_captain_relevant() {
   printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
 }
 
+status_captain_relevant_is_current() {  # <status-file> <status-line>
+  [ "$(last_status_line "$1")" = "$2" ] || return 1
+  status_is_captain_relevant "$2"
+}
+
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure
 # read of the line itself, so the daemon's classify_stale can reuse the last line
 # it already read without a fm-crew-state.sh call. Matches only the verb before the
@@ -592,8 +597,10 @@ EOF
   printf '%s' "$out"
 }
 # Fold ONE status line into an existing "<key>\t<verb>\t<note>\n"-per-line open
-# set, applying the same needs-decision/blocked-opens, resolved/captain-held-closes
-# rule status_open_decisions documents above. Pure text transform, no file I/O.
+# set, applying the same needs-decision/blocked-opens and keyed explicit-close
+# rules status_open_decisions documents above. An unkeyed working line also closes
+# an unkeyed blocker because it is the durable recovered transition; keyed waits
+# still require their matching explicit close. Pure text transform, no file I/O.
 # This is the ONE place the per-line open/resolved rule is written; both the
 # whole-file fold (status_open_decisions) and the incremental cursor-backed fold
 # (status_open_decisions_incremental) below call this instead of re-deriving the
@@ -652,6 +659,12 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
     "$resolve"|"$held")
       open=$(_fm_decision_drop "$open" "$key")
       [ -n "$open" ] && open="${open}"$'\n'
+      ;;
+    working)
+      if [ "$key" = default ] && [ "$(_fm_open_set_verb "$open" "$key")" = blocked ]; then
+        open=$(_fm_decision_drop "$open" "$key")
+        [ -n "$open" ] && open="${open}"$'\n'
+      fi
       ;;
   esac
   printf '%s' "$open"
@@ -788,11 +801,11 @@ EOF
 # is open. Cost is bounded by NEW appends since the last drain, not by the
 # status file's total lifetime size.
 #
-# Correctness invariant (unchanged from the whole-file fold): an open decision
-# is dropped ONLY by an explicit resolved/captain-held line for its exact key,
-# never by cursor advancement, age, or being buried under later appends - the
-# persisted open-set carries every still-open key forward across calls
-# regardless of how much new unrelated log content has since been folded in.
+# Correctness invariant (unchanged from the whole-file fold): an open keyed
+# decision is dropped only by an explicit resolved/captain-held line for its exact
+# key. An unkeyed blocker also closes on an unkeyed working recovery. Cursor
+# advancement, age, and unrelated appends never close anything, so the persisted
+# open-set carries every still-open condition forward across calls.
 #
 # The cursor format is `version`, `offset`, `ident`, then the folded open set.
 # FM_OPEN_DECISIONS_FOLD_VERSION must be bumped whenever
@@ -835,7 +848,7 @@ _fm_open_decisions_cursor_path() {  # <status-file>
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
 
-FM_OPEN_DECISIONS_FOLD_VERSION=4
+FM_OPEN_DECISIONS_FOLD_VERSION=5
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure

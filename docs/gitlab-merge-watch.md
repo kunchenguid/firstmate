@@ -1,7 +1,7 @@
 # GitLab merge request watch verification
 
-Empirical record for the merge watch on GitLab, alongside the existing GitHub watch.
-Every command below was run on 2026-07-21 and its output is reproduced exactly.
+Maintainer verification for the merge watch on GitLab, alongside the existing GitHub watch.
+The fixture CLI transcripts were captured on 2026-07-21, while the current validated observation contract is exercised by `tests/fm-pr-check-security.test.sh`.
 
 ## Versions
 
@@ -30,16 +30,9 @@ A GitLab project also sits under at least one group at no fixed depth, so no own
 The stored record therefore carries `provider`, `url`, `host`, `path`, and `number`, and every consumer rebuilds the URL from those parts and refuses any record that does not reconstruct the stored URL exactly.
 `tests/fm-pr-check-security.test.sh` asserts that neither `bin/fm-pr-lib.sh` nor `bin/fm-pr-poll.sh` contains the string `gitlab.com` at all.
 
-## How plain glab is invoked, and why
+## How glab is invoked, and why
 
-Two things about plain `glab` were established by running it, because assuming either one would have failed silently into a permanent "not merged".
-
-First, plain `glab` has no field selector.
-`gh` reads one field with `--json state -q .state`; `glab mr view` offers only `-F, --output string  Format output as: text, json`.
-Its JSON would need a JSON processor, and `jq` is not one of firstmate's common tools, so the state is read from glab's own field output instead.
-Only an exact `merged` wakes firstmate, so a changed output format produces no wake rather than a false merge.
-
-Second, `glab` cannot take a merge request URL the way `gh pr view` can.
+`glab` cannot take a merge request URL the way `gh pr view` can.
 That form shells out to git for the current repository, and the watcher runs in no repository:
 
 ```
@@ -49,7 +42,7 @@ Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).
 git: exit status 128
 ```
 
-Passing the project URL to `-R` with the merge request number works from anywhere, and resolves the instance from that URL rather than from glab's configured default:
+Passing the project URL to `-R` with the merge request number works from anywhere and resolves the instance from that URL rather than from glab's configured default:
 
 ```
 $ cd /tmp && glab mr view 1 -R https://gitlab.com/KarotKris/gitlab-merge-watch-fixture
@@ -117,19 +110,25 @@ group/subgroup/project
 70:957244
 ```
 
-Running each published poll the way the watcher does, where an empty result means the poll stayed silent and produced no wake:
+The watcher uses the authenticated observation interface:
+
+```
+$ fm-pr-poll.sh --observe-validated $(tr '\n' ' ' < state/e1.pr-poll)
+observed|merged|<head-sha>|<pipeline-status>|<pipeline-status>
+```
+
+The poll requests `glab mr view --output json` and parses the top-level merge request state, head SHA, and head-pipeline status with Perl's core `JSON::PP` module.
+It validates those fields before emitting one `observed|state|head|checks|conclusion` record, and any CLI, JSON, schema, or validation failure remains silent.
+The watcher compares that durable observation with prior evidence, surfaces only first readiness or a meaningful state, head, or check transition, and retires the poll only after an exact merged observation has been durably queued.
+The legacy `--validated` and sidecar interfaces still emit only `merged` for compatibility:
 
 ```
 $ fm-pr-poll.sh --validated $(tr '\n' ' ' < state/e1.pr-poll)
 merged
 $ fm-pr-poll.sh --validated $(tr '\n' ' ' < state/e2.pr-poll)
-$ fm-pr-poll.sh --validated $(tr '\n' ' ' < state/e3.pr-poll)
 ```
 
-The merged fixture merge request produces exactly one `merged` line.
-The open one produces nothing, and the unreachable placeholder host produces nothing rather than a false merge.
-
-The same bytes work in the watcher's sidecar-driven mode, where the published check locates its own record:
+The same bytes work in the sidecar-driven compatibility mode, where the published check locates its own record:
 
 ```
 $ state/e1x.check.sh
@@ -195,6 +194,5 @@ No armed watch is lost by upgrading.
 `bin/fm-pr-merge.sh` still addresses GitHub only, by owner and repository.
 It refuses a GitLab merge request URL rather than sending it to the wrong forge, so merging a merge request stays a deliberate manual step until merge parity lands separately.
 
-A GitLab task records no `pr_head=`.
-`gh` exposes the head commit as a selectable field, while plain `glab` exposes it only inside its JSON output, which would need a JSON processor firstmate does not require.
-Both consumers already treat it as optional: `bin/fm-teardown.sh` reads the head from the forge at teardown rather than from metadata and falls back to its provider-agnostic content check, and `bin/fm-review-diff.sh` resolves the head from the remote when none is recorded.
+The authenticated observation records the GitLab head SHA and pipeline status beside the task, so changed heads and red checks participate in the same one-shot notification lifecycle as GitHub evidence.
+The arming metadata can still omit `pr_head=` when the initial head lookup is unavailable; later validated observations supply the durable polling evidence.
