@@ -705,7 +705,7 @@ SH
 # gets killed mid-run and retries invisibly, so an over-budget run has to be a
 # failure, not a note in the log.
 test_max_wall_ms_is_a_result_not_advice() {
-  local tmp repo runner fast final fifo rc runner_pid waited summary_duration budget_duration
+  local tmp repo runner fast final fifo rc runner_pid waited summary_duration
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-budget.XXXXXX")
   repo="$tmp/repo"
   runner="$repo/bin/fm-test-run.sh"
@@ -730,7 +730,7 @@ SH
 
   # Same green script, budget it cannot meet: the run must FAIL.
   set +e
-  "$runner" --max-wall-ms 1 "$fast" >"$tmp/over" 2>"$tmp/over.err"
+  "$runner" --max-wall-ms 500 "$fast" >"$tmp/over" 2>"$tmp/over.err"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "an over-budget run must fail even with every script green: $(cat "$tmp/over")"
@@ -778,15 +778,11 @@ SH
   wait "$runner_pid"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "blocking JSON finalization must fail the budgeted run"
+  [ "$rc" -eq 143 ] || fail "blocking finalization watchdog exit must be 143, got $rc"
   summary_duration=$(awk '/^FM_TEST_SUMMARY / { for (i=1;i<=NF;i++) if ($i ~ /^duration_ms=/) { sub(/^duration_ms=/, "", $i); print $i } }' "$tmp/finalization.out")
-  budget_duration=$(awk '/^FM_TEST_BUDGET / { for (i=1;i<=NF;i++) if ($i ~ /^duration_ms=/) { sub(/^duration_ms=/, "", $i); print $i } }' "$tmp/finalization.out")
   [ -n "$summary_duration" ] && [ "$summary_duration" -lt 2000 ] \
     || fail "suite duration unexpectedly included blocking finalization: $(cat "$tmp/finalization.out")"
-  [ -n "$budget_duration" ] && [ "$budget_duration" -gt 2000 ] \
-    || fail "budget duration omitted blocking finalization: $(cat "$tmp/finalization.out")"
-  grep -Fq 'timing artifact finalization failed' "$tmp/finalization.err" \
-    || fail "blocking finalization failure was not reported: $(cat "$tmp/finalization.err")"
+  [ "$waited" -lt 100 ] || fail "blocking finalization was not bounded"
 
   rm -rf "$tmp"
   pass "--max-wall-ms fails an over-budget run and refuses a malformed budget"
@@ -937,6 +933,11 @@ test_signal_cleanup_reaps_concurrent_descendants() {
     cat >"$repo/tests/$script" <<'SH'
 #!/usr/bin/env bash
 name=$(basename "$0")
+on_term() {
+  sh -c 'trap "" TERM; echo $$ >"$1"; sleep 600' _ "$TRACK_DIR/$name.late.pid" &
+  exit 0
+}
+trap on_term TERM
 sh -c 'trap "" TERM; echo $$ >"$1"; sleep 600' _ "$TRACK_DIR/$name.pid" &
 wait
 SH
@@ -967,6 +968,8 @@ SH
   rc=$?
   set -e
   [ "$rc" -eq 143 ] || fail "SIGTERM runner exit must be 143, got $rc"
+  [ "$(find "$track" -name '*.late.pid' -type f 2>/dev/null | wc -l | tr -d ' ')" -eq 2 ] \
+    || fail "TERM traps did not spawn their late descendants"
   for pid_file in "$track"/*.pid; do
     child=$(cat "$pid_file")
     waited=0

@@ -1745,12 +1745,16 @@ fi
 RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
 RECORDS="$RUN_TMP/records.tsv"
 FAMILIES_TSV="$RUN_TMP/families.tsv"
+TIMEOUT_GROUPS="$RUN_TMP/timeout-groups"
+mkdir -p "$TIMEOUT_GROUPS"
+export FM_TIMEOUT_TRACK_DIR="$TIMEOUT_GROUPS"
 : >"$RECORDS"
 declare -a WORKER_PIDS=()
 declare -a WORKER_IDX=()
 declare -a WORKER_SCRIPTS=()
 declare -a BOUNDED_PIDS=()
 RUN_CLEANED=0
+FINALIZATION_WATCHDOG_PID=
 
 remove_bounded_pid() {
   local want=$1 slot
@@ -1759,56 +1763,25 @@ remove_bounded_pid() {
   done
 }
 
-descendants_of_pid() {
-  local root=$1
-  ps -eo pid=,ppid= 2>/dev/null | awk -v root="$root" '
-    { pid[NR] = $1; ppid[NR] = $2 }
-    END {
-      seen[root] = 1
-      changed = 1
-      while (changed) {
-        changed = 0
-        for (i = 1; i <= NR; i++) {
-          if (seen[ppid[i]] && !seen[pid[i]]) {
-            seen[pid[i]] = 1
-            print pid[i]
-            changed = 1
-          }
-        }
-      }
-    }
-  '
+tracked_group_is_owned() {
+  local pid=$1 pgid
+  pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+  [ -n "$pgid" ] && [ "$pgid" = "$pid" ]
 }
 
-terminate_tracked_roots() {
-  local tree="$RUN_TMP/cleanup-pids" pid any=0
-  : >"$tree"
+terminate_tracked_groups() {
+  local pid any=0
   for pid in "$@"; do
-    if kill -0 "$pid" 2>/dev/null; then
+    if kill -0 -- "-$pid" 2>/dev/null; then
+      kill -TERM -- "-$pid" 2>/dev/null || true
       any=1
-      descendants_of_pid "$pid" >>"$tree"
     fi
-  done
-  sort -u "$tree" -o "$tree"
-  while IFS= read -r pid; do
-    [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null || true
-  done <"$tree"
-  for pid in "$@"; do
-    kill -TERM "$pid" 2>/dev/null || true
   done
   [ "$any" -eq 0 ] || sleep 0.2
   for pid in "$@"; do
-    descendants_of_pid "$pid" >>"$tree"
-  done
-  sort -u "$tree" -o "$tree"
-  while IFS= read -r pid; do
-    [ -n "$pid" ] && kill -KILL "$pid" 2>/dev/null || true
-  done <"$tree"
-  for pid in "$@"; do
-    kill -KILL "$pid" 2>/dev/null || true
+    kill -KILL -- "-$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
   done
-  rm -f "$tree"
 }
 
 cleanup_run() {
@@ -1821,7 +1794,10 @@ cleanup_run() {
   for slot in "${!BOUNDED_PIDS[@]}"; do
     roots+=("${BOUNDED_PIDS[$slot]}")
   done
-  [ "${#roots[@]}" -eq 0 ] || terminate_tracked_roots "${roots[@]}"
+  for slot in "$TIMEOUT_GROUPS"/*; do
+    [ -f "$slot" ] && roots+=("$(basename "$slot")")
+  done
+  [ "${#roots[@]}" -eq 0 ] || terminate_tracked_groups "${roots[@]}"
   rm -rf "$RUN_TMP"
 }
 
@@ -1830,6 +1806,42 @@ signal_exit() {
   trap '' HUP INT TERM
   cleanup_run
   exit "$code"
+}
+
+arm_finalization_watchdog() {
+  local monitor_was_on=0 parent=$$ pid release="$RUN_TMP/finalization-watchdog-release"
+  rm -f "$release"
+  case $- in *m*) monitor_was_on=1 ;; esac
+  set -m
+  (
+    trap - EXIT HUP INT TERM
+    set +m
+    while [ ! -e "$release" ]; do sleep 0.01; done
+    if command -v python3 >/dev/null 2>&1; then
+      python3 -c 'import sys, time; time.sleep(int(sys.argv[1]) / 1000)' "$MAX_WALL_MS"
+    else
+      sleep $(((MAX_WALL_MS + 999) / 1000))
+    fi
+    kill -TERM "$parent" 2>/dev/null || exit 0
+    sleep 1
+    kill -KILL "$parent" 2>/dev/null || true
+  ) &
+  pid=$!
+  [ "$monitor_was_on" -eq 1 ] || set +m
+  tracked_group_is_owned "$pid" || die "finalization watchdog did not lead its process group: $pid"
+  FINALIZATION_WATCHDOG_PID=$pid
+  BOUNDED_PIDS+=("$pid")
+  : >"$release"
+}
+
+disarm_finalization_watchdog() {
+  local pid=${FINALIZATION_WATCHDOG_PID:-}
+  [ -n "$pid" ] || return 0
+  kill -TERM -- "-$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  remove_bounded_pid "$pid"
+  rm -f "$RUN_TMP/finalization-watchdog-release"
+  FINALIZATION_WATCHDOG_PID=
 }
 
 trap cleanup_run EXIT
@@ -1915,10 +1927,18 @@ record_script_result() {
 # because an unbounded suite is what silently outruns its caller's budget.
 run_script_bounded() {  # <script> <out> <stream> <id>
   local script=$1 out=$2 stream=$3 id=$4
-  local rc pid
-  : "$id"
+  local rc pid release="$RUN_TMP/group-release.$id" monitor_was_on=0 tracked=0
+  rm -f "$release"
+  if [ "${FM_TEST_WORKER_GROUP:-0}" -eq 0 ]; then
+    case $- in *m*) monitor_was_on=1 ;; esac
+    set -m
+    tracked=1
+  fi
   (
     trap - EXIT HUP INT TERM
+    if [ "$tracked" -eq 1 ]; then
+      while [ ! -e "$release" ]; do sleep 0.01; done
+    fi
     set +e
     if [ "$stream" -eq 1 ]; then
       if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
@@ -1936,11 +1956,19 @@ run_script_bounded() {  # <script> <out> <stream> <id>
     bash "$script" >"$out" 2>&1
   ) &
   pid=$!
-  BOUNDED_PIDS+=("$pid")
+  if [ "$tracked" -eq 1 ]; then
+    [ "$monitor_was_on" -eq 1 ] || set +m
+    tracked_group_is_owned "$pid" || die "tracked test process did not lead its process group: $pid"
+    BOUNDED_PIDS+=("$pid")
+    : >"$release"
+  fi
   set +e
   wait "$pid"
   rc=$?
-  remove_bounded_pid "$pid"
+  if [ "$tracked" -eq 1 ]; then
+    remove_bounded_pid "$pid"
+    rm -f "$release"
+  fi
   if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ] && [ "$rc" -eq 124 ]; then
     printf 'not ok - %s exceeded the per-script bound of %ss and was terminated\n' \
       "$script" "$PER_SCRIPT_TIMEOUT_SECS" >>"$out"
@@ -2000,6 +2028,7 @@ else
     unset 'WORKER_PIDS[slot]'
     unset 'WORKER_IDX[slot]'
     unset 'WORKER_SCRIPTS[slot]'
+    rm -f "$RUN_TMP/worker-release.$idx"
     active_workers=$((active_workers - 1))
     work="$RUN_TMP/w$idx"
     rc=$(cat "$work/exit" 2>/dev/null || echo 1)
@@ -2060,9 +2089,16 @@ else
     expected=$(expected_gate_skip_for_family "$family")
     printf 'FM_TEST_BEGIN %s %s family=%s expected_gate_skip=%s\n' \
       "$(now_iso)" "$script" "$family" "$expected"
+    worker_release="$RUN_TMP/worker-release.$worker_n"
+    rm -f "$worker_release"
+    case $- in *m*) worker_monitor_was_on=1 ;; *) worker_monitor_was_on=0 ;; esac
+    set -m
     (
       trap - EXIT HUP INT TERM
+      set +m
+      while [ ! -e "$worker_release" ]; do sleep 0.01; done
       set +e
+      export FM_TEST_WORKER_GROUP=1
       export TMPDIR="$work/tmp"
       export TMP="$work/tmp"
       unset FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \
@@ -2082,7 +2118,11 @@ else
       printf '%s\n' "$rc" >"$work/exit"
       exit 0
     ) &
-    WORKER_PIDS[worker_n]=$!
+    worker_pid=$!
+    [ "$worker_monitor_was_on" -eq 1 ] || set +m
+    tracked_group_is_owned "$worker_pid" || die "worker did not lead its process group: $worker_pid"
+    WORKER_PIDS[worker_n]=$worker_pid
+    : >"$worker_release"
     WORKER_IDX[worker_n]=$worker_n
     WORKER_SCRIPTS[worker_n]=$script
     active_workers=$((active_workers + 1))
@@ -2102,6 +2142,8 @@ RUN_DURATION=$((RUN_FINISHED_MS - RUN_STARTED_MS))
 if [ "$RUN_DURATION" -lt 0 ]; then
   RUN_DURATION=0
 fi
+
+[ -z "$MAX_WALL_MS" ] || arm_finalization_watchdog
 
 printf 'FM_TEST_SUMMARY total=%s failed=%s skipped_gate=%s duration_ms=%s\n' \
   "$TOTAL" "$FAILED" "$SKIPPED_GATE" "$RUN_DURATION"
@@ -2133,8 +2175,14 @@ if [ -n "$JSON_PATH" ]; then
     : >"$FAMILIES_TSV"
   fi
   json_status="$RUN_TMP/json-status"
+  json_release="$RUN_TMP/json-release"
+  rm -f "$json_release"
+  case $- in *m*) json_monitor_was_on=1 ;; *) json_monitor_was_on=0 ;; esac
+  set -m
   (
     trap - EXIT HUP INT TERM
+    set +m
+    while [ ! -e "$json_release" ]; do sleep 0.01; done
     set +e
     write_json_artifact "$JSON_PATH" \
       "$RUN_STARTED_ISO" "$RUN_FINISHED_ISO" "$RUN_ID" \
@@ -2143,22 +2191,16 @@ if [ -n "$JSON_PATH" ]; then
     printf '%s\n' "$?" >"$json_status"
   ) &
   json_pid=$!
+  [ "$json_monitor_was_on" -eq 1 ] || set +m
+  tracked_group_is_owned "$json_pid" || die "timing artifact writer did not lead its process group: $json_pid"
   BOUNDED_PIDS+=("$json_pid")
-  if [ -n "$MAX_WALL_MS" ]; then
-    while [ ! -f "$json_status" ]; do
-      finalization_now=$(now_ms)
-      if [ "$((finalization_now - RUN_STARTED_MS))" -gt "$MAX_WALL_MS" ]; then
-        terminate_tracked_roots "$json_pid"
-        break
-      fi
-      sleep 0.01
-    done
-  fi
+  : >"$json_release"
   set +e
   wait "$json_pid" 2>/dev/null
   json_rc=$?
   set -e
   remove_bounded_pid "$json_pid"
+  rm -f "$json_release"
   if [ -f "$json_status" ]; then
     json_rc=$(cat "$json_status" 2>/dev/null || printf '1')
   fi
@@ -2178,6 +2220,7 @@ if [ -n "$MAX_WALL_MS" ]; then
     log "wall-clock budget exceeded: ${BUDGET_DURATION}ms > ${MAX_WALL_MS}ms for $SELECTION_DESC"
     AGG_RC=1
   fi
+  disarm_finalization_watchdog
 fi
 
 exit "$AGG_RC"
