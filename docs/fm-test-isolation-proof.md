@@ -85,20 +85,24 @@ A family is admitted to `list_concurrent_safe_families` in `bin/fm-test-run.sh` 
 
 - Date: 2026-08-28
 - Command: `bin/fm-test-isolation-proof.sh --pool watcher-wake-lock --jobs 4`
-- Result: two consecutive runs, 18 candidates, 0 failures.
+- Archived harness result: two consecutive runs, 18 candidates, 0 failures.
 
 | Run | Summary |
 |---|---|
 | 1 | `FM_ISOLATION_SUMMARY total=18 failed=0 concurrency=4 duration_ms=394675` |
 | 2 | `FM_ISOLATION_SUMMARY total=18 failed=0 concurrency=4 duration_ms=374869` |
 
+Those archived harness runs used alphabetical launch order and oldest-worker reclamation. They establish the worker isolation result, but they did not reproduce the production scheduler's load profile and are not the sole basis for admission. The current harness consumes the runner's longest-hint-first schedule and reclaims any completed worker, matching the admitted execution condition.
+
+Admission is also supported by three independent runs of the production scheduler: `bin/fm-test-run.sh --changed` used automatic concurrency at four workers, longest-first scheduling, selected 19 scripts, and completed with 0 failures in 208s, 216s, and 226s. Those runs exercised the production path that the family admission enables.
+
 These scripts assert how quickly a real watcher reaches its next poll, so they are sensitive to CPU oversubscription rather than to shared state.
 An earlier attempt on the same host measured three failures (`fm-watch-checkpoint`, `fm-watch-recovery-loop`, `fm-watch-arm`) while six unrelated busy processes were running, at roughly ten runnable processes against fourteen cores.
 That is the margin this family has: four workers is proven, and the failures reappear well before the machine is merely busy.
 Keep `--jobs` for this family at or below the proven bound rather than raising it to fill a larger machine.
 
-The same runs showed why ordering matters: the candidate sum was 818s and the balanced four-worker target 205s, but alphabetical order finished in 395s because the 193s `fm-watch-triage` started last and ran alone at the tail.
-`bin/fm-test-run.sh` therefore orders concurrent runs longest-hint-first.
+The archived harness runs showed why ordering matters: the candidate sum was 818s and the balanced four-worker target 205s, but alphabetical order finished in 395s because the 193s `fm-watch-triage` started last and ran alone at the tail.
+Both `bin/fm-test-run.sh` and the current proof harness therefore order concurrent runs longest-hint-first.
 
 ## Scope
 

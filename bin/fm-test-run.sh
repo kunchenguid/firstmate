@@ -17,6 +17,7 @@
 #   fm-test-run.sh --list --all
 #   fm-test-run.sh --list --family <name>
 #   fm-test-run.sh --list --lane portable-parallel-1
+#   fm-test-run.sh --list-scheduled --family <name>
 #   fm-test-run.sh --list-families
 #   fm-test-run.sh --list-concurrent-safe-families
 #   fm-test-run.sh --list-lanes
@@ -28,6 +29,8 @@
 # Options:
 #   --json <path>   write a deterministic timing artifact after the run
 #   --list          print selected script paths (one per line) and exit 0
+#   --list-scheduled
+#                   print selected paths longest-hint-first and exit 0
 #   --base <ref>    with --changed, compare against this ref (default: origin/main)
 #   --exclude-family <name>
 #                   drop scripts whose primary family matches <name> after selection
@@ -159,6 +162,7 @@ cd "$ROOT" || exit 1
 
 MODE=
 LIST_ONLY=0
+LIST_SCHEDULED=0
 LIST_FAMILIES=0
 LIST_CONCURRENT_SAFE_FAMILIES=0
 LIST_LANES=0
@@ -1547,6 +1551,10 @@ while [ "$#" -gt 0 ]; do
       LIST_ONLY=1
       shift
       ;;
+    --list-scheduled)
+      LIST_SCHEDULED=1
+      shift
+      ;;
     --list-families)
       LIST_FAMILIES=1
       shift
@@ -1710,10 +1718,16 @@ if [ "$JOBS" -gt 1 ]; then
   SELECTION_DESC="${SELECTION_DESC};jobs=$JOBS"
 fi
 
-if [ "$LIST_ONLY" -eq 1 ]; then
-  for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
-    printf '%s\n' "$s"
-  done
+if [ "$LIST_ONLY" -eq 1 ] || [ "$LIST_SCHEDULED" -eq 1 ]; then
+  if [ "$LIST_SCHEDULED" -eq 1 ]; then
+    for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
+      printf '%s\t%s\n' "$(portable_serial_weight_for "$s")" "$s"
+    done | LC_ALL=C sort -t"$(printf '\t')" -k1,1nr -k2,2 | cut -f2-
+  else
+    for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
+      printf '%s\n' "$s"
+    done
+  fi
   exit 0
 fi
 
@@ -1810,14 +1824,35 @@ declare -a WORKER_PIDS=()
 declare -a WORKER_IDX=()
 declare -a WORKER_SCRIPTS=()
 FINALIZATION_WATCHDOG_PID=
+FINALIZATION_ACTIVE=0
+BUDGET_REPORTED=0
 
 cleanup_run() {
   rm -rf "$RUN_TMP"
 }
 
+emit_budget_result() {
+  [ "$BUDGET_REPORTED" -eq 0 ] || return 0
+  if ! mkdir "$RUN_TMP/budget-reported" 2>/dev/null; then
+    BUDGET_REPORTED=1
+    return 0
+  fi
+  BUDGET_DURATION=$(($(now_ms) - RUN_STARTED_MS))
+  [ "$BUDGET_DURATION" -ge 0 ] || BUDGET_DURATION=0
+  printf 'FM_TEST_BUDGET max_wall_ms=%s duration_ms=%s\n' "$MAX_WALL_MS" "$BUDGET_DURATION"
+  if [ "$BUDGET_DURATION" -gt "$MAX_WALL_MS" ]; then
+    log "wall-clock budget exceeded: ${BUDGET_DURATION}ms > ${MAX_WALL_MS}ms for $SELECTION_DESC"
+    AGG_RC=1
+  fi
+  BUDGET_REPORTED=1
+}
+
 signal_exit() {
   local code=$1
   trap '' HUP INT TERM
+  if [ "$FINALIZATION_ACTIVE" -eq 1 ] && [ -n "$MAX_WALL_MS" ]; then
+    emit_budget_result
+  fi
   cleanup_run
   exit "$code"
 }
@@ -1826,12 +1861,30 @@ arm_finalization_watchdog() {
   local parent=$RUN_WRAPPER_PID elapsed remaining
   elapsed=$(($(now_ms) - RUN_STARTED_MS))
   remaining=$((MAX_WALL_MS - elapsed))
-  [ "$remaining" -gt 0 ] || signal_exit 143
+  [ "$remaining" -gt 0 ] || return 0
   if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import os, signal, sys, time; time.sleep(int(sys.argv[1]) / 1000); os.kill(int(sys.argv[2]), signal.SIGTERM)' \
-      "$remaining" "$parent" &
+    python3 -c 'import os, signal, sys, time
+remaining, parent, maximum, started, marker = sys.argv[1:]
+time.sleep(int(remaining) / 1000)
+try:
+    os.mkdir(marker)
+except FileExistsError:
+    pass
+else:
+    duration = max(0, int(time.time() * 1000) - int(started))
+    print(f"FM_TEST_BUDGET max_wall_ms={maximum} duration_ms={duration}", flush=True)
+os.kill(int(parent), signal.SIGTERM)' \
+      "$remaining" "$parent" "$MAX_WALL_MS" "$RUN_STARTED_MS" "$RUN_TMP/budget-reported" &
   else
-    (sleep $(((remaining + 999) / 1000)); kill -TERM "$parent" 2>/dev/null || true) &
+    (
+      sleep $(((remaining + 999) / 1000))
+      if mkdir "$RUN_TMP/budget-reported" 2>/dev/null; then
+        duration=$(($(now_ms) - RUN_STARTED_MS))
+        [ "$duration" -ge 0 ] || duration=0
+        printf 'FM_TEST_BUDGET max_wall_ms=%s duration_ms=%s\n' "$MAX_WALL_MS" "$duration"
+      fi
+      kill -TERM "$parent" 2>/dev/null || true
+    ) &
   fi
   FINALIZATION_WATCHDOG_PID=$!
 }
@@ -2109,8 +2162,6 @@ if [ "$RUN_DURATION" -lt 0 ]; then
   RUN_DURATION=0
 fi
 
-[ -z "$MAX_WALL_MS" ] || arm_finalization_watchdog
-
 printf 'FM_TEST_SUMMARY total=%s failed=%s skipped_gate=%s duration_ms=%s\n' \
   "$TOTAL" "$FAILED" "$SKIPPED_GATE" "$RUN_DURATION"
 
@@ -2130,6 +2181,11 @@ if [ -s "$RECORDS" ]; then
       "$rank" "$path" "$duration"
     rank=$((rank + 1))
   done
+fi
+
+if [ -n "$MAX_WALL_MS" ]; then
+  FINALIZATION_ACTIVE=1
+  arm_finalization_watchdog
 fi
 
 if [ -n "$JSON_PATH" ]; then
@@ -2156,13 +2212,8 @@ if [ -n "$JSON_PATH" ]; then
 fi
 
 if [ -n "$MAX_WALL_MS" ]; then
-  BUDGET_DURATION=$(($(now_ms) - RUN_STARTED_MS))
-  [ "$BUDGET_DURATION" -ge 0 ] || BUDGET_DURATION=0
-  printf 'FM_TEST_BUDGET max_wall_ms=%s duration_ms=%s\n' "$MAX_WALL_MS" "$BUDGET_DURATION"
-  if [ "$BUDGET_DURATION" -gt "$MAX_WALL_MS" ]; then
-    log "wall-clock budget exceeded: ${BUDGET_DURATION}ms > ${MAX_WALL_MS}ms for $SELECTION_DESC"
-    AGG_RC=1
-  fi
+  emit_budget_result
+  FINALIZATION_ACTIVE=0
   disarm_finalization_watchdog
 fi
 

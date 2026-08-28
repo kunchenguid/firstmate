@@ -263,7 +263,11 @@ SH
     >"$tmp/slow-selection.out" 2>"$tmp/slow-selection.err"
   rc=$?
   set -e
-  [ "$rc" -eq 143 ] || fail "an empty run past its budget must terminate at finalization, got $rc"
+  [ "$rc" -eq 1 ] || fail "an empty run past its budget must fail normally, got $rc"
+  grep -Eq '^FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=[0-9]+$' "$tmp/slow-selection.out" \
+    || fail "over-budget empty selection omitted its summary"
+  grep -Eq '^FM_TEST_BUDGET max_wall_ms=100 duration_ms=[0-9]+$' "$tmp/slow-selection.out" \
+    || fail "over-budget empty selection omitted its budget result"
   [ -e "$tmp/slow-git" ] || fail "the slow selection fixture did not run"
   set +e
   (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --max-wall-ms nope) \
@@ -727,7 +731,15 @@ SH
   "$runner" --max-wall-ms 500 "$fast" >"$tmp/over" 2>"$tmp/over.err"
   rc=$?
   set -e
-  [ "$rc" -eq 143 ] || fail "an over-budget run must terminate before finalization, got $rc"
+  [ "$rc" -eq 1 ] || fail "an over-budget run must fail through the result path, got $rc"
+  grep -Eq '^FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=[0-9]+$' "$tmp/over" \
+    || fail "an over-budget run omitted its summary: $(cat "$tmp/over")"
+  grep -Eq '^FM_TEST_SUMMARY_FAMILY .+$' "$tmp/over" \
+    || fail "an over-budget run omitted its family summary: $(cat "$tmp/over")"
+  grep -Eq '^FM_TEST_SLOWEST rank=1 .+$' "$tmp/over" \
+    || fail "an over-budget run omitted its slowest result: $(cat "$tmp/over")"
+  grep -Eq '^FM_TEST_BUDGET max_wall_ms=500 duration_ms=[0-9]+$' "$tmp/over" \
+    || fail "an over-budget run omitted its budget result: $(cat "$tmp/over")"
 
   # A malformed budget is refused rather than silently ignored.
   set +e
@@ -770,6 +782,8 @@ SH
   rc=$?
   set -e
   [ "$rc" -eq 143 ] || fail "blocking finalization watchdog exit must be 143, got $rc"
+  grep -Eq '^FM_TEST_BUDGET max_wall_ms=3000 duration_ms=[0-9]+$' "$tmp/finalization.out" \
+    || fail "blocking finalization omitted its budget result: $(cat "$tmp/finalization.out")"
   summary_duration=$(awk '/^FM_TEST_SUMMARY / { for (i=1;i<=NF;i++) if ($i ~ /^duration_ms=/) { sub(/^duration_ms=/, "", $i); print $i } }' "$tmp/finalization.out")
   [ -n "$summary_duration" ] && [ "$summary_duration" -lt 3000 ] \
     || fail "suite duration unexpectedly included blocking finalization: $(cat "$tmp/finalization.out")"

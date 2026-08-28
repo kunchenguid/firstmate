@@ -331,12 +331,19 @@ fi
 # families passed. Membership stays empirical: a family that fails here is not
 # admitted, and this harness never retries a failure into green.
 pool_candidates() {
-  case "$POOL" in
-    portable)
+  case "$POOL:$LIST_ONLY" in
+    portable:1)
       list_parallel_candidates
       ;;
-    *)
+    portable:0)
+      "$ROOT/bin/fm-test-run.sh" --list-scheduled --proven-isolated
+      ;;
+    *:1)
       "$ROOT/bin/fm-test-run.sh" --list --family "$POOL" \
+        || die "--pool $POOL is not a known family (see bin/fm-test-run.sh --list-families)"
+      ;;
+    *)
+      "$ROOT/bin/fm-test-run.sh" --list-scheduled --family "$POOL" \
         || die "--pool $POOL is not a known family (see bin/fm-test-run.sh --list-families)"
       ;;
   esac
@@ -352,7 +359,7 @@ CANDIDATES=()
 while IFS= read -r s; do
   [ -n "$s" ] || continue
   CANDIDATES+=("$s")
-done < <(printf '%s\n' "$candidate_output" | LC_ALL=C sort -u)
+done < <(printf '%s\n' "$candidate_output" | awk '!seen[$0]++')
 
 if [ "$LIST_ONLY" -eq 1 ]; then
   for s in "${CANDIDATES[@]+"${CANDIDATES[@]}"}"; do
@@ -387,14 +394,15 @@ printf 'FM_ISOLATION_BEGIN %s concurrency=%s candidates=%s\n' \
 # Worker state arrays parallel to CANDIDATES indices (1-based worker labels).
 declare -a WORKER_PIDS=()
 declare -a WORKER_IDX=()
+ACTIVE_WORKERS=0
 
 wait_one_slot() {
-  local pid idx work rc duration script mode
-  # Wait for the oldest launched worker still recorded.
-  pid=${WORKER_PIDS[0]}
-  idx=${WORKER_IDX[0]}
-  WORKER_PIDS=("${WORKER_PIDS[@]:1}")
-  WORKER_IDX=("${WORKER_IDX[@]:1}")
+  local slot=$1 pid idx work rc duration script mode
+  pid=${WORKER_PIDS[$slot]}
+  idx=${WORKER_IDX[$slot]}
+  unset 'WORKER_PIDS[slot]'
+  unset 'WORKER_IDX[slot]'
+  ACTIVE_WORKERS=$((ACTIVE_WORKERS - 1))
   set +e
   wait "$pid"
   set -e
@@ -435,6 +443,29 @@ wait_one_slot() {
       AGG_RC=1
       ;;
   esac
+}
+
+worker_pid_is_running() {
+  local want=$1 running inventory="$PROOF_ROOT/running-pids"
+  jobs -r -p >"$inventory"
+  while IFS= read -r running; do
+    [ "$running" = "$want" ] && return 0
+  done <"$inventory"
+  return 1
+}
+
+wait_one_completed_slot() {
+  local slot work
+  while :; do
+    for slot in "${!WORKER_PIDS[@]}"; do
+      work="$PROOF_ROOT/w${WORKER_IDX[$slot]}"
+      if [ -f "$work/out/exit" ] || ! worker_pid_is_running "${WORKER_PIDS[$slot]}"; then
+        wait_one_slot "$slot"
+        return
+      fi
+    done
+    sleep 0.01
+  done
 }
 
 idx=0
@@ -479,17 +510,18 @@ for script in "${CANDIDATES[@]}"; do
     printf '%s\n' "$duration" >"$work/out/duration_ms"
     exit 0
   ) &
-  WORKER_PIDS+=("$!")
-  WORKER_IDX+=("$idx")
+  WORKER_PIDS[$idx]=$!
+  WORKER_IDX[$idx]=$idx
+  ACTIVE_WORKERS=$((ACTIVE_WORKERS + 1))
 
   # Bound concurrency.
-  while [ "${#WORKER_PIDS[@]}" -ge "$JOBS" ]; do
-    wait_one_slot
+  while [ "$ACTIVE_WORKERS" -ge "$JOBS" ]; do
+    wait_one_completed_slot
   done
 done
 
-while [ "${#WORKER_PIDS[@]}" -gt 0 ]; do
-  wait_one_slot
+while [ "$ACTIVE_WORKERS" -gt 0 ]; do
+  wait_one_completed_slot
 done
 
 GIT_AFTER=$(global_git_snapshot)

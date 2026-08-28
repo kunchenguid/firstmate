@@ -35,10 +35,14 @@ test_family_pool_json_identifies_admission() {
   cp "$PROOF" "$proof"
   cat >"$repo/bin/fm-test-run.sh" <<'SH'
 #!/usr/bin/env bash
-if [ "$1" = --list ] && [ "$2" = --family ]; then
+if { [ "$1" = --list ] || [ "$1" = --list-scheduled ]; } && [ "$2" = --family ]; then
   case "$3" in
-    fixture-family|admitted-family)
+    fixture-family)
       printf '%s\n' tests/fm-proof-fixture-a.test.sh tests/fm-proof-fixture-b.test.sh
+      exit 0
+      ;;
+    admitted-family)
+      printf '%s\n' tests/fm-proof-slow.test.sh tests/fm-proof-fast.test.sh tests/fm-proof-replacement.test.sh
       exit 0
       ;;
   esac
@@ -56,7 +60,30 @@ echo "ok - proof fixture"
 SH
     chmod +x "$repo/tests/$fixture"
   done
-  chmod +x "$proof" "$repo/bin/fm-test-run.sh"
+  cat >"$repo/tests/fm-proof-slow.test.sh" <<'SH'
+#!/usr/bin/env bash
+waited=0
+while [ ! -e "$PROOF_SCHED_EVIDENCE/replacement-started" ] && [ "$waited" -lt 200 ]; do
+  sleep 0.05
+  waited=$((waited + 1))
+done
+touch "$PROOF_SCHED_EVIDENCE/slow-done"
+echo "ok - slow proof fixture"
+SH
+  cat >"$repo/tests/fm-proof-fast.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - fast proof fixture"
+SH
+  cat >"$repo/tests/fm-proof-replacement.test.sh" <<'SH'
+#!/usr/bin/env bash
+if [ -e "$PROOF_SCHED_EVIDENCE/slow-done" ]; then
+  echo "not ok - proof scheduler waited for oldest worker"
+  exit 1
+fi
+touch "$PROOF_SCHED_EVIDENCE/replacement-started"
+echo "ok - replacement proof fixture"
+SH
+  chmod +x "$proof" "$repo/bin/fm-test-run.sh" "$repo/tests/fm-proof-"*.test.sh
   set +e
   "$proof" --pool fixture-family --jobs 1 --json "$json" >"$tmp/out" 2>"$tmp/err"
   rc=$?
@@ -73,7 +100,7 @@ assert artifact["summary"]["total"] == 2
 assert artifact["summary"]["failed"] == 0
 ' "$json" || fail "serial family pool artifact metadata is incorrect"
   set +e
-  "$proof" --pool admitted-family --jobs 2 --json "$admitted_json" >"$tmp/admitted.out" 2>"$tmp/admitted.err"
+  PROOF_SCHED_EVIDENCE="$tmp" "$proof" --pool admitted-family --jobs 2 --json "$admitted_json" >"$tmp/admitted.out" 2>"$tmp/admitted.err"
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "admitted family proof fixture failed: $(cat "$tmp/admitted.out") $(cat "$tmp/admitted.err")"
@@ -83,7 +110,7 @@ artifact = json.load(open(sys.argv[1], encoding="utf-8"))
 assert artifact["pool"] == "admitted-family"
 assert artifact["concurrency"] == 2
 assert artifact["fm_test_run_jobs_enabled"] is True
-assert artifact["summary"]["total"] == 2
+assert artifact["summary"]["total"] == 3
 assert artifact["summary"]["failed"] == 0
 ' "$admitted_json" || fail "admitted family pool artifact metadata is incorrect"
   rm -rf "$tmp"
@@ -157,13 +184,16 @@ test_list_exclusions_documents_reasons() {
 }
 
 test_family_map_labels_this_contract() {
-  local fam safe
+  local fam safe scheduled_first
   fam=$("$RUNNER" --list --family pure-contract-unit)
   printf '%s\n' "$fam" | grep -Fq 'tests/fm-test-isolation-proof.test.sh' \
     || fail "fm-test-isolation-proof.test.sh must map to pure-contract-unit"
   safe=$("$RUNNER" --list-concurrent-safe-families)
   printf '%s\n' "$safe" | grep -Fxq watcher-wake-lock \
     || fail "runner must expose the admitted concurrent-safe family"
+  scheduled_first=$("$RUNNER" --list-scheduled --family watcher-wake-lock | head -n 1)
+  [ "$scheduled_first" = tests/fm-watch-triage.test.sh ] \
+    || fail "runner scheduled the watcher family out of longest-hint order: $scheduled_first"
   pass "isolation-proof contract test is family-mapped"
 }
 
