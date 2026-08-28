@@ -220,6 +220,50 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+test_lsof_fallback_when_sandbox_denies_ps() {
+  local dir fakebin got
+  dir="$TMP_ROOT/lsof-fallback"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  cat > "$fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+set -u
+pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid" in
+  4242)
+    printf 'p4242\nR1\nccodex\nfcwd\n'
+    ;;
+  *)
+    printf 'p%s\nR4242\ncbash\nfcwd\n' "$pid"
+    ;;
+esac
+SH
+  chmod +x "$fakebin/ps" "$fakebin/lsof"
+
+  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "lsof fallback did not resolve the Codex parent when ps was denied"
+  [ "$got" = 4242 ] || fail "lsof fallback resolved '$got', expected Codex pid 4242"
+  printf '4242\n' > "$dir/state/.lock"
+  lib_eval "$fakebin" 'fm_harness_pid_alive 4242' \
+    || fail "lsof fallback did not recognize the live Codex lock holder"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "lsof fallback did not recognize the current Codex session as lock owner"
+  if lib_eval "$fakebin" 'fm_harness_pid_alive 31337'; then
+    fail "lsof fallback accepted an unrelated process as a harness"
+  fi
+  pass "session-lock: lsof preserves Codex ownership when the sandbox denies ps without sending a signal"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -360,6 +404,11 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
-test_e2e_version_named_session_claims_the_home
-test_e2e_daemon_parented_session_claims_the_home
-test_e2e_daemon_parented_version_named_session_keeps_its_lock
+test_lsof_fallback_when_sandbox_denies_ps
+if ps -p $$ -o comm= >/dev/null 2>&1; then
+  test_e2e_version_named_session_claims_the_home
+  test_e2e_daemon_parented_session_claims_the_home
+  test_e2e_daemon_parented_version_named_session_keeps_its_lock
+else
+  echo "skip: real version-named process-tree E2E requires ps ancestry access"
+fi

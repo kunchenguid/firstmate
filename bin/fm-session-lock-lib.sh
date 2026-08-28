@@ -88,6 +88,37 @@ fm_harness_process_matches() {  # <comm> <args>
   return 1
 }
 
+# Read one process record without assuming `ps` is permitted.
+# Codex's managed macOS sandbox denies `ps` and even signal-0 probes against
+# its own parent, but permits lsof's process fields. The lsof fallback keeps
+# the same PID/command/parent proof and never sends a signal.
+FM_HARNESS_PROCESS_COMM=
+FM_HARNESS_PROCESS_ARGS=
+FM_HARNESS_PROCESS_PPID=
+fm_harness_process_info() {  # <pid>
+  local pid=$1 record reported
+  FM_HARNESS_PROCESS_COMM=
+  FM_HARNESS_PROCESS_ARGS=
+  FM_HARNESS_PROCESS_PPID=
+  case "$pid" in ''|*[!0-9]*|0) return 1 ;; esac
+
+  if FM_HARNESS_PROCESS_COMM=$(ps -o comm= -p "$pid" 2>/dev/null); then
+    FM_HARNESS_PROCESS_ARGS=$(ps -o args= -p "$pid" 2>/dev/null)
+    FM_HARNESS_PROCESS_PPID=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    return 0
+  fi
+
+  command -v lsof >/dev/null 2>&1 || return 1
+  record=$(lsof -a -p "$pid" -d cwd -FpcR 2>/dev/null) || return 1
+  reported=$(printf '%s\n' "$record" | sed -n 's/^p//p' | head -n 1)
+  [ "$reported" = "$pid" ] || return 1
+  FM_HARNESS_PROCESS_COMM=$(printf '%s\n' "$record" | sed -n 's/^c//p' | head -n 1)
+  FM_HARNESS_PROCESS_PPID=$(printf '%s\n' "$record" | sed -n 's/^R//p' | head -n 1)
+  [ -n "$FM_HARNESS_PROCESS_COMM" ] || return 1
+  case "$FM_HARNESS_PROCESS_PPID" in ''|*[!0-9]*) return 1 ;; esac
+  FM_HARNESS_PROCESS_ARGS=$FM_HARNESS_PROCESS_COMM
+}
+
 # Walk the current process ancestry (up to 16 hops) and print this session's
 # contiguous verified-harness ancestry, innermost pid first.
 #
@@ -109,8 +140,9 @@ fm_harness_process_matches() {  # <comm> <args>
 fm_harness_ancestry_pids() {
   local pid=$$ comm args extending=0 printed=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    fm_harness_process_info "$pid" || break
+    comm=$FM_HARNESS_PROCESS_COMM
+    args=$FM_HARNESS_PROCESS_ARGS
     if fm_harness_process_matches "$comm" "$args"; then
       printf '%s\n' "$pid"
       printed=1
@@ -119,7 +151,7 @@ fm_harness_ancestry_pids() {
     elif [ "$extending" -eq 1 ]; then
       break
     fi
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    pid=$FM_HARNESS_PROCESS_PPID
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
   done
   [ "$printed" -eq 1 ]
@@ -146,9 +178,9 @@ EOF
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
   local pid=$1 comm args
-  kill -0 "$pid" 2>/dev/null || return 1
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  args=$(ps -o args= -p "$pid" 2>/dev/null)
+  fm_harness_process_info "$pid" || return 1
+  comm=$FM_HARNESS_PROCESS_COMM
+  args=$FM_HARNESS_PROCESS_ARGS
   fm_harness_process_matches "$comm" "$args"
 }
 

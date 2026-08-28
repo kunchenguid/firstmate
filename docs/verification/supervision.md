@@ -316,10 +316,43 @@ The secondmate-home scope and manual-repair wake path were measured with Claude 
 The current Stop-owned main/secondmate inclusion and child-worktree exclusion are covered deterministically by `tests/fm-claude-stop-autoarm.test.sh`.
 Session-lock ownership in `bin/fm-session-lock-lib.sh` is decided against a session's whole contiguous harness ancestry rather than one chosen pid, so the Stop auto-arm reaches its lock owner wherever that owner sits: the outermost pid of Claude Code's multi-level `bg-spare` hook worker chain, or an inner pid when a harness-named daemon parents the session.
 Harness identity is read from the executable path and `argv[0]` as well as the command basename, because Claude Code's native installer names the per-session executable by its version (`.../share/claude/versions/2.1.220`): `ps -o comm=` reports that path on macOS and the bare version string on Linux, and neither basename names a harness.
+When a managed Codex macOS sandbox denies `ps`, the same owner reads PID, parent PID, and command name from `lsof` without sending a signal.
 `tests/fm-session-lock-ancestry.test.sh` pins both platforms' reporting semantics behind a deterministic process table and runs the real Stop auto-arm in version-named, daemon-parented, and combined real process trees.
 `tests/fm-watch-arm.test.sh` runs real watcher and arm cycles against durable on-disk state to verify that a delivered reason survives until post-handling acknowledgement and stops replaying after acknowledgement, while an unrelated queue append cannot make a watcher cycle that delivered nothing look successful.
 The same suite ingests a keyed remote-secondmate parent reply through the real adapter, establishes the incremental OPEN DECISIONS cursor, interrupts supervision, and proves re-arm replays every unacknowledged queue row plus the still-open decision through the ordinary drain path.
 It also covers decision-only recovery, interrupted handling, handling-window generation reuse, non-fatal moved-generation acknowledgement with sequence-bounded consumption, and a persistent successor remaining live after recovery is acknowledged.
+
+The managed Codex fallback was originally verified on 2026-08-18 with codex-cli 0.147.0 under the macOS Seatbelt sandbox, and re-verified on 2026-08-28 with codex-cli 0.149.1 under the same sandbox (`workspace-write`).
+The 2026-08-28 pass ran `codex exec -s workspace-write` as a child of the current harness session rather than as an interactive Codex primary, so the outer session's own `CLAUDECODE` marker was explicitly stripped before invoking the reader; without that, harness detection would take the environment-marker fast path documented in `bin/fm-harness.sh` and never exercise process ancestry at all, which would prove nothing about the `lsof` fallback.
+
+```sh
+env -u CLAUDECODE bash -c '
+  echo CLAUDECODE=${CLAUDECODE:-unset}
+  ps -o comm= -p $$
+  bin/fm-harness.sh
+  . bin/fm-session-lock-lib.sh
+  fm_harness_process_info $$ && echo "comm=$FM_HARNESS_PROCESS_COMM ppid=$FM_HARNESS_PROCESS_PPID"
+  fm_harness_ancestry_pid
+'
+probe=$(mktemp -d /tmp/fm-lock-e2e.XXXXXX)
+FM_STATE_OVERRIDE="$probe" bin/fm-lock.sh
+FM_STATE_OVERRIDE="$probe" bin/fm-lock.sh status
+```
+
+Observed output (2026-08-28, codex-cli 0.149.1):
+
+```text
+CLAUDECODE=unset
+bash: line 1: /bin/ps: Operation not permitted
+codex
+comm=bash ppid=36518
+36518
+lock acquired: harness pid 21515
+lock: held by live harness pid 21515
+```
+
+`ps` is denied exactly as the captain's original evidence recorded, `bin/fm-harness.sh` still resolves the harness correctly, and `fm_harness_process_info` proves it read comm/ppid through the `lsof` fallback rather than failing closed.
+`tests/fm-session-lock-ancestry.test.sh` and `tests/fm-sessionstart-nudge.test.sh` were run directly on this machine, unsandboxed, via `bin/fm-test-run.sh tests/fm-session-lock-ancestry.test.sh tests/fm-sessionstart-nudge.test.sh`, and passed cleanly (`FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0`); running that same suite nested inside the Codex sandbox failed on unrelated fixture paths outside `/tmp` that `workspace-write` does not permit, not on session-lock logic, so that nested run is not cited as suite evidence.
 
 The Claude product live path ran with Claude Code 2.1.219 on 2026-07-24:
 
