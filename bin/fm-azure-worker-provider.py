@@ -583,6 +583,36 @@ def list_json(controller, args, transient_not_found_attempts=1):
     raise ProviderError("Azure inventory retry bound was exhausted")
 
 
+def list_json_many(controller, operations):
+    """Read independent fleet inventories concurrently, preserving error order."""
+    if not operations:
+        return {}
+    keys = [key for key, _args, _attempts in operations]
+    if len(keys) != len(set(keys)):
+        raise ProviderError("Azure fleet inventory operation keys are not unique")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(operations))) as executor:
+        futures = {
+            key: executor.submit(
+                list_json, controller, args,
+                transient_not_found_attempts=attempts,
+            )
+            for key, args, attempts in operations
+        }
+        results = {}
+        failures = []
+        for key in keys:
+            try:
+                results[key] = futures[key].result()
+            except Exception as exc:
+                failures.append((key, exc))
+        if failures:
+            key, exc = failures[0]
+            if isinstance(exc, ProviderError):
+                raise ProviderError("{}: {}".format(key, exc))
+            raise ProviderError("{}: Azure fleet inventory read failed: {}".format(key, exc))
+    return results
+
+
 def blob_record(controller, storage, container, name, kind, required=False):
     value, rc, stderr = az(controller, [
         "storage", "blob", "show", "--auth-mode", "login", "--account-name", storage,
@@ -1150,37 +1180,54 @@ def inventory(controller, include_metrics=True, target_slot=None):
 
     prefix = re.escape(controller["prefix"])
     if target_slot is None:
-        vms = list_json(
-            controller,
-            ["vm", "list", "--resource-group", controller["resource_group"], "--show-details"],
-            transient_not_found_attempts=4,
-        )
-        nics = list_json(controller, ["network", "nic", "list", "--resource-group", controller["resource_group"]])
-        disks = list_json(controller, ["disk", "list", "--resource-group", controller["resource_group"]])
-        identities = list_json(controller, ["identity", "list", "--resource-group", controller["resource_group"]])
-        extensions = list_json(controller, [
-            "resource", "list", "--resource-group", controller["resource_group"],
-            "--resource-type", "Microsoft.Compute/virtualMachines/extensions",
+        listed = list_json_many(controller, [
+            ("vms", [
+                "vm", "list", "--resource-group", controller["resource_group"],
+                "--show-details",
+            ], 4),
+            ("nics", [
+                "network", "nic", "list", "--resource-group", controller["resource_group"],
+            ], 1),
+            ("disks", [
+                "disk", "list", "--resource-group", controller["resource_group"],
+            ], 1),
+            ("identities", [
+                "identity", "list", "--resource-group", controller["resource_group"],
+            ], 1),
+            ("extensions", [
+                "resource", "list", "--resource-group", controller["resource_group"],
+                "--resource-type", "Microsoft.Compute/virtualMachines/extensions",
+            ], 1),
+            ("run_commands", [
+                "resource", "list", "--resource-group", controller["resource_group"],
+                "--resource-type", "Microsoft.Compute/virtualMachines/runCommands",
+            ], 1),
+            ("schedules", [
+                "resource", "list", "--resource-group", controller["resource_group"],
+                "--resource-type", "Microsoft.DevTestLab/schedules",
+            ], 1),
+            ("roles", ["role", "assignment", "list", "--all"], 1),
+            ("containers", [
+                "storage", "container", "list", "--auth-mode", "login",
+                "--include-metadata", "--account-name",
+                os.environ.get("FM_AZURE_STORAGE_NAME", ""),
+            ], 1),
         ])
-        run_commands = list_json(controller, [
-            "resource", "list", "--resource-group", controller["resource_group"],
-            "--resource-type", "Microsoft.Compute/virtualMachines/runCommands",
-        ])
-        schedules = list_json(controller, [
-            "resource", "list", "--resource-group", controller["resource_group"],
-            "--resource-type", "Microsoft.DevTestLab/schedules",
-        ])
+        vms = listed["vms"]
+        nics = listed["nics"]
+        disks = listed["disks"]
+        identities = listed["identities"]
+        extensions = listed["extensions"]
+        run_commands = listed["run_commands"]
+        schedules = listed["schedules"]
         # Scope casing varies across ARM responses, so filter client-side rather
         # than with a case-sensitive JMESPath query.
         scope_marker = "/resourcegroups/{}/".format(controller["resource_group"]).lower()
         roles = [
-            role for role in list_json(controller, ["role", "assignment", "list", "--all"])
+            role for role in listed["roles"]
             if scope_marker in str(role.get("scope") or "").lower()
         ]
-        containers = list_json(controller, [
-            "storage", "container", "list", "--auth-mode", "login", "--include-metadata",
-            "--account-name", os.environ.get("FM_AZURE_STORAGE_NAME", ""),
-        ])
+        containers = listed["containers"]
     else:
         names = expected_names(controller, target_slot)
         resource_group = controller["resource_group"]

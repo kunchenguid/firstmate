@@ -952,6 +952,8 @@ import inspect
 import json
 import subprocess
 import sys
+import threading
+import time
 
 spec = importlib.util.spec_from_file_location("azure_provider", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
@@ -960,6 +962,47 @@ controller = {
     "subscription": "11111111-1111-4111-8111-111111111111",
     "resource_group": "rg", "deployment_generation": "dep", "owner": "owner", "prefix": "fmtest",
 }
+
+# Fresh service admission needs nine independent fleet listings. Keep those
+# reads concurrent while preserving declaration-order failures for operators.
+active = 0
+peak = 0
+lock = threading.Lock()
+original_list_json = module.list_json
+def concurrent_list(_controller, args, transient_not_found_attempts=1):
+    global active, peak
+    with lock:
+        active += 1
+        peak = max(peak, active)
+    time.sleep(0.04)
+    with lock:
+        active -= 1
+    return [{"name": args[0], "attempts": transient_not_found_attempts}]
+module.list_json = concurrent_list
+listed = module.list_json_many(controller, [
+    ("first", ["one"], 4),
+    ("second", ["two"], 1),
+    ("third", ["three"], 1),
+])
+assert peak > 1, peak
+assert listed["first"] == [{"name": "one", "attempts": 4}], listed
+
+def ordered_failure(_controller, args, transient_not_found_attempts=1):
+    del transient_not_found_attempts
+    time.sleep(0.04 if args[0] == "first" else 0.01)
+    raise module.ProviderError(args[0] + " failed")
+module.list_json = ordered_failure
+try:
+    module.list_json_many(controller, [
+        ("first-key", ["first"], 1),
+        ("second-key", ["second"], 1),
+    ])
+except module.ProviderError as exc:
+    assert str(exc).startswith("first-key: first failed"), exc
+else:
+    raise AssertionError("concurrent fleet inventory softened provider failures")
+module.list_json = original_list_json
+
 action = {
     "type": "deallocate", "slot": 1, "sku": "Standard_D4as_v6",
     "sku_family": "standardDav6Family", "cloud_generation": 1,
@@ -1036,7 +1079,8 @@ else:
     raise AssertionError("child inventory accepted a malformed successful read")
 module.az = original_az
 inventory_source = inspect.getsource(module.inventory)
-assert "transient_not_found_attempts=4" in inventory_source
+vm_inventory = inventory_source.split('(\"vms\", [', 1)[1].split('(\"nics\", [', 1)[0]
+assert "], 4)," in vm_inventory
 
 # Azure CLI can fail `vm list --show-details` when a VM disappears during its
 # internal instance-view expansion. Only the explicitly opted-in list retries
