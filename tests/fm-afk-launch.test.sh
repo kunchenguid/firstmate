@@ -289,27 +289,42 @@ unit_lock_initialization_grace() {
 }
 
 unit_signal_exits_with_lock_cleanup() {
-  local st marker child
+  local st marker ready child sleeper
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-signal.XXXXXX")
   marker="$st/resumed"
+  ready="$st/trap-ready"
+  # The stand-in start hook is dispatched only after fm_afk_launch_main has
+  # installed its traps and taken its lock, so its ready marker is a stricter
+  # gate than the lock dir: signalling earlier tests nothing, and on a loaded
+  # machine the lock could be created just after the kill and outlive the
+  # process. The sleeper runs in the background so the trapped TERM interrupts
+  # the wait builtin immediately - a foreground sleep would defer the handler
+  # until it returned - and its recorded pid lets the test reap it.
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
-    fm_afk_launch_start() { sleep 30; }
+    fm_test_ready=$3
+    fm_test_sleeper_file=$4
+    fm_afk_launch_start() {
+      local sleeper
+      sleep 30 & sleeper=$!
+      printf "%s\n" "$sleeper" > "$fm_test_sleeper_file"
+      : > "$fm_test_ready"
+      wait "$sleeper"
+    }
     fm_afk_launch_main start
     : > "$2"
-  ' _ "$LAUNCH" "$marker" &
+  ' _ "$LAUNCH" "$marker" "$ready" "$st/sleeper-pid" &
   child=$!
-  # Signal only once the lifecycle actually holds its lock. Killing before the
-  # lock exists tests nothing, and on a loaded machine it used to race: the
-  # lock could be created just after the kill and outlive the process.
   local locked=0 _
   for _ in $(seq 1 100); do
-    if [ -d "$st/state/.afk-launch.lock" ]; then locked=1; break; fi
+    if [ -e "$ready" ]; then locked=1; break; fi
     sleep 0.05
   done
   [ "$locked" = 1 ] || fail "launcher signal: lifecycle never acquired its lock to interrupt"
   kill -TERM "$child" 2>/dev/null || true
   wait "$child" 2>/dev/null || true
+  sleeper=$(cat "$st/sleeper-pid" 2>/dev/null || true)
+  [ -n "$sleeper" ] && kill "$sleeper" 2>/dev/null
   # The signal handler releases the lock as it exits; give that removal a
   # bounded settle rather than sampling the instant `wait` returns.
   for _ in $(seq 1 100); do

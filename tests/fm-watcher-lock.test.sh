@@ -459,6 +459,17 @@ test_watch_restart_rejects_reused_pid() {
   pass "watch restart preserves recovery without signaling a reused pid"
 }
 
+# Reap the restart peer before failing. fail() is exit 1 and the suite's EXIT
+# trap only removes temp dirs, so an unreaped peer would outlive the run for the
+# remaining five minutes of its timer and linger through every later shard. The
+# peer ignores SIGTERM on purpose, hence -KILL.
+fail_reaping_peer() {
+  local peer=$1
+  kill -KILL "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  fail "$2"
+}
+
 test_watch_restart_attaches_to_healthy_peer() {
   local dir state fakebin out peer_ready peer identity armpid status i
   dir=$(make_case restart-healthy-peer)
@@ -467,19 +478,19 @@ test_watch_restart_attaches_to_healthy_peer() {
   out="$dir/restart.out"
   peer_ready="$dir/peer.ready"
   mark_pr_check_migration_complete "$state"
+  # --restart TERMs a matching live holder, so the peer must be TERM-resistant
+  # BEFORE the arm launches: wait for node to report its handler installed, or
+  # a loaded host can deliver the TERM during node startup and kill the peer.
   node -e 'const fs = require("node:fs"); process.on("SIGTERM", () => {}); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 300000)' "$peer_ready" &
   peer=$!
   i=0
-  while [ "$i" -lt 50 ] && [ ! -s "$peer_ready" ]; do
+  while [ "$i" -lt 80 ] && [ ! -s "$peer_ready" ]; do
     sleep 0.1
     i=$((i + 1))
   done
-  if [ ! -s "$peer_ready" ]; then
-    kill -KILL "$peer" 2>/dev/null || true
-    wait "$peer" 2>/dev/null || true
-    fail "TERM-resistant peer did not become ready"
-  fi
-  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
+  [ -s "$peer_ready" ] || fail_reaping_peer "$peer" "peer never reported its SIGTERM handler installed"
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") \
+    || fail_reaping_peer "$peer" "could not identify peer pid"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$peer" > "$state/.watch.lock/pid"
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
@@ -494,8 +505,10 @@ test_watch_restart_attaches_to_healthy_peer() {
     sleep 0.1
     i=$((i + 1))
   done
-  grep -qF "watcher: attached pid=$peer" "$out" || fail "restart did not attach to the verified healthy peer: $(cat "$out")"
-  is_live_non_zombie "$armpid" || fail "restart arm exited instead of following the healthy peer"
+  grep -qF "watcher: attached pid=$peer" "$out" \
+    || fail_reaping_peer "$peer" "restart did not attach to the verified healthy peer: $(cat "$out")"
+  is_live_non_zombie "$armpid" \
+    || fail_reaping_peer "$peer" "restart arm exited instead of following the healthy peer"
   is_live_non_zombie "$peer" || fail "restart killed a TERM-resistant peer unexpectedly"
   kill -KILL "$peer" 2>/dev/null || true
   wait "$peer" 2>/dev/null || true
@@ -1121,10 +1134,104 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+test_pid_identity_unlimited_width_under_narrow_terminal() {
+  # A PreToolUse hook context inherits the UI's narrow terminal width (observed
+  # live 2026-07-21: COLUMNS=77), and a width-honoring ps then truncates
+  # command=, so the recomputed identity mismatches the recorded one and a live
+  # watcher is judged dead. Whether the system ps applies a width to non-tty
+  # output varies by platform and version, so a width-sensitive ps stand-in
+  # makes the regression deterministic: it truncates like a width-honoring ps
+  # unless -ww requests unlimited width. The missing proc root forces the ps
+  # fallback even on Linux, mirroring test_pid_identity_is_locale_invariant.
+  local dir fakebin real_ps no_proc pid identity
+  dir=$(make_case narrow-terminal-identity)
+  fakebin="$dir/fakebin"
+  real_ps=$(command -v ps) || fail "no real ps on PATH"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+# Width-sensitive ps stand-in: truncate output to FM_TEST_PS_WIDTH columns
+# unless -ww requests unlimited width, regardless of whether stdout is a tty.
+ww=false
+for arg in "$@"; do [ "$arg" = -ww ] && ww=true; done
+out=$("$FM_TEST_REAL_PS" "$@") || exit $?
+if $ww || [ -z "${FM_TEST_PS_WIDTH:-}" ]; then
+  printf '%s\n' "$out"
+else
+  printf '%s\n' "$out" | cut -c1-"$FM_TEST_PS_WIDTH"
+fi
+SH
+  chmod +x "$fakebin/ps"
+  bash -c 'sleep 300 # this-deliberately-long-trailer-pushes-the-command-line-well-past-a-narrow-terminal-width
+true' >/dev/null 2>&1 &
+  pid=$!
+  no_proc="$TMP_ROOT/no-proc"
+  identity=$(PATH="$fakebin:$PATH" FM_TEST_REAL_PS="$real_ps" FM_TEST_PS_WIDTH=40 FM_PROC_ROOT_OVERRIDE="$no_proc" \
+    bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid" 2>/dev/null)
+  pkill -P "$pid" 2>/dev/null || true
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ -n "$identity" ] || fail "fm_pid_identity produced no identity through the width-sensitive ps"
+  case "$identity" in
+    *this-deliberately-long-trailer-pushes-the-command-line-well-past-a-narrow-terminal-width*) ;;
+    *) fail "fm_pid_identity truncated the command at a narrow width (got '$identity')" ;;
+  esac
+  pass "fm_pid_identity forces unlimited ps width in a narrow-terminal context"
+}
+
+test_lock_match_accepts_same_dir_different_spelling() {
+  # On a case-insensitive filesystem getcwd() is not case-stable across
+  # processes (observed live 2026-07-21: a hook context resolved the home as
+  # .../Sc/firstmate while the watcher lock recorded .../sc/firstmate), and the
+  # pure string comparison then evicted a live watcher. A symlinked spelling of
+  # the same directory reproduces the string-mismatch/same-file shape portably
+  # on case-sensitive filesystems too. Genuine mismatches must still refuse:
+  # a different existing directory and a missing recorded path both fail -ef.
+  local dir state home_real home_alias watch_real watch_alias lockdir pid identity other alias_rc other_rc missing_rc
+  dir=$(make_case lock-spelling)
+  state="$dir/state"
+  home_real="$dir/home-real"
+  mkdir -p "$home_real"
+  ln -s home-real "$dir/home-alias"
+  home_alias="$dir/home-alias"
+  watch_real="$home_real/fm-watch.sh"
+  : > "$watch_real"
+  watch_alias="$home_alias/fm-watch.sh"
+  sleep 300 >/dev/null 2>&1 &
+  pid=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
+    || fail "could not identify live helper pid"
+  lockdir="$state/.watch.lock"
+  mkdir -p "$lockdir"
+  printf '%s\n' "$pid" > "$lockdir/pid"
+  printf '%s\n' "$home_real" > "$lockdir/fm-home"
+  printf '%s\n' "$watch_real" > "$lockdir/watcher-path"
+  printf '%s\n' "$identity" > "$lockdir/pid-identity"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' \
+    _ "$LIB" "$state" "$watch_alias" "$pid" "$home_alias"
+  alias_rc=$?
+  other="$dir/genuinely-other-home"
+  mkdir -p "$other"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' \
+    _ "$LIB" "$state" "$watch_real" "$pid" "$other"
+  other_rc=$?
+  printf '%s\n' "$dir/recorded-home-that-no-longer-exists" > "$lockdir/fm-home"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' \
+    _ "$LIB" "$state" "$watch_real" "$pid" "$home_real"
+  missing_rc=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$alias_rc" -eq 0 ] || fail "a different spelling of the same home and watcher path evicted a live watcher"
+  [ "$other_rc" -ne 0 ] || fail "a genuinely different home directory was accepted"
+  [ "$missing_rc" -ne 0 ] || fail "a missing recorded home directory was accepted"
+  pass "lock match tolerates same-directory spelling differences and still refuses real mismatches"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
+test_pid_identity_unlimited_width_under_narrow_terminal
+test_lock_match_accepts_same_dir_different_spelling
 test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
