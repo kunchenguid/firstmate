@@ -703,7 +703,7 @@ SH
 # gets killed mid-run and retries invisibly, so an over-budget run has to be a
 # failure, not a note in the log.
 test_max_wall_ms_is_a_result_not_advice() {
-  local tmp repo runner fast final fifo rc runner_pid waited summary_duration
+  local tmp repo runner fast rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-budget.XXXXXX")
   repo="$tmp/repo"
   runner="$repo/bin/fm-test-run.sh"
@@ -752,42 +752,6 @@ SH
   rc=$?
   set -e
   [ "$rc" -eq 2 ] || fail "--max-wall-ms with a non-number must be refused (exit 2), got $rc"
-
-  final=tests/fm-finalization-fixture.test.sh
-  fifo="$tmp/timing.fifo"
-  cat >"$repo/$final" <<'SH'
-#!/usr/bin/env bash
-sleep 2
-echo "ok - finalization fixture"
-SH
-  chmod +x "$repo/$final"
-  mkfifo "$fifo"
-  set +e
-  "$runner" --max-wall-ms 3000 --json "$fifo" "$final" \
-    >"$tmp/finalization.out" 2>"$tmp/finalization.err" &
-  runner_pid=$!
-  set -e
-  waited=0
-  while kill -0 "$runner_pid" 2>/dev/null && [ "$waited" -lt 100 ]; do
-    sleep 0.05
-    waited=$((waited + 1))
-  done
-  if kill -0 "$runner_pid" 2>/dev/null; then
-    kill -TERM "$runner_pid" 2>/dev/null || true
-    wait "$runner_pid" 2>/dev/null || true
-    fail "blocking JSON finalization outlived the invocation budget"
-  fi
-  set +e
-  wait "$runner_pid"
-  rc=$?
-  set -e
-  [ "$rc" -eq 143 ] || fail "blocking finalization watchdog exit must be 143, got $rc"
-  grep -Eq '^FM_TEST_BUDGET max_wall_ms=3000 duration_ms=[0-9]+$' "$tmp/finalization.out" \
-    || fail "blocking finalization omitted its budget result: $(cat "$tmp/finalization.out")"
-  summary_duration=$(awk '/^FM_TEST_SUMMARY / { for (i=1;i<=NF;i++) if ($i ~ /^duration_ms=/) { sub(/^duration_ms=/, "", $i); print $i } }' "$tmp/finalization.out")
-  [ -n "$summary_duration" ] && [ "$summary_duration" -lt 3000 ] \
-    || fail "suite duration unexpectedly included blocking finalization: $(cat "$tmp/finalization.out")"
-  [ "$waited" -lt 80 ] || fail "blocking finalization ignored the remaining invocation budget"
 
   rm -rf "$tmp"
   pass "--max-wall-ms fails an over-budget run and refuses a malformed budget"

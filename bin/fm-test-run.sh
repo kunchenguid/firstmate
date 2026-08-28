@@ -63,10 +63,11 @@
 #                   On interruption the runner best-effort terminates its one
 #                   run-owned process group; fm_run_timed remains the owner of
 #                   any nested timeout groups until their configured bound.
-#   --max-wall-ms N fail the run when its wall clock exceeds N milliseconds,
-#                   after reporting the per-script results. Duration is a
-#                   result: a suite that outgrows its caller's invocation budget
-#                   gets killed mid-run and retried invisibly.
+#   --max-wall-ms N fail the run when its measured suite wall clock exceeds N
+#                   milliseconds. It is evaluated after suite execution and
+#                   cannot interrupt a running script; per-script hangs are
+#                   bounded by --per-script-timeout-secs. Pathological output
+#                   sinks that block finalization are explicitly out of scope.
 #   -h, --help      print this header
 #
 # Per-script machine-parseable markers (stdout):
@@ -1823,84 +1824,12 @@ FAMILIES_TSV="$RUN_TMP/families.tsv"
 declare -a WORKER_PIDS=()
 declare -a WORKER_IDX=()
 declare -a WORKER_SCRIPTS=()
-FINALIZATION_WATCHDOG_PID=
-FINALIZATION_ACTIVE=0
-BUDGET_REPORTED=0
 
 cleanup_run() {
   rm -rf "$RUN_TMP"
 }
 
-emit_budget_result() {
-  [ "$BUDGET_REPORTED" -eq 0 ] || return 0
-  if ! mkdir "$RUN_TMP/budget-reported" 2>/dev/null; then
-    BUDGET_REPORTED=1
-    return 0
-  fi
-  BUDGET_DURATION=$(($(now_ms) - RUN_STARTED_MS))
-  [ "$BUDGET_DURATION" -ge 0 ] || BUDGET_DURATION=0
-  printf 'FM_TEST_BUDGET max_wall_ms=%s duration_ms=%s\n' "$MAX_WALL_MS" "$BUDGET_DURATION"
-  if [ "$BUDGET_DURATION" -gt "$MAX_WALL_MS" ]; then
-    log "wall-clock budget exceeded: ${BUDGET_DURATION}ms > ${MAX_WALL_MS}ms for $SELECTION_DESC"
-    AGG_RC=1
-  fi
-  BUDGET_REPORTED=1
-}
-
-signal_exit() {
-  local code=$1
-  trap '' HUP INT TERM
-  if [ "$FINALIZATION_ACTIVE" -eq 1 ] && [ -n "$MAX_WALL_MS" ]; then
-    emit_budget_result
-  fi
-  cleanup_run
-  exit "$code"
-}
-
-arm_finalization_watchdog() {
-  local parent=$RUN_WRAPPER_PID elapsed remaining
-  elapsed=$(($(now_ms) - RUN_STARTED_MS))
-  remaining=$((MAX_WALL_MS - elapsed))
-  [ "$remaining" -gt 0 ] || return 0
-  if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import os, signal, sys, time
-remaining, parent, maximum, started, marker = sys.argv[1:]
-time.sleep(int(remaining) / 1000)
-try:
-    os.mkdir(marker)
-except FileExistsError:
-    pass
-else:
-    duration = max(0, int(time.time() * 1000) - int(started))
-    print(f"FM_TEST_BUDGET max_wall_ms={maximum} duration_ms={duration}", flush=True)
-os.kill(int(parent), signal.SIGTERM)' \
-      "$remaining" "$parent" "$MAX_WALL_MS" "$RUN_STARTED_MS" "$RUN_TMP/budget-reported" &
-  else
-    (
-      sleep $(((remaining + 999) / 1000))
-      if mkdir "$RUN_TMP/budget-reported" 2>/dev/null; then
-        duration=$(($(now_ms) - RUN_STARTED_MS))
-        [ "$duration" -ge 0 ] || duration=0
-        printf 'FM_TEST_BUDGET max_wall_ms=%s duration_ms=%s\n' "$MAX_WALL_MS" "$duration"
-      fi
-      kill -TERM "$parent" 2>/dev/null || true
-    ) &
-  fi
-  FINALIZATION_WATCHDOG_PID=$!
-}
-
-disarm_finalization_watchdog() {
-  local pid=${FINALIZATION_WATCHDOG_PID:-}
-  [ -n "$pid" ] || return 0
-  kill -TERM "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-  FINALIZATION_WATCHDOG_PID=
-}
-
 trap cleanup_run EXIT
-trap 'signal_exit 129' HUP
-trap 'signal_exit 130' INT
-trap 'signal_exit 143' TERM
 
 RUN_ID="fm-test-run-${RUN_STARTED_MS}-$$"
 TOTAL=0
@@ -2183,11 +2112,6 @@ if [ -s "$RECORDS" ]; then
   done
 fi
 
-if [ -n "$MAX_WALL_MS" ]; then
-  FINALIZATION_ACTIVE=1
-  arm_finalization_watchdog
-fi
-
 if [ -n "$JSON_PATH" ]; then
   mkdir -p "$(dirname "$JSON_PATH")"
   # Families file may be unsorted; write_json reads as-is (deterministic sort in python).
@@ -2212,9 +2136,13 @@ if [ -n "$JSON_PATH" ]; then
 fi
 
 if [ -n "$MAX_WALL_MS" ]; then
-  emit_budget_result
-  FINALIZATION_ACTIVE=0
-  disarm_finalization_watchdog
+  BUDGET_DURATION=$(($(now_ms) - RUN_STARTED_MS))
+  [ "$BUDGET_DURATION" -ge 0 ] || BUDGET_DURATION=0
+  printf 'FM_TEST_BUDGET max_wall_ms=%s duration_ms=%s\n' "$MAX_WALL_MS" "$BUDGET_DURATION"
+  if [ "$BUDGET_DURATION" -gt "$MAX_WALL_MS" ]; then
+    log "wall-clock budget exceeded: ${BUDGET_DURATION}ms > ${MAX_WALL_MS}ms for $SELECTION_DESC"
+    AGG_RC=1
+  fi
 fi
 
 exit "$AGG_RC"
