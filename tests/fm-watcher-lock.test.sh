@@ -652,6 +652,30 @@ test_msys_stale_corrupted_lock_recovers_generated_owner_dir() {
   pass "MSYS stale lock recovery removes generated nested owner dirs"
 }
 
+test_msys_stale_corrupted_lock_refuses_empty_nested_owner_dir() {
+  local dir state fakebin lockdir nested ln_used rc
+  dir=$(make_case msys-lock-corrupted-empty-refusal)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lockdir="$state/.contend.lock"
+  nested="$lockdir/.contend.lock.owner.stale123"
+  ln_used="$dir/ln-used"
+  make_fake_msys_lock_bin "$fakebin"
+  mkdir -p "$nested"
+  printf '%s\n' "$(dead_pid)" > "$lockdir/pid"
+  rc=0
+  PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" && exit 10
+    [ -d "$2" ] || exit 11
+    [ -d "$3" ] || exit 12
+    [ ! -e "$3/pid" ] || exit 13
+  ' _ "$LIB" "$lockdir" "$nested" || rc=$?
+  [ "$rc" -eq 0 ] || fail "MSYS stale lock with empty nested owner dir was not refused safely (rc=$rc)"
+  [ ! -e "$ln_used" ] || fail "MSYS empty nested-owner refusal invoked ln -s"
+  pass "MSYS stale lock recovery refuses empty nested owner dirs"
+}
+
 test_msys_stale_corrupted_lock_refuses_unknown_nested_content() {
   local dir state fakebin lockdir nested ln_used rc
   dir=$(make_case msys-lock-corrupted-refusal)
@@ -710,6 +734,10 @@ test_symlink_lock_contention_cleans_stray_owner_link() {
   ready="$dir/holder.ready"
   release="$dir/holder.release"
   real_ln=$(command -v ln)
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'Linux'
+SH
   cat > "$fakebin/ln" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = -s ] && [ "$#" -eq 3 ] && [ "$3" = "${TARGET_LOCK:-}" ] && [ ! -e "${LN_RACED_ONCE:-}" ]; then
@@ -724,7 +752,7 @@ if [ "${1:-}" = -s ] && [ "$#" -eq 3 ] && [ "$3" = "${TARGET_LOCK:-}" ] && [ ! -
 fi
 exec "$REAL_LN" "$@"
 SH
-  chmod +x "$fakebin/ln"
+  chmod +x "$fakebin/uname" "$fakebin/ln"
 
   rc=0
   PATH="$fakebin:$PATH" TARGET_LOCK="$lockdir" LN_ENTERED="$entered" HOLDER_READY="$ready" \
@@ -1502,6 +1530,7 @@ test_msys_lock_single_winner_under_concurrency
 test_msys_lock_steals_abandoned_directory_lock
 test_msys_lock_live_steal_mutex_is_not_reclaimed
 test_msys_stale_corrupted_lock_recovers_generated_owner_dir
+test_msys_stale_corrupted_lock_refuses_empty_nested_owner_dir
 test_msys_stale_corrupted_lock_refuses_unknown_nested_content
 test_cygwin_lock_keeps_symlink_publication
 test_symlink_lock_contention_cleans_stray_owner_link

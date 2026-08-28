@@ -386,12 +386,22 @@ fm_lock_remove_stray_owner_link() {
   fi
 }
 
+fm_lock_generated_owner_dir_is_removable() {
+  local ownerdir=$1 pid
+  [ -d "$ownerdir" ] && [ ! -L "$ownerdir" ] || return 1
+  [ -f "$ownerdir/pid" ] && [ ! -L "$ownerdir/pid" ] || return 1
+  pid=$(cat "$ownerdir/pid" 2>/dev/null || true)
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+}
+
 fm_lock_remove_generated_owner_dirs() {
   local lockdir=$1 base nested
   base=$(basename "$lockdir")
   for nested in "$lockdir/$base.owner."*; do
     [ -e "$nested" ] || continue
-    [ -d "$nested" ] && [ ! -L "$nested" ] || return 1
+    fm_lock_generated_owner_dir_is_removable "$nested" || return 1
     fm_lock_clean_known_files "$nested"
     rmdir "$nested" 2>/dev/null || return 1
   done
