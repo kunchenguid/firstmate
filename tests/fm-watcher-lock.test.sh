@@ -451,6 +451,20 @@ SH
   chmod +x "$fakebin/uname" "$fakebin/ln"
 }
 
+make_fake_cygwin_lock_bin() {
+  local fakebin=$1
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'CYGWIN_NT-10.0'
+SH
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+printf 'used\n' > "${FM_TEST_LN_USED:?}"
+exec "${REAL_LN:?}" "$@"
+SH
+  chmod +x "$fakebin/uname" "$fakebin/ln"
+}
+
 test_msys_lock_single_winner_under_concurrency() {
   local dir state fakebin lockdir marker ready release ln_used i pids pid wins rc
   dir=$(make_case msys-lock-concurrency)
@@ -565,6 +579,81 @@ test_msys_lock_steals_abandoned_directory_lock() {
   [ "$newpid" != "$oldpid" ] || fail "MSYS stale directory lock kept the abandoned pid"
   [ ! -e "$ln_used" ] || fail "MSYS stale recovery invoked ln -s"
   pass "MSYS abandoned directory locks are reclaimed cleanly"
+}
+
+test_msys_stale_corrupted_lock_recovers_generated_owner_dir() {
+  local dir state fakebin lockdir nested ln_used rc
+  dir=$(make_case msys-lock-corrupted-recovery)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lockdir="$state/.contend.lock"
+  nested="$lockdir/.contend.lock.owner.stale123"
+  ln_used="$dir/ln-used"
+  make_fake_msys_lock_bin "$fakebin"
+  mkdir -p "$nested"
+  printf '%s\n' "$(dead_pid)" > "$lockdir/pid"
+  printf '%s\n' "$(dead_pid)" > "$nested/pid"
+  printf '%s\n' "$state" > "$nested/fm-home"
+  rc=0
+  PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 10
+    [ -d "$2" ] && [ ! -L "$2" ] || exit 11
+    [ ! -e "$3" ] || exit 12
+    fm_lock_release "$2"
+    [ ! -e "$2" ] && [ ! -L "$2" ] || exit 13
+  ' _ "$LIB" "$lockdir" "$nested" || rc=$?
+  [ "$rc" -eq 0 ] || fail "corrupted MSYS stale lock did not recover cleanly (rc=$rc)"
+  [ ! -e "$ln_used" ] || fail "MSYS corrupted-lock recovery invoked ln -s"
+  pass "MSYS stale lock recovery removes generated nested owner dirs"
+}
+
+test_msys_stale_corrupted_lock_refuses_unknown_nested_content() {
+  local dir state fakebin lockdir nested ln_used rc
+  dir=$(make_case msys-lock-corrupted-refusal)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lockdir="$state/.contend.lock"
+  nested="$lockdir/.contend.lock.owner.stale123"
+  ln_used="$dir/ln-used"
+  make_fake_msys_lock_bin "$fakebin"
+  mkdir -p "$nested"
+  printf '%s\n' "$(dead_pid)" > "$lockdir/pid"
+  printf '%s\n' "$(dead_pid)" > "$nested/pid"
+  printf 'keep\n' > "$nested/foreign.txt"
+  rc=0
+  PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" && exit 10
+    [ -d "$2" ] || exit 11
+    [ -d "$3" ] || exit 12
+    [ -f "$3/foreign.txt" ] || exit 13
+  ' _ "$LIB" "$lockdir" "$nested" || rc=$?
+  [ "$rc" -eq 0 ] || fail "MSYS stale lock with foreign nested content was not refused safely (rc=$rc)"
+  [ ! -e "$ln_used" ] || fail "MSYS foreign-content refusal invoked ln -s"
+  pass "MSYS stale lock recovery refuses foreign nested content"
+}
+
+test_cygwin_lock_keeps_symlink_publication() {
+  local dir state fakebin lockdir ln_used real_ln rc
+  dir=$(make_case cygwin-lock-publication)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lockdir="$state/.contend.lock"
+  ln_used="$dir/ln-used"
+  real_ln=$(command -v ln)
+  make_fake_cygwin_lock_bin "$fakebin"
+  rc=0
+  PATH="$fakebin:$PATH" REAL_LN="$real_ln" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 10
+    [ -L "$2" ] || exit 11
+    [ -e "$3" ] || exit 12
+    fm_lock_release "$2"
+    [ ! -e "$2" ] && [ ! -L "$2" ] || exit 13
+  ' _ "$LIB" "$lockdir" "$ln_used" || rc=$?
+  [ "$rc" -eq 0 ] || fail "Cygwin lock publication did not stay symlink-based (rc=$rc)"
+  pass "Cygwin keeps symlink-based lock publication"
 }
 
 test_symlink_lock_contention_cleans_stray_owner_link() {
@@ -1367,6 +1456,9 @@ test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_msys_lock_single_winner_under_concurrency
 test_msys_lock_steals_abandoned_directory_lock
+test_msys_stale_corrupted_lock_recovers_generated_owner_dir
+test_msys_stale_corrupted_lock_refuses_unknown_nested_content
+test_cygwin_lock_keeps_symlink_publication
 test_symlink_lock_contention_cleans_stray_owner_link
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer

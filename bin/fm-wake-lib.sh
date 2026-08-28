@@ -354,7 +354,7 @@ fm_lock_points_to_owner() {
 
 fm_lock_uses_legacy_directory() {
   case "$_FM_UNAME" in
-    MSYS*|MINGW*|CYGWIN*) return 0 ;;
+    MSYS*|MINGW*) return 0 ;;
   esac
   return 1
 }
@@ -384,6 +384,17 @@ fm_lock_remove_stray_owner_link() {
   if [ -L "$stray" ] && [ "$(readlink "$stray" 2>/dev/null || true)" = "$ownerdir" ]; then
     rm -f "$stray" 2>/dev/null || true
   fi
+}
+
+fm_lock_remove_generated_owner_dirs() {
+  local lockdir=$1 base nested
+  base=$(basename "$lockdir")
+  for nested in "$lockdir/$base.owner."*; do
+    [ -e "$nested" ] || continue
+    [ -d "$nested" ] && [ ! -L "$nested" ] || return 1
+    fm_lock_clean_known_files "$nested"
+    rmdir "$nested" 2>/dev/null || return 1
+  done
 }
 
 fm_lock_claim_blocked_by_steal() {
@@ -478,6 +489,7 @@ fm_lock_remove_path() {
     [ -n "$ownerdir" ] && fm_lock_discard_owner "$ownerdir"
     return 0
   fi
+  fm_lock_remove_generated_owner_dirs "$lockdir" || return 1
   fm_lock_clean_known_files "$lockdir"
   rmdir "$lockdir" 2>/dev/null
 }
@@ -945,8 +957,7 @@ fm_lock_release() {
   fi
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$pid" = "$current" ] || return 0
-  fm_lock_clean_known_files "$lockdir"
-  rmdir "$lockdir" 2>/dev/null || true
+  fm_lock_remove_path "$lockdir" || true
 }
 
 fm_meta_lock_path() {
