@@ -1085,13 +1085,13 @@ else:
 deallocated_transition = copy.deepcopy(transitioned)
 deallocated_transition["resources"]["vm"]["power_state"] = "VM deallocated"
 original_inventory = module.inventory
-module.inventory = lambda controller_arg, include_metrics=False: {
+module.inventory = lambda controller_arg, include_metrics=False, target_slot=None: {
     "workers": [deallocated_transition], "conflicts": [], "metrics": {},
 }
 assert module.mutate_deallocate(controller, action) == deallocated_transition
 foreign_transition = copy.deepcopy(deallocated_transition)
 foreign_transition["resources"]["monitor-extension"]["id"] = "/foreign/monitor-extension"
-module.inventory = lambda controller_arg, include_metrics=False: {
+module.inventory = lambda controller_arg, include_metrics=False, target_slot=None: {
     "workers": [foreign_transition], "conflicts": [], "metrics": {},
 }
 try:
@@ -1639,7 +1639,7 @@ partial_module.create_lifecycle_children=lambda controller, action: partial_call
 partial_module.converge_create_tags=lambda controller, action: partial_calls.append("converge") or {"slot": 1, "resources": {}}
 partial_action={"slot":1,"bindings":{"home_binding":"h"*64,"task":"task-a","task_generation":"g","assignment_generation":"asg-1","account_binding":"a"*64,"worktree_binding":"w"*64,"repository_binding":"r"*64,"repository_generation":"rg"},"sku":"Standard_D4as_v6","sku_family":"standardDav6Family","shared_admission_digest":"x","type":"create"}
 partial_worker={"slot":1,"resources":{"nic":{"id":"/nic","immutable_id":"n","tags":{"home-binding":"h"*64,"task-binding":"task-a","invocation-binding":"asg-1"}},"task-disk":{"id":"/d","immutable_id":"d","tags":{}}}}
-partial_module.inventory=lambda controller, include_metrics=True: {"workers":[partial_worker],"conflicts":[],"capacity_reservations":[],"metrics":{}}
+partial_module.inventory=lambda controller, include_metrics=True, target_slot=None: {"workers":[partial_worker],"conflicts":[],"capacity_reservations":[],"metrics":{}}
 partial_module.worker_by_slot=lambda snapshot, slot: partial_worker
 partial_module.create_or_resume({"prefix":"fmtest"}, partial_action)
 assert partial_calls==["create","children","converge"], partial_calls
@@ -2241,13 +2241,25 @@ else:
         "workers": [state["workers"][key] for key in sorted(state["workers"], key=int)],
         "capacity_reservations": state.get("capacity_reservations", []), "conflicts": [], "metrics": metrics,
     }
+    if request["operation"] == "inventory-slot":
+        slot = request.get("action", {}).get("slot")
+        inventory["workers"] = [
+            worker for worker in inventory["workers"] if worker.get("slot") == slot
+        ]
+        inventory["capacity_reservations"] = []
+        response_slot = slot
     result = inventory
 
 response = {
     "schema": "fm.worker-provider-response/v1", "operation": request["operation"],
     "controller": controller,
 }
-response["inventory" if request["operation"] == "inventory" else "result"] = result
+if request["operation"] in ("inventory", "inventory-slot"):
+    response["inventory"] = result
+    if request["operation"] == "inventory-slot":
+        response["slot"] = response_slot
+else:
+    response["result"] = result
 print(json.dumps(response, sort_keys=True, separators=(",", ":")))
 PY
   chmod +x "$1"
@@ -9191,8 +9203,94 @@ PY
   pass "independent exact Azure cleanup mutations overlap and fail deterministically"
 }
 
+targeted_slot_inventory_contract() {
+  python3 - "$AZURE" "$CONTROLLER" <<'PY' || fail "targeted Azure slot inventory contract failed"
+import importlib.util
+import sys
+
+provider_spec = importlib.util.spec_from_file_location("azure_provider_slot", sys.argv[1])
+provider = importlib.util.module_from_spec(provider_spec)
+provider_spec.loader.exec_module(provider)
+lifecycle_spec = importlib.util.spec_from_file_location("lifecycle_slot", sys.argv[2])
+lifecycle = importlib.util.module_from_spec(lifecycle_spec)
+lifecycle_spec.loader.exec_module(lifecycle)
+
+controller = {
+    "subscription": "11111111-1111-4111-8111-111111111111",
+    "resource_group": "rg", "prefix": "fixture",
+    "deployment_generation": "dep", "owner": "owner", "home_binding": "h" * 64,
+}
+tags = {
+    "workload": "firstmate", "deployment-generation": "dep", "cleanup-owner": "owner",
+}
+vms = [
+    {"name": "vm-fixture-wkr-01", "id": "/vm/1", "vmId": "vm-id-1",
+     "powerState": "VM running", "tags": tags},
+    {"name": "vm-fixture-wkr-02", "id": "/vm/2", "vmId": "vm-id-2",
+     "powerState": "VM running", "tags": tags},
+]
+extensions = [
+    {"name": "vm-fixture-wkr-01/AzureMonitorLinuxAgent", "id": "/vm/1/ext"},
+    {"name": "vm-fixture-wkr-02/AzureMonitorLinuxAgent", "id": "/vm/2/ext"},
+]
+expanded = []
+
+provider.az = lambda _controller, args, check=False, timeout=provider.AZ_TIMEOUT_SECONDS: (
+    ({"id": controller["subscription"], "state": "Enabled"}, 0, "")
+    if args[:2] == ["account", "show"] else (None, 1, "unexpected")
+)
+def listing(_controller, args, transient_not_found_attempts=1):
+    if args[:2] == ["vm", "list"]:
+        return vms
+    if args[:2] == ["resource", "list"] and args[-1] == "Microsoft.Compute/virtualMachines/extensions":
+        return extensions
+    return []
+provider.list_json = listing
+def show(_controller, resource_id, api_version=None, inventory_missing_ok=False):
+    expanded.append(resource_id)
+    return {
+        "id": resource_id, "tags": tags,
+        "properties": {"provisioningState": "Succeeded"},
+    }
+provider.show_full = show
+
+snapshot = provider.inventory_slot(controller, 2)
+assert [worker["slot"] for worker in snapshot["workers"]] == [2], snapshot
+assert expanded == ["/vm/2/ext"], expanded
+assert snapshot["capacity_reservations"] == []
+assert snapshot["metrics"]["actual_usd"] is None
+try:
+    provider.inventory_slot(controller, 17)
+except provider.ProviderError:
+    pass
+else:
+    raise AssertionError("targeted inventory accepted a slot outside the fleet")
+
+inventory = dict(snapshot)
+response = {
+    "schema": lifecycle.PROVIDER_RESPONSE_SCHEMA, "operation": "inventory-slot",
+    "controller": {key: controller[key] for key in (
+        "home_binding", "subscription", "deployment_generation", "owner", "prefix", "resource_group"
+    )},
+    "slot": 2, "inventory": inventory,
+}
+env = dict(response["controller"])
+lifecycle.provider_call = lambda _env, operation, action=None: response
+assert lifecycle.provider_slot_inventory(env, 2) == inventory
+response["slot"] = 1
+try:
+    lifecycle.provider_slot_inventory(env, 2)
+except lifecycle.LifecycleError:
+    pass
+else:
+    raise AssertionError("controller accepted a differently bound slot inventory")
+PY
+  pass "service lifecycle expands and validates only its exact Azure slot"
+}
+
 static_contract
 independent_cleanup_contract
+targeted_slot_inventory_contract
 service_complete_front_door
 service_reconcile_scope_contract
 service_complete_replay_contract

@@ -1085,7 +1085,12 @@ def metrics(controller, vms, capacity_reservations, specialized_active_by_family
     }
 
 
-def inventory(controller, include_metrics=True):
+def inventory(controller, include_metrics=True, target_slot=None):
+    if target_slot is not None and (
+        not isinstance(target_slot, int) or isinstance(target_slot, bool)
+        or not 1 <= target_slot <= 16
+    ):
+        raise ProviderError("target worker slot is outside the reviewed fleet")
     account, rc, stderr = az(controller, ["account", "show"], check=False)
     if rc != 0 or not isinstance(account, dict):
         raise ProviderError("Azure scope is unreadable: {}".format(stderr))
@@ -1142,15 +1147,15 @@ def inventory(controller, include_metrics=True):
 
     for vm in vms:
         slot = slot_from_name(vm.get("name"), r"^vm-{}-wkr-".format(prefix))
-        if slot is not None:
+        if slot is not None and (target_slot is None or slot == target_slot):
             add("vm", vm, slot, vm.get("powerState") or vm.get("power_state") or "unknown")
     for nic in nics:
         slot = slot_from_name(nic.get("name"), r"^nic-{}-wkr-".format(prefix))
-        if slot is not None:
+        if slot is not None and (target_slot is None or slot == target_slot):
             add("nic", nic, slot)
     for disk in disks:
         slot = slot_from_name(disk.get("name"), r"^disk-{}-wkr-".format(prefix))
-        if slot is None:
+        if slot is None or (target_slot is not None and slot != target_slot):
             continue
         name = str(disk.get("name"))
         if name.endswith("-os"):
@@ -1166,7 +1171,7 @@ def inventory(controller, include_metrics=True):
     identity_principals = {}
     for identity in identities:
         slot = slot_from_name(identity.get("name"), r"^id-{}-wkr-".format(prefix))
-        if slot is not None:
+        if slot is not None and (target_slot is None or slot == target_slot):
             add("identity", identity, slot)
             principal = immutable_id("identity", identity)
             if principal:
@@ -1180,7 +1185,7 @@ def inventory(controller, include_metrics=True):
         if not match:
             continue
         slot = int(match.group(1))
-        if not 1 <= slot <= 16:
+        if not 1 <= slot <= 16 or (target_slot is not None and slot != target_slot):
             continue
         metadata = partial_container_metadata(
             metadata_to_tags(container.get("metadata") or {}), slot, workers,
@@ -1218,7 +1223,10 @@ def inventory(controller, include_metrics=True):
 
     for extension in extensions:
         slot = slot_from_name(extension.get("name"), r"^vm-{}-wkr-".format(prefix))
-        if slot is None or not str(extension.get("name", "")).endswith("/AzureMonitorLinuxAgent"):
+        if (
+            slot is None or (target_slot is not None and slot != target_slot)
+            or not str(extension.get("name", "")).endswith("/AzureMonitorLinuxAgent")
+        ):
             continue
         vm_id = exact_id(
             controller, "Microsoft.Compute", "virtualMachines",
@@ -1235,7 +1243,7 @@ def inventory(controller, include_metrics=True):
         add("monitor-extension", value, slot)
     for command in run_commands:
         slot = slot_from_name(command.get("name"), r"^vm-{}-wkr-".format(prefix))
-        if slot is None:
+        if slot is None or (target_slot is not None and slot != target_slot):
             continue
         child = str(command.get("name", "")).rsplit("/", 1)[-1]
         kind = {"bootstrap": "bootstrap-command", "execute": "task-command"}.get(child)
@@ -1254,7 +1262,7 @@ def inventory(controller, include_metrics=True):
         add(kind, value, slot)
     for schedule in schedules:
         slot = slot_from_name(schedule.get("name"), r"^shutdown-computevm-vm-{}-wkr-".format(prefix))
-        if slot is not None:
+        if slot is not None and (target_slot is None or slot == target_slot):
             value = show_full(
                 controller, schedule["id"], api_version="2018-09-15",
                 inventory_missing_ok=True,
@@ -1274,7 +1282,7 @@ def inventory(controller, include_metrics=True):
         if not match:
             continue
         slot = int(match.group(1))
-        if not 1 <= slot <= 16:
+        if not 1 <= slot <= 16 or (target_slot is not None and slot != target_slot):
             continue
         principal = role.get("principalId")
         if identity_principals.get(slot) != principal:
@@ -1313,9 +1321,12 @@ def inventory(controller, include_metrics=True):
         if nic and nic.get("attached_to") and vm and nic["attached_to"].lower() != vm["id"].lower():
             conflicts.append({"kind": "nic", "slot": slot, "reason": "NIC is attached to another VM"})
 
-    capacity_reservations, specialized_active_by_family = specialized_capacity_inventory(
-        controller, vms, identities
-    )
+    if include_metrics:
+        capacity_reservations, specialized_active_by_family = specialized_capacity_inventory(
+            controller, vms, identities
+        )
+    else:
+        capacity_reservations, specialized_active_by_family = [], {}
     result = {
         "schema": INVENTORY_SCHEMA,
         "observed_at": iso_utc(),
@@ -1338,6 +1349,11 @@ def inventory(controller, include_metrics=True):
         },
     }
     return result
+
+
+def inventory_slot(controller, slot):
+    """Read one exact worker compartment without expanding peer children."""
+    return inventory(controller, include_metrics=False, target_slot=slot)
 
 
 def worker_by_slot(snapshot, slot):
@@ -2439,7 +2455,7 @@ def run_pilot_create(controller, action):
 
 
 def converge_create_tags(controller, action):
-    snapshot = inventory(controller, include_metrics=False)
+    snapshot = inventory_slot(controller, action["slot"])
     if snapshot["conflicts"]:
         raise ProviderError("new worker inventory contains foreign or unsafe resources")
     worker = worker_by_slot(snapshot, action["slot"])
@@ -2454,7 +2470,7 @@ def converge_create_tags(controller, action):
             continue
         tag_resource(controller, resource["id"], tags)
     tag_container(controller, expected_names(controller, action["slot"])["state-container"], tags)
-    snapshot = inventory(controller, include_metrics=False)
+    snapshot = inventory_slot(controller, action["slot"])
     if snapshot["conflicts"]:
         raise ProviderError("tagged worker inventory contains foreign or unsafe resources")
     worker = worker_by_slot(snapshot, action["slot"])
@@ -2465,7 +2481,7 @@ def converge_create_tags(controller, action):
 
 
 def create_or_resume(controller, action):
-    snapshot = inventory(controller, include_metrics=False)
+    snapshot = inventory_slot(controller, action["slot"])
     if snapshot["conflicts"]:
         raise ProviderError("same-name foreign worker resources refuse create/adopt")
     existing = worker_by_slot(snapshot, action["slot"])
@@ -2486,7 +2502,7 @@ def create_or_resume(controller, action):
                 # for, and it is the one that skips the create path entirely.
                 if ensure_worker_running(controller, expected_names(controller, action["slot"])["vm"]):
                     existing = worker_by_slot(
-                        inventory(controller, include_metrics=False), action["slot"]
+                        inventory_slot(controller, action["slot"]), action["slot"]
                     )
                 return existing
             except ProviderError:
@@ -2594,7 +2610,7 @@ def run_independent_cleanup(operations):
 
 
 def mutate_deallocate(controller, action):
-    snapshot = inventory(controller, include_metrics=False)
+    snapshot = inventory_slot(controller, action["slot"])
     resources = cleanup_recorded_exact(
         action, worker_by_slot(snapshot, action["slot"]), require_ready_children=False
     )
@@ -2606,7 +2622,7 @@ def mutate_deallocate(controller, action):
         ], check=False)
         if rc != 0:
             raise ProviderError("exact worker deallocation failed: {}".format(stderr))
-    final = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
+    final = worker_by_slot(inventory_slot(controller, action["slot"]), action["slot"])
     final_resources = cleanup_recorded_exact(action, final, require_ready_children=False)
     if "deallocated" not in str(final_resources["vm"].get("power_state", "")).lower():
         raise ProviderError("worker compute did not reach Azure deallocated state")
@@ -2632,7 +2648,7 @@ def service_cancel_allows_missing_task_command(action):
 
 
 def mutate_delete_compute(controller, action):
-    snapshot = inventory(controller, include_metrics=False)
+    snapshot = inventory_slot(controller, action["slot"])
     worker = worker_by_slot(snapshot, action["slot"])
     if worker is None:
         raise ProviderError("compute cleanup lost exact retained task/account ownership")
@@ -2669,7 +2685,7 @@ def mutate_delete_compute(controller, action):
         mark_cleanup_container(
             controller, action, "compute-action", action["idempotency_key"]
         )
-        worker = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
+        worker = worker_by_slot(inventory_slot(controller, action["slot"]), action["slot"])
     # ttl-schedule may be absent only on re-entry after the VM already
     # cascaded away (Azure deletes shutdown-computevm schedules with their
     # target VM); the fresh-entry path above still required it alongside the
@@ -2683,7 +2699,7 @@ def mutate_delete_compute(controller, action):
     )
     if resources.get("ttl-schedule") is None and resources.get("vm") is not None:
         raise ProviderError("TTL disappeared while the worker VM still exists")
-    worker = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
+    worker = worker_by_slot(inventory_slot(controller, action["slot"]), action["slot"])
     if worker is None:
         raise ProviderError("VM deletion also lost exact retained task/account capacity")
     remaining = worker.get("resources") or {}
@@ -2707,7 +2723,7 @@ def mutate_delete_compute(controller, action):
             wait_absent(controller, resource["id"])
             # NIC/disk attach relations only clear once the VM is gone, so the
             # detach proof below must read a fresh snapshot.
-            refreshed = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
+            refreshed = worker_by_slot(inventory_slot(controller, action["slot"]), action["slot"])
             if refreshed is None:
                 raise ProviderError("VM deletion also lost exact retained task/account capacity")
             remaining = refreshed.get("resources") or {}
@@ -2729,7 +2745,7 @@ def mutate_delete_compute(controller, action):
             continue
         conditional_delete(controller, kind, resource)
     run_independent_cleanup(detached)
-    final = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
+    final = worker_by_slot(inventory_slot(controller, action["slot"]), action["slot"])
     if final is None:
         raise ProviderError("compute cleanup lost retained task/account ownership")
     final_resources = final.get("resources") or {}
@@ -2741,7 +2757,7 @@ def mutate_delete_compute(controller, action):
     ttl = final_resources.get("ttl-schedule")
     if ttl is not None:
         conditional_delete(controller, "ttl-schedule", ttl)
-        final = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
+        final = worker_by_slot(inventory_slot(controller, action["slot"]), action["slot"])
         if final is None:
             raise ProviderError("TTL cleanup lost retained task/account ownership")
     # An absent TTL here is the Azure cascade outcome: shutdown-computevm
@@ -2758,7 +2774,7 @@ def mutate_delete_compute(controller, action):
 def mutate_reset(controller, action):
     if not re.match(r"^[0-9a-f]{64}$", str(action.get("release_proof_digest", ""))):
         raise ProviderError("reset requires the exact ordinary release-proof digest")
-    snapshot = inventory(controller, include_metrics=False)
+    snapshot = inventory_slot(controller, action["slot"])
     worker = worker_by_slot(snapshot, action["slot"])
     if worker is None:
         return None
@@ -2782,7 +2798,7 @@ def mutate_reset(controller, action):
         mark_cleanup_container(
             controller, action, "reset-action", action["idempotency_key"]
         )
-        worker = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
+        worker = worker_by_slot(inventory_slot(controller, action["slot"]), action["slot"])
     allow_missing = tuple(kind for kind in REQUIRED_RESOURCE_KINDS if kind != "state-container")
     resources = cleanup_recorded_exact(
         action, worker, allow_missing=allow_missing, skip_immutable=("state-container",),
@@ -2847,7 +2863,7 @@ def mutate_reset(controller, action):
                     "staging archive deletion failed for {}: {}".format(blob_name, stderr))
         independent.append((blob_name, delete_archive))
     run_independent_cleanup(independent)
-    refreshed = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
+    refreshed = worker_by_slot(inventory_slot(controller, action["slot"]), action["slot"])
     if refreshed is None:
         raise ProviderError("cleanup marker container disappeared before exact reset completed")
     state_container = (refreshed.get("resources") or {}).get("state-container")
@@ -2873,7 +2889,7 @@ def mutate_reset(controller, action):
     ], check=False)
     if rc != 0:
         raise ProviderError("exact worker state-container deletion failed: {}".format(stderr))
-    final = inventory(controller, include_metrics=False)
+    final = inventory_slot(controller, action["slot"])
     if worker_by_slot(final, action["slot"]) is not None:
         raise ProviderError("released worker capacity remains after exact reset")
     return None
@@ -3125,7 +3141,7 @@ def abandon_execute(controller, action):
     if not isinstance(expected_task, str) or not expected_task:
         raise ProviderError("execute abandonment action carries no exact task-command identity")
 
-    worker = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
+    worker = worker_by_slot(inventory_slot(controller, action["slot"]), action["slot"])
     if worker is None:
         raise ProviderError("execute abandonment lost exact retained worker ownership")
     current = worker.get("resources") or {}
@@ -3160,7 +3176,7 @@ def abandon_execute(controller, action):
         mark_cleanup_container(
             controller, action, EXECUTE_ABANDON_MARKER, action["idempotency_key"]
         )
-    bracketed = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
+    bracketed = worker_by_slot(inventory_slot(controller, action["slot"]), action["slot"])
     bracketed_resources = recorded_exact(
         action, bracketed, skip_immutable=("state-container",), require_ready_children=False,
     )
@@ -3340,7 +3356,7 @@ def persist_execute_result(controller, action, names, tags, execution):
 
 
 def mutate_execute(controller, action):
-    snapshot = inventory(controller, include_metrics=False)
+    snapshot = inventory_slot(controller, action["slot"])
     worker = worker_by_slot(snapshot, action["slot"])
     resources = recorded_exact(action, worker)
     durable_retired_key = action.get("retired_execute_key")
@@ -3378,7 +3394,7 @@ def mutate_execute(controller, action):
         if disposition == EXECUTE_DISPOSITION_RECOVERED:
             persist_execute_result(controller, action, names, tags, recovered)
             worker = worker_by_slot(
-                inventory(controller, include_metrics=False), action["slot"]
+                inventory_slot(controller, action["slot"]), action["slot"]
             )
             if worker is None:
                 raise ProviderError("execution result persistence lost its exact worker")
@@ -3482,14 +3498,14 @@ def mutate_execute(controller, action):
     if execution is None:
         raise ProviderError("private worker execution returned no exact result")
     persist_execute_result(controller, action, names, tags, execution)
-    worker = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
+    worker = worker_by_slot(inventory_slot(controller, action["slot"]), action["slot"])
     if worker is None:
         raise ProviderError("execution result persistence lost its exact worker")
     return worker, execution
 
 
 def mutate_steer(controller, action):
-    snapshot = inventory(controller, include_metrics=False)
+    snapshot = inventory_slot(controller, action["slot"])
     resources = recorded_exact(action, worker_by_slot(snapshot, action["slot"]))
     if "deallocated" in str(resources["vm"].get("power_state", "")).lower():
         raise ProviderError("steer refuses deallocated worker compute")
@@ -3526,7 +3542,7 @@ exec \"$supervisor\" steer --home-binding '{}' --task '{}' --task-generation '{}
         or ack.get("assignment_generation") != bindings["assignment_generation"]
     ):
         raise ProviderError("guest supervisor did not acknowledge the exact steer request")
-    return worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
+    return worker_by_slot(inventory_slot(controller, action["slot"]), action["slot"])
 
 
 def validate_mutation_action(controller, action):
@@ -3620,6 +3636,19 @@ def main():
     operation = request.get("operation")
     if operation == "inventory":
         value = response(controller, operation, inventory=inventory(controller))
+    elif operation == "inventory-slot":
+        selector = request.get("action")
+        if (
+            not isinstance(selector, dict) or set(selector) != {"slot"}
+            or not isinstance(selector.get("slot"), int)
+            or isinstance(selector.get("slot"), bool)
+            or not 1 <= selector["slot"] <= 16
+        ):
+            raise ProviderError("slot inventory requires one exact reviewed slot")
+        value = response(
+            controller, operation, slot=selector["slot"],
+            inventory=inventory_slot(controller, selector["slot"]),
+        )
     elif operation == "mutate":
         require_landed_code()
         value = response(controller, operation, result=mutate(controller, request.get("action")))

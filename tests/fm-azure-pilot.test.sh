@@ -984,7 +984,7 @@ execution["result_digest"] = provider.hashlib.sha256(
 ).hexdigest()
 
 worker = {"slot": 1, "resources": {"vm": {"power_state": "VM running"}}}
-provider.inventory = lambda controller, include_metrics=True: {"workers": [worker]}
+provider.inventory = lambda controller, include_metrics=True, target_slot=None: {"workers": [worker]}
 provider.worker_by_slot = lambda snapshot, slot: worker
 provider.recorded_exact = lambda action, worker, **kwargs: worker["resources"]
 provider.action_tags = lambda controller, action: {}
@@ -1299,7 +1299,7 @@ assert [c for c in calls if c[:2] == ["vm", "deallocate"]], (
 # the case the change exists for unguarded.
 existing_worker = {"slot": 1, "resources": {"vm": {"tags": {}}}}
 provider.az, calls = make_az(["PowerState/deallocated", "PowerState/running"])
-provider.inventory = lambda controller, include_metrics=True: {
+provider.inventory = lambda controller, include_metrics=True, target_slot=None: {
     "conflicts": [], "workers": [existing_worker],
 }
 provider.worker_by_slot = lambda snapshot, slot: existing_worker

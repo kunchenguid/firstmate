@@ -1282,6 +1282,17 @@ def provider_call(env, operation, action=None):
     return _provider_call_raw(env, operation, action)
 
 
+def provider_slot_inventory(env, slot):
+    response = provider_call(env, "inventory-slot", {"slot": slot})
+    if response.get("slot") != slot:
+        raise LifecycleError("provider slot inventory binding is not exact")
+    value = response.get("inventory")
+    verify_inventory(value)
+    if any(worker.get("slot") != slot for worker in value["workers"]):
+        raise LifecycleError("provider slot inventory escaped its exact compartment")
+    return value
+
+
 def _provider_call_raw(env, operation, action=None):
     request = {
         "schema": PROVIDER_REQUEST_SCHEMA,
@@ -1332,7 +1343,7 @@ def verify_provider_response(env, operation, response):
         expected = env[field]
         if controller.get(field) != expected:
             raise LifecycleError("provider response {} binding is not exact".format(field))
-    if operation == "inventory":
+    if operation in ("inventory", "inventory-slot"):
         verify_inventory(response.get("inventory"))
 
 
@@ -2679,7 +2690,6 @@ def next_service_reconcile_action(env, state, inventory, task, generation, now=N
         raise LifecycleError(
             "provider found same-fleet worker-name conflicts; unrelated resources were not adopted"
         )
-    roll_daily_baseline(state, inventory["metrics"].get("actual_usd"), now)
     key = request_key(task, generation)
     item = state["queue"].get(key)
     if item is None or item.get("role") != "no-mistakes":
@@ -2688,6 +2698,7 @@ def next_service_reconcile_action(env, state, inventory, task, generation, now=N
     if status == "complete":
         return None
     if status == "queued":
+        roll_daily_baseline(state, inventory["metrics"].get("actual_usd"), now)
         if not item.get("eligible"):
             raise LifecycleError("service reconcile refuses an ineligible request")
         if active_count(state, inventory) >= env["max_workers"]:
@@ -3898,12 +3909,18 @@ def command_service_reconcile(env, args):
             print("pending: slot={} task={}@{}".format(slot_key, task, generation))
         return
 
-    inventory = provider_call(env, "inventory")["inventory"]
+    if item.get("status") == "queued":
+        inventory = provider_call(env, "inventory")["inventory"]
+    else:
+        if worker is None or slot_key is None:
+            raise LifecycleError("service reconcile task has no exact durable worker owner")
+        inventory = provider_slot_inventory(env, worker["slot"])
     action = None
     with contextlib.ExitStack() as stack:
         with controller_lock(env):
             state = load_state(env)
-            state["last_metrics"] = metrics_from_inventory(inventory)
+            if item.get("status") == "queued":
+                state["last_metrics"] = metrics_from_inventory(inventory)
             action = next_service_reconcile_action(
                 env, state, inventory, task, generation
             )

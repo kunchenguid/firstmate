@@ -331,7 +331,7 @@ execution["result_digest"] = hashlib.sha256(
 # Only the collaborators that read live Azure state are substituted; every
 # line of mutate_execute own body runs for real.
 worker = {"slot": 1, "resources": {"vm": {"power_state": "VM running"}}}
-provider.inventory = lambda controller, include_metrics=True: {"workers": [worker]}
+provider.inventory = lambda controller, include_metrics=True, target_slot=None: {"workers": [worker]}
 provider.worker_by_slot = lambda snapshot, slot: worker
 provider.recorded_exact = lambda action, worker, **kwargs: worker["resources"]
 provider.action_tags = lambda controller, action: {}
