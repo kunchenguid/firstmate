@@ -1,16 +1,27 @@
-Mode: Pi extension background wake with direct-exchange compaction continuity.
+Mode: Pi extension persistent background-wake cycle with observable custom-message delivery and direct-exchange compaction continuity.
 
 When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
 2. Confirm the Pi primary auto-loaded both project extensions (plain `pi`, after approving project trust once per clone); if not, restart with `-e __FM_PI_TURNEND_EXT__ -e __FM_PI_EXT__` as a trust-free fallback.
-3. Arm supervision with the `fm_watch_arm_pi` tool.
+3. Arm supervision once with the `fm_watch_arm_pi` tool.
    Use `/fm-watch-arm-pi` only as a human-entered fallback.
    Never run `bin/fm-watch-arm.sh` through Pi's bash tool because that foreground arm can wedge the agent and bypasses extension-owned cleanup.
-4. The extension starts `bin/fm-watch-arm.sh --restart`, keeps the child attached to the live Pi process, and sends a context-participating `firstmate-watcher-wake` custom follow-up when the child exits with an actionable watcher reason.
-5. If the extension says the watcher is already healthy, do not start another cycle.
-6. If the extension reports a watcher failure, drain queued wakes, inspect the failure text, and restart Pi with both extensions loaded if needed.
-7. Never use shell `&` for watcher supervision.
-   The arm mechanism above is extension-owned, not a model tool call, but a manual recovery probe that backgrounds, pipes, or bundles the arm is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`, wired into the turn-end guard extension at `__FM_PI_TURNEND_EXT__`).
+4. The extension starts `bin/fm-watch-arm.sh --restart`, keeps the child attached to the live Pi process, and owns the single-child cycle after that arm.
+5. On every actionable child exit, the extension starts the successor immediately without waiting for a model or tool turn, then sends a visible context-participating `firstmate-watcher-wake` custom follow-up.
+6. The wake carries a stable delivery identity.
+   Pi's `message_end` custom-message event or the matching `custom_message` session entry proves admission.
+   The extension marks each fire-and-forget handoff in flight before calling Pi and does not retry it while asynchronous admission remains possible.
+   Pi's `agent_settled` event is the concrete non-admission boundary: if the matching wake was not observed by then, capped exponential retry continues while the durable queue remains undrained.
+   A synchronous handoff failure also permits retry; observed admission or queue drainage clears the pending delivery and cancels its retry timer.
+7. The follow-up delivery mode preserves Pi's steering priority for direct captain input, and one pending delivery plus one arm child prevents message floods and duplicate watchers.
+8. After a watcher wake, drain and handle the queue, but do not call the arm tool again because the extension already owns the successor.
+9. If the extension says the watcher is already healthy, do not start another cycle.
+10. Session shutdown, process exit, session-lock loss, or away-mode entry stops the extension-owned child and retry state.
+    After lock reacquisition or away-mode exit, the same arm tool resumes the cycle.
+11. If the extension reports a watcher failure, drain queued wakes, inspect the failure text, and restart Pi with both extensions loaded if needed.
+    Non-actionable exits and spawn failures schedule automatic child restarts with capped exponential spacing; failure notifications without a queue requirement stop after three unadmitted attempts.
+12. Never use shell `&` for watcher supervision.
+    The arm mechanism above is extension-owned, not a model tool call, but a manual recovery probe that backgrounds, pipes, or bundles the arm is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`, wired into the turn-end guard extension at `__FM_PI_TURNEND_EXT__`).
 
 The turn-end guard extension lives at `__FM_PI_TURNEND_EXT__`.
 The watcher extension lives at `__FM_PI_EXT__`.
@@ -20,6 +31,7 @@ Both are tracked, project-local `.pi/extensions/*.ts` files that Pi auto-discove
 
 This document owns the Pi-specific boundary between direct captain input, automated supervision prompts, pending input, and rebuilt post-compaction model context.
 The watcher and turn-end extensions use Pi's context-participating `sendMessage()` custom-message path with distinct `firstmate-watcher-wake` and `firstmate-turnend-guard` types, `deliverAs: "followUp"`, and `triggerTurn: true`.
+The admission checks in the cycle above do not infer success from `sendMessage()` returning because the extension API intentionally returns `void` and reports asynchronous rejection separately.
 They never use `sendUserMessage()` for automation, so supervision remains visible to the model without becoming a human-authored `role: "user"` turn.
 
 The watcher extension observes Pi's `input` event and records `interactive` or `rpc` submissions as provisional non-context `firstmate-direct-input-observation` entries before Pi queues or delivers them.
@@ -63,6 +75,20 @@ A compaction-before-delivery fixture records text plus an image provisionally, c
 It also proves a consumed steer does not become continuity metadata while unrelated automation is pending or after that automation drains.
 A separate compaction fixture cuts an unanswered direct question behind a custom watcher turn and proves the exact question returns as `OPEN_REPLY_OBLIGATION` rather than being inferred from summary prose.
 `tests/fm-pi-retry-continuity.test.sh` exercises the installed-Pi proof that an error followed by a retry without another human delivery closes the retained exchange, while a new human delivery on the retry replaces the retained cohort so its answer cannot close the older failed exchange.
+
+### 2026-08-28 persistent-cycle regression evidence
+
+The observed failure sequence was an armed Pi child, an actionable watcher exit with a durable queued wake, no persisted `firstmate-watcher-wake`, no successor child, and a stale beacon until later captain input caused a manual re-arm.
+The cycle protocol above owns the recovery contract exercised by the following proofs.
+
+Deterministic command: `tests/fm-pi-watch-extension.test.sh`.
+Observed output included `ok - Pi watcher avoids duplicate in-flight admission, retries after settlement, survives two wakes, and stops on ownership changes`.
+The fixture reproduces arm, durable queue append, actionable exit, a delayed asynchronous admission that arrives after the former retry timer would have fired without a duplicate handoff, custom-message admission and triggered turn, successor with a fresh beacon before queue drain, a second actionable exit whose first handoff reaches settlement without admission, stable-identity retry and admission, another successor, away-mode stop and resume, lock-loss stop and resume, and session-shutdown cleanup.
+
+Live command: `FM_PI_LIVE_E2E=1 FM_PI_LIVE_AUTH_DIR='/Users/dongkeun/.pi/firstmate-local' tests/fm-pi-primary-live-e2e.test.sh`.
+Observed output: `ok - Pi 0.84.2 live E2E persisted two custom wakes, self-rearmed both successors, and cleaned up on exit`.
+The isolated smoke used installed Pi, a cloned project, a private tmux socket, isolated Pi and Firstmate homes, copied credential input, the real watcher and arm scripts, and two consecutive durable status wakes.
+It proved each actionable exit gained a distinct live successor with a fresh beacon that remained live after model queue handling, each wake persisted as a visible custom message and triggered a model turn that drained the queue, no second arm-tool call occurred, and `/quit` left neither watcher nor arm child alive.
 
 Live command: `FM_PI_COMPACTION_LIVE_E2E=1 FM_PI_LIVE_AUTH_DIR='/Users/dongkeun/.pi/firstmate-local' tests/fm-pi-primary-compaction-live-e2e.test.sh`.
 Observed output: `ok - Pi 0.84.2 live compaction rebuilt the exact answered captain exchange across a custom watcher turn (firstKeptType=message)`.

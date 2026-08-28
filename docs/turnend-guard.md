@@ -124,8 +124,8 @@ Only unmarked child worktrees fall through to the linked-worktree exemption, and
 
 "No turn ends blind" for a secondmate is delivered by the same two mechanisms the main primary relies on.
 Mechanism B, the turn-end backstop, is this guard; its secondmate-home behavior is covered by hermetic tests in `tests/fm-turnend-guard.test.sh` (`test_hook_blocks_in_secondmate_own_home`, `test_hook_blocks_in_treehouse_leased_secondmate_home`, `test_hook_silent_in_idle_secondmate_home`, `test_hook_secondmate_loop_guard_allows_retry`, `test_hook_secondmate_reinvoke_recovery_loop`, `test_hook_silent_in_secondmate_child_worktree`, and `test_hook_exempts_linked_worktree_with_stray_marker`).
-Mechanism A, the autonomous wake, is a harness property: when a background watcher task exits, the harness re-invokes the model, which drains the wake, advances children, and re-arms a fresh watcher.
-Mechanism A cannot be a hermetic CI assertion because it requires a live model session, so it is recorded here as a dated first-hand measurement while `test_hook_secondmate_reinvoke_recovery_loop` covers the guard's deterministic half of the same recovery loop.
+Mechanism A, the autonomous wake, follows the active [harness supervision protocol](supervision-protocols/); Pi's extension-owned successor cycle is specified there rather than relying on model re-arming.
+The Claude autonomous model re-invocation measured below requires a live model session, so it is recorded here as a dated first-hand measurement while `test_hook_secondmate_reinvoke_recovery_loop` covers the guard's deterministic half of the same recovery loop.
 
 Autonomous-re-invoke measurement, run first-hand on Claude Code 2.1.207 (Darwin 25.5.0) on 2026-07-12.
 Procedure: launch a detached `run_in_background` Bash task that models a one-shot watcher - it records a launch epoch, runs `sleep 25`, then records a completion epoch just before exit, writing only to the session scratchpad - then end the turn with no further tool calls and no pending question, a genuinely idle session with no human input.
@@ -148,5 +148,5 @@ No Herdr command was issued and no fleet state was touched; the experiment wrote
 
 `tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
 The default behavior suite does not invoke live language-model harnesses.
-`FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the isolated interactive Pi regression recorded above.
+[`supervision-protocols/pi.md`](supervision-protocols/pi.md#2026-08-28-persistent-cycle-regression-evidence) owns the current Pi cycle and delivery evidence, including the opt-in interactive regression command.
 `FM_PI_COMPACTION_LIVE_E2E=1 FM_PI_LIVE_AUTH_DIR=<isolated-smoke-auth-source> tests/fm-pi-primary-compaction-live-e2e.test.sh` opts into the isolated real-compaction regression owned and evidenced by [`supervision-protocols/pi.md`](supervision-protocols/pi.md#2026-08-25-regression-evidence).
