@@ -1044,6 +1044,82 @@ SH
   pass "runner signals reap only tracked concurrent descendants"
 }
 
+test_nested_runner_establishes_its_own_cleanup_group() {
+  local tmp repo runner track orchestrator rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-nested-signal.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  track="$tmp/track"
+  orchestrator="$tmp/orchestrator.test.sh"
+  mkdir -p "$repo/bin" "$repo/tests" "$track"
+  cp "$RUNNER" "$runner"
+  for script in fm-brief.test.sh fm-composer-lib.test.sh; do
+    cat >"$repo/tests/$script" <<'SH'
+#!/usr/bin/env bash
+name=$(basename "$0")
+sh -c 'trap "" TERM; echo $$ >"$1"; sleep 600' _ "$TRACK_DIR/$name.pid" &
+wait
+SH
+    chmod +x "$repo/tests/$script"
+  done
+  cat >"$orchestrator" <<'SH'
+#!/usr/bin/env bash
+set -eu
+nested_pid=
+cleanup() {
+  [ -z "$nested_pid" ] || kill -KILL "$nested_pid" 2>/dev/null || true
+  for pid_file in "$TRACK_DIR"/*.pid; do
+    [ -e "$pid_file" ] || continue
+    kill -KILL "$(cat "$pid_file")" 2>/dev/null || true
+  done
+}
+trap cleanup EXIT
+TRACK_DIR="$TRACK_DIR" "$NESTED_RUNNER" --jobs 2 \
+  tests/fm-brief.test.sh tests/fm-composer-lib.test.sh >"$NESTED_OUT" 2>"$NESTED_ERR" &
+nested_pid=$!
+waited=0
+while [ "$(find "$TRACK_DIR" -name '*.pid' -type f 2>/dev/null | wc -l | tr -d ' ')" -lt 2 ] \
+  && [ "$waited" -lt 100 ]; do
+  sleep 0.05
+  waited=$((waited + 1))
+done
+[ "$waited" -lt 100 ] || { echo "nested workers did not start"; exit 1; }
+kill -TERM "$nested_pid"
+set +e
+wait "$nested_pid"
+rc=$?
+set -e
+[ "$rc" -eq 143 ] || { echo "nested runner exited $rc after TERM"; exit 1; }
+for pid_file in "$TRACK_DIR"/*.pid; do
+  child=$(cat "$pid_file")
+  waited=0
+  while kill -0 "$child" 2>/dev/null && [ "$waited" -lt 50 ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  if kill -0 "$child" 2>/dev/null; then
+    echo "nested runner left worker descendant $child running"
+    exit 1
+  fi
+done
+trap - EXIT
+echo "ok - nested runner cleanup"
+SH
+  chmod +x "$runner" "$orchestrator"
+  set +e
+  (cd "$repo" && TRACK_DIR="$track" NESTED_RUNNER="$runner" \
+    NESTED_OUT="$tmp/nested.out" NESTED_ERR="$tmp/nested.err" \
+    "$RUNNER" "$orchestrator") >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || { cat "$tmp/out" "$tmp/err" "$tmp/nested.out" "$tmp/nested.err"; rm -rf "$tmp"; fail "nested runner did not establish its own cleanup group"; }
+  grep -Fq 'FM_TEST_SUMMARY total=1 failed=0' "$tmp/out" \
+    || { rm -rf "$tmp"; fail "outer runner did not report nested cleanup fixture green"; }
+  rm -rf "$tmp"
+  pass "nested runners establish independent cleanup groups"
+}
+
 test_herdr_ci_family_run_has_a_step_timeout() {
   # The required Herdr lane's hang tripwire is the family-run *step* bound, not
   # the 75-minute job cap. Parse the workflow as YAML so nested `with.name`
@@ -1143,5 +1219,6 @@ test_per_script_timeout_bounds_a_hang
 test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
 test_signal_cleanup_reaps_concurrent_descendants
+test_nested_runner_establishes_its_own_cleanup_group
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
