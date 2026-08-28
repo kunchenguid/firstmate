@@ -63,9 +63,8 @@
 #                   no real script approaches it, so it only converts a HUNG
 #                   script into a bounded failure. --max-wall-ms is checked
 #                   after the run and so cannot catch a hang on its own.
-#                   On interruption the runner best-effort terminates its one
-#                   run-owned process group; fm_run_timed remains the owner of
-#                   any nested timeout groups until their configured bound.
+#                   External interruption cleanup is outside this runner's
+#                   guarantee; configured per-script bounds remain authoritative.
 #   --max-wall-ms N fail the run when its measured suite wall clock exceeds N
 #                   milliseconds. It is evaluated after suite execution and
 #                   cannot interrupt a running script; per-script hangs are
@@ -114,52 +113,8 @@ now_ms() {
   fi
 }
 
-if [ -z "${FM_TEST_RUN_GROUP_ACTIVE:-}" ]; then
-  group_child=
-  group_pending=
-  group_signal() {
-    local sig=$1 code=$2
-    if [ -z "$group_child" ]; then
-      group_pending="$sig:$code"
-      return 0
-    fi
-    trap '' HUP INT TERM
-    kill -"$sig" -- "-$group_child" 2>/dev/null || true
-    sleep 0.2
-    kill -KILL -- "-$group_child" 2>/dev/null || true
-    wait "$group_child" 2>/dev/null || true
-    exit "$code"
-  }
-  trap 'group_signal HUP 129' HUP
-  trap 'group_signal INT 130' INT
-  trap 'group_signal TERM 143' TERM
-  group_started_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  group_started_ms=$(now_ms)
-  case $- in *m*) group_monitor_was_on=1 ;; *) group_monitor_was_on=0 ;; esac
-  set -m
-  (
-    FM_TEST_RUN_GROUP_ACTIVE=1 \
-      FM_TEST_RUN_STARTED_ISO="$group_started_iso" \
-      FM_TEST_RUN_STARTED_MS="$group_started_ms" \
-      exec "$0" "$@"
-  ) &
-  group_child=$!
-  [ "$group_monitor_was_on" -eq 1 ] || set +m
-  if [ -n "$group_pending" ]; then
-    group_signal "${group_pending%%:*}" "${group_pending#*:}"
-  fi
-  set +e
-  wait "$group_child"
-  group_rc=$?
-  set -e
-  trap - HUP INT TERM
-  exit "$group_rc"
-fi
-
-RUN_STARTED_ISO=${FM_TEST_RUN_STARTED_ISO:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
-RUN_STARTED_MS=${FM_TEST_RUN_STARTED_MS:-$(now_ms)}
-unset FM_TEST_RUN_GROUP_ACTIVE FM_TEST_RUN_STARTED_ISO FM_TEST_RUN_STARTED_MS
-set +m
+RUN_STARTED_ISO=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+RUN_STARTED_MS=$(now_ms)
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
