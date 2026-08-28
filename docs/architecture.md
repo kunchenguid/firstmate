@@ -13,7 +13,9 @@ Actionable wakes include captain-relevant status signals, no-verb signals whose 
 After that first inspect, the same leftover-idle pane uses exponential backoff capped at once per hour.
 A dead+done or dead+paused pane stays silent after classification, never auto-teardown, and at most unbinds its window mapping.
 A leftover held window stays on the open-work list after that inspect and does not re-enter the wake channel.
-Once per day the watcher emits one leftover list for firstmate (task, age, last movement, where work sits).
+Once per day the watcher emits one leftover list of long-inactive panes for firstmate (task, age, last movement, where work sits).
+Firstmate brings the captain one decide-or-discard from that list, then cleans only discarded panes.
+The watcher never auto-teardowns unlanded work, and leftover notes younger than `FM_LEFTOVER_LIST_SECS` stay off the digest.
 `bin/fm-watch.sh` owns the stale and wedge contract.
 Repeated provably-working stale escalations on the same unchanged pane add an escalation count to the wake reason and, at `FM_WEDGE_DEMAND_INSPECT_COUNT`, a `demand-deep-inspection` marker.
 A pane holding a file newer than the start of its own quiet window, anywhere in the worktree recorded for that task, is deferred instead of escalated, because a crew writing source, then tests, then documentation behind a static pane is liveness that neither pane quietness nor the run step can show.

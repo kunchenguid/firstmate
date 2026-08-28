@@ -10,7 +10,8 @@
 # provably-working stale panes absorbed-then-escalated past the threshold,
 # leftover idle inspected once then exponential-backoff capped at once per hour,
 # dead+done/dead+paused silent after classify with at most an unbind, leftover
-# done/held windows not re-rung even when the pause cadence is due, terminal-looking stale status lines
+# done/held windows not re-rung even when the pause cadence is due, a daily leftover
+# list of long-inactive panes for one decide-or-discard without auto-teardown, terminal-looking stale status lines
 # overridden by an active run, the heartbeat
 # backstop fail-safe, and afk coherence (no double-triage while the away-mode
 # daemon owns supervision).
@@ -107,6 +108,14 @@ wait_poll_cycle() {  # <state> <pid> [limit-ticks]
 # it is still starting and reports a spurious "did not surface" failure. A
 # generous budget can only remove that false negative - a watcher that never
 # exits still fails the assertion when the budget runs out.
+# Drop lock and downtime leftovers so a follow-up watcher in the same case is a
+# fresh cycle, not crash recovery after the previous process was reaped.
+clear_watcher_cycle() {  # <state>
+  local state=$1
+  rm -rf "$state/.watch.lock"
+  rm -f "$state/.watcher-down"
+}
+
 # After an inspect-and-ack, re-arm with a 1s escalate threshold and a short
 # pause cadence and complete two poll cycles. The same unchanged idle hash must
 # not grow a wedge timer or queue another stale wake. Used by leftover-idle,
@@ -115,6 +124,7 @@ wait_poll_cycle() {  # <state> <pid> [limit-ticks]
 # only in a long live run.
 assert_inspected_idle_stays_quiet() {  # <state> <fakebin> <out> <window> <key> <capture-file> <fail-label>
   local state=$1 fakebin=$2 out=$3 window=$4 key=$5 capture_file=$6 label=$7 pid wakes
+  clear_watcher_cycle "$state"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
@@ -142,6 +152,7 @@ assert_inspected_idle_stays_quiet() {  # <state> <fakebin> <out> <window> <key> 
 # idle that re-queues every 25s (or every STALE_ESCALATE_SECS=1) fails here.
 assert_idle_does_not_requeue_on_25s() {  # <state> <fakebin> <out> <window> <key> <capture-file> <fail-label>
   local state=$1 fakebin=$2 out=$3 window=$4 key=$5 capture_file=$6 label=$7 pid wakes back
+  clear_watcher_cycle "$state"
   [ -e "$state/.idle-last-$key" ] || date +%s > "$state/.idle-last-$key"
   back=$(( $(date +%s) - 25 ))
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$state/.idle-last-$key"
@@ -1127,14 +1138,17 @@ test_inspected_idle_does_not_requeue_stale_wakes() {
   pass "an already-inspected leftover idle, dead pane, or leftover done/held window stays quiet on the same hash"
 }
 
-# Once per day the watcher emits one leftover list for firstmate, not a per-pane
-# stale wake. A second poll the same day must not scream again.
+# Once per day the watcher emits one leftover list of long-inactive panes for
+# firstmate, not a per-pane stale wake. Young leftover notes stay off that
+# digest. The payload is one decide-or-discard. A second poll the same day must
+# not scream again. Emitting the list never teardowns unlanded copies.
 test_daily_leftover_list_emits_once() {
-  local dir state fakebin out capture_file window key pane_hash sig pid back
+  local dir state fakebin out capture_file window key pane_hash sig pid back note
   dir=$(make_case leftover-list-daily); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
   window="test:fm-leftover-list"
   mkdir -p "$dir/wt"
+  printf 'keep-me\n' > "$dir/wt/keep-me"
   printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$dir/wt" > "$state/leftover-list.meta"
   printf 'working: leftover quiet\n' > "$state/leftover-list.status"
   printf 'idle leftover pane' > "$capture_file"
@@ -1150,11 +1164,25 @@ test_daily_leftover_list_emits_once() {
   pid=$!
   wait_for_exit "$pid" 100 || fail "leftover idle did not surface on first inspect"
   ack_stopped_cycle "$state" || fail "could not acknowledge leftover idle before the daily list"
-  [ -f "$state/.leftover-task-leftover-list" ] || fail "leftover idle inspect did not record a leftover note"
+  note="$state/.leftover-task-leftover-list"
+  [ -f "$note" ] || fail "leftover idle inspect did not record a leftover note"
   touch "$state/.leftover-list"
   back=$(( $(date +%s) - 90000 ))
-  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$state/.leftover-list"
-  else touch -m -d "@$back" "$state/.leftover-list"; fi
+  set_mtime "$back" "$state/.leftover-list"
+  clear_watcher_cycle "$state"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_IDLE_BACKOFF_SECS=3600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"
+    fail "a young leftover note woke the daily leftover list: $(cat "$out")"
+  fi
+  grep -F "leftover list" "$out" >/dev/null && { reap "$pid"; fail "a young leftover note was treated as long-inactive: $(cat "$out")"; }
+  reap "$pid"
+  set_mtime "$back" "$note"
+  clear_watcher_cycle "$state"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_IDLE_BACKOFF_SECS=3600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -1162,11 +1190,16 @@ test_daily_leftover_list_emits_once() {
   pid=$!
   wait_for_exit "$pid" 100 || fail "daily leftover list did not wake firstmate"
   grep -F "check: leftover list:" "$out" >/dev/null || fail "daily leftover list did not print the digest: $(cat "$out")"
+  grep -Fx "decide-or-discard" "$out" >/dev/null || fail "daily leftover list omitted decide-or-discard: $(cat "$out")"
   grep -F "leftover-list age=" "$out" >/dev/null || fail "daily leftover list omitted the task name/age: $(cat "$out")"
   grep -F "last-movement=" "$out" >/dev/null || fail "daily leftover list omitted last movement: $(cat "$out")"
   grep -F "work-sits=$dir/wt" "$out" >/dev/null || fail "daily leftover list omitted where work sits: $(cat "$out")"
   grep -F "possible wedge" "$out" >/dev/null && fail "daily leftover list was mislabeled a wedge"
+  [ -f "$dir/wt/keep-me" ] || fail "daily leftover list deleted unlanded copies"
+  [ -f "$state/leftover-list.meta" ] || fail "daily leftover list deleted the task meta"
+  grep '^worktree=' "$state/leftover-list.meta" >/dev/null || fail "daily leftover list stripped the worktree mapping"
   ack_stopped_cycle "$state" || fail "could not acknowledge the daily leftover list"
+  clear_watcher_cycle "$state"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_IDLE_BACKOFF_SECS=3600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -1179,7 +1212,7 @@ test_daily_leftover_list_emits_once() {
   grep -F "leftover list" "$out" >/dev/null && { reap "$pid"; fail "daily leftover list screamed twice the same day: $(cat "$out")"; }
   reap "$pid"
   unset FM_FAKE_CREW_STATE
-  pass "once per day the watcher emits one leftover list for firstmate"
+  pass "once per day the watcher emits one leftover list of long-inactive panes for a decide-or-discard"
 }
 
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long

@@ -35,10 +35,17 @@
 #                          never tears down, never deletes unlanded copies, and at
 #                          most unbinds the window mapping. A leftover held window
 #                          stays on the open-work list and off the wake channel.
-#                          Once per day one leftover list is emitted for firstmate
-#                          (task, age, last movement, where work sits), not a
-#                          per-pane scream. A secondmate idle stays skipped as
-#                          healthy. A live declared paused: wait keeps its bounded
+#                          Once per day one leftover list of long-inactive panes
+#                          is emitted for firstmate (task, age, last movement,
+#                          where work sits), not a per-pane scream. Firstmate
+#                          brings the captain one decide-or-discard from that
+#                          list, then cleans only discarded panes. Agents return
+#                          and rebuilding context costs more, so this is not an
+#                          aggressive sweep: leftover notes younger than
+#                          LEFTOVER_LIST_SECS stay off the digest. This path
+#                          never auto-teardowns unlanded work. A secondmate idle
+#                          stays skipped as healthy. A live declared paused: wait
+#                          keeps its bounded
 #                          recheck. A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
 #                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
@@ -94,8 +101,13 @@
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
 #   check: leftover list: <rows>
-#                          once per day, one firstmate-facing digest of leftover
-#                          tasks (name, age, last movement, where work sits)
+#                          once per day, one firstmate-facing digest of long-inactive
+#                          leftover tasks (name, age, last movement, where work sits).
+#                          The payload starts with decide-or-discard. Firstmate
+#                          brings the captain that one call, then cleans only
+#                          discarded panes. This path never auto-teardowns
+#                          unlanded work. Leftover notes younger than
+#                          LEFTOVER_LIST_SECS stay off the digest.
 #   check: secondmate wake-loop stalled: mate=<id> row=<seq> age=<seconds>s
 #                          the oldest valid row in an endpoint-recorded local
 #                          secondmate home's durable wake queue exceeded
@@ -241,7 +253,9 @@ PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT
 # capped at once per hour. Not the wedge timer and not the pause cadence.
 IDLE_BACKOFF_SECS=${FM_IDLE_BACKOFF_SECS:-60}
 IDLE_BACKOFF_CAP_SECS=${FM_IDLE_BACKOFF_CAP_SECS:-3600}
-# One leftover list per day for firstmate, not a per-pane stale wake.
+# One leftover list per day of long-inactive leftover notes for firstmate.
+# Notes younger than this stay off the digest so returning agents keep context.
+# The digest is one decide-or-discard; this path never auto-teardowns.
 LEFTOVER_LIST_SECS=${FM_LEFTOVER_LIST_SECS:-86400}
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
 # connect/subscribe failure) before the push fast-path is disabled for the rest
@@ -800,9 +814,12 @@ leftover_idle_backoff_check() {  # <window>
   wake "stale: $win"
 }
 
-# One leftover list per day. Missing marker starts the clock without waking.
+# One leftover list per day of long-inactive leftover notes.
+# Missing marker starts the clock without waking.
+# Notes younger than LEFTOVER_LIST_SECS stay off the digest so agents can return.
+# The digest is one decide-or-discard for firstmate; this path never teardowns.
 leftover_list_tick() {
-  local marker="$STATE/.leftover-list" rows='' f task last sits age reason
+  local marker="$STATE/.leftover-list" rows='' f task last sits age reason any=0
   afk_present && return 0
   if [ ! -e "$marker" ]; then
     touch "$marker"
@@ -811,16 +828,21 @@ leftover_list_tick() {
   [ "$(age_of "$marker")" -ge "$LEFTOVER_LIST_SECS" ] || return 0
   for f in "$STATE"/.leftover-task-*; do
     [ -e "$f" ] || continue
+    any=1
     task=$(grep '^task=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     last=$(grep '^last-movement=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     sits=$(grep '^work-sits=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     age=$(age_of "$f")
     [ -n "$task" ] || continue
+    [ "$age" -ge "$LEFTOVER_LIST_SECS" ] || continue
     rows="${rows}${task} age=${age}s last-movement=${last:-none} work-sits=${sits:-unknown}"$'\n'
   done
+  if [ -z "$rows" ]; then
+    [ "$any" -eq 0 ] && touch "$marker"
+    return 0
+  fi
   touch "$marker"
-  [ -n "$rows" ] || return 0
-  reason="check: leftover list:"$'\n'"$rows"
+  reason="check: leftover list:"$'\n'"decide-or-discard"$'\n'"$rows"
   fm_wake_append check leftover-list "$reason" || exit 1
   wake "$reason"
 }
