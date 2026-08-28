@@ -18,6 +18,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
 | `fm-bearings-snapshot.sh` | Project the fleet snapshot to the compact TOON bearings view; local-only unless `--include-prs` |
 | `fm-bearings-board.sh`   | Build and arm the stable interactive `/bearings lavish` fleet board                  |
+| `fm-secondmate-reconcile.sh` | Ask each secondmate to reconcile an inventory mismatch through its durable inbox, limited by a per-home cooldown |
 | `fm-update.sh`           | Fast-forward-only self-update of firstmate and local or remote secondmate homes       |
 | `fm-on.sh`               | Execute one tracked Firstmate command in a configured remote secondmate home, using its job worker except for the doctor bootstrap |
 | `fm-remote-job-lib.sh`   | Shared bounded remote job queue, worker readiness, LaunchAgent contract, and filesystem-composed PATH |
@@ -88,7 +89,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-resource-sample.sh`  | One cheap pass sampling each agent's RSS and the machine's memory pressure; detects a vanished agent |
 | `fm-agent-postmortem.sh` | Record why a task's agent process died: exit signal, jetsam/kernel termination reports, memory picture |
 | `fm-resource-lib.sh`     | Shared memory-snapshot, agent-pid resolution, and sample-log primitives              |
-| `fm-nm-run-lib.sh`       | Shared branch-and-code-identity attribution for no-mistakes runs                    |
+| `fm-nm-run-lib.sh`       | Single owner of shared no-mistakes run-attribution primitives and rules             |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
 | `fm-timeout-lib.sh`      | Single owner of hard-bounded command execution and its fallback watchdog |
 | `fm-timing-lib.sh`       | Single owner of the deferred network stage's per-step elapsed-time records, inert unless a run asks for them |
@@ -129,7 +130,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-poll-lib.sh`         | Provide the PR/MR poll judgement used by the poll extension and compatibility shims, and end a task's watch run once its PR/MR lands |
 | `fm-poll-extra.sh`       | Answer an armed poll's extra questions about this task's no-mistakes watch run       |
 | `fm-nm-orphan-scan.sh`   | Report a no-mistakes run this home armed that is parked with no live task left to answer it |
-| `fm-pr-merge.sh`         | Record PR/MR metadata, then guardedly merge a canonical GitHub, GitLab, or Codebase URL through its provider |
+| `fm-pr-merge.sh`         | Record PR/MR metadata, guardedly merge a canonical GitHub, GitLab, or Codebase URL, then refuse an outcome it cannot prove landed or queued |
+| `fm-merge-outcome-lib.sh` | Publish a confirmed merge's durable, role-routed supervision outcome                 |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, conclude a run parked with nobody left to answer it, end the watch run whose PR has landed, retire secondmate homes, close the task's backlog row |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
