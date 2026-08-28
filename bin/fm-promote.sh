@@ -37,6 +37,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-tangle-lib.sh
+. "$SCRIPT_DIR/fm-tangle-lib.sh"
 
 MODE=
 YOLO=
@@ -120,24 +122,26 @@ fm_lock_acquire_wait "$META_LOCK"
 META_LOCK_HELD=1
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
-if [ "$MODE" != local-only ]; then
-  PROMOTE_WT=$(fmx_meta_get "$META" worktree)
-  [ -n "$PROMOTE_WT" ] || {
-    echo "error: scout task $ID has no recorded worktree; refusing to create a PR-backed task contract" >&2
-    exit 1
-  }
-  PROMOTE_REMOTES=$(git -C "$PROMOTE_WT" remote 2>/dev/null) || {
-    echo "error: could not inspect configured remotes for scout worktree '$PROMOTE_WT'; refusing to create a PR-backed task contract" >&2
-    exit 1
-  }
-  if ! printf '%s\n' "$PROMOTE_REMOTES" | grep -qx origin; then
-    echo "error: scout worktree '$PROMOTE_WT' has no origin remote; refusing to create a PR-backed task contract" >&2
-    exit 1
-  fi
-  if ! git -C "$PROMOTE_WT" fetch --quiet origin; then
-    echo "error: could not fetch origin for scout worktree '$PROMOTE_WT'; refusing to create a PR-backed task contract" >&2
-    exit 1
-  fi
+PROMOTE_WT=$(fmx_meta_get "$META" worktree)
+PROMOTE_PROJECT=$(fmx_meta_get "$META" project)
+[ -n "$PROMOTE_WT" ] || {
+  echo "error: scout task $ID has no recorded worktree; refusing to create a delivery contract" >&2
+  exit 1
+}
+[ -n "$PROMOTE_PROJECT" ] || {
+  echo "error: scout task $ID has no recorded authoritative project; refusing to create a delivery contract" >&2
+  exit 1
+}
+PROMOTE_ALLOW_REMOTELESS=no
+PROMOTE_REQUIRE_TASK_ORIGIN=yes
+if [ "$MODE" = local-only ]; then
+  PROMOTE_ALLOW_REMOTELESS=yes
+  PROMOTE_REQUIRE_TASK_ORIGIN=no
+fi
+if ! fm_project_base_resolve "$PROMOTE_PROJECT" "$PROMOTE_WT" \
+    "$PROMOTE_ALLOW_REMOTELESS" "$PROMOTE_REQUIRE_TASK_ORIGIN"; then
+  echo "error: $FM_PROJECT_BASE_ERROR; refusing to create a $MODE task contract" >&2
+  exit 1
 fi
 
 # The promoted worker must receive the same delivery contract an ordinary ship

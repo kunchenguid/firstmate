@@ -27,6 +27,8 @@
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-tangle-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-tangle-lib.sh"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -35,24 +37,11 @@ first_line() {
 }
 
 local_default_branch() {
-  local dir=$1 branch
-  for branch in main master; do
-    if git -C "$dir" show-ref --verify --quiet "refs/heads/$branch"; then
-      echo "$branch"
-      return 0
-    fi
-  done
-  return 1
+  fm_local_default_branch "$@"
 }
 
 default_branch() {
-  local dir=$1 ref
-  ref=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
-    return 0
-  fi
-  local_default_branch "$dir"
+  fm_default_branch "$@"
 }
 
 # Resolve the PRIMARY checkout's current default-branch commit - the local-HEAD

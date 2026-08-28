@@ -664,6 +664,30 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
+test_remoteless_local_cleanup_ignores_stale_origin_head() {
+  local case_dir rc wt_head initial
+  case_dir=$(make_case remoteless-stale-default)
+  write_meta "$case_dir" local-only ship
+  initial=$(git -C "$case_dir/project" rev-parse main)
+  wt_commit "$case_dir" "merged remote-less work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" remote remove origin
+  git -C "$case_dir/project" branch trunk "$initial"
+  git -C "$case_dir/project" update-ref refs/remotes/origin/trunk "$initial"
+  git -C "$case_dir/project" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/trunk
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "remote-less stale-default: cleanup should recognize work landed on local main"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "remote-less stale-default: teardown selected stale origin/HEAD"
+  pass "local-only teardown ignores stale remote-tracking defaults without remotes"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -2610,6 +2634,7 @@ test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_remoteless_local_cleanup_ignores_stale_origin_head
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed

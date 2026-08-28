@@ -8,8 +8,9 @@
 #   (a) pr= + reachable pr_head=, no remote pull ref -> offline fallback to recorded SHA
 #   (b) pr= without pr_head= -> fetch refs/pull/<n>/head and diff that
 #   (c) pr= absent -> unchanged worktree-branch diff
-#   (d) pr= present but PR head unreachable -> fallback to local branch + warning
-#   (e) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
+#   (d) PR-backed task with no origin -> refuse the unverified base
+#   (e) remote-less local-only task with stale origin/HEAD -> compare against local main
+#   (f) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
 #       (this is the class that bit reviewers holding merges over "missing" fixes)
 set -u
 
@@ -71,6 +72,7 @@ run_review_diff() {
   local case_dir=$1
   shift
   FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$case_dir/home" \
   FM_STATE_OVERRIDE="$case_dir/state" \
     "$REVIEW_DIFF" "$@"
 }
@@ -148,29 +150,62 @@ test_no_pr_meta_uses_local_branch() {
   pass "fm-review-diff without pr= keeps the worktree-branch diff"
 }
 
-test_unreachable_pr_head_falls_back_with_warning() {
-  local case_dir out err
-  case_dir=$(make_case fetch-fallback)
+test_pr_backed_review_refuses_without_origin() {
+  local case_dir out status
+  case_dir=$(make_case fetch-refusal)
   stale_and_pr_commits "$case_dir"
   git -C "$case_dir/wt" remote remove origin
   write_task_meta "$case_dir" \
+    "kind=ship" \
+    "mode=no-mistakes" \
     "pr=https://github.com/example/repo/pull/9" \
     "pr_head=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
-  set +e
-  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
-  set -e
-  err=$(cat "$case_dir/stderr")
+  out=$(run_review_diff "$case_dir" task-x1 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "PR-backed review fell back to local history without origin"
+  assert_contains "$out" 'requires a valid origin' \
+    "PR-backed review did not explain its missing-origin refusal"
+  pass "fm-review-diff refuses a PR-backed review without valid origin"
+}
 
-  assert_contains "$err" 'warning: PR head unavailable; diff may lag the open PR' \
-    "fetch-fallback: must warn when PR head cannot be resolved"
-  assert_contains "$out" '+stale-local' "fetch-fallback: should fall back to the local branch diff"
-  assert_not_contains "$out" '+pr-fixed' "fetch-fallback: must not invent a PR head diff offline"
-  pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
+test_remoteless_review_ignores_stale_origin_head() {
+  local case_dir out initial
+  case_dir="$TMP_ROOT/remoteless-stale-default"
+  mkdir -p "$case_dir/state" "$case_dir/home/data"
+  printf '%s\n' '- project [local-only] - fixture (added 2026-01-01)' \
+    > "$case_dir/home/data/projects.md"
+  git init -q -b main "$case_dir/project"
+  printf 'base\n' > "$case_dir/project/feature.txt"
+  git -C "$case_dir/project" add feature.txt
+  git -C "$case_dir/project" commit -qm baseline
+  initial=$(git -C "$case_dir/project" rev-parse HEAD)
+  git -C "$case_dir/project" branch trunk "$initial"
+  git -C "$case_dir/project" update-ref refs/remotes/origin/trunk "$initial"
+  git -C "$case_dir/project" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/trunk
+  printf 'current main\n' > "$case_dir/project/main.txt"
+  git -C "$case_dir/project" add main.txt
+  git -C "$case_dir/project" commit -qm main-advance
+  git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
+  printf 'local change\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm local-change
+  write_task_meta "$case_dir" "kind=ship" "mode=local-only"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr") \
+    || fail "remote-less review failed: $(cat "$case_dir/stderr")"
+  assert_contains "$out" 'diff base: main' \
+    "remote-less review selected stale origin/HEAD instead of main"
+  assert_contains "$out" '+local change' \
+    "remote-less review omitted the task change"
+  assert_not_contains "$out" '+current main' \
+    "remote-less review compared against stale trunk"
+  pass "fm-review-diff uses the local default when stale remote refs remain"
 }
 
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
-test_unreachable_pr_head_falls_back_with_warning
+test_pr_backed_review_refuses_without_origin
+test_remoteless_review_ignores_stale_origin_head

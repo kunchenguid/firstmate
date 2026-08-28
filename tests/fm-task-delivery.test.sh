@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Behavior tests for the explicit per-task delivery contract (AGENTS.md section 7)
-# across bin/fm-spawn.sh, bin/fm-promote.sh, and bin/fm-project-mode.sh.
+# across spawn, promotion, local landing, and project-mode resolution.
 #
 # A ship task's delivery mode and yolo posture are firstmate's decision at intake,
 # so the tools refuse to guess: the spawn and a scout promotion require both flags,
@@ -21,6 +21,7 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 BRIEF="$ROOT/bin/fm-brief.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 PROJECT_MODE="$ROOT/bin/fm-project-mode.sh"
+MERGE_LOCAL="$ROOT/bin/fm-merge-local.sh"
 TMP_ROOT=$(fm_test_tmproot fm-task-delivery)
 
 # A home with one registered project, one project directory, and a fake tmux that
@@ -402,14 +403,83 @@ test_promote_requires_origin_for_pr_backed_contracts() {
     "PR-backed promotion did not verify that origin was fetchable"
   assert_grep 'kind=scout' "$meta" "failing-origin refusal changed the scout contract"
 
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PROMOTE" promote-origin-d2 --mode local-only --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "local-only promotion treated a failing configured origin as remote-less"
+  assert_contains "$out" "could not fetch origin" \
+    "local-only promotion bypassed validation of its configured origin"
+  assert_grep 'kind=scout' "$meta" "local-only failing-origin refusal changed the scout contract"
+
+  git clone --quiet --bare "$project" "$TMP_ROOT/promote-origin/unresolved.git"
+  git -C "$TMP_ROOT/promote-origin/unresolved.git" symbolic-ref HEAD refs/heads/missing-default
+  git -C "$project" remote set-url origin "file://$TMP_ROOT/promote-origin/unresolved.git"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PROMOTE" promote-origin-d2 --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion accepted an origin whose HEAD names no branch"
+  assert_contains "$out" "could not resolve origin's current default branch" \
+    "PR-backed promotion did not validate origin's advertised default branch"
+  assert_grep 'kind=scout' "$meta" "unresolved-default refusal changed the scout contract"
+
   git -C "$project" remote remove origin
+  git -C "$project" config extensions.worktreeConfig true
+  git -C "$project" config --worktree remote.backup.url "file://$TMP_ROOT/promote-origin/backup.git"
+  git -C "$project" config --worktree remote.backup.fetch '+refs/heads/*:refs/remotes/backup/*'
+  [ "$(git -C "$project" remote)" = backup ] \
+    || fail "authoritative-project-only remote fixture was not configured"
+  [ -z "$(git -C "$worktree" remote)" ] \
+    || fail "authoritative-project-only remote leaked into the task worktree"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PROMOTE" promote-origin-d2 --mode local-only --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "local-only promotion used fallback without proving the project had no remotes"
+  assert_contains "$out" "configured remotes but no origin" \
+    "local-only promotion did not inspect the authoritative project's remotes"
+  assert_grep 'kind=scout' "$meta" "project-remote refusal changed the scout contract"
+  git -C "$project" config --worktree --remove-section remote.backup
+
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     "$PROMOTE" promote-origin-d2 --mode local-only --yolo off 2>&1)
   status=$?
   expect_code 0 "$status" "local-only promotion should not require origin"
   assert_grep 'kind=ship' "$meta" "remote-less local-only promotion did not restore ship protection"
   assert_grep 'mode=local-only' "$meta" "remote-less local-only promotion did not record its contract"
-  pass "fm-promote: only PR-backed promotions require a fetchable origin"
+  pass "fm-promote: every configured origin is validated and remote-less fallback proves both repositories"
+}
+
+test_local_landing_ignores_stale_remote_tracking_default() {
+  local home project worktree meta out initial
+  home="$TMP_ROOT/merge-local/home"
+  project="$TMP_ROOT/merge-local/project"
+  worktree="$TMP_ROOT/merge-local/worktree"
+  mkdir -p "$home/state"
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  initial=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" branch trunk "$initial"
+  git -C "$project" update-ref refs/remotes/origin/trunk "$initial"
+  git -C "$project" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/trunk
+  git -C "$project" worktree add --quiet -b fm/merge-local-e1 "$worktree" main
+  printf 'landed locally\n' > "$worktree/local.txt"
+  git -C "$worktree" add local.txt
+  git -C "$worktree" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm local-change
+  meta="$home/state/merge-local-e1.meta"
+  printf 'window=fm-merge-local-e1\nkind=ship\nmode=local-only\nworktree=%s\nproject=%s\n' \
+    "$worktree" "$project" > "$meta"
+
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$MERGE_LOCAL" merge-local-e1 2>&1) \
+    || fail "remote-less local landing failed: $out"
+  assert_contains "$out" "into local main" \
+    "local landing selected the stale remote-tracking default"
+  assert_grep 'landed locally' "$project/local.txt" \
+    "local landing did not fast-forward main"
+  [ "$(git -C "$project" rev-parse trunk)" = "$initial" ] \
+    || fail "local landing moved stale trunk"
+  pass "fm-merge-local: remote-less landing ignores stale remote-tracking defaults"
 }
 
 # The registry parser survives for the mechanical consumers only. It accepts the
@@ -454,5 +524,6 @@ test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promotion_delivers_the_real_definition_of_done
 test_promote_requires_origin_for_pr_backed_contracts
+test_local_landing_ignores_stale_remote_tracking_default
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"

@@ -18,6 +18,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-tangle-lib.sh
+. "$SCRIPT_DIR/fm-tangle-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
@@ -49,23 +51,21 @@ PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 [ -d "$WT" ] || { echo "error: worktree for task $ID is missing: $WT" >&2; exit 1; }
 [ -d "$PROJ" ] || { echo "error: project for task $ID is missing: $PROJ" >&2; exit 1; }
 
-default_branch() {
-  local ref branch
-  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
-    return 0
-  fi
-  for branch in main master; do
-    if git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
-      echo "$branch"
-      return 0
-    fi
-  done
-  return 1
-}
-
-DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+TASK_KIND=$(grep '^kind=' "$META" | tail -1 | cut -d= -f2- || true)
+[ -n "$TASK_KIND" ] || TASK_KIND=ship
+TASK_MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
+ALLOW_REMOTELESS=no
+if [ "$TASK_KIND" = scout ] || [ "$TASK_MODE" = local-only ]; then
+  PROJECT_POSTURE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$(basename "$PROJ")" 2>/dev/null | cut -d' ' -f1) || PROJECT_POSTURE=
+  [ "$PROJECT_POSTURE" != local-only ] || ALLOW_REMOTELESS=yes
+fi
+REQUIRE_TASK_ORIGIN=yes
+[ "$TASK_MODE" != local-only ] || REQUIRE_TASK_ORIGIN=no
+if ! fm_project_base_resolve "$PROJ" "$WT" "$ALLOW_REMOTELESS" "$REQUIRE_TASK_ORIGIN"; then
+  echo "error: $FM_PROJECT_BASE_ERROR; refusing to review against an unverified base" >&2
+  exit 1
+fi
+DEFAULT=$FM_PROJECT_BASE_BRANCH
 
 BRANCH="fm/$ID"
 if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
@@ -133,26 +133,24 @@ if [ -n "$PR_URL" ]; then
   fi
 fi
 
-if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
-  # Update the remote-tracking ref itself; a bare single-branch fetch can leave
-  # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
-  git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
+BASE_REF=$FM_PROJECT_BASE_COMMIT
+if [ "$FM_PROJECT_BASE_KIND" = origin ]; then
   BASE="origin/$DEFAULT"
 else
   BASE="$DEFAULT"
 fi
 
-git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
+git -C "$WT" rev-parse --verify --quiet "$BASE_REF^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
 git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
 
 echo "diff base: $BASE"
-if git -C "$WT" diff --quiet "$BASE...$COMPARE_REF" --; then
+if git -C "$WT" diff --quiet "$BASE_REF...$COMPARE_REF" --; then
   echo "no changes vs $BASE"
   exit 0
 fi
 
-git -C "$WT" diff --stat "$BASE...$COMPARE_REF" --
+git -C "$WT" diff --stat "$BASE_REF...$COMPARE_REF" --
 if ! "$STAT_ONLY"; then
   echo
-  git -C "$WT" diff "$BASE...$COMPARE_REF" --
+  git -C "$WT" diff "$BASE_REF...$COMPARE_REF" --
 fi
