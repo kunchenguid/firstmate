@@ -829,10 +829,13 @@ test_orphaned_sidecar_escalates_instead_of_going_silent() {
 
 # THE REGRESSION for a surfaced orphan that could not be retired: its marker
 # is written first, and if the move into handled/orphaned/ then fails the
-# sidecar stays in the inbox root. The scan must skip it by its marker, so it
-# neither re-escalates nor hides a newer orphan behind it on every later poll.
+# sidecar stays in the inbox root. The marker alone must retire it from every
+# reader: it neither re-escalates nor hides a newer orphan behind it on every
+# later poll, and it must not feed the pending-answer set, or the same key
+# reopened later would read as already answered and still unread. Later polls
+# retry the move so the root heals once it can.
 test_surfaced_orphan_left_in_root_never_shadows_a_newer_orphan() {
-  local home state rec1 rec2 sidecar1 sidecar2 out
+  local home state rec1 rec2 sidecar1 sidecar2 out pending
   home="$TMP_ROOT/orphan-shadow"; state="$home/state"; mkdir -p "$state" "$home/data"
   printf 'needs-decision [key=first]: pick\nneeds-decision [key=second]: pick\n' > "$state/t1.status"
   rec1=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "answer one")
@@ -840,16 +843,30 @@ test_surfaced_orphan_left_in_root_never_shadows_a_newer_orphan() {
   rec2=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "answer two")
   sidecar2=$(inbox_lib "$state" fm_task_inbox_defer_resolution "$rec2" "answer two" "second" "")
   rm -f "$rec1"
-  # Marker written, retirement failed: the surfaced orphan is still in the root.
-  printf '%s\n' "${sidecar1##*/}" > "$state/t1.inbox/.orphan-escalated"
+  # A regular file on the quarantine path makes every retirement move fail.
+  : > "$state/t1.inbox/handled/orphaned"
+  out=$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$out" = "escalate 0 orphaned $sidecar1" ] || fail "the orphan should escalate first: $out"
+  inbox_lib "$state" fm_task_inbox_record_orphan_escalated "$state" t1 "$sidecar1" \
+    && fail "a retirement whose move failed must be returned, not swallowed"
+  [ -e "$sidecar1" ] || fail "the failed retirement should have left the surfaced orphan in the root"
   out=$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
   [ "$out" = quiet ] || fail "a surfaced orphan must not re-escalate while it waits for retirement: $out"
+  pending=$(inbox_lib "$state" fm_task_inbox_pending_answer_keys "$state" t1)
+  [ "$pending" = second ] || fail "a surfaced orphan still in the root must not feed the pending-answer set (only the genuinely pending second answer belongs there): $pending"
 
   rm -f "$rec2"
   out=$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
   [ "$out" = "escalate 0 orphaned $sidecar2" ] \
     || fail "a newer orphan was hidden behind a surfaced one still in the root: $out"
-  pass "inbox: a surfaced orphan that could not be retired never shadows a newer orphan"
+
+  # Once the move can succeed, the next poll retires the stuck orphan itself.
+  rm -f "$state/t1.inbox/handled/orphaned"
+  inbox_lib "$state" fm_task_inbox_due_action "$state" t1 >/dev/null
+  [ ! -e "$sidecar1" ] || fail "a later poll should retry a surfaced orphan's retirement"
+  [ -f "$state/t1.inbox/handled/orphaned/001.resolve" ] \
+    || fail "the retried retirement should set the orphan aside under handled/orphaned/:"$'\n'"$(ls -laR "$state/t1.inbox")"
+  pass "inbox: a surfaced orphan that could not be retired never shadows a newer orphan, never reads pending, and retires on a later poll"
 }
 
 # A captain-held task the sidecar answers, driven through the REAL watcher in

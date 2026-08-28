@@ -54,7 +54,9 @@
 #   <task>.inbox/.orphan-escalated
 #                              append-only names of orphaned sidecars already
 #                              surfaced (the ladder's orphaned cause), so each
-#                              escalates exactly once
+#                              escalates exactly once; a name here retires its
+#                              sidecar for every reader even while the move
+#                              below is still owed, and later polls retry it
 #   <task>.inbox/handled/orphaned/NNN.resolve
 #                              an escalated orphaned sidecar, set aside there
 #                              so it never reads as a pending answer again
@@ -131,7 +133,9 @@
 #             own. Surfaced whatever the pane is doing, once per sidecar, and
 #             then set aside under handled/orphaned/ so it never reads as a
 #             pending answer again (_fm_task_inbox_orphaned_sidecar,
-#             fm_task_inbox_record_orphan_escalated).
+#             fm_task_inbox_record_orphan_escalated); the surfaced marker
+#             alone already retires it from every reader, so a retirement
+#             that fails leaves nothing reading as pending or unseen.
 # The caller owns the busy check (a busy pane just waits for the ring ladder -
 # the record is durable and the worker reaches a turn boundary) and the wake
 # emission; this library owns only the schedule. If attempt bookkeeping cannot
@@ -510,17 +514,17 @@ fm_task_inbox_is_acknowledged() {  # <record-path>
 # under handled/orphaned/ (fm_task_inbox_record_orphan_escalated) so a closure
 # firstmate then settles by hand cannot keep feeding
 # fm_task_inbox_pending_answer_keys and mislabel the same key, reopened later,
-# as already answered. A sidecar already named in .orphan-escalated is skipped
-# here, in the scan itself: an orphan whose marker was written but whose
-# retirement into handled/orphaned/ failed would otherwise stay the oldest
-# match forever and hide every later orphan behind it. Oldest by sequence;
-# empty when none.
+# as already answered. A sidecar already surfaced
+# (_fm_task_inbox_sidecar_is_surfaced_orphan) is skipped here, in the scan
+# itself: an orphan whose marker was written but whose retirement into
+# handled/orphaned/ failed would otherwise stay the oldest match forever and
+# hide every later orphan behind it. Oldest by sequence; empty when none.
 _fm_task_inbox_orphaned_sidecar() {  # <state-dir> <task-id>
   local dir f rec best='' best_n=0 n
   dir=$(fm_task_inbox_dir "$1" "$2")
   for f in "$dir"/.*.resolve; do
     [ -e "$f" ] || continue
-    ! grep -Fxq -- "${f##*/}" "$dir/.orphan-escalated" 2>/dev/null || continue
+    ! _fm_task_inbox_sidecar_is_surfaced_orphan "$f" || continue
     rec=$(fm_task_inbox_resolution_record "$f")
     [ ! -e "$rec" ] || continue
     [ ! -f "$dir/handled/${rec##*/}" ] || continue
@@ -534,13 +538,26 @@ _fm_task_inbox_orphaned_sidecar() {  # <state-dir> <task-id>
   printf '%s' "$best"
 }
 
+# 0 when <sidecar-path> is an orphan the ladder has already surfaced: its name
+# is in the inbox's .orphan-escalated marker. The marker, not the move into
+# handled/orphaned/, is what retires the sidecar: every reader treats a
+# surfaced orphan as neither pending nor acknowledged from the moment the
+# marker is durable, so a retirement whose move failed cannot leave the
+# sidecar reading as a still-unread answer for its keys.
+_fm_task_inbox_sidecar_is_surfaced_orphan() {  # <sidecar-path>
+  grep -Fxq -- "${1##*/}" "${1%/*}/.orphan-escalated" 2>/dev/null
+}
+
 # Sidecars in this task's inbox, in sequence order, filtered by whether their
-# record has been acknowledged. One path per line; silent when there are none.
+# record has been acknowledged. A surfaced orphan is neither: it is skipped
+# whether or not its retirement out of the root has succeeded yet. One path per
+# line; silent when there are none.
 _fm_task_inbox_resolutions() {  # <state-dir> <task-id> <acknowledged|pending>
   local dir want=$3 f rec
   dir=$(fm_task_inbox_dir "$1" "$2")
   for f in "$dir"/.*.resolve; do
     [ -e "$f" ] || continue
+    ! _fm_task_inbox_sidecar_is_surfaced_orphan "$f" || continue
     rec=$(fm_task_inbox_resolution_record "$f")
     if fm_task_inbox_is_acknowledged "$rec"; then
       [ "$want" = acknowledged ] || continue
@@ -760,6 +777,7 @@ fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
 fm_task_inbox_due_action() {  # <state-dir> <task-id>
   local dir oldest base age now grace max ladder rec_base count last blocked orphan
   dir=$(fm_task_inbox_dir "$1" "$2")
+  _fm_task_inbox_retire_surfaced_orphans "$dir"
   # Checked before the .msg-based scan below, and independently of it: an
   # orphaned sidecar's bound .msg is gone, so fm_task_inbox_oldest_unhandled
   # can never see it even while it is the only unresolved thing in this inbox
@@ -887,17 +905,27 @@ fm_task_inbox_record_escalated() {  # <state-dir> <task-id> <record-path>
 # to settle it by hand, and left in the root it would keep reading as a
 # pending answer for its keys - so a later, genuine reopening of the same key
 # would be annotated as already answered and still unread. The marker stays
-# the dedupe of record: if the retirement itself fails, the orphan is still
-# surfaced exactly once, and the failure is returned so the caller can name it.
+# the dedupe of record and already retires the sidecar from every reader: if
+# the retirement itself fails, the orphan is still surfaced exactly once, the
+# failure is returned so the caller can name it, and fm_task_inbox_due_action
+# retries the move on later polls so the inbox root heals on its own.
 fm_task_inbox_record_orphan_escalated() {  # <state-dir> <task-id> <sidecar-path>
-  local dir sidecar=$3 base
+  local dir sidecar=$3
   dir=$(fm_task_inbox_dir "$1" "$2")
   [ -d "$dir" ] || return 0
-  base=${sidecar##*/}
-  if ! { printf '%s\n' "$base" >> "$dir/.orphan-escalated"; } 2>/dev/null; then
+  if ! { printf '%s\n' "${sidecar##*/}" >> "$dir/.orphan-escalated"; } 2>/dev/null; then
     [ -d "$dir" ] || return 0
     return 1
   fi
+  _fm_task_inbox_retire_orphan "$dir" "$sidecar"
+}
+
+# Move a surfaced orphan out of the inbox root into handled/orphaned/ and drop
+# its committed-identity ledger. A sidecar already gone is a quiet no-op, as
+# is a concurrently removed inbox; any other failure is returned.
+_fm_task_inbox_retire_orphan() {  # <inbox-dir> <sidecar-path>
+  local dir=$1 sidecar=$2 base
+  base=${sidecar##*/}
   [ -e "$sidecar" ] || return 0
   if ! mkdir -p "$dir/handled/orphaned" 2>/dev/null \
     || ! mv "$sidecar" "$dir/handled/orphaned/${base#.}" 2>/dev/null; then
@@ -905,4 +933,16 @@ fm_task_inbox_record_orphan_escalated() {  # <state-dir> <task-id> <sidecar-path
     return 1
   fi
   rm -f "$(_fm_task_inbox_resolution_committed_path "$sidecar")" 2>/dev/null || true
+}
+
+# Retry the retirement of every surfaced orphan still in the inbox root. The
+# marker already retired each one from every reader and its failure was
+# surfaced when first attempted, so a retry that fails again stays quiet.
+_fm_task_inbox_retire_surfaced_orphans() {  # <inbox-dir>
+  local dir=$1 f
+  for f in "$dir"/.*.resolve; do
+    [ -e "$f" ] || continue
+    _fm_task_inbox_sidecar_is_surfaced_orphan "$f" || continue
+    _fm_task_inbox_retire_orphan "$dir" "$f" || true
+  done
 }
