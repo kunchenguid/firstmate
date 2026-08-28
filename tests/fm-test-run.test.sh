@@ -224,23 +224,53 @@ test_changed_bin_reference_selects_per_script_not_per_family() {
 }
 
 test_empty_selection_emits_summary() {
-  local tmp repo out json rc
+  local tmp repo out json rc fake_bin real_git
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-empty.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
   printf 'documentation only\n' >"$repo/README.md"
   out=$(cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --json "$tmp/artifacts/timing.json" 2>"$tmp/err") \
     || fail "empty valid changed selection must pass"
-  [ "$out" = "FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0" ] \
-    || fail "empty selection summary is missing or non-deterministic: $out"
+  printf '%s\n' "$out" | grep -Eq \
+    '^FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=[0-9]+$' \
+    || fail "empty selection summary is missing or malformed: $out"
   json="$tmp/artifacts/timing.json"
   python3 -c '
 import json, sys
 doc = json.load(open(sys.argv[1]))
-assert doc["summary"] == {"duration_ms": 0, "failed": 0, "skipped_gate": 0, "total": 0}
+assert doc["summary"]["total"] == 0
+assert doc["summary"]["failed"] == 0
+assert doc["summary"]["skipped_gate"] == 0
+assert doc["summary"]["duration_ms"] >= 0
 assert doc["scripts"] == []
 assert doc["families"] == []
 ' "$json" || { rm -rf "$tmp"; fail "empty selection JSON summary is wrong"; }
+  fake_bin="$tmp/fake-bin"
+  real_git=$(command -v git)
+  mkdir -p "$fake_bin"
+  cat >"$fake_bin/git" <<'SH'
+#!/usr/bin/env bash
+if [ ! -e "$SLOW_GIT_MARKER" ]; then
+  : >"$SLOW_GIT_MARKER"
+  sleep 1
+fi
+exec "$REAL_GIT" "$@"
+SH
+  chmod +x "$fake_bin/git"
+  set +e
+  (cd "$repo" && PATH="$fake_bin:$PATH" REAL_GIT="$real_git" SLOW_GIT_MARKER="$tmp/slow-git" \
+    bin/fm-test-run.sh --changed --base HEAD --max-wall-ms 100) \
+    >"$tmp/slow-selection.out" 2>"$tmp/slow-selection.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an empty run whose selection exceeded its budget must fail"
+  [ -e "$tmp/slow-git" ] || fail "the slow selection fixture did not run"
+  grep -Fq 'FM_TEST_SUMMARY total=0 failed=0' "$tmp/slow-selection.out" \
+    || fail "the over-budget empty run did not report its summary: $(cat "$tmp/slow-selection.out")"
+  grep -Fq 'FM_TEST_BUDGET max_wall_ms=100' "$tmp/slow-selection.out" \
+    || fail "the over-budget empty run did not report its budget: $(cat "$tmp/slow-selection.out")"
+  grep -Fq 'wall-clock budget exceeded' "$tmp/slow-selection.err" \
+    || fail "selection time was omitted from the wall-clock budget: $(cat "$tmp/slow-selection.err")"
   set +e
   (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --max-wall-ms nope) \
     >"$tmp/bad-budget.out" 2>"$tmp/bad-budget.err"

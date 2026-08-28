@@ -93,6 +93,17 @@
 # recorded family-level coupling still expands to the whole family.
 set -eu
 
+now_ms() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import time; print(int(time.time() * 1000))'
+  else
+    echo $(($(date +%s) * 1000))
+  fi
+}
+
+RUN_STARTED_ISO=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+RUN_STARTED_MS=$(now_ms)
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
@@ -158,15 +169,6 @@ cpu_count() {
   esac
   [ "$n" -ge 1 ] || n=1
   printf '%s\n' "$n"
-}
-
-now_ms() {
-  if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import time; print(int(time.time() * 1000))'
-  else
-    # Second precision only when python3 is unavailable.
-    echo $(($(date +%s) * 1000))
-  fi
 }
 
 # Primary family for one tests/*.test.sh basename. Unmapped scripts are
@@ -1657,18 +1659,6 @@ fi
 
 if [ "${#SCRIPTS[@]}" -eq 0 ]; then
   log "nothing to run"
-  printf 'FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0\n'
-  if [ -n "$JSON_PATH" ]; then
-    empty_rec=$(mktemp)
-    empty_fam=$(mktemp)
-    : >"$empty_rec"
-    : >"$empty_fam"
-    started=$(now_iso)
-    mkdir -p "$(dirname "$JSON_PATH")"
-    write_json_artifact "$JSON_PATH" "$started" "$started" "empty" 0 0 0 0 "$SELECTION_DESC" "$empty_rec" "$empty_fam"
-    rm -f "$empty_rec" "$empty_fam"
-  fi
-  exit 0
 fi
 
 # Verify selected scripts exist before starting.
@@ -1758,8 +1748,6 @@ FAMILIES_TSV="$RUN_TMP/families.tsv"
 : >"$RECORDS"
 trap 'rm -rf "$RUN_TMP"' EXIT
 
-RUN_STARTED_ISO=$(now_iso)
-RUN_STARTED_MS=$(now_ms)
 RUN_ID="fm-test-run-${RUN_STARTED_MS}-$$"
 TOTAL=0
 FAILED=0
