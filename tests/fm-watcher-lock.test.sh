@@ -51,6 +51,13 @@ wait_for_file_text() {
   return 1
 }
 
+host_lacks_real_symlink_support() {
+  case "$(uname 2>/dev/null || echo unknown)" in
+    MSYS*|MINGW*) return 0 ;;
+  esac
+  return 1
+}
+
 test_singleton_start() {
   local dir state fakebin out1 out2 pid1 pid2 live i
   dir=$(make_case singleton)
@@ -704,6 +711,10 @@ test_msys_stale_corrupted_lock_refuses_unknown_nested_content() {
 
 test_cygwin_lock_keeps_symlink_publication() {
   local dir state fakebin lockdir ln_used real_ln rc
+  if host_lacks_real_symlink_support; then
+    pass "Cygwin symlink publication skipped on MSYS host"
+    return
+  fi
   dir=$(make_case cygwin-lock-publication)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -726,6 +737,10 @@ test_cygwin_lock_keeps_symlink_publication() {
 
 test_symlink_lock_contention_cleans_stray_owner_link() {
   local dir state fakebin lockdir entered ready release real_ln contender holder rc
+  if host_lacks_real_symlink_support; then
+    pass "Symlink contention skipped on MSYS host"
+    return
+  fi
   dir=$(make_case symlink-lock-contention)
   state="$dir/state"
   fakebin="$dir/fakebin"
