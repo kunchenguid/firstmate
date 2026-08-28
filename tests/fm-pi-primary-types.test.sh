@@ -4,10 +4,15 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-command -v npm >/dev/null 2>&1 || { echo "skip: npm not found for Pi extension typecheck"; exit 0; }
-command -v tsc >/dev/null 2>&1 || { echo "skip: tsc not found for Pi extension typecheck"; exit 0; }
-
-PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g)/@earendil-works/pi-coding-agent"}
+PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$ROOT/node_modules/@earendil-works/pi-coding-agent"}
+if [ -x "$ROOT/node_modules/.bin/tsc" ]; then
+  TSC="$ROOT/node_modules/.bin/tsc"
+elif command -v tsc >/dev/null 2>&1; then
+  TSC=$(command -v tsc)
+else
+  echo "skip: tsc not found; run npm install for the Pi extension typecheck"
+  exit 0
+fi
 if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
   echo "skip: installed @earendil-works/pi-coding-agent package not found"
   exit 0
@@ -63,6 +68,6 @@ cat > "$TMP_ROOT/tsconfig.json" <<'JSON'
 }
 JSON
 
-tsc -p "$TMP_ROOT/tsconfig.json" || exit 1
+"$TSC" -p "$TMP_ROOT/tsconfig.json" || exit 1
 version=$(jq -r '.version' "$PI_PACKAGE_DIR/package.json" 2>/dev/null || printf 'unknown')
 printf 'ok - tracked Pi extensions pass strict no-emit typecheck against Pi %s\n' "$version"

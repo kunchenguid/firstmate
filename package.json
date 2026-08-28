@@ -1,0 +1,8 @@
+{
+  "name": "firstmate",
+  "private": true,
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.3",
+    "typescript": "5.9.3"
+  }
+}

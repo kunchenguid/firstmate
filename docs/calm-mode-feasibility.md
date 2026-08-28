@@ -285,7 +285,7 @@ The operational provider path covers Calm loaded on, loaded off, default prefere
 It asserts one persisted and rendered captain answer, exact user-role operational envelopes in order, no replacement custom messages, one processing result, zero operational transcript rows, and the two-row neighboring-assistant geometry for live, adjacent, and restart paths.
 Quoted current markers, ASCII-only labels, ordinary text before a marker, unrelated U+2063 placement, and image-bearing input remain visible in component and native transcript checks.
 `tests/fm-pi-primary-live-e2e.test.sh` also proves the working ship replaces the built-in `Working...` row while Calm is active on the credentialed provider path, and that it clears when the run settles, before continuing its ordinary watcher lifecycle.
-`tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against the installed Pi declarations, currently package version 0.81.1.
+`tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against the Pi declarations the repository's npm install pins, currently package version 0.84.3.
 
 The relevant commands are:
 
