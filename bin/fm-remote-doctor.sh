@@ -140,9 +140,20 @@ herdr_cli_available() {
 # either here. Sourced only when both tools resolve, so a bare host still
 # reports its gaps instead of failing to load.
 herdr_adapter_load() {
+  local dep
   [ -z "${FM_REMOTE_DOCTOR_HERDR_LOADED:-}" ] || return 0
   herdr_cli_available || return 1
-  [ -f "$SCRIPT_DIR/fm-backend.sh" ] && [ -f "$SCRIPT_DIR/backends/herdr.sh" ] || return 1
+  # -r, not -f: under errexit bash 3.2 abandons the `|| return 1` below and
+  # terminates the shell outright when a source cannot open its file, which in
+  # this script - it arms no EXIT trap - would end the whole doctor run at
+  # status 1 instead of this refusal. Naming the file keeps the refusal as loud
+  # as the diagnostic the source that no longer runs would have printed.
+  for dep in "$SCRIPT_DIR/fm-backend.sh" "$SCRIPT_DIR/backends/herdr.sh"; do
+    if [ ! -r "$dep" ]; then
+      echo "error: the herdr adapter cannot be loaded: $dep is missing or unreadable" >&2
+      return 1
+    fi
+  done
   # shellcheck source=bin/fm-backend.sh
   . "$SCRIPT_DIR/fm-backend.sh" || return 1
   fm_backend_source herdr || return 1

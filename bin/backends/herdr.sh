@@ -2914,11 +2914,16 @@ fm_backend_herdr_kill() {  # <target>
   fm_backend_herdr_target_ready "$1" || return 0
   local session=$FM_BACKEND_HERDR_SESSION pane=$FM_BACKEND_HERDR_PANE
   local lock_path attempt=0 lock_held=0
-  if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
+  # Readability first, for the reason fm_backend_adapter_readable states in
+  # bin/fm-backend.sh: an unopenable lock library would kill this shell instead
+  # of reaching the unlocked-close refusal below.
+  if ! declare -F fm_lock_try_acquire >/dev/null 2>&1 \
+    && [ -r "$FM_BACKEND_HERDR_ROOT/bin/fm-wake-lib.sh" ]; then
     # shellcheck source=bin/fm-wake-lib.sh
     . "$FM_BACKEND_HERDR_ROOT/bin/fm-wake-lib.sh"
   fi
-  if lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session"); then
+  if declare -F fm_lock_try_acquire >/dev/null 2>&1 \
+    && lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session"); then
     while [ "$attempt" -lt 50 ]; do
       if fm_lock_try_acquire "$lock_path"; then
         lock_held=1

@@ -2319,7 +2319,11 @@ teardown_herdr_require_prerequisites() {  # <task-id>
       return 1
     fi
   done
-  if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
+  # Readability first, for the reason fm_backend_adapter_readable states in
+  # bin/fm-backend.sh: an unopenable lock library would kill this shell before
+  # the refusal below could run, and this teardown arms an EXIT trap.
+  if ! declare -F fm_lock_try_acquire >/dev/null 2>&1 \
+    && [ -r "$SCRIPT_DIR/fm-wake-lib.sh" ]; then
     # shellcheck source=bin/fm-wake-lib.sh
     . "$SCRIPT_DIR/fm-wake-lib.sh"
   fi
