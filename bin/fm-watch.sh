@@ -835,7 +835,8 @@ leftover_idle_backoff_check() {  # <window>
 # A digest is queued before the clock advances.
 # The digest is one decide-or-discard for firstmate; this path never teardowns.
 leftover_list_tick() {
-  local marker="$STATE/.leftover-list" rows='' f task last sits age reason young=0 to_mark='' tmp listed now
+  local marker="$STATE/.leftover-list" rows='' f task last sits age reason young=0 tmp listed now
+  local -a to_mark=()
   afk_present && return 0
   if [ ! -e "$marker" ]; then
     touch "$marker"
@@ -863,7 +864,7 @@ leftover_list_tick() {
       young=1
       continue
     fi
-    to_mark="$to_mark $f"
+    to_mark+=("$f")
     rows="${rows}${task} age=${age}s last-movement=${last:-none} work-sits=${sits:-unknown}"$'\n'
   done
   if [ -z "$rows" ]; then
@@ -872,7 +873,7 @@ leftover_list_tick() {
   fi
   reason="check: leftover list:"$'\n'"decide-or-discard"$'\n'"$rows"
   fm_wake_append check leftover-list "$reason" || exit 1
-  for f in $to_mark; do
+  for f in "${to_mark[@]}"; do
     tmp="$f.listed.$$"
     grep -v '^listed=' "$f" > "$tmp" || true
     printf 'listed=%s\n' "$now" >> "$tmp"
