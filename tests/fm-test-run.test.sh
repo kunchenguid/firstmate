@@ -120,8 +120,9 @@ init_changed_fixture_repo() {
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
   printf '# .pi/extensions/fm-primary-pi-watch.ts\n' >>"$repo/tests/fm-pi-watch-extension.test.sh"
-  mkdir -p "$repo/.agents/skills/example" "$repo/.claude" "$repo/.pi/extensions" "$repo/src"
+  mkdir -p "$repo/.agents/skills/example/references" "$repo/.claude" "$repo/.pi/extensions" "$repo/src"
   : >"$repo/.agents/skills/example/SKILL.md"
+  : >"$repo/.agents/skills/example/references/note.md"
   : >"$repo/.claude/settings.json"
   : >"$repo/.pi/extensions/fm-primary-pi-watch.ts"
   : >"$repo/.pi/extensions/fm-primary-turnend-guard.ts"
