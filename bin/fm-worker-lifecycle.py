@@ -2309,21 +2309,26 @@ def apply_pending(env, action, result):
     return state
 
 
-def drain_pending(env, slot=None, strict=True):
+def drain_pending(env, slot=None, strict=True, skip_slots=None):
     """Replay unapplied claims. Returns (drained_slots, refusals).
 
     A claim whose owning process is still ALIVE is skipped, never replayed:
     re-sending a key that is still in flight is the one thing the single
     fleet lock used to make impossible, and the only new way this design
     could create two cloud assignments for one key. Must not be called under
-    the fleet lock (controller_lock refuses re-entry).
+    the fleet lock (controller_lock refuses re-entry). A fleet-wide caller may
+    skip provider-conflicted slots while continuing unrelated claims; the
+    exact claim stays durable for supported slot recovery.
     """
+    skipped = {str(value) for value in (skip_slots or ())}
     with controller_lock(env):
         snapshot = sorted(
             (load_state(env).get("pending_actions") or {}).items(), key=lambda p: int(p[0]))
     drained = []
     refusals = []
     for slot_key, action in snapshot:
+        if slot_key in skipped:
+            continue
         if slot is not None and slot_key != str(slot):
             continue
         try:
@@ -4062,7 +4067,9 @@ def command_service_reconcile(env, args):
 def command_reconcile(env, args):
     actions, inventory = reconcile(env, args.apply, args.confirm_subscription)
     if args.apply:
-        drained, refusals = drain_pending(env, strict=False)
+        drained, refusals = drain_pending(
+            env, strict=False, skip_slots=inventory_conflict_slots(inventory)
+        )
         actions.extend(refusals)
     with controller_lock(env):
         state = load_state(env)

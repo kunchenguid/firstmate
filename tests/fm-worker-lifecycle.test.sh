@@ -4106,6 +4106,18 @@ assert durable["pending_actions"]["1"]["idempotency_key"] == action["idempotency
 assert any("provider mutation result" in str(entry.get("note", "")) or entry
            for entry in durable["cleanup_refusals"])
 
+# Fleet-wide replay quarantines a provider-conflicted slot without erasing its
+# exact claim or recording another failed replay. Slot-specific supported
+# recovery can still replay it later.
+refusal_count = len(durable["cleanup_refusals"])
+drained, refusals = controller.drain_pending(
+    env, strict=False, skip_slots={1}
+)
+assert drained == [] and refusals == [], (drained, refusals)
+durable = json.loads(env["state_path"].read_text())
+assert durable["pending_actions"]["1"]["idempotency_key"] == action["idempotency_key"]
+assert len(durable["cleanup_refusals"]) == refusal_count
+
 # With an honest provider result, the drain applies and clears the claim.
 controller._provider_call_raw = _stub(good)
 drained, refusals = controller.drain_pending(env, strict=False)
