@@ -6,25 +6,24 @@
 # Normal mode absorbs it unless its newly changed status carries a captain-relevant
 # verb or belongs to a secondmate's parent-directed reply stream; the independent
 # stale-pane path still detects a worker that actually stopped and uses positive
-# current-state evidence before suppressing that condition. A declared wait,
-# either a paused:
-# external wait or a verified captain-held transfer, is the separate idle absorb
-# case and re-surfaces only on its long bounded, backing-off cadence
+# current-state evidence before suppressing that condition. A declared `paused:`
+# external wait is the separate idle absorb case and re-surfaces only on its long
+# bounded, backing-off cadence. A verified captain-held transfer has no timer and
+# stays silent until its evidence changes or it resolves. Human-owned notification
+# identity and evidence are owned once by bin/fm-human-notify-lib.sh.
 # (FM_PAUSE_RESURFACE_SECS, FM_PAUSE_RESURFACE_MAX_SECS; waits that come due in
 # the same poll are batched into one wake and their backoff records published
 # through state/.paused-recheck-publish).
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
-#   signal: <display-name> [task <id>; source <file>]...
-#                          normal-mode status/turn-end signals show validated
-#                          display names with exact task ids and source paths when
-#                          newly changed status has a captain-relevant verb or is a
-#                          secondmate's parent-directed reply; away-mode keeps the
-#                          undecorated source-file handoff
-#   stale: <display-name> [endpoint <window>]
-#                          a normal-mode human wake shows the validated display name
-#                          while retaining the exact routing endpoint; away-mode
-#                          handoff remains the undecorated machine window. A
+#   signal: <display-name>: <why-now>. Action required: <action>
+#                          normal-mode delivery is readable and keeps task ids and
+#                          source paths only in the durable queue; away-mode keeps
+#                          the undecorated source-file handoff for daemon triage
+#   stale: <display-name>: <why-now>. Action required: <action>
+#                          normal-mode delivery keeps the endpoint only in the
+#                          durable queue; away-mode handoff remains the undecorated
+#                          machine window for daemon triage. A
 #                          provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
@@ -115,6 +114,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-human-notify-lib.sh
+. "$SCRIPT_DIR/fm-human-notify-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -186,12 +187,12 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
-# A captain-held or paused crew whose agent has confidently exited uses the same
-# bounded cadence, while a live or ambiguously read agent still surfaces once; a
+# A paused crew whose agent has confidently exited uses the bounded external-wait
+# cadence, while a live or ambiguously read agent still surfaces once; a
 # secondmate earns the cadence on its declaration alone, because its endpoint
 # liveness is deliberately never read (pause_state_class owns that split).
-# These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
-# longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
+# These external waits re-surface once for a recheck every PAUSE_RESURFACE_SECS,
+# far longer than the wedge threshold. Human-owned waits never use this timer.
 # Each recheck that finds the wait's monitored evidence unchanged doubles the next
 # window up to PAUSE_RESURFACE_MAX_SECS, and any change in that evidence drops the
 # window back to the base cadence (fm-classify-lib.sh owns that cadence contract for
@@ -287,28 +288,47 @@ window_human_ref() {  # <window>
   meta="$STATE/$task.meta"
   if [ -n "$task" ] && [ -f "$meta" ]; then
     display_name=$(fm_display_name_for_meta "$meta" "$task")
-    printf '%s [endpoint %s]' "$display_name" "$w"
+    printf '%s' "$display_name"
   else
-    printf '%s' "$w"
+    printf 'Worker'
   fi
 }
 
-signal_human_reason() {  # <space-separated-signal-files>
-  local files=$1 f base task meta display_name reason=signal:
-  # shellcheck disable=SC2086
-  for f in $files; do
+signal_human_reason() {  # stdin: scan_signals rows
+  local sf sig f seen base task display_name last summary reason='' unread line before
+  while IFS=$(printf '\t') read -r sf sig f seen; do
+    [ -n "$sf" ] || continue
+    case "$f" in *.status) ;; *) continue ;; esac
     base=$(basename "$f")
     task=${base%.status}
-    task=${task%.turn-ended}
-    meta="$STATE/$task.meta"
-    if [ -n "$task" ] && [ -f "$meta" ]; then
-      display_name=$(fm_display_name_for_meta "$meta" "$task")
-      reason="$reason $display_name [task $task; source $f]"
+    unread=$(status_unread_range "$f" "$seen" "$sig") || unread=''
+    before=$reason
+    while IFS= read -r line || [ -n "$line" ]; do
+      [ -n "$line" ] || continue
+      if status_human_condition_is_current "$f" "$line" \
+        && fm_human_notify_pending "$STATE" "$task" "$line"; then
+        summary=$(fm_human_notify_summary "$STATE" "$task" "$line") || summary=''
+        [ -z "$summary" ] || reason="$reason${reason:+ | }$summary"
+      fi
+    done <<EOF
+$unread
+EOF
+    [ "$reason" = "$before" ] || continue
+    if [ -f "$STATE/$task.meta" ]; then
+      display_name=$(fm_display_name_for_meta "$STATE/$task.meta" "$task")
     else
-      reason="$reason $f"
+      display_name=$(fm_display_name_fallback "$task")
     fi
+    last=$(last_status_line "$f")
+    case "$(status_line_verb "$last")" in
+      failed) summary="$display_name: a new failure surfaced - $(status_line_note "$last"). Action required: inspect the failure and choose recovery." ;;
+      done) summary="$display_name: a new result surfaced - $(status_line_note "$last"). Action required: review the result." ;;
+      *) summary="$display_name: a new routed update arrived. Action required: review the update and respond if requested." ;;
+    esac
+    reason="$reason${reason:+ | }$summary"
   done
-  printf '%s' "$reason"
+  [ -n "$reason" ] || reason='A worker update changed. Action required: inspect the durable fleet status.'
+  printf 'signal: %s' "$reason"
 }
 
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
@@ -455,10 +475,10 @@ pause_recheck_flush() {
 $pause_recheck_details
 EOF
     key=$win
-    reason="stale: $(window_human_ref "$win") ($detail)"
+    reason="stale: $(window_human_ref "$win"): an external wait reached its bounded recheck ($detail). Action required: confirm whether the external wait still holds."
   else
     key=$(printf '%s' "$pause_recheck_details" | cut -f1 | paste -sd, -)
-    reason="stale: $count declared waits came due for a recheck together, batched into one wake, none a wedge:"
+    reason="stale: $count external waits reached their bounded recheck together. Action required: confirm whether each external wait still holds:"
     while IFS=$(printf '\t') read -r win detail; do
       [ -n "$win" ] || continue
       ref=$(window_human_ref "$win")
@@ -542,9 +562,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
         ref=$(window_human_ref "$win")
-        reason="stale: $ref (idle ${age}s, possible wedge, escalation $n)"
+        reason="stale: $ref: the worker has remained unresponsive for ${age}s (attempt $n). Action required: inspect and recover the worker."
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $ref (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+          reason="stale: $ref: the worker has remained unresponsive for ${age}s (attempt $n; demand-deep-inspection). Action required: perform a deep inspection instead of accepting unchanged activity evidence."
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
         rm -f "$since_file"
@@ -568,9 +588,8 @@ busy_turn_over_age() {  # <task>
   [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
 }
 
-# Absorb a stale pane under a declared external-wait pause (paused:) or a
-# dead-agent captain-held transfer, and re-surface it on the capped pause recheck
-# cadence so it cannot rot invisibly. Called on any
+# Absorb a stale pane under a declared external-wait pause (paused:) and
+# re-surface it on the capped pause recheck cadence. Called on any
 # stale poll once pause_state_class permits the bounded cadence, so it must be
 # cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
 # status file mtime, not a per-hash marker, so a churny idle pane (a ticking
@@ -579,14 +598,17 @@ busy_turn_over_age() {  # <task>
 # above, throttled by this window's own .paused-resurfaced-<key> marker. Advances
 # the stale suppressor to <hash> and flags the key paused.
 #
-# The recheck names WHICH human the declared wait is on, because that is the whole
-# point of a recheck the captain reads: an external dependency for paused:, and the
-# captain themself for a verified hold. Only the captain-held verb takes the second
-# wording; a caller that reached the bounded cadence off pause tracking alone, with
-# no declaring verb left on the log, keeps the external-wait wording it always had.
+# The recheck names the external dependency and asks whether it still holds.
+# A captain-held line is rejected from this cadence defensively and clears any
+# legacy pause tracking before returning.
 handle_paused_stale() {  # <window> <task> <hash>
   local win=$1 task=$2 h=$3 key statusf mtime age detail reason
   key=$(window_key "$win")
+  if status_is_captain_held "$(last_status_line "$STATE/$task.status")"; then
+    clear_pause_tracking "$key"
+    triage_log "absorbed human-owned wait without a timed recheck: $win"
+    return 0
+  fi
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
@@ -595,13 +617,8 @@ handle_paused_stale() {  # <window> <task> <hash>
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   age=$(( $(date +%s) - mtime ))
-  if status_is_captain_held "$(last_status_line "$statusf")"; then
-    detail="captain-held, awaiting the captain"
-    reason="captain-held ${age}s, awaiting the captain - verified hold transfer, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
-  else
-    detail="paused, awaiting external"
-    reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
-  fi
+  detail="paused, awaiting external"
+  reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
   resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "$reason" \
     task_wait_signature "$task" "$detail"
   triage_log "absorbed stale ($detail, age ${age}s): $win"
@@ -623,7 +640,12 @@ handle_paused_stale() {  # <window> <task> <hash>
 # classification.
 busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-file>
   local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5
-  if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+  if ! afk_present && status_is_captain_held "$(last_status_line "$STATE/$task.status")"; then
+    clear_pause_tracking "$(window_key "$win")"
+    triage_log "absorbed busy human-owned wait without a timed recheck: $win"
+    return 0
+  fi
+  if ! afk_present && status_is_paused "$(last_status_line "$STATE/$task.status")"; then
     handle_paused_stale "$win" "$task" "$h"
     return 0
   fi
@@ -652,7 +674,12 @@ pause_state_class() {  # <window> <task>
   key=$(window_key "$win")
   last=$(last_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
-  if ! status_is_paused_or_captain_held "$last"; then
+  if status_is_captain_held "$last"; then
+    rm -f "$recheck_file"
+    printf 'human'
+    return
+  fi
+  if ! status_is_paused "$last"; then
     rm -f "$recheck_file"
     crew_absorb_class "$task"
     return
@@ -706,7 +733,7 @@ pause_state_class() {  # <window> <task>
 surface_nonterminal_stale() {  # <window> <hash>
   local win=$1 h=$2 key task last reason
   key=$(window_key "$win")
-  reason="stale: $(window_human_ref "$win")"
+  reason="stale: $(window_human_ref "$win"): worker state is idle or unclear without a declared wait. Action required: inspect for completion, failure, or a stuck worker."
   fm_wake_append stale "$win" "$reason" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
@@ -755,21 +782,56 @@ scan_signals() {
   return 0
 }
 
-status_unread_range_is_actionable() {  # <file> <seen-signature> <captured-signature>
-  local f=$1 seen=$2 captured=$3 start=0 end unread line
+status_unread_range() {  # <file> <seen-signature> <captured-signature>
+  local f=$1 seen=$2 captured=$3 start=0 end
   end=${captured%%:*}
-  case "$end" in ''|*[!0-9]*) return 0 ;; esac
+  case "$end" in ''|*[!0-9]*) return 1 ;; esac
   if [ -n "$seen" ]; then
     start=${seen%%:*}
     case "$start" in ''|*[!0-9]*) start=0 ;; esac
     [ "$end" -ge "$start" ] || start=0
   fi
-  if [ "$end" -eq "$start" ]; then
-    start=0
-  fi
-  unread=$(dd if="$f" bs=1 skip="$start" count="$((end - start))" 2>/dev/null) || return 0
+  [ "$end" -ne "$start" ] || start=0
+  dd if="$f" bs=1 skip="$start" count="$((end - start))" 2>/dev/null
+}
+
+status_human_condition_is_current() {  # <status-file> <line>
+  local f=$1 line=$2 class key verb note open okey overb onote
+  class=$(fm_human_notify_class "$line") || return 1
+  case "$class" in
+    decision|blocker)
+      key=$(_fm_human_notify_key "$line")
+      verb=$(status_line_verb "$line")
+      note=$(status_line_note "$line")
+      open=$(status_open_decisions "$f")
+      while IFS=$(printf '\t') read -r okey overb onote; do
+        [ "$okey" = "$key" ] && [ "$overb" = "$verb" ] && [ "$onote" = "$note" ] && return 0
+      done <<EOF
+$open
+EOF
+      return 1
+      ;;
+    *) return 0 ;;
+  esac
+}
+
+status_unread_range_is_actionable() {  # <file> <seen-signature> <captured-signature>
+  local f=$1 seen=$2 captured=$3 unread line task kind class
+  task=$(basename "$f"); task=${task%.status}
+  kind=$(grep '^kind=' "$STATE/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  unread=$(status_unread_range "$f" "$seen" "$captured") || return 0
   while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    if class=$(fm_human_notify_class "$line"); then
+      if status_human_condition_is_current "$f" "$line" \
+        && fm_human_notify_pending "$STATE" "$task" "$line"; then
+        return 0
+      fi
+      continue
+    fi
+    [ "$(status_line_verb "$line")" = resolved ] && continue
     status_is_captain_relevant "$line" && return 0
+    [ "$kind" = secondmate ] && return 0
   done <<EOF
 $unread
 EOF
@@ -784,6 +846,26 @@ pending_signal_is_actionable() {  # stdin: scan_signals rows
     status_unread_range_is_actionable "$f" "$seen" "$sig" && return 0
   done
   return 1
+}
+
+apply_human_signal_transitions() {  # stdin: scan_signals rows
+  local sf sig f seen task unread line
+  while IFS=$(printf '\t') read -r sf sig f seen; do
+    [ -n "$sf" ] || continue
+    case "$f" in *.status) ;; *) continue ;; esac
+    task=$(basename "$f"); task=${task%.status}
+    unread=$(status_unread_range "$f" "$seen" "$sig") || continue
+    while IFS= read -r line || [ -n "$line" ]; do
+      [ -n "$line" ] || continue
+      if [ "$(status_line_verb "$line")" = resolved ]; then
+        fm_human_notify_resolve_line "$STATE" "$task" "$line" || true
+      elif status_human_condition_is_current "$f" "$line"; then
+        fm_human_notify_record "$STATE" "$task" "$line" || return 1
+      fi
+    done <<EOF
+$unread
+EOF
+  done
 }
 
 # Deliver a durably queued process-event result to firstmate. Publication is
@@ -944,6 +1026,7 @@ mark_all_captain_relevant_surfaced() {
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
     printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
+    fm_human_notify_record "$STATE" "$task" "$last" 2>/dev/null || true
   done < <(scan_captain_relevant_statuses "$STATE")
 }
 
@@ -956,9 +1039,13 @@ mark_all_captain_relevant_surfaced() {
 # surfaces only a captain-relevant status the per-wake path absorbed by mistake -
 # the fail-safe backstop.
 heartbeat_scan_finds_actionable() {
-  local f task last surfaced
+  local f task last surfaced class
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
+    if class=$(fm_human_notify_class "$last"); then
+      fm_human_notify_pending "$STATE" "$task" "$last" && return 0
+      continue
+    fi
     surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
     [ "$surfaced" = "$last" ] && continue
     return 0
@@ -1318,6 +1405,7 @@ while :; do
         reason="check: $c: $out"
         fm_wake_append check "$c" "$reason" || exit 1
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
+          fm_human_notify_clear_review "$STATE" "$id"
           if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$out"; then
             fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
               || triage_log "merged PR poll retirement remains recoverable for $id"
@@ -1346,7 +1434,13 @@ while :; do
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
-    pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    pending=$(printf '%s\n%s' "$pending" "$(scan_signals)" | awk -F '\t' '
+      NF >= 3 {
+        if (!seen[$1]++) order[++count]=$1
+        row[$1]=$0
+      }
+      END { for (i=1; i<=count; i++) print row[order[i]] }
+    ')
     files=""
     while IFS=$(printf '\t') read -r sf sig f seen; do
       [ -n "$sf" ] || continue
@@ -1366,12 +1460,10 @@ EOF
       actionable=1
     elif pending_signal_is_actionable <<< "$pending"; then
       actionable=1
-    elif signal_has_parent_directed_status $files; then
-      actionable=1
     fi
     if [ "$actionable" -eq 1 ]; then
       if ! afk_present; then
-        reason=$(signal_human_reason "$files")
+        reason=$(signal_human_reason <<< "$pending")
       fi
       while IFS=$(printf '\t') read -r sf sig f seen; do
         [ -n "$sf" ] || continue
@@ -1379,6 +1471,7 @@ EOF
       done <<EOF
 $pending
 EOF
+      apply_human_signal_transitions <<< "$pending" || exit 1
       while IFS=$(printf '\t') read -r sf sig f seen; do
         [ -n "$sf" ] || continue
         printf '%s' "$sig" > "$sf"
@@ -1388,6 +1481,7 @@ $pending
 EOF
       wake "$reason"
     else
+      apply_human_signal_transitions <<< "$pending" || exit 1
       while IFS=$(printf '\t') read -r sf sig f seen; do
         [ -n "$sf" ] || continue
         printf '%s' "$sig" > "$sf"
@@ -1410,7 +1504,12 @@ EOF
     task=$(window_to_task "$w" "$STATE")
     key=$(window_key "$w")
     last=$(last_status_line "$STATE/$task.status")
-    if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
+    if status_is_captain_held "$last"; then
+      clear_pause_tracking "$key"
+      triage_log "absorbed human-owned wait without a timed recheck: $w"
+      continue
+    fi
+    if ! status_is_paused "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"
     fi
     # An idle secondmate endpoint is healthy by design, so a mate is admitted to
@@ -1478,13 +1577,24 @@ EOF
               clear_write_tracking "$key"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             else
-              reason="stale: $(window_human_ref "$w")"
-              fm_wake_append stale "$w" "$reason" || exit 1
-              printf '%s' "$h" > "$sf"
-              rm -f "$ssf"
-              clear_write_tracking "$key"
-              mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
-              wake "$reason"
+              human_line=$(last_status_line "$STATE/$task.status")
+              if fm_human_notify_class "$human_line" >/dev/null 2>&1 \
+                && ! fm_human_notify_pending "$STATE" "$task" "$human_line"; then
+                printf '%s' "$h" > "$sf"
+                rm -f "$ssf"
+                clear_write_tracking "$key"
+                triage_log "absorbed unchanged human-owned stale condition: $w"
+              else
+                reason="stale: $(fm_human_notify_summary "$STATE" "$task" "$human_line" 2>/dev/null \
+                  || printf '%s: worker state changed and needs inspection. Action required: inspect and recover.' "$(fm_display_name_for_meta "$STATE/$task.meta" "$task")")"
+                fm_wake_append stale "$w" "$reason" || exit 1
+                printf '%s' "$h" > "$sf"
+                rm -f "$ssf"
+                clear_write_tracking "$key"
+                mark_surfaced "$STATE/$task.status"
+                fm_human_notify_record "$STATE" "$task" "$human_line" 2>/dev/null || true
+                wake "$reason"
+              fi
             fi
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a

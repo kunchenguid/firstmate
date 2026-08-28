@@ -434,6 +434,22 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
 
+Pi 0.84.3 human-notification suppression was verified on 2026-08-28 against a real interactive primary using `github-copilot/gpt-5.6-sol` in a guarded Herdr 0.7.3 named non-default lab.
+The first decision transition reached Pi once, its durable wake was handled, and an identical replay stayed in bash with the successor watcher live and no second prompt.
+
+```sh
+export HERDR_LAB_HELPER=/home/reneg/kun-agent-workspace/bin/fm-herdr-lab.sh
+export HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name firstmate-one-shot-human-waits-v1)
+FM_HUMAN_NOTIFY_HERDR_E2E=1 tests/fm-human-notifications-herdr-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - real Pi absorbs an unchanged human-owned decision before model invocation
+evidence: herdr-session=fm-lab-firstmate-one-sh-1309584-28038 pi=0.84.3 model=github-copilot/gpt-5.6-sol prompts=1 unchanged-replay=0
+```
+
 Pi 0.84.3 away takeover and return were verified on 2026-08-27 against a real interactive primary in a guarded Herdr 0.7.3 named non-default lab.
 The ordinary watcher was live before entry, the launcher waited for the extension's generation-bound standdown receipt, the daemon then held the only watcher, and return restored one ordinary watcher without a direct watcher follow-up.
 A redundant arm command preserved that returned singleton.

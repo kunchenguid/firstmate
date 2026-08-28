@@ -175,8 +175,10 @@ test_stale_diagnostic_wedge_survives_busy_housekeeping() {
     )
     [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] \
       || fail "$case_name enriched wedge did not produce exactly one escalation"
-    grep -F "${reason#stale: }" "$state/.subsuper-escalations" >/dev/null \
+    grep -F "demand-deep-inspection" "$state/.subsuper-escalations" >/dev/null \
       || fail "$case_name enriched wedge lost its demand-deep-inspection detail"
+    grep -F "$win" "$state/.subsuper-escalations" >/dev/null \
+      && fail "$case_name enriched wedge leaked its private endpoint into presentation"
     [ ! -e "$state/.subsuper-stale-$key" ] \
       || fail "$case_name enriched wedge retained ordinary stale tracking"
     case "$case_name" in
@@ -231,8 +233,8 @@ test_stale_captain_held_classifies_pause() {
   status_is_captain_relevant "$held_reason" && fail "a captain-held transfer line was treated as captain-relevant"
   printf '%s\n' "$held_reason" > "$state/held-w9h.status"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9h" "$state")
-  case "$out" in pause\|*) ;; *) fail "captain-held transfer did not classify as pause: $out" ;; esac
-  pass "a captain-held transfer classifies as pause, not as a wedge candidate"
+  case "$out" in humanwait\|*) ;; *) fail "captain-held transfer did not classify as a silent human wait: $out" ;; esac
+  pass "a captain-held transfer classifies as a human wait with no timed reminder"
 }
 
 # handle_wake on a paused stale records a pause marker, drops any pre-existing wedge
@@ -477,15 +479,10 @@ test_housekeeping_recovers_pause_batch_atomically() {
   pass "away-mode recovery publishes one buffered sibling batch and advances every record together"
 }
 
-# The other half of quieting a captain-held task: it must NOT be silenced outright.
-# fm-classify-lib.sh's cadence comment is explicit that a forgotten hold cannot rot
-# invisibly, so a held task re-surfaces on the same bounded window as a pause, with
-# its marker reset so the window repeats instead of firing once. The digest the
-# captain reads must also name the captain rather than an external dependency: the
-# hold is waiting on the one person reading the digest, so borrowing the pause verb's
-# awaiting-external wording would point them away from being the blocker.
+# A captain-held task is durable human-owned waiting, not an external pause.
+# Housekeeping removes legacy pause-cadence state and emits no timed escalation.
 test_housekeeping_captain_held_resurfaces_and_resets() {
-  local dir state fakebin win pane key age
+  local dir state fakebin win pane key
   dir=$(make_supercase captain-held-resurface)
   state="$dir/state"; fakebin="$dir/fakebin"
   win="sess:fm-held-w11h"; pane="$dir/pane.txt"
@@ -495,13 +492,9 @@ test_housekeeping_captain_held_resurfaces_and_resets() {
   echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
-  grep -F "awaiting the captain" "$state/.subsuper-escalations" >/dev/null 2>&1 || fail "a captain hold was silenced entirely instead of re-surfacing as a captain-owned recheck: $(cat "$state/.subsuper-escalations" 2>/dev/null || true)"
-  grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null 2>&1 && fail "a captain hold was re-surfaced as an external wait, hiding that the captain is the blocker"
-  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 && fail "a captain hold was re-surfaced as a possible wedge"
-  [ -e "$state/.subsuper-paused-$key" ] || fail "captain-held marker cleared instead of reset for the next window"
-  age=$(( $(date +%s) - $(cat "$state/.subsuper-paused-$key" 2>/dev/null || echo 0) ))
-  [ "$age" -lt 60 ] || fail "captain-held marker was not reset to now on re-surface (age ${age}s)"
-  pass "housekeeping re-surfaces a forgotten captain hold on the long cadence and resets its window"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "an unchanged captain hold created a timed escalation"
+  [ ! -e "$state/.subsuper-paused-$key" ] || fail "captain hold retained external-pause cadence state"
+  pass "housekeeping keeps an unchanged captain hold silent and removes legacy pause cadence state"
 }
 
 # A pause whose pane became busy again (the crew resumed) drops its marker without
@@ -580,9 +573,8 @@ test_housekeeping_stale_marker_transitions_to_pause() {
   pass "housekeeping moves an existing stale marker to pause before wedge escalation"
 }
 
-# The quieting half for a captain hold. A finished task marked captain-held is idle by
-# design, so an already-aged wedge marker converts to pause tracking on the next sweep
-# instead of firing the possible-wedge escalation.
+# A finished task marked captain-held is idle by design, so an already-aged wedge
+# marker is retired without creating an external-pause timer or escalation.
 test_housekeeping_captain_held_stale_marker_transitions_to_pause() {
   local dir state fakebin win pane key
   dir=$(make_supercase stale-to-captain-held)
@@ -593,10 +585,10 @@ test_housekeeping_captain_held_stale_marker_transitions_to_pause() {
   echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-stale-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
-  [ -e "$state/.subsuper-paused-$key" ] || fail "a captain hold did not move its stale marker to pause tracking"
+  [ ! -e "$state/.subsuper-paused-$key" ] || fail "a captain hold created an external-pause timer"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "a captain hold remained wedge-aged"
   [ ! -s "$state/.subsuper-escalations" ] || fail "a captain hold was escalated as a possible wedge"
-  pass "housekeeping moves a captain hold's existing stale marker to pause before wedge escalation"
+  pass "housekeeping retires stale tracking for a captain hold without a timed reminder"
 }
 
 test_housekeeping_pause_marker_transitions_to_clear() {
@@ -865,15 +857,15 @@ test_away_escalations_present_display_name_with_machine_identity() {
   printf 'done: ready for review\n' > "$state/$task.status"
   FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/$task.status" "$state"
   escalation=$(cat "$state/.subsuper-escalations")
-  assert_contains "$escalation" "CRM · Authentication [task $task]" \
-    "away signal escalation omitted the display name and immutable task id"
+  assert_contains "$escalation" "CRM · Authentication: a new result surfaced - ready for review. Action required: review the result." \
+    "away signal escalation omitted the readable result transition"
+  assert_not_contains "$escalation" "$task" "away signal presentation leaked its machine task id"
 
   : > "$state/.subsuper-escalations"
   rm -f "$state/.subsuper-seen-status-$key"
   FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
   escalation=$(cat "$state/.subsuper-escalations")
-  assert_contains "$escalation" "CRM · Authentication [task $task]; endpoint $win" \
-    "away terminal-stale escalation omitted the display name or exact endpoint"
+  [ -z "$escalation" ] || fail "away terminal-stale path repeated an unchanged result: $escalation"
 
   : > "$state/.subsuper-escalations"
   printf 'working: authentication checks\n' > "$state/$task.status"
@@ -882,18 +874,20 @@ test_away_escalations_present_display_name_with_machine_identity() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
   escalation=$(cat "$state/.subsuper-escalations")
-  assert_contains "$escalation" "CRM · Authentication [task $task]; endpoint $win" \
-    "away persistent-stale escalation omitted the display name or exact endpoint"
+  assert_contains "$escalation" "CRM · Authentication" \
+    "away persistent-stale escalation omitted the display name"
+  assert_not_contains "$escalation" "$win" "away persistent-stale presentation leaked its endpoint"
 
   : > "$state/.subsuper-escalations"
   rm -f "$state/.subsuper-last-scan" "$state/.subsuper-seen-status-$key"
   printf 'done: final review ready\n' > "$state/$task.status"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   escalation=$(cat "$state/.subsuper-escalations")
-  assert_contains "$escalation" "CRM · Authentication [task $task]: done: final review ready (catch-all scan)" \
-    "away catch-all escalation omitted the display name and immutable task id"
+  assert_contains "$escalation" "CRM · Authentication: a new result surfaced - final review ready. Action required: review the result." \
+    "away catch-all escalation omitted the readable result transition"
+  assert_not_contains "$escalation" "$task" "away catch-all presentation leaked its machine task id"
 
-  pass "away escalation surfaces show display names with immutable task identities"
+  pass "away escalation surfaces show readable transitions while machine identities remain private"
 }
 
 test_inject_skip_forces_self() {
@@ -1217,8 +1211,9 @@ test_classify_signal_dedup_against_scan() {
   printf 'done: PR https://x/y/pull/9' > "$state/.subsuper-seen-status-$key"
   out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/dup-s9.status" "$state")
   case "$out" in self\|*) ;; *) fail "signal not deduped against scan: $out" ;; esac
-  # Without the seen marker, it should escalate.
+  # Removing both the compatibility marker and the shared receipt models a new edge.
   rm -f "$state/.subsuper-seen-status-$key"
+  fm_human_notify_clear_task "$state" dup-s9
   out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/dup-s9.status" "$state")
   case "$out" in escalate\|*) ;; *) fail "signal should escalate when not seen: $out" ;; esac
   pass "classify_signal dedupes against the catch-all scan seen marker"
@@ -1235,8 +1230,9 @@ test_classify_stale_dedup_against_signal() {
   printf 'done: PR https://x/y/pull/10' > "$state/.subsuper-seen-status-$key"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-dup-s10" "$state")
   case "$out" in self\|*) ;; *) fail "stale not deduped against signal: $out" ;; esac
-  # Without the seen marker, it should escalate.
+  # Removing both the compatibility marker and the shared receipt models a new edge.
   rm -f "$state/.subsuper-seen-status-$key"
+  fm_human_notify_clear_task "$state" dup-s10
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-dup-s10" "$state")
   case "$out" in escalate\|*) ;; *) fail "stale should escalate when not seen: $out" ;; esac
   pass "classify_stale dedupes against the signal path seen marker"

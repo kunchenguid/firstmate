@@ -685,11 +685,12 @@ test_secondmate_status_note_surfaced_despite_busy_agent() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher absorbed a busy secondmate's routed status note"
-  grep -F "signal: Mate [task mate; source $state/mate.status]" "$out" >/dev/null \
-    || fail "watcher did not print the surfaced secondmate display name and exact source: $(cat "$out")"
+  grep -F "signal: Mate: a new routed update arrived. Action required: review the update and respond if requested." "$out" >/dev/null \
+    || fail "watcher did not print the readable routed-update transition: $(cat "$out")"
+  grep -F "$state" "$out" >/dev/null && fail "human presentation leaked the private state path"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the surfaced note failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/mate.status" >/dev/null \
-    || fail "surfaced secondmate note was not queued"
+  grep "$(printf '\tsignal\tmate.status\t')" "$drain_out" >/dev/null \
+    || fail "surfaced secondmate note was not queued under its private machine key"
   pass "a secondmate's status note surfaces even while its own agent is busy"
 }
 
@@ -719,8 +720,8 @@ test_self_announced_close_does_not_rewake_but_next_note_does() {
   # exact announced bytes, never on task identity.
   printf 'needs-decision [key=k2]: a genuinely new decision\n' >> "$status_file"
   wait_for_exit "$pid" 100 || fail "a later different note after a self-announced close was swallowed"
-  grep -F "signal: $status_file" "$out" >/dev/null \
-    || fail "the later note did not surface as a signal"
+  grep -F "signal: Task: a decision changed - a genuinely new decision. Action required: answer the question." "$out" >/dev/null \
+    || fail "the later decision did not surface as a readable transition"
   pass "a self-announced close never wakes its own home, and the next real note still does"
 }
 
@@ -736,10 +737,11 @@ test_actionable_signal_surfaced() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher swallowed an unread needs-decision followed by a routine note"
-  grep -F "signal: Planning · CRM Scope [task task; source $status_file]" "$out" >/dev/null \
-    || fail "watcher did not print the signal display name with exact task and source: $(cat "$out")"
+  grep -F "signal: Planning · CRM Scope: a decision changed - pick A or B. Action required: answer the question." "$out" >/dev/null \
+    || fail "watcher did not print the readable decision transition: $(cat "$out")"
+  grep -F "$status_file" "$out" >/dev/null && fail "decision presentation leaked its private status path"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the actionable signal failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "actionable signal was not queued"
+  grep "$(printf '\tsignal\ttask.status\t')" "$drain_out" >/dev/null || fail "actionable signal was not queued"
   pass "an unread captain-relevant status is surfaced even when a routine note follows"
 }
 
@@ -760,8 +762,9 @@ test_terminal_stale_surfaced() {
     FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not exit for a stale pane on a terminal status"
-  grep -Fx "stale: CRM · Dashboard [endpoint $window]" "$out" >/dev/null \
-    || fail "watcher did not print the display name with the exact endpoint: $(cat "$out")"
+  grep -F "stale: CRM · Dashboard: the review-ready result changed" "$out" >/dev/null \
+    || fail "watcher did not print the readable review-ready transition: $(cat "$out")"
+  grep -F "$window" "$out" >/dev/null && fail "review-ready presentation leaked its private endpoint"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the terminal stale failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "terminal stale was not queued"
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
@@ -821,8 +824,8 @@ test_stale_terminal_status_overridden_by_active_run() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not escalate an overridden stale terminal status past the threshold"
-  grep -F "$window" "$out" >/dev/null || fail "escalation did not retain the exact endpoint"
-  grep -F "possible wedge" "$out" >/dev/null || fail "escalation did not flag a possible wedge"
+  grep -F "$window" "$out" >/dev/null && fail "stuck-worker presentation leaked its private endpoint"
+  grep -F "worker has remained unresponsive" "$out" >/dev/null || fail "escalation did not explain the stuck-worker transition"
   unset FM_FAKE_CREW_STATE
   pass "a stale terminal-looking status is overridden and absorbed while a run is actively working, then wedge-escalated"
 }
@@ -874,8 +877,8 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not escalate a provably-working non-terminal stale past the threshold"
-  grep -F "$window" "$out" >/dev/null || fail "escalation did not retain the exact endpoint"
-  grep -F "possible wedge" "$out" >/dev/null || fail "escalation did not flag a possible wedge"
+  grep -F "$window" "$out" >/dev/null && fail "stuck-worker presentation leaked its private endpoint"
+  grep -F "worker has remained unresponsive" "$out" >/dev/null || fail "escalation did not explain the stuck-worker transition"
   [ ! -e "$state/.stale-since-$key" ] || fail "stale-since timer was not cleared after escalation"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the wedge escalation failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "wedge escalation was not queued"
@@ -912,8 +915,8 @@ test_nonterminal_stale_not_working_surfaced() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not surface a not-provably-working non-terminal stale at once"
-  grep -F "$window" "$out" >/dev/null || fail "watcher did not retain the exact endpoint in the immediate stale wake"
-  grep -F "possible wedge" "$out" >/dev/null && fail "an immediate stopped-crew stale was mislabeled a wedge"
+  grep -F "$window" "$out" >/dev/null && fail "immediate stopped-worker presentation leaked its private endpoint"
+  grep -F "worker state is idle or unclear" "$out" >/dev/null || fail "immediate stopped-worker wake omitted why it surfaced"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor was not advanced on surface"
   [ ! -e "$state/.stale-since-$key" ] || fail "stale-since timer should not be set when surfacing immediately"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the immediate stale failed"
@@ -981,8 +984,8 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not re-surface a declared pause past the threshold"
-  grep -F "$window" "$out" >/dev/null || fail "re-surface did not retain the exact endpoint"
-  grep -F "awaiting external" "$out" >/dev/null || fail "re-surface was not labeled a paused/awaiting-external recheck"
+  grep -F "$window" "$out" >/dev/null && fail "external-wait presentation leaked its private endpoint"
+  grep -F "external wait reached its bounded recheck" "$out" >/dev/null || fail "re-surface was not labeled as an external-wait recheck"
   grep -F "possible wedge" "$out" >/dev/null && fail "a declared pause was mislabeled a possible wedge"
   [ -e "$state/.paused-resurfaced-$key" ] || fail "the paused re-surface throttle marker was not recorded"
   [ ! -e "$state/.stale-since-$key" ] || fail "a paused re-surface must not use the wedge timer"
@@ -1199,8 +1202,8 @@ test_pause_recheck_resets_and_retires() {
   pass "a changed wait resets the recheck cadence immediately and a finished wait retires its cadence state"
 }
 
-# Three crews blocked on the same merge decision cost ONE notification and one
-# model turn, naming every wait, instead of one wake each.
+# External waits that come due together cost one notification and model turn.
+# A sibling captain-held condition remains outside the timed batch.
 test_sibling_pause_rechecks_batch_into_one_wake() {
   local dir state fakebin out drain_out capture w1 w2 w3 k1 k2 k3 staleq pid
   dir=$(make_case pause-recheck-batch); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1224,18 +1227,19 @@ test_sibling_pause_rechecks_batch_into_one_wake() {
   pid=$!
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "sibling declared waits never came due"; }
   [ "$(grep -c '' "$out")" -eq 1 ] || fail "sibling rechecks printed more than one wake reason: $(cat "$out")"
-  grep -F "$w1" "$out" >/dev/null || fail "the batched recheck did not name the first wait: $(cat "$out")"
-  grep -F "$w2" "$out" >/dev/null || fail "the batched recheck did not name the second wait: $(cat "$out")"
-  grep -F "$w3" "$out" >/dev/null || fail "the batched recheck did not name the third wait: $(cat "$out")"
+  grep -F "Sib1" "$out" >/dev/null || fail "the batched recheck did not name the first external wait: $(cat "$out")"
+  grep -F "Sib2" "$out" >/dev/null || fail "the batched recheck did not name the second external wait: $(cat "$out")"
+  grep -F "$w1" "$out" >/dev/null && fail "the batched presentation leaked the first endpoint"
+  grep -F "$w2" "$out" >/dev/null && fail "the batched presentation leaked the second endpoint"
+  grep -F "Sib3" "$out" >/dev/null && fail "the captain-held sibling entered the timed external batch"
   grep -F "awaiting external" "$out" >/dev/null || fail "the batched recheck lost the external-wait wording: $(cat "$out")"
-  grep -F "awaiting the captain" "$out" >/dev/null || fail "the batched recheck lost the captain-held wording: $(cat "$out")"
   grep -F "possible wedge" "$out" >/dev/null && fail "a batched recheck was mislabeled a possible wedge"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the batched recheck failed"
   staleq=$(grep -c "$(printf '\tstale\t')" "$drain_out" || true)
   [ "$staleq" -eq 1 ] || fail "three sibling waits queued $staleq wakes instead of one"
   [ -e "$state/.paused-resurfaced-$k1" ] || fail "the first sibling's cadence record was not published"
   [ -e "$state/.paused-resurfaced-$k2" ] || fail "the second sibling's cadence record was not published"
-  [ -e "$state/.paused-resurfaced-$k3" ] || fail "the third sibling's cadence record was not published"
+  [ ! -e "$state/.paused-resurfaced-$k3" ] || fail "the captain-held sibling received external cadence state"
   [ ! -e "$state/.paused-recheck-publish" ] || fail "the batched publication journal was left behind"
   ack_stopped_cycle "$state" || fail "could not acknowledge the batched recheck"
 
@@ -1273,7 +1277,8 @@ test_unrelated_stale_is_not_delayed_by_a_due_recheck() {
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "a stopped crew was delayed behind a due declared-wait recheck"; }
-  grep -F "$wstop" "$out" >/dev/null || fail "the stopped crew endpoint was not surfaced immediately: $(cat "$out")"
+  grep -F "Stopped1: worker state is idle or unclear" "$out" >/dev/null || fail "the stopped worker transition was not surfaced immediately: $(cat "$out")"
+  grep -F "$wstop" "$out" >/dev/null && fail "the stopped-worker presentation leaked its endpoint"
   [ ! -e "$state/.paused-recheck-publish" ] || fail "an interrupted pass left a publication journal behind"
   [ ! -e "$state/.paused-resurfaced-$kpause" ] || fail "an undelivered recheck advanced its cadence record anyway"
   ack_stopped_cycle "$state" || fail "could not acknowledge the immediate stopped-crew wake"
@@ -1433,11 +1438,12 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 100 || fail "captain-held dead-agent pane did not re-surface on the bounded cadence"
-  grep -F "awaiting the captain" "$state/.wake-queue" >/dev/null \
-    || fail "captain-held dead-agent pane surfaced as a stopped crew instead of a captain-owned recheck: $(cat "$state/.wake-queue")"
-  grep -F "awaiting external" "$state/.wake-queue" >/dev/null \
-    && fail "captain-held dead-agent pane borrowed the pause verb's external-wait wording"
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "captain-held dead-agent pane created a timed model turn: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "captain-held dead-agent pane printed a timed reminder"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "captain-held dead-agent pane queued a timed reminder"; }
+  reap "$pid"
 
   dir=$(make_case alive-decision-gate); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/gate.status"
@@ -1482,7 +1488,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue")
   [ "$wakes" -eq 0 ] || fail "acknowledged external-decision surface replayed $wakes wakes"
   [ "$bare" -eq 0 ] || fail "acknowledged external-decision bare stale remained queued"
-  pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
+  pass "exited external pauses retain bounded rechecks, captain-held panes stay silent, and a live external gate still surfaces once"
 }
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
@@ -1507,18 +1513,16 @@ test_secondmate_paused_resurfaces_in_normal_mode() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not re-surface a paused secondmate"
-  grep -F "$window" "$out" >/dev/null || fail "paused secondmate recheck omitted its exact endpoint"
-  grep -F "awaiting external" "$out" >/dev/null || fail "paused secondmate recheck omitted its external-wait reason"
+  grep -F "$window" "$out" >/dev/null && fail "paused secondmate presentation leaked its private endpoint"
+  grep -F "external wait reached its bounded recheck" "$out" >/dev/null || fail "paused secondmate recheck omitted its external-wait reason"
   grep -F "awaiting the captain" "$out" >/dev/null && fail "paused secondmate recheck named the captain instead of its external dependency"
   grep -F "possible wedge" "$out" >/dev/null && fail "paused secondmate was mislabeled a wedge"
   unset FM_FAKE_CREW_STATE
   pass "a declared paused secondmate re-surfaces on the bounded normal-mode cadence"
 }
 
-# A captain hold is the other declared wait, but unlike paused: it has no
-# current-state mapping, so a held mate reports `unknown` rather than `paused`.
-# The bounded re-surface must still reach it, or a mate's hold rots invisibly:
-# nothing else re-reads a quiet mate's endpoint.
+# A captain hold is durable human-owned waiting, not an external pause.
+# Even a quiet secondmate remains silent until the hold evidence changes.
 test_secondmate_captain_held_resurfaces_in_normal_mode() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
   dir=$(make_case secondmate-held-resurface); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1540,13 +1544,14 @@ test_secondmate_captain_held_resurfaces_in_normal_mode() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 100 || fail "watcher did not re-surface a captain-held secondmate"
-  grep -F "$window" "$out" >/dev/null || fail "captain-held secondmate recheck omitted its exact endpoint"
-  grep -F "awaiting the captain" "$out" >/dev/null || fail "captain-held secondmate recheck did not name the captain as the blocker: $(cat "$out")"
-  grep -F "awaiting external" "$out" >/dev/null && fail "captain-held secondmate recheck claimed an external wait"
-  grep -F "possible wedge" "$out" >/dev/null && fail "captain-held secondmate was mislabeled a wedge"
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "an unchanged captain-held secondmate started a timed turn: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "captain-held secondmate printed a timed reminder"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "captain-held secondmate queued a timed reminder"; }
+  reap "$pid"
   unset FM_FAKE_CREW_STATE
-  pass "a captain-held secondmate re-surfaces on the bounded normal-mode cadence"
+  pass "an unchanged captain-held secondmate stays silent without losing durable visibility"
 }
 
 test_secondmate_nonpaused_stale_remains_suppressed() {
@@ -1721,7 +1726,7 @@ test_paused_authoritative_working_preserves_wedge_timer() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "authoritative working state did not wedge-escalate past the threshold"
-  grep -F "possible wedge" "$out" >/dev/null || fail "authoritative working wedge escalation omitted its reason"
+  grep -F "worker has remained unresponsive" "$out" >/dev/null || fail "authoritative working escalation omitted its stuck-worker reason"
   [ ! -e "$state/.stale-since-$key" ] || fail "wedge timer remained after authoritative working escalation"
   unset FM_FAKE_CREW_STATE
   pass "a paused status overridden by authoritative working preserves its wedge timer and escalates"
@@ -1779,7 +1784,7 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold() {
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
     pid=$!
     wait_for_exit "$pid" 100 || fail "watcher did not escalate on consecutive wedge round $n: $(cat "$out")"
-    grep -F "escalation $n" "$out" >/dev/null || fail "round $n did not report escalation count $n: $(cat "$out")"
+    grep -F "attempt $n" "$out" >/dev/null || fail "round $n did not report inspection count $n: $(cat "$out")"
     if [ "$n" -lt 3 ]; then
       grep -F "demand-deep-inspection" "$out" >/dev/null && fail "round $n escalated to demand-deep-inspection before the threshold: $(cat "$out")"
     else
@@ -1902,8 +1907,8 @@ test_busy_pane_stable_hash_escalates_past_turn_age_bound() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "a stable-hash busy pane did not wedge-escalate past the turn-age bound"
-  grep -F "$window" "$out" >/dev/null || fail "busy turn-age escalation omitted its exact endpoint"
-  grep -F "possible wedge" "$out" >/dev/null || fail "busy turn-age escalation did not flag a possible wedge"
+  grep -F "$window" "$out" >/dev/null && fail "busy turn-age presentation leaked its private endpoint"
+  grep -F "worker has remained unresponsive" "$out" >/dev/null || fail "busy turn-age escalation did not explain the stuck worker"
   pass "a busy worker with a stable pane hash still escalates once its completed-turn age reaches the bound"
 }
 
@@ -1947,8 +1952,8 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "a changing-hash busy pane did not wedge-escalate past the turn-age bound"
-  grep -F "$window" "$out" >/dev/null || fail "busy turn-age escalation (changing hash) omitted its exact endpoint"
-  grep -F "possible wedge" "$out" >/dev/null || fail "busy turn-age escalation (changing hash) did not flag a possible wedge"
+  grep -F "$window" "$out" >/dev/null && fail "changing-hash presentation leaked its private endpoint"
+  grep -F "worker has remained unresponsive" "$out" >/dev/null || fail "changing-hash escalation did not explain the stuck worker"
   pass "a busy worker whose pane hash changes every poll still escalates once its completed-turn age reaches the bound"
 }
 
@@ -2023,7 +2028,7 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
     pid=$!
     wait_for_exit "$pid" 100 || fail "busy turn-age escalation round $n did not escalate: $(cat "$out")"
-    grep -F "escalation $n" "$out" >/dev/null || fail "busy turn-age round $n did not report escalation count $n: $(cat "$out")"
+    grep -F "attempt $n" "$out" >/dev/null || fail "busy turn-age round $n did not report inspection count $n: $(cat "$out")"
     if [ "$n" -lt 3 ]; then
       grep -F "demand-deep-inspection" "$out" >/dev/null && fail "busy turn-age round $n escalated to demand-deep-inspection before the threshold: $(cat "$out")"
     else
@@ -2133,7 +2138,7 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "a lifted pause on an over-age busy pane no longer wedge-escalates"; }
-  grep -F "possible wedge" "$out" >/dev/null || fail "the restored busy-turn escalation did not flag a possible wedge: $(cat "$out")"
+  grep -F "worker has remained unresponsive" "$out" >/dev/null || fail "the restored busy-turn escalation did not explain the stuck worker: $(cat "$out")"
   pass "a busy pane under a declared pause is rechecked on the long cadence, and lifting the pause restores the wedge escalation"
 }
 
@@ -2287,8 +2292,8 @@ test_wedge_escalation_deferred_while_worktree_is_written() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 40 || fail "a stalled crew that wrote nothing did not wedge-escalate on the existing schedule"
-  grep -F "$window" "$out" >/dev/null || fail "the stalled-crew escalation omitted its exact endpoint"
-  grep -F "possible wedge" "$out" >/dev/null || fail "the stalled-crew escalation did not flag a possible wedge"
+  grep -F "$window" "$out" >/dev/null && fail "stalled-worker presentation leaked its private endpoint"
+  grep -F "worker has remained unresponsive" "$out" >/dev/null || fail "the stalled-worker escalation omitted why it surfaced"
   [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 1 ] || fail "the stalled-crew escalation was not counted"
   [ ! -e "$state/.stale-since-$key" ] || fail "the idle timer was not cleared after a real escalation"
   [ ! -e "$state/.writing-since-$key" ] || fail "the write-deferral chain outlived a real escalation"
@@ -2330,7 +2335,7 @@ test_write_deferral_resurfaces_on_the_bounded_cadence() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 40 || fail "a long-running write deferral never re-surfaced on the bounded cadence"
-  grep -F "$window" "$out" >/dev/null || fail "the write-deferral recheck omitted its exact endpoint"
+  grep -F "$window" "$out" >/dev/null && fail "write-deferral presentation leaked its private endpoint"
   grep -F "writing its worktree" "$out" >/dev/null || fail "the write-deferral recheck was not labeled as such"
   grep -F "possible wedge" "$out" >/dev/null && fail "a write-deferral recheck was mislabeled a possible wedge"
   [ -e "$state/.writing-resurfaced-$key" ] || fail "the write-deferral re-surface throttle marker was not recorded"
@@ -2380,8 +2385,8 @@ test_secondmate_home_supervision_churn_is_not_write_evidence() {
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 40 || fail "a mate home's own supervision churn deferred an escalation it must not defer"
-  grep -F "$window" "$out" >/dev/null || fail "the mate-home escalation omitted its exact endpoint"
-  grep -F "possible wedge" "$out" >/dev/null || fail "the mate-home escalation did not flag a possible wedge"
+  grep -F "$window" "$out" >/dev/null && fail "mate-home presentation leaked its private endpoint"
+  grep -F "worker has remained unresponsive" "$out" >/dev/null || fail "the mate-home escalation omitted why it surfaced"
   [ ! -e "$state/.writing-since-$key" ] || fail "a mate's provisioned home was probed as if it were a code tree"
   [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 1 ] || fail "the mate escalation was not counted"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the mate escalation failed"
@@ -2513,7 +2518,7 @@ test_terminal_first_sight_drops_a_finished_write_deferral_chain() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 40 || fail "a first-sight captain-relevant status was not surfaced"
-  grep -F "$window" "$out" >/dev/null || fail "the first-sight surface omitted its exact endpoint"
+  grep -F "$window" "$out" >/dev/null && fail "first-sight presentation leaked its private endpoint"
   [ ! -e "$state/.writing-since-$key" ] \
     || fail "the first-sight surface kept a finished write-deferral chain"
   unset FM_FAKE_CREW_STATE

@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+# Human-owned notification transition owner.
+#
+# A decision, blocker, captain hold, or review-ready result is a durable condition,
+# but its notification is an edge.  This library derives one evidence fingerprint
+# from the immutable task id, task incarnation, condition identity, and meaningful
+# evidence.  Supervisors consult that fingerprint before starting a model turn and
+# record it only after the durable wake or away-mode escalation has been published.
+# A crash between publication and the record can therefore duplicate one notice;
+# it cannot lose the first notice.  No elapsed-time input participates.
+#
+# Records live under state/human-notifications/.  They are presentation receipts,
+# never condition truth: status folds, backlog holds, PR metadata, Bearings, and
+# explicit fleet views remain authoritative and visible regardless of a receipt.
+# A matching resolved line or captain-hold answer removes the receipt, so reopening
+# the same key can notify again.  Task cleanup removes every receipt for that task.
+#
+# Public functions:
+#   fm_human_notify_class <status-line>
+#   fm_human_notify_pending <state> <task-id> <status-line>
+#   fm_human_notify_record <state> <task-id> <status-line>
+#   fm_human_notify_resolve_line <state> <task-id> <status-line>
+#   fm_human_notify_clear_hold <state> <task-id>
+#   fm_human_notify_clear_review <state> <task-id>
+#   fm_human_notify_clear_task <state> <task-id>
+#   fm_human_notify_summary <state> <task-id> <status-line>
+#
+# Return convention: fm_human_notify_pending returns 0 only for a recognized
+# human-owned condition whose current fingerprint has not been recorded, 1 for an
+# unchanged recognized condition, and 2 for a line outside this contract.
+
+FM_HUMAN_NOTIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$FM_HUMAN_NOTIFY_LIB_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-display-name-lib.sh
+. "$FM_HUMAN_NOTIFY_LIB_DIR/fm-display-name-lib.sh"
+
+FM_HUMAN_NOTIFY_SCHEMA=fm-human-notification.v1
+FM_HUMAN_NOTIFY_CLASS=
+FM_HUMAN_NOTIFY_KEY=
+FM_HUMAN_NOTIFY_EVIDENCE=
+FM_HUMAN_NOTIFY_FINGERPRINT=
+FM_HUMAN_NOTIFY_MARKER=
+
+_fm_human_notify_sha256() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  else
+    cksum | awk '{print "cksum-" $1 "-" $2}'
+  fi
+}
+
+_fm_human_notify_safe() {
+  printf '%s' "$1" | tr '\t\r\n' '   ' | LC_ALL=C tr -d '\000-\037\177'
+}
+
+_fm_human_notify_key() {
+  _fm_decision_key "$1" 2>/dev/null || printf 'default'
+}
+
+# Review-ready includes both delivery paths: a PR with green checks and a direct
+# PR that is ready for review immediately after opening.  Reports and ordinary
+# terminal outcomes remain outside this class.
+_fm_human_notify_review_ready() {
+  local line=$1 verb note
+  verb=$(status_line_verb "$line")
+  [ "$verb" = done ] || return 1
+  note=$(status_line_note "$line")
+  case "$note" in
+    *'PR https://'*) return 0 ;;
+    *https://*'/pull/'*|*https://*'/-/merge_requests/'*) return 0 ;;
+    *'ready in branch'*) return 0 ;;
+  esac
+  return 1
+}
+
+fm_human_notify_class() {  # <status-line>
+  local line=$1 verb
+  verb=$(status_line_verb "$line")
+  case "$verb" in
+    needs-decision) printf 'decision'; return 0 ;;
+    blocked) printf 'blocker'; return 0 ;;
+    captain-held) printf 'captain-hold'; return 0 ;;
+    failed) printf 'failure'; return 0 ;;
+  esac
+  if _fm_human_notify_review_ready "$line"; then
+    printf 'review-ready'
+    return 0
+  fi
+  if [ "$verb" = done ]; then
+    printf 'result'
+    return 0
+  fi
+  return 1
+}
+
+_fm_human_notify_incarnation() {  # <state> <task>
+  local state=$1 task=$2 meta key value out='' ident
+  meta="$state/$task.meta"
+  if [ -f "$meta" ] && [ ! -L "$meta" ]; then
+    for key in busy_gen kind window terminal worktree branch project; do
+      value=$(grep "^$key=" "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+      [ -z "$value" ] || out="$out$key=$value|"
+    done
+  fi
+  if [ -z "$out" ] && [ -f "$state/$task.status" ] && [ ! -L "$state/$task.status" ]; then
+    if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+      ident=$(stat -f '%d:%i' "$state/$task.status" 2>/dev/null || true)
+    else
+      ident=$(stat -c '%d:%i' "$state/$task.status" 2>/dev/null || true)
+    fi
+    out="status=$ident|"
+  fi
+  printf '%s' "$out"
+}
+
+_fm_human_notify_derive() {  # <state> <task> <line>
+  local state=$1 task=$2 line=$3 class key evidence incarnation material marker_id pr pr_head pr_state pr_checks pr_conclusion
+  class=$(fm_human_notify_class "$line") || return 2
+  key=$(_fm_human_notify_key "$line")
+  evidence=$(status_line_note "$line")
+  incarnation=$(_fm_human_notify_incarnation "$state" "$task")
+  if [ "$class" = review-ready ] && [ -f "$state/$task.meta" ]; then
+    pr=$(grep '^pr=' "$state/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    pr_head=$(grep '^pr_head=' "$state/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    pr_state=$(grep '^pr_state=' "$state/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    pr_checks=$(grep '^pr_checks=' "$state/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    pr_conclusion=$(grep '^pr_conclusion=' "$state/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    evidence="$evidence|pr=$pr|head=$pr_head|state=$pr_state|checks=$pr_checks|conclusion=$pr_conclusion"
+    key=ready
+  fi
+  material="class=$class|task=$task|key=$key|incarnation=$incarnation|evidence=$evidence"
+  marker_id=$(printf '%s' "$class|$task|$key" | _fm_human_notify_sha256)
+  FM_HUMAN_NOTIFY_CLASS=$class
+  FM_HUMAN_NOTIFY_KEY=$key
+  FM_HUMAN_NOTIFY_EVIDENCE=$evidence
+  FM_HUMAN_NOTIFY_FINGERPRINT=$(printf '%s' "$material" | _fm_human_notify_sha256)
+  FM_HUMAN_NOTIFY_MARKER="$state/human-notifications/$marker_id"
+}
+
+fm_human_notify_pending() {  # <state> <task> <line>
+  local state=$1 task=$2 line=$3 recorded legacy_key legacy
+  _fm_human_notify_derive "$state" "$task" "$line" || return $?
+  recorded=$(sed -n 's/^fingerprint=//p' "$FM_HUMAN_NOTIFY_MARKER" 2>/dev/null | head -1 || true)
+  [ "$recorded" != "$FM_HUMAN_NOTIFY_FINGERPRINT" ] || return 1
+  # Adopt either pre-owner supervisor receipt on first read, so an upgrade or
+  # restart does not replay evidence already presented by the prior version.
+  legacy_key=$(printf '%s' "$task" | tr ':/.' '___')
+  for legacy in "$state/.hb-surfaced-$legacy_key" "$state/.subsuper-seen-status-$legacy_key"; do
+    if [ "$(cat "$legacy" 2>/dev/null || true)" = "$line" ]; then
+      fm_human_notify_record "$state" "$task" "$line" || return 0
+      return 1
+    fi
+  done
+  return 0
+}
+
+fm_human_notify_record() {  # <state> <task> <line>
+  local state=$1 task=$2 line=$3 dir tmp
+  _fm_human_notify_derive "$state" "$task" "$line" || return $?
+  dir="$state/human-notifications"
+  (umask 077; mkdir -p "$dir") || return 1
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  tmp=$(umask 077; mktemp "$dir/.notification.XXXXXX") || return 1
+  if ! {
+    printf 'schema=%s\n' "$FM_HUMAN_NOTIFY_SCHEMA"
+    printf 'task=%s\n' "$(_fm_human_notify_safe "$task")"
+    printf 'class=%s\n' "$FM_HUMAN_NOTIFY_CLASS"
+    printf 'key=%s\n' "$FM_HUMAN_NOTIFY_KEY"
+    printf 'fingerprint=%s\n' "$FM_HUMAN_NOTIFY_FINGERPRINT"
+  } > "$tmp" || ! chmod 0600 "$tmp" || ! mv -f -- "$tmp" "$FM_HUMAN_NOTIFY_MARKER"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+_fm_human_notify_remove_class_key() {  # <state> <task> <class> <key>
+  local state=$1 task=$2 class=$3 key=$4 marker_id
+  marker_id=$(printf '%s' "$class|$task|$key" | _fm_human_notify_sha256)
+  rm -f -- "$state/human-notifications/$marker_id"
+}
+
+fm_human_notify_resolve_line() {  # <state> <task> <status-line>
+  local state=$1 task=$2 line=$3 verb key
+  verb=$(status_line_verb "$line")
+  [ "$verb" = resolved ] || return 2
+  key=$(_fm_human_notify_key "$line")
+  _fm_human_notify_remove_class_key "$state" "$task" decision "$key"
+  _fm_human_notify_remove_class_key "$state" "$task" blocker "$key"
+  _fm_human_notify_remove_class_key "$state" "$task" captain-hold "$key"
+}
+
+fm_human_notify_clear_hold() {  # <state> <captain-held-task-id>
+  _fm_human_notify_remove_class_key "$1" "$2" captain-hold "$2"
+}
+
+fm_human_notify_clear_review() {  # <state> <task-id>
+  _fm_human_notify_remove_class_key "$1" "$2" review-ready ready
+}
+
+fm_human_notify_clear_task() {  # <state> <task>
+  local state=$1 task=$2 f recorded
+  [ -d "$state/human-notifications" ] || return 0
+  for f in "$state"/human-notifications/*; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    recorded=$(sed -n 's/^task=//p' "$f" 2>/dev/null | head -1 || true)
+    [ "$recorded" = "$task" ] && rm -f -- "$f"
+  done
+  return 0
+}
+
+fm_human_notify_summary() {  # <state> <task> <status-line>
+  local state=$1 task=$2 line=$3 class display note
+  class=$(fm_human_notify_class "$line") || return 1
+  if [ -f "$state/$task.meta" ]; then
+    display=$(fm_display_name_for_meta "$state/$task.meta" "$task")
+  else
+    display=$(fm_display_name_fallback "$task")
+  fi
+  note=$(status_line_note "$line")
+  case "$class" in
+    decision)
+      printf '%s: a decision changed - %s. Action required: answer the question.' "$display" "$note" ;;
+    blocker)
+      printf '%s: blocker evidence changed - %s. Action required: remove the blocker or provide the requested input.' "$display" "$note" ;;
+    captain-hold)
+      printf '%s: a captain-owned approval or decision opened - %s. Action required: answer or defer it.' "$display" "$note" ;;
+    review-ready)
+      printf '%s: the review-ready result changed - %s. Action required: review it and approve or merge only if authorized.' "$display" "$note" ;;
+    result)
+      printf '%s: a new result surfaced - %s. Action required: review the result.' "$display" "$note" ;;
+    failure)
+      printf '%s: new failure evidence surfaced - %s. Action required: inspect and choose recovery.' "$display" "$note" ;;
+  esac
+}

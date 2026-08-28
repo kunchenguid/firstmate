@@ -77,17 +77,17 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
-# Bounded re-surface cadence for a declared pause or a verified captain hold.
+# Bounded re-surface cadence for a declared external pause.
 # Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it
-# avoids nagging a deliberate wait while ensuring a forgotten hold cannot rot
-# invisibly - it re-surfaces once for a recheck every window. One hour by default,
-# which is the window until the FIRST recheck and the floor every later window is
-# derived from; both consumers read FM_PAUSE_RESURFACE_SECS with this default so
-# the cadence has one owner.
+# avoids nagging a deliberate external wait while still checking a dependency
+# that may clear on its own. Human-owned waits have no timed cadence and are
+# governed by bin/fm-human-notify-lib.sh instead. One hour is the first external
+# recheck and the floor later windows derive from; both supervisors read this
+# default so the cadence has one owner.
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
-# Capped exponential backoff for CONSECUTIVE UNCHANGED rechecks of the SAME wait,
+# Capped exponential backoff for consecutive unchanged rechecks of the same external wait,
 # the same shape the watcher's heartbeat already uses (FM_HEARTBEAT/FM_HEARTBEAT_MAX):
 # the first recheck still lands on the base cadence above, and each recheck that
 # finds the monitored evidence unchanged doubles the next window until this cap.

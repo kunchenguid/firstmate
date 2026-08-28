@@ -5,12 +5,11 @@
 # durable wake after an actionable close, acknowledges only after routing, and
 # either SELF-HANDLES the routine majority in bash (no firstmate turn) or
 # ESCALATES a batched, distilled digest to the supervisor pane on
-# captain-relevant events plus bounded declared-wait rechecks. This is the
-# token-efficient replacement for the prior always-inject daemon: routine
-# signal/stale/heartbeat wakes cost zero firstmate context; only done/
-# needs-decision/blocked/failed/persistent-wedge/check-output events and a
-# declared-wait recheck reach the LLM, and even then as one pre-read digest per
-# batch window.
+# changed captain-relevant events plus bounded external-wait rechecks. This is
+# the token-efficient replacement for the prior always-inject daemon: routine
+# signal/stale/heartbeat wakes and unchanged human-owned conditions cost zero
+# firstmate context; only changed outcomes, persistent wedges, check output, and
+# external-wait rechecks reach the LLM, as one pre-read digest per batch window.
 #
 # PRESENCE-GATING (the /afk contract). The daemon is the away-mode engine: it
 # injects ONLY when the durable away-mode flag state/.afk is present. Invoking
@@ -47,11 +46,10 @@
 #   - Bounded wedge latency: a stale pane without a declared wait is escalated
 #     only after it has been idle for STALE_ESCALATE_SECS
 #     (configurable), rechecked once. A wedged crewmate is therefore detected
-#     within STALE_ESCALATE_SECS + a tick, never lost. A declared wait - either a
-#     paused: external wait or a verified captain-held transfer, per
-#     fm-classify-lib.sh's combined predicate - instead gets its own longer
-#     PAUSE_RESURFACE_SECS recheck, never a wedge escalation, on the same
-#     backing-off cadence the attended watcher uses (fm-classify-lib.sh owns it).
+#     within STALE_ESCALATE_SECS + a tick, never lost. A paused: external wait
+#     instead gets its own longer PAUSE_RESURFACE_SECS recheck and backing-off
+#     cadence. A verified captain-held transfer is human-owned and has no timer;
+#     fm-human-notify-lib.sh keeps it silent until evidence changes or it resolves.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
@@ -95,9 +93,9 @@
 #                                   kinds.
 #          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
 #                                   as a possible wedge (default 240)
-#          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared wait (external
-#                                   or captain-held) re-surfaces as a recheck
-#                                   (default 3600); each recheck that finds the
+#          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared external wait
+#                                   re-surfaces as a recheck (default 3600);
+#                                   each recheck that finds the
 #                                   wait unchanged doubles the next window, and
 #                                   any change in its evidence resets it
 #          FM_PAUSE_RESURFACE_MAX_SECS
@@ -189,6 +187,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 # shellcheck source=bin/fm-display-name-lib.sh
 . "$FM_DAEMON_DIR/fm-display-name-lib.sh"
+# shellcheck source=bin/fm-human-notify-lib.sh
+. "$FM_DAEMON_DIR/fm-human-notify-lib.sh"
 
 # Supervisor-pane discovery (FM_SUPERVISOR_TARGET_DEFAULT,
 # FM_SUPERVISOR_BACKEND_DEFAULT, discover_supervisor_target,
@@ -364,30 +364,57 @@ daemon_task_human_ref() {  # <task-id> <state>
   else
     display_name=$(fm_display_name_fallback "$task")
   fi
-  printf '%s [task %s]' "$display_name" "$task"
+  printf '%s' "$display_name"
 }
 
 daemon_window_human_ref() {  # <window> <state>
   local win=$1 state=$2 task
   task=$(window_to_task "$win" "$state")
-  [ -n "$task" ] || { printf '%s' "$win"; return; }
-  printf '%s; endpoint %s' "$(daemon_task_human_ref "$task" "$state")" "$win"
+  [ -n "$task" ] || { printf 'Worker'; return; }
+  daemon_task_human_ref "$task" "$state"
+}
+
+daemon_terminal_summary() {  # <task> <state> <status-line>
+  local task=$1 state=$2 line=$3 display verb note
+  display=$(daemon_task_human_ref "$task" "$state")
+  verb=$(status_line_verb "$line")
+  note=$(status_line_note "$line")
+  case "$verb" in
+    failed) printf '%s: new failure evidence surfaced - %s. Action required: inspect and choose recovery.' "$display" "$note" ;;
+    done) printf '%s: a new result surfaced - %s. Action required: review the result.' "$display" "$note" ;;
+    *) printf '%s: a new actionable update surfaced - %s. Action required: review and respond.' "$display" "$note" ;;
+  esac
 }
 
 classify_signal() {  # <reason-after-colon> <state>
-  local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen
+  local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen class summary
   for f in $reason; do
     [ -e "$f" ] || continue
     last=$(last_status_line "$f")
     [ -n "$last" ] || continue
     task=$(basename "$f"); task="${task%.status}"
-    distilled="${distilled}$(daemon_task_human_ref "$task" "$state"): ${last} | "
+    if [ "$(status_line_verb "$last")" = resolved ]; then
+      fm_human_notify_resolve_line "$state" "$task" "$last" || true
+    fi
+    if class=$(fm_human_notify_class "$last"); then
+      [ "$class" != captain-hold ] || continue
+      rel=1
+      if fm_human_notify_pending "$state" "$task" "$last"; then
+        seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
+        if [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ]; then
+          fm_human_notify_record "$state" "$task" "$last" || true
+        else
+          all_seen=0
+          summary=$(fm_human_notify_summary "$state" "$task" "$last") || summary=''
+          distilled="${distilled}${summary} | "
+        fi
+      fi
+      continue
+    fi
     status_is_captain_relevant "$last" || continue
+    distilled="${distilled}$(daemon_terminal_summary "$task" "$state" "$last") | "
     rel=1
-    # Dedupe against the catch-all scan: if this status was already escalated
-    # (seen marker matches), skip escalating again. The seen marker is the
-    # single source of truth shared between the per-wake signal path and the
-    # heartbeat scan. all_seen stays 1 only if EVERY relevant file was seen.
+    # Non-human terminal compatibility keeps the older catch-all receipt.
     seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
     [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
   done
@@ -411,13 +438,13 @@ classify_stale() {  # <window> <state>
   local win=$1 state=$2 task last seen
   task=$(window_to_task "$win" "$state")
   last=$(last_status_line "$state/$task.status")
-  if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
-    # A DECLARED external-wait pause or a verified captain-held transfer
-    # (fm-classify-lib.sh owns which declarations qualify): an idle pane is
-    # EXPECTED, so this is not a wedge. The caller records a pause marker (long
-    # re-surface cadence in housekeeping) rather than a wedge stale marker. Cheap:
-    # reuses the status line already read, no fm-crew-state.sh call, mirroring the
-    # daemon's existing status-log classification.
+  if [ -n "$last" ] && status_is_captain_held "$last"; then
+    printf 'humanwait|captain-owned wait remains visible on demand without a timed reminder'
+    return
+  fi
+  if [ -n "$last" ] && status_is_paused "$last"; then
+    # A declared external wait can clear without a human, so it retains the
+    # bounded recheck cadence rather than entering human-notification dedupe.
     printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
     return
   fi
@@ -435,14 +462,28 @@ classify_stale() {  # <window> <state>
           ;;
       esac
     fi
-    # Dedupe against the signal path: if this status was already escalated
-    # (seen marker matches), self-handle to avoid a duplicate in the digest.
+    if fm_human_notify_class "$last" >/dev/null 2>&1; then
+      if fm_human_notify_pending "$state" "$task" "$last"; then
+        seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
+        if [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ]; then
+          fm_human_notify_record "$state" "$task" "$last" || true
+          printf 'self|unchanged human-owned condition'
+          return
+        fi
+      else
+        printf 'self|unchanged human-owned condition'
+        return
+      fi
+      printf 'escalate|%s' "$(fm_human_notify_summary "$state" "$task" "$last")"
+      return
+    fi
+    # Dedupe non-human terminal compatibility against the signal path.
     seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
     if [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ]; then
       printf 'self|stale + terminal (already escalated by signal): %s' "$last"
       return
     fi
-    printf 'escalate|stale + terminal status for %s: %s' "$(daemon_window_human_ref "$win" "$state")" "$last"
+    printf 'escalate|%s' "$(daemon_terminal_summary "$task" "$state" "$last")"
     return
   fi
   # Non-terminal (or no status): defer to the persistence recheck. The caller
@@ -536,9 +577,12 @@ reconcile_pause_tracking() {  # <window> <state> <last-status-line>
   key=$(_stale_key "$task")
   marker="$state/.subsuper-paused-$key"
   watcher_key=$(_stale_key "$win")
-  if status_is_paused_or_captain_held "$last"; then
+  if status_is_paused "$last"; then
     stale_marker_remove "$win" "$state"
     pause_marker_record "$win" "$state"
+  elif status_is_captain_held "$last"; then
+    stale_marker_remove "$win" "$state"
+    pause_marker_remove "$win" "$state"
   elif [ -e "$marker" ] || [ -e "$state/.paused-$watcher_key" ]; then
     clear_pause_tracking "$win" "$state"
   fi
@@ -554,7 +598,8 @@ migrate_watcher_pause_markers() {  # <state>
     key=$(_stale_key "$task")
     watcher_key=$(_stale_key "$win")
     last=$(last_status_line "$state/$task.status")
-    if status_is_paused_or_captain_held "$last" || [ -e "$state/.subsuper-paused-$key" ] || [ -e "$state/.paused-$watcher_key" ]; then
+    if status_is_paused "$last" || status_is_captain_held "$last" \
+      || [ -e "$state/.subsuper-paused-$key" ] || [ -e "$state/.paused-$watcher_key" ]; then
       reconcile_pause_tracking "$win" "$state" "$last"
     fi
   done
@@ -569,6 +614,9 @@ sync_pause_markers_from_signal() {  # <state> <signal files>
     [ -e "$f" ] || continue
     last=$(last_status_line "$f")
     task=$(basename "$f"); task=${task%.status}
+    if [ "$(status_line_verb "$last")" = resolved ]; then
+      fm_human_notify_resolve_line "$state" "$task" "$last" || true
+    fi
     win=$(window_for_task "$task" "$state" 2>/dev/null || true)
     [ -n "$win" ] || continue
     reconcile_pause_tracking "$win" "$state" "$last"
@@ -582,6 +630,7 @@ sync_pause_markers_from_signal() {  # <state> <signal files>
 mark_status_seen() {  # <state> <task> <last-line>
   local state=$1 task=$2 line=$3
   printf '%s' "$line" > "$state/.subsuper-seen-status-$(_stale_key "$task")"
+  fm_human_notify_record "$state" "$task" "$line" 2>/dev/null || true
 }
 
 # Mark every captain-relevant status line a per-wake classification escalated as
@@ -1012,7 +1061,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     Never silently defer forever.
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
-#  2b) pause re-surface: for each declared-wait marker past its current recheck
+#  2b) pause re-surface: for each declared-external-wait marker past its current recheck
 #     window (PAUSE_RESURFACE_SECS, doubled per consecutive unchanged recheck up to
 #     FM_PAUSE_RESURFACE_MAX_SECS), re-peek; busy/gone -> clear; still idle + still
 #     declaring the wait -> escalate a recheck digest naming which human the wait is
@@ -1070,7 +1119,7 @@ housekeeping() {  # <state>
     fi
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
-    if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
+    if [ -n "$last" ] && { status_is_paused "$last" || status_is_captain_held "$last"; }; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
@@ -1085,15 +1134,14 @@ housekeeping() {  # <state>
     esac
   done
 
-  # (2b) pause re-surface recheck. A declared wait idles by design (fm-classify-lib.sh's
-  # status_is_paused_or_captain_held owns which declarations qualify), so it is
+  # (2b) pause re-surface recheck. A declared external wait idles by design, so it is
   # rechecked on a much longer cadence than a wedge (PAUSE_RESURFACE_SECS) and never
-  # escalated as one - but it MUST re-surface, so neither a forgotten pause nor a
-  # forgotten captain hold can rot invisibly. Past the window: busy (resumed) or gone
+  # escalated as one. Human-owned holds are excluded above and remain visible through
+  # recovery and explicit status views without a timer. Past the window: busy (resumed) or gone
   # -> drop; still idle and still declaring the wait -> escalate a recheck digest and
   # reset the marker so the window repeats. The digest names WHICH human the wait is
   # on, because the captain is the one reading it: an external dependency for a
-  # paused: declaration, and the captain themself for a verified hold transfer.
+  # paused: declaration.
   # Consecutive rechecks that find one wait unchanged back off through the shared
   # cadence owner (fm-classify-lib.sh), and the daemon's own escalation buffer
   # already collapses every wait that comes due in the same tick into one digest.
@@ -1108,7 +1156,7 @@ housekeeping() {  # <state>
     fi
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
-    if [ -z "$last" ] || ! status_is_paused_or_captain_held "$last"; then
+    if [ -z "$last" ] || ! status_is_paused "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
@@ -1131,13 +1179,7 @@ housekeeping() {  # <state>
       0) rm -f "$marker" "$backoff_file" ;;
       *)
         last=$(last_status_line "$state/$task.status")
-        if [ -n "$last" ] && status_is_captain_held "$last"; then
-          pause_item="captain-held ${age}s (awaiting the captain, answer the held decision or release the hold): $(daemon_window_human_ref "$win" "$state")"
-          pause_items="$pause_items$pause_item"$'\n'
-          printf -v pause_records '%sR\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-            "$pause_records" "$backoff_file" "$(( backoff_streak + 1 ))" "$backoff_sig" \
-            "$worker_condition" "$marker" "$now"
-        elif [ -n "$last" ] && status_is_paused "$last"; then
+        if [ -n "$last" ] && status_is_paused "$last"; then
           pause_item="paused ${age}s (awaiting external, recheck whether the wait still holds): $(daemon_window_human_ref "$win" "$state")"
           pause_items="$pause_items$pause_item"$'\n'
           printf -v pause_records '%sR\t%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -1157,12 +1199,19 @@ housekeeping() {  # <state>
   #     scan_captain_relevant_statuses; the daemon layers its digest dedup on top.
   if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "${FM_HEARTBEAT_SCAN_SECS:-$HEARTBEAT_SCAN_SECS_DEFAULT}" ]; then
     _now > "$state/.subsuper-last-scan"
-    local seen
+    local seen class summary
     while IFS="$(printf '\t')" read -r f task last; do
       [ -n "$f" ] || continue
+      if class=$(fm_human_notify_class "$last"); then
+        fm_human_notify_pending "$state" "$task" "$last" || continue
+        summary=$(fm_human_notify_summary "$state" "$task" "$last") || summary=''
+        escalate_add "$state" "$summary"
+        mark_status_seen "$state" "$task" "$last"
+        continue
+      fi
       seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
       [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] && continue
-      escalate_add "$state" "$(daemon_task_human_ref "$task" "$state"): $last (catch-all scan)"
+      escalate_add "$state" "$(daemon_terminal_summary "$task" "$state" "$last")"
       mark_status_seen "$state" "$task" "$last"
     done < <(scan_captain_relevant_statuses "$state")
   fi
@@ -1328,15 +1377,20 @@ handle_wake() {  # <reason> <state>
       [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
       ;;
     pause)
-      # Declared wait, an external-wait pause or a verified captain-held transfer:
-      # record a pause marker (long re-surface cadence in housekeeping) and drop any
-      # wedge stale marker, so a pane that transitioned working->declared-wait is not
-      # still wedge-aged. Only stale produces this action.
+      # Declared external waits can clear without a human and retain their bounded
+      # recheck cadence. Human-owned waits use the separate branch below.
       if [ "$kind" = "stale" ]; then
         stale_marker_remove "$arg" "$state"
         pause_marker_record "$arg" "$state"
       fi
       log "self-handle (paused): $reason -> $distilled"
+      ;;
+    humanwait)
+      if [ "$kind" = "stale" ]; then
+        stale_marker_remove "$arg" "$state"
+        pause_marker_remove "$arg" "$state"
+      fi
+      log "self-handle (human-owned wait, no timed reminder): $reason"
       ;;
     *)
       # Transient (non-terminal) stale: record/refresh the wedge marker so

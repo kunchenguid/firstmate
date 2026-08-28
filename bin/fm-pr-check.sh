@@ -17,6 +17,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-human-notify-lib.sh
+. "$SCRIPT_DIR/fm-human-notify-lib.sh"
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -134,4 +136,15 @@ fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
+# The ready notice was delivered before firstmate arms this merge watch.
+# Refresh its evidence receipt after pr_head publication so learning the exact
+# head does not manufacture a second review-ready transition.
+READY_LINE=$(last_status_line "$STATE/$ID.status")
+READY_CLASS=$(fm_human_notify_class "$READY_LINE" 2>/dev/null || true)
+if [ "$READY_CLASS" = review-ready ]; then
+  fm_human_notify_record "$STATE" "$ID" "$READY_LINE" || {
+    echo "error: could not preserve the review-ready notification receipt" >&2
+    exit 1
+  }
+fi
 printf 'armed: state/%s.check.sh\n' "$ID"

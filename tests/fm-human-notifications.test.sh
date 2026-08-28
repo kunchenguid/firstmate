@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# Portable contract and watcher delivery tests for edge-triggered human waits.
+set -euo pipefail
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-human-notify-lib.sh
+. "$ROOT/bin/fm-human-notify-lib.sh"
+
+TMP_ROOT=$(fm_test_tmproot fm-human-notifications)
+STATE="$TMP_ROOT/state"
+mkdir -p "$STATE"
+
+meta() {
+  local task=$1 name=$2 gen=${3:-gen-1}
+  printf 'display_name=%s\nbusy_gen=%s\nkind=ship\nproject=firstmate\n' "$name" "$gen" > "$STATE/$task.meta"
+}
+
+assert_pending() {
+  fm_human_notify_pending "$STATE" "$1" "$2" || fail "expected a new notification edge: $1 / $2"
+}
+
+assert_absorbed() {
+  local rc=0
+  fm_human_notify_pending "$STATE" "$1" "$2" || rc=$?
+  [ "$rc" -eq 1 ] || fail "expected an unchanged notification to be absorbed (rc=$rc): $1 / $2"
+}
+
+meta decision-task 'CRM · Data Shape'
+DECISION='needs-decision [key=shape]: choose REST or RPC'
+BLOCKER='blocked [key=access]: production credential is missing'
+REVIEW='done: PR https://github.com/example/repo/pull/7 checks green'
+HOLD='captain-held [key=launch]: approve the launch window'
+FAILURE='failed: credential check returned a new denial'
+RESULT='done: implementation result is ready for review'
+PAUSE='paused: waiting for the vendor release'
+
+[ "$(fm_human_notify_class "$DECISION")" = decision ] || fail "needs-decision did not classify"
+[ "$(fm_human_notify_class "$BLOCKER")" = blocker ] || fail "blocked did not classify"
+[ "$(fm_human_notify_class "$REVIEW")" = review-ready ] || fail "review-ready PR did not classify"
+[ "$(fm_human_notify_class "$HOLD")" = captain-hold ] || fail "captain hold did not classify"
+[ "$(fm_human_notify_class "$FAILURE")" = failure ] || fail "failure did not classify"
+[ "$(fm_human_notify_class "$RESULT")" = result ] || fail "terminal result did not classify"
+if fm_human_notify_class "$PAUSE" >/dev/null 2>&1; then fail "external pause entered human-owned dedupe"; fi
+pass "human-owned decisions, blockers, results, failures, and captain holds share one owner while external pauses stay separate"
+
+for row in "$DECISION" "$BLOCKER" "$REVIEW" "$HOLD" "$FAILURE" "$RESULT"; do
+  assert_pending decision-task "$row"
+  fm_human_notify_record "$STATE" decision-task "$row" || fail "could not record notification"
+  assert_absorbed decision-task "$row"
+done
+pass "each unchanged human-owned condition emits one edge and then stays silent"
+
+CHANGED='needs-decision [key=shape]: choose REST, RPC, or GraphQL after the schema test'
+assert_pending decision-task "$CHANGED"
+fm_human_notify_record "$STATE" decision-task "$CHANGED"
+assert_absorbed decision-task "$CHANGED"
+pass "a changed decision question resets the edge without using elapsed time"
+
+fm_human_notify_resolve_line "$STATE" decision-task 'resolved [key=shape]: chose RPC' || fail "resolution failed"
+assert_pending decision-task "$DECISION"
+fm_human_notify_record "$STATE" decision-task "$DECISION"
+assert_absorbed decision-task "$DECISION"
+pass "resolution clears the receipt so a genuinely reopened decision notifies"
+
+# Receipts are durable across a new shell process.
+FM_STATE_OVERRIDE="$STATE" bash -c '
+  . "$1/bin/fm-human-notify-lib.sh"
+  fm_human_notify_pending "$2" decision-task "$3"
+' _ "$ROOT" "$STATE" "$DECISION" && fail "restart replay re-notified an unchanged decision"
+pass "restart and replay preserve one-shot silence"
+
+meta legacy-task 'CRM · Legacy Receipt'
+printf '%s' "$DECISION" > "$STATE/.hb-surfaced-legacy-task"
+assert_absorbed legacy-task "$DECISION"
+[ -d "$STATE/human-notifications" ] || fail "legacy receipt was not adopted"
+pass "restart recovery adopts pre-owner receipts without replaying an already presented condition"
+
+# Publication-before-record leaves only the accepted duplicate window.
+CRASH='blocked [key=network]: access gateway returned a new denial'
+assert_pending decision-task "$CRASH"
+assert_pending decision-task "$CRASH"
+fm_human_notify_record "$STATE" decision-task "$CRASH"
+assert_absorbed decision-task "$CRASH"
+pass "the crash window can duplicate but cannot suppress the first publication"
+
+# Meaningful review evidence and task incarnation both reset an unchanged line.
+fm_human_notify_record "$STATE" decision-task "$REVIEW"
+printf 'pr=https://github.com/example/repo/pull/7\npr_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' >> "$STATE/decision-task.meta"
+assert_pending decision-task "$REVIEW"
+fm_human_notify_record "$STATE" decision-task "$REVIEW"
+printf 'display_name=CRM · Data Shape\nbusy_gen=gen-2\nkind=ship\nproject=firstmate\npr=https://github.com/example/repo/pull/7\npr_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' > "$STATE/decision-task.meta"
+assert_pending decision-task "$REVIEW"
+pass "changed PR head evidence and a new task incarnation create new edges"
+
+SUMMARY=$(fm_human_notify_summary "$STATE" decision-task "$BLOCKER")
+assert_contains "$SUMMARY" 'CRM · Data Shape' "summary omitted the readable label"
+assert_contains "$SUMMARY" 'blocker evidence changed' "summary omitted why it surfaced"
+assert_contains "$SUMMARY" 'Action required:' "summary omitted the exact action"
+case "$SUMMARY" in *'/state/'*|*'endpoint '*|*'followUp'*|*'queue generation'*) fail "summary leaked private routing terms: $SUMMARY" ;; esac
+pass "presentation names the readable outcome, transition reason, and required action without routing internals"
+
+# A held condition is deliberate human waiting, while an undeclared idle worker
+# remains on the stale-worker path.
+(
+  export FM_STATE_OVERRIDE="$STATE" FM_ROOT_OVERRIDE="$ROOT"
+  # shellcheck source=bin/fm-supervise-daemon.sh
+  . "$ROOT/bin/fm-supervise-daemon.sh"
+  printf '%s\n' "$HOLD" > "$STATE/decision-task.status"
+  out=$(classify_stale 'session:fm-decision-task' "$STATE")
+  case "$out" in humanwait\|*) : ;; *) exit 11 ;; esac
+  printf '%s\n' "$PAUSE" > "$STATE/decision-task.status"
+  out=$(classify_stale 'session:fm-decision-task' "$STATE")
+  case "$out" in pause\|*) : ;; *) exit 12 ;; esac
+  printf '%s\n' 'working: implementation stopped without declaring a wait' > "$STATE/decision-task.status"
+  out=$(classify_stale 'session:fm-decision-task' "$STATE")
+  case "$out" in self\|transient\ stale*) : ;; *) exit 13 ;; esac
+) || fail "human/external/undeclared stale distinction failed"
+pass "human waits have no timed reminder, external pauses retain rechecks, and undeclared idle work remains inspectable"
+
+# End-to-end: an unchanged decision signal is consumed by bash without the
+# watcher exiting, printing a wake reason, or queueing a model turn.
+QUIET="$TMP_ROOT/quiet"
+mkdir -p "$QUIET"
+printf 'display_name=CRM · Quiet Choice\nbusy_gen=quiet-1\nkind=ship\nproject=firstmate\n' > "$QUIET/q.meta"
+printf '%s\n' "$DECISION" > "$QUIET/q.status"
+fm_human_notify_record "$QUIET" q "$DECISION"
+touch "$QUIET/.last-heartbeat" "$QUIET/.last-check"
+FM_STATE_OVERRIDE="$QUIET" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$TMP_ROOT" \
+  FM_POLL=0.05 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=999999 FM_CHECK_INTERVAL=999999 \
+  "$ROOT/bin/fm-watch.sh" > "$TMP_ROOT/watch.out" 2> "$TMP_ROOT/watch.err" &
+WATCH_PID=$!
+sleep 0.5
+kill -0 "$WATCH_PID" 2>/dev/null || fail "unchanged decision ended the watcher and would start a model turn: $(cat "$TMP_ROOT/watch.out")"
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+[ ! -s "$TMP_ROOT/watch.out" ] || fail "unchanged decision printed a delivery: $(cat "$TMP_ROOT/watch.out")"
+[ ! -s "$QUIET/.wake-queue" ] || fail "unchanged decision queued a model turn"
+pass "unchanged human-owned evidence is absorbed before persistent Pi or OpenCode delivery"

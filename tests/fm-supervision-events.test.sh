@@ -93,7 +93,7 @@ if [ -e "$STATE_DIR/.wake-queue" ] && grep -q 'stale' "$STATE_DIR/.wake-queue"; 
 fi
 [ ! -s "$WAKE_LOG" ] || fail "a captain-held crew must not wake the supervisor from the event fast-path"
 grep -q 'absorbed push' "$STATE_DIR/.watch-triage.log" 2>/dev/null || fail "the captain-held absorb should be logged to the triage log"
-pass "handle_push_transition: a captain-held crew is absorbed (no fast wake), left to the poll loop's long cadence"
+pass "handle_push_transition: a captain-held crew is absorbed with no fast wake or timed reminder"
 
 # --- event_wait_or_sleep: secondmate windows are excluded from the pane list --
 

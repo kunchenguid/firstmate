@@ -15,6 +15,8 @@ FM_PUSH_TRANSITION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$FM_PUSH_TRANSITION_LIB_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-transition-lib.sh
 . "$FM_PUSH_TRANSITION_LIB_DIR/fm-transition-lib.sh"
+# shellcheck source=bin/fm-human-notify-lib.sh
+. "$FM_PUSH_TRANSITION_LIB_DIR/fm-human-notify-lib.sh"
 
 TRIAGE_LOG="$STATE/.watch-triage.log"
 TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
@@ -164,24 +166,33 @@ mark_surfaced() {  # <status-file>
 
 # Act on a fresh actionable transition from a push-capable backend.
 handle_push_transition() {  # <backend> <session> <record>
-  local backend=$1 session=$2 record=$3 pane_id to window task reason
+  local backend=$1 session=$2 record=$3 pane_id to window task reason last
   pane_id=$(fm_transition_pane_id "$record")
   to=$(fm_transition_to_status "$record")
   [ -n "$pane_id" ] || { sleep 1; return; }
   window="$session:$pane_id"
   task=$(window_to_task "$window" "$STATE")
-  # A declared wait already names the human this transition would report: an
-  # external dependency, or the captain a verified hold transferred the work to.
-  # Either way the wait is durably recorded, so absorb the immediate escalation
-  # and leave the bounded re-surface to the watcher's own pause cadence.
-  if status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
-    triage_log "absorbed push $to (declared wait, awaiting external or captain): $window"
+  last=$(last_status_line "$STATE/$task.status")
+  # External waits retain their bounded cadence. Captain-owned waits remain
+  # silent until evidence changes or the captain answers.
+  if status_is_paused "$last" || status_is_captain_held "$last"; then
+    triage_log "absorbed push $to (declared wait): $window"
     fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
     return
   fi
-  reason="stale: $window (herdr: agent $to - waiting on human, escalated immediately, not via wedge timer)"
+  if fm_human_notify_class "$last" >/dev/null 2>&1; then
+    if ! fm_human_notify_pending "$STATE" "$task" "$last"; then
+      triage_log "absorbed push $to (unchanged human-owned condition): $window"
+      fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
+      return
+    fi
+    reason="stale: $window (herdr: agent $to - $(fm_human_notify_summary "$STATE" "$task" "$last"))"
+  else
+    reason="stale: $window (herdr: agent $to - waiting on human, escalated immediately, not via wedge timer)"
+  fi
   fm_wake_append stale "$window" "$reason" || exit 1
   fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
   mark_surfaced "$STATE/$task.status"
+  fm_human_notify_record "$STATE" "$task" "$last" 2>/dev/null || true
   wake "$reason"
 }
