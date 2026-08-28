@@ -9247,6 +9247,8 @@ def exact_read(_controller, args, check=False, timeout=provider.AZ_TIMEOUT_SECON
         }, 0, ""
     if args[:3] == ["storage", "container", "show"]:
         return None, 1, "ErrorCode:ContainerNotFound"
+    if args[:2] == ["disk", "show"] and args[args.index("--name") + 1] == "disk-fixture-wkr-02-task":
+        return None, 1, "ERROR: (NotFound) Disk disk-fixture-wkr-02-task is not found.\nCode: NotFound\nMessage: Disk disk-fixture-wkr-02-task is not found."
     return None, 1, "(ResourceNotFound) exact fixture absence"
 
 provider.az = exact_read
@@ -9263,6 +9265,7 @@ assert not any("list" in call[:3] for call in calls), calls
 assert any(call[:2] == ("vm", "show") for call in calls), calls
 assert any(call[:2] == ("network", "nic") for call in calls), calls
 assert sum(call[:2] == ("disk", "show") for call in calls) == 3, calls
+assert "task-disk" not in snapshot["workers"][0]["resources"], snapshot
 assert snapshot["capacity_reservations"] == []
 assert snapshot["metrics"]["actual_usd"] is None
 try:

@@ -484,9 +484,9 @@ def resource_record(kind, value, power_state=None, tags_override=None):
 
 def azure_resource_not_found(stderr):
     return bool(re.search(
-        r"(?:\((?:ResourceNotFound|ParentResourceNotFound|ContainerNotFound)\)"
+        r"(?:\((?:NotFound|ResourceNotFound|ParentResourceNotFound|ContainerNotFound)\)"
         r"|^(?:Code|ErrorCode):\s*"
-        r"(?:ResourceNotFound|ParentResourceNotFound|ContainerNotFound)\s*$)",
+        r"(?:NotFound|ResourceNotFound|ParentResourceNotFound|ContainerNotFound)\s*$)",
         str(stderr or ""), re.MULTILINE,
     ))
 
