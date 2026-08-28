@@ -93,6 +93,22 @@ EOF
   printf '%s\n' "$home"
 }
 
+register_local_only_project() {
+  local home=$1 project=$2
+  printf -- '- %s [local-only] - fixture (added 2026-01-01)\n' \
+    "$(basename "$project")" > "$home/data/projects.md"
+}
+
+make_local_only_project() {
+  local home=$1 name=$2 project="$1/projects/$2" worktree="$1/projects/$2-worktree"
+  git init --quiet -b main "$project"
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit --quiet --allow-empty -m fixture
+  git -C "$project" worktree add --quiet --detach "$worktree" HEAD
+  register_local_only_project "$home" "$project"
+  printf '%s|%s\n' "$project" "$worktree"
+}
+
 run_pf() {  # <home> <args...>
   local home=$1
   shift
@@ -824,6 +840,7 @@ test_secondmate_teardown_durable_record_with_unknown_field_succeeds() {
   ln -s "$parent" "$parent_alias"
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_git_init_commit "$child/projects/worktree"
+  register_local_only_project "$child" "$child/projects/worktree"
   printf 'manual\n' > "$child/config/backlog-backend"
   fm_write_meta "$child/state/work-clean.meta" \
     "window=firstmate:fm-work-clean" "endpoint_task_id=work-clean" \
@@ -856,6 +873,7 @@ test_secondmate_teardown_rejects_conflicting_live_and_durable_parent_bindings() 
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   fm_write_meta "$durable_parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_git_init_commit "$child/projects/worktree"
+  register_local_only_project "$child" "$child/projects/worktree"
   printf 'manual\n' > "$child/config/backlog-backend"
   fm_write_meta "$child/state/work-conflict.meta" \
     "window=firstmate:fm-work-conflict" "endpoint_task_id=work-conflict" \
@@ -950,6 +968,7 @@ test_secondmate_teardown_rejects_nul_bearing_durable_parent_record() {
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_git_init_commit "$child/projects/worktree"
+  register_local_only_project "$child" "$child/projects/worktree"
   printf 'manual\n' > "$child/config/backlog-backend"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
@@ -981,6 +1000,7 @@ test_relay_disabled_unmarked_teardown_skips_public_path() {
   local home tasks_log out rc
   home=$(make_home teardown-disabled-unmarked relay-off)
   fm_git_init_commit "$home/projects/worktree"
+  register_local_only_project "$home" "$home/projects/worktree"
   tasks_log="$home/tasks-axi.log"; : > "$tasks_log"
   printf 'manual\n' > "$home/config/backlog-backend"
   cat > "$home/fakebin/tasks-axi" <<'SH'
@@ -1013,6 +1033,7 @@ test_relay_disabled_parent_allows_marked_child_teardown() {
   parent=$(make_home teardown-disabled-parent relay-off)
   child=$(make_home teardown-disabled-child relay-off)
   fm_git_init_commit "$child/projects/worktree"
+  register_local_only_project "$child" "$child/projects/worktree"
   printf '%s\n' disabled-mate > "$child/.fm-secondmate-home"
   printf -- '- disabled-mate - synthetic (home: %s; scope: synthetic; projects: ; added 2026-07-30)\n' \
     "$child" > "$parent/data/secondmates.md"
@@ -2157,10 +2178,14 @@ test_x_request_teardown_warns_when_final_unposted() {
 }
 
 test_secondmate_promotion_uses_teardown_parent_resolution() {
-  local parent stale child remote_child out
+  local parent stale child remote_child out target project worktree
   parent=$(make_home promote-parent)
   stale=$(make_home promote-stale-parent)
   child=$(make_home promote-child relay-off)
+  target=$(make_local_only_project "$child" promote-local)
+  IFS='|' read -r project worktree <<EOF
+$target
+EOF
   printf '%s\n' mate > "$child/.fm-secondmate-home"
   printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' \
     "$stale" > "$child/.fm-secondmate-parent"
@@ -2176,7 +2201,8 @@ test_secondmate_promotion_uses_teardown_parent_resolution() {
     "$stale/state/public-followup/registry/pf-stale"
 
   fm_write_meta "$child/state/promote-conflict.meta" \
-    "window=firstmate:fm-promote-conflict" "kind=scout"
+    "window=firstmate:fm-promote-conflict" "kind=scout" \
+    "worktree=$worktree" "project=$project"
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" \
     "$PROMOTE" promote-conflict --mode local-only --yolo off 2>&1) \
@@ -2190,7 +2216,8 @@ test_secondmate_promotion_uses_teardown_parent_resolution() {
 
   rm -f "$child/.fm-secondmate-parent"
   fm_write_meta "$child/state/promote-legacy.meta" \
-    "window=firstmate:fm-promote-legacy" "kind=scout"
+    "window=firstmate:fm-promote-legacy" "kind=scout" \
+    "worktree=$worktree" "project=$project"
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" \
     "$PROMOTE" promote-legacy --mode local-only --yolo off 2>&1) \
@@ -2201,12 +2228,17 @@ test_secondmate_promotion_uses_teardown_parent_resolution() {
     "legacy parent recovery must print the rechain hint"
 
   remote_child=$(make_home promote-remote-child relay-off)
+  target=$(make_local_only_project "$remote_child" promote-local)
+  IFS='|' read -r project worktree <<EOF
+$target
+EOF
   printf '%s\n' remote-mate > "$remote_child/.fm-secondmate-home"
   printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_host=remote.example\n' \
     > "$remote_child/.fm-secondmate-parent"
   printf 'FMX_PAIRING_TOKEN=child-local-token\n' > "$remote_child/.env"
   fm_write_meta "$remote_child/state/promote-remote.meta" \
-    "window=firstmate:fm-promote-remote" "kind=scout"
+    "window=firstmate:fm-promote-remote" "kind=scout" \
+    "worktree=$worktree" "project=$project"
   out=$(PATH="$remote_child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$remote_child" \
     FM_STATE_OVERRIDE="$remote_child/state" \
     "$PROMOTE" promote-remote --mode local-only --yolo off 2>&1) \

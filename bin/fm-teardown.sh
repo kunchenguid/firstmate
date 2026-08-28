@@ -1396,6 +1396,7 @@ teardown_treehouse_return() {
 
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT default_commit unmerged_raw unmerged branch
+  local project_remotes worktree_remotes require_local_check
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -1423,11 +1424,27 @@ validate_worktree_teardown_safety() {
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
 
   if [ "$MODE" = local-only ]; then
-    if ! fm_project_base_resolve "$PROJ" "$WT" yes no; then
-      echo "REFUSED: $FM_PROJECT_BASE_ERROR." >&2
-      return 1
+    require_local_check=0
+    if [ -n "$unpushed" ]; then
+      require_local_check=1
+    else
+      project_remotes=$(git -C "$PROJ" remote 2>/dev/null) || {
+        echo "REFUSED: cannot inspect configured remotes for authoritative project $PROJ." >&2
+        return 1
+      }
+      worktree_remotes=$(git -C "$WT" remote 2>/dev/null) || {
+        echo "REFUSED: cannot inspect configured remotes for task worktree $WT." >&2
+        return 1
+      }
+      if [ -z "$project_remotes" ] && [ -z "$worktree_remotes" ]; then
+        require_local_check=1
+      fi
     fi
-    if [ "$FM_PROJECT_BASE_KIND" = local ] || [ -n "$unpushed" ]; then
+    if [ "$require_local_check" = 1 ]; then
+      if ! fm_project_base_resolve "$PROJ" "$WT" yes no; then
+        echo "REFUSED: $FM_PROJECT_BASE_ERROR." >&2
+        return 1
+      fi
       DEFAULT=$FM_PROJECT_BASE_BRANCH
       default_commit=$(git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$DEFAULT^{commit}" 2>/dev/null) || {
         echo "REFUSED: local default branch $DEFAULT does not resolve in $PROJ." >&2

@@ -585,6 +585,25 @@ test_local_only_fork_remote_allows() {
   pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
 }
 
+test_remoteless_local_only_fork_remote_allows() {
+  local case_dir rc
+  case_dir=$(make_case remoteless-fork-allow)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  git -C "$case_dir/project" remote remove origin
+  add_fork_with_pushed_branch "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "remote-less fork-allow: teardown should accept remote containment without origin"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "remote-less fork-allow: teardown required origin despite fork containment"
+  pass "local-only teardown preserves fork containment without origin"
+}
+
 test_teardown_closes_the_backlog_item_itself() {
   local case_dir out
   case_dir=$(make_case tasks-axi-close)
@@ -2656,6 +2675,7 @@ EOF
 }
 
 test_local_only_fork_remote_allows
+test_remoteless_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
