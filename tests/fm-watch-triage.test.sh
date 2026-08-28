@@ -898,6 +898,41 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   pass "provably-working non-terminal stale is absorbed on first sight, then wedge-escalated past the threshold"
 }
 
+# A non-terminal stale hash may already have been surfaced before it acquires a
+# wedge timer. Once that timer crosses the threshold, the already-surfaced path
+# must still pass the task identity needed by the worktree-write probe.
+test_nonterminal_stale_already_surfaced_escalates_past_threshold() {
+  local dir state fakebin out err capture_file window key pane_hash sig pid
+  dir=$(make_case nonterminal-stale-already-surfaced); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; err="$dir/watch.err"; capture_file="$dir/pane.txt"
+  window="test:fm-already-surfaced"
+  printf 'idle after earlier surface' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/already-surfaced.meta"
+  printf 'working: awaiting follow-up\n' > "$state/already-surfaced.status"
+  sig=$(seen_sig "$state/already-surfaced.status"); printf '%s' "$sig" > "$state/.seen-already-surfaced_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle after earlier surface")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '%s' "$pane_hash" > "$state/.surfaced-$key"
+  printf '1\n' > "$state/.count-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" &
+  pid=$!
+  if ! wait_for_exit "$pid" 100; then
+    fail "already-surfaced wedge path did not exit cleanly: $(cat "$err")"
+  fi
+  [ ! -s "$err" ] || fail "already-surfaced wedge path crashed: $(cat "$err")"
+  grep -F "stale: $window" "$out" >/dev/null || fail "already-surfaced wedge escalation did not print a stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "already-surfaced wedge escalation omitted its reason"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 1 ] \
+    || fail "already-surfaced wedge escalation did not advance its counter"
+  pass "an already-surfaced non-terminal stale wedge-escalates without an unbound argument"
+}
+
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
 # The key requirement: a crew with no running pipeline that has gone quiet (and is
 # not busy) has stopped - it may be done via interactive menus, waiting, or wedged.
@@ -2801,6 +2836,7 @@ test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
+test_nonterminal_stale_already_surfaced_escalates_past_threshold
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed

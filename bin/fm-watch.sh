@@ -1609,7 +1609,7 @@ EOF
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
               handle_paused_stale "$w" "$task" "$h"
             else
-              wedge_timer_check "$w" "$ssf" "non-terminal stale (already surfaced)" "$ewf"
+              wedge_timer_check "$w" "$ssf" "non-terminal stale (already surfaced)" "$ewf" "$task"
             fi
           else
             task=$(window_to_task "$w" "$STATE")
