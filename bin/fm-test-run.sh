@@ -1591,6 +1591,17 @@ esac
 [ "$JOBS" -ge 1 ] || die "--jobs must be >= 1"
 [ "$JOBS" -le "$JOBS_MAX" ] || die "--jobs is capped at $JOBS_MAX (got $JOBS)"
 
+if [ -n "$MAX_WALL_MS" ]; then
+  case "$MAX_WALL_MS" in
+    ''|*[!0-9]*) die "--max-wall-ms requires a positive integer" ;;
+  esac
+  [ "$MAX_WALL_MS" -gt 0 ] || die "--max-wall-ms requires a positive integer"
+fi
+
+case "$PER_SCRIPT_TIMEOUT_SECS" in
+  ''|*[!0-9]*) die "--per-script-timeout-secs requires a whole number of seconds (0 disables)" ;;
+esac
+
 case "${MODE:-}" in
   all)
     select_all
@@ -1735,16 +1746,6 @@ if [ "$JOBS" -gt 1 ]; then
   rm -f "$SCHEDULE_TMP"
 fi
 
-if [ -n "$MAX_WALL_MS" ]; then
-  case "$MAX_WALL_MS" in
-    ''|*[!0-9]*) die "--max-wall-ms requires a positive integer" ;;
-  esac
-  [ "$MAX_WALL_MS" -gt 0 ] || die "--max-wall-ms requires a positive integer"
-fi
-
-case "$PER_SCRIPT_TIMEOUT_SECS" in
-  ''|*[!0-9]*) die "--per-script-timeout-secs requires a whole number of seconds (0 disables)" ;;
-esac
 if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
   [ -r "$ROOT/bin/fm-timeout-lib.sh" ] || die "per-script timeout helper not found: bin/fm-timeout-lib.sh"
   # shellcheck source=bin/fm-timeout-lib.sh

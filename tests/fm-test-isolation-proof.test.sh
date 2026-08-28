@@ -11,6 +11,19 @@ RUNNER="$ROOT/bin/fm-test-run.sh"
 assert_present "$PROOF" "bin/fm-test-isolation-proof.sh is missing"
 [ -x "$PROOF" ] || fail "bin/fm-test-isolation-proof.sh must be executable"
 
+test_unknown_pool_is_refused() {
+  local tmp rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-isolation-proof-pool.XXXXXX")
+  set +e
+  "$PROOF" --pool unknown-family --list >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "unknown --pool must be refused with exit 2, got $rc"
+  [ ! -s "$tmp/out" ] || fail "unknown --pool unexpectedly listed candidates: $(cat "$tmp/out")"
+  rm -rf "$tmp"
+  pass "unknown candidate pools are refused"
+}
+
 test_list_candidates_nonempty_and_stable() {
   local listed count sorted
   listed=$("$PROOF" --list)
@@ -99,6 +112,7 @@ test_parallel_shards_consume_the_proven_set() {
   pass "parallel shards consume the proven-isolated set only"
 }
 
+test_unknown_pool_is_refused
 test_list_candidates_nonempty_and_stable
 test_candidates_exclude_serial_classes
 test_extra_hermetic_candidates_present

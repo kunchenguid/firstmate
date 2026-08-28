@@ -224,7 +224,7 @@ test_changed_bin_reference_selects_per_script_not_per_family() {
 }
 
 test_empty_selection_emits_summary() {
-  local tmp repo out json
+  local tmp repo out json rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-empty.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
@@ -241,6 +241,18 @@ assert doc["summary"] == {"duration_ms": 0, "failed": 0, "skipped_gate": 0, "tot
 assert doc["scripts"] == []
 assert doc["families"] == []
 ' "$json" || { rm -rf "$tmp"; fail "empty selection JSON summary is wrong"; }
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --max-wall-ms nope) \
+    >"$tmp/bad-budget.out" 2>"$tmp/bad-budget.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "malformed budget on an empty selection must be refused, got $rc"
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --per-script-timeout-secs nope) \
+    >"$tmp/bad-timeout.out" 2>"$tmp/bad-timeout.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "malformed timeout on an empty selection must be refused, got $rc"
   rm -rf "$tmp"
   pass "empty changed selection emits deterministic text and JSON summaries"
 }

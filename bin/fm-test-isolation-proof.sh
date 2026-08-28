@@ -341,11 +341,17 @@ pool_candidates() {
   esac
 }
 
+set +e
+candidate_output=$(pool_candidates)
+pool_rc=$?
+set -e
+[ "$pool_rc" -eq 0 ] || exit "$pool_rc"
+
 CANDIDATES=()
 while IFS= read -r s; do
   [ -n "$s" ] || continue
   CANDIDATES+=("$s")
-done < <(pool_candidates | LC_ALL=C sort -u)
+done < <(printf '%s\n' "$candidate_output" | LC_ALL=C sort -u)
 
 if [ "$LIST_ONLY" -eq 1 ]; then
   for s in "${CANDIDATES[@]+"${CANDIDATES[@]}"}"; do
