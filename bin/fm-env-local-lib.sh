@@ -150,28 +150,17 @@ fm_env_local_digest() {  # <file>
   fi
 }
 
-fm_env_local_file_identity() {  # <file>
-  case "$(uname -s 2>/dev/null || true)" in
-    Darwin) stat -f '%d:%i' "$1" 2>/dev/null ;;
-    *) stat -c '%d:%i' "$1" 2>/dev/null ;;
-  esac
-}
-
 # The single authorship question, asked read-only: is the worktree's .env.local
 # exactly the file this library seeded into that worktree, untouched since? Every
 # unresolvable answer is a no, because the permissive answer here would delete a
 # task's own unlanded work.
 fm_env_local_seeded_copy_intact() {  # <worktree>
-  local worktree=$1 record recorded current identity recorded_identity target="$1/.env.local"
+  local worktree=$1 record recorded current target="$1/.env.local"
   record=$(fm_env_local_seed_record_path "$worktree") || return 1
   [ -f "$record" ] && [ ! -L "$record" ] || return 1
   recorded=$(sed -n 's/^sha256=//p' "$record" 2>/dev/null | head -1)
-  recorded_identity=$(sed -n 's/^identity=//p' "$record" 2>/dev/null | head -1)
   [ -n "$recorded" ] || return 1
-  [ -n "$recorded_identity" ] || return 1
   [ -f "$target" ] && [ ! -L "$target" ] || return 1
-  identity=$(fm_env_local_file_identity "$target") || return 1
-  [ "$identity" = "$recorded_identity" ] || return 1
   current=$(fm_env_local_digest "$target") || return 1
   [ -n "$current" ] && [ "$current" = "$recorded" ]
 }
@@ -182,15 +171,14 @@ fm_env_local_seeded_copy_intact() {  # <worktree>
 # direction, while a stale one would authorize deleting a file this library did not
 # write.
 fm_env_local_write_seed_record() {  # <worktree> <seeded-file>
-  local record digest identity
+  local record digest
   record=$(fm_env_local_seed_record_path "$1") || return 0
   digest=$(fm_env_local_digest "$2") || digest=""
-  identity=$(fm_env_local_file_identity "$2") || identity=""
-  if [ -z "$digest" ] || [ -z "$identity" ]; then
+  if [ -z "$digest" ]; then
     rm -f "$record" 2>/dev/null || true
     return 0
   fi
-  ( umask 077; printf 'sha256=%s\nidentity=%s\n' "$digest" "$identity" > "$record" ) 2>/dev/null \
+  ( umask 077; printf 'sha256=%s\n' "$digest" > "$record" ) 2>/dev/null \
     || rm -f "$record" 2>/dev/null || true
 }
 
