@@ -1157,8 +1157,7 @@ families_for_changed_path() {
     bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
       printf '%s\n' watcher-wake-lock
       ;;
-    bin/fm-stow-cadence-lab.sh|.claude/settings.json|.codex/hooks.json|\
-    .pi/extensions/fm-primary-turnend-guard.ts)
+    bin/fm-stow-cadence-lab.sh)
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;

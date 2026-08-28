@@ -97,6 +97,9 @@ make_case() {
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$fakebin"
+  # Initialize the project as a git repo so the fork's Review receipt gate
+  # (firstmate_review_receipt_required) does not fire for non-Firstmate projects.
+  git init --quiet "$case_dir/project" 2>/dev/null
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=fm-task-x1" \
     "worktree=$case_dir/wt" \
