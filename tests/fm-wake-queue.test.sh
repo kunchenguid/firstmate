@@ -1196,18 +1196,34 @@ EOF
 }
 
 test_msys_contended_publication_cleans_stray_owner_link() {
-  local dir state fakebin lock real_ln rc ready release holder
+  local dir state holder_fakebin racebin lock real_ln rc entered ready release holder contender
   dir=$(make_case msys-contended-publication)
   state="$dir/state"
-  fakebin="$dir/fakebin"
+  holder_fakebin="$dir/holder-fakebin"
+  racebin="$dir/race-fakebin"
   lock="$state/.fixture.lock"
+  entered="$dir/ln-entered"
   ready="$dir/holder.ready"
   release="$dir/holder.release"
   real_ln=$(command -v ln)
-  mkdir -p "$fakebin"
-  cat > "$fakebin/ln" <<'EOF'
+  mkdir -p "$holder_fakebin" "$racebin"
+  cat > "$holder_fakebin/ln" <<'EOF'
+#!/usr/bin/env bash
+[ "${1:-}" = -s ] && [ "$#" -eq 3 ] || exit 64
+mkdir "$3" || exit 1
+cp -R "$2"/. "$3"/ || exit 1
+EOF
+  chmod +x "$holder_fakebin/ln"
+  cat > "$racebin/ln" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = -s ] && [ "$#" -eq 3 ] && [ "$3" = "${TARGET_LOCK:-}" ] && [ ! -e "${LN_RACED_ONCE:-}" ]; then
+  printf 'entered\n' > "$LN_ENTERED" || exit 1
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "${HOLDER_READY:-}" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "${HOLDER_READY:-}" ] || exit 1
   : > "$LN_RACED_ONCE" || exit 1
   nested="$3/$(basename "$2")"
   mkdir "$nested" || exit 1
@@ -1216,9 +1232,34 @@ if [ "${1:-}" = -s ] && [ "$#" -eq 3 ] && [ "$3" = "${TARGET_LOCK:-}" ] && [ ! -
 fi
 exec "$REAL_LN" "$@"
 EOF
-  chmod +x "$fakebin/ln"
+  chmod +x "$racebin/ln"
 
-  FM_STATE_OVERRIDE="$state" bash -c '
+  # Start the losing contender first and hold it inside ln so the existing lock
+  # appears after fm_lock_try_create's initial existence check but before the
+  # contended publication returns.
+  rc=0
+  PATH="$racebin:$PATH" TARGET_LOCK="$lock" LN_ENTERED="$entered" HOLDER_READY="$ready" \
+    LN_RACED_ONCE="$dir/ln-raced.once" REAL_LN="$real_ln" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock=$2
+    holder_pid_file=$3
+    fm_lock_try_acquire "$lock" && exit 10
+    [ -e "$4" ] || exit 13
+    holder_pid=$(cat "$holder_pid_file" 2>/dev/null || true)
+    [ -n "$holder_pid" ] || exit 14
+    [ "${FM_LOCK_HELD_PID:-}" = "$holder_pid" ] || exit 11
+    if compgen -G "$lock/.fixture.lock.owner.*" >/dev/null; then
+      exit 12
+    fi
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$dir/holder.pid" "$dir/ln-raced.once" &
+  contender=$!
+  wait_for_file_text "$entered" "entered" || {
+    kill "$contender" 2>/dev/null || true
+    wait "$contender" 2>/dev/null || true
+    fail "contender never reached the contended publication race"
+  }
+
+  PATH="$holder_fakebin:$PATH" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     lock=$2
     ready=$3
@@ -1232,27 +1273,25 @@ EOF
     [ ! -e "$lock" ] && [ ! -L "$lock" ] || exit 31
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$ready" "$release" &
   holder=$!
+  printf '%s\n' "$holder" > "$dir/holder.pid"
   wait_for_file_text "$ready" "ready" || {
+    kill "$contender" 2>/dev/null || true
     kill "$holder" 2>/dev/null || true
+    wait "$contender" 2>/dev/null || true
     wait "$holder" 2>/dev/null || true
     fail "existing holder never acquired the lock"
   }
 
-  rc=0
-  PATH="$fakebin:$PATH" TARGET_LOCK="$lock" LN_RACED_ONCE="$dir/ln-raced.once" REAL_LN="$real_ln" FM_STATE_OVERRIDE="$state" bash -c '
-    . "$1"
-    lock=$2
-    holder_pid=$3
-    fm_lock_try_acquire "$lock" && exit 10
-    [ "${FM_LOCK_HELD_PID:-}" = "$holder_pid" ] || exit 11
-    if compgen -G "$lock/.fixture.lock.owner.*" >/dev/null; then
-      exit 12
-    fi
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$holder" || rc=$?
+  wait "$contender" || rc=$?
   [ "$rc" -eq 0 ] || {
     : > "$release"
     wait "$holder" 2>/dev/null || true
     fail "contended MSYS publication left a copied stray owner behind (rc=$rc)"
+  }
+  [ -e "$dir/ln-raced.once" ] || {
+    : > "$release"
+    wait "$holder" 2>/dev/null || true
+    fail "MSYS contention stub never exercised the nested copied-owner race"
   }
 
   : > "$release"
@@ -1267,11 +1306,12 @@ EOF
 }
 
 test_symlink_lock_contention_cleans_nested_owner_artifact() {
-  local dir state fakebin lock real_ln rc ready release holder
+  local dir state fakebin lock real_ln rc entered ready release holder contender
   dir=$(make_case symlink-lock-contention)
   state="$dir/state"
   fakebin="$dir/fakebin"
   lock="$state/.fixture.lock"
+  entered="$dir/ln-entered"
   ready="$dir/holder.ready"
   release="$dir/holder.release"
   real_ln=$(command -v ln)
@@ -1279,6 +1319,13 @@ test_symlink_lock_contention_cleans_nested_owner_artifact() {
   cat > "$fakebin/ln" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = -s ] && [ "$#" -eq 3 ] && [ "$3" = "${TARGET_LOCK:-}" ] && [ ! -e "${LN_RACED_ONCE:-}" ]; then
+  printf 'entered\n' > "$LN_ENTERED" || exit 1
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "${HOLDER_READY:-}" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "${HOLDER_READY:-}" ] || exit 1
   : > "$LN_RACED_ONCE" || exit 1
   nested="$3/$(basename "$2")"
   mkdir "$nested" || exit 1
@@ -1288,6 +1335,30 @@ fi
 exec "$REAL_LN" "$@"
 EOF
   chmod +x "$fakebin/ln"
+
+  rc=0
+  PATH="$fakebin:$PATH" TARGET_LOCK="$lock" LN_ENTERED="$entered" HOLDER_READY="$ready" \
+    LN_RACED_ONCE="$dir/ln-raced.once" REAL_LN="$real_ln" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock=$2
+    holder_pid_file=$3
+    fm_lock_try_acquire "$lock" && exit 10
+    owner=$(fm_lock_link_owner "$lock") || exit 13
+    [ -e "$4" ] || exit 15
+    holder_pid=$(cat "$holder_pid_file" 2>/dev/null || true)
+    [ -n "$holder_pid" ] || exit 16
+    [ "${FM_LOCK_HELD_PID:-}" = "$holder_pid" ] || exit 11
+    [ -L "$lock" ] || exit 12
+    if compgen -G "$owner/.fixture.lock.owner.*" >/dev/null; then
+      exit 14
+    fi
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$dir/holder.pid" "$dir/ln-raced.once" &
+  contender=$!
+  wait_for_file_text "$entered" "entered" || {
+    kill "$contender" 2>/dev/null || true
+    wait "$contender" 2>/dev/null || true
+    fail "contender never reached the symlink publication race"
+  }
 
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
@@ -1304,29 +1375,25 @@ EOF
     [ ! -e "$lock" ] && [ ! -L "$lock" ] || exit 32
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$ready" "$release" &
   holder=$!
+  printf '%s\n' "$holder" > "$dir/holder.pid"
   wait_for_file_text "$ready" "ready" || {
+    kill "$contender" 2>/dev/null || true
     kill "$holder" 2>/dev/null || true
+    wait "$contender" 2>/dev/null || true
     wait "$holder" 2>/dev/null || true
     fail "symlink holder never acquired the lock"
   }
 
-  rc=0
-  PATH="$fakebin:$PATH" TARGET_LOCK="$lock" LN_RACED_ONCE="$dir/ln-raced.once" REAL_LN="$real_ln" FM_STATE_OVERRIDE="$state" bash -c '
-    . "$1"
-    lock=$2
-    holder_pid=$3
-    owner=$(fm_lock_link_owner "$lock") || exit 13
-    fm_lock_try_acquire "$lock" && exit 10
-    [ "${FM_LOCK_HELD_PID:-}" = "$holder_pid" ] || exit 11
-    [ -L "$lock" ] || exit 12
-    if compgen -G "$owner/.fixture.lock.owner.*" >/dev/null; then
-      exit 14
-    fi
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$holder" || rc=$?
+  wait "$contender" || rc=$?
   [ "$rc" -eq 0 ] || {
     : > "$release"
     wait "$holder" 2>/dev/null || true
     fail "symlink contention left a nested owner artifact behind (rc=$rc)"
+  }
+  [ -e "$dir/ln-raced.once" ] || {
+    : > "$release"
+    wait "$holder" 2>/dev/null || true
+    fail "symlink contention stub never exercised the nested owner race"
   }
 
   : > "$release"

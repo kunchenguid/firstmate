@@ -375,6 +375,10 @@ fm_lock_discard_owner() {
   rmdir "$ownerdir" 2>/dev/null || true
 }
 
+# A raced `ln -s` against an existing holder can publish our prepared owner
+# beneath that holder instead of at the lock path on GNU/MSYS variants.
+# Clean only the exact nested symlink or copied owner directory that still
+# proves our own pid, so contention never removes a foreign holder payload.
 fm_lock_remove_stray_owner_artifact() {
   local lockdir=$1 ownerdir=$2 stray mypid stray_pid
   stray="$lockdir/$(basename "$ownerdir")"
