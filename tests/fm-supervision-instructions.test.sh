@@ -48,6 +48,7 @@ test_repair_lines() {
   mkdir -p "$home/state" "$home/config"
   out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --repair-line)
   assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 7" "codex repair line did not use checkpoint helper and env override"
+  assert_contains "$out" "host-context approval" "codex repair line omitted the managed PID sandbox retry"
 
   out=$(FM_HOME="$home" "$RENDER" --harness claude --queue-pending 1 --repair-line)
   assert_contains "$out" "After draining queued wakes" "queue-pending prefix missing"
@@ -116,6 +117,7 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   out=$("$RENDER" --harness codex --repair-line)
   assert_contains "$out" "foreground checkpoint" "codex recovery line lost its checkpoint repair"
   assert_contains "$out" "bin/fm-watch-checkpoint.sh" "codex recovery line lost the checkpoint command"
+  assert_contains "$out" "host-context approval" "codex recovery line lost the managed PID sandbox retry"
 
   pass "renderer preserves every harness ordinary-continuation and missing-cycle repair path"
 }
