@@ -6,9 +6,17 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab] [--plays <name[,name...]>]
+#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab] [--plays <name[,name...]>]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#   --plays names the pstack-hybrid plays this specific job needs (comma-separated;
+#   the flag may also repeat). Each name must resolve to a play skill under
+#   $FM_ROOT/.agents/skills/play-<name>/SKILL.md, and an unknown name stops the
+#   scaffold so a typo can never silently drop a discipline the task depends on.
+#   The generated brief carries a "# Plays" section listing exactly those play
+#   paths; a play the brief does not name does not apply to that task, and nothing
+#   is always-on. Omitted on secondmate charters (a charter is not a code-writing
+#   job): --plays is refused there rather than silently dropped.
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -109,8 +117,18 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+PLAY_NAMES=()
 POS=()
 want_value=
+add_play_names() {
+  local spec=$1 name
+  [ -n "$spec" ] || { echo "error: --plays requires at least one play name" >&2; exit 1; }
+  local IFS=,
+  for name in $spec; do
+    [ -n "$name" ] || { echo "error: --plays received an empty play name in '$spec'" >&2; exit 1; }
+    PLAY_NAMES+=("$name")
+  done
+}
 for a in "$@"; do
   if [ -n "$want_value" ]; then
     case "$a" in
@@ -118,6 +136,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      plays) add_play_names "$a" ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -128,6 +147,8 @@ for a in "$@"; do
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
+    --plays) want_value=plays ;;
+    --plays=*) add_play_names "${a#--plays=}" ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
@@ -138,6 +159,38 @@ for a in "$@"; do
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+
+# Plays are validated against the firstmate home that generates the brief, so a
+# typo or a play that does not exist in this home stops the scaffold loudly.
+PLAYS_SECTION=""
+if [ "${#PLAY_NAMES[@]}" -gt 0 ]; then
+  if [ "$KIND" = secondmate ]; then
+    echo "error: --plays applies only to crewmate ship or scout briefs; a charter is not a code-writing task" >&2
+    exit 1
+  fi
+  PLAY_LINES=""
+  seen_plays=,
+  available_plays=$(cd "$FM_ROOT/.agents/skills" 2>/dev/null && find . -maxdepth 1 -type d -name 'play-*' -printf '%f\n' 2>/dev/null | sed 's|^play-||' | tr '\n' ' ')
+  for play in "${PLAY_NAMES[@]}"; do
+    [ -f "$FM_ROOT/.agents/skills/play-$play/SKILL.md" ] || {
+      echo "error: unknown play '$play' (available in this home: ${available_plays:-none}); plays live under $FM_ROOT/.agents/skills/play-<name>/" >&2
+      exit 1
+    }
+    case ",$seen_plays," in
+      *,"$play",*) echo "error: play '$play' named more than once" >&2; exit 1 ;;
+    esac
+    seen_plays="$seen_plays$play,"
+    PLAY_LINES+="- \`$play\`: $FM_ROOT/.agents/skills/play-$play/SKILL.md
+"
+  done
+  PLAYS_SECTION="
+# Plays
+This task uses exactly the plays named below from the firstmate home's pstack-hybrid discipline layer.
+Load each named play's SKILL.md before the stage of work it governs, and apply only what it says.
+A play not listed here does not apply to this task; do not load other plays or a plays library dump.
+$PLAY_LINES
+"
+fi
 
 # Ship delivery mode is an explicit per-task decision (AGENTS.md section 7). A
 # missing or invalid value stops the scaffold rather than silently defaulting.
@@ -325,7 +378,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Task
 {TASK}
-
+$PLAYS_SECTION
 $HERDR_SECTION
 
 # Setup
@@ -438,7 +491,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Task
 {TASK}
-
+$PLAYS_SECTION
 $HERDR_SECTION
 
 # Setup

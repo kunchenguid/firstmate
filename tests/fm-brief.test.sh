@@ -474,6 +474,81 @@ test_documented_global_replace_leaves_the_herdr_gate_intact() {
   pass "fm-brief.sh: the documented {TASK} fill cannot corrupt the Herdr safety gate"
 }
 
+# Plays are conditional by design: a brief names exactly the plays that job
+# needs, an unnamed play never applies, and an unknown name must stop the
+# scaffold so a typo can never silently drop a discipline the task depends on.
+test_plays_section_renders_named_plays() {
+  local home id brief
+  home="$TMP_ROOT/plays-home"
+  mkdir -p "$home/data"
+  id="brief-plays-e1"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" "$id" proj --mode no-mistakes \
+    --plays subtract-first,prove-the-artifact >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "plays brief was not scaffolded"
+  assert_grep "# Plays" "$brief" "plays brief missing the Plays section"
+  assert_grep "A play not listed here does not apply to this task" "$brief" \
+    "plays brief missing the nothing-always-on rule"
+  assert_grep "$ROOT/.agents/skills/play-subtract-first/SKILL.md" "$brief" \
+    "plays brief missing the subtract-first play path"
+  assert_grep "$ROOT/.agents/skills/play-prove-the-artifact/SKILL.md" "$brief" \
+    "plays brief missing the prove-the-artifact play path"
+  assert_no_grep "play-walk-if-needed" "$brief" \
+    "plays brief rendered a play the task did not name"
+  assert_no_grep "play-no-comments" "$brief" \
+    "plays brief rendered a play the task did not name"
+  pass "fm-brief.sh: --plays renders exactly the named plays"
+}
+
+test_plays_are_never_always_on() {
+  local home brief
+  home="$TMP_ROOT/plays-off-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-plays-off proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/brief-plays-off/brief.md"
+  assert_no_grep "# Plays" "$brief" "a brief without --plays leaked a plays section"
+  pass "fm-brief.sh: briefs without --plays carry no plays section"
+}
+
+test_plays_support_scout_briefs() {
+  local home brief
+  home="$TMP_ROOT/plays-scout-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" brief-plays-scout proj --scout --plays walk-if-needed >/dev/null 2>&1
+  brief="$home/data/brief-plays-scout/brief.md"
+  assert_grep "# Plays" "$brief" "scout brief dropped the plays section"
+  assert_grep "$ROOT/.agents/skills/play-walk-if-needed/SKILL.md" "$brief" \
+    "scout brief missing the named play path"
+  pass "fm-brief.sh: --plays works on scout scaffolds"
+}
+
+test_plays_reject_unknown_duplicate_and_charter_use() {
+  local home out status label expect
+  home="$TMP_ROOT/plays-refusal-home"
+  mkdir -p "$home/data"
+  while IFS='|' read -r label args expect; do
+    [ -n "$label" ] || continue
+    # shellcheck disable=SC2086  # args is an intentional word-split arg list
+    out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-brief.sh" $args 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$label: expected a non-zero exit"
+    assert_contains "$out" "$expect" "$label: refusal did not explain the contract"
+  done <<ROWS
+unknown play name|brief-plays-x1 proj --mode no-mistakes --plays nope|unknown play 'nope'
+duplicate play name|brief-plays-x2 proj --mode no-mistakes --plays subtract-first --plays subtract-first|named more than once
+plays on a charter|brief-plays-x3 --secondmate --no-projects --plays subtract-first|applies only to crewmate ship or scout briefs
+missing --plays value|brief-plays-x4 proj --mode no-mistakes --plays|--plays requires a value
+empty play name|brief-plays-x5 proj --mode no-mistakes --plays ,|--plays received an empty play name
+ROWS
+  local id
+  for id in brief-plays-x1 brief-plays-x2 brief-plays-x3 brief-plays-x4 brief-plays-x5; do
+    assert_absent "$home/data/$id/brief.md" "$id: refused plays scaffold still wrote a brief"
+  done
+  pass "fm-brief.sh: unknown, duplicate, empty, and charter plays uses are refused loudly"
+}
+
 test_secondmate_no_projects_charter() {
   local home brief status
   home="$TMP_ROOT/no-projects-home"
@@ -762,6 +837,10 @@ test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
+test_plays_section_renders_named_plays
+test_plays_are_never_always_on
+test_plays_support_scout_briefs
+test_plays_reject_unknown_duplicate_and_charter_use
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_documented_global_replace_leaves_the_herdr_gate_intact

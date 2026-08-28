@@ -403,6 +403,26 @@
     {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
+    },
+    {
+      "path": ".agents/skills/play-subtract-first/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/play-walk-if-needed/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/play-prove-the-artifact/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/play-no-comments/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/pstack-hybrid.md",
+      "audience": "maintainer-architecture"
     }
   ]
 }

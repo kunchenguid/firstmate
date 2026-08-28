@@ -524,6 +524,10 @@ Load `secondmate-provisioning` before creating or using a charter brief and pres
 Status appends are sparse supervisor-actionable events, not routine progress; `bin/fm-classify-lib.sh` owns keyed open and resolved semantics.
 The scaffold is a safety contract, not a suggestion.
 
+Plays are the pstack-hybrid discipline layer documented in [`docs/pstack-hybrid.md`](docs/pstack-hybrid.md): small internal skills a brief can name per task via `fm-brief.sh --plays`.
+Name only the plays that job needs, and an unnamed play never applies; nothing is always-on.
+Plays never pick work, isolate copies, or decide delivery; this lifecycle keeps that authority.
+
 ## 12. Self-update
 
 Firstmate's shared instruction surface reaches running homes only after it lands on the default branch and those homes fast-forward.
