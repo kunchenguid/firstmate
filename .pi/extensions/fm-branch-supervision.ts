@@ -97,7 +97,7 @@ import {
   type BranchPickerItem,
 } from "./lib/fm-branch-model-picker.ts";
 import {
-  classifyFirstmateCurrentOperationalText,
+  classifyFirstmateOperationalText,
   encodeFirstmateOperationalInput,
 } from "./lib/fm-operational-input.ts";
 
@@ -307,7 +307,7 @@ function textOfContent(content: unknown): string {
 // analysis counts them apart from dialog, and mirroring them would feed the
 // branch its own supervision traffic back.
 function isOperationalUserText(text: string): boolean {
-  return classifyFirstmateCurrentOperationalText(text) !== undefined;
+  return classifyFirstmateOperationalText(text) !== undefined;
 }
 
 function capMirrorText(text: string): string {

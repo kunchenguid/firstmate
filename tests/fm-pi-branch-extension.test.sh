@@ -919,6 +919,11 @@ const unsolicitedPrompt = "Please keep responses concise while monitoring the fl
 fire("before_agent_start", { prompt: unsolicitedPrompt }, mainCtx);
 entries.push({ type: "message", message: { role: "user", content: unsolicitedPrompt } });
 fire("agent_start", {}, mainCtx);
+fire("agent_end", {}, mainCtx);
+const legacyOperational = "⁣FIRSTMATE_OP: give me a fresh system-resource report.";
+fire("before_agent_start", { prompt: legacyOperational }, mainCtx);
+entries.push({ type: "message", message: { role: "user", content: legacyOperational } });
+fire("agent_start", {}, mainCtx);
 const unsolicited = dispatch("signal: healthy resource result");
 if (!unsolicited.accepted) throw new Error("branch did not accept the unsolicited result");
 await settle(() => fleetOperations.length === 2, "unsolicited result acknowledgement");
@@ -969,8 +974,10 @@ for (const content of [unsolicitedPrompt, ...requestedPrompts]) {
   const copies = mirroredCaptainText.filter((text) => text === `[captain] ${content}`).length;
   if (copies !== 1) throw new Error(`current captain prompt was mirrored ${copies} times instead of once`);
 }
-if (mirroredCaptainText.some((text) => text.includes("operational watcher injection"))) {
-  throw new Error("canonical operational input entered captain mirror context");
+if (mirroredCaptainText.some((text) =>
+  text.includes("operational watcher injection") || text.includes("FIRSTMATE_OP: give me a fresh system-resource report")
+)) {
+  throw new Error("canonical current or legacy operational input entered captain mirror context");
 }
 if ((globalThis.__fmPrompts ?? []).length !== 5) throw new Error("a handled fleet wake was rerun");
 if (sentToMain.length !== 5) throw new Error(`one result was reprocessed into ${sentToMain.length} main messages`);
