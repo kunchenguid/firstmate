@@ -75,11 +75,11 @@ detect_own() {
   # without verifying it reaches children AND that it cannot survive in a
   # multiplexer's stored environment, which is the precedence hazard above.
   # Layer 2: walk the parent chain and match the command name.
-  local rows pid ppid comm args base
+  local rows pid ppid comm argv0 args base
   rows=$(fm_process_ancestry_rows 8 2>/dev/null || true)
-  while IFS=$'\t' read -r pid ppid comm args; do
+  while IFS=$'\t' read -r pid ppid comm argv0 args; do
     [ -n "$pid" ] || continue
-    if fm_harness_process_matches "$comm" "$args"; then
+    if fm_harness_process_matches "$comm" "$args" "$argv0"; then
       case "$FM_HARNESS_MATCH_NAME" in
         pi-signed) echo pi ;;
         *) echo "$FM_HARNESS_MATCH_NAME" ;;

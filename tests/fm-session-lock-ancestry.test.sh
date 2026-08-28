@@ -220,6 +220,57 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+test_harness_detection_preserves_kimi_and_cursor_identity() {
+  local dir fakebin proc_root cursor_bin shape got
+  dir="$TMP_ROOT/harness-detection"
+  fakebin=$(fm_fakebin "$dir")
+  proc_root="$dir/proc"
+  cursor_bin="$dir/Cursor Agent/cursor-agent/versions/2026.08.11/cursor-agent"
+  mkdir -p "$proc_root/850" "$(dirname -- "$cursor_bin")"
+  ln -s /bin/bash "$cursor_bin"
+  printf '%s\0--resume\0' "$cursor_bin" > "$proc_root/850/cmdline"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field:${FM_TEST_HARNESS_SHAPE:-kimi}" in
+  850:comm=:kimi) printf '%s\n' kimi ;;
+  850:args=:kimi) printf '%s\n' kimi ;;
+  850:comm=:kimi-exe) printf '%s\n' 'C:\Tools\kimi.exe' ;;
+  850:args=:kimi-exe) printf '%s\n' 'C:\Tools\kimi.exe' ;;
+  850:comm=:kimi-helper) printf '%s\n' kimi-helper ;;
+  850:args=:kimi-helper) printf '%s\n' kimi-helper ;;
+  850:comm=:cursor) printf '%s\n' MainThread ;;
+  850:args=:cursor) printf '%s\n' "$FM_TEST_CURSOR_BIN --resume" ;;
+  850:ppid=:*) printf '%s\n' 1 ;;
+  *:comm=:*) printf '%s\n' bash ;;
+  *:args=:*) printf '%s\n' bash ;;
+  *:ppid=:*) printf '%s\n' 850 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  for shape in kimi kimi-exe kimi-helper cursor; do
+    got=$(env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+      -u PI_CODING_AGENT -u GROK_AGENT \
+      PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$proc_root" \
+      FM_TEST_HARNESS_SHAPE="$shape" FM_TEST_CURSOR_BIN="$cursor_bin" \
+      "$ROOT/bin/fm-harness.sh")
+    case "$shape:$got" in
+      kimi:kimi|kimi-exe:kimi|kimi-helper:unknown|cursor:cursor) ;;
+      *) fail "$shape ancestry classified as '$got'" ;;
+    esac
+  done
+  pass "harness detection: Kimi stays exact and Cursor keeps structured argv0"
+}
+
 test_native_windows_process_table_identifies_codex() {
   local dir fakebin got
   dir="$TMP_ROOT/native-windows"
@@ -241,15 +292,15 @@ while [ "$#" -gt 0 ] && [ "$1" != ancestry ]; do shift; done
 [ "${1:-}" = ancestry ] || exit 1
 case "${2:-}" in
   410)
-    printf '410\t510\tC:\\Program Files\\Git\\bin\\bash.exe\tbash bin/fm-codex-hook.sh sessionstart\n'
-    printf '510\t610\tC:\\Windows\\System32\\cmd.exe\tcmd.exe /C bin\\fm-codex-hook.cmd sessionstart\n'
-    printf '610\t710\tC:\\Users\\u\\AppData\\Roaming\\npm\\codex.exe\tcodex.exe\n'
+    printf '410\t510\tC:\\Program Files\\Git\\bin\\bash.exe\tC:\\Program Files\\Git\\bin\\bash.exe\tbash bin/fm-codex-hook.sh sessionstart\n'
+    printf '510\t610\tC:\\Windows\\System32\\cmd.exe\tC:\\Windows\\System32\\cmd.exe\tcmd.exe /C bin\\fm-codex-hook.cmd sessionstart\n'
+    printf '610\t710\tC:\\Users\\u\\AppData\\Roaming\\npm\\codex.exe\tC:\\Users\\u\\AppData\\Roaming\\npm\\codex.exe\tcodex.exe\n'
     ;;
   610)
-    printf '610\t710\tC:\\Users\\u\\AppData\\Roaming\\npm\\codex.exe\tcodex.exe\n'
+    printf '610\t710\tC:\\Users\\u\\AppData\\Roaming\\npm\\codex.exe\tC:\\Users\\u\\AppData\\Roaming\\npm\\codex.exe\tcodex.exe\n'
     ;;
   999)
-    printf '999\t710\tC:\\Windows\\System32\\notepad.exe\tnotepad.exe\n'
+    printf '999\t710\tC:\\Windows\\System32\\notepad.exe\tC:\\Windows\\System32\\notepad.exe\tnotepad.exe\n'
     ;;
 esac
 SH
@@ -426,6 +477,7 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_harness_detection_preserves_kimi_and_cursor_identity
 test_native_windows_process_table_identifies_codex
 if ps -o comm= -p "$$" >/dev/null 2>&1; then
   test_e2e_version_named_session_claims_the_home

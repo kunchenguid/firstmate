@@ -1,8 +1,8 @@
 # Native Windows process-table transport for fm-session-lock-lib.sh.
 # Usage: fm-windows-process.ps1 ancestry <process-id> [limit]
-# Prints pid<TAB>ppid<TAB>executable<TAB>command-line from the requested process
-# toward the root. Missing or inaccessible processes stop the walk without
-# inventing identity evidence.
+# Prints pid<TAB>ppid<TAB>executable<TAB>argv0<TAB>arguments from the requested
+# process toward the root. Missing or inaccessible processes stop the walk
+# without inventing identity evidence.
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [ValidateSet('ancestry')]
@@ -87,7 +87,7 @@ for ($hop = 0; $hop -lt $Limit -and $currentId -gt 0; $hop++) {
     }
     catch {}
     $command = $command -replace "[`t`r`n]", ' '
-    [Console]::Out.WriteLine("{0}`t{1}`t{2}`t{2}", $currentId, $parentId, $command)
+    [Console]::Out.WriteLine("{0}`t{1}`t{2}`t{2}`t{2}", $currentId, $parentId, $command)
 
     if ($parentId -le 0 -or $parentId -eq $currentId) {
         break
