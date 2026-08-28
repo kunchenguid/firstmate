@@ -322,8 +322,8 @@ with tempfile.TemporaryDirectory() as temporary:
 assert request["prompt"] == prompt
 assert request["review_schema"] == schema
 assert request["tool_protocol"]["model_tools"] == [
-    "repo_search", "repo_read", "submit_evidence_file", "report_finding",
-    "report_suspicion", "update_finding", "request_lookup", "finish_review",
+    "repo_search", "repo_read", "report_finding", "report_suspicion",
+    "retract_review_item", "update_finding", "request_lookup", "finish_review",
 ]
 assert request["verdict_extension"]["sha256"] == module.digest_bytes(
     request["verdict_extension"]["source"].encode("utf-8")
@@ -4586,8 +4586,8 @@ const tools = [];
 const extension = await import(pathToFileURL(process.argv[2]).href + `?test=${Date.now()}`);
 extension.default({ registerTool(tool) { tools.push(tool); } });
 assert.deepEqual(tools.map((tool) => tool.name), [
-  "repo_search", "repo_read", "submit_evidence_file", "report_finding",
-  "report_suspicion", "update_finding", "request_lookup", "finish_review",
+  "repo_search", "repo_read", "report_finding", "report_suspicion",
+  "retract_review_item", "update_finding", "request_lookup", "finish_review",
 ]);
 assert(tools.every((tool) => tool.executionMode === "sequential"));
 const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
@@ -4604,10 +4604,6 @@ const oversized = await byName.finish_review.execute("oversized", {
 });
 assert.deepEqual(oversized.details, { accepted: false, correctable: true });
 assert.equal(oversized.terminate, undefined);
-const trailingSlash = await byName.submit_evidence_file.execute("trailing", {
-  path: ".crosscheck/reproductions/proof/", content: "true\n",
-});
-assert.deepEqual(trailingSlash.details, { accepted: false, correctable: true });
 const symlink = await byName.finish_review.execute("symlink", {
   verdict: "BLOCKING", summary: "blocked", citations: [{ path: "link.py", line: 1 }],
 });
@@ -4725,7 +4721,8 @@ if valid or lookup_scenario:
     elif scenario == "rejected-identical-finish":
         log.write_text("\n".join(canonical(record) for record in [
             {"seq": 1, "name": "report_suspicion", "arguments": suspicion,
-             "result_sha256": digest({"admitted": True})},
+             "result_sha256": digest({"admitted": True,
+                                       "provisional_id": "provisional-suspicion-0001"})},
             {"seq": 2, "name": "finish_review", "arguments": blocking_finish,
              "result_sha256": digest({"finalized": True})},
         ]) + "\n")
@@ -4821,6 +4818,7 @@ print(json.dumps({"type": "agent_end", "messages": []}))
             "FM_CROSSCHECK_EXECUTION_HOME": str(root / "home"),
             "FM_CROSSCHECK_FINDING_IDS": '["cc-active"]' if active else "[]",
             "FM_CROSSCHECK_ACTIVE_FINDING_IDS": '["cc-active"]' if active else "[]",
+            "FM_CROSSCHECK_BLOCKING_FINDING_IDS": '["cc-active"]' if active else "[]",
             "FM_CROSSCHECK_ELIGIBLE_EQUIVALENT_IDS": "[]",
             "FM_CROSSCHECK_LOOKUP_ALLOWED": "1" if lookup_allowed else "0",
         })
@@ -4837,8 +4835,8 @@ print(json.dumps({"type": "agent_end", "messages": []}))
     assert completed.returncode == 0 and value["verdict"]["summary"] == "review complete"
     assert len(launches) == 1 and launches[0][launches[0].index("--thinking") + 1] == "xhigh"
     assert launches[0][launches[0].index("--tools") + 1].split(",") == [
-        "repo_search", "repo_read", "submit_evidence_file", "report_finding",
-        "report_suspicion", "update_finding", "request_lookup", "finish_review",
+        "repo_search", "repo_read", "report_finding", "report_suspicion",
+        "retract_review_item", "update_finding", "request_lookup", "finish_review",
     ]
 
     completed, launches, value = execute("repair")
@@ -5021,7 +5019,7 @@ extension = extension_path.read_text(encoding="utf-8")
 assert "submit_evidence_file" not in extension
 for tool in (
     "repo_search", "repo_read", "report_finding", "report_suspicion",
-    "update_finding", "request_lookup", "finish_review",
+    "retract_review_item", "update_finding", "request_lookup", "finish_review",
 ):
     assert tool in extension
 PY

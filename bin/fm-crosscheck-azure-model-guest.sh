@@ -84,7 +84,8 @@ if value.get("tool_protocol", {}).get("network_bytes") != 0:
 expected_tools = (
     [
         "repo_search", "repo_read",
-        "report_finding", "report_suspicion", "update_finding",
+        "report_finding", "report_suspicion", "retract_review_item",
+        "update_finding",
         "request_lookup", "finish_review",
     ]
     if value.get("reviewer", {}).get("harness") == "pi"
@@ -460,6 +461,8 @@ export FM_CROSSCHECK_ELIGIBLE_EQUIVALENT_IDS
 FM_CROSSCHECK_ELIGIBLE_EQUIVALENT_IDS=$(jq -c '.tool_protocol.eligible_equivalent_ids' "$INPUT")
 export FM_CROSSCHECK_ACTIVE_FINDING_IDS
 FM_CROSSCHECK_ACTIVE_FINDING_IDS=$(jq -c '.tool_protocol.active_finding_ids' "$INPUT")
+export FM_CROSSCHECK_BLOCKING_FINDING_IDS
+FM_CROSSCHECK_BLOCKING_FINDING_IDS=$(jq -c '.tool_protocol.blocking_finding_ids' "$INPUT")
 export FM_CROSSCHECK_LOOKUP_ALLOWED
 FM_CROSSCHECK_LOOKUP_ALLOWED=$(jq -r 'if .tool_protocol.lookup_allowed then "1" else "0" end' "$INPUT")
 export FM_CROSSCHECK_TRUST_SNAPSHOT_MANIFEST=1

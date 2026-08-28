@@ -7,6 +7,7 @@ const TOOL_NAMES = [
 	"repo_read",
 	"report_finding",
 	"report_suspicion",
+	"retract_review_item",
 	"update_finding",
 	"request_lookup",
 	"finish_review",
@@ -114,6 +115,7 @@ export default function registerCrosscheckTools(pi) {
 	const knownFindingIds = new Set(JSON.parse(process.env.FM_CROSSCHECK_FINDING_IDS || "[]"));
 	const eligibleEquivalentIds = new Set(JSON.parse(process.env.FM_CROSSCHECK_ELIGIBLE_EQUIVALENT_IDS || "[]"));
 	const activeFindingIds = new Set(JSON.parse(process.env.FM_CROSSCHECK_ACTIVE_FINDING_IDS || "[]"));
+	const blockingFindingIds = new Set(JSON.parse(process.env.FM_CROSSCHECK_BLOCKING_FINDING_IDS || process.env.FM_CROSSCHECK_FINDING_IDS || "[]"));
 	const lookupAllowed = process.env.FM_CROSSCHECK_LOOKUP_ALLOWED === "1";
 	const properties = reviewSchema.properties;
 	const finding = properties.new_findings.items;
@@ -154,6 +156,8 @@ export default function registerCrosscheckTools(pi) {
 	let suspicionCount = 0;
 	let updateCount = 0;
 	let blockingUpdateCount = 0;
+	const provisionalFindings = new Map();
+	const provisionalSuspicions = new Set();
 	const updatedFindingIds = new Set();
 	const repositoryTextCache = new Map();
 	let searchScannedBytes = 0;
@@ -283,7 +287,7 @@ export default function registerCrosscheckTools(pi) {
 		return accepted("repo_read", args, result);
 	});
 
-	register(pi, "report_finding", "Report one actionable finding with exact-head citations.", {
+	register(pi, "report_finding", "Report one provisional actionable finding with exact-head citations. The returned provisional_id can be retracted before finalization.", {
 		type: "object", additionalProperties: false, required: ["severity", "title", "citations", "explanation"], properties: {
 			severity: finding.properties.severity, title: finding.properties.title, citations: finding.properties.citations,
 			explanation: finding.properties.description,
@@ -293,19 +297,38 @@ export default function registerCrosscheckTools(pi) {
 		if (findingCount >= 32) throw new Error("new finding limit reached");
 		if (!["blocking", "high", "medium", "low"].includes(args.severity)) throw new Error("severity is invalid");
 		nonempty(args.title, "title", 1024); nonempty(args.explanation, "explanation", 8192); citations(args.citations);
-		const response = accepted("report_finding", args, { admitted: true });
+		const provisionalId = `provisional-finding-${String(findingCount + 1).padStart(4, "0")}`;
+		const response = accepted("report_finding", args, { admitted: true, provisional_id: provisionalId });
 		findingCount += 1;
+		provisionalFindings.set(provisionalId, args.severity);
 		return response;
 	});
 
-	register(pi, "report_suspicion", "Report one unresolved blocking suspicion with citations.", {
+	register(pi, "report_suspicion", "Report one provisional unresolved blocking suspicion with citations. The returned provisional_id can be retracted before finalization.", {
 		type: "object", additionalProperties: false, required: ["description", "citations"], properties: suspicion.properties,
 	}, (args) => {
 		if (!exactObject(args, ["description", "citations"])) throw new Error("report_suspicion arguments are malformed");
 		if (suspicionCount >= 32) throw new Error("suspicion limit reached");
 		nonempty(args.description, "description", 8192); citations(args.citations);
-		const response = accepted("report_suspicion", args, { admitted: true });
+		const provisionalId = `provisional-suspicion-${String(suspicionCount + 1).padStart(4, "0")}`;
+		const response = accepted("report_suspicion", args, { admitted: true, provisional_id: provisionalId });
 		suspicionCount += 1;
+		provisionalSuspicions.add(provisionalId);
+		return response;
+	});
+
+	register(pi, "retract_review_item", "Retract one provisional finding or suspicion that did not survive skeptical re-checking.", {
+		type: "object", additionalProperties: false, required: ["id", "explanation"], properties: {
+			id: { type: "string", minLength: 1, maxLength: 256 },
+			explanation: { type: "string", minLength: 1, maxLength: 8192 },
+		},
+	}, (args) => {
+		if (!exactObject(args, ["id", "explanation"])) throw new Error("retract_review_item arguments are malformed");
+		nonempty(args.id, "id", 256); nonempty(args.explanation, "explanation", 8192);
+		if (!provisionalFindings.has(args.id) && !provisionalSuspicions.has(args.id)) throw new Error("provisional review item is unknown or already retracted");
+		const response = accepted("retract_review_item", args, { retracted: true, provisional_id: args.id });
+		provisionalFindings.delete(args.id);
+		provisionalSuspicions.delete(args.id);
 		return response;
 	});
 
@@ -328,7 +351,7 @@ export default function registerCrosscheckTools(pi) {
 		if (args.equivalent_to !== undefined) nonempty(args.equivalent_to, "equivalent_to", 256);
 		const response = accepted("update_finding", args, { admitted: true });
 		updateCount += 1;
-		if (["open", "claimed-fixed"].includes(args.requested_status)) blockingUpdateCount += 1;
+		if (["open", "claimed-fixed"].includes(args.requested_status) && blockingFindingIds.has(args.id)) blockingUpdateCount += 1;
 		updatedFindingIds.add(args.id);
 		return response;
 	});
@@ -365,10 +388,10 @@ export default function registerCrosscheckTools(pi) {
 		if (!["CLEAR", "BLOCKING"].includes(args.verdict)) throw new Error("verdict must be CLEAR or BLOCKING");
 		nonempty(args.summary, "summary", 16384); citations(args.citations);
 		const untouchedActive = [...activeFindingIds].some((identifier) => !updatedFindingIds.has(identifier));
-		const blockingEvents = findingCount > 0 || suspicionCount > 0 || blockingUpdateCount > 0 || untouchedActive;
+		const blockingEvents = [...provisionalFindings.values()].some((severity) => severity === "blocking") || provisionalSuspicions.size > 0 || blockingUpdateCount > 0 || untouchedActive;
 		if ((args.verdict === "BLOCKING") !== blockingEvents) throw new Error("finish verdict contradicts accepted review items");
 		return accepted("finish_review", args, { finalized: true }, true);
 	});
 
-	if (TOOL_NAMES.length !== 7 || statSync(repository).isDirectory() !== true) throw new Error("Crosscheck tool registration invariant failed");
+	if (TOOL_NAMES.length !== 8 || statSync(repository).isDirectory() !== true) throw new Error("Crosscheck tool registration invariant failed");
 }
