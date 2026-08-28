@@ -768,11 +768,6 @@ pause_state_class() {  # <window> <task>
     printf 'paused'
     return
   fi
-  if [ "$class" = working ]; then
-    rm -f "$recheck_file"
-    printf 'working'
-    return
-  fi
   if status_is_paused "$last"; then
     date +%s > "$recheck_file"
     printf 'paused'
