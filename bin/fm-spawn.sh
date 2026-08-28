@@ -7,8 +7,9 @@
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
-#   standing posture as context, not as this task's answer, so a spawn never looks
-#   the mode up. A ship spawn additionally reads the brief's recorded
+#   standing posture as context and for remote-less eligibility, but a spawn never
+#   derives this task's mode from the registry. A ship spawn additionally reads
+#   the brief's recorded
 #   "Delivery contract: mode=<mode>" line and REFUSES a mismatch, so the worker's
 #   instructions and the recorded task delivery cannot drift apart; a brief
 #   scaffolded before that line existed warns once and launches on the flag. When
@@ -134,12 +135,14 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
-#   Before a fresh ship or scout worker starts, its clean task worktree refreshes
-#   from origin's current default branch. A registered local-only project's scout
-#   or local-only ship instead refreshes from the local default branch only when
-#   the repository has no configured remotes. Any configured remote keeps the
-#   origin freshness guard, and an unreachable origin, unresolved default branch,
-#   or non-clean worktree refuses the spawn rather than risking stale history.
+#   Before a fresh ship or scout worker starts, the shared lifecycle-base resolver
+#   validates origin's current default branch, then spawn resets the clean task
+#   worktree to that commit. A registered local-only project's scout or local-only
+#   ship may instead use the local default branch only after both the authoritative
+#   project and task worktree prove they have no configured remotes. Any configured
+#   remote keeps the origin freshness guard, and an unreachable origin, unresolved
+#   default branch, or non-clean worktree refuses the spawn rather than risking
+#   stale history.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.

@@ -2,14 +2,17 @@
 # Review a crewmate branch against the authoritative base.
 #
 # Pooled project clones do not keep their local default branch current, so this
-# helper compares remote-backed projects against origin/<default> after fetching
-# the default branch, and local-only projects against the local default branch.
+# helper first validates the authoritative base through the shared lifecycle-base
+# resolver. Any configured remote requires origin-backed resolution at its fetched
+# current default; an eligible registered local-only project with no remotes uses
+# its local default; PR-backed tasks require origin in the task worktree.
 # When state/<id>.meta records pr= (URL or number) for an open PR, the compare
 # side is ALWAYS a freshly fetched refs/pull/<n>/head by default so review stays
 # current after no-mistakes fix rounds push to the PR. A recorded pr_head= is
-# only a fallback when fetch fails (stale recorded SHAs must never win over a
-# reachable remote PR head). If neither PR head can be resolved, fall back to
-# the local branch with a warning. Without pr=, compare the local branch.
+# only a fallback when that pull-head fetch fails after base validation (stale
+# recorded SHAs must never win over a reachable remote PR head). If neither PR
+# head can be resolved, fall back to the local branch with a warning. Without
+# pr=, compare the local branch.
 # Usage: fm-review-diff.sh <task-id> [--stat]
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
 set -eu
@@ -114,8 +117,8 @@ resolve_pr_head() {
       return 0
     fi
   fi
-  # Offline / unreachable remote: recorded pr_head is better than the local
-  # branch, but never preferred over a successful pull-head fetch above.
+  # A pull-head fetch can fail after base validation; recorded pr_head is then
+  # better than the local branch, but never preferred over a successful fetch.
   if [ -n "$recorded_head" ] \
     && git -C "$WT" cat-file -e "$recorded_head^{commit}" 2>/dev/null; then
     printf '%s' "$recorded_head"

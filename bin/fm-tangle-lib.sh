@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Shared worktree-tangle guard for the firstmate-on-itself case.
+# Shared default-branch, lifecycle-base, and primary-checkout tangle resolution.
 # Usage: . bin/fm-tangle-lib.sh
 #
 # Firstmate is a treehouse-pooled git repo of itself: crewmate worktrees and
@@ -17,8 +17,8 @@
 # default branch. Detached HEAD on the default is fine; a feature branch in a
 # primary checkout is the alarm.
 
-# Resolve the default branch name of a local-only repository without consulting
-# remote-tracking refs. Echoes the name, or returns 1.
+# Resolve local main/master without consulting remote-tracking refs.
+# Echoes the name, or returns 1.
 fm_local_default_branch() {
   local dir=$1 branch
   for branch in main master; do
@@ -30,9 +30,9 @@ fm_local_default_branch() {
   return 1
 }
 
-# Resolve the default branch name of the git repo at <dir>: use origin/HEAD when
-# recorded, then a local main/master. Lifecycle operations that require a fresh
-# validated origin use fm_project_base_resolve below.
+# Resolve the default branch name of the git repo at <dir>: use a recorded
+# origin/HEAD only when origin is configured, then a local main/master. Lifecycle
+# operations that require a fresh validated origin use fm_project_base_resolve below.
 fm_default_branch() {
   local dir=$1 remotes ref
   remotes=$(git -C "$dir" remote 2>/dev/null) || return 1
@@ -45,6 +45,16 @@ fm_default_branch() {
   fm_local_default_branch "$dir"
 }
 
+# Resolve the authoritative base shared by spawn, promotion, review, local
+# landing, and cleanup. Origin-backed resolution asks origin for its current
+# default branch and fetches its tip. Remote-less resolution is available only
+# when the caller opts in, both the authoritative project and task worktree have
+# no configured remotes, and the project is registered local-only; it chooses
+# local main/master without consulting stale remote-tracking refs. Any configured
+# remote stays on the origin path, and PR-backed callers may additionally require
+# origin in the task worktree. Inspection, fetch, and default-resolution failures
+# never fall back. On success the FM_PROJECT_BASE_* values describe the base; on
+# failure FM_PROJECT_BASE_ERROR describes the refusal.
 FM_PROJECT_BASE_KIND=
 FM_PROJECT_BASE_BRANCH=
 FM_PROJECT_BASE_REF=

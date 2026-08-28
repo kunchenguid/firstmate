@@ -8,9 +8,10 @@
 # yolo are resolved by firstmate at intake and passed explicitly to
 # bin/fm-brief.sh, bin/fm-spawn.sh, and bin/fm-promote.sh (AGENTS.md section 7).
 # The consumers are bin/fm-fleet-sync.sh (skip local-only clones),
-# bin/fm-home-seed.sh (refuse local-only seeding, run no-mistakes init), and the
-# shared lifecycle base resolver (registered-local-only eligibility for spawn,
-# promotion, review, local landing, and cleanup).
+# bin/fm-home-seed.sh (refuse local-only seeding, run no-mistakes init),
+# bin/fm-spawn.sh (delivery advisory), and the shared lifecycle base resolver
+# (registered-local-only eligibility for spawn, promotion, review, local landing,
+# and cleanup).
 #
 # Registry line format (data/projects.md):
 #   - <name> - <desc> (added <date>)                  -> no-mistakes off  (legacy default)
