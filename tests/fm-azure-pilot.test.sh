@@ -420,6 +420,87 @@ PY
   pass "worker-create executes live gates and parameters with its exact singleton plan"
 }
 
+run_worker_create_runtime_gate_checks() {
+  local sourceable output status
+  sourceable=$(mktemp)
+  write_sourceable_script "$sourceable"
+  set +e
+  output=$(
+    (
+      set --
+      # shellcheck source=bin/fm-azure-pilot.sh
+      . "$sourceable"
+      COMMAND=worker-create
+      WORKER_SLOTS_JSON='[3]'
+      WORKER_SKUS_JSON='["Standard_D4as_v7"]'
+      INCREMENTAL_WORKER_DEPLOY=1
+      require_tool() { :; }
+      local_validate() { printf 'local\n'; }
+      scope_gate() { printf 'scope\n'; }
+      quota_gate() { printf 'quota\n'; }
+      # These deliberately fail the assertion if the narrow gate invokes them.
+      # shellcheck disable=SC2329
+      provider_gate() { printf 'provider\n'; }
+      # shellcheck disable=SC2329
+      sku_gate() { printf 'sku\n'; }
+      # shellcheck disable=SC2329
+      name_gate() { printf 'name\n'; }
+      # shellcheck disable=SC2329
+      cost_gate() { printf 'cost\n'; }
+      worker_create_runtime_gates
+    ) 2>&1
+  )
+  status=$?
+  set -e
+  rm -f "$sourceable"
+  [ "$status" -eq 0 ] || fail "worker-create runtime gates failed: $output"
+  grep -q '^local$' <<<"$output" || fail "worker-create runtime gates skipped local validation"
+  grep -q '^scope$' <<<"$output" || fail "worker-create runtime gates skipped exact scope"
+  grep -q '^quota$' <<<"$output" || fail "worker-create runtime gates skipped current quota"
+  ! grep -Eq '^(provider|sku|name|cost)$' <<<"$output" || \
+    fail "worker-create runtime gates repeated foundation-only checks: $output"
+
+  sourceable=$(mktemp)
+  write_sourceable_script "$sourceable"
+  set +e
+  output=$(
+    (
+      set --
+      # shellcheck source=bin/fm-azure-pilot.sh
+      . "$sourceable"
+      FM_AZURE_SUBSCRIPTION_ID=00000000-0000-0000-0000-000000000001
+      FM_AZURE_CAPACITY_PROFILE=full
+      FM_AZURE_NAMING_PREFIX=fmtest
+      FM_AZURE_CONTROLLER_ADMISSION_PROOF=1
+      CAPACITY_PROFILE=full
+      AUTHOR_CAPACITY_MODE=mixed-current
+      REGION=eastus
+      DEPLOYMENT_NAME=test-deployment
+      TEMPLATE=/tmp/unused-worker-template
+      require_tool() { :; }
+      require_cloud_environment() { :; }
+      require_landed_code() { :; }
+      worker_create_runtime_gates() { printf 'runtime\n'; }
+      live_gates() { printf 'full\n'; }
+      make_parameters_file() { PARAMS_FILE=/tmp/unused-worker-parameters; }
+      # Invoked by the EXIT trap installed in run_worker_create.
+      # shellcheck disable=SC2329
+      cleanup_parameters() { :; }
+      run_bounded_az() { printf 'deploy\n'; }
+      run_worker_create --slot 3 --confirm-create \
+        --confirm-subscription "$FM_AZURE_SUBSCRIPTION_ID"
+    ) 2>&1
+  )
+  status=$?
+  set -e
+  rm -f "$sourceable"
+  [ "$status" -eq 0 ] || fail "controller-admitted worker-create dispatch failed: $output"
+  grep -q '^runtime$' <<<"$output" || fail "controller proof did not select runtime gates"
+  ! grep -q '^full$' <<<"$output" || fail "controller proof still selected full foundation gates"
+  grep -q '^deploy$' <<<"$output" || fail "controller-admitted worker-create did not reach deployment: $output"
+  pass "worker-create controller admission avoids repeated foundation-only live gates"
+}
+
 run_destroy_inventory_failure_checks() {
   local sourceable mode call_log calls output status
   sourceable=$(mktemp)
@@ -883,6 +964,7 @@ run_static_template_checks
 run_explicit_mutation_gate_checks
 run_safe_cleanup_order_check
 run_worker_create_plan_gate_check
+run_worker_create_runtime_gate_checks
 run_destroy_inventory_failure_checks
 run_destroy_unknown_disk_check
 run_destroy_deadline_check

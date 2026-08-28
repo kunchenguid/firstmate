@@ -2657,6 +2657,11 @@ def run_pilot_create(controller, action):
         "FM_AZURE_WORKER_INVOCATION_BINDING": action["bindings"]["assignment_generation"],
         "FM_AZURE_WORKER_SNAPSHOT_DIGEST": "sha256:" + action["bindings"]["repository_binding"],
         "FM_AZURE_WORKER_COST_ATTRIBUTION": "author",
+        # The controller validated current spend, quota, and the exact action
+        # digest immediately before this provider call. The pilot still
+        # rechecks exact subscription scope and current quota, but does not
+        # repeat foundation-only provider, SKU, name, and retail-price gates.
+        "FM_AZURE_CONTROLLER_ADMISSION_PROOF": "1",
     })
     result = run([
         str(PILOT), "worker-create", "--slot", str(action["slot"]), "--confirm-create",

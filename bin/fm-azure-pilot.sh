@@ -595,6 +595,16 @@ live_gates() {
   printf 'live gates: profile=%s; exact scope, providers, region, SKU, quota, names, and cost are green\n' "$CAPACITY_PROFILE"
 }
 
+worker_create_runtime_gates() {
+  require_tool az
+  require_tool jq
+  require_tool python3
+  local_validate
+  scope_gate
+  quota_gate
+  printf 'worker-create gates: exact scope and current quota are green; foundation provider, SKU, name, and retail-price checks remain owned by the landed deployment\n'
+}
+
 make_parameters_file() {
   PARAMS_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-azure-pilot-params.XXXXXX")
   chmod 600 "$PARAMS_FILE"
@@ -901,7 +911,11 @@ run_worker_create() {
   WORKER_SLOTS_JSON=$(printf '[%s]' "$SLOT")
   WORKER_SKUS_JSON=$(jq -cn --arg sku "$(sku_for_slot "$SLOT")" '[$sku]')
   INCREMENTAL_WORKER_DEPLOY=1
-  live_gates
+  if [ "${FM_AZURE_CONTROLLER_ADMISSION_PROOF:-0}" = 1 ]; then
+    worker_create_runtime_gates
+  else
+    live_gates
+  fi
   make_parameters_file
   trap cleanup_parameters EXIT HUP INT TERM
   run_bounded_az "worker-create-$SLOT" deployment sub create \
