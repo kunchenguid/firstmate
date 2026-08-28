@@ -39,6 +39,18 @@
 #   <task>.inbox/.commit-escalated
 #                              closure names whose failed commit was already
 #                              surfaced, so later polls retry them quietly
+#   <task>.inbox/.NNN.resolve.committed
+#                              per-sidecar ledger of the decision identities
+#                              that sidecar has already durably closed, so a
+#                              retry after a partial commit closes each at
+#                              most once; removed once the sidecar is filed
+#   <task>.inbox/.orphan-escalated
+#                              append-only names of orphaned sidecars already
+#                              surfaced (the ladder's orphaned cause), so each
+#                              escalates exactly once
+#   <task>.inbox/handled/orphaned/NNN.resolve
+#                              an escalated orphaned sidecar, set aside there
+#                              so it never reads as a pending answer again
 #
 # Record format (fm_task_inbox_write / fm_task_inbox_body):
 #   schema=fm-task-inbox.v1
@@ -85,7 +97,7 @@
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
 # attempt may ring or be skipped to protect proven pending composer text. It
-# escalates for one of three stated causes, and every one of them is bounded:
+# escalates for one of four stated causes, and every one of them is bounded:
 #   attempts  FM_TASK_INBOX_RING_MAX delivery attempts produced no
 #             acknowledgement (default 3, so ~4 grace periods after enqueue)
 #   blocked   FM_TASK_INBOX_BLOCKED_MAX attempts were SKIPPED because the
@@ -103,9 +115,16 @@
 #             wait into a named, fixable one.
 #   overdue   the record has been unhandled for FM_TASK_INBOX_UNHANDLED_MAX_SECS
 #             (default 900) whatever the pane is doing. This is the absolute
-#             bound, and the only cause the caller must surface while the pane
-#             reads busy: a busy worker legitimately has not reached a turn
-#             boundary yet, but "busy" must never mean "unread forever".
+#             bound, and one of the two causes the caller must surface while
+#             the pane reads busy: a busy worker legitimately has not reached
+#             a turn boundary yet, but "busy" must never mean "unread forever".
+#   orphaned  a parked closure's bound record is in NEITHER the inbox root nor
+#             handled/ - a contract violation (the worker removed the record
+#             instead of moving it), so the closure can never commit on its
+#             own. Surfaced whatever the pane is doing, once per sidecar, and
+#             then set aside under handled/orphaned/ so it never reads as a
+#             pending answer again (_fm_task_inbox_orphaned_sidecar,
+#             fm_task_inbox_record_orphan_escalated).
 # The caller owns the busy check (a busy pane just waits for the ring ladder -
 # the record is durable and the worker reaches a turn boundary) and the wake
 # emission; this library owns only the schedule. If attempt bookkeeping cannot
@@ -480,7 +499,11 @@ fm_task_inbox_is_acknowledged() {  # <record-path>
 # closes) and never escalates (the ladder finds nothing left to watch), so an
 # already-delivered answer would read open in every durable record forever
 # with no path back to firstmate's attention - exactly the silent failure this
-# whole change exists to eliminate. Oldest by sequence; empty when none.
+# whole change exists to eliminate. Once surfaced, the sidecar is set aside
+# under handled/orphaned/ (fm_task_inbox_record_orphan_escalated) so a closure
+# firstmate then settles by hand cannot keep feeding
+# fm_task_inbox_pending_answer_keys and mislabel the same key, reopened later,
+# as already answered. Oldest by sequence; empty when none.
 _fm_task_inbox_orphaned_sidecar() {  # <state-dir> <task-id>
   local dir f rec best='' best_n=0 n
   dir=$(fm_task_inbox_dir "$1" "$2")
@@ -615,8 +638,8 @@ fm_task_inbox_commit_resolutions() {  # <state-dir> <task-id> <status-file>
       continue
     fi
     if ! mv "$f" "$dir/handled/${f##*/}" 2>/dev/null; then
-      echo "error: $task closed the answered decision in ${f##*/}, but the committed closure could not be filed under $dir/handled" >&2
-      rc=1
+      [ "$quiet" = 1 ] \
+        || { echo "error: $task closed the answered decision in ${f##*/}, but the committed closure could not be filed under $dir/handled" >&2; rc=1; }
     else
       rm -f "$(_fm_task_inbox_resolution_committed_path "$f")" 2>/dev/null || true
     fi
@@ -823,13 +846,28 @@ fm_task_inbox_record_escalated() {  # <state-dir> <task-id> <record-path>
 # Same wake-before-marker contract as fm_task_inbox_record_escalated, for an
 # orphaned sidecar instead: append-only (there may be more than one orphan
 # over a task's lifetime, unlike the single current-oldest .msg the other
-# marker tracks) so each sidecar identity escalates exactly once.
+# marker tracks) so each sidecar identity escalates exactly once. Once the
+# marker is durable the sidecar is retired out of the inbox root into
+# handled/orphaned/<NNN>.resolve: it can never commit, firstmate has been told
+# to settle it by hand, and left in the root it would keep reading as a
+# pending answer for its keys - so a later, genuine reopening of the same key
+# would be annotated as already answered and still unread. The marker stays
+# the dedupe of record: if the retirement itself fails, the orphan is still
+# surfaced exactly once, and the failure is returned so the caller can name it.
 fm_task_inbox_record_orphan_escalated() {  # <state-dir> <task-id> <sidecar-path>
-  local dir
+  local dir sidecar=$3 base
   dir=$(fm_task_inbox_dir "$1" "$2")
   [ -d "$dir" ] || return 0
-  if ! { printf '%s\n' "${3##*/}" >> "$dir/.orphan-escalated"; } 2>/dev/null; then
+  base=${sidecar##*/}
+  if ! { printf '%s\n' "$base" >> "$dir/.orphan-escalated"; } 2>/dev/null; then
     [ -d "$dir" ] || return 0
     return 1
   fi
+  [ -e "$sidecar" ] || return 0
+  if ! mkdir -p "$dir/handled/orphaned" 2>/dev/null \
+    || ! mv "$sidecar" "$dir/handled/orphaned/${base#.}" 2>/dev/null; then
+    [ -d "$dir" ] || return 0
+    return 1
+  fi
+  rm -f "$(_fm_task_inbox_resolution_committed_path "$sidecar")" 2>/dev/null || true
 }

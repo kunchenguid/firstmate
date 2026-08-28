@@ -575,6 +575,61 @@ test_commit_retries_close_each_key_once_and_surface_once() {
   pass "inbox: a partly failed commit closes each key once and is surfaced once"
 }
 
+# The filing step is the third place a commit can fail, and it is bounded the
+# same way as the other two: an acknowledged closure whose status key closed
+# but which cannot be filed under handled/ (the directory stopped being
+# writable after the worker's ack) surfaces once, then retries quietly and
+# files itself the moment the directory is writable again. Without the bound,
+# a permanently unwritable handled/ re-woke firstmate and re-fed the
+# captain-held tasks on every poll.
+test_commit_files_quietly_when_handled_is_unwritable() {
+  local home state rec sidecar err rc
+  if [ "$(id -u)" = 0 ]; then
+    pass "inbox: unwritable handled/ case skipped (root ignores directory permissions)"
+    return 0
+  fi
+  home="$TMP_ROOT/unwritable-handled"; state="$home/state"; mkdir -p "$state" "$home/data"
+  err="$home/commit.err"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/t1.status"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "go with REST")
+  sidecar=$(inbox_lib "$state" fm_task_inbox_defer_resolution "$rec" "go with REST" "api-shape" "")
+  mv "$rec" "$state/t1.inbox/handled/"
+  chmod a-w "$state/t1.inbox/handled"
+
+  rc=0
+  inbox_lib "$state" fm_task_inbox_commit_resolutions "$state" t1 "$state/t1.status" >/dev/null 2>"$err" || rc=$?
+  chmod u+w "$state/t1.inbox/handled" 2>/dev/null
+  [ "$rc" -ne 0 ] || fail "a closure that closed its key but could not be filed should report the failure once"
+  assert_contains "$(cat "$err")" "could not be filed" "the first failure should name the filing step"
+  [ "$(grep -cF 'resolved [key=api-shape]' "$state/t1.status")" = 1 ] \
+    || fail "the status key should have closed once before the filing failure"
+  [ -f "$sidecar" ] || fail "an unfiled closure must stay parked for the retry"
+
+  # The caller surfaced it; from here the retry is quiet even while handled/
+  # stays unwritable.
+  inbox_lib "$state" fm_task_inbox_record_commit_escalated "$state" t1 \
+    || fail "could not mark the unfiled closure as surfaced"
+  chmod a-w "$state/t1.inbox/handled"
+  rc=0
+  inbox_lib "$state" fm_task_inbox_commit_resolutions "$state" t1 "$state/t1.status" >/dev/null 2>"$err" || rc=$?
+  chmod u+w "$state/t1.inbox/handled" 2>/dev/null
+  [ "$rc" -eq 0 ] || fail "a surfaced filing failure must retry quietly instead of failing every poll"
+  [ ! -s "$err" ] || fail "a surfaced filing failure must not repeat its diagnostic on every poll:"$'\n'"$(cat "$err")"
+  [ "$(grep -cF 'resolved [key=api-shape]' "$state/t1.status")" = 1 ] \
+    || fail "the quiet retry appended the status key's closing line again"
+  [ -f "$sidecar" ] || fail "the quiet retry must keep the unfiled closure parked as evidence"
+
+  # Writable again: the quiet retry files it without closing anything twice.
+  rc=0
+  inbox_lib "$state" fm_task_inbox_commit_resolutions "$state" t1 "$state/t1.status" >/dev/null 2>"$err" || rc=$?
+  [ "$rc" -eq 0 ] || fail "filing should succeed once handled/ is writable again:"$'\n'"$(cat "$err")"
+  [ ! -e "$sidecar" ] || fail "the closure was not filed once handled/ became writable"
+  [ -f "$state/t1.inbox/handled/${sidecar##*/}" ] || fail "the filed closure should sit under handled/"
+  [ "$(grep -cF 'resolved [key=api-shape]' "$state/t1.status")" = 1 ] \
+    || fail "filing the closure re-closed its status key"
+  pass "inbox: a closure that cannot be filed under handled/ surfaces once, retries quietly, then files"
+}
+
 # THE REGRESSION for a global-text dedupe: the idempotence check must be
 # scoped to THIS sidecar's own identity, never to whether matching text
 # already exists anywhere in the status log. A key legitimately reopened
@@ -658,13 +713,30 @@ test_orphaned_sidecar_escalates_instead_of_going_silent() {
   assert_not_contains "$(cat "$state/t1.status")" "resolved [key=api-shape]" \
     "an orphaned sidecar's answer must never silently commit on its own"
 
-  # Escalates exactly once: the marker suppresses a repeat on the next poll.
-  local orphan_path=${out##* }
+  # Escalates exactly once: the marker suppresses a repeat on the next poll,
+  # and the surfaced orphan is retired out of the inbox root so it stops
+  # reading as a pending answer for its keys.
+  local orphan_path=${out##* } pending
   inbox_lib "$state" fm_task_inbox_record_orphan_escalated "$state" t1 "$orphan_path" \
     || fail "could not record the orphan escalation marker"
   out=$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
   [ "$out" = quiet ] || fail "a surfaced orphan must not re-escalate on every poll: $out"
-  pass "inbox: an orphaned sidecar (record rm'd instead of moved) escalates once instead of going silent forever"
+  [ ! -e "$orphan_path" ] || fail "a surfaced orphan was left in the inbox root, where it still reads as pending"
+  [ -f "$state/t1.inbox/handled/orphaned/001.resolve" ] \
+    || fail "a surfaced orphan should be set aside under handled/orphaned/:"$'\n'"$(ls -laR "$state/t1.inbox")"
+  pending=$(inbox_lib "$state" fm_task_inbox_pending_answer_keys "$state" t1)
+  [ -z "$pending" ] || fail "a retired orphan must not feed the pending-answer set: $pending"
+
+  # Firstmate settles it by hand; the SAME key later reopens for real. That
+  # fresh decision has no answer in flight, and the retired orphan must not
+  # make it read as already answered, nor escalate again on its behalf.
+  printf 'resolved [key=api-shape]: answered: go with REST (closed by hand)\n' >> "$state/t1.status"
+  printf 'needs-decision [key=api-shape]: pick again for v2\n' >> "$state/t1.status"
+  out=$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$out" = quiet ] || fail "a retired orphan re-escalated when its key was reopened afresh: $out"
+  pending=$(inbox_lib "$state" fm_task_inbox_pending_answer_keys "$state" t1)
+  [ -z "$pending" ] || fail "a reopened key was wrongly reported as already answered by a retired orphan: $pending"
+  pass "inbox: an orphaned sidecar (record rm'd instead of moved) escalates once, is retired, and never shadows a reopened key"
 }
 
 # A captain-held task the sidecar answers, driven through the REAL watcher in
@@ -1004,6 +1076,42 @@ test_watcher_escalates_blocked_composer_and_names_the_decision() {
   pass "watcher: a blocked doorbell escalates by name and says which decision stays open"
 }
 
+# An orphaned sidecar through the real watcher: the wake names the violation
+# and the orphan's own keys as something to settle by hand, and does NOT tell
+# the reader to wait for an acknowledgement that can never come. The orphan is
+# then set aside under handled/orphaned/ rather than left to read as pending.
+test_watcher_escalates_an_orphan_for_hand_closure() {
+  local dir state out log pid rec sidecar
+  dir=$(setup_watch_case orphan)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/t1.status"
+  prime_status_seen "$state" "$state/t1.status"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "go with REST")
+  sidecar=$(inbox_lib "$state" fm_task_inbox_defer_resolution "$rec" "go with REST" "api-shape" "")
+  rm -f "$rec"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_TASK_INBOX_RING_MAX=99
+  pid=$!
+  wait_watcher_gone "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "an orphaned sidecar never escalated through the watcher"; }
+  grep -qF 'steering-inbox contract violation' "$state/.wake-queue" \
+    || fail "the wake should name the contract violation:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  grep -qF 'decision key(s) api-shape' "$state/.wake-queue" \
+    || fail "the wake should name the orphan's own decision key:"$'\n'"$(cat "$state/.wake-queue")"
+  grep -qF 'closed by hand' "$state/.wake-queue" \
+    || fail "the wake should say the closure must be settled by hand:"$'\n'"$(cat "$state/.wake-queue")"
+  if grep -qF 'until the worker acknowledges' "$state/.wake-queue"; then
+    fail "an orphan's wake must not tell the reader to wait for an acknowledgement that cannot come:"$'\n'"$(cat "$state/.wake-queue")"
+  fi
+  [ ! -e "$sidecar" ] || fail "the surfaced orphan was left in the inbox root"
+  [ -f "$state/t1.inbox/handled/orphaned/${sidecar##*/.}" ] \
+    || fail "the surfaced orphan should be set aside under handled/orphaned/:"$'\n'"$(ls -laR "$state/t1.inbox")"
+  assert_no_grep 'resolved [key=api-shape]' "$state/t1.status" \
+    "an orphaned answer must never close its decision on its own"
+  pass "watcher: an orphaned closure is surfaced for hand closure by name, then set aside"
+}
+
 # The other half of the same contract: once the worker acknowledges, the real
 # watcher is what turns the parked closure into the closing resolved line.
 test_watcher_commits_the_closure_on_acknowledgement() {
@@ -1099,6 +1207,7 @@ test_deferred_closure_needs_a_complete_acknowledgement
 test_deferred_closure_refuses_an_empty_key_set
 test_deferred_closure_survives_a_glob_sweep
 test_commit_retries_close_each_key_once_and_surface_once
+test_commit_files_quietly_when_handled_is_unwritable
 test_reopened_key_with_identical_answer_closes_again
 test_blocked_escalation_fires_one_poll_after_first_skip
 test_orphaned_sidecar_escalates_instead_of_going_silent
@@ -1113,5 +1222,6 @@ test_watcher_escalates_once_after_budget
 test_watcher_escalates_overdue_on_busy_pane
 test_watcher_overdue_on_idle_pane_says_idle
 test_watcher_escalates_blocked_composer_and_names_the_decision
+test_watcher_escalates_an_orphan_for_hand_closure
 test_watcher_commits_the_closure_on_acknowledgement
 test_watcher_surfaces_a_failed_closure_once
