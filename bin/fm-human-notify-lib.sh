@@ -281,16 +281,19 @@ fm_human_notify_review_current() {  # <state> <task-id>
 }
 
 fm_human_notify_pr_observation_record() {  # <state> <task> <pr-state> <head> <checks> <conclusion>
-  local state=$1 task=$2 pr_state=$3 head=$4 checks=$5 conclusion=$6 path tmp
+  local state=$1 task=$2 pr_state=$3 head=$4 checks=$5 conclusion=$6 path tmp pr identity incarnation
   case "$task" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac
   case "$pr_state" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
   [ -z "$head" ] || [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]] || return 1
   case "$checks$conclusion" in *[!A-Za-z0-9_,.-]*) return 1 ;; esac
   path="$state/$task.pr-observation"
   [ ! -L "$path" ] || return 1
+  pr=$(grep '^pr=' "$state/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  identity=$(printf '%s' "$pr" | _fm_human_notify_sha256)
+  incarnation=$(printf '%s' "$(_fm_human_notify_incarnation "$state" "$task")" | _fm_human_notify_sha256)
   tmp=$(umask 077; mktemp "$state/.pr-observation.XXXXXX") || return 1
-  if ! printf 'state=%s\nhead=%s\nchecks=%s\nconclusion=%s\n' \
-      "$pr_state" "$head" "$checks" "$conclusion" > "$tmp" \
+  if ! printf 'state=%s\nhead=%s\nchecks=%s\nconclusion=%s\nidentity=%s\nincarnation=%s\n' \
+      "$pr_state" "$head" "$checks" "$conclusion" "$identity" "$incarnation" > "$tmp" \
     || ! chmod 0600 "$tmp" || ! mv -f -- "$tmp" "$path"; then
     rm -f -- "$tmp"
     return 1

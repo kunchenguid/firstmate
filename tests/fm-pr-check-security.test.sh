@@ -11,6 +11,8 @@ set -u
 . "$ROOT/bin/fm-x-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-check-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-human-notify-lib.sh"
 
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
@@ -674,6 +676,57 @@ run_watcher_bounded() {
   perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
     env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=1 \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
+}
+
+test_pr_arm_preserves_notification_edges() {
+  local dir state ready observation
+  ready='done: PR https://github.com/o/r/pull/1 ready for review'
+
+  dir=$(make_case first-ready-edge)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf '%s\n' "$ready" > "$state/task-a.status"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2>/dev/null \
+    || fail "could not arm first readiness fixture"
+  fm_human_notify_pending "$state" task-a "$ready" \
+    || fail "arming suppressed the first undelivered review-ready edge"
+
+  dir=$(make_case delivered-ready-edge)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf '%s\n' "$ready" > "$state/task-a.status"
+  fm_human_notify_record "$state" task-a "$ready" || fail "could not seed delivered readiness receipt"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2>/dev/null \
+    || fail "could not arm delivered readiness fixture"
+  if fm_human_notify_pending "$state" task-a "$ready"; then
+    fail "arming replayed an already delivered review-ready edge"
+  fi
+
+  fm_human_notify_pr_observation_record "$state" task-a OPEN \
+    0123456789abcdef0123456789abcdef01234567 COMPLETED FAILURE \
+    || fail "could not seed red PR observation"
+  observation=$(cat "$state/task-a.pr-observation")
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2>/dev/null \
+    || fail "could not rearm unchanged PR"
+  [ "$(cat "$state/task-a.pr-observation")" = "$observation" ] \
+    || fail "same PR identity, head, and incarnation discarded its observation"
+
+  FM_TEST_GH_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2>/dev/null \
+    || fail "could not rearm changed PR head"
+  [ ! -e "$state/task-a.pr-observation" ] \
+    || fail "changed PR head retained the old observation"
+
+  fm_human_notify_pr_observation_record "$state" task-a OPEN \
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa COMPLETED FAILURE \
+    || fail "could not seed incarnation-bound PR observation"
+  printf 'busy_gen=2\n' >> "$state/task-a.meta"
+  FM_TEST_GH_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2>/dev/null \
+    || fail "could not rearm changed task incarnation"
+  [ ! -e "$state/task-a.pr-observation" ] \
+    || fail "changed task incarnation retained the old observation"
+  pass "PR arming preserves first readiness and unchanged observations"
 }
 
 test_rejected_metacharacter_bytes_are_inert() {
@@ -3003,7 +3056,7 @@ test_merged_poll_retires_once() {
   set -e
   [ "$rc" -eq 0 ] || fail "second watcher cycle failed: $(cat "$dir/watch-2.err")"
   second=$(cat "$dir/watch-2.out")
-  case "$second" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "second cycle did not reach the control check: $second" ;; esac
+  case "$second" in check:*'Z · Stop: an authenticated state check produced a new result now.'*) ;; *) fail "second cycle did not reach the control check: $second" ;; esac
   ! grep -F 'task-a.check.sh: merged' "$dir/watch-2.out" >/dev/null \
     || fail "retired merged poll executed a second time"
   ! grep "$(printf '\tcheck\ttask-a.check.sh\t')" "$state/.wake-queue" >/dev/null 2>&1 \
@@ -3104,7 +3157,7 @@ test_retirement_crash_recovery() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "post-check-removal restart failed: $(cat "$dir/restart.err")"
-  case "$(cat "$dir/restart.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "post-check-removal restart did not reach the control check" ;; esac
+  case "$(cat "$dir/restart.out")" in check:*'Z · Stop: an authenticated state check produced a new result now.'*) ;; *) fail "post-check-removal restart did not reach the control check" ;; esac
   assert_poll_absent "$state" task-a
   fm_pr_poll_retirement_recover_one "$state" task-a "$POLL" || fail "completed retirement was not idempotent"
 
@@ -3121,7 +3174,7 @@ test_retirement_crash_recovery() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "post-registration-removal restart failed: $(cat "$dir/restart.err")"
-  case "$(cat "$dir/restart.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "post-registration-removal restart did not reach the control check" ;; esac
+  case "$(cat "$dir/restart.out")" in check:*'Z · Stop: an authenticated state check produced a new result now.'*) ;; *) fail "post-registration-removal restart did not reach the control check" ;; esac
   assert_poll_absent "$state" task-a
 
   dir=$(make_case retirement-before-receipt-removal)
@@ -3137,7 +3190,7 @@ test_retirement_crash_recovery() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "receipt-only restart failed: $(cat "$dir/restart.err")"
-  case "$(cat "$dir/restart.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "receipt-only restart did not reach the control check" ;; esac
+  case "$(cat "$dir/restart.out")" in check:*'Z · Stop: an authenticated state check produced a new result now.'*) ;; *) fail "receipt-only restart did not reach the control check" ;; esac
   assert_poll_absent "$state" task-a
 
   dir=$(make_case retirement-after-template-update)
@@ -3166,7 +3219,7 @@ test_retirement_crash_recovery() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "template-update recovery watcher failed: $(cat "$dir/restart.err")"
-  case "$(cat "$dir/restart.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "template-update recovery did not reach the control check" ;; esac
+  case "$(cat "$dir/restart.out")" in check:*'Z · Stop: an authenticated state check produced a new result now.'*) ;; *) fail "template-update recovery did not reach the control check" ;; esac
   [ ! -s "$dir/gh.log" ] || fail "template-update migration rebuilt and queried the retired poll"
   ! grep "$(printf '\tcheck\ttask-a.check.sh\t')" "$state/.wake-queue" >/dev/null 2>&1 \
     || fail "template-update recovery left the handled terminal wake queued"
@@ -3210,7 +3263,7 @@ test_external_merge_transition_retires_only_terminal_poll() {
     case "$label" in
       open-red) grep -F 'review checks turned red - FAILURE' "$dir/$label.out" >/dev/null || fail "$label did not surface changed checks" ;;
       closed-unmerged) grep -F 'the review target closed' "$dir/$label.out" >/dev/null || fail "$label did not surface closure" ;;
-      *) case "$(cat "$dir/$label.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "$label did not reach the control check" ;; esac ;;
+      *) case "$(cat "$dir/$label.out")" in check:*'Z · Stop: an authenticated state check produced a new result now.'*) ;; *) fail "$label did not reach the control check" ;; esac ;;
     esac
     [ "$(poll_artifact_snapshot "$state" task-a)" = "$before" ] || fail "$label changed the armed poll"
     ack_watcher_cycle "$state" || fail "$label wake acknowledgement failed"
@@ -3403,6 +3456,7 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
+test_pr_arm_preserves_notification_edges
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
