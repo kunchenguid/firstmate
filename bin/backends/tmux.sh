@@ -124,8 +124,14 @@ fm_backend_tmux_send_literal() {  # <target> <text>
 # fm_backend_tmux_kill: remove one explicitly named task window, best-effort.
 # Empty, omitted, and malformed targets return nonzero before invoking tmux so
 # tmux can never interpret an empty target as the caller's current window.
+#
+# The `=name` exact-match target prefix that keeps this from fuzzy-matching a
+# different window is a real-tmux feature psmux (Windows) does not implement -
+# `kill-window -t "=s:=w"` fails there with "can't find window: =w" and the
+# window leaks. On Windows resolve the window id by an EXACT name match instead,
+# which is equally unambiguous, then kill by that id.
 fm_backend_tmux_kill() {  # <target>
-  local target=${1:-} session window
+  local target=${1:-} session window wid
   case "$target" in
     *:*)
       session=${target%%:*}
@@ -136,7 +142,16 @@ fm_backend_tmux_kill() {  # <target>
   case "$session:$window" in
     :*|*:|*:*:*) return 1 ;;
   esac
-  tmux kill-window -t "=$session:=$window" 2>/dev/null || true
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      wid=$(tmux list-windows -t "$session" -F '#{window_id} #{window_name}' 2>/dev/null \
+        | awk -v n="$window" '$2 == n { print $1; exit }')
+      [ -n "$wid" ] && tmux kill-window -t "$wid" 2>/dev/null || true
+      ;;
+    *)
+      tmux kill-window -t "=$session:=$window" 2>/dev/null || true
+      ;;
+  esac
 }
 
 # fm_backend_tmux_current_command: <target>'s live foreground process name -
