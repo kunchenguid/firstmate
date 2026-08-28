@@ -71,7 +71,10 @@ assert_pending decision-task "$REVIEW"
 fm_human_notify_record "$STATE" decision-task "$REVIEW"
 fm_human_notify_apply_transition "$STATE" decision-task 'blocked [key=merge]: resolve the merge conflict'
 assert_pending decision-task "$REVIEW"
-pass "recovery, rework, and human-owned waits reset readiness for restoration"
+fm_human_notify_record "$STATE" decision-task "$REVIEW"
+fm_human_notify_apply_transition "$STATE" decision-task "$PAUSE"
+assert_pending decision-task "$REVIEW"
+pass "recovery, rework, human waits, and external pauses reset readiness for restoration"
 
 printf '%s\n%s\n' 'blocked: temporary dependency failed' 'working: recovered and resumed' > "$STATE/nonkeyed.status"
 [ -z "$(status_open_decisions "$STATE/nonkeyed.status")" ] \

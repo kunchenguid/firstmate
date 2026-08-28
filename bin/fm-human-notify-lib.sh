@@ -284,6 +284,7 @@ fm_human_notify_apply_transition() {  # <state> <task> <status-line>
     paused)
       _fm_human_notify_remove_task_class "$state" "$task" failure
       _fm_human_notify_remove_task_class "$state" "$task" result
+      _fm_human_notify_remove_task_class "$state" "$task" review-ready
       ;;
   esac
 }
