@@ -644,7 +644,7 @@ This evidence-heavy scout opts into a narrow raw-source archive: raw captures be
 EOF
 }
 
-# Reader scout: the slot-free contract. The environment is a scratch directory
+# Reader scout: the checkout-free contract. The environment is a scratch directory
 # plus a bare read handle, so the Setup section, rule 2's boundary, and the
 # promotion sentence all differ from the writer scout scaffold below; the rest
 # is the shared scout wording above. The set of sanctioned writes outside the
@@ -705,7 +705,8 @@ EOF
 if [ "$EVIDENCE_ARCHIVE" -eq 1 ]; then
   scaffold_evidence_archive
 fi
-echo "scaffolded: $BRIEF (scout, access=reader; replace {TASK} and {PROJECT_RULES})"
+printf '%s\n' "$LOAD_BEARING_BOOKEND" >> "$BRIEF"
+echo "scaffolded: $BRIEF (scout, access=reader; replace the two standalone {TASK} slots and {PROJECT_RULES})"
 exit 0
 fi
 
@@ -739,11 +740,11 @@ $HEAVY_SUITE_RULE
 # Definition of done
 $SCOUT_DOD_COMMON
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
-$LOAD_BEARING_BOOKEND
 EOF
 if [ "$EVIDENCE_ARCHIVE" -eq 1 ]; then
   scaffold_evidence_archive
 fi
+printf '%s\n' "$LOAD_BEARING_BOOKEND" >> "$BRIEF"
 echo "scaffolded: $BRIEF (scout; replace the two standalone {TASK} slots)"
 exit 0
 fi

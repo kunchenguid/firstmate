@@ -2343,7 +2343,7 @@ fi
 # charter is not an ordinary brief and is left to secondmate-provisioning.
 # fm-brief.sh --validate-bookends is the single owner of the check; it no-ops a
 # charter so this gate only acts on ordinary ship/scout briefs.
-if [ "$KIND" != secondmate ] && { [ "$KIND" != scout ] || ! grep -qx 'Access contract: access=reader' "$BRIEF"; }; then
+if [ "$KIND" != secondmate ]; then
   VB_ERR=$("$FM_ROOT/bin/fm-brief.sh" --validate-bookends "$BRIEF" 2>&1) || {
     printf '%s\n' "$VB_ERR" >&2
     echo "error: $ID brief failed the load-bearing bookend check; fill both standalone {TASK} slots from one input (bin/fm-brief.sh <task-id> --fill <text-file>) before launch" >&2

@@ -2548,6 +2548,48 @@ test_spawn_refuses_unfilled_bookends_before_endpoint_creation() {
   pass "fm-spawn refuses an unfilled bookend brief before endpoint or task-state creation"
 }
 
+test_spawn_refuses_reader_bookends_before_endpoint_creation() {
+  local rec id out status endpoint_log text_file
+  id=profile-reader-bookend-refuse-z31
+  rec=$(make_spawn_case reader-bookend-refuse codex "$id")
+  read_case_record "$rec"
+  endpoint_log="$CASE_DIR/endpoint.log"
+  : > "$endpoint_log"
+  rm -f "$HOME_DIR/data/$id/brief.md"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" "$PROJ_DIR" --scout --access reader >/dev/null 2>&1 \
+    || fail "fm-brief.sh failed to scaffold a real reader scout brief for the bookend gate"
+  grep -qx '^# Task$' "$HOME_DIR/data/$id/brief.md" || fail "real reader brief missing its # Task section"
+  out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --scout --access reader --model gpt-5 --effort medium --routing-source fallback 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a reader scout brief with unfilled {TASK} bookends"
+  assert_contains "$out" "bookend check" "reader spawn refusal did not name the bookend gate"
+  assert_contains "$out" "fill both standalone {TASK} slots" "reader spawn refusal did not point at the fill command"
+  [ ! -s "$endpoint_log" ] || fail "reader spawn created an endpoint before the bookend gate refused"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "reader spawn wrote task metadata before the bookend gate refused"
+
+  rm -f "$HOME_DIR/data/$id/brief.md"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" "$PROJ_DIR" --scout --access reader >/dev/null 2>&1 \
+    || fail "fm-brief.sh failed to scaffold a divergent reader brief fixture"
+  text_file="$CASE_DIR/reader-bookend-text.txt"
+  printf 'Oracle: FM-READER-ORACLE-7f3a\nAcceptance: FM-READER-ACCEPT-7f3a\nConstraints: FM-READER-CONSTRAINT-7f3a\n' > "$text_file"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" --fill "$text_file" >/dev/null 2>&1 \
+    || fail "fm-brief.sh failed to fill the reader brief for the divergent gate"
+  python3 - "$HOME_DIR/data/$id/brief.md" <<'PY'
+import sys
+p=sys.argv[1]; s=open(p).read()
+i=s.rfind("# Load-bearing contract")
+open(p,"w").write(s[:i] + s[i:].replace("FM-READER-CONSTRAINT-7f3a","FM-READER-DIVERGE-7f3a",1))
+PY
+  out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --scout --access reader --model gpt-5 --effort medium --routing-source fallback 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a reader scout brief with divergent bookends"
+  assert_contains "$out" "bookend check" "divergent reader spawn refusal did not name the bookend gate"
+  assert_contains "$out" "diverge" "divergent reader spawn refusal did not name the divergent pair"
+  [ ! -s "$endpoint_log" ] || fail "divergent reader spawn created an endpoint before the bookend gate refused"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "divergent reader spawn wrote task metadata before the bookend gate refused"
+  pass "fm-spawn refuses unfilled and divergent reader bookends before endpoint or task-state creation"
+}
+
 test_routing_source_recorded_only_when_declared
 test_spawn_writes_routing_facts_into_intake
 test_secondmate_config_provenance_requires_exclusive_complete_tuple
@@ -2605,9 +2647,15 @@ reader_meta_value() {  # <meta> <key>
   grep "^$2=" "$1" | tail -1 | cut -d= -f2-
 }
 
-write_reader_brief() {  # <home> <task-id>
-  mkdir -p "$1/data/$2"
-  printf 'brief for %s\nAccess contract: access=reader\n\n# Task\nfixture\n' "$2" > "$1/data/$2/brief.md"
+write_reader_brief() {  # <home> <task-id> [repo]
+  local home=$1 id=$2 repo=${3:-project} text_file
+  rm -f "$home/data/$id/brief.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$repo" --scout --access reader >/dev/null 2>&1 \
+    || fail "write_reader_brief failed to scaffold $id"
+  text_file="$TMP_ROOT/reader-brief-text-$id.txt"
+  printf 'Fixture task for %s\n' "$id" > "$text_file"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --fill "$text_file" >/dev/null 2>&1 \
+    || fail "write_reader_brief failed to fill $id"
 }
 
 install_reader_realpath_test_double() {  # <fakebin>
@@ -2920,6 +2968,9 @@ test_reader_brief_access_contract_cross_check() {
   rm -f "$brief"
   FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" project --scout --access reader >/dev/null 2>&1 \
     || fail "reader scout brief scaffold should succeed"
+  printf 'Generated reader brief fixture for %s\n' "$id" > "$CASE_DIR/access-reader-brief-generated-text.txt"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" --fill "$CASE_DIR/access-reader-brief-generated-text.txt" >/dev/null 2>&1 \
+    || fail "reader scout brief fill should succeed"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
   status=$?
   [ "$status" -ne 0 ] || fail "writer scout spawn with a reader brief should be refused"
@@ -3477,6 +3528,7 @@ test_oversized_cooldown_evidence_is_recorded_truncated
 test_expired_and_sibling_cooldowns_do_not_suppress_spawn
 test_captain_override_dispatches_cooled_tuple_and_updates_record
 test_spawn_refuses_unfilled_bookends_before_endpoint_creation
+test_spawn_refuses_reader_bookends_before_endpoint_creation
 test_missing_axis_refusal_names_the_flags_spawn_accepts
 test_cooldown_protects_the_static_crew_harness_path
 test_claude_threads_model_and_effort

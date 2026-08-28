@@ -17,6 +17,11 @@
 # stock macOS Bash 3.2.
 set -u
 
+# Keep child Bash processes and captured no-op output deterministic when the
+# host advertises a locale that is not installed (for example C.UTF-8 on a
+# minimal runner). The brief contract is ASCII and does not depend on locale.
+export LC_ALL=C
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -90,59 +95,73 @@ test_ordinary_briefs_state_slice_contracts() {
 }
 
 test_ordinary_briefs_bookend_load_bearing_task() {
-  local kind id brief filled task_slots bookend_line dod_line setup_line task_line oracle_count text_file inline_count remaining
-  for kind in ship scout; do
-    id="brief-bookend-$kind"
-    if [ "$kind" = scout ]; then
-      FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1 \
-        || fail "fm-brief.sh failed to generate the $kind bookend brief"
-    else
-      FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1 \
-        || fail "fm-brief.sh failed to generate the $kind bookend brief"
-    fi
+  local variant id brief filled task_slots bookend_line dod_line setup_line task_line oracle_count text_file inline_count remaining mode
+  for variant in ship-no-mistakes ship-direct-PR ship-local-only scout reader-scout; do
+    id="brief-bookend-$variant"
+    case "$variant" in
+      scout)
+        FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1 \
+          || fail "fm-brief.sh failed to generate the $variant bookend brief"
+        ;;
+      reader-scout)
+        FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout --access reader >/dev/null 2>&1 \
+          || fail "fm-brief.sh failed to generate the $variant bookend brief"
+        ;;
+      ship-*)
+        mode=${variant#ship-}
+        FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode "$mode" >/dev/null 2>&1 \
+          || fail "fm-brief.sh failed to generate the $variant bookend brief"
+        ;;
+    esac
     brief="$BRIEF_HOME/data/$id/brief.md"
     task_slots=$(grep -c '^{TASK}$' "$brief" || true)
-    [ "$task_slots" -eq 2 ] || fail "$kind brief emitted $task_slots standalone {TASK} bookends instead of two"
+    [ "$task_slots" -eq 2 ] || fail "$variant brief emitted $task_slots standalone {TASK} bookends instead of two"
     assert_grep '# Load-bearing contract' "$brief" \
-      "$kind brief missing its closing load-bearing contract section"
+      "$variant brief missing its closing load-bearing contract section"
     bookend_line=$(grep -n '^# Load-bearing contract$' "$brief" | head -1 | cut -d: -f1)
     dod_line=$(grep -n '^# Definition of done$' "$brief" | head -1 | cut -d: -f1)
     task_line=$(grep -n '^# Task$' "$brief" | head -1 | cut -d: -f1)
     setup_line=$(grep -n '^# Setup$' "$brief" | head -1 | cut -d: -f1)
     [ -n "$bookend_line" ] && [ -n "$dod_line" ] && [ -n "$task_line" ] && [ -n "$setup_line" ] \
-      || fail "$kind brief lost a structural boundary needed for bookend placement"
+      || fail "$variant brief lost a structural boundary needed for bookend placement"
     [ "$bookend_line" -gt "$dod_line" ] \
-      || fail "$kind brief closing load-bearing contract must follow Definition of done"
+      || fail "$variant brief closing load-bearing contract must follow Definition of done"
     # Fill both standalone slots from one input through the public command, not
     # a test-only Perl substitution. The text includes an inline {TASK}: prose
     # line so the fill must target only the two standalone {TASK} lines and leave
     # the inline token intact as content (colon-split false-negative guard).
-    text_file="$TMP_ROOT/bookend-text-$kind.txt"
+    text_file="$TMP_ROOT/bookend-text-$variant.txt"
     printf 'Oracle: FM-BOOKEND-ORACLE-7f3a\n{TASK}: FM-BOOKEND-INLINE-7f3a\nAcceptance: FM-BOOKEND-ACCEPT-7f3a\nConstraints: FM-BOOKEND-CONSTRAINT-7f3a\n' > "$text_file"
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" --fill "$text_file" >/dev/null 2>&1 \
-      || fail "fm-brief.sh --fill failed to fill the $kind bookend brief from one input"
+      || fail "fm-brief.sh --fill failed to fill the $variant bookend brief from one input"
     filled="$brief"
     oracle_count=$(grep -c 'FM-BOOKEND-ORACLE-7f3a' "$filled" || true)
-    [ "$oracle_count" -eq 2 ] || fail "$kind brief duplicated $oracle_count load-bearing copies instead of start and end bookends"
+    [ "$oracle_count" -eq 2 ] || fail "$variant brief duplicated $oracle_count load-bearing copies instead of start and end bookends"
     sed -n "${task_line},${setup_line}p" "$filled" | grep -q 'FM-BOOKEND-ACCEPT-7f3a' \
-      || fail "$kind brief start bookend missing acceptance criteria content"
+      || fail "$variant brief start bookend missing acceptance criteria content"
     sed -n "${bookend_line},\$p" "$filled" | grep -q 'FM-BOOKEND-CONSTRAINT-7f3a' \
-      || fail "$kind brief end bookend missing hard-constraint content"
+      || fail "$variant brief end bookend missing hard-constraint content"
     sed -n "${setup_line},${dod_line}p" "$filled" | grep -q 'FM-BOOKEND-ORACLE-7f3a' \
-      && fail "$kind brief load-bearing content appears only in the middle scaffold"
+      && fail "$variant brief load-bearing content appears only in the middle scaffold"
     inline_count=$(grep -c '{TASK}: FM-BOOKEND-INLINE-7f3a' "$filled" || true)
-    [ "$inline_count" -eq 2 ] || fail "$kind brief fill replaced or dropped the inline {TASK}: prose token instead of leaving it as content"
+    [ "$inline_count" -eq 2 ] || fail "$variant brief fill replaced or dropped the inline {TASK}: prose token instead of leaving it as content"
     remaining=$(grep -c '^{TASK}$' "$filled" || true)
-    [ "$remaining" -eq 0 ] || fail "$kind brief fill left $remaining standalone {TASK} slot(s) unfilled"
+    [ "$remaining" -eq 0 ] || fail "$variant brief fill left $remaining standalone {TASK} slot(s) unfilled"
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" --validate-bookends "$filled" >/dev/null 2>&1 \
-      || fail "$kind brief failed the bookend validation after a one-input fill"
+      || fail "$variant brief failed the bookend validation after a one-input fill"
+    if [ "$variant" = reader-scout ]; then
+      assert_grep 'Access contract: access=reader' "$filled" \
+        "reader scout fill discarded its access contract"
+      assert_grep '{PROJECT_RULES}' "$filled" \
+        "reader scout fill discarded its project-rules replacement slot"
+    fi
   done
   FM_SECONDMATE_CHARTER='Supervise the beta domain.' \
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-bookend-secondmate --secondmate beta >/dev/null 2>&1 \
     || fail "fm-brief.sh failed to generate the secondmate bookend fixture"
   assert_no_grep '# Load-bearing contract' "$BRIEF_HOME/data/brief-bookend-secondmate/brief.md" \
     "secondmate charter must not receive ordinary-task load-bearing bookends"
-  pass "fm-brief: ship and scout briefs fill both standalone slots from one input and keep the load-bearing bookends"
+  pass "fm-brief: every ordinary ship mode and scout variant fills both standalone slots from one input and keeps the load-bearing bookends"
 }
 
 test_fill_refuses_non_ordinary_or_already_filled_brief() {
@@ -241,10 +260,13 @@ test_herdr_omission_keeps_inserted_after_scaffolding_wording() {
 
 test_ordinary_brief_echoes_describe_two_slots() {
   local kind id output
-  for kind in ship scout; do
+  for kind in ship scout reader-scout; do
     id="brief-echo-slots-$kind"
     if [ "$kind" = scout ]; then
       output=$(FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout 2>&1) \
+        || fail "fm-brief.sh failed to generate the $kind echo fixture"
+    elif [ "$kind" = reader-scout ]; then
+      output=$(FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout --access reader 2>&1) \
         || fail "fm-brief.sh failed to generate the $kind echo fixture"
     else
       output=$(FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes 2>&1) \
@@ -253,7 +275,7 @@ test_ordinary_brief_echoes_describe_two_slots() {
     assert_contains "$output" 'replace the two standalone {TASK} slots' \
       "$kind scaffold echo must describe both standalone task slots"
   done
-  pass "fm-brief: ship and scout scaffold echoes describe both standalone task slots"
+  pass "fm-brief: ship, scout, and reader-scout scaffold echoes describe both standalone task slots"
 }
 
 # The script itself must always parse under the ambient bash. That is Bash 5 in
@@ -263,7 +285,7 @@ test_ordinary_brief_echoes_describe_two_slots() {
 # real cross-version enforcement.
 test_script_parses() {
   local out rc
-  out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
+  out=$(LC_ALL=C bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
   expect_code 0 "$rc" "bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
   [ -z "$out" ] || fail "bash -n bin/fm-brief.sh emitted unexpected output: $out"
   pass "fm-brief.sh: bash -n succeeds"
@@ -1218,6 +1240,32 @@ test_scout_evidence_archive_opt_in() {
   pass "fm-brief.sh: evidence archive is opt-in for scouts and rejected elsewhere"
 }
 
+test_scout_evidence_archive_bookend_fill_and_validate() {
+  local access extra id brief text_file bookend_line archive_line
+  for access in writer reader; do
+    id="brief-archive-bookend-$access"
+    extra=
+    if [ "$access" = reader ]; then extra="--access reader"; fi
+    # shellcheck disable=SC2086 # deliberate word-split for optional scout flag
+    FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout $extra --evidence-archive >/dev/null 2>&1 \
+      || fail "$access evidence-archive scaffold failed"
+    brief="$BRIEF_HOME/data/$id/brief.md"
+    archive_line=$(grep -n '^## Evidence archive$' "$brief" | head -1 | cut -d: -f1)
+    bookend_line=$(grep -n '^# Load-bearing contract$' "$brief" | head -1 | cut -d: -f1)
+    [ -n "$archive_line" ] && [ -n "$bookend_line" ] \
+      || fail "$access evidence-archive brief lost archive or bookend sections"
+    [ "$archive_line" -lt "$bookend_line" ] \
+      || fail "$access evidence-archive section must precede the closing bookend"
+    text_file="$TMP_ROOT/archive-bookend-$access.txt"
+    printf 'Oracle: FM-ARCHIVE-ORACLE-7f3a\nAcceptance: FM-ARCHIVE-ACCEPT-7f3a\nConstraints: FM-ARCHIVE-CONSTRAINT-7f3a\n' > "$text_file"
+    FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" --fill "$text_file" >/dev/null 2>&1 \
+      || fail "$access evidence-archive brief fill failed"
+    FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" --validate-bookends "$brief" >/dev/null 2>&1 \
+      || fail "$access evidence-archive brief failed validate-bookends after fill"
+  done
+  pass "fm-brief: evidence-archive scout briefs place archive before the closing bookend and survive fill/validate-bookends"
+}
+
 # Isolate the generated Engineering bar as a structural section rather than
 # grepping the whole brief. The next ATX heading ends the section, so a
 # contradictory clause that leaked into another owner is visible as absence
@@ -1609,6 +1657,7 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_all_brief_kinds_delivery_evidence_contracts
 test_scout_evidence_archive_opt_in
+test_scout_evidence_archive_bookend_fill_and_validate
 test_ship_brief_engineering_bar
 test_scout_access_reader_scaffold_contract
 test_scout_access_reader_evidence_archive
