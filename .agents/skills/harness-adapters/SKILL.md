@@ -26,6 +26,31 @@ The [`secondmate-provisioning` skill](../secondmate-provisioning/SKILL.md) owns 
 This skill owns only the harness-relevant consequence: a secondmate's own crewmates use the primary's inherited dispatch profiles and static harness value, while `config/secondmate-harness` is the primary's own setting and is never inherited - secondmates do not spawn secondmates.
 Inheritance copies the literal `config/crew-harness` file, so for a secondmate's own crewmates to run on the primary's crewmate harness the captain must set `config/crew-harness` to a concrete adapter name, such as `codex`.
 If `config/crew-harness` is unset or `default`, there is no concrete value to inherit, so the secondmate's own crewmates fall back to the secondmate's own/detected harness rather than the primary's effective crewmate harness.
+
+### cc-deepseek / cc-deepseek-pro adapters (verified 2026-08-28)
+
+`cc-deepseek` and `cc-deepseek-pro` are claude-family adapters that route
+claude through local DeepSeek proxy aliases (~/.local/bin/cc-deepseek*,
+ports 8767/8768). Verified harness names for `--harness` and
+`config/crew-harness`.
+
+- Launch: fm-spawn.sh launch_template emits
+  `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false cc-deepseek[-pro] __EFFORTFLAG__"$(...launch-brief...)"`.
+  The MODEL axis is deliberately absent: the alias owns the model
+  (deepseek-v4-flash[1m] / deepseek-v4-pro[1m]), so dispatch can never
+  override it. The effort axis passes through (`--effort`), which claude
+  encodes as output_config.effort that DeepSeek honors (low/medium/high/max;
+  medium maps to high; v4-flash has no low tier).
+- Supervision: busy-state hooks, interrupt recording, session-lock identity,
+  and harness-family normalization all map cc-deepseek* to the claude
+  adapter (the underlying agent IS claude).
+- Model/effort tokens in `config/secondmate-harness` do not apply: these
+  are crewmate/scout adapters, not secondmate (primary) adapters.
+- Spawn with: `bin/fm-spawn.sh --harness cc-deepseek <task>` (or
+  `cc-deepseek-pro`), or select via crew-dispatch.json rules naming the
+  harness. The wrappers start their own proxy and tear it down on exit;
+  a stuck pane with a dead proxy shows "connection refused" (see the
+  cc-deepseek skill for recovery).
 Inheritance also copies the literal `config/crew-dispatch.json` file, so secondmates apply the same best-fit profile rules for their own crewmates.
 
 Each adapter splits into mechanics and knowledge.
