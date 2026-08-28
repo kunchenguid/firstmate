@@ -173,6 +173,31 @@ Valid cleanup removed only the exact task-bound target and left the control wind
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
+### Lost endpoint signal
+
+The signal the watcher's lost-endpoint alarm depends on was verified on 2026-08-26 with tmux 3.6a on macOS arm64, on a private socket.
+
+```sh
+tmux new-session -d -s fmverify -n verifywin "sleep 300"
+tmux list-windows -t fmverify -F '#{window_name}'; tmux capture-pane -p -t fmverify:verifywin
+tmux kill-session -t fmverify
+tmux list-windows -t fmverify -F '#{window_name}'; tmux capture-pane -p -t fmverify:verifywin
+```
+
+Observed output:
+
+```text
+verifywin
+capture rc=0
+can't find session: fmverify
+list rc=1
+can't find session: fmverify
+capture rc=1
+```
+
+A pane capture against an absent target fails rather than returning empty output, which is what lets the watcher separate a lost endpoint from a quiet one.
+The portable regression models that failure through the wake fixtures' opt-in missing-window flag file rather than changing every fixture's capture semantics, and the flag file is what lets a fixture take an endpoint away and give it back mid-run.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.

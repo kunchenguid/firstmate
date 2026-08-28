@@ -61,13 +61,28 @@ make_case() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# A GONE window: real tmux both drops an absent target from `list-windows` and
+# fails a capture against it, and that pair is the watcher's only proof that a
+# recorded endpoint's process is no longer running (verified against tmux 3.6a in
+# docs/verification/runtime-backends.md). FM_FAKE_TMUX_MISSING_WINDOW names a FLAG
+# FILE rather than carrying a boolean, so the window is absent exactly while that
+# file exists: a fixture can make an endpoint vanish and come back mid-run, which
+# is the shape an ordinary teardown has. Unset - the default - leaves every
+# existing fixture's inventory and capture semantics untouched.
+fake_window_missing() {
+  [ -n "${FM_FAKE_TMUX_MISSING_WINDOW:-}" ] && [ -e "$FM_FAKE_TMUX_MISSING_WINDOW" ]
+}
 if [ "${1:-}" = "list-windows" ]; then
-  if [ -n "${FM_FAKE_TMUX_WINDOW:-}" ]; then
+  if [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && ! fake_window_missing; then
     printf '%s\n' "${FM_FAKE_TMUX_WINDOW#*:}"
   fi
   exit 0
 fi
 if [ "${1:-}" = "capture-pane" ]; then
+  if fake_window_missing; then
+    printf "can't find window\n" >&2
+    exit 1
+  fi
   if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
     cat "$FM_FAKE_TMUX_CAPTURE"
   fi

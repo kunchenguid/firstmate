@@ -33,7 +33,12 @@
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
-#                          resume. Unless afk is active. A pane whose own task
+#                          resume. An escalation firstmate has already DRAINED AND
+#                          ACKNOWLEDGED backs the next one off geometrically up to
+#                          WEDGE_ACKED_BACKOFF_MAX_SECS, while an escalation still
+#                          queued unacknowledged keeps the short detection cadence
+#                          (wedge_escalation_due). Unless afk is active. A pane
+#                          whose own task
 #                          worktree was written during the quiet window is
 #                          deferred rather than escalated (wedge_defer_writing),
 #                          because files appearing there are liveness the pane and
@@ -55,6 +60,12 @@
 #                          for human inspection only - never an automatic
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
+#   stale: <window> (endpoint gone: ...)
+#                          the recorded window is absent from a successful backend
+#                          inventory on two consecutive polls, so the worker's process
+#                          is gone rather than mid-teardown. Surfaced once per window
+#                          on its own evidence, before and independently of any
+#                          declared wait, and re-armed if the endpoint returns
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
 #                          budget on an idle pane without an acknowledgement
@@ -211,12 +222,26 @@ SECONDMATE_WAKE_STALL_SECS=${FM_SECONDMATE_WAKE_STALL_SECS:-60}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
-# bounded cadence, while a live or ambiguously read agent still surfaces once; a
+# bounded cadence, while a live or ambiguously read agent still surfaces once per
+# DECLARATION (declared_wait_already_surfaced, not once per pane hash); a
 # secondmate earns the cadence on its declaration alone, because its endpoint
 # liveness is deliberately never read (pause_state_class owns that split).
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+# Upper bound on the wedge ladder's backed-off recheck interval, and the second
+# half of the evidence invariant PAUSE_RESURFACE_SECS opens above: pane-idle
+# supervision escalates on evidence the supervisor has not already seen. Once
+# firstmate has drained AND acknowledged a pane's previous escalation, repeating
+# the identical escalation every STALE_ESCALATE_SECS adds nothing it has not
+# already handled, so wedge_escalation_due doubles the required quiet interval
+# per acknowledged repeat and stops here. Deliberately well inside
+# PAUSE_RESURFACE_SECS, so an UNDECLARED wedge is still rechecked more often than
+# a wait the crew declared, and deliberately finite, so a genuinely wedged pane
+# nobody has fixed still comes back. An unacknowledged escalation is never backed
+# off at all: nothing has looked at it yet, so the ladder keeps its short cadence
+# and still reaches FM_WEDGE_DEMAND_INSPECT_COUNT.
+WEDGE_ACKED_BACKOFF_MAX_SECS=${FM_WEDGE_ACKED_BACKOFF_MAX_SECS:-1800}
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
 # connect/subscribe failure) before the push fast-path is disabled for the rest
 # of this watcher process and the loop reverts to pure polling (report section
@@ -303,11 +328,11 @@ window_label() {
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .paused-*, .writing-*), and live homes hold those markers on
-# disk under the current format, so the format lives here alone: a second copy is
-# how a future change to it silently orphans a window's markers instead of clearing
-# them. The helpers below take the derived key rather than re-deriving it, so one
-# poll of one window derives it once.
+# .wedge-escalations-, .paused-*, .writing-*, .endpoint-gone-*), and live homes hold
+# those markers on disk under the current format, so the format lives here alone: a
+# second copy is how a future change to it silently orphans a window's markers
+# instead of clearing them. The helpers below take the derived key rather than
+# re-deriving it, so one poll of one window derives it once.
 window_key() {  # <window>
   local key=${1//:/_}
   key=${key//\//_}
@@ -534,6 +559,125 @@ clear_write_tracking() {  # <window-key>
   rm -f "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key"
 }
 
+# A recorded endpoint whose pane cannot be captured is either GONE or transiently
+# unreadable, and only the backend can tell those apart. Only a `missing` verdict -
+# the window is absent from a SUCCESSFUL backend inventory - is proof the worker's
+# process is no longer running; every other unreadable answer keeps the pre-existing
+# silence, so a backend hiccup never manufactures a wake.
+#
+# This deliberately runs BEFORE any declared-wait consideration and consults no
+# status line. `paused:` declares that an EXTERNAL dependency is pending, never that
+# the worker may disappear, so a lost endpoint is surfaced on its own evidence even
+# under a standing declaration - otherwise a crew that died mid-wait would be covered
+# by its own last words. One marker per window keeps it one wake rather than a flood,
+# and the marker is dropped as soon as the endpoint reads back, so a recovered or
+# relaunched worker re-arms it.
+#
+# The verdict must repeat on TWO CONSECUTIVE polls before it wakes anyone, because a
+# single `missing` poll is also the normal shape of an ordinary teardown:
+# bin/fm-teardown.sh closes the runtime endpoint before it removes the task metadata,
+# and the watcher enumerates windows from that metadata without taking the metadata
+# lock, so a poll landing in that gap sees a window that is genuinely absent and
+# genuinely still recorded. Confirming across a poll costs a lost endpoint one poll of
+# detection latency - irrelevant against a worker that is not coming back - and costs
+# a completing task the false "inspect and recover" wake entirely, since its metadata
+# is gone well before the next poll. Only an unbroken run counts: any other verdict,
+# including the transient `unreadable` a backend hiccup produces, drops the pending
+# confirmation so two hiccups a minute apart can never add up to an alarm.
+#
+# "Consecutive" is counted in POLLS, never in wall-clock. The pending record stores
+# the poll-cycle sequence (POLL_SEQ) the first missing verdict was seen on, and a
+# confirmation counts only when the stored value is the IMMEDIATELY preceding poll of
+# this window (POLL_SEQ - 1). An elapsed-time proxy would multiply FM_POLL to guess
+# where the previous poll landed, but a single poll cycle can run far longer than
+# FM_POLL behind a large fleet's captures, so any window a dead worker's poll gap
+# exceeds would reset its own confirmation on every poll and the alarm would never
+# fire. Counting polls confirms on the next poll no matter how slow the cycle, and a
+# stale record a torn-down task leaves behind never matches POLL_SEQ - 1 the next time
+# that window name is recorded, so a reused name simply starts a fresh pair rather than
+# alarming instantly.
+#
+# A secondmate's endpoint liveness is deliberately never read here, matching
+# pause_state_class: a mate whose window vanishes is owned by startup
+# secondmate-liveness, not surfaced as a lost ordinary endpoint, so this never reads
+# fm_backend_agent_state for a mate.
+endpoint_gone_check() {  # <window>
+  local win=$1 key marker pending reason recorded
+  [ "$(window_kind "$win")" = secondmate ] && return 0
+  key=$(window_key "$win")
+  marker="$STATE/.endpoint-gone-$key"
+  pending="$STATE/.endpoint-gone-pending-$key"
+  [ ! -e "$marker" ] || return 0
+  if [ "$(fm_backend_agent_state "$(window_backend "$win")" "$win" 2>/dev/null)" != missing ]; then
+    rm -f "$pending"
+    return 0
+  fi
+  recorded=$(cat "$pending" 2>/dev/null || true)
+  case "$recorded" in ''|*[!0-9]*) recorded= ;; esac
+  if [ -z "$recorded" ] || [ "$recorded" -ne "$(( POLL_SEQ - 1 ))" ]; then
+    printf '%s' "$POLL_SEQ" > "$pending"
+    return 0
+  fi
+  reason="stale: $win (endpoint gone: the recorded window is absent from its backend on two consecutive polls, so the worker's process is no longer running - a declared wait does not cover this; inspect and recover or clean up)"
+  # Enqueue before suppressing, as everywhere else in this file: a failed append
+  # must leave the alarm re-armed rather than silently spent.
+  fm_wake_append stale "$win" "$reason" || exit 1
+  : > "$marker"
+  rm -f "$pending"
+  wake "$reason"
+}
+
+# 0 while a stale wake for <window> is still QUEUED AND UNACKNOWLEDGED. The
+# durable queue is the authority (bin/fm-wake-lib.sh): a key appears there exactly
+# while a record for it is queued, and leaves only after post-handling
+# acknowledgement consumes it. So this is the watcher's one read of whether the
+# supervisor has actually looked at the last thing it said about this pane, and it
+# is the only input that separates "nobody is listening" from "already handled".
+wedge_escalation_unacknowledged() {  # <window>
+  fm_wake_queued_keys stale 2>/dev/null | grep -Fxq -- "$1"
+}
+
+# The quiet interval a pane that has ALREADY escalated <n> times must clear before
+# the next escalation, when every one of those was acknowledged: the detection
+# cadence doubled per acknowledged repeat, capped. A misconfigured cap below the
+# detection cadence simply degrades to the detection cadence.
+wedge_backed_off_interval() {  # <escalation-count>
+  local n=$1 secs
+  # Bounded shift width: the cap settles the value anyway, and a shift wider than
+  # the integer would be undefined rather than merely large.
+  [ "$n" -gt 20 ] && n=20
+  secs=$(( STALE_ESCALATE_SECS << n ))
+  if [ "$secs" -gt "$WEDGE_ACKED_BACKOFF_MAX_SECS" ] || [ "$secs" -le 0 ]; then
+    secs=$WEDGE_ACKED_BACKOFF_MAX_SECS
+  fi
+  printf '%s' "$secs"
+}
+
+# 0 when <window> has been quiet at <idle-age> long enough to escalate again.
+# Three tiers, cheapest first, so the durable-queue read is rare:
+#   - below STALE_ESCALATE_SECS: never. The detection cadence is the floor, and a
+#     pane with no escalation history escalates on it exactly as it always did.
+#   - at or above this pane's backed-off interval: yes, with no queue read at all,
+#     because both thresholds are cleared either way.
+#   - between the two: only while the previous escalation is still queued
+#     unacknowledged. That is the one case that keeps the short detection cadence,
+#     so a ladder nobody has read still climbs to demand-deep-inspection, while an
+#     escalation the supervisor already inspected and cleared does not re-fire on it.
+# The queue read therefore happens only inside that narrow band, and only for a
+# pane that has already escalated at least once - never once per poll per pane.
+# New evidence clears the escalation count at its existing reset points (a pane that
+# goes active, a pause reclassification), which restores the floor with no special
+# case here.
+wedge_escalation_due() {  # <window> <escalation-count-file> <idle-age>
+  local win=$1 escalation_file=$2 age=$3 n
+  [ "$age" -ge "$STALE_ESCALATE_SECS" ] || return 1
+  n=$(cat "$escalation_file" 2>/dev/null || echo 0)
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  [ "$n" -gt 0 ] || return 0
+  [ "$age" -lt "$(wedge_backed_off_interval "$n")" ] || return 0
+  wedge_escalation_unacknowledged "$win"
+}
+
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
@@ -558,7 +702,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       ;;
     *)
       age=$(( $(date +%s) - since ))
-      if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+      if wedge_escalation_due "$win" "$escalation_file" "$age"; then
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
           return 0
@@ -758,8 +902,36 @@ pause_state_class() {  # <window> <task>
   printf '%s' "$class"
 }
 
+# 0 when <window>'s CURRENTLY STANDING declared wait has already been surfaced to
+# firstmate once, so the next newly-seen pane hash under that SAME declaration
+# belongs on the long PAUSE_RESURFACE_SECS cadence instead of another immediate
+# surface. A declaration's identity is the status log's own size:mtime signature
+# (fm_wake_signal_sig, the same one the signal scan reads), so a fresh append - the
+# crew declaring a new wait, or replacing one - reads as a different declaration
+# while an unchanged log keeps one identity no matter how often it is read.
+#
+# Root cause of the 2026-08-25/26 stale-churn incidents. The one prompt surface a
+# live declared wait earns (so an external-decision gate is never hidden behind the
+# pause cadence) was keyed to the pane HASH, not to the declaration: every redraw
+# of a quiet pane - a progress tick, a token counter, a resized footer - is a new
+# hash, and each one re-earned the same immediate wake. A crew that declared a
+# 40-60 minute external wait was therefore surfaced every few seconds, and the
+# long cadence its declaration is supposed to buy was never once reached. Keying
+# the allowance to the declaration keeps the guarantee (firstmate is still told
+# once, promptly, about every declared wait) and drops the churn, because a
+# redrawing pane is not new evidence about a wait the crew already declared.
+# A fresh append re-arms the allowance, because that IS new evidence.
+declared_wait_already_surfaced() {  # <window> <task>
+  local win=$1 task=$2 key sig
+  key=$(window_key "$win")
+  status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" || return 1
+  sig=$(fm_wake_signal_sig "$STATE/$task.status" 2>/dev/null) || return 1
+  [ -n "$sig" ] || return 1
+  [ "$(cat "$STATE/.paused-declared-$key" 2>/dev/null || true)" = "$sig" ]
+}
+
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last
+  local win=$1 h=$2 key task last sig
   key=$(window_key "$win")
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
@@ -768,6 +940,10 @@ surface_nonterminal_stale() {  # <window> <hash>
   task=$(window_to_task "$win" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
   if status_is_paused_or_captain_held "$last"; then
+    # Spend this declaration's one prompt surface. Recorded by SIGNATURE, not by
+    # existence, so the allowance is re-armed by a fresh append and by nothing else.
+    sig=$(fm_wake_signal_sig "$STATE/$task.status" 2>/dev/null) || sig=
+    [ -z "$sig" ] || printf '%s' "$sig" > "$STATE/.paused-declared-$key"
     : > "$STATE/.paused-$key"
     date +%s > "$STATE/.paused-rechecked-$key"
     date +%s > "$STATE/.paused-resurfaced-$key"
@@ -1174,6 +1350,14 @@ resurface_after_downtime() {
   wake "check: rearm-resurface"
 }
 
+# Monotonic poll-cycle counter, one increment per poll below. endpoint_gone_check
+# confirms a lost endpoint only across two IMMEDIATELY consecutive polls, and
+# "consecutive" has to be counted in polls, not wall-clock, so a slow fleet cycle
+# cannot reset a dead worker's confirmation forever. Seeded from disk so the poll a
+# pending record refers to still means "the previous poll" across a watcher restart.
+POLL_SEQ=$(cat "$STATE/.watch-poll-seq" 2>/dev/null || echo 0)
+case "$POLL_SEQ" in ''|*[!0-9]*) POLL_SEQ=0 ;; esac
+
 while :; do
   # Self-eviction: if the singleton lock no longer names this process, a second
   # watcher has taken over (e.g. a transient duplicate from a racy arm). Stand
@@ -1188,6 +1372,12 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+
+  # Advance the poll-cycle counter once per poll, before any window is examined, so
+  # every window's endpoint_gone_check this cycle reads the same sequence. Persisted
+  # so a pending confirmation survives a watcher restart meaning the same poll pair.
+  POLL_SEQ=$(( POLL_SEQ + 1 ))
+  printf '%s' "$POLL_SEQ" > "$STATE/.watch-poll-seq"
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery
@@ -1390,7 +1580,13 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
+      endpoint_gone_check "$w"
+      continue
+    fi
+    # The endpoint reads back, which both re-arms the alarm for a relaunched worker
+    # and breaks any run of `missing` polls short of the two the alarm requires.
+    rm -f "$STATE/.endpoint-gone-$key" "$STATE/.endpoint-gone-pending-$key"
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
@@ -1476,7 +1672,10 @@ EOF
           #     Surface immediately so firstmate inspects the inconclusive state
           #     (it may be done via an interactive menu that wrote no done: status,
           #     waiting on a decision, or wedged) instead of leaving the finish to
-          #     wait out the timer.
+          #     wait out the timer - UNLESS the crew's own standing declared wait has
+          #     already been surfaced once, in which case a newly-seen hash is just this
+          #     pane redrawing under a wait firstmate was already told about, and it
+          #     takes the long declared-wait cadence (declared_wait_already_surfaced).
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             task=$(window_to_task "$w" "$STATE")
             case "$(pause_state_class "$w" "$task")" in
@@ -1490,7 +1689,11 @@ EOF
                 handle_paused_stale "$w" "$task" "$h"
                 ;;
               *)
-                surface_nonterminal_stale "$w" "$h"
+                if declared_wait_already_surfaced "$w" "$task"; then
+                  handle_paused_stale "$w" "$task" "$h"
+                else
+                  surface_nonterminal_stale "$w" "$h"
+                fi
                 ;;
             esac
           else
@@ -1542,8 +1745,22 @@ EOF
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
         case "$(pause_state_class "$w" "$task")" in
-          paused) handle_paused_stale "$w" "$task" "$h" ;;
-          *)      clear_pause_tracking "$key" ;;
+          paused)  handle_paused_stale "$w" "$task" "$h" ;;
+          working) clear_pause_tracking "$key" ;;
+          *)
+            # The crew is still declaring a wait and nothing authoritative
+            # contradicts it; only the pane redrew. Dropping the pause bookkeeping
+            # here is what let a redrawing pane rebuild the whole immediate-surface
+            # path from scratch on every tick, so keep the declared-wait cadence
+            # once firstmate has been told about THIS declaration. A declaration it
+            # has not seen yet still earns its one prompt surface through the stale
+            # path above, which needs the bookkeeping cleared to get there.
+            if declared_wait_already_surfaced "$w" "$task"; then
+              handle_paused_stale "$w" "$task" "$h"
+            else
+              clear_pause_tracking "$key"
+            fi
+            ;;
         esac
       elif [ "$paused_bound" -ne 0 ] && [ -e "$pf" ]; then
         # Same rule as the stable-hash branch: never clear pause bookkeeping the
