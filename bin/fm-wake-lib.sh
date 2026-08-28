@@ -348,8 +348,20 @@ fm_lock_link_owner() {
 
 fm_lock_points_to_owner() {
   local lockdir=$1 ownerdir=$2 actual
+  if [ "$lockdir" = "$ownerdir" ] && [ -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    return 0
+  fi
   actual=$(readlink "$lockdir" 2>/dev/null) || return 1
   [ "$actual" = "$ownerdir" ]
+}
+
+fm_lock_uses_directory_publication() {
+  # Git Bash may report success from ln -s while materializing a directory
+  # that readlink cannot identify. Publish the prepared owner atomically instead.
+  case "${OSTYPE:-}:${MSYSTEM:-}" in
+    msys*:*|cygwin*:*|*:MSYS*|*:MINGW*|*:CYGWIN*) return 0 ;;
+  esac
+  return 1
 }
 
 fm_lock_discard_owner() {
@@ -404,7 +416,7 @@ fm_lock_claim() {
 }
 
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir published_owner
   FM_LOCK_OWNER_DIR=
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
@@ -412,6 +424,17 @@ fm_lock_try_create() {
     return 1
   fi
   if ! fm_lock_prepare_owner "$ownerdir"; then
+    fm_lock_discard_owner "$ownerdir"
+    return 1
+  fi
+  if fm_lock_uses_directory_publication; then
+    if mv -T -- "$ownerdir" "$lockdir" 2>/dev/null; then
+      published_owner=$lockdir
+      if fm_lock_claim "$lockdir" "$published_owner" "$allowed_steal_owner"; then
+        FM_LOCK_OWNER_DIR=$published_owner
+        return 0
+      fi
+    fi
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi

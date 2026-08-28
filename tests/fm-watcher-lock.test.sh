@@ -198,11 +198,13 @@ test_guard_warnings() {
 }
 
 test_lock_single_winner_under_concurrency() {
-  local dir state lockdir marker i pids pid wins
+  local dir state lockdir marker i pids pid wins hold_seconds
   dir=$(make_case lock-concurrency)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   marker="$dir/wins"
+  hold_seconds=1
+  case "$(uname)" in MSYS*|MINGW*|CYGWIN*) hold_seconds=5 ;; esac
   : > "$marker"
   pids=
   i=1
@@ -213,9 +215,9 @@ test_lock_single_winner_under_concurrency() {
         printf "%s\n" "$$" >> "$3"
         # Stay alive so the held lock names a live pid for the whole window;
         # otherwise a late contender could legitimately reclaim a dead-pid lock.
-        sleep 1
+        sleep "$4"
       fi
-    ' _ "$LIB" "$lockdir" "$marker" &
+    ' _ "$LIB" "$lockdir" "$marker" "$hold_seconds" &
     pids="$pids $!"
     i=$((i + 1))
   done
@@ -225,6 +227,33 @@ test_lock_single_winner_under_concurrency() {
   wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
   [ "$wins" -eq 1 ] || fail "expected exactly one lock winner under concurrency, got $wins"
   pass "concurrent fm_lock_try_acquire yields exactly one winner"
+}
+
+test_msys_lock_uses_atomic_directory_publication() {
+  local dir state lockdir out
+  case "$(uname)" in
+    MSYS*|MINGW*|CYGWIN*) ;;
+    *)
+      pass "MSYS atomic directory lock regression skipped on non-Windows host"
+      return
+      ;;
+  esac
+  dir=$(make_case msys-directory-lock)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  out=$(env -u MSYS FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+    if [ -d "$2" ] && [ ! -L "$2" ]; then kind=directory; else kind=other; fi
+    printf "kind=%s owner=%s pid=%s\n" "$kind" "${FM_LOCK_OWNER_DIR:-}" "$(cat "$2/pid" 2>/dev/null || true)"
+    fm_lock_release "$2"
+    [ ! -e "$2" ] && [ ! -L "$2" ] || exit 8
+  ' _ "$LIB" "$lockdir") || fail "MSYS lock acquire/release failed with MSYS unset"
+  case "$out" in
+    "kind=directory owner=$lockdir pid="*) ;;
+    *) fail "MSYS lock did not publish an owned directory: $out" ;;
+  esac
+  pass "MSYS publishes and releases an atomic directory lock when symlinks are unavailable"
 }
 
 test_lock_steals_dead_pid_lock() {
@@ -368,6 +397,12 @@ test_lock_empty_pid_uses_minimum_grace() {
 
 test_lock_late_claim_loses_after_recreate() {
   local dir state lockdir out
+  case "$(uname)" in
+    MSYS*|MINGW*|CYGWIN*)
+      pass "late symlink claimant regression is not applicable to atomic MSYS directory publication"
+      return
+      ;;
+  esac
   dir=$(make_case lock-late-claim)
   state="$dir/state"
   lockdir="$state/.contend.lock"
@@ -400,6 +435,12 @@ test_lock_late_claim_loses_after_recreate() {
 
 test_lock_paused_mid_acquire_claim_fails_during_steal() {
   local dir state lockdir out pid
+  case "$(uname)" in
+    MSYS*|MINGW*|CYGWIN*)
+      pass "paused symlink claimant regression is not applicable to atomic MSYS directory publication"
+      return
+      ;;
+  esac
   dir=$(make_case lock-paused-claim-steal)
   state="$dir/state"
   lockdir="$state/.contend.lock"
@@ -460,14 +501,23 @@ test_watch_restart_rejects_reused_pid() {
 }
 
 test_watch_restart_attaches_to_healthy_peer() {
-  local dir state fakebin out peer_ready peer identity armpid status i
+  local dir state fakebin out peer_ready peer identity armpid status i confirm_timeout
   dir=$(make_case restart-healthy-peer)
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
   peer_ready="$dir/peer.ready"
+  confirm_timeout=1
+  case "$(uname)" in MSYS*|MINGW*|CYGWIN*) confirm_timeout=5 ;; esac
   mark_pr_check_migration_complete "$state"
-  node -e 'const fs = require("node:fs"); process.on("SIGTERM", () => {}); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 300000)' "$peer_ready" &
+  case "$(uname)" in
+    MSYS*|MINGW*|CYGWIN*)
+      bash -c 'trap : TERM; printf "ready\n" > "$1"; while :; do sleep 1; done' _ "$peer_ready" &
+      ;;
+    *)
+      node -e 'const fs = require("node:fs"); process.on("SIGTERM", () => {}); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 300000)' "$peer_ready" &
+      ;;
+  esac
   peer=$!
   i=0
   while [ "$i" -lt 50 ] && [ ! -s "$peer_ready" ]; do
@@ -486,7 +536,7 @@ test_watch_restart_attaches_to_healthy_peer() {
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   touch "$state/.last-watcher-beat"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" --restart > "$out" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT="$confirm_timeout" "$WATCH_ARM" --restart > "$out" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -1129,6 +1179,7 @@ test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
+test_msys_lock_uses_atomic_directory_publication
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
