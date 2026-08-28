@@ -241,7 +241,8 @@ A missing or invalid authored report retains the assignment and produces no gene
 Replaying the same result converges on the same refs, files, branch, and one terminal status line.
 An assigned worker whose earlier supervisor could not return its task disk uses the explicit `execute --existing-task-disk` recovery lane.
 That request carries no payload or account archive, binds the exact landed recovery-supervisor digest, and runs one bounded continuation or no-op collection command against the retained repository instead of replacing it.
-The Azure adapter executes those bound supervisor bytes from a task-command-local recovery path without changing the originally bootstrapped supervisor, while every alternate provider must preserve the same request binding and retained-disk semantics.
+The Azure adapter executes those bound supervisor bytes from a task-command-local recovery path without changing the originally bootstrapped supervisor; when public main has advanced, it resolves the requested digest only from the bounded landed default-branch history.
+Every alternate provider must preserve the same request binding and retained-disk semantics.
 A missing repository, lost dispatched lineage, unreadable working tree, payload-restaging attempt, or recovery request without an authorized return refuses before the command runs, because continuing after any of them could delete or misattribute unlanded task-disk work.
 The blob name carries the request digest, so a later execute against the same worker cannot overwrite an outcome the controller has not collected yet.
 Reset deletes the inbound staging archives by name and the outcome blobs as part of removing the whole state container.

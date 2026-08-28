@@ -2880,6 +2880,42 @@ def execute_generation_line(action):
     )
 
 
+def landed_supervisor_body(expected_digest):
+    """Resolve exact recovery bytes from the landed default-branch history."""
+    supervisor_path = "bin/fm-worker-supervisor.py"
+    try:
+        current = (ROOT / supervisor_path).read_bytes()
+    except OSError as exc:
+        raise ProviderError(
+            "existing task-disk recovery supervisor is unreadable: {}".format(exc)
+        ) from None
+    if hashlib.sha256(current).hexdigest() == expected_digest:
+        return current
+    default_ref = run([
+        "git", "-C", str(ROOT), "symbolic-ref", "--quiet",
+        "refs/remotes/origin/HEAD",
+    ], check=False)
+    if default_ref.returncode != 0:
+        raise ProviderError("existing task-disk recovery supervisor binding differs")
+    default_name = default_ref.stdout.decode("utf-8", errors="replace").strip()
+    history = run([
+        "git", "-C", str(ROOT), "log", "--format=%H", "-n", "128",
+        default_name, "--", supervisor_path,
+    ], check=False)
+    if history.returncode == 0:
+        for revision in history.stdout.decode("ascii", errors="ignore").splitlines():
+            candidate = run([
+                "git", "-C", str(ROOT), "show",
+                "{}:{}".format(revision, supervisor_path),
+            ], check=False)
+            if (
+                candidate.returncode == 0
+                and hashlib.sha256(candidate.stdout).hexdigest() == expected_digest
+            ):
+                return candidate.stdout
+    raise ProviderError("existing task-disk recovery supervisor binding differs")
+
+
 def build_execute_script(action):
     request = action["request"]
     request_json = json.dumps(request, sort_keys=True, separators=(",", ":"))
@@ -2887,15 +2923,8 @@ def build_execute_script(action):
     supervisor_prelude = ""
     supervisor_command = "/usr/local/libexec/fm-worker-supervisor"
     if request.get("existing_task_disk"):
-        try:
-            supervisor_body = (ROOT / "bin" / "fm-worker-supervisor.py").read_bytes()
-        except OSError as exc:
-            raise ProviderError(
-                "existing task-disk recovery supervisor is unreadable: {}".format(exc)
-            ) from None
-        supervisor_digest = hashlib.sha256(supervisor_body).hexdigest()
-        if request.get("supervisor_sha256") != supervisor_digest:
-            raise ProviderError("existing task-disk recovery supervisor binding differs")
+        supervisor_digest = request.get("supervisor_sha256")
+        supervisor_body = landed_supervisor_body(supervisor_digest)
         supervisor_path = "/var/lib/firstmate-worker/recovery-supervisor-{}.py".format(
             supervisor_digest
         )

@@ -180,11 +180,13 @@ run_outcome_call_sites() {
   fixture="$tmp/fixture.bundle"
   printf 'pretend git bundle bytes\n' > "$fixture"
   cat >"$tmp/callsites.py" <<'CALLSITES'
+import base64
 import hashlib
 import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 provider_path, tmp = sys.argv[1:]
 spec = importlib.util.spec_from_file_location("fm_provider", provider_path)
@@ -280,6 +282,28 @@ recovery_script = provider.build_execute_script(recovery_action)
 assert "/usr/bin/base64 --decode" in recovery_script, recovery_script[:500]
 assert "recovery-supervisor-{}.py".format(recovery_request["supervisor_sha256"]) in recovery_script
 assert "/usr/bin/python3 '/var/lib/firstmate-worker/recovery-supervisor-" in recovery_script
+
+# A request can remain durably pending while public main advances its
+# supervisor. Resolve only exact bytes already landed in the default-branch
+# history; never rewrite the digest-bound action to the current supervisor.
+legacy_body = b"#!/usr/bin/env python3\nprint('landed legacy supervisor')\n"
+legacy_digest = hashlib.sha256(legacy_body).hexdigest()
+original_run = provider.run
+def fake_history(command, **_kwargs):
+    if "symbolic-ref" in command:
+        return SimpleNamespace(returncode=0, stdout=b"refs/remotes/origin/main\n", stderr=b"")
+    if "log" in command:
+        return SimpleNamespace(returncode=0, stdout=b"landed-revision\n", stderr=b"")
+    if "show" in command:
+        return SimpleNamespace(returncode=0, stdout=legacy_body, stderr=b"")
+    raise AssertionError(command)
+provider.run = fake_history
+legacy_request = dict(recovery_request, supervisor_sha256=legacy_digest)
+legacy_script = provider.build_execute_script(dict(recovery_action, request=legacy_request))
+provider.run = original_run
+assert base64.b64encode(legacy_body).decode("ascii") in legacy_script, legacy_script[:500]
+assert "recovery-supervisor-{}.py".format(legacy_digest) in legacy_script
+
 changed_recovery = dict(recovery_request, supervisor_sha256="f" * 64)
 try:
     provider.build_execute_script(dict(recovery_action, request=changed_recovery))
