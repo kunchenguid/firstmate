@@ -9,7 +9,7 @@ Fleet supervision on the Pi primary harness runs on a second, persistent convers
 Supervision is default-on: once a Pi primary session owns this home's fleet lock, the branch handles eligible task-local rows from ordinary actionable wakes plus heartbeat scans that the cheap bash-level scan flags as possibly captain-relevant, then merges each outcome back by appending a short note to the captain conversation's tail.
 Ordinary main-only rows remain on main even when eligible task-local rows share their queue.
 An unresolvable row makes the scan unsafe and returns the whole wake to main, and every watcher-failure alarm also stays on main.
-Only captain-relevant branch outcomes open a turn on main - that follow-up turn is itself the captain-visible outcome, so Pi never separately prints or renders a captain-facing merge note.
+Only captain-relevant branch outcomes open a turn on main; the generated [Pi supervision protocol](supervision-protocols/pi.md) requires MAIN to produce the captain-visible response in that turn, while Pi never separately prints or renders a captain-facing merge note.
 The design source is the captain-approved forked-supervision architecture board, a captain-private fleet record (a self-contained HTML explainer with the measured cache and judgment evidence); this document records the shape it landed as, and the delivering PR cites the board artifact itself.
 
 This feature is Pi-only by construction and changes nothing anywhere else:
@@ -54,9 +54,9 @@ The branch prompt frames mirrored text as context for judgment, never as instruc
 
 Stage one is unchanged: the bash watcher absorbs everything provably fine at zero token cost.
 Stage two is the branch's verdict on each handled event, reported through its `fm_branch_report` tool: `routine` merges without a follow-up turn, while `captain` merges with exactly one follow-up turn.
-The follow-up turn a `captain` verdict opens is itself the captain-visible outcome, so its merge note is delivered silently and never printed or rendered in Pi.
+The generated [Pi supervision protocol](supervision-protocols/pi.md) requires MAIN to produce the captain-visible response in the one follow-up turn a `captain` verdict opens, so its merge note is delivered silently and never printed or rendered in Pi.
 Because Pi gives the model only a custom message's `content`, that silent note normally carries both a relay instruction and the `branch-outcome` operational kind owned by `bin/fm-operational-input.sh` inside its own text.
-This self-description lets main distinguish a new supervision outcome from its own earlier captain-facing answer; without it, main can mistake the outcome for that answer and re-emit the stale answer instead of relaying the outcome.
+This self-description lets main distinguish a new supervision outcome from its own earlier captain-facing answer; without it, main can mistake the outcome for that answer and lose the outcome while deciding how to handle it.
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns main's event-ownership and conversational-treatment instructions for merged outcomes.
 If envelope encoding fails, the captain-facing note degrades to the same runtime instruction as plain text rather than losing the outcome or opening another turn.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is also delivered silently with no rendered note, while every other `routine` outcome stays rendered with its sailboat prefix.
