@@ -791,8 +791,8 @@ EOF
     *) fail "captain outcome body lost the event-ownership boundary: $body" ;;
   esac
   case "$body" in
-    *"Use your judgment about whether and how to surface, summarize, reference, or incorporate this outcome in the captain conversation."*) ;;
-    *) fail "captain outcome body imposed a mechanical conversational treatment: $body" ;;
+    *"This outcome is captain-facing: give the captain a visible response now."*"Use your judgment over the wording and how to incorporate it, not whether to surface it."*) ;;
+    *) fail "captain outcome body made visibility optional or removed wording judgment: $body" ;;
   esac
   case "$body" in
     *"An outcome that directly answers an explicit captain request is captain-facing"*"regardless of whether it is healthy, routine, measured, actionable, or requires a decision."*) ;;
@@ -849,14 +849,20 @@ async function runFleetCommand(session, args) {
   return result.details;
 }
 
-// The stubbed provider executes the same public branch turn contract as a real
-// provider: consume its delivered mirror context, drain the owned wake, choose
-// a verdict, report through the registered tool, and acknowledge that drain.
+function directlyRequestsResourceReport(mirror) {
+  const latestCaptain = mirror.at(-1) ?? "";
+  const words = new Set(latestCaptain.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+  const requestsDelivery = ["give", "provide", "send", "show"].some((word) => words.has(word));
+  const namesReport = ["report", "status", "measurement"].some((word) => words.has(word));
+  const namesResources = ["resource", "resources", "cpu", "memory"].some((word) => words.has(word));
+  return requestsDelivery && namesReport && namesResources;
+}
+
 globalThis.__fmOnBranchPrompt = async ({ session }) => {
   const mirror = session.ops
     .filter((op) => op.kind === "custom" && op.message.customType === "fm-main-mirror")
     .map((op) => op.message.content);
-  const directlyRequested = mirror.length > 0;
+  const directlyRequested = directlyRequestsResourceReport(mirror);
   const drained = await runFleetCommand(session, []);
   const ack = drained.stderr.match(/--ack-through ([0-9]+) --recovery-generation ([A-Za-z0-9._-]+)/);
   if (!ack) throw new Error(`drain did not return its acknowledgement command: ${drained.stderr}`);
@@ -883,8 +889,25 @@ globalThis.__fmOnBranchPrompt = async ({ session }) => {
   await runFleetCommand(session, ["--ack-through", ack[1], "--recovery-generation", ack[2]]);
 };
 
-// With no captain request, the healthy result remains a rendered sailboat and
-// the scripted branch turn does not open main.
+const explicitRequest = "Please give me a fresh mini system-resource report.";
+const longRequests = [
+  `${explicitRequest}${" head context".repeat(500)}`,
+  `${"middle context ".repeat(250)}${explicitRequest}${" middle context".repeat(250)}`,
+  `${"tail context ".repeat(500)}${explicitRequest}`,
+];
+const entries = [{
+  type: "message",
+  message: { role: "user", content: "Please keep responses concise while monitoring the fleet." },
+}];
+const mainCtx = {
+  model: { provider: "anthropic", id: "main-model" },
+  sessionManager: {
+    getSessionFile: () => `${home}/main.jsonl`,
+    getEntries: () => entries,
+  },
+};
+fire("before_agent_start", { prompt: entries[0].message.content }, mainCtx);
+fire("agent_start", {}, mainCtx);
 const unsolicited = dispatch("signal: healthy resource result");
 if (!unsolicited.accepted) throw new Error("branch did not accept the unsolicited result");
 await settle(() => fleetOperations.length === 2, "unsolicited result acknowledgement");
@@ -905,22 +928,6 @@ if (visibleToMain.isError || !mainOutcomeText.includes("healthy resource report:
 }
 if (fleetOperations.length !== 2) throw new Error("main's outcome read reprocessed the fleet event");
 
-// Start real main turns whose user entries are already in the session, then
-// let each result arrive before turn_end.
-const explicitRequest = "Please give me a fresh mini system-resource report.";
-const longRequests = [
-  `${explicitRequest}${" head context".repeat(500)}`,
-  `${"middle context ".repeat(250)}${explicitRequest}${" middle context".repeat(250)}`,
-  `${"tail context ".repeat(500)}${explicitRequest}`,
-];
-const entries = [];
-const mainCtx = {
-  model: { provider: "anthropic", id: "main-model" },
-  sessionManager: {
-    getSessionFile: () => `${home}/main.jsonl`,
-    getEntries: () => entries,
-  },
-};
 for (let index = 0; index < longRequests.length; index += 1) {
   const content = longRequests[index];
   if (content.length <= 4000) throw new Error(`request fixture ${index} did not exceed the mirror bound`);
@@ -1002,7 +1009,8 @@ if (delivered.message.content.includes("FIRSTMATE_OP:")) {
   throw new Error(`fallback unexpectedly carried an envelope: ${delivered.message.content}`);
 }
 if (!delivered.message.content.includes("The fleet event is already handled: do not re-drain, re-run, or acknowledge it.") ||
-    !delivered.message.content.includes("Use your judgment about whether and how to surface, summarize, reference, or incorporate this outcome in the captain conversation.") ||
+    !delivered.message.content.includes("This outcome is captain-facing: give the captain a visible response now.") ||
+    !delivered.message.content.includes("Use your judgment over the wording and how to incorporate it, not whether to surface it.") ||
     !delivered.message.content.includes("task-fallback: PR https://example.com/pr/fallback is ready")) {
   throw new Error(`fallback lost its instruction or outcome: ${delivered.message.content}`);
 }

@@ -132,15 +132,15 @@ const MERGE_NOTE_BOAT = "⛵";
 // part of a custom message Pi gives the model (see mergeIntoMain).
 //
 // The note still needs to identify itself so main cannot mistake an incoming
-// outcome for its own earlier answer and silently lose the outcome. It must not
-// decide the conversational treatment, though: event ownership forbids a
-// second fleet operation, while main uses judgment about what the captain
-// should see and how to say it.
+// outcome for its own earlier answer and silently lose the outcome. Event
+// ownership forbids a second fleet operation, while the captain-facing verdict
+// requires a visible response and leaves its wording to main.
 const CAPTAIN_OUTCOME_INSTRUCTION =
   "This is a supervision outcome delivered automatically by the supervision branch. " +
   "It was not typed by the captain. " +
   "The fleet event is already handled: do not re-drain, re-run, or acknowledge it. " +
-  "Use your judgment about whether and how to surface, summarize, reference, or incorporate this outcome in the captain conversation. " +
+  "This outcome is captain-facing: give the captain a visible response now. " +
+  "Use your judgment over the wording and how to incorporate it, not whether to surface it. " +
   "An outcome that directly answers an explicit captain request is captain-facing, regardless of whether it is healthy, routine, measured, actionable, or requires a decision.";
 type MirrorItem = { tag: "captain" | "main"; text: string };
 type MirrorCursor = { file: string; index: number };

@@ -55,10 +55,10 @@ Stage two is the branch's verdict on each handled event, reported through its `f
 The follow-up turn a `captain` verdict opens is itself the captain-visible outcome, so its merge note is delivered silently and never printed or rendered in Pi.
 Because Pi gives the model only a custom message's `content`, that silent note normally carries both a relay instruction and the `branch-outcome` operational kind owned by `bin/fm-operational-input.sh` inside its own text.
 This self-description lets main distinguish a new supervision outcome from its own earlier captain-facing answer; without it, main can mistake the outcome for that answer and re-emit the stale answer instead of relaying the outcome.
-The incoming outcome identifies itself to main, but does not decide the conversational treatment.
+The incoming captain-facing outcome identifies itself to main and requires a captain-visible response, while main retains judgment over its wording and conversational incorporation.
 Event ownership is separate: main must not re-drain, re-run, or acknowledge the fleet event after the branch has reported it.
-Main independently applies judgment about whether and how to surface, summarize, reference, or incorporate the outcome in the captain conversation.
-If envelope encoding fails, the note degrades to the same judgment-and-ownership instruction as plain text rather than losing the outcome or opening another turn.
+For routine sailboat outcomes, main independently applies judgment about whether and how to surface, summarize, reference, or incorporate the content in the captain conversation.
+If envelope encoding fails, the captain-facing note degrades to the same visibility-and-ownership instruction as plain text rather than losing the outcome or opening another turn.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is also delivered silently with no rendered note, while every other `routine` outcome stays rendered with its sailboat prefix.
 The branch prompt owns the verdict criteria, including its unconditional explicit-request rule; unsolicited routine outcomes remain routine sailboat notes, unchanged fleet reviews remain silent, and doubt escalates.
 The extension refreshes the main-dialog mirror synchronously before accepting each branch wake, preserving the complete current captain message while keeping older dialog entries bounded, so a request anywhere in the current in-flight message reaches the branch before that wake's prompt rather than waiting for `turn_end`.
