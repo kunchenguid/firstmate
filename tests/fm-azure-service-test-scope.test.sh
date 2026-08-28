@@ -90,6 +90,14 @@ workflow_contract() {
   # shellcheck disable=SC2016 # The assertion requires the literal workflow expansion.
   assert_grep 'bin/fm-lint.sh "${files[@]}"' "$CI" \
     "focused CI does not delegate its changed shell files to the canonical lint owner"
+  python3 - "$CI" <<'PY' || fail "focused CI still runs the unrelated Agent Fleet package job"
+from pathlib import Path
+import sys
+body = Path(sys.argv[1]).read_text()
+block = body.split("\n  agent-fleet:\n", 1)[1].split("\n  invariants:\n", 1)[0]
+assert "needs: behavior-test-plan" in block
+assert "if: needs.behavior-test-plan.outputs.mode == 'full'" in block
+PY
   pass "CI runs focused test and lint paths behind stable required checks and preserves full fallback"
 }
 
