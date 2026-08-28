@@ -456,8 +456,14 @@ cmd_headroom() {
   fi
 
   local effective providers
+  # Two different windows answer two different questions, so both are read.
+  # `limitingWindowIds` bounds the PERCENTAGE; `limitingWindowId` bounds the
+  # RUNWAY. They usually agree, which is why pairing the percentage with the
+  # runway's window stayed invisible - until a five-hour window at 85% sat
+  # beside a seven-day window at 35% and the line claimed the five-hour window
+  # was the one at 35%.
   effective=$(printf '%s\n' "$out" | toon_block effective \
-    'provider,scope,effectivePercentRemaining,limitingWindowId,runway,usableRunwaySeconds,projectionConfidence')
+    'provider,scope,effectivePercentRemaining,limitingWindowIds,runway,usableRunwaySeconds,projectionConfidence,limitingWindowId')
   providers=$(printf '%s\n' "$out" | toon_block providers 'provider,status,authStatus,plan,source')
   if [ -z "$effective" ]; then
     headroom_unmeasurable 'quota-axi printed no effective-headroom block' \
@@ -469,7 +475,7 @@ cmd_headroom() {
   windows=$(printf '%s\n' "$out" | toon_block windows 'provider,id,resetsAt')
 
   local measured=0 tight=0 wall=0 unknown=0 rows='' summary_verdict
-  while IFS="$(printf '\t')" read -r provider scope pct win runway runway_s conf; do
+  while IFS="$(printf '\t')" read -r provider scope pct win runway runway_s conf runway_win; do
     [ -n "$provider" ] || continue
     # One account-level reading per provider. A model-scoped row bounds only that
     # model (quota-axi owns that relationship) and is not the dispatch gauge.
@@ -477,7 +483,10 @@ cmd_headroom() {
       all_models|unresolved) ;;
       *) continue ;;
     esac
-    local pstatus pauth resets verdict detail hint=''
+    local pstatus pauth resets verdict detail hint='' runway_resets
+    # A gauge that emits only the singular field bounds both answers with it,
+    # which is the case this labelling was correct for all along.
+    [ -n "$win" ] || win=$runway_win
     pstatus=$(printf '%s\n' "$providers" | awk -F'\t' -v p="$provider" '$1 == p { print $2; exit }')
     pauth=$(printf '%s\n' "$providers" | awk -F'\t' -v p="$provider" '$1 == p { print $3; exit }')
     [ -n "$pstatus" ] || pstatus='-'
@@ -509,6 +518,15 @@ cmd_headroom() {
           detail="$detail runway=$(humanize_secs "$runway_s")"
         else
           detail="$detail runway=unknown($runway)"
+        fi
+        # The reset time is the half that bites: paired with the wrong window it
+        # makes an operator wait out a window that is not the one holding them
+        # up. So the runway's window is named whenever it is not the one that
+        # bounds the percentage, with its own reset beside it.
+        if [ -n "$runway_win" ] && [ "$runway_win" != '-' ] && [ "$runway_win" != "$win" ]; then
+          runway_resets=$(printf '%s\n' "$windows" | awk -F'\t' -v p="$provider" -v w="$runway_win" '$1 == p && $2 == w { print $3; exit }')
+          [ -n "$runway_resets" ] || runway_resets='-'
+          detail="$detail runway_bound=$runway_win runway_resets=$runway_resets"
         fi
         detail="$detail confidence=$conf"
         ;;

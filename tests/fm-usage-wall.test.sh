@@ -70,7 +70,7 @@ fm_git_identity
 # header deliberately reproduces the vendor's own quirk of declaring a count
 # that does not match its field list, so the parser is pinned against the real
 # shape rather than a tidied one.
-quota_toon() {  # <healthy|tight-pct|tight-runway|exhausted|auth|no-effective|reordered>
+quota_toon() {  # <healthy|tight-pct|tight-runway|exhausted|auth|no-effective|reordered|divergent>
   case "$1" in
     no-effective)
       cat <<'EOF'
@@ -96,6 +96,24 @@ EOF
       return 0
       ;;
   esac
+  if [ "$1" = divergent ]; then
+    # The two windows answer different questions and disagree loudly: the
+    # five-hour window is nearly full while the SEVEN-DAY window is the one
+    # actually holding the account down, and their resets are a week apart.
+    # Mislabelling either is unmistakable here, which is the whole point - the
+    # defect hid for as long as it did only because the two usually agree.
+    cat <<'EOF'
+bin: /fake/quota-axi
+providers[1]{provider,plan,source,status,authStatus,refreshedAt}:
+  claude,max,oauth,fresh,unknown,none
+windows[2]{provider,id,label,percentRemaining,resetsAt,pace,state}:
+  claude,five_hour,session,85,"2026-08-29T04:09:59Z",ahead,fresh
+  claude,seven_day,week,35,"2026-09-02T07:59:59Z",ahead,fresh
+effective[8]{provider,scope,effectivePercentRemaining,boundedBy,limitingWindowIds,runway,usableRunwaySeconds,projectionConfidence,limitingWindowId}:
+  claude,all_models,35,"five_hour + seven_day",seven_day,projected_exhaustion,2400,early,five_hour
+EOF
+    return 0
+  fi
   local pct=84 runway=14400 cursor_row='  cursor,unresolved,unknown,unknown,unknown,unknown,unknown'
   case "$1" in
     tight-pct) pct=12 ;;
@@ -178,6 +196,30 @@ assert_contains "$OUT" 'confidence=early' 'the reading carries the projection co
 assert_contains "$OUT" 'verdict=ok measured=2 tight=0 wall=0 unknown=0' 'all-measured all-ok summarizes as ok'
 assert_not_contains "$OUT" 'HEADROOM_NOTE' 'a fully measured healthy fleet needs no unmeasured warning'
 pass 'headroom reports a measurable provider with window, reset and runway'
+
+# --- headroom: each number carries the window that actually bounds IT --------
+#
+# Two windows answer two different questions. `limitingWindowIds` bounds the
+# PERCENTAGE; `limitingWindowId` bounds the RUNWAY. Labelling the percentage
+# with the runway's window read as "the five-hour window is at 35%" while that
+# window was at 85%, and - the half that actually bites - paired the seven-day
+# percentage with the five-hour RESET, which sends an operator off to wait out a
+# window that is not the one holding them up. This fixture makes both windows
+# disagree loudly, because one where they agree cannot catch either mistake.
+CASE="$TMP_ROOT/hr-divergent"; mkdir -p "$CASE"
+fake_quota "$CASE/fakebin" divergent
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'pct=35 bound=seven_day' \
+  'the percentage is labelled with the window that bounds the percentage'
+assert_contains "$OUT" 'resets=2026-09-02T07:59:59Z' \
+  "the reset shown beside the percentage is that window's own reset"
+assert_contains "$OUT" 'runway_bound=five_hour' \
+  'the runway names its own limiting window when it differs'
+assert_contains "$OUT" 'runway_resets=2026-08-29T04:09:59Z' \
+  "and carries that window's own reset, so neither clock is attributed to the other"
+assert_not_contains "$OUT" 'pct=35 bound=five_hour' \
+  'the percentage must never be attributed to a window sitting at 85 percent'
+pass 'headroom labels the percentage and the runway with their own windows and resets'
 
 # --- headroom: tight and exhausted are distinguishable ----------------------
 

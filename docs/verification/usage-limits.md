@@ -66,6 +66,27 @@ HEADROOM: claude tight pct=84 bound=five_hour resets=2026-08-27T08:39:59.783103+
 HEADROOM_SUMMARY: verdict=tight measured=1 tight=1 wall=0 unknown=5 source=quota-axi/0.1.17 build=below-floor(0.1.29)
 ```
 
+## Each number carries the window that bounds it
+
+Two windows answer two different questions, and on 2026-08-28 they disagreed sharply on this host.
+The five-hour window was nearly full while the seven-day window was the one actually holding the account down, and their resets are a week apart.
+
+```
+$ quota-axi
+  claude,five_hour,session,72,"2026-08-29T04:10:00.470828+00:00",ahead,fresh
+  claude,seven_day,week,34,"2026-09-02T08:00:00.470847+00:00",ahead,fresh
+  claude,all_models,34,five_hour + seven_day,seven_day,projected_exhaustion,2146,"2026-08-28T23:59:41.580Z",five_hour,early,cycle_average,none,none,known
+
+$ bin/fm-usage-wall.sh headroom
+HEADROOM: claude tight pct=34 bound=seven_day resets=2026-09-02T08:00:00.233048+00:00 runway=35m runway_bound=five_hour runway_resets=2026-08-29T04:10:00.232949+00:00 confidence=early
+```
+
+The percentage is bounded by `seven_day` and carries the seven-day reset; the runway is bounded by `five_hour` and carries its own.
+Before this was fixed the line read `pct=34 bound=five_hour` with the five-hour reset, which claimed the window sitting at 72 percent was the one at 34, and pointed at a reset tonight for a constraint that does not lift until next week.
+The reset half is the one that bites: a reader who waits out the named window is waiting on a clock that was never the constraint.
+It stayed latent because the two windows usually agree, so `tests/fm-usage-wall.test.sh` pins a fixture where they diverge far enough that mislabelling either is unmistakable.
+A gauge that emits only the singular `limitingWindowId` bounds both answers with it, and that reading is unchanged.
+
 ## The gauge saw a real wall before it landed
 
 This is the guarantee working against a wall that actually arrived, rather than a constructed one.
