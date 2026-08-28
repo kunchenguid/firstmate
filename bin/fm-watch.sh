@@ -727,6 +727,12 @@ pause_state_class() {  # <window> <task>
     crew_absorb_class "$task"
     return
   fi
+  class=$(crew_absorb_class "$task")
+  if [ "$class" = working ]; then
+    clear_pause_state "$key"
+    printf 'working'
+    return
+  fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     if status_is_paused "$last"; then
       printf 'paused'
@@ -748,7 +754,6 @@ pause_state_class() {  # <window> <task>
     printf 'paused'
     return
   fi
-  class=$(crew_absorb_class "$task")
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
     printf 'working'

@@ -2498,6 +2498,39 @@ test_timer_repair_drops_a_finished_write_deferral_chain() {
   pass "an idle-window timer repair drops a finished write-deferral chain, so the next deferral gets a fresh re-surface window"
 }
 
+test_fresh_pause_recheck_yields_to_authoritative_working() {
+  local dir state fakebin out capture_file statusf window key pane_hash pid
+  dir=$(make_case fresh-pause-recheck-working); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/resumed.status"
+  window="test:fm-fresh-recheck-working"
+  printf 'idle after resuming work\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/resumed.meta"
+  printf 'paused: waiting for an external decision\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-resumed_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle after resuming work")
+  printf '%s\n' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  : > "$state/.paused-rechecked-$key"
+  printf '%s\n' "$pane_hash" > "$state/.stale-$key"
+  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "fresh pause recheck did not complete: $(cat "$out")"; }
+  [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "fresh pause recheck retained pause tracking after work resumed"; }
+  [ ! -e "$state/.paused-rechecked-$key" ] || { reap "$pid"; fail "fresh pause recheck marker survived authoritative working state"; }
+  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "fresh pause recheck did not restore wedge tracking"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "fresh pause recheck emitted a wake before wedge threshold"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a fresh pause recheck yields to authoritative working state"
+}
+
 # The same chain must not outlive either first-sight path through a captain-relevant
 # status line, because both also open a new idle window: the provably-working absorb
 # and the plain surface.
@@ -3055,6 +3088,7 @@ test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
+test_fresh_pause_recheck_yields_to_authoritative_working
 test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
