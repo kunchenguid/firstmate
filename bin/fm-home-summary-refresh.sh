@@ -18,11 +18,12 @@
 # (default 60 seconds). No reader can observe temporary output through the
 # ledger path.
 #
-# With --best-effort, any failure is appended to the bounded home-local
-# state/.home-summary-refresh.log and the command exits zero. Session start,
-# watcher, spawn, and teardown use that mode so this side-band publication can
-# never change their result. Without it, failures are printed and returned to
-# the direct caller for tests and diagnostics.
+# With --best-effort, a failure is appended to the bounded home-local
+# state/.home-summary-refresh.log when available, with stderr as the bounded
+# fallback, and the command exits zero. Session start, watcher, spawn, and
+# teardown use that mode so this side-band publication can never change their
+# result. Without it, failures are printed and returned to the direct caller
+# for tests and diagnostics.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
