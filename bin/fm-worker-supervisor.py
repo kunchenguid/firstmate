@@ -313,28 +313,16 @@ def stage_payload(request, worktree, account_home):
         repo = worktree / "repo"
         if repo.is_symlink() or not repo.is_dir():
             raise SupervisorError("existing task-disk repository is unavailable or redirected")
-        top = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=GIT_HEAD_TIMEOUT, check=False,
-        )
+        top = git_in(repo, "rev-parse", "--show-toplevel", timeout=GIT_HEAD_TIMEOUT)
         if top.returncode != 0 or Path(top.stdout.decode().strip()).resolve() != repo.resolve():
             raise SupervisorError("existing task-disk repository is not the exact repository root")
-        lineage = subprocess.run(
-            [
-                "git", "-C", str(repo), "merge-base", "--is-ancestor",
-                request["repository_generation"], "HEAD",
-            ],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=GIT_HEAD_TIMEOUT, check=False,
+        lineage = git_in(
+            repo, "merge-base", "--is-ancestor",
+            request["repository_generation"], "HEAD", timeout=GIT_HEAD_TIMEOUT,
         )
         if lineage.returncode != 0:
             raise SupervisorError("existing task-disk repository lost its dispatched lineage")
-        readable = subprocess.run(
-            ["git", "-C", str(repo), "status", "--porcelain"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=GIT_STATUS_TIMEOUT, check=False,
-        )
+        readable = git_in(repo, "status", "--porcelain", timeout=GIT_STATUS_TIMEOUT)
         if readable.returncode != 0:
             raise SupervisorError("existing task-disk working tree is unreadable")
         return repo
@@ -368,11 +356,7 @@ def stage_payload(request, worktree, account_home):
                 clone.stderr.decode("utf-8", errors="replace")[-500:]
             )
         )
-    head = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"],
-        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        timeout=GIT_HEAD_TIMEOUT, check=False,
-    )
+    head = git_in(repo, "rev-parse", "HEAD", timeout=GIT_HEAD_TIMEOUT)
     if head.returncode != 0 or head.stdout.decode().strip() != request["repository_generation"]:
         raise SupervisorError("staged repository head differs from the bound repository generation")
     if request.get("worker_role") == "no-mistakes":
@@ -541,11 +525,12 @@ def prepare_no_mistakes_execution(worktree, worktree_root, account_home, brief):
     return {}
 
 
-def git_in(repo, *arguments, timeout=BUNDLE_CREATE_TIMEOUT):
+def git_in(repo, *arguments, timeout=BUNDLE_CREATE_TIMEOUT, input_bytes=None, env=None):
     return subprocess.run(
         ["git", "-c", "safe.directory={}".format(repo), "-C", str(repo), *arguments],
-        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        timeout=timeout, check=False,
+        input=input_bytes, stdin=subprocess.DEVNULL if input_bytes is None else None,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False,
+        env=env,
     )
 
 
@@ -646,9 +631,9 @@ def _scratch_artifacts(repo):
 
 
 def _hash_blob(repo, body):
-    result = subprocess.run(
-        ["git", "-C", str(repo), "hash-object", "-w", "--stdin"], input=body,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=GIT_HEAD_TIMEOUT, check=False,
+    result = git_in(
+        repo, "hash-object", "-w", "--stdin", input_bytes=body,
+        timeout=GIT_HEAD_TIMEOUT,
     )
     if result.returncode != 0:
         raise SupervisorError("returned artifact could not be stored in the repository")
@@ -659,9 +644,8 @@ def _return_commit(repo, base, artifacts, request):
     entries = []
     for name, body in sorted(artifacts.items()):
         entries.append("100644 blob {}\t{}\n".format(_hash_blob(repo, body), name))
-    tree = subprocess.run(
-        ["git", "-C", str(repo), "mktree"], input="".join(entries).encode(),
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=GIT_HEAD_TIMEOUT, check=False,
+    tree = git_in(
+        repo, "mktree", input_bytes="".join(entries).encode(), timeout=GIT_HEAD_TIMEOUT,
     )
     if tree.returncode != 0:
         raise SupervisorError("returned artifact tree could not be created")
@@ -674,11 +658,10 @@ def _return_commit(repo, base, artifacts, request):
         "GIT_AUTHOR_DATE": "@0 +0000",
         "GIT_COMMITTER_DATE": "@0 +0000",
     })
-    committed = subprocess.run(
-        ["git", "-C", str(repo), "commit-tree", tree.stdout.decode().strip(), "-p", base],
-        input=("Firstmate worker return {}\n".format(request["request_digest"])).encode(),
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=GIT_HEAD_TIMEOUT,
-        check=False, env=environment,
+    committed = git_in(
+        repo, "commit-tree", tree.stdout.decode().strip(), "-p", base,
+        input_bytes=("Firstmate worker return {}\n".format(request["request_digest"])).encode(),
+        timeout=GIT_HEAD_TIMEOUT, env=environment,
     )
     if committed.returncode != 0:
         raise SupervisorError("returned artifact commit could not be created")

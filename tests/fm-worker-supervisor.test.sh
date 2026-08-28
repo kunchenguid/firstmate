@@ -725,6 +725,21 @@ run_supervisor_existing_task_disk_recovery() {
   fm_git_init_commit "$repo"
   base=$(git -C "$repo" rev-parse HEAD)
   printf 'uncommitted scout evidence\n' > "$repo/scratch.txt"
+  python3 - "$repo" <<'PY' \
+    || fail "could not prepare the cross-owner retained repository fixture"
+import os
+from pathlib import Path
+import pwd
+import sys
+
+root = Path(sys.argv[1])
+if os.geteuid() == 0:
+    identity = pwd.getpwnam("nobody")
+    for directory, directories, files in os.walk(root):
+        os.chown(directory, identity.pw_uid, identity.pw_gid)
+        for name in directories + files:
+            os.chown(Path(directory) / name, identity.pw_uid, identity.pw_gid)
+PY
   cat > "$work/.fm-return/data/recover-existing/report.md" <<'REPORT'
 ## Summary
 
@@ -841,7 +856,7 @@ PY
   expect_code 2 "$status" "existing task-disk recovery with foreign lineage should refuse: $out"
   assert_contains "$out" "lost its dispatched lineage" "existing task-disk lineage refusal was not explicit"
   assert_present "$repo/scratch.txt" "a refused existing task-disk recovery removed scout work"
-  pass "existing task-disk recovery returns reports and scratch without restaging or lineage drift"
+  pass "existing task-disk recovery and return Git work across ownership without lineage drift"
 }
 
 run_no_mistakes_privilege_contract() {
