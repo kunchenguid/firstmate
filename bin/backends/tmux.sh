@@ -58,15 +58,37 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
   fm_tmux_submit_core "$@"
 }
 
+# fm_backend_tmux_pane_shell: on Windows, the native path of the shell firstmate's
+# panes must run. psmux (the Windows tmux) defaults panes to PowerShell, but
+# firstmate drives its panes with bash commands (treehouse get, the harness
+# launch, status appends), so every session/window it creates must launch Git
+# Bash instead. Resolve the running MSYS bash to a forward-slash Windows path
+# psmux can spawn. Prints nothing on non-Windows, where the platform default is
+# already a POSIX shell - keeping firstmate self-contained without a per-machine
+# ~/.tmux.conf.
+fm_backend_tmux_pane_shell() {
+  local bash_path
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *) return 0 ;;
+  esac
+  bash_path=$(command -v bash 2>/dev/null) || return 0
+  cygpath -m "$bash_path" 2>/dev/null || printf '%s\n' "$bash_path"
+}
+
 # fm_backend_tmux_container_ensure: reuse the current tmux session when
 # firstmate itself runs inside tmux, else ensure a dedicated detached
 # "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;
 # prints the resolved session name.
 fm_backend_tmux_container_ensure() {
+  local shell
+  local -a shell_arg=()
+  shell=$(fm_backend_tmux_pane_shell)
+  [ -n "$shell" ] && shell_arg=("$shell")
   if [ -n "${TMUX:-}" ]; then
     tmux display-message -p '#S'
   else
-    tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
+    tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate "${shell_arg[@]}"
     printf 'firstmate'
   fi
 }
@@ -87,12 +109,15 @@ fm_backend_tmux_container_ensure() {
 # The returned window id lets callers target the window even if its name is ever
 # lost, so worktree discovery cannot fall back to the active client's window.
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
-  local ses=$1 wname=$2 proj_abs=$3 wid
+  local ses=$1 wname=$2 proj_abs=$3 wid shell
+  local -a shell_arg=()
   if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
     echo "error: window $ses:$wname already exists" >&2
     return 1
   fi
-  wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs") || return 1
+  shell=$(fm_backend_tmux_pane_shell)
+  [ -n "$shell" ] && shell_arg=("$shell")
+  wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs" "${shell_arg[@]}") || return 1
   tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
   tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
   printf '%s\n' "$wid"
