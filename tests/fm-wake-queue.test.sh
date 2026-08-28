@@ -1196,43 +1196,73 @@ EOF
 }
 
 test_msys_contended_publication_cleans_stray_owner_link() {
-  local dir state fakebin lock real_ln rc
+  local dir state fakebin lock real_ln rc ready release holder
   dir=$(make_case msys-contended-publication)
   state="$dir/state"
   fakebin="$dir/fakebin"
   lock="$state/.fixture.lock"
+  ready="$dir/holder.ready"
+  release="$dir/holder.release"
   real_ln=$(command -v ln)
   mkdir -p "$fakebin"
   cat > "$fakebin/ln" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = -s ] && [ "$#" -eq 3 ] && [ "$3" = "${TARGET_LOCK:-}" ] && [ ! -e "${LN_RACED_ONCE:-}" ]; then
   : > "$LN_RACED_ONCE" || exit 1
-  mkdir "$3" || exit 1
-  printf '%s\n' "$HOLDER_PID" > "$3/pid" || exit 1
-  "$REAL_LN" -s "$2" "$3/$(basename "$2")" || exit 1
+  nested="$3/$(basename "$2")"
+  mkdir "$nested" || exit 1
+  cp -R "$2"/. "$nested"/ || exit 1
   exit 0
 fi
 exec "$REAL_LN" "$@"
 EOF
   chmod +x "$fakebin/ln"
 
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock=$2
+    ready=$3
+    release=$4
+    fm_lock_try_acquire "$lock" || exit 30
+    printf "ready\n" > "$ready"
+    while [ ! -e "$release" ]; do
+      sleep 0.1
+    done
+    fm_lock_release "$lock"
+    [ ! -e "$lock" ] && [ ! -L "$lock" ] || exit 31
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$ready" "$release" &
+  holder=$!
+  wait_for_file_text "$ready" "ready" || {
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    fail "existing holder never acquired the lock"
+  }
+
   rc=0
   PATH="$fakebin:$PATH" TARGET_LOCK="$lock" LN_RACED_ONCE="$dir/ln-raced.once" REAL_LN="$real_ln" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     lock=$2
-    sleep 30 &
-    holder=$!
-    trap '\''kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true'\'' EXIT
-    HOLDER_PID=$holder
-    export HOLDER_PID
+    holder_pid=$3
     fm_lock_try_acquire "$lock" && exit 10
-    kill "$holder" 2>/dev/null || true
+    [ "${FM_LOCK_HELD_PID:-}" = "$holder_pid" ] || exit 11
+    if compgen -G "$lock/.fixture.lock.owner.*" >/dev/null; then
+      exit 12
+    fi
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$holder" || rc=$?
+  [ "$rc" -eq 0 ] || {
+    : > "$release"
     wait "$holder" 2>/dev/null || true
-    fm_lock_try_acquire "$lock" || exit 11
-    fm_lock_release "$lock"
-    [ ! -e "$lock" ] && [ ! -L "$lock" ] || exit 12
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" || rc=$?
-  [ "$rc" -eq 0 ] || fail "contended MSYS publication left a stray owner entry behind (rc=$rc)"
+    fail "contended MSYS publication left a copied stray owner behind (rc=$rc)"
+  }
+
+  : > "$release"
+  wait "$holder" || fail "existing lock holder did not release cleanly after contention"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 20
+    fm_lock_release "$2"
+    [ ! -e "$2" ] && [ ! -L "$2" ] || exit 21
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" || fail "lock was not reacquirable after the contended copied-directory cleanup"
   pass "contended MSYS publication cleans stray owner entries before stale recovery"
 }
 

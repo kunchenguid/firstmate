@@ -375,12 +375,19 @@ fm_lock_discard_owner() {
   rmdir "$ownerdir" 2>/dev/null || true
 }
 
-fm_lock_remove_stray_owner_link() {
-  local lockdir=$1 ownerdir=$2 stray
+fm_lock_remove_stray_owner_artifact() {
+  local lockdir=$1 ownerdir=$2 stray mypid stray_pid
   stray="$lockdir/$(basename "$ownerdir")"
   if [ -L "$stray" ] && [ "$(readlink "$stray" 2>/dev/null || true)" = "$ownerdir" ]; then
     rm -f "$stray" 2>/dev/null || true
+    return 0
   fi
+  [ -d "$stray" ] && [ ! -L "$stray" ] || return 0
+  mypid=${BASHPID:-$$}
+  stray_pid=$(cat "$stray/pid" 2>/dev/null || true)
+  [ "$stray_pid" = "$mypid" ] || return 0
+  fm_lock_clean_known_files "$stray"
+  rmdir "$stray" 2>/dev/null || true
 }
 
 fm_lock_claim_blocked_by_steal() {
@@ -454,11 +461,11 @@ fm_lock_try_create() {
           return 0
         fi
       else
-        fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
+        fm_lock_remove_stray_owner_artifact "$lockdir" "$ownerdir"
       fi
     fi
   else
-    fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
+    fm_lock_remove_stray_owner_artifact "$lockdir" "$ownerdir"
   fi
   fm_lock_discard_owner "$ownerdir"
   return 1
