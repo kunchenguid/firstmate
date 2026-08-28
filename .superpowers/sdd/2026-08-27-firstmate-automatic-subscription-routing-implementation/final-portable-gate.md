@@ -69,3 +69,23 @@ bin/fm-lint.sh
 bash -n tests/lib.sh tests/fm-bootstrap.test.sh tests/fm-on.test.sh tests/fm-remote-doctor.test.sh tests/fm-session-start.test.sh tests/fm-calm-pi-extension.test.sh tests/fm-tmux-agent-liveness.test.sh
 git diff --check
 ```
+
+## Tmux fixture cleanup follow-up
+
+Independent review found that the background `claude-link` fixture survived the private tmux server and became an orphan under PID 1. RED evidence on `293300f`: the target test passed while the exact matching orphan count increased by one.
+
+The fixture now records both processes created with `&` at creation time and adopts their exact PID, process group, and `fm_pid_identity` before cleanup. It rejects the caller/session process group. EXIT, INT, TERM, explicit-success, and `fail` cleanup send TERM only to still-matching owned groups, condition-wait, revalidate identity and PGID before any KILL fallback, close the private tmux server, recheck, and remove LAB last. Launcher and background children use separate two-stage FIFOs so PID publication completes before parent readiness. Identity-library state is scoped under LAB.
+
+The residue regression compares the exact temporary `fm-liveness.*` process set and cleanup-registry set before and after success, a marker-proven early exit, and an exact-marker/exit-1 induced failure. It derives its process root from `TMPDIR` and uses portable shell globbing for registry files.
+
+Evidence:
+
+- Pre-fix target: passed but exact orphan delta `+1`.
+- Nine post-fix targeted runs passed across review iterations; the final three were consecutive after the last behavioral change.
+- Non-default `TMPDIR=/home/yaro/tmp-fm-liveness.*` target passed.
+- Post-review exact six: `total=6 failed=0 skipped_gate=1 duration_ms=251913`.
+- Related proportional runner (`fm-cursor-harness`, `fm-secondmate-liveness`, and `fm-tmux-agent-liveness`): `total=3 failed=0 skipped_gate=0 duration_ms=53761`.
+- Lint, ShellCheck, Bash syntax, and diff checks passed.
+- Final independent review: no Critical, Important, or Minor findings. It judged the prior green 125-test serial sufficient because this follow-up changes only one test harness and its cleanup assertions, not production or lane-selection code.
+
+Historical cleanup: 26 processes were individually resolved as exact test fixtures by PPID 1, PGID equal to PID, stable Linux start identity, and fixture-only argv. Each exact group was revalidated immediately before TERM. All 26 exited on TERM; KILL fallback was unused; survivors were zero. Those processes are not recoverable. No unrelated process was signaled.

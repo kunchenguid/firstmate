@@ -29,16 +29,101 @@ CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
 [ -n "$CC_BIN" ] \
   || { echo "not ok - a C compiler is required for real process-identity fixtures" >&2; exit 1; }
 
+fm_liveness_process_snapshot() {
+  ps -eo pid=,ppid=,pgid=,lstart=,args= | \
+    awk -v prefix="$FM_LIVENESS_TMP_ROOT/fm-liveness." '
+      index($0, prefix) && ($0 ~ /\/bin\// || $0 ~ /\.fifo([ ]|$)/) {print}
+    ' | sort
+}
+
+fm_cleanup_registry_snapshot() {
+  local path
+  for path in "$FM_LIVENESS_TMP_ROOT"/.fm-test-cleanup.*; do
+    [ -f "$path" ] && printf '%s\n' "$path"
+  done | sort
+}
+
+FM_LIVENESS_TMP_ROOT=${TMPDIR:-/tmp}
+FM_LIVENESS_TMP_ROOT=${FM_LIVENESS_TMP_ROOT%/}
+process_baseline=$(fm_liveness_process_snapshot)
+registry_baseline=$(fm_cleanup_registry_snapshot)
+
 REAL_TMUX=$(command -v tmux)
 SOCKET="fm-liveness-$$"
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-liveness.XXXXXX")
 SESSION=liveness
+mkdir -p "$LAB/state"
+FM_STATE_OVERRIDE="$LAB/state"
+export FM_STATE_OVERRIDE
+# shellcheck source=bin/fm-wake-lib.sh
+. "$ROOT/bin/fm-wake-lib.sh"
+TEST_SHELL_PGID=$(ps -o pgid= -p "$$" | tr -d ' ')
+OWNED_PIDS=()
+OWNED_PGIDS=()
+OWNED_IDENTITIES=()
+
+record_owned_process() {  # <pid> <label>
+  local pid=$1 label=$2 pgid identity args
+  case "$pid" in '' | *[!0-9]*) fail "$label published an invalid pid" ;; esac
+  pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ') || pgid=
+  identity=$(fm_pid_identity "$pid" 2>/dev/null) || identity=
+  args=$(ps -o args= -p "$pid" 2>/dev/null) || args=
+  case "$pgid" in '' | *[!0-9]*) fail "$label has no readable process group" ;; esac
+  [ "$pgid" -gt 1 ] && [ "$pgid" != "$TEST_SHELL_PGID" ] \
+    || fail "$label resolved to the caller/session process group"
+  [ -n "$identity" ] && [ "${args#*"$LAB/"}" != "$args" ] \
+    || fail "$label is not attributable to this exact test fixture"
+  OWNED_PIDS+=("$pid")
+  OWNED_PGIDS+=("$pgid")
+  OWNED_IDENTITIES+=("$identity")
+}
+
+owned_process_matches() {  # <array-index>
+  local index=$1 pid=${OWNED_PIDS[$1]} expected=${OWNED_IDENTITIES[$1]} current pgid args
+  current=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ "$current" = "$expected" ] || return 1
+  pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ') || return 1
+  [ "$pgid" = "${OWNED_PGIDS[$index]}" ] || return 1
+  args=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
+  [ "${args#*"$LAB/"}" != "$args" ]
+}
+
+wait_owned_process_exit() {  # <array-index>
+  local index=$1 attempt=0
+  while [ "$attempt" -lt 40 ] && owned_process_matches "$index"; do
+    sleep 0.05
+    attempt=$((attempt + 1))
+  done
+  ! owned_process_matches "$index"
+}
+
+terminate_owned_process_groups() {
+  local index pgid
+  for ((index = 0; index < ${#OWNED_PIDS[@]}; index++)); do
+    owned_process_matches "$index" || continue
+    pgid=${OWNED_PGIDS[$index]}
+    [ "$pgid" != "$TEST_SHELL_PGID" ] || continue
+    kill -TERM -- "-$pgid" 2>/dev/null || true
+  done
+  for ((index = 0; index < ${#OWNED_PIDS[@]}; index++)); do
+    wait_owned_process_exit "$index" && continue
+    owned_process_matches "$index" || continue
+    pgid=${OWNED_PGIDS[$index]}
+    [ "$pgid" != "$TEST_SHELL_PGID" ] || continue
+    kill -KILL -- "-$pgid" 2>/dev/null || true
+    wait_owned_process_exit "$index" || true
+  done
+}
 
 cleanup_all() {
+  terminate_owned_process_groups
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+  terminate_owned_process_groups
   [ -n "${LAB:-}" ] && rm -rf "$LAB"
 }
 trap cleanup_all EXIT
+trap 'cleanup_all; exit 130' INT
+trap 'cleanup_all; exit 143' TERM
 
 # A `tmux` shim on PATH so bin/backends/tmux.sh's bare `tmux` calls reach the
 # private socket and never touch the host's real sessions.
@@ -99,8 +184,13 @@ compile_named_blocker "$LAB/bin/muse-bind"
 # false `dead`.
 cat > "$LAB/bin/agent-launcher" <<SH
 #!/bin/sh
-"$LAB/bin/pi" "\$1" &
-wait
+"$LAB/bin/pi" "\$3" &
+child=\$!
+printf '%s\n' "\$child" > "\$2"
+IFS= read -r child_ready < "\$3"
+[ "\$child_ready" = ready ] || exit 4
+printf 'ready\n' > "\$1"
+wait "\$child"
 SH
 chmod +x "$LAB/bin/agent-launcher"
 
@@ -146,8 +236,9 @@ await_ready_fifo() {  # <label>
 
 new_blocker_window() {  # <window> <binary>
   local window=$1 binary=$2
+  shift 2
   open_ready_fifo "$window"
-  new_window "$window" "$binary" "$READY_FIFO"
+  new_window "$window" "$binary" "$READY_FIFO" "$@"
   await_ready_fifo "$window"
 }
 
@@ -265,7 +356,14 @@ pass "tmux liveness: a process neither name source attributes stays ambiguous ra
 # The single-source classifier would read this pane as an idle shell and call
 # it dead - the one verdict that can start a duplicate agent on a live worktree.
 
-new_blocker_window launcher "$LAB/bin/agent-launcher"
+launcher_child_pid_file="$LAB/launcher-child.pid"
+launcher_child_ready_fifo="$LAB/launcher-child-ready.fifo"
+mkfifo "$launcher_child_ready_fifo" || fail "could not create launcher child readiness FIFO"
+new_blocker_window launcher "$LAB/bin/agent-launcher" \
+  "$launcher_child_pid_file" "$launcher_child_ready_fifo"
+launcher_child_pid=$(cat "$launcher_child_pid_file")
+rm -f "$launcher_child_ready_fifo"
+record_owned_process "$launcher_child_pid" "the launcher harness child"
 assert_state "$SESSION:launcher" alive \
   "a launcher running a harness child must classify alive, never dead"
 comms_classify_agent "$SESSION:launcher" \
@@ -290,6 +388,7 @@ new_window background bash -c "set -m; '$LAB/bin/claude-link' '$LAB/background-c
 await_ready_fifo background
 bg_pid=$(cat "$LAB/bg.pid")
 [ -n "$bg_pid" ] || fail "the background harness-named process did not record its pid"
+record_owned_process "$bg_pid" "the background harness child"
 kill -0 "$bg_pid" 2>/dev/null \
   || fail "the background harness-named process is not running, so this case would prove nothing"
 assert_state "$SESSION:background" dead \
@@ -297,6 +396,13 @@ assert_state "$SESSION:background" dead \
 kill -0 "$bg_pid" 2>/dev/null \
   || fail "the background harness-named process died during the check, so this case proves nothing"
 pass "tmux liveness: a harness-named background process in an idle pane still classifies dead"
+
+case "${FM_TMUX_LIVENESS_RESIDUE_CHILD:-}" in
+  early-exit) exit 0 ;;
+  induced-failure) fail "induced cleanup-path failure" ;;
+  '') ;;
+  *) fail "unknown residue-child mode" ;;
+esac
 
 # --- an absent window never inherits tmux's active-window fallback ----------
 # tmux answers a display-message for an absent target from the CLIENT's active
@@ -399,4 +505,47 @@ fi
 pass "cursor composer: a stale Cursor screen over a dead shell never reads empty"
 
 cleanup_all
-trap - EXIT
+trap - EXIT INT TERM
+
+assert_residue_unchanged() {  # <process-before> <registry-before> <label>
+  local process_before=$1 registry_before=$2 label=$3 process_after registry_after
+  process_after=$(fm_liveness_process_snapshot)
+  registry_after=$(fm_cleanup_registry_snapshot)
+  [ "$process_after" = "$process_before" ] \
+    || fail "$label left a new $FM_LIVENESS_TMP_ROOT/fm-liveness.* process"
+  [ "$registry_after" = "$registry_before" ] \
+    || fail "$label changed the cleanup registry set"
+}
+
+run_residue_child() {  # <mode> <baseline-processes> <baseline-registries>
+  local mode=$1 process_before=$2 registry_before=$3 log rc
+  log=$(mktemp "${TMPDIR:-/tmp}/fm-liveness-residue.XXXXXX") \
+    || fail "could not allocate residue child log"
+  if FM_TMUX_LIVENESS_RESIDUE_CHILD="$mode" \
+    bash "$ROOT/tests/fm-tmux-agent-liveness.test.sh" >"$log" 2>&1; then
+    rc=0
+  else
+    rc=$?
+  fi
+  case "$mode:$rc" in
+    early-exit:0)
+      grep -Fxq 'ok - tmux liveness: a harness-named background process in an idle pane still classifies dead' "$log" \
+        || { rm -f "$log"; fail "early-exit residue child did not reach its cleanup hook"; }
+      ;;
+    induced-failure:1)
+      grep -Fxq 'not ok - induced cleanup-path failure' "$log" \
+        || { rm -f "$log"; fail "induced-failure residue child failed before its intended cleanup hook"; }
+      ;;
+    early-exit:*) rm -f "$log"; fail "early-exit residue child unexpectedly failed with $rc" ;;
+    induced-failure:0) rm -f "$log"; fail "induced-failure residue child unexpectedly passed" ;;
+    induced-failure:*) rm -f "$log"; fail "induced-failure residue child exited $rc instead of 1" ;;
+    *) rm -f "$log"; fail "unknown residue child result $mode:$rc" ;;
+  esac
+  rm -f "$log"
+  assert_residue_unchanged "$process_before" "$registry_before" "$mode cleanup"
+}
+
+assert_residue_unchanged "$process_baseline" "$registry_baseline" "successful cleanup"
+run_residue_child early-exit "$process_baseline" "$registry_baseline"
+run_residue_child induced-failure "$process_baseline" "$registry_baseline"
+pass "tmux liveness: success, early-exit, and failure cleanup leave no process or registry residue"
