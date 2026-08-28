@@ -1003,6 +1003,45 @@ else:
     raise AssertionError("concurrent fleet inventory softened provider failures")
 module.list_json = original_list_json
 
+# Exact slot reads dominate the repeated cleanup fences. Eleven independently
+# addressed resources complete in two bounded waves, without exceeding the
+# reviewed per-run concurrency ceiling or changing declaration-order errors.
+active = 0
+peak = 0
+original_show_exact_optional = module.show_exact_optional
+def concurrent_exact(_controller, args):
+    global active, peak
+    with lock:
+        active += 1
+        peak = max(peak, active)
+    time.sleep(0.04)
+    with lock:
+        active -= 1
+    return {"name": args[0]}
+module.show_exact_optional = concurrent_exact
+exact = module.show_exact_optional_many(controller, [
+    ("key-{}".format(index), ["value-{}".format(index)])
+    for index in range(11)
+])
+assert peak == module.EXACT_INVENTORY_MAX_WORKERS, peak
+assert peak == 6, peak
+assert exact["key-10"] == {"name": "value-10"}, exact
+
+def ordered_exact_failure(_controller, args):
+    time.sleep(0.04 if args[0] == "first" else 0.01)
+    raise module.ProviderError(args[0] + " failed")
+module.show_exact_optional = ordered_exact_failure
+try:
+    module.show_exact_optional_many(controller, [
+        ("first-key", ["first"]),
+        ("second-key", ["second"]),
+    ])
+except module.ProviderError as exc:
+    assert str(exc).startswith("first-key: first failed"), exc
+else:
+    raise AssertionError("concurrent exact inventory softened provider failures")
+module.show_exact_optional = original_show_exact_optional
+
 action = {
     "type": "deallocate", "slot": 1, "sku": "Standard_D4as_v6",
     "sku_family": "standardDav6Family", "cloud_generation": 1,

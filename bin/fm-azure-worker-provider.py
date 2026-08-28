@@ -64,6 +64,11 @@ EXECUTION_REQUEST_TAG = "execution-request-digest"
 EXECUTION_IDEMPOTENCY_TAG = "execution-idempotency-key"
 EXECUTE_ABANDON_MARKER = "execute-abandon-action"
 MAX_INPUT_BYTES = 2 * 1024 * 1024
+# One slot has eleven independently addressed resources. Six readers finish
+# that inventory in two bounded waves while limiting a four-lane service to
+# at most twenty-four concurrent Azure reads. Cleanup mutations remain at
+# their separate four-worker bound below.
+EXACT_INVENTORY_MAX_WORKERS = 6
 # The one blob name the guest may create, and the ceiling the supervisor
 # enforces before it uploads; both sides bound the same transfer. The name
 # carries the request digest so a later execute against the same worker
@@ -520,7 +525,9 @@ def show_exact_optional_many(controller, operations):
     keys = [key for key, _ in operations]
     if len(keys) != len(set(keys)):
         raise ProviderError("exact Azure inventory operation keys are not unique")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(operations))) as executor:
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(EXACT_INVENTORY_MAX_WORKERS, len(operations))
+    ) as executor:
         futures = {
             key: executor.submit(show_exact_optional, controller, args)
             for key, args in operations
