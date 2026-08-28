@@ -61,7 +61,6 @@ On [PR 1495](https://github.com/kunchenguid/firstmate/pull/1495), its main step 
 Each shard is still strictly serial in itself, and separate runners mean no two of these stateful scripts ever share a machine, so the split needs no concurrency isolation proof.
 
 `bin/fm-test-run.sh` owns `n` and refuses any lane whose `of<n>` disagrees with it.
-`.github/workflows/ci.yml` derives the same `n` from `strategy.job-total` rather than a literal, so changing the shard count in either file without the other fails the lane loudly instead of leaving part of the required suite unrun.
 
 Assignment is longest-processing-time bin packing over per-script duration hints embedded in `bin/fm-test-run.sh`.
 The hints came from the `fm-test-timing-portable-serial-*` artifacts of green CI run [32491999845](https://github.com/kunchenguid/firstmate/actions/runs/32491999845) on 2026-08-21, where the lane ran 116 scripts in 2541548 ms of serial work.
@@ -99,20 +98,8 @@ It separately verifies that the portable serial CI shards are non-empty, disjoin
 
 Portable shards, each portable serial shard, and the Herdr lane upload runner-generated timing JSON.
 `bin/fm-test-run.sh --aggregate-json` creates the combined summary artifact.
-`.github/workflows/ci.yml` owns the exact artifact names and aggregation wiring.
 
 ## Local entry points
 
 [CONTRIBUTING.md](../CONTRIBUTING.md) owns the local test policy and common entry points.
 `bin/fm-test-run.sh --help` owns exact lane names, selection flags, and bounded `--jobs` mechanics.
-
-## Timeouts
-
-| Lane | Bound | Rationale |
-|---|---|---|
-| portable parallel 1/2 | job `timeout-minutes: 10` | The measured shard sums are about three minutes and the timeout is a hang tripwire. |
-| portable serial 1-4 | job `timeout-minutes: 20` | Each balanced shard is about eleven minutes of measured script time, leaving roughly 2x hang-tripwire margin for job setup and runner-speed spread. |
-| Herdr | family-run step `timeout-minutes: 20`; job `timeout-minutes: 75` backstop | Healthy runs finish around 7 minutes, so the step bound is the hang tripwire (cleanup and timing artifacts still upload) while the job cap stays a last-resort backstop. |
-
-Timeouts are hang tripwires rather than expected healthy durations.
-`.github/workflows/ci.yml` owns the exact numbers.

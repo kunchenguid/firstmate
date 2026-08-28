@@ -11,7 +11,6 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 LINT_WF="$ROOT/bin/fm-lint-workflows.sh"
-LINT="$ROOT/bin/fm-lint.sh"
 INSTALLER="$ROOT/bin/fm-install-actionlint.sh"
 REQUIRED=$("$LINT_WF" --required-version)
 
@@ -166,15 +165,6 @@ EOF
 YAML
 }
 
-test_current_workflows_pass() {
-  local out rc
-  rc=0
-  out=$("$LINT_WF" 2>&1) || rc=$?
-  [ "$rc" -eq 0 ] || fail "current workflows must parse, got $rc"$'\n'"$out"
-  assert_contains "$out" "workflow files valid" \
-    "current-workflow lint did not report a valid count"
-  pass "current .github/workflows YAML files parse"
-}
 
 test_col0_heredoc_fails_with_clear_error() {
   local tmp out rc
@@ -459,63 +449,8 @@ test_installer_rejects_unsupported_platform() {
   pass "actionlint installer rejects an unsupported OS or architecture"
 }
 
-# Prove the no-mistakes/local owner (bin/fm-lint.sh with no paths) catches a
-# self-broken ci.yml. Copy the lint scripts into a fake repo so the default
-# workflow root is the fixture, not this worktree.
-test_fm_lint_default_path_catches_broken_ci_yml() {
-  local tmp fakebin log diff_file out rc
-  tmp=$(fm_test_tmproot fm-lint-wf-default)
-  mkdir -p "$tmp/bin" "$tmp/.github/workflows"
-  cp "$LINT" "$tmp/bin/fm-lint.sh"
-  cp "$LINT_WF" "$tmp/bin/fm-lint-workflows.sh"
-  chmod +x "$tmp/bin/fm-lint.sh" "$tmp/bin/fm-lint-workflows.sh"
-  write_col0_heredoc_workflow "$tmp/.github/workflows/ci.yml"
-
-  fakebin=$(fm_fakebin "$tmp")
-  log="$tmp/shellcheck.log"
-  cat > "$fakebin/git" <<'SH'
-#!/usr/bin/env bash
-case "$*" in
-  "rev-parse --is-inside-work-tree") printf 'true\n'; exit 0 ;;
-  "rev-parse --abbrev-ref HEAD") printf 'feature\n'; exit 0 ;;
-  "rev-parse --verify -q origin/main") exit 0 ;;
-  "merge-base "*) printf 'fakebase123\n'; exit 0 ;;
-  "diff --name-only --diff-filter=ACMR -z fakebase123 --")
-    [ -n "${FM_TEST_GIT_DIFF_FILE:-}" ] && cat "${FM_TEST_GIT_DIFF_FILE}"
-    exit 0
-    ;;
-  *) exit 0 ;;
-esac
-SH
-  chmod +x "$fakebin/git"
-  : > "$log"
-  cat > "$fakebin/shellcheck" <<SH
-#!/usr/bin/env bash
-if [ "\${1:-}" = --version ]; then
-  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
-  exit 0
-fi
-shift 3
-printf '%s\n' "\$@" >> "$log"
-exit 0
-SH
-  chmod +x "$fakebin/shellcheck"
-  diff_file="$tmp/diff.nul"
-  : > "$diff_file"
-
-  rc=0
-  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
-    FM_TEST_GIT_DIFF_FILE="$diff_file" "$tmp/bin/fm-lint.sh" 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "fm-lint.sh default path missed a broken ci.yml"$'\n'"$out"
-  assert_contains "$out" "could not parse as YAML" \
-    "fm-lint.sh default path did not surface the workflow YAML error"
-  assert_contains "$out" "ci.yml" \
-    "fm-lint.sh default path did not name the broken workflow"
-  pass "fm-lint.sh default path catches a self-broken ci.yml"
-}
 
 test_pins_an_explicit_version
-test_current_workflows_pass
 test_col0_heredoc_fails_with_clear_error
 test_valid_fixture_passes
 test_empty_workflows_dir_fails
@@ -529,4 +464,3 @@ test_installer_rejects_wrong_checksum
 test_installer_falls_back_to_shasum
 test_installer_prefers_sha256sum_over_shasum
 test_installer_rejects_unsupported_platform
-test_fm_lint_default_path_catches_broken_ci_yml

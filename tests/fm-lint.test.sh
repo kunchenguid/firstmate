@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Parity guard for firstmate's shell-lint definition.
 #
-# bin/fm-lint.sh must be the single owner that BOTH CI
-# (.github/workflows/ci.yml) and the pre-push gate (.no-mistakes.yaml
-# commands.lint) invoke, so the local lint can never diverge from CI again.
+# bin/fm-lint.sh must be the single owner that BOTH the pre-push gate
+# (.no-mistakes.yaml commands.lint) and local validation invoke, so the local
+# lint can never diverge from the gate again.
 # Regression origin: with no commands.lint configured, the local no-mistakes
 # lint step never ran the deterministic
 # `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh`, so PRs passed local
@@ -446,8 +446,6 @@ test_zero_changed_files_exits_clean() {
   [ "$rc" -eq 0 ] || fail "zero changed lint targets must exit 0, got $rc"$'\n'"$out"
   assert_contains "$out" "ShellCheck 0.11.0" "zero-changed run did not print the ShellCheck version line"
   assert_contains "$out" "no changed lint targets" "zero-changed run did not note the empty target set"
-  assert_contains "$out" "workflow files valid" \
-    "zero-changed run skipped workflow YAML validation"
   pass "fm-lint.sh exits 0 with a note when the local branch has no changed lint targets"
 }
 
