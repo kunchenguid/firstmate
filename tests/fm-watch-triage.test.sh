@@ -1444,6 +1444,65 @@ test_daily_leftover_list_retries_when_wake_fails() {
   pass "a leftover list retries the same day when enqueue fails before the marker advances"
 }
 
+# An eligible leftover plus a younger leftover must not refresh the daily marker.
+# Aging only the young note then has to wake firstmate; the already-listed note
+# stays quiet the same day.
+test_daily_leftover_list_reports_young_note_when_it_ages_in() {
+  local dir state fakebin out pid back note_old note_young now mt
+  dir=$(make_case leftover-list-mixed); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  mkdir -p "$dir/wt-old" "$dir/wt-young"
+  printf 'keep-old\n' > "$dir/wt-old/keep-me"
+  printf 'keep-young\n' > "$dir/wt-young/keep-me"
+  printf 'kind=ship\nworktree=%s\n' "$dir/wt-old" > "$state/long-idle.meta"
+  printf 'kind=ship\nworktree=%s\n' "$dir/wt-young" > "$state/fresh-idle.meta"
+  note_old="$state/.leftover-task-long-idle"
+  note_young="$state/.leftover-task-fresh-idle"
+  printf 'task=long-idle\nlast-movement=working: leftover quiet\nwork-sits=%s\n' "$dir/wt-old" > "$note_old"
+  printf 'task=fresh-idle\nlast-movement=working: leftover quiet\nwork-sits=%s\n' "$dir/wt-young" > "$note_young"
+  touch "$state/.leftover-list"
+  back=$(( $(date +%s) - 90000 ))
+  set_mtime "$back" "$state/.leftover-list"
+  set_mtime "$back" "$note_old"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "mixed-age leftover list did not wake for the long-inactive note"
+  grep -F "check: leftover list:" "$out" >/dev/null || fail "mixed-age leftover list did not print the digest: $(cat "$out")"
+  grep -F "long-idle age=" "$out" >/dev/null || fail "mixed-age leftover list omitted the long-inactive note: $(cat "$out")"
+  grep -F "fresh-idle age=" "$out" >/dev/null && fail "mixed-age leftover list included the young note: $(cat "$out")"
+  now=$(date +%s)
+  mt=$(file_mtime "$state/.leftover-list")
+  [ -n "$mt" ] && [ $((now - mt)) -ge 80000 ] || fail "partial leftover digest refreshed the daily leftover-list marker"
+  [ -f "$dir/wt-old/keep-me" ] || fail "mixed-age leftover list deleted unlanded copies"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the mixed-age leftover list"
+  clear_watcher_cycle "$state"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"
+    fail "partial leftover digest re-emitted the long-inactive note the same day: $(cat "$out")"
+  fi
+  grep -F "leftover list" "$out" >/dev/null && { reap "$pid"; fail "already-listed leftover re-screamed before the young note aged in: $(cat "$out")"; }
+  reap "$pid"
+  set_mtime "$back" "$note_young"
+  clear_watcher_cycle "$state"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "young leftover note did not enter the digest when it aged in"
+  grep -F "check: leftover list:" "$out" >/dev/null || fail "aged-in leftover note did not print the digest: $(cat "$out")"
+  grep -Fx "decide-or-discard" "$out" >/dev/null || fail "aged-in leftover note omitted decide-or-discard: $(cat "$out")"
+  grep -F "fresh-idle age=" "$out" >/dev/null || fail "aged-in leftover note was absent from the digest: $(cat "$out")"
+  grep -F "long-idle age=" "$out" >/dev/null && fail "already-listed leftover re-entered when the young note aged in: $(cat "$out")"
+  [ -f "$dir/wt-old/keep-me" ] || fail "aged-in leftover digest deleted unlanded copies"
+  [ -f "$dir/wt-young/keep-me" ] || fail "aged-in leftover digest deleted the young note's unlanded copies"
+  pass "a younger leftover note enters the digest when it ages in after a partial list"
+}
+
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
 #     cadence, never wedge-escalated ------------------------------------------
 # Dead+paused leftover: one inspect, then silence. Never auto-teardown. Never
@@ -3361,6 +3420,7 @@ test_dead_or_unknown_leftover_stays_silent_when_backoff_due
 test_daily_leftover_list_emits_once
 test_daily_leftover_list_skips_discarded_task
 test_daily_leftover_list_retries_when_wake_fails
+test_daily_leftover_list_reports_young_note_when_it_ages_in
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode

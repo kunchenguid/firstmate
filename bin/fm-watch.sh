@@ -44,7 +44,10 @@
 #                          list, then cleans only discarded panes. Agents return
 #                          and rebuilding context costs more, so this is not an
 #                          aggressive sweep: leftover notes younger than
-#                          LEFTOVER_LIST_SECS stay off the digest. This path
+#                          LEFTOVER_LIST_SECS stay off the digest. A mixed-age
+#                          digest leaves the daily marker expired so a younger
+#                          note enters when it ages in; already-listed notes stay
+#                          quiet the same day. This path
 #                          never auto-teardowns unlanded work. A secondmate idle
 #                          stays skipped as healthy. A live declared paused: wait
 #                          keeps its bounded
@@ -111,7 +114,9 @@
 #                          brings the captain that one call, then cleans only
 #                          discarded panes. This path never auto-teardowns
 #                          unlanded work. Leftover notes younger than
-#                          LEFTOVER_LIST_SECS stay off the digest.
+#                          LEFTOVER_LIST_SECS stay off the digest. A mixed-age
+#                          digest leaves the daily marker expired so a younger
+#                          note enters when it ages in.
 #   check: secondmate wake-loop stalled: mate=<id> row=<seq> age=<seconds>s
 #                          the oldest valid row in an endpoint-recorded local
 #                          secondmate home's durable wake queue exceeded
@@ -826,16 +831,18 @@ leftover_idle_backoff_check() {  # <window>
 # Missing marker starts the clock without waking.
 # Notes younger than LEFTOVER_LIST_SECS stay off the digest so agents can return.
 # Young leftover notes leave the marker expired so they enter the digest as soon as they age in.
+# A mixed-age digest also leaves the marker expired; listed notes stay quiet the same day.
 # A digest is queued before the clock advances.
 # The digest is one decide-or-discard for firstmate; this path never teardowns.
 leftover_list_tick() {
-  local marker="$STATE/.leftover-list" rows='' f task last sits age reason any=0
+  local marker="$STATE/.leftover-list" rows='' f task last sits age reason young=0 to_mark='' tmp listed now
   afk_present && return 0
   if [ ! -e "$marker" ]; then
     touch "$marker"
     return 0
   fi
   [ "$(age_of "$marker")" -ge "$LEFTOVER_LIST_SECS" ] || return 0
+  now=$(date +%s)
   for f in "$STATE"/.leftover-task-*; do
     [ -e "$f" ] || continue
     task=$(grep '^task=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- || true)
@@ -847,17 +854,32 @@ leftover_list_tick() {
       rm -f "$f"
       continue
     fi
-    any=1
-    [ "$age" -ge "$LEFTOVER_LIST_SECS" ] || continue
+    listed=$(grep '^listed=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    case "$listed" in
+      ''|*[!0-9]*) ;;
+      *) [ $((now - listed)) -lt "$LEFTOVER_LIST_SECS" ] && continue ;;
+    esac
+    if [ "$age" -lt "$LEFTOVER_LIST_SECS" ]; then
+      young=1
+      continue
+    fi
+    to_mark="$to_mark $f"
     rows="${rows}${task} age=${age}s last-movement=${last:-none} work-sits=${sits:-unknown}"$'\n'
   done
   if [ -z "$rows" ]; then
-    [ "$any" -eq 0 ] && touch "$marker"
+    [ "$young" -eq 0 ] && touch "$marker"
     return 0
   fi
   reason="check: leftover list:"$'\n'"decide-or-discard"$'\n'"$rows"
   fm_wake_append check leftover-list "$reason" || exit 1
-  touch "$marker"
+  for f in $to_mark; do
+    tmp="$f.listed.$$"
+    grep -v '^listed=' "$f" > "$tmp" || true
+    printf 'listed=%s\n' "$now" >> "$tmp"
+    touch -r "$f" "$tmp"
+    mv "$tmp" "$f"
+  done
+  [ "$young" -eq 0 ] && touch "$marker"
   wake "$reason"
 }
 
