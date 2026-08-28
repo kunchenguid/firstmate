@@ -43,7 +43,7 @@
 #                   The required Herdr CI lane uses this so a missing pin cannot
 #                   silently pass as a gate skip.
 #   --jobs N|auto   run the selected scripts with up to N concurrent workers.
-#                   Plain --changed and its `auto` alias use min(4, cpus)
+#                   With --changed, explicit `--jobs auto` uses min(4, cpus)
 #                   workers when multiple selected scripts are admissible.
 #                   N>1 is allowed only when every selected script is proven
 #                   safe to run concurrently: individually in the proven-isolated
@@ -53,14 +53,14 @@
 #                   family proofs may impose a lower cap. Unproven stateful
 #                   scripts stay serial. Concurrent runs are ordered
 #                   longest-hint-first so the slowest script is not stranded
-#                   alone at the tail. Default is 1 (serial) except for
-#                   --changed, which uses the bounded automatic scheduler.
-#                   Any unproven remainder runs serially after that group.
+#                   alone at the tail. Default is 1 (serial); concurrency is
+#                   enabled only by an explicit --jobs value. Any unproven
+#                   remainder under --jobs auto runs serially after that group.
 #   --per-script-timeout-secs N
 #                   terminate a script that runs longer than N seconds and
 #                   record it as exit 124 (0 disables, the default). The
-#                   automatic --changed path applies 900s automatically:
-#                   no real script approaches it, so it only converts a HUNG
+#                   --changed applies 900s automatically: no real script
+#                   approaches it, so it only converts a HUNG
 #                   script into a bounded failure. --max-wall-ms is checked
 #                   after the run and so cannot catch a hang on its own.
 #                   External interruption cleanup is outside this runner's
@@ -135,7 +135,6 @@ SCRIPTS=()
 EXCLUDE_FAMILIES=()
 FAIL_ON_GATE_SKIP=
 JOBS=1
-JOBS_EXPLICIT=0
 JOBS_MAX=8
 MAX_WALL_MS=
 PER_SCRIPT_TIMEOUT_SECS=0
@@ -1489,12 +1488,10 @@ while [ "$#" -gt 0 ]; do
     --jobs)
       [ "$#" -gt 1 ] || die "--jobs requires a positive integer or auto"
       JOBS=$2
-      JOBS_EXPLICIT=1
       shift 2
       ;;
     --jobs=*)
       JOBS=${1#--jobs=}
-      JOBS_EXPLICIT=1
       shift
       ;;
     --max-wall-ms)
@@ -1724,15 +1721,16 @@ for s in "${SCRIPTS[@]}"; do
   [ -x "$s" ] || [ -r "$s" ] || die "test script not readable: $s"
 done
 
-# Plain --changed and its explicit `--jobs auto` alias use the bounded
-# representative-suite scheduler; numeric --jobs retains the strict all-script
-# admission rule below.
+# Every changed run gets a generous per-script hang bound. Concurrency remains
+# an explicit opt-in: only --changed --jobs auto invokes the bounded scheduler;
+# numeric --jobs retains the strict all-script admission rule below.
+if [ "$MODE" = changed ] && [ "${#SCRIPTS[@]}" -gt 0 ] && [ "$PER_SCRIPT_TIMEOUT_SECS" -eq 0 ]; then
+  PER_SCRIPT_TIMEOUT_SECS=$CHANGED_DEFAULT_TIMEOUT_SECS
+fi
+
 AUTO_CONCURRENCY=0
-if [ "$MODE" = changed ] && { [ "$JOBS_EXPLICIT" -eq 0 ] || [ "$JOBS" = auto ]; }; then
+if [ "$MODE" = changed ] && [ "$JOBS" = auto ]; then
   JOBS=1
-  if [ "${#SCRIPTS[@]}" -gt 0 ] && [ "$PER_SCRIPT_TIMEOUT_SECS" -eq 0 ]; then
-    PER_SCRIPT_TIMEOUT_SECS=$CHANGED_DEFAULT_TIMEOUT_SECS
-  fi
   auto_admissible=0
   for s in "${SCRIPTS[@]}"; do
     script_allows_concurrency "$s" && auto_admissible=$((auto_admissible + 1))

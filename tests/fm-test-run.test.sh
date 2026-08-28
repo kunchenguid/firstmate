@@ -258,10 +258,10 @@ test_changed_bin_reference_selects_per_script_not_per_family() {
   pass "a bin reference selects the referencing scripts, and consumers still select their curated families"
 }
 
-# Exercise begin/end markers from real fixture processes to prove the bounded
-# changed-suite default, its explicit serial override, and the auto alias.
-test_changed_uses_bounded_automatic_concurrency() {
-  local tmp repo script serial_shape parallel_shape alias_shape timeout_repo timeout_script rc
+# Exercise begin/end markers from real fixture processes to prove the serial
+# changed-suite default and the explicitly opted-in automatic scheduler.
+test_changed_requires_explicit_concurrency_consent() {
+  local tmp repo script serial_shape parallel_shape timeout_repo timeout_script rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed-consent.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
@@ -279,25 +279,18 @@ SH
   printf '\n' >>"$repo/bin/shared-probe-lib.sh"
 
   (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD) \
-    >"$tmp/parallel.out" 2>"$tmp/parallel.err" \
-    || fail "default changed fixture run failed: $(cat "$tmp/parallel.err")"
-  parallel_shape=$(grep -E '^FM_TEST_(BEGIN|END)' "$tmp/parallel.out" | head -n 2 | awk '{print $1}' | paste -sd, -)
-  [ "$parallel_shape" = FM_TEST_BEGIN,FM_TEST_BEGIN ] \
-    || fail "plain --changed did not use bounded concurrent scheduling: $parallel_shape"
-
-  (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --jobs 1) \
     >"$tmp/serial.out" 2>"$tmp/serial.err" \
-    || fail "explicit serial changed fixture run failed: $(cat "$tmp/serial.err")"
+    || fail "default changed fixture run failed: $(cat "$tmp/serial.err")"
   serial_shape=$(grep -E '^FM_TEST_(BEGIN|END)' "$tmp/serial.out" | head -n 2 | awk '{print $1}' | paste -sd, -)
   [ "$serial_shape" = FM_TEST_BEGIN,FM_TEST_END ] \
-    || fail "explicit --jobs 1 did not force serial execution: $serial_shape"
+    || fail "plain --changed ran concurrently without explicit consent: $serial_shape"
 
   (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --jobs auto) \
-    >"$tmp/alias.out" 2>"$tmp/alias.err" \
-    || fail "auto-jobs alias fixture run failed: $(cat "$tmp/alias.err")"
-  alias_shape=$(grep -E '^FM_TEST_(BEGIN|END)' "$tmp/alias.out" | head -n 2 | awk '{print $1}' | paste -sd, -)
-  [ "$alias_shape" = FM_TEST_BEGIN,FM_TEST_BEGIN ] \
-    || fail "--jobs auto did not preserve automatic scheduling: $alias_shape"
+    >"$tmp/parallel.out" 2>"$tmp/parallel.err" \
+    || fail "explicit automatic scheduling fixture run failed: $(cat "$tmp/parallel.err")"
+  parallel_shape=$(grep -E '^FM_TEST_(BEGIN|END)' "$tmp/parallel.out" | head -n 2 | awk '{print $1}' | paste -sd, -)
+  [ "$parallel_shape" = FM_TEST_BEGIN,FM_TEST_BEGIN ] \
+    || fail "--jobs auto did not enable bounded concurrent scheduling: $parallel_shape"
 
   set +e
   "$RUNNER" --jobs auto --family watcher-wake-lock --list >"$tmp/bad.out" 2>"$tmp/bad.err"
@@ -336,7 +329,7 @@ SH
   [ ! -e "$timeout_repo/should-not-run" ] || fail "automatic timeout helper did not own the single changed script"
 
   rm -rf "$tmp"
-  pass "changed defaults to bounded automatic scheduling with serial override"
+  pass "changed concurrency requires explicit --jobs auto consent"
 }
 
 test_empty_selection_emits_summary() {
@@ -1093,7 +1086,7 @@ test_changed_file_selection_is_conservative
 test_changed_runner_surfaces_select_contract_owners
 test_changed_dependency_selection_and_unmapped_failure
 test_changed_bin_reference_selects_per_script_not_per_family
-test_changed_uses_bounded_automatic_concurrency
+test_changed_requires_explicit_concurrency_consent
 test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior
