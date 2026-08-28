@@ -1658,6 +1658,42 @@ test_endpoint_gone_alarms_despite_a_declared_pause() {
   pass "a lost endpoint alarms once on its own evidence even under a standing declared pause"
 }
 
+# --- a fractional poll interval does not abort the lost-endpoint alarm --------
+# FM_POLL is a whole-second cadence by contract but the watcher tests drive it as
+# low as 0.2, and the confirmation window scales the interval. Multiplying a
+# decimal in Bash integer arithmetic aborts the shell under set -u, so a lost
+# endpoint could silently kill supervision at the exact moment it is needed. The
+# window now floors the interval to a whole second, so a fractional cadence still
+# alarms on the second consecutive missing poll rather than crashing on it.
+test_endpoint_gone_survives_a_fractional_poll_interval() {
+  local dir state fakebin out statusf window key pid
+  dir=$(make_case endpoint-gone-fractional); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; statusf="$state/frac.status"
+  window="test:fm-frac"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/frac.meta"
+  printf 'paused: benchmark batch running, ~40-60 min expected\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-frac_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  unset FM_FAKE_TMUX_CAPTURE 2>/dev/null || true
+  export FM_FAKE_TMUX_WINDOW="$window"
+  export FM_FAKE_TMUX_MISSING_WINDOW="$dir/gone.flag"
+  : > "$FM_FAKE_TMUX_MISSING_WINDOW"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable'
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=1200 FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || fail "a fractional poll interval never alarmed a lost endpoint (arithmetic abort?): $(cat "$out")"
+  grep -F "endpoint gone" "$out" >/dev/null \
+    || fail "a fractional-poll lost endpoint did not name itself in the wake: $(cat "$out")"
+  [ -e "$state/.endpoint-gone-$key" ] || fail "the fractional-poll lost-endpoint marker was not recorded"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the fractional-poll lost-endpoint alarm"
+  unset FM_FAKE_CREW_STATE FM_FAKE_TMUX_MISSING_WINDOW FM_FAKE_TMUX_WINDOW
+  pass "a lost endpoint still alarms under a fractional poll interval instead of aborting on the decimal"
+}
+
 # --- an ordinary teardown is not a lost endpoint -----------------------------
 # bin/fm-teardown.sh closes the runtime endpoint before it removes the task
 # metadata, and the watcher enumerates windows from that metadata without taking
@@ -3125,6 +3161,7 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_acknowledged_wedge_escalation_backs_off
 test_declared_pause_survives_a_redrawing_pane
 test_endpoint_gone_alarms_despite_a_declared_pause
+test_endpoint_gone_survives_a_fractional_poll_interval
 test_teardown_race_does_not_alarm_as_a_lost_endpoint
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound

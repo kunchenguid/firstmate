@@ -595,7 +595,7 @@ ENDPOINT_GONE_CONFIRM_POLLS=10
 # including the transient `unreadable` a backend hiccup produces, drops the pending
 # confirmation so two hiccups a minute apart can never add up to an alarm.
 endpoint_gone_check() {  # <window>
-  local win=$1 key marker pending reason now since
+  local win=$1 key marker pending reason now since poll_secs
   key=$(window_key "$win")
   marker="$STATE/.endpoint-gone-$key"
   pending="$STATE/.endpoint-gone-pending-$key"
@@ -607,7 +607,15 @@ endpoint_gone_check() {  # <window>
   now=$(date +%s)
   since=$(cat "$pending" 2>/dev/null || true)
   case "$since" in ''|*[!0-9]*) since= ;; esac
-  if [ -z "$since" ] || [ "$(( now - since ))" -gt "$(( POLL * ENDPOINT_GONE_CONFIRM_POLLS ))" ]; then
+  # FM_POLL is a whole-second cadence by contract but is driven fractionally in
+  # tests (as low as 0.2) and integer arithmetic on a decimal aborts the shell
+  # under set -u, which would silently kill supervision at the exact moment a lost
+  # endpoint needs it. The confirmation window is integer seconds either way, so
+  # floor POLL to a whole second with a 1s minimum before scaling it.
+  poll_secs=${POLL%%.*}
+  case "$poll_secs" in ''|*[!0-9]*) poll_secs=1 ;; esac
+  [ "$poll_secs" -ge 1 ] || poll_secs=1
+  if [ -z "$since" ] || [ "$(( now - since ))" -gt "$(( poll_secs * ENDPOINT_GONE_CONFIRM_POLLS ))" ]; then
     printf '%s' "$now" > "$pending"
     return 0
   fi
