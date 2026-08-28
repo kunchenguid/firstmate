@@ -26,14 +26,23 @@
 #                          human the wait is on. Only when neither absorb class
 #                          applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
-#                          both surfaced at once. A provably-working stale past the
+#                          both surfaced once. After that inspect, an unchanged
+#                          leftover idle - including a dead pane whose harness is
+#                          unknown or missing, and a leftover done or held window -
+#                          stays quiet until the pane hash changes, busy appears,
+#                          or a captain-relevant status verb is appended. Watching
+#                          less is not deleting: this path never tears down or
+#                          discards unlanded work. A secondmate idle stays
+#                          skipped as healthy. A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
 #                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
 #                          consecutive escalations on the SAME pane, the reason
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
-#                          resume. Unless afk is active. A pane whose own task
+#                          resume. A frozen run that was classified working still
+#                          uses that ladder; leftover idle does not. Unless afk
+#                          is active. A pane whose own task
 #                          worktree was written during the quiet window is
 #                          deferred rather than escalated (wedge_defer_writing),
 #                          because files appearing there are liveness the pane and
@@ -1368,7 +1377,11 @@ EOF
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified, or the declaration a busy pane's
-  # crossed turn bound already handed to the away-mode daemon).
+  # crossed turn bound already handed to the away-mode daemon). A leftover idle
+  # that has already been inspected stays quiet on that same hash until the pane
+  # changes, busy appears, or a captain-relevant status verb is appended; only a
+  # hash still on the provably-working wedge ladder (timer or escalation count)
+  # keeps re-arming.
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
@@ -1504,7 +1517,11 @@ EOF
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
-            else
+            elif [ -e "$ssf" ] || [ -s "$ewf" ]; then
+              # This hash was classified as provably-working: the idle window
+              # timer is running, or the frozen-run ladder already escalated
+              # and cleared the timer. Keep that ladder. A leftover idle that
+              # was already inspected has neither marker and stays quiet.
               wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$task"
             fi
           fi
