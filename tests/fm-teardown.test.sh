@@ -585,6 +585,31 @@ test_local_only_fork_remote_allows() {
   pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
 }
 
+test_local_only_advanced_fork_remote_allows() {
+  local case_dir rc remote_head
+  case_dir=$(make_case advanced-fork-allow)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  git clone -q --branch fm/task-x1 "$case_dir/fork.git" "$case_dir/_advance"
+  git -C "$case_dir/_advance" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m "advance remote branch"
+  git -C "$case_dir/_advance" push -q origin HEAD:fm/task-x1
+  remote_head=$(git -C "$case_dir/_advance" rev-parse HEAD)
+  if git -C "$case_dir/project" cat-file -e "$remote_head^{commit}" 2>/dev/null; then
+    fail "advanced-fork fixture already had the advertised descendant"
+  fi
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "advanced-fork: teardown should accept HEAD contained by an unfetched remote descendant"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "advanced-fork: teardown printed a REFUSED line"
+  pass "local-only teardown fetches advertised descendants for containment"
+}
+
 test_remoteless_local_only_fork_remote_allows() {
   local case_dir rc
   case_dir=$(make_case remoteless-fork-allow)
@@ -2726,6 +2751,7 @@ EOF
 }
 
 test_local_only_fork_remote_allows
+test_local_only_advanced_fork_remote_allows
 test_remoteless_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator

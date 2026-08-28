@@ -1041,32 +1041,63 @@ patch_id_for_commit() {
     | awk 'NR == 1 { print $1 }'
 }
 
+delete_teardown_remote_ref_namespace() {
+  local repo=$1 namespace=$2 refs ref
+  refs=$(git -C "$repo" for-each-ref --format='%(refname)' "$namespace/" 2>/dev/null) || return 1
+  [ -n "$refs" ] || return 0
+  while IFS= read -r ref; do
+    [ -n "$ref" ] && printf 'delete %s\n' "$ref"
+  done <<EOF | git -C "$repo" update-ref --stdin >/dev/null 2>&1
+$refs
+EOF
+}
+
 commits_not_on_configured_remotes() {
-  local format=$1 repo remotes remote advertised oid ref commit has_exclusion=0
-  local -a args
-  args=(log "$format" HEAD)
+  local format=$1 repo remotes remote source_namespace namespace refs ref output
+  local has_exclusion=0 slot=0 status=0 cleanup_status=0
+  local -a args=(log "$format" HEAD) temp_repos=() temp_namespaces=()
   for repo in "$PROJ" "$WT"; do
     remotes=$(git -C "$repo" remote 2>/dev/null) || return 1
     while IFS= read -r remote; do
       [ -n "$remote" ] || continue
-      advertised=$(git -C "$repo" ls-remote --heads "$remote" 2>/dev/null) || continue
-      while read -r oid ref; do
-        [ -n "$oid" ] && [ -n "$ref" ] || continue
-        commit=$(git -C "$WT" rev-parse --verify --quiet "$oid^{commit}" 2>/dev/null) || continue
+      slot=$((slot + 1))
+      source_namespace="refs/fm-teardown/$ID/remote-heads/${BASHPID:-$$}/$slot/source"
+      namespace="refs/fm-teardown/$ID/remote-heads/${BASHPID:-$$}/$slot/heads"
+      delete_teardown_remote_ref_namespace "$repo" "$source_namespace" || return 1
+      delete_teardown_remote_ref_namespace "$WT" "$namespace" || return 1
+      temp_repos+=("$repo" "$WT")
+      temp_namespaces+=("$source_namespace" "$namespace")
+      git -C "$repo" fetch --quiet --no-tags --no-write-fetch-head \
+        "$remote" "+refs/heads/*:$source_namespace/*" >/dev/null 2>&1 || continue
+      git -C "$WT" fetch --quiet --no-tags --no-write-fetch-head \
+        "$repo" "+$source_namespace/*:$namespace/*" >/dev/null 2>&1 || continue
+      refs=$(git -C "$WT" for-each-ref --format='%(refname)' "$namespace/" 2>/dev/null) || {
+        status=1
+        continue
+      }
+      while IFS= read -r ref; do
+        [ -n "$ref" ] || continue
         if [ "$has_exclusion" = 0 ]; then
           args+=(--not)
           has_exclusion=1
         fi
-        args+=("$commit")
+        args+=("$ref")
       done <<EOF
-$advertised
+$refs
 EOF
     done <<EOF
 $remotes
 EOF
   done
   args+=(--)
-  git -C "$WT" "${args[@]}" 2>/dev/null
+  output=$(git -C "$WT" "${args[@]}" 2>/dev/null) || status=1
+  for ((slot=0; slot<${#temp_namespaces[@]}; slot++)); do
+    repo=${temp_repos[$slot]}
+    namespace=${temp_namespaces[$slot]}
+    delete_teardown_remote_ref_namespace "$repo" "$namespace" || cleanup_status=1
+  done
+  [ "$status" = 0 ] && [ "$cleanup_status" = 0 ] || return 1
+  printf '%s\n' "$output"
 }
 
 unpushed_patches_are_in_pr_head() {
