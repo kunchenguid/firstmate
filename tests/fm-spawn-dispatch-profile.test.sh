@@ -12,6 +12,9 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
+TEST_REAL_MV=$(command -v mv)
+TEST_REAL_RM=$(command -v rm)
+export FM_TEST_REAL_MV="$TEST_REAL_MV" FM_TEST_REAL_RM="$TEST_REAL_RM"
 
 make_spawn_pi_probe() {
   local fakebin=$1 tool=$2
@@ -74,6 +77,32 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+target=${!#}
+if [ -n "${FM_FAKE_RETIRE_META:-}" ] && [ "$target" = "$FM_FAKE_RETIRE_META" ]; then
+  [ "${FM_FAKE_RETIRE_META_FAIL:-0}" = 0 ] || exit 73
+  "$FM_TEST_REAL_MV" "$@"
+  status=$?
+  [ "$status" -eq 0 ] || exit "$status"
+  [ -z "${FM_FAKE_RETIRE_ORDER_LOG:-}" ] || printf 'publish\n' >> "$FM_FAKE_RETIRE_ORDER_LOG"
+  exit 0
+fi
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  cat > "$fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+set -u
+for target in "$@"; do
+  if [ -n "${FM_FAKE_RETIRE_MARKER:-}" ] && [ "$target" = "$FM_FAKE_RETIRE_MARKER" ]; then
+    [ -f "${FM_FAKE_RETIRE_META:-}" ] || exit 74
+    [ -z "${FM_FAKE_RETIRE_ORDER_LOG:-}" ] || printf 'clear\n' >> "$FM_FAKE_RETIRE_ORDER_LOG"
+  fi
+done
+exec "$FM_TEST_REAL_RM" "$@"
+SH
+  chmod +x "$fakebin/mv" "$fakebin/rm"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -126,6 +155,7 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
+    FM_TEST_REAL_MV="$TEST_REAL_MV" FM_TEST_REAL_RM="$TEST_REAL_RM" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
@@ -826,6 +856,117 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+write_spawn_retirement_marker() {  # <state> <task-id>
+  printf 'schema=fm-record-retired.v1\ntask_id=%s\nwindow=firstmate:fm-%s\nmeta_sha256=%064d\n' \
+    "$2" "$2" 0 > "$1/.record-retired-$2"
+}
+
+test_partial_bin_spawn_preserves_marker_compatibility_contract() {
+  local partial_root rec id out status marker target
+  partial_root="$TMP_ROOT/partial-spawn-root"
+  mkdir -p "$partial_root"
+  cp -R "$ROOT/bin" "$partial_root/bin"
+  rm -f "$partial_root/bin/fm-record-retire-lib.sh"
+
+  id=profile-partial-no-marker-z19a
+  rec=$(make_spawn_case profile-partial-no-marker claude "$id")
+  read_case_record "$rec"
+  out=$(SPAWN="$partial_root/bin/fm-spawn.sh" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "partial-bin spawn without a retirement marker should succeed"
+  assert_not_contains "$out" "command not found" \
+    "partial-bin marker-free spawn called an unavailable marker interface"
+  assert_present "$HOME_DIR/state/$id.meta" \
+    "partial-bin marker-free spawn did not publish canonical metadata"
+
+  id=profile-partial-regular-marker-z19b
+  rec=$(make_spawn_case profile-partial-regular-marker claude "$id")
+  read_case_record "$rec"
+  marker="$HOME_DIR/state/.record-retired-$id"
+  write_spawn_retirement_marker "$HOME_DIR/state" "$id"
+  out=$(SPAWN="$partial_root/bin/fm-spawn.sh" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "partial-bin spawn accepted an existing regular retirement marker"
+  assert_contains "$out" "record-retirement support is unavailable" \
+    "partial-bin regular-marker refusal did not name unavailable retirement support"
+  assert_not_contains "$out" "command not found" \
+    "partial-bin regular-marker refusal called an unavailable marker interface"
+  assert_present "$marker" "partial-bin spawn removed an existing regular retirement marker"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "partial-bin regular-marker refusal published canonical metadata"
+
+  id=profile-partial-symlink-marker-z19c
+  rec=$(make_spawn_case profile-partial-symlink-marker claude "$id")
+  read_case_record "$rec"
+  marker="$HOME_DIR/state/.record-retired-$id"
+  target="$HOME_DIR/state/partial-marker-target"
+  printf 'unsupported marker\n' > "$target"
+  ln -s "$target" "$marker"
+  out=$(SPAWN="$partial_root/bin/fm-spawn.sh" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "partial-bin spawn accepted an existing symlink retirement marker"
+  assert_contains "$out" "record-retirement support is unavailable" \
+    "partial-bin symlink-marker refusal did not name unavailable retirement support"
+  assert_not_contains "$out" "command not found" \
+    "partial-bin symlink-marker refusal called an unavailable marker interface"
+  [ -L "$marker" ] || fail "partial-bin spawn removed an existing symlink retirement marker"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "partial-bin symlink-marker refusal published canonical metadata"
+  pass "partial-bin spawns permit no marker and preserve regular or symlink markers"
+}
+
+test_spawn_clears_only_a_valid_inherited_retirement_marker() {
+  local rec id out status marker order_log
+  id=profile-retired-valid-z20
+  rec=$(make_spawn_case profile-retired-valid claude "$id")
+  read_case_record "$rec"
+  marker="$HOME_DIR/state/.record-retired-$id"
+  order_log="$CASE_DIR/retirement-order.log"
+  write_spawn_retirement_marker "$HOME_DIR/state" "$id"
+
+  out=$(FM_FAKE_RETIRE_META="$HOME_DIR/state/$id.meta" \
+    FM_FAKE_RETIRE_MARKER="$marker" FM_FAKE_RETIRE_ORDER_LOG="$order_log" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "spawn with a valid inherited retirement marker should succeed"
+  assert_absent "$marker" "fresh spawn left the old retirement marker active"
+  assert_present "$HOME_DIR/state/$id.meta" "fresh spawn did not publish canonical metadata"
+  [ "$(cat "$order_log")" = $'publish\nclear' ] \
+    || fail "fresh spawn did not publish metadata before clearing its inherited retirement marker"
+
+  id=profile-retired-publish-failure-z20b
+  rec=$(make_spawn_case profile-retired-publish-failure claude "$id")
+  read_case_record "$rec"
+  marker="$HOME_DIR/state/.record-retired-$id"
+  write_spawn_retirement_marker "$HOME_DIR/state" "$id"
+  out=$(FM_FAKE_RETIRE_META="$HOME_DIR/state/$id.meta" \
+    FM_FAKE_RETIRE_MARKER="$marker" FM_FAKE_RETIRE_META_FAIL=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded after metadata publication failed"
+  assert_present "$marker" "metadata-publication failure removed the inherited retirement marker"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "metadata-publication failure left canonical metadata behind"
+
+  id=profile-retired-invalid-z21
+  rec=$(make_spawn_case profile-retired-invalid claude "$id")
+  read_case_record "$rec"
+  marker="$HOME_DIR/state/.record-retired-$id"
+  printf 'invalid marker\n' > "$marker"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn ignored an invalid inherited retirement marker"
+  assert_contains "$out" "invalid record-retirement marker" \
+    "spawn refusal did not explain the invalid inherited marker"
+  assert_present "$marker" "spawn removed an inherited marker it could not validate"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "spawn published metadata after retirement-marker validation failed"
+  pass "fresh spawn clears a valid retirement marker and refuses an invalid one"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
@@ -857,5 +998,7 @@ test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_partial_bin_spawn_preserves_marker_compatibility_contract
+test_spawn_clears_only_a_valid_inherited_retirement_marker
 
 echo "# all fm-spawn-dispatch-profile tests passed"

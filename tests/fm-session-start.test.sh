@@ -1162,6 +1162,31 @@ EOF
   pass "orphan status logs are printed once with bounded tails"
 }
 
+test_marker_cannot_hide_orphan_with_broken_metadata_link() {
+  local rec root home fakebin out id digest
+  rec=$(new_world orphan-broken-meta-link)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  id=task-orphan-broken-meta
+  digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  printf 'blocked: metadata link needs investigation\n' > "$home/state/$id.status"
+  ln -s "$home/state/missing-meta-target" "$home/state/$id.meta"
+  printf 'schema=fm-record-retired.v1\ntask_id=%s\nwindow=firstmate:fm-%s\nmeta_sha256=%s\n' \
+    "$id" "$id" "$digest" > "$home/state/.record-retired-$id"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "--- $id ---" \
+    "valid marker hid an orphan whose canonical metadata path was still a symlink"
+  assert_contains "$out" "blocked: metadata link needs investigation" \
+    "orphan digest omitted the status behind a broken metadata link"
+  pass "session start keeps marker-bearing orphan status visible while a metadata symlink remains"
+}
+
 # --- session-start secondmate recovery boundary -----------------------------
 
 test_session_start_relaunches_missing_pi_secondmate() {
@@ -2477,6 +2502,7 @@ test_session_start_relaunches_herdr_husk_secondmate
 test_status_tail_bounding
 test_status_tail_line_cap
 test_orphan_status_logs_are_printed
+test_marker_cannot_hide_orphan_with_broken_metadata_link
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts

@@ -672,6 +672,7 @@ SPAWN_META_TMP=
 SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
+SPAWN_RETIREMENT_MARKER_INHERITED=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -1963,7 +1964,7 @@ case "$BACKEND" in
     HERDR_LAUNCHER_RELATIONSHIP=launcher-home
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
-      HERDR_LAUNCHER_RELATIONSHIP=other-home
+      HERDR_LAUNCHER_RELATIONSHIP='other-home'
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
@@ -2690,13 +2691,17 @@ fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
-SPAWN_META_PATH="$STATE/$ID.meta"
+SPAWN_META_TMP="$STATE/.$ID.meta.spawn.${BASHPID:-$$}"
+SPAWN_META_PATH=$SPAWN_META_TMP
+SPAWN_RETIREMENT_MARKER=$(fm_record_retire_marker_path "$STATE" "$ID")
+if [ -e "$SPAWN_RETIREMENT_MARKER" ] || [ -L "$SPAWN_RETIREMENT_MARKER" ]; then
+  fm_record_retire_marker_validate_for_spawn "$STATE" "$ID" || exit 1
+  SPAWN_RETIREMENT_MARKER_INHERITED=1
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=1
-  SPAWN_META_TMP="$STATE/.$ID.meta.relaunch.${BASHPID:-$$}"
-  SPAWN_META_PATH=$SPAWN_META_TMP
 fi
 preserve_relaunch_meta() {
   awk -F= '
@@ -2756,12 +2761,18 @@ preserve_relaunch_meta() {
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
 } > "$SPAWN_META_PATH"
+SPAWN_META_PUBLISH_STARTED=1
+mv -f -- "$SPAWN_META_TMP" "$STATE/$ID.meta"
 if [ "$RELAUNCH" -eq 1 ]; then
-  SPAWN_META_PUBLISH_STARTED=1
-  mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
   RELAUNCH_REPLACEMENT_PENDING=0
-  SPAWN_META_PUBLISH_STARTED=0
-  SPAWN_META_TMP=
+fi
+SPAWN_META_PUBLISH_STARTED=0
+SPAWN_META_TMP=
+if [ "$SPAWN_RETIREMENT_MARKER_INHERITED" = 1 ]; then
+  fm_record_retire_marker_clear_for_spawn "$STATE" "$ID" || exit 1
+  SPAWN_RETIREMENT_MARKER_INHERITED=0
+fi
+if [ "$RELAUNCH" -eq 1 ]; then
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
 fi

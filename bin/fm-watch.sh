@@ -795,9 +795,13 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # surfaced or intentionally absorbed, so a watcher killed mid-cycle never
 # swallows a signal.
 scan_signals() {
-  local f sig sf
+  local f sig sf task
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
     [ -e "$f" ] || continue
+    task=$(basename "$f")
+    task=${task%.status}
+    task=${task%.turn-ended}
+    fm_record_retire_marker_active "$STATE" "$task" && continue
     sig=$(fm_wake_signal_sig "$f") || continue
     [ -n "$sig" ] || continue
     sf=$(fm_wake_signal_seen_path "$STATE" "$f")
@@ -939,8 +943,8 @@ run_check_capture() {
   fm_check_output_cleanup
 }
 
-# Surfaced-marker bookkeeping for the heartbeat backstop is owned by
-# fm-push-transition-lib.sh because push and poll paths must write one format.
+# The heartbeat surfaced-marker path and task-id normalization are owned by
+# fm-wake-lib.sh so push, poll, and retirement use one format.
 # Mark every current captain-relevant status as surfaced. Called after the
 # heartbeat backstop enqueues its wake, so the same statuses are not re-surfaced
 # by the next heartbeat.
@@ -948,7 +952,7 @@ mark_all_captain_relevant_surfaced() {
   local f task last
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
-    printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
+    printf '%s' "$last" > "$(fm_wake_hb_surfaced_path "$STATE" "$task")"
   done < <(scan_captain_relevant_statuses "$STATE")
 }
 
@@ -964,7 +968,7 @@ heartbeat_scan_finds_actionable() {
   local f task last surfaced
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
-    surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
+    surfaced=$(cat "$(fm_wake_hb_surfaced_path "$STATE" "$task")" 2>/dev/null || true)
     [ "$surfaced" = "$last" ] && continue
     return 0
   done < <(scan_captain_relevant_statuses "$STATE")
