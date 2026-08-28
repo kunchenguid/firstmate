@@ -100,12 +100,14 @@
 #                 corroboration. This is NOT a claim that the task crashed - only
 #                 that no corroborated wall signature is present in what was
 #                 readable.
-#   unknown       the evidence could not be read at all. A step log that failed
-#                 to read lands here (`reason=step-log-unreadable`), never on
-#                 `no-signature`, because "nothing matched" is a claim about
-#                 evidence that was actually read.
+#   unknown       the evidence could not be read at all. A step log that yielded
+#                 nothing to read lands here (`reason=step-log-unreadable`),
+#                 never on `no-signature`, because "nothing matched" is a claim
+#                 about evidence that was actually read.
 # A partial scan discloses both of its gaps separately: `unread=` names logs that
-# resisted a read, `unscanned=` names logs the budget never reached. Diagnose
+# yielded no evidence - the read failed, or it succeeded with no content at all,
+# which `axi logs` does for a step that never produced one - and `unscanned=`
+# names logs the budget never reached. Diagnose
 # always attempts at least one log, so budget truncation reaches a reader here as
 # `unscanned=` rather than as a reason slug of its own; the reason
 # `scan-budget-exhausted` belongs to the digest's fleet-wide scan
@@ -293,8 +295,26 @@ USAGE_WALL_EXIT_PATTERNS="$USAGE_WALL_EXIT_PATTERNS|exit(ed with)? code [1-9]"
 # prose that narrates both facts at once.
 #
 # It is a whole-evidence rule, deliberately not a proximity or window one: a
-# narrowed window trades a real detection for an accident of layout. The residual
-# it therefore does not close is recorded in docs/usage-limit-survivability.md.
+# narrowed window trades a real detection for an accident of layout.
+#
+# THE GAP THIS LEAVES OPEN, measured rather than assumed: sliding the default
+# 200-line capture window over this repository's tracked files and running this
+# rule over each window, two files still read as a wall - the verification
+# record, which quotes a real step log verbatim, and THIS FILE, whose header
+# above quotes a limit phrasing while a later line carries an independent exit
+# phrase. The detector's own source trips the detector. Anyone editing this
+# function is already reading the text that causes it, which is why the gap is
+# recorded here and not only in the feature document.
+#
+# Revisit it if the vendor emits the phrasing and the exit on one line, if a
+# real transcript turns up a multi-line wall being missed, or if this text
+# drifts so a window over some third file starts reading as a wall. The open
+# question behind it, which widening this disclosure again will not answer, is
+# whether a wall verdict should be authoritative only where a structural signal
+# exists - the harness's own non-zero exit together with the vendor's final line
+# in a pipeline step log - and be demoted to a non-asserting hint on the pane
+# path, where only a screen scrape is available.
+# docs/usage-limit-survivability.md owns the rule and this residual in full.
 first_wall_line() {  # <evidence>
   local evidence=${1:-}
   printf '%s\n' "$evidence" |
@@ -854,7 +874,13 @@ cmd_diagnose() {
     # exit status, so a log that could not be read at all was indistinguishable
     # from one read cleanly with no match - and `checked=` then named a step
     # nothing had ever looked at. The status decides which of the two this is.
-    if logs=$(fm_nm_run_checked "$wt" "$bound" axi logs --run "$run_id" --step "$step" --full); then
+    # The exit status alone is not enough: `axi logs` exits 0 with NO output for
+    # a step that never produced one (a cancelled or skipped step), and counting
+    # that as a read listed a step nothing looked at in `checked=` and let the
+    # scan settle on `no-signature` - the verdict this header defines as evidence
+    # that WAS read. Empty output is therefore no evidence, not a clean read.
+    if logs=$(fm_nm_run_checked "$wt" "$bound" axi logs --run "$run_id" --step "$step" --full) \
+      && [ -n "$logs" ]; then
       readable=$((readable + 1))
       checked="${checked:+$checked,}step-log:$step"
       log_line=$(first_wall_line "$logs")

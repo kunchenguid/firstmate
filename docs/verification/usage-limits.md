@@ -32,7 +32,7 @@ The verdict is `unknown` with its reason, never `ok`:
 
 ```
 HEADROOM: (all providers) unknown reason=quota-axi is not installed
-HEADROOM_SUMMARY: verdict=unknown measured=0 tight=0 wall=0 unknown=1 source=quota-axi/unavailable
+HEADROOM_SUMMARY: verdict=unknown measured=0 tight=0 wall=0 unknown=1 source=quota-axi/unavailable build=unavailable
 HEADROOM_NOTE: headroom is UNMEASURED, not healthy - install it with npm install -g quota-axi to get a reading.
 HEADROOM_NEXT: <repo>/bin/fm-usage-wall.sh resume regenerates the resume record for the work now in flight.
 ```
@@ -216,11 +216,12 @@ It asserts the same for an endpoint with no window recorded, which is not alive 
 Run on a disposable scratch task on a private tmux socket, never on live work.
 Steps 1 and 2 establish a task whose harness has just hit the wall; step 3 removes the whole terminal server, which is the shape of [issue #3113](https://github.com/kunchenguid/firstmate/issues/3113).
 
-To reproduce: put a `tmux` shim on `PATH` that redirects to a private socket (`tmux -L <name>`, the pattern `tests/fm-backend-tmux-smoke.test.sh` uses); create a scratch `FM_HOME`, git repo, worktree, and `state/<id>.meta`; open the recorded session and window with the worktree as its working directory and print the vendor limit line into it; then run the steps below in order.
+To reproduce: put a `tmux` shim on `PATH` that redirects to a private socket (`tmux -L <name>`, the pattern `tests/fm-backend-tmux-smoke.test.sh` uses); create a scratch `FM_HOME`, git repo, worktree, and a `state/<id>.meta` carrying a project identity as well as the window and worktree; open the recorded session and window with the worktree as its working directory; then run the steps below in order.
+Print the harness's real TWO-line output into the pane - the vendor limit line and the harness's own exit line on its own line - because the corroboration rule requires the exit line and a lone phrasing no longer reads as a wall.
+Print it from a file rather than typing it, or the shell's own command echo carries the phrasing and becomes the matched line instead of the harness's output.
 An unrelated turn-end guard banner is elided from step 6's output.
 
 ```
-
 === 1. the scratch task's endpoint exists and the harness has just hit the wall ===
 fm-proofcrew
 agent state: dead
@@ -238,11 +239,13 @@ exit status: 1
 
 === 5. the work itself is intact on the branch ===
 fm/proofcrew
-2f979c3 init
+95395a9 init
 
 === 6. teardown also refuses, because the work is unlanded ===
-worktree <scratch>/wt is not managed by treehouse
-error: treehouse return failed for worktree <scratch>/wt; teardown aborted
+REFUSED: worktree <scratch>/wt has work not on any remote and not landed.
+unpushed commits:
+95395a9 init
+Push the branch, land its PR, or get the captain's explicit OK to discard, then --force.
 exit status: 1
 
 === 7. recreate the EXACT recorded endpoint, with the recorded local copy as its working directory ===

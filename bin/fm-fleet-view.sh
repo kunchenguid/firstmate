@@ -53,9 +53,27 @@ command -v jq >/dev/null 2>&1 || { echo "fm-fleet-view: jq not found" >&2; exit 
 SNAPSHOT=$("$SCRIPT_DIR/fm-fleet-snapshot.sh" --json) || exit $?
 HEADROOM_INNER=$((HEADROOM_TIMEOUT * 3 / 4))
 [ "$HEADROOM_INNER" -ge 1 ] || HEADROOM_INNER=1
+# Every non-zero exit used to be reported as a timeout, but only 124 is one.
+# `headroom` exits 2 on a usage error - reachable from here because
+# FM_USAGE_WALL_QUOTA_TIMEOUT is passed through from the operator's environment
+# and a non-numeric value is refused - and 126/127 when the script cannot be
+# executed at all. This surface's own rule is that an unknown carries its real
+# reason, so a reason that can be false is the one thing it must not print.
 HEADROOM=$(FM_USAGE_WALL_QUOTA_TIMEOUT=${FM_USAGE_WALL_QUOTA_TIMEOUT:-$HEADROOM_INNER} \
-  fm_run_timed "$HEADROOM_TIMEOUT" "$SCRIPT_DIR/fm-usage-wall.sh" headroom 2>/dev/null) \
-  || HEADROOM="HEADROOM: (all providers) unknown reason=the headroom read did not complete within ${HEADROOM_TIMEOUT}s"
+  fm_run_timed "$HEADROOM_TIMEOUT" "$SCRIPT_DIR/fm-usage-wall.sh" headroom 2>/dev/null) || {
+  headroom_rc=$?
+  case "$headroom_rc" in
+    124) headroom_reason="the headroom read did not complete within ${HEADROOM_TIMEOUT}s" ;;
+    2) headroom_reason="the headroom read was refused as a usage error (exit 2); check FM_USAGE_WALL_QUOTA_TIMEOUT" ;;
+    126) headroom_reason="$SCRIPT_DIR/fm-usage-wall.sh is not executable (exit 126)" ;;
+    127) headroom_reason="$SCRIPT_DIR/fm-usage-wall.sh could not be found to run (exit 127)" ;;
+    *) headroom_reason="the headroom read exited $headroom_rc" ;;
+  esac
+  # The note travels with the fallback: an unknown that loses it reads as absent
+  # rather than unmeasured, which is the confusion this whole surface refuses.
+  HEADROOM="HEADROOM: (all providers) unknown reason=$headroom_reason
+HEADROOM_NOTE: headroom is UNMEASURED, not healthy - treat it as unproven when deciding what to dispatch."
+}
 
 printf '%s\n' "$SNAPSHOT" | jq -r '
   def dash($v): if $v == null or $v == "" then "-" else $v end;

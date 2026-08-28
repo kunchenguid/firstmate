@@ -664,6 +664,27 @@ test_view_headroom_reads_the_stubbed_gauge() {
   pass "fleet view reads the stubbed gauge, so the suite is host-independent"
 }
 
+# The fallback used to attribute EVERY non-zero exit of the headroom command to a
+# timeout. `headroom` exits 2 on a usage error, which is reachable from the view
+# because FM_USAGE_WALL_QUOTA_TIMEOUT is passed through from the operator's
+# environment. A reason that can be false is the one thing this surface must not
+# print, and the UNMEASURED note must survive the fallback rather than leaving an
+# unknown that reads as merely absent.
+test_view_headroom_fallback_states_a_true_reason() {
+  local home fakebin view
+  home=$(make_home headroom-usage-error)
+  fakebin=$(make_fakebin "$home")
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_USAGE_WALL_QUOTA_TIMEOUT=not-a-number \
+    FM_FLEET_VIEW_HEADROOM_TIMEOUT=30 "$VIEW")
+  assert_contains "$view" "usage error (exit 2)" \
+    "a usage error must be named as one, not reported as a timeout"
+  assert_not_contains "$view" "did not complete within" \
+    "the view must not claim a timeout that did not happen"
+  assert_contains "$view" "UNMEASURED, not healthy" \
+    "the fallback must keep the note that an unknown is unmeasured rather than fine"
+  pass "fleet view fallback states the real reason and keeps the unmeasured note"
+}
+
 test_view_renders_dead_secondmate_agent_status() {
   local home fakebin view
   home=$(make_home dead-secondmate)
@@ -862,6 +883,7 @@ test_parked_scout_decision_stays_pending() {
 
 test_view_headroom_is_bounded_and_unknown_reads_unknown
 test_view_headroom_reads_the_stubbed_gauge
+test_view_headroom_fallback_states_a_true_reason
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure

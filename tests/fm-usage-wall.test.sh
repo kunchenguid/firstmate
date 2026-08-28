@@ -917,6 +917,46 @@ assert_contains "$OUT" 'step-log:review' 'the log that was read is named as chec
 assert_contains "$OUT" 'unread=test' 'the log that was NOT read is disclosed on the same line'
 pass 'diagnose discloses a partially read scan instead of reporting it clean'
 
+# --- diagnose: an EMPTY successful log read is not a read -------------------
+#
+# `axi logs` exits 0 and prints nothing for a step that never produced a log (a
+# cancelled or skipped step). Branching on the exit status alone counted that as
+# read: the step landed in `checked=` and the scan settled on `no-signature`,
+# which this command defines as evidence that WAS read. Empty output is no
+# evidence, so it belongs with the steps that yielded nothing.
+CASE="$TMP_ROOT/dx-log-empty"; mkdir -p "$CASE"
+make_task "$CASE" emptycrew
+printf 'idle shell\n' > "$CASE/capture.txt"
+fake_tmux "$CASE_FB" fm-emptycrew "$CASE/capture.txt"
+fake_nm_perstep "$CASE_FB" "fm/emptycrew" RUNEMPTY failed \
+  '    review,cancelled,0,10
+    test,failed,0,120'
+: > "$CASE_FB/log-review"                      # exists, readable, EMPTY, exits 0
+printf 'tests failed: 3 assertions\n' > "$CASE_FB/log-test"
+OUT=$(run_wall "$CASE_HOME" "$CASE_FB" diagnose emptycrew)
+assert_not_contains "$OUT" 'step-log:review' \
+  'a step whose log had nothing in it must never be listed as checked'
+assert_contains "$OUT" 'unread=review' \
+  'the empty step is disclosed as having yielded no evidence'
+assert_contains "$OUT" 'step-log:test' 'the step that did have content is still read'
+pass 'diagnose does not count an empty successful log read as evidence read'
+
+# Every step empty means nothing was read at all, so the verdict must be the
+# honest `unknown`, not `no-signature` - the same boundary as a failed read.
+CASE="$TMP_ROOT/dx-log-all-empty"; mkdir -p "$CASE"
+make_task "$CASE" allemptycrew
+printf 'idle shell\n' > "$CASE/capture.txt"
+fake_tmux "$CASE_FB" fm-allemptycrew "$CASE/capture.txt"
+fake_nm_perstep "$CASE_FB" "fm/allemptycrew" RUNALLEMPTY failed \
+  '    review,cancelled,0,10'
+: > "$CASE_FB/log-review"
+OUT=$(run_wall "$CASE_HOME" "$CASE_FB" diagnose allemptycrew)
+assert_contains "$OUT" 'unknown' 'a scan that read nothing reports unknown'
+assert_contains "$OUT" 'step-log-unreadable' 'and names the reason it could not read'
+assert_not_contains "$OUT" 'no-signature' \
+  'nothing matched is a claim about evidence that was actually read'
+pass 'diagnose reports unknown when every step log yielded nothing'
+
 # The scan used to stop after three failed steps, silently. A run whose FOURTH
 # failed step carries the vendor limit line would then return `no-signature` -
 # the exact false negative this command exists to prevent.

@@ -124,8 +124,13 @@ The negative stays `no-signature`, which is still not proof that the work crashe
 
 The rule is whole-evidence rather than proximity or window based, because a narrowed window would trade a real detection for an accident of layout.
 The residual it leaves open is stated rather than hidden.
-A pane displaying this surface's verification record shows the limit line and the harness's exit line on separate lines exactly as the harness emitted them, because it is that step log quoted verbatim, so that one page still reads as a wall.
-Closing it would mean either degrading the record whose value depends on quoting real evidence, or guessing from layout, and both are worse trades than the residual.
+The residual is larger than one page, and it was understated here before it was measured.
+Sliding the default 200-line capture window over this repository's tracked files and running the shipped rule over each window, two files still read as a wall: `docs/verification/usage-limits.md`, which quotes a real step log verbatim, and `bin/fm-usage-wall.sh` itself, whose header quotes a limit phrasing while a later line carries an independent exit phrase.
+The detector's own source tripping the detector is the sharpest form of the defect class named above, and it is why the scope belongs here in measured terms rather than as an example.
+Closing it would mean either degrading a record whose value depends on quoting real evidence, or guessing from layout, and both are worse trades than the residual.
+
+Revisit this if the vendor emits the phrasing and the exit on one line, if a real transcript turns up a multi-line wall being missed, or if either file's text drifts so that a window over some third file starts reading as a wall.
+The open question behind it, which a fourth round of widening this disclosure will not answer, is whether a wall verdict should be authoritative only where a structural signal exists - the harness's own non-zero exit together with the vendor's final line in a pipeline step log - and be demoted to a non-asserting hint on the pane path, where only a screen scrape is available and this repository's own text can be on screen.
 
 ## Why every bounded scan discloses what it skipped
 

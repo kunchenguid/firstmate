@@ -43,8 +43,9 @@ Run `bin/fm-usage-wall.sh diagnose <task-id>`.
 It reads the endpoint's own output and then the failed pipeline steps' logs, and answers `wall`, `no-signature`, or `unknown`.
 `no-signature` means nothing matched in what was readable, and `unknown` means the evidence could not be read; neither is proof that the work crashed, so do not record a failure on either.
 A `wall` needs the vendor's phrasing and, on a different line of the same evidence, the harness's own non-zero exit, because this repository's tracked text quotes those phrasings and a pane merely showing it should not be read as a wall.
-That corroboration closes one sentence of prose narrating both facts at once, and it does not close a page quoting a real transcript, so [`docs/verification/usage-limits.md`](../../../docs/verification/usage-limits.md) still reads as a wall.
-[`docs/usage-limit-survivability.md`](../../../docs/usage-limit-survivability.md) owns the rule and that open residual.
+That corroboration closes one sentence of prose narrating both facts at once, and it does not close an evidence window quoting a real transcript, so two tracked files still read as a wall: `docs/verification/usage-limits.md` and `bin/fm-usage-wall.sh` itself.
+If a worker had either on screen when its endpoint died, treat an endpoint-sourced wall as unproven and read the step log before believing it.
+[`docs/usage-limit-survivability.md`](../../../docs/usage-limit-survivability.md) owns the rule, the measured scope of that residual, and the condition that should make someone revisit it.
 Read the verdict's own disclosure before trusting a negative: `checked=` names what was actually read, `unread=` names logs that resisted a read, and `unscanned=` names logs the scan's budget never reached.
 A verdict carrying either list is a partial scan, so read those logs yourself before concluding anything.
 
