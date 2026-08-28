@@ -659,6 +659,7 @@ remote_secondmate_teardown_locked() {
 }
 
 if remote_secondmate_teardown_locked; then
+  "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
   exit 0
 else
   remote_teardown_rc=$?
@@ -2829,5 +2830,6 @@ META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
+"$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 echo "teardown $ID complete (window $T, worktree $WT)"
 backlog_refresh_reminder

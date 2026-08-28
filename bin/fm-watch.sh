@@ -1316,6 +1316,11 @@ while :; do
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    # The final coalesced signal set is the watcher-carried status-change
+    # trigger for this home's published summary. Refresh before either
+    # surfacing or absorbing the signal so an actionable exit cannot leave the
+    # ledger behind the event it reports. Publication failure stays side-band.
+    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do
       [ -n "$sf" ] || continue
