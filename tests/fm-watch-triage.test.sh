@@ -9,7 +9,7 @@
 # advanced, beacon fresh), stopped-crew no-verb wakes surfaced (queue + exit),
 # provably-working stale panes absorbed-then-escalated past the threshold,
 # leftover idle inspected once then kept quiet on the same hash, dead or
-# leftover done/held windows not re-rung, terminal-looking stale status lines
+# leftover done/held windows not re-rung even when the pause cadence is due, terminal-looking stale status lines
 # overridden by an active run, the heartbeat
 # backstop fail-safe, and afk coherence (no double-triage while the away-mode
 # daemon owns supervision).
@@ -106,17 +106,18 @@ wait_poll_cycle() {  # <state> <pid> [limit-ticks]
 # it is still starting and reports a spurious "did not surface" failure. A
 # generous budget can only remove that false negative - a watcher that never
 # exits still fails the assertion when the budget runs out.
-# After an inspect-and-ack, re-arm with a 1s escalate threshold and complete
-# two poll cycles. The same unchanged idle hash must not grow a wedge timer or
-# queue another stale wake. Used by leftover-idle, dead-pane, and leftover
-# done/held fixtures so a regression that re-queues every STALE_ESCALATE_SECS
-# fails here rather than only in a long live run.
+# After an inspect-and-ack, re-arm with a 1s escalate threshold and a short
+# pause cadence and complete two poll cycles. The same unchanged idle hash must
+# not grow a wedge timer or queue another stale wake. Used by leftover-idle,
+# dead-pane, and leftover done/held fixtures so a regression that re-queues
+# every STALE_ESCALATE_SECS or FM_PAUSE_RESURFACE_SECS fails here rather than
+# only in a long live run.
 assert_inspected_idle_stays_quiet() {  # <state> <fakebin> <out> <window> <key> <capture-file> <fail-label>
   local state=$1 fakebin=$2 out=$3 window=$4 key=$5 capture_file=$6 label=$7 pid wakes
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_poll_cycle "$state" "$pid"; then
@@ -955,10 +956,12 @@ test_nonterminal_stale_not_working_surfaced() {
 }
 
 # Idle is not an event: after firstmate inspects a leftover quiet pane once, the
-# same unchanged hash must not re-queue stale wakes every STALE_ESCALATE_SECS.
-# Covers leftover non-terminal idle, a dead pane whose harness is missing, and a
-# leftover done window. Watching less is not deleting; these fixtures only assert
-# silence, never teardown. A frozen provably-working run still escalates in
+# same unchanged hash must not re-queue stale wakes every STALE_ESCALATE_SECS or
+# FM_PAUSE_RESURFACE_SECS. Covers leftover non-terminal idle, a dead pane whose
+# harness is missing, and leftover done or held windows. Watching less is not
+# deleting; these fixtures only assert silence, never teardown. A leftover held
+# window stays on the open-work list and off the wake channel. A frozen
+# provably-working run still escalates in
 # test_nonterminal_stale_provably_working_absorbed_then_escalated.
 test_inspected_idle_does_not_requeue_stale_wakes() {
   local dir state fakebin out capture_file window key pane_hash sig pid
@@ -1046,9 +1049,9 @@ test_inspected_idle_does_not_requeue_stale_wakes() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: unknown · source: none · leftover held window'
+  export FM_FAKE_TMUX_CURRENT_COMMAND=grok
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "leftover held window did not surface on first inspect"
@@ -1224,38 +1227,21 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   pane_hash=$(hash_text "idle external-decision gate")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_TMUX_CURRENT_COMMAND=grok
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate'
 
   # First sight must surface promptly so a live external-decision gate is not
   # hidden behind the pause cadence.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "live external-decision gate did not surface immediately"
   ack_stopped_cycle "$state" || fail "could not acknowledge the immediate external-decision surface"
-
-  # Re-arm with the stale timer already beyond the wedge threshold. This is the
-  # exact unchanged-hash fallback after the immediate surface: it must retain
-  # the pause cadence and discard any residual wedge timer instead of emitting
-  # a second possible-wedge wake.
-  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
-  pid=$!
-  if ! wait_poll_cycle "$state" "$pid"; then
-    reap "$pid"
-    fail "live external-decision gate escalated on the wedge timer after its immediate surface: $(cat "$out")"
-  fi
-  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "live external-decision gate lost its pause cadence marker"; }
-  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "live external-decision gate retained the wedge timer"; }
-  reap "$pid"
-  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
-  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
-  [ "$wakes" -eq 0 ] || fail "acknowledged external-decision surface replayed $wakes wakes"
-  [ "$bare" -eq 0 ] || fail "acknowledged external-decision bare stale remained queued"
+  assert_inspected_idle_stays_quiet "$state" "$fakebin" "$out" "$window" "$key" "$capture_file" \
+    "live external-decision gate"
+  unset FM_FAKE_CREW_STATE
+  unset FM_FAKE_TMUX_CURRENT_COMMAND
   pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
 }
 
