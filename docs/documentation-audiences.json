@@ -185,6 +185,18 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/upstream-sync/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/upstream-sync/references/herdr-lab.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/upstream-sync/references/worker-brief.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/updatefirstmate/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -351,6 +363,10 @@
     {
       "path": "docs/turnend-guard.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/upstream-sync.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "docs/verification/dispatch-auth.md",

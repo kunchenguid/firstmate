@@ -170,6 +170,12 @@ test_changed_dependency_selection_and_unmapped_failure() {
   git -C "$repo" add .agents .claude .pi
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm non-bin-source-change
 
+  printf '\n' >>"$repo/.agents/skills/example/references/note.md"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-ask-user-authority.test.sh" "skill reference asset selects pure contract coverage"
+  git -C "$repo" add .agents
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm skill-reference-change
+
   printf '\n' >>"$repo/src/unmapped.ts"
   set +e
   (cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) >"$tmp/out" 2>"$tmp/err"

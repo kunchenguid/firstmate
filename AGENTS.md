@@ -551,6 +551,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the Relay configuration blocker, on a `public-followup ...` `check:` wake or a startup-surfaced public commitment, and on any milestone or terminal wake for a Relay-linked task before posting its completion follow-up; relevant only when Relay is on.
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
+- `upstream-sync` - load when the captain asks to sync, catch up, or snapshot onto upstream, or when the weekly upstream sync is due; it owns the tier decision, the fixed worker brief and verdict-table inputs, the Herdr lab setup, and the optional urgent-upstream tripwire, over the procedure in `docs/upstream-sync.md`.
 
 ## 14. Relay
 
