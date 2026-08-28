@@ -1708,6 +1708,12 @@ def tag_container(controller, name, tags):
         raise ProviderError("exact worker state-container metadata update failed: {}".format(stderr))
 
 
+def carries_tags(resource, expected):
+    """Whether one inventory record already carries every exact assignment tag."""
+    current = resource.get("tags") or {}
+    return all(str(current.get(key)) == str(value) for key, value in expected.items())
+
+
 def cleanup_marker(resource, key, value):
     return (resource.get("tags") or {}).get(key) == value
 
@@ -2675,8 +2681,11 @@ def converge_create_tags(controller, action):
             "staging-request", "staging-result",
         ):
             continue
-        tag_resource(controller, resource["id"], tags)
-    tag_container(controller, expected_names(controller, action["slot"])["state-container"], tags)
+        if not carries_tags(resource, tags):
+            tag_resource(controller, resource["id"], tags)
+    container = worker["resources"].get("state-container")
+    if container is None or not carries_tags(container, tags):
+        tag_container(controller, expected_names(controller, action["slot"])["state-container"], tags)
     snapshot = inventory_slot(controller, action["slot"])
     if snapshot["conflicts"]:
         raise ProviderError("tagged worker inventory contains foreign or unsafe resources")

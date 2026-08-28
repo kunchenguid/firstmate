@@ -1684,6 +1684,36 @@ ready_module.run_pilot_create=lambda *_args: (_ for _ in ()).throw(
 resumed=ready_module.create_or_resume({"prefix":"fmtest"}, ready_action)
 assert resumed is ready_worker and ready_calls == ["read"], (resumed, ready_calls)
 
+# The worker deployment already carries the exact assignment tags. Rewriting
+# them makes Azure reconverge the VM extension and managed Run Commands after
+# they have succeeded, adding control-plane work to every cold admission. Only
+# an actually missing or differing tag should produce a write.
+tag_spec=importlib.util.spec_from_file_location("azure_provider_tags", sys.argv[1])
+tag_module=importlib.util.module_from_spec(tag_spec); tag_spec.loader.exec_module(tag_module)
+expected_tags={"alpha":"one","beta":"two"}
+tag_resources={kind:{
+    "id":"/{}".format(kind), "immutable_id":"i-{}".format(kind),
+    "tags":dict(expected_tags), "provisioning_state":"succeeded",
+} for kind in tag_module.REQUIRED_RESOURCE_KINDS}
+tag_worker={"slot":1,"resources":tag_resources}
+tag_action={"slot":1}
+tag_module.action_tags=lambda *_args: expected_tags
+tag_module.inventory_slot=lambda *_args: {"workers":[tag_worker],"conflicts":[]}
+tag_module.worker_by_slot=lambda snapshot, _slot: snapshot["workers"][0]
+tag_module.recorded_exact=lambda _action, worker, **_kwargs: worker["resources"]
+writes=[]
+tag_module.tag_resource=lambda _controller, resource_id, _tags: writes.append(("resource",resource_id))
+tag_module.tag_container=lambda _controller, name, _tags: writes.append(("container",name))
+tag_module.converge_create_tags({"prefix":"fmtest"}, tag_action)
+assert writes == [], writes
+
+tag_resources["vm"]["tags"].pop("beta")
+tag_resources["state-container"]["tags"]["beta"]="stale"
+tag_module.converge_create_tags({"prefix":"fmtest"}, tag_action)
+assert writes == [
+    ("resource", "/vm"), ("container", "worker-state-01"),
+], writes
+
 # A pre-convergence container has empty metadata; it inherits a same-slot
 # exact-fleet sibling's tags (VM first) instead of classifying as foreign,
 # while a bare orphan container keeps its emptiness and still refuses.
