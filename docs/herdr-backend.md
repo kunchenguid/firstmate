@@ -212,10 +212,15 @@ Enter, Escape, and Ctrl-C are supported.
 Typed-plane slash input, and dollar-prefixed skill input for Codex, uses the shared harness-aware settle before the first Enter so a completion popup cannot consume it.
 Typed-plane text is typed once; only Enter is retried.
 
-On an idle or done native baseline, submit confirmation first waits for `working` or `blocked` across a bounded polling window.
+On an idle or done native baseline, the adapter samples for `working` or `blocked` across a bounded polling window.
+For known non-Claude harnesses whose native state is a foreground-turn signal, a detected submit-active status confirms delivery.
 If native status stays idle, the shared composer verdict is the next positive signal: a cleared composer is delivery, and proven pending text retries Enter.
-After the retry budget, `fm_composer_queued_enter_verdict` treats proven pending text plus a generating busy signal as a queued delivered Enter, and keeps an idle pending composer as a genuine swallow.
-On an already active or unreadable baseline, the adapter falls back to conservative composer clearance, with a pre-Enter rendered-footer transition when that baseline is unavailable.
+After the retry budget, `fm_composer_queued_enter_verdict` treats proven pending text plus a generating busy signal as a queued delivered Enter for those non-Claude harnesses, and keeps an idle pending composer as a genuine swallow.
+For a known Claude target, Herdr's native `working` signal is not that generating proof because a tracked background shell can keep it set after the foreground turn ends.
+A Claude queued Enter is confirmed only when the rendered Claude active-turn signature changes from idle immediately before that Enter to busy after it, or when the composer clears; native `working` alone and a pre-existing rendered-busy footer never prove that Enter.
+Rendered idle with pending text remains unconfirmed and preserves the escalation for retry.
+For a non-Claude target with an already active or unreadable native baseline, the adapter falls back to conservative composer clearance, with a pre-Enter rendered-footer transition when that baseline is unavailable.
+A known Claude target captures its rendered baseline before each Enter, so a pre-existing active-turn footer cannot serve as submit confirmation.
 A fully unreadable target stops retrying and reports unknown.
 blocked is not treated as a queued-Enter busy signal, so a Cursor pane that reports blocked in every state does not receive that conversion.
 
@@ -223,7 +228,7 @@ Some harnesses never present a legibly idle native baseline at all, so the compo
 Herdr reports a Cursor pane `blocked` in every state, and Cursor's mid-turn composer renders its placeholder beside a right-aligned busy token, which is composer content and therefore `pending` on a composer that holds no user text.
 That fallback alone reported every delivered steer as unconfirmed, so it is paired with a rendered-footer transition: the pane's verified busy footer is read once before the first Enter, and an idle-to-busy transition across that Enter confirms the submit.
 It is the same semantic signal the native path uses and the same one the tmux submit core reads.
-A pane already mid-turn cannot borrow a rendered-footer transition as proof of this delivery; after retries, only proven pending text plus native `working` can establish that its Enter was accepted and queued.
+For non-Claude targets, a pane already mid-turn cannot borrow a rendered-footer transition as proof of this delivery; after retries, only proven pending text plus native `working` can establish that its Enter was accepted and queued.
 The composer verdict itself is deliberately unchanged: a right-aligned status token on the composer row stays content for every other caller, including the away-mode pre-injection guard.
 The poll density bounds the residual possibility of an extremely fast complete turn; a missed native transition falls through to the composer verdict rather than reporting a false swallow.
 
@@ -291,6 +296,13 @@ It refuses Zellij, Orca, and cmux as supervisor backends rather than applying th
 For Herdr, target existence, native state, capture, composer state, and verified submit all route through the shared backend dispatcher and the explicit named-session CLI owner.
 The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-alarm.md).
 
+For a Herdr primary whose detected harness is Claude, native `agent_status=working` is diagnostic only during away-mode injection because Claude's tracked background daemon shell can keep that value working after the foreground turn ends.
+`pane_is_busy` therefore requires the rendered Claude active-turn signature, such as `esc to interrupt` or a spinner with elapsed time, before declaring the pane busy.
+When the rendered pane is idle, injection falls through to the affirmative `empty` composer guard, while an unreadable capture or any non-`empty` composer verdict still defers.
+Each busy or composer deferral records the sub-cause as `native-busy`, `rendered-busy`, or `composer=<verdict>`; an unreadable busy-guard capture is logged as `unreadable` and also defers.
+The Herdr `busy` adapter result is logged as its native `working` label; for Claude this preserves diagnostic evidence without making it a busy verdict.
+Every other harness/backend combination retains its native-busy fast path.
+
 Harnesses with native tracked background execution can run the daemon in their terminal.
 Pi has no such mechanism.
 `bin/fm-afk-launch.sh` therefore creates a dedicated unfocused Herdr workspace, runs the daemon there with an explicit supervisor target and backend, records the exact daemon pane, and closes only that pane on stop.
@@ -338,7 +350,9 @@ tests/fm-backend-herdr-presentation-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
+tests/fm-daemon.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
+tests/fm-afk-herdr-claude-busy-guard-live-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
 ```
 

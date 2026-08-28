@@ -97,7 +97,7 @@ done
 [ "$idle" = 1 ] || fail "Claude Code ($VERSION) on $HERDR_VER never registered an idle agent in the lab pane"
 
 TOKEN="FMHERDRPONG$$_$RANDOM"
-verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "Reply with exactly $TOKEN and nothing else." 3 0.4 0.4) \
+verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "Reply with exactly $TOKEN and nothing else." 3 0.4 0.4 "" claude) \
   || fail "send_text_submit failed to run against Claude Code ($VERSION) on $HERDR_VER"
 CHECKED=1
 [ "$verdict" = empty ] \

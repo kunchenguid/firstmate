@@ -92,8 +92,11 @@ The daemon never injects into an in-use pane. Two checks run before every
 injection, dispatched through `bin/fm-backend.sh` for the supervisor's own
 backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
 
-- **Primary-pane busy guard** - `pane_is_busy` trusts Herdr native `busy` when available, otherwise matches rendered output against only the detected primary harness's signature.
-  This narrow delivery guard never classifies a recorded worker task and never uses a global union of vendor patterns.
+- **Primary-pane busy guard** - `pane_is_busy` keeps the Herdr native-busy fast path except for a Herdr primary detected as Claude, where native `working` is diagnostic only because the tracked away daemon shell can keep it set after the foreground turn ends.
+  For that pair, only the rendered Claude active-turn signature proves foreground busy; rendered idle falls through to the affirmative `empty` composer guard, and unreadable capture still defers.
+  Submit confirmation for the same pair requires that rendered signature to transition from idle across the queued Enter or requires the composer to clear; native `working` alone never proves delivery.
+  Busy or composer deferrals name `native-busy`, `rendered-busy`, or `composer=<verdict>` in the daemon log, while an unreadable busy-guard capture is named `unreadable`; Herdr's semantic `busy` diagnostic is recorded as native `working`.
+  The full contract is in `docs/herdr-backend.md` under “Away-mode supervisor support”.
 - **Composer-state guard** - `inject_msg` reads the full `empty`/`pending`/`pending-unproven`/`unknown` verdict from `fm_backend_composer_state` and injects only when it is affirmatively `empty`.
   Every other or future verdict defers, including an unreadable pane, ambiguous geometry, a blank unidentified row, and a bare shell prompt left after the agent exits.
   Each adapter contributes only capture and capability facts to the fleet-wide screen classifier in `bin/fm-composer-lib.sh`, which owns every shape and verdict.
@@ -123,7 +126,8 @@ Enter is retried (Enter only, never a retype) until the backend confirms the
 submit landed.
 For tmux that confirmation is normally a proven cleared composer from the shared classifier; an idle baseline transitioning to busy across this submit's own Enter also confirms that the turn started when a working harness hides its composer.
 Without that baseline, busy state never converts an `unknown` composer into confirmation.
-For herdr, idle-baseline submits first seek native agent-state showing a real turn started, then use the shared classifier when native state remains idle: a cleared composer confirms delivery, while pending text retries Enter and reaches the shared busy-queue verdict only after the retry budget.
+For non-Claude Herdr targets, idle-baseline submits first seek native agent-state showing a real turn started, then use the shared classifier when native state remains idle: a cleared composer confirms delivery, while pending text retries Enter and reaches the shared busy-queue verdict only after the retry budget.
+For the away-mode Claude primary, native `working` alone never proves that a queued Enter was submitted; pending text requires a rendered Claude active-turn signature that transitions from idle immediately before that Enter to busy after it, while a cleared composer remains sufficient.
 A bordered-empty or ghost-only composer is recognized as empty where that backend uses composer confirmation, rather than mistaken for a swallowed Enter.
 `fm-send.sh` uses the same primitive only on its typed plane and exits non-zero when that plane's Enter is positively swallowed; ordinary local text steers use the durable inbox and do not treat doorbell submission as delivery proof.
 
@@ -192,7 +196,7 @@ the operational prefix lets firstmate distinguish it from a real captain message
   Enter is retried, Enter only and never a retype, until the backend submit
   primitive reports `empty` as its caller-facing success verdict.
   For tmux that verdict normally means the shared classifier proved the composer cleared; a baseline-gated idle-to-busy transition may instead prove this Enter started the turn.
-  For herdr's idle-baseline path it means native agent-state observed a turn start, the shared classifier proved the composer cleared, or the shared queued-Enter verdict proved delivery while busy.
+  For non-Claude Herdr idle-baseline paths it means native agent-state observed a turn start, the shared classifier proved the composer cleared, or the shared queued-Enter verdict proved delivery while busy; a Claude primary instead requires the rendered transition or cleared-composer proof described above.
   This lets ghost-only or bordered-empty composers count as empty where a composer read is the active confirmation signal.
 - **Marker strip** - `strip_injection_marker` removes the current operational
   prefix or legacy bare marker before classification or relay, so the digest

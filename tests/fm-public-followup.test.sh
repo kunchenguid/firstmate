@@ -24,6 +24,9 @@ PROMOTE="$ROOT/bin/fm-promote.sh"
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 TMP_ROOT=$(fm_test_tmproot fm-public-followup)
 PF_TEST_NOW=1787539200
+# Rechain fixtures close on 2026-08-28T01:12:00Z.
+# Pin their clock before that boundary instead of letting the suite age into an expired-thread refusal.
+PF_RECHAIN_NOW_OVERRIDE=1787539200
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
@@ -1450,7 +1453,8 @@ test_rechain_delivers_second_post_on_same_thread() {
   FAKE_CURL_LOG="$log" run_pf "$parent" deliver public-final-a >/dev/null || fail "deliver failed"
   [ "$(followup_posts "$log")" = 1 ] || fail "expected the investigation post"
 
-  out=$(FAKE_CURL_LOG="$log" run_pf "$parent" rechain public-final-b --from public-final-a \
+  out=$(FMX_NOW_OVERRIDE="$PF_RECHAIN_NOW_OVERRIDE" FAKE_CURL_LOG="$log" \
+    run_pf "$parent" rechain public-final-b --from public-final-a \
     --work-home main --work-id ship-b --expected pr-merged) \
     || fail "rechain failed: $out"
   assert_contains "$out" "retired public-final-a reason=handed on to public-final-b" \
@@ -1525,6 +1529,7 @@ SH
   chmod +x "$home/fakebin/tasks-axi"
 
   REAL_TASKS_AXI="$real_tasks" RECHAIN_FAIL_MARKER="$marker" \
+    FMX_NOW_OVERRIDE="$PF_RECHAIN_NOW_OVERRIDE" \
     expect_failure "rechain must expose a resumable partial add" \
     run_pf "$home" rechain public-final-resume-b --from public-final-resume-a \
       --work-home main --work-id ship-resume --expected pr-merged
@@ -1539,6 +1544,7 @@ SH
     "a failed bind must not publish a registration"
 
   out=$(REAL_TASKS_AXI="$real_tasks" RECHAIN_FAIL_MARKER="$marker" \
+    FMX_NOW_OVERRIDE="$PF_RECHAIN_NOW_OVERRIDE" \
     run_pf "$home" rechain public-final-resume-b --from public-final-resume-a \
       --work-home main --work-id ship-resume --expected pr-merged) \
     || fail "retrying the same rechain command must resume: $out"
@@ -1566,11 +1572,11 @@ test_rechain_claims_delivered_source_once() {
   FAKE_CURL_LOG="$log" run_pf "$home" consume >/dev/null || fail "consume failed"
   FAKE_CURL_LOG="$log" run_pf "$home" deliver public-final-claim-a >/dev/null || fail "deliver failed"
 
-  FMX_NOW_OVERRIDE=1787539200 run_pf "$home" rechain public-final-claim-b \
+  FMX_NOW_OVERRIDE="$PF_RECHAIN_NOW_OVERRIDE" run_pf "$home" rechain public-final-claim-b \
     --from public-final-claim-a --work-home main --work-id ship-claim-b \
     --expected pr-merged > "$home/rechain-b.out" 2>&1 &
   pid_b=$!
-  FMX_NOW_OVERRIDE=1787539200 run_pf "$home" rechain public-final-claim-c \
+  FMX_NOW_OVERRIDE="$PF_RECHAIN_NOW_OVERRIDE" run_pf "$home" rechain public-final-claim-c \
     --from public-final-claim-a --work-home main --work-id ship-claim-c \
     --expected pr-merged > "$home/rechain-c.out" 2>&1 &
   pid_c=$!
@@ -1612,13 +1618,13 @@ done
 exec /bin/rm "\$@"
 EOF
   chmod +x "$home/fakebin/rm"
-  expect_failure "rechain must surface a failed source retirement" \
+  FMX_NOW_OVERRIDE="$PF_RECHAIN_NOW_OVERRIDE" expect_failure "rechain must surface a failed source retirement" \
     run_pf "$home" rechain public-final-retire-b --from public-final-retire-a \
       --work-home main --work-id ship-retire-b --expected pr-merged
   assert_contains "$EXPECT_OUT" "public loop remains open" \
     "failed retirement must report that the source remains open"
 
-  expect_failure "a failed retirement must not leave the source claimable by another destination" \
+  FMX_NOW_OVERRIDE="$PF_RECHAIN_NOW_OVERRIDE" expect_failure "a failed retirement must not leave the source claimable by another destination" \
     run_pf "$home" rechain public-final-retire-c --from public-final-retire-a \
       --work-home main --work-id ship-retire-c --expected pr-merged
   assert_contains "$EXPECT_OUT" "already claimed by rechain destination 'public-final-retire-b'" \
@@ -1627,7 +1633,7 @@ EOF
     "a refused competing destination must not be registered"
 
   /bin/rm "$home/fakebin/rm"
-  out=$(run_pf "$home" rechain public-final-retire-b --from public-final-retire-a \
+  out=$(FMX_NOW_OVERRIDE="$PF_RECHAIN_NOW_OVERRIDE" run_pf "$home" rechain public-final-retire-b --from public-final-retire-a \
     --work-home main --work-id ship-retire-b --expected pr-merged) \
     || fail "the claimed destination must remain resumable: $out"
   assert_contains "$out" "retired public-final-retire-a" \
@@ -1837,7 +1843,7 @@ test_rechain_refuses_unclaimed_existing_destination() {
     --expected-final-file "$home/collision-expected.json" \
     --expires-at 2026-08-28T01:12:00Z >/dev/null || fail "could not seed destination collision"
 
-  expect_failure "a first rechain must not adopt an unrelated existing obligation" \
+  FMX_NOW_OVERRIDE="$PF_RECHAIN_NOW_OVERRIDE" expect_failure "a first rechain must not adopt an unrelated existing obligation" \
     run_pf "$home" rechain public-final-existing-b --from public-final-existing-a \
       --work-home main --work-id ship-existing --expected pr-merged
   assert_contains "$EXPECT_OUT" "was not created by this rechain" \

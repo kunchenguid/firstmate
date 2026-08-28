@@ -1942,16 +1942,182 @@ test_discover_supervisor_target_herdr() {
   pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > firstmate:0 fallback"
 }
 
-test_pane_is_busy_herdr_native_busy_state() {
+# shellcheck disable=SC2030 # The harness fixture is intentionally scoped to the isolated injection subshell.
+test_inject_msg_herdr_claude_native_busy_rendered_idle_submits() {
   local dir
-  dir=$(make_supercase primary-herdr-busy)
+  dir=$(make_supercase inject-herdr-claude-native-busy-idle)
+  afk_enter "$dir/state"
   (
+    fm_backend_target_exists() { return 0; }
     fm_backend_busy_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected busy_state args: $1 $2"; printf 'busy'; }
-    fm_backend_capture() { fail "capture should not be consulted when busy_state is conclusive"; }
-    FM_STATE_OVERRIDE="$dir/state" FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "default:w1:p2" herdr \
-      || fail "pane_is_busy should report busy from herdr's native busy_state"
-  ) || fail "herdr native-busy pane_is_busy subshell failed"
-  pass "pane_is_busy: herdr native busy_state='busy' short-circuits without a capture fallback"
+    fm_backend_capture() { printf 'idle Claude prompt\n'; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { printf 'empty'; }
+    FM_DAEMON_PRIMARY_HARNESS=claude
+    LOG="$dir/daemon.log"
+    FM_SUPERVISOR_BACKEND=herdr
+    FM_SUPERVISOR_TARGET="default:w1:p2"
+    inject_msg "hello" "$dir/state" \
+      || fail "Herdr+Claude native busy with an idle rendered pane should permit injection"
+  ) || fail "Herdr+Claude native-busy rendered-idle injection subshell failed"
+  pass "inject_msg: Herdr+Claude native busy does not block an idle rendered pane with an empty composer"
+}
+
+# shellcheck disable=SC2031 # The assertion intentionally inspects harness detection within the isolated subshell.
+test_inject_msg_detects_claude_harness_before_submit() {
+  local dir state
+  dir=$(make_supercase inject-herdr-claude-detected-harness)
+  state="$dir/state"
+  afk_enter "$state"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" claude' > "$dir/fakebin/fm-harness.sh"
+  chmod +x "$dir/fakebin/fm-harness.sh"
+  (
+    unset FM_DAEMON_PRIMARY_HARNESS
+    FM_DAEMON_DIR="$dir/fakebin"
+    fm_backend_target_exists() { return 0; }
+    fm_backend_busy_state() { printf 'busy'; }
+    fm_backend_capture() { printf 'idle Claude prompt\n'; }
+    fm_busy_lines_match() { return 1; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() {
+      [ "${FM_DAEMON_PRIMARY_HARNESS:-}" = claude ] \
+        || fail "detected harness did not survive the busy guard before submit: ${FM_DAEMON_PRIMARY_HARNESS:-unset}"
+      [ "${8:-}" = claude ] \
+        || fail "detected harness was not passed through the submit boundary: ${8:-unset}"
+      printf 'empty'
+    }
+    LOG="$dir/daemon.log"
+    FM_SUPERVISOR_BACKEND=herdr
+    FM_SUPERVISOR_TARGET="default:w1:p2"
+    inject_msg "hello" "$state" \
+      || fail "a detected Claude harness with rendered idle and empty composer should reach submit"
+  ) || fail "detected Claude harness submit-boundary subshell failed"
+  pass "inject_msg: detected Claude harness survives pane_is_busy into the submit boundary"
+}
+
+test_pane_is_busy_herdr_claude_rendered_busy_state() {
+  local dir
+  dir=$(make_supercase primary-herdr-claude-rendered-busy)
+  (
+    fm_backend_busy_state() { printf 'busy'; }
+    fm_backend_capture() { printf 'esc to interrupt\n'; }
+    FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "default:w1:p2" herdr \
+      || fail "pane_is_busy should report a rendered Claude active turn as busy"
+    [ "$FM_PANE_BUSY_REASON" = rendered-busy ] \
+      || fail "rendered Claude active turn did not record rendered-busy: ${FM_PANE_BUSY_REASON:-unset}"
+  ) || fail "Herdr+Claude rendered-busy pane_is_busy subshell failed"
+  pass "pane_is_busy: Herdr+Claude requires the rendered active-turn signature even when native state is busy"
+}
+
+test_pane_is_busy_herdr_claude_native_idle_keeps_rendered_guard() {
+  (
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf 'esc to interrupt\n'; }
+    FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "default:w1:p2" herdr \
+      || fail "native idle should still defer on a rendered Claude active turn"
+  ) || fail "Herdr+Claude native-idle rendered-busy pane_is_busy subshell failed"
+  (
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf 'idle Claude prompt\n'; }
+    if FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "default:w1:p2" herdr; then
+      fail "native idle with an idle rendered pane should remain injectable"
+    fi
+  ) || fail "Herdr+Claude native-idle rendered-idle pane_is_busy subshell failed"
+  pass "pane_is_busy: Herdr+Claude native idle still honors the rendered active-turn guard"
+}
+
+test_pane_is_busy_native_busy_fast_path_outside_herdr_claude() {
+  (
+    fm_backend_busy_state() { printf 'busy'; }
+    fm_backend_capture() { fail "Herdr non-Claude native busy should retain the fast path"; }
+    FM_DAEMON_PRIMARY_HARNESS=opencode pane_is_busy "default:w1:p2" herdr \
+      || fail "a non-Claude Herdr pane should remain busy on native busy"
+    [ "$FM_PANE_BUSY_REASON" = native-busy ] \
+      || fail "non-Claude Herdr native busy did not record native-busy: ${FM_PANE_BUSY_REASON:-unset}"
+  ) || fail "non-Claude Herdr native-busy fast-path subshell failed"
+  (
+    fm_backend_busy_state() { printf 'busy'; }
+    fm_backend_capture() { fail "tmux native busy should retain the fast path"; }
+    FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "fakepane" tmux \
+      || fail "a Claude tmux pane should remain busy on native busy"
+    [ "$FM_PANE_BUSY_REASON" = native-busy ] \
+      || fail "Claude tmux native busy did not record native-busy: ${FM_PANE_BUSY_REASON:-unset}"
+  ) || fail "non-Herdr native-busy fast-path subshell failed"
+  pass "pane_is_busy: native busy remains a fast path outside Herdr+Claude"
+}
+
+test_inject_msg_logs_native_busy_subcause() {
+  local dir state
+  dir=$(make_supercase inject-native-busy)
+  state="$dir/state"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() { return 0; }
+    fm_backend_busy_state() { printf 'busy'; }
+    fm_backend_capture() { fail "capture should not run for the native busy fast path"; }
+    fm_backend_composer_state() { fail "composer_state should not run for the native busy fast path"; }
+    fm_backend_send_text_submit() { fail "send_text_submit should not run for the native busy fast path"; }
+    FM_DAEMON_PRIMARY_HARNESS=claude
+    LOG="$dir/daemon.log"
+    FM_SUPERVISOR_BACKEND=tmux
+    FM_SUPERVISOR_TARGET=fakepane
+    if inject_msg "hello" "$state"; then
+      fail "inject_msg should defer on native busy outside Herdr+Claude"
+    fi
+    grep -F 'subcause=native-busy' "$dir/daemon.log" >/dev/null \
+      || fail "native-busy deferral did not name its subcause: $(cat "$dir/daemon.log")"
+  ) || fail "native-busy logging subshell failed"
+  pass "inject_msg: native-busy deferrals name the native subcause"
+}
+
+test_inject_msg_logs_rendered_busy_subcause() {
+  local dir state
+  dir=$(make_supercase inject-herdr-claude-rendered-busy)
+  state="$dir/state"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() { return 0; }
+    fm_backend_busy_state() { printf 'busy'; }
+    fm_backend_capture() { printf 'esc to interrupt\n'; }
+    fm_backend_composer_state() { fail "composer_state should not run for a rendered-busy Claude pane"; }
+    fm_backend_send_text_submit() { fail "send_text_submit should not run for a rendered-busy Claude pane"; }
+    FM_DAEMON_PRIMARY_HARNESS=claude
+    LOG="$dir/daemon.log"
+    FM_SUPERVISOR_BACKEND=herdr
+    FM_SUPERVISOR_TARGET="default:w1:p2"
+    if inject_msg "hello" "$state"; then
+      fail "inject_msg should defer for a rendered Claude active turn"
+    fi
+    grep -F 'subcause=rendered-busy' "$dir/daemon.log" >/dev/null \
+      || fail "rendered-busy deferral did not name its subcause: $(cat "$dir/daemon.log")"
+    grep -F 'native-state=working' "$dir/daemon.log" >/dev/null \
+      || fail "Herdr rendered-busy deferral did not name native working state: $(cat "$dir/daemon.log")"
+  ) || fail "rendered-busy logging subshell failed"
+  pass "inject_msg: rendered-busy deferrals name the rendered subcause"
+}
+
+test_inject_msg_herdr_claude_unreadable_capture_defers() {
+  local dir state
+  dir=$(make_supercase inject-herdr-claude-unreadable)
+  state="$dir/state"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() { return 0; }
+    fm_backend_busy_state() { printf 'busy'; }
+    fm_backend_capture() { return 1; }
+    fm_backend_composer_state() { fail "composer_state should not run after an unreadable Claude capture"; }
+    fm_backend_send_text_submit() { fail "send_text_submit should not run after an unreadable Claude capture"; }
+    FM_DAEMON_PRIMARY_HARNESS=claude
+    LOG="$dir/daemon.log"
+    FM_SUPERVISOR_BACKEND=herdr
+    FM_SUPERVISOR_TARGET="default:w1:p2"
+    if inject_msg "hello" "$state"; then
+      fail "inject_msg should defer after an unreadable Herdr+Claude capture"
+    fi
+    grep -F 'supervisor pane unreadable (subcause=unreadable; native-state=working)' "$dir/daemon.log" >/dev/null \
+      || fail "unreadable capture deferral did not name its subcause: $(cat "$dir/daemon.log")"
+  ) || fail "unreadable Herdr+Claude capture subshell failed"
+  pass "inject_msg: unreadable Herdr+Claude captures defer before consulting the composer"
 }
 
 test_primary_busy_guard_is_harness_scoped() {
@@ -2023,9 +2189,12 @@ test_inject_msg_herdr_composer_guard_defers() {
     pane_is_busy() { return 1; }
     fm_backend_composer_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected composer_state args: $1 $2"; printf 'pending'; }
     fm_backend_send_text_submit() { fail "send_text_submit should not run when the composer-guard defers"; }
+    LOG="$dir/daemon.log"
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
       fail "inject_msg should defer when the herdr composer has pending input"
     fi
+    grep -F 'subcause=composer=pending' "$dir/daemon.log" >/dev/null \
+      || fail "composer deferral did not name its verdict: $(cat "$dir/daemon.log")"
   ) || fail "herdr composer-guard inject_msg subshell failed"
   pass "inject_msg: herdr composer-guard defers before ever attempting a submit"
 }
@@ -2200,7 +2369,14 @@ test_fm_send_exits_nonzero_on_initial_send_failure
 test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
-test_pane_is_busy_herdr_native_busy_state
+test_inject_msg_herdr_claude_native_busy_rendered_idle_submits
+test_inject_msg_detects_claude_harness_before_submit
+test_pane_is_busy_herdr_claude_rendered_busy_state
+test_pane_is_busy_herdr_claude_native_idle_keeps_rendered_guard
+test_pane_is_busy_native_busy_fast_path_outside_herdr_claude
+test_inject_msg_logs_native_busy_subcause
+test_inject_msg_logs_rendered_busy_subcause
+test_inject_msg_herdr_claude_unreadable_capture_defers
 test_primary_busy_guard_is_harness_scoped
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted
 test_pane_input_pending_herdr_dispatch
