@@ -912,58 +912,6 @@ SH
   pass "jobs scheduler runs proven scripts; failure propagates; non-proven refused"
 }
 
-test_signal_during_launch_reaps_registered_group() {
-  local tmp repo runner fake_bin real_ps runner_pid rc waited group_pid
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-launch-signal.XXXXXX")
-  repo="$tmp/repo"
-  runner="$repo/bin/fm-test-run.sh"
-  fake_bin="$tmp/fake-bin"
-  real_ps=$(command -v ps)
-  mkdir -p "$repo/bin" "$repo/tests" "$fake_bin"
-  cp "$RUNNER" "$runner"
-  cat >"$repo/tests/fm-brief.test.sh" <<'SH'
-#!/usr/bin/env bash
-sleep 600
-SH
-  cat >"$fake_bin/ps" <<'SH'
-#!/usr/bin/env bash
-if [ ! -e "$LAUNCH_MARKER" ]; then
-  printf '%s\n' "${!#}" >"$LAUNCH_GROUP"
-  : >"$LAUNCH_MARKER"
-  sleep 1
-fi
-exec "$REAL_PS" "$@"
-SH
-  chmod +x "$runner" "$repo/tests/fm-brief.test.sh" "$fake_bin/ps"
-  set +e
-  PATH="$fake_bin:$PATH" REAL_PS="$real_ps" LAUNCH_MARKER="$tmp/launching" \
-    LAUNCH_GROUP="$tmp/group" "$runner" tests/fm-brief.test.sh \
-    >"$tmp/out" 2>"$tmp/err" &
-  runner_pid=$!
-  set -e
-  waited=0
-  while [ ! -e "$tmp/launching" ] && [ "$waited" -lt 100 ]; do
-    sleep 0.02
-    waited=$((waited + 1))
-  done
-  if [ ! -e "$tmp/launching" ]; then
-    kill -TERM "$runner_pid" 2>/dev/null || true
-    wait "$runner_pid" 2>/dev/null || true
-    fail "launch registration fixture did not reach its critical section"
-  fi
-  kill -TERM "$runner_pid"
-  set +e
-  wait "$runner_pid"
-  rc=$?
-  set -e
-  [ "$rc" -eq 143 ] || fail "signal during launch must exit 143, got $rc"
-  group_pid=$(cat "$tmp/group")
-  kill -0 -- "-$group_pid" 2>/dev/null \
-    && fail "signal during launch left process group $group_pid running"
-  rm -rf "$tmp"
-  pass "signals during launch reap the newly registered process group"
-}
-
 test_signal_cleanup_reaps_concurrent_descendants() {
   local tmp repo runner track unrelated runner_pid rc waited pid_file child
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-signal.XXXXXX")
@@ -1130,7 +1078,6 @@ test_concurrent_runs_are_ordered_longest_first
 test_per_script_timeout_bounds_a_hang
 test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
-test_signal_during_launch_reaps_registered_group
 test_signal_cleanup_reaps_concurrent_descendants
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json

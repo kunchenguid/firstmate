@@ -41,16 +41,6 @@ fm_timeout_mechanism() {
   fi
 }
 
-fm_timeout_track_group() {
-  [ -n "${FM_TIMEOUT_TRACK_DIR:-}" ] || return 0
-  : >"$FM_TIMEOUT_TRACK_DIR/$1"
-}
-
-fm_timeout_untrack_group() {
-  [ -n "${FM_TIMEOUT_TRACK_DIR:-}" ] || return 0
-  rm -f "$FM_TIMEOUT_TRACK_DIR/$1"
-}
-
 fm_run_bash_timeout() {
   local seconds=$1 command_status deadline_status child_pid watchdog_pid command_rc recorded_rc monitor_was_on=0
   shift
@@ -66,7 +56,6 @@ fm_run_bash_timeout() {
     exit "$command_rc"
   ) &
   child_pid=$!
-  fm_timeout_track_group "$child_pid"
   (
     set +m
     sleep "$seconds"
@@ -77,7 +66,6 @@ fm_run_bash_timeout() {
     exit 124
   ) &
   watchdog_pid=$!
-  fm_timeout_track_group "$watchdog_pid"
   [ "$monitor_was_on" -eq 1 ] || set +m
 
   if wait "$child_pid" 2>/dev/null; then
@@ -94,8 +82,6 @@ fm_run_bash_timeout() {
     recorded_rc=$(cat "$command_status" 2>/dev/null || true)
     case "$recorded_rc" in ''|*[!0-9]*) ;; *) command_rc=$recorded_rc ;; esac
   fi
-  fm_timeout_untrack_group "$child_pid"
-  fm_timeout_untrack_group "$watchdog_pid"
   rm -f "$command_status" "$deadline_status" 2>/dev/null || true
   return "$command_rc"
 }
@@ -119,14 +105,12 @@ fm_run_external_timeout() {
     exit "$command_rc"
   ' _ "$status_file" "$@" &
   runner_pid=$!
-  fm_timeout_track_group "$runner_pid"
   if wait "$runner_pid"; then
     runner_rc=0
   else
     runner_rc=$?
   fi
   command_rc=$(cat "$status_file" 2>/dev/null || true)
-  fm_timeout_untrack_group "$runner_pid"
   rm -f "$status_file" 2>/dev/null || true
   case "$command_rc" in
     ''|*[!0-9]*) ;;
@@ -148,7 +132,7 @@ fm_run_timed() {  # <seconds> <command...>
     timeout) fm_run_external_timeout timeout "$seconds" "$@" ;;
     gtimeout) fm_run_external_timeout gtimeout "$seconds" "$@" ;;
     perl)
-      perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } my $marker = $ENV{FM_TIMEOUT_TRACK_DIR} ? "$ENV{FM_TIMEOUT_TRACK_DIR}/$pid" : ""; if ($marker ne "") { open my $fh, ">", $marker; close $fh } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; unlink $marker if $marker ne ""; exit 124 }; alarm $t; waitpid $pid, 0; unlink $marker if $marker ne ""; exit($? >> 8)' \
+      perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
         "$seconds" "$@"
       ;;
     bash) fm_run_bash_timeout "$seconds" "$@" ;;

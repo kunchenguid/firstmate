@@ -56,6 +56,9 @@
 #                   no real script approaches it, so it only converts a HUNG
 #                   script into a bounded failure. --max-wall-ms is checked
 #                   after the run and so cannot catch a hang on its own.
+#                   On interruption the runner best-effort terminates its one
+#                   run-owned process group; fm_run_timed remains the owner of
+#                   any nested timeout groups until their configured bound.
 #   --max-wall-ms N fail the run when its wall clock exceeds N milliseconds,
 #                   after reporting the per-script results. Duration is a
 #                   result: a suite that outgrows its caller's invocation budget
@@ -101,8 +104,54 @@ now_ms() {
   fi
 }
 
-RUN_STARTED_ISO=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-RUN_STARTED_MS=$(now_ms)
+if [ -z "${FM_TEST_RUN_GROUP_ACTIVE:-}" ]; then
+  group_child=
+  group_pending=
+  group_signal() {
+    local sig=$1 code=$2
+    if [ -z "$group_child" ]; then
+      group_pending="$sig:$code"
+      return 0
+    fi
+    trap '' HUP INT TERM
+    kill -"$sig" -- "-$group_child" 2>/dev/null || true
+    sleep 0.2
+    kill -KILL -- "-$group_child" 2>/dev/null || true
+    wait "$group_child" 2>/dev/null || true
+    exit "$code"
+  }
+  trap 'group_signal HUP 129' HUP
+  trap 'group_signal INT 130' INT
+  trap 'group_signal TERM 143' TERM
+  group_started_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  group_started_ms=$(now_ms)
+  case $- in *m*) group_monitor_was_on=1 ;; *) group_monitor_was_on=0 ;; esac
+  set -m
+  (
+    export FM_TEST_RUN_GROUP_ACTIVE=1
+    export FM_TEST_RUN_STARTED_ISO="$group_started_iso"
+    export FM_TEST_RUN_STARTED_MS="$group_started_ms"
+    export FM_TEST_RUN_WRAPPER_PID="$$"
+    exec "$0" "$@"
+  ) &
+  group_child=$!
+  [ "$group_monitor_was_on" -eq 1 ] || set +m
+  if [ -n "$group_pending" ]; then
+    group_signal "${group_pending%%:*}" "${group_pending#*:}"
+  fi
+  set +e
+  wait "$group_child"
+  group_rc=$?
+  set -e
+  trap - HUP INT TERM
+  exit "$group_rc"
+fi
+
+RUN_STARTED_ISO=${FM_TEST_RUN_STARTED_ISO:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
+RUN_STARTED_MS=${FM_TEST_RUN_STARTED_MS:-$(now_ms)}
+RUN_WRAPPER_PID=${FM_TEST_RUN_WRAPPER_PID:-$$}
+unset FM_TEST_RUN_STARTED_ISO FM_TEST_RUN_STARTED_MS FM_TEST_RUN_WRAPPER_PID
+set +m
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
@@ -1745,61 +1794,13 @@ fi
 RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
 RECORDS="$RUN_TMP/records.tsv"
 FAMILIES_TSV="$RUN_TMP/families.tsv"
-TIMEOUT_GROUPS="$RUN_TMP/timeout-groups"
-mkdir -p "$TIMEOUT_GROUPS"
-export FM_TIMEOUT_TRACK_DIR="$TIMEOUT_GROUPS"
 : >"$RECORDS"
 declare -a WORKER_PIDS=()
 declare -a WORKER_IDX=()
 declare -a WORKER_SCRIPTS=()
-declare -a BOUNDED_PIDS=()
-RUN_CLEANED=0
 FINALIZATION_WATCHDOG_PID=
-LAUNCH_CRITICAL=0
-PENDING_SIGNAL=
-
-remove_bounded_pid() {
-  local want=$1 slot
-  for slot in "${!BOUNDED_PIDS[@]}"; do
-    [ "${BOUNDED_PIDS[$slot]}" = "$want" ] && unset 'BOUNDED_PIDS[slot]'
-  done
-}
-
-tracked_group_is_owned() {
-  local pid=$1 pgid
-  pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
-  [ -n "$pgid" ] && [ "$pgid" = "$pid" ]
-}
-
-terminate_tracked_groups() {
-  local pid any=0
-  for pid in "$@"; do
-    if kill -0 -- "-$pid" 2>/dev/null; then
-      kill -TERM -- "-$pid" 2>/dev/null || true
-      any=1
-    fi
-  done
-  [ "$any" -eq 0 ] || sleep 0.2
-  for pid in "$@"; do
-    kill -KILL -- "-$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-  done
-}
 
 cleanup_run() {
-  local roots=() slot
-  [ "$RUN_CLEANED" -eq 0 ] || return 0
-  RUN_CLEANED=1
-  for slot in "${!WORKER_PIDS[@]}"; do
-    roots+=("${WORKER_PIDS[$slot]}")
-  done
-  for slot in "${!BOUNDED_PIDS[@]}"; do
-    roots+=("${BOUNDED_PIDS[$slot]}")
-  done
-  for slot in "$TIMEOUT_GROUPS"/*; do
-    [ -f "$slot" ] && roots+=("$(basename "$slot")")
-  done
-  [ "${#roots[@]}" -eq 0 ] || terminate_tracked_groups "${roots[@]}"
   rm -rf "$RUN_TMP"
 }
 
@@ -1810,71 +1811,32 @@ signal_exit() {
   exit "$code"
 }
 
-handle_signal() {
-  local code=$1
-  if [ "$LAUNCH_CRITICAL" -eq 1 ]; then
-    [ -n "$PENDING_SIGNAL" ] || PENDING_SIGNAL=$code
-    return 0
-  fi
-  signal_exit "$code"
-}
-
-begin_tracked_launch() {
-  LAUNCH_CRITICAL=1
-}
-
-finish_tracked_launch() {
-  local pending=$PENDING_SIGNAL
-  LAUNCH_CRITICAL=0
-  PENDING_SIGNAL=
-  [ -z "$pending" ] || signal_exit "$pending"
-}
-
 arm_finalization_watchdog() {
-  local monitor_was_on=0 parent=$$ pid elapsed remaining release="$RUN_TMP/finalization-watchdog-release"
+  local parent=$RUN_WRAPPER_PID elapsed remaining
   elapsed=$(($(now_ms) - RUN_STARTED_MS))
   remaining=$((MAX_WALL_MS - elapsed))
   [ "$remaining" -gt 0 ] || signal_exit 143
-  rm -f "$release"
-  begin_tracked_launch
-  case $- in *m*) monitor_was_on=1 ;; esac
-  set -m
-  (
-    trap - EXIT HUP INT TERM
-    set +m
-    while [ ! -e "$release" ]; do sleep 0.01; done
-    if command -v python3 >/dev/null 2>&1; then
-      python3 -c 'import sys, time; time.sleep(int(sys.argv[1]) / 1000)' "$remaining"
-    else
-      sleep $(((remaining + 999) / 1000))
-    fi
-    kill -TERM "$parent" 2>/dev/null || exit 0
-    sleep 1
-    kill -KILL "$parent" 2>/dev/null || true
-  ) &
-  pid=$!
-  FINALIZATION_WATCHDOG_PID=$pid
-  BOUNDED_PIDS+=("$pid")
-  [ "$monitor_was_on" -eq 1 ] || set +m
-  tracked_group_is_owned "$pid" || die "finalization watchdog did not lead its process group: $pid"
-  : >"$release"
-  finish_tracked_launch
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import os, signal, sys, time; time.sleep(int(sys.argv[1]) / 1000); os.kill(int(sys.argv[2]), signal.SIGTERM)' \
+      "$remaining" "$parent" &
+  else
+    (sleep $(((remaining + 999) / 1000)); kill -TERM "$parent" 2>/dev/null || true) &
+  fi
+  FINALIZATION_WATCHDOG_PID=$!
 }
 
 disarm_finalization_watchdog() {
   local pid=${FINALIZATION_WATCHDOG_PID:-}
   [ -n "$pid" ] || return 0
-  kill -TERM -- "-$pid" 2>/dev/null || true
+  kill -TERM "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
-  remove_bounded_pid "$pid"
-  rm -f "$RUN_TMP/finalization-watchdog-release"
   FINALIZATION_WATCHDOG_PID=
 }
 
 trap cleanup_run EXIT
-trap 'handle_signal 129' HUP
-trap 'handle_signal 130' INT
-trap 'handle_signal 143' TERM
+trap 'signal_exit 129' HUP
+trap 'signal_exit 130' INT
+trap 'signal_exit 143' TERM
 
 RUN_ID="fm-test-run-${RUN_STARTED_MS}-$$"
 TOTAL=0
@@ -1954,49 +1916,24 @@ record_script_result() {
 # because an unbounded suite is what silently outruns its caller's budget.
 run_script_bounded() {  # <script> <out> <stream> <id>
   local script=$1 out=$2 stream=$3 id=$4
-  local rc pid release="$RUN_TMP/group-release.$id" monitor_was_on=0 tracked=0
-  rm -f "$release"
-  if [ "${FM_TEST_WORKER_GROUP:-0}" -eq 0 ]; then
-    begin_tracked_launch
-    case $- in *m*) monitor_was_on=1 ;; esac
-    set -m
-    tracked=1
-  fi
-  (
-    trap - EXIT HUP INT TERM
-    if [ "$tracked" -eq 1 ]; then
-      while [ ! -e "$release" ]; do sleep 0.01; done
-    fi
-    set +e
-    if [ "$stream" -eq 1 ]; then
-      if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
-        fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c \
-          'bash "$1" 2>&1 | tee "$2"; exit "${PIPESTATUS[0]}"' _ "$script" "$out"
-        exit $?
-      fi
-      bash "$script" 2>&1 | tee "$out"
-      exit "${PIPESTATUS[0]}"
-    fi
-    if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
-      fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash "$script" >"$out" 2>&1
-      exit $?
-    fi
-    bash "$script" >"$out" 2>&1
-  ) &
-  pid=$!
-  if [ "$tracked" -eq 1 ]; then
-    BOUNDED_PIDS+=("$pid")
-    [ "$monitor_was_on" -eq 1 ] || set +m
-    tracked_group_is_owned "$pid" || die "tracked test process did not lead its process group: $pid"
-    : >"$release"
-    finish_tracked_launch
-  fi
+  local rc
+  : "$id"
   set +e
-  wait "$pid"
-  rc=$?
-  if [ "$tracked" -eq 1 ]; then
-    remove_bounded_pid "$pid"
-    rm -f "$release"
+  if [ "$stream" -eq 1 ]; then
+    if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
+      fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c \
+        'bash "$1" 2>&1 | tee "$2"; exit "${PIPESTATUS[0]}"' _ "$script" "$out"
+      rc=$?
+    else
+      bash "$script" 2>&1 | tee "$out"
+      rc=${PIPESTATUS[0]}
+    fi
+  elif [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
+    fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash "$script" >"$out" 2>&1
+    rc=$?
+  else
+    bash "$script" >"$out" 2>&1
+    rc=$?
   fi
   if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ] && [ "$rc" -eq 124 ]; then
     printf 'not ok - %s exceeded the per-script bound of %ss and was terminated\n' \
@@ -2057,7 +1994,6 @@ else
     unset 'WORKER_PIDS[slot]'
     unset 'WORKER_IDX[slot]'
     unset 'WORKER_SCRIPTS[slot]'
-    rm -f "$RUN_TMP/worker-release.$idx"
     active_workers=$((active_workers - 1))
     work="$RUN_TMP/w$idx"
     rc=$(cat "$work/exit" 2>/dev/null || echo 1)
@@ -2118,17 +2054,9 @@ else
     expected=$(expected_gate_skip_for_family "$family")
     printf 'FM_TEST_BEGIN %s %s family=%s expected_gate_skip=%s\n' \
       "$(now_iso)" "$script" "$family" "$expected"
-    worker_release="$RUN_TMP/worker-release.$worker_n"
-    rm -f "$worker_release"
-    begin_tracked_launch
-    case $- in *m*) worker_monitor_was_on=1 ;; *) worker_monitor_was_on=0 ;; esac
-    set -m
     (
       trap - EXIT HUP INT TERM
-      set +m
-      while [ ! -e "$worker_release" ]; do sleep 0.01; done
       set +e
-      export FM_TEST_WORKER_GROUP=1
       export TMPDIR="$work/tmp"
       export TMP="$work/tmp"
       unset FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \
@@ -2150,13 +2078,9 @@ else
     ) &
     worker_pid=$!
     WORKER_PIDS[worker_n]=$worker_pid
-    [ "$worker_monitor_was_on" -eq 1 ] || set +m
-    tracked_group_is_owned "$worker_pid" || die "worker did not lead its process group: $worker_pid"
     WORKER_IDX[worker_n]=$worker_n
     WORKER_SCRIPTS[worker_n]=$script
     active_workers=$((active_workers + 1))
-    : >"$worker_release"
-    finish_tracked_launch
   done
   while [ "$active_workers" -gt 0 ]; do
     wait_one_completed_job_worker
@@ -2205,38 +2129,13 @@ if [ -n "$JSON_PATH" ]; then
   else
     : >"$FAMILIES_TSV"
   fi
-  json_status="$RUN_TMP/json-status"
-  json_release="$RUN_TMP/json-release"
-  rm -f "$json_release"
-  begin_tracked_launch
-  case $- in *m*) json_monitor_was_on=1 ;; *) json_monitor_was_on=0 ;; esac
-  set -m
-  (
-    trap - EXIT HUP INT TERM
-    set +m
-    while [ ! -e "$json_release" ]; do sleep 0.01; done
-    set +e
-    write_json_artifact "$JSON_PATH" \
-      "$RUN_STARTED_ISO" "$RUN_FINISHED_ISO" "$RUN_ID" \
-      "$TOTAL" "$FAILED" "$SKIPPED_GATE" "$RUN_DURATION" \
-      "$SELECTION_DESC" "$RECORDS" "$FAMILIES_TSV"
-    printf '%s\n' "$?" >"$json_status"
-  ) &
-  json_pid=$!
-  BOUNDED_PIDS+=("$json_pid")
-  [ "$json_monitor_was_on" -eq 1 ] || set +m
-  tracked_group_is_owned "$json_pid" || die "timing artifact writer did not lead its process group: $json_pid"
-  : >"$json_release"
-  finish_tracked_launch
   set +e
-  wait "$json_pid" 2>/dev/null
+  write_json_artifact "$JSON_PATH" \
+    "$RUN_STARTED_ISO" "$RUN_FINISHED_ISO" "$RUN_ID" \
+    "$TOTAL" "$FAILED" "$SKIPPED_GATE" "$RUN_DURATION" \
+    "$SELECTION_DESC" "$RECORDS" "$FAMILIES_TSV"
   json_rc=$?
   set -e
-  remove_bounded_pid "$json_pid"
-  rm -f "$json_release"
-  if [ -f "$json_status" ]; then
-    json_rc=$(cat "$json_status" 2>/dev/null || printf '1')
-  fi
   if [ "$json_rc" -eq 0 ]; then
     log "wrote timing artifact: $JSON_PATH"
   else
