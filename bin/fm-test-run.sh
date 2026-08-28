@@ -439,7 +439,7 @@ family_is_concurrent_safe() {
 
 concurrent_safe_family_jobs_max() {
   case "$1" in
-    watcher-wake-lock) printf '4\n' ;;
+    watcher-wake-lock|pure-contract-unit) printf '4\n' ;;
     *) printf '1\n' ;;
   esac
 }

@@ -241,9 +241,13 @@ test_family_map_labels_this_contract() {
     || fail "fm-test-isolation-proof.test.sh must map to pure-contract-unit"
   safe=$("$RUNNER" --list-concurrent-safe-families)
   printf '%s\n' "$safe" | grep -Fxq watcher-wake-lock \
-    || fail "runner must expose the admitted concurrent-safe family"
+    || fail "runner must expose the admitted watcher concurrent-safe family"
+  printf '%s\n' "$safe" | grep -Fxq pure-contract-unit \
+    || fail "runner must expose the admitted contract-unit concurrent-safe family"
   safe_max=$("$RUNNER" --concurrent-safe-family-jobs-max watcher-wake-lock)
   [ "$safe_max" -eq 4 ] || fail "runner exposed the wrong watcher family worker cap: $safe_max"
+  safe_max=$("$RUNNER" --concurrent-safe-family-jobs-max pure-contract-unit)
+  [ "$safe_max" -eq 4 ] || fail "runner exposed the wrong contract-unit family worker cap: $safe_max"
   scheduled_first=$("$RUNNER" --list-scheduled --family watcher-wake-lock | head -n 1)
   [ "$scheduled_first" = tests/fm-watch-triage.test.sh ] \
     || fail "runner scheduled the watcher family out of longest-hint order: $scheduled_first"
