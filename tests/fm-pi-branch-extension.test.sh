@@ -905,14 +905,15 @@ if (visibleToMain.isError || !mainOutcomeText.includes("healthy resource report:
 }
 if (fleetOperations.length !== 2) throw new Error("main's outcome read reprocessed the fleet event");
 
-// Start a real main turn whose user entry is already in the session, then let
-// the result arrive before turn_end. The dispatch boundary must mirror that
-// current request before the branch provider classifies the equivalent result.
+// Start real main turns whose user entries are already in the session, then
+// let each result arrive before turn_end.
 const explicitRequest = "Please give me a fresh mini system-resource report.";
-const entries = [{
-  type: "message",
-  message: { role: "user", content: `${"background context ".repeat(300)}${explicitRequest}` },
-}];
+const longRequests = [
+  `${explicitRequest}${" head context".repeat(500)}`,
+  `${"middle context ".repeat(250)}${explicitRequest}${" middle context".repeat(250)}`,
+  `${"tail context ".repeat(500)}${explicitRequest}`,
+];
+const entries = [];
 const mainCtx = {
   model: { provider: "anthropic", id: "main-model" },
   sessionManager: {
@@ -920,27 +921,29 @@ const mainCtx = {
     getEntries: () => entries,
   },
 };
-fire("before_agent_start", { prompt: entries[0].message.content }, mainCtx);
-fire("agent_start", {}, mainCtx);
-const requested = dispatch("signal: healthy resource result");
-if (!requested.accepted) throw new Error("branch did not accept the requested result");
-await settle(() => fleetOperations.length === 4, "requested result acknowledgement");
-const deliveredRequestMirror = globalThis.__fmSessions[0].ops
-  .filter((op) => op.kind === "custom" && op.message.customType === "fm-main-mirror")
-  .at(-1)?.message.content;
-if (!deliveredRequestMirror?.endsWith(explicitRequest)) {
-  throw new Error(`pre-turn-end mirror dropped the captain request tail: ${deliveredRequestMirror}`);
+for (let index = 0; index < longRequests.length; index += 1) {
+  const content = longRequests[index];
+  if (content.length <= 4000) throw new Error(`request fixture ${index} did not exceed the mirror bound`);
+  entries.push({ type: "message", message: { role: "user", content } });
+  fire("before_agent_start", { prompt: content }, mainCtx);
+  fire("agent_start", {}, mainCtx);
+  const requested = dispatch("signal: healthy resource result");
+  if (!requested.accepted) throw new Error(`branch did not accept requested result ${index}`);
+  await settle(() => fleetOperations.length === 4 + (index * 2), `requested result ${index} acknowledgement`);
+  const deliveredRequestMirror = globalThis.__fmSessions[0].ops
+    .filter((op) => op.kind === "custom" && op.message.customType === "fm-main-mirror")
+    .at(-1)?.message.content;
+  if (deliveredRequestMirror !== `[captain] ${content}`) {
+    throw new Error(`pre-turn-end mirror changed long captain request ${index}`);
+  }
+  const turns = sentToMain.filter((sent) => sent.options.triggerTurn === true);
+  if (turns.length !== index + 1 || turns.at(-1).options.deliverAs !== "followUp") {
+    throw new Error(`requested result ${index} did not open exactly one main turn: ${JSON.stringify(sentToMain)}`);
+  }
 }
-if (!deliveredRequestMirror.includes("[mirror truncated:")) {
-  throw new Error("long captain request did not exercise the bounded mirror path");
-}
-if ((globalThis.__fmPrompts ?? []).length !== 2) throw new Error("a handled fleet wake was rerun");
-const turns = sentToMain.filter((sent) => sent.options.triggerTurn === true);
-if (turns.length !== 1 || turns[0].options.deliverAs !== "followUp") {
-  throw new Error(`pre-turn-end requested result did not open exactly one main turn: ${JSON.stringify(sentToMain)}`);
-}
-if (sentToMain.length !== 2) throw new Error(`one result was reprocessed into ${sentToMain.length} main messages`);
-if (fleetOperations.length !== 4 || fleetOperations.some((operation) => operation.status !== 0)) {
+if ((globalThis.__fmPrompts ?? []).length !== 4) throw new Error("a handled fleet wake was rerun");
+if (sentToMain.length !== 4) throw new Error(`one result was reprocessed into ${sentToMain.length} main messages`);
+if (fleetOperations.length !== 8 || fleetOperations.some((operation) => operation.status !== 0)) {
   throw new Error(`fleet event ownership repeated or failed work: ${JSON.stringify(fleetOperations)}`);
 }
 if (fleetOperations.some((operation) => operation.actor !== "branch")) {
@@ -950,7 +953,7 @@ if (existsSync(`${home}/state/.wake-queue`) && readFileSync(`${home}/state/.wake
   throw new Error("acknowledged fleet wake remained queued for another owner");
 }
 const rows = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-if (rows.length !== 2 || rows[0].verdict !== "routine" || rows[1].verdict !== "captain") {
+if (rows.length !== 4 || rows[0].verdict !== "routine" || rows.slice(1).some((row) => row.verdict !== "captain")) {
   throw new Error(`provider classifications were not recorded once in order: ${JSON.stringify(rows)}`);
 }
 if (outcomeScript(["unread"]) !== "") throw new Error("merged outcomes remained unread for redelivery");
@@ -1440,7 +1443,7 @@ const { fire, dispatch, settle, home } = globalThis.__t;
 import { existsSync, readFileSync } from "node:fs";
 
 const entries = [
-  { type: "message", message: { role: "user", content: "never merge task-7 without my word" } },
+  { type: "message", message: { role: "user", content: `never merge task-7 without my word ${"h".repeat(5000)} old-history-tail` } },
   { type: "message", message: { role: "assistant", content: [{ type: "text", text: "aye, holding task-7" }, { type: "toolCall", id: "t1" }] } },
   { type: "message", message: { role: "user", content: "⁣FIRSTMATE_OP: v1 watcher: operational injection" } },
   { type: "message", message: { role: "toolResult", content: "tool output stays in main" } },
@@ -1469,10 +1472,14 @@ if (JSON.stringify(kinds) !== JSON.stringify(["custom", "custom", "custom", "pro
 const mirrored = session.ops.filter((op) => op.kind === "custom").map((op) => op.message);
 if (mirrored.some((m) => m.customType !== "fm-main-mirror")) throw new Error("mirror used the wrong custom type");
 if (mirrored.some((m) => m.display !== false)) throw new Error("mirrored context must be silent");
-if (mirrored[0].content !== "[captain] never merge task-7 without my word") throw new Error(`bad captain mirror: ${mirrored[0].content}`);
+if (!mirrored[0].content.startsWith("[captain] never merge task-7 without my word") ||
+    !mirrored[0].content.includes("[mirror truncated:") ||
+    !mirrored[0].content.endsWith("old-history-tail")) {
+  throw new Error(`older captain history was not bounded: ${mirrored[0].content}`);
+}
 if (mirrored[1].content !== "[main] aye, holding task-7") throw new Error(`bad main mirror: ${mirrored[1].content}`);
-if (!mirrored[2].content.includes("[mirror truncated:") || !mirrored[2].content.endsWith("tail: retain this request")) {
-  throw new Error(`long dialog did not preserve its bounded head and tail: ${mirrored[2].content}`);
+if (mirrored[2].content !== `[captain] ${entries[6].message.content}`) {
+  throw new Error("current captain dialog was not preserved completely");
 }
 if (mirrored.some((m) => m.content.includes("operational injection") || m.content.includes("tool output") || m.content.includes("merged note"))) {
   throw new Error("mirror leaked operational, tool, or merge-note traffic");

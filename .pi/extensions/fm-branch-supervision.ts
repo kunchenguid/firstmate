@@ -354,8 +354,20 @@ function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCo
   const entries = sessionManager.getEntries();
   const anchor = collection.collectAnchor ?? readMirrorCursor();
   const start = anchor.file === file ? Math.min(anchor.index, entries.length) : 0;
+  let currentCaptainIndex = -1;
+  for (let index = entries.length - 1; index >= start; index -= 1) {
+    const entry = entries[index];
+    if (entry.type !== "message") continue;
+    const message = (entry as { message?: { role?: string; content?: unknown } }).message;
+    if (message?.role !== "user") continue;
+    const text = textOfContent(message.content).trim();
+    if (!text || isOperationalUserText(text)) continue;
+    currentCaptainIndex = index;
+    break;
+  }
   const items: MirrorItem[] = [];
-  for (const entry of entries.slice(start)) {
+  for (let index = start; index < entries.length; index += 1) {
+    const entry = entries[index];
     if (entry.type !== "message") continue;
     const message = (entry as { message?: { role?: string; content?: unknown } }).message;
     if (!message) continue;
@@ -363,7 +375,10 @@ function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCo
     const text = textOfContent(message.content).trim();
     if (!text) continue;
     if (message.role === "user" && isOperationalUserText(text)) continue;
-    items.push({ tag: message.role === "user" ? "captain" : "main", text: capMirrorText(text) });
+    items.push({
+      tag: message.role === "user" ? "captain" : "main",
+      text: index === currentCaptainIndex ? text : capMirrorText(text),
+    });
   }
   collection.collectAnchor = { file, index: entries.length };
   collection.pendingCursor = collection.collectAnchor;
