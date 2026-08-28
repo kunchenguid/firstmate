@@ -78,6 +78,17 @@ detect_own() {
   # deep enough to acquire the fleet lock is still attributed to its harness.
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
+    # Codex shell tools can expose codex-linux-sandbox as PID 1 inside their
+    # process namespace. That is the only verified PID-1 harness signal; keep
+    # every other adapter's previous classification behavior unchanged.
+    if [ "$pid" -le 1 ]; then
+      if [ "$pid" -eq 1 ]; then
+        case "$(basename -- "$comm")" in
+          *codex*) echo codex; return ;;
+        esac
+      fi
+      break
+    fi
     argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
     if fm_cursor_process_matches "$comm" '' "$argv0"; then
       echo cursor
@@ -108,11 +119,6 @@ detect_own() {
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
     esac
-    # A Codex shell tool can put codex-linux-sandbox at PID 1 inside its
-    # process namespace. Inspect that process before terminating the walk.
-    if [ "$pid" -le 1 ]; then
-      break
-    fi
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] || break
   done
