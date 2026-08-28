@@ -10,7 +10,8 @@
 # Usage:
 #   fm-codex-queue-wake.sh capability
 #   fm-codex-queue-wake.sh deliver
-#   fm-codex-queue-wake.sh acknowledge <recovery-generation>
+#   fm-codex-queue-wake.sh acknowledge <ack-through> <thread-uuid>
+#     <session-generation> <recovery-generation>
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -180,14 +181,20 @@ fm_codex_queue_deliver() {
   printf 'accepted\n'
 }
 
-fm_codex_queue_acknowledge() { # <recovery-generation> [<session-generation>]
-  local generation=$1 session_gen=${2:-} stored stored_session record record_header field_count
+fm_codex_queue_acknowledge() { # <ack-through> <thread> <session-generation> <recovery-generation>
+  local ack_through=$1 thread=$2 session_gen=$3 generation=$4
+  local stored stored_thread stored_session stored_sequence record record_header field_count
+  case "$ack_through" in *[!0-9]*|'') return 2 ;; esac
+  fm_codex_uuid_valid "$thread" || return 2
+  case "$session_gen" in *[!A-Za-z0-9._-]*|'') return 2 ;; esac
   case "$generation" in *[!A-Za-z0-9._-]*|'') return 2 ;; esac
-  case "$session_gen" in *[!A-Za-z0-9._-]*) return 2 ;; esac
   mkdir -p "$STATE" || return 1
   fm_lock_acquire_wait "$FM_CODEX_PRIMARY_LOCK" || return 1
-  if [ -z "$session_gen" ] && fm_codex_record_shape_valid "$FM_CODEX_PRIMARY_BINDING" fm-codex-primary-binding-v1 6; then
-    session_gen=$(fm_codex_record_field "$FM_CODEX_PRIMARY_BINDING" session_generation 2>/dev/null || true)
+  if ! fm_codex_validate_locked \
+    || [ "$FM_CODEX_VALID_THREAD" != "$thread" ] \
+    || [ "$FM_CODEX_VALID_GENERATION" != "$session_gen" ]; then
+    fm_lock_release "$FM_CODEX_PRIMARY_LOCK"
+    return 1
   fi
   for record in "$OUTSTANDING" "$FALLBACK_OUTSTANDING"; do
     if [ -f "$record" ] && [ ! -L "$record" ]; then
@@ -196,11 +203,21 @@ fm_codex_queue_acknowledge() { # <recovery-generation> [<session-generation>]
         *) record_header=fm-codex-present-fallback-v1 field_count=4 ;;
       esac
       stored=$(fm_codex_record_field "$record" recovery_generation 2>/dev/null || true)
+      stored_thread=$(fm_codex_record_field "$record" thread_uuid 2>/dev/null || true)
       stored_session=$(fm_codex_record_field "$record" session_generation 2>/dev/null || true)
       if [ "$stored" = "$generation" ] \
-        && { [ -z "$session_gen" ] || [ "$stored_session" = "$session_gen" ]; } \
+        && [ "$stored_thread" = "$thread" ] \
+        && [ "$stored_session" = "$session_gen" ] \
         && fm_codex_record_shape_valid "$record" "$record_header" "$field_count"; then
-        rm -f -- "$record"
+        if [ "$record" = "$OUTSTANDING" ]; then
+          stored_sequence=$(fm_codex_record_field "$record" wake_sequence 2>/dev/null || true)
+          case "$stored_sequence" in *[!0-9]*|'') continue ;; esac
+          [ "$stored_sequence" -le "$ack_through" ] || continue
+        fi
+        if ! rm -f -- "$record"; then
+          fm_lock_release "$FM_CODEX_PRIMARY_LOCK"
+          return 1
+        fi
       fi
     fi
   done
@@ -211,8 +228,8 @@ case "${1:-}" in
   capability) fm_codex_queue_capable ;;
   deliver) fm_codex_queue_deliver ;;
   acknowledge)
-    case "$#" in 2|3) ;; *) exit 2 ;; esac
-    fm_codex_queue_acknowledge "$2" "${3:-}"
+    [ "$#" -eq 5 ] || exit 2
+    fm_codex_queue_acknowledge "$2" "$3" "$4" "$5"
     ;;
-  *) printf 'usage: fm-codex-queue-wake.sh capability|deliver|acknowledge RECOVERY_GENERATION [SESSION_GENERATION]\n' >&2; exit 2 ;;
+  *) printf 'usage: fm-codex-queue-wake.sh capability|deliver|acknowledge ACK_THROUGH THREAD_UUID SESSION_GENERATION RECOVERY_GENERATION\n' >&2; exit 2 ;;
 esac

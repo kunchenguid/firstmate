@@ -24,9 +24,11 @@ The interactive TUI does not fire the tracked project `SessionStart` hook on ver
 An in-process compaction leaves the validated process and native thread identity unchanged, but it does not provide an instruction-refresh channel.
 Firstmate never chooses a thread from transcript recency, session title, or the general session list.
 
-For one bound session and recovery generation, accepted, timed-out, or interrupted native submissions suppress another native submission until post-handling acknowledgement.
+For one bound session and recovery generation, accepted, timed-out, or interrupted native submissions suppress another native submission through the highest wake sequence that doorbell covered.
 This coalesces a burst behind one generic drain turn and makes ambiguous acceptance harmless.
-Only the drain acknowledgement consumes wake rows and retires the delivery record, so duplicate turns can observe an empty eligible queue but cannot duplicate a captain report.
+Only the drain acknowledgement consumes wake rows, and it retires only a matching delivery record whose wake-sequence high-water mark is at or below the handled cutoff.
+If a newer row survives the acknowledgement without a newer doorbell already covering it, the same queue-first delivery path immediately rings one successor doorbell, with the unchanged terminal and checkpoint fallbacks.
+Duplicate turns can therefore observe an empty eligible queue but cannot duplicate a captain report, while a row arriving during handling cannot be stranded behind the acknowledgement for an earlier row.
 
 Fallback order is exact:
 

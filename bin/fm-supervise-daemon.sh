@@ -79,6 +79,9 @@
 # Usage: fm-supervise-daemon.sh
 #          Long-lived background loop. Normally started by the /afk skill, which
 #          sets state/.afk first. Env knobs:
+#        fm-supervise-daemon.sh --present-wake-once <reason>
+#          Make one queue-first present-mode delivery attempt through the same
+#          guarded fallback path, without starting or replacing a watcher.
 #          FM_SUPERVISOR_TARGET     supervisor pane target (override; otherwise
 #                                   auto-discovered per backend - $TMUX_PANE
 #                                   under tmux, "<session>:<pane-id>" from
@@ -1417,7 +1420,7 @@ log() { [ -n "${LOG:-}" ] && printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
 # (fm-watch enqueues before it exits), so a deferred or failed doorbell loses
 # nothing: the record persists for the next delivery attempt, the next watcher
 # wake, or a manual bin/fm-wake-drain.sh at the top of any turn.
-present_handle_wake() {  # <reason> <state>
+present_handle_wake_locked() {  # <reason> <state>
   local reason=$1 state=$2 harness queue_err queue_line generation recovery fallback_record tmp
   local binding thread=unbound
   harness=$(fm_daemon_primary_harness)
@@ -1480,6 +1483,31 @@ present_handle_wake() {  # <reason> <state>
   else
     log "present delivery deferred after native queue and terminal fallbacks (wake persists for the foreground checkpoint): $reason"
   fi
+}
+
+present_handle_wake() {  # <reason> <state>
+  local reason=$1 state=$2 delivery_lock="$2/.codex-present-delivery.lock" result=0
+  fm_lock_acquire_wait "$delivery_lock" || return 1
+  present_handle_wake_locked "$reason" "$state" || result=$?
+  fm_lock_release "$delivery_lock"
+  return "$result"
+}
+
+fm_present_wake_once() {  # <reason>
+  local reason=$1 state backend target
+  state=$(_state_root)
+  mkdir -p "$state" || return 1
+  FM_SUPERVISE_PRESENT=1
+  if [ -z "${FM_SUPERVISOR_BACKEND:-}" ]; then
+    backend=$(discover_supervisor_backend) || true
+    FM_SUPERVISOR_BACKEND=$backend
+  fi
+  if [ -z "${FM_SUPERVISOR_TARGET:-}" ]; then
+    target=$(discover_supervisor_target) || true
+    FM_SUPERVISOR_TARGET=$target
+  fi
+  LOG="$state/.supervise-present.log"
+  present_handle_wake "$reason" "$state"
 }
 
 trim_log() {
@@ -1812,7 +1840,14 @@ fm_super_main() {
 
 # Run only when executed, not when sourced (tests source the classifiers).
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
-  fm_super_main "$@"
+  case "${1:-}" in
+    '') fm_super_main ;;
+    --present-wake-once)
+      [ "$#" -eq 2 ] || { printf 'usage: fm-supervise-daemon.sh [--present-wake-once REASON]\n' >&2; exit 2; }
+      fm_present_wake_once "$2"
+      ;;
+    *) printf 'usage: fm-supervise-daemon.sh [--present-wake-once REASON]\n' >&2; exit 2 ;;
+  esac
 else
   # Library mode: these functions were SOURCED (only tests do this - production
   # execs the daemon, see bin/fm-afk-start.sh). Make it structurally impossible

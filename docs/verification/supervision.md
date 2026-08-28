@@ -480,6 +480,7 @@ bin/fm-test-run.sh tests/fm-codex-queue-wake.test.sh tests/fm-present-launch.tes
 ```
 
 The suites cover authoritative home/lock/process binding, stale and invalid rejection, idle/busy adapter boundaries, burst and ambiguous-acceptance coalescing, missing/unsupported/rejected/timed-out queue fallbacks, composer safety, resume/rebind and compact identity, Stop-loop suppression, and the real watcher row -> doorbell -> drain/report -> acknowledgement -> successor path with a fake CLI.
+The deterministic adapter suite also appends wake sequence 8 after presenting sequence 7, acknowledges only through 7 in the same recovery generation, and proves that row 8 remains durable while a successor queue doorbell advances the outstanding high-water mark to 8.
 The manual live guard is separate because it requires Codex credentials and an interactive TUI.
 Its successful 0.150.1 output is:
 

@@ -16,16 +16,21 @@ UUID_B=22222222-2222-4222-8222-222222222222
 # shellcheck source=bin/fm-supervise-daemon.sh
 . "$DAEMON"
 
-hash_text() {
-  if command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}'; else sha256sum | awk '{print $1}'; fi
+hash_text() { # <text>
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+  else
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+  fi
 }
 
 make_case() { # <name>
   local dir="$TMP_ROOT/$1" owner_identity home_hash identity_hash
   mkdir -p "$dir/state" "$dir/fakebin"
-  owner_identity=$(FM_STATE_OVERRIDE="$dir/state" . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity $$)
-  identity_hash=$(printf '%s' "$owner_identity" | hash_text)
-  home_hash=$(printf '%s' "$dir" | hash_text)
+  owner_identity=$(FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$$")
+  identity_hash=$(hash_text "$owner_identity")
+  home_hash=$(hash_text "$dir")
   printf '%s\n' "$$" > "$dir/state/.lock"
   printf 'fm-session-lock-generation-v1\n%s\ngen-a\n%s\n' "$$" "$identity_hash" > "$dir/state/.lock-generation"
   printf 'pending:downtime:recovery-a\n' > "$dir/state/.watcher-down"
@@ -71,6 +76,33 @@ deliver() { # <dir> [mode]
   FM_CODEX_TESTING=1 FM_CODEX_PRIMARY_OWNER_PID_OVERRIDE=$$ FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
     FM_CODEX_QUEUE_BIN="$bin" FM_FAKE_MODE="$mode" FM_FAKE_LOG="$dir/queue.log" FM_CODEX_QUEUE_TIMEOUT=1 \
     "$QUEUE" deliver
+}
+
+present_with_fake_backend() { # <dir> <queue-mode> <composer-state> <fallback-log> <reason>...
+  local dir=$1 queue_mode=$2 composer_state=$3 fallback_log=$4 queue_bin reason
+  shift 4
+  queue_bin="$dir/fakebin/codex"
+  [ "$queue_mode" != missing ] || queue_bin="$dir/not-there"
+  (
+    LOG="$dir/present.log"
+    export FM_DAEMON_PRIMARY_HARNESS=codex FM_SUPERVISOR_BACKEND=tmux \
+      FM_SUPERVISOR_TARGET=fixture FM_SUPERVISE_PRESENT=1
+    export FM_CODEX_QUEUE_BIN="$queue_bin" FM_FAKE_MODE="$queue_mode" \
+      FM_FAKE_LOG="$dir/queue.log"
+    export FM_CODEX_TESTING=1 FM_CODEX_PRIMARY_OWNER_PID_OVERRIDE=$$ \
+      FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state"
+    export FM_FAKE_COMPOSER_STATE="$composer_state" FM_FAKE_FALLBACK_LOG="$fallback_log"
+    fm_backend_target_exists() { return 0; }
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf 'idle prompt\n'; }
+    fm_backend_composer_state() { printf '%s' "$FM_FAKE_COMPOSER_STATE"; }
+    supervisor_target_home_ok() { return 0; }
+    supervisor_target_login_shell() { return 1; }
+    fm_backend_send_text_submit() { printf '%s\n' "$3" >> "$FM_FAKE_FALLBACK_LOG"; printf 'empty'; }
+    for reason in "$@"; do
+      present_handle_wake "$reason" "$dir/state"
+    done
+  )
 }
 
 test_authoritative_binding_and_stale_rejection() {
@@ -189,39 +221,13 @@ test_failures_preserve_wakes_and_fallback_safely() {
   sed -i 's/^thread_uuid=.*/thread_uuid=not-a-uuid/' "$dir/state/.codex-primary-binding"
   write_fake_codex "$dir" ok >/dev/null
   invalid_fallback="$dir/invalid-fallback.txt"
-  (
-    LOG="$dir/present.log"
-    FM_DAEMON_PRIMARY_HARNESS=codex
-    fm_backend_target_exists() { return 0; }
-    fm_backend_busy_state() { printf 'idle'; }
-    fm_backend_capture() { printf 'idle prompt\n'; }
-    fm_backend_composer_state() { printf 'empty'; }
-    supervisor_target_home_ok() { return 0; }
-    supervisor_target_login_shell() { return 1; }
-    fm_backend_send_text_submit() { printf '%s' "$3" > "$invalid_fallback"; printf 'empty'; }
-    FM_CODEX_QUEUE_BIN="$dir/fakebin/codex" FM_CODEX_TESTING=1 FM_CODEX_PRIMARY_OWNER_PID_OVERRIDE=$$ \
-      FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_SUPERVISE_PRESENT=1 \
-      FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fixture \
-      present_handle_wake "signal: invalid binding" "$dir/state"
-  )
+  present_with_fake_backend "$dir" ok empty "$invalid_fallback" "signal: invalid binding"
   [ -s "$invalid_fallback" ] || fail "invalid UUID binding did not use terminal fallback"
   [ ! -e "$dir/queue.log" ] || fail "invalid UUID binding reached the native queue command"
   [ -s "$dir/state/.wake-queue" ] || fail "invalid UUID fallback consumed durable wakes"
 
   fallback="$dir/fallback.txt"
-  (
-    LOG="$dir/present.log"
-    FM_DAEMON_PRIMARY_HARNESS=codex
-    fm_backend_target_exists() { return 0; }
-    fm_backend_busy_state() { printf 'idle'; }
-    fm_backend_capture() { printf 'idle prompt\n'; }
-    fm_backend_composer_state() { printf 'pending'; }
-    fm_backend_send_text_submit() { printf '%s' "$3" > "$fallback"; printf 'empty'; }
-    FM_CODEX_QUEUE_BIN="$dir/not-there" FM_CODEX_TESTING=1 FM_CODEX_PRIMARY_OWNER_PID_OVERRIDE=$$ \
-      FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_SUPERVISE_PRESENT=1 \
-      FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fixture \
-      present_handle_wake "signal: private payload" "$dir/state"
-  )
+  present_with_fake_backend "$dir" missing pending "$fallback" "signal: private payload"
   [ ! -e "$fallback" ] || fail "terminal fallback typed into a pending user composer"
   [ -s "$dir/state/.wake-queue" ] || fail "unsafe fallback path consumed durable wakes"
   pass "queue rejection, timeout, unsupported/missing command, and pending-composer fallback preserve durable wakes"
@@ -237,7 +243,8 @@ test_ambiguous_submission_is_idempotent_until_ack() {
   deliver "$dir" ok >/dev/null || fail "ambiguous retry did not coalesce"
   count=$(wc -l < "$dir/queue.log" | tr -d ' ')
   [ "$count" = 1 ] || fail "ambiguous acceptance was resubmitted ($count queue calls)"
-  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" "$QUEUE" acknowledge recovery-a
+  FM_CODEX_TESTING=1 FM_CODEX_PRIMARY_OWNER_PID_OVERRIDE=$$ FM_HOME="$dir" \
+    FM_STATE_OVERRIDE="$dir/state" "$QUEUE" acknowledge 7 "$UUID_A" gen-a recovery-a
   [ ! -e "$dir/state/.codex-queue-outstanding" ] || fail "post-handling acknowledgement did not retire the doorbell record"
   [ -s "$dir/state/.wake-queue" ] || fail "doorbell acknowledgement consumed the durable queue itself"
   pass "ambiguous acceptance is idempotent and only the handling acknowledgement retires its delivery record"
@@ -251,21 +258,7 @@ test_interrupted_submission_falls_back_without_native_retry() {
     "$UUID_A" > "$dir/state/.codex-queue-outstanding"
   write_fake_codex "$dir" ok >/dev/null
   fallback="$dir/fallback.log"
-  (
-    LOG="$dir/present.log"
-    FM_DAEMON_PRIMARY_HARNESS=codex
-    fm_backend_target_exists() { return 0; }
-    fm_backend_busy_state() { printf 'idle'; }
-    fm_backend_capture() { printf 'idle prompt\n'; }
-    fm_backend_composer_state() { printf 'empty'; }
-    supervisor_target_home_ok() { return 0; }
-    supervisor_target_login_shell() { return 1; }
-    fm_backend_send_text_submit() { printf '%s\n' "$3" >> "$fallback"; printf 'empty'; }
-    export FM_CODEX_QUEUE_BIN="$dir/fakebin/codex" FM_FAKE_MODE=ok FM_FAKE_LOG="$dir/queue.log"
-    export FM_CODEX_TESTING=1 FM_CODEX_PRIMARY_OWNER_PID_OVERRIDE=$$ FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state"
-    export FM_SUPERVISE_PRESENT=1 FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fixture
-    present_handle_wake "signal: interrupted submission" "$dir/state"
-  )
+  present_with_fake_backend "$dir" ok empty "$fallback" "signal: interrupted submission"
   [ ! -e "$dir/queue.log" ] || fail "interrupted submission was retried through the ambiguous native path"
   [ "$(wc -l < "$fallback" | tr -d ' ')" = 1 ] || fail "interrupted submission did not use one safe terminal fallback"
   [ "$(sed -n 's/^status=//p' "$dir/state/.codex-queue-outstanding")" = submitting ] \
@@ -282,22 +275,8 @@ test_rejection_fallback_coalesces_and_diagnostics_rate_limit() {
   printf 'fm-codex-present-fallback-v1\nthread_uuid=%s\nsession_generation=gen-a\nrecovery_generation=recovery-a\nstatus=accepted\n' \
     "$UUID_B" > "$dir/state/.codex-present-fallback-outstanding"
   fallback="$dir/fallback.log"
-  (
-    LOG="$dir/present.log"
-    FM_DAEMON_PRIMARY_HARNESS=codex
-    fm_backend_target_exists() { return 0; }
-    fm_backend_busy_state() { printf 'idle'; }
-    fm_backend_capture() { printf 'idle prompt\n'; }
-    fm_backend_composer_state() { printf 'empty'; }
-    supervisor_target_home_ok() { return 0; }
-    supervisor_target_login_shell() { return 1; }
-    fm_backend_send_text_submit() { printf '%s\n' "$3" >> "$fallback"; printf 'empty'; }
-    export FM_CODEX_QUEUE_BIN="$dir/fakebin/codex" FM_FAKE_MODE=reject FM_FAKE_LOG="$dir/queue.log"
-    export FM_CODEX_TESTING=1 FM_CODEX_PRIMARY_OWNER_PID_OVERRIDE=$$ FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state"
-    export FM_SUPERVISE_PRESENT=1 FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fixture
-    present_handle_wake "signal: first" "$dir/state"
-    present_handle_wake "signal: duplicate" "$dir/state"
-  )
+  present_with_fake_backend "$dir" reject empty "$fallback" \
+    "signal: first" "signal: duplicate"
   count=$(wc -l < "$fallback" | tr -d ' ')
   [ "$count" = 1 ] || fail "queue rejection burst or stale-thread record injected $count terminal fallbacks instead of one"
   [ "$(grep -c 'native queue rejected' "$dir/present.log" 2>/dev/null || true)" = 1 ] \
@@ -337,12 +316,44 @@ test_end_to_end_doorbell_and_ack_boundary() {
   sequence=$(printf '%s\n' "$ack" | sed -n 's/.*--ack-through \([0-9][0-9]*\).*/\1/p')
   generation=$(printf '%s\n' "$ack" | sed -n 's/.*--recovery-generation \([A-Za-z0-9._-]*\).*/\1/p')
   [ -n "$sequence" ] && [ -n "$generation" ] || fail "e2e drain omitted its acknowledgement command"
-  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_SUPERVISION_MODEL=extension \
+  FM_CODEX_TESTING=1 FM_CODEX_PRIMARY_OWNER_PID_OVERRIDE=$$ \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_SUPERVISION_MODEL=extension \
     "$ROOT/bin/fm-wake-drain.sh" --ack-through "$sequence" --recovery-generation "$generation" \
     >/dev/null 2>&1 || fail "e2e acknowledgement failed"
   [ ! -s "$dir/state/.wake-queue" ] || fail "e2e acknowledgement left the handled row queued"
   [ ! -e "$dir/state/.codex-queue-outstanding" ] || fail "e2e acknowledgement left the doorbell outstanding"
   pass "done signal flows through durable row, queue doorbell, drain/report, and post-handling acknowledgement"
+}
+
+test_ack_requeues_same_generation_successor() {
+  local dir drain_err ack sequence generation count outstanding_sequence
+  dir=$(make_case same-generation-successor)
+  bind_primary "$dir" "$UUID_A" startup || fail "same-generation successor binding setup failed"
+  deliver "$dir" ok >/dev/null || fail "same-generation initial doorbell failed"
+  drain_err="$dir/drain.err"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_SUPERVISION_MODEL=extension \
+    "$ROOT/bin/fm-wake-drain.sh" > "$dir/drain.out" 2> "$drain_err" \
+    || fail "same-generation drain presentation failed"
+  ack=$(grep '^WAKE_ACK_REQUIRED:' "$drain_err" | tail -1)
+  sequence=$(printf '%s\n' "$ack" | sed -n 's/.*--ack-through \([0-9][0-9]*\).*/\1/p')
+  generation=$(printf '%s\n' "$ack" | sed -n 's/.*--recovery-generation \([A-Za-z0-9._-]*\).*/\1/p')
+  [ "$sequence" = 7 ] && [ "$generation" = recovery-a ] \
+    || fail "same-generation drain returned the wrong acknowledgement boundary: $ack"
+  printf '2\t8\tsignal\tcrew2.status\tdone: arrived during handling\n' >> "$dir/state/.wake-queue"
+  FM_CODEX_TESTING=1 FM_CODEX_PRIMARY_OWNER_PID_OVERRIDE=$$ \
+    FM_CODEX_QUEUE_BIN="$dir/fakebin/codex" FM_FAKE_MODE=ok FM_FAKE_LOG="$dir/queue.log" \
+    FM_CODEX_QUEUE_ONLY=1 FM_DAEMON_PRIMARY_HARNESS=codex \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_SUPERVISION_MODEL=extension \
+    "$ROOT/bin/fm-wake-drain.sh" --ack-through "$sequence" --recovery-generation "$generation" \
+    >/dev/null 2>&1 || fail "same-generation acknowledgement failed"
+  assert_contains "$(cat "$dir/state/.wake-queue")" $'\t8\t' \
+    "same-generation acknowledgement consumed the row beyond its boundary"
+  count=$(wc -l < "$dir/queue.log" | tr -d ' ')
+  [ "$count" = 2 ] || fail "same-generation survivor received $count total queue calls instead of two"
+  outstanding_sequence=$(sed -n 's/^wake_sequence=//p' "$dir/state/.codex-queue-outstanding")
+  [ "$outstanding_sequence" = 8 ] \
+    || fail "successor doorbell did not advance its high-water mark to row 8: $outstanding_sequence"
+  pass "ack-through 7 preserves and re-delivers same-generation row 8 with a new high-water mark"
 }
 
 test_authoritative_binding_and_stale_rejection
@@ -355,3 +366,4 @@ test_interrupted_submission_falls_back_without_native_retry
 test_rejection_fallback_coalesces_and_diagnostics_rate_limit
 test_stop_guard_does_not_queue_recursively
 test_end_to_end_doorbell_and_ack_boundary
+test_ack_requeues_same_generation_successor

@@ -97,14 +97,14 @@ fm_codex_atomic_write() { # <target>, content on stdin
 }
 
 fm_codex_lock_generation_read() {
-  local path=$FM_CODEX_LOCK_GENERATION header owner generation identity_hash extra
+  local path=$FM_CODEX_LOCK_GENERATION header owner generation identity_hash _extra
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
   exec 8< "$path" || return 1
   IFS= read -r header <&8 || { exec 8<&-; return 1; }
   IFS= read -r owner <&8 || { exec 8<&-; return 1; }
   IFS= read -r generation <&8 || { exec 8<&-; return 1; }
   IFS= read -r identity_hash <&8 || { exec 8<&-; return 1; }
-  if IFS= read -r extra <&8; then exec 8<&-; return 1; fi
+  if IFS= read -r _extra <&8; then exec 8<&-; return 1; fi
   exec 8<&-
   [ "$header" = fm-session-lock-generation-v1 ] || return 1
   case "$owner" in *[!0-9]*|'') return 1 ;; esac
@@ -201,7 +201,6 @@ fm_codex_validate_locked() {
   [ "$current_home_hash" = "$home_hash" ] || return 1
   FM_CODEX_VALID_THREAD=$thread
   FM_CODEX_VALID_GENERATION=$generation
-  FM_CODEX_VALID_OWNER=$owner
 }
 
 fm_codex_validate() {
