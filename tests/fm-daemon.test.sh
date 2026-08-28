@@ -148,7 +148,10 @@ test_classify_buried_open_decision_escalates() {
   out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
   [ "$(printf '%s' "$out" | awk -F 'new actionable update surfaced' '{ print NF - 1 }')" -eq 1 ] \
     || fail "away signal repeated one legacy condition in its digest: $out"
-  pass "away signal classification folds, deduplicates, and sanitizes unread conditions"
+  mark_escalated_seen signal "$state/t.status" "$state"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
+  case "$out" in self\|*) ;; *) fail "away signal repeated a delivered legacy condition across drains: $out" ;; esac
+  pass "away signal classification folds, durably deduplicates, and sanitizes unread conditions"
 }
 
 test_classify_check_and_unknown_escalate() {

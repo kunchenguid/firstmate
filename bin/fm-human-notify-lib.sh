@@ -118,6 +118,10 @@ fm_human_notify_class() {  # <status-line>
     printf 'result'
     return 0
   fi
+  if status_is_captain_relevant "$line"; then
+    printf 'legacy-result'
+    return 0
+  fi
   return 1
 }
 
@@ -192,10 +196,17 @@ fm_human_notify_pending() {  # <state> <task> <line>
   return 0
 }
 
+_fm_human_notify_receipt_dir_safe() {  # <state>
+  local dir="$1/human-notifications"
+  [ ! -e "$dir" ] && [ ! -L "$dir" ] && return 0
+  [ -d "$dir" ] && [ ! -L "$dir" ]
+}
+
 fm_human_notify_record() {  # <state> <task> <line>
   local state=$1 task=$2 line=$3 dir tmp
   _fm_human_notify_derive "$state" "$task" "$line" || return $?
   dir="$state/human-notifications"
+  _fm_human_notify_receipt_dir_safe "$state" || return 1
   (umask 077; mkdir -p "$dir") || return 1
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
   tmp=$(umask 077; mktemp "$dir/.notification.XXXXXX") || return 1
@@ -213,12 +224,14 @@ fm_human_notify_record() {  # <state> <task> <line>
 
 _fm_human_notify_remove_class_key() {  # <state> <task> <class> <key>
   local state=$1 task=$2 class=$3 key=$4 marker_id
+  _fm_human_notify_receipt_dir_safe "$state" || return 1
   marker_id=$(printf '%s' "$class|$task|$key" | _fm_human_notify_sha256)
   rm -f -- "$state/human-notifications/$marker_id"
 }
 
 _fm_human_notify_remove_task_class() {  # <state> <task> <class>
   local state=$1 task=$2 class=$3 f recorded_task recorded_class
+  _fm_human_notify_receipt_dir_safe "$state" || return 1
   [ -d "$state/human-notifications" ] || return 0
   for f in "$state"/human-notifications/*; do
     [ -f "$f" ] && [ ! -L "$f" ] || continue
@@ -249,17 +262,26 @@ fm_human_notify_apply_transition() {  # <state> <task> <status-line>
     failed)
       _fm_human_notify_remove_task_class "$state" "$task" result
       _fm_human_notify_remove_task_class "$state" "$task" review-ready
+      _fm_human_notify_remove_task_class "$state" "$task" legacy-result
       ;;
     done)
       _fm_human_notify_remove_task_class "$state" "$task" failure
+      _fm_human_notify_remove_task_class "$state" "$task" legacy-result
       ;;
     working)
       _fm_human_notify_remove_class_key "$state" "$task" blocker default
       _fm_human_notify_remove_task_class "$state" "$task" failure
       _fm_human_notify_remove_task_class "$state" "$task" result
       _fm_human_notify_remove_task_class "$state" "$task" review-ready
+      _fm_human_notify_remove_task_class "$state" "$task" legacy-result
       ;;
-    needs-decision|blocked|captain-held|paused)
+    needs-decision|blocked|captain-held)
+      _fm_human_notify_remove_task_class "$state" "$task" failure
+      _fm_human_notify_remove_task_class "$state" "$task" result
+      _fm_human_notify_remove_task_class "$state" "$task" review-ready
+      _fm_human_notify_remove_task_class "$state" "$task" legacy-result
+      ;;
+    paused)
       _fm_human_notify_remove_task_class "$state" "$task" failure
       _fm_human_notify_remove_task_class "$state" "$task" result
       ;;
@@ -323,6 +345,7 @@ fm_human_notify_pr_observation_record() {  # <state> <task> <pr-state> <head> <c
 fm_human_notify_clear_task() {  # <state> <task>
   local state=$1 task=$2 f recorded
   rm -f -- "$state/$task.pr-observation"
+  _fm_human_notify_receipt_dir_safe "$state" || return 1
   [ -d "$state/human-notifications" ] || return 0
   for f in "$state"/human-notifications/*; do
     [ -f "$f" ] && [ ! -L "$f" ] || continue
@@ -351,6 +374,8 @@ fm_human_notify_summary() {  # <state> <task> <status-line>
       printf '%s: the review-ready result changed. Action required: inspect the private task record and approve or merge only if authorized.' "$display" ;;
     result)
       printf '%s: a new result surfaced. Action required: inspect the private task record and review the result.' "$display" ;;
+    legacy-result)
+      printf '%s: a new actionable update surfaced. Action required: inspect the private task record and respond.' "$display" ;;
     failure)
       printf '%s: new failure evidence surfaced. Action required: inspect the private task record and choose recovery.' "$display" ;;
   esac

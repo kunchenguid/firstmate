@@ -68,7 +68,10 @@ assert_pending decision-task "$FAILURE"
 fm_human_notify_record "$STATE" decision-task "$REVIEW"
 fm_human_notify_apply_transition "$STATE" decision-task 'working: revising after review'
 assert_pending decision-task "$REVIEW"
-pass "recovery and rework clear terminal receipts so identical evidence can reopen"
+fm_human_notify_record "$STATE" decision-task "$REVIEW"
+fm_human_notify_apply_transition "$STATE" decision-task 'blocked [key=merge]: resolve the merge conflict'
+assert_pending decision-task "$REVIEW"
+pass "recovery, rework, and human-owned waits reset readiness for restoration"
 
 printf '%s\n%s\n' 'blocked: temporary dependency failed' 'working: recovered and resumed' > "$STATE/nonkeyed.status"
 [ -z "$(status_open_decisions "$STATE/nonkeyed.status")" ] \
@@ -109,6 +112,15 @@ printf '%s' "$DECISION" > "$STATE/.hb-surfaced-legacy-task"
 assert_absorbed legacy-task "$DECISION"
 [ -d "$STATE/human-notifications" ] || fail "legacy receipt was not adopted"
 pass "restart recovery adopts pre-owner receipts without replaying an already presented condition"
+
+LEGACY='PR ready: legacy review result'
+[ "$(fm_human_notify_class "$LEGACY")" = legacy-result ] || fail "legacy result did not enter the shared owner"
+assert_pending legacy-task "$LEGACY"
+fm_human_notify_record "$STATE" legacy-task "$LEGACY"
+assert_absorbed legacy-task "$LEGACY"
+fm_human_notify_apply_transition "$STATE" legacy-task 'working: revising the legacy result'
+assert_pending legacy-task "$LEGACY"
+pass "legacy outcomes use durable deduplication and reopen after resolution"
 
 # Publication-before-record leaves only the accepted duplicate window.
 CRASH='blocked [key=network]: access gateway returned a new denial'
@@ -291,3 +303,23 @@ for transition in 'CLOSED COMPLETED SUCCESS' 'OPEN COMPLETED FAILURE'; do
   fi
 done
 pass "red and closed PR transitions defer state changes until publication"
+
+SYMLINK_STATE="$TMP_ROOT/symlink-state"
+SYMLINK_TARGET="$TMP_ROOT/symlink-target"
+mkdir -p "$SYMLINK_STATE" "$SYMLINK_TARGET"
+printf 'display_name=CRM · Symlink Safety\nbusy_gen=link-1\nkind=ship\nproject=firstmate\n' > "$SYMLINK_STATE/link.meta"
+fm_human_notify_record "$SYMLINK_STATE" link "$DECISION" || fail "could not seed symlink safety receipt"
+mv "$SYMLINK_STATE/human-notifications" "$SYMLINK_TARGET/receipts"
+ln -s "$SYMLINK_TARGET/receipts" "$SYMLINK_STATE/human-notifications"
+receipt_count=$(find "$SYMLINK_TARGET/receipts" -type f | wc -l | tr -d ' ')
+if fm_human_notify_clear_task "$SYMLINK_STATE" link; then
+  fail "task cleanup accepted a symlinked receipt directory"
+fi
+[ "$(find "$SYMLINK_TARGET/receipts" -type f | wc -l | tr -d ' ')" -eq "$receipt_count" ] \
+  || fail "task cleanup removed a receipt through a directory symlink"
+if fm_human_notify_apply_transition "$SYMLINK_STATE" link 'resolved [key=shape]: chose RPC'; then
+  fail "transition cleanup accepted a symlinked receipt directory"
+fi
+[ "$(find "$SYMLINK_TARGET/receipts" -type f | wc -l | tr -d ' ')" -eq "$receipt_count" ] \
+  || fail "transition cleanup removed a receipt through a directory symlink"
+pass "receipt removals refuse symlinked directories without touching their targets"
