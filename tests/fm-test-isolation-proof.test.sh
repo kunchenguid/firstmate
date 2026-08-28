@@ -25,26 +25,38 @@ test_unknown_pool_is_refused() {
 }
 
 test_family_pool_json_identifies_admission() {
-  local tmp repo proof json rc
+  local tmp repo proof json admitted_json rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-isolation-proof-json.XXXXXX")
   repo="$tmp/repo"
   proof="$repo/bin/fm-test-isolation-proof.sh"
   json="$tmp/proof.json"
+  admitted_json="$tmp/admitted-proof.json"
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$PROOF" "$proof"
   cat >"$repo/bin/fm-test-run.sh" <<'SH'
 #!/usr/bin/env bash
-if [ "$1" = --list ] && [ "$2" = --family ] && [ "$3" = fixture-family ]; then
-  printf '%s\n' tests/fm-proof-fixture.test.sh
+if [ "$1" = --list ] && [ "$2" = --family ]; then
+  case "$3" in
+    fixture-family|admitted-family)
+      printf '%s\n' tests/fm-proof-fixture-a.test.sh tests/fm-proof-fixture-b.test.sh
+      exit 0
+      ;;
+  esac
+fi
+if [ "$1" = --list-concurrent-safe-families ]; then
+  printf '%s\n' admitted-family
   exit 0
 fi
 exit 2
 SH
-  cat >"$repo/tests/fm-proof-fixture.test.sh" <<'SH'
+  for fixture in fm-proof-fixture-a.test.sh fm-proof-fixture-b.test.sh; do
+    cat >"$repo/tests/$fixture" <<'SH'
 #!/usr/bin/env bash
 echo "ok - proof fixture"
 SH
-  chmod +x "$proof" "$repo/bin/fm-test-run.sh" "$repo/tests/fm-proof-fixture.test.sh"
+    chmod +x "$repo/tests/$fixture"
+  done
+  chmod +x "$proof" "$repo/bin/fm-test-run.sh"
   set +e
   "$proof" --pool fixture-family --jobs 1 --json "$json" >"$tmp/out" 2>"$tmp/err"
   rc=$?
@@ -55,13 +67,27 @@ import json, sys
 artifact = json.load(open(sys.argv[1], encoding="utf-8"))
 assert artifact["kind"] == "isolation-proof"
 assert artifact["pool"] == "fixture-family"
-assert artifact["fm_test_run_jobs_enabled"] is True
+assert artifact["fm_test_run_jobs_enabled"] is False
 assert artifact["production_sharding_enabled"] is False
-assert artifact["summary"]["total"] == 1
+assert artifact["summary"]["total"] == 2
 assert artifact["summary"]["failed"] == 0
-' "$json" || fail "family pool artifact metadata is incorrect"
+' "$json" || fail "serial family pool artifact metadata is incorrect"
+  set +e
+  "$proof" --pool admitted-family --jobs 2 --json "$admitted_json" >"$tmp/admitted.out" 2>"$tmp/admitted.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "admitted family proof fixture failed: $(cat "$tmp/admitted.out") $(cat "$tmp/admitted.err")"
+  python3 -c '
+import json, sys
+artifact = json.load(open(sys.argv[1], encoding="utf-8"))
+assert artifact["pool"] == "admitted-family"
+assert artifact["concurrency"] == 2
+assert artifact["fm_test_run_jobs_enabled"] is True
+assert artifact["summary"]["total"] == 2
+assert artifact["summary"]["failed"] == 0
+' "$admitted_json" || fail "admitted family pool artifact metadata is incorrect"
   rm -rf "$tmp"
-  pass "family pool JSON identifies its successful jobs admission"
+  pass "family pool JSON scopes jobs admission to proven concurrency"
 }
 
 test_list_candidates_nonempty_and_stable() {
@@ -131,10 +157,13 @@ test_list_exclusions_documents_reasons() {
 }
 
 test_family_map_labels_this_contract() {
-  local fam
+  local fam safe
   fam=$("$RUNNER" --list --family pure-contract-unit)
   printf '%s\n' "$fam" | grep -Fq 'tests/fm-test-isolation-proof.test.sh' \
     || fail "fm-test-isolation-proof.test.sh must map to pure-contract-unit"
+  safe=$("$RUNNER" --list-concurrent-safe-families)
+  printf '%s\n' "$safe" | grep -Fxq watcher-wake-lock \
+    || fail "runner must expose the admitted concurrent-safe family"
   pass "isolation-proof contract test is family-mapped"
 }
 

@@ -527,7 +527,10 @@ if [ -n "$JSON_PATH" ]; then
   # Stable record order for the artifact.
   sort -t$'\t' -k1,1 "$RECORDS" -o "$RECORDS"
   jobs_enabled=0
-  [ "$AGG_RC" -ne 0 ] || jobs_enabled=1
+  if [ "$AGG_RC" -eq 0 ] && [ "$JOBS" -gt 1 ] && \
+    "$ROOT/bin/fm-test-run.sh" --list-concurrent-safe-families | grep -Fxq "$POOL"; then
+    jobs_enabled=1
+  fi
   write_json_artifact "$JSON_PATH" \
     "$RUN_STARTED_ISO" "$RUN_FINISHED_ISO" "$RUN_ID" \
     "$TOTAL" "$FAILED" "$JOBS" "$RUN_DURATION" "$RECORDS" "$POOL" "$jobs_enabled"

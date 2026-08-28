@@ -18,6 +18,7 @@
 #   fm-test-run.sh --list --family <name>
 #   fm-test-run.sh --list --lane portable-parallel-1
 #   fm-test-run.sh --list-families
+#   fm-test-run.sh --list-concurrent-safe-families
 #   fm-test-run.sh --list-lanes
 #   fm-test-run.sh --check-coverage
 #
@@ -159,6 +160,7 @@ cd "$ROOT" || exit 1
 MODE=
 LIST_ONLY=0
 LIST_FAMILIES=0
+LIST_CONCURRENT_SAFE_FAMILIES=0
 LIST_LANES=0
 CHECK_COVERAGE=0
 AGGREGATE_OUT=
@@ -1549,6 +1551,10 @@ while [ "$#" -gt 0 ]; do
       LIST_FAMILIES=1
       shift
       ;;
+    --list-concurrent-safe-families)
+      LIST_CONCURRENT_SAFE_FAMILIES=1
+      shift
+      ;;
     --list-lanes)
       LIST_LANES=1
       shift
@@ -1613,6 +1619,11 @@ done
 
 if [ "$LIST_FAMILIES" -eq 1 ]; then
   list_known_families
+  exit 0
+fi
+
+if [ "$LIST_CONCURRENT_SAFE_FAMILIES" -eq 1 ]; then
+  list_concurrent_safe_families
   exit 0
 fi
 
