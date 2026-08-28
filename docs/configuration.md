@@ -237,6 +237,14 @@ The switch is a list name, not a policy: how each entry reads, when an entry is 
 What must be registered as a captain call in the first place is owned by `AGENTS.md` section 9 and the `captain-hold-lifecycle` skill, not by this switch.
 Run `bin/fm-captain-reminders.sh status` for a dry run that prints what a sync would change without touching the list, including the first-time macOS automation approval when that is what is standing in the way.
 
+## Fast-mode project configs (config/fast-mode/)
+
+`config/fast-mode/<name>.sh` is an optional local, gitignored config per project that `bin/fm-fast-mode.sh` can bring up as a single clickable local instance.
+One file describes one project: its preferred ports, the directories that prove the command is running in that project's worktree, the build caches to clear, and the shell hooks that start its backend and frontend.
+`<name>` is the basename of the worktree's `origin` remote, so an ordinary worktree needs no argument to find its config.
+These files stay local because they carry machine paths, project-private commands, and the location of gitignored credentials, while the logic they drive is shared in `bin/`.
+The full contract, the hook environment, and the port, origin, and build-cache behavior are owned by `bin/fm-fast-mode.sh`'s header; [`examples/fast-mode-config.sh`](examples/fast-mode-config.sh) is a copyable starting shape.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
