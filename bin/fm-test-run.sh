@@ -138,11 +138,10 @@ if [ -z "${FM_TEST_RUN_GROUP_ACTIVE:-}" ]; then
   case $- in *m*) group_monitor_was_on=1 ;; *) group_monitor_was_on=0 ;; esac
   set -m
   (
-    export FM_TEST_RUN_GROUP_ACTIVE=1
-    export FM_TEST_RUN_STARTED_ISO="$group_started_iso"
-    export FM_TEST_RUN_STARTED_MS="$group_started_ms"
-    export FM_TEST_RUN_WRAPPER_PID="$$"
-    exec "$0" "$@"
+    FM_TEST_RUN_GROUP_ACTIVE=1 \
+      FM_TEST_RUN_STARTED_ISO="$group_started_iso" \
+      FM_TEST_RUN_STARTED_MS="$group_started_ms" \
+      exec "$0" "$@"
   ) &
   group_child=$!
   [ "$group_monitor_was_on" -eq 1 ] || set +m
@@ -159,8 +158,7 @@ fi
 
 RUN_STARTED_ISO=${FM_TEST_RUN_STARTED_ISO:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 RUN_STARTED_MS=${FM_TEST_RUN_STARTED_MS:-$(now_ms)}
-RUN_WRAPPER_PID=${FM_TEST_RUN_WRAPPER_PID:-$$}
-unset FM_TEST_RUN_STARTED_ISO FM_TEST_RUN_STARTED_MS FM_TEST_RUN_WRAPPER_PID
+unset FM_TEST_RUN_STARTED_ISO FM_TEST_RUN_STARTED_MS
 set +m
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -1839,6 +1837,8 @@ declare -a WORKER_PIDS=()
 declare -a WORKER_IDX=()
 declare -a WORKER_SCRIPTS=()
 
+# Invoked indirectly by the EXIT trap below.
+# shellcheck disable=SC2329
 cleanup_run() {
   rm -rf "$RUN_TMP"
 }
@@ -1928,6 +1928,8 @@ run_script_bounded() {  # <script> <out> <stream> <id>
   set +e
   if [ "$stream" -eq 1 ]; then
     if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
+      # Expansion is intentionally deferred to the child bash passed to -c.
+      # shellcheck disable=SC2016
       fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c \
         'bash "$1" 2>&1 | tee "$2"; exit "${PIPESTATUS[0]}"' _ "$script" "$out"
       rc=$?

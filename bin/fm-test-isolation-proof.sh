@@ -510,8 +510,8 @@ for script in "${CANDIDATES[@]}"; do
     printf '%s\n' "$duration" >"$work/out/duration_ms"
     exit 0
   ) &
-  WORKER_PIDS[$idx]=$!
-  WORKER_IDX[$idx]=$idx
+  WORKER_PIDS[idx]=$!
+  WORKER_IDX[idx]=$idx
   ACTIVE_WORKERS=$((ACTIVE_WORKERS + 1))
 
   # Bound concurrency.
