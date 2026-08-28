@@ -36,7 +36,8 @@
 #
 # `resume` is deliberately NOT a verb. It is not deterministic across the
 # verified adapters: codex and grok resume only from a session id printed at
-# exit, opencode resumes the most recent session for the cwd with --continue,
+# exit, opencode and agy resume the most recent session for the cwd with
+# --continue (agy also accepts an explicit --conversation <id>),
 # and claude, pi, pi-signed, omp, and kimi have no verified pane-resume contract
 # at all. `relaunch` covers the same need deterministically for every adapter,
 # because the brief on disk - not a harness-private session - is the durable
@@ -63,7 +64,7 @@ fm_control_verb_allowed() {  # <verb>
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harness_supported() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp) return 0 ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy) return 0 ;;
   esac
   return 1
 }
@@ -90,6 +91,7 @@ fm_control_harness_family() {  # <recorded-harness>
     gemini*) printf 'gemini' ;;
     muse*) printf 'muse' ;;
     rovo*) printf 'rovo' ;;
+    agy*) printf 'agy' ;;
     *) return 1 ;;
   esac
 }
@@ -117,9 +119,19 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 # 202609.1.2). omp (Oh My Pi) shares Pi's single Escape, empty composer
 # afterwards, and /quit exit (verified omp 18.1.2 in a PTY, re-verified 18.1.11
 # through Herdr).
+#
+# agy accepts either a single Escape or a single Ctrl+C, both verified to stop a
+# foreground turn and leave a clean composer, so it takes the fleet default.
+# It carries one caveat this plane cannot fix with a key: agy auto-promotes a
+# long shell command to its own background-task tracker, and NEITHER key kills
+# that already-backgrounded child - the command runs to completion and agy
+# resumes reporting on it afterwards (verified live, agy 1.1.22). `interrupt`
+# therefore cancels agy's current turn, exactly as its name says, and a hard
+# stop of in-flight shell work still needs the pane or process tree killed,
+# which is `exit` or `relaunch`, not this key.
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo) printf 'Escape' ;;
+    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy) printf 'Escape' ;;
     grok) printf 'C-c' ;;
     *) return 1 ;;
   esac
@@ -130,7 +142,7 @@ fm_control_interrupt_key() {  # <harness>
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode) printf '2' ;;
-    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo) printf '1' ;;
+    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) printf '1' ;;
     *) return 1 ;;
   esac
 }
@@ -151,7 +163,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy) ;;
     *) return 1 ;;
   esac
 }
@@ -166,7 +178,7 @@ fm_control_interrupt_ack_source() {  # <harness>
     # rovo's TUI prints "Agent cancelled" on Escape, but for parity with
     # claude/cursor this stays 'none': the ack is a rendered string, not a
     # recorded state source, and rovo has no busy wiring to confirm against.
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo) printf 'none' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy) printf 'none' ;;
     *) return 1 ;;
   esac
 }
@@ -174,7 +186,7 @@ fm_control_interrupt_ack_source() {  # <harness>
 # The command that exits the agent from its own composer.
 fm_control_exit_command() {  # <harness>
   case "${1-}" in
-    claude|opencode|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
+    claude|opencode|grok|kimi|cursor|muse|rovo|agy) printf '/exit' ;;
     codex|pi|pi-signed|omp|gemini) printf '/quit' ;;
     *) return 1 ;;
   esac
@@ -246,6 +258,15 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
     # is written into the worktree, whose own .gemini/settings.json belongs to
     # the project, and nothing global is installed.
     gemini) printf '%s\n' "$state/$id.gemini-settings.json" ;;
+    agy)
+      # agy installs no hook either: agy 1.1.22 exposes no lifecycle-hook
+      # surface at all, so its busy source is its own conversation database,
+      # bound to the pane by these two firstmate-owned artifacts. A relaunch
+      # ONTO agy rewrites them, and a relaunch AWAY from agy must retire them so
+      # no retired incarnation's conversation binding outlives the agent.
+      printf '%s\n' "$state/$id.agy-session"
+      printf '%s\n' "$state/$id.agy-log"
+      ;;
   esac
 }
 

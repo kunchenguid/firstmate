@@ -43,8 +43,9 @@
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
 #   endpoint-gone, herdr-native, grok-regex, rovo-regex, muse-session-log,
-#   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
-#   kimi-unverified, codex-unverified, capture-failed, no-target
+#   cursor-transcript, agy-steps, missing, malformed, gen-mismatch,
+#   source-mismatch, kimi-unverified, codex-unverified, capture-failed,
+#   no-target
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
@@ -53,7 +54,8 @@
 #   3. a valid, gen-matching, source-trusted record -> its state and source
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
-#      muse session-log and cursor transcript pull sources, then the Grok/Rovo
+#      muse session-log, cursor transcript, and agy step-status pull sources,
+#      then the Grok/Rovo
 #      temporary regex fallbacks classify a grok or rovo task from its
 #      rendered tail, then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
@@ -80,6 +82,17 @@
 # no writer, no arm, and no gen, so nothing is seeded that could never be
 # cleared. See fm_busy_cursor_turn_state for the fold. Cursor's rendered
 # `ctrl+c to stop` footer is deliberately not a state source here.
+#
+# The agy (Antigravity CLI) pull source is the third of this family and works
+# the same way: it folds agy's own durable per-conversation SQLite step table,
+# whose every row carries a status that is 3 exactly when that step has
+# finished. It has no writer, no arm, and no gen, because agy 1.1.22 exposes no
+# lifecycle-hook surface at all (`agy plugin`, `agy mcp`, and `agy agents` were
+# each checked and none carries a turn-boundary event), so nothing is armed that
+# could never be cleared. See fm_busy_agy_run_state for the fold. agy's rendered
+# `esc to cancel` footer is deliberately not a state source here, and it could
+# not be one: a shell command agy auto-promotes to its own background-task
+# tracker clears that footer while the turn is still running.
 #
 # Codex negotiation (fm_busy_codex_appserver_observable,
 # fm_busy_codex_hooks_verified): the approved contract prefers Codex's
@@ -182,11 +195,12 @@ fm_busy_current_gen() {  # <state-dir> <id>
 # fm_busy_sources_for_harness: the semantic sources trusted to classify a
 # task recorded with <harness>. One line, space-separated, possibly empty.
 # The firstmate-owned sources are appended for every converted adapter.
-# Grok and muse deliberately trust nothing: neither has a semantic WRITER, so
-# neither is armed, and both read their live source on demand in the classifier
-# (grok's rendered tail, muse's session log) rather than through a stored
-# record. Listing a source here without a writer that can clear it would seed a
-# busy record nothing could ever settle.
+# Grok, muse, cursor, and agy deliberately trust nothing: none has a semantic
+# WRITER, so none is armed, and each reads its live source on demand in the
+# classifier (grok's rendered tail, muse's session log, cursor's transcript,
+# agy's conversation database) rather than through a stored record. Listing a
+# source here without a writer that can clear it would seed a busy record
+# nothing could ever settle.
 fm_busy_sources_for_harness() {  # <harness>
   local adapter=
   case "${1:-}" in
@@ -829,6 +843,126 @@ fm_busy_cursor_turn_state() {  # <transcript>
   '
 }
 
+# agy conversation step-status busy source
+#
+# Antigravity CLI persists one SQLite database per conversation at
+# <conversations-root>/<conversation-id>.db. Its `steps` table holds one row per
+# step of the conversation, and every row carries a `status` integer that is 3
+# exactly when that step has finished. Verified live on agy 1.1.22:
+#   idx=2 step_type=132 status=2   <- an enclosing task step, still running
+#   idx=3 step_type=15  status=3   <- a LATER step that already finished
+# and, once the turn settled, every row at status=3 with no other value present.
+#
+# The busy predicate is therefore "ANY row is not status 3", never "the
+# highest-idx row is not status 3". Those two are not equivalent, and the
+# highest-idx form is actively wrong: the capture above was taken while a shell
+# command was in flight, and its newest row had already settled to 3 while the
+# enclosing step that owned the running command was still at 2. Reading only the
+# last row there yields a FALSE IDLE mid-turn, which is the one verdict this
+# contract must never produce (verified live, agy 1.1.22, 2026-08-28).
+#
+# Binding is by LOG FILE, not by database content. fm-spawn gives each task its
+# own --log-file and removes any predecessor's copy first, and agy writes a
+# `Created conversation <id>` line into it, so the conversation this pane owns is
+# named by a file only this incarnation can have written. Deliberately NOT bound
+# by grepping the database blobs for the worktree path: that path appears only
+# because agy happens to mention its own cwd in first-turn reasoning, which no
+# structural guarantee backs. Pre-assigning the id was checked and rejected too -
+# `--conversation <unknown-id>` warns "not found" and mints a fresh id anyway,
+# and a pre-set ANTIGRAVITY_CONVERSATION_ID in the launch environment is ignored
+# (both verified live, agy 1.1.22).
+#
+# fm_busy_agy_binding_path: the per-task sidecar fm-spawn writes. It records
+# conversations_root=<abs> and log_file=<abs>.
+fm_busy_agy_binding_path() {  # <state-dir> <id>
+  printf '%s/%s.agy-session' "$1" "$2"
+}
+
+fm_busy_agy_binding_field() {  # <state-dir> <id> <key>
+  local path value
+  path=$(fm_busy_agy_binding_path "$1" "$2")
+  [ -f "$path" ] || return 1
+  value=$(LC_ALL=C awk -F= -v k="$3" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$path")
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+
+# fm_busy_agy_conversation_id: the conversation this pane owns, read from its
+# own log file. Matched on agy's literal `Created conversation <uuid>` token and
+# a strict UUID shape, so an arbitrary UUID appearing elsewhere in the log - the
+# task's own worktree path can contain one - is never mistaken for the
+# conversation. The LAST such line wins, so a session that opened a second
+# conversation is folded on its current one rather than its first.
+fm_busy_agy_conversation_id() {  # <state-dir> <id>
+  local log conv
+  log=$(fm_busy_agy_binding_field "$1" "$2" log_file) || return 1
+  [ -f "$log" ] || return 1
+  conv=$(LC_ALL=C sed -n \
+    's/.*Created conversation \([0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}\).*/\1/p' \
+    "$log" | tail -1)
+  [ -n "$conv" ] || return 1
+  printf '%s' "$conv"
+}
+
+# fm_busy_agy_db: the conversation database this pane owns, or failure.
+fm_busy_agy_db() {  # <state-dir> <id>
+  local root conv db
+  root=$(fm_busy_agy_binding_field "$1" "$2" conversations_root) || return 1
+  conv=$(fm_busy_agy_conversation_id "$1" "$2") || return 1
+  db="$root/$conv.db"
+  [ -f "$db" ] || return 1
+  printf '%s' "$db"
+}
+
+# fm_busy_agy_uri_path: percent-encode the three characters SQLite gives a
+# special meaning inside a file: URI, so a database under a home directory
+# containing one of them still resolves to the intended file.
+fm_busy_agy_uri_path() {  # <path>
+  printf '%s' "$1" | LC_ALL=C sed -e 's/%/%25/g' -e 's/?/%3f/g' -e 's/#/%23/g' -e 's/ /%20/g'
+}
+
+# fm_busy_agy_query: run one read-only query against <db>, or fail.
+#
+# Two open modes, tried in this order, and deliberately never a plain
+# read-write open. agy keeps the database in WAL mode:
+#   - While the WAL sidecars exist, `mode=ro` reads them and is the only mode
+#     that sees steps agy has written but not yet checkpointed.
+#   - Once agy checkpoints and removes them, `mode=ro` can no longer open the
+#     database at all (it may not create the -shm it would need), while
+#     `immutable=1` reads it correctly - and reads it accurately, because a
+#     database with no WAL has nothing outstanding to miss.
+# `immutable=1` is never tried first: with a live WAL it would silently ignore
+# it and could report a running turn as settled. A plain open is never used
+# because it would create -shm/-wal files inside the operator's own live agy
+# store. Both behaviours verified live, agy 1.1.22 / sqlite 3.51.0.
+fm_busy_agy_query() {  # <db> <sql>
+  local db=$1 sql=$2 uri out
+  command -v sqlite3 >/dev/null 2>&1 || return 1
+  uri=$(fm_busy_agy_uri_path "$db")
+  if out=$(LC_ALL=C sqlite3 "file:$uri?mode=ro" "$sql" 2>/dev/null) && [ -n "$out" ]; then
+    printf '%s' "$out"
+    return 0
+  fi
+  if out=$(LC_ALL=C sqlite3 "file:$uri?immutable=1" "$sql" 2>/dev/null) && [ -n "$out" ]; then
+    printf '%s' "$out"
+    return 0
+  fi
+  return 1
+}
+
+# fm_busy_agy_run_state: fold the conversation database into busy | settled |
+# none. `none` means the table holds no step at all, which is a conversation
+# that has not run a turn yet and proves nothing about the pane.
+fm_busy_agy_run_state() {  # <db>
+  local total unfinished
+  total=$(fm_busy_agy_query "$1" 'SELECT COUNT(*) FROM steps;') || return 1
+  case "$total" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$total" -gt 0 ] || { printf 'none'; return 0; }
+  unfinished=$(fm_busy_agy_query "$1" 'SELECT COUNT(*) FROM steps WHERE status != 3;') || return 1
+  case "$unfinished" in ''|*[!0-9]*) return 1 ;; esac
+  if [ "$unfinished" -gt 0 ]; then printf 'busy'; else printf 'settled'; fi
+}
+
 # fm_busy_grok_tail_busy: the Grok-only temporary rendered-tail fallback.
 # Consumes the tail on stdin; 0 when Grok's verified busy signature matches.
 # FM_BUSY_REGEX still globally overrides the signature, mirroring the
@@ -888,6 +1022,26 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
         busy) printf 'busy cursor-transcript' ;;
         settled) printf 'idle cursor-transcript' ;;
         *) printf 'unknown cursor-transcript' ;;
+      esac
+      return 0
+      ;;
+    agy*)
+      # Semantic, on demand: fold this task's bound conversation database. Any
+      # step still short of its finished status is positive proof of a turn in
+      # flight, and a table whose every step has finished is a settled turn.
+      # Every other outcome - no sidecar, no log line naming a conversation, a
+      # missing or unreadable database, no sqlite3, or a conversation that has
+      # not run a turn yet - is unknown, never idle. The rendered `esc to
+      # cancel` footer is deliberately NOT consulted here; see the source note
+      # above for why it cannot be trusted for this harness.
+      if ! log=$(fm_busy_agy_db "$state" "$id"); then
+        printf 'unknown agy-steps'
+        return 0
+      fi
+      case "$(fm_busy_agy_run_state "$log" 2>/dev/null)" in
+        busy) printf 'busy agy-steps' ;;
+        settled) printf 'idle agy-steps' ;;
+        *) printf 'unknown agy-steps' ;;
       esac
       return 0
       ;;

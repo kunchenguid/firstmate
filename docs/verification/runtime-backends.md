@@ -1402,6 +1402,213 @@ Refresh this harness-dependent proof before accepting a cursor upgrade:
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
 
+## Antigravity CLI (agy)
+
+agy runs crewmate and scout work only; `bin/fm-spawn.sh` refuses `--secondmate` on it.
+The evidence below was produced on 2026-08-28 against the installed CLI on macOS 26.5.2 arm64 with tmux, running as `landonbrice`, with sqlite 3.51.0.
+
+- Binary: `~/.local/bin/agy`, a single Go binary; `agy --version` reported `1.1.22`.
+- Account: `landonbrice2005@gmail.com (Google AI Pro)`, reported in the CLI banner.
+
+### Process identity
+
+`ps -o comm=` reported the literal, unshortened string `agy` for a live pane process, with no launcher renaming and no version riding the name:
+
+```text
+$ ps -o pid,ppid,comm= -p 513
+  PID  PPID
+  513   511 agy
+$ ps -o args= -p 513
+agy --dangerously-skip-permissions
+```
+
+The match is anchored to that exact name in `bin/fm-harness.sh`, `bin/backends/tmux.sh`, and `bin/fm-tmux-lib.sh`, never globbed: `agy` is a three-letter fragment of ordinary words such as `magyar` and `nagy`, which an unanchored match would claim as live agent panes.
+
+### Environment markers
+
+Read from a shell subprocess the agent spawned:
+
+| Marker | Where observed |
+| --- | --- |
+| `ANTIGRAVITY_AGENT=1` | child/tool processes |
+| `ANTIGRAVITY_CONVERSATION_ID=<uuid>` | child/tool processes |
+| `ANTIGRAVITY_AGENTAPI_EXE=<binary path>` | child/tool processes |
+| `ANTIGRAVITY_LS_ADDRESS=localhost:<port>` | child/tool processes |
+
+agy does not set `CLAUDECODE`, so its marker is unambiguous when present.
+Like grok's it is a fast path only, because only tool children are known to carry it; the ancestry walk is what identifies the pane process itself.
+
+### Workspace trust is exact-path and unsuppressable
+
+Launching in `/Users/landonbrice/.treehouse/firstmate-7bab20/1/firstmate` - a path UNDER the already-trusted `/Users/landonbrice` - still raised the dialog, proving the match is exact rather than by prefix:
+
+```text
+Do you trust the contents of this project?
+Antigravity CLI requires permission to read, edit, and execute files here.
+> Yes, I trust this folder
+  No, exit
+```
+
+`--dangerously-skip-permissions` produced the identical prompt, so it does not cover this gate.
+`agy --help` lists no `--trust` flag, and no environment variable substitutes for one.
+
+Writing the exact path into `trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json` before launch suppressed it completely: a pane launched that way went straight to its idle composer with no dialog.
+Two normalization facts bound how that path must be written.
+agy tolerates redundant separators - a grant stored as `.../scratchpad//slash-wt` matched a pane launched in that directory.
+agy does NOT resolve symlinks - a pane launched through `.../link-wt` was matched by a grant naming `.../link-wt` and reported that same logical path as its workspace, so canonicalizing the grant to the symlink's target would break it.
+`bin/fm-spawn.sh` therefore stores the recorded worktree verbatim.
+
+### Autonomy flag
+
+`--dangerously-skip-permissions` suppressed every approval for a five-step shell sequence (branch create, file write, `git status`, branch delete, file delete) with zero prompts.
+`--mode accept-edits` covers edits only and stalls on each new shell command.
+
+### Busy state: the conversation step table
+
+agy persists one SQLite database per conversation at `~/.gemini/antigravity-cli/conversations/<id>.db`.
+Its `steps` table carries one row per step with a `status` integer that is 3 exactly when that step has finished.
+
+Polled live across a turn that was running a `sleep 25` shell command:
+
+```text
+mid-turn:                       after the turn settled:
+  idx=3 step_type=15  status=3    idx=5 status=3
+  idx=2 step_type=132 status=2    idx=3 status=3
+  idx=1 step_type=15  status=3    idx=2 status=3
+  idx=0 step_type=14  status=3
+```
+
+**The busy predicate is "ANY row is not status 3", never "the highest-idx row is not status 3".**
+The mid-turn capture above is the counterexample: the highest-idx row (idx=3) had already settled to 3 while the enclosing step that owned the running command (idx=2) was still at 2.
+A last-row predicate reads a FALSE IDLE there, which is the one verdict the semantic busy contract must never produce.
+Measured directly against that live conversation:
+
+```text
+--- t+8s ---   highest-idx: 3/3   any-nonidle: 1   <- predicates DISAGREE; turn was running
+--- t+16s ---  highest-idx: 5/8   any-nonidle: 1
+--- t+24s ---  highest-idx: 5/3   any-nonidle: 0   <- turn settled
+```
+
+Two read-only open modes are needed, and their order matters.
+While the WAL sidecars exist, `file:<db>?mode=ro` reads them and is the only mode that sees steps agy has written but not yet checkpointed.
+Once agy checkpoints and removes them, that mode cannot open the database at all, while `immutable=1` reads it correctly:
+
+```text
+wal present, mode=ro:    0
+wal removed, mode=ro:    Error: in prepare, unable to open database file (14)
+wal removed, immutable:  0
+```
+
+`immutable=1` is never tried first, because with a live WAL it would ignore it and could report a running turn as settled.
+A plain read-write open is never used: it works, but it creates `-shm`/`-wal` files inside the operator's own live conversation store.
+
+### Conversation binding
+
+The binding is the per-task `--log-file`, into which agy writes a `Created conversation <id>` line:
+
+```text
+I0828 08:56:47.818805  1 server.go:1153] Created conversation 964b729f-e88d-463f-bc7d-f337c588f6f6
+```
+
+Three alternatives were checked and rejected.
+Grepping the database blobs for the worktree path works only because agy happens to mention its cwd in first-turn reasoning, which nothing guarantees.
+Pre-assigning the id does not work: `--conversation 72b34483-...` answered `warning: conversation "72b34483-..." not found` and minted `072fd6fb-...` instead.
+Pre-setting `ANTIGRAVITY_CONVERSATION_ID` in the launch environment is ignored the same way.
+Selecting the live database by its `-shm`/`-wal` sidecars is also unreliable: sidecars were observed persisting on conversations whose process had already exited.
+
+### Composer
+
+agy's composer is the `separated` shape - content between two solid horizontal rules, with no side border - and unlike Pi's it carries a prompt glyph.
+The styled capture of an idle composer was:
+
+```text
+\x1b[90m────...────\x1b[m      <- top rule, SGR 90, U+2500
+\x1b[94m>\x1b[39m              <- prompt glyph U+003E, SGR 94
+\x1b[90m────...────\x1b[m      <- bottom rule
+\x1b[90m? for shortcuts\x1b[39m   \x1b[2mGemini 3.6 Flash · high\x1b[m
+```
+
+Nothing renders inside the composer when it is empty: agy draws no ghost or placeholder text.
+Real typed text carries no SGR wrapping at all, so styled chrome (SGR 90 or SGR 2) versus unstyled content is the discriminator, and the footer sits BELOW the closing rule rather than inside the composer.
+The footer reads `esc to cancel` mid-turn and `? for shortcuts` when idle.
+
+That footer is a DELIVERY guard only and could not be a state source: agy auto-promotes a long shell command to its own background-task tracker and restores the idle footer while the turn is still running, which was observed directly (`? for shortcuts ... 1 task(s)` with a `sleep 25` in flight).
+
+### Lifecycle
+
+| Action | Verified behavior |
+| --- | --- |
+| Interrupt | A single Escape or a single Ctrl+C stops a foreground turn and leaves a clean composer; no follow-up clear key is needed. |
+| Interrupt limit | Neither key kills a shell command agy has promoted to its background-task tracker: a `sleep 30` kept running after Escape and the agent later reported its completion. A hard stop needs the pane or process tree killed. |
+| Exit | `/exit` terminated the process cleanly, confirmed twice. |
+| Resume | `--continue`/`-c` and `--conversation <id>` both restored prior conversation state, confirmed by recalling a number injected in an earlier process. |
+
+### Launch shape and profile axes
+
+agy accepts no positional prompt; the brief rides `-i/--prompt-interactive`, which runs an initial prompt and then continues interactively.
+
+`agy models` prints display names that bake effort into the id, and passing `--effort` alongside one is rejected:
+
+```text
+$ agy --model gemini-3.6-flash-medium --effort low -p ping
+Error: invalid model selection: --model gemini-3.6-flash-medium conflicts with --effort=low
+$ agy --model gemini-3.6-flash --effort low -p ping
+pong! How can I help you today?
+```
+
+The ceiling is `high`, by explicit rejection rather than absence from the catalog:
+
+```text
+$ agy --model gemini-3.6-flash-medium --effort xhigh -p ping
+Error: invalid --effort "xhigh" (valid: low, medium, high)
+$ agy --model claude-sonnet-4-6 --effort high -p ping
+Error: --effort is not supported for model "claude-sonnet-4-6"
+```
+
+`--effort` with no `--model` at all is accepted and applies to the configured default model.
+
+### No lifecycle-hook surface
+
+`agy plugin --help` (install/enable/disable plugins), `agy mcp --help` (MCP server config), and `agy agent`/`agy agents` (custom agent listing, empty) were each checked.
+None exposes a Stop hook or turn-boundary event analogous to grok's `~/.grok/hooks/` or Claude's Stop hook.
+This is why agy's busy state is a polled pull source, and why `bin/fm-spawn.sh` refuses an agy secondmate: there is nothing a primary supervision cycle could arm on.
+
+### Slash-command hazard
+
+agy's slash popup swallows the first Enter like grok's and cursor's, but its failure mode is worse.
+An unmatched `/token` is intercepted client-side as `Unknown command` and never reaches the model at all, where grok and cursor still submit the text.
+agy discovers this repo's own tracked `.agents/skills/` (typing `/e` surfaced `/process-event-sources` with its exact SKILL.md description) but NOT the captain's global `~/.claude/skills/`, so `/no-mistakes` matched nothing and was dropped.
+The `__OPINPUT__ encode launch-brief` delivery firstmate already uses avoids this by construction.
+
+### Eager reading of project instructions
+
+On its first turn, unprompted, agy read this repo's `AGENTS.md` and ran `bin/fm-session-start.sh` on its own initiative.
+It treats project instructions as live orders rather than background context, so an agy brief in a firstmate checkout should state plainly that the worker is a crewmate and must not run primary-session commands.
+
+### Drift guard
+
+The portable regression is `tests/fm-agy-harness.test.sh`, which pins the detection signals, the busy fold including the false-idle counterexample above, the composer verdicts, the control mechanics, and the trust write, all with real processes and real SQLite databases and no agy installed.
+
+Refresh the harness-dependent half of this record after an agy upgrade:
+
+```sh
+FM_AGY_SIGNALS_LIVE=1 tests/fm-agy-signals-live-e2e.test.sh
+```
+
+Observed output on 2026-08-28, agy 1.1.22:
+
+```text
+# agy 1.1.22 at /Users/landonbrice/.local/bin/agy
+ok - agy's trust grant still suppresses the workspace dialog for an exact path
+ok - agy's live process name is still the exact string agy
+ok - agy's real idle composer still classifies empty
+not ok - agy accepted the turn but its account could not start one (pane says: ⚠ Verifying your account...). This is an account/quota condition, not adapter drift - retry when the account is available (agy 1.1.22)
+```
+
+The guard's turn-dependent legs - the conversation binding, the busy fold, and the effort axes - could not complete on that run because the Antigravity account entered an eligibility/quota hold partway through the session.
+Those same guarantees are recorded above from the direct live measurements taken earlier in the same session, before the hold.
+Rerun the guard when the account is available to bring its automated evidence up to the level of the manual evidence here; the guard distinguishes that account condition from adapter drift so a maintainer is not sent looking in the wrong place.
+
 ## Pi supervision branch
 
 The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [docs/pi-supervision-branch.md](../pi-supervision-branch.md)) builds its second session through the Pi SDK surface: `createAgentSession` (including its `model`, `modelRuntime`, and `thinkingLevel` options), `DefaultResourceLoader` with `extensionFactories`, `SessionManager`, `createBashToolDefinition` with a `spawnHook`, `sendCustomMessage` for routine notes, `appendEntry` and `registerEntryRenderer` for captain outcomes, the `before_provider_request` hook, the command context's model registry for picker candidates, a fresh `ModelRuntime` for isolated-branch resolution, and Pi's own `getSupportedThinkingLevels`/`clampThinkingLevel` plus its `getThinkingLevel` and `thinking_level_select` extension surface for effort.
