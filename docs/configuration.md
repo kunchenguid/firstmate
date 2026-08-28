@@ -362,9 +362,10 @@ A relaunch reuses the worktree it already has, and a secondmate home is a provis
 
 The project must git-ignore `.env.local` for any of this to happen.
 An unignored copy would be untracked work, which both the base-freshness check and teardown refuse, so the spawn reports the missing ignore rule and seeds nothing rather than wedging the slot.
+If a task removes that ignore rule after the file was seeded, firstmate retires its own copy - and only a copy that still matches the project checkout's current file - so the worktree still returns; anything it cannot prove it authored stays put and is refused as your work.
 A `.env.local` the project tracks is version-controlled content that this seeding never writes over and never deletes, so a project that commits the file keeps exactly what it committed.
 The copy preserves the source's mode, and its contents are never printed to logs, status lines, or task metadata.
-`bin/fm-spawn.sh --help` owns the exact per-edge behavior, including which states refuse the spawn and which degrade to a warning that names the file to fix by hand.
+`bin/fm-spawn.sh --help` and `bin/fm-env-local-lib.sh` own the exact per-edge behavior, including which states refuse the spawn and which degrade to a warning that names the file to fix by hand.
 
 ## Toolchain
 

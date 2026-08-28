@@ -174,6 +174,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-env-local-lib.sh
+. "$SCRIPT_DIR/fm-env-local-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -1381,6 +1383,19 @@ validate_worktree_teardown_safety() {
   case "$KIND" in
     secondmate|scout) return 0 ;;
   esac
+
+  # Retire firstmate's own seeded .env.local before asking git what is dirty. That
+  # file is seeded only while the project ignores it, but a task can drop the ignore
+  # rule mid-flight, and the copy then shows up as untracked work here. Refusing it
+  # would strand the worktree for good: the acquisition path that retires such a
+  # copy only runs once the slot is back in the pool, which this very refusal
+  # prevents. bin/fm-env-local-lib.sh owns the decision and removes the copy only
+  # when it is provably firstmate's own - byte-identical to the project checkout's
+  # current .env.local - so a task's own work still reaches the check below and is
+  # still refused. The retire is advisory: whatever it cannot prove it owns stays
+  # put, and the uncommitted-work check below remains the only authority on what
+  # teardown refuses.
+  fm_env_local_apply "$WT" "$PROJ" retire "teardown of '$WT'" || true
 
   if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then

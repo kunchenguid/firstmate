@@ -12,6 +12,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
+TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-pool-base-freshen)
 
 # git consults core.excludesFile for every ignore decision, so a machine whose
@@ -411,11 +412,11 @@ unignore_local_env_file() {
 
 # The sweep has to run on every path through the seeding, including the ones that
 # never reach the base refresh. An unignored copy the seeding cannot prove is its
-# own refuses the slot in the pre-refresh phase, so a sweep placed after that phase
+# own refuses the slot in the retire phase, so a sweep placed after that phase
 # never runs again for this slot and the scratch holding the captain's credential
 # bytes stays readable through the slot's git directory for as long as the wedge
 # lasts. Count the leftovers; never read them.
-test_scratch_is_swept_even_when_the_pre_refresh_phase_refuses() {
+test_scratch_is_swept_even_when_the_retire_phase_refuses() {
   local rec id retry out status before after
   id='pool-env-local-r10'
   rec=$(make_case env-local-scratch-refused "$id")
@@ -433,7 +434,7 @@ test_scratch_is_swept_even_when_the_pre_refresh_phase_refuses() {
     || fail "the fixture left no staged scratch, so the entry sweep cannot be observed"
 
   # The rule the seeding depends on is gone, and the slot holds a copy that differs
-  # from the source, so the next acquisition refuses inside the pre-refresh phase
+  # from the source, so the next acquisition refuses inside the retire phase
   # and never reaches the base refresh or the phase after it.
   unignore_local_env_file
   printf 'FIXTURE_MARKER=the-task-own-work-not-a-real-credential\n' > "$POOL_DIR/.env.local"
@@ -448,7 +449,7 @@ test_scratch_is_swept_even_when_the_pre_refresh_phase_refuses() {
   [ "$status" -ne 0 ] \
     || fail "spawn launched from a slot wedged by an unignored copy it could not prove was its own"
   assert_contains "$out" "remove it by hand" \
-    "the pre-refresh refusal did not tell the operator how to clear the slot"
+    "the retire phase's refusal did not tell the operator how to clear the slot"
   [ "$(staged_scratch_count)" = 0 ] \
     || fail "a staged credential scratch survived an acquisition that refused before the base refresh"
   [ -f "$POOL_DIR/.env.local" ] \
@@ -955,6 +956,120 @@ test_stale_pin_beside_other_dirt_reports_one_verdict() {
   pass "a stale pin beside other dirt yields the conservative refusal alone, with no stale-pin line"
 }
 
+# --- teardown's half of the same .env.local lifecycle -----------------------
+#
+# Seeding is safe only while the project ignores .env.local, and a task can drop
+# that ignore rule mid-flight. The copy firstmate seeded then reads as untracked
+# work, and teardown's uncommitted-work check refuses the slot - permanently,
+# because the acquisition path that retires such a copy only runs once the slot is
+# back in the pool. These cases drive the real spawn and the real teardown in
+# sequence, so the two halves are proven against one another rather than against a
+# restatement of either. Assert on presence and on the refusal wording only; the
+# fixture's bytes are never printed.
+
+# Teardown reaches further than spawn does, so its own external commands need
+# stubs. They answer the shape teardown expects and nothing more: no PR exists and
+# no validation run is active.
+add_teardown_stubs() {  # <fakebin>
+  local fakebin=$1
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list") printf '%s\n' "count: 0 (showing first 0)" "pull_requests[]: []"; exit 0 ;;
+  "pr view") echo "error: pull request not found" >&2; exit 1 ;;
+esac
+exit 0
+SH
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/gh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/no-mistakes"
+  chmod +x "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
+}
+
+run_teardown() {  # <id>
+  local id=$1
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    "$TEARDOWN" "$id" 2>&1
+}
+
+# The task's own committed change is what turns the seeded copy into untracked
+# work. Landing that branch on origin leaves the uncommitted-work check as the only
+# thing that can refuse the teardown that follows.
+land_task_branch_without_the_ignore_rule() {  # <id>
+  local id=$1
+  git -C "$POOL_DIR" checkout --quiet -b "fm/$id"
+  git -C "$POOL_DIR" rm --quiet .gitignore >/dev/null
+  git -C "$POOL_DIR" -c user.name='Firstmate Tests' \
+    -c user.email='tests@example.invalid' commit -qm 'drop the local env ignore rule'
+  git -C "$POOL_DIR" push --quiet origin "fm/$id"
+  git -C "$POOL_DIR" fetch --quiet origin
+}
+
+test_teardown_returns_a_slot_whose_task_dropped_the_ignore_rule() {
+  local rec id out status
+  id='pool-env-local-r11'
+  rec=$(make_case env-local-teardown-unignored "$id")
+  read_case_record "$rec"
+  add_teardown_stubs "$FAKEBIN_DIR"
+
+  ignore_local_env_file
+  printf 'FIXTURE_MARKER=authored-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
+  chmod 0600 "$PROJECT_DIR/.env.local"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should seed the slot before the task drops the rule"
+  [ -f "$POOL_DIR/.env.local" ] || fail "the fixture never got a seeded .env.local"
+
+  land_task_branch_without_the_ignore_rule "$id"
+  [ -n "$(git -C "$POOL_DIR" status --porcelain)" ] \
+    || fail "the fixture did not reproduce the untracked seeded copy teardown must not refuse"
+
+  out=$(run_teardown "$id")
+  status=$?
+  expect_code 0 "$status" "teardown refused a slot held only by firstmate's own seeded file"
+  [ ! -e "$POOL_DIR/.env.local" ] \
+    || fail "teardown left its own seeded copy in the slot it handed back"
+  assert_contains "$out" "no longer ignores .env.local" \
+    "teardown did not explain why it removed its own copy"
+  pass "teardown hands back a slot whose task dropped the local environment file's ignore rule"
+}
+
+test_teardown_still_refuses_a_task_authored_local_env_file() {
+  local rec id out status before after
+  id='pool-env-local-r12'
+  rec=$(make_case env-local-teardown-task-work "$id")
+  read_case_record "$rec"
+  add_teardown_stubs "$FAKEBIN_DIR"
+
+  ignore_local_env_file
+  printf 'FIXTURE_MARKER=authored-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
+  chmod 0600 "$PROJECT_DIR/.env.local"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should seed the slot before the task rewrites the file"
+  land_task_branch_without_the_ignore_rule "$id"
+  # The task then wrote its own content over the seeded copy, so it is real work.
+  printf 'FIXTURE_MARKER=the-task-own-work-not-a-real-credential\n' > "$POOL_DIR/.env.local"
+  before=$(cksum < "$POOL_DIR/.env.local")
+
+  out=$(run_teardown "$id")
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "teardown returned a slot holding the task's own uncommitted work"
+  [ -f "$POOL_DIR/.env.local" ] \
+    || fail "teardown deleted a file it could not prove was firstmate's own"
+  after=$(cksum < "$POOL_DIR/.env.local")
+  [ "$after" = "$before" ] \
+    || fail "teardown modified the task's own uncommitted work"
+  assert_contains "$out" "uncommitted changes" \
+    "teardown did not refuse the task's own work as uncommitted"
+  pass "teardown still refuses a local environment file the task itself authored"
+}
+
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
@@ -966,12 +1081,14 @@ test_acquired_worktree_refreshes_a_stale_local_env_file
 test_acquired_worktree_retires_a_local_env_file_the_captain_deleted
 test_interrupted_local_env_seed_leaves_the_slot_acquirable
 test_interrupted_seed_scratch_does_not_outlive_revocation
-test_scratch_is_swept_even_when_the_pre_refresh_phase_refuses
+test_scratch_is_swept_even_when_the_retire_phase_refuses
 test_cross_filesystem_layout_degrades_to_a_loud_skip
 test_unanswerable_filesystem_question_still_refuses
 test_unignored_local_env_file_is_not_seeded
 test_unignored_copy_matching_the_source_is_retired
 test_unignored_copy_differing_from_the_source_is_kept
+test_teardown_returns_a_slot_whose_task_dropped_the_ignore_rule
+test_teardown_still_refuses_a_task_authored_local_env_file
 test_tracked_local_env_file_is_never_touched
 test_stale_submodule_pin_explains_itself
 test_unpushed_submodule_commit_is_still_uncommitted_work
