@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 # GitHub concurrency groups retain at most one pending run, replacing older
 # pending runs even when cancel-in-progress is false. Give body-bearing events
@@ -22,9 +23,103 @@ jobs:
   check:
     name: PR must be raised via no-mistakes
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: >-
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
+      - name: Wait for the PR body attestation to catch up
+        id: current-pr
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const prefix = '<!-- no-mistakes-pipeline-attestation:v1 ';
+            const closing = ' -->';
+            const signature = 'Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)';
+            const maxAttempts = 11; // Initial read plus ten 60-second waits.
+            const retryMilliseconds = 60_000;
+
+            function latestAttestation(body) {
+              // Evidence may quote marker-shaped examples before the real
+              // protocol comment. The pinned verifier takes the first marker,
+              // so pass it only the latest live comment.
+              const start = body.lastIndexOf(prefix);
+              if (start < 0) return { head: '', comment: '' };
+              const payloadStart = start + prefix.length;
+              const end = body.indexOf(closing, payloadStart);
+              if (end < 0) return { head: '', comment: body.slice(start) };
+              const comment = body.slice(start, end + closing.length);
+              try {
+                const payload = JSON.parse(body.slice(payloadStart, end));
+                return {
+                  head: typeof payload.head_sha === 'string' ? payload.head_sha : '',
+                  comment,
+                };
+              } catch {
+                return { head: '', comment };
+              }
+            }
+
+            let pullRequest;
+            for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+              let response;
+              try {
+                response = await github.rest.pulls.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: context.issue.number,
+                });
+              } catch (error) {
+                if (attempt === maxAttempts) throw error;
+                const message = error instanceof Error ? error.message : String(error);
+                core.warning(`Could not refresh the PR on attempt ${attempt}/${maxAttempts}: ${message}. Retrying in 60 seconds.`);
+                await new Promise((resolve) => setTimeout(resolve, retryMilliseconds));
+                continue;
+              }
+              pullRequest = response.data;
+              const body = pullRequest.body || '';
+              const attested = latestAttestation(body).head;
+              const head = pullRequest.head.sha;
+              if (attested === head) {
+                core.info(`Attestation caught up to PR head ${head} on attempt ${attempt}/${maxAttempts}.`);
+                break;
+              }
+              const shownAttestation = attested || '(missing or invalid)';
+              if (attempt === maxAttempts) {
+                core.warning(
+                  `Attestation did not catch up after 10 minutes: attestation.head_sha=${shownAttestation}, PR head=${head}. ` +
+                  'The shared verifier will now make the final decision.'
+                );
+                break;
+              }
+              core.info(
+                `Attestation is still behind on attempt ${attempt}/${maxAttempts}: ` +
+                `attestation.head_sha=${shownAttestation}, PR head=${head}. Retrying in 60 seconds.`
+              );
+              await new Promise((resolve) => setTimeout(resolve, retryMilliseconds));
+            }
+
+            // The shared action treats an empty input as "use the event body".
+            // Pass a non-matching sentinel so a body cleared after the event cannot fall back to stale data.
+            // Keep the original signature result, but give the first-marker
+            // parser only the final live attestation comment.
+            const liveBody = pullRequest.body || '';
+            const finalAttestation = latestAttestation(liveBody);
+            const verificationBody = [
+              liveBody.includes(signature) ? signature : '[no-mistakes signature missing]',
+              finalAttestation.comment || '[pipeline attestation missing]',
+            ].join('\n');
+            core.setOutput('body', liveBody ? verificationBody : '[empty PR body]');
+            core.setOutput('head-sha', pullRequest.head.sha);
+            core.setOutput('head-ref', pullRequest.head.ref);
+            core.setOutput('author', pullRequest.user.login);
+            core.setOutput('number', String(pullRequest.number));
       - name: Verify no-mistakes signature and pipeline attestation
         uses: kunchenguid/no-mistakes/.github/actions/require-no-mistakes@32d396ac0f29135daf7fcb9964aba9d5f4e796d6 # post-v1.57.1, untagged (action added in #819)
+        with:
+          pr-body: ${{ steps.current-pr.outputs.body }}
+          pr-head-sha: ${{ steps.current-pr.outputs.head-sha }}
+          pr-head-ref: ${{ steps.current-pr.outputs.head-ref }}
+          pr-author: ${{ steps.current-pr.outputs.author }}
+          pr-number: ${{ steps.current-pr.outputs.number }}
