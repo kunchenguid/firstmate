@@ -130,6 +130,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-cursor-lib.sh
+. "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -202,7 +204,7 @@ for a in "$@"; do
       --*) die "--$want_value requires a value" ;;
     esac
     case "$want_value" in
-      harness) NEW_HARNESS=$a; HARNESS_SET=1 ;;
+      harness) NEW_HARNESS=$(fm_cursor_normalize_harness "$a"); HARNESS_SET=1 ;;
       model) NEW_MODEL=$a; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$a; EFFORT_SET=1 ;;
       note) NOTE=$a; NOTE_SET=1 ;;
@@ -217,7 +219,7 @@ for a in "$@"; do
   fi
   case "$a" in
     --harness) want_value=harness ;;
-    --harness=*) NEW_HARNESS=${a#--harness=}; HARNESS_SET=1 ;;
+    --harness=*) NEW_HARNESS=$(fm_cursor_normalize_harness "${a#--harness=}"); HARNESS_SET=1 ;;
     --model) want_value=model ;;
     --model=*) NEW_MODEL=${a#--model=}; MODEL_SET=1 ;;
     --effort) want_value=effort ;;

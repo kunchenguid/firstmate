@@ -69,7 +69,7 @@ SH
 #!/usr/bin/env bash
 if [ "${1:-}" = --list-models ]; then
   [ "${FM_FAKE_CURSOR_LIST_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_CURSOR_LIST_STATUS}"
-  printf '%b\n' "${FM_FAKE_CURSOR_MODELS:-Available models\ncursor-grok-4.5-high - Grok 4.5 High}"
+  printf '%b\n' "${FM_FAKE_CURSOR_MODELS:-Available models\nauto - Auto (current, default)\ncursor-grok-4.5-high - Grok 4.5 High}"
 fi
 exit 0
 SH
@@ -556,6 +556,27 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   pass "cursor receives its model-qualified reasoning class and exact task workspace"
 }
 
+test_cursor_defaults_to_auto_and_normalizes_cursor_agent_alias() {
+  local rec id out status launch
+  id=profile-cursor-auto-z6f
+  rec=$(make_spawn_case profile-cursor-auto cursor "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness cursor-agent)
+  status=$?
+  expect_code 0 "$status" "cursor-agent alias spawn without a model should succeed"
+  assert_contains "$out" "spawned $id harness=cursor" \
+    "cursor-agent alias must record the canonical cursor adapter"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor auto default
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--trust --yolo --model 'auto' --workspace '$WT_DIR'" \
+    "cursor launch without an explicit model must pass --model auto"
+  assert_not_contains "$launch" "cursor-agent --trust" \
+    "cursor-agent must remain an intake alias, not a second launch template"
+  pass "cursor-agent alias records cursor and defaults the model to auto"
+}
+
 test_cursor_refuses_model_absent_from_live_catalog() {
   local rec id out status
   id=profile-cursor-unsupported-z6d
@@ -580,8 +601,8 @@ test_cursor_failed_catalog_probe_does_not_block_spawn() {
   rec=$(make_spawn_case profile-cursor-catalog-unreachable cursor "$id")
   read_case_record "$rec"
 
-  FM_TEST_CURSOR_LIST_STATUS=124 \
-    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+  out=$(FM_TEST_CURSOR_LIST_STATUS=124 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
       --model cursor-catalog-unreachable)
   status=$?
   expect_code 0 "$status" "cursor spawn should fail open when the bounded catalog query fails"
@@ -590,6 +611,54 @@ test_cursor_failed_catalog_probe_does_not_block_spawn() {
     "failed catalog lookup incorrectly removed the requested model"
   assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-catalog-unreachable default
   pass "cursor preserves the requested model when its live catalog is unreachable"
+}
+
+test_cursor_secondmate_model_pin_is_catalog_checked_not_auto() {
+  local rec id sm out status launch
+  id=profile-cursor-sm-pin-z6g
+  rec=$(make_spawn_case profile-cursor-sm-pin cursor "$id")
+  read_case_record "$rec"
+  printf '%s\n' 'cursor cursor-grok-4.5-high' > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+
+  out=$(FM_TEST_CURSOR_LIST_STATUS=0 \
+    FM_TEST_CURSOR_MODELS='Available models\ncursor-grok-4.5-high - Grok 4.5 High' \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "cursor secondmate pin should spawn even when the live catalog omits auto"
+  assert_contains "$out" "spawned $id harness=cursor kind=secondmate" \
+    "cursor secondmate pin must keep the canonical cursor adapter"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-grok-4.5-high default
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--model 'cursor-grok-4.5-high'" \
+    "cursor secondmate pin must launch the configured model, not auto"
+  assert_not_contains "$launch" "--model 'auto'" \
+    "cursor secondmate pin must not fall back to auto after the catalog check"
+  pass "cursor secondmate model pin is catalog-checked instead of auto"
+}
+
+test_cursor_secondmate_model_pin_absent_from_catalog_is_refused() {
+  local rec id sm out status
+  id=profile-cursor-sm-pin-missing-z6h
+  rec=$(make_spawn_case profile-cursor-sm-pin-missing cursor "$id")
+  read_case_record "$rec"
+  printf '%s\n' 'cursor cursor-grok-4.5-high' > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(FM_TEST_CURSOR_LIST_STATUS=0 \
+    FM_TEST_CURSOR_MODELS='Available models\nauto - Auto (current, default)' \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 1 "$status" "cursor secondmate pin should refuse when the live catalog omits that id"
+  assert_contains "$out" "Cursor model 'cursor-grok-4.5-high' is not available" \
+    "cursor secondmate pin refusal did not identify the configured model"
+  assert_contains "$out" "--list-models" \
+    "cursor secondmate pin refusal did not tell the caller how to find valid ids"
+  [ ! -s "$LAUNCH_LOG" ] || fail "cursor secondmate pin refusal must happen before launch"
+  pass "cursor refuses a secondmate model pin absent from its live catalog"
 }
 
 test_opencode_threads_model_and_ignores_effort_axis() {
@@ -844,8 +913,11 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_cursor_threads_model_workspace_and_omits_effort_axis
+test_cursor_defaults_to_auto_and_normalizes_cursor_agent_alias
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
+test_cursor_secondmate_model_pin_is_catalog_checked_not_auto
+test_cursor_secondmate_model_pin_absent_from_catalog_is_refused
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi

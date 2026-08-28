@@ -14,10 +14,13 @@
 #        fm-harness.sh secondmate-effort   print the optional EFFORT token from
 #                                        config/secondmate-harness, or empty when absent.
 # config/secondmate-harness format: a single line "<harness> [<model>] [<effort>]",
-# whitespace-separated. A bare "<harness>" (today's format) behaves exactly as before:
-# harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
-# Model/effort come ONLY from this file - config/crew-harness stays a bare adapter
-# name and is never parsed for a model.
+# whitespace-separated. A bare "<harness>" still contributes no model or effort
+# token from this file; Cursor's later --model auto default is owned by
+# bin/fm-spawn.sh (docs/configuration.md#harness-support). Only the first
+# non-empty, non-comment line is parsed. Model/effort come ONLY from this file -
+# config/crew-harness stays a bare adapter name and is never parsed for a model.
+# cursor-agent is an intake alias for cursor (bin/fm-cursor-lib.sh); detection
+# and recorded identity stay cursor.
 # Detection layers: verified environment markers first, then process ancestry.
 # Record each newly verified env marker here.
 set -u
@@ -119,7 +122,7 @@ detect_own() {
 resolve_crew() {
   local crew=
   [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
-  if [ -z "$crew" ] || [ "$crew" = "default" ]; then detect_own; else echo "$crew"; fi
+  if [ -z "$crew" ] || [ "$crew" = "default" ]; then detect_own; else fm_cursor_normalize_harness "$crew"; fi
 }
 
 # Print the first non-empty, non-comment line of config/secondmate-harness
@@ -164,7 +167,7 @@ secondmate_field() {
 resolve_secondmate() {
   local sm
   sm=$(secondmate_field 1)
-  if [ -z "$sm" ] || [ "$sm" = "default" ]; then resolve_crew; else echo "$sm"; fi
+  if [ -z "$sm" ] || [ "$sm" = "default" ]; then resolve_crew; else fm_cursor_normalize_harness "$sm"; fi
 }
 
 # Print the optional model token (2nd field) from config/secondmate-harness, or

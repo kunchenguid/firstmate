@@ -274,6 +274,10 @@ test_harness_family_resolution() {
       || fail "'$recorded' should resolve to the $want adapter"
     [ "$got" = "$want" ] || fail "'$recorded' should resolve to $want, got '$got'"
   done
+  [ "$(fm_control_harness_family cursor-agent)" = cursor ] \
+    || fail "cursor-agent must resolve to the cursor adapter"
+  fm_control_harness_supported cursor-agent \
+    || fail "cursor-agent must be accepted as the cursor intake alias"
   fm_control_harness_family someagent \
     && fail "an unrecognized launch command must not be guessed into an adapter family"
   fm_control_harness_family '' \

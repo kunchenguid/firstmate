@@ -1080,7 +1080,7 @@ crew_dispatch_validate() {
     return 0
   fi
   err=$(jq -r '
-    def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","muse"] | index($h);
+    def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","cursor-agent","muse"] | index($h);
     def effort_ok($h; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
@@ -1089,7 +1089,7 @@ crew_dispatch_validate() {
       elif $h == "grok" then (["low","medium","high"] | index($e))
       elif $h == "pi" or $h == "pi-signed" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "muse" then (["low","medium","high","xhigh","max"] | index($e))
-      elif $h == "opencode" or $h == "kimi" or $h == "cursor" then false
+      elif $h == "opencode" or $h == "kimi" or $h == "cursor" or $h == "cursor-agent" then false
       else true
       end;
     def profiles($value):
@@ -1263,9 +1263,12 @@ detect_local_config() {
   # verified owner rather than a bare `command -v`, so a home that merely has
   # some unrelated executable named `agent` on PATH is still reported missing
   # instead of failing at the first spawn.
-  if [ "$crew" = cursor ] && ! fm_cursor_resolve_binary >/dev/null 2>&1; then
-    echo "MISSING_MANUAL: cursor-agent (instructions: $(manual_install_url cursor-agent))"
-  fi
+  case "$crew" in cursor|cursor-agent)
+    if ! fm_cursor_resolve_binary >/dev/null 2>&1; then
+      echo "MISSING_MANUAL: cursor-agent (instructions: $(manual_install_url cursor-agent))"
+    fi
+    ;;
+  esac
   crew_dispatch_validate
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then

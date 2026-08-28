@@ -38,11 +38,25 @@
 # bin/fm-composer-lib.sh, which every backend already delegates to; an
 # adapter-local composer normalizer would be the second copy that owner exists
 # to prevent.
+#
+# The adapter name is cursor. cursor-agent is only an intake alias for that
+# same adapter (the installed CLI name), never a second harness and never the
+# Pi plugin model namespace cursor-agent/*.
 
 # Bounded probe budget in seconds. Cursor's --help is local and returns
 # immediately; the bound exists so a hung or interactive impostor cannot wedge
 # a spawn or a readiness check.
 FM_CURSOR_PROBE_TIMEOUT=${FM_CURSOR_PROBE_TIMEOUT:-10}
+
+# Canonical adapter name for an intake spelling. cursor-agent is the installed
+# CLI name and is accepted only as this alias; every table and launch template
+# stays keyed on cursor.
+fm_cursor_normalize_harness() {  # <name>
+  case "${1-}" in
+    cursor-agent) printf '%s\n' cursor ;;
+    *) printf '%s\n' "${1-}" ;;
+  esac
+}
 
 # Canonical absolute path for $1, or the input unchanged when it cannot be
 # resolved. Symlink resolution is what makes the structural signal work, since

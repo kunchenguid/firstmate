@@ -59,11 +59,12 @@ fm_control_verb_allowed() {  # <verb>
 }
 
 # The harnesses whose control mechanics are verified. Mirrors AGENTS.md
-# section 4's verified-adapter list; an unverified adapter is refused rather
+# section 4's verified-adapter list, plus cursor-agent as an intake alias
+# for cursor (bin/fm-cursor-lib.sh). An unverified adapter is refused rather
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harness_supported() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse) return 0 ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|cursor-agent|muse) return 0 ;;
   esac
   return 1
 }
@@ -85,7 +86,7 @@ fm_control_harness_family() {  # <recorded-harness>
     opencode*) printf 'opencode' ;;
     grok*) printf 'grok' ;;
     kimi*) printf 'kimi' ;;
-    cursor*) printf 'cursor' ;;
+    cursor-agent|cursor*) printf 'cursor' ;;
     muse*) printf 'muse' ;;
     *) return 1 ;;
   esac

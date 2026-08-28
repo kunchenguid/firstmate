@@ -790,6 +790,9 @@ The evidence below was produced on 2026-08-11 against the installed signed CLI o
 - Binary: `~/.local/bin/cursor-agent`, canonicalizing into `~/.local/share/cursor-agent/versions/2026.08.11-e8db854/cursor-agent`.
 - Version: `cursor-agent --version` reported `2026.08.11-e8db854`, and `cursor-agent status` reported a logged-in account.
 - Both installed names, `cursor-agent` and the legacy alias `agent`, resolve into that same versioned install tree.
+- The adapter name is `cursor`.
+  `cursor-agent` is only an intake alias for that adapter, never a second harness and never the Pi plugin model namespace `cursor-agent/*`.
+- Re-checked 2026-08-15 on the same binary: `cursor-agent --list-models` lists `auto - Auto (current, default)` first, and firstmate launches `--model auto` when no Cursor model is chosen.
 
 Resolution prints the STABLE launcher rather than the canonical target, because the canonical path carries a version the CLI replaces on its own auto-update.
 
