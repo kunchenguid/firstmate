@@ -70,6 +70,20 @@ fm_human_notify_apply_transition "$STATE" decision-task 'working: revising after
 assert_pending decision-task "$REVIEW"
 pass "recovery and rework clear terminal receipts so identical evidence can reopen"
 
+printf '%s\n%s\n' 'blocked: temporary dependency failed' 'working: recovered and resumed' > "$STATE/nonkeyed.status"
+[ -z "$(status_open_decisions "$STATE/nonkeyed.status")" ] \
+  || fail "working recovery left an unkeyed blocker open"
+printf '%s\n%s\n' 'blocked [key=access]: credential is required' 'working: unrelated progress resumed' > "$STATE/keyed.status"
+assert_contains "$(status_open_decisions "$STATE/keyed.status")" $'access\tblocked\tcredential is required' \
+  "working progress closed a keyed blocker without explicit resolution"
+fm_human_notify_record "$STATE" decision-task "$BLOCKER"
+fm_human_notify_apply_transition "$STATE" decision-task 'working: unrelated progress resumed'
+assert_absorbed decision-task "$BLOCKER"
+printf '%s\n' 'blocked: a fresh dependency failure' >> "$STATE/keyed.status"
+assert_contains "$(status_open_decisions "$STATE/keyed.status")" $'default\tblocked\ta fresh dependency failure' \
+  "a fresh unkeyed blocker did not reopen after recovery"
+pass "working recovery closes only unkeyed blockers and later blocker edges reopen"
+
 printf '%s\n%s\n' "$FAILURE" 'working: recovery completed' > "$STATE/decision-task.status"
 printf '%s\n%s\n' "$FAILURE" 'working: recovery completed' > "$STATE/decision-task.away-unread"
 fm_human_notify_record "$STATE" decision-task "$FAILURE"
@@ -120,8 +134,8 @@ assert_pending decision-task "$REVIEW"
 fm_human_notify_record "$STATE" decision-task "$REVIEW"
 fm_human_notify_pr_observation_record "$STATE" decision-task OPEN \
   bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb COMPLETED FAILURE
-assert_pending decision-task "$REVIEW"
-pass "durable PR head and check observations feed review-ready fingerprints"
+assert_absorbed decision-task "$REVIEW"
+pass "durable PR observations change fingerprints without reviving red review targets"
 
 SUMMARY=$(fm_human_notify_summary "$STATE" decision-task "$BLOCKER")
 assert_contains "$SUMMARY" 'CRM · Data Shape' "summary omitted the readable label"
@@ -217,6 +231,10 @@ for observation in 'CLOSED COMPLETED SUCCESS' 'MERGED COMPLETED SUCCESS' 'OPEN C
     . "$ROOT/bin/fm-watch.sh"
     ! status_human_condition_is_current "$CURRENT/c.status" "$REVIEW"
   ) || fail "a closed, merged, or red review target resurfaced as review-ready: $observation"
+  review_rc=0
+  fm_human_notify_pending "$CURRENT" c "$REVIEW" || review_rc=$?
+  [ "$review_rc" -eq 1 ] \
+    || fail "shared pending boundary accepted a closed, merged, or red review target: $observation"
 done
 fm_human_notify_pr_observation_record "$CURRENT" c OPEN \
   "$CURRENT_HEAD" COMPLETED SUCCESS
@@ -226,4 +244,6 @@ fm_human_notify_pr_observation_record "$CURRENT" c OPEN \
   . "$ROOT/bin/fm-watch.sh"
   status_human_condition_is_current "$CURRENT/c.status" "$REVIEW"
 ) || fail "an open green review target was not current"
-pass "only final active terminal conditions and reviewable PR states can surface"
+fm_human_notify_pending "$CURRENT" c "$REVIEW" \
+  || fail "shared pending boundary rejected an open green review target"
+pass "all watcher paths share durable PR currentness gating"

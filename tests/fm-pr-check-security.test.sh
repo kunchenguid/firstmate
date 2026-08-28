@@ -2438,8 +2438,10 @@ SH
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "registered custom check did not run: $(cat "$dir/watch-custom.err")"
-  assert_grep "check: $state/b-custom.check.sh: custom-ready" "$dir/watch-custom.out" \
-    "registered custom check output did not wake the watcher"
+  assert_grep "check: Registered state check: new output is ready. Action required: inspect the authenticated result." "$dir/watch-custom.out" \
+    "registered custom check output did not produce a readable actionable wake"
+  assert_no_grep "$state/b-custom.check.sh" "$dir/watch-custom.out" \
+    "registered custom check presentation leaked its private source path"
   ack_watcher_cycle "$state" || fail "registered custom check wake acknowledgement failed"
   printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' custom-replacement-ran" > "$state/b-custom.check.sh"
   chmod 0700 "$state/b-custom.check.sh"
@@ -2453,6 +2455,10 @@ SH
   [ "$rc" -eq 0 ] || fail "watcher failed while rejecting a replaced custom check: $(cat "$dir/watch-custom-replaced.err")"
   assert_no_grep 'custom-replacement-ran' "$dir/watch-custom-replaced.out" \
     "watcher executed a custom check after its registered bytes changed"
+  assert_grep "check: State check authentication failed. Action required: inspect the registered checks and repair or remove each changed check." \
+    "$dir/watch-custom-replaced.out" "rejected custom check omitted a readable actionable presentation"
+  assert_no_grep "$state/b-custom.check.sh" "$dir/watch-custom-replaced.out" \
+    "rejected custom check presentation leaked its private source path"
   [ -e "$x_poll_marker" ] || fail "custom replacement rejection suppressed the trusted X poll"
   [ ! -e "$state/b-custom.check.sh" ] && [ ! -L "$state/b-custom.check.sh" ] \
     || fail "marker-aware scan left the replaced custom check runnable"

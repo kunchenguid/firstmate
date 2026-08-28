@@ -66,17 +66,22 @@
 #                          demand-deep-inspection marker, for human inspection
 #                          only - never an automatic interrupt, signal, or restart
 #                          of the worker or its tool process.
-#   check: <script>: <out> authenticated check output, always actionable
-#   check: process-event result captured: <keys>
-#                          a durably captured process-to-event result is queued
-#                          and has not been surfaced yet; reported once per
-#                          captured generation, never again while that record
-#                          stays queued and never once it is acknowledged
-#   check: rejected unauthenticated state checks: <paths>
-#                          unsafe state checks were refused without execution
-#   check: rejected unauthenticated PR poll retirement receipts: <paths>
-#                          invalid pending retirements were preserved without
-#                          running a check or removing poll artifacts
+#   check: Registered state check: new output is ready. Action required: inspect
+#                          the authenticated result. Its source path and raw output
+#                          remain in the durable queue record.
+#   check: Background process result: a captured result is ready. Action required:
+#                          inspect the pending result and run its registered handler.
+#                          Routing keys remain private in the durable queue; this is
+#                          reported once per captured generation, never again while
+#                          that record stays queued and never once acknowledged.
+#   check: State check authentication failed. Action required: inspect the registered
+#                          checks and repair or remove each changed check. Unsafe state
+#                          checks are refused without execution and their paths remain
+#                          private queue keys.
+#   check: PR poll retirement authentication failed. Action required: inspect
+#                          the pending retirement records and repair invalid ones.
+#                          Invalid records are preserved without running a check or
+#                          removing poll artifacts; paths remain private queue keys.
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
@@ -948,7 +953,7 @@ procevent_surface_queued() {
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 0
   fi
-  reason="check: process-event result captured:$PROCEVENT_SURFACED"
+  reason="check: Background process result: a captured result is ready. Action required: inspect the pending result and run its registered handler."
   watch_delivery_preselect "$selected_sequence" "$selected_payload" || {
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
@@ -1371,8 +1376,13 @@ fm_pause_publish_recover "$STATE" || exit 1
 # between receipt publication and fixed-path removal.
 # Finish only identity-bound retirement receipts before any check can run.
 if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; then
-  reason="check: rejected unauthenticated PR poll retirement receipts:$FM_PR_POLL_RETIREMENT_REJECTED"
-  fm_wake_append check pr-poll-retirement "$reason" || exit 1
+  reason="check: PR poll retirement authentication failed. Action required: inspect the pending retirement records and repair each invalid record."
+  retirement_appended=0
+  for rejected_retirement in $FM_PR_POLL_RETIREMENT_REJECTED; do
+    fm_wake_append check "$rejected_retirement" "$reason" || exit 1
+    retirement_appended=1
+  done
+  [ "$retirement_appended" -eq 1 ] || fm_wake_append check pr-poll-retirement "$reason" || exit 1
   touch "$STATE/.last-check"
   wake "$reason"
 fi
@@ -1532,15 +1542,18 @@ EOF
         esac
       fi
       if [ -n "$out" ]; then
-        reason="check: $c: $out"
-        fm_wake_append check "$c" "$reason" || exit 1
+        queue_reason="check: $c: $out"
+        reason="check: Registered state check: new output is ready. Action required: inspect the authenticated result."
+        fm_wake_append check "$c" "$queue_reason" || exit 1
         touch "$STATE/.last-check"
         wake "$reason"
       fi
     done
     if [ -n "$rejected_checks" ]; then
-      reason="check: rejected unauthenticated state checks:$rejected_checks"
-      fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
+      reason="check: State check authentication failed. Action required: inspect the registered checks and repair or remove each changed check."
+      for rejected_check in $rejected_checks; do
+        fm_wake_append check "$rejected_check" "$reason" || exit 1
+      done
       touch "$STATE/.last-check"
       wake "$reason"
     fi

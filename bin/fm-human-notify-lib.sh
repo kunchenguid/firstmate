@@ -155,6 +155,9 @@ _fm_human_notify_derive() {  # <state> <task> <line>
 fm_human_notify_pending() {  # <state> <task> <line>
   local state=$1 task=$2 line=$3 recorded legacy_key legacy
   _fm_human_notify_derive "$state" "$task" "$line" || return $?
+  if [ "$FM_HUMAN_NOTIFY_CLASS" = review-ready ]; then
+    fm_human_notify_review_current "$state" "$task" || return 1
+  fi
   recorded=$(sed -n 's/^fingerprint=//p' "$FM_HUMAN_NOTIFY_MARKER" 2>/dev/null | head -1 || true)
   [ "$recorded" != "$FM_HUMAN_NOTIFY_FINGERPRINT" ] || return 1
   # Adopt either pre-owner supervisor receipt on first read, so an upgrade or
@@ -231,7 +234,7 @@ fm_human_notify_apply_transition() {  # <state> <task> <status-line>
       _fm_human_notify_remove_task_class "$state" "$task" failure
       ;;
     working)
-      _fm_human_notify_remove_task_class "$state" "$task" blocker
+      _fm_human_notify_remove_class_key "$state" "$task" blocker default
       _fm_human_notify_remove_task_class "$state" "$task" failure
       _fm_human_notify_remove_task_class "$state" "$task" result
       _fm_human_notify_remove_task_class "$state" "$task" review-ready
