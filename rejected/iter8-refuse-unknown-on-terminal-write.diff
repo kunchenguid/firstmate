@@ -1,0 +1,72 @@
+# Rejected iteration 8 attempt.
+# score-that-rejected: 3/9 (oracle red; assertion 2 did not go green)
+# oracle: FM_TEST_BEGIN 2026-08-28T07:12:59Z tests/fm-model-telemetry.test.sh
+#         not ok - cancelled terminal failed
+#         FM_TEST_END 2026-08-28T07:13:06Z tests/fm-model-telemetry.test.sh exit=1 duration_ms=6201
+#         FM_TEST_SUMMARY total=1 failed=1 skipped_gate=0 duration_ms=6254
+# blocker: tests/fm-model-telemetry.test.sh test_terminals_and_retry_links
+#          spec cancelled:not-applicable:unknown
+# stderr: error: model telemetry: new terminal primaryFailureClass must be one of none, capability, refusal, timeout, quota, tool, transport, environment, external-wait, scope-change, integrity, approval-wait, custody-wait, lease-conflict, state-divergence
+#
+diff --git a/bin/fm-model-telemetry.sh b/bin/fm-model-telemetry.sh
+index 0b1e37d..d467904 100755
+--- a/bin/fm-model-telemetry.sh
++++ b/bin/fm-model-telemetry.sh
+@@ -339,6 +339,15 @@ validate_new_intake_quota_decision() {
+   ' >/dev/null || die "new intake quota decision must be one of selected, stopped, not-applicable"
+ }
+ 
++# Historic rows may still carry primaryFailureClass=unknown. New terminal
++# writes must name a closed class; unknown counts as absent.
++validate_new_terminal_failure_class() {
++  printf '%s' "$1" | jq -e '
++    def oneof($a): . as $v | ($a|index($v))!=null;
++    (.primaryFailureClass|oneof(["none","capability","refusal","timeout","quota","tool","transport","environment","external-wait","scope-change","integrity","approval-wait","custody-wait","lease-conflict","state-divergence"]))
++  ' >/dev/null || die "new terminal primaryFailureClass must be one of none, capability, refusal, timeout, quota, tool, transport, environment, external-wait, scope-change, integrity, approval-wait, custody-wait, lease-conflict, state-divergence"
++}
++
+ validate_terminal() {
+   printf '%s' "$1" | jq -e '
+     def keys_are($a): (keys|sort)==($a|sort);
+@@ -891,6 +900,7 @@ terminal_command() {
+   require_safe_task_id "$task"
+   canonical=$(canonical_json "$payload")
+   validate_terminal "$canonical"
++  validate_new_terminal_failure_class "$canonical"
+   path=$(receipt_path "$task")
+   with_lock_begin
+   validate_ledger_for_write
+diff --git a/tests/fm-model-telemetry.test.sh b/tests/fm-model-telemetry.test.sh
+index 237b51c..b177417 100755
+--- a/tests/fm-model-telemetry.test.sh
++++ b/tests/fm-model-telemetry.test.sh
+@@ -1052,6 +1052,23 @@ test_terminal_facts_round_trip_blocked_class_and_green_none() {
+   pass "terminal-facts round-trips a blocked class and a green none through the sheet with typed usageSource"
+ }
+ 
++test_new_terminal_refuses_unknown_failure_class() {
++  local home payload err
++  home=$(make_home unknown-class-write)
++  payload=$(intake_payload)
++  run_intake "$home" unknown-class-a "$payload" >/dev/null || fail "unknown-class intake failed"
++  err=$(FM_HOME="$home" "$TELEMETRY" terminal --state "$home/state" --task unknown-class-a \
++    --payload "$(terminal_payload cancelled not-applicable unknown)" 2>&1) &&
++    fail "a new terminal whose primaryFailureClass is unknown was accepted"
++  assert_contains "$err" "new terminal primaryFailureClass must be one of" \
++    "unknown failure-class refusal did not name the closed write set"
++  run_intake "$home" typed-class-a "$payload" >/dev/null || fail "typed-class intake failed"
++  FM_HOME="$home" "$TELEMETRY" terminal --state "$home/state" --task typed-class-a \
++    --payload "$(terminal_payload failed not-applicable approval-wait)" >/dev/null \
++    || fail "a new terminal carrying a closed blocked class was refused"
++  pass "new terminal writes refuse unknown primaryFailureClass and still accept a closed blocked class"
++}
++
+ test_intake_refuses_unknown_quota_decision_and_sheet_surfaces_it() {
+   local home result attempt sheet err
+   home=$(make_home quota-decision)
+@@ -1097,4 +1114,5 @@ test_terminal_accepts_state_divergence_failure_class
+ test_intake_records_task_id_on_event_and_sheet
+ test_intake_refuses_unknown_quota_decision_and_sheet_surfaces_it
+ test_terminal_facts_round_trip_blocked_class_and_green_none
++test_new_terminal_refuses_unknown_failure_class
+ printf 'All model telemetry tests passed.\n'

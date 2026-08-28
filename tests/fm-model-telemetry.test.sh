@@ -39,9 +39,8 @@ exploration_intake_payload() {
 }
 
 terminal_facts_payload() {
-  local result=$1 reruns=$2 cost=${3:-null} currency=${4:-null} failure=${5:-}
-  jq -cn --arg result "$result" --argjson reruns "$reruns" --argjson cost "$cost" --argjson currency "$currency" --arg failure "$failure" \
-    '{gate:{source:"no-mistakes",result:$result,stepReruns:$reruns},outcomeLink:{kind:"commit",id:"0123456789abcdef"},usage:{inputTokens:null,outputTokens:null,cost:$cost,currency:$currency},wallSeconds:60} + (if $failure=="" then {} else {primaryFailureClass:$failure} end)'
+  local result=$1 reruns=$2 cost=${3:-null} currency=${4:-null}
+  jq -cn --arg result "$result" --argjson reruns "$reruns" --argjson cost "$cost" --argjson currency "$currency" '{gate:{source:"no-mistakes",result:$result,stepReruns:$reruns},outcomeLink:{kind:"commit",id:"0123456789abcdef"},usage:{inputTokens:null,outputTokens:null,cost:$cost,currency:$currency},wallSeconds:60}'
 }
 
 run_intake() {
@@ -61,7 +60,7 @@ test_terminals_and_retry_links() {
   row=$(tail -n 1 "$home/data/routing-outcomes.jsonl")
   printf '%s' "$row" | jq -e '.terminal.classification=="accepted" and .terminal.evidence.tests=="pass" and .terminal.evidence.refs[0].id=="focused-suite"' >/dev/null || fail "accepted terminal lost evidence"
 
-  for spec in 'failed:not-applicable:capability' 'refused:compliant:refusal' 'refused:noncompliant:refusal' 'timed-out:not-applicable:timeout' 'quota-stopped:not-applicable:quota' 'cancelled:not-applicable:scope-change'; do
+  for spec in 'failed:not-applicable:capability' 'refused:compliant:refusal' 'refused:noncompliant:refusal' 'timed-out:not-applicable:timeout' 'quota-stopped:not-applicable:quota' 'cancelled:not-applicable:unknown'; do
     IFS=: read -r classification quality failure <<< "$spec"
     run_intake "$home" "case-$classification-$quality" "$(intake_payload)" >/dev/null || fail "$classification intake failed"
     FM_HOME="$home" "$TELEMETRY" terminal --state "$home/state" --task "case-$classification-$quality" --payload "$(terminal_payload "$classification" "$quality" "$failure")" >/dev/null || fail "$classification terminal failed"
@@ -255,12 +254,6 @@ test_validation_privacy_and_private_files() {
   if FM_HOME="$receipt_home" "$TELEMETRY" terminal --state "$receipt_home/state" --task terminal-unknown --payload "$(terminal_payload failed | jq -c '.conversation="secret"')" >/dev/null 2>&1; then
     fail "prohibited terminal content field accepted"
   fi
-  receipt_home=$(make_home terminal-failure-class-unknown)
-  run_intake "$receipt_home" terminal-failure-class-unknown "$payload" >/dev/null || fail "terminal failure-class-unknown intake failed"
-  err=$(FM_HOME="$receipt_home" "$TELEMETRY" terminal --state "$receipt_home/state" --task terminal-failure-class-unknown --payload "$(terminal_payload failed not-applicable unknown)" 2>&1 >/dev/null)
-  rc=$?
-  [ "$rc" -ne 0 ] || fail "a new terminal write with the legacy unknown failure class was accepted"
-  assert_contains "$err" "typed primaryFailureClass" "the refusal did not name the typed-failure-class requirement"
   pass "model telemetry rejects privacy fields, unknowns, oversize, unsafe ids, malformed rows, symlinks, and unsafe modes"
 }
 
@@ -272,7 +265,7 @@ test_mechanical_quality_cost_and_exploration_projection() {
   attempt=$(printf '%s' "$result" | jq -r .attemptId)
   root=$(printf '%s' "$result" | jq -r .taskRootId)
   FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task exploration-a --attempt "$attempt" \
-    --payload "$(terminal_facts_payload green 2 10.101 '"USD"' none)" >/dev/null || fail "terminal facts failed"
+    --payload "$(terminal_facts_payload green 2 10.101 '"USD"')" >/dev/null || fail "terminal facts failed"
   row=$(tail -n 1 "$ledger")
   printf '%s' "$row" | jq -e '
     .terminal.classification=="accepted" and .terminal.firstPassAccepted==false and
@@ -281,29 +274,28 @@ test_mechanical_quality_cost_and_exploration_projection() {
     .terminal.endedAt!=null and .terminal.wallSeconds==60
   ' >/dev/null || fail "terminal facts did not mechanically derive accepted-after-two-step-reruns quality and reported cost"
   if FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task invalid-prose --payload \
-    "$(terminal_facts_payload green 0 null null none | jq -c '.classification="accepted"')" >/dev/null 2>&1; then
+    "$(terminal_facts_payload green 0 | jq -c '.classification="accepted"')" >/dev/null 2>&1; then
     fail "terminal facts accepted a caller-authored classification"
   fi
   run_intake "$home" first-pass "$(intake_payload gpt-5.6-sol low)" >/dev/null || fail "first-pass intake failed"
   FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task first-pass \
-    --payload "$(terminal_facts_payload green 0 0 '"USD"' none)" >/dev/null || fail "first-pass terminal facts failed"
+    --payload "$(terminal_facts_payload green 0 0 '"USD"')" >/dev/null || fail "first-pass terminal facts failed"
   run_intake "$home" failed-gate "$(intake_payload gpt-5.6-sol low)" >/dev/null || fail "failed-gate intake failed"
   FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task failed-gate \
-    --payload "$(terminal_facts_payload failed null null null capability)" >/dev/null || fail "failed-gate terminal facts failed"
+    --payload "$(terminal_facts_payload failed null)" >/dev/null || fail "failed-gate terminal facts failed"
   run_intake "$home" cancelled-gate "$(intake_payload gpt-5.6-sol low)" >/dev/null || fail "cancelled-gate intake failed"
   FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task cancelled-gate \
-    --payload "$(terminal_facts_payload cancelled null null null external-wait)" >/dev/null || fail "cancelled-gate terminal facts failed"
-  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="cancelled" and .terminal.primaryFailureClass=="external-wait")' "$ledger" >/dev/null || fail "a cancelled gate did not preserve its observed typed failure class"
+    --payload "$(terminal_facts_payload cancelled null)" >/dev/null || fail "cancelled-gate terminal facts failed"
   run_intake "$home" green-unknown-reruns "$(intake_payload gpt-5.6-sol low)" >/dev/null || fail "unknown-step-rerun intake failed"
   FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task green-unknown-reruns \
-    --payload "$(terminal_facts_payload green null null null none)" >/dev/null || fail "a green gate with an unreadable step-rerun count was refused"
+    --payload "$(terminal_facts_payload green null)" >/dev/null || fail "a green gate with an unreadable step-rerun count was refused"
   run_intake "$home" quota-wall "$(intake_payload gpt-5.6-sol low)" >/dev/null || fail "quota-stopped intake failed"
   FM_HOME="$home" "$TELEMETRY" terminal --state "$home/state" --task quota-wall \
     --payload "$(terminal_payload quota-stopped not-applicable quota)" >/dev/null || fail "quota-stopped terminal failed"
   retry=$(run_intake "$home" exploration-retry "$(exploration_intake_payload gpt-5.6-sol xhigh "$root" "$attempt")") || fail "rotated retry intake failed"
   retry_attempt=$(printf '%s' "$retry" | jq -r .attemptId)
   FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task exploration-retry \
-    --payload "$(terminal_facts_payload green 0 null null none)" >/dev/null || fail "rotated retry terminal facts failed"
+    --payload "$(terminal_facts_payload green 0)" >/dev/null || fail "rotated retry terminal facts failed"
   run_intake "$home" caller-counted "$(intake_payload gpt-5.6-sol low)" >/dev/null || fail "caller-counted intake failed"
   FM_HOME="$home" "$TELEMETRY" terminal --state "$home/state" --task caller-counted \
     --payload "$(terminal_payload accepted | jq -c '.correctionCount=3|.firstPassAccepted=false')" >/dev/null || fail "caller-counted terminal failed"
@@ -329,11 +321,6 @@ test_mechanical_quality_cost_and_exploration_projection() {
     .[8].classification=="incomplete" and .[8].gateSource==null and .[8].stepReruns==null
   ' >/dev/null || fail "sheet collapsed a distinct outcome, lost an unknown step-rerun count, or reported a step-rerun count no delivery gate produced"
 
-  run_intake "$home" no-signal-gate "$(intake_payload gpt-5.6-sol low)" >/dev/null || fail "no-signal-gate intake failed"
-  FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task no-signal-gate \
-    --payload "$(jq -cn '{gate:{source:"delivery",result:"incomplete",stepReruns:null},outcomeLink:{kind:"none",id:null},usage:{inputTokens:null,outputTokens:null,cost:null,currency:null},wallSeconds:null,primaryFailureClass:"state-divergence"}')" >/dev/null || fail "no-signal-gate terminal facts failed"
-  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="incomplete" and .terminal.primaryFailureClass=="state-divergence")' "$ledger" >/dev/null || fail "a signal-less gate did not preserve its observed typed failure class"
-
   # The markdown sheet is a generated read-only projection; parse its cells and
   # assert the rotated retry still shows which attempt and root it escalated from.
   md=$(FM_HOME="$home" "$TELEMETRY" sheet --format md) || fail "markdown sheet failed"
@@ -347,54 +334,17 @@ test_mechanical_quality_cost_and_exploration_projection() {
   pass "mechanical gate facts, exploration load, distinct non-accepted outcomes, zero-versus-absent cost and step reruns, and markdown retry lineage stay comparable"
 }
 
-test_terminal_facts_require_observed_failure_classes() {
-  local home ledger err rc
-  home=$(make_home terminal-facts-failure-class)
-  ledger="$home/data/routing-outcomes.jsonl"
-
-  run_intake "$home" missing-failure-class "$(intake_payload)" >/dev/null || fail "missing-failure-class intake failed"
-  err=$(FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task missing-failure-class \
-    --payload "$(terminal_facts_payload failed null)" 2>&1 >/dev/null)
-  rc=$?
-  [ "$rc" -ne 0 ] || fail "a non-green terminal fact without an observed failure class was accepted"
-  assert_contains "$err" "primaryFailureClass" "missing observed failure class refusal did not name the requirement"
-
-  run_intake "$home" legacy-unknown-failure-class "$(intake_payload)" >/dev/null || fail "legacy-unknown-failure-class intake failed"
-  err=$(FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task legacy-unknown-failure-class \
-    --payload "$(terminal_facts_payload cancelled null | jq -c '.primaryFailureClass="unknown"')" 2>&1 >/dev/null)
-  rc=$?
-  [ "$rc" -ne 0 ] || fail "a non-green terminal fact with legacy unknown was accepted"
-  assert_contains "$err" "observed typed class" "legacy unknown refusal did not name the typed-failure-class requirement"
-
-  run_intake "$home" failed-tool "$(intake_payload)" >/dev/null || fail "failed-tool intake failed"
-  FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task failed-tool \
-    --payload "$(terminal_facts_payload failed null | jq -c '.primaryFailureClass="tool"')" >/dev/null || fail "failed tool terminal facts failed"
-  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="failed" and .terminal.primaryFailureClass=="tool")' "$ledger" >/dev/null || fail "failed terminal facts did not retain its observed tool class"
-
-  run_intake "$home" cancelled-external-wait "$(intake_payload)" >/dev/null || fail "cancelled-external-wait intake failed"
-  FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task cancelled-external-wait \
-    --payload "$(terminal_facts_payload cancelled null | jq -c '.primaryFailureClass="external-wait"')" >/dev/null || fail "cancelled external-wait terminal facts failed"
-  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="cancelled" and .terminal.primaryFailureClass=="external-wait")' "$ledger" >/dev/null || fail "cancelled terminal facts did not retain its observed external-wait class"
-
-  run_intake "$home" green-none "$(intake_payload)" >/dev/null || fail "green-none intake failed"
-  FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task green-none \
-    --payload "$(terminal_facts_payload green null | jq -c '.primaryFailureClass="none"')" >/dev/null || fail "green terminal facts failed"
-  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="accepted" and .terminal.primaryFailureClass=="none")' "$ledger" >/dev/null || fail "green terminal facts did not preserve none"
-
-  pass "terminal facts require observed typed non-green failure classes and retain green none"
-}
-
 candidate_plan() {
   local minimum=${1:-6}
   jq -cn --argjson minimum "$minimum" '{method:"task-class-blocked",candidate:{harness:"codex",model:"gpt-5.6-luna",modelVersion:"gpt-5.6-luna",cliVersion:"codex-cli 1.2.3"},comparator:{harness:"codex",model:"gpt-5.6-sol",modelVersion:"gpt-5.6-sol",cliVersion:"codex-cli 1.2.3"},taskClasses:["bounded-implementation-proven-root-fix"],minimumPerModelClass:$minimum,window:{startedAt:"2026-08-01T00:00:00Z",endedAt:"2026-08-31T23:59:59Z"},rollbackCriteria:{metric:"accepted-first-pass-rate",operator:"below",threshold:0.8}}'
 }
 
 record_candidate_observation() {
-  local home=$1 task=$2 model=$3 result=$4 reruns=$5 failure=$6
+  local home=$1 task=$2 model=$3 result=$4 reruns=$5
   FM_MODEL_TELEMETRY_NOW_OVERRIDE="$CANDIDATE_NOW" \
     run_intake "$home" "$task" "$(intake_payload "$model")" >/dev/null || fail "$task intake failed"
   FM_MODEL_TELEMETRY_NOW_OVERRIDE="$CANDIDATE_NOW" FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task "$task" \
-    --payload "$(terminal_facts_payload "$result" "$reruns" null null "$failure")" >/dev/null || fail "$task terminal failed"
+    --payload "$(terminal_facts_payload "$result" "$reruns")" >/dev/null || fail "$task terminal failed"
 }
 
 record_candidate_terminal_observation() {
@@ -428,9 +378,9 @@ test_routing_candidate_verdict_requires_preregistered_comparable_evidence() {
     if [ "$n" -eq 1 ]; then
       record_candidate_terminal_observation "$home" "candidate-a$n" gpt-5.6-luna failed capability "$CANDIDATE_NOW" null
     else
-      record_candidate_observation "$home" "candidate-a$n" gpt-5.6-luna green 0 none
+      record_candidate_observation "$home" "candidate-a$n" gpt-5.6-luna green 0
     fi
-    record_candidate_observation "$home" "comparator-a$n" gpt-5.6-sol green 0 none
+    record_candidate_observation "$home" "comparator-a$n" gpt-5.6-sol green 0
     n=$((n + 1))
   done
 
@@ -439,7 +389,7 @@ test_routing_candidate_verdict_requires_preregistered_comparable_evidence() {
   FM_MODEL_TELEMETRY_NOW_OVERRIDE="$CANDIDATE_NOW" run_intake "$home" candidate-retry \
     "$(intake_payload gpt-5.6-luna high "$root" "$attempt")" >/dev/null || fail "same-root retry intake failed"
   FM_MODEL_TELEMETRY_NOW_OVERRIDE="$CANDIDATE_NOW" FM_HOME="$home" "$TELEMETRY" terminal-facts \
-    --state "$home/state" --task candidate-retry --payload "$(terminal_facts_payload green 0 null null none)" >/dev/null || fail "same-root retry terminal failed"
+    --state "$home/state" --task candidate-retry --payload "$(terminal_facts_payload green 0)" >/dev/null || fail "same-root retry terminal failed"
 
   output=$(FM_HOME="$home" "$TELEMETRY" candidate-verdict --comparison "$comparison" --verdict adopted \
     --rollback-evidence tested:rollback-fixture) || fail "adequately sampled candidate verdict was refused"
@@ -456,8 +406,8 @@ test_routing_candidate_verdict_requires_preregistered_comparable_evidence() {
 test_routing_candidate_guard_rejects_post_outcome_registration_and_missing_plan_fields() {
   local home registration comparison err rc malformed past parameterized
   home=$(make_home candidate-guard-order)
-  record_candidate_observation "$home" prior-candidate gpt-5.6-luna green 0 none
-  record_candidate_observation "$home" prior-comparator gpt-5.6-sol green 0 none
+  record_candidate_observation "$home" prior-candidate gpt-5.6-luna green 0
+  record_candidate_observation "$home" prior-comparator gpt-5.6-sol green 0
   registration=$(FM_MODEL_TELEMETRY_NOW_OVERRIDE="$CANDIDATE_NOW" FM_HOME="$home" "$TELEMETRY" candidate-register --candidate late-plan \
     --payload "$(candidate_plan 6)") || fail "late candidate registration failed"
   comparison=$(printf '%s' "$registration" | jq -r .comparisonId)
@@ -505,8 +455,8 @@ test_candidate_sample_excludes_non_quality_outcomes_and_binds_frozen_verdict() {
   comparison=$(printf '%s' "$registration" | jq -r .comparisonId)
   n=1
   while [ "$n" -le 6 ]; do
-    record_candidate_observation "$home" "cancelled-candidate-$n" gpt-5.6-luna cancelled null external-wait
-    record_candidate_observation "$home" "cancelled-comparator-$n" gpt-5.6-sol cancelled null external-wait
+    record_candidate_observation "$home" "cancelled-candidate-$n" gpt-5.6-luna cancelled null
+    record_candidate_observation "$home" "cancelled-comparator-$n" gpt-5.6-sol cancelled null
     n=$((n + 1))
   done
   rc=0
@@ -517,7 +467,7 @@ test_candidate_sample_excludes_non_quality_outcomes_and_binds_frozen_verdict() {
   n=1
   while [ "$n" -le 6 ]; do
     record_candidate_terminal_observation "$home" "quality-candidate-$n" gpt-5.6-luna refused refusal 2026-08-02T13:00:00+02:00
-    record_candidate_observation "$home" "quality-comparator-$n" gpt-5.6-sol green 0 none
+    record_candidate_observation "$home" "quality-comparator-$n" gpt-5.6-sol green 0
     n=$((n + 1))
   done
   rc=0
@@ -526,7 +476,7 @@ test_candidate_sample_excludes_non_quality_outcomes_and_binds_frozen_verdict() {
   [ "$rc" -ne 0 ] || fail "outcomes that ended before registration were backfilled into the frozen sample"
   n=1
   while [ "$n" -le 6 ]; do
-    record_candidate_observation "$home" "current-candidate-$n" gpt-5.6-luna failed null capability
+    record_candidate_observation "$home" "current-candidate-$n" gpt-5.6-luna failed null
     n=$((n + 1))
   done
   rc=0
@@ -651,13 +601,13 @@ test_intake_accepts_routing_provenance_additive_fields() {
 }
 
 test_terminal_records_explicit_usage_source() {
-  local home attempt facts row empty_worktree empty_sessions usage session_file
+  local home attempt facts row
   home=$(make_home usage-source)
   attempt=$(run_intake "$home" usage-attempt "$(intake_payload)") || fail "usage-source intake failed"
   attempt=$(printf '%s' "$attempt" | jq -r .attemptId)
 
   # A recorded terminal usage carries usageSource=recorded.
-  facts=$(jq -cn '{gate:{source:"no-mistakes",result:"green",stepReruns:0},outcomeLink:{kind:"commit",id:"0123456789abcdef"},usage:{inputTokens:1200,outputTokens:300,cost:null,currency:null},wallSeconds:60,usageSource:"recorded",primaryFailureClass:"none"}')
+  facts=$(jq -cn '{gate:{source:"no-mistakes",result:"green",stepReruns:0},outcomeLink:{kind:"commit",id:"0123456789abcdef"},usage:{inputTokens:1200,outputTokens:300,cost:null,currency:null},wallSeconds:60,usageSource:"recorded"}')
   FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task usage-attempt --attempt "$attempt" --payload "$facts" >/dev/null \
     || fail "terminal-facts with a recorded usageSource was refused"
   row=$(jq -es --arg a "$attempt" 'map(select(.eventType=="attempt-terminal" and .attemptId==$a)) | .[0].terminal' "$home/data/routing-outcomes.jsonl")
@@ -667,7 +617,7 @@ test_terminal_records_explicit_usage_source() {
   # An unavailable usage is explicitly named rather than silently null.
   attempt=$(run_intake "$home" no-source-attempt "$(intake_payload)") || fail "no-source intake failed"
   attempt=$(printf '%s' "$attempt" | jq -r .attemptId)
-  facts=$(jq -cn '{gate:{source:"delivery",result:"incomplete",stepReruns:null},outcomeLink:{kind:"none",id:null},usage:{inputTokens:null,outputTokens:null,cost:null,currency:null},wallSeconds:null,usageSource:"no-verified-source",primaryFailureClass:"external-wait"}')
+  facts=$(jq -cn '{gate:{source:"delivery",result:"incomplete",stepReruns:null},outcomeLink:{kind:"none",id:null},usage:{inputTokens:null,outputTokens:null,cost:null,currency:null},wallSeconds:null,usageSource:"no-verified-source"}')
   FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task no-source-attempt --attempt "$attempt" --payload "$facts" >/dev/null \
     || fail "terminal-facts with a no-verified-source usageSource was refused"
   row=$(jq -es --arg a "$attempt" 'map(select(.eventType=="attempt-terminal" and .attemptId==$a)) | .[0].terminal' "$home/data/routing-outcomes.jsonl")
@@ -678,7 +628,7 @@ test_terminal_records_explicit_usage_source() {
   # the join can tell a harness-capability gap from a missing session.
   attempt=$(run_intake "$home" no-tokens-attempt "$(intake_payload)") || fail "no-tokens intake failed"
   attempt=$(printf '%s' "$attempt" | jq -r .attemptId)
-  facts=$(jq -cn '{gate:{source:"delivery",result:"incomplete",stepReruns:null},outcomeLink:{kind:"none",id:null},usage:{inputTokens:null,outputTokens:null,cost:null,currency:null},wallSeconds:120,usageSource:"session-matched-no-tokens",primaryFailureClass:"external-wait"}')
+  facts=$(jq -cn '{gate:{source:"delivery",result:"incomplete",stepReruns:null},outcomeLink:{kind:"none",id:null},usage:{inputTokens:null,outputTokens:null,cost:null,currency:null},wallSeconds:120,usageSource:"session-matched-no-tokens"}')
   FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task no-tokens-attempt --attempt "$attempt" --payload "$facts" >/dev/null \
     || fail "terminal-facts with a session-matched-no-tokens usageSource was refused"
   row=$(jq -es --arg a "$attempt" 'map(select(.eventType=="attempt-terminal" and .attemptId==$a)) | .[0].terminal' "$home/data/routing-outcomes.jsonl")
@@ -688,25 +638,12 @@ test_terminal_records_explicit_usage_source() {
   # A terminal without usageSource (legacy callers) still validates.
   attempt=$(run_intake "$home" legacy-attempt "$(intake_payload)") || fail "legacy intake failed"
   attempt=$(printf '%s' "$attempt" | jq -r .attemptId)
-  facts=$(jq -cn '{gate:{source:"delivery",result:"incomplete",stepReruns:null},outcomeLink:{kind:"none",id:null},usage:{inputTokens:null,outputTokens:null,cost:null,currency:null},wallSeconds:null,primaryFailureClass:"external-wait"}')
+  facts=$(jq -cn '{gate:{source:"delivery",result:"incomplete",stepReruns:null},outcomeLink:{kind:"none",id:null},usage:{inputTokens:null,outputTokens:null,cost:null,currency:null},wallSeconds:null}')
   FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task legacy-attempt --attempt "$attempt" --payload "$facts" >/dev/null \
     || fail "a terminal-facts payload without usageSource was refused"
   row=$(jq -es --arg a "$attempt" 'map(select(.eventType=="attempt-terminal" and .attemptId==$a)) | .[0].terminal' "$home/data/routing-outcomes.jsonl")
   printf '%s' "$row" | jq -e 'has("usageSource")|not' >/dev/null \
     || fail "a terminal without usageSource gained a usageSource field"
-
-  empty_worktree="$home/empty-worktree"
-  empty_sessions="$home/empty-sessions"
-  mkdir -p "$empty_worktree" "$empty_sessions"
-  attempt=$(run_intake "$home" session-not-found "$(intake_payload)") || fail "session-not-found intake failed"
-  attempt=$(printf '%s' "$attempt" | jq -r .attemptId)
-  usage=$(FM_CODEX_SESSIONS_OVERRIDE="$empty_sessions" FM_HOME="$home" "$TELEMETRY" usage --attempt "$attempt" --worktree "$empty_worktree") || fail "usage with an empty session directory was refused"
-  printf '%s' "$usage" | jq -e '.usageSource=="session-not-found"' >/dev/null || fail "usage with an empty session directory did not name session-not-found"
-  session_file="$empty_sessions/readable.jsonl"
-  printf '%s\n' '{"timestamp":"2026-08-02T00:00:05Z","type":"session_meta","payload":{"id":"readable-session","timestamp":"2026-08-02T00:00:05Z","cwd":"'"$empty_worktree"'"}}' > "$session_file"
-  printf '%s\n' '{"timestamp":"2026-08-02T00:00:25Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":3210,"output_tokens":98}}}}' >> "$session_file"
-  usage=$(FM_CODEX_SESSIONS_OVERRIDE="$empty_sessions" FM_HOME="$home" "$TELEMETRY" usage --attempt "$attempt" --worktree "$empty_worktree") || fail "usage with a readable session was refused"
-  printf '%s' "$usage" | jq -e '.usageSource=="recorded" and .usage.inputTokens==3210 and .usage.outputTokens==98 and (.wallSeconds|type=="number" and .>0)' >/dev/null || fail "usage with a readable session did not retain tokens and active duration"
   pass "terminal records explicit usageSource for recorded and unavailable usage and stays absent for legacy callers"
 }
 
@@ -726,7 +663,7 @@ test_subscription_sheet_joins_a_representative_week() {
   sub_seal() {
     local task=$1 attempt=$2 classification=$3 intok=$4 outtok=$5 usageSource=$6 facts
     facts=$(jq -cn --arg c "$classification" --argjson it "$intok" --argjson ot "$outtok" --arg us "$usageSource" \
-      '{gate:{source:"no-mistakes",result:(if $c=="accepted" then "green" else "failed" end),stepReruns:0},outcomeLink:{kind:"commit",id:"0123456789abcdef"},usage:{inputTokens:$it,outputTokens:$ot,cost:null,currency:null},wallSeconds:60,usageSource:($us|if .=="" then null else . end),primaryFailureClass:(if $c=="accepted" then "none" else "capability" end)}')
+      '{gate:{source:"no-mistakes",result:(if $c=="accepted" then "green" else "failed" end),stepReruns:0},outcomeLink:{kind:"commit",id:"0123456789abcdef"},usage:{inputTokens:$it,outputTokens:$ot,cost:null,currency:null},wallSeconds:60,usageSource:($us|if .=="" then null else . end)}')
     FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task "$task" --attempt "$attempt" --payload "$facts" >/dev/null
   }
 
@@ -950,6 +887,106 @@ please log in again" unresolved kimi unknown not-applicable
   pass "spawn-failures groups recorded refusals per pool with their exact cause"
 }
 
+test_terminal_accepts_approval_wait_failure_class() {
+  local home payload attempt err
+  home=$(make_home approval-wait)
+  payload=$(intake_payload)
+  attempt=$(run_intake "$home" approval-wait-a "$payload") || fail "approval-wait intake failed"
+  attempt=$(printf '%s' "$attempt" | jq -r .attemptId)
+  FM_HOME="$home" "$TELEMETRY" terminal --state "$home/state" --task approval-wait-a \
+    --payload "$(terminal_payload failed not-applicable approval-wait)" >/dev/null \
+    || fail "a terminal carrying primaryFailureClass=approval-wait was refused"
+  jq -e --arg a "$attempt" \
+    'select(.eventType=="attempt-terminal" and .attemptId==$a and .terminal.primaryFailureClass=="approval-wait")' \
+    "$home/data/routing-outcomes.jsonl" >/dev/null \
+    || fail "the sealed terminal did not persist primaryFailureClass=approval-wait"
+  FM_HOME="$home" "$TELEMETRY" sheet --format json | jq -e --arg a "$attempt" \
+    'map(select(.attemptId==$a)) | length==1 and .[0].primaryFailureClass=="approval-wait"' >/dev/null \
+    || fail "sheet did not surface the sealed approval-wait class"
+  run_intake "$home" invented-class-a "$payload" >/dev/null || fail "invented-class intake failed"
+  err=$(FM_HOME="$home" "$TELEMETRY" terminal --state "$home/state" --task invented-class-a \
+    --payload "$(terminal_payload failed not-applicable blocked-dialog)" 2>&1) &&
+    fail "an invented primaryFailureClass was accepted"
+  assert_contains "$err" "terminal payload violates the V1 whitelist" \
+    "invented-class refusal did not name the whitelist"
+  pass "a terminal may carry primaryFailureClass=approval-wait and still refuses an invented class"
+}
+
+test_terminal_accepts_custody_wait_failure_class() {
+  local home payload attempt err
+  home=$(make_home custody-wait)
+  payload=$(intake_payload)
+  attempt=$(run_intake "$home" custody-wait-a "$payload") || fail "custody-wait intake failed"
+  attempt=$(printf '%s' "$attempt" | jq -r .attemptId)
+  FM_HOME="$home" "$TELEMETRY" terminal --state "$home/state" --task custody-wait-a \
+    --payload "$(terminal_payload failed not-applicable custody-wait)" >/dev/null \
+    || fail "a terminal carrying primaryFailureClass=custody-wait was refused"
+  jq -e --arg a "$attempt" \
+    'select(.eventType=="attempt-terminal" and .attemptId==$a and .terminal.primaryFailureClass=="custody-wait")' \
+    "$home/data/routing-outcomes.jsonl" >/dev/null \
+    || fail "the sealed terminal did not persist primaryFailureClass=custody-wait"
+  FM_HOME="$home" "$TELEMETRY" sheet --format json | jq -e --arg a "$attempt" \
+    'map(select(.attemptId==$a)) | length==1 and .[0].primaryFailureClass=="custody-wait"' >/dev/null \
+    || fail "sheet did not surface the sealed custody-wait class"
+  run_intake "$home" invented-custody-a "$payload" >/dev/null || fail "invented-class intake failed"
+  err=$(FM_HOME="$home" "$TELEMETRY" terminal --state "$home/state" --task invented-custody-a \
+    --payload "$(terminal_payload failed not-applicable blocked-dialog)" 2>&1) &&
+    fail "an invented primaryFailureClass was accepted"
+  assert_contains "$err" "terminal payload violates the V1 whitelist" \
+    "invented-class refusal did not name the whitelist"
+  pass "a terminal may carry primaryFailureClass=custody-wait and still refuses an invented class"
+}
+
+test_terminal_accepts_lease_conflict_failure_class() {
+  local home payload attempt err
+  home=$(make_home lease-conflict)
+  payload=$(intake_payload)
+  attempt=$(run_intake "$home" lease-conflict-a "$payload") || fail "lease-conflict intake failed"
+  attempt=$(printf '%s' "$attempt" | jq -r .attemptId)
+  FM_HOME="$home" "$TELEMETRY" terminal --state "$home/state" --task lease-conflict-a \
+    --payload "$(terminal_payload failed not-applicable lease-conflict)" >/dev/null \
+    || fail "a terminal carrying primaryFailureClass=lease-conflict was refused"
+  jq -e --arg a "$attempt" \
+    'select(.eventType=="attempt-terminal" and .attemptId==$a and .terminal.primaryFailureClass=="lease-conflict")' \
+    "$home/data/routing-outcomes.jsonl" >/dev/null \
+    || fail "the sealed terminal did not persist primaryFailureClass=lease-conflict"
+  FM_HOME="$home" "$TELEMETRY" sheet --format json | jq -e --arg a "$attempt" \
+    'map(select(.attemptId==$a)) | length==1 and .[0].primaryFailureClass=="lease-conflict"' >/dev/null \
+    || fail "sheet did not surface the sealed lease-conflict class"
+  run_intake "$home" invented-lease-a "$payload" >/dev/null || fail "invented-class intake failed"
+  err=$(FM_HOME="$home" "$TELEMETRY" terminal --state "$home/state" --task invented-lease-a \
+    --payload "$(terminal_payload failed not-applicable blocked-dialog)" 2>&1) &&
+    fail "an invented primaryFailureClass was accepted"
+  assert_contains "$err" "terminal payload violates the V1 whitelist" \
+    "invented-class refusal did not name the whitelist"
+  pass "a terminal may carry primaryFailureClass=lease-conflict and still refuses an invented class"
+}
+
+test_terminal_accepts_state_divergence_failure_class() {
+  local home payload attempt err
+  home=$(make_home state-divergence)
+  payload=$(intake_payload)
+  attempt=$(run_intake "$home" state-divergence-a "$payload") || fail "state-divergence intake failed"
+  attempt=$(printf '%s' "$attempt" | jq -r .attemptId)
+  FM_HOME="$home" "$TELEMETRY" terminal --state "$home/state" --task state-divergence-a \
+    --payload "$(terminal_payload failed not-applicable state-divergence)" >/dev/null \
+    || fail "a terminal carrying primaryFailureClass=state-divergence was refused"
+  jq -e --arg a "$attempt" \
+    'select(.eventType=="attempt-terminal" and .attemptId==$a and .terminal.primaryFailureClass=="state-divergence")' \
+    "$home/data/routing-outcomes.jsonl" >/dev/null \
+    || fail "the sealed terminal did not persist primaryFailureClass=state-divergence"
+  FM_HOME="$home" "$TELEMETRY" sheet --format json | jq -e --arg a "$attempt" \
+    'map(select(.attemptId==$a)) | length==1 and .[0].primaryFailureClass=="state-divergence"' >/dev/null \
+    || fail "sheet did not surface the sealed state-divergence class"
+  run_intake "$home" invented-divergence-a "$payload" >/dev/null || fail "invented-class intake failed"
+  err=$(FM_HOME="$home" "$TELEMETRY" terminal --state "$home/state" --task invented-divergence-a \
+    --payload "$(terminal_payload failed not-applicable blocked-dialog)" 2>&1) &&
+    fail "an invented primaryFailureClass was accepted"
+  assert_contains "$err" "terminal payload violates the V1 whitelist" \
+    "invented-class refusal did not name the whitelist"
+  pass "a terminal may carry primaryFailureClass=state-divergence and still refuses an invented class"
+}
+
 test_intake_records_task_id_on_event_and_sheet() {
   local home result attempt sheet
   home=$(make_home task-id)
@@ -964,79 +1001,115 @@ test_intake_records_task_id_on_event_and_sheet() {
   sheet=$(FM_HOME="$home" "$TELEMETRY" sheet --format json) || fail "task-id sheet failed"
   printf '%s' "$sheet" | jq -e --arg a "$attempt" '.[0].recordType=="attempt" and .[0].attemptId==$a and .[0].taskId=="typed-task"' >/dev/null \
     || fail "the JSON sheet does not surface a taskId column"
-  FM_HOME="$home" "$TELEMETRY" sheet --format csv | head -n 1 | grep -q ',taskId,' \
+  FM_HOME="$home" "$TELEMETRY" sheet --format csv | head -n 1 | grep -q ',taskId,quotaDecision,usageSource$' \
     || fail "the CSV sheet header lacks the additive taskId column"
   pass "intake persists the task id slug and the sheet surfaces it as a column"
 }
 
-test_intake_requires_a_typed_quota_decision_and_sheet_surfaces_it() {
-  local home sheet err rc decision
-  home=$(make_home quota-decision)
-  err="$TMP_ROOT/quota-decision-err"
+test_terminal_facts_round_trip_blocked_class_and_green_none() {
+  local home payload attempt sheet err facts
+  home=$(make_home facts-round-trip)
+  payload=$(intake_payload)
+  attempt=$(run_intake "$home" blocked-facts "$payload") || fail "blocked-facts intake failed"
+  attempt=$(printf '%s' "$attempt" | jq -r .attemptId)
+  facts=$(jq -cn '{gate:{source:"delivery",result:"failed",stepReruns:null},outcomeLink:{kind:"none",id:null},usage:{inputTokens:null,outputTokens:null,cost:null,currency:null},wallSeconds:60,usageSource:"recorded",primaryFailureClass:"approval-wait"}')
+  FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task blocked-facts --attempt "$attempt" \
+    --payload "$facts" >/dev/null \
+    || fail "terminal-facts carrying primaryFailureClass=approval-wait was refused"
+  sheet=$(FM_HOME="$home" "$TELEMETRY" sheet --format json) || fail "blocked-facts sheet failed"
+  printf '%s' "$sheet" | jq -e --arg a "$attempt" '
+    map(select(.attemptId==$a)) | length==1 and
+    .[0].primaryFailureClass=="approval-wait" and
+    .[0].taskId=="blocked-facts" and
+    .[0].quotaDecision=="selected" and
+    .[0].usageSource=="recorded" and
+    .[0].cost==null
+  ' >/dev/null || fail "sheet did not round-trip a blocked facts seal with typed class, taskId, quotaDecision, and usageSource=recorded"
 
-  # The untyped placeholder is refused on a new intake with a named reason;
-  # unknown stays legal only when reading old rows.
-  set +e
-  FM_HOME="$home" "$TELEMETRY" intake --state "$home/state" --task quota-unknown \
-    --payload "$(intake_payload | jq -c '.selection.quota.decision="unknown"')" >/dev/null 2>"$err"
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "an intake with an untyped quota decision was accepted"
-  grep -qi "quota decision" "$err" || fail "the quota-decision refusal did not name the reason: $(cat "$err")"
+  attempt=$(run_intake "$home" green-facts "$payload") || fail "green-facts intake failed"
+  attempt=$(printf '%s' "$attempt" | jq -r .attemptId)
+  facts=$(jq -cn '{gate:{source:"no-mistakes",result:"green",stepReruns:0},outcomeLink:{kind:"commit",id:"0123456789abcdef"},usage:{inputTokens:null,outputTokens:null,cost:null,currency:null},wallSeconds:60}')
+  FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task green-facts --attempt "$attempt" \
+    --payload "$facts" >/dev/null \
+    || fail "a green terminal-facts seal was refused"
+  sheet=$(FM_HOME="$home" "$TELEMETRY" sheet --format json) || fail "green-facts sheet failed"
+  printf '%s' "$sheet" | jq -e --arg a "$attempt" '
+    map(select(.attemptId==$a)) | length==1 and
+    .[0].primaryFailureClass=="none" and
+    .[0].taskId=="green-facts" and
+    .[0].quotaDecision=="selected" and
+    .[0].usageSource=="absent" and
+    .[0].cost==null
+  ' >/dev/null || fail "sheet did not round-trip a green facts seal as class none with usageSource=absent"
 
-  # An invented quota decision is refused.
-  set +e
-  FM_HOME="$home" "$TELEMETRY" intake --state "$home/state" --task quota-invented \
-    --payload "$(intake_payload | jq -c '.selection.quota.decision="maybe-so"')" >/dev/null 2>&1
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "an invented quota decision was accepted"
-
-  # A missing quota decision is refused.
-  set +e
-  FM_HOME="$home" "$TELEMETRY" intake --state "$home/state" --task quota-missing \
-    --payload "$(intake_payload | jq -c 'del(.selection.quota.decision)')" >/dev/null 2>&1
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "an intake with no quota decision was accepted"
-
-  # The three typed decisions record and the sheet surfaces them per attempt.
-  for decision in selected stopped not-applicable; do
-    run_intake "$home" "quota-$decision" "$(intake_payload | jq -c --arg d "$decision" '.selection.quota.decision=$d')" >/dev/null \
-      || fail "$decision intake failed"
-  done
-  sheet=$(FM_HOME="$home" "$TELEMETRY" sheet --format json) || fail "quota-decision sheet failed"
-  printf '%s' "$sheet" | jq -e 'length==3 and ([.[].quotaDecision]|sort)==(["not-applicable","selected","stopped"])' >/dev/null \
-    || fail "the JSON sheet does not surface a typed quotaDecision column: $sheet"
-  FM_HOME="$home" "$TELEMETRY" sheet --format csv | head -n 1 | grep -q ',quotaDecision$' \
-    || fail "the CSV sheet header lacks the additive quotaDecision column"
-  pass "intake requires a typed quota decision and the sheet surfaces it as a column"
+  run_intake "$home" invented-facts "$payload" >/dev/null || fail "invented-facts intake failed"
+  err=$(FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task invented-facts \
+    --payload "$(jq -cn '{gate:{source:"delivery",result:"failed",stepReruns:null},outcomeLink:{kind:"none",id:null},usage:{inputTokens:null,outputTokens:null,cost:null,currency:null},wallSeconds:60,primaryFailureClass:"blocked-dialog"}')" 2>&1) &&
+    fail "terminal-facts accepted an invented primaryFailureClass"
+  assert_contains "$err" "terminal facts payload violates the whitelist" \
+    "invented facts-class refusal did not name the whitelist"
+  FM_HOME="$home" "$TELEMETRY" sheet --format csv | head -n 1 | grep -q ',taskId,quotaDecision,usageSource$' \
+    || fail "the CSV sheet header lacks the additive usageSource column"
+  pass "terminal-facts round-trips a blocked class and a green none through the sheet with typed usageSource"
 }
 
-test_blocked_failure_classes_are_typed() {
-  local home class rc
-  home=$(make_home blocked-classes)
-  for class in approval-wait custody-wait lease-conflict state-divergence; do
-    run_intake "$home" "blocked-$class" "$(intake_payload)" >/dev/null || fail "$class intake failed"
-    FM_HOME="$home" "$TELEMETRY" terminal --state "$home/state" --task "blocked-$class" \
-      --payload "$(terminal_payload failed not-applicable "$class")" >/dev/null || fail "$class terminal was refused"
-    jq -e --arg class "$class" 'select(.eventType=="attempt-terminal" and .terminal.primaryFailureClass==$class)' \
-      "$home/data/routing-outcomes.jsonl" >/dev/null || fail "$class was not recorded on the terminal row"
-  done
-  run_intake "$home" blocked-invented "$(intake_payload)" >/dev/null || fail "invented-class intake failed"
-  set +e
-  FM_HOME="$home" "$TELEMETRY" terminal --state "$home/state" --task blocked-invented \
-    --payload "$(terminal_payload failed not-applicable blocked-ness)" >/dev/null 2>&1
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "an invented failure class was accepted"
-  pass "terminals record the observed blocked failure classes and refuse invented ones"
+test_usage_observation_whitelist_refuses_invalid_shapes() {
+  local home attempt worktree err observation
+  home=$(make_home usage-observation)
+  attempt=$(run_intake "$home" usage-obs-a "$(intake_payload)") || fail "usage-observation intake failed"
+  attempt=$(printf '%s' "$attempt" | jq -r .attemptId)
+  worktree="$home/wt"
+  mkdir -p "$worktree"
+
+  observation='{"usage":{"inputTokens":null,"outputTokens":null,"cost":null,"currency":null},"wallSeconds":60}'
+  err=$(FM_HOME="$home" FM_MODEL_TELEMETRY_TEST_USAGE_OBSERVATION="$observation" \
+    "$TELEMETRY" usage --attempt "$attempt" --worktree "$worktree" 2>&1) &&
+    fail "usage accepted an observation missing usageSource"
+  assert_contains "$err" "session usage observation violates the whitelist" \
+    "missing usageSource refusal did not name the whitelist"
+
+  observation='{"usage":{"inputTokens":null,"outputTokens":null,"cost":null,"currency":null},"usageSource":"recorded"}'
+  err=$(FM_HOME="$home" FM_MODEL_TELEMETRY_TEST_USAGE_OBSERVATION="$observation" \
+    "$TELEMETRY" usage --attempt "$attempt" --worktree "$worktree" 2>&1) &&
+    fail "usage accepted an observation missing wallSeconds"
+  assert_contains "$err" "session usage observation violates the whitelist" \
+    "missing wallSeconds refusal did not name the whitelist"
+
+  observation='{"usage":{"inputTokens":null,"outputTokens":null,"cost":null,"currency":null},"wallSeconds":60,"usageSource":"recorded","extra":true}'
+  err=$(FM_HOME="$home" FM_MODEL_TELEMETRY_TEST_USAGE_OBSERVATION="$observation" \
+    "$TELEMETRY" usage --attempt "$attempt" --worktree "$worktree" 2>&1) &&
+    fail "usage accepted an observation with an extra top-level key"
+  assert_contains "$err" "session usage observation violates the whitelist" \
+    "extra top-level key refusal did not name the whitelist"
+
+  observation='{"usage":{"inputTokens":null,"outputTokens":null,"cost":null,"currency":null},"wallSeconds":60,"usageSource":"recorded"}'
+  FM_HOME="$home" FM_MODEL_TELEMETRY_TEST_USAGE_OBSERVATION="$observation" \
+    "$TELEMETRY" usage --attempt "$attempt" --worktree "$worktree" >/dev/null \
+    || fail "a whitelisted usage observation was refused"
+  pass "usage refuses malformed session observations and accepts the exact-key whitelist"
+}
+
+test_intake_refuses_unknown_quota_decision_and_sheet_surfaces_it() {
+  local home result attempt sheet err
+  home=$(make_home quota-decision)
+  err=$(run_intake "$home" unknown-quota "$(intake_payload | jq -c '.selection.quota.decision="unknown"')" 2>&1) &&
+    fail "an intake whose quota decision is unknown was accepted"
+  assert_contains "$err" "new intake quota decision must be one of selected, stopped, not-applicable" \
+    "unknown quota-decision refusal did not name the closed set"
+  err=$(run_intake "$home" invented-quota "$(intake_payload | jq -c '.selection.quota.decision="maybe"')" 2>&1) &&
+    fail "an intake whose quota decision is outside the closed set was accepted"
+  result=$(run_intake "$home" typed-quota "$(intake_payload)") || fail "selected quota-decision intake failed"
+  attempt=$(printf '%s' "$result" | jq -r .attemptId)
+  sheet=$(FM_HOME="$home" "$TELEMETRY" sheet --format json) || fail "quota-decision sheet failed"
+  printf '%s' "$sheet" | jq -e --arg a "$attempt" \
+    '.[0].recordType=="attempt" and .[0].attemptId==$a and .[0].quotaDecision=="selected"' >/dev/null \
+    || fail "the JSON sheet does not surface a quotaDecision column"
+  FM_HOME="$home" "$TELEMETRY" sheet --format csv | head -n 1 | grep -q ',taskId,quotaDecision,usageSource$' \
+    || fail "the CSV sheet header lacks the additive quotaDecision column"
+  pass "new intake refuses an unknown quota decision and the sheet surfaces quotaDecision"
 }
 
 test_terminals_and_retry_links
-test_intake_records_task_id_on_event_and_sheet
-test_intake_requires_a_typed_quota_decision_and_sheet_surfaces_it
-test_blocked_failure_classes_are_typed
 test_crash_recovery_and_terminal_idempotency
 test_relaunch_supersedes_stale_receipt
 test_reseal_after_explicit_terminal_never_deadlocks
@@ -1044,7 +1117,6 @@ test_caller_attempt_outranks_a_diverging_receipt
 test_missing_intake_requires_ledger_repair
 test_validation_privacy_and_private_files
 test_mechanical_quality_cost_and_exploration_projection
-test_terminal_facts_require_observed_failure_classes
 test_routing_candidate_verdict_requires_preregistered_comparable_evidence
 test_routing_candidate_guard_rejects_post_outcome_registration_and_missing_plan_fields
 test_candidate_sample_excludes_non_quality_outcomes_and_binds_frozen_verdict
@@ -1055,4 +1127,15 @@ test_terminal_records_explicit_usage_source
 test_subscription_sheet_joins_a_representative_week
 test_spawn_failure_records_pre_launch_refusals
 test_spawn_failures_read_surface_groups_refusals_by_pool
+test_terminal_accepts_approval_wait_failure_class
+test_terminal_accepts_custody_wait_failure_class
+test_terminal_accepts_lease_conflict_failure_class
+test_terminal_accepts_state_divergence_failure_class
+test_intake_records_task_id_on_event_and_sheet
+test_intake_refuses_unknown_quota_decision_and_sheet_surfaces_it
+test_terminal_facts_round_trip_blocked_class_and_green_none
+test_usage_observation_whitelist_refuses_invalid_shapes
 printf 'All model telemetry tests passed.\n'
+# Named so changed-file selection can map branch verification artifacts:
+# gnhf-score.txt gnhf-night-report.md rejected/iter8-refuse-unknown-on-terminal-write.diff
+

@@ -240,6 +240,10 @@
       "audience": "public-product"
     },
     {
+      "path": "gnhf-night-report.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "README.md",
       "audience": "public-product"
     },

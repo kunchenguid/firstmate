@@ -2,9 +2,10 @@
 
 One schema document for the two append-only operational ledgers. Both ledger
 writers validate new rows against the contracts defined here; a payload that
-does not satisfy this document is refused with a named reason, never defaulted.
-Both ledgers are append-only: rows already written are history, are never
-rewritten or backfilled, and readers keep accepting their legacy shapes.
+does not satisfy this document is refused with a named reason. The deliberate
+defaults named in this document are the only exceptions. Both ledgers are
+append-only: rows already written are history, are never rewritten or
+backfilled, and readers keep accepting their legacy shapes.
 
 Failure fields are typed at the source. The caller that ends a unit of work
 already knows why it ended and passes the class as a typed field; no reader
@@ -56,7 +57,15 @@ Closed enum. Writers refuse any value outside this list.
 | `custody-wait` | Branch or worktree custody held pending an external merge. |
 | `lease-conflict` | A slot or lease was held by a record whose work already finished. |
 | `state-divergence` | Durable state contradicted observable truth, e.g. a failed state recorded for work that had merged. |
-| `unknown` | Legacy placeholder. Legal only when reading rows written before typed classes were required; writers refuse it on new terminal rows. A non-green terminal whose facts carry no class from this enum, or carry `unknown`, is refused. |
+| `unknown` | Legacy placeholder for rows written before typed classes were required. `terminal-facts` may default a missing non-green `primaryFailureClass` to `unknown`. An explicit `terminal` payload may still carry `unknown` when the classification warrants it. Writers refuse any invented class outside this enum. |
+
+### `terminal.usageSource`
+
+Closed enum on new terminal rows: `recorded`, `no-verified-source`,
+`session-not-found`, `session-matched-no-tokens`, `unreadable`,
+`worktree-missing`. A terminal row without `usageSource` is valid for legacy
+callers. The attempt sheet surfaces the additive `usageSource` column and uses
+the sentinel `absent` when the sealed terminal omitted the field.
 
 ## Review ledger: `data/review-outcomes.jsonl`
 
