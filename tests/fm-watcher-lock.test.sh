@@ -736,6 +736,41 @@ test_msys_stale_corrupted_lock_refuses_unknown_nested_content() {
   pass "MSYS stale lock recovery refuses foreign nested content without deleting evidence"
 }
 
+test_msys_stale_corrupted_lock_refuses_partial_nested_cleanup() {
+  local dir state fakebin lockdir nested_ok nested_bad ln_used rc stalepid
+  dir=$(make_case msys-lock-corrupted-partial-refusal)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lockdir="$state/.contend.lock"
+  nested_ok="$lockdir/.contend.lock.owner.generated111"
+  nested_bad="$lockdir/.contend.lock.owner.generated222"
+  ln_used="$dir/ln-used"
+  make_fake_msys_lock_bin "$fakebin"
+  stalepid=$(stale_fixture_pid)
+  assert_fixture_pid_not_live "$state" "$stalepid"
+  mkdir -p "$nested_ok" "$nested_bad"
+  printf '%s\n' "$stalepid" > "$lockdir/pid"
+  printf '%s\n' "$stalepid" > "$nested_ok/pid"
+  printf '%s\n' "$state" > "$nested_ok/fm-home"
+  printf '%s\n' "$stalepid" > "$nested_bad/pid"
+  printf 'keep\n' > "$nested_bad/foreign.txt"
+  rc=0
+  PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" && exit 10
+    [ -d "$2" ] || exit 11
+    [ -d "$3" ] || exit 12
+    [ "$(cat "$3/pid" 2>/dev/null || true)" = "$5" ] || exit 13
+    [ "$(cat "$3/fm-home" 2>/dev/null || true)" = "$6" ] || exit 14
+    [ -d "$4" ] || exit 15
+    [ "$(cat "$4/pid" 2>/dev/null || true)" = "$5" ] || exit 16
+    [ -f "$4/foreign.txt" ] || exit 17
+  ' _ "$LIB" "$lockdir" "$nested_ok" "$nested_bad" "$stalepid" "$state" || rc=$?
+  [ "$rc" -eq 0 ] || fail "MSYS stale lock partially deleted earlier nested evidence before refusal (rc=$rc)"
+  [ ! -e "$ln_used" ] || fail "MSYS partial-refusal path invoked ln -s"
+  pass "MSYS stale lock refusal preserves all nested evidence when later content is foreign"
+}
+
 test_cygwin_lock_keeps_symlink_publication() {
   local dir state fakebin lockdir ln_used real_ln rc
   if host_lacks_real_symlink_support; then
@@ -1574,6 +1609,7 @@ test_msys_lock_live_steal_mutex_is_not_reclaimed
 test_msys_stale_corrupted_lock_recovers_generated_owner_dir
 test_msys_stale_corrupted_lock_refuses_empty_nested_owner_dir
 test_msys_stale_corrupted_lock_refuses_unknown_nested_content
+test_msys_stale_corrupted_lock_refuses_partial_nested_cleanup
 test_cygwin_lock_keeps_symlink_publication
 test_symlink_lock_contention_cleans_stray_owner_link
 test_watch_restart_rejects_reused_pid

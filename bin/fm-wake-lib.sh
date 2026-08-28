@@ -418,9 +418,14 @@ fm_lock_generated_owner_dir_is_removable() {
 fm_lock_remove_generated_owner_dirs() {
   local lockdir=$1 base nested
   base=$(basename "$lockdir")
+  # Migration cleanup must be all-or-nothing: if any nested artifact is
+  # malformed or foreign, preserve every nested entry as evidence.
   for nested in "$lockdir/$base.owner."*; do
     [ -e "$nested" ] || continue
     fm_lock_generated_owner_dir_is_removable "$nested" || return 1
+  done
+  for nested in "$lockdir/$base.owner."*; do
+    [ -e "$nested" ] || continue
     fm_lock_clean_known_files "$nested"
     rmdir "$nested" 2>/dev/null || return 1
   done
