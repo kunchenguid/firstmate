@@ -13,6 +13,7 @@ import io
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import shutil
 import subprocess
@@ -312,28 +313,16 @@ def stage_payload(request, worktree, account_home):
         repo = worktree / "repo"
         if repo.is_symlink() or not repo.is_dir():
             raise SupervisorError("existing task-disk repository is unavailable or redirected")
-        top = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=GIT_HEAD_TIMEOUT, check=False,
-        )
+        top = git_in(repo, "rev-parse", "--show-toplevel", timeout=GIT_HEAD_TIMEOUT)
         if top.returncode != 0 or Path(top.stdout.decode().strip()).resolve() != repo.resolve():
             raise SupervisorError("existing task-disk repository is not the exact repository root")
-        lineage = subprocess.run(
-            [
-                "git", "-C", str(repo), "merge-base", "--is-ancestor",
-                request["repository_generation"], "HEAD",
-            ],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=GIT_HEAD_TIMEOUT, check=False,
+        lineage = git_in(
+            repo, "merge-base", "--is-ancestor",
+            request["repository_generation"], "HEAD", timeout=GIT_HEAD_TIMEOUT,
         )
         if lineage.returncode != 0:
             raise SupervisorError("existing task-disk repository lost its dispatched lineage")
-        readable = subprocess.run(
-            ["git", "-C", str(repo), "status", "--porcelain"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=GIT_STATUS_TIMEOUT, check=False,
-        )
+        readable = git_in(repo, "status", "--porcelain", timeout=GIT_STATUS_TIMEOUT)
         if readable.returncode != 0:
             raise SupervisorError("existing task-disk working tree is unreadable")
         return repo
@@ -367,11 +356,7 @@ def stage_payload(request, worktree, account_home):
                 clone.stderr.decode("utf-8", errors="replace")[-500:]
             )
         )
-    head = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"],
-        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        timeout=GIT_HEAD_TIMEOUT, check=False,
-    )
+    head = git_in(repo, "rev-parse", "HEAD", timeout=GIT_HEAD_TIMEOUT)
     if head.returncode != 0 or head.stdout.decode().strip() != request["repository_generation"]:
         raise SupervisorError("staged repository head differs from the bound repository generation")
     if request.get("worker_role") == "no-mistakes":
@@ -387,7 +372,8 @@ def stage_no_mistakes_runtime(source, target, enforce_linux=True):
         if target.is_symlink() or not target.is_dir():
             raise SupervisorError("no-mistakes runtime target is unsafe")
         shutil.rmtree(target)
-    target.mkdir(mode=0o700)
+    target.mkdir(mode=0o755)
+    target.chmod(0o755)
     extracted = {}
     total = 0
     try:
@@ -411,7 +397,7 @@ def stage_no_mistakes_runtime(source, target, enforce_linux=True):
                 if total > 2 * 1024 * 1024 * 1024:
                     raise SupervisorError("no-mistakes runtime expands beyond its bound")
                 destination = target.joinpath(*parts)
-                destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                destination.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
                 destination.write_bytes(body)
                 destination.chmod(member.mode)
                 extracted[member.name] = body
@@ -482,13 +468,69 @@ def stage_no_mistakes_runtime(source, target, enforce_linux=True):
             ):
                 raise SupervisorError(
                     "no-mistakes runtime {} is not Linux amd64".format(path))
+    for directory, directories, _ in os.walk(target):
+        Path(directory).chmod(0o755)
+        for name in directories:
+            child = Path(directory) / name
+            if child.is_symlink():
+                raise SupervisorError("no-mistakes runtime contains a redirected directory")
+            child.chmod(0o755)
 
 
-def git_in(repo, *arguments, timeout=BUNDLE_CREATE_TIMEOUT):
+def no_mistakes_execution_identity():
+    try:
+        identity = pwd.getpwnam("fmworker") if os.geteuid() == 0 else pwd.getpwuid(os.geteuid())
+    except KeyError:
+        raise SupervisorError("no-mistakes service user is unavailable") from None
+    if identity.pw_uid == 0 or identity.pw_gid == 0:
+        raise SupervisorError("no-mistakes service user is privileged")
+    return identity
+
+
+def chown_tree(root, uid, gid):
+    root = Path(root)
+    if root.is_symlink() or not root.is_dir():
+        raise SupervisorError("no-mistakes writable root is unavailable or redirected")
+    os.chown(root, uid, gid, follow_symlinks=False)
+    for directory, directories, files in os.walk(root, followlinks=False):
+        base = Path(directory)
+        os.chown(base, uid, gid, follow_symlinks=False)
+        for name in directories + files:
+            os.chown(base / name, uid, gid, follow_symlinks=False)
+
+
+def prepare_no_mistakes_execution(worktree, worktree_root, account_home, brief):
+    identity = no_mistakes_execution_identity()
+    if os.geteuid() == 0:
+        chown_tree(worktree, identity.pw_uid, identity.pw_gid)
+        chown_tree(account_home, identity.pw_uid, identity.pw_gid)
+    account_home.chmod(0o700)
+    runtime = worktree_root / ".fm-runtime"
+    if runtime.is_symlink() or not runtime.is_dir():
+        raise SupervisorError("no-mistakes runtime root is unavailable or redirected")
+    for directory, directories, _ in os.walk(runtime, followlinks=False):
+        Path(directory).chmod(0o755)
+        for name in directories:
+            child = Path(directory) / name
+            if child.is_symlink():
+                raise SupervisorError("no-mistakes runtime contains a redirected directory")
+            child.chmod(0o755)
+    worktree_root.chmod(0o711)
+    brief.parent.chmod(0o711)
+    if os.geteuid() == 0:
+        os.chown(brief, identity.pw_uid, identity.pw_gid, follow_symlinks=False)
+    brief.chmod(0o400)
+    if os.geteuid() == 0:
+        return {"user": identity.pw_uid, "group": identity.pw_gid, "extra_groups": []}
+    return {}
+
+
+def git_in(repo, *arguments, timeout=BUNDLE_CREATE_TIMEOUT, input_bytes=None, env=None):
     return subprocess.run(
-        ["git", "-C", str(repo), *arguments],
-        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        timeout=timeout, check=False,
+        ["git", "-c", "safe.directory={}".format(repo), "-C", str(repo), *arguments],
+        input=input_bytes, stdin=subprocess.DEVNULL if input_bytes is None else None,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False,
+        env=env,
     )
 
 
@@ -589,9 +631,9 @@ def _scratch_artifacts(repo):
 
 
 def _hash_blob(repo, body):
-    result = subprocess.run(
-        ["git", "-C", str(repo), "hash-object", "-w", "--stdin"], input=body,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=GIT_HEAD_TIMEOUT, check=False,
+    result = git_in(
+        repo, "hash-object", "-w", "--stdin", input_bytes=body,
+        timeout=GIT_HEAD_TIMEOUT,
     )
     if result.returncode != 0:
         raise SupervisorError("returned artifact could not be stored in the repository")
@@ -602,9 +644,8 @@ def _return_commit(repo, base, artifacts, request):
     entries = []
     for name, body in sorted(artifacts.items()):
         entries.append("100644 blob {}\t{}\n".format(_hash_blob(repo, body), name))
-    tree = subprocess.run(
-        ["git", "-C", str(repo), "mktree"], input="".join(entries).encode(),
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=GIT_HEAD_TIMEOUT, check=False,
+    tree = git_in(
+        repo, "mktree", input_bytes="".join(entries).encode(), timeout=GIT_HEAD_TIMEOUT,
     )
     if tree.returncode != 0:
         raise SupervisorError("returned artifact tree could not be created")
@@ -617,11 +658,10 @@ def _return_commit(repo, base, artifacts, request):
         "GIT_AUTHOR_DATE": "@0 +0000",
         "GIT_COMMITTER_DATE": "@0 +0000",
     })
-    committed = subprocess.run(
-        ["git", "-C", str(repo), "commit-tree", tree.stdout.decode().strip(), "-p", base],
-        input=("Firstmate worker return {}\n".format(request["request_digest"])).encode(),
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=GIT_HEAD_TIMEOUT,
-        check=False, env=environment,
+    committed = git_in(
+        repo, "commit-tree", tree.stdout.decode().strip(), "-p", base,
+        input_bytes=("Firstmate worker return {}\n".format(request["request_digest"])).encode(),
+        timeout=GIT_HEAD_TIMEOUT, env=environment,
     )
     if committed.returncode != 0:
         raise SupervisorError("returned artifact commit could not be created")
@@ -945,6 +985,7 @@ def execute(request, worktree, worktree_root):
         "GIT_ASKPASS": "/bin/false",
     }
     argv = request["argv"]
+    execution_identity = {}
     if request.get("worker_role") == "no-mistakes":
         # The no-mistakes guest is already the isolated Azure test boundary.
         # Its project command uses this fixed marker to avoid recursively
@@ -959,11 +1000,13 @@ def execute(request, worktree, worktree_root):
             raise SupervisorError("no-mistakes staged brief is unavailable or redirected")
         argv = list(argv)
         argv[6] = str(brief.resolve())
+        execution_identity = prepare_no_mistakes_execution(
+            worktree, worktree_root, account_home, brief)
     try:
         completed = subprocess.run(
             argv, cwd=str(worktree), env=safe_env,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=request["wall_seconds"], check=False,
+            timeout=request["wall_seconds"], check=False, **execution_identity,
         )
         timed_out = False
         exit_code = completed.returncode

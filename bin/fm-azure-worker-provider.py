@@ -2121,6 +2121,12 @@ def bootstrap_script(action):
     bindings = action["bindings"]
     script = """set -eu
 umask 077
+if ! /usr/bin/getent passwd fmworker >/dev/null; then
+  /usr/sbin/useradd --system --user-group --create-home --home-dir /var/lib/firstmate-worker-user --shell /usr/sbin/nologin fmworker
+fi
+[ "$(/usr/bin/id -u fmworker)" -ne 0 ]
+[ "$(/usr/bin/getent passwd fmworker | /usr/bin/cut -d: -f6)" = /var/lib/firstmate-worker-user ]
+[ "$(/usr/bin/getent passwd fmworker | /usr/bin/cut -d: -f7)" = /usr/sbin/nologin ]
 install -d -m 0755 /usr/local/libexec
 python3 - <<'PY'
 from pathlib import Path

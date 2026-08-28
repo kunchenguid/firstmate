@@ -725,6 +725,21 @@ run_supervisor_existing_task_disk_recovery() {
   fm_git_init_commit "$repo"
   base=$(git -C "$repo" rev-parse HEAD)
   printf 'uncommitted scout evidence\n' > "$repo/scratch.txt"
+  python3 - "$repo" <<'PY' \
+    || fail "could not prepare the cross-owner retained repository fixture"
+import os
+from pathlib import Path
+import pwd
+import sys
+
+root = Path(sys.argv[1])
+if os.geteuid() == 0:
+    identity = pwd.getpwnam("nobody")
+    for directory, directories, files in os.walk(root):
+        os.chown(directory, identity.pw_uid, identity.pw_gid)
+        for name in directories + files:
+            os.chown(Path(directory) / name, identity.pw_uid, identity.pw_gid)
+PY
   cat > "$work/.fm-return/data/recover-existing/report.md" <<'REPORT'
 ## Summary
 
@@ -841,7 +856,74 @@ PY
   expect_code 2 "$status" "existing task-disk recovery with foreign lineage should refuse: $out"
   assert_contains "$out" "lost its dispatched lineage" "existing task-disk lineage refusal was not explicit"
   assert_present "$repo/scratch.txt" "a refused existing task-disk recovery removed scout work"
-  pass "existing task-disk recovery returns reports and scratch without restaging or lineage drift"
+  pass "existing task-disk recovery and return Git work across ownership without lineage drift"
+}
+
+run_no_mistakes_privilege_contract() {
+  local tmp
+  fm_test_tmproot_into tmp fm-worker-supervisor-no-mistakes-user
+  python3 - "$SUPERVISOR" "$ROOT/bin/fm-azure-worker-provider.py" "$tmp" <<'PY' \
+    || fail "no-mistakes guest did not execute through its unprivileged service identity"
+import importlib.util
+import os
+from pathlib import Path
+from types import SimpleNamespace
+import sys
+
+supervisor_path, provider_path, temporary = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("fm_worker_supervisor", supervisor_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+root = temporary / "work"
+repo = root / "repo"
+account = temporary / "account"
+brief = root / ".fm-task" / "brief.md"
+runtime_dir = root / ".fm-runtime" / "lib" / "pi"
+for directory in (repo, account / "pi-agent", brief.parent, runtime_dir):
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+(repo / "tracked.txt").write_text("tracked\n")
+(account / "pi-agent" / "auth.json").write_text("{}\n")
+brief.write_text("{}\n")
+(runtime_dir / "cli.js").write_text("export {};\n")
+
+module.no_mistakes_execution_identity = lambda: SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())
+module.os.geteuid = lambda: 0
+options = module.prepare_no_mistakes_execution(repo, root, account, brief)
+assert options == {"user": os.getuid(), "group": os.getgid(), "extra_groups": []}, options
+assert brief.stat().st_mode & 0o777 == 0o400
+assert root.stat().st_mode & 0o111
+assert all(path.stat().st_mode & 0o111 for path in (root / ".fm-runtime").rglob("*") if path.is_dir())
+
+calls = []
+def fake_run(argv, **kwargs):
+    calls.append((argv, kwargs))
+    return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+module.subprocess.run = fake_run
+module.os.environ["FM_WORKER_ACCOUNT_HOME"] = str(account)
+request = {
+    "worker_role": "no-mistakes",
+    "argv": ["no-mistakes", "worker", "run", "--role", "test", "--brief", "brief.md", "--result", "outcome.json"],
+    "wall_seconds": 60,
+    "assignment_generation": "asg-1",
+    "request_digest": "a" * 64,
+    "task": "task-1",
+    "task_generation": "gen-1",
+    "cloud_instance_id": "vm-1",
+    "repository_binding": "b" * 64,
+    "repository_generation": "c" * 40,
+}
+module.execute(request, repo, root)
+task_call = next(kwargs for argv, kwargs in calls if argv and argv[0] == "no-mistakes")
+assert task_call["user"] == os.getuid()
+assert task_call["group"] == os.getgid()
+assert task_call["extra_groups"] == []
+
+provider = provider_path.read_text()
+assert "useradd --system --user-group" in provider
+assert "fmworker" in provider
+PY
+  pass "no-mistakes guest runs as a dedicated non-root service user"
 }
 
 run_supervisor_controls
@@ -850,4 +932,5 @@ run_supervisor_steer_controls
 run_supervisor_payload_staging
 run_supervisor_outcome_collection
 run_supervisor_existing_task_disk_recovery
+run_no_mistakes_privilege_contract
 echo "# fm-worker-supervisor.test.sh: all assertions passed"

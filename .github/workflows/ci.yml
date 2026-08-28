@@ -213,6 +213,8 @@ jobs:
 
   agent-fleet:
     name: Agent Fleet package
+    needs: behavior-test-plan
+    if: needs.behavior-test-plan.outputs.mode == 'full'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
