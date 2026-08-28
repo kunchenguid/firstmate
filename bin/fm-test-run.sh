@@ -42,8 +42,9 @@
 #                   safe to run concurrently: individually in the proven-isolated
 #                   set (bin/fm-test-isolation-proof.sh --list), or in a family
 #                   carrying a recorded concurrent proof
-#                   (list_concurrent_safe_families below). Cap is 8; unproven
-#                   stateful scripts stay serial. Concurrent runs are ordered
+#                   (list_concurrent_safe_families below). Overall cap is 8;
+#                   family proofs may impose a lower cap. Unproven stateful
+#                   scripts stay serial. Concurrent runs are ordered
 #                   longest-hint-first so the slowest script is not stranded
 #                   alone at the tail. Default is 1 (serial) for every selection
 #                   mode EXCEPT --changed, which defaults to min(4, cpus) when
@@ -414,12 +415,24 @@ family_is_concurrent_safe() {
   return 1
 }
 
-# A script may run under --jobs when it is individually proven isolated or its
-# whole family carries a recorded concurrent proof.
+concurrent_safe_family_jobs_max() {
+  case "$1" in
+    watcher-wake-lock) printf '4\n' ;;
+    *) printf '1\n' ;;
+  esac
+}
+
+# A script may run under --jobs when it is individually proven isolated or is
+# an exact repository member of a family carrying a recorded concurrent proof.
 script_allows_concurrency() {
-  local s=$1
+  local s=$1 family repo_script
   is_proven_isolated_script "$s" && return 0
-  family_is_concurrent_safe "$(family_for_basename "$(basename "$s")")"
+  family=$(family_for_basename "$(basename "$s")")
+  family_is_concurrent_safe "$family" || return 1
+  while IFS= read -r repo_script; do
+    [ "$repo_script" = "$s" ] && return 0
+  done < <(all_repo_tests)
+  return 1
 }
 
 is_proven_isolated_script() {
@@ -1683,6 +1696,12 @@ if [ "$JOBS" -gt 1 ] && [ "$AUTO_CONCURRENCY" -eq 0 ]; then
     if ! script_allows_concurrency "$s"; then
       die "--jobs $JOBS refused: $s is not in the proven-isolated set (see bin/fm-test-isolation-proof.sh --list) and its family has no recorded concurrent proof. Unproven stateful scripts stay serial."
     fi
+    if ! is_proven_isolated_script "$s"; then
+      family=$(family_for_basename "$(basename "$s")")
+      family_jobs_max=$(concurrent_safe_family_jobs_max "$family")
+      [ "$JOBS" -le "$family_jobs_max" ] \
+        || die "--jobs $JOBS refused: family $family is proven only up to $family_jobs_max concurrent workers"
+    fi
   done
 fi
 
@@ -1726,6 +1745,11 @@ fi
 case "$PER_SCRIPT_TIMEOUT_SECS" in
   ''|*[!0-9]*) die "--per-script-timeout-secs requires a whole number of seconds (0 disables)" ;;
 esac
+if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
+  [ -r "$ROOT/bin/fm-timeout-lib.sh" ] || die "per-script timeout helper not found: bin/fm-timeout-lib.sh"
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$ROOT/bin/fm-timeout-lib.sh"
+fi
 
 RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
 RECORDS="$RUN_TMP/records.tsv"
@@ -1813,49 +1837,30 @@ record_script_result() {
 # because an unbounded suite is what silently outruns its caller's budget.
 run_script_bounded() {  # <script> <out> <stream> <id>
   local script=$1 out=$2 stream=$3 id=$4
-  local pid watchdog rc rcfile timeout_marker
-  rcfile="$RUN_TMP/rc.$id"
-  timeout_marker="$RUN_TMP/timeout.$id"
-  rm -f "$rcfile" "$timeout_marker"
-  if [ "$stream" -eq 1 ]; then
-    # PIPESTATUS[0] is the script; tee's own exit is not the result.
-    ( bash "$script" 2>&1 | tee "$out"; printf '%s\n' "${PIPESTATUS[0]}" >"$rcfile" ) &
-  else
-    ( bash "$script" >"$out" 2>&1; printf '%s\n' "$?" >"$rcfile" ) &
-  fi
-  pid=$!
-  watchdog=
-  if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
-    (
-      sleep "$PER_SCRIPT_TIMEOUT_SECS"
-      kill -0 "$pid" 2>/dev/null || exit 0
-      : >"$timeout_marker"
-      pkill -TERM -P "$pid" 2>/dev/null || true
-      kill -TERM "$pid" 2>/dev/null || true
-      sleep 5
-      pkill -KILL -P "$pid" 2>/dev/null || true
-      kill -KILL "$pid" 2>/dev/null || true
-    ) &
-    watchdog=$!
-  fi
-  # Errexit stays off from here: this function returns a non-zero script exit as
-  # data, and both callers wrap the call in their own set +e / set -e pair.
+  local rc
+  : "$id"
   set +e
-  wait "$pid" >/dev/null 2>&1
-  if [ -n "$watchdog" ]; then
-    kill "$watchdog" 2>/dev/null || true
-    wait "$watchdog" 2>/dev/null || true
+  if [ "$stream" -eq 1 ]; then
+    if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
+      fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c \
+        'bash "$1" 2>&1 | tee "$2"; exit "${PIPESTATUS[0]}"' _ "$script" "$out"
+      rc=$?
+    else
+      bash "$script" 2>&1 | tee "$out"
+      rc=${PIPESTATUS[0]}
+    fi
+  elif [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
+    fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash "$script" >"$out" 2>&1
+    rc=$?
+  else
+    bash "$script" >"$out" 2>&1
+    rc=$?
   fi
-  if [ -e "$timeout_marker" ]; then
+  if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ] && [ "$rc" -eq 124 ]; then
     printf 'not ok - %s exceeded the per-script bound of %ss and was terminated\n' \
       "$script" "$PER_SCRIPT_TIMEOUT_SECS" >>"$out"
     [ "$stream" -eq 1 ] && tail -1 "$out"
-    rm -f "$timeout_marker" "$rcfile"
-    return 124
   fi
-  rc=$(cat "$rcfile" 2>/dev/null || printf '1')
-  rm -f "$rcfile"
-  case "$rc" in ''|*[!0-9]*) rc=1 ;; esac
   return "$rc"
 }
 

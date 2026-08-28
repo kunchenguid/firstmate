@@ -539,7 +539,7 @@ test_jobs_requires_proven_isolated() {
 # proof is admitted and actually scheduled, so the admission rule is two-sided
 # rather than a blanket refusal that happens to pass its negative cases.
 test_jobs_admits_a_concurrent_safe_family() {
-  local tmp rc
+  local tmp rc external
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs-admit.XXXXXX")
   # --list exits before the admission guard, so this has to be a real run for
   # the assertion to mean anything. Two cheap watcher-wake-lock scripts exercise
@@ -553,6 +553,23 @@ test_jobs_admits_a_concurrent_safe_family() {
   [ "$rc" -eq 0 ] || fail "--jobs on a proven family must be admitted, got $rc: $(cat "$tmp/err") $(cat "$tmp/out")"
   grep -Fq 'FM_TEST_SUMMARY total=2 failed=0' "$tmp/out" \
     || fail "the admitted concurrent run did not report both scripts green: $(cat "$tmp/out")"
+
+  set +e
+  "$RUNNER" --jobs 5 tests/fm-session-lock-ancestry.test.sh \
+    >"$tmp/over-cap.out" 2>"$tmp/over-cap.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "a family run above its proven four-worker cap must be refused, got $rc"
+
+  external="$tmp/fm-session-lock-ancestry.test.sh"
+  printf '#!/usr/bin/env bash\necho "ok - colliding external fixture"\n' >"$external"
+  chmod +x "$external"
+  set +e
+  "$RUNNER" --jobs 2 "$external" >"$tmp/external.out" 2>"$tmp/external.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] \
+    || fail "an external script colliding with a proven family member must be refused, got $rc"
   rm -rf "$tmp"
   pass "--jobs admits and schedules a family with a recorded concurrent proof"
 }
@@ -583,23 +600,27 @@ test_concurrent_runs_are_ordered_longest_first() {
 # finishes. A hung script has to become a bounded failure, because an unbounded
 # suite is exactly what silently outruns its caller's invocation budget.
 test_per_script_timeout_bounds_a_hang() {
-  local tmp repo runner hang rc began ended
+  local tmp repo runner hang rc began ended grandchild_pid grandchild waited
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-hang.XXXXXX")
   repo="$tmp/repo"
   runner="$repo/bin/fm-test-run.sh"
   hang=tests/fm-hang-fixture.test.sh
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$runner"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
+  grandchild_pid="$tmp/grandchild.pid"
   cat >"$repo/$hang" <<'SH'
 #!/usr/bin/env bash
 echo "ok - fixture is about to hang"
+sh -c 'trap "" TERM; echo $$ >"$1"; sleep 600' _ "$GRANDCHILD_PID" &
 sleep 600
 SH
   chmod +x "$runner" "$repo/$hang"
 
   began=$(date +%s)
   set +e
-  "$runner" --per-script-timeout-secs 3 "$hang" >"$tmp/out" 2>"$tmp/err"
+  GRANDCHILD_PID="$grandchild_pid" \
+    "$runner" --per-script-timeout-secs 3 "$hang" >"$tmp/out" 2>"$tmp/err"
   rc=$?
   set -e
   ended=$(date +%s)
@@ -614,6 +635,17 @@ SH
   # The run still completes and accounts for the script, rather than dying.
   grep -Fq 'FM_TEST_SUMMARY total=1 failed=1' "$tmp/out" \
     || fail "the bounded run did not report a complete summary: $(cat "$tmp/out")"
+  [ -s "$grandchild_pid" ] || fail "the hanging fixture did not record its grandchild"
+  grandchild=$(cat "$grandchild_pid")
+  waited=0
+  while kill -0 "$grandchild" 2>/dev/null && [ "$waited" -lt 50 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$grandchild" 2>/dev/null; then
+    kill -KILL "$grandchild" 2>/dev/null || true
+    fail "the timed-out script left grandchild $grandchild running"
+  fi
 
   # 0 keeps the historical unbounded behavior, so no existing caller changes.
   set +e
