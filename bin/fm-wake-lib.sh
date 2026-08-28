@@ -79,9 +79,9 @@ fm_path_age() {
 }
 
 # fm_watcher_lock_unheld <state>
-# True when the watcher lock or its symlinked owner directory is absent, or when
-# the existing lock records no pid at all. Any non-empty pid remains held here;
-# its syntax, liveness, ownership metadata, and identity are health concerns.
+# True when the watcher lock publication is absent, or when its published owner
+# pid record is absent or empty. Any non-empty pid remains held here; its
+# syntax, liveness, ownership metadata, and identity are health concerns.
 fm_watcher_lock_unheld() {
   local state=$1 lockdir pid
   lockdir="$state/.watch.lock"
@@ -386,6 +386,10 @@ fm_lock_remove_stray_owner_link() {
   fi
 }
 
+#
+# Only nested directories that prove they were generated owner artifacts are
+# eligible for stale Windows migration cleanup. Anything empty, malformed, or
+# carrying unknown content must make the reclaim refuse and preserve evidence.
 fm_lock_generated_owner_dir_is_removable() {
   local ownerdir=$1 pid
   [ -d "$ownerdir" ] && [ ! -L "$ownerdir" ] || return 1
