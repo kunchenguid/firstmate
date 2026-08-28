@@ -8,11 +8,11 @@
 # (including on a self-hosted instance), and a Bitbucket Cloud pull request
 # URL are all accepted; bin/fm-pr-lib.sh owns the exact URL grammars.
 #
-# pr_dest is what lets bin/fm-teardown.sh's and bin/fm-pr-poll.sh's git-based
-# landed-work test compare against the PULL REQUEST'S destination instead of
-# always assuming the repository's default branch - most pull requests target
-# the default branch, but one that does not would otherwise be judged against
-# the wrong branch forever. It is read from the optional third argument when
+# pr_dest is what lets bin/fm-pr-poll.sh's git-based landed-work test compare
+# against the PULL REQUEST'S destination instead of always assuming the
+# repository's default branch - most pull requests target the default branch,
+# but one that does not would otherwise be judged against the wrong branch
+# forever. It is read from the optional third argument when
 # the caller already knows it, else auto-derived from the forge (GitHub's gh
 # CLI exposes baseRefName as a selectable field); GitLab records none, for the
 # same reason it records no pr_head (below); Bitbucket has no CLI at all, so a
