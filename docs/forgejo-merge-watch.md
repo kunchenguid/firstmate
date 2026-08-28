@@ -217,6 +217,7 @@ A recorded `pr_head=` that no longer matches the live head is reported and the l
 GitLab's merge API applies the project's own merge method, so imposing one there would override that convention.
 Forgejo's merge API takes the method in the request body and has no such fallback, so some method is always chosen.
 This path therefore names the same `--squash` default GitHub gets rather than inheriting `forgejo-axi`'s own `merge` default, and a caller who wants another one passes `-- --method merge` or `-- --method rebase`.
+`forgejo-axi pr merge` takes no `--squash`, `--merge` or `--rebase` flag, so those GitHub spellings are refused by name before anything is recorded rather than suppressing the default and failing at the CLI after the live pre-merge read has already run.
 A repository that disallows the chosen method fails the merge loudly at the forge instead of landing something else.
 
 ## Known limits of this integration

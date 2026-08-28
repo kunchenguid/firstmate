@@ -46,8 +46,11 @@
 # in the request body, so some method is always chosen. This script therefore
 # names the same --squash default GitHub gets, rather than inheriting
 # forgejo-axi's own "merge" default, and a caller who wants another one passes
-# -- --method merge|rebase. A repository that disallows the chosen method fails
-# the merge loudly at the forge instead of landing something else.
+# -- --method merge|rebase. GitHub's --squash, --merge and --rebase spellings
+# are not flags forgejo-axi takes, so they are refused by name before anything
+# is recorded rather than suppressing that default and failing at the CLI.
+# A repository that disallows the chosen method fails the merge loudly at the
+# forge instead of landing something else.
 #
 # A GitLab merge is refused unless every pre-merge condition holds, each read
 # live at merge time rather than taken from recorded metadata: the merge request
@@ -76,7 +79,8 @@
 # short-option cluster such as -yR, because the repository comes only from the
 # URL, nor --sha on GitLab or --expected-head on Forgejo because the head comes
 # only from the live read, nor --base-url on Forgejo because the instance comes
-# only from the URL.
+# only from the URL, nor --squash, --merge or --rebase on Forgejo because that
+# CLI names the method only as --method.
 #
 # On GitLab and Forgejo, this script confirms the request is actually merged
 # before reporting it; an auto-merge-queued or unconfirmed request leaves the
@@ -227,11 +231,30 @@ reject_base_url_overrides() {
   done
 }
 
+# forgejo-axi names the merge method only as --method <name>. GitHub's own
+# --squash, --merge and --rebase spellings are refused by name here rather than
+# forwarded, because forgejo-axi rejects them as unknown flags after the live
+# pre-merge read has already run, and they would first suppress this path's own
+# --method squash default.
+reject_github_merge_methods() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --squash|--merge|--rebase)
+        printf 'error: extra merge arguments must name a Forgejo merge method as --method squash|merge|rebase, not %s\n' \
+          "$arg" >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
 reject_repo_overrides "$@" || exit 1
 [ "$PROVIDER" != gitlab ] || reject_head_overrides --sha "$@" || exit 1
 if [ "$PROVIDER" = forgejo ]; then
   reject_head_overrides --expected-head "$@" || exit 1
   reject_base_url_overrides "$@" || exit 1
+  reject_github_merge_methods "$@" || exit 1
 fi
 
 # Task-derived paths are constructed only after the canonical ID validation.
@@ -495,7 +518,11 @@ forgejo_confirm_merged() {
       "$URL" "$url" >&2
     return 2
   }
-  [ "$merged" = true ]
+  [ "$merged" = true ] || {
+    printf 'actionable: Forgejo accepted the merge for %s but reads back as not merged; the merge poll remains armed\n' \
+      "$URL" >&2
+    return 2
+  }
 }
 
 # Read one live GitHub pull request view after gh-axi returns. The selected

@@ -2095,10 +2095,8 @@ test_forgejo_unconfirmed_merge_leaves_the_poll_armed() {
       || fail "forgejo-unconfirmed-$name: the merge itself never ran"
     assert_present "$case_dir/state/task-x1.check.sh" \
       "forgejo-unconfirmed-$name: an unconfirmed landing should leave the merge poll armed"
-    if [ "$name" != still-open ]; then
-      assert_grep 'the merge poll remains armed' "$case_dir/stderr" \
-        "forgejo-unconfirmed-$name: the unconfirmed landing was not reported"
-    fi
+    assert_grep 'the merge poll remains armed' "$case_dir/stderr" \
+      "forgejo-unconfirmed-$name: the unconfirmed landing was not reported"
   done
   pass "fm-pr-merge records no landed Forgejo outcome it could not confirm"
 }
@@ -2165,6 +2163,28 @@ test_forgejo_override_args_refuse_before_recording() {
       || fail "forgejo-override$flag: an override still reached forgejo-axi"
   done
   pass "fm-pr-merge refuses Forgejo arguments that would override the URL's own identity"
+}
+
+test_forgejo_github_method_spellings_refuse_before_recording() {
+  local case_dir rc flag
+  for flag in --squash --merge --rebase; do
+    case_dir=$(make_forgejo_case "forgejo-method-${flag#--}")
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$FJ_URL" -- "$flag" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "forgejo-method$flag: fm-pr-merge should refuse"
+    assert_grep "--method squash|merge|rebase, not $flag" "$case_dir/stderr" \
+      "forgejo-method$flag: the refusal did not name the spelling forgejo-axi rejects"
+    assert_no_grep "pr=" "$case_dir/state/task-x1.meta" \
+      "forgejo-method$flag: a rejected method spelling still recorded PR metadata"
+    [ ! -s "$case_dir/forgejo.log" ] \
+      || fail "forgejo-method$flag: a rejected method spelling still reached forgejo-axi"
+  done
+  pass "fm-pr-merge refuses GitHub merge-method spellings forgejo-axi does not accept"
 }
 
 test_gitlab_missing_tool_refuses_before_recording() {
@@ -2590,6 +2610,7 @@ test_forgejo_merge_failure_propagates
 test_forgejo_unconfirmed_merge_leaves_the_poll_armed
 test_forgejo_missing_tool_refuses_before_recording
 test_forgejo_override_args_refuse_before_recording
+test_forgejo_github_method_spellings_refuse_before_recording
 test_secondmate_merge_reports_upward_once
 test_secondmate_merge_reports_on_the_local_route
 test_gitlab_merge_reports_upward
