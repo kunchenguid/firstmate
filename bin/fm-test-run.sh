@@ -1151,7 +1151,9 @@ families_for_changed_path() {
     tests/*)
       printf '%s\n' "__unmapped__:$path"
       ;;
-    README.md|LICENSE|assets/*|docs/*|.gitignore)
+    README.md|LICENSE|assets/*|docs/*|.gitignore|gnhf-score.txt)
+      # gnhf-score.txt is an autonomous-run score artifact, not a source path;
+      # like .gitignore it selects no test family.
       ;;
     *)
       families_for_test_reference "$path" \

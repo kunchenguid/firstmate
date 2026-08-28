@@ -3686,6 +3686,17 @@ if [ -n "$TELEMETRY_ATTEMPT" ]; then
     }
   fi
   observe_telemetry_gate_facts "$WT"
+  TELEMETRY_PRIMARY_FAILURE_CLASS=null
+  if [ "$TELEMETRY_GATE_RESULT" = green ]; then
+    TELEMETRY_PRIMARY_FAILURE_CLASS='"none"'
+  elif [ -n "$TERMINAL_PAYLOAD" ]; then
+    TELEMETRY_PRIMARY_FAILURE_CLASS=$(printf '%s' "$TERMINAL_PAYLOAD" | jq -c '.primaryFailureClass // null') || {
+      echo "error: --terminal-payload has no readable primaryFailureClass" >&2
+      exit 1
+    }
+  else
+    TELEMETRY_PRIMARY_FAILURE_CLASS='"outcome-observed-cause-unobserved"'
+  fi
   TELEMETRY_OUTCOME_KIND=none
   TELEMETRY_OUTCOME_ID=null
   if [ "$KIND" = scout ]; then
@@ -3704,15 +3715,17 @@ if [ -n "$TELEMETRY_ATTEMPT" ]; then
     --argjson reruns "$TELEMETRY_STEP_RERUNS" --arg kind "$TELEMETRY_OUTCOME_KIND" \
     --argjson outcomeId "$TELEMETRY_OUTCOME_ID" --argjson usage "$TELEMETRY_USAGE" \
     --argjson wallSeconds "$TELEMETRY_WALL_SECONDS" --argjson usageSource "$TELEMETRY_USAGE_SOURCE" \
-    '{gate:{source:$source,result:$result,stepReruns:$reruns},outcomeLink:{kind:$kind,id:$outcomeId},usage:$usage,wallSeconds:$wallSeconds,usageSource:$usageSource}')
-  if [ "$TELEMETRY_GATE_SOURCE" = no-mistakes ] \
-    || [ "$TELEMETRY_GATE_RESULT" = green ] \
-    || [ -z "$TERMINAL_PAYLOAD" ]; then
+    --argjson primaryFailureClass "$TELEMETRY_PRIMARY_FAILURE_CLASS" \
+    '{gate:{source:$source,result:$result,stepReruns:$reruns},outcomeLink:{kind:$kind,id:$outcomeId},usage:$usage,wallSeconds:$wallSeconds,usageSource:$usageSource,primaryFailureClass:$primaryFailureClass}')
+  if [ -z "$TERMINAL_PAYLOAD" ] \
+    || [ "$TELEMETRY_GATE_SOURCE" = no-mistakes ] \
+    || [ "$TELEMETRY_GATE_RESULT" = green ]; then
     [ -z "$TERMINAL_PAYLOAD" ] ||
-      echo "note: task $ID has an observed terminal result ($TELEMETRY_GATE_RESULT), so its mechanical quality facts were sealed and --terminal-payload was not recorded" >&2
+      echo "note: task $ID has an observed terminal result ($TELEMETRY_GATE_RESULT), so mechanical quality facts were sealed; the terminal payload's quality fields were not used" >&2
     telemetry_args=(terminal-facts --state "$STATE" --task "$ID" --attempt "$TELEMETRY_ATTEMPT" --payload "$TELEMETRY_FACTS")
-  else
+  elif [ -n "$TERMINAL_PAYLOAD" ]; then
     TERMINAL_PAYLOAD_DIGEST=$(telemetry_payload_digest "$TERMINAL_PAYLOAD") || TERMINAL_PAYLOAD_DIGEST=
+    TERMINAL_PAYLOAD=$(printf '%s' "$TERMINAL_PAYLOAD" | jq -c --arg source "$TELEMETRY_GATE_SOURCE" --arg result "$TELEMETRY_GATE_RESULT" --argjson reruns "$TELEMETRY_STEP_RERUNS" '. + {gateFacts:{source:(if ($source|IN("task-terminal","teardown")) then "delivery" else $source end),result:$result,stepReruns:$reruns}}') || exit 1
     TELEMETRY_ATTEMPT_SEALED=0
     if telemetry_attempt_is_sealed "$TELEMETRY_ATTEMPT"; then
       TELEMETRY_ATTEMPT_SEALED=1
@@ -3760,6 +3773,10 @@ if [ -n "$TELEMETRY_ATTEMPT" ]; then
       fi
       telemetry_args=(seal-or-incomplete --state "$STATE" --task "$ID" --attempt "$TELEMETRY_ATTEMPT" --terminal-payload "$TERMINAL_PAYLOAD")
     fi
+  else
+    # No explicit terminal payload means teardown observed only an abandoned
+    # attempt. The telemetry owner seals that stale lease as lease-conflict.
+    telemetry_args=(seal-or-incomplete --state "$STATE" --task "$ID" --attempt "$TELEMETRY_ATTEMPT")
   fi
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       "$FM_ROOT/bin/fm-model-telemetry.sh" "${telemetry_args[@]}" >/dev/null; then

@@ -3248,7 +3248,7 @@ seed_teardown_telemetry() {
   mkdir -p "$case_dir/data"
   result=$(FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
     "$TELEMETRY" intake --state "$case_dir/state" --task task-x1 --payload \
-    '{"attemptClass":"real","source":"firstmate","taskRootId":null,"parentAttemptId":null,"projectRef":"project_0123456789abcdef","taskClass":"unresolved","tuple":{"harness":"codex","provider":null,"model":"default","effort":"default","modelVersion":"default","cliVersion":"codex-cli fixture"},"selection":{"matchedRule":null,"configSha256":null,"fitReasons":[],"candidateAssessments":[],"quota":{"decision":"unknown","headroom":"unknown","runway":"unknown","observedAt":null}},"neutralExecution":{"correlation":null,"capabilityProfile":"not-applicable","owner":"not-applicable","phase":null,"behavioralResult":"not-applicable"},"evaluation":{"kind":"none","fixtureId":null,"fixtureManifestSha256":null,"oracleId":null,"oracleSha256":null,"sourceCommit":null},"startedAt":"2026-08-02T00:00:00Z","privacy":{"classification":"operational-minimized","contentPolicy":"ids-codes-hashes-bounded-evidence-only"}}') || return 1
+    '{"attemptClass":"real","source":"firstmate","taskRootId":null,"parentAttemptId":null,"projectRef":"project_0123456789abcdef","taskClass":"unresolved","tuple":{"harness":"codex","provider":null,"model":"default","effort":"default","modelVersion":"default","cliVersion":"codex-cli fixture"},"selection":{"matchedRule":null,"configSha256":null,"fitReasons":[],"candidateAssessments":[],"quota":{"decision":"not-applicable","headroom":"unknown","runway":"unknown","observedAt":null}},"neutralExecution":{"correlation":null,"capabilityProfile":"not-applicable","owner":"not-applicable","phase":null,"behavioralResult":"not-applicable"},"evaluation":{"kind":"none","fixtureId":null,"fixtureManifestSha256":null,"oracleId":null,"oracleSha256":null,"sourceCommit":null},"startedAt":"2026-08-02T00:00:00Z","privacy":{"classification":"operational-minimized","contentPolicy":"ids-codes-hashes-bounded-evidence-only"}}') || return 1
   printf 'telemetry_attempt=%s\n' "$(printf '%s' "$result" | jq -r .attemptId)" >> "$case_dir/state/task-x1.meta"
   printf 'telemetry_task_root=%s\n' "$(printf '%s' "$result" | jq -r .taskRootId)" >> "$case_dir/state/task-x1.meta"
 }
@@ -3286,8 +3286,8 @@ test_teardown_derives_quality_and_cost_from_observable_facts() {
     FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" run_teardown "$case_dir" --terminal-payload "$terminal" >/dev/null 2>"$stderr" || fail "mechanical telemetry teardown failed"
   ledger="$case_dir/data/routing-outcomes.jsonl"
   jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="accepted" and .terminal.firstPassAccepted==false and .terminal.correctionCount==2 and .terminal.gateFacts=={source:"no-mistakes",result:"green",stepReruns:2} and .terminal.evidence.tests=="pass" and .terminal.usage.cost==null and .terminal.usage.currency==null and .terminal.outcomeLink.id!="caller-prose")' "$ledger" >/dev/null || fail "prose overrode gate quality or the step-rerun count, or a token-derived pane figure was recorded as spend"
-  assert_grep "terminal-payload was not recorded" "$stderr" \
-    "teardown silently discarded the superseded --terminal-payload"
+  assert_grep "terminal payload's quality fields were not used" "$stderr" \
+    "teardown did not describe payload-quality supersession truthfully"
   sheet=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" "$TELEMETRY" sheet --format json) || fail "mechanical telemetry sheet failed"
   printf '%s' "$sheet" | jq -e '.[0].quality=="accepted-after-step-reruns" and .[0].stepReruns==2 and .[0].costReported==false and .[0].cost==null and .[0].costPerAcceptedDelivery==null and .[0].wallSeconds==null' >/dev/null || fail "sheet omitted mechanical quality, invented duration without session facts, or reported an unbacked cost"
   pass "teardown seals quality from gate facts, leaves cost absent, and says when a payload was superseded"
@@ -3385,10 +3385,11 @@ test_local_only_zero_work_does_not_seal_accepted() {
     select(.eventType=="attempt-terminal") and
     .terminal.classification=="incomplete" and
     .terminal.evidence.oracle=="not-run" and
+    .terminal.primaryFailureClass=="outcome-observed-cause-unobserved" and
     .terminal.gateFacts=={source:"delivery",result:"incomplete",stepReruns:null}
   ' "$case_dir/data/routing-outcomes.jsonl" >/dev/null ||
-    fail "a zero-work local-only task falsely sealed accepted"
-  pass "a reused-lane zero-work task seals classification=incomplete oracle=not-run gate=delivery/incomplete"
+    fail "a zero-work local-only task did not preserve the observed outcome without inventing a cause"
+  pass "a reused-lane zero-work task preserves the observed outcome without inventing a cause"
 }
 
 # A sealed terminal takes the agent-authored payload, but the usage source is an
@@ -3586,10 +3587,11 @@ test_local_only_sync_to_advanced_main_does_not_seal_accepted() {
     select(.eventType=="attempt-terminal") and
     .terminal.classification=="incomplete" and
     .terminal.evidence.oracle=="not-run" and
+    .terminal.primaryFailureClass=="outcome-observed-cause-unobserved" and
     .terminal.gateFacts=={source:"delivery",result:"incomplete",stepReruns:null}
   ' "$case_dir/data/routing-outcomes.jsonl" >/dev/null ||
-    fail "a task that authored nothing falsely accepted another task's synced commits"
-  pass "a reused-lane task that only syncs advanced main seals incomplete"
+    fail "a task that authored nothing did not preserve the observed outcome without inventing a cause"
+  pass "a reused-lane task that only syncs advanced main preserves the observed outcome without inventing a cause"
 }
 
 test_local_only_missing_task_base_is_diagnosed() {
@@ -3629,7 +3631,8 @@ test_local_only_empty_commit_does_not_seal_accepted() {
     select(.eventType=="attempt-terminal") and
     .terminal.classification=="incomplete" and
     .terminal.evidence.oracle=="not-run" and
-    .terminal.gateFacts.result=="incomplete"
+    .terminal.gateFacts=={source:"delivery",result:"incomplete",stepReruns:null} and
+    .terminal.primaryFailureClass=="outcome-observed-cause-unobserved"
   ' "$case_dir/data/routing-outcomes.jsonl" >/dev/null ||
     fail "a content-less local-only commit falsely sealed accepted"
   pass "a content-less local-only commit seals incomplete instead of false acceptance"
@@ -3842,7 +3845,7 @@ test_recorded_pr_merge_predicate_kills_required_mutations() {
   pass "recorded-PR telemetry predicate kills delete, unreachable, weakened-unmerged, and constant-true mutations"
 }
 
-test_teardown_keeps_a_green_gate_accepted_and_a_cancelled_gate_distinct() {
+test_teardown_keeps_a_green_gate_accepted_and_seals_a_cancelled_gate_without_an_observed_cause() {
   local case_dir ledger head sheet
   case_dir=$(make_case telemetry-green-without-step-rerun-counts)
   write_meta "$case_dir" no-mistakes ship
@@ -3865,10 +3868,10 @@ test_teardown_keeps_a_green_gate_accepted_and_a_cancelled_gate_distinct() {
   FM_FAKE_AXI_STATUS="$(terminal_axi_status_toon fm/task-x1 "$head" cancelled)" \
     FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" run_teardown "$case_dir" >/dev/null || fail "cancelled-gate teardown failed"
   ledger="$case_dir/data/routing-outcomes.jsonl"
-  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="cancelled")' "$ledger" >/dev/null || fail "a cancelled run was not sealed as cancelled"
+  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="cancelled" and .terminal.evidence.oracle=="not-run" and .terminal.gateFacts=={source:"no-mistakes",result:"cancelled",stepReruns:null} and .terminal.primaryFailureClass=="outcome-observed-cause-unobserved")' "$ledger" >/dev/null || fail "a cancelled gate without an observed cause did not preserve its observed facts"
   sheet=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" "$TELEMETRY" sheet --format json) || fail "cancelled-gate sheet failed"
-  printf '%s' "$sheet" | jq -e '.[0].quality=="cancelled"' >/dev/null || fail "sheet scored a cancelled run as a model quality failure"
-  pass "an unreadable step-rerun count keeps a green gate accepted and a cancelled run stays distinct from failed"
+  printf '%s' "$sheet" | jq -e '.[0].quality=="cancelled" and .[0].primaryFailureClass=="outcome-observed-cause-unobserved"' >/dev/null || fail "sheet did not preserve the observed outcome"
+  pass "an unreadable step-rerun count keeps a green gate accepted and a cancelled gate preserves its observed outcome without inventing a cause"
 }
 
 test_teardown_records_failed_terminal_status_and_forced_cancellation() {
@@ -3880,11 +3883,11 @@ test_teardown_records_failed_terminal_status_and_forced_cancellation() {
   FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
     run_teardown "$case_dir" --force >/dev/null || fail "failed-status teardown failed"
   ledger="$case_dir/data/routing-outcomes.jsonl"
-  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="failed" and .terminal.firstPassAccepted==false and .terminal.correctionCount==null and .terminal.gateFacts=={source:"delivery",result:"failed",stepReruns:null} and .terminal.evidence.refs==[{kind:"transition",id:"task-terminal"}])' \
-    "$ledger" >/dev/null || fail "operator-visible failed terminal status was sealed as an indistinguishable incomplete row"
+  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="failed" and .terminal.evidence.oracle=="fail" and .terminal.gateFacts=={source:"delivery",result:"failed",stepReruns:null} and .terminal.primaryFailureClass=="outcome-observed-cause-unobserved")' \
+    "$ledger" >/dev/null || fail "a failed status without an observed typed cause did not preserve its observed facts"
   sheet=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" "$TELEMETRY" sheet --format json) || fail "failed-status sheet failed"
-  printf '%s' "$sheet" | jq -e '.[0].quality=="failed" and .[0].firstPassAccepted==false and .[0].correctionCount==null' >/dev/null ||
-    fail "sheet omitted the failed attempt outcome fields"
+  printf '%s' "$sheet" | jq -e '.[0].quality=="failed" and .[0].primaryFailureClass=="outcome-observed-cause-unobserved"' >/dev/null ||
+    fail "sheet did not preserve the observed outcome"
 
   case_dir=$(make_case telemetry-forced-cancellation)
   write_meta "$case_dir" local-only ship
@@ -3892,17 +3895,17 @@ test_teardown_records_failed_terminal_status_and_forced_cancellation() {
   printf 'working: attempt stopped by explicit discard decision\n' > "$case_dir/state/task-x1.status"
   FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
     run_teardown "$case_dir" --force >/dev/null || fail "forced cancellation teardown failed"
-  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="cancelled" and .terminal.firstPassAccepted==null and .terminal.correctionCount==null and .terminal.gateFacts=={source:"delivery",result:"cancelled",stepReruns:null} and .terminal.evidence.refs==[{kind:"transition",id:"teardown"}])' \
-    "$case_dir/data/routing-outcomes.jsonl" >/dev/null || fail "explicit forced discard was sealed as incomplete instead of cancelled"
+  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="cancelled" and .terminal.evidence.oracle=="not-run" and .terminal.gateFacts=={source:"delivery",result:"cancelled",stepReruns:null} and .terminal.primaryFailureClass=="outcome-observed-cause-unobserved")' \
+    "$case_dir/data/routing-outcomes.jsonl" >/dev/null || fail "a forced teardown without an observed typed cause did not preserve its observed facts"
 
   case_dir=$(make_case telemetry-forced-scout-without-report)
   write_meta "$case_dir" local-only scout
   seed_teardown_telemetry "$case_dir" || fail "could not seed forced-scout telemetry"
   FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
     run_teardown "$case_dir" --force >/dev/null || fail "forced scout teardown failed"
-  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="cancelled" and .terminal.outcomeLink=={kind:"none",id:null})' \
-    "$case_dir/data/routing-outcomes.jsonl" >/dev/null || fail "forced scout claimed acceptance or a report link without a report"
-  pass "terminal failure, explicit cancellation, and a forced scout without a report remain distinguishable"
+  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="cancelled" and .terminal.evidence.oracle=="not-run" and .terminal.gateFacts=={source:"delivery",result:"cancelled",stepReruns:null} and .terminal.primaryFailureClass=="outcome-observed-cause-unobserved" and .terminal.outcomeLink=={kind:"none",id:null})' \
+    "$case_dir/data/routing-outcomes.jsonl" >/dev/null || fail "a forced scout without an observed typed cause did not preserve the observed outcome"
+  pass "status and forced teardown paths without observed typed causes preserve the observed outcome"
 }
 
 test_teardown_preserves_telemetry_across_safety_refusals() {
@@ -4306,7 +4309,7 @@ test_teardown_notes_gate_observation_branch_mismatch
 test_teardown_finishes_returned_ship_with_recorded_merged_pr
 test_returned_ship_with_recorded_unmerged_pr_stays_incomplete
 test_recorded_pr_merge_predicate_kills_required_mutations
-test_teardown_keeps_a_green_gate_accepted_and_a_cancelled_gate_distinct
+test_teardown_keeps_a_green_gate_accepted_and_seals_a_cancelled_gate_without_an_observed_cause
 test_teardown_preserves_telemetry_across_safety_refusals
 test_forced_teardown_still_requires_ledger_repair
 test_squash_merged_branch_deleted_allows

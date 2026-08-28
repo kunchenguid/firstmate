@@ -344,6 +344,14 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/telemetry-schema.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "gnhf-score.txt",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/sessionstart-nudge.md",
       "audience": "operator-current"
     },

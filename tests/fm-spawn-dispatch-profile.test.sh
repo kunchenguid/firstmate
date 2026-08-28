@@ -374,7 +374,7 @@ test_spawn_writes_routing_facts_into_intake() {
   sel=$(jq -es 'map(select(.eventType=="attempt-intake")) | .[0].intake.selection' "$HOME_DIR/data/routing-outcomes.jsonl")
   printf '%s' "$sel" | jq -e '(has("routingSource")|not) and (has("dispatchAttestation")|not) and (has("dispatchModelFamily")|not)' >/dev/null \
     || fail "a bare spawn added additive routing-provenance fields it did not have evidence for: $sel"
-  printf '%s' "$sel" | jq -e '.matchedRule==null and (.quota.decision=="unknown") and (.quota.headroom=="unknown") and (.quota.runway=="unknown")' >/dev/null \
+  printf '%s' "$sel" | jq -e '.matchedRule==null and (.quota.decision=="not-applicable") and (.quota.headroom=="unknown") and (.quota.runway=="unknown")' >/dev/null \
     || fail "a bare spawn changed the base selection facts it should still default: $sel"
 
   # matched-rule and quota facts are written when firstmate passes them.
@@ -1617,6 +1617,7 @@ test_telemetry_precedes_submission_and_metadata_is_opaque() {
     length==2 and .[0].eventType=="attempt-intake" and
     .[1].eventType=="attempt-terminal" and
     .[1].terminal.classification=="accepted" and
+    .[1].terminal.gateFacts=={source:"delivery",result:"cancelled",stepReruns:null} and
     .[1].terminal.evidence.refs[0].id=="spawn-teardown-e2e" and
     .[1].terminal.usage.cost==null and .[1].terminal.usage.currency==null
   ' "$ledger" >/dev/null || fail "spawn and teardown did not seal one end-to-end attempt with cost left absent"

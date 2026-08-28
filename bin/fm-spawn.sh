@@ -3905,7 +3905,7 @@ TELEMETRY_INTAKE=$(jq -cn \
      | (if $modelFamily=="" then . else . + {dispatchModelFamily:$modelFamily[0:96]} end)
      | (if dispatchAttestation==null then . else . + {dispatchAttestation:dispatchAttestation} end);
    def quotaObj:
-     {decision:(if $quotaDecision=="" then "unknown" else $quotaDecision end),
+     {decision:(if $quotaDecision=="" then "not-applicable" else $quotaDecision end),
       headroom:(if $quotaHeadroom=="" then "unknown" else $quotaHeadroom end),
       runway:(if $quotaRunway=="" then "unknown" else $quotaRunway end),
       observedAt:null};

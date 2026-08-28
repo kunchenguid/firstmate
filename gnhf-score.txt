@@ -1,0 +1,85 @@
+# gnhf score
+
+Model: k3 (provider kimi-coding)
+PR: https://github.com/pedromuller-del/firstmate/pull/109
+
+Score: 1/9
+
+Assertion status:
+1. seal refuses non-green without typed primaryFailureClass: NOT DONE (writer still defaults; the fm-teardown caller seals hard on refusal, so this lands with that caller update, which is scheduled last)
+2. enum gains approval-wait/custody-wait/lease-conflict/state-divergence; out-of-enum refused; unknown write-refused: PARTIAL (enum extended red-then-green; unknown still legal on write; out-of-enum refusal was already green pre-change, so it cannot count red-then-green)
+3. intake taskId required + sheet column: DONE (see iteration 2 red/green below; the no-task refusal leg was already green pre-change because the CLI dies on a missing --task, so only the persistence and column legs count red-then-green)
+4. intake quotaDecision required + sheet column: NOT DONE
+5. round-trip blocked/green seal via sheet: NOT DONE
+6. review-outcome append validation: NOT DONE (phase B)
+7. review-outcome metrics honesty + append-only: NOT DONE (phase B)
+8. review-outcome sheet normalization: NOT DONE (phase B)
+9. review-outcome window counts: NOT DONE (phase B)
+
+Oracle baseline (untouched checkout, exit=0):
+  bash bin/fm-test-run.sh tests/fm-model-telemetry.test.sh
+  FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=168419
+
+Iteration 1 (enum extension, red-then-green):
+  RED: FM_TEST_END tests/fm-model-telemetry.test.sh exit=1
+       not ok - approval-wait terminal was refused
+       (error: model telemetry: terminal payload violates the V1 whitelist)
+  GREEN: FM_TEST_END tests/fm-model-telemetry.test.sh exit=0 duration_ms=202593
+       ok - terminals record the observed blocked failure classes and refuse invented ones
+       All model telemetry tests passed.
+
+Iteration 2 (intake taskId persistence + sheet column, red-then-green):
+  RED: FM_TEST_END tests/fm-model-telemetry.test.sh exit=1 duration_ms=11126
+       not ok - the intake event did not persist the task id slug
+  GREEN: FM_TEST_END tests/fm-model-telemetry.test.sh exit=0 duration_ms=254005
+       ok - intake persists the task id slug and the sheet surfaces it as a column
+       All model telemetry tests passed.
+  Held-out consumers green: FM_TEST_SUMMARY total=3 failed=1 where the one
+  failure was the audience check flagging the runner-committed gnhf-score.txt,
+  fixed by classifying it (maintainer-verification); fm-daily and
+  fm-fleet-dashboard green. fm-spawn-dispatch-profile green (exit=0).
+
+--changed gate: iteration 2 repair: the runner-committed gnhf-score.txt had no
+  changed-test mapping and made `fm-test-run.sh --changed` die on every future
+  iteration, so it was added to the runner's ignored-paths case next to
+  .gitignore (test selection only; no test weakened). After the repair:
+  FM_TEST_SUMMARY total=43 failed=4. The 4 failures reproduce identically on a
+  clean origin/main worktree (fm-calm-pi-extension node ESM resolve,
+  fm-ci-water7 workflow routing, fm-lint changed-mode: actionlint not
+  installed, fm-test-run ci.yml herdr timeouts) and are pre-existing
+  environmental breakage, not regressions. The one real regression introduced
+  in iteration 1 (fm-documentation-audiences: unclassified
+  docs/telemetry-schema.md) was fixed by classifying the doc and is green.
+
+Rejected attempts: none.
+Behavior outside the two writers: bin/fm-test-run.sh gained one ignored path
+  (gnhf-score.txt) in changed-test selection; no test, guard, or refusal was
+  weakened. Sheet columns taskId are additive in json/csv/md; existing column
+  names, meanings, and positions are unchanged.
+
+Iteration 4 (intake quotaDecision required + sheet column, red-then-green):
+  RED: FM_TEST_END tests/fm-model-telemetry.test.sh exit=1 duration_ms=9508
+       not ok - an intake with an untyped quota decision was accepted
+  GREEN: FM_TEST_END tests/fm-model-telemetry.test.sh exit=0 duration_ms=186600
+       ok - intake requires a typed quota decision and the sheet surfaces it as a column
+       All model telemetry tests passed.
+  Writer: validate_new_intake_quota_decision refuses missing/invented/unknown
+    selection.quota.decision on NEW intakes with a named reason; validate_intake
+    stays lenient so old rows with unknown remain readable.
+  Sheet: additive quotaDecision column in json/csv/md (null on legacy rows).
+  Caller: fm-spawn telemetry payload construction records not-applicable when
+    no quota decision was made (was the placeholder unknown). The
+    fm-spawn-dispatch-profile bare-spawn expectation was updated from
+    decision=="unknown" to decision=="not-applicable": the old assertion
+    encoded exactly the placeholder defaulting this objective bans, and the
+    file is editable; the assertion now proves the typed contract instead.
+  The missing-decision and invented-decision refusal legs were already green
+    pre-change (structural keys_are and the existing oneof enum); only the
+    unknown refusal and the sheet column count red-then-green.
+  Held-out consumers green: fm-daily and fm-fleet-dashboard exit=0;
+    fm-spawn-dispatch-profile exit=0 after the expectation update above.
+  --changed: FM_TEST_SUMMARY total=56 failed=4 - the same 4 documented
+    pre-existing environmental failures (fm-calm-pi-extension, fm-ci-water7,
+    fm-lint, fm-test-run), no new failures.
+
+Score: 2/9 (assertions 3, 4 DONE)
