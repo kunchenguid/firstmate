@@ -581,6 +581,50 @@ test_msys_lock_steals_abandoned_directory_lock() {
   pass "MSYS abandoned directory locks are reclaimed cleanly"
 }
 
+test_msys_lock_live_steal_mutex_is_not_reclaimed() {
+  local dir state fakebin lockdir holder_file ln_used dead holder out i lockpid stealpid
+  dir=$(make_case msys-lock-live-stealer)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lockdir="$state/.contend.lock"
+  holder_file="$dir/holder"
+  ln_used="$dir/ln-used"
+  dead=$(dead_pid)
+  make_fake_msys_lock_bin "$fakebin"
+  mkdir "$lockdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2.steal" || exit 7
+    printf "%s\n" "${BASHPID:-$$}" > "$3"
+    sleep 2
+    fm_lock_release "$2.steal"
+  ' _ "$LIB" "$lockdir" "$holder_file" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$holder_file" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$holder_file" ] || fail "MSYS live steal mutex holder did not start"
+  out=$(PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s lockpid=%s stealpid=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}" "$(cat "$2/pid" 2>/dev/null || true)" "$(cat "$2.steal/pid" 2>/dev/null || true)"
+  ' _ "$LIB" "$lockdir")
+  wait "$holder" || fail "MSYS live steal mutex holder failed"
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "MSYS stale lock was stolen while a live steal mutex was held: $out" ;;
+  esac
+  lockpid=${out#*lockpid=}; lockpid=${lockpid%% *}
+  stealpid=${out#*stealpid=}; stealpid=${stealpid%% *}
+  [ "$lockpid" = "$dead" ] || fail "MSYS primary lock changed while live steal mutex was held: $out"
+  [ "$stealpid" = "$(cat "$holder_file")" ] || fail "MSYS live steal mutex owner changed: $out"
+  [ ! -e "$ln_used" ] || fail "MSYS live steal mutex check invoked ln -s"
+  pass "MSYS live steal mutex is not reclaimed"
+}
+
 test_msys_stale_corrupted_lock_recovers_generated_owner_dir() {
   local dir state fakebin lockdir nested ln_used rc
   dir=$(make_case msys-lock-corrupted-recovery)
@@ -1456,6 +1500,7 @@ test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_msys_lock_single_winner_under_concurrency
 test_msys_lock_steals_abandoned_directory_lock
+test_msys_lock_live_steal_mutex_is_not_reclaimed
 test_msys_stale_corrupted_lock_recovers_generated_owner_dir
 test_msys_stale_corrupted_lock_refuses_unknown_nested_content
 test_cygwin_lock_keeps_symlink_publication
