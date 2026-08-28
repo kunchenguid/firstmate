@@ -39,7 +39,12 @@ backend_source_refusal_probe() {  # <fixture-root> <backend>
   "$BASH" -c '
     set -eu
     . "$1/bin/fm-backend.sh"
-    if ! fm_backend_source "$2"; then printf "REFUSED\n"; fi
+    if fm_backend_source "$2"; then
+      printf "SOURCE_OK\n"
+    else
+      printf "REFUSED\n"
+      printf "REFUSED_RC=1\n"
+    fi
     printf "REACHED_CALLER\n"
   ' _ "$1" "$2" 2>/dev/null
 }
@@ -47,7 +52,7 @@ backend_source_refusal_probe() {  # <fixture-root> <backend>
 # Every adapter arm shares one code shape, so every adapter is pinned here
 # rather than only herdr, whose caller happened to expose the defect.
 test_backend_source_missing_adapter_refuses() {
-  local fixture backend out
+  local fixture backend out rc
   fixture=$TMP_ROOT/missing-adapter
   for backend in tmux herdr zellij orca cmux; do
     rm -rf "$fixture"
@@ -56,10 +61,16 @@ test_backend_source_missing_adapter_refuses() {
     cp "$ROOT"/bin/backends/*.sh "$fixture/bin/backends/"
 
     rm -f "$fixture/bin/backends/$backend.sh"
-    out=$(backend_source_refusal_probe "$fixture" "$backend") \
-      || fail "$backend: a missing adapter aborted the caller instead of returning non-zero"
+    set +e
+    out=$(backend_source_refusal_probe "$fixture" "$backend")
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] \
+      || fail "$backend: the refusal probe itself failed before exposing the caller state"
     assert_contains "$out" "REFUSED" \
       "$backend: fm_backend_source did not report failure for a missing adapter"
+    assert_contains "$out" "REFUSED_RC=1" \
+      "$backend: fm_backend_source did not return non-zero for a missing adapter"
     assert_contains "$out" "REACHED_CALLER" \
       "$backend: a missing adapter killed the caller before its refusal branch"
 
@@ -67,10 +78,16 @@ test_backend_source_missing_adapter_refuses() {
     : > "$fixture/bin/backends/$backend.sh"
     chmod 000 "$fixture/bin/backends/$backend.sh"
     if [ ! -r "$fixture/bin/backends/$backend.sh" ]; then
-      out=$(backend_source_refusal_probe "$fixture" "$backend") \
-        || fail "$backend: an unreadable adapter aborted the caller instead of returning non-zero"
+      set +e
+      out=$(backend_source_refusal_probe "$fixture" "$backend")
+      rc=$?
+      set -e
+      [ "$rc" -eq 0 ] \
+        || fail "$backend: the unreadable refusal probe itself failed before exposing the caller state"
       assert_contains "$out" "REFUSED" \
         "$backend: fm_backend_source did not report failure for an unreadable adapter"
+      assert_contains "$out" "REFUSED_RC=1" \
+        "$backend: fm_backend_source did not return non-zero for an unreadable adapter"
       assert_contains "$out" "REACHED_CALLER" \
         "$backend: an unreadable adapter killed the caller before its refusal branch"
     fi
