@@ -575,6 +575,98 @@ test_commit_retries_close_each_key_once_and_surface_once() {
   pass "inbox: a partly failed commit closes each key once and is surfaced once"
 }
 
+# THE REGRESSION for a global-text dedupe: the idempotence check must be
+# scoped to THIS sidecar's own identity, never to whether matching text
+# already exists anywhere in the status log. A key legitimately reopened
+# (needs-decision [key=K] again after an earlier resolved [key=K]) and
+# answered a second time with IDENTICAL wording - routine for a short answer
+# like "fix them all" repeated on a repeated step key - must still close on
+# its own sidecar's commit. A dedupe keyed on "does this exact closing line
+# already exist in the status log" cannot tell that apart from a retry of the
+# SAME sidecar's own earlier append, and silently orphans the reopened
+# decision forever.
+test_reopened_key_with_identical_answer_closes_again() {
+  local home state rec1 rec2 out
+  home="$TMP_ROOT/reopened"; state="$home/state"; mkdir -p "$state" "$home/data"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/t1.status"
+  rec1=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "go with REST")
+  inbox_lib "$state" fm_task_inbox_defer_resolution "$rec1" "go with REST" "api-shape" "" >/dev/null \
+    || fail "could not park the first closure"
+  mv "$rec1" "$state/t1.inbox/handled/"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    inbox_lib "$state" fm_task_inbox_commit_resolutions "$state" t1 "$state/t1.status" >/dev/null \
+    || fail "the first closure should commit cleanly"
+  [ "$(grep -cF 'resolved [key=api-shape]: answered: go with REST' "$state/t1.status")" = 1 ] \
+    || fail "the first answer did not close:"$'\n'"$(cat "$state/t1.status")"
+
+  # The decision is reopened under the same key and answered again, verbatim.
+  printf 'needs-decision [key=api-shape]: confirm REST for the v2 endpoint too\n' >> "$state/t1.status"
+  rec2=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "go with REST")
+  inbox_lib "$state" fm_task_inbox_defer_resolution "$rec2" "go with REST" "api-shape" "" >/dev/null \
+    || fail "could not park the reopened closure"
+  mv "$rec2" "$state/t1.inbox/handled/"
+  out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    inbox_lib "$state" fm_task_inbox_commit_resolutions "$state" t1 "$state/t1.status") \
+    || fail "the reopened key's closure should commit cleanly too"
+  assert_contains "$out" "api-shape" "the reopened key should report as closed"
+  [ "$(grep -cF 'resolved [key=api-shape]: answered: go with REST' "$state/t1.status")" = 2 ] \
+    || fail "a reopened key answered identically must close again, not be silently skipped as already-closed:"$'\n'"$(cat "$state/t1.status")"
+  pass "inbox: a key reopened and answered identically closes again instead of reading as already-closed"
+}
+
+# The absolute-bound overdue timing must be independent of this ladder cause,
+# whose header now states "~1 grace period plus one poll interval": confirms
+# the blocked escalation fires on the poll immediately after the first
+# composer-blocked skip, not after a second full grace period.
+test_blocked_escalation_fires_one_poll_after_first_skip() {
+  local state rec out
+  state="$TMP_ROOT/blocked-timing/state"; mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "hello")
+  FM_TASK_INBOX_GRACE_SECS=1 FM_TASK_INBOX_BLOCKED_MAX=1 \
+    inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" blocked >/dev/null \
+    || fail "could not record the composer-blocked skip"
+  sleep 1.1
+  out=$(FM_TASK_INBOX_GRACE_SECS=1 FM_TASK_INBOX_BLOCKED_MAX=1 \
+    inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  case "$out" in
+    "escalate "*" blocked "*) ;;
+    *) fail "one skipped attempt past grace should already escalate as blocked, matching the corrected ~1 grace + 1 poll timing claim: $out" ;;
+  esac
+  pass "inbox: the blocked bound escalates on the very next poll after the first skipped attempt"
+}
+
+# THE REGRESSION for a worker that `rm`s its acknowledged record instead of
+# moving it into handled/ (a contract violation, but not literally prevented):
+# the sidecar is then bound to a record in neither the inbox root nor
+# handled/, so the ladder's normal .msg-based scan can never see it and the
+# closure would otherwise never commit and never escalate - a third silent
+# failure state this whole change exists to eliminate.
+test_orphaned_sidecar_escalates_instead_of_going_silent() {
+  local home state rec out
+  home="$TMP_ROOT/orphaned"; state="$home/state"; mkdir -p "$state" "$home/data"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/t1.status"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "go with REST")
+  inbox_lib "$state" fm_task_inbox_defer_resolution "$rec" "go with REST" "api-shape" "" >/dev/null \
+    || fail "could not park the closure"
+  rm -f "$rec"
+
+  out=$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  case "$out" in
+    "escalate "*" orphaned "*) ;;
+    *) fail "an orphaned sidecar (rm'd record, neither pending nor acknowledged) must escalate, not read as quiet: $out" ;;
+  esac
+  assert_not_contains "$(cat "$state/t1.status")" "resolved [key=api-shape]" \
+    "an orphaned sidecar's answer must never silently commit on its own"
+
+  # Escalates exactly once: the marker suppresses a repeat on the next poll.
+  local orphan_path=${out##* }
+  inbox_lib "$state" fm_task_inbox_record_orphan_escalated "$state" t1 "$orphan_path" \
+    || fail "could not record the orphan escalation marker"
+  out=$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$out" = quiet ] || fail "a surfaced orphan must not re-escalate on every poll: $out"
+  pass "inbox: an orphaned sidecar (record rm'd instead of moved) escalates once instead of going silent forever"
+}
+
 # A captain-held task the sidecar answers, driven through the REAL watcher in
 # the environment it runs under (an FM_HOME with its own backlog): the
 # acknowledgement must close the task through the one keyed-answer intake,
@@ -1007,6 +1099,9 @@ test_deferred_closure_needs_a_complete_acknowledgement
 test_deferred_closure_refuses_an_empty_key_set
 test_deferred_closure_survives_a_glob_sweep
 test_commit_retries_close_each_key_once_and_surface_once
+test_reopened_key_with_identical_answer_closes_again
+test_blocked_escalation_fires_one_poll_after_first_skip
+test_orphaned_sidecar_escalates_instead_of_going_silent
 test_watcher_closes_the_captain_held_task_with_its_provenance
 test_commit_treats_a_hold_settled_elsewhere_as_closed
 test_watcher_rerings_idle_pane_quietly

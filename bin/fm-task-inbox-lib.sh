@@ -89,11 +89,14 @@
 #   attempts  FM_TASK_INBOX_RING_MAX delivery attempts produced no
 #             acknowledgement (default 3, so ~4 grace periods after enqueue)
 #   blocked   FM_TASK_INBOX_BLOCKED_MAX attempts were SKIPPED because the
-#             composer provenly holds pending text (default 1, so ~2 grace
-#             periods after enqueue: fm-send's own initial skip is not in the
-#             ladder, the watcher's first attempt happens at >=1 grace, and
-#             the escalation fires at the next due poll >=1 grace after
-#             that). Repeating a skip cannot deliver anything: the composer
+#             composer provenly holds pending text (default 1, so ~1 grace
+#             period plus one poll interval after enqueue, about 90-100s at
+#             defaults: fm-send's own initial skip is not in the ladder, the
+#             watcher's first attempt happens at >=1 grace, that attempt's
+#             own skip is what the blocked count checks, and the check sits
+#             before the attempt-spacing check, so the very next poll after
+#             the first skipped attempt already escalates). Repeating a skip
+#             cannot deliver anything: the composer
 #             is occupied by text the worker will not clear itself, so the
 #             remaining attempt budget would buy only silence. Escalating on
 #             the first proven skip is what turns that condition from a quiet
@@ -396,6 +399,26 @@ fm_task_inbox_resolution_record() {  # <resolution-path>
   printf '%s/%s.msg' "${path%/*}" "${base%.resolve}"
 }
 
+# Per-sidecar committed-identity ledger: <resolution-path>.committed, one
+# already-closed "status-key:K" or "hold-id:K" identity per line. Scoped to
+# THIS sidecar, never to the status log's text, so a key legitimately reopened
+# and answered again with identical wording is never mistaken for a retry of
+# this same sidecar's own earlier append - a global "does this exact line
+# already exist anywhere in the status log" check cannot tell the two apart
+# and silently orphans the reopened decision. Removed once the sidecar itself
+# is filed under handled/, since nothing checks it again after that.
+_fm_task_inbox_resolution_committed_path() {  # <resolution-path>
+  printf '%s.committed' "$1"
+}
+
+_fm_task_inbox_resolution_is_committed() {  # <resolution-path> <identity>
+  grep -Fxq -- "$2" "$(_fm_task_inbox_resolution_committed_path "$1")" 2>/dev/null
+}
+
+_fm_task_inbox_resolution_mark_committed() {  # <resolution-path> <identity>
+  printf '%s\n' "$2" >> "$(_fm_task_inbox_resolution_committed_path "$1")"
+}
+
 # Park the closure an answer owes beside its record: temp-write, then atomic
 # rename, so a torn write is never mistaken for a committable closure. Prints
 # the sidecar path. <status-keys> and <hold-ids> are space-separated and may be
@@ -442,6 +465,38 @@ fm_task_inbox_is_acknowledged() {  # <record-path>
   base=${rec##*/}
   [ ! -e "$dir/$base" ] || return 1
   [ -f "$dir/handled/$base" ]
+}
+
+# A CONTRACT VIOLATION, not a race: a sidecar bound to a record that is in
+# NEITHER the inbox root NOR handled/. The brief instructs the worker to `mv`
+# its acknowledged record into handled/; a worker that `rm`s it instead (or
+# any other loss of the .msg between root and handled/) leaves the sidecar in
+# a third state fm_task_inbox_is_acknowledged cannot distinguish from "still
+# pending": not pending in the sense the ladder can act on, because
+# fm_task_inbox_oldest_unhandled only ever globs *.msg files and so can never
+# see a sidecar whose .msg is simply gone, and not acknowledged either, so
+# fm_task_inbox_commit_resolutions's acknowledged-only scan never reaches it.
+# Left undetected, such a sidecar never commits (its answer never actually
+# closes) and never escalates (the ladder finds nothing left to watch), so an
+# already-delivered answer would read open in every durable record forever
+# with no path back to firstmate's attention - exactly the silent failure this
+# whole change exists to eliminate. Oldest by sequence; empty when none.
+_fm_task_inbox_orphaned_sidecar() {  # <state-dir> <task-id>
+  local dir f rec best='' best_n=0 n
+  dir=$(fm_task_inbox_dir "$1" "$2")
+  for f in "$dir"/.*.resolve; do
+    [ -e "$f" ] || continue
+    rec=$(fm_task_inbox_resolution_record "$f")
+    [ ! -e "$rec" ] || continue
+    [ ! -f "$dir/handled/${rec##*/}" ] || continue
+    n=$(fm_task_inbox_seq_of "${rec##*/}") || continue
+    if [ -z "$best" ] || [ "$n" -lt "$best_n" ]; then
+      best=$f
+      best_n=$n
+    fi
+  done
+  [ -n "$best" ] || return 1
+  printf '%s' "$best"
 }
 
 # Sidecars in this task's inbox, in sequence order, filtered by whether their
@@ -496,9 +551,12 @@ EOF
 # This is the only writer of a deferred closure, so a decision reads answered
 # exactly when the worker has seen the answer.
 #
-# Idempotent per identity (see the header): a status key whose exact closing
-# line is already in the status log is skipped, not appended again, so a retry
-# after a partial failure closes each key at most once; a captain-held task the
+# Idempotent per SIDECAR identity (see the header and
+# _fm_task_inbox_resolution_is_committed): a status key this exact sidecar has
+# already durably appended is skipped, not appended again, so a retry after a
+# partial failure closes each key at most once - scoped to this sidecar, never
+# to whether matching text happens to already sit in the status log, so a key
+# legitimately reopened and re-answered still closes. A captain-held task the
 # intake reports already closed counts as closed.
 #
 # Prints one "<key>" line per closed decision identity so a caller can log or
@@ -510,7 +568,7 @@ EOF
 # failing close to one wake. A missing inbox is a quiet no-op.
 fm_task_inbox_commit_resolutions() {  # <state-dir> <task-id> <status-file>
   local state=$1 task=$2 status_file=$3
-  local dir f rec note keys holds k line rc=0 failed append_rc surfaced quiet unresolved
+  local dir f rec note keys holds k line rc=0 failed append_rc surfaced quiet unresolved ident
   dir=$(fm_task_inbox_dir "$state" "$task")
   [ -d "$dir" ] || return 0
   surfaced=$(cat "$dir/.commit-escalated" 2>/dev/null || true)
@@ -525,12 +583,13 @@ fm_task_inbox_commit_resolutions() {  # <state-dir> <task-id> <status-file>
     holds=$(fm_task_inbox_resolution_values "$f" hold-id 2>/dev/null) || holds=
     failed=0
     for k in $keys; do
-      fm_cap_line_var "resolved [key=$k]: answered: $note"
-      line=$FM_LINE_CAP_LINE
-      if grep -Fxq -- "$line" "$status_file" 2>/dev/null; then
+      ident="status-key:$k"
+      if _fm_task_inbox_resolution_is_committed "$f" "$ident"; then
         printf '%s\n' "$k"
         continue
       fi
+      fm_cap_line_var "resolved [key=$k]: answered: $note"
+      line=$FM_LINE_CAP_LINE
       append_rc=0
       fm_wake_status_append_self_announced "$state" "$status_file" "$line" || append_rc=$?
       if [ "$append_rc" -eq 2 ]; then
@@ -539,6 +598,7 @@ fm_task_inbox_commit_resolutions() {  # <state-dir> <task-id> <status-file>
         failed=1
         continue
       fi
+      _fm_task_inbox_resolution_mark_committed "$f" "$ident"
       printf '%s\n' "$k"
     done
     if [ -n "$holds" ]; then
@@ -557,6 +617,8 @@ fm_task_inbox_commit_resolutions() {  # <state-dir> <task-id> <status-file>
     if ! mv "$f" "$dir/handled/${f##*/}" 2>/dev/null; then
       echo "error: $task closed the answered decision in ${f##*/}, but the committed closure could not be filed under $dir/handled" >&2
       rc=1
+    else
+      rm -f "$(_fm_task_inbox_resolution_committed_path "$f")" 2>/dev/null || true
     fi
   done <<EOF
 $(fm_task_inbox_acknowledged_resolutions "$state" "$task")
@@ -630,13 +692,25 @@ fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
 #   ring <record-path>        one doorbell re-ring is due
 #   escalate <count> <cause> <record-path>
 #                             surface as stale; <cause> is attempts|blocked|
-#                             overdue exactly as the header defines them.
+#                             overdue|orphaned exactly as the header defines
+#                             them (orphaned: see _fm_task_inbox_orphaned_sidecar).
 # The cause and count lead so a record path containing spaces still parses.
 # An empty inbox also resets the ladder bookkeeping so the next message starts
 # a fresh ladder.
 fm_task_inbox_due_action() {  # <state-dir> <task-id>
-  local dir oldest base age now grace max ladder rec_base count last blocked
+  local dir oldest base age now grace max ladder rec_base count last blocked orphan
   dir=$(fm_task_inbox_dir "$1" "$2")
+  # Checked before the .msg-based scan below, and independently of it: an
+  # orphaned sidecar's bound .msg is gone, so fm_task_inbox_oldest_unhandled
+  # can never see it even while it is the only unresolved thing in this inbox
+  # (see _fm_task_inbox_orphaned_sidecar's header for why that would otherwise
+  # go quiet forever).
+  if orphan=$(_fm_task_inbox_orphaned_sidecar "$1" "$2"); then
+    if ! grep -Fxq -- "${orphan##*/}" "$dir/.orphan-escalated" 2>/dev/null; then
+      printf 'escalate 0 orphaned %s' "$orphan"
+      return 0
+    fi
+  fi
   if ! oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
     rm -f "$dir/.ring-state" "$dir/.escalated" 2>/dev/null || true
     printf 'quiet'
@@ -741,6 +815,20 @@ fm_task_inbox_record_escalated() {  # <state-dir> <task-id> <record-path>
   dir=$(fm_task_inbox_dir "$1" "$2")
   [ -d "$dir" ] || return 0
   if ! { printf '%s\n' "${3##*/}" > "$dir/.escalated"; } 2>/dev/null; then
+    [ -d "$dir" ] || return 0
+    return 1
+  fi
+}
+
+# Same wake-before-marker contract as fm_task_inbox_record_escalated, for an
+# orphaned sidecar instead: append-only (there may be more than one orphan
+# over a task's lifetime, unlike the single current-oldest .msg the other
+# marker tracks) so each sidecar identity escalates exactly once.
+fm_task_inbox_record_orphan_escalated() {  # <state-dir> <task-id> <sidecar-path>
+  local dir
+  dir=$(fm_task_inbox_dir "$1" "$2")
+  [ -d "$dir" ] || return 0
+  if ! { printf '%s\n' "${3##*/}" >> "$dir/.orphan-escalated"; } 2>/dev/null; then
     [ -d "$dir" ] || return 0
     return 1
   fi

@@ -73,6 +73,13 @@
 #                          open while the worker is already acting on it;
 #                          surfaced once per parked closure, then retried
 #                          quietly (bin/fm-task-inbox-lib.sh)
+#   stale: <window> (steering-inbox contract violation: ...)
+#                          a deferred closure's bound record is gone from both
+#                          the inbox and handled/ - the worker likely `rm`d it
+#                          instead of moving it, so the closure can never
+#                          commit on its own; surfaced regardless of pane
+#                          busy state, once per orphaned sidecar
+#                          (bin/fm-task-inbox-lib.sh: _fm_task_inbox_orphaned_sidecar)
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -400,8 +407,11 @@ inbox_steer_check() {  # <window> <task>
     # A busy worker is between turn boundaries: no doorbell, and no escalation
     # for an attempt budget it never had the chance to spend. The absolute
     # bound is the one exception, and it is why an unread instruction cannot
-    # stay silent behind a permanently busy pane.
-    [ "$cause" = overdue ] || return 0
+    # stay silent behind a permanently busy pane. An orphaned sidecar is a
+    # second exception for an unrelated reason: it is a data-integrity
+    # violation independent of pane liveness, and busy-suppressing it would
+    # reintroduce the same indefinite silent failure this ladder exists to end.
+    case "$cause" in overdue|orphaned) ;; *) return 0 ;; esac
     pane=busy
   fi
   case "$verb" in
@@ -434,6 +444,9 @@ inbox_steer_check() {  # <window> <task>
       answers=$(fm_task_inbox_pending_answer_keys "$STATE" "$task" 2>/dev/null | tr '\n' ' ') || answers=
       answers=${answers% }
       case "$cause" in
+        orphaned)
+          reason="stale: $w (steering-inbox contract violation: $rec is an answered decision's closure with no bound record in the inbox or handled/ - the worker likely removed its record instead of moving it into handled/, so the closure can never commit and the decision reads open in every durable record forever; close it by hand)"
+          ;;
         blocked)
           reason="stale: $w (unread firstmate instruction: $rec cannot be delivered because the composer visibly holds pending text, so every doorbell is being skipped; clear the composer, then re-ring)"
           ;;
@@ -454,7 +467,12 @@ inbox_steer_check() {  # <window> <task>
       [ -z "$answers" ] \
         || reason="${reason%)} - it carries the answer to decision key(s) $answers, which stay OPEN until the worker acknowledges the record)"
       fm_wake_append stale "$w" "$reason" || exit 1
-      if ! fm_task_inbox_record_escalated "$STATE" "$task" "$rec"; then
+      if [ "$cause" = orphaned ]; then
+        if ! fm_task_inbox_record_orphan_escalated "$STATE" "$task" "$rec"; then
+          echo "error: stale wake was queued for $task but its orphaned-sidecar escalation marker could not be written" >&2
+          exit 1
+        fi
+      elif ! fm_task_inbox_record_escalated "$STATE" "$task" "$rec"; then
         echo "error: stale wake was queued for $task but its inbox escalation marker could not be written" >&2
         exit 1
       fi
