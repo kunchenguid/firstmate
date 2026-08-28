@@ -1063,15 +1063,12 @@ families_for_changed_path() {
       # resolution in the caller; emit a marker family of __script__
       printf '%s\n' "__script__:$(basename "$path")"
       ;;
-    bin/fm-test-run.sh)
-      # The runner and proof contract tests directly exercise this interface.
-      # Selecting their whole family would run unrelated product contracts.
-      printf '%s\n' __script__:fm-test-run.test.sh
-      printf '%s\n' __script__:fm-test-isolation-proof.test.sh
-      ;;
-    bin/fm-test-isolation-proof.sh)
-      printf '%s\n' __script__:fm-test-isolation-proof.test.sh
-      printf '%s\n' __script__:fm-test-run.test.sh
+    bin/fm-test-run.sh|bin/fm-test-isolation-proof.sh)
+      # Deliberately the WHOLE family, not just the two contract tests. This
+      # runner executes every pure-contract-unit script, so a change to it is
+      # only proven by running them: its own contract test passing says the
+      # runner's logic is right, not that the suite it drives still runs.
+      printf '%s\n' pure-contract-unit
       ;;
     bin/backends/herdr*|bin/fm-herdr-lab.sh|tests/herdr-test-safety.sh)
       printf '%s\n' real-herdr-gated
@@ -1209,14 +1206,9 @@ families_for_changed_path() {
       ;;
     docs/fm-test-portable-shards.md|docs/fm-test-isolation-proof.md|\
     docs/fm-test-isolation-proof.json)
-      printf '%s\n' __script__:fm-test-run.test.sh
-      printf '%s\n' __script__:fm-test-isolation-proof.test.sh
-      printf '%s\n' __script__:fm-documentation-audiences.test.sh
+      printf '%s\n' pure-contract-unit
       ;;
-    CONTRIBUTING.md)
-      printf '%s\n' __script__:fm-documentation-audiences.test.sh
-      ;;
-    .github/*|.tasks.toml|AGENTS.md|CLAUDE.md|\
+    .github/*|.tasks.toml|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|\
     docs/configuration.md|docs/supervision-protocols/*)
       printf '%s\n' pure-contract-unit
       ;;

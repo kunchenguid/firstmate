@@ -146,34 +146,50 @@ init_changed_fixture_repo() {
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
 }
 
-test_changed_runner_surfaces_select_contract_owners() {
-  local tmp repo listed expected
+test_changed_runner_surfaces_select_their_family() {
+  local tmp repo listed
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-owner-scope.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
 
+  # A change to the runner selects the WHOLE pure-contract-unit family, not
+  # just its own contract test. The runner executes every script in that
+  # family, so its own test passing proves its logic is right, not that the
+  # suite it drives still runs. Narrowing this to the contract owners would
+  # also make any wall-clock claim about the changed suite trivially true by
+  # not running the work.
   printf '\n' >>"$repo/bin/fm-test-run.sh"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD | LC_ALL=C sort)
-  expected=$(printf '%s\n' \
-    tests/fm-test-isolation-proof.test.sh \
-    tests/fm-test-run.test.sh | LC_ALL=C sort)
-  [ "$listed" = "$expected" ] \
-    || fail "runner change must select only its executable contract owners: $listed"
+  case "$listed" in
+    *tests/fm-test-run.test.sh*) ;;
+    *) fail "runner change did not select its own contract test: $listed" ;;
+  esac
+  case "$listed" in
+    *tests/fm-brief.test.sh*) ;;
+    *) fail "runner change did not select its pure-contract-unit family: $listed" ;;
+  esac
+  case "$listed" in
+    *tests/fm-ask-user-authority.test.sh*) ;;
+    *) fail "runner change did not select its pure-contract-unit family: $listed" ;;
+  esac
   git -C "$repo" add bin/fm-test-run.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm runner-change
 
+  # The same holds for the surfaces that document that contract.
   printf '\n' >>"$repo/docs/fm-test-isolation-proof.md"
   printf '\n' >>"$repo/CONTRIBUTING.md"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD | LC_ALL=C sort)
-  expected=$(printf '%s\n' \
-    tests/fm-documentation-audiences.test.sh \
-    tests/fm-test-isolation-proof.test.sh \
-    tests/fm-test-run.test.sh | LC_ALL=C sort)
-  [ "$listed" = "$expected" ] \
-    || fail "runner documentation must select only its contract owners: $listed"
+  case "$listed" in
+    *tests/fm-documentation-audiences.test.sh*) ;;
+    *) fail "documentation surface change did not select audience coverage: $listed" ;;
+  esac
+  case "$listed" in
+    *tests/fm-brief.test.sh*) ;;
+    *) fail "documentation surface change did not select its curated family: $listed" ;;
+  esac
 
   rm -rf "$tmp"
-  pass "runner surfaces select their executable contract owners"
+  pass "runner and its documentation surfaces select their curated family, not just their contract owners"
 }
 
 test_changed_dependency_selection_and_unmapped_failure() {
@@ -1092,7 +1108,7 @@ test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
 test_changed_file_selection_is_conservative
-test_changed_runner_surfaces_select_contract_owners
+test_changed_runner_surfaces_select_their_family
 test_changed_dependency_selection_and_unmapped_failure
 test_changed_bin_reference_selects_per_script_not_per_family
 test_changed_uses_bounded_automatic_concurrency
