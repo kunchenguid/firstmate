@@ -39,9 +39,10 @@ SH
   chmod +x "$FIXTURE/bin/$target"
 done
 
-exercise_hook() {  # <jq-path> <command-field> <expected-target> [cwd]
-  local query=$1 field=$2 expected=$3 cwd=${4:-$FIXTURE} command payload out status=0
-  command=$(jq -r "$query.$field // empty" "$FIXTURE/.codex/hooks.json")
+exercise_hook() {  # <jq-path> <command-field> <expected-target> [cwd] [root]
+  local query=$1 field=$2 expected=$3 cwd=${4:-$FIXTURE} root=${5:-$FIXTURE}
+  local command payload out status=0
+  command=$(jq -r "$query.$field // empty" "$root/.codex/hooks.json")
   [ -n "$command" ] || fail "$field is missing for $expected"
   payload=$(jq -cn --arg expected "$expected" '{hook_event_name:"fixture",expected:$expected}')
   if [ "$field" = commandWindows ]; then
@@ -73,12 +74,44 @@ exercise_hook() {  # <jq-path> <command-field> <expected-target> [cwd]
   esac
 }
 
-exercise_all() {  # <command-field> [cwd]
-  local field=$1 cwd=${2:-$FIXTURE}
-  exercise_hook '.hooks.SessionStart[0].hooks[0]' "$field" fm-sessionstart-run.sh "$cwd"
-  exercise_hook '.hooks.PreToolUse[0].hooks[0]' "$field" fm-arm-pretool-check.sh "$cwd"
-  exercise_hook '.hooks.PreToolUse[0].hooks[1]' "$field" fm-cd-pretool-check.sh "$cwd"
-  exercise_hook '.hooks.Stop[0].hooks[0]' "$field" fm-turnend-guard.sh "$cwd"
+exercise_all() {  # <command-field> [cwd] [root]
+  local field=$1 cwd=${2:-$FIXTURE} root=${3:-$FIXTURE}
+  exercise_hook '.hooks.SessionStart[0].hooks[0]' "$field" fm-sessionstart-run.sh "$cwd" "$root"
+  exercise_hook '.hooks.PreToolUse[0].hooks[0]' "$field" fm-arm-pretool-check.sh "$cwd" "$root"
+  exercise_hook '.hooks.PreToolUse[0].hooks[1]' "$field" fm-cd-pretool-check.sh "$cwd" "$root"
+  exercise_hook '.hooks.Stop[0].hooks[0]' "$field" fm-turnend-guard.sh "$cwd" "$root"
+}
+
+test_autocrlf_checkout_dispatches_native_hooks() {
+  local source checkout attrs
+  source="$TMP_ROOT/autocrlf-source"
+  checkout="$TMP_ROOT/autocrlf-checkout"
+  mkdir -p "$source/bin" "$source/.codex"
+  cp "$FIXTURE/AGENTS.md" "$source/AGENTS.md"
+  cp "$FIXTURE/.codex/hooks.json" "$source/.codex/hooks.json"
+  cp "$FIXTURE/bin/"* "$source/bin/"
+  [ ! -f "$ROOT/.gitattributes" ] || cp "$ROOT/.gitattributes" "$source/.gitattributes"
+  git init -q "$source"
+  git -C "$source" add .
+  git -C "$source" update-index --chmod=+x -- \
+    bin/fm-codex-hook.sh bin/fm-sessionstart-run.sh bin/fm-arm-pretool-check.sh \
+    bin/fm-cd-pretool-check.sh bin/fm-turnend-guard.sh
+  git -C "$source" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+    commit -qm fixture
+  git -c core.autocrlf=true clone -q "$source" "$checkout"
+  mkdir -p "$checkout/src/nested"
+
+  attrs=$(git -C "$checkout" check-attr eol -- bin/fm-codex-hook.sh bin/fm-codex-hook.cmd)
+  assert_contains "$attrs" 'bin/fm-codex-hook.sh: eol: lf' \
+    "autocrlf checkout did not preserve the shell-source LF policy"
+  assert_contains "$attrs" 'bin/fm-codex-hook.cmd: eol: unspecified' \
+    "shell-source policy changed the Windows command file"
+
+  rm -f "$SCAN_LOG"
+  exercise_all commandWindows "$checkout/src/nested" "$checkout"
+  [ "$(wc -l < "$SCAN_LOG" | tr -d ' ')" = 1 ] \
+    || fail "autocrlf checkout performed more than the SessionStart ancestry scan"
+  pass "Codex hook transport: autocrlf checkout dispatches LF shell hooks through cmd.exe"
 }
 
 exercise_quiet_noop() {  # <command-field>
@@ -153,6 +186,7 @@ if command -v cmd.exe >/dev/null 2>&1; then
     || fail "native Windows lifecycle hooks performed more than the SessionStart ancestry scan"
   exercise_quiet_noop commandWindows
   pass "Codex hook transport: native Windows commands dispatch from repository subdirectories"
+  test_autocrlf_checkout_dispatches_native_hooks
 else
   pass "Codex hook transport: native Windows command path skipped (cmd.exe unavailable)"
 fi

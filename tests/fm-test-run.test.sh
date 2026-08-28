@@ -97,6 +97,7 @@ init_changed_fixture_repo() {
     fm-brief.test.sh \
     fm-ask-user-authority.test.sh \
     fm-cd-pretool-check.test.sh \
+    fm-codex-hook.test.sh \
     fm-daemon.test.sh \
     fm-session-lock-ancestry.test.sh \
     fm-backend-herdr-smoke.test.sh \
@@ -119,6 +120,7 @@ init_changed_fixture_repo() {
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/fm-harness.sh"
   : >"$repo/bin/fm-windows-process.ps1"
+  : >"$repo/.gitattributes"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
@@ -173,6 +175,13 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-session-lock-ancestry.test.sh" "harness detector selects ancestry coverage"
   git -C "$repo" add bin/fm-harness.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm harness-change
+
+  printf '*.sh text eol=lf\n' >>"$repo/.gitattributes"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-codex-hook.test.sh" \
+    "line-ending policy selects native Codex hook coverage"
+  git -C "$repo" add .gitattributes
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm attributes-change
 
   printf '\n' >>"$repo/.agents/skills/example/SKILL.md"
   printf '\n' >>"$repo/.claude/settings.json"
