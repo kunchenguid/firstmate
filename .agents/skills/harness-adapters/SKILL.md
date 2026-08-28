@@ -401,9 +401,11 @@ The tracked Claude Stop hooks skip themselves under `GROK_AGENT`, because Grok a
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol remains background-notify around `bin/fm-watch-arm.sh`; native Stop continuation does not provide Pi-like extension ownership.
 
-## cursor-agent (VERIFIED 2026-08-14 for ordinary crew and scout launches; secondmate production-test support, Cursor Agent 2026.08.11-e8db854)
+## cursor-agent (VERIFIED 2026-08-27 for ordinary crew and scout launches; secondmate production-test support, Cursor Agent 2026.08.25-3e8eec8)
 
-Cursor Agent launches with a positional prompt as `cursor-agent --trust --force --model <model> <brief>`.
+For a non-reader persistent session, launch `cursor-agent --trust --force --model <model>` without a positional prompt, wait for the shared composer reader to prove the empty `→ Add a follow-up` composer, then submit an encoded `Read the launch brief at <path> and follow it exactly.` pointer through `fm_backend_send_text_submit`.
+The locally installed CLI's `--help` describes both the positional `[prompt...]` and `--print`; real 2026.08.25-3e8eec8 observation showed the large positional encoded brief leaves an empty composer, while the ready-composer submission starts work and returns to the interactive composer for a follow-up.
+The pointer is the verified interactive prompt-delivery mechanism; `--print` ends the session and is unsuitable for persistent workers.
 `--force` is the unattended command-approval mode, while `--trust` bypasses the separate first-workspace confirmation that still appears under `--force` alone.
 
 | Fact | Value |

@@ -409,6 +409,7 @@ ok - forced teardown retains a nested secondmate home and its grandchild's Herdr
 Real captures verified these active distinctions:
 
 - Claude and Codex use bare `❯` and `›` agent composers.
+- Cursor Agent 2026.08.25-3e8eec8 renders the dim `→ Add a follow-up` placeholder as an empty composer. Its documented positional `[prompt...]` can leave that composer empty for a large encoded launch brief; a prompt submitted only after that empty state begins work and returns to the composer for a follow-up.
 - Pi uses content between complete separator rows and requires exact native Pi identity.
 - Dim or faint suggestion text is ghost content, while normally styled text is pending input.
 - Grok dark truecolor placeholders are ghost content, while bright truecolor typed input remains pending.

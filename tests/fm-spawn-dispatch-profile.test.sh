@@ -33,11 +33,19 @@ case "${1:-}" in
   display-message)
     case "$*" in
       *"#{pane_current_command}"*) printf '%s\n' "${FM_FAKE_PANE_COMMAND:-firstmate}" ;;
+      *"#{cursor_y}"*) printf '%s\n' "${FM_FAKE_TMUX_CURSOR_Y:-0}" ;;
       *) printf 'firstmate\n' ;;
     esac
     exit 0
     ;;
-  capture-pane) printf '%s\n' "${FM_FAKE_TMUX_CAPTURE:-}"; exit 0 ;;
+  capture-pane)
+    if [ -s "${FM_FAKE_TMUX_CAPTURE_STATE:-}" ]; then
+      cat "$FM_FAKE_TMUX_CAPTURE_STATE"
+    else
+      printf '%s\n' "${FM_FAKE_TMUX_CAPTURE:-}"
+    fi
+    exit 0
+    ;;
   list-windows)
     [ -z "${FM_FAKE_TMUX_WINDOWS:-}" ] || printf '%s\n' "$FM_FAKE_TMUX_WINDOWS"
     exit 0
@@ -54,6 +62,13 @@ case "${1:-}" in
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+          case "$a" in
+            *'FIRSTMATE_OP: v1 launch-brief:'*)
+              if [ -n "${FM_FAKE_TMUX_CAPTURE_AFTER_TEXT:-}" ] && [ -n "${FM_FAKE_TMUX_CAPTURE_STATE:-}" ]; then
+                printf '%s\n' "$FM_FAKE_TMUX_CAPTURE_AFTER_TEXT" > "$FM_FAKE_TMUX_CAPTURE_STATE"
+              fi
+              ;;
+          esac
           if [ "${FM_FAKE_EXEC_LAUNCH:-0}" = 1 ]; then
             (
               cd "${FM_FAKE_EXEC_CWD:?}"
@@ -244,6 +259,9 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
+    FM_FAKE_TMUX_CAPTURE="${FM_FAKE_TMUX_CAPTURE:-→}" \
+    FM_FAKE_TMUX_CAPTURE_STATE="${FM_FAKE_TMUX_CAPTURE_STATE:-$home/cursor-capture.state}" \
+    FM_FAKE_TMUX_CAPTURE_AFTER_TEXT="${FM_FAKE_TMUX_CAPTURE_AFTER_TEXT:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_ENDPOINT_LOG="${FM_TEST_ENDPOINT_LOG:-}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
@@ -901,13 +919,92 @@ test_cursor_agent_threads_model_variant_and_records_effort() {
   expect_code 0 "$status" "cursor-agent spawn with a model-variant effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" cursor-agent cursor-grok-4.6-high high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "cursor-agent --trust --force --model 'cursor-grok-4.6-high' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < " \
-    "cursor-agent launch did not preserve the model variant and typed brief"
+  assert_contains "$launch" "cursor-agent --trust --force --model 'cursor-grok-4.6-high'" \
+    "cursor-agent launch did not preserve the model variant"
+  assert_not_contains "$launch" "encode launch-brief" \
+    "cursor-agent launch must defer its encoded brief until the interactive composer is ready"
   assert_not_contains "$launch" "--effort" \
     "cursor-agent launch must not invent a separate effort flag"
   assert_not_contains "$launch" "--reasoning-effort" \
     "cursor-agent launch must not borrow another harness's effort flag"
   pass "cursor-agent receives the model variant while metadata preserves the selected effort axis"
+}
+
+test_cursor_agent_delivers_encoded_brief_after_interactive_ready_for_persistent_workers() {
+  local rec id out status launch secondmate_home first_launch expected_pointer
+  id=profile-cursor-ready-ship-z7c
+  rec=$(make_spawn_case profile-cursor-ready-ship cursor-agent "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_TMUX_CAPTURE='→' \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --model cursor-grok-4.6-high --effort high)
+  status=$?
+  expect_code 0 "$status" "cursor-agent ship spawn should deliver its brief through the ready interactive composer"
+  launch=$(cat "$LAUNCH_LOG")
+  first_launch=$(sed -n '1p' "$LAUNCH_LOG")
+  expected_pointer="FIRSTMATE_OP: v1 launch-brief: Read the launch brief at $HOME_DIR/data/$id/brief.md and follow it exactly."
+  assert_contains "$first_launch" "cursor-agent --trust --force --model 'cursor-grok-4.6-high'" \
+    "cursor-agent ship launch lost its persistent interactive command"
+  assert_not_contains "$first_launch" "encode launch-brief" \
+    "cursor-agent ship launch must not pass the brief as a positional argument"
+  assert_not_contains "$first_launch" "--print" \
+    "cursor-agent ship launch must remain interactive"
+  assert_contains "$launch" "$expected_pointer" \
+    "cursor-agent ship did not submit the encoded brief pointer after readiness"
+
+  id=profile-cursor-ready-scout-z7d
+  rec=$(make_spawn_case profile-cursor-ready-scout cursor-agent "$id")
+  read_case_record "$rec"
+  out=$(FM_FAKE_TMUX_CAPTURE='→' \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --scout --harness cursor-agent --model cursor-grok-4.6-high --effort high)
+  status=$?
+  expect_code 0 "$status" "cursor-agent writer scout should deliver its brief through the ready interactive composer"
+  launch=$(cat "$LAUNCH_LOG")
+  expected_pointer="FIRSTMATE_OP: v1 launch-brief: Read the launch brief at $HOME_DIR/data/$id/brief.md and follow it exactly."
+  assert_contains "$launch" "$expected_pointer" \
+    "cursor-agent writer scout did not submit the encoded brief pointer after readiness"
+  assert_not_contains "$(sed -n '1p' "$LAUNCH_LOG")" "--print" \
+    "cursor-agent writer scout launch must remain interactive"
+
+  id=profile-cursor-ready-secondmate-z7e
+  rec=$(make_spawn_case profile-cursor-ready-secondmate cursor-agent "$id")
+  read_case_record "$rec"
+  secondmate_home="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$secondmate_home" "$id"
+  out=$(FM_FAKE_TMUX_CAPTURE='→' \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$secondmate_home" \
+      --secondmate)
+  status=$?
+  expect_code 0 "$status" "cursor-agent secondmate should deliver its charter through the ready interactive composer"
+  launch=$(cat "$LAUNCH_LOG")
+  expected_pointer="FIRSTMATE_OP: v1 launch-brief: Read the launch brief at $secondmate_home/data/charter.md and follow it exactly."
+  assert_contains "$launch" "$expected_pointer" \
+    "cursor-agent secondmate did not submit the encoded charter pointer after readiness"
+  assert_not_contains "$(sed -n '1p' "$LAUNCH_LOG")" "--print" \
+    "cursor-agent secondmate launch must remain interactive"
+  pass "cursor-agent sends encoded launch briefs only after a ready interactive composer for ships, writer scouts, and secondmates"
+}
+
+test_cursor_agent_refuses_unconfirmed_brief_submission() {
+  local rec id out status
+  for case in pending unknown; do
+    id="profile-cursor-unconfirmed-${case}-z7f"
+    rec=$(make_spawn_case "profile-cursor-unconfirmed-$case" cursor-agent "$id")
+    read_case_record "$rec"
+    case "$case" in
+      pending) out=$(FM_FAKE_TMUX_CAPTURE='→' FM_FAKE_TMUX_CAPTURE_AFTER_TEXT='→ brief still pending' FM_CURSOR_SUBMIT_RETRIES=1 FM_CURSOR_SUBMIT_SLEEP=0 run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model cursor-grok-4.6-high --effort high) ;;
+      unknown) out=$(FM_FAKE_TMUX_CAPTURE='→' FM_FAKE_TMUX_CAPTURE_AFTER_TEXT='shell starting' FM_CURSOR_SUBMIT_RETRIES=1 FM_CURSOR_SUBMIT_SLEEP=0 run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model cursor-grok-4.6-high --effort high) ;;
+    esac
+    status=$?
+    [ "$status" -ne 0 ] || fail "cursor-agent must refuse a $case brief-submission verdict"
+    assert_contains "$out" "cursor-agent launch brief could not be submitted" \
+      "cursor-agent $case brief-submission refusal lacked a diagnostic"
+    assert_contains "$(cat "$HOME_DIR/state/$id.status")" "failed: cursor-agent launch brief could not be submitted" \
+      "cursor-agent $case brief-submission refusal was not supervisor-visible"
+  done
+  pass "cursor-agent refuses pending and unknown brief-submission verdicts"
 }
 
 test_cursor_reader_launch_uses_noninteractive_brief_delivery() {
@@ -3559,6 +3656,8 @@ test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_cursor_agent_threads_model_variant_and_records_effort
+test_cursor_agent_delivers_encoded_brief_after_interactive_ready_for_persistent_workers
+test_cursor_agent_refuses_unconfirmed_brief_submission
 test_cursor_reader_launch_uses_noninteractive_brief_delivery
 test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity

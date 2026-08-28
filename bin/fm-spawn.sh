@@ -1712,7 +1712,7 @@ fi
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
-  local harness=$1 kind=${2:-ship}
+  local harness=$1 kind=${2:-ship} access=${3:-writer}
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
   case "$harness" in
     # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false disables claude's interactive
@@ -1759,22 +1759,18 @@ launch_template() {
     # The environment privacy control keeps operator-owned foreign personal
     # context out of the worker while preserving project AGENTS.md context.
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-    # Cursor Agent accepts a positional prompt. --force is its unattended
-    # command-approval mode, while --trust bypasses the separate first-workspace
-    # dialog that --force does not cover. Cursor effort is encoded in the model
-    # selector itself, so __EFFORTFLAG__ is deliberately absent and the requested
-    # axis remains metadata-only. Persistent secondmates use the same Cursor
-    # lifecycle and busy integration where it already applies, with foreground
-    # checkpoints covering the unverified native seat-start and Stop-hook paths.
+    # Cursor Agent's positional prompt silently drops a large launch brief while
+    # leaving an empty interactive composer. Non-reader tasks therefore start the
+    # persistent TUI bare and deliver an encoded brief pointer only after the
+    # shared composer classifier proves it ready below. Reader scout transport
+    # remains outside this persistent-worker change.
     cursor-agent)
-      # Cursor's interactive TUI opens its empty composer after a confined
-      # reader launch and does not run the positional prompt. Reader scouts
-      # therefore use Cursor's documented non-interactive prompt mode; writer
-      # tasks keep the interactive TUI and their existing handoff unchanged.
-      if [ "$ACCESS" = reader ]; then
+      # Readers use documented one-shot print mode. Persistent workers start
+      # bare and receive a brief pointer after composer readiness below.
+      if [ "$access" = reader ]; then
         printf '%s' 'cursor-agent --trust --force __MODELFLAG__--print "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'cursor-agent --trust --force __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'cursor-agent --trust --force __MODELFLAG__'
       fi
       ;;
     *) return 1 ;;
@@ -1812,12 +1808,12 @@ case "$ARG3" in
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
       harness_src='config/crew-harness'
     fi
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND" "$ACCESS") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
   *)
     RAW_LAUNCH=0
     HARNESS=$ARG3
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND" "$ACCESS") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
 
@@ -3218,6 +3214,22 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
+cursor_wait_for_ready() {
+  local verdict i=0 max=${FM_CURSOR_READY_POLLS:-60} interval=${FM_CURSOR_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    verdict=$(fm_backend_composer_state "$BACKEND" "$T" "$W")
+    [ "$verdict" = empty ] && return 0
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+cursor_spawn_fail() {  # <detail>
+  printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+}
+
 # Reuse a recorded writer lease under the acquisition lock. A later generic
 # `treehouse get` cannot return that same durable lease, so recovery must not
 # allocate a second slot.
@@ -4206,6 +4218,30 @@ if [ "$HARNESS" = kimi ]; then
   fi
   if ! kimi_wait_for_delivery; then
     kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
+    exit 1
+  fi
+fi
+if [ "$HARNESS" = cursor-agent ] && [ "$ACCESS" != reader ]; then
+  if ! cursor_wait_for_ready; then
+    cursor_spawn_fail "cursor-agent did not show a verified empty composer before brief delivery"
+    exit 1
+  fi
+  CURSOR_POINTER="Read the launch brief at $BRIEF_REAL and follow it exactly."
+  CURSOR_PAYLOAD=$(printf '%s' "$CURSOR_POINTER" | "$FM_ROOT/bin/fm-operational-input.sh" encode launch-brief) || {
+    cursor_spawn_fail "cursor-agent launch brief could not be encoded"
+    exit 1
+  }
+  CURSOR_SUBMIT_RETRIES=${FM_CURSOR_SUBMIT_RETRIES:-3}
+  CURSOR_SUBMIT_SLEEP=${FM_CURSOR_SUBMIT_SLEEP:-${FM_CURSOR_POLL_INTERVAL:-0.5}}
+  CURSOR_SUBMIT_SETTLE=${FM_CURSOR_SUBMIT_SETTLE:-0}
+  CURSOR_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
+    "$BACKEND" "$T" "$CURSOR_PAYLOAD" "$CURSOR_SUBMIT_RETRIES" \
+    "$CURSOR_SUBMIT_SLEEP" "$CURSOR_SUBMIT_SETTLE" "$W" "$HARNESS") || {
+    cursor_spawn_fail "cursor-agent launch brief could not be submitted"
+    exit 1
+  }
+  if [ "$CURSOR_SUBMIT_VERDICT" != empty ]; then
+    cursor_spawn_fail "cursor-agent launch brief could not be submitted"
     exit 1
   fi
 fi
