@@ -246,7 +246,7 @@ test_unparkable_closure_fails_loudly() {
   fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
   printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$home/state/t1.status"
   # A non-file already occupying the sidecar path the first record will claim.
-  mkdir -p "$home/state/t1.inbox/handled" "$home/state/t1.inbox/001.resolve"
+  mkdir -p "$home/state/t1.inbox/handled" "$home/state/t1.inbox/.001.resolve"
 
   : > "$log"
   env PATH="$fb:$PATH" \

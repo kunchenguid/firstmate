@@ -15,7 +15,8 @@
 #   (d) terminal run-step (passed/failed) is authoritative        -> run-step
 #   (e) cross-branch attribution: this branch's own run found via list lookup,
 #       and the 2026-08-27 regression: only a branch's NEWEST run can describe
-#       its current state, so an unbindable newest run reports no attribution
+#       its current state, so a newest run that does not bind - unresolvable
+#       here, or resolvable but no longer current - reports no attribution
 #       instead of walking back onto an older, superseded FAILED run
 #   (f) no run + semantic busy                                    -> pane
 #   (g) no run + semantic idle falls to the status-log verb       -> status-log
@@ -786,6 +787,44 @@ EOF
   assert_contains "$out" "source: pane" \
     "an unbindable newest run means no run attribution, so the pane answers"
   pass "crew-state: an unbindable newest run never falls back to an older failed run"
+}
+
+# The same rule for a newest row that RESOLVES but does not bind: the worker
+# has moved past the live run's head (a commit on top after the run started,
+# or a rewrite), so the head is a proven mismatch rather than unknown
+# attribution. That is still the branch's newest run, and an older row is
+# still superseded history - even when that older row's head is exactly this
+# worktree's HEAD and would bind perfectly. Stopping only on an unresolvable
+# head left this shape walking onto the older FAILED row.
+test_newest_resolvable_mismatch_never_falls_back_to_an_older_row() {
+  local d older short out
+  reset_fakes
+  d=$(new_case stale-run-resolvable)
+  make_repo_on_branch "$d/wt" fm/feat-moved-on
+  older=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m "moved on after the run started"
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/moved.meta" "window=fm:fm-moved" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: validating\n' > "$d/state/moved.status"
+  "$ROOT/bin/fm-busy-event.sh" arm "$d/state" moved >/dev/null
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  # Row 1: this branch's LIVE run at the commit the worktree has moved past -
+  # resolvable, not current. Row 2: an older FAILED run at the worktree's HEAD.
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-moved-on ${older}  2026-08-27 19:02
+  failed     fm/feat-moved-on ${short}  2026-08-27 17:17
+EOF
+)"
+  out=$(run_crew_state "$d" moved)
+  assert_not_contains "$out" "state: failed" \
+    "a resolvable-but-mismatched newest run must not be resolved by an older run that binds"
+  assert_not_contains "$out" "run failed" \
+    "the older run's terminal detail must not leak into the current-state read"
+  assert_contains "$out" "state: working" "the live busy worker should read as working"
+  assert_contains "$out" "source: pane" \
+    "a newest run that does not bind means no run attribution, so the pane answers"
+  pass "crew-state: a resolvable-but-mismatched newest run never falls back to an older row"
 }
 
 # The same rule from the other direction: when `axi status` already answered
@@ -1659,6 +1698,7 @@ test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_newest_unbindable_run_never_falls_back_to_an_older_failure
+test_newest_resolvable_mismatch_never_falls_back_to_an_older_row
 test_own_branch_head_mismatch_does_not_consult_the_coarse_list
 test_other_branch_run_ignored
 test_no_run_busy_pane

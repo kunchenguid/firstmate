@@ -24,15 +24,22 @@
 #   5. The acknowledgement-gated decision closure: a parked closure stays
 #      uncommitted while its record is unread (so the decision keeps reading
 #      open, which is the whole point), commits the moment the worker
-#      acknowledges the record, and is then filed beside it.
+#      acknowledges the record, and is then filed beside it. The sidecar
+#      survives a sloppy glob sweep of the inbox root, a commit that partly
+#      fails closes each key at most once when retried, a captain-held task
+#      settled through another channel counts as closed, and a hold-id
+#      closure actually closes its captain-held task with the acknowledging
+#      task's provenance when the real watcher commits it.
 #   6. A real fm-watch.sh subprocess re-rings the doorbell for an unhandled
 #      aged message on an idle pane WITHOUT waking firstmate, waits on a busy
 #      pane, stays silent on a healthy/empty inbox, surfaces unwritable ladder
 #      bookkeeping only while its record remains unhandled, emits exactly
 #      one stale wake once the ring budget is spent, escalates an unread record
-#      past the absolute bound even while the pane reads busy, names the
-#      decision an undelivered answer is holding open, and commits a deferred
-#      closure once the worker acknowledges it.
+#      past the absolute bound even while the pane reads busy (saying so, so
+#      recovery can tell busy-and-unread from stopped), names the decision an
+#      undelivered answer is holding open, commits a deferred closure once the
+#      worker acknowledges it, and surfaces a closure that cannot commit
+#      exactly once instead of on every poll.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -488,8 +495,179 @@ test_deferred_closure_refuses_an_empty_key_set() {
   if inbox_lib "$state" fm_task_inbox_defer_resolution "$rec" "note" "" "" 2>/dev/null; then
     fail "a closure naming no decision should be refused"
   fi
-  [ ! -e "${rec%.msg}.resolve" ] || fail "a refused closure still wrote a sidecar"
+  [ ! -e "$(inbox_lib "$state" fm_task_inbox_resolution_path "$rec")" ] \
+    || fail "a refused closure still wrote a sidecar"
   pass "inbox: a closure that would close nothing is refused rather than parked"
+}
+
+# The brief says `mv NNN.msg handled/`, but a worker will sometimes sweep the
+# whole inbox root instead. An uncommitted closure carried into handled/ by
+# that sweep would never commit, and nothing would ever say why. The sidecar
+# therefore lives outside the non-dot glob, and the sweep leaves it behind.
+test_deferred_closure_survives_a_glob_sweep() {
+  local state rec sidecar closed
+  state="$TMP_ROOT/sweep/state"; mkdir -p "$state"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/t1.status"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "go with REST")
+  sidecar=$(inbox_lib "$state" fm_task_inbox_defer_resolution "$rec" "go with REST" "api-shape" "")
+  case "${sidecar##*/}" in
+    .*) ;;
+    *) fail "the sidecar must be a dot file so a glob sweep cannot carry it away: $sidecar" ;;
+  esac
+  # The sloppy acknowledgement: everything the glob sees goes into handled/.
+  mv "$state/t1.inbox"/* "$state/t1.inbox/handled/" 2>/dev/null || true
+  [ -f "$state/t1.inbox/handled/${rec##*/}" ] || fail "the sweep should have acknowledged the record"
+  [ -f "$sidecar" ] || fail "the sweep carried the uncommitted closure into handled/"
+  closed=$(inbox_lib "$state" fm_task_inbox_commit_resolutions "$state" t1 "$state/t1.status") \
+    || fail "the swept-and-acknowledged closure failed to commit"
+  [ "$closed" = "api-shape" ] || fail "the commit should report the closed key, got: $closed"
+  assert_grep 'resolved [key=api-shape]: answered: go with REST' "$state/t1.status" \
+    "the acknowledged answer should close the decision after a glob sweep"
+  [ ! -e "$sidecar" ] || fail "the committed closure was left in the inbox root"
+  [ -f "$state/t1.inbox/handled/${sidecar##*/}" ] || fail "the committed closure should be filed"
+  pass "inbox: a glob sweep of the inbox root leaves the parked closure in place to commit"
+}
+
+# A partial commit must be safe to retry: the status key closed on the first
+# attempt, the captain-held close did not, and every later poll retries the
+# same sidecar. Each key closes at most once, and once the failure has been
+# surfaced the retry is quiet - no second error, no failed exit - so a
+# permanently failing close can neither grow the status log nor wake firstmate
+# on every poll. The hold id names no task in an isolated home, so the intake
+# refuses it deterministically whether or not tasks-axi is installed.
+test_commit_retries_close_each_key_once_and_surface_once() {
+  local home state rec sidecar err rc
+  home="$TMP_ROOT/partial"; state="$home/state"; mkdir -p "$state" "$home/data"
+  err="$home/commit.err"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/t1.status"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "go with REST")
+  sidecar=$(inbox_lib "$state" fm_task_inbox_defer_resolution "$rec" "go with REST" "api-shape" "no-such-hold")
+  mv "$rec" "$state/t1.inbox/handled/"
+
+  rc=0
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    inbox_lib "$state" fm_task_inbox_commit_resolutions "$state" t1 "$state/t1.status" >/dev/null 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a closure whose captain-held close failed should report the failure"
+  assert_contains "$(cat "$err")" "captain-held tasks could not be closed" \
+    "the failure should name what could not be closed"
+  [ "$(grep -cF 'resolved [key=api-shape]' "$state/t1.status")" = 1 ] \
+    || fail "the status key should have closed once on the first attempt"
+  [ -f "$sidecar" ] || fail "an uncommittable closure must stay parked for the retry"
+
+  rc=0
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    inbox_lib "$state" fm_task_inbox_commit_resolutions "$state" t1 "$state/t1.status" >/dev/null 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unsurfaced failure should still report on the retry"
+  [ "$(grep -cF 'resolved [key=api-shape]' "$state/t1.status")" = 1 ] \
+    || fail "the retry appended the status key's closing line again:"$'\n'"$(cat "$state/t1.status")"
+
+  # The caller surfaced the failure; from here the retry is quiet.
+  inbox_lib "$state" fm_task_inbox_record_commit_escalated "$state" t1 \
+    || fail "could not mark the failed closure as surfaced"
+  rc=0
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    inbox_lib "$state" fm_task_inbox_commit_resolutions "$state" t1 "$state/t1.status" >/dev/null 2>"$err" || rc=$?
+  [ "$rc" -eq 0 ] || fail "a surfaced failure must retry quietly instead of failing every poll"
+  [ ! -s "$err" ] || fail "a surfaced failure must not repeat its diagnostic on every poll:"$'\n'"$(cat "$err")"
+  [ "$(grep -cF 'resolved [key=api-shape]' "$state/t1.status")" = 1 ] \
+    || fail "the quiet retry appended the status key's closing line again"
+  [ -f "$sidecar" ] || fail "the quiet retry must keep the closure parked as evidence"
+  pass "inbox: a partly failed commit closes each key once and is surfaced once"
+}
+
+# A captain-held task the sidecar answers, driven through the REAL watcher in
+# the environment it runs under (an FM_HOME with its own backlog): the
+# acknowledgement must close the task through the one keyed-answer intake,
+# recording that the answer came from a firstmate answer this task
+# acknowledged. Line format, provenance, and the watcher-side environment are
+# all exercised here; a regression in any of them fails this case.
+test_watcher_closes_the_captain_held_task_with_its_provenance() {
+  local dir home state out log pid rec sidecar show i=0
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    pass "inbox: (skipped: tasks-axi not found) the watcher closes a captain-held task with provenance"
+    return 0
+  fi
+  dir=$(setup_watch_case hold-close)
+  home="$dir/home"; state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  make_hold_home "$home"
+  (cd "$home" && tasks-axi add gated-work "Gated work" --kind ship --repo sample --body 'Gated work plan.' >/dev/null) \
+    || fail "could not create the work item to hold"
+  PATH="$home/holdbin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" hold gated-work --reason "captain go needed" >/dev/null \
+    || fail "could not hold the work item for the captain"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "go ahead")
+  sidecar=$(inbox_lib "$state" fm_task_inbox_defer_resolution "$rec" "go ahead" "" "gated-work")
+  # The worker has already acknowledged; the watcher's own poll commits.
+  mv "$rec" "$state/t1.inbox/handled/"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config"
+  pid=$!
+  while [ "$i" -lt 100 ]; do
+    [ -e "$sidecar" ] || break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  [ ! -e "$sidecar" ] || fail "the watcher never committed the acknowledged hold closure:"$'\n'"$(cat "$out")"
+  [ -f "$state/t1.inbox/handled/${sidecar##*/}" ] || fail "the committed closure should be filed"
+  show=$(cd "$home" && tasks-axi show gated-work --full)
+  assert_contains "$show" "state: done" "the acknowledged answer did not close the captain-held task"
+  assert_contains "$show" "Resolution mode: answered" "the close did not record its path"
+  assert_contains "$show" "Answer: go ahead" "the close did not record the answer the worker acknowledged"
+  assert_contains "$show" "Captain answered this call through a firstmate answer acknowledged by t1." \
+    "the close did not record the acknowledging task as its provenance"
+  [ ! -s "$state/.wake-queue" ] || fail "a clean hold close must not wake firstmate:"$'\n'"$(cat "$state/.wake-queue")"
+  pass "inbox: the watcher's commit closes the captain-held task with the acknowledging task's provenance"
+}
+
+# The captain can settle a held task through another channel - chat, a direct
+# answer, or closing the backlog item - during the window before the worker
+# acknowledges the delivered answer. That is a closed decision, not a failed
+# commit: the closure files itself and nothing escalates.
+test_commit_treats_a_hold_settled_elsewhere_as_closed() {
+  local home state rec sidecar err rc
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    pass "inbox: (skipped: tasks-axi not found) a hold settled elsewhere counts as closed"
+    return 0
+  fi
+  home="$TMP_ROOT/settled-elsewhere"; state="$home/state"; err="$home/commit.err"
+  make_hold_home "$home"
+  mkdir -p "$state"
+  (cd "$home" && tasks-axi add gated-work "Gated work" --kind ship --repo sample --body 'Gated work plan.' >/dev/null) \
+    || fail "could not create the work item to hold"
+  PATH="$home/holdbin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" hold gated-work --reason "captain go needed" >/dev/null \
+    || fail "could not hold the work item for the captain"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "go ahead")
+  sidecar=$(inbox_lib "$state" fm_task_inbox_defer_resolution "$rec" "go ahead" "" "gated-work")
+  # The captain settles it directly while the answer is still unread.
+  printf 'Captain said go in chat.\n' > "$home/direct.txt"
+  PATH="$home/holdbin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" answer gated-work --decision-file "$home/direct.txt" >/dev/null \
+    || fail "could not settle the held task directly"
+  mv "$rec" "$state/t1.inbox/handled/"
+  rc=0
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    inbox_lib "$state" fm_task_inbox_commit_resolutions "$state" t1 "$state/t1.status" >/dev/null 2>"$err" || rc=$?
+  [ "$rc" -eq 0 ] || fail "a hold already settled by the captain was reported as a failed close:"$'\n'"$(cat "$err")"
+  [ ! -e "$sidecar" ] || fail "the closure for a settled hold should have been filed"
+  [ -f "$state/t1.inbox/handled/${sidecar##*/}" ] || fail "the closure for a settled hold should be filed under handled/"
+  pass "inbox: a captain-held task settled through another channel counts as closed, not failed"
+}
+
+# An isolated FM_HOME with its own tasks-axi backlog, so a captain-held task
+# can be created and closed here without touching any real home; the tool
+# stubs fm-captain-hold's hold path expects live beside it.
+make_hold_home() {  # <home>
+  local home=$1 fb
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  fb="$home/holdbin"
+  mkdir -p "$fb"
+  fm_fake_exit0 "$fb" tmux treehouse no-mistakes gh gh-axi
 }
 
 setup_watch_case() {  # <name> -> echoes case dir; state in <dir>/state
@@ -676,7 +854,28 @@ test_watcher_escalates_overdue_on_busy_pane() {
     || fail "the absolute bound should queue a stale wake:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
   grep -qF 'has been unhandled for over' "$state/.wake-queue" \
     || fail "the wake should name the absolute bound it crossed:"$'\n'"$(cat "$state/.wake-queue")"
+  grep -qF 'while the pane reads busy' "$state/.wake-queue" \
+    || fail "the wake should say the pane read busy, so recovery does not treat a long tool call as a stopped worker:"$'\n'"$(cat "$state/.wake-queue")"
   pass "watcher: a busy pane no longer holds an unread instruction in silence forever"
+}
+
+# The same bound on an idle pane says so too: the verdict is what lets
+# recovery triage the two shapes differently.
+test_watcher_overdue_on_idle_pane_says_idle() {
+  local dir state out log pid rec
+  dir=$(setup_watch_case idle-overdue)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "unload the model now")
+  age_path "$rec"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_TASK_INBOX_RING_MAX=99 FM_TASK_INBOX_UNHANDLED_MAX_SECS=1
+  pid=$!
+  wait_watcher_gone "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "an idle pane held an unread instruction past the absolute bound in silence"; }
+  grep -qF 'while the pane reads idle' "$state/.wake-queue" \
+    || fail "the wake should say the pane read idle:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  pass "watcher: the absolute bound names an idle pane as idle"
 }
 
 # The reported incident, end to end: the composer holds pending text, so every
@@ -738,8 +937,59 @@ test_watcher_commits_the_closure_on_acknowledgement() {
   kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
   assert_grep 'resolved [key=api-shape]: answered: go with REST' "$state/t1.status" \
     "the watcher should close the decision once the worker acknowledged the answer"
-  [ ! -e "${rec%.msg}.resolve" ] || fail "the committed closure was left parked in the inbox root"
+  [ ! -e "$(inbox_lib "$state" fm_task_inbox_resolution_path "$rec")" ] \
+    || fail "the committed closure was left parked in the inbox root"
   pass "watcher: the worker's acknowledgement is what commits the answered decision"
+}
+
+# A closure that cannot commit is surfaced exactly once. The first poll queues
+# the stale wake; a fresh watcher over the same records must stay quiet, keep
+# the status log at one closing line, and leave the closure parked as
+# evidence. Without that bound a permanently failing close woke firstmate on
+# every poll and appended the same resolved line each time.
+test_watcher_surfaces_a_failed_closure_once() {
+  local dir home state out log pid rec sidecar queue_after_ack
+  dir=$(setup_watch_case commit-fail)
+  home="$dir/home"; state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  mkdir -p "$home/data"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/t1.status"
+  prime_status_seen "$state" "$state/t1.status"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "go with REST")
+  sidecar=$(inbox_lib "$state" fm_task_inbox_defer_resolution "$rec" "go with REST" "api-shape" "no-such-hold")
+  mv "$rec" "$state/t1.inbox/handled/"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_HOME="$home" FM_DATA_OVERRIDE="$home/data"
+  pid=$!
+  wait_watcher_gone "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "a closure that cannot commit never surfaced"; }
+  grep -qF 'answered decision could not be closed' "$state/.wake-queue" \
+    || fail "the failed commit should queue a stale wake:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  [ "$(grep -cF 'resolved [key=api-shape]' "$state/t1.status")" = 1 ] \
+    || fail "the status key should have closed exactly once:"$'\n'"$(cat "$state/t1.status")"
+  [ -f "$sidecar" ] || fail "an uncommittable closure must stay parked"
+
+  # The supervising turn presents and acknowledges that wake, exactly as it
+  # would; the next cycle over the same records must then be quiet, and
+  # nothing may grow.
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2>"$dir/drain.err" || true
+  ack_drain_err "$state" "$dir/drain.err" >/dev/null || fail "could not acknowledge the surfaced wake"
+  queue_after_ack=$(cat "$state/.wake-queue" 2>/dev/null || true)
+  : > "$out"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_HOME="$home" FM_DATA_OVERRIDE="$home/data"
+  pid=$!
+  if wait_watcher_gone "$pid" 40; then
+    fail "a surfaced closure failure woke firstmate again on a later poll:"$'\n'"$(cat "$out")"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  fi
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  [ "$(cat "$state/.wake-queue" 2>/dev/null || true)" = "$queue_after_ack" ] \
+    || fail "later polls queued another wake for the same failed closure:"$'\n'"$(cat "$state/.wake-queue")"
+  [ "$(grep -cF 'resolved [key=api-shape]' "$state/t1.status")" = 1 ] \
+    || fail "later polls appended the closing line again:"$'\n'"$(cat "$state/t1.status")"
+  [ -f "$sidecar" ] || fail "the quiet retry must keep the closure parked as evidence"
+  pass "watcher: a closure that cannot commit is surfaced once, then retried quietly"
 }
 
 test_write_is_durable_and_exact
@@ -755,6 +1005,10 @@ test_ladder_absolute_bound_escalates_with_nothing_else_due
 test_deferred_closure_waits_for_the_acknowledgement
 test_deferred_closure_needs_a_complete_acknowledgement
 test_deferred_closure_refuses_an_empty_key_set
+test_deferred_closure_survives_a_glob_sweep
+test_commit_retries_close_each_key_once_and_surface_once
+test_watcher_closes_the_captain_held_task_with_its_provenance
+test_commit_treats_a_hold_settled_elsewhere_as_closed
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
 test_watcher_quiet_on_healthy_inbox
@@ -762,5 +1016,7 @@ test_watcher_ack_silences_unwritable_ladder
 test_watcher_surfaces_unwritable_ladder
 test_watcher_escalates_once_after_budget
 test_watcher_escalates_overdue_on_busy_pane
+test_watcher_overdue_on_idle_pane_says_idle
 test_watcher_escalates_blocked_composer_and_names_the_decision
 test_watcher_commits_the_closure_on_acknowledgement
+test_watcher_surfaces_a_failed_closure_once

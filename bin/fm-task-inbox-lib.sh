@@ -22,16 +22,23 @@
 #
 # Layout under <state-dir>:
 #   <task>.inbox/NNN.msg       one durable steer, numeric sequence, atomic rename
-#   <task>.inbox/NNN.resolve   the decision closure NNN.msg's answer owes, held
-#                              until the worker acknowledges that record
+#   <task>.inbox/.NNN.resolve  the decision closure NNN.msg's answer owes, held
+#                              until the worker acknowledges that record.
+#                              Dot-prefixed on purpose: a worker that sweeps
+#                              the inbox root with `mv <inbox>/* handled/`
+#                              must not carry an uncommitted closure into
+#                              handled/, where it would never commit
 #   <task>.inbox/handled/      the worker's `mv` here IS the acknowledgement;
-#                              a committed NNN.resolve is filed here too
+#                              a committed .NNN.resolve is filed here too
 #   <task>.inbox/.seq.lock     serializes sequence allocation across writers
 #                              (the session and the away daemon)
 #   <task>.inbox/.ring-state   watcher re-ring ladder:
 #                              "<msg>\t<count>\t<epoch>\t<blocked-count>"
 #   <task>.inbox/.escalated    oldest-message name already surfaced as stale,
 #                              so later polls suppress another escalation
+#   <task>.inbox/.commit-escalated
+#                              closure names whose failed commit was already
+#                              surfaced, so later polls retry them quietly
 #
 # Record format (fm_task_inbox_write / fm_task_inbox_body):
 #   schema=fm-task-inbox.v1
@@ -65,6 +72,16 @@
 # reading as a moving one. A lost or unwritable sidecar leaves the decision
 # open for the same reason.
 #
+# A commit is idempotent and its failure is bounded. Each identity closes at
+# most once: a status key whose exact closing line is already in the status
+# log is not appended again, and the keyed-answer intake is itself idempotent
+# for a replayed answer while a captain-held task closed through another
+# channel in the meantime counts as closed, not failed. A sidecar that still
+# cannot commit stays parked as evidence and is retried quietly on later polls;
+# the caller surfaces that failure exactly once per sidecar through
+# fm_task_inbox_record_commit_escalated, so a permanently failing close can
+# neither grow the status log nor wake firstmate on every poll.
+#
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
 # attempt may ring or be skipped to protect proven pending composer text. It
@@ -72,8 +89,11 @@
 #   attempts  FM_TASK_INBOX_RING_MAX delivery attempts produced no
 #             acknowledgement (default 3, so ~4 grace periods after enqueue)
 #   blocked   FM_TASK_INBOX_BLOCKED_MAX attempts were SKIPPED because the
-#             composer provenly holds pending text (default 1, so ~1 grace
-#             period). Repeating a skip cannot deliver anything: the composer
+#             composer provenly holds pending text (default 1, so ~2 grace
+#             periods after enqueue: fm-send's own initial skip is not in the
+#             ladder, the watcher's first attempt happens at >=1 grace, and
+#             the escalation fires at the next due poll >=1 grace after
+#             that). Repeating a skip cannot deliver anything: the composer
 #             is occupied by text the worker will not clear itself, so the
 #             remaining attempt budget would buy only silence. Escalating on
 #             the first proven skip is what turns that condition from a quiet
@@ -360,9 +380,20 @@ fm_task_inbox_is_fire_and_forget() {  # <record-path>
 # See the header contract: an answer's closure is parked next to its record and
 # commits only when the worker acknowledges that record.
 
-# Path of the deferred-closure sidecar bound to one inbox record.
+# Path of the deferred-closure sidecar bound to one inbox record: a dot file
+# beside the record, so a glob sweep of the inbox root cannot carry it away.
 fm_task_inbox_resolution_path() {  # <record-path>
-  printf '%s.resolve' "${1%.msg}"
+  local rec=$1 base
+  base=${rec##*/}
+  printf '%s/.%s.resolve' "${rec%/*}" "${base%.msg}"
+}
+
+# The inbox record a sidecar is bound to.
+fm_task_inbox_resolution_record() {  # <resolution-path>
+  local path=$1 base
+  base=${path##*/}
+  base=${base#.}
+  printf '%s/%s.msg' "${path%/*}" "${base%.resolve}"
 }
 
 # Park the closure an answer owes beside its record: temp-write, then atomic
@@ -379,7 +410,7 @@ fm_task_inbox_defer_resolution() {  # <record-path> <note> <status-keys> <hold-i
   # A non-file already sitting on the sidecar path would swallow the rename
   # into itself and report success for a closure that can never be read back.
   [ ! -e "$path" ] || [ -f "$path" ] || return 1
-  tmp=$(mktemp "$dir/.resolve.XXXXXX") || return 1
+  tmp=$(mktemp "$dir/.resolve-staging.XXXXXX") || return 1
   {
     printf 'schema=%s\n' "$FM_TASK_INBOX_RESOLVE_SCHEMA"
     printf 'at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -418,9 +449,9 @@ fm_task_inbox_is_acknowledged() {  # <record-path>
 _fm_task_inbox_resolutions() {  # <state-dir> <task-id> <acknowledged|pending>
   local dir want=$3 f rec
   dir=$(fm_task_inbox_dir "$1" "$2")
-  for f in "$dir"/*.resolve; do
+  for f in "$dir"/.*.resolve; do
     [ -e "$f" ] || continue
-    rec="${f%.resolve}.msg"
+    rec=$(fm_task_inbox_resolution_record "$f")
     if fm_task_inbox_is_acknowledged "$rec"; then
       [ "$want" = acknowledged ] || continue
     else
@@ -465,19 +496,30 @@ EOF
 # This is the only writer of a deferred closure, so a decision reads answered
 # exactly when the worker has seen the answer.
 #
+# Idempotent per identity (see the header): a status key whose exact closing
+# line is already in the status log is skipped, not appended again, so a retry
+# after a partial failure closes each key at most once; a captain-held task the
+# intake reports already closed counts as closed.
+#
 # Prints one "<key>" line per closed decision identity so a caller can log or
 # surface it. Returns nonzero after naming on stderr every closure it could NOT
-# commit; the sidecar is left in place so the next poll retries, and a repeated
-# resolved line for an already-closed key is a harmless no-op in the fold. A
-# missing inbox is a quiet no-op.
+# commit for the first time; the sidecar is left in place so the next poll
+# retries. A sidecar whose failure the caller already surfaced
+# (fm_task_inbox_record_commit_escalated) is retried quietly: it neither fails
+# the call nor repeats its diagnostic, which is what bounds a permanently
+# failing close to one wake. A missing inbox is a quiet no-op.
 fm_task_inbox_commit_resolutions() {  # <state-dir> <task-id> <status-file>
   local state=$1 task=$2 status_file=$3
-  local dir f note keys holds k line rc=0 failed append_rc
+  local dir f rec note keys holds k line rc=0 failed append_rc surfaced quiet unresolved
   dir=$(fm_task_inbox_dir "$state" "$task")
   [ -d "$dir" ] || return 0
+  surfaced=$(cat "$dir/.commit-escalated" 2>/dev/null || true)
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     [ -f "$f" ] || continue
+    rec=$(fm_task_inbox_resolution_record "$f")
+    quiet=0
+    ! printf '%s\n' "$surfaced" | grep -Fxq -- "${f##*/}" || quiet=1
     note=$(fm_task_inbox_body "$f" 2>/dev/null) || note=
     keys=$(fm_task_inbox_resolution_values "$f" status-key 2>/dev/null) || keys=
     holds=$(fm_task_inbox_resolution_values "$f" hold-id 2>/dev/null) || holds=
@@ -485,25 +527,31 @@ fm_task_inbox_commit_resolutions() {  # <state-dir> <task-id> <status-file>
     for k in $keys; do
       fm_cap_line_var "resolved [key=$k]: answered: $note"
       line=$FM_LINE_CAP_LINE
+      if grep -Fxq -- "$line" "$status_file" 2>/dev/null; then
+        printf '%s\n' "$k"
+        continue
+      fi
       append_rc=0
       fm_wake_status_append_self_announced "$state" "$status_file" "$line" || append_rc=$?
       if [ "$append_rc" -eq 2 ]; then
-        echo "error: $task acknowledged the answer in ${f%.resolve}.msg, but decision key '$k' could not be closed in $status_file" >&2
+        [ "$quiet" = 1 ] \
+          || echo "error: $task acknowledged the answer in $rec, but decision key '$k' could not be closed in $status_file" >&2
         failed=1
         continue
       fi
       printf '%s\n' "$k"
     done
     if [ -n "$holds" ]; then
-      if _fm_task_inbox_feed_holds "$task" "$note" "$holds"; then
+      if unresolved=$(_fm_task_inbox_feed_holds "$task" "$note" "$holds"); then
         for k in $holds; do printf '%s\n' "$k"; done
       else
-        echo "error: $task acknowledged the answer in ${f%.resolve}.msg, but these captain-held tasks could not be closed: $(printf '%s' "$holds" | tr '\n' ' ')" >&2
+        [ "$quiet" = 1 ] \
+          || echo "error: $task acknowledged the answer in $rec, but these captain-held tasks could not be closed: $unresolved" >&2
         failed=1
       fi
     fi
     if [ "$failed" = 1 ]; then
-      rc=1
+      [ "$quiet" = 1 ] || rc=1
       continue
     fi
     if ! mv "$f" "$dir/handled/${f##*/}" 2>/dev/null; then
@@ -518,14 +566,45 @@ EOF
 
 # Feed answered captain-held task ids to the one keyed-answer intake, as the
 # same "<task-id>\t<answer>\t<label>" lines every other channel sends. This
-# library decides nothing about what the intake does with them.
+# library decides nothing about what the intake does with them; it only reads
+# the intake's per-id verdict back. An id the intake reports closed - or
+# already closed, because the captain settled it through another channel
+# while the answer sat unread - is done. Prints the ids that are neither, with
+# the intake's own wording, and fails when there are any.
 _fm_task_inbox_feed_holds() {  # <task-id> <note> <hold-ids>
-  local task=$1 note=$2 holds=$3 k lines=''
+  local task=$1 note=$2 holds=$3 k lines='' out verdict unresolved=''
   for k in $holds; do
     lines="${lines}${k}"$'\t'"${note}"$'\t'$'\n'
   done
-  printf '%s' "$lines" | "$_FM_TASK_INBOX_LIB_DIR/fm-captain-hold.sh" answers \
-    --source "a firstmate answer acknowledged by $task" >/dev/null 2>&1
+  out=$(printf '%s' "$lines" | "$_FM_TASK_INBOX_LIB_DIR/fm-captain-hold.sh" answers \
+    --source "a firstmate answer acknowledged by $task" 2>&1) || true
+  for k in $holds; do
+    if printf '%s\n' "$out" | grep -Fxq -- "closed: $k" \
+      || printf '%s\n' "$out" | grep -Fxq -- "skipped: $k (already closed)"; then
+      continue
+    fi
+    verdict=$(printf '%s\n' "$out" | grep -F -- "skipped: $k " | head -1)
+    [ -n "$verdict" ] || verdict="$k ($(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200))"
+    unresolved="${unresolved}${unresolved:+; }$verdict"
+  done
+  [ -z "$unresolved" ] || { printf '%s' "$unresolved"; return 1; }
+}
+
+# Mark every acknowledged closure still parked in the inbox root - by
+# construction, exactly the ones whose commit just failed - as surfaced, after
+# the caller has durably queued its wake. Later polls retry them quietly. The
+# same wake-before-marker ordering as fm_task_inbox_record_escalated: a crash
+# in between can cost a rare duplicate wake, never a lost one. A concurrently
+# removed inbox is a successful no-op.
+fm_task_inbox_record_commit_escalated() {  # <state-dir> <task-id>
+  local dir names
+  dir=$(fm_task_inbox_dir "$1" "$2")
+  [ -d "$dir" ] || return 0
+  names=$(fm_task_inbox_acknowledged_resolutions "$1" "$2" | sed 's|.*/||')
+  if ! { printf '%s\n' "$names" > "$dir/.commit-escalated"; } 2>/dev/null; then
+    [ -d "$dir" ] || return 0
+    return 1
+  fi
 }
 
 # Oldest escalation-tracked unhandled record, or fail when none is due.

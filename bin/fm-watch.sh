@@ -70,7 +70,9 @@
 #   stale: <window> (answered decision could not be closed: ...)
 #                          the worker acknowledged an answer but its deferred
 #                          closure failed to commit, so the decision is still
-#                          open while the worker is already acting on it
+#                          open while the worker is already acting on it;
+#                          surfaced once per parked closure, then retried
+#                          quietly (bin/fm-task-inbox-lib.sh)
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -334,7 +336,10 @@ window_key() {  # <window>
 # (bin/fm-task-inbox-lib.sh owns that contract); this is where the worker's
 # acknowledgement turns it into the closing resolved line. It runs before the
 # ladder and before the busy check, because an acknowledged answer is exactly
-# the case the ladder reports as `quiet`. Cheap when healthy: one glob.
+# the case the ladder reports as `quiet`. Cheap when healthy: one glob. A
+# closure that fails to commit is surfaced once - the wake is queued, then the
+# parked closure is marked as surfaced - and retried quietly on later polls,
+# so a permanently failing close cannot wake firstmate on every poll.
 inbox_answer_commit() {  # <window> <task>
   local w=$1 task=$2 closed reason
   # stderr is deliberately NOT swallowed: the library names exactly which
@@ -343,8 +348,12 @@ inbox_answer_commit() {  # <window> <task>
     [ -z "$closed" ] || triage_log "steer-inbox answered decision closed: $task $(printf '%s' "$closed" | tr '\n' ' ')"
     return 0
   fi
-  reason="stale: $w (answered decision could not be closed: $task acknowledged a firstmate answer, but its deferred closure did not commit, so the decision is still open while the worker acts on it - inspect $STATE/$task.inbox and close it by hand)"
+  reason="stale: $w (answered decision could not be closed: $task acknowledged a firstmate answer, but its deferred closure did not commit, so the decision is still open while the worker acts on it - inspect $STATE/$task.inbox and close it by hand; the parked closure is retried quietly and files itself once the close succeeds)"
   fm_wake_append stale "$w" "$reason" || exit 1
+  if ! fm_task_inbox_record_commit_escalated "$STATE" "$task"; then
+    echo "error: stale wake was queued for $task but its closure escalation marker could not be written" >&2
+    exit 1
+  fi
   wake "$reason"
 }
 
@@ -367,7 +376,7 @@ inbox_answer_commit() {  # <window> <task>
 # while an unacknowledged instruction past the ladder is a stuck steer.
 inbox_steer_check() {  # <window> <task>
   local w=$1 task=$2 action verb rest rec cause count tail40 reason ring_rc
-  local answers='' ring_result
+  local answers='' ring_result pane=idle
   inbox_answer_commit "$w" "$task"
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
@@ -393,6 +402,7 @@ inbox_steer_check() {  # <window> <task>
     # bound is the one exception, and it is why an unread instruction cannot
     # stay silent behind a permanently busy pane.
     [ "$cause" = overdue ] || return 0
+    pane=busy
   fi
   case "$verb" in
     ring)
@@ -428,7 +438,14 @@ inbox_steer_check() {  # <window> <task>
           reason="stale: $w (unread firstmate instruction: $rec cannot be delivered because the composer visibly holds pending text, so every doorbell is being skipped; clear the composer, then re-ring)"
           ;;
         overdue)
-          reason="stale: $w (unread firstmate instruction: $rec has been unhandled for over $(fm_task_inbox_unhandled_max_secs)s without an acknowledgement; inspect the worker)"
+          # The pane verdict travels with the wake: a busy-and-unread worker
+          # may be inside one long tool call (a validation run routinely is),
+          # which recovery must triage differently from a stopped one.
+          if [ "$pane" = busy ]; then
+            reason="stale: $w (unread firstmate instruction: $rec has been unhandled for over $(fm_task_inbox_unhandled_max_secs)s without an acknowledgement while the pane reads busy - the worker may be inside one long tool call; inspect it before treating it as stopped)"
+          else
+            reason="stale: $w (unread firstmate instruction: $rec has been unhandled for over $(fm_task_inbox_unhandled_max_secs)s without an acknowledgement while the pane reads idle; inspect the worker)"
+          fi
           ;;
         *)
           reason="stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"
